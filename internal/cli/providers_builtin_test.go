@@ -33,6 +33,7 @@ func init() {
 	RegisterProvider(testExeDevProvider{})
 	RegisterProvider(testRunPodProvider{})
 	RegisterProvider(testVastProvider{})
+	RegisterProvider(testFalProvider{})
 	RegisterProvider(testNvidiaBrevProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
@@ -1114,6 +1115,65 @@ func (testVastProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) er
 }
 func (p testVastProvider) Configure(Config, Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testFalProvider struct{}
+
+func (testFalProvider) Name() string      { return "fal" }
+func (testFalProvider) Aliases() []string { return []string{"fal-ai"} }
+func (testFalProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "fal",
+		Family:      "fal",
+		Kind:        ProviderKindServiceControl,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    nil,
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testFalProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testFalFlagValues{
+		APIURL:       fs.String("fal-api-url", defaults.Fal.APIURL, "fal Compute API URL"),
+		InstanceType: fs.String("fal-instance-type", defaults.Fal.InstanceType, "fal Compute instance type"),
+		Sector:       fs.String("fal-sector", defaults.Fal.Sector, "fal Compute sector"),
+		User:         fs.String("fal-user", defaults.Fal.User, "SSH user for fal Compute instances"),
+		WorkRoot:     fs.String("fal-work-root", defaults.Fal.WorkRoot, "remote Crabbox work root on fal Compute instances"),
+	}
+}
+func (testFalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testFalFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "fal-api-url") {
+		cfg.Fal.APIURL = *v.APIURL
+	}
+	if flagWasSet(fs, "fal-instance-type") {
+		cfg.Fal.InstanceType = *v.InstanceType
+	}
+	if flagWasSet(fs, "fal-sector") {
+		cfg.Fal.Sector = *v.Sector
+	}
+	if flagWasSet(fs, "fal-user") {
+		cfg.Fal.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "fal-work-root") {
+		cfg.Fal.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	return nil
+}
+func (p testFalProvider) Configure(Config, Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testFalFlagValues struct {
+	APIURL       *string
+	InstanceType *string
+	Sector       *string
+	User         *string
+	WorkRoot     *string
 }
 
 type testNvidiaBrevProvider struct{}

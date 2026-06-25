@@ -174,6 +174,7 @@ type Config struct {
 	Runpod                        RunpodConfig
 	Vast                          VastConfig
 	vastWorkRootExplicit          bool
+	Fal                           FalConfig
 	NvidiaBrev                    NvidiaBrevConfig
 	nvidiaBrevWorkRootExplicit    bool
 	Hostinger                     HostingerConfig
@@ -657,6 +658,15 @@ type VastConfig struct {
 	User           string
 	WorkRoot       string
 	ReleaseAction  string
+}
+
+type FalConfig struct {
+	APIKey       string
+	APIURL       string
+	InstanceType string
+	Sector       string
+	User         string
+	WorkRoot     string
 }
 
 // NvidiaBrevConfig is intentionally non-secret. Authentication stays in the
@@ -1978,6 +1988,50 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
+	if cfg.Provider == "fal" {
+		if cfg.Fal.APIURL == "" {
+			cfg.Fal.APIURL = "https://api.fal.ai/v1"
+		}
+		if cfg.Fal.InstanceType == "" {
+			cfg.Fal.InstanceType = "gpu_1x_h100_sxm5"
+		}
+		if cfg.Fal.User == "" {
+			cfg.Fal.User = "root"
+		}
+		if cfg.Fal.WorkRoot == "" {
+			cfg.Fal.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+			if cfg.Fal.WorkRoot == "" || cfg.Fal.WorkRoot == defaultPOSIXWorkRoot {
+				cfg.Fal.WorkRoot = cfg.explicitWorkRoot
+			}
+		} else {
+			cfg.WorkRoot = cfg.Fal.WorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = cfg.Fal.User
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		cfg.ServerType = cfg.Fal.InstanceType
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
 	if cfg.Provider == "hyperv" {
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetWindows
@@ -2806,6 +2860,13 @@ func baseConfig() Config {
 			WorkRoot:      defaultPOSIXWorkRoot,
 			ReleaseAction: "destroy",
 		},
+		Fal: FalConfig{
+			APIURL:       "https://api.fal.ai/v1",
+			InstanceType: "gpu_1x_h100_sxm5",
+			Sector:       "sector_1",
+			User:         "root",
+			WorkRoot:     defaultPOSIXWorkRoot,
+		},
 		NvidiaBrev: NvidiaBrevConfig{
 			CLI:           "brev",
 			GPUName:       "A100",
@@ -3138,6 +3199,7 @@ type fileConfig struct {
 	FastAPICloud             *fileFastAPICloudConfig             `yaml:"fastapiCloud,omitempty"`
 	Runpod                   *fileRunpodConfig                   `yaml:"runpod,omitempty"`
 	Vast                     *fileVastConfig                     `yaml:"vast,omitempty"`
+	Fal                      *fileFalConfig                      `yaml:"fal,omitempty"`
 	NvidiaBrev               *fileNvidiaBrevConfig               `yaml:"nvidiaBrev,omitempty"`
 	Hostinger                *fileHostingerConfig                `yaml:"hostinger,omitempty"`
 	Wandb                    *fileWandbConfig                    `yaml:"wandb,omitempty"`
@@ -3738,6 +3800,14 @@ type fileVastConfig struct {
 	User           string   `yaml:"user,omitempty"`
 	WorkRoot       string   `yaml:"workRoot,omitempty"`
 	ReleaseAction  string   `yaml:"releaseAction,omitempty"`
+}
+
+type fileFalConfig struct {
+	APIURL       string `yaml:"apiUrl,omitempty"`
+	InstanceType string `yaml:"instanceType,omitempty"`
+	Sector       string `yaml:"sector,omitempty"`
+	User         string `yaml:"user,omitempty"`
+	WorkRoot     string `yaml:"workRoot,omitempty"`
 }
 
 type fileNvidiaBrevConfig struct {
@@ -6022,6 +6092,24 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			MarkDeleteOnReleaseExplicit(cfg, "vast")
 		}
 	}
+	if file.Fal != nil {
+		if file.Fal.APIURL != "" {
+			cfg.Fal.APIURL = file.Fal.APIURL
+			cfg.credentialProvenance.falAPIURL = credentialSource
+		}
+		if file.Fal.InstanceType != "" {
+			cfg.Fal.InstanceType = file.Fal.InstanceType
+		}
+		if file.Fal.Sector != "" {
+			cfg.Fal.Sector = file.Fal.Sector
+		}
+		if file.Fal.User != "" {
+			cfg.Fal.User = file.Fal.User
+		}
+		if file.Fal.WorkRoot != "" {
+			cfg.Fal.WorkRoot = file.Fal.WorkRoot
+		}
+	}
 	if file.NvidiaBrev != nil {
 		if trusted && file.NvidiaBrev.CLI != "" {
 			cfg.NvidiaBrev.CLI = file.NvidiaBrev.CLI
@@ -8126,6 +8214,18 @@ func applyEnv(cfg *Config) error {
 		cfg.Vast.ReleaseAction = value
 		MarkDeleteOnReleaseExplicit(cfg, "vast")
 	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_FAL_KEY", "FAL_KEY"); ok {
+		cfg.Fal.APIKey = value
+		cfg.credentialProvenance.falAPIKey = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_FAL_API_URL"); ok {
+		cfg.Fal.APIURL = value
+		cfg.credentialProvenance.falAPIURL = credentialSourceEnvironment
+	}
+	cfg.Fal.InstanceType = getenv("CRABBOX_FAL_INSTANCE_TYPE", cfg.Fal.InstanceType)
+	cfg.Fal.Sector = getenv("CRABBOX_FAL_SECTOR", cfg.Fal.Sector)
+	cfg.Fal.User = getenv("CRABBOX_FAL_USER", cfg.Fal.User)
+	cfg.Fal.WorkRoot = getenv("CRABBOX_FAL_WORK_ROOT", cfg.Fal.WorkRoot)
 	cfg.NvidiaBrev.CLI = getenv("CRABBOX_NVIDIA_BREV_CLI", cfg.NvidiaBrev.CLI)
 	cfg.NvidiaBrev.Org = getenv("CRABBOX_NVIDIA_BREV_ORG", cfg.NvidiaBrev.Org)
 	cfg.NvidiaBrev.Type = getenv("CRABBOX_NVIDIA_BREV_TYPE", cfg.NvidiaBrev.Type)
@@ -8883,6 +8983,9 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "cloudflare" {
 		return cloudflareContainerInstanceTypeForClass(cfg.Class)
 	}
+	if cfg.Provider == "fal" {
+		return blank(cfg.Fal.InstanceType, "gpu_1x_h100_sxm5")
+	}
 	if cfg.Provider == "aws" {
 		return awsInstanceTypeCandidatesForConfig(cfg)[0]
 	}
@@ -8934,6 +9037,9 @@ func serverTypeForProviderClass(provider, class string) string {
 	}
 	if provider == "cloudflare" {
 		return cloudflareContainerInstanceTypeForClass(class)
+	}
+	if provider == "fal" {
+		return "gpu_1x_h100_sxm5"
 	}
 	if provider == "aws" {
 		return awsInstanceTypeCandidatesForClass(class)[0]

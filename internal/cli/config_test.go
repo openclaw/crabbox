@@ -512,6 +512,13 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_VAST_USER",
 		"CRABBOX_VAST_WORK_ROOT",
 		"CRABBOX_VAST_RELEASE_ACTION",
+		"CRABBOX_FAL_KEY",
+		"FAL_KEY",
+		"CRABBOX_FAL_API_URL",
+		"CRABBOX_FAL_INSTANCE_TYPE",
+		"CRABBOX_FAL_SECTOR",
+		"CRABBOX_FAL_USER",
+		"CRABBOX_FAL_WORK_ROOT",
 		"CRABBOX_NVIDIA_BREV_CLI",
 		"CRABBOX_NVIDIA_BREV_ORG",
 		"CRABBOX_NVIDIA_BREV_TYPE",
@@ -2012,6 +2019,57 @@ func TestLinodeConfigFileAndEnv(t *testing.T) {
 		t.Fatalf("linode defaults leaked into generic fields: cfg=%#v", cfg)
 	}
 	if got := serverTypeForConfig(cfg); got != "g6-nanode-1" {
+		t.Fatalf("serverTypeForConfig=%q", got)
+	}
+}
+
+func TestFalProviderConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "fal"
+	if err := applyFileConfig(&cfg, fileConfig{Fal: &fileFalConfig{
+		APIURL:       "https://file-api.example.test/v1",
+		InstanceType: "gpu_8x_h100_sxm5",
+		Sector:       "sector_2",
+		User:         "ubuntu",
+		WorkRoot:     "/file/fal",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Fal.APIURL != "https://file-api.example.test/v1" ||
+		cfg.Fal.InstanceType != "gpu_8x_h100_sxm5" ||
+		cfg.Fal.Sector != "sector_2" ||
+		cfg.Fal.User != "ubuntu" ||
+		cfg.Fal.WorkRoot != "/file/fal" ||
+		cfg.Fal.APIKey != "" {
+		t.Fatalf("file fal config not applied or accepted a secret: %#v", cfg.Fal)
+	}
+
+	t.Setenv("FAL_KEY", "fallback-key")
+	t.Setenv("CRABBOX_FAL_KEY", "crabbox-key")
+	t.Setenv("CRABBOX_FAL_API_URL", "https://env-api.example.test/v1")
+	t.Setenv("CRABBOX_FAL_INSTANCE_TYPE", "gpu_1x_h100_sxm5")
+	t.Setenv("CRABBOX_FAL_SECTOR", "sector_3")
+	t.Setenv("CRABBOX_FAL_USER", "root")
+	t.Setenv("CRABBOX_FAL_WORK_ROOT", "/env/fal")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Fal.APIKey != "crabbox-key" ||
+		cfg.Fal.APIURL != "https://env-api.example.test/v1" ||
+		cfg.Fal.InstanceType != "gpu_1x_h100_sxm5" ||
+		cfg.Fal.Sector != "sector_3" ||
+		cfg.Fal.User != "root" ||
+		cfg.Fal.WorkRoot != "/env/fal" {
+		t.Fatalf("env fal config not applied: %#v", cfg.Fal)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.SSHUser != "root" || cfg.SSHPort != "22" || cfg.WorkRoot != "/env/fal" || len(cfg.SSHFallbackPorts) != 0 {
+		t.Fatalf("fal defaults not applied: target=%q user=%q port=%q workRoot=%q fallback=%v", cfg.TargetOS, cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.SSHFallbackPorts)
+	}
+	if got := serverTypeForConfig(cfg); got != "gpu_1x_h100_sxm5" {
 		t.Fatalf("serverTypeForConfig=%q", got)
 	}
 }
@@ -5044,6 +5102,12 @@ vast:
   user: root
   workRoot: /workspaces/vast-test
   releaseAction: stop
+fal:
+  apiUrl: https://api.fal.example.test/v1
+  instanceType: gpu_8x_h100_sxm5
+  sector: sector_2
+  user: root
+  workRoot: /workspaces/fal-test
 islo:
   baseUrl: https://islo.example.test
   image: docker.io/library/ubuntu:24.04
@@ -5303,6 +5367,9 @@ ssh:
 	}
 	if cfg.Vast.APIURL != "https://vast.example.test/api/v0" || cfg.Vast.InstanceType != "on-demand" || cfg.Vast.GPUName != "RTX 4090" || cfg.Vast.GPUCount != 2 || cfg.Vast.Image != "nvidia/cuda:vast-file" || cfg.Vast.TemplateID != "vast-tpl-file" || cfg.Vast.Runtype != "ssh_direct" || cfg.Vast.DiskGB != 60 || cfg.Vast.MaxDphTotal != 3.5 || cfg.Vast.MinReliability != 0.9 || cfg.Vast.Order != "reliability desc" || cfg.Vast.User != "root" || cfg.Vast.WorkRoot != "/workspaces/vast-test" || cfg.Vast.ReleaseAction != "stop" {
 		t.Fatalf("vast config not loaded: %#v", cfg.Vast)
+	}
+	if cfg.Fal.APIURL != "https://api.fal.example.test/v1" || cfg.Fal.InstanceType != "gpu_8x_h100_sxm5" || cfg.Fal.Sector != "sector_2" || cfg.Fal.User != "root" || cfg.Fal.WorkRoot != "/workspaces/fal-test" || cfg.Fal.APIKey != "" {
+		t.Fatalf("fal config not loaded safely: %#v", cfg.Fal)
 	}
 	if cfg.Islo.BaseURL != "https://islo.example.test" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.SnapshotName != "snap-ready" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 || cfg.Islo.DiskGB != 40 {
 		t.Fatalf("islo config not loaded: %#v", cfg.Islo)

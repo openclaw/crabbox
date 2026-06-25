@@ -150,6 +150,18 @@ func TestRepositoryCredentialDestinationsRejectInheritedCredentials(t *testing.T
 			want: "vast.apiUrl",
 		},
 		{
+			name: "fal api",
+			cfg: Config{
+				Provider: "fal",
+				Fal:      FalConfig{APIURL: "https://repo.example.test", APIKey: "secret"},
+				credentialProvenance: credentialDestinationProvenance{
+					falAPIURL: credentialSourceRepository,
+					falAPIKey: credentialSourceEnvironment,
+				},
+			},
+			want: "fal.apiUrl",
+		},
+		{
 			name: "islo api",
 			cfg: Config{
 				Provider: "islo",
@@ -450,6 +462,31 @@ func TestVastCredentialDestinationAllowsExplicitFlagOverride(t *testing.T) {
 	}
 	if cfg.Vast.APIURL != "https://approved.example.test" {
 		t.Fatalf("vast apiUrl=%q", cfg.Vast.APIURL)
+	}
+}
+
+func TestFalCredentialDestinationAllowsExplicitFlagOverride(t *testing.T) {
+	cfg := Config{
+		Provider: "fal",
+		Fal:      FalConfig{APIURL: "https://repo.example.test", APIKey: "secret"},
+		credentialProvenance: credentialDestinationProvenance{
+			falAPIURL: credentialSourceRepository,
+			falAPIKey: credentialSourceEnvironment,
+		},
+	}
+	fs := newFlagSet("test", io.Discard)
+	values := registerProviderFlags(fs, cfg)
+	if err := parseFlags(fs, []string{"--fal-api-url", "https://approved.example.test/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("explicit fal flag override rejected: %v", err)
+	}
+	if cfg.Fal.APIURL != "https://approved.example.test/v1" {
+		t.Fatalf("fal apiUrl=%q", cfg.Fal.APIURL)
 	}
 }
 

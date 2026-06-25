@@ -1221,6 +1221,7 @@ func allBuiltInProviderNames() []string {
 		"e2b",
 		"exe-dev",
 		"external",
+		"fal",
 		"fastapi-cloud",
 		"firecracker",
 		"freestyle",
