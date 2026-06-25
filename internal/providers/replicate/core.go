@@ -102,6 +102,9 @@ func ValidateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.Provider) != providerName {
 		return nil
 	}
+	if cfg.Tailscale.Enabled || cfg.Network == core.NetworkTailscale {
+		return core.Exit(2, "provider=%s does not support Tailscale options", providerName)
+	}
 	deployment := strings.TrimSpace(cfg.Replicate.Deployment)
 	version := strings.TrimSpace(cfg.Replicate.Version)
 	if deployment != "" && version != "" {
@@ -133,6 +136,12 @@ func validateRunnerTargetConfig(cfg Config) error {
 	}
 	if deployment != "" && version != "" {
 		return core.Exit(2, "provider=replicate accepts exactly one of replicate.deployment or replicate.version, not both")
+	}
+	if deployment != "" {
+		owner, name, ok := strings.Cut(deployment, "/")
+		if !ok || strings.TrimSpace(owner) == "" || strings.TrimSpace(name) == "" || strings.Contains(name, "/") {
+			return core.Exit(2, "replicate deployment must use owner/name")
+		}
 	}
 	return nil
 }

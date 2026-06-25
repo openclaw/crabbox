@@ -113,6 +113,11 @@ func TestWarmupRequiresTokenAndRunnerTarget(t *testing.T) {
 	if err := backend.Warmup(context.Background(), WarmupRequest{}); err == nil || !strings.Contains(err.Error(), "requires exactly one") {
 		t.Fatalf("Warmup err=%v, want target validation", err)
 	}
+
+	backend.cfg.Replicate.Deployment = "missing-slash"
+	if err := backend.Warmup(context.Background(), WarmupRequest{}); err == nil || !strings.Contains(err.Error(), "owner/name") {
+		t.Fatalf("Warmup err=%v, want deployment shape validation", err)
+	}
 }
 
 func TestReplicateWorkdirRejectsRelativeAndBroad(t *testing.T) {

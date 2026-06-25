@@ -39,6 +39,8 @@ func TestValidateConfigAllowsMissingRunnerTargetForExistingPredictionCommands(t 
 		{name: "version", cfg: core.Config{Provider: "replicate", Replicate: ReplicateConfig{Version: "v1"}}, ok: true},
 		{name: "missing", cfg: core.Config{Provider: "replicate"}, ok: true},
 		{name: "both", cfg: core.Config{Provider: "replicate", Replicate: ReplicateConfig{Deployment: "owner/deploy", Version: "v1"}}, ok: false},
+		{name: "tailscale enabled", cfg: core.Config{Provider: "replicate", Replicate: ReplicateConfig{Deployment: "owner/deploy"}, Tailscale: core.TailscaleConfig{Enabled: true}}, ok: false},
+		{name: "tailscale network", cfg: core.Config{Provider: "replicate", Replicate: ReplicateConfig{Deployment: "owner/deploy"}, Network: core.NetworkTailscale}, ok: false},
 		{name: "other provider", cfg: core.Config{Provider: "modal"}, ok: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
