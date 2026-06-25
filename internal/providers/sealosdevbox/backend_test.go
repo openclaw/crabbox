@@ -527,6 +527,55 @@ func TestResolveReadOnlyDoesNotPersistSecretKey(t *testing.T) {
 	}
 }
 
+func TestResolveResumesPausedDevboxBeforeSSHReuse(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_resume12345"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused","ssh":{"secretName":"` + name + `-ssh"}}}`
+	runningItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"stringData":{"` + devboxPublicKeyField + `":"ssh-ed25519 AAA test","` + devboxPrivateKeyField + `":"private"}}`
+	runner := &lifecycleRunner{outputs: []string{
+		`{"items":[` + pausedItem + `]}`,
+		"patched",
+		runningItem,
+		secretJSON,
+	}}
+	backend := lifecycleBackend(cfg, runner)
+	probed := false
+	backend.sshReady = func(_ context.Context, target *core.SSHTarget, _ io.Writer, phase string, _ time.Duration) error {
+		probed = true
+		if target.Host != "ssh.sealos.example.test" || target.Key == "" || phase != "Sealos DevBox SSH" {
+			t.Fatalf("unexpected SSH target=%#v phase=%q", target, phase)
+		}
+		return nil
+	}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.Status != "Running" {
+		t.Fatalf("lease=%#v", lease)
+	}
+	if !probed {
+		t.Fatal("SSH wait was not called")
+	}
+	commands := []string{}
+	for _, req := range runner.requests {
+		commands = append(commands, strings.Join(req.Args, " "))
+	}
+	if len(commands) < 4 {
+		t.Fatalf("commands=%#v", commands)
+	}
+	if !strings.Contains(commands[1], "patch "+devboxResource+"/"+name) || !strings.Contains(commands[1], `"state":"Running"`) {
+		t.Fatalf("resume patch missing: %#v", commands)
+	}
+	if !strings.Contains(commands[2], "get "+devboxResource+"/"+name) || !strings.Contains(commands[3], "get secret/"+name+"-ssh") {
+		t.Fatalf("resume did not refresh before secret read: %#v", commands)
+	}
+}
+
 func TestResolveClaimRejectsDevboxOutsideActiveScope(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()
