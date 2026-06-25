@@ -27,6 +27,7 @@ var benchmarkProviderCategories = map[string]string{
 	"e2b":                        "delegated-sandbox",
 	"exe-dev":                    "direct-cloud",
 	"external":                   "external-provider",
+	"fal":                        "gpu-cloud",
 	"fastapi-cloud":              "service-control",
 	"firecracker":                "self-hosted-virtualization",
 	"freestyle":                  "delegated-sandbox",

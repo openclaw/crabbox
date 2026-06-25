@@ -40,6 +40,26 @@ test("OpenSandbox live smoke dispatches to the provider-specific script", () => 
   assert.match(result.stderr, /admin active-lease check skipped/);
 });
 
+test("fal live smoke dispatches to the provider-specific script", () => {
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "fal",
+      CRABBOX_FAL_KEY: "",
+      FAL_KEY: "",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=environment_blocked reason=FAL_KEY_missing/);
+  assert.match(result.stderr, /admin active-lease check skipped/);
+});
+
 test("Proxmox live smoke dispatches to the provider-specific proof script", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-proxmox-"));
   const fakeCrabbox = path.join(dir, "crabbox");

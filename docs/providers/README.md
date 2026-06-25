@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 71 providers (41 SSH lease, 28 delegated run, 2 service control).
+Current built-in surface: 72 providers (42 SSH lease, 28 delegated run, 2 service control).
 
 Access terms:
 
@@ -95,6 +95,7 @@ Access terms:
 | [e2b](e2b.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: `url-bridge`, `run-session` | `linux`; E2B Firecracker sandbox | `provider-managed`; GPU: no | E2B; sandbox kill or expiry | Hosted ephemeral code sandbox | URL bridge is provider-specific; no normal SSH lease |
 | [exe-dev](exe-dev.md) (`exe`, `exedev`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; exe.dev managed VM | `provider-managed`; GPU: unknown | exe.dev; provider lifecycle | Fast managed Linux VM exposed over SSH | Public SSH only; provider CLI owns auth |
 | [external](external.md) (`exec-provider`) | built-in; `ssh-lease` · external-provider | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`; Configured executable contract | `byo`; GPU: unknown | external executable; contract-defined | Private or organization-specific provider integration | Safety and semantics depend on the configured executable |
+| [fal](fal.md) (`fal-ai`) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; fal Compute instance | `cloud`; GPU: yes | Crabbox; local-claim-owned instance delete | Direct GPU-backed Linux workload over SSH | Direct-only; live creates are billable and account-gated |
 | [fastapi-cloud](fastapi-cloud.md) (`fastapicloud`, `fastapi`) | specialized; `service-control` · service-control | SSH not applicable; `none` · direct only; features: none | `linux`; FastAPI Cloud app | `cloud`; GPU: unknown | FastAPI Cloud; not exposed | Inspecting FastAPI Cloud app deployment readiness | Cannot execute arbitrary Crabbox run commands or stop apps |
 | [firecracker](firecracker.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Firecracker microVM | `self-hosted`; GPU: no | Crabbox direct lifecycle; microVM and local artifact cleanup | Self-hosted Linux KVM host with prepared Firecracker kernel, rootfs, and CNI | Requires Linux, /dev/kvm, Firecracker assets, and a working CNI setup on the host |
 | [freestyle](freestyle.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Freestyle VM | `provider-managed`; GPU: unknown | Freestyle; provider VM cleanup | Hosted delegated Linux VM execution | No Crabbox-managed SSH path |
