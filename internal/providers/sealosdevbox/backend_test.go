@@ -649,6 +649,45 @@ func TestResolveClaimRejectsDevboxMissingProviderScope(t *testing.T) {
 	}
 }
 
+func TestWaitForDevboxSecretRefreshesLateSecretName(t *testing.T) {
+	cfg := lifecycleConfig()
+	name := "crabbox-blue-12345678"
+	initial := devboxItem{
+		Metadata: devboxMeta{Name: name},
+		Status:   devboxStatus{State: "Running", Phase: "Running"},
+	}
+	refreshedItem := `{"metadata":{"name":"` + name + `"},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"stringData":{"` + devboxPublicKeyField + `":"ssh-ed25519 AAA test","` + devboxPrivateKeyField + `":"private"}}`
+	runner := &lifecycleRunner{
+		outputs:  []string{"", refreshedItem, secretJSON},
+		stderrs:  []string{`Error from server (NotFound): secrets "` + name + `" not found`},
+		exitCode: []int{1},
+		errors:   []error{errors.New("exit status 1")},
+	}
+	backend := lifecycleBackend(cfg, runner)
+	secret, err := backend.waitForDevboxSecret(context.Background(), initial, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := parseDevboxSecretKeys(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys.PrivateKey != "private\n" {
+		t.Fatalf("keys=%#v", keys)
+	}
+	if len(runner.requests) != 3 {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+	commands := []string{}
+	for _, req := range runner.requests {
+		commands = append(commands, strings.Join(req.Args, " "))
+	}
+	if !strings.Contains(commands[0], "get secret/"+name) || !strings.Contains(commands[1], "get "+devboxResource+"/"+name) || !strings.Contains(commands[2], "get secret/"+name+"-ssh") {
+		t.Fatalf("commands=%#v", commands)
+	}
+}
+
 func flattenArgs(requests []core.LocalCommandRequest) []string {
 	out := []string{}
 	for _, req := range requests {
