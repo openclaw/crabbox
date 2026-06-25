@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
 type replicateAPI interface {
@@ -331,11 +330,4 @@ func parsePredictionOutput(pred replicatePrediction) (RunnerOutput, error) {
 		return RunnerOutput{}, fmt.Errorf("replicate prediction %s has no runner output", pred.ID)
 	}
 	return ParseRunnerOutput(pred.Output)
-}
-
-func waitDuration(secs int) time.Duration {
-	if secs <= 0 {
-		return 0
-	}
-	return time.Duration(secs) * time.Second
 }
