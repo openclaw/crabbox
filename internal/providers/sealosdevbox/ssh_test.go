@@ -52,6 +52,29 @@ func TestNodePortTargetUsesStatusPortAndNodeHost(t *testing.T) {
 	}
 }
 
+func TestNodePortTargetPrefersSSHPort(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.Network = networkNodePort
+	cfg.SealosDevbox.NodeHost = "node-1.example.test"
+	backend := lifecycleBackend(cfg, &lifecycleRunner{})
+	item := devboxItem{
+		Metadata: devboxMeta{Name: "devbox-blue"},
+		Status: devboxStatus{Network: map[string]any{
+			"ports": []any{
+				map[string]any{"name": "http", "port": float64(80), "nodePort": float64(30080)},
+				map[string]any{"name": "ssh", "port": float64(22), "nodePort": float64(32022)},
+			},
+		}},
+	}
+	target, err := backend.sshTarget(item, "/tmp/cbx-key", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Host != "node-1.example.test" || target.Port != "32022" {
+		t.Fatalf("target=%#v", target)
+	}
+}
+
 func TestSSHTargetValidationRejectsInvalidRoute(t *testing.T) {
 	cfg := lifecycleConfig()
 	cfg.SealosDevbox.SSHUser = "dev box"
