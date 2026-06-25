@@ -132,6 +132,34 @@ func TestFalAcquireCreatesInstanceWaitsAndClaimsLease(t *testing.T) {
 	}
 }
 
+func TestFalAcquireReturnsSSHPortUpdatedByReadinessProbe(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	b.cfg.SSHPort = "2222"
+	b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ string, _ time.Duration) error {
+		if target.Port != "2222" {
+			t.Fatalf("probe received port %q, want configured 2222", target.Port)
+		}
+		target.Port = "22"
+		return nil
+	}
+
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "fallback-port"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Port != "22" {
+		t.Fatalf("returned ssh port=%q, want readiness-updated 22", lease.SSH.Port)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("fallback-port", providerName)
+	if claimErr != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, claimErr)
+	}
+	if claim.SSHPort != 22 {
+		t.Fatalf("persisted ssh port=%d, want readiness-updated 22", claim.SSHPort)
+	}
+}
+
 func TestFalAcquireRollsBackOnCallbackFailure(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
