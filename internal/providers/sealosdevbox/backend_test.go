@@ -474,6 +474,50 @@ func TestResolveReleaseOnlySkipsMissingNodePortRoute(t *testing.T) {
 	}
 }
 
+func TestResolveReadOnlyDoesNotPersistSecretKey(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_readonlykey"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	item := `{"items":[{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}]}`
+	runner := &lifecycleRunner{outputs: []string{item}}
+	backend := lifecycleBackend(cfg, runner)
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.SSH.Host != "ssh.sealos.example.test" || lease.SSH.Key == "" {
+		t.Fatalf("lease=%#v", lease)
+	}
+	if got := strings.Join(flattenArgs(runner.requests), " "); strings.Contains(got, "secret/") {
+		t.Fatalf("read-only resolve fetched Secret: %s", got)
+	}
+	target := core.SSHTarget{}
+	core.UseStoredTestboxKey(&target, leaseID)
+	if target.Key != "" {
+		t.Fatalf("read-only resolve persisted key: %s", target.Key)
+	}
+}
+
+func TestResolveClaimRejectsDevboxOutsideActiveScope(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_wrongscope"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	backend := lifecycleBackend(cfg, &lifecycleRunner{})
+	if err := backend.claimLeaseForRepo(leaseID, slug, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"other-scope","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	backend.rt.Exec = &lifecycleRunner{outputs: []string{item}}
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "outside the active provider scope") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+}
+
 func flattenArgs(requests []core.LocalCommandRequest) []string {
 	out := []string{}
 	for _, req := range requests {
