@@ -121,6 +121,20 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 			want: "absolute URL without credentials",
 		},
 		{
+			name: "query url",
+			mutate: func(cfg *core.Config) {
+				cfg.Vast.APIURL = "https://vast.example.test/api/v0?token=secret"
+			},
+			want: "query strings or fragments",
+		},
+		{
+			name: "fragment url",
+			mutate: func(cfg *core.Config) {
+				cfg.Vast.APIURL = "https://vast.example.test/api/v0#secret"
+			},
+			want: "query strings or fragments",
+		},
+		{
 			name: "instance type",
 			mutate: func(cfg *core.Config) {
 				cfg.Vast.InstanceType = "spot"
