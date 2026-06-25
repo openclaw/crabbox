@@ -174,12 +174,28 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		}
 		return result
 	}
+	cleanupOwnedRunJob := func() error {
+		if !shouldStop {
+			return nil
+		}
+		shouldStop = false
+		cleanupCtx, cancel := b.cleanupContext(ctx)
+		defer cancel()
+		if err := b.deleteOwnedRunJob(cleanupCtx, client, claim); err != nil {
+			return fmt.Errorf("nomad stop failed for lease=%s job=%s: %w", leaseID, claim.Labels[claimLabelJobID], err)
+		}
+		return nil
+	}
 	defer func() {
-		if shouldStop {
-			cleanupCtx, cancel := b.cleanupContext(ctx)
-			defer cancel()
-			if err := b.deleteOwnedRunJob(cleanupCtx, client, claim); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: nomad stop failed for lease=%s job=%s: %v\n", leaseID, claim.Labels[claimLabelJobID], err)
+		if cleanupErr := cleanupOwnedRunJob(); cleanupErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
+			if result.ExitCode == 0 {
+				result.ExitCode = 1
+			}
+			if retErr == nil {
+				retErr = cleanupErr
+			} else {
+				retErr = errors.Join(retErr, cleanupErr)
 			}
 		}
 		result = finishResult(result)
@@ -225,8 +241,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 				return result, err
 			}
 		}
+		cleanupErr := cleanupOwnedRunJob()
+		if cleanupErr != nil {
+			result.ExitCode = 1
+		}
 		if req.TimingJSON {
-			return result, writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
+			if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 				Provider:      providerName,
 				LeaseID:       leaseID,
 				Slug:          slug,
@@ -238,9 +258,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 				ExitCode:      0,
 				Label:         strings.TrimSpace(req.Label),
 				Workdir:       workdir,
-			}, result, nil))
+			}, result, cleanupErr)); err != nil {
+				return result, errors.Join(cleanupErr, err)
+			}
 		}
-		return result, nil
+		return result, cleanupErr
 	}
 
 	commandStart := b.now()
@@ -257,8 +279,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		CommandText:   strings.Join(req.Command, " "),
 	}
 	fmt.Fprintf(b.rt.Stderr, "nomad run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
+	writeRunTiming := func(finalErr error) error {
+		if !req.TimingJSON {
+			return nil
+		}
+		return writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
@@ -271,20 +296,20 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			ExitCode:      exitCode,
 			Label:         strings.TrimSpace(req.Label),
 			Workdir:       workdir,
-		}, result, runErr)); err != nil {
-			return result, err
-		}
+		}, result, finalErr))
 	}
 	if runErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
-			return result, runErr
+			return result, errors.Join(runErr, writeRunTiming(runErr))
 		}
-		return result, ExitError{Code: 1, Message: runErr.Error()}
+		retErr := ExitError{Code: 1, Message: runErr.Error()}
+		return result, errors.Join(retErr, writeRunTiming(retErr))
 	}
 	if exitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("nomad run exited %d", exitCode)}
+		retErr := ExitError{Code: exitCode, Message: fmt.Sprintf("nomad run exited %d", exitCode)}
+		return result, errors.Join(retErr, writeRunTiming(retErr))
 	}
 	if !shouldStop {
 		if err := refreshNomadLeaseActivity(b.cfg, claim); err != nil {
@@ -292,7 +317,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			return result, err
 		}
 	}
-	return result, nil
+	cleanupErr := cleanupOwnedRunJob()
+	if cleanupErr != nil {
+		result.ExitCode = 1
+	}
+	if err := writeRunTiming(cleanupErr); err != nil {
+		return result, errors.Join(cleanupErr, err)
+	}
+	return result, cleanupErr
 }
 
 func (b *backend) createRunJob(ctx context.Context, client Client, req RunRequest) (string, string, allocationReadiness, LeaseClaim, error) {

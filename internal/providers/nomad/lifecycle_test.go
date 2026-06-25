@@ -17,16 +17,17 @@ import (
 )
 
 type lifecycleFakeClient struct {
-	jobs         map[string]*nomadapi.Job
-	evals        map[string]*nomadapi.Evaluation
-	allocs       map[string][]*nomadapi.AllocationListStub
-	registers    int
-	deregisters  []string
-	deregistered map[string]bool
-	jobInfoErr   map[string]error
-	execs        []recordedNomadExec
-	execResults  []fakeNomadExecResult
-	evalStatus   string
+	jobs          map[string]*nomadapi.Job
+	evals         map[string]*nomadapi.Evaluation
+	allocs        map[string][]*nomadapi.AllocationListStub
+	registers     int
+	deregisters   []string
+	deregistered  map[string]bool
+	jobInfoErr    map[string]error
+	execs         []recordedNomadExec
+	execResults   []fakeNomadExecResult
+	evalStatus    string
+	deregisterErr error
 }
 
 type recordedNomadExec struct {
@@ -108,6 +109,9 @@ func (f *lifecycleFakeClient) DeregisterJob(_ context.Context, jobID string, pur
 		return "", errors.New("expected purge deregister")
 	}
 	f.deregisters = append(f.deregisters, jobID)
+	if f.deregisterErr != nil {
+		return "", f.deregisterErr
+	}
 	f.deregistered[jobID] = true
 	return "eval-deregister-" + jobID, nil
 }
@@ -558,6 +562,36 @@ func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
 	if len(fake.execs) < 2 || !strings.Contains(fake.execs[1].Stdin, "export TOKEN='secret'") ||
 		strings.Contains(fake.execs[1].Stdin, "BAD-NAME") {
 		t.Fatalf("execs=%#v", fake.execs)
+	}
+}
+
+func TestRunNoSyncPropagatesCleanupFailureAfterSuccessfulCommand(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.execResults = []fakeNomadExecResult{
+		{ExitCode: 0},
+		{ExitCode: 0, Stdout: "out\n"},
+	}
+	fake.deregisterErr = errors.New("nomad deregister unavailable")
+	b, stdout, stderr := testBackend(t, fake)
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:    newNomadRunRepo(t),
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "nomad stop failed") || !strings.Contains(err.Error(), "nomad deregister unavailable") {
+		t.Fatalf("err=%v, want cleanup failure", err)
+	}
+	if result.ExitCode != 1 || result.Provider != providerName || result.Session != nil {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(fake.deregisters) != 1 {
+		t.Fatalf("deregisters=%v", fake.deregisters)
+	}
+	if stdout.String() != "out\n" {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "nomad run summary") {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
 
