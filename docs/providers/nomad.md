@@ -175,7 +175,7 @@ Without `jobspecTemplate`, Crabbox registers a service job named
 runs:
 
 ```text
-/bin/sh -lc 'mkdir -p /workspace/crabbox && sleep infinity'
+/bin/sh -lc 'mkdir -p /workspace/crabbox && while :; do sleep 3600; done'
 ```
 
 Crabbox adds ownership metadata to the job, task group, and task:
@@ -185,7 +185,7 @@ crabbox.managed=true
 crabbox.lease_id=<cbx_...>
 crabbox.slug=<slug>
 crabbox.provider=nomad
-crabbox.scope=<sha256 namespace/region/task scope>
+crabbox.scope=<sha256 address/namespace/region/task scope>
 crabbox.namespace=<namespace or default>
 crabbox.region=<region or default>
 crabbox.job_id=<job id>
@@ -218,8 +218,8 @@ metadata, and a task whose name equals `nomad.task`.
    friendly slug, renders the Nomad job, registers it, waits for evaluation
    completion, waits for a running allocation, and writes a local Crabbox claim.
 2. `status` and `list` start from local `cbx_...` claims scoped to the selected
-   namespace, region, and task. They verify remote job ownership before
-   reporting readiness.
+   Nomad address, namespace, region, and task. They verify remote job ownership
+   before reporting readiness.
 3. Unless `--no-sync` is set, `run` creates a portable archive of the checkout,
    uploads it through allocation exec, and extracts it inside `nomad.workdir`.
    With `sync.delete: true`, archive sync replaces stale remote files according
