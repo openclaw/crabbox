@@ -57,9 +57,9 @@ func defaultJobSpec(cfg Config, jobID string, meta map[string]string) *nomadapi.
 	disk := cfg.Nomad.DiskMB
 	taskConfig := map[string]interface{}{
 		"command": "/bin/sh",
-		"args":    []string{"-lc", "mkdir -p " + shellQuote(cfg.Nomad.Workdir) + " && sleep infinity"},
+		"args":    []string{"-lc", "mkdir -p " + shellQuote(cfg.Nomad.Workdir) + " && while :; do sleep 3600; done"},
 	}
-	if image != "" {
+	if nomadDriverRequiresImage(driver) && image != "" {
 		taskConfig["image"] = image
 	}
 	job := &nomadapi.Job{
