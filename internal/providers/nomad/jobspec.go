@@ -121,9 +121,17 @@ func renderJobSpecTemplate(template string, cfg Config, in jobSpecInput, meta ma
 	}
 	out := template
 	for placeholder, value := range values {
-		out = strings.ReplaceAll(out, placeholder, value)
+		out = strings.ReplaceAll(out, placeholder, jsonStringFragment(value))
 	}
 	return out
+}
+
+func jsonStringFragment(value string) string {
+	encoded, _ := json.Marshal(value)
+	if len(encoded) < 2 {
+		return ""
+	}
+	return string(encoded[1 : len(encoded)-1])
 }
 
 func validateJobSpecOwnership(cfg Config, in jobSpecInput, job *nomadapi.Job) error {
