@@ -197,7 +197,9 @@ the local claim, and removes the local per-lease key.
 Release actions:
 
 - `destroy` or `delete`: destroy the Vast instance on `stop` or one-shot release.
-- `stop`: request Vast to stop the instance and remove the local Crabbox claim.
+- `stop`: request Vast to stop the instance and keep the local Crabbox claim
+  with `state=stopped` so later status, cleanup, or explicit destroy can
+  reconcile the retained resource.
 - `keep`: leave the instance and local claim untouched during release.
 
 Use `stop` or `keep` only when you explicitly accept the retained resource and
