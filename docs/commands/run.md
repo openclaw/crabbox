@@ -112,6 +112,14 @@ command through the Blaxel process API, and mirrors the remote exit code.
 `--keep-on-failure` follow the delegated-run contract; SSH-only run features are
 rejected.
 
+`--provider flue` is a Node/local delegated-run bridge. Crabbox archives the
+checkout, writes a temporary request JSON file, and invokes
+`flue run workflow:<name> --target node --input '{"requestFile":"..."}'`.
+The configured Flue workflow extracts the archive, runs the command, and prints
+a final protocol response JSON. Crabbox v1 rejects non-`node` Flue targets,
+persistent lease IDs, retained sessions, SSH-only options, Cloudflare/server
+staging, and artifact/download/session promises.
+
 `--provider cloudflare-dynamic-workers` is a module-runtime provider. It accepts
 Worker module source through `--script` or `--script-stdin`, supports cache and
 egress controls through `--cloudflare-dynamic-workers-*` flags, and rejects

@@ -349,6 +349,20 @@
     "caveat": "Requires Linux, /dev/kvm, Firecracker assets, and a working CNI setup on the host",
     "docs": "firecracker.md"
   },
+  "flue": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "Flue workflow runner",
+    "location": "local",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "unknown",
+    "lifecycle": "Flue workflow",
+    "cleanup": "one-shot workflow exit and temp-file cleanup",
+    "bestFit": "Local Flue workflow delegation with Crabbox archive sync",
+    "caveat": "Node target only in v1; no SSH, coordinator, retained sessions, or Cloudflare/server staging",
+    "docs": "flue.md"
+  },
   "freestyle": {
     "status": "built-in",
     "category": "delegated-sandbox",

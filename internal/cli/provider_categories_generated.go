@@ -28,6 +28,7 @@ var benchmarkProviderCategories = map[string]string{
 	"external":                   "external-provider",
 	"fastapi-cloud":              "service-control",
 	"firecracker":                "self-hosted-virtualization",
+	"flue":                       "delegated-sandbox",
 	"freestyle":                  "delegated-sandbox",
 	"gcp":                        "brokerable-cloud",
 	"hetzner":                    "brokerable-cloud",

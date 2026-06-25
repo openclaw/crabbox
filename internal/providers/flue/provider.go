@@ -43,10 +43,20 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	return ValidateFlueConfig(cfg)
 }
 
+func (Provider) ValidateDoctorConfig(cfg core.Config) error {
+	return ValidateFlueDoctorConfig(cfg)
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if err := p.ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	return &backend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
+}
+
+func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	return &backend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
