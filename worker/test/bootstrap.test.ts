@@ -490,19 +490,43 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("DoNotOpenServerManagerAtLogon");
     expect(got).toContain("VALUE_OF_PASSWORD=$vncPassword");
     expect(got).toContain("VALUE_OF_ALLOWLOOPBACK=1");
+    expect(got).toContain("Enable-CrabboxTightVNCFirewallRule");
+    expect(got).toContain("Crabbox-TightVNC-Loopback");
+    expect(got).toContain(
+      'New-NetFirewallRule -Name $ruleName -DisplayName "Crabbox TightVNC loopback"',
+    );
+    expect(got).toContain("-Protocol TCP -LocalPort 5900");
     expect(got).toContain("CrabboxUserVNC");
     expect(got).toContain("crabbox-user-vnc.cmd");
     expect(got).toContain("AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup");
     expect(got).toContain("start-user-vnc.ps1");
+    expect(got).toContain('$ErrorActionPreference = "Stop"');
+    expect(got).toContain("Get-TightVNCBinaryHex");
     expect(got).toContain("Set-TightVNCBinaryValue");
+    expect(got).toContain('reg.exe query "HKLM\\Software\\TightVNC\\Server" /v $Name');
     expect(got).toContain('reg.exe add "HKCU\\Software\\TightVNC\\Server"');
+    expect(got).toContain("return ($LASTEXITCODE -eq 0)");
+    expect(got).toContain("if (-not $vncPasswordReady)");
+    expect(got).toContain('throw "TightVNC HKCU password values were not copied"');
     expect(got).toContain('$hex = -join ($bytes | ForEach-Object { $_.ToString("X2") })');
-    expect(got).toContain("/SC ONLOGON");
+    expect(got).toContain("New-ScheduledTaskAction");
+    expect(got).toContain("New-ScheduledTaskTrigger -AtLogOn -User $user");
+    expect(got).toContain(
+      "New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest",
+    );
+    expect(got).toContain("Register-ScheduledTask");
     expect(got).toContain("Set-Service -StartupType Disabled");
     expect(got).toContain("Stop-Service -Name tvnserver");
     expect(got).not.toContain("/SC ONCE");
+    expect(got).not.toContain("/SC ONLOGON");
     expect(got).not.toContain("Set-Service -StartupType Manual");
     expect(got).not.toContain("Start-Service -Name tvnserver");
+    expect(got.indexOf("Enable-CrabboxTightVNCFirewallRule")).toBeLessThan(
+      got.indexOf("$userVNCStartup = @'"),
+    );
+    expect(got.indexOf("Enable-CrabboxTightVNCFirewallRule")).toBeLessThan(
+      got.indexOf("CrabboxUserVNC"),
+    );
     expect(got).toContain("New-CrabboxPassword");
     expect(got).toContain("${userSID}:F");
     expect(got).toContain("$credentialPaths = @($passwordPath)");

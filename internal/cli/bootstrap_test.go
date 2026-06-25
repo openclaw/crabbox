@@ -568,17 +568,30 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		tightVNCMSISHA256,
 		"VALUE_OF_PASSWORD=$vncPassword",
 		"VALUE_OF_ALLOWLOOPBACK=1",
+		"Enable-CrabboxTightVNCFirewallRule",
+		"Crabbox-TightVNC-Loopback",
+		`New-NetFirewallRule -Name $ruleName -DisplayName "Crabbox TightVNC loopback"`,
+		"-Protocol TCP -LocalPort 5900",
 		"CrabboxUserVNC",
 		"crabbox-user-vnc.cmd",
 		`AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup`,
 		"start-user-vnc.ps1",
+		`$ErrorActionPreference = "Stop"`,
+		"Get-TightVNCBinaryHex",
 		"Set-TightVNCBinaryValue",
+		`reg.exe query "HKLM\Software\TightVNC\Server" /v $Name`,
 		`reg.exe add "HKCU\Software\TightVNC\Server"`,
+		`return ($LASTEXITCODE -eq 0)`,
+		`if (-not $vncPasswordReady)`,
+		`throw "TightVNC HKCU password values were not copied"`,
 		`$hex = -join ($bytes | ForEach-Object { $_.ToString("X2") })`,
 		"-run",
 		"NewNetworkWindowOff",
 		"DoNotOpenServerManagerAtLogon",
-		"/SC ONLOGON",
+		"New-ScheduledTaskAction",
+		"New-ScheduledTaskTrigger -AtLogOn -User $user",
+		"New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest",
+		"Register-ScheduledTask",
 		"Set-Service -StartupType Disabled",
 		"Stop-Service -Name tvnserver",
 		"New-CrabboxPassword",
@@ -605,6 +618,9 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 	if strings.Contains(got, "/SC ONCE") {
 		t.Fatalf("windows user data should not schedule user VNC as a one-shot task")
 	}
+	if strings.Contains(got, "/SC ONLOGON") {
+		t.Fatalf("windows user data should create the user VNC task with ScheduledTasks cmdlets")
+	}
 	if strings.Contains(got, "Set-Service -StartupType Manual") {
 		t.Fatalf("windows user data should not keep the service VNC fallback enabled")
 	}
@@ -621,6 +637,18 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		if verifyIndex < 0 || useIndex < 0 || verifyIndex > useIndex {
 			t.Fatalf("windows bootstrap must run %q before %q", pair[0], pair[1])
 		}
+	}
+	firewallIndex := strings.Index(got, "Enable-CrabboxTightVNCFirewallRule")
+	userStartupIndex := strings.Index(got, "$userVNCStartup = @'")
+	taskIndex := strings.Index(got, "CrabboxUserVNC")
+	if firewallIndex < 0 || userStartupIndex < 0 || taskIndex < 0 {
+		t.Fatalf("windows user data missing VNC startup markers")
+	}
+	if firewallIndex > userStartupIndex {
+		t.Fatalf("windows user data must create the TightVNC firewall rule before user startup script")
+	}
+	if firewallIndex > taskIndex {
+		t.Fatalf("windows user data must create the TightVNC firewall rule before scheduling VNC")
 	}
 	mirrorIndex := strings.Index(got, "$credentialPaths += $passwordMirrorPath")
 	aclIndex := strings.Index(got, "foreach ($credentialPath in $credentialPaths)")

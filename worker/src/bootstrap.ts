@@ -1,3 +1,4 @@
+// Builds provider bootstrap scripts that prepare disposable Crabbox machines for SSH and desktop access.
 import { sshPorts, type LeaseConfig } from "./config";
 
 const tightVNCMSIURL =
@@ -486,30 +487,67 @@ function windowsDesktopBootstrapPowerShell(): string {
     "SET_ACCEPTHTTPCONNECTIONS=1", "VALUE_OF_ACCEPTHTTPCONNECTIONS=0"
   ) -Wait
 }
+function Enable-CrabboxTightVNCFirewallRule {
+  $vncExecutable = "C:\\Program Files\\TightVNC\\tvnserver.exe"
+  if (-not (Test-Path -LiteralPath $vncExecutable)) { return }
+  $ruleName = "Crabbox-TightVNC-Loopback"
+  $existing = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
+  if ($existing) {
+    Set-NetFirewallRule -Name $ruleName -Enabled True -Direction Inbound -Action Allow -Profile Any | Out-Null
+  } else {
+    New-NetFirewallRule -Name $ruleName -DisplayName "Crabbox TightVNC loopback" -Enabled True -Direction Inbound -Program $vncExecutable -Protocol TCP -LocalPort 5900 -Action Allow -Profile Any | Out-Null
+  }
+}
+Enable-CrabboxTightVNCFirewallRule
 $userVNCStartup = @'
-$ErrorActionPreference = "SilentlyContinue"
+$ErrorActionPreference = "Stop"
 $serverKey = "HKCU:\\Software\\TightVNC\\Server"
 $serviceKey = "HKLM:\\Software\\TightVNC\\Server"
 $serviceConfig = Get-ItemProperty -Path $serviceKey -ErrorAction SilentlyContinue
-function Set-TightVNCBinaryValue($Name) {
+function Get-TightVNCBinaryHex($Name) {
   $hex = ""
+  $regOutput = & reg.exe query "HKLM\\Software\\TightVNC\\Server" /v $Name 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    foreach ($line in $regOutput) {
+      if ($line -match ("^\\s*" + [regex]::Escape($Name) + "\\s+REG_BINARY\\s+([0-9A-Fa-f]+)\\s*$")) {
+        return $Matches[1]
+      }
+    }
+  }
   if ($serviceConfig -and $serviceConfig.$Name) {
     $bytes = [byte[]]$serviceConfig.$Name
     if ($bytes -and $bytes.Length -gt 0) {
       $hex = -join ($bytes | ForEach-Object { $_.ToString("X2") })
     }
   }
-  if ($hex) {
-    & reg.exe add "HKCU\\Software\\TightVNC\\Server" /v $Name /t REG_BINARY /d $hex /f | Out-Null
-  }
+  return $hex
 }
-New-Item -Force -Path $serverKey | Out-Null
-New-ItemProperty -Force -Path $serverKey -Name UseVncAuthentication -PropertyType DWord -Value 1 | Out-Null
-Set-TightVNCBinaryValue "Password"
-New-ItemProperty -Force -Path $serverKey -Name UseControlAuthentication -PropertyType DWord -Value 1 | Out-Null
-Set-TightVNCBinaryValue "ControlPassword"
-New-ItemProperty -Force -Path $serverKey -Name AllowLoopback -PropertyType DWord -Value 1 | Out-Null
-New-ItemProperty -Force -Path $serverKey -Name AcceptHttpConnections -PropertyType DWord -Value 0 | Out-Null
+function Set-TightVNCBinaryValue($Name) {
+  $hex = Get-TightVNCBinaryHex $Name
+  if (-not $hex) {
+    return $false
+  }
+  & reg.exe add "HKCU\\Software\\TightVNC\\Server" /v $Name /t REG_BINARY /d $hex /f | Out-Null
+  return ($LASTEXITCODE -eq 0)
+}
+$vncPasswordReady = $false
+for ($i = 1; $i -le 60; $i++) {
+  New-Item -Force -Path $serverKey | Out-Null
+  New-ItemProperty -Force -Path $serverKey -Name UseVncAuthentication -PropertyType DWord -Value 1 | Out-Null
+  $passwordReady = Set-TightVNCBinaryValue "Password"
+  New-ItemProperty -Force -Path $serverKey -Name UseControlAuthentication -PropertyType DWord -Value 1 | Out-Null
+  $controlReady = Set-TightVNCBinaryValue "ControlPassword"
+  New-ItemProperty -Force -Path $serverKey -Name AllowLoopback -PropertyType DWord -Value 1 | Out-Null
+  New-ItemProperty -Force -Path $serverKey -Name AcceptHttpConnections -PropertyType DWord -Value 0 | Out-Null
+  if ($passwordReady -and $controlReady) {
+    $vncPasswordReady = $true
+    break
+  }
+  Start-Sleep -Seconds 1
+}
+if (-not $vncPasswordReady) {
+  throw "TightVNC HKCU password values were not copied"
+}
 $exe = "C:\\Program Files\\TightVNC\\tvnserver.exe"
 Get-Process tvnserver -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq (Get-Process -Id $PID).SessionId } | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
@@ -519,8 +557,11 @@ Set-Content -Encoding UTF8 -LiteralPath $userVNCStartupPath -Value $userVNCStart
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $userVNCStartupCommandPath) | Out-Null
 Set-Content -Encoding ASCII -LiteralPath $userVNCStartupCommandPath -Value ('@echo off' + [Environment]::NewLine + 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $userVNCStartupPath + '"' + [Environment]::NewLine)
 $startupTask = "CrabboxUserVNC"
-cmd.exe /c "schtasks.exe /Delete /TN $startupTask /F 2>NUL" | Out-Null
-schtasks.exe /Create /TN $startupTask /SC ONLOGON /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $userVNCStartupPath" /RU $user /IT /F | Out-Null
+Unregister-ScheduledTask -TaskName $startupTask -Confirm:$false -ErrorAction SilentlyContinue
+$startupAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $userVNCStartupPath + '"')
+$startupTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$startupPrincipal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+Register-ScheduledTask -TaskName $startupTask -Action $startupAction -Trigger $startupTrigger -Principal $startupPrincipal -Force | Out-Null
 Get-Service -Name tvnserver -ErrorAction SilentlyContinue | Set-Service -StartupType Disabled
 Stop-Service -Name tvnserver -Force -ErrorAction SilentlyContinue
 $winlogon = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon"
