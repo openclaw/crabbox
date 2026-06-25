@@ -453,6 +453,27 @@ func TestStatusWaitRequiresSSHReadiness(t *testing.T) {
 	}
 }
 
+func TestResolveReleaseOnlySkipsMissingNodePortRoute(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.Network = networkNodePort
+	cfg.SealosDevbox.NodeHost = "node-1.example.test"
+	leaseID := "cbx_nodeportgone"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	item := `{"items":[{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}]}`
+	backend := lifecycleBackend(cfg, &lifecycleRunner{outputs: []string{item}})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.Name != name {
+		t.Fatalf("lease=%#v", lease)
+	}
+	if lease.SSH.Host != "" || lease.SSH.Port != "" || lease.SSH.Key != "" {
+		t.Fatalf("release-only resolve should not require SSH route: %#v", lease.SSH)
+	}
+}
+
 func flattenArgs(requests []core.LocalCommandRequest) []string {
 	out := []string{}
 	for _, req := range requests {
