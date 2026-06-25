@@ -593,6 +593,13 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 			approveEnv:    "CRABBOX_TENSORLAKE_API_URL",
 		},
 		{
+			name:          "replicate",
+			provider:      "replicate",
+			file:          fileConfig{Replicate: &fileReplicateConfig{APIURL: stringPtr("https://repo.example.test/v1")}},
+			credentialEnv: "CRABBOX_REPLICATE_API_TOKEN",
+			approveEnv:    "CRABBOX_REPLICATE_API_URL",
+		},
+		{
 			name:          "upstash box",
 			provider:      "upstash-box",
 			file:          fileConfig{UpstashBox: &fileUpstashBoxConfig{BaseURL: "https://repo.example.test"}},

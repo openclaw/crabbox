@@ -5743,6 +5743,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Replicate != nil {
 		if file.Replicate.APIURL != nil {
 			cfg.Replicate.APIURL = *file.Replicate.APIURL
+			cfg.credentialProvenance.replicateAPIURL = credentialSource
 		}
 		if file.Replicate.Deployment != nil {
 			cfg.Replicate.Deployment = *file.Replicate.Deployment
@@ -7589,7 +7590,10 @@ func applyEnv(cfg *Config) error {
 		cfg.OpenComputer.Burst = v
 	}
 	var err error
-	cfg.Replicate.APIURL = getenv("CRABBOX_REPLICATE_API_URL", getenv("REPLICATE_API_URL", cfg.Replicate.APIURL))
+	if value, ok := firstNonEmptyEnv("CRABBOX_REPLICATE_API_URL", "REPLICATE_API_URL"); ok {
+		cfg.Replicate.APIURL = value
+		cfg.credentialProvenance.replicateAPIURL = credentialSourceEnvironment
+	}
 	cfg.Replicate.Deployment = getenv("CRABBOX_REPLICATE_DEPLOYMENT", cfg.Replicate.Deployment)
 	cfg.Replicate.Version = getenv("CRABBOX_REPLICATE_VERSION", cfg.Replicate.Version)
 	cfg.Replicate.Workdir = getenv("CRABBOX_REPLICATE_WORKDIR", cfg.Replicate.Workdir)
