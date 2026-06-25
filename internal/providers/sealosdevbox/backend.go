@@ -222,6 +222,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 	}
 	if !req.StatusOnly && !req.ReleaseOnly {
+		if req.NoLocalStateMutations {
+			return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+		}
 		secret, err := b.getSecret(ctx, devboxSecretName(item))
 		if err != nil {
 			return core.LeaseTarget{}, err

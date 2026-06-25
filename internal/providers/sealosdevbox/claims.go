@@ -221,6 +221,9 @@ func (b *backend) resolveDevbox(ctx context.Context, identifier string) (devboxI
 		if err != nil {
 			return devboxItem{}, "", "", "", err
 		}
+		if !b.itemMatchesScope(item) {
+			return devboxItem{}, "", "", "", core.Exit(4, "Sealos DevBox %q is outside the active provider scope", name)
+		}
 		actualName, leaseID, slug, err := identityFromDevbox(item, name)
 		if err != nil {
 			return devboxItem{}, "", "", "", err
