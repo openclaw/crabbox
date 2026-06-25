@@ -1,7 +1,6 @@
 package replicate
 
 import (
-	"context"
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -39,8 +38,8 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	return ValidateConfig(cfg)
 }
 
-func (p Provider) Configure(core.Config, core.Runtime) (core.Backend, error) {
-	return replicateBackend{spec: p.Spec()}, nil
+func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
+	return NewReplicateBackend(p.Spec(), cfg, rt), nil
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
@@ -53,38 +52,4 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 		return nil, core.Exit(2, "replicate doctor backend unavailable")
 	}
 	return doctor, nil
-}
-
-type replicateBackend struct {
-	spec core.ProviderSpec
-}
-
-func (b replicateBackend) Spec() core.ProviderSpec { return b.spec }
-
-func (b replicateBackend) Doctor(context.Context, core.DoctorRequest) (core.DoctorResult, error) {
-	return core.DoctorResult{
-		Provider: providerName,
-		Message:  "auth=unchecked control_plane=unchecked inventory=unchecked api=not-implemented mutation=false leases=0 runtime=unchecked",
-		Status:   "not-implemented",
-	}, nil
-}
-
-func (b replicateBackend) Warmup(context.Context, core.WarmupRequest) error {
-	return exit(2, "provider=replicate backend lifecycle is not implemented in this build")
-}
-
-func (b replicateBackend) Run(context.Context, core.RunRequest) (core.RunResult, error) {
-	return core.RunResult{}, exit(2, "provider=replicate backend lifecycle is not implemented in this build")
-}
-
-func (b replicateBackend) List(context.Context, core.ListRequest) ([]core.LeaseView, error) {
-	return nil, exit(2, "provider=replicate backend lifecycle is not implemented in this build")
-}
-
-func (b replicateBackend) Status(context.Context, core.StatusRequest) (core.StatusView, error) {
-	return core.StatusView{}, exit(2, "provider=replicate backend lifecycle is not implemented in this build")
-}
-
-func (b replicateBackend) Stop(context.Context, core.StopRequest) error {
-	return exit(2, "provider=replicate backend lifecycle is not implemented in this build")
 }
