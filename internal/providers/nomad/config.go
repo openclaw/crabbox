@@ -2,6 +2,7 @@ package nomad
 
 import (
 	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -27,11 +28,11 @@ func validateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.Nomad.Driver) == "" {
 		return exit(2, "nomad driver must not be empty")
 	}
-	if strings.TrimSpace(cfg.Nomad.Image) == "" {
+	if nomadDriverRequiresImage(cfg.Nomad.Driver) && strings.TrimSpace(cfg.Nomad.Image) == "" && strings.TrimSpace(cfg.Nomad.JobSpecTemplate) == "" {
 		return exit(2, "nomad image must not be empty")
 	}
-	if strings.TrimSpace(cfg.Nomad.Workdir) == "" || !filepath.IsAbs(cfg.Nomad.Workdir) {
-		return exit(2, "nomad workdir must be an absolute path")
+	if err := validateNomadWorkdir(cfg.Nomad.Workdir); err != nil {
+		return err
 	}
 	if cfg.Nomad.CPU < 0 {
 		return exit(2, "nomad cpu must be non-negative")
@@ -50,6 +51,28 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.Nomad.ExecTimeoutSecs < 0 {
 		return exit(2, "nomad execTimeoutSecs must be non-negative")
+	}
+	return nil
+}
+
+func nomadDriverRequiresImage(driver string) bool {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "", "docker", "podman":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateNomadWorkdir(workdir string) error {
+	workdir = strings.TrimSpace(workdir)
+	if workdir == "" || !path.IsAbs(workdir) {
+		return exit(2, "nomad workdir must be an absolute path")
+	}
+	clean := path.Clean(workdir)
+	switch clean {
+	case "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/run", "/sbin", "/sys", "/tmp", "/usr", "/var", "/work", "/workspace":
+		return exit(2, "nomad workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return nil
 }

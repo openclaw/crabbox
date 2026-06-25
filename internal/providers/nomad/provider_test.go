@@ -123,6 +123,10 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 		{name: "bad scheme", mut: func(c *Config) { c.Nomad.Address = "ftp://nomad.example.test" }, want: "scheme"},
 		{name: "bad token env", mut: func(c *Config) { c.Nomad.TokenEnv = "BAD-NAME" }, want: "tokenEnv"},
 		{name: "relative workdir", mut: func(c *Config) { c.Nomad.Workdir = "workspace" }, want: "absolute"},
+		{name: "root workdir", mut: func(c *Config) { c.Nomad.Workdir = "/" }, want: "too broad"},
+		{name: "workspace root workdir", mut: func(c *Config) { c.Nomad.Workdir = "/workspace" }, want: "too broad"},
+		{name: "system workdir", mut: func(c *Config) { c.Nomad.Workdir = "/etc" }, want: "too broad"},
+		{name: "docker without image", mut: func(c *Config) { c.Nomad.Driver = "docker"; c.Nomad.Image = "" }, want: "image"},
 		{name: "negative cpu", mut: func(c *Config) { c.Nomad.CPU = -1 }, want: "cpu"},
 		{name: "negative memory", mut: func(c *Config) { c.Nomad.MemoryMB = -1 }, want: "memoryMB"},
 		{name: "negative disk", mut: func(c *Config) { c.Nomad.DiskMB = -1 }, want: "diskMB"},
@@ -134,6 +138,32 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 			err := validateConfig(cfg)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err=%v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateConfigAllowsNonImageDriversAndTemplatesWithoutImage(t *testing.T) {
+	base := core.BaseConfig()
+	base.Provider = providerName
+	base.TargetOS = core.TargetLinux
+	base.Nomad.Address = "https://nomad.example.test:4646"
+
+	for _, tc := range []struct {
+		name   string
+		driver string
+		tpl    string
+	}{
+		{name: "raw exec", driver: "raw_exec"},
+		{name: "docker template", driver: "docker", tpl: "/templates/job.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			cfg.Nomad.Driver = tc.driver
+			cfg.Nomad.Image = ""
+			cfg.Nomad.JobSpecTemplate = tc.tpl
+			if err := validateConfig(cfg); err != nil {
+				t.Fatalf("validateConfig() error=%v", err)
 			}
 		})
 	}
