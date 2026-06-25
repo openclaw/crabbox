@@ -595,6 +595,30 @@ func TestRunNoSyncPropagatesCleanupFailureAfterSuccessfulCommand(t *testing.T) {
 	}
 }
 
+func TestRunNoSyncTransportFailureUsesNonZeroResultExitCode(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.execResults = []fakeNomadExecResult{
+		{ExitCode: 0},
+		{ExitCode: 0, Err: errors.New("websocket closed")},
+	}
+	b, _, _ := testBackend(t, fake)
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:    newNomadRunRepo(t),
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	var exitErr ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(err.Error(), "websocket closed") {
+		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
+	}
+	if result.ExitCode != 1 || result.Provider != providerName || result.Session != nil {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(fake.deregisters) != 1 {
+		t.Fatalf("deregisters=%v", fake.deregisters)
+	}
+}
+
 func TestRunKeepOnFailureRetainsNewJob(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.execResults = []fakeNomadExecResult{{ExitCode: 0}, {ExitCode: 7}}
