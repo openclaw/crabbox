@@ -57,9 +57,9 @@ func (f *fakeFalAPI) CreateInstance(_ context.Context, req CreateInstanceRequest
 		ID:           "inst_created",
 		InstanceType: req.InstanceType,
 		Sector:       req.Sector,
-		Region:      "us-west",
-		IP:          "203.0.113.42",
-		Status:      InstanceStatusReady,
+		Region:       "us-west",
+		IP:           "203.0.113.42",
+		Status:       InstanceStatusReady,
 	}
 	f.instances[item.ID] = item
 	return item, nil
@@ -355,8 +355,8 @@ func TestFalStatusOnlyResolveDoesNotRequireSSHHost(t *testing.T) {
 			ID:           "inst_pending",
 			InstanceType: InstanceTypeH100x1,
 			Sector:       Sector1,
-			Region:      "us-west",
-			Status:      InstanceStatusProvisioning,
+			Region:       "us-west",
+			Status:       InstanceStatusProvisioning,
 		},
 	}}
 	b := newFalTestBackend(t, api)
@@ -487,9 +487,9 @@ func readyFalInstance(id, ip string) ComputeInstance {
 		ID:           id,
 		InstanceType: InstanceTypeH100x1,
 		Sector:       Sector1,
-		Region:      "us-west",
-		IP:          ip,
-		Status:      InstanceStatusReady,
+		Region:       "us-west",
+		IP:           ip,
+		Status:       InstanceStatusReady,
 	}
 }
 
