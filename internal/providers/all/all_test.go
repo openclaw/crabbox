@@ -129,7 +129,7 @@ func TestNebiusRegistersWithoutAliases(t *testing.T) {
 	}
 }
 
-func TestSealosDevboxRegistersWithoutAliases(t *testing.T) {
+func TestSealosDevboxRegistersWithRequestedAliases(t *testing.T) {
 	provider, err := core.ProviderFor("sealos-devbox")
 	if err != nil {
 		t.Fatalf("ProviderFor(sealos-devbox): %v", err)
@@ -152,10 +152,17 @@ func TestSealosDevboxRegistersWithoutAliases(t *testing.T) {
 			t.Fatalf("sealos-devbox features=%v missing %s", spec.Features, feature)
 		}
 	}
-	for _, alias := range []string{"sealos", "devbox", "sealos-dev"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "sealos-devbox" {
-			t.Fatalf("%q alias unexpectedly resolves to sealos-devbox", alias)
+	for _, alias := range []string{"sealos", "sealos-dev"} {
+		got, err := core.ProviderFor(alias)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
+		if got.Name() != "sealos-devbox" {
+			t.Fatalf("ProviderFor(%q).Name=%q want sealos-devbox", alias, got.Name())
+		}
+	}
+	if got, err := core.ProviderFor("devbox"); err == nil && got.Name() == "sealos-devbox" {
+		t.Fatal(`"devbox" alias unexpectedly resolves to sealos-devbox`)
 	}
 }
 

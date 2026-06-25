@@ -28,7 +28,8 @@ func TestProviderSpecAndAutomationSurface(t *testing.T) {
 	if provider.Name() != providerName {
 		t.Fatalf("name=%q", provider.Name())
 	}
-	if len(provider.Aliases()) != 0 {
+	aliases := provider.Aliases()
+	if len(aliases) != 2 || aliases[0] != "sealos" || aliases[1] != "sealos-dev" {
 		t.Fatalf("aliases=%v", provider.Aliases())
 	}
 	spec := provider.Spec()
