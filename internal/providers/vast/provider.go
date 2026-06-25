@@ -93,6 +93,9 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
 		return exit(2, "vast.apiUrl must be an absolute URL without credentials")
 	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return exit(2, "vast.apiUrl must not include query strings or fragments")
+	}
 	switch strings.ToLower(u.Scheme) {
 	case "https", "http":
 	default:

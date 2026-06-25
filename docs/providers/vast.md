@@ -69,7 +69,7 @@ Config keys under `vast:`:
 
 | Key | Maps to | Default | Notes |
 | --- | --- | --- | --- |
-| `apiUrl` | `cfg.Vast.APIURL` | `https://console.vast.ai/api/v0` | Absolute Vast REST API URL without credentials. HTTPS is required except for localhost test endpoints. |
+| `apiUrl` | `cfg.Vast.APIURL` | `https://console.vast.ai/api/v0` | Absolute Vast REST API URL without credentials, query strings, or fragments. HTTPS is required except for localhost test endpoints. |
 | `instanceType` | `cfg.Vast.InstanceType` | `ondemand` | Offer type, `ondemand` or `interruptible`; `on-demand` is normalized. |
 | `gpuName` | `cfg.Vast.GPUName` | empty | Optional Vast GPU name selector. |
 | `gpuCount` | `cfg.Vast.GPUCount` | `0` | Minimum GPU count when greater than zero. |
