@@ -147,7 +147,7 @@ func (b *backend) itemMatchesScope(item devboxItem) bool {
 		return false
 	}
 	scope := strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider_scope"])
-	return scope == "" || scope == b.claimScope()
+	return scope == b.claimScope()
 }
 
 func (b *backend) serverFromDevbox(item devboxItem) core.Server {

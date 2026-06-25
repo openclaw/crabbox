@@ -631,6 +631,24 @@ func TestResolveClaimRejectsDevboxOutsideActiveScope(t *testing.T) {
 	}
 }
 
+func TestResolveClaimRejectsDevboxMissingProviderScope(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_noscope123"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	backend := lifecycleBackend(cfg, &lifecycleRunner{})
+	if err := backend.claimLeaseForRepo(leaseID, slug, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	backend.rt.Exec = &lifecycleRunner{outputs: []string{item}}
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "outside the active provider scope") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+}
+
 func flattenArgs(requests []core.LocalCommandRequest) []string {
 	out := []string{}
 	for _, req := range requests {
