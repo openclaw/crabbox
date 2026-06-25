@@ -285,11 +285,6 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if err != nil {
 			return err
 		}
-		remove, reason := core.ShouldCleanupServer(server, b.now())
-		if !remove {
-			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
-			continue
-		}
 		if claim.CloudID == "" {
 			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=recovery_pending\n", server.DisplayID(), server.Name)
 			continue
@@ -308,6 +303,11 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		if strings.TrimSpace(live.ID) != claim.CloudID {
 			return exit(2, "refusing cleanup for fal lease %s after provider identity changed", claim.LeaseID)
+		}
+		remove, reason := core.ShouldCleanupServer(server, b.now())
+		if !remove {
+			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
+			continue
 		}
 		fmt.Fprintf(b.rt.Stderr, "delete server id=%s name=%s\n", claim.CloudID, server.Name)
 		if req.DryRun {

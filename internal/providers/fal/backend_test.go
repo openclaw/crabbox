@@ -534,6 +534,22 @@ func TestFalCleanupDeletesOnlyExpiredClaimedInstances(t *testing.T) {
 	}
 }
 
+func TestFalCleanupRemovesProviderAbsentClaimBeforeTTLEligibility(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{}}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_absent12345", "absent", "inst_absent", "203.0.113.31", false)
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("absent", providerName); err != nil || ok {
+		t.Fatalf("provider-absent claim retained ok=%v err=%v", ok, err)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("provider-absent cleanup issued delete: %#v", api.deletedIDs)
+	}
+}
+
 func TestFalTouchPersistsLocalClaimLabels(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
