@@ -27,7 +27,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	item, name, leaseID, slug, err := b.validateDevboxIdentity(ctx, name, req.Lease.LeaseID, expectedSlug)
 	if err != nil {
-		if b.deleteOnRelease(req.Lease) && kubectlNotFound(err) && req.Lease.LeaseID != "" {
+		if b.deleteOnRelease(req.Lease) && kubernetesObjectNotFound(err) && req.Lease.LeaseID != "" {
 			core.RemoveLeaseClaim(req.Lease.LeaseID)
 			core.RemoveStoredTestboxKey(req.Lease.LeaseID)
 			return nil

@@ -2,6 +2,7 @@ package sealosdevbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -80,6 +81,74 @@ func TestReleaseDeleteRemovesDevboxClaimAndKeyAfterValidation(t *testing.T) {
 	}
 	if backend.RetainLeaseClaimAfterRelease(core.LeaseTarget{LeaseID: leaseID, Server: server}) {
 		t.Fatal("delete release should not retain local claim")
+	}
+}
+
+func TestReleaseDeleteKeepsLocalStateWhenKubectlMissing(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.DeleteOnRelease = true
+	leaseID := "cbx_missingkubectl"
+	slug := "red"
+	name := core.LeaseProviderName(leaseID, slug)
+	server := releaseServer(cfg, leaseID, slug, name)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := persistDevboxKey(leaseID, devboxSecretKeys{PublicKey: "ssh-ed25519 AAA test", PrivateKey: "private\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &lifecycleRunner{
+		stderrs:  []string{`exec: "kubectl": executable file not found in $PATH`},
+		exitCode: []int{127},
+		errors:   []error{errors.New(`exec: "kubectl": executable file not found in $PATH`)},
+	}
+	backend := lifecycleBackend(cfg, runner)
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "executable file not found") {
+		t.Fatalf("release error=%v", err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key was removed after local kubectl failure: %v", err)
+	}
+	if got := strings.Join(flattenArgs(runner.requests), " "); strings.Contains(got, "patch ") || strings.Contains(got, "delete ") {
+		t.Fatalf("local kubectl failure mutated resource: %s", got)
+	}
+}
+
+func TestReleaseDeleteRemovesLocalStateWhenDevboxNotFound(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.DeleteOnRelease = true
+	leaseID := "cbx_missingdevbox"
+	slug := "red"
+	name := core.LeaseProviderName(leaseID, slug)
+	server := releaseServer(cfg, leaseID, slug, name)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := persistDevboxKey(leaseID, devboxSecretKeys{PublicKey: "ssh-ed25519 AAA test", PrivateKey: "private\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &lifecycleRunner{
+		stderrs:  []string{`Error from server (NotFound): devboxes.devbox.sealos.io "` + name + `" not found`},
+		exitCode: []int{1},
+		errors:   []error{errors.New("exit status 1")},
+	}
+	backend := lifecycleBackend(cfg, runner)
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stored key still exists or stat failed unexpectedly: %v", err)
 	}
 }
 
