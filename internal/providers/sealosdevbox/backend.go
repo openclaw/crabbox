@@ -225,6 +225,10 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		if req.NoLocalStateMutations {
 			return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 		}
+		item, server, err = b.resumeDevboxIfPaused(ctx, item, server)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 		secret, err := b.getSecret(ctx, devboxSecretName(item))
 		if err != nil {
 			return core.LeaseTarget{}, err
@@ -257,6 +261,24 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 	}
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func (b *backend) resumeDevboxIfPaused(ctx context.Context, item devboxItem, server core.Server) (devboxItem, core.Server, error) {
+	if normalizeDevboxState(item) != devboxStatePaused {
+		return item, server, nil
+	}
+	name := strings.TrimSpace(item.Metadata.Name)
+	if name == "" {
+		return item, server, core.Exit(5, "Sealos DevBox has no metadata.name")
+	}
+	if err := b.patchDevboxState(ctx, name, devboxStateRun, nil); err != nil {
+		return item, server, err
+	}
+	resumed, err := b.waitForDevboxPrepared(ctx, name, bootstrapWaitTimeout(b.cfg))
+	if err != nil {
+		return item, server, err
+	}
+	return resumed, b.serverFromDevbox(resumed), nil
 }
 
 func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
