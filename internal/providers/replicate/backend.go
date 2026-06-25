@@ -75,11 +75,15 @@ func (b replicateBackend) Run(ctx context.Context, req RunRequest) (RunResult, e
 	if err != nil {
 		return RunResult{}, err
 	}
+	baseURL, _, err := b.validateReadyConfig()
+	if err != nil {
+		return RunResult{}, err
+	}
 	workdir, err := replicateWorkdir(b.cfg)
 	if err != nil {
 		return RunResult{}, err
 	}
-	api, baseURL, err := b.api()
+	api, _, err := b.api()
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -187,7 +191,7 @@ func (b replicateBackend) Run(ctx context.Context, req RunRequest) (RunResult, e
 func (b replicateBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
 	_ = ctx
 	_ = req
-	if _, _, err := b.validateReadyConfig(); err != nil {
+	if _, _, err := b.validateAPIConfig(); err != nil {
 		return nil, err
 	}
 	claims, err := listReplicateLeaseClaims()
@@ -310,6 +314,18 @@ func (b replicateBackend) validateReadyConfig() (string, string, error) {
 	if err := ValidateConfig(cfg); err != nil {
 		return "", "", err
 	}
+	baseURL, source, err := b.validateAPIConfig()
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := replicateWorkdir(cfg); err != nil {
+		return "", "", err
+	}
+	return baseURL, source, nil
+}
+
+func (b replicateBackend) validateAPIConfig() (string, string, error) {
+	cfg := b.cfg
 	baseURL, err := validateReplicateAPIURL(blank(strings.TrimSpace(cfg.Replicate.APIURL), defaultAPIURL))
 	if err != nil {
 		return "", "", err
@@ -318,14 +334,11 @@ func (b replicateBackend) validateReadyConfig() (string, string, error) {
 	if !ok {
 		return "", "", exit(2, "provider=replicate needs an API token; load CRABBOX_REPLICATE_API_TOKEN from a secret manager or set REPLICATE_API_TOKEN")
 	}
-	if _, err := replicateWorkdir(cfg); err != nil {
-		return "", "", err
-	}
 	return baseURL, source, nil
 }
 
 func (b replicateBackend) api() (replicateAPI, string, error) {
-	baseURL, _, err := b.validateReadyConfig()
+	baseURL, _, err := b.validateAPIConfig()
 	if err != nil {
 		return nil, "", err
 	}

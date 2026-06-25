@@ -64,9 +64,11 @@ screenshots.
 
 ## Config
 
-Choose exactly one runner target: `replicate.deployment` or
-`replicate.version`. Setting both is rejected; setting neither is rejected when
-`provider: replicate` is selected.
+Choose exactly one runner target for `run`, `warmup`, and `doctor`:
+`replicate.deployment` or `replicate.version`. Setting both is rejected;
+setting neither is rejected for commands that create or validate a runner
+target. Existing-prediction commands such as `status`, `list`, and `stop` only
+require the API URL, API token, and prediction or claim identifier.
 
 ```yaml
 provider: replicate

@@ -369,6 +369,45 @@ func TestListUsesOnlyLocalClaimsAndDoesNotListAccountPredictions(t *testing.T) {
 	}
 }
 
+func TestExistingPredictionOperationsDoNotRequireRunnerTarget(t *testing.T) {
+	t.Setenv(envCrabboxReplicateToken, "test-token")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeReplicateAPI{
+		getSeq: []replicatePrediction{{ID: "pred_status", Status: "processing"}},
+		cancel: replicatePrediction{
+			ID:     "pred_stop",
+			Status: "canceled",
+		},
+	}
+	backend := newTestBackend(fake, io.Discard, io.Discard)
+	backend.cfg.Replicate.Deployment = ""
+	backend.cfg.Replicate.Version = ""
+
+	view, err := backend.Status(context.Background(), StatusRequest{ID: "pred_status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.ID != "rbx_pred_status" || view.ServerID != "pred_status" {
+		t.Fatalf("status=%#v", view)
+	}
+	if err := claimLeaseForRepoProviderScopePond("rbx_pred_list", "list-me", providerName, backend.claimScope(), "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].CloudID != "pred_list" {
+		t.Fatalf("views=%#v", views)
+	}
+	if err := backend.Stop(context.Background(), StopRequest{ID: "pred_stop"}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fake.cancels, []string{"pred_stop"}) {
+		t.Fatalf("cancels=%v", fake.cancels)
+	}
+}
+
 func TestStopCancelsPredictionAndRemovesClaim(t *testing.T) {
 	t.Setenv(envCrabboxReplicateToken, "test-token")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
