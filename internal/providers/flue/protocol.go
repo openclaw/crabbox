@@ -1,6 +1,7 @@
 package flue
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -118,10 +119,8 @@ func (req Request) Validate() error {
 	if len(req.Command) == 0 {
 		return exit(2, "flue request command is required")
 	}
-	for i, arg := range req.Command {
-		if strings.TrimSpace(arg) == "" {
-			return exit(2, "flue request command[%d] must not be empty", i)
-		}
+	if strings.TrimSpace(req.Command[0]) == "" {
+		return exit(2, "flue request command[0] must not be empty")
 	}
 	if req.TimeoutMs < 0 {
 		return exit(2, "flue request timeoutMs must be non-negative")
@@ -176,4 +175,27 @@ func (resp Response) Validate() error {
 		}
 	}
 	return nil
+}
+
+func ParseResponseFromStdout(stdout string) (Response, error) {
+	trimmed := strings.TrimSpace(stdout)
+	if trimmed == "" {
+		return Response{}, exit(5, "flue run produced no protocol response on stdout")
+	}
+	if resp, err := ParseResponse([]byte(trimmed)); err == nil {
+		return resp, nil
+	}
+	lines := bytes.Split([]byte(stdout), []byte{'\n'})
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		resp, err := ParseResponse(line)
+		if err == nil {
+			return resp, nil
+		}
+		return Response{}, exit(5, "parse flue protocol response: %v", err)
+	}
+	return Response{}, exit(5, "flue run stdout did not contain a protocol JSON response")
 }
