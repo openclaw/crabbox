@@ -267,7 +267,7 @@ exit 99
   });
 
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /classification=environment_blocked reason=missing_NOMAD_ADDR_or_nomad.address/);
+  assert.match(result.stdout, /classification=environment_blocked reason=missing_NOMAD_ADDR_or_trusted_nomad.address/);
   assert.match(result.stderr, /admin active-lease check skipped/);
   assert.equal(fs.existsSync(log), false);
 });

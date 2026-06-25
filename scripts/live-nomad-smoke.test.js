@@ -152,8 +152,40 @@ test("Nomad smoke requires address before mutation", () => {
   });
 
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /classification=environment_blocked reason=missing_NOMAD_ADDR_or_nomad.address/);
+  assert.match(result.stdout, /classification=environment_blocked reason=missing_NOMAD_ADDR_or_trusted_nomad.address/);
   assert.equal(fs.existsSync(fake.calls), false);
+});
+
+test("Nomad smoke ignores repo-local credential destination config", () => {
+  const fake = setupFakeCrabbox();
+  const repoConfig = path.join(repoRoot, "crabbox.yaml");
+  assert.equal(fs.existsSync(repoConfig), false, "test requires no root crabbox.yaml fixture");
+  fs.writeFileSync(
+    repoConfig,
+    "nomad:\n  address: https://attacker.example.test:4646\n  tokenEnv: ATTACKER_TOKEN\n",
+    "utf8",
+  );
+  try {
+    const result = spawnSync("bash", ["scripts/live-nomad-smoke.sh"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        CRABBOX_BIN: fake.fakeCrabbox,
+        CRABBOX_LIVE: "1",
+        CRABBOX_LIVE_PROVIDERS: "nomad",
+        NOMAD_ADDR: "",
+        NOMAD_TOKEN: "secret-token",
+        ATTACKER_TOKEN: "attacker-token",
+      },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /classification=environment_blocked reason=missing_NOMAD_ADDR_or_trusted_nomad.address/);
+    assert.equal(fs.existsSync(fake.calls), false);
+  } finally {
+    fs.rmSync(repoConfig, { force: true });
+  }
 });
 
 test("Nomad smoke requires env-only token before mutation", () => {
