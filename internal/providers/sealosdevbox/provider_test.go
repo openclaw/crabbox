@@ -102,6 +102,52 @@ func TestConfigureRejectsNonLinuxTarget(t *testing.T) {
 	}
 }
 
+func TestConfigureRejectsMissingRouteConfig(t *testing.T) {
+	cfg := testConfig()
+	cfg.SealosDevbox.SSHGatewayHost = ""
+	if err := (Provider{}).ValidateConfig(cfg); err != nil {
+		t.Fatalf("base validation should allow doctor preflight: %v", err)
+	}
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}}); err == nil || !strings.Contains(err.Error(), "sshGatewayHost") {
+		t.Fatalf("configure error=%v", err)
+	}
+}
+
+func TestDoctorReportsMissingSSHGateRoute(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.SSHGatewayHost = ""
+	doctor, err := (Provider{}).ConfigureDoctor(cfg, core.Runtime{Exec: &recordingRunner{}, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := findDoctorCheck(t, result.Checks, "network")
+	if result.Status != "blocked" || check.Status != "failed" || check.Details["host_configured"] != "false" {
+		t.Fatalf("result=%#v check=%#v", result, check)
+	}
+}
+
+func TestDoctorReportsMissingNodePortRoute(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.Network = networkNodePort
+	cfg.SealosDevbox.NodeHost = ""
+	doctor, err := (Provider{}).ConfigureDoctor(cfg, core.Runtime{Exec: &recordingRunner{}, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := findDoctorCheck(t, result.Checks, "network")
+	if result.Status != "blocked" || check.Status != "failed" || check.Details["node_host_configured"] != "false" {
+		t.Fatalf("result=%#v check=%#v", result, check)
+	}
+}
+
 func TestDoctorUsesReadOnlyKubectlCommands(t *testing.T) {
 	runner := &recordingRunner{}
 	doctor, err := (Provider{}).ConfigureDoctor(lifecycleConfig(), core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
@@ -203,4 +249,15 @@ func firstKubectlVerb(args []string) int {
 		return i
 	}
 	return -1
+}
+
+func findDoctorCheck(t *testing.T, checks []core.DoctorCheck, name string) core.DoctorCheck {
+	t.Helper()
+	for _, check := range checks {
+		if check.Check == name {
+			return check
+		}
+	}
+	t.Fatalf("doctor check %q missing from %#v", name, checks)
+	return core.DoctorCheck{}
 }
