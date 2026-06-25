@@ -49,7 +49,7 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 			add(b.canI(ctx, verb, resource))
 		}
 	}
-	for _, verb := range []string{"create", "update", "delete"} {
+	for _, verb := range []string{"create", "update", "patch", "delete"} {
 		add(b.canI(ctx, verb, devboxResource))
 	}
 	creationDetails := map[string]string{
@@ -414,6 +414,7 @@ func (b *backend) waitForDevboxPrepared(ctx context.Context, name string, timeou
 
 func (b *backend) waitForDevboxSecret(ctx context.Context, item devboxItem, timeout time.Duration) (devboxSecret, error) {
 	name := devboxSecretName(item)
+	devboxName := strings.TrimSpace(item.Metadata.Name)
 	deadline := b.now().Add(timeout)
 	var lastErr error
 	for {
@@ -425,6 +426,21 @@ func (b *backend) waitForDevboxSecret(ctx context.Context, item devboxItem, time
 			return devboxSecret{}, err
 		}
 		lastErr = err
+		if devboxName != "" {
+			refreshed, refreshErr := b.getDevbox(ctx, devboxName)
+			if refreshErr == nil {
+				item = refreshed
+				previousName := name
+				name = devboxSecretName(item)
+				if name != previousName {
+					continue
+				}
+			} else if !kubectlNotFound(refreshErr) {
+				return devboxSecret{}, refreshErr
+			} else {
+				lastErr = refreshErr
+			}
+		}
 		if !b.now().Before(deadline) {
 			return devboxSecret{}, core.Exit(5, "timed out waiting for Sealos DevBox Secret %s: %s", name, redactSensitive(lastErr.Error()))
 		}

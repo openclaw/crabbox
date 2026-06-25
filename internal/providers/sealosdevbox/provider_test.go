@@ -164,6 +164,10 @@ func TestDoctorUsesReadOnlyKubectlCommands(t *testing.T) {
 	if !strings.Contains(result.Message, "automation_surface=crd_first") || !strings.Contains(result.Message, "mutation=false") {
 		t.Fatalf("message=%q", result.Message)
 	}
+	patchCheck := findDoctorCheck(t, result.Checks, "rbac.patch.devboxes")
+	if patchCheck.Status != "ok" {
+		t.Fatalf("patch RBAC check=%#v", patchCheck)
+	}
 	if len(runner.requests) == 0 {
 		t.Fatal("doctor did not run kubectl")
 	}
