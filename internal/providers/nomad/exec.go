@@ -59,7 +59,11 @@ func (b *backend) runCommand(ctx context.Context, client Client, ready allocatio
 	defer cancel()
 	exitCode, err := b.allocationExec(execCtx, client, ready, []string{"sh", "-s"}, strings.NewReader(script), b.rt.Stdout, b.rt.Stderr)
 	if err != nil {
-		return 0, fmt.Errorf("nomad run transport failed: %w", err)
+		exitCode = normalizeExitCode(exitCode)
+		if exitCode == 0 {
+			exitCode = 1
+		}
+		return exitCode, fmt.Errorf("nomad run transport failed: %w", err)
 	}
 	return normalizeExitCode(exitCode), nil
 }
