@@ -254,6 +254,43 @@ func TestRunKeepOnFailureRetainsCreatedSandbox(t *testing.T) {
 	}
 }
 
+func TestRunReturnsErrorForCanceledTerminalWithoutExitCode(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeCrownestClient{
+		baseURL:        "https://api.crownest.dev",
+		startSandboxID: "sbx_canceled",
+		stream: func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(strings.Join([]string{
+				`data: {"type":"terminal","seq":1,"workspaceRun":{"id":"wsr_123","status":"canceled","failureReason":"timeout","failureClass":"platform","sandboxId":"sbx_canceled"}}`,
+				"",
+			}, "\n"))), nil
+		},
+	}
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  testConfig(),
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		Command: []string{"pnpm", "test"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "status=canceled") {
+		t.Fatalf("err=%v, want canceled terminal status error", err)
+	}
+	if result.ExitCode == 0 {
+		t.Fatalf("exit=%d, want non-zero", result.ExitCode)
+	}
+	if api.deletedSandboxID != "sbx_canceled" {
+		t.Fatalf("deletedSandboxID=%q, want canceled sandbox cleanup", api.deletedSandboxID)
+	}
+}
+
 func TestCreateSandboxCleansUpRemoteWhenLocalClaimFails(t *testing.T) {
 	repoRoot := tempGitRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

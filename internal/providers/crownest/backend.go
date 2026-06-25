@@ -259,9 +259,13 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if terminalWorkspaceRun(terminal) {
 		cancelActiveRun = false
 	}
+	terminalStatus := normalizedWorkspaceRunStatus(terminal.Status)
+	missingExitStatusFailure := terminal.ExitCode == nil && terminalWorkspaceRun(terminal) && terminalStatus != "succeeded"
 	exitCode := 0
 	if terminal.ExitCode != nil {
 		exitCode = *terminal.ExitCode
+	} else if missingExitStatusFailure {
+		exitCode = 1
 	}
 	result = RunResult{
 		Provider:      providerName,
@@ -313,7 +317,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if streamErr != nil {
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("crownest stream failed: %v", streamErr)}
 	}
-	if terminal.Status == "failed" && terminal.FailureReason != "command_exit" {
+	if missingExitStatusFailure {
+		return result, exit(5, "crownest workspace run ended status=%s reason=%s class=%s without command exit code", blank(terminalStatus, "unknown"), blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
+	}
+	if terminalStatus == "failed" && terminal.FailureReason != "command_exit" {
 		return result, exit(5, "crownest workspace run failed reason=%s class=%s", blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
 	}
 	if result.ExitCode != 0 {
@@ -789,12 +796,16 @@ func isReadyState(state string) bool {
 }
 
 func terminalWorkspaceRun(run workspaceRun) bool {
-	switch strings.TrimSpace(strings.ToLower(run.Status)) {
+	switch normalizedWorkspaceRunStatus(run.Status) {
 	case "succeeded", "failed", "canceled":
 		return true
 	default:
 		return false
 	}
+}
+
+func normalizedWorkspaceRunStatus(status string) string {
+	return strings.TrimSpace(strings.ToLower(status))
 }
 
 func repoName(repo Repo) string {
