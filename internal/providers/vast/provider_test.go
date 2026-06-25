@@ -174,3 +174,43 @@ func TestValidateConfigRejectsUnsafeValues(t *testing.T) {
 		t.Fatalf("on-demand alias rejected: %v", err)
 	}
 }
+
+func TestConfigureRejectsTailscaleBeforeBackend(t *testing.T) {
+	base := core.Config{
+		TargetOS: core.TargetLinux,
+		Vast: core.VastConfig{
+			APIURL:        "https://console.vast.ai/api/v0",
+			InstanceType:  "ondemand",
+			Runtype:       "ssh_direct",
+			DiskGB:        20,
+			ReleaseAction: "destroy",
+		},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*core.Config)
+	}{
+		{
+			name: "enabled",
+			mutate: func(cfg *core.Config) {
+				cfg.Tailscale.Enabled = true
+			},
+		},
+		{
+			name: "network",
+			mutate: func(cfg *core.Config) {
+				cfg.Network = core.NetworkTailscale
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := base
+			test.mutate(&cfg)
+			backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+			if err == nil || backend != nil || !strings.Contains(err.Error(), "does not support Tailscale") {
+				t.Fatalf("backend=%T err=%v, want Tailscale rejection", backend, err)
+			}
+		})
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -172,7 +173,11 @@ func (c *vastClient) do(ctx context.Context, method, path string, body any, out 
 		}
 		reader = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.apiURL+path, reader)
+	endpoint := c.apiURL + path
+	if parsed, err := url.Parse(path); err == nil && parsed.IsAbs() {
+		endpoint = path
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
 		return err
 	}
@@ -252,11 +257,29 @@ func (c *vastClient) GetInstance(ctx context.Context, id int) (vastInstance, err
 }
 
 func (c *vastClient) ListInstances(ctx context.Context) ([]vastInstance, error) {
-	var raw json.RawMessage
-	if err := c.do(ctx, http.MethodGet, "/instances/", nil, &raw); err != nil {
-		return nil, err
+	var out []vastInstance
+	var afterToken string
+	for {
+		params := url.Values{}
+		params.Set("limit", "25")
+		if afterToken != "" {
+			params.Set("after_token", afterToken)
+		}
+		var raw json.RawMessage
+		endpoint := vastAPIURLForVersion(c.apiURL, "v1") + "/instances/?" + params.Encode()
+		if err := c.do(ctx, http.MethodGet, endpoint, nil, &raw); err != nil {
+			return nil, err
+		}
+		page, nextToken, err := decodeVastInstancesPage(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+		if strings.TrimSpace(nextToken) == "" {
+			return out, nil
+		}
+		afterToken = nextToken
 	}
-	return decodeVastInstances(raw)
 }
 
 func (c *vastClient) ManageInstance(ctx context.Context, id int, input vastManageInstanceInput) (vastInstance, error) {
@@ -291,35 +314,66 @@ func (c *vastClient) DetachInstanceSSHKey(ctx context.Context, id int, keyID str
 }
 
 func buildVastOfferSearchPayload(cfg VastConfig) map[string]any {
-	query := map[string]any{
-		"verified": true,
-		"rentable": true,
-		"rented":   false,
-		"direct_port_count": map[string]any{
-			"gte": 1,
-		},
+	payload := map[string]any{
+		"verified":          vastFilter("eq", true),
+		"rentable":          vastFilter("eq", true),
+		"rented":            vastFilter("eq", false),
+		"direct_port_count": vastFilter("gte", 1),
 	}
 	if cfg.GPUName != "" {
-		query["gpu_name"] = cfg.GPUName
+		payload["gpu_name"] = vastFilter("eq", cfg.GPUName)
 	}
 	if cfg.GPUCount > 0 {
-		query["num_gpus"] = map[string]any{"gte": cfg.GPUCount}
+		payload["num_gpus"] = vastFilter("gte", cfg.GPUCount)
 	}
 	if cfg.MinReliability > 0 {
-		query["reliability2"] = map[string]any{"gte": cfg.MinReliability}
+		payload["reliability"] = vastFilter("gte", cfg.MinReliability)
 	}
 	if cfg.MaxDphTotal > 0 {
-		query["dph_total"] = map[string]any{"lte": cfg.MaxDphTotal}
+		payload["dph_total"] = vastFilter("lte", cfg.MaxDphTotal)
 	}
-	instanceType := normalizeInstanceType(strings.TrimSpace(cfg.InstanceType))
+	instanceType := vastAPIInstanceType(cfg.InstanceType)
 	if instanceType == "" {
 		instanceType = "ondemand"
 	}
-	return map[string]any{
-		"type":  instanceType,
-		"query": query,
-		"order": strings.TrimSpace(cfg.Order),
+	payload["type"] = instanceType
+	if order := strings.TrimSpace(cfg.Order); order != "" {
+		payload["order"] = vastOrderTuples(order)
 	}
+	return payload
+}
+
+func vastFilter(operator string, value any) map[string]any {
+	return map[string]any{operator: value}
+}
+
+func vastAPIInstanceType(value string) string {
+	switch normalizeInstanceType(value) {
+	case "interruptible":
+		return "bid"
+	default:
+		return normalizeInstanceType(value)
+	}
+}
+
+func vastOrderTuples(order string) [][]string {
+	parts := strings.Split(order, ",")
+	out := make([][]string, 0, len(parts))
+	for _, part := range parts {
+		fields := strings.Fields(strings.TrimSpace(part))
+		if len(fields) == 0 {
+			continue
+		}
+		direction := "desc"
+		if len(fields) > 1 {
+			switch strings.ToLower(fields[1]) {
+			case "asc", "desc":
+				direction = strings.ToLower(fields[1])
+			}
+		}
+		out = append(out, []string{fields[0], direction})
+	}
+	return out
 }
 
 func buildVastCreatePayload(input vastCreateInstanceInput) map[string]any {
@@ -334,7 +388,7 @@ func buildVastCreatePayload(input vastCreateInstanceInput) map[string]any {
 		payload["image"] = cfg.Image
 	}
 	if cfg.TemplateID != "" {
-		payload["template_id"] = cfg.TemplateID
+		payload["template_hash_id"] = cfg.TemplateID
 	}
 	if cfg.DiskGB > 0 {
 		payload["disk"] = cfg.DiskGB
@@ -346,12 +400,43 @@ func buildVastCreatePayload(input vastCreateInstanceInput) map[string]any {
 		payload["ssh_key"] = input.SSHKey
 	}
 	if len(input.Environment) > 0 {
-		payload["env"] = input.Environment
+		payload["env"] = vastEnvFlags(input.Environment)
 	}
 	if input.OnStart != "" {
 		payload["onstart"] = input.OnStart
 	}
 	return payload
+}
+
+func vastEnvFlags(env map[string]string) string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, "-e", key+"="+shellQuoteVastEnvValue(env[key]))
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuoteVastEnvValue(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		return (r < 'A' || r > 'Z') &&
+			(r < 'a' || r > 'z') &&
+			(r < '0' || r > '9') &&
+			!strings.ContainsRune("_-./:", r)
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 func decodeVastOffers(raw json.RawMessage) ([]vastOffer, error) {
@@ -406,8 +491,9 @@ func decodeVastInstance(raw json.RawMessage) (vastInstance, error) {
 		return normalizeVastInstance(direct), nil
 	}
 	var envelope struct {
-		Instance vastInstance `json:"instance"`
-		Data     vastInstance `json:"data"`
+		Instance  vastInstance `json:"instance"`
+		Instances vastInstance `json:"instances"`
+		Data      vastInstance `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return vastInstance{}, err
@@ -415,30 +501,49 @@ func decodeVastInstance(raw json.RawMessage) (vastInstance, error) {
 	if envelope.Instance.ID != 0 || envelope.Instance.ContractID != 0 || envelope.Instance.SSHHost != "" {
 		return normalizeVastInstance(envelope.Instance), nil
 	}
+	if envelope.Instances.ID != 0 || envelope.Instances.ContractID != 0 || envelope.Instances.SSHHost != "" {
+		return normalizeVastInstance(envelope.Instances), nil
+	}
 	return normalizeVastInstance(envelope.Data), nil
 }
 
 func decodeVastInstances(raw json.RawMessage) ([]vastInstance, error) {
+	instances, _, err := decodeVastInstancesPage(raw)
+	return instances, err
+}
+
+func decodeVastInstancesPage(raw json.RawMessage) ([]vastInstance, string, error) {
 	var direct []vastInstance
 	if err := json.Unmarshal(raw, &direct); err == nil {
-		return normalizeVastInstances(direct), nil
+		return normalizeVastInstances(direct), "", nil
 	}
 	var envelope struct {
 		Instances []vastInstance `json:"instances"`
 		Data      []vastInstance `json:"data"`
 		Results   []vastInstance `json:"results"`
+		NextToken string         `json:"next_token"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	switch {
 	case envelope.Instances != nil:
-		return normalizeVastInstances(envelope.Instances), nil
+		return normalizeVastInstances(envelope.Instances), envelope.NextToken, nil
 	case envelope.Data != nil:
-		return normalizeVastInstances(envelope.Data), nil
+		return normalizeVastInstances(envelope.Data), envelope.NextToken, nil
 	default:
-		return normalizeVastInstances(envelope.Results), nil
+		return normalizeVastInstances(envelope.Results), envelope.NextToken, nil
 	}
+}
+
+func vastAPIURLForVersion(apiURL, version string) string {
+	base := strings.TrimRight(apiURL, "/")
+	for _, suffix := range []string{"/api/v0", "/api/v1"} {
+		if strings.HasSuffix(base, suffix) {
+			return strings.TrimSuffix(base, suffix) + "/api/" + version
+		}
+	}
+	return base
 }
 
 func decodeVastSSHKeys(raw json.RawMessage) ([]vastInstanceSSHKey, error) {
