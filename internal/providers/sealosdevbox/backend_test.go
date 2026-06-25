@@ -141,6 +141,33 @@ func TestRenderDevboxManifestStructured(t *testing.T) {
 	}
 }
 
+func TestRenderDevboxManifestRequiresImage(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.Image = ""
+	cfg.SealosDevbox.TemplateID = "tpl-devbox"
+	backend := lifecycleBackend(cfg, &lifecycleRunner{})
+	_, err := backend.renderDevboxManifest("crabbox-blue", "cbx_123456abcdef", "blue", false, backend.now())
+	if err == nil || !strings.Contains(err.Error(), "requires image") {
+		t.Fatalf("render error=%v", err)
+	}
+}
+
+func TestListDecodesContainerStatusObject(t *testing.T) {
+	cfg := lifecycleConfig()
+	leaseID := "cbx_statusobject"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	item := `{"items":[{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","lastContainerStatus":{"name":"devbox","ready":true,"restartCount":0}}}]}`
+	backend := lifecycleBackend(cfg, &lifecycleRunner{outputs: []string{item}})
+	leases, err := backend.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leases) != 1 || leases[0].Labels["lease"] != leaseID {
+		t.Fatalf("leases=%#v", leases)
+	}
+}
+
 func TestClaimScopeSeparatesSameSlugAcrossRoutes(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()
@@ -372,10 +399,10 @@ func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
 	}
 }
 
-func TestDoctorBlocksWhenImageAndTemplateAreMissing(t *testing.T) {
+func TestDoctorBlocksWhenImageIsMissing(t *testing.T) {
 	cfg := lifecycleConfig()
 	cfg.SealosDevbox.Image = ""
-	cfg.SealosDevbox.TemplateID = ""
+	cfg.SealosDevbox.TemplateID = "tpl-devbox"
 	runner := &lifecycleRunner{}
 	backend := lifecycleBackend(cfg, runner)
 	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
@@ -389,7 +416,7 @@ func TestDoctorBlocksWhenImageAndTemplateAreMissing(t *testing.T) {
 	for _, check := range result.Checks {
 		if check.Check == "devbox.source" {
 			found = true
-			if check.Status != "failed" || !strings.Contains(check.Message, "requires image or templateID") {
+			if check.Status != "failed" || !strings.Contains(check.Message, "requires image") {
 				t.Fatalf("devbox.source check=%#v", check)
 			}
 		}

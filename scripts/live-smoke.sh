@@ -545,8 +545,8 @@ sealos_smoke() {
     sealos_blocked missing_namespace
     return 0
   fi
-  if [[ -z "$image" && -z "$template_id" ]]; then
-    sealos_blocked missing_image_or_template
+  if [[ -z "$image" ]]; then
+    sealos_blocked missing_image
     return 0
   fi
   local normalized_network

@@ -18,8 +18,9 @@ DevBox templates remain under Sealos and cluster control.
 - RBAC to get/list DevBoxes, Secrets, Pods, and Events.
 - RBAC to create, update, and delete DevBoxes when running `warmup`, `run`,
   `stop`, or non-dry-run `cleanup`.
-- Either `sealosDevbox.image` or `sealosDevbox.templateID`.
-- A Sealos DevBox image or template with OpenSSH, `git`, `rsync`, and `tar`.
+- `sealosDevbox.image`; `sealosDevbox.templateID` is optional metadata, not an
+  image replacement.
+- A Sealos DevBox image with OpenSSH, `git`, `rsync`, and `tar`.
 - For `network: SSHGate`, a reachable Sealos SSHGateway host and port.
 - For `network: NodePort`, `sealosDevbox.nodeHost` and a DevBox status shape
   that exposes an SSH NodePort.
@@ -91,8 +92,8 @@ Local path expansion applies to host-side path fields such as `kubectl` and
 
 `warmup` and one-shot `run` create a Crabbox-owned DevBox CR in the configured
 namespace. The generated manifest sets `spec.state: Running`, resource size,
-image or template ID, storage limit, network mode, SSH user, workdir, and an SSH
-port entry. Crabbox adds deterministic labels and annotations for the provider,
+image, optional template ID, storage limit, network mode, SSH user, workdir, and
+an SSH port entry. Crabbox adds deterministic labels and annotations for the provider,
 lease ID, slug, namespace, route scope, TTL, idle timeout, timestamps, and
 release policy.
 
@@ -192,9 +193,9 @@ For `NodePort`, set `CRABBOX_SEALOS_DEVBOX_NETWORK=NodePort` and
 `CRABBOX_SEALOS_DEVBOX_NODE_HOST=<node-host>` instead of the SSHGateway host.
 
 The shared smoke refuses to mutate Sealos resources until local credentials,
-context, namespace, image or template, RBAC, and route configuration are
+context, namespace, image, RBAC, and route configuration are
 present. Missing setup is classified as `environment_blocked`, for example
-`missing_context`, `missing_image_or_template`, `missing_ssh_gateway_host`,
+`missing_context`, `missing_image`, `missing_ssh_gateway_host`,
 `doctor_failed`, or `missing_rbac_create_devboxes`.
 
 When the prerequisites are present, the smoke runs `doctor`, dry-run cleanup,
@@ -209,13 +210,12 @@ log that reaches the shell and exits cleanly.
 - `sealos-devbox context is required`: set `sealosDevbox.context` or
   `CRABBOX_SEALOS_DEVBOX_CONTEXT`; claims intentionally do not follow a
   kubeconfig's mutable current context.
-- `sealos-devbox requires image or templateID`: set a DevBox image or template
-  ID before `warmup` or `run`.
+- `sealos-devbox requires image`: set a DevBox image before `warmup` or `run`.
 - `Sealos DevBox ... has no SSH NodePort in status.network`: use `SSHGate` or
   confirm the Sealos deployment publishes SSH NodePort status for the DevBox.
 - SSH waits time out: run `doctor --provider sealos-devbox --json`, then inspect
   DevBox phase, related Pod events, the route mode, and whether the selected
-  image/template includes OpenSSH, `git`, `rsync`, and `tar`.
+  image includes OpenSSH, `git`, `rsync`, and `tar`.
 - Cleanup skips a DevBox as outside scope: rerun cleanup with the same
   kubeconfig/context/namespace/network route that created the lease, or delete
   the provider resource manually after verifying ownership.

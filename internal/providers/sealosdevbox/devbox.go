@@ -72,8 +72,8 @@ type devboxNetworkSpec struct {
 
 func (b *backend) renderDevboxManifest(name, leaseID, slug string, keep bool, now time.Time) ([]byte, error) {
 	cfg := b.cfg.SealosDevbox
-	if strings.TrimSpace(cfg.Image) == "" && strings.TrimSpace(cfg.TemplateID) == "" {
-		return nil, core.Exit(2, "sealos-devbox requires image or templateID to create a DevBox")
+	if strings.TrimSpace(cfg.Image) == "" {
+		return nil, core.Exit(2, "sealos-devbox requires image to create a DevBox")
 	}
 	if strings.TrimSpace(cfg.CPU) == "" || strings.TrimSpace(cfg.Memory) == "" || strings.TrimSpace(cfg.StorageLimit) == "" {
 		return nil, core.Exit(2, "sealos-devbox cpu, memory, and storageLimit are required")

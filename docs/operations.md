@@ -112,7 +112,7 @@ Per-provider smoke prerequisites:
   dry-run cleanup.
 - **Sealos DevBox** — `kubectl`, an inherited kubeconfig or readable configured
   kubeconfig, an explicit `sealosDevbox.context`, namespace RBAC for the
-  DevBox CRD, either `sealosDevbox.image` or `sealosDevbox.templateID`, and a
+  DevBox CRD, `sealosDevbox.image`, and a
   configured SSHGate or NodePort route. `scripts/live-smoke.sh` refuses to
   mutate Sealos resources until those prerequisites and `doctor --json` pass,
   then proves dry-run cleanup, one retained DevBox warmup, status, SSH command

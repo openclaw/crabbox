@@ -43,7 +43,7 @@ cannot:
 - **Kubernetes-backed SSH lease providers**: also prove the selected context,
   namespace, CRD, RBAC, route configuration, and dry-run cleanup before creating
   a resource. For example, `sealos-devbox` must classify missing kubeconfig,
-  context, image/template, SSHGateway or NodePort route, DevBox RBAC, or
+  context, image, SSHGateway or NodePort route, DevBox RBAC, or
   SSHGate availability as `environment_blocked` instead of claiming live proof
   from unit tests.
 - **Delegated run providers**: create or reuse one provider-owned runtime, send a

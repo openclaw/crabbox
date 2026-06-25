@@ -21,7 +21,7 @@ type devboxStatus struct {
 	Conditions          []devboxCondition `json:"conditions"`
 	ContentID           string            `json:"contentID"`
 	NodeName            string            `json:"nodeName"`
-	LastContainerStatus string            `json:"lastContainerStatus"`
+	LastContainerStatus any               `json:"lastContainerStatus"`
 	SecretName          string            `json:"secretName"`
 	SSHSecretName       string            `json:"sshSecretName"`
 	SSH                 devboxSSHStatus   `json:"ssh"`
