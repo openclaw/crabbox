@@ -99,13 +99,6 @@ func (b *backend) stderr() io.Writer {
 	return io.Discard
 }
 
-func (b *backend) stdout() io.Writer {
-	if b.rt.Stdout != nil {
-		return b.rt.Stdout
-	}
-	return io.Discard
-}
-
 func (b *backend) now() time.Time {
 	if b.rt.Clock != nil {
 		return b.rt.Clock.Now().UTC()

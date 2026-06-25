@@ -57,7 +57,3 @@ func isVastProviderName(provider string) bool {
 		return false
 	}
 }
-
-func notImplemented(operation string) error {
-	return exit(2, "provider=%s %s is not implemented yet", providerName, operation)
-}

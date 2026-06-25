@@ -507,11 +507,6 @@ func decodeVastInstance(raw json.RawMessage) (vastInstance, error) {
 	return normalizeVastInstance(envelope.Data), nil
 }
 
-func decodeVastInstances(raw json.RawMessage) ([]vastInstance, error) {
-	instances, _, err := decodeVastInstancesPage(raw)
-	return instances, err
-}
-
 func decodeVastInstancesPage(raw json.RawMessage) ([]vastInstance, string, error) {
 	var direct []vastInstance
 	if err := json.Unmarshal(raw, &direct); err == nil {
