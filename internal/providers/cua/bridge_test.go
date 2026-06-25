@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -145,6 +146,21 @@ func TestBridgeExecUsesRunOutputCaptureLimit(t *testing.T) {
 	}
 }
 
+func TestBridgeTimeoutUsesStartupTimeoutForCreate(t *testing.T) {
+	cfg := testConfig()
+	cfg.Cua.ExecTimeoutSecs = 60
+	cfg.Cua.StartupTimeoutSecs = 300
+	if got := bridgeTimeout(cfg, bridgeRequest{Action: "create"}); got != 300*time.Second {
+		t.Fatalf("create timeout=%s want 300s", got)
+	}
+	if got := bridgeTimeout(cfg, bridgeRequest{Action: "exec"}); got != 60*time.Second {
+		t.Fatalf("exec timeout=%s want 60s", got)
+	}
+	if got := bridgeTimeout(cfg, bridgeRequest{Action: "create", Timeout: 45}); got != 45*time.Second {
+		t.Fatalf("explicit timeout=%s want 45s", got)
+	}
+}
+
 func TestBridgeRejectsMalformedJSON(t *testing.T) {
 	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `not-json`)
@@ -162,11 +178,23 @@ func TestBridgeScriptKeepsLifecycleActionsExplicitlyDispatched(t *testing.T) {
 			t.Fatalf("bridge script missing %q", snippet)
 		}
 	}
-	if !strings.Contains(bridgeScript, `" && " + env_prefix + command`) {
-		t.Fatalf("bridge script must apply forwarded env to the user command after cd")
+	if !strings.Contains(bridgeScript, `env_file_content(env)`) || !strings.Contains(bridgeScript, `sb.files.write_bytes(env_file_path`) || !strings.Contains(bridgeScript, `. \"$env_file\"`) {
+		t.Fatalf("bridge script must materialize forwarded env outside the command text")
+	}
+	if !strings.Contains(bridgeScript, `cleanup_env_file(sb, env_file_path)`) || !strings.Contains(bridgeScript, `await remove(path)`) {
+		t.Fatalf("bridge script must remove forwarded env files outside the user command trap")
+	}
+	if strings.Contains(bridgeScript, `env_prefix`) || strings.Contains(bridgeScript, `f"{k}={shlex.quote(v)}"`) {
+		t.Fatalf("bridge script must not embed forwarded env values in the command text")
+	}
+	if strings.Contains(bridgeScript, `if len(values) == 1`) {
+		t.Fatalf("bridge script must not execute single-argument argv as raw shell text")
 	}
 	if !strings.Contains(bridgeScript, `invalid_env`) || !strings.Contains(bridgeScript, `valid_env_name`) {
 		t.Fatalf("bridge script must validate forwarded env names before shell construction")
+	}
+	if !strings.Contains(bridgeScript, `inspect.signature(create_func).parameters`) || !strings.Contains(bridgeScript, `"time_to_start" in parameters`) {
+		t.Fatalf("bridge script must guard SDK-specific startup timeout kwargs")
 	}
 	if strings.Contains(bridgeScript, "CUA_API_BASE") {
 		t.Fatalf("bridge script must use SDK CUA_BASE_URL, not CLI-only CUA_API_BASE")

@@ -1,12 +1,14 @@
 import importlib
 import asyncio
 import base64
+import inspect
 import json
 import os
 import re
 import shlex
 import sys
 import traceback
+import uuid
 
 
 def emit(value, code=0):
@@ -109,7 +111,7 @@ def image_for_config(mod, cfg):
     return image_cls.linux("ubuntu", "24.04", kind=kind)
 
 
-def sandbox_kwargs(cfg):
+def sandbox_kwargs(cfg, create_func=None):
     kwargs = {"local": False}
     if cfg.get("region"):
         kwargs["region"] = str(cfg.get("region"))
@@ -119,7 +121,13 @@ def sandbox_kwargs(cfg):
         kwargs["memory_mb"] = int(cfg.get("memoryMb"))
     if int(cfg.get("diskGb") or 0) > 0:
         kwargs["disk_gb"] = int(cfg.get("diskGb"))
-    if int(cfg.get("startupTimeoutSecs") or 0) > 0:
+    parameters = {}
+    if create_func is not None:
+        try:
+            parameters = inspect.signature(create_func).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+    if int(cfg.get("startupTimeoutSecs") or 0) > 0 and "time_to_start" in parameters:
         kwargs["time_to_start"] = int(cfg.get("startupTimeoutSecs"))
     return kwargs
 
@@ -128,13 +136,32 @@ def command_text(argv):
     values = [str(v) for v in (argv or [])]
     if not values:
         return ""
-    if len(values) == 1:
-        return values[0]
     return shlex.join(values)
 
 
 def valid_env_name(name):
     return re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name or "") is not None
+
+
+def env_file_content(env):
+    return "".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(env.items())).encode("utf-8")
+
+
+def exec_script(command, workdir="", env_file_path=""):
+    script = ""
+    if env_file_path:
+        script += "env_file=" + shlex.quote(env_file_path) + "; trap 'rm -f \"$env_file\"' EXIT; . \"$env_file\" && "
+    if workdir:
+        script += "cd " + shlex.quote(workdir) + " && "
+    return script + command
+
+
+async def cleanup_env_file(sb, path):
+    remove = getattr(getattr(sb, "files", None), "remove", None)
+    if callable(remove):
+        await remove(path)
+        return
+    await sb.shell.run("rm -f " + shlex.quote(path), timeout=10)
 
 
 def error_response(exc, klass="environment_blocked"):
@@ -246,7 +273,7 @@ def create(req, mod):
         if not name:
             return {"ok": False, "class": "validation_failed", "error": {"code": "missing_sandbox_name", "message": "sandbox.name is required", "class": "validation_failed"}}
         try:
-            sb = await cls.create(image_for_config(mod, cfg), name=name, **sandbox_kwargs(cfg))
+            sb = await cls.create(image_for_config(mod, cfg), name=name, **sandbox_kwargs(cfg, cls.create))
             try:
                 return {"ok": True, "sandbox": summarize_sandbox({"id": name, "name": getattr(sb, "name", name), "status": "running", "metadata": (req.get("sandbox") or {}).get("metadata") or {}})}
             finally:
@@ -311,17 +338,19 @@ def exec_command(req, mod):
         invalid_env = sorted(k for k in env if not valid_env_name(k))
         if invalid_env:
             return {"ok": False, "class": "validation_failed", "error": {"code": "invalid_env_name", "message": "invalid environment variable name: " + ", ".join(invalid_env), "class": "validation_failed"}}
-        env_prefix = ""
-        if env:
-            env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(env.items())) + " "
-        if workdir:
-            script = "cd " + shlex.quote(workdir) + " && " + env_prefix + command
-        else:
-            script = env_prefix + command
         sb = None
         try:
             sb = await cls.connect(sid)
-            result = await sb.shell.run(script, timeout=timeout)
+            env_file_path = ""
+            if env:
+                env_file_path = f"/tmp/crabbox-cua-env-{uuid.uuid4().hex}.sh"
+                await sb.files.write_bytes(env_file_path, env_file_content(env))
+            script = exec_script(command, workdir, env_file_path)
+            try:
+                result = await sb.shell.run(script, timeout=timeout)
+            finally:
+                if env_file_path:
+                    await cleanup_env_file(sb, env_file_path)
             return {"ok": True, "stdout": result.stdout, "stderr": result.stderr, "exitCode": int(result.returncode), "sandbox": summarize_sandbox({"id": sid, "name": sid, "status": "running"})}
         except Exception as exc:
             return error_response(exc)

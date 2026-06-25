@@ -135,17 +135,6 @@ func (c *bridgeClient) CreateSandbox(ctx context.Context, name string, metadata 
 	return resp.Sandbox, nil
 }
 
-func (c *bridgeClient) ListSandboxes(ctx context.Context) ([]bridgeSandboxSummary, error) {
-	resp, err := c.RoundTrip(ctx, bridgeRequest{Action: "list"})
-	if err != nil {
-		return nil, err
-	}
-	if err := bridgeResponseError("list", resp); err != nil {
-		return nil, err
-	}
-	return resp.Sandboxes, nil
-}
-
 func (c *bridgeClient) GetSandbox(ctx context.Context, sandboxID string) (bridgeSandboxSummary, error) {
 	resp, err := c.RoundTrip(ctx, bridgeRequest{Action: "info", SandboxID: sandboxID})
 	if err != nil {
@@ -321,8 +310,11 @@ func bridgeCommand(cfg Config) string {
 
 func bridgeTimeout(cfg Config, req bridgeRequest) time.Duration {
 	seconds := cfg.Cua.ExecTimeoutSecs
-	if req.Action == "doctor" {
+	switch req.Action {
+	case "doctor":
 		seconds = 15
+	case "create":
+		seconds = cfg.Cua.StartupTimeoutSecs
 	}
 	if req.Timeout > 0 {
 		seconds = req.Timeout

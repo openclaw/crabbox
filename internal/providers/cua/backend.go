@@ -64,6 +64,14 @@ func (b backend) Run(ctx context.Context, req RunRequest) (result RunResult, ret
 	if req.Options.Tailscale.Enabled {
 		return RunResult{}, exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
+	var command []string
+	if !req.SyncOnly {
+		var err error
+		command, err = buildCommand(req.Command, req.ShellMode)
+		if err != nil {
+			return RunResult{}, err
+		}
+	}
 	workdir, err := cuaWorkdir(b.cfg)
 	if err != nil {
 		return RunResult{}, err
@@ -72,8 +80,16 @@ func (b backend) Run(ctx context.Context, req RunRequest) (result RunResult, ret
 	client := b.client()
 	leaseID, sandboxID, slug := "", "", ""
 	acquired := false
+	var operationUnlock func()
 	if req.ID == "" {
-		leaseID, sandboxID, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
+		leaseID = newCUALeaseID()
+		operationUnlock, err = lockCUALeaseOperation(ctx, leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer operationUnlock()
+		operationUnlock = nil
+		leaseID, sandboxID, slug, err = b.createSandboxWithLease(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug, leaseID)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -88,12 +104,25 @@ func (b backend) Run(ctx context.Context, req RunRequest) (result RunResult, ret
 			return RunResult{}, exit(4, "CUA sandbox %q is not claimed by Crabbox", req.ID)
 		}
 		leaseID, sandboxID, slug = claim.LeaseID, claimSandboxName(claim), blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+		if claimCleanupInProgress(claim) {
+			return RunResult{}, exit(4, "CUA lease=%s cleanup is already in progress", claim.LeaseID)
+		}
+		unlock, err := lockCUALeaseOperation(ctx, claim.LeaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		operationUnlock = unlock
+		defer operationUnlock()
+		operationUnlock = nil
 		if _, err := b.verifyClaim(ctx, client, claim); err != nil {
 			return RunResult{}, err
 		}
 		if err := b.refreshLeaseActivity(claim, req.Repo.Root, req.Reclaim); err != nil {
-			return RunResult{}, err
+			return RunResult{}, fmt.Errorf("refresh CUA lease activity before reuse: %w", err)
 		}
+	}
+	if operationUnlock != nil {
+		defer operationUnlock()
 	}
 
 	shouldStop := acquired && !req.Keep
@@ -150,10 +179,6 @@ func (b backend) Run(ctx context.Context, req RunRequest) (result RunResult, ret
 		return result, activityErr
 	}
 
-	command, err := buildCommand(req.Command, req.ShellMode)
-	if err != nil {
-		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}, err
-	}
 	commandEnv, stripped := commandEnv(req.Env)
 	if len(stripped) > 0 {
 		fmt.Fprintf(b.rt.Stderr, "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(stripped, ","))
@@ -330,6 +355,18 @@ func (b backend) Stop(ctx context.Context, req StopRequest) error {
 	if !ok {
 		return exit(4, "CUA sandbox %q is not claimed by Crabbox", req.ID)
 	}
+	unlock, err := lockCUALeaseOperation(ctx, claim.LeaseID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	claim, err = readLeaseClaim(claim.LeaseID)
+	if err != nil {
+		return err
+	}
+	if claim.LeaseID == "" {
+		return exit(4, "CUA sandbox %q is not claimed by Crabbox", req.ID)
+	}
 	client := b.client()
 	if _, err := b.verifyClaim(ctx, client, claim); err != nil {
 		if !isCUANotFound(err) || !b.cfg.Cua.ForgetMissing {
@@ -339,13 +376,22 @@ func (b backend) Stop(ctx context.Context, req StopRequest) error {
 		removeLeaseClaim(claim.LeaseID)
 		return nil
 	}
+	transitioned, err := markCleanupIfUnchanged(claim)
+	if err != nil {
+		return fmt.Errorf("mark CUA lease=%s cleanup before stop: %w", claim.LeaseID, err)
+	}
 	if err := client.DeleteSandbox(ctx, claimSandboxName(claim)); err != nil {
 		if !isCUANotFound(err) || !b.cfg.Cua.ForgetMissing {
+			if restoreErr := restoreCleanupMark(transitioned, claim); restoreErr != nil {
+				return errors.Join(err, restoreErr)
+			}
 			return err
 		}
 		fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing CUA sandbox=%s after explicit request\n", claimSandboxName(claim))
 	}
-	removeLeaseClaim(claim.LeaseID)
+	if err := removeLeaseClaimIfUnchanged(claim.LeaseID, transitioned); err != nil {
+		return err
+	}
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", claim.LeaseID, claimSandboxName(claim))
 	return nil
 }
@@ -364,55 +410,79 @@ func (b backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if listed.Provider != providerName || !b.claimMatchesActiveScope(listed) {
 			continue
 		}
-		claim, err := readLeaseClaim(listed.LeaseID)
+		unlock, err := lockCUALeaseOperation(ctx, listed.LeaseID)
 		if err != nil {
 			return err
 		}
-		if claim.LeaseID == "" || claim.Provider != providerName || !b.claimMatchesActiveScope(claim) {
-			continue
-		}
-		checked++
-		sandboxName := claimSandboxName(claim)
-		sb, getErr := client.GetSandbox(ctx, sandboxName)
-		if getErr != nil {
-			if !isCUANotFound(getErr) {
-				return getErr
-			}
-			if !b.cfg.Cua.ForgetMissing {
-				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set cua.forgetMissing to remove the claim\n", sandboxName, claim.LeaseID)
-				continue
-			}
-			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
-				continue
-			}
-			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		err = func() error {
+			defer unlock()
+			claim, err := readLeaseClaim(listed.LeaseID)
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
-			claimsRemoved++
-			continue
-		}
-		if err := validateSandboxOwnership(claim, sb, claim.ProviderScope); err != nil {
+			if claim.LeaseID == "" || claim.Provider != providerName || !b.claimMatchesActiveScope(claim) {
+				return nil
+			}
+			checked++
+			sandboxName := claimSandboxName(claim)
+			sb, getErr := client.GetSandbox(ctx, sandboxName)
+			if getErr != nil {
+				if !isCUANotFound(getErr) {
+					return getErr
+				}
+				markedCleanup := claimCleanupInProgress(claim)
+				if !markedCleanup && !b.cfg.Cua.ForgetMissing {
+					fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set cua.forgetMissing to remove the claim\n", sandboxName, claim.LeaseID)
+					return nil
+				}
+				reason := "missing sandbox"
+				if markedCleanup {
+					reason = "cleanup marker missing sandbox"
+				}
+				if req.DryRun {
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
+					return nil
+				}
+				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+					return err
+				}
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
+				claimsRemoved++
+				return nil
+			}
+			if err := validateSandboxOwnership(claim, sb, claim.ProviderScope); err != nil {
+				return err
+			}
+			due, reason := claimCleanupDue(claim, now)
+			if !due {
+				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxName, claim.LeaseID, reason)
+				return nil
+			}
+			if req.DryRun {
+				fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxName, claim.LeaseID, reason)
+				return nil
+			}
+			transitioned, err := markCleanupIfUnchanged(claim)
+			if err != nil {
+				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=claim changed during cleanup\n", sandboxName, claim.LeaseID)
+				return nil
+			}
+			if err := client.DeleteSandbox(ctx, sandboxName); err != nil && !isCUANotFound(err) {
+				if restoreErr := restoreCleanupMark(transitioned, claim); restoreErr != nil {
+					return errors.Join(err, restoreErr)
+				}
+				return err
+			}
+			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, transitioned); err != nil {
+				return err
+			}
+			fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxName, claim.LeaseID, reason)
+			removed++
+			return nil
+		}()
+		if err != nil {
 			return err
 		}
-		due, reason := claimCleanupDue(claim, now)
-		if !due {
-			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxName, claim.LeaseID, reason)
-			continue
-		}
-		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxName, claim.LeaseID, reason)
-			continue
-		}
-		if err := client.DeleteSandbox(ctx, sandboxName); err != nil && !isCUANotFound(err) {
-			return err
-		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-			return err
-		}
-		fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxName, claim.LeaseID, reason)
-		removed++
 	}
 	if !req.DryRun {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
@@ -421,6 +491,10 @@ func (b backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 }
 
 func (b backend) createSandbox(ctx context.Context, client *bridgeClient, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+	return b.createSandboxWithLease(ctx, client, repo, reclaim, requestedSlug, newCUALeaseID())
+}
+
+func (b backend) createSandboxWithLease(ctx context.Context, client *bridgeClient, repo Repo, reclaim bool, requestedSlug, leaseID string) (string, string, string, error) {
 	if err := validateProviderConfig(b.cfg); err != nil {
 		return "", "", "", err
 	}
@@ -428,7 +502,6 @@ func (b backend) createSandbox(ctx context.Context, client *bridgeClient, repo R
 	if err != nil {
 		return "", "", "", err
 	}
-	leaseID := newCUALeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", "", "", err
@@ -525,7 +598,10 @@ func (b backend) refreshLeaseActivity(claim LeaseClaim, repoRoot string, reclaim
 	if timeout <= 0 && claim.IdleTimeoutSeconds > 0 {
 		timeout = time.Duration(claim.IdleTimeoutSeconds) * time.Second
 	}
-	if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, repoRoot, timeout, reclaim); err != nil {
+	if claimCleanupInProgress(claim) {
+		return exit(4, "CUA lease=%s cleanup is already in progress", claim.LeaseID)
+	}
+	if _, err := claimLeaseForRepoProviderScopePondIfUnchanged(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, repoRoot, timeout, reclaim, claim, true); err != nil {
 		return err
 	}
 	updated, err := readLeaseClaim(claim.LeaseID)
@@ -545,6 +621,25 @@ func (b backend) refreshLeaseActivityIfRetained(leaseID string, shouldStop bool)
 		return err
 	}
 	return b.refreshLeaseActivity(claim, claim.RepoRoot, false)
+}
+
+func markCleanupIfUnchanged(claim LeaseClaim) (LeaseClaim, error) {
+	if claimCleanupInProgress(claim) {
+		return claim, nil
+	}
+	labels := make(map[string]string, len(claim.Labels)+1)
+	for key, value := range claim.Labels {
+		labels[key] = value
+	}
+	labels[labelState] = "cleanup"
+	return updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+}
+
+func restoreCleanupMark(current, previous LeaseClaim) error {
+	if current.LeaseID == "" {
+		return nil
+	}
+	return restoreLeaseClaimIfUnchanged(current.LeaseID, current, previous, true)
 }
 
 func (b backend) cleanupCreateFailure(ctx context.Context, client *bridgeClient, sandboxID string, cause error) error {
@@ -584,13 +679,6 @@ func (b backend) now() time.Time {
 	return time.Now()
 }
 
-func (b backend) execTimeoutSecs() int {
-	if b.cfg.Cua.ExecTimeoutSecs > 0 {
-		return b.cfg.Cua.ExecTimeoutSecs
-	}
-	return 600
-}
-
 func normalizedSandboxState(sb bridgeSandboxSummary) string {
 	return strings.ToLower(blank(strings.TrimSpace(blank(sb.Status, sb.State)), "unknown"))
 }
@@ -614,6 +702,9 @@ func isTerminalState(state string) bool {
 }
 
 func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
+	if claimCleanupInProgress(claim) {
+		return true, "cleanup marker"
+	}
 	if claim.IdleTimeoutSeconds <= 0 {
 		return false, "idle timeout disabled"
 	}

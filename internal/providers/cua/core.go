@@ -87,8 +87,8 @@ func claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, provide
 	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, core.SSHTarget{})
 }
 
-func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
+func claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
 
 func readLeaseClaim(leaseID string) (LeaseClaim, error) {
@@ -105,6 +105,10 @@ func removeLeaseClaim(leaseID string) {
 
 func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
+}
+
+func restoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {
+	return core.RestoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
 }
 
 func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {

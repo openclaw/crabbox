@@ -19,6 +19,7 @@ const (
 	labelRegion       = "cua.region"
 	labelWorkdir      = "cua.workdir"
 	labelMissing      = "cua.missing"
+	labelState        = "state"
 )
 
 func newCUALeaseID() string {
@@ -153,6 +154,10 @@ func validateSandboxOwnership(claim LeaseClaim, sandbox bridgeSandboxSummary, ex
 
 func claimIsMissing(claim LeaseClaim) bool {
 	return claim.Labels != nil && claim.Labels[labelMissing] == "true"
+}
+
+func claimCleanupInProgress(claim LeaseClaim) bool {
+	return claim.Labels != nil && strings.EqualFold(strings.TrimSpace(claim.Labels[labelState]), "cleanup")
 }
 
 func normalizeLeaseSlug(value string) string {
