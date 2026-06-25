@@ -47,11 +47,8 @@ type createSandboxRequest struct {
 }
 
 type sandbox struct {
-	ID        string            `json:"id"`
-	Status    string            `json:"status,omitempty"`
-	CreatedAt string            `json:"createdAt,omitempty"`
-	ExpiresAt string            `json:"expiresAt,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	ID     string `json:"id"`
+	Status string `json:"status,omitempty"`
 }
 
 type createWorkspaceRunRequest struct {
@@ -66,20 +63,12 @@ type createWorkspaceRunRequest struct {
 }
 
 type workspaceRun struct {
-	ID              string            `json:"id"`
-	Status          string            `json:"status"`
-	Command         string            `json:"command,omitempty"`
-	ExitCode        *int              `json:"exitCode,omitempty"`
-	FailureReason   string            `json:"failureReason,omitempty"`
-	FailureClass    string            `json:"failureClass,omitempty"`
-	KeepSandbox     bool              `json:"keepSandbox,omitempty"`
-	SandboxID       string            `json:"sandboxId,omitempty"`
-	TemplateSlug    string            `json:"templateSlug,omitempty"`
-	ProjectID       string            `json:"projectId,omitempty"`
-	DurationMS      int64             `json:"durationMs,omitempty"`
-	CleanupStatus   string            `json:"cleanupStatus,omitempty"`
-	OrchestrationOK *bool             `json:"orchestrationSucceeded,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
+	ID            string `json:"id"`
+	Status        string `json:"status"`
+	ExitCode      *int   `json:"exitCode,omitempty"`
+	FailureReason string `json:"failureReason,omitempty"`
+	FailureClass  string `json:"failureClass,omitempty"`
+	SandboxID     string `json:"sandboxId,omitempty"`
 }
 
 type createArchiveTransferRequest struct {
@@ -88,15 +77,11 @@ type createArchiveTransferRequest struct {
 }
 
 type archiveTransfer struct {
-	ID                string            `json:"id"`
-	ChecksumAlgorithm string            `json:"checksumAlgorithm"`
-	ExpiresAt         string            `json:"expiresAt"`
-	Headers           map[string]string `json:"headers"`
-	MaxSizeBytes      int64             `json:"maxSizeBytes"`
-	Method            string            `json:"method"`
-	Status            string            `json:"status"`
-	UploadURL         string            `json:"uploadUrl"`
-	WorkspaceRunID    string            `json:"workspaceRunId"`
+	ID           string            `json:"id"`
+	Headers      map[string]string `json:"headers"`
+	MaxSizeBytes int64             `json:"maxSizeBytes"`
+	Method       string            `json:"method"`
+	UploadURL    string            `json:"uploadUrl"`
 }
 
 type finalizeArchiveRequest struct {
@@ -172,15 +157,14 @@ func effectivePort(value *url.URL) string {
 func (c *httpClient) BaseURL() string { return c.baseURL }
 
 func (c *httpClient) Probe(ctx context.Context) error {
-	_, err := c.doJSON(ctx, http.MethodGet, "/v1/sandboxes?limit=1", nil, nil, "")
-	return err
+	return c.doJSON(ctx, http.MethodGet, "/v1/sandboxes?limit=1", nil, nil, "")
 }
 
 func (c *httpClient) CreateSandbox(ctx context.Context, req createSandboxRequest) (sandbox, error) {
 	var out struct {
 		Sandbox sandbox `json:"sandbox"`
 	}
-	if _, err := c.doJSON(ctx, http.MethodPost, "/v1/sandboxes", req, &out, idempotencyKey("sandbox")); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sandboxes", req, &out, idempotencyKey("sandbox")); err != nil {
 		return sandbox{}, err
 	}
 	if out.Sandbox.ID == "" {
@@ -193,22 +177,21 @@ func (c *httpClient) GetSandbox(ctx context.Context, id string) (sandbox, error)
 	var out struct {
 		Sandbox sandbox `json:"sandbox"`
 	}
-	if _, err := c.doJSON(ctx, http.MethodGet, "/v1/sandboxes/"+url.PathEscape(id), nil, &out, ""); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/sandboxes/"+url.PathEscape(id), nil, &out, ""); err != nil {
 		return sandbox{}, err
 	}
 	return out.Sandbox, nil
 }
 
 func (c *httpClient) DeleteSandbox(ctx context.Context, id string) error {
-	_, err := c.doJSON(ctx, http.MethodDelete, "/v1/sandboxes/"+url.PathEscape(id), nil, nil, idempotencyKey("delete"))
-	return err
+	return c.doJSON(ctx, http.MethodDelete, "/v1/sandboxes/"+url.PathEscape(id), nil, nil, idempotencyKey("delete"))
 }
 
 func (c *httpClient) CreateWorkspaceRun(ctx context.Context, req createWorkspaceRunRequest, key string) (workspaceRun, error) {
 	var out struct {
 		WorkspaceRun workspaceRun `json:"workspaceRun"`
 	}
-	if _, err := c.doJSON(ctx, http.MethodPost, "/v1/workspace-runs", req, &out, key); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/workspace-runs", req, &out, key); err != nil {
 		return workspaceRun{}, err
 	}
 	if out.WorkspaceRun.ID == "" {
@@ -221,7 +204,7 @@ func (c *httpClient) CreateArchiveTransfer(ctx context.Context, workspaceRunID s
 	var out struct {
 		Transfer archiveTransfer `json:"transfer"`
 	}
-	if _, err := c.doJSON(ctx, http.MethodPost, "/v1/workspace-runs/"+url.PathEscape(workspaceRunID)+"/archive-transfer", req, &out, key); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/workspace-runs/"+url.PathEscape(workspaceRunID)+"/archive-transfer", req, &out, key); err != nil {
 		return archiveTransfer{}, err
 	}
 	if out.Transfer.ID == "" || out.Transfer.UploadURL == "" {
@@ -296,7 +279,7 @@ func (c *httpClient) FinalizeArchive(ctx context.Context, workspaceRunID string,
 	var out struct {
 		WorkspaceRun workspaceRun `json:"workspaceRun"`
 	}
-	if _, err := c.doJSON(ctx, http.MethodPost, "/v1/workspace-runs/"+url.PathEscape(workspaceRunID)+"/archive/finalize", req, &out, key); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/workspace-runs/"+url.PathEscape(workspaceRunID)+"/archive/finalize", req, &out, key); err != nil {
 		return workspaceRun{}, err
 	}
 	return out.WorkspaceRun, nil
@@ -306,7 +289,7 @@ func (c *httpClient) StartWorkspaceRun(ctx context.Context, id, key string) (wor
 	var out struct {
 		WorkspaceRun workspaceRun `json:"workspaceRun"`
 	}
-	if _, err := c.doJSON(ctx, http.MethodPost, "/v1/workspace-runs/"+url.PathEscape(id)+"/start", nil, &out, key); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/workspace-runs/"+url.PathEscape(id)+"/start", nil, &out, key); err != nil {
 		return workspaceRun{}, err
 	}
 	return out.WorkspaceRun, nil
@@ -316,7 +299,7 @@ func (c *httpClient) CancelWorkspaceRun(ctx context.Context, id, key string) (wo
 	var out struct {
 		WorkspaceRun workspaceRun `json:"workspaceRun"`
 	}
-	if _, err := c.doJSON(ctx, http.MethodPost, "/v1/workspace-runs/"+url.PathEscape(id)+"/cancel", nil, &out, key); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/workspace-runs/"+url.PathEscape(id)+"/cancel", nil, &out, key); err != nil {
 		return workspaceRun{}, err
 	}
 	return out.WorkspaceRun, nil
@@ -326,7 +309,7 @@ func (c *httpClient) GetWorkspaceRun(ctx context.Context, id string) (workspaceR
 	var out struct {
 		WorkspaceRun workspaceRun `json:"workspaceRun"`
 	}
-	if _, err := c.doJSON(ctx, http.MethodGet, "/v1/workspace-runs/"+url.PathEscape(id), nil, &out, ""); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/workspace-runs/"+url.PathEscape(id), nil, &out, ""); err != nil {
 		return workspaceRun{}, err
 	}
 	return out.WorkspaceRun, nil
@@ -348,27 +331,27 @@ func (c *httpClient) StreamWorkspaceRunEvents(ctx context.Context, id string, af
 	return resp.Body, nil
 }
 
-func (c *httpClient) doJSON(ctx context.Context, method, apiPath string, body, out any, idempotency string) (bool, error) {
+func (c *httpClient) doJSON(ctx context.Context, method, apiPath string, body, out any, idempotency string) error {
 	resp, cancel, err := c.request(ctx, method, apiPath, body, idempotency)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false, c.apiError(method, apiPath, resp)
+		return c.apiError(method, apiPath, resp)
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return false, nil
+		return nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		if errors.Is(err, io.EOF) {
-			return true, nil
+			return nil
 		}
-		return false, fmt.Errorf("crownest decode %s: %w", apiPath, err)
+		return fmt.Errorf("crownest decode %s: %w", apiPath, err)
 	}
-	return false, nil
+	return nil
 }
 
 func (c *httpClient) request(ctx context.Context, method, apiPath string, body any, idempotency string) (*http.Response, func(), error) {
@@ -464,7 +447,6 @@ type streamEvent struct {
 	Data         string       `json:"data,omitempty"`
 	Code         string       `json:"code,omitempty"`
 	Message      string       `json:"message,omitempty"`
-	Status       string       `json:"status,omitempty"`
 	WorkspaceRun workspaceRun `json:"workspaceRun,omitempty"`
 }
 
@@ -485,7 +467,7 @@ func readSSE(reader io.Reader, emit func(streamEvent) error) error {
 		return emit(event)
 	}
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := strings.TrimSuffix(scanner.Text(), "\r")
 		if line == "" {
 			if err := flush(); err != nil {
 				return err

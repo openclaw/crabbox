@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"os"
 	"sort"
@@ -105,13 +104,33 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if err != nil {
 		return RunResult{}, err
 	}
+	scope := claimScope(api.BaseURL(), b.cfg)
 	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
-		leaseID = ""
-		acquired = true
-	} else {
-		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, claimScope(api.BaseURL(), b.cfg))
+	acquired := req.ID == ""
+	var unlockOperation func()
+	defer func() {
+		if unlockOperation != nil {
+			unlockOperation()
+		}
+	}()
+	lockAcquiredLease := func() error {
+		if !acquired || unlockOperation != nil || leaseID == "" {
+			return nil
+		}
+		var err error
+		unlockOperation, err = lockCrownestLeaseOperation(ctx, leaseID)
+		return err
+	}
+	if !acquired {
+		leaseID, _, _, err = resolveLeaseID(req.ID, "", false, 0, scope)
+		if err != nil {
+			return RunResult{}, err
+		}
+		unlockOperation, err = lockCrownestLeaseOperation(ctx, leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		leaseID, sandboxID, slug, err = resolveLeaseID(leaseID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, scope)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -119,10 +138,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			return RunResult{}, err
 		}
 	}
+	keepSandbox := false
 	shouldStop := acquired && !req.Keep
 	if shouldStop {
 		defer func() {
-			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, keepSandbox, &shouldStop); cleanupErr != nil {
 				if result.ExitCode == 0 {
 					result.ExitCode = 1
 				}
@@ -141,7 +161,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if err != nil {
 		return RunResult{}, err
 	}
-	commandText := commandScript(command)
+	commandText := shellScriptFromArgv(command)
 	commandEnv, stripped := commandEnv(req.Env)
 	if len(stripped) > 0 {
 		fmt.Fprintf(b.rt.Stderr, "warning: provider=crownest did not forward provider authentication variables: %s\n", strings.Join(stripped, ","))
@@ -170,7 +190,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if leaseID != "" {
 		metadata["crabbox.lease"] = leaseID
 	}
-	keepSandbox := req.Keep || req.KeepOnFailure || !acquired
+	keepSandbox = req.Keep || req.KeepOnFailure || !acquired
 	workspaceRun, err := api.CreateWorkspaceRun(ctx, createWorkspaceRunRequest{
 		Command:   commandText,
 		Keep:      keepSandbox,
@@ -192,6 +212,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if acquired && sandboxID != "" {
 		if err := b.claimAcquiredSandbox(ctx, api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
 			return RunResult{}, err
+		}
+		if err := lockAcquiredLease(); err != nil {
+			return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 		}
 	}
 	transfer, err := api.CreateArchiveTransfer(ctx, workspaceRun.ID, createArchiveTransferRequest{SHA256: archiveSHA, SizeBytes: archiveBytes}, idempotencyKey("transfer", workspaceRun.ID))
@@ -221,8 +244,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if err := b.claimAcquiredSandbox(ctx, api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
 			return RunResult{}, err
 		}
+		if err := lockAcquiredLease(); err != nil {
+			return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
+		}
 	}
-	session := crownestRunSession(leaseID, slug, !acquired, req.Keep || !acquired)
+	session := b.crownestRunSession(leaseID, slug, !acquired, req.Keep || !acquired)
 	commandStart := b.now()
 	cancelActiveRun := true
 	var streamErr error
@@ -273,13 +299,18 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	fmt.Fprintf(b.rt.Stderr, "crownest run summary sync=%s command=%s total=%s exit=%d\n",
 		syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	if result.ExitCode != 0 {
+	failedBeforeCleanup := result.ExitCode != 0 ||
+		streamErr != nil ||
+		ctx.Err() != nil ||
+		missingExitStatusFailure ||
+		(terminalStatus == "failed" && terminal.FailureReason != "command_exit")
+	if failedBeforeCleanup {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		if result.Session != nil {
 			result.Session.Kept = !shouldStop
 		}
 	}
-	if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+	if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, keepSandbox, &shouldStop); cleanupErr != nil {
 		if result.ExitCode == 0 {
 			result.ExitCode = 1
 		}
@@ -367,11 +398,11 @@ func (b *backend) setupFailure(ctx context.Context, req RunRequest, api client, 
 		ExitCode:      1,
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
-		Session:       crownestRunSession(leaseID, slug, !acquired, leaseID != "" && !*shouldStop),
+		Session:       b.crownestRunSession(leaseID, slug, !acquired, leaseID != "" && !*shouldStop),
 	}, cause
 }
 
-func crownestRunSession(leaseID, slug string, reused, kept bool) *RunSessionHandle {
+func (b *backend) crownestRunSession(leaseID, slug string, reused, kept bool) *RunSessionHandle {
 	if leaseID == "" {
 		return nil
 	}
@@ -381,8 +412,16 @@ func crownestRunSession(leaseID, slug string, reused, kept bool) *RunSessionHand
 		Slug:           slug,
 		Reused:         reused,
 		Kept:           kept,
-		CleanupCommand: "crabbox stop --provider " + providerName + " --id " + shellQuote(blank(slug, leaseID)),
+		CleanupCommand: crownestCleanupCommand(b.cfg, blank(slug, leaseID)),
 	}
+}
+
+func crownestCleanupCommand(cfg Config, id string) string {
+	return "crabbox stop --provider " + providerName +
+		" --crownest-url " + shellQuote(cfg.Crownest.APIURL) +
+		" --crownest-project-id " + shellQuote(cfg.Crownest.ProjectID) +
+		" --crownest-template " + shellQuote(cfg.Crownest.Template) +
+		" --id " + shellQuote(id)
 }
 
 func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -431,7 +470,6 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(waitTimeout)
 	pollCtx := ctx
 	cancel := func() {}
 	if req.Wait {
@@ -471,9 +509,6 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if isTerminalState(state) {
 			return StatusView{}, exit(5, "crownest sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if b.now().After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for crownest sandbox %s to become ready", sandboxID)
-		}
 		select {
 		case <-pollCtx.Done():
 			if ctx.Err() == nil {
@@ -491,6 +526,15 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	leaseID, sandboxID, _, err := resolveLeaseID(req.ID, "", false, 0, claimScope(api.BaseURL(), b.cfg))
+	if err != nil {
+		return err
+	}
+	unlockOperation, err := lockCrownestLeaseOperation(ctx, leaseID)
+	if err != nil {
+		return err
+	}
+	defer unlockOperation()
+	leaseID, sandboxID, _, err = resolveLeaseID(leaseID, "", false, 0, claimScope(api.BaseURL(), b.cfg))
 	if err != nil {
 		return err
 	}
@@ -519,49 +563,77 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	checked := 0
 	removed := 0
 	claimsRemoved := 0
-	for _, claim := range claims {
-		if claim.Provider != providerName || claim.ProviderScope != scope {
+	for _, listed := range claims {
+		if listed.Provider != providerName || listed.ProviderScope != scope {
 			continue
 		}
-		checked++
-		sandboxID := sandboxIDFromLease(claim.LeaseID)
-		_, err := api.GetSandbox(ctx, sandboxID)
-		if err != nil {
-			if !isNotFound(err) {
+		var checkedOne, removedOne, claimRemovedOne bool
+		err := func() error {
+			unlockOperation, err := lockCrownestLeaseOperation(ctx, listed.LeaseID)
+			if err != nil {
 				return err
 			}
-			if !b.cfg.Crownest.ForgetMissing {
-				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set crownest forget-missing to remove the claim\n", sandboxID, claim.LeaseID)
-				continue
+			defer unlockOperation()
+			claim, err := readLeaseClaim(listed.LeaseID)
+			if err != nil {
+				return err
+			}
+			if claim.LeaseID == "" || claim.Provider != providerName || claim.ProviderScope != scope {
+				return nil
+			}
+			checkedOne = true
+			sandboxID := sandboxIDFromLease(claim.LeaseID)
+			_, err = api.GetSandbox(ctx, sandboxID)
+			if err != nil {
+				if !isNotFound(err) {
+					return err
+				}
+				if !b.cfg.Crownest.ForgetMissing {
+					fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set crownest forget-missing to remove the claim\n", sandboxID, claim.LeaseID)
+					return nil
+				}
+				if req.DryRun {
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+					return nil
+				}
+				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+					return err
+				}
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				claimRemovedOne = true
+				return nil
+			}
+			due, reason := crownestClaimCleanupDue(claim, now)
+			if !due {
+				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+				return nil
 			}
 			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
-				continue
+				fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+				return nil
+			}
+			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isNotFound(err) {
+				return err
 			}
 			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 				return err
 			}
-			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+			fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+			removedOne = true
+			return nil
+		}()
+		if err != nil {
+			return err
+		}
+		if checkedOne {
+			checked++
+		}
+		if removedOne {
+			removed++
+		}
+		if claimRemovedOne {
 			claimsRemoved++
-			continue
 		}
-		due, reason := crownestClaimCleanupDue(claim, now)
-		if !due {
-			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			continue
-		}
-		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			continue
-		}
-		if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isNotFound(err) {
-			return err
-		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-			return err
-		}
-		fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-		removed++
 	}
 	if !req.DryRun {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
@@ -634,7 +706,7 @@ func (b *backend) prepareArchive(ctx context.Context, req RunRequest) (*os.File,
 		return nil, "", 0, nil, 0, err
 	}
 	archiveDuration := b.now().Sub(archiveStart)
-	sum, size, err := hashArchive(archive, sha256.New())
+	sum, size, err := hashArchive(archive)
 	if err != nil {
 		_ = archive.Close()
 		_ = os.Remove(archive.Name())
@@ -649,10 +721,11 @@ func (b *backend) prepareArchive(ctx context.Context, req RunRequest) (*os.File,
 	}, total, nil
 }
 
-func hashArchive(file *os.File, h hash.Hash) (string, int64, error) {
+func hashArchive(file *os.File) (string, int64, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return "", 0, exit(6, "rewind sync archive: %v", err)
 	}
+	h := sha256.New()
 	size, err := io.Copy(h, file)
 	if err != nil {
 		return "", 0, exit(6, "hash sync archive: %v", err)
@@ -698,15 +771,17 @@ func (b *backend) streamRun(ctx context.Context, api client, workspaceRunID stri
 	return workspaceRun{}, exit(5, "crownest event stream ended before terminal event")
 }
 
-func (b *backend) cleanupCreatedRun(ctx context.Context, api client, leaseID, sandboxID string, shouldStop *bool) error {
+func (b *backend) cleanupCreatedRun(ctx context.Context, api client, leaseID, sandboxID string, deleteSandbox bool, shouldStop *bool) error {
 	if !*shouldStop || sandboxID == "" {
 		return nil
 	}
 	*shouldStop = false
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-	defer cancel()
-	if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isNotFound(err) {
-		return fmt.Errorf("crownest delete failed for %s: %w", sandboxID, err)
+	if deleteSandbox {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isNotFound(err) {
+			return fmt.Errorf("crownest delete failed for %s: %w", sandboxID, err)
+		}
 	}
 	if leaseID != "" {
 		removeLeaseClaim(leaseID)
@@ -801,10 +876,6 @@ func buildCommand(command []string, shellMode bool) ([]string, error) {
 		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
 	}
 	return command, nil
-}
-
-func commandScript(command []string) string {
-	return shellScriptFromArgv(command)
 }
 
 func commandEnv(env map[string]string) (map[string]string, []string) {

@@ -107,7 +107,7 @@ func TestReadSSEParsesEvents(t *testing.T) {
 		"",
 		`data: {"type":"terminal","seq":2,"workspaceRun":{"id":"wsr_123","status":"succeeded","exitCode":0}}`,
 		"",
-	}, "\n")
+	}, "\r\n")
 	if err := readSSE(strings.NewReader(input), func(event streamEvent) error {
 		got = append(got, event)
 		return nil

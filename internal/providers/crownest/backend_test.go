@@ -3,6 +3,7 @@ package crownest
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -49,21 +50,64 @@ func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
 	if api.created.Command != result.CommandText || api.created.Template != "python-node" || api.created.Keep {
 		t.Fatalf("create request=%#v", api.created)
 	}
-	if api.uploadBytes == 0 || api.finalized.UploadID != "upl_123" || !api.started || api.deletedSandboxID != "sbx_123" {
+	if api.uploadBytes == 0 || api.finalized.UploadID != "upl_123" || !api.started || api.deletedSandboxID != "" {
 		t.Fatalf("fake api state upload=%d finalized=%#v started=%v deleted=%q", api.uploadBytes, api.finalized, api.started, api.deletedSandboxID)
 	}
 	if result.Session == nil || result.Session.Provider != providerName || result.Session.Kept {
 		t.Fatalf("session=%#v", result.Session)
 	}
-	if !strings.Contains(result.Session.CleanupCommand, "--provider crownest --id ") {
-		t.Fatalf("cleanup command=%q, want provider-scoped stop command", result.Session.CleanupCommand)
+	for _, want := range []string{"--provider crownest", "--crownest-url 'https://api.crownest.dev'", "--crownest-template 'python-node'", "--id "} {
+		if !strings.Contains(result.Session.CleanupCommand, want) {
+			t.Fatalf("cleanup command=%q, want %q", result.Session.CleanupCommand, want)
+		}
 	}
 	if strings.Contains(stderr.String(), "cn_test") {
 		t.Fatalf("stderr leaked secret: %q", stderr.String())
 	}
+	if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("claim=%#v err=%v, want one-shot local claim removed without sandbox delete", claim, err)
+	}
 }
 
-func TestRunMarksSessionKeptWhenAutomaticCleanupFails(t *testing.T) {
+func TestRunCleanupCommandIncludesCrownestScopeFlags(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeCrownestClient{baseURL: "https://crownest.internal.example/api"}
+	cfg := testConfig()
+	cfg.Crownest.APIURL = api.BaseURL()
+	cfg.Crownest.ProjectID = "proj_custom"
+	cfg.Crownest.Template = "node-22"
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		Command: []string{"pnpm", "test"},
+		Keep:    true,
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	for _, want := range []string{
+		"--provider crownest",
+		"--crownest-url 'https://crownest.internal.example/api'",
+		"--crownest-project-id 'proj_custom'",
+		"--crownest-template 'node-22'",
+		"--id ",
+	} {
+		if !strings.Contains(result.Session.CleanupCommand, want) {
+			t.Fatalf("cleanup command=%q, want %q", result.Session.CleanupCommand, want)
+		}
+	}
+}
+
+func TestRunMarksSessionKeptWhenRetainedCleanupFails(t *testing.T) {
 	repoRoot := tempGitRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	api := &fakeCrownestClient{
@@ -80,11 +124,15 @@ func TestRunMarksSessionKeptWhenAutomaticCleanupFails(t *testing.T) {
 	}
 
 	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
-		Command: []string{"pnpm", "test"},
+		Repo:          Repo{Root: repoRoot, Name: "demo"},
+		Command:       []string{"pnpm", "test"},
+		KeepOnFailure: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "delete failed") {
 		t.Fatalf("err=%v, want cleanup failure", err)
+	}
+	if !api.created.Keep {
+		t.Fatalf("create request=%#v, want retained sandbox for keep-on-failure cleanup", api.created)
 	}
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v, want kept session after cleanup failure", result.Session)
@@ -191,16 +239,22 @@ func TestRunCancelsWorkspaceRunWhenStreamFailsBeforeTerminal(t *testing.T) {
 		},
 	}
 
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
-		Command: []string{"pnpm", "test"},
-		Keep:    true,
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:          Repo{Root: repoRoot, Name: "demo"},
+		Command:       []string{"pnpm", "test"},
+		KeepOnFailure: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "crownest stream failed") {
 		t.Fatalf("err=%v, want stream failure", err)
 	}
 	if api.canceledRunID != "wsr_123" {
 		t.Fatalf("canceledRunID=%q, want active run cancellation", api.canceledRunID)
+	}
+	if api.deletedSandboxID != "" {
+		t.Fatalf("deletedSandboxID=%q, want retained sandbox", api.deletedSandboxID)
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session=%#v, want kept session after stream failure", result.Session)
 	}
 }
 
@@ -241,6 +295,44 @@ func TestRunReusesClaimWithoutDeletingSandbox(t *testing.T) {
 	}
 }
 
+func TestRunReuseHonorsOperationLock(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := testConfig()
+	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev", startSandboxID: "sbx_reused"}
+	leaseID := leasePrefix + "sbx_reused"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "kept", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockCrownestLeaseOperation(context.Background(), leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = b.Run(ctx, RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		ID:      "kept",
+		Command: []string{"pnpm", "test"},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want context deadline while waiting for operation lock", err)
+	}
+	if api.getSandboxCalls != 0 || api.created.Command != "" {
+		t.Fatalf("run touched remote before lock: getSandboxCalls=%d created=%#v", api.getSandboxCalls, api.created)
+	}
+}
+
 func TestStatusWaitPollsUntilSandboxReady(t *testing.T) {
 	repoRoot := tempGitRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -275,7 +367,106 @@ func TestStatusWaitPollsUntilSandboxReady(t *testing.T) {
 	}
 }
 
-func TestRunCleansUpCreatedSandboxAfterArchiveSetupFailure(t *testing.T) {
+func TestStopHonorsOperationLock(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := testConfig()
+	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev"}
+	leaseID := leasePrefix + "sbx_stop_locked"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "stop-locked", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockCrownestLeaseOperation(context.Background(), leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err = b.Stop(ctx, StopRequest{ID: "stop-locked"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want context deadline while waiting for operation lock", err)
+	}
+	if api.deletedSandboxID != "" {
+		t.Fatalf("stop deleted sandbox before lock: %q", api.deletedSandboxID)
+	}
+}
+
+func TestCleanupSerializesAndRechecksLeaseActivity(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := testConfig()
+	cfg.IdleTimeout = time.Minute
+	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev"}
+	leaseID := leasePrefix + "sbx_cleanup_locked"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "cleanup-locked", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim.LastUsedAt = time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	claim.IdleTimeoutSeconds = 60
+	writeCrownestClaimFixture(t, claim)
+	unlock, err := lockCrownestLeaseOperation(context.Background(), leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	cleanupDone := make(chan error, 1)
+	go func() {
+		cleanupDone <- b.Cleanup(context.Background(), CleanupRequest{})
+	}()
+	select {
+	case err := <-cleanupDone:
+		t.Fatalf("cleanup completed while operation lock was held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	claim.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+	writeCrownestClaimFixture(t, claim)
+	unlock()
+	if err := <-cleanupDone; err != nil {
+		t.Fatal(err)
+	}
+	if api.deletedSandboxID != "" {
+		t.Fatalf("cleanup deleted refreshed active sandbox: %q", api.deletedSandboxID)
+	}
+}
+
+func TestCrownestOperationLockHonorsContextCancellation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	unlock, err := lockCrownestLeaseOperation(context.Background(), leasePrefix+"lock-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := lockCrownestLeaseOperation(ctx, leasePrefix+"lock-test"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want context deadline", err)
+	}
+}
+
+func TestRunRemovesOneShotClaimAfterArchiveSetupFailure(t *testing.T) {
 	repoRoot := tempGitRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	api := &fakeCrownestClient{
@@ -299,8 +490,12 @@ func TestRunCleansUpCreatedSandboxAfterArchiveSetupFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "transfer failed") {
 		t.Fatalf("err=%v, want transfer failure", err)
 	}
-	if api.deletedSandboxID != "sbx_created" {
-		t.Fatalf("deletedSandboxID=%q, want created sandbox cleanup", api.deletedSandboxID)
+	if api.deletedSandboxID != "" {
+		t.Fatalf("deletedSandboxID=%q, want Crownest-owned one-shot cleanup", api.deletedSandboxID)
+	}
+	leaseID := leasePrefix + "sbx_created"
+	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("claim=%#v err=%v, want one-shot setup-failure claim removed", claim, err)
 	}
 }
 
@@ -462,8 +657,11 @@ func TestRunReturnsErrorForCanceledTerminalWithoutExitCode(t *testing.T) {
 	if result.ExitCode == 0 {
 		t.Fatalf("exit=%d, want non-zero", result.ExitCode)
 	}
-	if api.deletedSandboxID != "sbx_canceled" {
-		t.Fatalf("deletedSandboxID=%q, want canceled sandbox cleanup", api.deletedSandboxID)
+	if api.deletedSandboxID != "" {
+		t.Fatalf("deletedSandboxID=%q, want Crownest-owned canceled sandbox cleanup", api.deletedSandboxID)
+	}
+	if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("claim=%#v err=%v, want one-shot terminal-failure claim removed", claim, err)
 	}
 }
 
@@ -544,7 +742,7 @@ func (f *fakeCrownestClient) CreateArchiveTransfer(_ context.Context, id string,
 	if f.transferErr != nil {
 		return archiveTransfer{}, f.transferErr
 	}
-	return archiveTransfer{ID: "upl_123", Method: "PUT", UploadURL: "/upload", MaxSizeBytes: 1 << 30, WorkspaceRunID: id}, nil
+	return archiveTransfer{ID: "upl_123", Method: "PUT", UploadURL: "/upload", MaxSizeBytes: 1 << 30}, nil
 }
 
 func (f *fakeCrownestClient) UploadArchive(_ context.Context, _ archiveTransfer, body io.Reader) error {
@@ -593,6 +791,17 @@ func (f *fakeCrownestClient) StreamWorkspaceRunEvents(context.Context, string, i
 }
 
 func (f *fakeCrownestClient) Probe(context.Context) error { return nil }
+
+func writeCrownestClaimFixture(t *testing.T, claim LeaseClaim) {
+	t.Helper()
+	data, err := json.MarshalIndent(claim, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", claim.LeaseID+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func tempGitRepo(t *testing.T) string {
 	t.Helper()
