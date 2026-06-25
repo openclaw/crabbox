@@ -258,9 +258,39 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 }
 
 func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
-	item, _, leaseID, slug, err := b.resolveDevbox(ctx, req.ID)
+	statusCtx := ctx
+	cancel := func() {}
+	if req.Wait && req.WaitTimeout > 0 {
+		statusCtx, cancel = context.WithTimeout(ctx, req.WaitTimeout)
+	}
+	defer cancel()
+	for {
+		view, target, item, err := b.statusView(statusCtx, req.ID)
+		if err != nil {
+			return core.StatusView{}, err
+		}
+		if !req.Wait {
+			return view, nil
+		}
+		if view.Ready {
+			if err := b.waitForSSH(statusCtx, &target, "Sealos DevBox status"); err != nil {
+				return core.StatusView{}, err
+			}
+			return view, nil
+		}
+		if devboxTerminalFailure(item) {
+			return core.StatusView{}, core.Exit(5, "Sealos DevBox %s reached terminal state before readiness: %s", item.Metadata.Name, view.State)
+		}
+		if err := sleepContext(statusCtx, 2*time.Second); err != nil {
+			return core.StatusView{}, err
+		}
+	}
+}
+
+func (b *backend) statusView(ctx context.Context, id string) (core.StatusView, core.SSHTarget, devboxItem, error) {
+	item, _, leaseID, slug, err := b.resolveDevbox(ctx, id)
 	if err != nil {
-		return core.StatusView{}, err
+		return core.StatusView{}, core.SSHTarget{}, devboxItem{}, err
 	}
 	server := b.serverFromDevbox(item)
 	target, _ := b.sshTarget(item, b.statusSSHKey(leaseID), false)
@@ -285,7 +315,7 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		Labels:        server.Labels,
 		HasHost:       target.Host != "",
 		Ready:         devboxReady(item) && target.Host != "",
-	}, nil
+	}, target, item, nil
 }
 
 func (b *backend) statusSSHKey(leaseID string) string {
