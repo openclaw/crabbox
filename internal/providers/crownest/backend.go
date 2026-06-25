@@ -16,6 +16,7 @@ import (
 )
 
 const cleanupTimeout = 15 * time.Second
+const statusPollInterval = 250 * time.Millisecond
 
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
@@ -124,6 +125,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
 				if result.ExitCode == 0 {
 					result.ExitCode = 1
+				}
+				if result.Session != nil {
+					result.Session.Kept = true
 				}
 				if retErr == nil {
 					retErr = cleanupErr
@@ -279,6 +283,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if result.ExitCode == 0 {
 			result.ExitCode = 1
 		}
+		if result.Session != nil {
+			result.Session.Kept = true
+		}
 		retErr = cleanupErr
 	}
 	if req.TimingJSON {
@@ -420,26 +427,62 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	sb, err := api.GetSandbox(ctx, sandboxID)
-	if err != nil {
-		return StatusView{}, err
+	waitTimeout := req.WaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = 5 * time.Minute
 	}
-	state := normalizedSandboxState(sb)
-	return StatusView{
-		ID:       leaseID,
-		Slug:     slug,
-		Provider: providerName,
-		TargetOS: targetLinux,
-		State:    state,
-		ServerID: sandboxID,
-		Ready:    isReadyState(state),
-		Labels: map[string]string{
-			"provider": providerName,
-			"lease":    leaseID,
-			"slug":     slug,
-			"state":    state,
-		},
-	}, nil
+	deadline := b.now().Add(waitTimeout)
+	pollCtx := ctx
+	cancel := func() {}
+	if req.Wait {
+		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
+	}
+	defer cancel()
+	for {
+		sb, getErr := api.GetSandbox(pollCtx, sandboxID)
+		if getErr != nil {
+			if req.Wait && ctx.Err() == nil && pollCtx.Err() != nil {
+				return StatusView{}, exit(5, "timed out waiting for crownest sandbox %s to become ready", sandboxID)
+			}
+			if ctx.Err() != nil {
+				return StatusView{}, ctx.Err()
+			}
+			return StatusView{}, getErr
+		}
+		state := normalizedSandboxState(sb)
+		view := StatusView{
+			ID:       leaseID,
+			Slug:     slug,
+			Provider: providerName,
+			TargetOS: targetLinux,
+			State:    state,
+			ServerID: sandboxID,
+			Ready:    isReadyState(state),
+			Labels: map[string]string{
+				"provider": providerName,
+				"lease":    leaseID,
+				"slug":     slug,
+				"state":    state,
+			},
+		}
+		if !req.Wait || view.Ready {
+			return view, nil
+		}
+		if isTerminalState(state) {
+			return StatusView{}, exit(5, "crownest sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
+		}
+		if b.now().After(deadline) {
+			return StatusView{}, exit(5, "timed out waiting for crownest sandbox %s to become ready", sandboxID)
+		}
+		select {
+		case <-pollCtx.Done():
+			if ctx.Err() == nil {
+				return StatusView{}, exit(5, "timed out waiting for crownest sandbox %s to become ready", sandboxID)
+			}
+			return StatusView{}, pollCtx.Err()
+		case <-time.After(statusPollInterval):
+		}
+	}
 }
 
 func (b *backend) Stop(ctx context.Context, req StopRequest) error {
@@ -838,6 +881,15 @@ func normalizedSandboxState(sb sandbox) string {
 func isReadyState(state string) bool {
 	switch strings.TrimSpace(strings.ToLower(state)) {
 	case "running", "ready", "started", "active":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTerminalState(state string) bool {
+	switch strings.TrimSpace(strings.ToLower(state)) {
+	case "terminated", "stopped", "failed", "error", "aborted", "killed", "deleted", "destroyed":
 		return true
 	default:
 		return false

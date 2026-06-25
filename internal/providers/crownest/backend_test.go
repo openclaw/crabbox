@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
@@ -59,6 +60,34 @@ func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "cn_test") {
 		t.Fatalf("stderr leaked secret: %q", stderr.String())
+	}
+}
+
+func TestRunMarksSessionKeptWhenAutomaticCleanupFails(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeCrownestClient{
+		baseURL:   "https://api.crownest.dev",
+		deleteErr: errors.New("delete failed"),
+	}
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  testConfig(),
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		Command: []string{"pnpm", "test"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err=%v, want cleanup failure", err)
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session=%#v, want kept session after cleanup failure", result.Session)
 	}
 }
 
@@ -209,6 +238,40 @@ func TestRunReusesClaimWithoutDeletingSandbox(t *testing.T) {
 	}
 	if result.Session == nil || !result.Session.Reused || !result.Session.Kept {
 		t.Fatalf("session=%#v", result.Session)
+	}
+}
+
+func TestStatusWaitPollsUntilSandboxReady(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := testConfig()
+	api := &fakeCrownestClient{
+		baseURL:          "https://api.crownest.dev",
+		getSandboxStates: []string{"starting", "running"},
+	}
+	leaseID := leasePrefix + "sbx_123"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "status-wait", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeLeaseClaim(leaseID) })
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	view, err := b.Status(context.Background(), StatusRequest{ID: "status-wait", Wait: true, WaitTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("Status err=%v", err)
+	}
+	if !view.Ready || view.State != "running" {
+		t.Fatalf("view=%#v, want ready running", view)
+	}
+	if api.getSandboxCalls < 2 {
+		t.Fatalf("getSandboxCalls=%d, want polling", api.getSandboxCalls)
 	}
 }
 
@@ -440,8 +503,11 @@ type fakeCrownestClient struct {
 	started          bool
 	startSandboxID   string
 	latestRun        workspaceRun
+	getSandboxStates []string
+	getSandboxCalls  int
 	deletedSandboxID string
 	canceledRunID    string
+	deleteErr        error
 	transferErr      error
 	stream           func() (io.ReadCloser, error)
 }
@@ -453,12 +519,20 @@ func (f *fakeCrownestClient) CreateSandbox(context.Context, createSandboxRequest
 }
 
 func (f *fakeCrownestClient) GetSandbox(context.Context, string) (sandbox, error) {
+	f.getSandboxCalls++
+	if len(f.getSandboxStates) > 0 {
+		idx := f.getSandboxCalls - 1
+		if idx >= len(f.getSandboxStates) {
+			idx = len(f.getSandboxStates) - 1
+		}
+		return sandbox{ID: "sbx_123", Status: f.getSandboxStates[idx]}, nil
+	}
 	return sandbox{ID: "sbx_123", Status: "running"}, nil
 }
 
 func (f *fakeCrownestClient) DeleteSandbox(_ context.Context, id string) error {
 	f.deletedSandboxID = id
-	return nil
+	return f.deleteErr
 }
 
 func (f *fakeCrownestClient) CreateWorkspaceRun(_ context.Context, req createWorkspaceRunRequest, _ string) (workspaceRun, error) {
