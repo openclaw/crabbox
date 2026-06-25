@@ -3956,10 +3956,12 @@ func TestNomadConfigYAMLAndEnv(t *testing.T) {
 	}
 }
 
-func TestNomadUntrustedConfigCannotRedirectConnectionOrHostPaths(t *testing.T) {
+func TestNomadUntrustedConfigCannotRedirectCredentialedJobs(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
 	cfg.Nomad.Address = "https://trusted-nomad.example.test:4646"
+	cfg.Nomad.Region = "trusted-region"
+	cfg.Nomad.Namespace = "trusted-namespace"
 	cfg.Nomad.TokenEnv = "TRUSTED_NOMAD_TOKEN"
 	cfg.Nomad.CACert = "/trusted/ca.pem"
 	cfg.Nomad.CAPath = "/trusted/certs"
@@ -3967,7 +3969,19 @@ func TestNomadUntrustedConfigCannotRedirectConnectionOrHostPaths(t *testing.T) {
 	cfg.Nomad.ClientKey = "/trusted/client.key"
 	cfg.Nomad.TLSServerName = "trusted-nomad.example.test"
 	cfg.Nomad.SkipVerify = false
+	cfg.Nomad.Task = "trusted-task"
+	cfg.Nomad.Driver = "docker"
+	cfg.Nomad.Image = "trusted-image:latest"
+	cfg.Nomad.Workdir = "/workspace/trusted"
 	cfg.Nomad.JobSpecTemplate = "/trusted/job.hcl"
+	cfg.Nomad.NodePool = "trusted-pool"
+	cfg.Nomad.Datacenters = []string{"trusted-dc"}
+	cfg.Nomad.CPU = 1000
+	cfg.Nomad.MemoryMB = 2048
+	cfg.Nomad.DiskMB = 1024
+	cfg.Nomad.AllocReadyTimeout = 5 * time.Minute
+	cfg.Nomad.EvalTimeout = 6 * time.Minute
+	cfg.Nomad.ExecTimeoutSecs = 600
 	var file fileConfig
 	yamlText := strings.Join([]string{
 		"nomad:",
@@ -4002,6 +4016,8 @@ func TestNomadUntrustedConfigCannotRedirectConnectionOrHostPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Nomad.Address != "https://trusted-nomad.example.test:4646" ||
+		cfg.Nomad.Region != "trusted-region" ||
+		cfg.Nomad.Namespace != "trusted-namespace" ||
 		cfg.Nomad.TokenEnv != "TRUSTED_NOMAD_TOKEN" ||
 		cfg.Nomad.CACert != "/trusted/ca.pem" ||
 		cfg.Nomad.CAPath != "/trusted/certs" ||
@@ -4009,24 +4025,20 @@ func TestNomadUntrustedConfigCannotRedirectConnectionOrHostPaths(t *testing.T) {
 		cfg.Nomad.ClientKey != "/trusted/client.key" ||
 		cfg.Nomad.TLSServerName != "trusted-nomad.example.test" ||
 		cfg.Nomad.SkipVerify ||
-		cfg.Nomad.JobSpecTemplate != "/trusted/job.hcl" {
-		t.Fatalf("untrusted nomad config changed connection material: %#v", cfg.Nomad)
-	}
-	if cfg.Nomad.Region != "repo-region" ||
-		cfg.Nomad.Namespace != "repo-namespace" ||
-		cfg.Nomad.Task != "repo-task" ||
-		cfg.Nomad.Driver != "raw_exec" ||
-		cfg.Nomad.Image != "repo-image:latest" ||
-		cfg.Nomad.Workdir != "/workspace/repo" ||
-		cfg.Nomad.NodePool != "repo-pool" ||
-		!reflect.DeepEqual(cfg.Nomad.Datacenters, []string{"dc1", "dc2"}) ||
-		cfg.Nomad.CPU != 500 ||
-		cfg.Nomad.MemoryMB != 1024 ||
-		cfg.Nomad.DiskMB != 2048 ||
-		cfg.Nomad.AllocReadyTimeout != 2*time.Minute ||
-		cfg.Nomad.EvalTimeout != 3*time.Minute ||
-		cfg.Nomad.ExecTimeoutSecs != 45 {
-		t.Fatalf("safe untrusted nomad settings not applied: %#v", cfg.Nomad)
+		cfg.Nomad.Task != "trusted-task" ||
+		cfg.Nomad.Driver != "docker" ||
+		cfg.Nomad.Image != "trusted-image:latest" ||
+		cfg.Nomad.Workdir != "/workspace/trusted" ||
+		cfg.Nomad.JobSpecTemplate != "/trusted/job.hcl" ||
+		cfg.Nomad.NodePool != "trusted-pool" ||
+		!reflect.DeepEqual(cfg.Nomad.Datacenters, []string{"trusted-dc"}) ||
+		cfg.Nomad.CPU != 1000 ||
+		cfg.Nomad.MemoryMB != 2048 ||
+		cfg.Nomad.DiskMB != 1024 ||
+		cfg.Nomad.AllocReadyTimeout != 5*time.Minute ||
+		cfg.Nomad.EvalTimeout != 6*time.Minute ||
+		cfg.Nomad.ExecTimeoutSecs != 600 {
+		t.Fatalf("untrusted nomad config changed credentialed job settings: %#v", cfg.Nomad)
 	}
 }
 

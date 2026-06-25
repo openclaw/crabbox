@@ -6298,12 +6298,6 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Nomad.Address = file.Nomad.Address
 			cfg.credentialProvenance.nomadAddress = credentialSource
 		}
-		if file.Nomad.Region != "" {
-			cfg.Nomad.Region = file.Nomad.Region
-		}
-		if file.Nomad.Namespace != "" {
-			cfg.Nomad.Namespace = file.Nomad.Namespace
-		}
 		if trusted && file.Nomad.TokenEnv != "" {
 			cfg.Nomad.TokenEnv = file.Nomad.TokenEnv
 			cfg.credentialProvenance.nomadTokenEnv = credentialSource
@@ -6326,56 +6320,64 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if trusted && file.Nomad.SkipVerify != nil {
 			cfg.Nomad.SkipVerify = *file.Nomad.SkipVerify
 		}
-		if file.Nomad.Task != nil {
-			cfg.Nomad.Task = *file.Nomad.Task
-		}
-		if file.Nomad.Driver != nil {
-			cfg.Nomad.Driver = *file.Nomad.Driver
-		}
-		if file.Nomad.Image != nil {
-			cfg.Nomad.Image = *file.Nomad.Image
-		}
-		if file.Nomad.Workdir != nil {
-			cfg.Nomad.Workdir = *file.Nomad.Workdir
-		}
-		if trusted && file.Nomad.JobSpecTemplate != "" {
-			cfg.Nomad.JobSpecTemplate = expandUserPath(file.Nomad.JobSpecTemplate)
-		}
-		if file.Nomad.NodePool != "" {
-			cfg.Nomad.NodePool = file.Nomad.NodePool
-		}
-		if len(file.Nomad.Datacenters) > 0 {
-			cfg.Nomad.Datacenters = normalizeList(file.Nomad.Datacenters)
-		}
-		if file.Nomad.CPU != nil {
-			if *file.Nomad.CPU < 0 {
-				return exit(2, "nomad cpu must be non-negative")
+		if trusted {
+			if file.Nomad.Region != "" {
+				cfg.Nomad.Region = file.Nomad.Region
 			}
-			cfg.Nomad.CPU = *file.Nomad.CPU
-		}
-		if file.Nomad.MemoryMB != nil {
-			if *file.Nomad.MemoryMB < 0 {
-				return exit(2, "nomad memoryMB must be non-negative")
+			if file.Nomad.Namespace != "" {
+				cfg.Nomad.Namespace = file.Nomad.Namespace
 			}
-			cfg.Nomad.MemoryMB = *file.Nomad.MemoryMB
-		}
-		if file.Nomad.DiskMB != nil {
-			if *file.Nomad.DiskMB < 0 {
-				return exit(2, "nomad diskMB must be non-negative")
+			if file.Nomad.Task != nil {
+				cfg.Nomad.Task = *file.Nomad.Task
 			}
-			cfg.Nomad.DiskMB = *file.Nomad.DiskMB
-		}
-		if file.Nomad.AllocReadyTimeout != "" {
-			applyLeaseDuration(&cfg.Nomad.AllocReadyTimeout, file.Nomad.AllocReadyTimeout)
-		}
-		if file.Nomad.EvalTimeout != "" {
-			applyLeaseDuration(&cfg.Nomad.EvalTimeout, file.Nomad.EvalTimeout)
-		}
-		if file.Nomad.ExecTimeoutSecs != nil {
-			if *file.Nomad.ExecTimeoutSecs < 0 {
-				return exit(2, "nomad execTimeoutSecs must be non-negative")
+			if file.Nomad.Driver != nil {
+				cfg.Nomad.Driver = *file.Nomad.Driver
 			}
-			cfg.Nomad.ExecTimeoutSecs = *file.Nomad.ExecTimeoutSecs
+			if file.Nomad.Image != nil {
+				cfg.Nomad.Image = *file.Nomad.Image
+			}
+			if file.Nomad.Workdir != nil {
+				cfg.Nomad.Workdir = *file.Nomad.Workdir
+			}
+			if file.Nomad.JobSpecTemplate != "" {
+				cfg.Nomad.JobSpecTemplate = expandUserPath(file.Nomad.JobSpecTemplate)
+			}
+			if file.Nomad.NodePool != "" {
+				cfg.Nomad.NodePool = file.Nomad.NodePool
+			}
+			if len(file.Nomad.Datacenters) > 0 {
+				cfg.Nomad.Datacenters = normalizeList(file.Nomad.Datacenters)
+			}
+			if file.Nomad.CPU != nil {
+				if *file.Nomad.CPU < 0 {
+					return exit(2, "nomad cpu must be non-negative")
+				}
+				cfg.Nomad.CPU = *file.Nomad.CPU
+			}
+			if file.Nomad.MemoryMB != nil {
+				if *file.Nomad.MemoryMB < 0 {
+					return exit(2, "nomad memoryMB must be non-negative")
+				}
+				cfg.Nomad.MemoryMB = *file.Nomad.MemoryMB
+			}
+			if file.Nomad.DiskMB != nil {
+				if *file.Nomad.DiskMB < 0 {
+					return exit(2, "nomad diskMB must be non-negative")
+				}
+				cfg.Nomad.DiskMB = *file.Nomad.DiskMB
+			}
+			if file.Nomad.AllocReadyTimeout != "" {
+				applyLeaseDuration(&cfg.Nomad.AllocReadyTimeout, file.Nomad.AllocReadyTimeout)
+			}
+			if file.Nomad.EvalTimeout != "" {
+				applyLeaseDuration(&cfg.Nomad.EvalTimeout, file.Nomad.EvalTimeout)
+			}
+			if file.Nomad.ExecTimeoutSecs != nil {
+				if *file.Nomad.ExecTimeoutSecs < 0 {
+					return exit(2, "nomad execTimeoutSecs must be non-negative")
+				}
+				cfg.Nomad.ExecTimeoutSecs = *file.Nomad.ExecTimeoutSecs
+			}
 		}
 	}
 	if file.Blaxel != nil {
