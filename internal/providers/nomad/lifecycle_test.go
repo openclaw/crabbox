@@ -235,6 +235,49 @@ func TestJobspecTemplateRequiresOwnershipMetadata(t *testing.T) {
 	}
 }
 
+func TestJobspecTemplateEscapesPlaceholderValues(t *testing.T) {
+	cfg := testNomadConfig()
+	cfg.Nomad.Task = `crabbox","Config":{"evil":true},"Name":"crabbox`
+	template := filepath.Join(t.TempDir(), "job.json")
+	tpl := `{
+		"ID":"{{.JobID}}",
+		"Name":"{{.JobID}}",
+		"Type":"service",
+		"Meta":{
+			"crabbox.managed":"true",
+			"crabbox.lease_id":"{{.LeaseID}}",
+			"crabbox.slug":"{{.Slug}}",
+			"crabbox.provider":"nomad",
+			"crabbox.scope":"{{.Scope}}",
+			"crabbox.namespace":"{{.Namespace}}",
+			"crabbox.region":"{{.Region}}",
+			"crabbox.job_id":"{{.JobID}}",
+			"crabbox.task":"{{.Task}}",
+			"crabbox.workdir":"{{.Workdir}}",
+			"crabbox.expires_at":"{{.ExpiresAt}}"
+		},
+		"TaskGroups":[{"Name":"crabbox","Tasks":[{"Name":"{{.Task}}","Driver":"docker"}]}]
+	}`
+	if err := os.WriteFile(template, []byte(tpl), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Nomad.JobSpecTemplate = template
+	job, err := buildJobSpec(cfg, jobSpecInput{LeaseID: "cbx_123456789abc", Slug: "blue-lobster", JobID: "crabbox-123456789abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(job, cfg.Nomad.Task)
+	if !ok {
+		t.Fatalf("missing escaped task %q in %#v", cfg.Nomad.Task, job.TaskGroups[0].Tasks)
+	}
+	if _, ok := task.Config["evil"]; ok {
+		t.Fatalf("placeholder escaped into task config: %#v", task.Config)
+	}
+	if job.Meta[metadataTask] != cfg.Nomad.Task {
+		t.Fatalf("metadata task=%q want %q", job.Meta[metadataTask], cfg.Nomad.Task)
+	}
+}
+
 func TestWarmupRegistersJobAndWritesNomadClaim(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	b, stdout, _ := testBackend(t, fake)
@@ -263,6 +306,21 @@ func TestWarmupRegistersJobAndWritesNomadClaim(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "allocation=") {
 		t.Fatalf("stdout=%s", stdout.String())
+	}
+}
+
+func TestWarmupTimingJSONIncludesNomadLease(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	b, _, stderr := testBackend(t, fake)
+	repo := Repo{Root: filepath.Join(t.TempDir(), "repo"), Name: "my-app"}
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: repo, Keep: true, RequestedSlug: "timed-crab", TimingJSON: true}); err != nil {
+		t.Fatal(err)
+	}
+	out := stderr.String()
+	for _, want := range []string{`"provider":"nomad"`, `"slug":"timed-crab"`, `"exitCode":0`, `"runStatus":"succeeded"`, `"workdir":"/workspace/crabbox"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("timing JSON missing %s in %q", want, out)
+		}
 	}
 }
 
@@ -638,6 +696,25 @@ func TestSelectAllocationPrefersRunningTask(t *testing.T) {
 	}
 	if ready.AllocationID != "alloc-running" || ready.State() != "running" {
 		t.Fatalf("ready=%#v", ready)
+	}
+}
+
+func TestSelectAllocationPrefersNonTerminalBeforeStaleTerminal(t *testing.T) {
+	terminal := runningAlloc("job", "alloc-terminal", "node-0", "old-worker", "crabbox")
+	terminal.ClientStatus = nomadapi.AllocClientStatusFailed
+	terminal.DesiredStatus = nomadapi.AllocDesiredStatusStop
+	terminal.TaskStates["crabbox"].State = "dead"
+	terminal.TaskStates["crabbox"].Failed = true
+	pending := runningAlloc("job", "alloc-pending", "node-1", "new-worker", "crabbox")
+	pending.ClientStatus = nomadapi.AllocClientStatusPending
+	pending.TaskStates["crabbox"].State = "pending"
+
+	ready, err := selectAllocation([]*nomadapi.AllocationListStub{terminal, pending}, "job", "crabbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.AllocationID != "alloc-pending" || ready.State() == "terminal" {
+		t.Fatalf("ready=%#v, want pending replacement before stale terminal", ready)
 	}
 }
 

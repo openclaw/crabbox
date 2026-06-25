@@ -87,6 +87,16 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	}
 	total := b.now().Sub(started)
 	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
+	if req.TimingJSON {
+		return writeTimingJSON(b.rt.Stderr, timingReport{
+			Provider: providerName,
+			LeaseID:  leaseID,
+			Slug:     slug,
+			TotalMs:  total.Milliseconds(),
+			ExitCode: 0,
+			Workdir:  b.cfg.Nomad.Workdir,
+		})
+	}
 	return nil
 }
 
@@ -668,7 +678,8 @@ func (b *backend) currentAllocation(ctx context.Context, client Client, jobID st
 }
 
 func selectAllocation(allocs []*nomadapi.AllocationListStub, jobID, taskName string) (allocationReadiness, error) {
-	var fallback allocationReadiness
+	var nonTerminal allocationReadiness
+	var terminal allocationReadiness
 	for _, alloc := range allocs {
 		if alloc == nil || alloc.JobID != jobID {
 			continue
@@ -690,12 +701,21 @@ func selectAllocation(allocs []*nomadapi.AllocationListStub, jobID, taskName str
 		if ready.State() == "running" && strings.EqualFold(state.State, "running") && !state.Failed {
 			return ready, nil
 		}
-		if fallback.AllocationID == "" {
-			fallback = ready
+		if ready.State() == "terminal" {
+			if terminal.AllocationID == "" {
+				terminal = ready
+			}
+			continue
+		}
+		if nonTerminal.AllocationID == "" {
+			nonTerminal = ready
 		}
 	}
-	if fallback.AllocationID != "" {
-		return fallback, nil
+	if nonTerminal.AllocationID != "" {
+		return nonTerminal, nil
+	}
+	if terminal.AllocationID != "" {
+		return terminal, nil
 	}
 	return allocationReadiness{JobID: jobID, Task: taskName}, nil
 }
