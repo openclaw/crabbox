@@ -32,10 +32,6 @@ func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
 }
 
-func inventoryDoctorResult(provider string, leases int) DoctorResult {
-	return core.InventoryDoctorResult(provider, leases)
-}
-
 func isFalProviderName(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case providerName, "fal-ai":
