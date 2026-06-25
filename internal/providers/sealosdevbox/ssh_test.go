@@ -89,7 +89,16 @@ func TestSSHTargetValidationRejectsInvalidRoute(t *testing.T) {
 	if _, err := backend.sshTarget(devboxItem{Metadata: devboxMeta{Name: "devbox-blue"}}, "/tmp/cbx-key", true); err == nil || !strings.Contains(err.Error(), "NodePort") {
 		t.Fatalf("missing nodePort err=%v", err)
 	}
-	if _, err := backend.sshTarget(devboxItem{Status: devboxStatus{Network: map[string]any{"nodePort": float64(32022)}}}, "", true); err == nil || !strings.Contains(err.Error(), "key path") {
+	httpOnly := devboxItem{
+		Metadata: devboxMeta{Name: "devbox-blue"},
+		Status: devboxStatus{Network: map[string]any{
+			"ports": []any{map[string]any{"name": "http", "port": float64(80), "nodePort": float64(30080)}},
+		}},
+	}
+	if _, err := backend.sshTarget(httpOnly, "/tmp/cbx-key", true); err == nil || !strings.Contains(err.Error(), "NodePort") {
+		t.Fatalf("http nodePort err=%v", err)
+	}
+	if _, err := backend.sshTarget(devboxItem{Status: devboxStatus{Network: map[string]any{"sshNodePort": float64(32022)}}}, "", true); err == nil || !strings.Contains(err.Error(), "key path") {
 		t.Fatalf("missing key err=%v", err)
 	}
 }

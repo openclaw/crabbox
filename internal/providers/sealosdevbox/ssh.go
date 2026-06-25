@@ -92,7 +92,7 @@ func devboxSSHNodePort(item devboxItem) (int, bool) {
 	if port, ok := findSSHNodePort(value); ok {
 		return port, true
 	}
-	return findAnyNodePort(value)
+	return 0, false
 }
 
 func findSSHNodePort(value any) (int, bool) {
@@ -116,29 +116,6 @@ func findSSHNodePort(value any) (int, bool) {
 	case []any:
 		for _, nested := range typed {
 			if port, ok := findSSHNodePort(nested); ok {
-				return port, true
-			}
-		}
-	}
-	return 0, false
-}
-
-func findAnyNodePort(value any) (int, bool) {
-	switch typed := value.(type) {
-	case map[string]any:
-		for _, key := range []string{"nodePort", "sshNodePort", "port"} {
-			if port, ok := numericPort(typed[key]); ok {
-				return port, true
-			}
-		}
-		for _, nested := range typed {
-			if port, ok := findAnyNodePort(nested); ok {
-				return port, true
-			}
-		}
-	case []any:
-		for _, nested := range typed {
-			if port, ok := findAnyNodePort(nested); ok {
 				return port, true
 			}
 		}

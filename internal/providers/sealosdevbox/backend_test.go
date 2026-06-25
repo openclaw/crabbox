@@ -57,6 +57,8 @@ func (r *lifecycleRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 	if result.Stdout == "" {
 		if isCanIRequest(req) {
 			result.Stdout = "yes"
+		} else if isCRDVersionsRequest(req) {
+			result.Stdout = "v1alpha2"
 		} else {
 			result.Stdout = "ok"
 		}
@@ -703,6 +705,11 @@ func isCanIRequest(req core.LocalCommandRequest) bool {
 		}
 	}
 	return false
+}
+
+func isCRDVersionsRequest(req core.LocalCommandRequest) bool {
+	args := strings.Join(req.Args, " ")
+	return strings.Contains(args, "get customresourcedefinition "+devboxCRD) && strings.Contains(args, "jsonpath={.spec.versions[*].name}")
 }
 
 func TestPersistDevboxKeyUsesCrabboxKeyPath(t *testing.T) {

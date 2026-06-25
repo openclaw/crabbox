@@ -161,6 +161,10 @@ func TestDoctorUsesReadOnlyKubectlCommands(t *testing.T) {
 	if result.Provider != providerName || result.Status != "ready" {
 		t.Fatalf("result=%#v", result)
 	}
+	crdCheck := findDoctorCheck(t, result.Checks, "crd.devboxes")
+	if crdCheck.Status != "ok" || !strings.Contains(crdCheck.Details["versions"], "v1alpha2") {
+		t.Fatalf("crd check=%#v", crdCheck)
+	}
 	if !strings.Contains(result.Message, "automation_surface=crd_first") || !strings.Contains(result.Message, "mutation=false") {
 		t.Fatalf("message=%q", result.Message)
 	}
@@ -241,6 +245,26 @@ func TestDoctorRequiresExplicitRBACYes(t *testing.T) {
 	}
 }
 
+func TestDoctorRequiresDevboxCRDVersion(t *testing.T) {
+	runner := &recordingRunner{
+		results: map[int]core.LocalCommandResult{
+			4: {Stdout: "v1beta1\n"},
+		},
+	}
+	doctor, err := (Provider{}).ConfigureDoctor(lifecycleConfig(), core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := findDoctorCheck(t, result.Checks, "crd.devboxes")
+	if result.Status != "blocked" || check.Status != "failed" || !strings.Contains(check.Message, "v1alpha2") {
+		t.Fatalf("result=%#v check=%#v", result, check)
+	}
+}
+
 type recordingRunner struct {
 	requests []core.LocalCommandRequest
 	results  map[int]core.LocalCommandResult
@@ -255,6 +279,9 @@ func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 	}
 	if isCanIRequest(req) {
 		return core.LocalCommandResult{Stdout: "yes"}, r.errors[index]
+	}
+	if isCRDVersionsRequest(req) {
+		return core.LocalCommandResult{Stdout: "v1alpha2"}, r.errors[index]
 	}
 	return core.LocalCommandResult{Stdout: "ok"}, r.errors[index]
 }
