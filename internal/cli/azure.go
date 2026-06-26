@@ -1795,7 +1795,9 @@ func (c *AzureClient) deleteVMResources(ctx context.Context, name string) error 
 func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string) ([]error, bool) {
 	var errs []error
 	retry := false
-	if poller, err := c.vmc.BeginDelete(ctx, c.ResourceGroup, name, nil); err == nil {
+	if poller, err := c.vmc.BeginDelete(ctx, c.ResourceGroup, name, &armcompute.VirtualMachinesClientBeginDeleteOptions{
+		ForceDeletion: to.Ptr(true),
+	}); err == nil {
 		if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
 			errs = append(errs, fmt.Errorf("delete vm %s: %w", name, err))
 			retry = retry || isAzureRetryableDeleteError(err)
@@ -1804,27 +1806,51 @@ func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string) ([
 		errs = append(errs, fmt.Errorf("begin delete vm: %w", err))
 		retry = retry || isAzureRetryableDeleteError(err)
 	}
-	if poller, err := c.nicc.BeginDelete(ctx, c.ResourceGroup, name+"-nic", nil); err == nil {
-		if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
-			errs = append(errs, fmt.Errorf("delete nic %s-nic: %w", name, err))
+	dependentDeletes := []func() error{
+		func() error { return c.deleteNIC(ctx, name+"-nic") },
+		func() error { return c.deletePublicIP(ctx, name+"-pip") },
+		func() error { return c.deleteDisk(ctx, name+"-osdisk") },
+	}
+	deleteResults := make(chan error, len(dependentDeletes))
+	for _, deleteResource := range dependentDeletes {
+		go func() { deleteResults <- deleteResource() }()
+	}
+	for range dependentDeletes {
+		if err := <-deleteResults; err != nil {
+			errs = append(errs, err)
 			retry = retry || isAzureRetryableDeleteError(err)
 		}
-	} else if !isAzureNotFoundError(err) {
-		errs = append(errs, fmt.Errorf("begin delete nic: %w", err))
-		retry = retry || isAzureRetryableDeleteError(err)
 	}
-	if err := c.deletePublicIP(ctx, name+"-pip"); err != nil {
-		errs = append(errs, err)
-		retry = retry || isAzureRetryableDeleteError(err)
+	absenceChecks := []struct {
+		name string
+		get  func() error
+	}{
+		{name: "vm " + name, get: func() error {
+			_, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil)
+			return err
+		}},
+		{name: "nic " + name + "-nic", get: func() error {
+			_, err := c.nicc.Get(ctx, c.ResourceGroup, name+"-nic", nil)
+			return err
+		}},
+		{name: "public ip " + name + "-pip", get: func() error {
+			_, err := c.pipc.Get(ctx, c.ResourceGroup, name+"-pip", nil)
+			return err
+		}},
+		{name: "disk " + name + "-osdisk", get: func() error {
+			_, err := c.diskc.Get(ctx, c.ResourceGroup, name+"-osdisk", nil)
+			return err
+		}},
 	}
-	if poller, err := c.diskc.BeginDelete(ctx, c.ResourceGroup, name+"-osdisk", nil); err == nil {
-		if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
-			errs = append(errs, fmt.Errorf("delete disk %s-osdisk: %w", name, err))
+	for _, check := range absenceChecks {
+		err := check.get()
+		if err == nil {
+			errs = append(errs, fmt.Errorf("%s still exists after delete", check.name))
+			retry = true
+		} else if !isAzureNotFoundError(err) {
+			errs = append(errs, fmt.Errorf("verify delete %s: %w", check.name, err))
 			retry = retry || isAzureRetryableDeleteError(err)
 		}
-	} else if !isAzureNotFoundError(err) {
-		errs = append(errs, fmt.Errorf("begin delete disk: %w", err))
-		retry = retry || isAzureRetryableDeleteError(err)
 	}
 	return errs, retry
 }
@@ -1839,6 +1865,34 @@ func (c *AzureClient) deletePublicIP(ctx context.Context, pipName string) error 
 	}
 	if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
 		return fmt.Errorf("delete pip %s: %w", pipName, err)
+	}
+	return nil
+}
+
+func (c *AzureClient) deleteNIC(ctx context.Context, nicName string) error {
+	poller, err := c.nicc.BeginDelete(ctx, c.ResourceGroup, nicName, nil)
+	if err != nil {
+		if isAzureNotFoundError(err) {
+			return nil
+		}
+		return fmt.Errorf("begin delete nic: %w", err)
+	}
+	if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
+		return fmt.Errorf("delete nic %s: %w", nicName, err)
+	}
+	return nil
+}
+
+func (c *AzureClient) deleteDisk(ctx context.Context, diskName string) error {
+	poller, err := c.diskc.BeginDelete(ctx, c.ResourceGroup, diskName, nil)
+	if err != nil {
+		if isAzureNotFoundError(err) {
+			return nil
+		}
+		return fmt.Errorf("begin delete disk: %w", err)
+	}
+	if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
+		return fmt.Errorf("delete disk %s: %w", diskName, err)
 	}
 	return nil
 }
