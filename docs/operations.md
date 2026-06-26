@@ -372,7 +372,7 @@ proxied HTML and JavaScript to a separate browser origin.
 
 ```text
 AWS_SESSION_TOKEN                  optional
-CRABBOX_HOST_ID                    optional; admin-only explicit brokered host pin
+CRABBOX_HOST_ID                    optional; admin-only except owner reuse of a released Mac host
 CRABBOX_AWS_MAC_HOST_ID            optional legacy AWS alias for CRABBOX_HOST_ID
 CRABBOX_SHARED_OWNER              optional fixed owner identity for shared-token automation
 CRABBOX_ADMIN_TOKEN               required for admin routes and image promotion

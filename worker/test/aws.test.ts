@@ -1550,8 +1550,10 @@ describe("aws provider", () => {
     expect(result.server.hostID).toBe("h-spare");
   });
 
-  it("does not fail over from an explicit macOS host pin after host capacity is exhausted", async () => {
+  it("waits for an explicit macOS host pin to regain capacity without failing over", async () => {
+    vi.useFakeTimers();
     const runHosts: string[] = [];
+    let runCalls = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1585,10 +1587,25 @@ describe("aws provider", () => {
         }
         if (action === "RunInstances") {
           runHosts.push(params.get("Placement.HostId") ?? "");
-          return ec2XMLResponse(
-            `<Response><Errors><Error><Code>InsufficientCapacityOnHost</Code><Message>Dedicated host h-occupied has insufficient capacity.</Message></Error></Errors></Response>`,
-            400,
-          );
+          runCalls += 1;
+          if (runCalls < 3) {
+            return ec2XMLResponse(
+              `<Response><Errors><Error><Code>InsufficientCapacityOnHost</Code><Message>Dedicated host h-occupied has insufficient capacity.</Message></Error></Errors></Response>`,
+              400,
+            );
+          }
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse>
+  <instancesSet>
+    <item>
+      <instanceId>i-mac2</instanceId>
+      <instanceType>mac2.metal</instanceType>
+      <placement><hostId>h-occupied</hostId></placement>
+      <ipAddress>203.0.113.44</ipAddress>
+      <instanceState><name>pending</name></instanceState>
+    </item>
+  </instancesSet>
+</RunInstancesResponse>`);
         }
         return ec2XMLResponse(
           `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
@@ -1606,24 +1623,26 @@ describe("aws provider", () => {
       } as never,
       "eu-west-1",
     );
-    await expect(
-      client.createServerWithFallback(
-        leaseConfig({
-          provider: "aws",
-          target: "macos",
-          capacity: { market: "on-demand" },
-          hostID: "h-occupied",
-          serverType: "mac2.metal",
-          sshPublicKey: "ssh-ed25519 test",
-        }),
-        "cbx_abcdef123456",
-        "violet-prawn",
-        "alice@example.com",
-      ),
-    ).rejects.toThrow("InsufficientCapacityOnHost");
+    const creation = client.createServerWithFallback(
+      leaseConfig({
+        provider: "aws",
+        target: "macos",
+        capacity: { market: "on-demand" },
+        hostID: "h-occupied",
+        serverType: "mac2.metal",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+    await vi.waitFor(() => expect(runCalls).toBe(1));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() => expect(runCalls).toBe(2));
+    await vi.advanceTimersByTimeAsync(10_000);
 
-    expect(runHosts.length).toBeGreaterThan(0);
-    expect(new Set(runHosts)).toEqual(new Set(["h-occupied"]));
+    await expect(creation).resolves.toMatchObject({ server: { hostID: "h-occupied" } });
+    expect(runHosts).toEqual(["h-occupied", "h-occupied", "h-occupied"]);
   });
 
   it("does not reuse a pinned macOS AMI after changing fallback host families", async () => {

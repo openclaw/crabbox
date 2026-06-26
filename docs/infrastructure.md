@@ -333,7 +333,7 @@ Brokered credentials and host pinning (coordinator secrets):
 AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
 AWS_SESSION_TOKEN                # optional
-CRABBOX_HOST_ID                  # optional; admin-only explicit brokered host pin
+CRABBOX_HOST_ID                  # optional; admin-only except owner reuse of a released Mac host
 CRABBOX_AWS_MAC_HOST_ID          # optional legacy AWS alias for CRABBOX_HOST_ID
 ```
 
@@ -619,7 +619,7 @@ is in [Node.js And PostgreSQL](#node-js-and-postgresql).
 # Providers (at least one set)
 HETZNER_TOKEN
 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN (optional)
-CRABBOX_HOST_ID / CRABBOX_AWS_MAC_HOST_ID (optional; admin-only explicit brokered Mac host pin)
+CRABBOX_HOST_ID / CRABBOX_AWS_MAC_HOST_ID (optional; admin-only except owner reuse of a released Mac host)
 AZURE_* / CRABBOX_AZURE_* (Azure)
 GCP_* / CRABBOX_GCP_* (GCP)
 

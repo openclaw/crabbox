@@ -296,7 +296,8 @@ from the logged-in console session using a scheduled task.
 make sure an available EC2 Mac Dedicated Host is allocated in the selected AWS
 region. Set `CRABBOX_HOST_ID` or `hostId` only when you want to pin a specific
 host or when running the direct AWS provider. Brokered host pinning requires
-admin authentication; normal broker users rely on automatic available-host
+admin authentication unless the host belongs to the same owner and
+organization's released lease; other users rely on automatic available-host
 discovery. `CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain compatibility
 aliases.
 
