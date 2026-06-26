@@ -62,6 +62,7 @@ var benchmarkProviderCategories = map[string]string{
 	"ssh":                        "byo-ssh",
 	"superserve":                 "delegated-sandbox",
 	"tart":                       "local-vm",
+	"tencentcloud":               "direct-cloud",
 	"tenki":                      "direct-cloud",
 	"tensorlake":                 "delegated-sandbox",
 	"upstash-box":                "delegated-sandbox",
