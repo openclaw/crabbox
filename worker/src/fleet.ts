@@ -408,6 +408,7 @@ interface WorkspaceRecord {
   provider: Provider;
   class: string;
   desktop: boolean;
+  desktopCapabilityVersion?: 1;
   ttlSeconds: number;
   idleTimeoutSeconds: number;
   createdAt: string;
@@ -2447,6 +2448,7 @@ export class FleetCoordinator {
         provider,
         class: machineClass,
         desktop,
+        desktopCapabilityVersion: 1,
         ttlSeconds,
         idleTimeoutSeconds,
         createdAt: nowISO,
@@ -2552,6 +2554,7 @@ export class FleetCoordinator {
       provider: input.provider,
       class: input.class,
       desktop: input.desktop,
+      desktopCapabilityVersion: 1,
       ttlSeconds: input.ttlSeconds,
       idleTimeoutSeconds: input.idleTimeoutSeconds,
       createdAt: nowISO,
@@ -2650,6 +2653,7 @@ export class FleetCoordinator {
               provider: template.provider,
               class: template.class,
               desktop: template.desktop,
+              desktopCapabilityVersion: 1,
               ttlSeconds: template.ttlSeconds,
               idleTimeoutSeconds: template.idleTimeoutSeconds,
               createdAt: nowISO,
@@ -12108,12 +12112,15 @@ function workspaceConflictResponse(
   ttlSeconds: number,
   idleTimeoutSeconds: number,
 ): Response | undefined {
+  const desktopMatches =
+    workspace.desktop === desktop ||
+    (workspace.desktopCapabilityVersion === undefined && !workspace.desktop && desktop);
   if (
     workspace.profile === profile &&
     (workspace.repo ?? "") === repo &&
     (workspace.branch ?? "main") === branch &&
     (workspace.command ?? "exec bash -l") === command &&
-    workspace.desktop === desktop &&
+    desktopMatches &&
     workspace.ttlSeconds === ttlSeconds &&
     workspace.idleTimeoutSeconds === idleTimeoutSeconds
   ) {

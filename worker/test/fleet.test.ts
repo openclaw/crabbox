@@ -3406,6 +3406,33 @@ describe("fleet lease identity and idle", () => {
       providerResourceId: created.providerResourceId,
       status: "ready",
     });
+    expect(
+      storage.value<{ desktopCapabilityVersion?: number }>(
+        "workspace:example-org:alice%40example.com:fleet-is-101",
+      )?.desktopCapabilityVersion,
+    ).toBe(1);
+
+    const legacyID = "fleet-legacy-desktop";
+    storage.seed(`workspace:example-org:alice%40example.com:${legacyID}`, {
+      ...storage.value<Record<string, unknown>>(
+        "workspace:example-org:alice%40example.com:fleet-is-101",
+      ),
+      id: legacyID,
+      leaseID: "cbx_legacydesktop",
+      desktop: false,
+      desktopCapabilityVersion: undefined,
+    });
+    const legacyDuplicate = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers,
+        body: { ...body, id: legacyID },
+      }),
+    );
+    expect(legacyDuplicate.status).toBe(202);
+    await expect(legacyDuplicate.json()).resolves.toMatchObject({
+      providerResourceId: "cbx_legacydesktop",
+      capabilities: { desktop: false, vnc: false, nativeVnc: false },
+    });
 
     const otherOwner = await fleet.fetch(
       request("POST", "/v1/workspaces", {
