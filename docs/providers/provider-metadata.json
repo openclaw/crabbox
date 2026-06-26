@@ -853,6 +853,20 @@
     "caveat": "Apple silicon host and prepared Tart image required",
     "docs": "tart.md"
   },
+  "tencentcloud": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Tencent Cloud CVM instance",
+    "location": "cloud",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "optional",
+    "lifecycle": "Crabbox",
+    "cleanup": "instance termination",
+    "bestFit": "Linux SSH leases on Tencent Cloud CVM",
+    "caveat": "Direct-only; requires CVM image, VPC/subnet/security-group planning, and Tencent Cloud API credentials",
+    "docs": "tencentcloud.md"
+  },
   "tenki": {
     "status": "built-in",
     "category": "direct-cloud",

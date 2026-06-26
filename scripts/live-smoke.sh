@@ -1010,6 +1010,10 @@ if has_provider scaleway; then
   "$root/scripts/live-scaleway-smoke.sh"
 fi
 
+if has_provider tencentcloud || has_provider tencent || has_provider tencent-cvm || has_provider cvm; then
+  "$root/scripts/live-tencentcloud-smoke.sh"
+fi
+
 if has_provider linode; then
   "$root/scripts/live-linode-smoke.sh"
 fi

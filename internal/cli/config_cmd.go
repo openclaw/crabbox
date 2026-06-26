@@ -91,6 +91,16 @@ func effectiveConfigForShow(cfg Config) Config {
 		}
 		cfg.SSHFallbackPorts = nil
 	}
+	if cfg.Provider == "tencentcloud" {
+		base := baseConfig()
+		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
+			cfg.SSHUser = "ubuntu"
+		}
+		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+	}
 	if cfg.Provider == "hostinger" {
 		cfg.WorkRoot = cfg.Hostinger.WorkRoot
 		cfg.SSHUser = cfg.Hostinger.User
@@ -269,6 +279,21 @@ func configShowView(cfg Config) map[string]any {
 			"securityGroup":  cfg.Scaleway.SecurityGroup,
 			"sshCIDRs":       cfg.Scaleway.SSHCIDRs,
 			"auth":           scalewayAuthState(),
+		},
+		"tencentcloud": map[string]any{
+			"region":                  cfg.TencentCloud.Region,
+			"zone":                    cfg.TencentCloud.Zone,
+			"image":                   cfg.TencentCloud.Image,
+			"type":                    cfg.TencentCloud.Type,
+			"vpcId":                   cfg.TencentCloud.VPCID,
+			"subnetId":                cfg.TencentCloud.SubnetID,
+			"securityGroupId":         cfg.TencentCloud.SecurityGroupID,
+			"sshCIDRs":                cfg.TencentCloud.SSHCIDRs,
+			"rootGB":                  cfg.TencentCloud.RootGB,
+			"internetChargeType":      cfg.TencentCloud.InternetChargeType,
+			"internetMaxBandwidthOut": cfg.TencentCloud.InternetMaxBandwidthOut,
+			"apiEndpoint":             redactedConfigURL(cfg.TencentCloud.APIEndpoint),
+			"auth":                    tencentCloudAuthState(),
 		},
 		"azureDynamicSessions": map[string]any{
 			"endpoint":        cfg.AzureDynamicSessions.Endpoint,
@@ -643,6 +668,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "hostinger api_url=%s item_id=%s payment_method_id=%s template_id=%s data_center_id=%s hostname_prefix=%s user=%s work_root=%s allow_purchase=%t release_action=%s auth=%s\n", blank(cfg.Hostinger.APIURL, "-"), blank(cfg.Hostinger.ItemID, "-"), blank(cfg.Hostinger.PaymentMethodID, "-"), blank(cfg.Hostinger.TemplateID, "-"), blank(cfg.Hostinger.DataCenterID, "-"), blank(cfg.Hostinger.HostnamePrefix, "-"), blank(cfg.Hostinger.User, "-"), blank(cfg.Hostinger.WorkRoot, "-"), cfg.Hostinger.AllowPurchase, blank(cfg.Hostinger.ReleaseAction, "-"), tokenState(cfg.Hostinger.APIToken))
 	fmt.Fprintf(w, "ovh endpoint=%s project_id=%s region=%s image=%s flavor=%s auth=%s\n", blank(redactedConfigURL(cfg.OVH.Endpoint), "-"), blank(cfg.OVH.ProjectID, "-"), blank(cfg.OVH.Region, "-"), blank(cfg.OVH.Image, "-"), blank(cfg.OVH.Flavor, "-"), ovhAuthState())
 	fmt.Fprintf(w, "scaleway region=%s zone=%s image=%s type=%s project_id=%s organization_id=%s security_group=%s ssh_cidrs=%s auth=%s\n", blank(cfg.Scaleway.Region, "-"), blank(cfg.Scaleway.Zone, "-"), blank(cfg.Scaleway.Image, "-"), blank(cfg.Scaleway.Type, "-"), blank(cfg.Scaleway.ProjectID, "-"), blank(cfg.Scaleway.OrganizationID, "-"), blank(cfg.Scaleway.SecurityGroup, "-"), blank(strings.Join(cfg.Scaleway.SSHCIDRs, ","), "-"), scalewayAuthState())
+	fmt.Fprintf(w, "tencentcloud region=%s zone=%s image=%s type=%s vpc_id=%s subnet_id=%s security_group_id=%s root_gb=%d internet_charge_type=%s internet_max_bandwidth_out=%d ssh_cidrs=%s api_endpoint=%s auth=%s\n", blank(cfg.TencentCloud.Region, "-"), blank(cfg.TencentCloud.Zone, "-"), blank(cfg.TencentCloud.Image, "-"), blank(cfg.TencentCloud.Type, "-"), blank(cfg.TencentCloud.VPCID, "-"), blank(cfg.TencentCloud.SubnetID, "-"), blank(cfg.TencentCloud.SecurityGroupID, "-"), cfg.TencentCloud.RootGB, blank(cfg.TencentCloud.InternetChargeType, "-"), cfg.TencentCloud.InternetMaxBandwidthOut, blank(strings.Join(cfg.TencentCloud.SSHCIDRs, ","), "-"), blank(redactedConfigURL(cfg.TencentCloud.APIEndpoint), "-"), tencentCloudAuthState())
 	fmt.Fprintf(w, "azure_dynamic_sessions endpoint=%s unsupported_pool=%s api_version=%s workdir=%s timeout_secs=%d\n", blank(cfg.AzureDynamicSessions.Endpoint, "-"), blank(cfg.AzureDynamicSessions.Pool, "-"), cfg.AzureDynamicSessions.APIVersion, cfg.AzureDynamicSessions.Workdir, cfg.AzureDynamicSessions.TimeoutSecs)
 	fmt.Fprintf(w, "gcp project=%s zone=%s image=%s network=%s subnet=%s root_gb=%d ssh_cidrs=%s\n", blank(cfg.GCPProject, "-"), cfg.GCPZone, cfg.GCPImage, cfg.GCPNetwork, blank(cfg.GCPSubnet, "-"), cfg.GCPRootGB, blank(strings.Join(cfg.GCPSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "proxmox api_url=%s node=%s template_id=%d storage=%s pool=%s bridge=%s user=%s work_root=%s full_clone=%t auth=%s\n", blank(redactedConfigURL(cfg.Proxmox.APIURL), "-"), blank(cfg.Proxmox.Node, "-"), cfg.Proxmox.TemplateID, blank(cfg.Proxmox.Storage, "-"), blank(cfg.Proxmox.Pool, "-"), blank(cfg.Proxmox.Bridge, "-"), cfg.Proxmox.User, cfg.Proxmox.WorkRoot, cfg.Proxmox.FullClone, tokenState(cfg.Proxmox.TokenSecret))
@@ -964,6 +990,27 @@ func scalewayAuthState() string {
 	values := []string{
 		os.Getenv("SCW_ACCESS_KEY"),
 		os.Getenv("SCW_SECRET_KEY"),
+	}
+	configured := 0
+	for _, value := range values {
+		if value != "" {
+			configured++
+		}
+	}
+	switch configured {
+	case 0:
+		return "missing"
+	case len(values):
+		return "configured"
+	default:
+		return "partial"
+	}
+}
+
+func tencentCloudAuthState() string {
+	values := []string{
+		os.Getenv("TENCENTCLOUD_SECRET_ID"),
+		os.Getenv("TENCENTCLOUD_SECRET_KEY"),
 	}
 	configured := 0
 	for _, value := range values {

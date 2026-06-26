@@ -308,6 +308,38 @@ func SetScalewayTypeExplicit(cfg *Config) {
 	cfg.scalewayTypeExplicit = true
 }
 
+func TencentCloudRegionWasExplicit(cfg Config) bool {
+	return cfg.tencentCloudRegionExplicit
+}
+
+func SetTencentCloudRegionExplicit(cfg *Config) {
+	cfg.tencentCloudRegionExplicit = true
+}
+
+func TencentCloudZoneWasExplicit(cfg Config) bool {
+	return cfg.tencentCloudZoneExplicit
+}
+
+func SetTencentCloudZoneExplicit(cfg *Config) {
+	cfg.tencentCloudZoneExplicit = true
+}
+
+func TencentCloudImageWasExplicit(cfg Config) bool {
+	return cfg.tencentCloudImageExplicit
+}
+
+func SetTencentCloudImageExplicit(cfg *Config) {
+	cfg.tencentCloudImageExplicit = true
+}
+
+func TencentCloudTypeWasExplicit(cfg Config) bool {
+	return cfg.tencentCloudTypeExplicit
+}
+
+func SetTencentCloudTypeExplicit(cfg *Config) {
+	cfg.tencentCloudTypeExplicit = true
+}
+
 func CrabboxStateDir() (string, error) {
 	return crabboxStateDir()
 }
