@@ -63,6 +63,40 @@ func TestProviderValidatesConfiguredAzureOSDisk(t *testing.T) {
 	}
 }
 
+func TestProviderSupportsDirectWindowsOSDiskCheckpoints(t *testing.T) {
+	t.Parallel()
+	capability, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
+		Config: core.Config{TargetOS: core.TargetWindows},
+		Server: core.Server{CloudID: "crabbox-source"},
+		Target: core.SSHTarget{TargetOS: core.TargetWindows},
+	})
+	if !ok {
+		t.Fatal("expected Windows Azure checkpoint capability")
+	}
+	if capability.Kind != core.CheckpointKindAzureOS || !capability.Direct {
+		t.Fatalf("capability=%+v, want direct Azure OS disk snapshot", capability)
+	}
+}
+
+func TestProviderAppliesWindowsSnapshotForkAzureScope(t *testing.T) {
+	t.Parallel()
+	cfg := core.Config{}
+	err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{
+		Config: &cfg,
+		Record: core.NativeCheckpointForkRecord{
+			Kind:     core.CheckpointKindAzureOS,
+			Resource: "/subscriptions/sub/resourceGroups/snapshot-rg/providers/Microsoft.Compute/snapshots/checkpoint",
+			Region:   "westus2",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AzureSnapshot == "" || cfg.AzureLocation != "westus2" || cfg.AzureResourceGroup != "snapshot-rg" || cfg.AzureSubscription != "sub" {
+		t.Fatalf("fork config=%+v", cfg)
+	}
+}
+
 func TestProviderRegistered(t *testing.T) {
 	provider, err := core.ProviderFor("azure")
 	if err != nil {

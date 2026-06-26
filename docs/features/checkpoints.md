@@ -62,12 +62,18 @@ Native checkpoints use one of two provider primitives, selected with
 | --- | --- |
 | AWS Linux | `aws-ebs-snapshot` |
 | AWS macOS | `aws-ami` (AMI-backed; raw EC2 Mac root snapshots lack enough launch metadata to fork reliably) |
-| Azure | `azure-os-disk-snapshot` |
+| Azure Linux or Windows | `azure-os-disk-snapshot` |
 | GCP | `gcp-disk-snapshot` |
 | Parallels | `parallels-snapshot` |
 
 Disk snapshots are faster to create and (on AWS and GCP) boot with fresh
 per-lease SSH keys via injected user-data.
+
+Azure Windows snapshot creation is intentionally disruptive: pass
+`--no-reboot=false` to allow Crabbox to deallocate the source, create a
+consistent managed-OS-disk snapshot, and restart the source. Forks specialize
+the copied disk with fresh SSH host/login keys, Windows credentials, and
+loopback-only TightVNC credentials.
 
 **`image`** — opt in with `--strategy image`.
 

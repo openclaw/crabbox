@@ -252,6 +252,64 @@ func TestAzureProvisioningCandidatesSkipsStaleEphemeralPreviewDefault(t *testing
 	}
 }
 
+func TestAzureWindowsSnapshotRehydrateCommandIsBounded(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Desktop = true
+	cfg.SSHUser = "crabbox"
+
+	publicKey := "ssh-ed25519 " + strings.Repeat("A", 68) + " crabbox@snapshot"
+	command, err := azureWindowsSnapshotRehydrateCommand(cfg, publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(command) > 8000 {
+		t.Fatalf("command length=%d", len(command))
+	}
+	if !strings.Contains(command, "FromBase64String") || !strings.Contains(command, "ScriptBlock]::Create") {
+		t.Fatalf("unexpected command: %s", command)
+	}
+}
+
+func TestAzureSnapshotOSDiskTypeMatchesTarget(t *testing.T) {
+	t.Parallel()
+	if got := azureOSDiskType(targetWindows); got != armcompute.OperatingSystemTypesWindows {
+		t.Fatalf("Windows disk type=%q", got)
+	}
+	if got := azureOSDiskType(targetLinux); got != armcompute.OperatingSystemTypesLinux {
+		t.Fatalf("Linux disk type=%q", got)
+	}
+}
+
+func TestAzureWindowsSnapshotRehydrateRotatesServiceVNCCredentials(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Desktop = true
+	cfg.SSHUser = "crabbox"
+
+	script := azureWindowsSnapshotRehydratePowerShell(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"ConvertTo-CrabboxVNCPassword",
+		"0xE8, 0x4A, 0xD6, 0x60, 0xC4, 0x72, 0x1A, 0xE0",
+		`HKLM:\Software\TightVNC\Server`,
+		"-Name Password -PropertyType Binary",
+		"-Name ControlPassword -PropertyType Binary",
+		"Stop-Service -Name tvnserver",
+		"Start-Service -Name tvnserver",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("snapshot rehydrate script missing %q", want)
+		}
+	}
+	if strings.Index(script, "Stop-Service -Name tvnserver") > strings.Index(script, "-Name Password -PropertyType Binary") {
+		t.Fatal("snapshot rehydrate must stop TightVNC before replacing its service password")
+	}
+}
+
 func TestAzureWindowsVMSizeCandidatesForClass(t *testing.T) {
 	t.Parallel()
 	got := azureWindowsVMSizeCandidatesForClass("beast")

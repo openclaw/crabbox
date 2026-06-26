@@ -1007,6 +1007,27 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 	}
 }
 
+func TestDirectAzureWindowsCheckpointRejectsImageStrategy(t *testing.T) {
+	t.Parallel()
+	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+		Strategy: checkpointStrategyImage,
+	})
+	if err == nil || !strings.Contains(err.Error(), "require --strategy disk-snapshot") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDirectAzureWindowsCheckpointRequiresRebootOptIn(t *testing.T) {
+	t.Parallel()
+	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+		Strategy: checkpointStrategyDiskSnapshot,
+		NoReboot: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--no-reboot=false") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestRemotePrepareNativeImageCommandFlushesFilesystem(t *testing.T) {
 	cmd := remotePrepareNativeImageCommand()
 	for _, want := range []string{"cloud-init clean --logs", "sync"} {
