@@ -1552,6 +1552,7 @@ describe("aws provider", () => {
 
   it("fails an occupied explicit macOS host pin without retrying or failing over", async () => {
     const runHosts: string[] = [];
+    const describedHostIDs: string[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1584,7 +1585,7 @@ describe("aws provider", () => {
 </DescribeImagesResponse>`);
         }
         if (action === "DescribeHosts") {
-          expect(params.get("HostId.1")).toBe("h-occupied");
+          describedHostIDs.push(params.get("HostId.1") ?? "");
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <DescribeHostsResponse>
   <hostSet>
@@ -1634,11 +1635,13 @@ describe("aws provider", () => {
         "alice@example.com",
       ),
     ).rejects.toThrow("InsufficientCapacityOnHost");
+    expect(describedHostIDs).toEqual(["h-occupied"]);
     expect(runHosts).toEqual(["h-occupied"]);
   });
 
   it("uses the pinned macOS host family when the server type was defaulted", async () => {
     const runTypes: string[] = [];
+    const describedHostIDs: string[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1656,7 +1659,7 @@ describe("aws provider", () => {
           return ec2XMLResponse("<DescribeKeyPairsResponse />");
         }
         if (action === "DescribeHosts") {
-          expect(params.get("HostId.1")).toBe("h-m4");
+          describedHostIDs.push(params.get("HostId.1") ?? "");
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <DescribeHostsResponse>
   <hostSet>
@@ -1725,6 +1728,7 @@ describe("aws provider", () => {
       "alice@example.com",
     );
 
+    expect(describedHostIDs).toEqual(["h-m4"]);
     expect(runTypes).toEqual(["mac-m4.metal"]);
     expect(result.serverType).toBe("mac-m4.metal");
     expect(result.server.hostID).toBe("h-m4");
