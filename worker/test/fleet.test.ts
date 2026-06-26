@@ -3330,14 +3330,19 @@ describe("fleet lease identity and idle", () => {
     const ready = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     const readyBody = (await ready.json()) as {
       attachUrl: string;
-      capabilities: { terminal: boolean };
+      capabilities: {
+        terminal: boolean;
+        desktop: boolean;
+        vnc: boolean;
+        nativeVnc: boolean;
+      };
       providerResourceId: string;
       status: string;
     };
     expect(readyBody).toMatchObject({
       providerResourceId: created.providerResourceId,
       status: "ready",
-      capabilities: { terminal: true },
+      capabilities: { terminal: true, desktop: false, vnc: false, nativeVnc: true },
     });
     const terminalURL = new URL(readyBody.attachUrl);
     expect(terminalURL.origin).toBe("wss://crabbox.example.com");

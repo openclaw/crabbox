@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -29,12 +30,16 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	openClient := fs.Bool("open", false, "open the VNC client locally")
+	nativeHandoff := fs.Bool("native-handoff", false, "emit a native-client JSON handoff and keep its tunnel in the foreground")
 	hostManaged := fs.Bool("host-managed", false, "allow opening host-managed static VNC")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *nativeHandoff && *openClient {
+		return exit(2, "--native-handoff and --open cannot be used together")
 	}
 	setIDFromFirstArg(fs, id)
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
@@ -67,15 +72,25 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if *localPort == "" {
-		*localPort = availableLocalVNCPort()
-	}
 	password := ""
 	if endpoint.Managed {
 		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
 	}
 	if !isStaticProvider(cfg.Provider) && password == "" {
 		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
+	}
+	if *nativeHandoff {
+		if endpoint.Direct {
+			return exit(2, "--native-handoff requires a loopback SSH tunnel")
+		}
+		username := ""
+		if endpoint.Managed && (target.TargetOS == targetWindows || target.TargetOS == targetMacOS) {
+			username = target.User
+		}
+		return runVNCNativeHandoff(ctx, a.Stdout, target, *localPort, endpoint, username, strings.TrimSpace(password))
+	}
+	if *localPort == "" {
+		*localPort = availableLocalVNCPort()
 	}
 	tunnel := vncTunnelCommand(target, *localPort)
 	staticHostVNC := isStaticProvider(cfg.Provider) && !endpoint.Managed
@@ -154,6 +169,57 @@ func (a App) vnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(a.Stdout, "Keep the tunnel process running while connected.")
 	}
 	return nil
+}
+
+const vncNativeHandoffSchema = "crabbox/vnc-handoff/v1"
+
+type vncNativeHandoff struct {
+	Schema   string `json:"schema"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func runVNCNativeHandoff(
+	ctx context.Context,
+	stdout interface{ Write([]byte) (int, error) },
+	target SSHTarget,
+	requestedPort string,
+	endpoint vncEndpoint,
+	username, password string,
+) error {
+	tunnel, localPort, err := startVNCForegroundTunnelOnReservedPort(
+		ctx,
+		target,
+		requestedPort,
+		endpoint.Host,
+		endpoint.Port,
+	)
+	if err != nil {
+		return err
+	}
+	defer stopProcess(tunnel)
+	port, err := strconv.Atoi(localPort)
+	if err != nil || port < 1 || port > 65535 {
+		return exit(5, "invalid reserved VNC tunnel port")
+	}
+	if len(username) > 256 || len(password) > 4096 {
+		return exit(5, "native VNC credentials exceed the handoff limit")
+	}
+	handoff := vncNativeHandoff{
+		Schema: vncNativeHandoffSchema, Host: vncLoopbackHost, Port: port,
+		Username: username, Password: password,
+	}
+	if err := json.NewEncoder(stdout).Encode(handoff); err != nil {
+		return fmt.Errorf("write native VNC handoff: %w", err)
+	}
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-tunnel.Done():
+		return tunnel.ExitError()
+	}
 }
 
 func vncTunnelCommand(target SSHTarget, localPort string) string {

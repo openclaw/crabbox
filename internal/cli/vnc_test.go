@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +11,30 @@ import (
 	"testing"
 	"time"
 )
+
+func TestVNCNativeHandoffJSONContract(t *testing.T) {
+	var output bytes.Buffer
+	handoff := vncNativeHandoff{
+		Schema:   vncNativeHandoffSchema,
+		Host:     vncLoopbackHost,
+		Port:     5907,
+		Username: "operator",
+		Password: "private value",
+	}
+	if err := json.NewEncoder(&output).Encode(handoff); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(output.String(), "\n") != 1 {
+		t.Fatalf("handoff must be exactly one JSON line: %q", output.String())
+	}
+	var decoded vncNativeHandoff
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded != handoff {
+		t.Fatalf("decoded handoff=%#v want=%#v", decoded, handoff)
+	}
+}
 
 func TestVNCTunnelCommandQuotesKeyPath(t *testing.T) {
 	got := vncTunnelCommand(SSHTarget{

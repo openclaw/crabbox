@@ -2327,7 +2327,7 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    const desktop = false;
+    const desktop = input.capabilities?.desktop === true;
     const key = workspaceKey(owner, org, id);
     const existingResponse = await this.state.runExclusive(async () => {
       const existing = await this.state.storage.get<WorkspaceRecord>(key);
@@ -12522,6 +12522,7 @@ function workspaceResponse(
       takeover: false,
       vnc: false,
       desktop: false,
+      nativeVnc: workspace.desktop && Boolean(terminalUrl),
       logs: false,
       artifacts: false,
     },

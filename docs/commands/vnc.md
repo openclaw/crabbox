@@ -43,6 +43,7 @@ of `--id`.
 --network auto|tailscale|public  Network path used to reach the box.
 --local-port <port>          Local tunnel port. Auto-picks 5901-5999 if unset.
 --open                       Start the tunnel (if needed) and open a VNC client.
+--native-handoff             Emit one JSON handoff and own its foreground tunnel.
 --host-managed               Allow --open against a static host-managed VNC.
 --reclaim                    Claim this lease for the current repo.
 ```
@@ -110,6 +111,13 @@ OS's URL handler. Dedicated VNC and WebVNC tunnels explicitly set
 `ForkAfterAuthentication=no`, so they cannot silently reuse, background, or
 leave behind an SSH connection whose listener is no longer owned by the
 tracked process. Opening URLs is supported on macOS, Linux, and Windows.
+
+`--native-handoff` is the machine-readable native-client contract. After its
+loopback tunnel is ready it writes exactly one JSON line to stdout, with schema
+`crabbox/vnc-handoff/v1`, loopback host and port, and the in-memory VNC
+credentials. It remains in the foreground until the client closes it. The flag
+is incompatible with `--open`; clients should consume stdout as a private pipe
+and terminate the Crabbox process when the viewer disconnects.
 
 For the same desktop inside the authenticated broker portal instead of a native
 VNC client, use [`crabbox webvnc --id <lease> --open`](webvnc.md). WebVNC still

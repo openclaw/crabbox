@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added a foreground, loopback-only `crabbox vnc --native-handoff` contract for native viewers, with connection credentials delivered over a private JSON pipe and tunnel lifetime owned by the client process.
+- Enabled desktop-capable runtime-adapter workspaces instead of discarding Crabfleet's requested desktop capability, and report native VNC separately from browser VNC.
 - Added direct FastAPI Cloud application and deployment inspection through `status`, `list`, and `doctor`, including configured default application support. Thanks @zozo123.
 - Added normalized provider runtime capabilities and `--runtime` filters to `crabbox providers` and `crabbox providers recommend`.
 - Added `crabbox providers recommend fanout-testing` for forkable workspace and best-of-N test selection guidance.
