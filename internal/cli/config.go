@@ -4181,7 +4181,11 @@ func writeUserFileConfig(cfg fileConfig) (string, error) {
 }
 
 func writeUserFileConfigAtomic(path string, data []byte, replaceFile func(string, string) error, syncDirectory func(string)) error {
-	dir := filepath.Dir(path)
+	writePath, err := resolveConfigWritePath(path)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(writePath)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
@@ -4208,12 +4212,37 @@ func writeUserFileConfigAtomic(path string, data []byte, replaceFile func(string
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := replaceFile(tmpPath, path); err != nil {
+	if err := replaceFile(tmpPath, writePath); err != nil {
 		return err
 	}
 	removeTemp = false
 	syncDirectory(dir)
 	return nil
+}
+
+func resolveConfigWritePath(path string) (string, error) {
+	writePath := path
+	for i := 0; i < 255; i++ {
+		info, err := os.Lstat(writePath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return writePath, nil
+			}
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return writePath, nil
+		}
+		target, err := os.Readlink(writePath)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(writePath), target)
+		}
+		writePath = target
+	}
+	return "", fmt.Errorf("resolve config path %s: too many symbolic links", path)
 }
 
 func configFilePermissionProblem(path string) string {

@@ -6211,6 +6211,43 @@ func TestWriteUserFileConfigAtomic(t *testing.T) {
 			t.Fatalf("previous config not preserved: %#v", file)
 		}
 	})
+
+	t.Run("symlink rewrite preserves link", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target.yaml")
+		path := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(target, []byte("profile: previous\nprovider: aws\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("target.yaml", path); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+
+		if err := writeUserFileConfigAtomic(path, []byte("profile: rewritten\nprovider: aws\n"), os.Rename, func(string) {}); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("config path mode=%s want symlink", info.Mode())
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if file.Profile != "rewritten" || file.Provider != "aws" {
+			t.Fatalf("file config=%#v", file)
+		}
+		targetInfo, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := targetInfo.Mode().Perm(); got != 0o600 {
+			t.Fatalf("target config mode=%04o want 0600", got)
+		}
+	})
 }
 
 func TestConfigHelperErrorBranches(t *testing.T) {
