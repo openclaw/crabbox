@@ -69,6 +69,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "local-container-work-root") {
 		cfg.LocalContainer.WorkRoot = *v.WorkRoot
 		cfg.WorkRoot = *v.WorkRoot
+		core.MarkWorkRootExplicit(cfg)
+		core.MarkLocalContainerWorkRootExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "local-container-cpus") {
 		cfg.LocalContainer.CPUs = *v.CPUs

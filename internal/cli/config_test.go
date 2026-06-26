@@ -627,6 +627,35 @@ func TestNvidiaBrevUntrustedConfigCannotRedirectCLI(t *testing.T) {
 	}
 }
 
+func TestLocalContainerWorkRootExplicitSources(t *testing.T) {
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, fileConfig{
+		LocalContainer: &fileLocalContainerConfig{
+			WorkRoot: "/workspace/file",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LocalContainer.WorkRoot != "/workspace/file" {
+		t.Fatalf("file local-container work root=%q", cfg.LocalContainer.WorkRoot)
+	}
+	if !LocalContainerWorkRootExplicit(cfg) {
+		t.Fatal("file local-container work root not marked explicit")
+	}
+
+	cfg = baseConfig()
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT", "/workspace/env")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LocalContainer.WorkRoot != "/workspace/env" {
+		t.Fatalf("env local-container work root=%q", cfg.LocalContainer.WorkRoot)
+	}
+	if !LocalContainerWorkRootExplicit(cfg) {
+		t.Fatal("env local-container work root not marked explicit")
+	}
+}
+
 func TestEffectiveNvidiaBrevWorkRootDoesNotInheritAnotherProviderDefault(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "xcp-ng"
@@ -5442,6 +5471,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.LocalContainer.Runtime != "docker" || cfg.LocalContainer.Image != "ubuntu:env" || cfg.LocalContainer.User != "runner-env" || cfg.LocalContainer.WorkRoot != "/workspace/env" || cfg.LocalContainer.CPUs != 6 || cfg.LocalContainer.Memory != "12g" || cfg.LocalContainer.Network != "bridge" || !cfg.LocalContainer.DockerSocket {
 		t.Fatalf("unexpected local-container env: %#v", cfg.LocalContainer)
+	}
+	if !LocalContainerWorkRootExplicit(cfg) {
+		t.Fatal("env local-container work root not marked explicit")
 	}
 	if cfg.Blacksmith.IdleTimeout != 2*time.Hour || !cfg.Blacksmith.Debug {
 		t.Fatalf("unexpected blacksmith env: %#v", cfg.Blacksmith)
