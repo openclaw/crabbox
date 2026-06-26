@@ -64,6 +64,28 @@ func (directAWSAMICheckpointDriver) Create(ctx context.Context, req checkpointNa
 
 type directAzureOSDiskCheckpointDriver struct{}
 
+const azureSnapshotNameMaxLength = 80
+
+func azureOSDiskSnapshotName(requested, leaseID, repoName string) (string, error) {
+	if requested != "" {
+		if len(requested) > azureSnapshotNameMaxLength || safeCaptureName(requested) != requested {
+			return "", exit(2, "Azure snapshot name must be at most %d characters using only letters, digits, underscores, and hyphens", azureSnapshotNameMaxLength)
+		}
+		return requested, nil
+	}
+	repoName = strings.TrimSpace(repoName)
+	if repoName == "" {
+		repoName = "workspace"
+	}
+	timestamp := time.Now().UTC().Format("20060102-150405")
+	suffix := "-" + timestamp
+	seed := "crabbox-" + safeCaptureName(repoName) + "-" + strings.ReplaceAll(safeCaptureName(leaseID), "_", "-")
+	if maxSeed := azureSnapshotNameMaxLength - len(suffix); len(seed) > maxSeed {
+		seed = strings.TrimRight(seed[:maxSeed], "-_")
+	}
+	return seed + suffix, nil
+}
+
 func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req checkpointNativeCreateRequest) (CoordinatorImage, error) {
 	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
 		return CoordinatorImage{}, exit(2, "Azure Windows checkpoints require --strategy disk-snapshot")
@@ -71,9 +93,9 @@ func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req checkpo
 	if req.NoReboot {
 		return CoordinatorImage{}, exit(2, "Azure Windows checkpoints require a deallocated source VM for a consistent OS-disk snapshot; rerun with --no-reboot=false")
 	}
-	name := req.Name
-	if name == "" {
-		name = defaultNativeImageName(req.LeaseID, req.RepoName)
+	name, err := azureOSDiskSnapshotName(req.Name, req.LeaseID, req.RepoName)
+	if err != nil {
+		return CoordinatorImage{}, err
 	}
 	client, err := NewAzureClient(ctx, req.Cfg)
 	if err != nil {

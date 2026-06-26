@@ -1028,6 +1028,34 @@ func TestDirectAzureWindowsCheckpointRequiresRebootOptIn(t *testing.T) {
 	}
 }
 
+func TestAzureOSDiskSnapshotNamePreservesTimestampWithinProviderLimit(t *testing.T) {
+	t.Parallel()
+	name, err := azureOSDiskSnapshotName("", "cbx_"+strings.Repeat("a", 80), strings.Repeat("repository", 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(name) > azureSnapshotNameMaxLength {
+		t.Fatalf("snapshot name length=%d want <=%d: %q", len(name), azureSnapshotNameMaxLength, name)
+	}
+	parts := strings.Split(name, "-")
+	if len(parts) < 3 || len(parts[len(parts)-2]) != 8 || len(parts[len(parts)-1]) != 6 {
+		t.Fatalf("snapshot name lost timestamp suffix: %q", name)
+	}
+}
+
+func TestDirectAzureWindowsCheckpointRejectsInvalidSnapshotName(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{strings.Repeat("a", azureSnapshotNameMaxLength+1), "snapshot with spaces"} {
+		_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+			Strategy: checkpointStrategyDiskSnapshot,
+			Name:     name,
+		})
+		if err == nil || !strings.Contains(err.Error(), "Azure snapshot name") {
+			t.Fatalf("name=%q err=%v", name, err)
+		}
+	}
+}
+
 func TestRemotePrepareNativeImageCommandFlushesFilesystem(t *testing.T) {
 	cmd := remotePrepareNativeImageCommand()
 	for _, want := range []string{"cloud-init clean --logs", "sync"} {
