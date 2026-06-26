@@ -2,6 +2,7 @@ package azure
 
 import (
 	"flag"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -12,8 +13,10 @@ func init() {
 
 type Provider struct{}
 type flagValues struct {
-	Backend *string
-	OSDisk  *string
+	Backend     *string
+	OSDisk      *string
+	SnapshotSKU *string
+	OSDiskSKU   *string
 }
 
 func (Provider) Name() string      { return "azure" }
@@ -37,8 +40,10 @@ func (Provider) Spec() core.ProviderSpec {
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		Backend: fs.String("azure-backend", defaults.AzureBackend, "Azure backend: vm or dynamic-sessions"),
-		OSDisk:  fs.String("azure-os-disk", defaults.AzureOSDisk, "Azure OS disk mode: managed, ephemeral, ephemeral-preview, or auto"),
+		Backend:     fs.String("azure-backend", defaults.AzureBackend, "Azure backend: vm or dynamic-sessions"),
+		OSDisk:      fs.String("azure-os-disk", defaults.AzureOSDisk, "Azure OS disk mode: managed, ephemeral, ephemeral-preview, or auto"),
+		SnapshotSKU: fs.String("azure-snapshot-sku", defaults.AzureSnapshotSKU, "Azure checkpoint snapshot storage SKU"),
+		OSDiskSKU:   fs.String("azure-os-disk-sku", defaults.AzureOSDiskSKU, "Azure managed OS disk storage SKU"),
 	}
 }
 
@@ -78,7 +83,6 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 		}
 		cfg.AzureOSDisk = mode
 		cfg.AzureOSDiskExplicit = true
-		return nil
 	}
 	if cfg.AzureOSDisk != "" {
 		mode, err := core.NormalizeAzureOSDiskMode(cfg.AzureOSDisk)
@@ -86,6 +90,26 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 			return err
 		}
 		cfg.AzureOSDisk = mode
+	}
+	if core.FlagWasSet(fs, "azure-snapshot-sku") && flags.SnapshotSKU != nil {
+		cfg.AzureSnapshotSKU = *flags.SnapshotSKU
+	}
+	if cfg.AzureSnapshotSKU != "" {
+		sku, err := core.NormalizeAzureSnapshotSKU(cfg.AzureSnapshotSKU)
+		if err != nil {
+			return err
+		}
+		cfg.AzureSnapshotSKU = sku
+	}
+	if core.FlagWasSet(fs, "azure-os-disk-sku") && flags.OSDiskSKU != nil {
+		cfg.AzureOSDiskSKU = *flags.OSDiskSKU
+	}
+	if cfg.AzureOSDiskSKU != "" {
+		sku, err := core.NormalizeAzureDiskSKU(cfg.AzureOSDiskSKU)
+		if err != nil {
+			return err
+		}
+		cfg.AzureOSDiskSKU = sku
 	}
 	return nil
 }
@@ -115,10 +139,14 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 }
 
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
-	if req.Config.Coordinator == "" || req.Server.CloudID == "" {
+	if req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
-	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
+	if targetOS == core.TargetWindows {
+		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAzureOS, Direct: true}, true
+	}
+	if req.Config.Coordinator == "" || targetOS != core.TargetLinux {
 		return core.NativeCheckpointCapability{}, false
 	}
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
@@ -152,6 +180,12 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 	if req.Record.Region != "" {
 		cfg.AzureLocation = req.Record.Region
 	}
+	if resourceGroup := azureResourceGroup(firstNonBlank(req.Record.Resource, req.Record.ImageID)); resourceGroup != "" {
+		cfg.AzureResourceGroup = resourceGroup
+	}
+	if subscription := azureSubscription(firstNonBlank(req.Record.Resource, req.Record.ImageID)); subscription != "" {
+		cfg.AzureSubscription = subscription
+	}
 	if req.AzureOSDiskExplicit {
 		mode, err := core.NormalizeAzureOSDiskMode(req.AzureOSDisk)
 		if err != nil {
@@ -161,4 +195,34 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 		cfg.AzureOSDiskExplicit = true
 	}
 	return nil
+}
+
+func (Provider) ApplyNativeCheckpointForkFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	flags, _ := values.(flagValues)
+	if core.FlagWasSet(fs, "azure-os-disk-sku") && flags.OSDiskSKU != nil {
+		sku, err := core.NormalizeAzureDiskSKU(*flags.OSDiskSKU)
+		if err != nil {
+			return err
+		}
+		cfg.AzureOSDiskSKU = sku
+	}
+	return nil
+}
+
+func azureResourceGroup(resourceID string) string {
+	return azureResourceIDPart(resourceID, "resourceGroups")
+}
+
+func azureSubscription(resourceID string) string {
+	return azureResourceIDPart(resourceID, "subscriptions")
+}
+
+func azureResourceIDPart(resourceID, name string) string {
+	parts := strings.Split(strings.Trim(resourceID, "/"), "/")
+	for index := 0; index+1 < len(parts); index += 1 {
+		if strings.EqualFold(parts[index], name) {
+			return parts[index+1]
+		}
+	}
+	return ""
 }

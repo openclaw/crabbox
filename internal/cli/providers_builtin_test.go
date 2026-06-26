@@ -142,6 +142,11 @@ func (b testExternalSSHBackend) Resolve(_ context.Context, req ResolveRequest) (
 
 type testAzureProvider struct{}
 
+type testAzureFlagValues struct {
+	Backend     *string
+	SnapshotSKU *string
+}
+
 func (testAzureProvider) Name() string      { return "azure" }
 func (testAzureProvider) Aliases() []string { return nil }
 func (testAzureProvider) RoutingFlagNames() []string {
@@ -162,14 +167,15 @@ func (testAzureProvider) Spec() ProviderSpec {
 	}
 }
 func (testAzureProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
-	return struct{ Backend *string }{
-		Backend: fs.String("azure-backend", defaults.AzureBackend, ""),
+	return testAzureFlagValues{
+		Backend:     fs.String("azure-backend", defaults.AzureBackend, ""),
+		SnapshotSKU: fs.String("azure-snapshot-sku", defaults.AzureSnapshotSKU, ""),
 	}
 }
 func (testAzureProvider) RouteConfig(cfg *Config, fs *flag.FlagSet, values any) error {
 	backend := cfg.AzureBackend
 	if fs != nil && flagWasSet(fs, "azure-backend") {
-		flags, _ := values.(struct{ Backend *string })
+		flags, _ := values.(testAzureFlagValues)
 		if flags.Backend != nil {
 			backend = *flags.Backend
 		}
@@ -187,7 +193,18 @@ func (testAzureProvider) RouteConfig(cfg *Config, fs *flag.FlagSet, values any) 
 	return nil
 }
 func (p testAzureProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	return p.RouteConfig(cfg, fs, values)
+	if err := p.RouteConfig(cfg, fs, values); err != nil {
+		return err
+	}
+	flags, _ := values.(testAzureFlagValues)
+	if fs != nil && flagWasSet(fs, "azure-snapshot-sku") && flags.SnapshotSKU != nil {
+		sku, err := NormalizeAzureSnapshotSKU(*flags.SnapshotSKU)
+		if err != nil {
+			return err
+		}
+		cfg.AzureSnapshotSKU = sku
+	}
+	return nil
 }
 func (testAzureProvider) ServerTypeForConfig(cfg Config) string {
 	return azureVMSizeCandidatesForConfig(cfg)[0]

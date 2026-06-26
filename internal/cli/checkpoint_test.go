@@ -27,6 +27,18 @@ func TestValidateCheckpointID(t *testing.T) {
 	}
 }
 
+func TestCheckpointCreateAppliesAzureSnapshotSKUFlag(t *testing.T) {
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointCreate(context.Background(), []string{
+		"--provider", "azure",
+		"--id", "cbx_missing",
+		"--azure-snapshot-sku", "not-a-sku",
+	})
+	if err == nil || !strings.Contains(err.Error(), "azure.snapshotSKU") {
+		t.Fatalf("checkpoint create error=%v, want Azure snapshot SKU validation", err)
+	}
+}
+
 func TestCheckpointRecordRoundTripAndListOrder(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	store, err := defaultCheckpointStore()
@@ -1003,6 +1015,27 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 		t.Fatal("expected Azure image strategy to fail")
 	}
 	if !strings.Contains(err.Error(), "Azure managed images require") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDirectAzureWindowsCheckpointRejectsImageStrategy(t *testing.T) {
+	t.Parallel()
+	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+		Strategy: checkpointStrategyImage,
+	})
+	if err == nil || !strings.Contains(err.Error(), "require --strategy disk-snapshot") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDirectAzureWindowsCheckpointRequiresRebootOptIn(t *testing.T) {
+	t.Parallel()
+	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+		Strategy: checkpointStrategyDiskSnapshot,
+		NoReboot: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--no-reboot=false") {
 		t.Fatalf("err=%v", err)
 	}
 }

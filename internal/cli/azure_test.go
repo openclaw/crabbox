@@ -252,6 +252,64 @@ func TestAzureProvisioningCandidatesSkipsStaleEphemeralPreviewDefault(t *testing
 	}
 }
 
+func TestAzureWindowsSnapshotRehydrateCommandIsBounded(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Desktop = true
+	cfg.SSHUser = "crabbox"
+
+	publicKey := "ssh-ed25519 " + strings.Repeat("A", 68) + " crabbox@snapshot"
+	command, err := azureWindowsSnapshotRehydrateCommand(cfg, publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(command) > 8000 {
+		t.Fatalf("command length=%d", len(command))
+	}
+	if !strings.Contains(command, "FromBase64String") || !strings.Contains(command, "ScriptBlock]::Create") {
+		t.Fatalf("unexpected command: %s", command)
+	}
+}
+
+func TestAzureSnapshotOSDiskTypeMatchesTarget(t *testing.T) {
+	t.Parallel()
+	if got := azureOSDiskType(targetWindows); got != armcompute.OperatingSystemTypesWindows {
+		t.Fatalf("Windows disk type=%q", got)
+	}
+	if got := azureOSDiskType(targetLinux); got != armcompute.OperatingSystemTypesLinux {
+		t.Fatalf("Linux disk type=%q", got)
+	}
+}
+
+func TestAzureWindowsSnapshotRehydrateRotatesServiceVNCCredentials(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Desktop = true
+	cfg.SSHUser = "crabbox"
+
+	script := azureWindowsSnapshotRehydratePowerShell(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"ConvertTo-CrabboxVNCPassword",
+		"0xE8, 0x4A, 0xD6, 0x60, 0xC4, 0x72, 0x1A, 0xE0",
+		`HKLM:\Software\TightVNC\Server`,
+		"-Name Password -PropertyType Binary",
+		"-Name ControlPassword -PropertyType Binary",
+		"Stop-Service -Name tvnserver",
+		"Start-Service -Name tvnserver",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("snapshot rehydrate script missing %q", want)
+		}
+	}
+	if strings.Index(script, "Stop-Service -Name tvnserver") > strings.Index(script, "-Name Password -PropertyType Binary") {
+		t.Fatal("snapshot rehydrate must stop TightVNC before replacing its service password")
+	}
+}
+
 func TestAzureWindowsVMSizeCandidatesForClass(t *testing.T) {
 	t.Parallel()
 	got := azureWindowsVMSizeCandidatesForClass("beast")
@@ -385,6 +443,73 @@ func TestNormalizeAzureOSDiskMode(t *testing.T) {
 	}
 	if _, err := NormalizeAzureOSDiskMode("premium"); err == nil {
 		t.Fatal("expected invalid Azure OS disk mode to fail")
+	}
+}
+
+func TestNormalizeAzureSnapshotStorageSKUs(t *testing.T) {
+	t.Parallel()
+	snapshot, err := NormalizeAzureSnapshotSKU(" premium_lrs ")
+	if err != nil || snapshot != "Premium_LRS" {
+		t.Fatalf("snapshot SKU=%q err=%v", snapshot, err)
+	}
+	disk, err := NormalizeAzureDiskSKU("standardssd_lrs")
+	if err != nil || disk != "StandardSSD_LRS" {
+		t.Fatalf("disk SKU=%q err=%v", disk, err)
+	}
+	if _, err := NormalizeAzureSnapshotSKU("UltraSSD_LRS"); err == nil {
+		t.Fatal("expected unsupported snapshot SKU to fail")
+	}
+	if _, err := NormalizeAzureDiskSKU("not-a-sku"); err == nil {
+		t.Fatal("expected unsupported disk SKU to fail")
+	}
+}
+
+func TestAzureSnapshotPrerequisitesRunConcurrently(t *testing.T) {
+	t.Parallel()
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	result := make(chan struct {
+		network string
+		disk    string
+		err     error
+	}, 1)
+	go func() {
+		network, disk, err := runAzureSnapshotPrerequisites(
+			context.Background(),
+			func(context.Context) (string, error) {
+				started <- "network"
+				<-release
+				return "nic-id", nil
+			},
+			func(context.Context) (string, error) {
+				started <- "disk"
+				<-release
+				return "disk-id", nil
+			},
+		)
+		result <- struct {
+			network string
+			disk    string
+			err     error
+		}{network: network, disk: disk, err: err}
+	}()
+
+	seen := map[string]bool{}
+	for range 2 {
+		select {
+		case operation := <-started:
+			seen[operation] = true
+		case <-time.After(time.Second):
+			t.Fatal("snapshot prerequisites did not start concurrently")
+		}
+	}
+	close(release)
+	completed := <-result
+	if completed.err != nil || completed.network != "nic-id" || completed.disk != "disk-id" {
+		t.Fatalf("result=%+v", completed)
+	}
+	if !seen["network"] || !seen["disk"] {
+		t.Fatalf("started=%v", seen)
 	}
 }
 
