@@ -73,6 +73,10 @@ crabbox checkpoint create --id swift-crab --strategy image
 # Direct AWS lease (no coordinator): force a native AMI
 crabbox checkpoint create --provider aws --id swift-crab --mode native
 
+# Azure Windows: permit a bounded deallocate/snapshot/restart cycle
+crabbox checkpoint create --provider azure --target windows --id swift-crab \
+  --strategy disk-snapshot --no-reboot=false
+
 # Archive a custom workdir
 crabbox checkpoint create --id swift-crab --workdir /work/cbx_123/my-app
 ```
@@ -89,8 +93,9 @@ crabbox checkpoint create --id swift-crab --workdir /work/cbx_123/my-app
 --wait                      Wait for the native snapshot to become available
                             (default true).
 --wait-timeout <duration>   Maximum native snapshot wait (default 45m).
---no-reboot                 Avoid rebooting the source instance during a native
-                            snapshot (default true; AWS AMI only).
+--no-reboot                 Avoid rebooting or stopping the source instance
+                            during a native snapshot (default true). Azure
+                            Windows disk snapshots require false.
 --workdir <path>            Remote workdir to archive (default: the lease's repo
                             workdir).
 --recipe-only               Record metadata only; create no artifact.
@@ -114,6 +119,13 @@ resolves to a disk snapshot where the provider supports one.
   (the default); creation refuses leases started with
   `--azure-os-disk ephemeral` or `--azure-os-disk ephemeral-preview`, where
   Azure reports success but does not capture live disk state.
+- Direct Azure Windows disk snapshots support `windows.mode=normal` leases and
+  require `--no-reboot=false`. Crabbox
+  deallocates the source for a consistent snapshot, restarts it after snapshot
+  creation (including failure paths), and rotates SSH host, SSH login, Windows,
+  and loopback-only VNC credentials when each fork boots.
+- Azure snapshot names use letters, digits, underscores, and hyphens and are
+  limited to 80 characters; generated names retain a unique timestamp suffix.
 
 Before a native snapshot, Crabbox cleans the source: on Linux it runs
 `cloud-init clean --logs` (so a forked box regenerates SSH host keys) and
@@ -235,6 +247,9 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 - *Native:* acquire a new lease from the checkpoint snapshot/image, wait for
   boot, relocate the workdir from the old lease path to the new one, then print
   the lease id and slug.
+- *Azure Windows native:* preserve the snapshotted filesystem in place and
+  print `workdir=-`; these desktop leases do not use the POSIX workdir
+  relocation flow.
 - *Archive:* acquire a standard new lease, upload and extract the tarball into
   the workdir, then print the lease id and slug.
 - *Fan-out:* `--count <n>` repeats the same provider-neutral fork flow. When
@@ -325,11 +340,13 @@ looks right.
 | AWS Linux | EBS snapshot | AMI |
 | AWS macOS | AMI-backed checkpoint (backing EBS snapshot) | AMI |
 | Azure Linux | Managed OS-disk snapshot | not supported from an active VM |
+| Azure Windows (`windows.mode=normal`) | Managed OS-disk snapshot (`--no-reboot=false`) | not supported |
 | GCP Linux | Persistent-disk snapshot | Machine image |
 | Parallels | VM snapshot | — |
 
 Brokered native checkpoints (through a configured coordinator) cover AWS
-Linux/macOS and Azure/GCP Linux leases. Direct AWS Linux/macOS leases create
+Linux/macOS and Azure/GCP Linux leases. Azure Windows leases use the direct
+managed-OS-disk snapshot path. Direct AWS Linux/macOS leases create
 AMIs locally without a coordinator: `--mode auto` falls back to a workspace
 archive when no coordinator is configured, while `--mode native` or
 `--strategy image` creates an AMI in the configured AWS region. Parallels native

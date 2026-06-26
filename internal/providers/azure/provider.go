@@ -2,6 +2,7 @@ package azure
 
 import (
 	"flag"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -115,10 +116,14 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 }
 
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
-	if req.Config.Coordinator == "" || req.Server.CloudID == "" {
+	if req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
-	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
+	if targetOS == core.TargetWindows && firstNonBlank(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal {
+		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAzureOS, Direct: true}, true
+	}
+	if req.Config.Coordinator == "" || targetOS != core.TargetLinux {
 		return core.NativeCheckpointCapability{}, false
 	}
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
@@ -152,6 +157,12 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 	if req.Record.Region != "" {
 		cfg.AzureLocation = req.Record.Region
 	}
+	if resourceGroup := azureResourceGroup(firstNonBlank(req.Record.Resource, req.Record.ImageID)); resourceGroup != "" {
+		cfg.AzureResourceGroup = resourceGroup
+	}
+	if subscription := azureSubscription(firstNonBlank(req.Record.Resource, req.Record.ImageID)); subscription != "" {
+		cfg.AzureSubscription = subscription
+	}
 	if req.AzureOSDiskExplicit {
 		mode, err := core.NormalizeAzureOSDiskMode(req.AzureOSDisk)
 		if err != nil {
@@ -161,4 +172,22 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 		cfg.AzureOSDiskExplicit = true
 	}
 	return nil
+}
+
+func azureResourceGroup(resourceID string) string {
+	return azureResourceIDPart(resourceID, "resourceGroups")
+}
+
+func azureSubscription(resourceID string) string {
+	return azureResourceIDPart(resourceID, "subscriptions")
+}
+
+func azureResourceIDPart(resourceID, name string) string {
+	parts := strings.Split(strings.Trim(resourceID, "/"), "/")
+	for index := 0; index+1 < len(parts); index += 1 {
+		if strings.EqualFold(parts[index], name) {
+			return parts[index+1]
+		}
+	}
+	return ""
 }

@@ -108,6 +108,12 @@ stateless leases that should use a local OS disk; provisioning fails if the
 selected SKU has no ephemeral OS support, and native Azure checkpoint/fork is
 unavailable.
 
+Managed Azure Windows leases using `windows.mode=normal` can also create direct
+OS-disk checkpoints for fast prepared-desktop reuse. Snapshot creation requires
+`crabbox checkpoint create --strategy disk-snapshot --no-reboot=false`; Crabbox
+restarts the source VM after the snapshot and rehydrates every fork with fresh
+SSH, Windows, and loopback-only VNC credentials.
+
 `azure.osDisk: ephemeral-preview` opts into Azure's public-preview
 full-caching mode for ephemeral OS disks. Crabbox sends Compute API
 `2025-04-01` with `diffDiskSettings.enableFullCaching: true`; for known
