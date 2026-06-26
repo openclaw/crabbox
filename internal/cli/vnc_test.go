@@ -36,6 +36,22 @@ func TestVNCNativeHandoffJSONContract(t *testing.T) {
 	}
 }
 
+func TestVNCNativeHandoffRejectsHostManagedEndpoints(t *testing.T) {
+	for _, endpoint := range []vncEndpoint{
+		{Host: "127.0.0.1", Port: managedVNCPort},
+		{Direct: true, Host: "192.0.2.10", Port: managedVNCPort},
+	} {
+		if err := validateNativeVNCHandoffEndpoint(endpoint); err == nil || !strings.Contains(err.Error(), "Crabbox-managed") {
+			t.Fatalf("endpoint=%#v error=%v, want Crabbox-managed rejection", endpoint, err)
+		}
+	}
+	if err := validateNativeVNCHandoffEndpoint(vncEndpoint{
+		Host: "127.0.0.1", Port: managedVNCPort, Managed: true,
+	}); err != nil {
+		t.Fatalf("managed loopback endpoint rejected: %v", err)
+	}
+}
+
 func TestVNCTunnelCommandQuotesKeyPath(t *testing.T) {
 	got := vncTunnelCommand(SSHTarget{
 		Key:  "/tmp/Application Support/crabbox/id_ed25519",

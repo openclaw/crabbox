@@ -80,8 +80,8 @@ func (a App) vnc(ctx context.Context, args []string) error {
 		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
 	}
 	if *nativeHandoff {
-		if endpoint.Direct {
-			return exit(2, "--native-handoff requires a loopback SSH tunnel")
+		if err := validateNativeVNCHandoffEndpoint(endpoint); err != nil {
+			return err
 		}
 		username := ""
 		if endpoint.Managed && (target.TargetOS == targetWindows || target.TargetOS == targetMacOS) {
@@ -179,6 +179,16 @@ type vncNativeHandoff struct {
 	Port     int    `json:"port"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+func validateNativeVNCHandoffEndpoint(endpoint vncEndpoint) error {
+	if !endpoint.Managed {
+		return exit(2, "--native-handoff requires a Crabbox-managed desktop over a loopback SSH tunnel")
+	}
+	if endpoint.Direct {
+		return exit(2, "--native-handoff requires a loopback SSH tunnel")
+	}
+	return nil
 }
 
 func runVNCNativeHandoff(
