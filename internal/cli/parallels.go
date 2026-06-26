@@ -352,7 +352,8 @@ func (c *ParallelsClient) EnsureGuestReady(ctx context.Context, vmID string, cfg
 	if workRoot == "" {
 		workRoot = baseConfig().WorkRoot
 	}
-	result, err := c.prlctl(ctx, nil, "exec", vmID, "/bin/sh", "-lc", parallelsPOSIXEnsureReadyScript(user, workRoot))
+	desktop := cfg.Desktop && cfg.TargetOS == targetLinux
+	result, err := c.prlctl(ctx, nil, "exec", vmID, "/bin/sh", "-lc", parallelsPOSIXEnsureReadyScript(user, workRoot, desktop))
 	if err != nil {
 		return commandOutputError("parallels guest prep", result, err)
 	}
@@ -545,12 +546,15 @@ printf '%%s\n' "$user" >/var/lib/crabbox/ssh.username 2>/dev/null || true
 `, shellWords([]string{user})[0], shellWords([]string{publicKey})[0])
 }
 
-func parallelsPOSIXEnsureReadyScript(user, workRoot string) string {
+func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop bool) string {
 	return fmt.Sprintf(`set -eu
 user=%s
 work_root=%s
+desktop=%t
 if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1; then
-  exit 0
+  if [ "$desktop" != true ] || { command -v websockify >/dev/null 2>&1 && command -v x11vnc >/dev/null 2>&1 && { [ -f /usr/share/novnc/vnc.html ] || [ -f /usr/share/novnc/core/vnc.html ] || [ -f /usr/share/novnc/html/vnc.html ]; } && systemctl is-active --quiet crabbox-x11vnc.service; }; then
+    exit 0
+  fi
 fi
 group=$(id -gn "$user" 2>/dev/null || printf '%%s' "$user")
 mkdir -p "$work_root" /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/lib/crabbox
@@ -570,6 +574,56 @@ Acquire::https::Timeout "30";
 APT
   apt-get update
   apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq
+  if [ "$desktop" = true ]; then
+    apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl util-linux novnc websockify
+    if [ ! -s /var/lib/crabbox/vnc.password ]; then
+      umask 077
+      openssl rand -hex 16 >/var/lib/crabbox/vnc.password
+    fi
+    { head -c 8 /var/lib/crabbox/vnc.password; printf '\n'; head -c 8 /var/lib/crabbox/vnc.password; printf '\n\n'; } | x11vnc -storepasswd /var/lib/crabbox/vnc.pass >/dev/null 2>&1
+    chown "$user:$group" /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
+    chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
+    printf 'CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=:99\n' >/var/lib/crabbox/desktop.env
+    cat >/etc/systemd/system/crabbox-xvfb.service <<'UNIT'
+[Unit]
+Description=Crabbox virtual X display
+After=network.target
+[Service]
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp
+Restart=always
+[Install]
+WantedBy=multi-user.target
+UNIT
+    cat >/etc/systemd/system/crabbox-desktop.service <<UNIT
+[Unit]
+Description=Crabbox XFCE desktop
+After=crabbox-xvfb.service
+Requires=crabbox-xvfb.service
+[Service]
+User=$user
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/startxfce4
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
+UNIT
+    cat >/etc/systemd/system/crabbox-x11vnc.service <<UNIT
+[Unit]
+Description=Crabbox VNC server
+After=crabbox-desktop.service
+Requires=crabbox-xvfb.service
+[Service]
+User=$user
+ExecStart=/usr/bin/x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -rfbauth /var/lib/crabbox/vnc.pass -wait 16 -defer 8 -nowait_bog
+Restart=always
+RestartSec=1
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable --now crabbox-xvfb.service crabbox-desktop.service crabbox-x11vnc.service
+  fi
   systemctl enable ssh >/dev/null 2>&1 || true
   systemctl restart ssh >/dev/null 2>&1 || systemctl restart ssh.socket >/dev/null 2>&1 || true
 fi
@@ -600,7 +654,7 @@ fi
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped 2>/dev/null || true
 /usr/local/bin/crabbox-ready
-`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
+`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
 }
 
 func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ...string) (LocalCommandResult, error) {

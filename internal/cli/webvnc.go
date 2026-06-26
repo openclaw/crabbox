@@ -2592,12 +2592,15 @@ func (a App) directSSHWebVNC(ctx context.Context, cfg Config, id, localPort stri
 	if err != nil {
 		return err
 	}
+	if directSSHWebVNCUsesLocalBridge(target) {
+		return a.directSSHWindowsWebVNC(ctx, cfg, server, target, leaseID, endpoint, listener, localPort, openViewer)
+	}
 	allowNone := directSSHWebVNCAllowsNone(server, endpoint)
 	remoteOwner, err := directSSHWebVNCRemoteOwnerForLease(cfg, server, leaseID, expected, controllerOwnerID)
 	if err != nil {
 		return exit(5, "resolve direct SSH WebVNC owner: %v", err)
 	}
-	remoteOutput, err := runSSHCombinedOutput(ctx, target, directSSHNoVNCRemoteCommand(remoteOwner))
+	remoteOutput, err := runDirectSSHWebVNCRemoteCombinedOutput(ctx, target, directSSHNoVNCRemoteCommand(remoteOwner))
 	if err != nil {
 		rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
 		printRescue(a.Stdout, classifyDesktopFailure(remoteOutput), trimFailureDetail(remoteOutput), desktopDoctorCommand(rescueCtx))
@@ -2664,6 +2667,60 @@ func (a App) directSSHWebVNC(ctx context.Context, cfg Config, id, localPort stri
 	}
 }
 
+func directSSHWebVNCUsesLocalBridge(target SSHTarget) bool {
+	return isWindowsNativeTarget(target)
+}
+
+func (a App) directSSHWindowsWebVNC(
+	ctx context.Context,
+	cfg Config,
+	server Server,
+	target SSHTarget,
+	leaseID string,
+	endpoint vncEndpoint,
+	webListener net.Listener,
+	webPort string,
+	openViewer bool,
+) error {
+	tunnel, vncPort, err := startVNCForegroundTunnelOnReservedPort(ctx, target, "", endpoint.Host, endpoint.Port, webPort)
+	if err != nil {
+		return err
+	}
+	defer stopProcess(tunnel)
+	bridgeCtx, cancelBridge := context.WithCancelCause(ctx)
+	defer cancelBridge(context.Canceled)
+	go func() {
+		select {
+		case <-tunnel.Done():
+			cancelBridge(tunnel.ExitError())
+		case <-bridgeCtx.Done():
+		}
+	}()
+	password, err := runSSHOutput(ctx, target, vncPasswordCommand(target))
+	if err != nil {
+		return exit(5, "read native Windows VNC credential: %v", err)
+	}
+	password = strings.TrimSpace(password)
+	if password == "" {
+		return exit(5, "read native Windows VNC credential: empty VNC password")
+	}
+	credentials := rfbCredentials{Username: target.User, Password: password}
+	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=windows\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider))
+	fmt.Fprintf(a.Stdout, "bridge: serving noVNC locally; SSH tunnel -> guest %s:%s; keep this running while viewing\n", endpoint.Host, endpoint.Port)
+	return a.serveLocalWebVNCBridge(
+		bridgeCtx,
+		webListener,
+		webPort,
+		credentials,
+		openViewer,
+		true,
+		func(ctx context.Context) (net.Conn, error) {
+			return dialVNCForegroundTunnel(ctx, tunnel, vncPort)
+		},
+		nil,
+	)
+}
+
 func verifyVNCForegroundTunnelListener(tunnel *vncForegroundTunnel, port string) error {
 	if tunnel == nil || tunnel.PID() <= 0 {
 		return errors.New("VNC SSH tunnel is unavailable")
@@ -2725,7 +2782,7 @@ func (a App) directSSHWebVNCStatus(ctx context.Context, cfg Config, id, localPor
 	allowNone := endpointErr == nil && directSSHWebVNCAllowsNone(server, endpoint)
 	websockify := "unknown"
 	remotePort := ""
-	if out, err := runSSHOutput(ctx, target, directSSHWebVNCRemoteStatusCommand(remoteOwner)); err == nil {
+	if out, err := runDirectSSHWebVNCRemoteCombinedOutput(ctx, target, directSSHWebVNCRemoteStatusCommand(remoteOwner)); err == nil {
 		if port, portErr := directSSHWebVNCRemotePortFromOutput(out); portErr == nil && directSSHWebVNCRemoteRunning(out) {
 			websockify = "running"
 			remotePort = port
@@ -2822,7 +2879,7 @@ func (a App) directSSHWebVNCReset(ctx context.Context, cfg Config, id string, op
 	if err != nil {
 		return exit(5, "resolve direct SSH WebVNC owner: %v", err)
 	}
-	if out, err := runSSHCombinedOutput(ctx, target, directSSHWebVNCResetRemoteCommand(remoteOwner)); err != nil {
+	if out, err := runDirectSSHWebVNCRemoteCombinedOutput(ctx, target, directSSHWebVNCResetRemoteCommand(remoteOwner)); err != nil {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}))
 		return exit(5, "reset direct SSH WebVNC/input stack: %v", err)
 	}
@@ -3000,6 +3057,15 @@ func reverseVNCKeyByte(value byte) byte {
 
 func vncTunnelCommandTo(target SSHTarget, localPort, remoteHost, remotePort string) string {
 	return strings.Join(shellWords(append([]string{"ssh"}, vncTunnelArgs(target, localPort, remoteHost, remotePort)...)), " ")
+}
+
+func runDirectSSHWebVNCRemoteCombinedOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
+	if isWindowsWSL2Target(target) {
+		// Large lifecycle scripts exceed Windows' command-line limit when nested
+		// in PowerShell EncodedCommand. Stage them over SSH stdin instead.
+		return runWSL2ControlScriptCombinedOutput(ctx, target, remote, 0, "10", "3")
+	}
+	return runSSHCombinedOutput(ctx, target, remote)
 }
 
 func directSSHNoVNCRemoteCommand(owner directSSHWebVNCRemoteOwner) string {

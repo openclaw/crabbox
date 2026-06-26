@@ -437,6 +437,63 @@ func TestDirectSSHWebVNCRemoteReadinessRequiresExactOwnedSocket(t *testing.T) {
 	}
 }
 
+func TestDirectSSHWebVNCWSL2StagesLargeCommandOverStdin(t *testing.T) {
+	dir := t.TempDir()
+	argvPath := filepath.Join(dir, "argv")
+	stdinPath := filepath.Join(dir, "stdin")
+	sshPath := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\nprintf '%s' \"$*\" > " + shellQuote(argvPath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf running\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	remote := strings.Repeat("large-webvnc-command\n", 2000)
+	target := SSHTarget{User: "crabbox", Host: "windows.test", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	out, err := runDirectSSHWebVNCRemoteCombinedOutput(context.Background(), target, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "running" {
+		t.Fatalf("output=%q want running", out)
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stdin) != remote {
+		t.Fatal("WSL2 WebVNC command was not staged intact over stdin")
+	}
+	argv, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(argv) >= 8191 || bytes.Contains(argv, []byte("large-webvnc-command")) {
+		t.Fatalf("WSL2 WebVNC wrapper still embeds the remote payload: argv bytes=%d", len(argv))
+	}
+}
+
+func TestDirectSSHWebVNCNativeWindowsUsesLocalBridge(t *testing.T) {
+	native := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	if !directSSHWebVNCUsesLocalBridge(native) {
+		t.Fatal("native Windows WebVNC must use the host-side bridge")
+	}
+	for _, target := range []SSHTarget{
+		{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+		{TargetOS: targetLinux},
+		{TargetOS: targetMacOS},
+	} {
+		if directSSHWebVNCUsesLocalBridge(target) {
+			t.Fatalf("target unexpectedly selected native Windows bridge: %#v", target)
+		}
+	}
+	command := powershellCommand(directSSHNoVNCRemoteCommand(directSSHWebVNCRemoteOwner{
+		ID: strings.Repeat("01", sha256.Size), PreferredPort: "20001",
+	}))
+	if len(command) <= 8191 {
+		t.Fatalf("regression fixture no longer exceeds Windows command-line limit: %d", len(command))
+	}
+}
+
 func TestDirectSSHWebVNCRemoteOwnersForcePreferredPortCollision(t *testing.T) {
 	ownerIDs := []string{
 		strings.Repeat("01", sha256.Size),

@@ -271,9 +271,35 @@ func TestParallelsEnsureGuestReadyInstallsPOSIXReadyScript(t *testing.T) {
 		t.Fatalf("name=%q", runner.lastReq.Name)
 	}
 	got := strings.Join(runner.lastReq.Args, "\n")
-	for _, want := range []string{"exec", "vm1", "cat >/usr/local/bin/crabbox-ready", "apt-get install", "test -w '/work/test'"} {
+	for _, want := range []string{"exec", "vm1", "desktop=false", "cat >/usr/local/bin/crabbox-ready", "apt-get install", "test -w '/work/test'"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("guest prep command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestParallelsEnsureGuestReadyUpgradesReadyGuestForDesktop(t *testing.T) {
+	runner := &parallelsFakeRunner{}
+	client := NewParallelsClient(Config{}, runner)
+	err := client.EnsureGuestReady(context.Background(), "vm1", Config{SSHUser: "runner", WorkRoot: "/work/test", TargetOS: targetLinux, Desktop: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(runner.lastReq.Args, "\n")
+	for _, want := range []string{
+		"desktop=true",
+		"command -v websockify",
+		"[ -f /usr/share/novnc/vnc.html ]",
+		"systemctl is-active --quiet crabbox-x11vnc.service",
+		"novnc websockify",
+		"/etc/systemd/system/crabbox-xvfb.service",
+		"/etc/systemd/system/crabbox-desktop.service",
+		"/etc/systemd/system/crabbox-x11vnc.service",
+		"-rfbport 5900",
+		"systemctl enable --now crabbox-xvfb.service crabbox-desktop.service crabbox-x11vnc.service",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("desktop guest prep missing %q:\n%s", want, got)
 		}
 	}
 }
