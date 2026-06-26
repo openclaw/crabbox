@@ -120,7 +120,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 		return core.NativeCheckpointCapability{}, false
 	}
 	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
-	if targetOS == core.TargetWindows {
+	if targetOS == core.TargetWindows && firstNonBlank(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal {
 		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAzureOS, Direct: true}, true
 	}
 	if req.Config.Coordinator == "" || targetOS != core.TargetLinux {

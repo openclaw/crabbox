@@ -66,15 +66,27 @@ func TestProviderValidatesConfiguredAzureOSDisk(t *testing.T) {
 func TestProviderSupportsDirectWindowsOSDiskCheckpoints(t *testing.T) {
 	t.Parallel()
 	capability, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
-		Config: core.Config{TargetOS: core.TargetWindows},
+		Config: core.Config{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
 		Server: core.Server{CloudID: "crabbox-source"},
-		Target: core.SSHTarget{TargetOS: core.TargetWindows},
+		Target: core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
 	})
 	if !ok {
 		t.Fatal("expected Windows Azure checkpoint capability")
 	}
 	if capability.Kind != core.CheckpointKindAzureOS || !capability.Direct {
 		t.Fatalf("capability=%+v, want direct Azure OS disk snapshot", capability)
+	}
+}
+
+func TestProviderRejectsDirectWSL2OSDiskCheckpoints(t *testing.T) {
+	t.Parallel()
+	_, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
+		Config: core.Config{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeWSL2},
+		Server: core.Server{CloudID: "crabbox-source"},
+		Target: core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeWSL2},
+	})
+	if ok {
+		t.Fatal("WSL2 Azure leases must not advertise native Windows snapshot forks")
 	}
 }
 

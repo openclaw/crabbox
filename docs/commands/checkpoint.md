@@ -119,7 +119,8 @@ resolves to a disk snapshot where the provider supports one.
   (the default); creation refuses leases started with
   `--azure-os-disk ephemeral` or `--azure-os-disk ephemeral-preview`, where
   Azure reports success but does not capture live disk state.
-- Direct Azure Windows disk snapshots require `--no-reboot=false`. Crabbox
+- Direct Azure Windows disk snapshots support `windows.mode=normal` leases and
+  require `--no-reboot=false`. Crabbox
   deallocates the source for a consistent snapshot, restarts it after snapshot
   creation (including failure paths), and rotates SSH host, SSH login, Windows,
   and loopback-only VNC credentials when each fork boots.
@@ -337,7 +338,7 @@ looks right.
 | AWS Linux | EBS snapshot | AMI |
 | AWS macOS | AMI-backed checkpoint (backing EBS snapshot) | AMI |
 | Azure Linux | Managed OS-disk snapshot | not supported from an active VM |
-| Azure Windows | Managed OS-disk snapshot (`--no-reboot=false`) | not supported |
+| Azure Windows (`windows.mode=normal`) | Managed OS-disk snapshot (`--no-reboot=false`) | not supported |
 | GCP Linux | Persistent-disk snapshot | Machine image |
 | Parallels | VM snapshot | — |
 
