@@ -4174,13 +4174,46 @@ func writeUserFileConfig(cfg fileConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeUserFileConfigAtomic(path, data, replaceClaimFile, fsyncDir); err != nil {
 		return "", exit(2, "write config %s: %v", path, err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return "", exit(2, "secure config %s: %v", path, err)
-	}
 	return path, nil
+}
+
+func writeUserFileConfigAtomic(path string, data []byte, replaceFile func(string, string) error, syncDirectory func(string)) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := replaceFile(tmpPath, path); err != nil {
+		return err
+	}
+	removeTemp = false
+	syncDirectory(dir)
+	return nil
 }
 
 func configFilePermissionProblem(path string) string {
