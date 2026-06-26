@@ -27,6 +27,18 @@ func TestValidateCheckpointID(t *testing.T) {
 	}
 }
 
+func TestCheckpointCreateAppliesAzureSnapshotSKUFlag(t *testing.T) {
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointCreate(context.Background(), []string{
+		"--provider", "azure",
+		"--id", "cbx_missing",
+		"--azure-snapshot-sku", "not-a-sku",
+	})
+	if err == nil || !strings.Contains(err.Error(), "azure.snapshotSKU") {
+		t.Fatalf("checkpoint create error=%v, want Azure snapshot SKU validation", err)
+	}
+}
+
 func TestCheckpointRecordRoundTripAndListOrder(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	store, err := defaultCheckpointStore()

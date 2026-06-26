@@ -13,8 +13,10 @@ func init() {
 
 type Provider struct{}
 type flagValues struct {
-	Backend *string
-	OSDisk  *string
+	Backend     *string
+	OSDisk      *string
+	SnapshotSKU *string
+	OSDiskSKU   *string
 }
 
 func (Provider) Name() string      { return "azure" }
@@ -38,8 +40,10 @@ func (Provider) Spec() core.ProviderSpec {
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		Backend: fs.String("azure-backend", defaults.AzureBackend, "Azure backend: vm or dynamic-sessions"),
-		OSDisk:  fs.String("azure-os-disk", defaults.AzureOSDisk, "Azure OS disk mode: managed, ephemeral, ephemeral-preview, or auto"),
+		Backend:     fs.String("azure-backend", defaults.AzureBackend, "Azure backend: vm or dynamic-sessions"),
+		OSDisk:      fs.String("azure-os-disk", defaults.AzureOSDisk, "Azure OS disk mode: managed, ephemeral, ephemeral-preview, or auto"),
+		SnapshotSKU: fs.String("azure-snapshot-sku", defaults.AzureSnapshotSKU, "Azure checkpoint snapshot storage SKU"),
+		OSDiskSKU:   fs.String("azure-os-disk-sku", defaults.AzureOSDiskSKU, "Azure managed OS disk storage SKU"),
 	}
 }
 
@@ -79,7 +83,6 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 		}
 		cfg.AzureOSDisk = mode
 		cfg.AzureOSDiskExplicit = true
-		return nil
 	}
 	if cfg.AzureOSDisk != "" {
 		mode, err := core.NormalizeAzureOSDiskMode(cfg.AzureOSDisk)
@@ -87,6 +90,26 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 			return err
 		}
 		cfg.AzureOSDisk = mode
+	}
+	if core.FlagWasSet(fs, "azure-snapshot-sku") && flags.SnapshotSKU != nil {
+		cfg.AzureSnapshotSKU = *flags.SnapshotSKU
+	}
+	if cfg.AzureSnapshotSKU != "" {
+		sku, err := core.NormalizeAzureSnapshotSKU(cfg.AzureSnapshotSKU)
+		if err != nil {
+			return err
+		}
+		cfg.AzureSnapshotSKU = sku
+	}
+	if core.FlagWasSet(fs, "azure-os-disk-sku") && flags.OSDiskSKU != nil {
+		cfg.AzureOSDiskSKU = *flags.OSDiskSKU
+	}
+	if cfg.AzureOSDiskSKU != "" {
+		sku, err := core.NormalizeAzureDiskSKU(cfg.AzureOSDiskSKU)
+		if err != nil {
+			return err
+		}
+		cfg.AzureOSDiskSKU = sku
 	}
 	return nil
 }
@@ -170,6 +193,18 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 		}
 		cfg.AzureOSDisk = mode
 		cfg.AzureOSDiskExplicit = true
+	}
+	return nil
+}
+
+func (Provider) ApplyNativeCheckpointForkFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	flags, _ := values.(flagValues)
+	if core.FlagWasSet(fs, "azure-os-disk-sku") && flags.OSDiskSKU != nil {
+		sku, err := core.NormalizeAzureDiskSKU(*flags.OSDiskSKU)
+		if err != nil {
+			return err
+		}
+		cfg.AzureOSDiskSKU = sku
 	}
 	return nil
 }

@@ -78,8 +78,10 @@ type Config struct {
 	AzureImage                    string
 	azureImageExplicit            bool
 	AzureSnapshot                 string
+	AzureSnapshotSKU              string
 	AzureOSDisk                   string
 	AzureOSDiskExplicit           bool
+	AzureOSDiskSKU                string
 	AzureVNet                     string
 	AzureSubnet                   string
 	AzureNSG                      string
@@ -3028,6 +3030,8 @@ type fileAzureConfig struct {
 	ResourceGroup  string   `yaml:"resourceGroup,omitempty"`
 	Image          string   `yaml:"image,omitempty"`
 	OSDisk         string   `yaml:"osDisk,omitempty"`
+	SnapshotSKU    string   `yaml:"snapshotSKU,omitempty"`
+	OSDiskSKU      string   `yaml:"osDiskSKU,omitempty"`
 	VNet           string   `yaml:"vnet,omitempty"`
 	Subnet         string   `yaml:"subnet,omitempty"`
 	NSG            string   `yaml:"nsg,omitempty"`
@@ -4624,6 +4628,12 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Azure.OSDisk != "" {
 			cfg.AzureOSDisk = file.Azure.OSDisk
 			cfg.AzureOSDiskExplicit = true
+		}
+		if file.Azure.SnapshotSKU != "" {
+			cfg.AzureSnapshotSKU = file.Azure.SnapshotSKU
+		}
+		if file.Azure.OSDiskSKU != "" {
+			cfg.AzureOSDiskSKU = file.Azure.OSDiskSKU
 		}
 		if file.Azure.VNet != "" {
 			cfg.AzureVNet = file.Azure.VNet
@@ -6834,6 +6844,8 @@ func applyEnv(cfg *Config) error {
 		cfg.AzureOSDisk = value
 		cfg.AzureOSDiskExplicit = true
 	}
+	cfg.AzureSnapshotSKU = getenv("CRABBOX_AZURE_SNAPSHOT_SKU", cfg.AzureSnapshotSKU)
+	cfg.AzureOSDiskSKU = getenv("CRABBOX_AZURE_OS_DISK_SKU", cfg.AzureOSDiskSKU)
 	cfg.AzureVNet = getenv("CRABBOX_AZURE_VNET", cfg.AzureVNet)
 	cfg.AzureSubnet = getenv("CRABBOX_AZURE_SUBNET", cfg.AzureSubnet)
 	cfg.AzureNSG = getenv("CRABBOX_AZURE_NSG", cfg.AzureNSG)

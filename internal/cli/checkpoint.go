@@ -94,6 +94,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
+	providerFlags := registerProviderFlags(fs, defaults)
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
@@ -103,6 +104,9 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	setIDFromFirstArg(fs, id)
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	if err := requireLeaseID(*id, "crabbox checkpoint create --id <lease-id-or-slug> [--name <name>] [--mode auto|native|archive]", cfg); err != nil {

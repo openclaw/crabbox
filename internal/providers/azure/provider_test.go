@@ -52,6 +52,26 @@ func TestProviderAppliesAzureOSDiskFlag(t *testing.T) {
 	}
 }
 
+func TestProviderAppliesAzureSnapshotStorageFlags(t *testing.T) {
+	t.Parallel()
+	provider := Provider{}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := provider.RegisterFlags(fs, core.Config{})
+	if err := fs.Parse([]string{
+		"--azure-snapshot-sku", "premium_lrs",
+		"--azure-os-disk-sku", "Premium_LRS",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.Config{Provider: "azure"}
+	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AzureSnapshotSKU != "Premium_LRS" || cfg.AzureOSDiskSKU != "Premium_LRS" {
+		t.Fatalf("snapshot SKU=%q OS disk SKU=%q", cfg.AzureSnapshotSKU, cfg.AzureOSDiskSKU)
+	}
+}
+
 func TestProviderValidatesConfiguredAzureOSDisk(t *testing.T) {
 	t.Parallel()
 	provider := Provider{}
@@ -94,6 +114,23 @@ func TestProviderAppliesWindowsSnapshotForkAzureScope(t *testing.T) {
 	}
 	if cfg.AzureSnapshot == "" || cfg.AzureLocation != "westus2" || cfg.AzureResourceGroup != "snapshot-rg" || cfg.AzureSubscription != "sub" {
 		t.Fatalf("fork config=%+v", cfg)
+	}
+}
+
+func TestProviderReappliesOSDiskSKUAfterCheckpointProviderRewrite(t *testing.T) {
+	t.Parallel()
+	provider := Provider{}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := provider.RegisterFlags(fs, core.Config{})
+	if err := fs.Parse([]string{"--azure-os-disk-sku", "premium_lrs"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.Config{Provider: "azure"}
+	if err := provider.ApplyNativeCheckpointForkFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AzureOSDiskSKU != "Premium_LRS" {
+		t.Fatalf("AzureOSDiskSKU=%q", cfg.AzureOSDiskSKU)
 	}
 }
 

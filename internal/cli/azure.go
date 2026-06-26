@@ -426,6 +426,31 @@ func NormalizeAzureOSDiskMode(value string) (string, error) {
 	}
 }
 
+func NormalizeAzureSnapshotSKU(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return "", nil
+	case "premium_lrs":
+		return string(armcompute.SnapshotStorageAccountTypesPremiumLRS), nil
+	case "standard_lrs":
+		return string(armcompute.SnapshotStorageAccountTypesStandardLRS), nil
+	case "standard_zrs":
+		return string(armcompute.SnapshotStorageAccountTypesStandardZRS), nil
+	default:
+		return "", exit(2, "azure.snapshotSKU must be Premium_LRS, Standard_LRS, or Standard_ZRS")
+	}
+}
+
+func NormalizeAzureDiskSKU(value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, sku := range armcompute.PossibleDiskStorageAccountTypesValues() {
+		if normalized == strings.ToLower(string(sku)) {
+			return string(sku), nil
+		}
+	}
+	return "", exit(2, "azure.osDiskSKU is not a supported managed disk storage SKU")
+}
+
 func azureOSDiskIsEphemeral(mode string) bool {
 	return mode == AzureOSDiskEphemeral || mode == AzureOSDiskEphemeralPreview
 }
@@ -922,66 +947,42 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 	labels := directLeaseLabels(cfg, leaseID, slug, "azure", mapMarket(strings.EqualFold(cfg.Capacity.Market, "spot")), keep, now)
 	tags := azureLabelsToTags(labels)
 
-	pipPoller, err := c.pipc.BeginCreateOrUpdate(ctx, c.ResourceGroup, pipName, armnetwork.PublicIPAddress{
-		Location: to.Ptr(c.Location),
-		Tags:     tags,
-		SKU: &armnetwork.PublicIPAddressSKU{
-			Name: to.Ptr(armnetwork.PublicIPAddressSKUNameStandard),
-		},
-		Properties: &armnetwork.PublicIPAddressPropertiesFormat{
-			PublicIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodStatic),
-		},
-	}, nil)
-	if err != nil {
-		return Server{}, fmt.Errorf("begin public ip: %w", err)
+	var nicID string
+	var snapshotDiskID string
+	var err error
+	if cfg.AzureSnapshot != "" {
+		nicID, snapshotDiskID, err = runAzureSnapshotPrerequisites(
+			ctx,
+			func(workCtx context.Context) (string, error) {
+				return c.createLeaseNetwork(workCtx, pipName, nicName, tags)
+			},
+			func(workCtx context.Context) (string, error) {
+				return c.createManagedDiskFromSnapshot(
+					workCtx,
+					diskName,
+					cfg.AzureSnapshot,
+					cfg.AzureOSDiskSKU,
+					tags,
+				)
+			},
+		)
+	} else {
+		nicID, err = c.createLeaseNetwork(ctx, pipName, nicName, tags)
 	}
-	pipResp, err := pipPoller.PollUntilDone(ctx, nil)
 	if err != nil {
-		return Server{}, fmt.Errorf("public ip: %w", err)
+		return Server{}, err
 	}
-	pipID := *pipResp.ID
-
-	subnetID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s",
-		c.SubscriptionID, c.ResourceGroup, c.VNet, c.Subnet)
-	nsgID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkSecurityGroups/%s",
-		c.SubscriptionID, c.ResourceGroup, c.NSG)
-	nicPoller, err := c.nicc.BeginCreateOrUpdate(ctx, c.ResourceGroup, nicName, armnetwork.Interface{
-		Location: to.Ptr(c.Location),
-		Tags:     tags,
-		Properties: &armnetwork.InterfacePropertiesFormat{
-			IPConfigurations: []*armnetwork.InterfaceIPConfiguration{{
-				Name: to.Ptr("ipconfig"),
-				Properties: &armnetwork.InterfaceIPConfigurationPropertiesFormat{
-					PrivateIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodDynamic),
-					Subnet:                    &armnetwork.Subnet{ID: to.Ptr(subnetID)},
-					PublicIPAddress:           &armnetwork.PublicIPAddress{ID: to.Ptr(pipID)},
-				},
-			}},
-			NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: to.Ptr(nsgID)},
-		},
-	}, nil)
-	if err != nil {
-		return Server{}, fmt.Errorf("begin nic: %w", err)
-	}
-	nicResp, err := nicPoller.PollUntilDone(ctx, nil)
-	if err != nil {
-		return Server{}, fmt.Errorf("nic: %w", err)
-	}
-	nicID := *nicResp.ID
 
 	var osProfile *armcompute.OSProfile
 	var osDiskMode string
 	var imageReference *armcompute.ImageReference
 	osDisk := &armcompute.OSDisk{Name: to.Ptr(diskName)}
 	if cfg.AzureSnapshot != "" {
-		diskID, err := c.createManagedDiskFromSnapshot(ctx, diskName, cfg.AzureSnapshot, tags)
-		if err != nil {
-			return Server{}, err
-		}
 		osDisk.CreateOption = to.Ptr(armcompute.DiskCreateOptionTypesAttach)
 		osDisk.OSType = to.Ptr(azureOSDiskType(cfg.TargetOS))
 		osDisk.Caching = to.Ptr(armcompute.CachingTypesReadWrite)
-		osDisk.ManagedDisk = &armcompute.ManagedDiskParameters{ID: to.Ptr(diskID)}
+		osDisk.DeleteOption = to.Ptr(armcompute.DiskDeleteOptionTypesDelete)
+		osDisk.ManagedDisk = &armcompute.ManagedDiskParameters{ID: to.Ptr(snapshotDiskID)}
 	} else {
 		osProfile, err = c.azureOSProfile(cfg, publicKey, name, leaseID)
 		if err != nil {
@@ -1015,6 +1016,12 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 			Version:   to.Ptr(c.Image.Version),
 		}
 	}
+	networkInterface := &armcompute.NetworkInterfaceReference{ID: to.Ptr(nicID)}
+	if cfg.AzureSnapshot != "" {
+		networkInterface.Properties = &armcompute.NetworkInterfaceReferenceProperties{
+			DeleteOption: to.Ptr(armcompute.DeleteOptionsDelete),
+		}
+	}
 	vmProperties := &armcompute.VirtualMachineProperties{
 		HardwareProfile: &armcompute.HardwareProfile{
 			VMSize: to.Ptr(armcompute.VirtualMachineSizeTypes(cfg.ServerType)),
@@ -1025,9 +1032,7 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 		},
 		OSProfile: osProfile,
 		NetworkProfile: &armcompute.NetworkProfile{
-			NetworkInterfaces: []*armcompute.NetworkInterfaceReference{{
-				ID: to.Ptr(nicID),
-			}},
+			NetworkInterfaces: []*armcompute.NetworkInterfaceReference{networkInterface},
 		},
 	}
 	if strings.EqualFold(cfg.Capacity.Market, "spot") {
@@ -1331,8 +1336,107 @@ func (c *AzureClient) azureOSProfile(cfg Config, publicKey, name, leaseID string
 	}, nil
 }
 
-func (c *AzureClient) createManagedDiskFromSnapshot(ctx context.Context, diskName, snapshotID string, tags map[string]*string) (string, error) {
-	poller, err := c.diskc.BeginCreateOrUpdate(ctx, c.ResourceGroup, diskName, armcompute.Disk{
+type azureSnapshotPrerequisiteResult struct {
+	kind string
+	id   string
+	err  error
+}
+
+func runAzureSnapshotPrerequisites(
+	ctx context.Context,
+	createNetwork func(context.Context) (string, error),
+	createDisk func(context.Context) (string, error),
+) (string, string, error) {
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan azureSnapshotPrerequisiteResult, 2)
+	go func() {
+		id, err := createNetwork(workCtx)
+		results <- azureSnapshotPrerequisiteResult{kind: "network", id: id, err: err}
+	}()
+	go func() {
+		id, err := createDisk(workCtx)
+		results <- azureSnapshotPrerequisiteResult{kind: "disk", id: id, err: err}
+	}()
+
+	var networkID string
+	var diskID string
+	var errs []error
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			errs = append(errs, result.err)
+			cancel()
+			continue
+		}
+		if result.kind == "network" {
+			networkID = result.id
+		} else {
+			diskID = result.id
+		}
+	}
+	if len(errs) > 0 {
+		return "", "", joinErrors(errs)
+	}
+	return networkID, diskID, nil
+}
+
+func (c *AzureClient) createLeaseNetwork(ctx context.Context, pipName, nicName string, tags map[string]*string) (string, error) {
+	pipPoller, err := c.pipc.BeginCreateOrUpdate(ctx, c.ResourceGroup, pipName, armnetwork.PublicIPAddress{
+		Location: to.Ptr(c.Location),
+		Tags:     tags,
+		SKU: &armnetwork.PublicIPAddressSKU{
+			Name: to.Ptr(armnetwork.PublicIPAddressSKUNameStandard),
+		},
+		Properties: &armnetwork.PublicIPAddressPropertiesFormat{
+			PublicIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodStatic),
+		},
+	}, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin public ip: %w", err)
+	}
+	pipResp, err := pipPoller.PollUntilDone(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("public ip: %w", err)
+	}
+	if pipResp.ID == nil || *pipResp.ID == "" {
+		return "", errors.New("public ip has no resource id")
+	}
+
+	subnetID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s",
+		c.SubscriptionID, c.ResourceGroup, c.VNet, c.Subnet)
+	nsgID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkSecurityGroups/%s",
+		c.SubscriptionID, c.ResourceGroup, c.NSG)
+	nicPoller, err := c.nicc.BeginCreateOrUpdate(ctx, c.ResourceGroup, nicName, armnetwork.Interface{
+		Location: to.Ptr(c.Location),
+		Tags:     tags,
+		Properties: &armnetwork.InterfacePropertiesFormat{
+			IPConfigurations: []*armnetwork.InterfaceIPConfiguration{{
+				Name: to.Ptr("ipconfig"),
+				Properties: &armnetwork.InterfaceIPConfigurationPropertiesFormat{
+					PrivateIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodDynamic),
+					Subnet:                    &armnetwork.Subnet{ID: to.Ptr(subnetID)},
+					PublicIPAddress:           &armnetwork.PublicIPAddress{ID: pipResp.ID},
+				},
+			}},
+			NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: to.Ptr(nsgID)},
+		},
+	}, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin nic: %w", err)
+	}
+	nicResp, err := nicPoller.PollUntilDone(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("nic: %w", err)
+	}
+	if nicResp.ID == nil || *nicResp.ID == "" {
+		return "", errors.New("nic has no resource id")
+	}
+	return *nicResp.ID, nil
+}
+
+func (c *AzureClient) createManagedDiskFromSnapshot(ctx context.Context, diskName, snapshotID, sku string, tags map[string]*string) (string, error) {
+	disk := armcompute.Disk{
 		Location: to.Ptr(c.Location),
 		Tags:     tags,
 		Properties: &armcompute.DiskProperties{
@@ -1341,7 +1445,11 @@ func (c *AzureClient) createManagedDiskFromSnapshot(ctx context.Context, diskNam
 				SourceResourceID: to.Ptr(snapshotID),
 			},
 		},
-	}, nil)
+	}
+	if sku != "" {
+		disk.SKU = &armcompute.DiskSKU{Name: to.Ptr(armcompute.DiskStorageAccountTypes(sku))}
+	}
+	poller, err := c.diskc.BeginCreateOrUpdate(ctx, c.ResourceGroup, diskName, disk, nil)
 	if err != nil {
 		return "", fmt.Errorf("begin snapshot disk: %w", err)
 	}
@@ -1563,7 +1671,7 @@ func (c *AzureClient) DeleteServer(ctx context.Context, name string) error {
 	return c.deleteVMResources(ctx, name)
 }
 
-func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshotName string) (image NativeCheckpointImage, err error) {
+func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshotName, sku string) (image NativeCheckpointImage, err error) {
 	vm, err := c.vmc.Get(ctx, c.ResourceGroup, vmName, nil)
 	if err != nil {
 		return NativeCheckpointImage{}, fmt.Errorf("get snapshot source vm: %w", err)
@@ -1592,7 +1700,7 @@ func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshot
 	if _, err := deallocate.PollUntilDone(ctx, nil); err != nil {
 		return NativeCheckpointImage{}, fmt.Errorf("deallocate snapshot source vm: %w", err)
 	}
-	poller, err := c.snapc.BeginCreateOrUpdate(ctx, c.ResourceGroup, snapshotName, armcompute.Snapshot{
+	snapshot := armcompute.Snapshot{
 		Location: to.Ptr(c.Location),
 		Tags:     azureSharedTags(),
 		Properties: &armcompute.SnapshotProperties{
@@ -1601,7 +1709,11 @@ func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshot
 				SourceResourceID: to.Ptr(diskID),
 			},
 		},
-	}, nil)
+	}
+	if sku != "" {
+		snapshot.SKU = &armcompute.SnapshotSKU{Name: to.Ptr(armcompute.SnapshotStorageAccountTypes(sku))}
+	}
+	poller, err := c.snapc.BeginCreateOrUpdate(ctx, c.ResourceGroup, snapshotName, snapshot, nil)
 	if err != nil {
 		return NativeCheckpointImage{}, fmt.Errorf("begin OS disk snapshot: %w", err)
 	}
