@@ -56,8 +56,6 @@ const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: strin
 };
 const snapshotDeleteBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const securityGroupVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
-// EC2 can accept TerminateInstances several minutes before a single-capacity Mac host is reusable.
-const macHostCapacityBackoffMs = [5_000, 10_000, 20_000, 30_000, ...Array(9).fill(60_000)];
 
 export function awsManagedSecurityGroupName(
   config: Pick<LeaseConfig, "providerKey"> & Partial<Pick<LeaseConfig, "awsSGName">>,
@@ -331,7 +329,22 @@ export class EC2SpotClient {
           ? ""
           : await this.resolveAMI(config);
       const securityGroupID = await this.ensureSecurityGroup(config, options);
-      const candidates = awsLaunchCandidates(config);
+      const pinnedMacHostID = config.target === "macos" ? config.hostID || config.awsMacHostID : "";
+      // An explicit Mac host is tied to one hardware family. Resolve that family once so a
+      // defaulted --type cannot send an incompatible instance type to the pinned host.
+      const pinnedMacHostType = pinnedMacHostID
+        ? await this.macHostInstanceType(pinnedMacHostID)
+        : "";
+      if (
+        pinnedMacHostType &&
+        config.serverTypeExplicit &&
+        pinnedMacHostType !== config.serverType
+      ) {
+        throw new Error(
+          `EC2 Mac Dedicated Host ${pinnedMacHostID} requires ${pinnedMacHostType}, not requested ${config.serverType}`,
+        );
+      }
+      const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
       const failures: string[] = [];
       const attempts: ProvisioningAttempt[] = [];
       const quotaCache = new Map<string, number | undefined>();
@@ -1130,29 +1143,6 @@ export class EC2SpotClient {
       const message = error instanceof Error ? error.message : String(error);
       if (
         config.target === "macos" &&
-        configuredMacHostID &&
-        isAWSInsufficientCapacityOnHostError(message)
-      ) {
-        let lastError = error;
-        for (const delay of macHostCapacityBackoffMs) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- pinned Mac host reuse needs bounded EC2 capacity polling.
-          await sleep(delay);
-          try {
-            // oxlint-disable-next-line eslint/no-await-in-loop -- retries the same explicit host; never fails over.
-            return await run(configuredMacHostID);
-          } catch (retryError) {
-            const retryMessage =
-              retryError instanceof Error ? retryError.message : String(retryError);
-            if (!isAWSInsufficientCapacityOnHostError(retryMessage)) {
-              throw retryError;
-            }
-            lastError = retryError;
-          }
-        }
-        throw lastError;
-      }
-      if (
-        config.target === "macos" &&
         ((configuredMacHostID && isAWSInvalidHostIDError(message)) ||
           (!configuredMacHostID && isAWSInsufficientCapacityOnHostError(message)))
       ) {
@@ -1420,6 +1410,17 @@ export class EC2SpotClient {
     });
     const root = await this.ec2("DescribeHosts", params);
     return items(record(root["hostSet"])["item"]).map((host) => this.macHostFromDescribeHost(host));
+  }
+
+  private async macHostInstanceType(hostID: string): Promise<string> {
+    const host = (await this.describeMacHostsByID([hostID]))[0];
+    if (!host) {
+      throw new Error(`AWS EC2 Mac Dedicated Host not found: ${hostID}`);
+    }
+    if (!host.instanceType.startsWith("mac")) {
+      throw new Error(`AWS Dedicated Host ${hostID} is not an EC2 Mac host`);
+    }
+    return host.instanceType;
   }
 
   private macHostsFromAllocatedIDs(

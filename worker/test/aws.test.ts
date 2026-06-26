@@ -1550,10 +1550,9 @@ describe("aws provider", () => {
     expect(result.server.hostID).toBe("h-spare");
   });
 
-  it("waits for an explicit macOS host pin to regain capacity without failing over", async () => {
-    vi.useFakeTimers();
+  it("fails an occupied explicit macOS host pin without retrying or failing over", async () => {
     const runHosts: string[] = [];
-    let runCalls = 0;
+    const describedHostIDs: string[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1585,22 +1584,115 @@ describe("aws provider", () => {
   </imagesSet>
 </DescribeImagesResponse>`);
         }
+        if (action === "DescribeHosts") {
+          describedHostIDs.push(params.get("HostId.1") ?? "");
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeHostsResponse>
+  <hostSet>
+    <item>
+      <hostId>h-occupied</hostId>
+      <hostState>available</hostState>
+      <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+    </item>
+  </hostSet>
+</DescribeHostsResponse>`);
+        }
         if (action === "RunInstances") {
           runHosts.push(params.get("Placement.HostId") ?? "");
-          runCalls += 1;
-          if (runCalls < 3) {
-            return ec2XMLResponse(
-              `<Response><Errors><Error><Code>InsufficientCapacityOnHost</Code><Message>Dedicated host h-occupied has insufficient capacity.</Message></Error></Errors></Response>`,
-              400,
-            );
-          }
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>InsufficientCapacityOnHost</Code><Message>Dedicated host h-occupied has insufficient capacity.</Message></Error></Errors></Response>`,
+            400,
+          );
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+      } as never,
+      "eu-west-1",
+    );
+    await expect(
+      client.createServerWithFallback(
+        leaseConfig({
+          provider: "aws",
+          target: "macos",
+          capacity: { market: "on-demand" },
+          hostID: "h-occupied",
+          serverType: "mac2.metal",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+      ),
+    ).rejects.toThrow("InsufficientCapacityOnHost");
+    expect(describedHostIDs).toEqual(["h-occupied"]);
+    expect(runHosts).toEqual(["h-occupied"]);
+  });
+
+  it("uses the pinned macOS host family when the server type was defaulted", async () => {
+    const runTypes: string[] = [];
+    const describedHostIDs: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) return securityGroupResponse;
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+        }
+        if (action === "DescribeHosts") {
+          describedHostIDs.push(params.get("HostId.1") ?? "");
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeHostsResponse>
+  <hostSet>
+    <item>
+      <hostId>h-m4</hostId>
+      <hostState>available</hostState>
+      <hostProperties><instanceType>mac-m4.metal</instanceType></hostProperties>
+    </item>
+  </hostSet>
+</DescribeHostsResponse>`);
+        }
+        if (action === "DescribeImages") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-m4</imageId>
+      <name>macos</name>
+      <imageState>available</imageState>
+      <creationDate>2026-05-01T00:00:00.000Z</creationDate>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`);
+        }
+        if (action === "RunInstances") {
+          runTypes.push(params.get("InstanceType") ?? "");
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <RunInstancesResponse>
   <instancesSet>
     <item>
-      <instanceId>i-mac2</instanceId>
-      <instanceType>mac2.metal</instanceType>
-      <placement><hostId>h-occupied</hostId></placement>
+      <instanceId>i-m4</instanceId>
+      <instanceType>mac-m4.metal</instanceType>
+      <placement><hostId>h-m4</hostId></placement>
       <ipAddress>203.0.113.44</ipAddress>
       <instanceState><name>pending</name></instanceState>
     </item>
@@ -1623,26 +1715,23 @@ describe("aws provider", () => {
       } as never,
       "eu-west-1",
     );
-    const creation = client.createServerWithFallback(
+    const result = await client.createServerWithFallback(
       leaseConfig({
         provider: "aws",
         target: "macos",
         capacity: { market: "on-demand" },
-        hostID: "h-occupied",
-        serverType: "mac2.metal",
+        hostID: "h-m4",
         sshPublicKey: "ssh-ed25519 test",
       }),
       "cbx_abcdef123456",
       "violet-prawn",
       "alice@example.com",
     );
-    await vi.waitFor(() => expect(runCalls).toBe(1));
-    await vi.advanceTimersByTimeAsync(5_000);
-    await vi.waitFor(() => expect(runCalls).toBe(2));
-    await vi.advanceTimersByTimeAsync(10_000);
 
-    await expect(creation).resolves.toMatchObject({ server: { hostID: "h-occupied" } });
-    expect(runHosts).toEqual(["h-occupied", "h-occupied", "h-occupied"]);
+    expect(describedHostIDs).toEqual(["h-m4"]);
+    expect(runTypes).toEqual(["mac-m4.metal"]);
+    expect(result.serverType).toBe("mac-m4.metal");
+    expect(result.server.hostID).toBe("h-m4");
   });
 
   it("does not reuse a pinned macOS AMI after changing fallback host families", async () => {

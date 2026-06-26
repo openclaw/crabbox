@@ -1661,19 +1661,24 @@ export class FleetCoordinator {
       );
     }
     const requestedHostID = config.hostID || config.awsMacHostID;
-    const reusesOwnedReleasedMacHost =
-      requestedHostID &&
-      config.provider === "aws" &&
-      config.target === "macos" &&
-      (await this.leaseRecords()).some(
-        (lease) =>
-          lease.state === "released" &&
-          lease.owner === owner &&
-          lease.org === org &&
-          lease.provider === "aws" &&
-          lease.target === "macos" &&
-          leaseHostID(lease) === requestedHostID,
-      );
+    const retainedMacHostLease =
+      requestedHostID && config.provider === "aws" && config.target === "macos"
+        ? (await this.leaseRecords())
+            .filter(
+              (lease) =>
+                lease.state === "released" &&
+                lease.releaseDeletesServer === false &&
+                Boolean(lease.cloudID) &&
+                lease.owner === owner &&
+                lease.org === org &&
+                lease.provider === "aws" &&
+                lease.target === "macos" &&
+                leaseHostID(lease) === requestedHostID &&
+                (!config.serverTypeExplicit || lease.serverType === config.serverType),
+            )
+            .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
+        : undefined;
+    const reusesOwnedReleasedMacHost = Boolean(retainedMacHostLease);
     if (!isAdminRequest(request) && requestedHostID && !reusesOwnedReleasedMacHost) {
       return json(
         {
@@ -1682,6 +1687,25 @@ export class FleetCoordinator {
         },
         { status: 403 },
       );
+    }
+    if (retainedMacHostLease) {
+      const missingCapabilities = [
+        config.desktop && !retainedMacHostLease.desktop ? "desktop" : "",
+        config.browser && !retainedMacHostLease.browser ? "browser" : "",
+        config.code && !retainedMacHostLease.code ? "code" : "",
+      ].filter(Boolean);
+      if (missingCapabilities.length > 0) {
+        return json(
+          {
+            error: "retained_instance_capability_mismatch",
+            message: `retained EC2 Mac instance lacks requested capabilities: ${missingCapabilities.join(", ")}`,
+          },
+          { status: 409 },
+        );
+      }
+    }
+    if (retainedMacHostLease && !config.serverTypeExplicit) {
+      config = { ...config, serverType: retainedMacHostLease.serverType };
     }
     config =
       (await this.provider(
@@ -1720,6 +1744,136 @@ export class FleetCoordinator {
       config.ttlSeconds,
       providerHourlyUSD,
     );
+    if (!workspaceID && retainedMacHostLease) {
+      const reactivation = await this.state.runExclusive(async () => {
+        const leases = await this.leaseRecords();
+        const current = leases.find(
+          (lease) =>
+            lease.id === retainedMacHostLease.id &&
+            lease.state === "released" &&
+            lease.releaseDeletesServer === false &&
+            Boolean(lease.cloudID) &&
+            lease.owner === owner &&
+            lease.org === org &&
+            lease.provider === "aws" &&
+            lease.target === "macos" &&
+            leaseHostID(lease) === requestedHostID &&
+            lease.serverType === config.serverType,
+        );
+        if (!current) {
+          return undefined;
+        }
+        const blocked = await reservationGuard?.();
+        if (blocked) {
+          return blocked;
+        }
+        const now = new Date();
+        let reactivated: LeaseRecord = {
+          ...current,
+          profile: config.profile,
+          class: config.class,
+          requestedServerType: config.serverType,
+          keep: config.keep,
+          ttlSeconds: config.ttlSeconds,
+          idleTimeoutSeconds: config.idleTimeoutSeconds,
+          estimatedHourlyUSD: cost.hourlyUSD,
+          maxEstimatedUSD: cost.maxUSD,
+          state: "active",
+          createdAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+          lastTouchedAt: now.toISOString(),
+          expiresAt: leaseExpiresAt(
+            now,
+            now,
+            config.ttlSeconds,
+            config.idleTimeoutSeconds,
+          ).toISOString(),
+        };
+        const sourceCIDRs = awsLeaseSSHSourceCIDRs(
+          config,
+          providerAccessContext(
+            requestSourceCIDRs(request),
+            mergeProviderAccessState(leases, await this.providerAccessRecords()),
+          ),
+        );
+        reactivated = withLeaseSSHSourceCIDRs(
+          reactivated,
+          uniqueNonEmpty([...(current.network?.sshSourceCIDRs ?? []), ...sourceCIDRs]),
+          Boolean(
+            current.network?.sshSourceCIDRsComplete ||
+            sourceCIDRs.length > 0 ||
+            awsGlobalSSHSourceCIDRs(this.env).length > 0,
+          ),
+        );
+        if (config.awsSSHCIDRsPinned) {
+          reactivated.network = {
+            ...reactivated.network,
+            sshPinnedSourceCIDRs: uniqueNonEmpty([
+              ...(current.network?.sshPinnedSourceCIDRs ?? []),
+              ...config.awsSSHCIDRs,
+            ]),
+          };
+        }
+        delete reactivated.releasedAt;
+        delete reactivated.endedAt;
+        delete reactivated.releaseDeletesServer;
+        delete reactivated.failureError;
+        delete reactivated.provisioningRequestStartedAt;
+        clearLeaseCleanupMetadata(reactivated);
+        const otherLeases = mergeProviderAccessState(
+          leases.filter((lease) => lease.id !== current.id),
+          await this.providerAccessRecords(),
+        );
+        const limitError = enforceCostLimits(otherLeases, reactivated, costLimits(this.env), now);
+        if (limitError) {
+          return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
+        }
+        await this.putLease(reactivated);
+        await this.markAWSIngressReconcilePending(reactivated);
+        await this.scheduleAlarm();
+        return { previous: structuredClone(current), reactivated };
+      });
+      if (reactivation instanceof Response) {
+        return reactivation;
+      }
+      if (reactivation) {
+        try {
+          if (provider.reconcileLeaseAccess) {
+            const leases = await this.leaseRecords();
+            const providerAccessLeases = await this.providerAccessRecords();
+            await this.withAWSIngressOperationLock(() =>
+              provider.reconcileLeaseAccess!(
+                reactivation.reactivated,
+                providerAccessContext(
+                  requestSourceCIDRs(request),
+                  mergeProviderAccessState(leases, providerAccessLeases),
+                ),
+              ),
+            );
+          }
+        } catch (error) {
+          await this.state.runExclusive(async () => {
+            const current = await this.getLease(reactivation.reactivated.id);
+            if (
+              current?.state === "active" &&
+              current.updatedAt === reactivation.reactivated.updatedAt
+            ) {
+              await this.putLease(reactivation.previous);
+              await this.scheduleAlarm();
+            }
+          });
+          throw error;
+        }
+        return json({ lease: reactivation.reactivated }, { status: 201 });
+      }
+      return json(
+        {
+          error: "retained_instance_unavailable",
+          message: "retained EC2 Mac instance is no longer available for reactivation",
+        },
+        { status: 409 },
+      );
+    }
     const reservation = await this.state.runExclusive(async () => {
       const blocked = await reservationGuard?.();
       if (blocked) {
