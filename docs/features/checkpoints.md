@@ -245,6 +245,9 @@ crabbox checkpoint fork chk_abc123 --count 3 --slug update-flow
 - Native forks acquire a lease from the provider using the snapshot/image, wait
   for boot, then relocate the snapshotted workdir to the new lease's standard
   path.
+- Azure Windows native forks are the exception: they preserve the snapshotted
+  filesystem in place and report `workdir=-` because Windows desktop leases do
+  not use Crabbox's POSIX repository workdir relocation flow.
 - Archive forks acquire a standard lease, upload the tarball, and extract it.
 - Accepts the standard lease-create flags (`--class`, `--type`, `--market`,
   `--slug`, etc.), `--keep` (default true), `--count`, `--workdir`, and
