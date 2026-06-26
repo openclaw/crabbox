@@ -124,6 +124,8 @@ resolves to a disk snapshot where the provider supports one.
   deallocates the source for a consistent snapshot, restarts it after snapshot
   creation (including failure paths), and rotates SSH host, SSH login, Windows,
   and loopback-only VNC credentials when each fork boots.
+- Azure snapshot names use letters, digits, underscores, and hyphens and are
+  limited to 80 characters; generated names retain a unique timestamp suffix.
 
 Before a native snapshot, Crabbox cleans the source: on Linux it runs
 `cloud-init clean --logs` (so a forked box regenerates SSH host keys) and
