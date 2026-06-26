@@ -69,6 +69,7 @@
 
 ### Fixed
 
+- Mounted the implicit local-container Docker-socket cache root at `/work/crabbox` while preserving explicit work roots, restoring access for the unprivileged guest user. Thanks @hxy91819.
 - Rewrote credential-bearing user config atomically so failed updates preserve the previous readable file, owner-only permissions, and configured symlinks. Thanks @clawsweeper.
 - Scoped managed AWS security groups per coordinator actor and preserved lease-declared CIDRs across heartbeats, preventing concurrent leases from revoking SSH and WebVNC access.
 - Allowed owners to reactivate their own retained EC2 Mac instances without admin-token pinning, avoiding replacement launches while the single-capacity host is occupied or undergoing AWS's post-termination sanitization.
