@@ -123,6 +123,18 @@ Crabbox Azure fallback lists it skips 2-core, 4-core, and no-local-disk SKUs
 that the preview cannot support. `azure.osDisk: auto` is accepted for
 compatibility and resolves to managed.
 
+Snapshot performance can be selected explicitly without changing those
+defaults. `azure.snapshotSKU` / `--azure-snapshot-sku` controls the storage SKU
+used when Crabbox creates an OS disk checkpoint. `azure.osDiskSKU` /
+`--azure-os-disk-sku` controls the managed disk created when a checkpoint is
+forked. For latency-sensitive Windows forks, use `Premium_LRS` for both:
+
+```sh
+crabbox checkpoint create --provider azure --target windows --id <lease> \
+  --strategy disk-snapshot --no-reboot=false --azure-snapshot-sku Premium_LRS
+crabbox checkpoint fork <checkpoint> --azure-os-disk-sku Premium_LRS
+```
+
 ## Quick Start With `az login`
 
 The simplest setup uses the Azure CLI — no environment variables required:

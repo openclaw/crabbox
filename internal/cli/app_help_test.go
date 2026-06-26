@@ -67,6 +67,18 @@ func TestTopLevelAndCommandHelpDescribeInteractiveConnect(t *testing.T) {
 	}
 }
 
+func TestCheckpointCreateHelpListsAzureSnapshotSKU(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{"checkpoint", "create", "--help"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 0 {
+		t.Fatalf("crabbox checkpoint create --help error=%v stderr=%q", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "-azure-snapshot-sku string") {
+		t.Fatalf("checkpoint create help omitted Azure snapshot SKU:\n%s", stderr.String())
+	}
+}
+
 func helpLineContaining(text, want string) string {
 	for _, line := range strings.Split(text, "\n") {
 		if strings.Contains(line, want) {
