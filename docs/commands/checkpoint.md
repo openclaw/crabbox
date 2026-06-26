@@ -244,6 +244,9 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 - *Native:* acquire a new lease from the checkpoint snapshot/image, wait for
   boot, relocate the workdir from the old lease path to the new one, then print
   the lease id and slug.
+- *Azure Windows native:* preserve the snapshotted filesystem in place and
+  print `workdir=-`; these desktop leases do not use the POSIX workdir
+  relocation flow.
 - *Archive:* acquire a standard new lease, upload and extract the tarball into
   the workdir, then print the lease id and slug.
 - *Fan-out:* `--count <n>` repeats the same provider-neutral fork flow. When
