@@ -232,8 +232,8 @@ already allocated Dedicated Host. Crabbox can discover an available host in the
 selected region, or pin one with `CRABBOX_HOST_ID` / `hostId`
 (`CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain AWS compatibility
 aliases). Brokered host pinning requires admin authentication unless the host
-belongs to the same owner and organization's released lease; other users rely
-on automatic available-host discovery. Use `--market on-demand`, and
+has a retained instance from the same owner and organization's released lease;
+other users rely on automatic available-host discovery. Use `--market on-demand`, and
 expect EC2 Mac host lifecycle rules to dominate cleanup and cost. Warmup never
 allocates a Dedicated Host implicitly; trusted operators manage host lifecycle with
 `crabbox admin hosts offerings|quota|list|allocate|release --provider aws --target macos`.

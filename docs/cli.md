@@ -364,8 +364,8 @@ Managed provider targets are intentionally narrow:
 - AWS also supports EC2 Mac (`--target macos`) when an available Mac Dedicated
   Host exists in the selected region. Brokered mode can discover an available
   host; explicit brokered host pinning requires admin authentication unless the
-  owner is reusing a host from their own released lease. Direct mode requires
-  `CRABBOX_HOST_ID` or `hostId`. `CRABBOX_AWS_MAC_HOST_ID`
+  owner is reactivating the retained instance from their own released lease.
+  Direct mode requires `CRABBOX_HOST_ID` or `hostId`. `CRABBOX_AWS_MAC_HOST_ID`
   and `aws.macHostId` remain AWS compatibility aliases. Azure has no managed macOS
   target.
 - Existing macOS and Windows machines belong on `provider: ssh`.
