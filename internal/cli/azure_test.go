@@ -310,6 +310,24 @@ func TestAzureWindowsSnapshotRehydrateRotatesServiceVNCCredentials(t *testing.T)
 	}
 }
 
+func TestAzureWindowsSnapshotRehydrateDefinesVNCPathWithoutDesktop(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeWSL2
+	cfg.Desktop = false
+	cfg.SSHUser = "crabbox"
+
+	script := azureWindowsSnapshotRehydratePowerShell(cfg, "ssh-ed25519 test")
+	definition := `$vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"`
+	reset := `Remove-Item -LiteralPath $vncPasswordPath, $windowsUsernamePath, $windowsPasswordPath`
+	definitionIndex := strings.Index(script, definition)
+	resetIndex := strings.Index(script, reset)
+	if definitionIndex < 0 || resetIndex < 0 || definitionIndex > resetIndex {
+		t.Fatalf("snapshot credential reset must define the VNC password path before use")
+	}
+}
+
 func TestAzureWindowsVMSizeCandidatesForClass(t *testing.T) {
 	t.Parallel()
 	got := azureWindowsVMSizeCandidatesForClass("beast")

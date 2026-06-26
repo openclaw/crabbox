@@ -564,7 +564,11 @@ New-ItemProperty -Force -Path $tightVNCServiceKey -Name AcceptHttpConnections -P
 }
 
 func azureWindowsSnapshotResetCredentialsPowerShell() string {
-	return "\nRemove-Item -LiteralPath $vncPasswordPath, $windowsUsernamePath, $windowsPasswordPath -Force -ErrorAction SilentlyContinue\nGet-ChildItem -LiteralPath \"$env:ProgramData\\ssh\" -Filter \"ssh_host_*\" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue\n"
+	return `
+$vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"
+Remove-Item -LiteralPath $vncPasswordPath, $windowsUsernamePath, $windowsPasswordPath -Force -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath "$env:ProgramData\ssh" -Filter "ssh_host_*" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+`
 }
 
 func azureWindowsBootstrapPowerShell(cfg Config, publicKey string) string {
