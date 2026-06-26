@@ -433,6 +433,10 @@ also receives a coordinator-generated SSH host identity whose fingerprint is
 persisted before provisioning, so first attachment does not rely on TOFU.
 The versioned workspace `attachUrl` is a bearer-authenticated server-to-server
 endpoint for control planes such as Crabfleet, not a browser portal URL.
+Desktop workspaces report `capabilities.nativeVnc=true` when the native CLI
+handoff is available. This does not imply a browser desktop endpoint:
+`capabilities.vnc` and `capabilities.desktop` remain false unless
+`POST /v1/workspaces/:id/connections/desktop` is supported.
 
 When `CRABBOX_WORKSPACE_PREWARM_COUNT` is positive, the coordinator keeps that
 many hidden ready workspaces for each organization with active workspace demand.
