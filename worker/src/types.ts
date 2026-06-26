@@ -156,6 +156,7 @@ export interface LeaseRequest {
   awsProfile?: string;
   awsRootGB?: number;
   awsSSHCIDRs?: string[];
+  awsSSHCIDRsPinned?: boolean;
   awsMacHostID?: string;
   azureLocation?: string;
   azureImage?: string;
@@ -443,6 +444,7 @@ export interface ReadyPoolReturnRequest {
 
 export interface LeaseNetworkState {
   sshSourceCIDRs?: string[];
+  sshPinnedSourceCIDRs?: string[];
   sshSourceCIDRsComplete?: boolean;
   awsSecurityGroupID?: string;
   awsSecurityGroupName?: string;

@@ -828,6 +828,7 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"awsProfile":                      cfg.AWSProfile,
 		"awsRootGB":                       cfg.AWSRootGB,
 		"awsSSHCIDRs":                     cfg.AWSSSHCIDRs,
+		"awsSSHCIDRsPinned":               cfg.AWSSSHCIDRsPinned,
 		"awsMacHostID":                    cfg.AWSMacHostID,
 		"azureLocation":                   cfg.AzureLocation,
 		"azureImage":                      cfg.AzureImage,

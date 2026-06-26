@@ -66,6 +66,7 @@ type Config struct {
 	AWSProfile                    string
 	AWSRootGB                     int32
 	AWSSSHCIDRs                   []string
+	AWSSSHCIDRsPinned             bool
 	AWSMacHostID                  string
 	AWSLambdaMicroVM              AWSLambdaMicroVMConfig
 	AzureSubscription             string

@@ -56,6 +56,7 @@ export interface LeaseConfig {
   awsProfile: string;
   awsRootGB: number;
   awsSSHCIDRs: string[];
+  awsSSHCIDRsPinned: boolean;
   awsMacHostID: string;
   azureLocation: string;
   azureImage: string;
@@ -290,6 +291,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     awsProfile: input.awsProfile ?? "",
     awsRootGB: input.awsRootGB ?? 400,
     awsSSHCIDRs,
+    awsSSHCIDRsPinned: input.awsSSHCIDRsPinned ?? (input.awsSSHCIDRs?.length ?? 0) > 0,
     awsMacHostID: input.awsMacHostID ?? "",
     azureLocation: input.azureLocation ?? "",
     azureImage,

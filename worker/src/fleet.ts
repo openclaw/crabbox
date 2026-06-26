@@ -15355,6 +15355,7 @@ export class AWSProvider implements CloudProvider {
       ...nextLeaseWithSources,
       network: {
         ...nextLeaseWithSources.network,
+        ...(config.awsSSHCIDRsPinned ? { sshPinnedSourceCIDRs: config.awsSSHCIDRs } : {}),
         ...(configuredSecurityGroupID
           ? { awsSecurityGroupID: configuredSecurityGroupID }
           : { awsSecurityGroupName: managedSecurityGroupName }),
@@ -15402,7 +15403,13 @@ export class AWSProvider implements CloudProvider {
     }
     const sourceCIDRs = context.requestSourceCIDRs;
     const nextLease =
-      sourceCIDRs.length > 0 ? withLeaseSSHSourceCIDRs(lease, sourceCIDRs, true) : lease;
+      sourceCIDRs.length > 0
+        ? withLeaseSSHSourceCIDRs(
+            lease,
+            uniqueNonEmpty([...(lease.network?.sshPinnedSourceCIDRs ?? []), ...sourceCIDRs]),
+            true,
+          )
+        : lease;
     const activeLeases = replaceProviderAccessState(context.activeLeases, nextLease);
     try {
       await this.reconcileLeaseAccess(nextLease, { ...context, activeLeases });

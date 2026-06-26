@@ -9863,6 +9863,51 @@ describe("fleet lease identity and idle", () => {
     expect(otherPrepared.lease.network?.awsSecurityGroupName).not.toBe(managedGroupName);
   });
 
+  it("preserves configured AWS SSH CIDRs when refreshing lease access", async () => {
+    const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+    vi.spyOn(provider, "reconcileLeaseAccess").mockResolvedValue();
+    expect(
+      leaseConfig({
+        provider: "aws",
+        awsSSHCIDRs: ["192.0.2.7/32"],
+        sshPublicKey: "ssh-ed25519 test",
+      }).awsSSHCIDRsPinned,
+    ).toBe(true);
+    expect(
+      leaseConfig({
+        provider: "aws",
+        awsSSHCIDRs: ["192.0.2.7/32"],
+        awsSSHCIDRsPinned: false,
+        sshPublicKey: "ssh-ed25519 test",
+      }).awsSSHCIDRsPinned,
+    ).toBe(false);
+    const lease = testLease({
+      provider: "aws",
+      network: {
+        sshSourceCIDRs: ["0.0.0.0/0"],
+        sshPinnedSourceCIDRs: ["0.0.0.0/0"],
+        sshSourceCIDRsComplete: true,
+      },
+    });
+
+    const refreshed = await provider.refreshLeaseAccess(lease, {
+      requestSourceCIDRs: ["203.0.113.7/32"],
+      activeLeases: [lease],
+    });
+
+    expect(refreshed?.network?.sshSourceCIDRs).toEqual(["0.0.0.0/0", "203.0.113.7/32"]);
+
+    const dynamic = testLease({
+      provider: "aws",
+      network: { sshSourceCIDRs: ["198.51.100.7/32"], sshSourceCIDRsComplete: true },
+    });
+    const refreshedDynamic = await provider.refreshLeaseAccess(dynamic, {
+      requestSourceCIDRs: ["203.0.113.8/32"],
+      activeLeases: [dynamic],
+    });
+    expect(refreshedDynamic?.network?.sshSourceCIDRs).toEqual(["203.0.113.8/32"]);
+  });
+
   it("reports each AWS fallback region before provisioning mutates it", async () => {
     const attempts: string[] = [];
     const targets: string[] = [];
