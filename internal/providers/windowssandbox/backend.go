@@ -22,6 +22,8 @@ type backend struct {
 
 var windowsSandboxHostOS = runtime.GOOS
 
+const windowsSandboxProcessNames = "WindowsSandbox,WindowsSandboxClient,WindowsSandboxServer,WindowsSandboxRemoteSession"
+
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	applyDefaults(&cfg)
 	return &backend{spec: spec, cfg: cfg, rt: rt}
@@ -477,7 +479,7 @@ func (b *backend) stopCanceledSandbox(ctx context.Context) {
 			"-ExecutionPolicy",
 			"Bypass",
 			"-Command",
-			`Get-Process -Name WindowsSandbox,WindowsSandboxClient -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue`,
+			`Get-Process -Name ` + windowsSandboxProcessNames + ` -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue`,
 		},
 		DisableOutputCapture: true,
 	})
@@ -619,7 +621,7 @@ func powershellEnvLines(env map[string]string) (string, error) {
 }
 
 func hostRunnerScript() string {
-	return strings.ReplaceAll(`param(
+	return strings.ReplaceAll(strings.ReplaceAll(`param(
   [Parameter(Mandatory=$true)][string]$WsbPath,
   [Parameter(Mandatory=$true)][string]$ControlDir,
   [int]$TimeoutSeconds = 5400,
@@ -634,7 +636,7 @@ $cancelFile = Join-Path $ControlDir 'cancel.txt'
 Remove-Item -LiteralPath $stdout,$stderr,$exitFile -Force -ErrorAction SilentlyContinue
 
 function Get-SandboxProcesses {
-  Get-Process -Name WindowsSandbox,WindowsSandboxClient -ErrorAction SilentlyContinue
+  Get-Process -Name __SANDBOX_PROCESS_NAMES__ -ErrorAction SilentlyContinue
 }
 
 $running = Get-SandboxProcesses
@@ -765,7 +767,7 @@ while ($true) {
   }
   Start-Sleep -Milliseconds 500
 }
-`, "\n", "\r\n")
+`, "__SANDBOX_PROCESS_NAMES__", windowsSandboxProcessNames), "\n", "\r\n")
 }
 
 func rejectWindowsSandboxRunOptions(spec ProviderSpec, req RunRequest) error {

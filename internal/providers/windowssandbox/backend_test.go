@@ -132,7 +132,7 @@ func TestHostRunnerScriptStopsActualSandboxProcessOnTimeout(t *testing.T) {
 		"function Get-SandboxProcesses",
 		"function Stop-SandboxSession",
 		"function Wait-SandboxSession",
-		"Get-Process -Name WindowsSandbox,WindowsSandboxClient -ErrorAction SilentlyContinue",
+		"Get-Process -Name " + windowsSandboxProcessNames + " -ErrorAction SilentlyContinue",
 		"$sandboxExe = (Get-Command WindowsSandbox.exe -ErrorAction Stop).Source",
 		"Start-Process -FilePath $sandboxExe",
 		"$startupGraceSeconds = [Math]::Min($TimeoutSeconds, 120)",
@@ -151,6 +151,34 @@ func TestHostRunnerScriptStopsActualSandboxProcessOnTimeout(t *testing.T) {
 	}
 	if strings.Contains(script, "Write-Error") {
 		t.Fatalf("host runner must not terminate before explicit lifecycle exit codes:\n%s", script)
+	}
+	for _, processName := range strings.Split(windowsSandboxProcessNames, ",") {
+		if !strings.Contains(script, processName) {
+			t.Fatalf("host runner missing sandbox process name %q:\n%s", processName, script)
+		}
+	}
+}
+
+func TestStopCanceledSandboxStopsLegacyAnd24H2Processes(t *testing.T) {
+	runner := &recordingRunner{}
+	be := &backend{rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	be.stopCanceledSandbox(context.Background())
+
+	if runner.name != "powershell.exe" {
+		t.Fatalf("cleanup runner name=%q", runner.name)
+	}
+	if !runner.disableOutputCapture {
+		t.Fatal("cleanup runner must stream without retaining output")
+	}
+	joined := strings.Join(runner.args, "\n")
+	wantCommand := "Get-Process -Name " + windowsSandboxProcessNames + " -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"
+	if !strings.Contains(joined, wantCommand) {
+		t.Fatalf("cleanup command missing %q: %#v", wantCommand, runner.args)
+	}
+	for _, processName := range strings.Split(windowsSandboxProcessNames, ",") {
+		if !strings.Contains(joined, processName) {
+			t.Fatalf("cleanup command missing sandbox process name %q: %#v", processName, runner.args)
+		}
 	}
 }
 
