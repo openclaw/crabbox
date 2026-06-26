@@ -896,6 +896,85 @@ func TestCreateContainerCanMountDockerSocket(t *testing.T) {
 	}
 }
 
+func TestCreateContainerMapsDefaultDockerSocketWorkRootToContainerPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("default Docker socket cache-root traversal bug is Linux-specific")
+	}
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	socketDir := t.TempDir()
+	socketPath := filepath.Join(socketDir, "docker.sock")
+	listener := listenUnixSocketOrSkip(t, socketPath)
+	defer listener.Close()
+	t.Setenv("DOCKER_HOST", "unix://"+socketPath)
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.LocalContainer.DockerSocket = true
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	cfg = b.configForRun()
+	hostWorkRoot := defaultDockerSocketWorkRoot()
+	if cfg.LocalContainer.WorkRoot != hostWorkRoot || cfg.WorkRoot != hostWorkRoot {
+		t.Fatalf("default host work root local=%q global=%q want %q", cfg.LocalContainer.WorkRoot, cfg.WorkRoot, hostWorkRoot)
+	}
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	_, _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	for _, want := range []string{
+		"--label\nhost_work_root=" + hostWorkRoot,
+		"--label\nwork_root=/work/crabbox",
+		"-e\nCRABBOX_WORK_ROOT=/work/crabbox",
+		"-v\n" + hostWorkRoot + ":/work/crabbox",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("default docker socket work root args missing %q:\n%s", want, args)
+		}
+	}
+	if strings.Contains(args, "-v\n"+hostWorkRoot+":"+hostWorkRoot) {
+		t.Fatalf("default docker socket work root mounted to host path inside container:\n%s", args)
+	}
+
+	container := inspectContainer{
+		ID:   "container1234567890",
+		Name: "/crabbox-blue",
+		Config: inspectConfig{
+			Image: "ubuntu:24.04",
+			Labels: map[string]string{
+				"crabbox":        "true",
+				"provider":       providerName,
+				"lease":          "cbx_123",
+				"slug":           "blue-lobster",
+				"state":          "ready",
+				"server_type":    "ubuntu:24.04",
+				"ssh_user":       "crabbox",
+				"docker_socket":  "1",
+				"host_work_root": hostWorkRoot,
+				"work_root":      "/work/crabbox",
+			},
+		},
+		State: inspectState{Status: "running", Running: true},
+		NetworkSettings: inspectNetworking{
+			Ports: map[string][]inspectPort{"2222/tcp": {{HostIP: "127.0.0.1", HostPort: "49153"}}},
+		},
+	}
+	lease, err := b.prepareLease(context.Background(), cfg, container, "cbx_123", "blue-lobster", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(lease.SSH.ReadyCheck, "test -d '/work/crabbox'") {
+		t.Fatalf("ready check did not use container work root: %q", lease.SSH.ReadyCheck)
+	}
+	if strings.Contains(lease.SSH.ReadyCheck, hostWorkRoot) || strings.Contains(lease.SSH.ReadyCheck, "/root/") {
+		t.Fatalf("ready check used host-only work root: %q", lease.SSH.ReadyCheck)
+	}
+}
+
 func TestCreateContainerMountsDockerHostUnixSocket(t *testing.T) {
 	socketDir := t.TempDir()
 	socketPath := filepath.Join(socketDir, "docker.sock")
@@ -1081,6 +1160,27 @@ func TestDockerSocketWorkRootsUseLinuxGuestPathForWindows(t *testing.T) {
 	}
 }
 
+func TestDockerSocketWorkRootsUseContainerPathForDefaultLinuxRoot(t *testing.T) {
+	hostDefault := defaultDockerSocketWorkRoot()
+	host, guest := dockerSocketWorkRootsForGOOS(hostDefault, "linux")
+	if host != hostDefault {
+		t.Fatalf("host root=%q, want %q", host, hostDefault)
+	}
+	if guest != "/work/crabbox" {
+		t.Fatalf("guest root=%q, want /work/crabbox", guest)
+	}
+
+	host, guest = dockerSocketWorkRootsForGOOSExplicit(hostDefault, "linux", true)
+	if host != hostDefault || guest != hostDefault {
+		t.Fatalf("explicit default-path work root should preserve existing behavior, host=%q guest=%q", host, guest)
+	}
+
+	host, guest = dockerSocketWorkRootsForGOOS("/tmp/custom-crabbox", "linux")
+	if host != "/tmp/custom-crabbox" || guest != "/tmp/custom-crabbox" {
+		t.Fatalf("custom Linux socket roots host=%q guest=%q", host, guest)
+	}
+}
+
 func TestPrepareLeaseUsesLabeledGuestWorkRootForReadyCheck(t *testing.T) {
 	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
 	cfg := b.configForRun()
@@ -1143,6 +1243,70 @@ func TestConfigForRunUsesHostVisibleWorkRootWithDockerSocket(t *testing.T) {
 	}
 	if !strings.Contains(got.LocalContainer.WorkRoot, "crabbox") || got.WorkRoot != got.LocalContainer.WorkRoot {
 		t.Fatalf("unexpected docker socket work root: workRoot=%q local=%q", got.WorkRoot, got.LocalContainer.WorkRoot)
+	}
+}
+
+func TestConfigForRunPreservesExplicitDockerSocketWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot = "/work/crabbox"
+	cfg.WorkRoot = "/work/crabbox"
+	core.MarkWorkRootExplicit(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	got := b.configForRun()
+	if got.LocalContainer.WorkRoot != "/work/crabbox" || got.WorkRoot != "/work/crabbox" {
+		t.Fatalf("explicit work root was replaced: workRoot=%q local=%q", got.WorkRoot, got.LocalContainer.WorkRoot)
+	}
+}
+
+func TestConfigForRunPreservesProviderSpecificExplicitDockerSocketWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot = "/work/crabbox"
+	cfg.WorkRoot = "/work/crabbox"
+	core.MarkLocalContainerWorkRootExplicit(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	got := b.configForRun()
+	if got.LocalContainer.WorkRoot != "/work/crabbox" || got.WorkRoot != "/work/crabbox" {
+		t.Fatalf("provider-specific explicit work root was replaced: workRoot=%q local=%q", got.WorkRoot, got.LocalContainer.WorkRoot)
+	}
+}
+
+func TestLocalContainerWorkRootFlagMarksWorkRootExplicit(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Set("local-container-work-root", "/work/crabbox"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !core.IsWorkRootExplicit(&cfg) {
+		t.Fatal("local-container work root flag did not mark work root explicit")
+	}
+	if !core.LocalContainerWorkRootExplicit(cfg) {
+		t.Fatal("local-container work root flag did not mark provider work root explicit")
+	}
+}
+
+func TestLocalContainerReadyCheckReportsFailureDiagnostics(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.LocalContainer.WorkRoot = "/work/crabbox"
+	got := localContainerReadyCheck(cfg)
+	for _, want := range []string{
+		"local-container ready-check failed:",
+		"/tmp/crabbox-ready.log",
+		"cat /tmp/crabbox-ready.log >&2",
+		"test -d '/work/crabbox'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ready check missing diagnostic %q: %s", want, got)
+		}
 	}
 }
 

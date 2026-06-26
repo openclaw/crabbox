@@ -198,6 +198,7 @@ type Config struct {
 	LocalContainer                LocalContainerConfig
 	localContainerRuntimeExplicit bool
 	localContainerImageExplicit   bool
+	localContainerRootExplicit    bool
 	AppleContainer                AppleContainerConfig
 	appleContainerImageExplicit   bool
 	AppleVZ                       AppleVZConfig
@@ -2165,6 +2166,14 @@ func MarkLocalContainerRuntimeExplicit(cfg *Config) {
 
 func LocalContainerRuntimeExplicit(cfg Config) bool {
 	return cfg.localContainerRuntimeExplicit
+}
+
+func MarkLocalContainerWorkRootExplicit(cfg *Config) {
+	cfg.localContainerRootExplicit = true
+}
+
+func LocalContainerWorkRootExplicit(cfg Config) bool {
+	return cfg.localContainerRootExplicit
 }
 
 func MarkAppleContainerImageExplicit(cfg *Config) {
@@ -6079,6 +6088,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.LocalContainer.WorkRoot != "" {
 			cfg.LocalContainer.WorkRoot = file.LocalContainer.WorkRoot
+			cfg.localContainerRootExplicit = true
 		}
 		if file.LocalContainer.CPUs > 0 {
 			cfg.LocalContainer.CPUs = file.LocalContainer.CPUs
@@ -7756,7 +7766,10 @@ func applyEnv(cfg *Config) error {
 		cfg.localContainerImageExplicit = true
 	}
 	cfg.LocalContainer.User = getenv("CRABBOX_LOCAL_CONTAINER_USER", cfg.LocalContainer.User)
-	cfg.LocalContainer.WorkRoot = getenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT", cfg.LocalContainer.WorkRoot)
+	if workRoot := os.Getenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT"); workRoot != "" {
+		cfg.LocalContainer.WorkRoot = workRoot
+		cfg.localContainerRootExplicit = true
+	}
 	cfg.LocalContainer.CPUs = getenvInt("CRABBOX_LOCAL_CONTAINER_CPUS", cfg.LocalContainer.CPUs)
 	cfg.LocalContainer.Memory = getenv("CRABBOX_LOCAL_CONTAINER_MEMORY", cfg.LocalContainer.Memory)
 	cfg.LocalContainer.Network = getenv("CRABBOX_LOCAL_CONTAINER_NETWORK", cfg.LocalContainer.Network)

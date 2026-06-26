@@ -532,7 +532,7 @@ func applyDefaults(cfg *core.Config) {
 	if cfg.LocalContainer.User == "" {
 		cfg.LocalContainer.User = "crabbox"
 	}
-	if cfg.LocalContainer.DockerSocket && isDefaultWorkRoot(cfg.LocalContainer.WorkRoot) && isDefaultWorkRoot(cfg.WorkRoot) {
+	if cfg.LocalContainer.DockerSocket && !localContainerWorkRootExplicit(*cfg) && isDefaultWorkRoot(cfg.LocalContainer.WorkRoot) && isDefaultWorkRoot(cfg.WorkRoot) {
 		if runtime.GOOS == "windows" {
 			cfg.LocalContainer.WorkRoot = "/work/crabbox"
 		} else {
@@ -817,10 +817,18 @@ func dockerSocketMountPathFromHostForGOOS(host, goos string) (string, error) {
 }
 
 func dockerSocketWorkRoots(cfg core.Config) (string, string) {
-	return dockerSocketWorkRootsForGOOS(cfg.LocalContainer.WorkRoot, runtime.GOOS)
+	return dockerSocketWorkRootsForGOOSExplicit(cfg.LocalContainer.WorkRoot, runtime.GOOS, localContainerWorkRootExplicit(cfg))
 }
 
 func dockerSocketWorkRootsForGOOS(workRoot, goos string) (string, string) {
+	return dockerSocketWorkRootsForGOOSExplicit(workRoot, goos, false)
+}
+
+func localContainerWorkRootExplicit(cfg core.Config) bool {
+	return core.IsWorkRootExplicit(&cfg) || core.LocalContainerWorkRootExplicit(cfg)
+}
+
+func dockerSocketWorkRootsForGOOSExplicit(workRoot, goos string, explicit bool) (string, string) {
 	workRoot = strings.TrimSpace(workRoot)
 	if workRoot == "" {
 		workRoot = "/work/crabbox"
@@ -830,6 +838,12 @@ func dockerSocketWorkRootsForGOOS(workRoot, goos string) (string, string) {
 			return workRoot, "/work/crabbox"
 		}
 		return defaultDockerSocketWorkRoot(), workRoot
+	}
+	// Default Docker-socket work roots are host cache paths. Keep that host
+	// storage location, but mount it somewhere the unprivileged SSH user can
+	// traverse inside the container.
+	if !explicit && filepath.Clean(workRoot) == filepath.Clean(defaultDockerSocketWorkRoot()) {
+		return workRoot, "/work/crabbox"
 	}
 	return workRoot, workRoot
 }
@@ -1441,7 +1455,15 @@ func localContainerReadyCheck(cfg core.Config) string {
 			"\"$BROWSER\" --version >>/tmp/crabbox-ready.log 2>&1",
 		)
 	}
+	for i, check := range checks {
+		checks[i] = localContainerReadyCheckWithDiagnostics(check)
+	}
 	return strings.Join(checks, " && ")
+}
+
+func localContainerReadyCheckWithDiagnostics(check string) string {
+	message := "local-container ready-check failed: " + check
+	return "{ " + check + "; } || { status=$?; printf '%s\n' " + shellQuote(message) + " >&2; if [ -f /tmp/crabbox-ready.log ]; then printf '%s\n' '--- /tmp/crabbox-ready.log ---' >&2; cat /tmp/crabbox-ready.log >&2; fi; exit \"$status\"; }"
 }
 
 func validateLocalContainerHostVolumes(cfg core.Config, workRoot string) ([]string, error) {
