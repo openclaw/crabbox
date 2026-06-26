@@ -517,6 +517,56 @@ func windowsCoreBootstrapFinalizePowerShell() string {
 	`
 }
 
+func azureWindowsSnapshotRehydratePowerShell(cfg Config, publicKey string) string {
+	workRoot := windowsBootstrapWorkRoot(cfg)
+	script := windowsBootstrapHeaderPowerShell(cfg, publicKey, workRoot) +
+		windowsManagedCorePreludePowerShell(cfg) +
+		azureWindowsSnapshotResetCredentialsPowerShell() +
+		windowsBootstrapCorePowerShell()
+	if cfg.Desktop {
+		return script + azureWindowsSnapshotRotateVNCPasswordPowerShell() + windowsDesktopBootstrapPowerShell()
+	}
+	return script + windowsCoreBootstrapFinalizePowerShell()
+}
+
+func azureWindowsSnapshotRotateVNCPasswordPowerShell() string {
+	return `
+function ConvertTo-CrabboxVNCPassword([string]$Password) {
+  $plain = New-Object byte[] 8
+  $bytes = [Text.Encoding]::ASCII.GetBytes($Password)
+  [Array]::Copy($bytes, $plain, [Math]::Min($plain.Length, $bytes.Length))
+  # VNC's fixed DES key with each byte bit-reversed for the platform DES implementation.
+  $key = [byte[]](0xE8, 0x4A, 0xD6, 0x60, 0xC4, 0x72, 0x1A, 0xE0)
+  $des = [Security.Cryptography.DES]::Create()
+  try {
+    $des.Mode = [Security.Cryptography.CipherMode]::ECB
+    $des.Padding = [Security.Cryptography.PaddingMode]::None
+    $des.Key = $key
+    $encryptor = $des.CreateEncryptor()
+    try { return $encryptor.TransformFinalBlock($plain, 0, $plain.Length) }
+    finally { $encryptor.Dispose() }
+  } finally {
+    $des.Dispose()
+  }
+}
+$tightVNCServiceKey = "HKLM:\Software\TightVNC\Server"
+$vncPassword = (Get-Content -Raw -LiteralPath $vncPasswordPath).Trim()
+$encryptedVNCPassword = ConvertTo-CrabboxVNCPassword $vncPassword
+Stop-Service -Name tvnserver -Force -ErrorAction SilentlyContinue
+New-Item -Force -Path $tightVNCServiceKey | Out-Null
+New-ItemProperty -Force -Path $tightVNCServiceKey -Name UseVncAuthentication -PropertyType DWord -Value 1 | Out-Null
+New-ItemProperty -Force -Path $tightVNCServiceKey -Name Password -PropertyType Binary -Value $encryptedVNCPassword | Out-Null
+New-ItemProperty -Force -Path $tightVNCServiceKey -Name UseControlAuthentication -PropertyType DWord -Value 1 | Out-Null
+New-ItemProperty -Force -Path $tightVNCServiceKey -Name ControlPassword -PropertyType Binary -Value $encryptedVNCPassword | Out-Null
+New-ItemProperty -Force -Path $tightVNCServiceKey -Name AllowLoopback -PropertyType DWord -Value 1 | Out-Null
+New-ItemProperty -Force -Path $tightVNCServiceKey -Name AcceptHttpConnections -PropertyType DWord -Value 0 | Out-Null
+`
+}
+
+func azureWindowsSnapshotResetCredentialsPowerShell() string {
+	return "\nRemove-Item -LiteralPath $vncPasswordPath, $windowsUsernamePath, $windowsPasswordPath -Force -ErrorAction SilentlyContinue\nGet-ChildItem -LiteralPath \"$env:ProgramData\\ssh\" -Filter \"ssh_host_*\" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue\n"
+}
+
 func azureWindowsBootstrapPowerShell(cfg Config, publicKey string) string {
 	workRoot := windowsBootstrapWorkRoot(cfg)
 	setupComplete := `Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")`
