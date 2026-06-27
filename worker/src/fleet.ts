@@ -12901,6 +12901,7 @@ function workspaceResponse(
 ): Record<string, unknown> {
   const status = workspaceStatus(workspace, lease);
   const terminalUrl = env ? workspaceTerminalURL(workspace, lease, env) : undefined;
+  const nativeVnc = env ? !workspaceNativeVNCError(workspace, lease, env) : false;
   return {
     id: workspace.id,
     workspaceId: workspace.id,
@@ -12912,7 +12913,7 @@ function workspaceResponse(
       takeover: false,
       vnc: false,
       desktop: false,
-      nativeVnc: workspace.desktop && Boolean(terminalUrl),
+      nativeVnc,
       logs: false,
       artifacts: false,
     },
