@@ -48,7 +48,8 @@ jobs:
       - name: Deadcode
         run: |
           output_file=$(mktemp)
-          go run golang.org/x/tools/cmd/deadcode@v0.45.0 -test ./... > "$output_file"
+          packages="$(go list ./... | grep -v '^github.com/openclaw/crabbox/mobile/go/crabboxmobile$')"
+          go run golang.org/x/tools/cmd/deadcode@v0.45.0 -test $packages > "$output_file"
           if [ -s "$output_file" ]; then
             cat "$output_file"
             exit 1
@@ -159,6 +160,71 @@ jobs:
 
       - name: Build Node runtime image
         run: docker build -f worker/Dockerfile.node worker
+
+  mobile:
+    name: Mobile (CrabboxKit + e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
+        with:
+          swift-version: "6.0"
+
+      - name: Build CrabboxKit + headless e2e
+        run: swift build
+        working-directory: mobile
+
+      - name: Unit tests
+        run: swift test
+        working-directory: mobile
+
+      - name: Headless e2e (17 scenarios / 13 invariants, deterministic)
+        run: swift run crabbox-sim --json
+        working-directory: mobile
+
+  mobile-ios:
+    name: Mobile (iOS app build)
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+        working-directory: mobile
+
+      - name: Build iOS app (build-only, unsigned)
+        working-directory: mobile
+        run: |
+          xcodebuild \
+            -project Crabbox.xcodeproj \
+            -scheme Crabbox \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build
 
   scripts:
     name: Scripts

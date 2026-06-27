@@ -1,0 +1,39 @@
+{
+  "colors" : [
+    {
+      "comment" : "Crabbox accent — #31d0aa (teal). Same value in both appearances; the dark UI is the canonical look.",
+      "color" : {
+        "color-space" : "srgb",
+        "components" : {
+          "alpha" : "1.000",
+          "blue" : "0xAA",
+          "green" : "0xD0",
+          "red" : "0x31"
+        }
+      },
+      "idiom" : "universal"
+    },
+    {
+      "appearances" : [
+        {
+          "appearance" : "luminosity",
+          "value" : "dark"
+        }
+      ],
+      "color" : {
+        "color-space" : "srgb",
+        "components" : {
+          "alpha" : "1.000",
+          "blue" : "0xAA",
+          "green" : "0xD0",
+          "red" : "0x31"
+        }
+      },
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

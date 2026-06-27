@@ -1,0 +1,15 @@
+{
+  "images" : [
+    {
+      "comment" : "Single-size universal app icon. Copy the 1024x1024 master PNG from the repo's assets/ directory (e.g. assets/icon.png, exported flattened with no alpha) to this folder as icon-1024.png before archiving. Xcode 14+ / iOS 17 generates the downscaled sizes automatically.",
+      "filename" : "icon-1024.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
