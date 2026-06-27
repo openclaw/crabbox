@@ -45,6 +45,8 @@ type credentialDestinationProvenance struct {
 	fastAPICloudToken   credentialValueSource
 	runpodAPIURL        credentialValueSource
 	runpodAPIKey        credentialValueSource
+	falAPIURL           credentialValueSource
+	falAPIKey           credentialValueSource
 	isloBaseURL         credentialValueSource
 	isloAPIKey          credentialValueSource
 	tenkiEndpoint       credentialValueSource
@@ -127,6 +129,9 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "runpod-url") {
 		provenance.runpodAPIURL = credentialSourceFlag
+	}
+	if flagWasSet(fs, "fal-api-url") {
+		provenance.falAPIURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "islo-base-url") {
 		provenance.isloBaseURL = credentialSourceFlag
@@ -246,6 +251,11 @@ func validateProviderCredentialDestination(cfg Config) error {
 		if provenance.runpodAPIURL == credentialSourceRepository &&
 			inheritedCredential(sourcedCredential{cfg.Runpod.APIKey, provenance.runpodAPIKey}) {
 			return repositoryCredentialDestinationError("runpod", "runpod.apiUrl", "CRABBOX_RUNPOD_API_URL or --runpod-url")
+		}
+	case "fal":
+		if provenance.falAPIURL == credentialSourceRepository &&
+			inheritedCredential(sourcedCredential{cfg.Fal.APIKey, provenance.falAPIKey}) {
+			return repositoryCredentialDestinationError("fal", "fal.apiUrl", "CRABBOX_FAL_API_URL or --fal-api-url")
 		}
 	case "islo":
 		if provenance.isloBaseURL == credentialSourceRepository &&

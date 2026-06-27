@@ -24,6 +24,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/e2b"
 	_ "github.com/openclaw/crabbox/internal/providers/exedev"
 	_ "github.com/openclaw/crabbox/internal/providers/external"
+	_ "github.com/openclaw/crabbox/internal/providers/fal"
 	_ "github.com/openclaw/crabbox/internal/providers/fastapicloud"
 	_ "github.com/openclaw/crabbox/internal/providers/firecracker"
 	_ "github.com/openclaw/crabbox/internal/providers/freestyle"

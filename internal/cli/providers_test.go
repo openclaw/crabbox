@@ -17,6 +17,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var digitalOcean *providerMatrixEntry
 	var vultr *providerMatrixEntry
 	var firecracker *providerMatrixEntry
+	var fal *providerMatrixEntry
 	var nvidiaBrev *providerMatrixEntry
 	var linode *providerMatrixEntry
 	var nebius *providerMatrixEntry
@@ -42,6 +43,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "firecracker" {
 			firecracker = &entries[i]
+		}
+		if entries[i].Provider == "fal" {
+			fal = &entries[i]
 		}
 		if entries[i].Provider == "nvidia-brev" {
 			nvidiaBrev = &entries[i]
@@ -88,6 +92,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if firecracker == nil {
 		t.Fatal("firecracker provider not found")
+	}
+	if fal == nil {
+		t.Fatal("fal provider not found")
 	}
 	if nvidiaBrev == nil {
 		t.Fatal("nvidia-brev provider not found")
@@ -185,6 +192,29 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if len(firecracker.Aliases) != 0 {
 		t.Fatalf("firecracker aliases=%v, want none", firecracker.Aliases)
+	}
+	if fal.Kind != ProviderKindSSHLease || fal.Family != "fal" || fal.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("fal kind/family/coordinator=%q/%q/%q", fal.Kind, fal.Family, fal.Coordinator)
+	}
+	if !containsString(fal.Targets, targetLinux) {
+		t.Fatalf("fal targets=%v", fal.Targets)
+	}
+	for _, feature := range []Feature{FeatureSSH, FeatureCrabboxSync, FeatureCleanup} {
+		if !containsFeature(fal.Features, feature) {
+			t.Fatalf("fal features=%v missing %s", fal.Features, feature)
+		}
+	}
+	if !containsString(fal.Runtime, "ssh-host") {
+		t.Fatalf("fal runtime=%v missing ssh-host", fal.Runtime)
+	}
+	if !containsString(fal.Reachability, "ssh-tunnel") {
+		t.Fatalf("fal reachability=%v missing ssh-tunnel", fal.Reachability)
+	}
+	if !containsString(fal.Lifecycle, "cleanup") {
+		t.Fatalf("fal lifecycle=%v missing cleanup", fal.Lifecycle)
+	}
+	if !containsString(fal.Aliases, "fal-ai") {
+		t.Fatalf("fal aliases=%v", fal.Aliases)
 	}
 	if linode.Kind != ProviderKindSSHLease || linode.Family != "linode" || linode.Coordinator != string(CoordinatorNever) {
 		t.Fatalf("linode kind/family/coordinator=%q/%q/%q", linode.Kind, linode.Family, linode.Coordinator)
@@ -347,6 +377,17 @@ func TestProvidersCommandJSON(t *testing.T) {
 		}
 		if entry.Provider == "blacksmith-testbox" && !containsString(entry.Lifecycle, "run-session") {
 			t.Fatalf("blacksmith json missing run-session lifecycle: %#v", entry)
+		}
+		if entry.Provider == "fal" && (entry.Kind != ProviderKindSSHLease ||
+			!containsFeature(entry.Features, FeatureSSH) ||
+			!containsFeature(entry.Features, FeatureCrabboxSync) ||
+			!containsFeature(entry.Features, FeatureCleanup) ||
+			!containsString(entry.Aliases, "fal-ai") ||
+			!containsString(entry.Runtime, "ssh-host") ||
+			!containsString(entry.Reachability, "ssh-tunnel") ||
+			!containsString(entry.Lifecycle, "cleanup") ||
+			entry.Family != "fal") {
+			t.Fatalf("fal json entry incomplete: %#v", entry)
 		}
 	}
 }
