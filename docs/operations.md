@@ -110,6 +110,14 @@ Per-provider smoke prerequisites:
   template is selected, then proves doctor, dry-run cleanup, stop-by-default
   warmup/run/stop/status, delete-on-release warmup/run/stop, list, and final
   dry-run cleanup.
+- **Sealos DevBox** — `kubectl`, an inherited kubeconfig or readable configured
+  kubeconfig, an explicit `sealosDevbox.context`, namespace RBAC for the
+  DevBox CRD, `sealosDevbox.image`, and a
+  configured SSHGate or NodePort route. `scripts/live-smoke.sh` refuses to
+  mutate Sealos resources until those prerequisites and `doctor --json` pass,
+  then proves dry-run cleanup, one retained DevBox warmup, status, SSH command
+  rendering, a synced command, stop, post-stop status, and final dry-run
+  cleanup.
 - **Semaphore** — `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`,
   and `CRABBOX_SEMAPHORE_TOKEN`, or the equivalent user config.
   `scripts/live-smoke.sh` refuses to call Semaphore until those values are

@@ -769,6 +769,20 @@
     "caveat": "Depends on debug SSH metadata from the job",
     "docs": "semaphore.md"
   },
+  "sealos-devbox": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Sealos DevBox CRD",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "unknown",
+    "lifecycle": "Sealos DevBox CRD",
+    "cleanup": "pause or DevBox delete",
+    "bestFit": "Sealos DevBox Linux workspace over SSHGate or NodePort",
+    "caveat": "Requires kubectl, explicit context, DevBox CRD/RBAC, image, and SSHGate or NodePort route configuration",
+    "docs": "sealos-devbox.md"
+  },
   "smolvm": {
     "status": "built-in",
     "category": "delegated-sandbox",

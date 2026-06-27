@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 67 providers (39 SSH lease, 26 delegated run, 2 service control).
+Current built-in surface: 68 providers (40 SSH lease, 26 delegated run, 2 service control).
 
 Access terms:
 
@@ -124,6 +124,7 @@ Access terms:
 | [railway](railway.md) (`rail`, `railwayapp`) | specialized; `service-control` · service-control | SSH not applicable; `none` · direct only; features: `url-bridge` | `linux`; Railway service | `cloud`; GPU: unknown | Railway; service stop only | Inspecting or stopping an existing Railway service | Cannot execute arbitrary Crabbox run commands |
 | [runpod](runpod.md) (`run-pod`, `runpodio`) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; RunPod GPU pod | `cloud`; GPU: yes | RunPod; pod release | GPU-backed Linux workload over public SSH | Capacity, GPU pricing, and public SSH vary |
 | [scaleway](scaleway.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Scaleway Instance | `cloud`; GPU: optional | Crabbox; instance and managed key delete | Direct Linux VM on Scaleway Instances | Direct-only; security groups must already allow SSH |
+| [sealos-devbox](sealos-devbox.md) (`sealos`, `sealos-dev`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Sealos DevBox CRD | `provider-managed`; GPU: unknown | Sealos DevBox CRD; pause or DevBox delete | Sealos DevBox Linux workspace over SSHGate or NodePort | Requires kubectl, explicit context, DevBox CRD/RBAC, image, and SSHGate or NodePort route configuration |
 | [semaphore](semaphore.md) (`sem`) | built-in; `ssh-lease` · ci-proof-runner | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Semaphore CI job | `provider-managed`; GPU: optional | Semaphore; job stop | Debugging in the same image and secret plane as CI | Depends on debug SSH metadata from the job |
 | [smolvm](smolvm.md) (`smol`, `smolmachines`, `smolfleet`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Smol Machines microVM | `provider-managed`; GPU: no | smolfleet; microVM delete | Lightweight hosted microVM execution | Delegated execution through smolfleet |
 | [sprites](sprites.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Sprite microVM | `provider-managed`; GPU: no | Sprites; sprite delete | Fast Linux microVM over provider SSH proxy | SSH transport depends on sprite proxy |

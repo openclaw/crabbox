@@ -149,6 +149,7 @@ type Config struct {
 	Actions                       ActionsConfig
 	Blacksmith                    BlacksmithConfig
 	KubeVirt                      KubeVirtConfig
+	SealosDevbox                  SealosDevboxConfig
 	AgentSandbox                  AgentSandboxConfig
 	deleteOnReleaseExplicit       map[string]bool
 	External                      ExternalConfig
@@ -384,6 +385,25 @@ type KubeVirtConfig struct {
 	SSHPublicKey    string
 	SSHPort         string
 	WorkRoot        string
+	DeleteOnRelease bool
+}
+
+type SealosDevboxConfig struct {
+	Kubectl         string
+	Kubeconfig      string
+	Context         string
+	Namespace       string
+	Image           string
+	TemplateID      string
+	CPU             string
+	Memory          string
+	StorageLimit    string
+	Network         string
+	SSHGatewayHost  string
+	SSHGatewayPort  string
+	SSHUser         string
+	WorkRoot        string
+	NodeHost        string
 	DeleteOnRelease bool
 }
 
@@ -2477,6 +2497,17 @@ func baseConfig() Config {
 			WorkRoot:        "/home/crabbox/crabbox",
 			DeleteOnRelease: true,
 		},
+		SealosDevbox: SealosDevboxConfig{
+			Kubectl:        "kubectl",
+			Namespace:      "default",
+			CPU:            "2",
+			Memory:         "4Gi",
+			StorageLimit:   "20Gi",
+			Network:        "SSHGate",
+			SSHGatewayPort: "2222",
+			SSHUser:        "devbox",
+			WorkRoot:       "/home/devbox/project",
+		},
 		AgentSandbox: AgentSandboxConfig{
 			Kubectl:             "kubectl",
 			Namespace:           "default",
@@ -2849,6 +2880,7 @@ type fileConfig struct {
 	Actions                  *fileActionsConfig                  `yaml:"actions,omitempty"`
 	Blacksmith               *fileBlacksmithConfig               `yaml:"blacksmith,omitempty"`
 	KubeVirt                 *fileKubeVirtConfig                 `yaml:"kubevirt,omitempty"`
+	SealosDevbox             *fileSealosDevboxConfig             `yaml:"sealosDevbox,omitempty"`
 	AgentSandbox             *fileAgentSandboxConfig             `yaml:"agentSandbox,omitempty"`
 	External                 *fileExternalConfig                 `yaml:"external,omitempty"`
 	Namespace                *fileNamespaceConfig                `yaml:"namespace,omitempty"`
@@ -3245,6 +3277,25 @@ type fileKubeVirtConfig struct {
 	SSHPublicKey    string `yaml:"sshPublicKey,omitempty"`
 	SSHPort         string `yaml:"sshPort,omitempty"`
 	WorkRoot        string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
+}
+
+type fileSealosDevboxConfig struct {
+	Kubectl         string `yaml:"kubectl,omitempty"`
+	Kubeconfig      string `yaml:"kubeconfig,omitempty"`
+	Context         string `yaml:"context,omitempty"`
+	Namespace       string `yaml:"namespace,omitempty"`
+	Image           string `yaml:"image,omitempty"`
+	TemplateID      string `yaml:"templateID,omitempty"`
+	CPU             string `yaml:"cpu,omitempty"`
+	Memory          string `yaml:"memory,omitempty"`
+	StorageLimit    string `yaml:"storageLimit,omitempty"`
+	Network         string `yaml:"network,omitempty"`
+	SSHGatewayHost  string `yaml:"sshGatewayHost,omitempty"`
+	SSHGatewayPort  string `yaml:"sshGatewayPort,omitempty"`
+	SSHUser         string `yaml:"sshUser,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	NodeHost        string `yaml:"nodeHost,omitempty"`
 	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
@@ -5207,6 +5258,57 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.KubeVirt.DeleteOnRelease != nil {
 			cfg.KubeVirt.DeleteOnRelease = *file.KubeVirt.DeleteOnRelease
 			MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
+		}
+	}
+	if file.SealosDevbox != nil {
+		if trusted && file.SealosDevbox.Kubectl != "" {
+			cfg.SealosDevbox.Kubectl = expandUserPath(file.SealosDevbox.Kubectl)
+		}
+		if trusted && file.SealosDevbox.Kubeconfig != "" {
+			cfg.SealosDevbox.Kubeconfig = expandUserPath(file.SealosDevbox.Kubeconfig)
+		}
+		if trusted && file.SealosDevbox.Context != "" {
+			cfg.SealosDevbox.Context = file.SealosDevbox.Context
+		}
+		if trusted && file.SealosDevbox.Namespace != "" {
+			cfg.SealosDevbox.Namespace = file.SealosDevbox.Namespace
+		}
+		if trusted && file.SealosDevbox.Image != "" {
+			cfg.SealosDevbox.Image = file.SealosDevbox.Image
+		}
+		if trusted && file.SealosDevbox.TemplateID != "" {
+			cfg.SealosDevbox.TemplateID = file.SealosDevbox.TemplateID
+		}
+		if trusted && file.SealosDevbox.CPU != "" {
+			cfg.SealosDevbox.CPU = file.SealosDevbox.CPU
+		}
+		if trusted && file.SealosDevbox.Memory != "" {
+			cfg.SealosDevbox.Memory = file.SealosDevbox.Memory
+		}
+		if trusted && file.SealosDevbox.StorageLimit != "" {
+			cfg.SealosDevbox.StorageLimit = file.SealosDevbox.StorageLimit
+		}
+		if trusted && file.SealosDevbox.Network != "" {
+			cfg.SealosDevbox.Network = file.SealosDevbox.Network
+		}
+		if trusted && file.SealosDevbox.SSHGatewayHost != "" {
+			cfg.SealosDevbox.SSHGatewayHost = file.SealosDevbox.SSHGatewayHost
+		}
+		if trusted && file.SealosDevbox.SSHGatewayPort != "" {
+			cfg.SealosDevbox.SSHGatewayPort = file.SealosDevbox.SSHGatewayPort
+		}
+		if trusted && file.SealosDevbox.SSHUser != "" {
+			cfg.SealosDevbox.SSHUser = file.SealosDevbox.SSHUser
+		}
+		if trusted && file.SealosDevbox.WorkRoot != "" {
+			cfg.SealosDevbox.WorkRoot = file.SealosDevbox.WorkRoot
+		}
+		if trusted && file.SealosDevbox.NodeHost != "" {
+			cfg.SealosDevbox.NodeHost = file.SealosDevbox.NodeHost
+		}
+		if file.SealosDevbox.DeleteOnRelease != nil {
+			cfg.SealosDevbox.DeleteOnRelease = *file.SealosDevbox.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "sealos-devbox")
 		}
 	}
 	if file.AgentSandbox != nil {
@@ -7254,6 +7356,25 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE"); ok {
 		cfg.KubeVirt.DeleteOnRelease = value
 		MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
+	}
+	cfg.SealosDevbox.Kubectl = expandUserPath(getenv("CRABBOX_SEALOS_DEVBOX_KUBECTL", cfg.SealosDevbox.Kubectl))
+	cfg.SealosDevbox.Kubeconfig = expandUserPath(getenv("CRABBOX_SEALOS_DEVBOX_KUBECONFIG", cfg.SealosDevbox.Kubeconfig))
+	cfg.SealosDevbox.Context = getenv("CRABBOX_SEALOS_DEVBOX_CONTEXT", cfg.SealosDevbox.Context)
+	cfg.SealosDevbox.Namespace = getenv("CRABBOX_SEALOS_DEVBOX_NAMESPACE", cfg.SealosDevbox.Namespace)
+	cfg.SealosDevbox.Image = getenv("CRABBOX_SEALOS_DEVBOX_IMAGE", cfg.SealosDevbox.Image)
+	cfg.SealosDevbox.TemplateID = getenv("CRABBOX_SEALOS_DEVBOX_TEMPLATE_ID", cfg.SealosDevbox.TemplateID)
+	cfg.SealosDevbox.CPU = getenv("CRABBOX_SEALOS_DEVBOX_CPU", cfg.SealosDevbox.CPU)
+	cfg.SealosDevbox.Memory = getenv("CRABBOX_SEALOS_DEVBOX_MEMORY", cfg.SealosDevbox.Memory)
+	cfg.SealosDevbox.StorageLimit = getenv("CRABBOX_SEALOS_DEVBOX_STORAGE_LIMIT", cfg.SealosDevbox.StorageLimit)
+	cfg.SealosDevbox.Network = getenv("CRABBOX_SEALOS_DEVBOX_NETWORK", cfg.SealosDevbox.Network)
+	cfg.SealosDevbox.SSHGatewayHost = getenv("CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST", cfg.SealosDevbox.SSHGatewayHost)
+	cfg.SealosDevbox.SSHGatewayPort = getenv("CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_PORT", cfg.SealosDevbox.SSHGatewayPort)
+	cfg.SealosDevbox.SSHUser = getenv("CRABBOX_SEALOS_DEVBOX_SSH_USER", cfg.SealosDevbox.SSHUser)
+	cfg.SealosDevbox.WorkRoot = getenv("CRABBOX_SEALOS_DEVBOX_WORK_ROOT", cfg.SealosDevbox.WorkRoot)
+	cfg.SealosDevbox.NodeHost = getenv("CRABBOX_SEALOS_DEVBOX_NODE_HOST", cfg.SealosDevbox.NodeHost)
+	if value, ok := getenvBool("CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE"); ok {
+		cfg.SealosDevbox.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "sealos-devbox")
 	}
 	cfg.AgentSandbox.Kubectl = getenv("CRABBOX_AGENT_SANDBOX_KUBECTL", cfg.AgentSandbox.Kubectl)
 	cfg.AgentSandbox.Kubeconfig = expandUserPath(getenv("CRABBOX_AGENT_SANDBOX_KUBECONFIG", cfg.AgentSandbox.Kubeconfig))
