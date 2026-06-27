@@ -51,6 +51,7 @@ type credentialDestinationProvenance struct {
 	tenkiGateway        credentialValueSource
 	tensorlakeAPIURL    credentialValueSource
 	tensorlakeAPIKey    credentialValueSource
+	replicateAPIURL     credentialValueSource
 	upstashBoxBaseURL   credentialValueSource
 	upstashBoxAPIKey    credentialValueSource
 	smolvmBaseURL       credentialValueSource
@@ -139,6 +140,9 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "tensorlake-api-url") {
 		provenance.tensorlakeAPIURL = credentialSourceFlag
+	}
+	if flagWasSet(fs, "replicate-api-url") {
+		provenance.replicateAPIURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "upstash-box-base-url") {
 		provenance.upstashBoxBaseURL = credentialSourceFlag
@@ -257,6 +261,10 @@ func validateProviderCredentialDestination(cfg Config) error {
 			inheritedCredential(sourcedCredential{cfg.Tensorlake.APIKey, provenance.tensorlakeAPIKey}) {
 			return repositoryCredentialDestinationError("tensorlake", "tensorlake.apiUrl", "CRABBOX_TENSORLAKE_API_URL or --tensorlake-api-url")
 		}
+	case "replicate":
+		if provenance.replicateAPIURL == credentialSourceRepository && inheritedReplicateToken() {
+			return repositoryCredentialDestinationError("replicate", "replicate.apiUrl", "CRABBOX_REPLICATE_API_URL or --replicate-api-url")
+		}
 	case "upstash-box":
 		if provenance.upstashBoxBaseURL == credentialSourceRepository &&
 			inheritedCredential(sourcedCredential{cfg.UpstashBox.APIKey, provenance.upstashBoxAPIKey}) {
@@ -316,6 +324,15 @@ func ValidateNativeCredentialDestination(cfg Config, provider string) error {
 		}
 	}
 	return nil
+}
+
+func inheritedReplicateToken() bool {
+	for _, name := range []string{"CRABBOX_REPLICATE_API_TOKEN", "REPLICATE_API_TOKEN"} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func inheritedCredential(credentials ...sourcedCredential) bool {

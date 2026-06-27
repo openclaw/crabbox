@@ -657,6 +657,20 @@
     "caveat": "REST execution contract, not an SSH lease",
     "docs": "opencomputer.md"
   },
+  "replicate": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "Replicate prediction runner",
+    "location": "cloud",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "optional",
+    "lifecycle": "Replicate prediction",
+    "cleanup": "prediction cancellation",
+    "bestFit": "Small archived command runs on a compatible Replicate runner",
+    "caveat": "Backend lifecycle is deferred in this branch; no SSH or coordinator path",
+    "docs": "replicate.md"
+  },
   "opensandbox": {
     "status": "built-in",
     "category": "delegated-sandbox",

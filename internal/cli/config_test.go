@@ -166,6 +166,18 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_CODESANDBOX_SDK_PACKAGE",
 		"CRABBOX_CODESANDBOX_DOCTOR_LIST_LIMIT",
 		"CRABBOX_CODESANDBOX_OPERATION_TIMEOUT_SECS",
+		"CRABBOX_REPLICATE_API_URL",
+		"REPLICATE_API_URL",
+		"CRABBOX_REPLICATE_API_TOKEN",
+		"REPLICATE_API_TOKEN",
+		"CRABBOX_REPLICATE_DEPLOYMENT",
+		"CRABBOX_REPLICATE_VERSION",
+		"CRABBOX_REPLICATE_WORKDIR",
+		"CRABBOX_REPLICATE_WAIT_SECS",
+		"CRABBOX_REPLICATE_POLL_INTERVAL_SECS",
+		"CRABBOX_REPLICATE_EXEC_TIMEOUT_SECS",
+		"CRABBOX_REPLICATE_CANCEL_AFTER_SECS",
+		"CRABBOX_REPLICATE_MAX_ARCHIVE_BYTES",
 		"CRABBOX_OPENSANDBOX_API_URL",
 		"OPEN_SANDBOX_API_URL",
 		"CRABBOX_OPENSANDBOX_API_KEY",
@@ -3316,6 +3328,114 @@ func TestOpenComputerConfigYAMLCannotSetAPIURL(t *testing.T) {
 	}
 	if cfg.OpenComputer.APIURL != "" {
 		t.Fatalf("repository config set OpenComputer API URL to %q", cfg.OpenComputer.APIURL)
+	}
+}
+
+func TestReplicateConfigDefaultsFileEnvAndNoPersistentSecretSurface(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.Replicate.APIURL != "https://api.replicate.com/v1" || cfg.Replicate.Workdir != "/workspace/crabbox" || cfg.Replicate.PollIntervalSecs != 2 || cfg.Replicate.ExecTimeoutSecs != 3600 || cfg.Replicate.MaxArchiveBytes != 10*1024*1024 {
+		t.Fatalf("unexpected replicate defaults: %#v", cfg.Replicate)
+	}
+	file := fileConfig{Replicate: &fileReplicateConfig{
+		APIURL:           stringPtr("https://replicate-file.example/v1"),
+		Deployment:       stringPtr("owner/deployment"),
+		Workdir:          stringPtr("/workspace/file"),
+		WaitSecs:         intPtr(3),
+		PollIntervalSecs: intPtr(4),
+		ExecTimeoutSecs:  intPtr(5),
+		CancelAfterSecs:  intPtr(6),
+		MaxArchiveBytes:  int64Ptr(7),
+	}}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Replicate.APIURL != "https://replicate-file.example/v1" || cfg.Replicate.Deployment != "owner/deployment" || cfg.Replicate.Workdir != "/workspace/file" || cfg.Replicate.WaitSecs != 3 || cfg.Replicate.PollIntervalSecs != 4 || cfg.Replicate.ExecTimeoutSecs != 5 || cfg.Replicate.CancelAfterSecs != 6 || cfg.Replicate.MaxArchiveBytes != 7 {
+		t.Fatalf("replicate file config not applied: %#v", cfg.Replicate)
+	}
+
+	t.Setenv("REPLICATE_API_URL", "https://replicate-vendor.example/v1")
+	t.Setenv("CRABBOX_REPLICATE_API_URL", "https://replicate-env.example/v1")
+	t.Setenv("CRABBOX_REPLICATE_DEPLOYMENT", "")
+	t.Setenv("CRABBOX_REPLICATE_VERSION", "version-env")
+	t.Setenv("CRABBOX_REPLICATE_WORKDIR", "/workspace/env")
+	t.Setenv("CRABBOX_REPLICATE_WAIT_SECS", "8")
+	t.Setenv("CRABBOX_REPLICATE_POLL_INTERVAL_SECS", "9")
+	t.Setenv("CRABBOX_REPLICATE_EXEC_TIMEOUT_SECS", "10")
+	t.Setenv("CRABBOX_REPLICATE_CANCEL_AFTER_SECS", "11")
+	t.Setenv("CRABBOX_REPLICATE_MAX_ARCHIVE_BYTES", "12")
+	t.Setenv("CRABBOX_REPLICATE_API_TOKEN", "token-must-not-enter-config")
+	t.Setenv("REPLICATE_API_TOKEN", "vendor-token-must-not-enter-config")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Replicate.APIURL != "https://replicate-env.example/v1" || cfg.Replicate.Deployment != "owner/deployment" || cfg.Replicate.Version != "version-env" || cfg.Replicate.Workdir != "/workspace/env" || cfg.Replicate.WaitSecs != 8 || cfg.Replicate.PollIntervalSecs != 9 || cfg.Replicate.ExecTimeoutSecs != 10 || cfg.Replicate.CancelAfterSecs != 11 || cfg.Replicate.MaxArchiveBytes != 12 {
+		t.Fatalf("replicate env config not applied: %#v", cfg.Replicate)
+	}
+	if _, ok := reflect.TypeOf(ReplicateConfig{}).FieldByName("APIToken"); ok {
+		t.Fatal("ReplicateConfig unexpectedly exposes APIToken")
+	}
+	if _, ok := reflect.TypeOf(ReplicateConfig{}).FieldByName("Token"); ok {
+		t.Fatal("ReplicateConfig unexpectedly exposes Token")
+	}
+}
+
+func stringPtr(value string) *string { return &value }
+
+func intPtr(value int) *int { return &value }
+
+func int64Ptr(value int64) *int64 { return &value }
+
+func TestReplicateConfigYAMLExplicitZeroPreserved(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Replicate.WaitSecs = 10
+	cfg.Replicate.PollIntervalSecs = 11
+	cfg.Replicate.ExecTimeoutSecs = 12
+	cfg.Replicate.CancelAfterSecs = 13
+	cfg.Replicate.MaxArchiveBytes = 14
+	zero := 0
+	zero64 := int64(0)
+	file := fileConfig{Replicate: &fileReplicateConfig{
+		WaitSecs:         &zero,
+		PollIntervalSecs: &zero,
+		ExecTimeoutSecs:  &zero,
+		CancelAfterSecs:  &zero,
+		MaxArchiveBytes:  &zero64,
+	}}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Replicate.WaitSecs != 0 || cfg.Replicate.PollIntervalSecs != 0 || cfg.Replicate.ExecTimeoutSecs != 0 || cfg.Replicate.CancelAfterSecs != 0 || cfg.Replicate.MaxArchiveBytes != 0 {
+		t.Fatalf("explicit zero values not preserved: %#v", cfg.Replicate)
+	}
+}
+
+func TestReplicateConfigRejectsNegativeYAMLAndEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		file fileConfig
+		env  map[string]string
+		want string
+	}{
+		{name: "file wait", file: fileConfig{Replicate: &fileReplicateConfig{WaitSecs: intPtr(-1)}}, want: "replicate waitSecs must be non-negative"},
+		{name: "env archive", env: map[string]string{"CRABBOX_REPLICATE_MAX_ARCHIVE_BYTES": "-1"}, want: "CRABBOX_REPLICATE_MAX_ARCHIVE_BYTES must be non-negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			var err error
+			if tc.file.Replicate != nil {
+				err = applyFileConfig(&cfg, tc.file)
+			} else {
+				err = applyEnv(&cfg)
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v want %q", err, tc.want)
+			}
+		})
 	}
 }
 
