@@ -3303,12 +3303,17 @@ export class FleetCoordinator {
       resolveStart = resolve;
       rejectStart = reject;
     });
-    let startTimer: ReturnType<typeof setTimeout> | null = null;
+    let startTimer: ReturnType<typeof setTimeout> | undefined;
     let expiryTimer: ReturnType<typeof setTimeout>;
+    const clearStartTimer = () => {
+      const timer = startTimer;
+      startTimer = undefined;
+      if (timer !== undefined) clearTimeout(timer as unknown as number);
+    };
     const close = (code: number, reason: string) => {
       if (closed) return;
       closed = true;
-      clearTimeout(startTimer);
+      clearStartTimer();
       clearTimeout(expiryTimer);
       rejectStart?.(new Error(reason));
       channel?.close();
@@ -3326,7 +3331,7 @@ export class FleetCoordinator {
         if (!started) {
           if (data === "start") {
             started = true;
-            clearTimeout(startTimer);
+            clearStartTimer();
             resolveStart?.();
           } else {
             close(1008, "native VNC start required");
