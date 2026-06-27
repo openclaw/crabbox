@@ -1169,6 +1169,7 @@ func allBuiltInProviderNames() []string {
 		"nvidia-brev",
 		"opencomputer",
 		"opensandbox",
+		"orgo",
 		"ovh",
 		"parallels",
 		"phala",
