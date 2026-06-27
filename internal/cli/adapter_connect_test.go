@@ -254,6 +254,10 @@ func TestAdapterRelayDesktopTimeoutCoversConnectionSetup(t *testing.T) {
 	if got := adapterRelayTimeoutForRequest(desktop, 11*time.Minute); got != 11*time.Minute {
 		t.Fatalf("desktop timeout=%s", got)
 	}
+	nativeVNC := adapterRelayRequest{Method: http.MethodPost, Path: "/v1/workspaces/fleet-a-is-101/connections/native-vnc"}
+	if got := adapterRelayTimeoutForRequest(nativeVNC, 11*time.Minute); got != 11*time.Minute {
+		t.Fatalf("native VNC timeout=%s", got)
+	}
 	ordinary := adapterRelayRequest{Method: http.MethodGet, Path: "/v1/workspaces/fleet-a-is-101"}
 	if got := adapterRelayTimeoutForRequest(ordinary, 11*time.Minute); got != 9*time.Second {
 		t.Fatalf("ordinary timeout=%s", got)

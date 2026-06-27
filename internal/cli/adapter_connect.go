@@ -418,7 +418,7 @@ func (r *adapterRelay) handle(ctx context.Context, request adapterRelayRequest) 
 }
 
 func adapterRelayTimeoutForRequest(request adapterRelayRequest, desktopTimeout time.Duration) time.Duration {
-	if request.Method == http.MethodPost && strings.HasSuffix(request.Path, "/connections/desktop") {
+	if request.Method == http.MethodPost && (strings.HasSuffix(request.Path, "/connections/desktop") || strings.HasSuffix(request.Path, "/connections/native-vnc")) {
 		if desktopTimeout <= 0 {
 			desktopTimeout = adapterRelayDefaultConnectionTime + adapterRelayConnectionOverhead
 		}

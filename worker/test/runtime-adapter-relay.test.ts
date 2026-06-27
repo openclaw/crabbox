@@ -98,8 +98,17 @@ describe("runtime adapter relay", () => {
       runtimeAdapterRelayTimeoutForPath("/v1/workspaces/example-workspace/connections/desktop"),
     ).toBe(runtimeAdapterDesktopRelayTimeoutMs);
     expect(
+      runtimeAdapterRelayTimeoutForPath("/v1/workspaces/example-workspace/connections/native-vnc"),
+    ).toBe(runtimeAdapterDesktopRelayTimeoutMs);
+    expect(
       runtimeAdapterRelayTimeoutForPath(
         "/v1/workspaces/example-workspace/connections/desktop",
+        11 * 60 * 1_000,
+      ),
+    ).toBe(11 * 60 * 1_000);
+    expect(
+      runtimeAdapterRelayTimeoutForPath(
+        "/v1/workspaces/example-workspace/connections/native-vnc",
         11 * 60 * 1_000,
       ),
     ).toBe(11 * 60 * 1_000);

@@ -83,7 +83,9 @@ export function validRuntimeAdapterDesktopRelayTimeout(value: unknown): value is
 }
 
 export function runtimeAdapterRelayTimeoutForPath(path: string, desktopTimeoutMs?: number): number {
-  if (!path.endsWith("/connections/desktop")) return runtimeAdapterRelayTimeoutMs;
+  if (!path.endsWith("/connections/desktop") && !path.endsWith("/connections/native-vnc")) {
+    return runtimeAdapterRelayTimeoutMs;
+  }
   return validRuntimeAdapterDesktopRelayTimeout(desktopTimeoutMs)
     ? desktopTimeoutMs
     : runtimeAdapterDesktopRelayTimeoutMs;

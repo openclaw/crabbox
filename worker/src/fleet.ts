@@ -3270,17 +3270,38 @@ export class FleetCoordinator {
       return json({ error: "native_vnc_unavailable", message: unavailable }, { status: 409 });
     }
     const key = workspaceKey(lease.workspace.owner, lease.workspace.org, lease.workspace.id);
-    const upgrade = await this.state.runExclusive(async () => {
-      if (this.workspaceConnectionLimitReached(key, lease.workspace.owner, lease.workspace.org)) {
-        return undefined;
+    const admission = await this.state.runExclusive(async () => {
+      const currentWorkspace = await this.state.storage.get<WorkspaceRecord>(key);
+      const currentLease = currentWorkspace
+        ? await this.getLease(currentWorkspace.leaseID)
+        : undefined;
+      const currentUnavailable = currentWorkspace
+        ? workspaceNativeVNCError(currentWorkspace, currentLease, this.env)
+        : "workspace is unavailable";
+      if (
+        currentUnavailable ||
+        !currentWorkspace ||
+        !currentLease ||
+        currentLease.id !== lease.lease.id
+      ) {
+        return {
+          error: "unavailable" as const,
+          message: currentUnavailable ?? "workspace lease changed",
+        };
       }
-      const accepted = this.state.createWebSocketUpgrade({
+      if (this.workspaceConnectionLimitReached(key, lease.workspace.owner, lease.workspace.org)) {
+        return { error: "limit" as const };
+      }
+      const upgrade = this.state.createWebSocketUpgrade({
         maxPayload: workspaceTerminalMaxBufferedBytes,
       });
-      this.trackWorkspaceTerminal(key, accepted.socket);
-      return accepted;
+      this.trackWorkspaceTerminal(key, upgrade.socket);
+      return { upgrade, workspace: currentWorkspace, lease: currentLease };
     });
-    if (!upgrade) {
+    if ("error" in admission && admission.error === "unavailable") {
+      return json({ error: "native_vnc_unavailable", message: admission.message }, { status: 409 });
+    }
+    if ("error" in admission) {
       return json(
         {
           error: "native_vnc_connection_limit",
@@ -3289,10 +3310,15 @@ export class FleetCoordinator {
         { status: 429, headers: { "retry-after": "5" } },
       );
     }
-    void this.connectWorkspaceNativeVNC(upgrade.socket, key, lease.workspace, lease.lease).catch(
-      (error) => closeSocket(upgrade.socket, 1011, boundedSocketReason(errorMessage(error))),
+    void this.connectWorkspaceNativeVNC(
+      admission.upgrade.socket,
+      key,
+      admission.workspace,
+      admission.lease,
+    ).catch((error) =>
+      closeSocket(admission.upgrade.socket, 1011, boundedSocketReason(errorMessage(error))),
     );
-    return upgrade.response;
+    return admission.upgrade.response;
   }
 
   private async connectWorkspaceNativeVNC(

@@ -3467,6 +3467,28 @@ describe("fleet lease identity and idle", () => {
       error: "native_vnc_connection_limit",
     });
     nativeVNCInternals.workspaceTerminals.delete(nativeVNCConnectionKey);
+    const stoppingGrantResponse = await fleet.fetch(
+      request("POST", `/v1/workspaces/${body.id}/connections/native-vnc`, { headers }),
+    );
+    const stoppingGrant = (await stoppingGrantResponse.json()) as { ticket: string };
+    const activeWorkspace = storage.value<WorkspaceRecord>(nativeVNCConnectionKey)!;
+    storage.seed(nativeVNCConnectionKey, {
+      ...activeWorkspace,
+      releaseRequestedAt: new Date().toISOString(),
+    });
+    const stoppingNativeVNC = await fleet.fetch(
+      request("GET", "/v1/native-vnc/handoff", {
+        headers: {
+          authorization: `Bearer ${stoppingGrant.ticket}`,
+          upgrade: "websocket",
+        },
+      }),
+    );
+    expect(stoppingNativeVNC.status).toBe(409);
+    await expect(stoppingNativeVNC.json()).resolves.toMatchObject({
+      error: "native_vnc_unavailable",
+    });
+    storage.seed(nativeVNCConnectionKey, activeWorkspace);
     const invalidNativeVNCTicket = await fleet.fetch(
       request("GET", "/v1/native-vnc/handoff", {
         headers: {
