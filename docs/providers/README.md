@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 67 providers (39 SSH lease, 26 delegated run, 2 service control).
+Current built-in surface: 68 providers (39 SSH lease, 27 delegated run, 2 service control).
 
 Access terms:
 
@@ -96,6 +96,7 @@ Access terms:
 | [external](external.md) (`exec-provider`) | built-in; `ssh-lease` · external-provider | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`; Configured executable contract | `byo`; GPU: unknown | external executable; contract-defined | Private or organization-specific provider integration | Safety and semantics depend on the configured executable |
 | [fastapi-cloud](fastapi-cloud.md) (`fastapicloud`, `fastapi`) | specialized; `service-control` · service-control | SSH not applicable; `none` · direct only; features: none | `linux`; FastAPI Cloud app | `cloud`; GPU: unknown | FastAPI Cloud; not exposed | Inspecting FastAPI Cloud app deployment readiness | Cannot execute arbitrary Crabbox run commands or stop apps |
 | [firecracker](firecracker.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Firecracker microVM | `self-hosted`; GPU: no | Crabbox direct lifecycle; microVM and local artifact cleanup | Self-hosted Linux KVM host with prepared Firecracker kernel, rootfs, and CNI | Requires Linux, /dev/kvm, Firecracker assets, and a working CNI setup on the host |
+| [flue](flue.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; Flue workflow runner | `local`; GPU: unknown | Flue workflow; one-shot workflow exit and temp-file cleanup | Local Flue workflow delegation with Crabbox archive sync | Node target only in v1; no SSH, coordinator, retained sessions, or Cloudflare/server staging |
 | [freestyle](freestyle.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Freestyle VM | `provider-managed`; GPU: unknown | Freestyle; provider VM cleanup | Hosted delegated Linux VM execution | No Crabbox-managed SSH path |
 | [gcp](gcp.md) (`google`, `google-cloud`) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Google Compute Engine VM | `cloud`; GPU: optional | Crabbox or coordinator; instance and firewall cleanup | Linux compute with broad machine selection | Project, IAM, quota, and firewall setup required |
 | [hetzner](hetzner.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `tailscale` | `linux`; Hetzner Cloud server | `cloud`; GPU: no | Crabbox or coordinator; server delete | Cost-effective high-CPU Linux VM | Linux-only and capacity varies by location |

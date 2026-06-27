@@ -178,6 +178,7 @@ type Config struct {
 	Freestyle                     FreestyleConfig
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
+	Flue                          FlueConfig
 	OpenComputer                  OpenComputerConfig
 	CodeSandbox                   CodeSandboxConfig
 	OpenSandbox                   OpenSandboxConfig
@@ -697,6 +698,21 @@ type TensorlakeConfig struct {
 	DiskMB         int
 	TimeoutSecs    int
 	NoInternet     bool
+}
+
+// FlueConfig configures the delegated Flue provider. It is intentionally
+// non-secret: credentials stay in Flue-managed env/config files, not Crabbox
+// config or argv.
+type FlueConfig struct {
+	CLIPath     string
+	Root        string
+	Workflow    string
+	Target      string
+	Config      string
+	EnvFile     string
+	Output      string
+	Workdir     string
+	TimeoutSecs int
 }
 
 // OpenComputerConfig configures the delegated OpenComputer provider, which
@@ -2600,6 +2616,13 @@ func baseConfig() Config {
 			MemoryMB: 1024,
 			DiskMB:   10240,
 		},
+		Flue: FlueConfig{
+			CLIPath:     "flue",
+			Workflow:    "crabbox-runner",
+			Target:      "node",
+			Workdir:     "/workspace/crabbox",
+			TimeoutSecs: 1800,
+		},
 		OpenComputer: OpenComputerConfig{
 			// APIURL is intentionally unset here so the `oc` config file's
 			// api_url is honored before the built-in default; the provider
@@ -2869,6 +2892,7 @@ type fileConfig struct {
 	Freestyle                *fileFreestyleConfig                `yaml:"freestyle,omitempty"`
 	Tenki                    *fileTenkiConfig                    `yaml:"tenki,omitempty"`
 	Tensorlake               *fileTensorlakeConfig               `yaml:"tensorlake,omitempty"`
+	Flue                     *fileFlueConfig                     `yaml:"flue,omitempty"`
 	OpenComputer             *fileOpenComputerConfig             `yaml:"openComputer,omitempty"`
 	CodeSandbox              *fileCodeSandboxConfig              `yaml:"codeSandbox,omitempty"`
 	OpenSandbox              *fileOpenSandboxConfig              `yaml:"openSandbox,omitempty"`
@@ -3499,6 +3523,18 @@ type fileTensorlakeConfig struct {
 	DiskMB         int     `yaml:"diskMB,omitempty"`
 	TimeoutSecs    int     `yaml:"timeoutSecs,omitempty"`
 	NoInternet     *bool   `yaml:"noInternet,omitempty"`
+}
+
+type fileFlueConfig struct {
+	CLIPath     string `yaml:"cliPath,omitempty"`
+	Root        string `yaml:"root,omitempty"`
+	Workflow    string `yaml:"workflow,omitempty"`
+	Target      string `yaml:"target,omitempty"`
+	Config      string `yaml:"config,omitempty"`
+	EnvFile     string `yaml:"envFile,omitempty"`
+	Output      string `yaml:"output,omitempty"`
+	Workdir     string `yaml:"workdir,omitempty"`
+	TimeoutSecs *int   `yaml:"timeoutSecs,omitempty"`
 }
 
 type fileOpenComputerConfig struct {
@@ -5755,6 +5791,38 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Tensorlake.NoInternet = *file.Tensorlake.NoInternet
 		}
 	}
+	if file.Flue != nil {
+		if file.Flue.CLIPath != "" {
+			cfg.Flue.CLIPath = file.Flue.CLIPath
+		}
+		if file.Flue.Root != "" {
+			cfg.Flue.Root = expandUserPath(file.Flue.Root)
+		}
+		if file.Flue.Workflow != "" {
+			cfg.Flue.Workflow = file.Flue.Workflow
+		}
+		if file.Flue.Target != "" {
+			cfg.Flue.Target = file.Flue.Target
+		}
+		if file.Flue.Config != "" {
+			cfg.Flue.Config = expandUserPath(file.Flue.Config)
+		}
+		if file.Flue.EnvFile != "" {
+			cfg.Flue.EnvFile = expandUserPath(file.Flue.EnvFile)
+		}
+		if file.Flue.Output != "" {
+			cfg.Flue.Output = file.Flue.Output
+		}
+		if file.Flue.Workdir != "" {
+			cfg.Flue.Workdir = file.Flue.Workdir
+		}
+		if file.Flue.TimeoutSecs != nil {
+			if *file.Flue.TimeoutSecs < 0 {
+				return exit(2, "flue timeoutSecs must be non-negative")
+			}
+			cfg.Flue.TimeoutSecs = *file.Flue.TimeoutSecs
+		}
+	}
 	if file.OpenComputer != nil {
 		if file.OpenComputer.Workdir != "" {
 			cfg.OpenComputer.Workdir = file.OpenComputer.Workdir
@@ -7581,6 +7649,24 @@ func applyEnv(cfg *Config) error {
 		cfg.OpenComputer.Burst = v
 	}
 	var err error
+	cfg.Flue.CLIPath = getenv("CRABBOX_FLUE_CLI", cfg.Flue.CLIPath)
+	if root := os.Getenv("CRABBOX_FLUE_ROOT"); root != "" {
+		cfg.Flue.Root = expandUserPath(root)
+	}
+	cfg.Flue.Workflow = getenv("CRABBOX_FLUE_WORKFLOW", cfg.Flue.Workflow)
+	cfg.Flue.Target = getenv("CRABBOX_FLUE_TARGET", cfg.Flue.Target)
+	if config := os.Getenv("CRABBOX_FLUE_CONFIG"); config != "" {
+		cfg.Flue.Config = expandUserPath(config)
+	}
+	if envFile := os.Getenv("CRABBOX_FLUE_ENV"); envFile != "" {
+		cfg.Flue.EnvFile = expandUserPath(envFile)
+	}
+	cfg.Flue.Output = getenv("CRABBOX_FLUE_OUTPUT", cfg.Flue.Output)
+	cfg.Flue.Workdir = getenv("CRABBOX_FLUE_WORKDIR", cfg.Flue.Workdir)
+	cfg.Flue.TimeoutSecs, err = getenvNonNegativeInt("CRABBOX_FLUE_TIMEOUT_SECS", cfg.Flue.TimeoutSecs)
+	if err != nil {
+		return err
+	}
 	cfg.CodeSandbox.TemplateID = getenv("CRABBOX_CODESANDBOX_TEMPLATE_ID", cfg.CodeSandbox.TemplateID)
 	cfg.CodeSandbox.Workdir = getenv("CRABBOX_CODESANDBOX_WORKDIR", cfg.CodeSandbox.Workdir)
 	cfg.CodeSandbox.VMTier = getenv("CRABBOX_CODESANDBOX_VM_TIER", cfg.CodeSandbox.VMTier)
