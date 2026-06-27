@@ -122,8 +122,10 @@ describe("cloud-init bootstrap", () => {
 
   it("adds desktop services only when requested", () => {
     const got = cloudInit({ ...config, desktop: true });
-    expect(got).toContain("xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal");
-    expect(got).toContain("xfconf xfce4-settings x11vnc xauth dbus-x11");
+    expect(got).toContain(
+      "tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel",
+    );
+    expect(got).toContain("xfconf xfce4-settings xauth dbus-x11");
     expect(got).toContain("arc-theme");
     expect(got).toContain("util-linux");
     expect(got).toContain("novnc websockify");
@@ -132,7 +134,11 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("/etc/systemd/system/crabbox-desktop.service");
     expect(got).toContain("/usr/local/bin/crabbox-desktop-session");
     expect(got).toContain("/etc/systemd/system/crabbox-desktop-session.service");
-    expect(got).toContain("/etc/systemd/system/crabbox-x11vnc.service");
+    expect(got).not.toContain("/etc/systemd/system/crabbox-x11vnc.service");
+    expect(got).toContain("ExecStart=/usr/bin/Xtigervnc :99");
+    expect(got).toContain("-AcceptSetDesktopSize");
+    expect(got).toContain("-localhost yes");
+    expect(got).toContain("-SecurityTypes VncAuth");
     expect(got).toContain("ExecStart=/usr/bin/startxfce4");
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop.service");
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop-session.service");
@@ -202,15 +208,16 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("xfce4-terminal --title='Crabbox Desktop'");
     expect(got).toContain("xterm -title 'Crabbox Desktop'");
     expect(got).toContain("(umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)");
-    expect(got).toContain("-rfbauth /var/lib/crabbox/vnc.pass");
-    expect(got).toContain("-wait 16 -defer 8 -nowait_bog");
+    expect(got).toContain("tigervncpasswd -f > /var/lib/crabbox/vnc.pass");
     expect(got).toContain("ss -ltn | grep -q '127.0.0.1:5900'");
-    expect(got).toContain("systemctl disable --now crabbox-wayvnc.service 2>/dev/null || true");
     expect(got).toContain(
-      "systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service",
+      "systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true",
     );
     expect(got).toContain(
-      "systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service",
+      "systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
+    );
+    expect(got).toContain(
+      "systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
     );
   });
 
@@ -323,7 +330,9 @@ describe("cloud-init bootstrap", () => {
   it("starts ssh before optional desktop and browser bootstrap", () => {
     const got = cloudInit({ ...config, desktop: true, browser: true });
     const sshIndex = got.indexOf("systemctl restart ssh");
-    const desktopIndex = got.indexOf("retry apt-get install -y --no-install-recommends xvfb");
+    const desktopIndex = got.indexOf(
+      "retry apt-get install -y --no-install-recommends tigervnc-standalone-server",
+    );
     const browserIndex = got.indexOf("retry apt-get install -y --no-install-recommends gnupg");
     const bootstrappedIndex = got.indexOf("touch /var/lib/crabbox/bootstrapped");
     expect(sshIndex).toBeGreaterThanOrEqual(0);

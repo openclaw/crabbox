@@ -345,6 +345,7 @@ func TestWebVNCResetRemoteCommandHandlesWaylandAndX11(t *testing.T) {
 		"/usr/local/bin/crabbox-start-desktop",
 		`CRABBOX_DESKTOP_ENV:-xfce`,
 		"crabbox-desktop.service crabbox-wayvnc.service",
+		"crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
 		"crabbox-desktop.service crabbox-x11vnc.service",
 		"crabbox-desktop-session.service crabbox-x11vnc.service",
 	} {

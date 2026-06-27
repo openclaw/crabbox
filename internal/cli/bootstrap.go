@@ -651,7 +651,6 @@ func cloudInitOptionalReadyChecks(cfg Config) string {
 			b.WriteString("      systemctl is-active --quiet crabbox-xvfb.service\n")
 			b.WriteString("      systemctl is-active --quiet crabbox-desktop.service\n")
 			b.WriteString("      systemctl is-active --quiet crabbox-desktop-session.service\n")
-			b.WriteString("      systemctl is-active --quiet crabbox-x11vnc.service\n")
 		}
 		b.WriteString("      ss -ltn | grep -q '127.0.0.1:5900'\n")
 	}
@@ -680,12 +679,12 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
     permissions: '0644'
     content: |
       [Unit]
-      Description=Crabbox Xvfb display
+      Description=Crabbox resize-capable TigerVNC display
       After=network.target
 
       [Service]
       User=crabbox
-      ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac
+      ExecStart=/usr/bin/Xtigervnc :99 -geometry 1920x1080 -depth 24 -localhost yes -rfbport 5900 -SecurityTypes VncAuth -PasswordFile=/var/lib/crabbox/vnc.pass -AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac
       Restart=always
 
       [Install]
@@ -939,21 +938,6 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
       User=crabbox
       Environment=DISPLAY=:99
       ExecStart=/usr/local/bin/crabbox-desktop-session
-      Restart=always
-
-      [Install]
-      WantedBy=multi-user.target
-  - path: /etc/systemd/system/crabbox-x11vnc.service
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=Crabbox loopback VNC server
-      After=crabbox-xvfb.service
-      Requires=crabbox-xvfb.service
-
-      [Service]
-      User=crabbox
-      ExecStart=/usr/bin/x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -rfbauth /var/lib/crabbox/vnc.pass -wait 16 -defer 8 -nowait_bog
       Restart=always
 
       [Install]
@@ -1315,12 +1299,12 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
     systemctl enable crabbox-desktop.service crabbox-wayvnc.service
     systemctl restart crabbox-desktop.service crabbox-wayvnc.service`)
 	} else if cfg.Desktop {
-		parts = append(parts, `    retry apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
+		parts = append(parts, `    retry apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
     fi
-    { head -c 8 /var/lib/crabbox/vnc.password; printf '\n'; head -c 8 /var/lib/crabbox/vnc.password; printf '\n\n'; } | x11vnc -storepasswd /var/lib/crabbox/vnc.pass >/dev/null 2>&1
+    head -c 8 /var/lib/crabbox/vnc.password | tigervncpasswd -f > /var/lib/crabbox/vnc.pass
     chown crabbox:crabbox /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     printf 'CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=:99\n' >/var/lib/crabbox/desktop.env
@@ -1328,9 +1312,9 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
     chmod 0644 /var/lib/crabbox/desktop.env
     CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme
     systemctl daemon-reload
-    systemctl disable --now crabbox-wayvnc.service 2>/dev/null || true
-    systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service
-    systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service`)
+    systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true
+    systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service
+    systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service`)
 	}
 	if cfg.Provider == "gcp" {
 		parts = append(parts, cloudInitGCPExpiryGuardBootstrap())

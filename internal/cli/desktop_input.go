@@ -641,10 +641,10 @@ check() {
   fi
 }
 CRABBOX_REPAIR="ensure DISPLAY=:99 is exported"; [ -n "$DISPLAY" ] && echo "session ok DISPLAY=$DISPLAY" || echo "session failed DISPLAY repair=export DISPLAY=:99"
-CRABBOX_REPAIR="restart crabbox-xvfb.service"; check session xvfb pgrep -f "Xvfb :99"
+CRABBOX_REPAIR="restart crabbox-xvfb.service"; check session display sh -c 'pgrep -f "Xtigervnc :99" >/dev/null || pgrep -f "Xvfb :99" >/dev/null'
 CRABBOX_REPAIR="restart crabbox-desktop.service"; check session xfwm4 pgrep -x xfwm4
 CRABBOX_REPAIR="restart crabbox-desktop.service"; check session panel pgrep -x xfce4-panel
-CRABBOX_REPAIR="restart crabbox-x11vnc.service"; check vm vnc ss -ltn sport = :5900
+CRABBOX_REPAIR="restart crabbox-xvfb.service"; check vm vnc ss -ltn sport = :5900
 CRABBOX_REPAIR="warm a new --desktop lease or install xdotool"; check input xdotool command -v xdotool
 CRABBOX_REPAIR="warm a new --desktop lease or install xclip"; if command -v xclip >/dev/null 2>&1 || command -v xsel >/dev/null 2>&1 || command -v wl-copy >/dev/null 2>&1; then echo "input ok clipboard"; else echo "input failed clipboard repair=$CRABBOX_REPAIR"; fi
 CRABBOX_REPAIR="warm with --browser or install Chrome/Chromium"; if [ -f /var/lib/crabbox/browser.env ]; then . /var/lib/crabbox/browser.env; fi; if [ -n "${BROWSER:-}" ] && [ -x "$BROWSER" ]; then echo "session ok browser=$BROWSER"; elif command -v google-chrome >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then echo "session ok browser"; else echo "session failed browser repair=$CRABBOX_REPAIR"; fi

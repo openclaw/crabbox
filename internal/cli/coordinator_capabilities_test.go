@@ -129,7 +129,7 @@ func TestProbeDesktopEnvCommandIncludesXAuthority(t *testing.T) {
 
 func TestStaticDesktopProbeCommandDefaultsToX11(t *testing.T) {
 	got := staticDesktopProbeCommand(Config{}, SSHTarget{TargetOS: targetLinux})
-	for _, want := range []string{"Xvfb :99", "x11vnc"} {
+	for _, want := range []string{"Xtigervnc :99", "Xvfb :99", "x11vnc"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("static x11 probe missing %q:\n%s", want, got)
 		}
