@@ -129,6 +129,37 @@ func TestNebiusRegistersWithoutAliases(t *testing.T) {
 	}
 }
 
+func TestNomadRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("nomad")
+	if err != nil {
+		t.Fatalf("ProviderFor(nomad): %v", err)
+	}
+	if provider.Name() != "nomad" {
+		t.Fatalf("ProviderFor(nomad).Name=%q", provider.Name())
+	}
+	if _, ok := provider.(core.DoctorProvider); !ok {
+		t.Fatal("nomad provider does not expose doctor")
+	}
+	spec := provider.Spec()
+	if spec.Family != "nomad" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("nomad spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("nomad targets=%#v", spec.Targets)
+	}
+	if !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("nomad features=%v, want cleanup after Wave 2 lifecycle", spec.Features)
+	}
+	if !spec.Features.Has(core.FeatureArchiveSync) {
+		t.Fatalf("nomad features=%v, want archive-sync after Wave 3 run sync", spec.Features)
+	}
+	for _, alias := range []string{"nomad-provider", "nomad-run", "hashicorp-nomad"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "nomad" {
+			t.Fatalf("%q alias unexpectedly resolves to nomad", alias)
+		}
+	}
+}
+
 func TestAgentSandboxRegistersWithoutAliases(t *testing.T) {
 	provider, err := core.ProviderFor("agent-sandbox")
 	if err != nil {
@@ -1166,6 +1197,7 @@ func allBuiltInProviderNames() []string {
 		"namespace-devbox",
 		"namespace-instance",
 		"nebius",
+		"nomad",
 		"nvidia-brev",
 		"opencomputer",
 		"opensandbox",

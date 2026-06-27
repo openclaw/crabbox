@@ -74,10 +74,10 @@ with `--keep` to write a small JSON lease handle for orchestrators.
 Most providers connect over SSH and Crabbox owns sync and command transport.
 Delegated providers (for example Blacksmith Testbox, Blaxel, Daytona, Islo,
 Azure Dynamic Sessions, Cloudflare Dynamic Workers, Cloudflare Sandbox, E2B,
-Superserve, OpenSandbox, and Vercel Sandbox) own command transport themselves:
-Crabbox sends either checkout content or module source through the provider's
-APIs, runs through the provider, and prints `sync=delegated` in the final timing
-summary where a sync phase exists. These
+Nomad, Superserve, OpenSandbox, and Vercel Sandbox) own command transport
+themselves: Crabbox sends either checkout content or module source through the
+provider's APIs, runs through the provider, and prints `sync=delegated` in the
+final timing summary where a sync phase exists. These
 providers reject the SSH-run-only features `--capture-stdout`,
 `--capture-stderr`, `--capture-on-fail`, `--script`, `--script-stdin`, and
 `--fresh-pr` unless a delegated adapter advertises the matching capability.

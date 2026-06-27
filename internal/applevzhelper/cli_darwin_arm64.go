@@ -323,6 +323,19 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	defer readyTimer.Stop()
 	pollTicker := time.NewTicker(runStartPollInterval)
 	defer pollTicker.Stop()
+	helperExitFailure := func(waitErr error) error {
+		exitDetail := error(nil)
+		if waitErr != nil {
+			exitDetail = fmt.Errorf("helper daemon process: %w", waitErr)
+		}
+		failure := errors.Join(
+			fmt.Errorf("helper daemon exited before the VM reached running state"),
+			exitDetail,
+			startupDiagnostics(root, *name),
+		)
+		_ = os.RemoveAll(instanceRoot)
+		return failure
+	}
 	for {
 		current, err := readMetadata(MetadataPath(root, *name))
 		if err == nil {
@@ -333,18 +346,13 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		}
 		select {
 		case waitErr := <-waitCh:
-			exitDetail := error(nil)
-			if waitErr != nil {
-				exitDetail = fmt.Errorf("helper daemon process: %w", waitErr)
-			}
-			failure := errors.Join(
-				fmt.Errorf("helper daemon exited before the VM reached running state"),
-				exitDetail,
-				startupDiagnostics(root, *name),
-			)
-			_ = os.RemoveAll(instanceRoot)
-			return failure
+			return helperExitFailure(waitErr)
 		case <-readyTimer.C:
+			select {
+			case waitErr := <-waitCh:
+				return helperExitFailure(waitErr)
+			case <-time.After(500 * time.Millisecond):
+			}
 			failure := errors.Join(
 				fmt.Errorf("timed out waiting for helper daemon to report readiness"),
 				startupDiagnostics(root, *name),
