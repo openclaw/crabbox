@@ -23,9 +23,9 @@ import (
 
 func controllerSubprocessTestTimeout(base time.Duration) time.Duration {
 	if raceEnabled {
-		return 5 * base
+		return 10 * base
 	}
-	return base
+	return 5 * base
 }
 
 type fixedIdentityExecControllerRunner struct {

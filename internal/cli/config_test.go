@@ -446,6 +446,38 @@ func clearConfigEnv(t *testing.T) {
 		"FASTAPI_CLOUD_APP_ID",
 		"CRABBOX_FASTAPI_CLOUD_TEAM_ID",
 		"FASTAPI_CLOUD_TEAM_ID",
+		"RUNPOD_API_KEY",
+		"CRABBOX_RUNPOD_API_KEY",
+		"RUNPOD_API_URL",
+		"CRABBOX_RUNPOD_API_URL",
+		"RUNPOD_CLOUD_TYPE",
+		"CRABBOX_RUNPOD_CLOUD_TYPE",
+		"RUNPOD_INSTANCE_ID",
+		"CRABBOX_RUNPOD_INSTANCE_ID",
+		"RUNPOD_IMAGE",
+		"CRABBOX_RUNPOD_IMAGE",
+		"RUNPOD_TEMPLATE_ID",
+		"CRABBOX_RUNPOD_TEMPLATE_ID",
+		"CRABBOX_RUNPOD_DISK_GB",
+		"CRABBOX_RUNPOD_USER",
+		"CRABBOX_RUNPOD_WORK_ROOT",
+		"CRABBOX_VAST_API_KEY",
+		"VAST_API_KEY",
+		"CRABBOX_VAST_API_URL",
+		"VAST_API_URL",
+		"CRABBOX_VAST_INSTANCE_TYPE",
+		"CRABBOX_VAST_GPU_NAME",
+		"CRABBOX_VAST_GPU_COUNT",
+		"CRABBOX_VAST_IMAGE",
+		"CRABBOX_VAST_TEMPLATE_ID",
+		"CRABBOX_VAST_RUNTYPE",
+		"CRABBOX_VAST_DISK_GB",
+		"CRABBOX_VAST_MAX_DPH_TOTAL",
+		"CRABBOX_VAST_MIN_RELIABILITY",
+		"CRABBOX_VAST_ORDER",
+		"CRABBOX_VAST_USER",
+		"CRABBOX_VAST_WORK_ROOT",
+		"CRABBOX_VAST_RELEASE_ACTION",
 		"CRABBOX_NVIDIA_BREV_CLI",
 		"CRABBOX_NVIDIA_BREV_ORG",
 		"CRABBOX_NVIDIA_BREV_TYPE",
@@ -4584,6 +4616,21 @@ runpod:
   diskGB: 25
   user: runpod-user
   workRoot: /workspaces/runpod-test
+vast:
+  apiUrl: https://vast.example.test/api/v0
+  instanceType: on-demand
+  gpuName: RTX 4090
+  gpuCount: 2
+  image: nvidia/cuda:vast-file
+  templateId: vast-tpl-file
+  runtype: ssh_direct
+  diskGB: 60
+  maxDphTotal: 3.5
+  minReliability: 0.9
+  order: reliability desc
+  user: root
+  workRoot: /workspaces/vast-test
+  releaseAction: stop
 islo:
   baseUrl: https://islo.example.test
   image: docker.io/library/ubuntu:24.04
@@ -4838,6 +4885,9 @@ ssh:
 	}
 	if cfg.Runpod.APIURL != "https://runpod.example.test/v1" || cfg.Runpod.CloudType != "SECURE" || cfg.Runpod.InstanceID != "NVIDIA L4" || cfg.Runpod.Image != "runpod/pytorch:custom" || cfg.Runpod.TemplateID != "tpl-file" || cfg.Runpod.DiskGB != 25 || cfg.Runpod.User != "runpod-user" || cfg.Runpod.WorkRoot != "/workspaces/runpod-test" {
 		t.Fatalf("runpod config not loaded: %#v", cfg.Runpod)
+	}
+	if cfg.Vast.APIURL != "https://vast.example.test/api/v0" || cfg.Vast.InstanceType != "on-demand" || cfg.Vast.GPUName != "RTX 4090" || cfg.Vast.GPUCount != 2 || cfg.Vast.Image != "nvidia/cuda:vast-file" || cfg.Vast.TemplateID != "vast-tpl-file" || cfg.Vast.Runtype != "ssh_direct" || cfg.Vast.DiskGB != 60 || cfg.Vast.MaxDphTotal != 3.5 || cfg.Vast.MinReliability != 0.9 || cfg.Vast.Order != "reliability desc" || cfg.Vast.User != "root" || cfg.Vast.WorkRoot != "/workspaces/vast-test" || cfg.Vast.ReleaseAction != "stop" {
+		t.Fatalf("vast config not loaded: %#v", cfg.Vast)
 	}
 	if cfg.Islo.BaseURL != "https://islo.example.test" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.SnapshotName != "snap-ready" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 || cfg.Islo.DiskGB != 40 {
 		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
@@ -5173,6 +5223,23 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_RUNPOD_DISK_GB", "30")
 	t.Setenv("CRABBOX_RUNPOD_USER", "runpod-env-user")
 	t.Setenv("CRABBOX_RUNPOD_WORK_ROOT", "/work/runpod-env")
+	t.Setenv("VAST_API_KEY", "vast-key-file")
+	t.Setenv("CRABBOX_VAST_API_KEY", "vast-key-env")
+	t.Setenv("VAST_API_URL", "https://vast-file.example/api/v0")
+	t.Setenv("CRABBOX_VAST_API_URL", "https://vast-env.example/api/v0")
+	t.Setenv("CRABBOX_VAST_INSTANCE_TYPE", "interruptible")
+	t.Setenv("CRABBOX_VAST_GPU_NAME", "H100")
+	t.Setenv("CRABBOX_VAST_GPU_COUNT", "4")
+	t.Setenv("CRABBOX_VAST_IMAGE", "nvidia/cuda:vast-env")
+	t.Setenv("CRABBOX_VAST_TEMPLATE_ID", "vast-tpl-env")
+	t.Setenv("CRABBOX_VAST_RUNTYPE", "ssh_direct")
+	t.Setenv("CRABBOX_VAST_DISK_GB", "80")
+	t.Setenv("CRABBOX_VAST_MAX_DPH_TOTAL", "4.25")
+	t.Setenv("CRABBOX_VAST_MIN_RELIABILITY", "0.95")
+	t.Setenv("CRABBOX_VAST_ORDER", "dlperf desc")
+	t.Setenv("CRABBOX_VAST_USER", "ubuntu")
+	t.Setenv("CRABBOX_VAST_WORK_ROOT", "/work/vast-env")
+	t.Setenv("CRABBOX_VAST_RELEASE_ACTION", "keep")
 	t.Setenv("ISLO_API_KEY", "islo-api-file")
 	t.Setenv("CRABBOX_ISLO_API_KEY", "islo-api-env")
 	t.Setenv("ISLO_BASE_URL", "https://islo-file.example")
@@ -5426,6 +5493,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Runpod.APIKey != "runpod-key-env" || cfg.Runpod.APIURL != "https://runpod-env.example/v1" || cfg.Runpod.CloudType != "SECURE" || cfg.Runpod.InstanceID != "NVIDIA L4" || cfg.Runpod.Image != "runpod/pytorch:env" || cfg.Runpod.TemplateID != "tpl-env" || cfg.Runpod.DiskGB != 30 || cfg.Runpod.User != "runpod-env-user" || cfg.Runpod.WorkRoot != "/work/runpod-env" {
 		t.Fatalf("unexpected runpod env: %#v", cfg.Runpod)
+	}
+	if cfg.Vast.APIKey != "vast-key-env" || cfg.Vast.APIURL != "https://vast-env.example/api/v0" || cfg.Vast.InstanceType != "interruptible" || cfg.Vast.GPUName != "H100" || cfg.Vast.GPUCount != 4 || cfg.Vast.Image != "nvidia/cuda:vast-env" || cfg.Vast.TemplateID != "vast-tpl-env" || cfg.Vast.Runtype != "ssh_direct" || cfg.Vast.DiskGB != 80 || cfg.Vast.MaxDphTotal != 4.25 || cfg.Vast.MinReliability != 0.95 || cfg.Vast.Order != "dlperf desc" || cfg.Vast.User != "ubuntu" || cfg.Vast.WorkRoot != "/work/vast-env" || cfg.Vast.ReleaseAction != "keep" {
+		t.Fatalf("unexpected vast env: %#v", cfg.Vast)
 	}
 	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)

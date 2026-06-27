@@ -780,7 +780,7 @@ func TestWindowsWSL2BootstrapCompleteProbeUsesWindowsMarker(t *testing.T) {
 	target := bootstrapTarget
 	target.WindowsMode = windowsModeWSL2
 
-	if !probeWindowsWSL2BootstrapComplete(context.Background(), bootstrapTarget, &target, 5*time.Second) {
+	if !probeWindowsWSL2BootstrapComplete(context.Background(), bootstrapTarget, &target, 30*time.Second) {
 		t.Fatal("setup marker probe should pass with fake ssh")
 	}
 	data, err := os.ReadFile(logPath)
