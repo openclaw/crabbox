@@ -1183,6 +1183,7 @@ func allBuiltInProviderNames() []string {
 		"ssh",
 		"superserve",
 		"tart",
+		"tencentcloud",
 		"tenki",
 		"tensorlake",
 		"upstash-box",

@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 67 providers (39 SSH lease, 26 delegated run, 2 service control).
+Current built-in surface: 68 providers (40 SSH lease, 26 delegated run, 2 service control).
 
 Access terms:
 
@@ -130,6 +130,7 @@ Access terms:
 | [ssh](ssh.md) (`static`, `static-ssh`) | built-in; `ssh-lease` · byo-ssh | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `desktop`, `browser`, `code` | `linux`, `windows/normal`, `windows/wsl2`, `macos`; Existing SSH host | `byo`; GPU: optional | user; none | Bring-your-own persistent Linux, macOS, or Windows host | Crabbox does not provision or clean up the host |
 | [superserve](superserve.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Superserve hosted sandbox | `provider-managed`; GPU: unknown | Superserve; sandbox delete | Hosted delegated Linux sandbox | Requires both control-plane and data-plane access |
 | [tart](tart.md) (`local-tart`, `macos-vm`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop` | `macos`; Tart Apple silicon VM | `local`; GPU: no | Crabbox; VM delete | Local macOS VM testing | Apple silicon host and prepared Tart image required |
+| [tencentcloud](tencentcloud.md) (`tencent`, `tencent-cvm`, `cvm`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Tencent Cloud CVM instance | `cloud`; GPU: optional | Crabbox; instance termination | Linux SSH leases on Tencent Cloud CVM | Direct-only; requires CVM image, VPC/subnet/security-group planning, and Tencent Cloud API credentials |
 | [tenki](tenki.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Tenki sandbox VM | `provider-managed`; GPU: unknown | Tenki; sandbox release | Managed Linux sandbox with SSH proxy | Gateway auth uses Tenki-managed key and certificate files |
 | [tensorlake](tensorlake.md) (`tl`, `tensorlake-sbx`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: `run-session` | `linux`; Tensorlake Firecracker sandbox | `provider-managed`; GPU: unknown | Tensorlake; provider sandbox cleanup | Hosted Firecracker-backed delegated execution | Does not expose raw Firecracker provisioning |
 | [upstash-box](upstash-box.md) (`upstash`, `box`, `upstashbox`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Upstash Box sandbox | `provider-managed`; GPU: no | Upstash; sandbox cleanup | Hosted short-lived delegated sandbox | No normal SSH access or coordinator routing |

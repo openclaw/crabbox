@@ -60,6 +60,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/ssh"
 	_ "github.com/openclaw/crabbox/internal/providers/superserve"
 	_ "github.com/openclaw/crabbox/internal/providers/tart"
+	_ "github.com/openclaw/crabbox/internal/providers/tencentcloud"
 	_ "github.com/openclaw/crabbox/internal/providers/tenki"
 	_ "github.com/openclaw/crabbox/internal/providers/tensorlake"
 	_ "github.com/openclaw/crabbox/internal/providers/upstashbox"
