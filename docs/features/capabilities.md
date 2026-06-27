@@ -63,9 +63,9 @@ desktop.
 When a managed Linux lease is created with `--desktop` (default `xfce`),
 bootstrap (`internal/cli/bootstrap.go`) installs and enables systemd units for:
 
-- Xvfb on display `:99`;
+- resize-capable TigerVNC on display `:99`;
 - an XFCE4 session (`xfce4-session`, panel, terminal, settings, theme);
-- x11vnc bound to `127.0.0.1:5900` with `-localhost`;
+- VNC bound to `127.0.0.1:5900` with `-localhost yes`;
 - a randomized VNC password at `/var/lib/crabbox/vnc.password`;
 - screenshot and capture tooling: `scrot`, `ffmpeg`, plus input helpers
   (`xdotool`, `wmctrl`, `xclip`, `xsel`).
@@ -205,8 +205,8 @@ For static SSH hosts, capability validation degrades to probe-based detection,
 because Crabbox does not install software on operator-owned machines:
 
 - `--desktop`: probe loopback VNC at `127.0.0.1:5900` over SSH (X11 checks for
-  Xvfb/x11vnc; Wayland/GNOME checks for the compositor and WayVNC). Fail with a
-  clear error if the desktop is not running.
+  Xtigervnc or legacy Xvfb/x11vnc; Wayland/GNOME checks for the compositor and
+  WayVNC). Fail with a clear error if the desktop is not running.
 - `--browser`: probe for a browser binary using the OS-specific search list;
   fail if none is found.
 - `--code` is rejected (managed Linux only).

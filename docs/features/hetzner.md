@@ -91,9 +91,9 @@ CRABBOX_HETZNER_SSH_KEY    # hetzner.sshKey    (reuse a named Hetzner key)
 The Hetzner adapter advertises `ssh`, `crabbox-sync`, `cleanup`, `desktop`,
 `browser`, `code`, and `tailscale`.
 
-- `--desktop` / `--browser` use the Linux VNC path: Xvfb, a lightweight desktop
-  session, and x11vnc bound to `127.0.0.1:5900`. `crabbox vnc` opens an SSH
-  local tunnel to it. See [Linux VNC](vnc-linux.md).
+- `--desktop` / `--browser` use the Linux VNC path: resize-capable TigerVNC and
+  a lightweight XFCE session, with VNC bound to `127.0.0.1:5900`. `crabbox vnc`
+  opens an SSH local tunnel to it. See [Linux VNC](vnc-linux.md).
 - `--code` provisions code-server, bridgeable into the portal with
   `crabbox code`.
 - `--tailscale` joins the lease to a tailnet. In direct mode this requires an

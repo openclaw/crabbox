@@ -117,7 +117,7 @@ func TestCloudInitStartsSSHBeforeOptionalDesktopBootstrap(t *testing.T) {
 	cfg.Desktop = true
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	sshIndex := strings.Index(got, "timeout 30s systemctl restart ssh")
-	desktopIndex := strings.Index(got, "retry apt-get install -y --no-install-recommends xvfb")
+	desktopIndex := strings.Index(got, "retry apt-get install -y --no-install-recommends tigervnc-standalone-server")
 	bootstrappedIndex := strings.Index(got, "touch /var/lib/crabbox/bootstrapped")
 	if sshIndex < 0 || desktopIndex < 0 || bootstrappedIndex < 0 {
 		t.Fatalf("cloudInit(desktop) missing expected bootstrap markers")
@@ -135,8 +135,8 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 	cfg.Desktop = true
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
-		"xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal",
-		"xfconf xfce4-settings x11vnc xauth dbus-x11",
+		"tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel",
+		"xfconf xfce4-settings xauth dbus-x11",
 		"x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel",
 		"arc-theme",
 		"util-linux",
@@ -146,7 +146,10 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"/etc/systemd/system/crabbox-desktop.service",
 		"/usr/local/bin/crabbox-desktop-session",
 		"/etc/systemd/system/crabbox-desktop-session.service",
-		"/etc/systemd/system/crabbox-x11vnc.service",
+		"ExecStart=/usr/bin/Xtigervnc :99",
+		"-AcceptSetDesktopSize",
+		"-localhost yes",
+		"-SecurityTypes VncAuth",
 		"ExecStart=/usr/bin/startxfce4",
 		"systemctl is-active --quiet crabbox-desktop.service",
 		"systemctl is-active --quiet crabbox-desktop-session.service",
@@ -196,17 +199,18 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"xfce4-terminal --title='Crabbox Desktop'",
 		"xterm -title 'Crabbox Desktop'",
 		"(umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)",
-		"x11vnc -storepasswd",
-		"-rfbauth /var/lib/crabbox/vnc.pass",
-		"-wait 16 -defer 8 -nowait_bog",
+		"tigervncpasswd -f > /var/lib/crabbox/vnc.pass",
 		"ss -ltn | grep -q '127.0.0.1:5900'",
-		"systemctl disable --now crabbox-wayvnc.service 2>/dev/null || true",
-		"systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service",
-		"systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service",
+		"systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true",
+		"systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
+		"systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(desktop) missing %q", want)
 		}
+	}
+	if strings.Contains(got, "/etc/systemd/system/crabbox-x11vnc.service") {
+		t.Fatal("cloudInit(desktop) should not install the fixed-size x11vnc service")
 	}
 }
 

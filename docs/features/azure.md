@@ -229,9 +229,9 @@ back to the public IP. The default is `public`.
 
 ## Desktop
 
-Azure Linux desktop leases use the standard VNC path: Xvfb, a lightweight
-desktop session, x11vnc bound to `127.0.0.1:5900`, and an SSH local tunnel
-created by `crabbox vnc`. Azure native Windows desktop leases use the shared
+Azure Linux desktop leases use the standard VNC path: resize-capable TigerVNC,
+a lightweight XFCE session, VNC bound to `127.0.0.1:5900`, and an SSH local
+tunnel created by `crabbox vnc`. Azure native Windows desktop leases use the shared
 managed Windows bootstrap to install TightVNC, create the local `crabbox`
 administrator, enable auto-logon, and expose VNC only through an SSH tunnel.
 The OpenSSH, Git for Windows, and TightVNC downloads are pinned and SHA-256
