@@ -437,6 +437,11 @@ Desktop workspaces report `capabilities.nativeVnc=true` when the native CLI
 handoff is available. This does not imply a browser desktop endpoint:
 `capabilities.vnc` and `capabilities.desktop` remain false unless
 `POST /v1/workspaces/:id/connections/desktop` is supported.
+`POST /v1/workspaces/:id/connections/native-vnc` mints a one-minute,
+single-use grant. The native CLI passes that grant on stdin, and the coordinator
+uses its dedicated workspace SSH key to relay the loopback VNC service over an
+authenticated WebSocket. The workspace SSH private key never leaves the
+coordinator.
 
 When `CRABBOX_WORKSPACE_PREWARM_COUNT` is positive, the coordinator keeps that
 many hidden ready workspaces for each organization with active workspace demand.

@@ -194,6 +194,7 @@ Allowed operations are exactly:
 - `GET /v1/workspaces/{id}`
 - `DELETE /v1/workspaces/{id}`
 - `POST /v1/workspaces/{id}/connections/desktop`
+- `POST /v1/workspaces/{id}/connections/native-vnc`
 
 There is no arbitrary URL, shell, argv, environment, file, or provider-command
 surface. Request and response bodies are UTF-8 strings bounded to 64 KiB.
@@ -202,7 +203,7 @@ requests time out after nine seconds, and the coordinator allows five more
 seconds for response delivery. Every frame carries that absolute Unix
 millisecond deadline; the connector rejects expired frames before local
 dispatch and caps the local request context to the earlier of that deadline or
-its own timeout. Desktop connection setup
+its own timeout. Desktop and native VNC connection setup
 gets the configured `--connection-timeout` plus 30 seconds of relay overhead,
 and the connector negotiates that deadline plus five seconds of response grace
 with the coordinator. The setup value may not exceed 24 hours. Set it to the

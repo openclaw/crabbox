@@ -1,15 +1,24 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"nhooyr.io/websocket"
 )
 
 func TestVNCNativeHandoffJSONContract(t *testing.T) {
@@ -33,6 +42,123 @@ func TestVNCNativeHandoffJSONContract(t *testing.T) {
 	}
 	if decoded != handoff {
 		t.Fatalf("decoded handoff=%#v want=%#v", decoded, handoff)
+	}
+}
+
+func TestVNCNativeGrantRelaysCoordinatorWebSocketToLoopback(t *testing.T) {
+	const ticket = "native_vnc_0123456789abcdef0123456789abcdef"
+	serverErr := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/native-vnc/handoff" || r.Header.Get("Authorization") != "Bearer "+ticket {
+			serverErr <- fmt.Errorf("request path=%q authorization=%q", r.URL.Path, r.Header.Get("Authorization"))
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer ws.Close(websocket.StatusNormalClosure, "done")
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		ready := `{"schema":"crabbox/native-vnc-ready/v1","leaseId":"cbx_native123","username":"dev","password":"private"}`
+		if err := ws.Write(ctx, websocket.MessageText, []byte(ready)); err != nil {
+			serverErr <- err
+			return
+		}
+		typ, start, err := ws.Read(ctx)
+		if err != nil || typ != websocket.MessageText || string(start) != "start" {
+			serverErr <- fmt.Errorf("start type=%v value=%q error=%v", typ, start, err)
+			return
+		}
+		if err := ws.Write(ctx, websocket.MessageBinary, []byte("RFB 003.008\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		typ, client, err := ws.Read(ctx)
+		if err != nil || typ != websocket.MessageBinary || string(client) != "client-vnc" {
+			serverErr <- fmt.Errorf("client type=%v value=%q error=%v", typ, client, err)
+			return
+		}
+		serverErr <- nil
+	}))
+	defer server.Close()
+
+	stdoutReader, stdoutWriter := io.Pipe()
+	app := App{Stdout: stdoutWriter, Stderr: io.Discard, Stdin: strings.NewReader(ticket + "\n")}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- app.vncFromNativeGrant(ctx, "cbx_native123", server.URL, "")
+		_ = stdoutWriter.Close()
+	}()
+	line, err := bufio.NewReader(stdoutReader).ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var handoff vncNativeHandoff
+	if err := json.Unmarshal(line, &handoff); err != nil {
+		t.Fatal(err)
+	}
+	if handoff.Host != vncLoopbackHost || handoff.Username != "dev" || handoff.Password != "private" {
+		t.Fatalf("handoff=%#v", handoff)
+	}
+	local, err := net.DialTimeout("tcp", net.JoinHostPort(handoff.Host, strconv.Itoa(handoff.Port)), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	buffer := make([]byte, len("RFB 003.008\n"))
+	if _, err := io.ReadFull(local, buffer); err != nil {
+		t.Fatal(err)
+	}
+	if string(buffer) != "RFB 003.008\n" {
+		t.Fatalf("server VNC bytes=%q", buffer)
+	}
+	if _, err := local.Write([]byte("client-vnc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+	_ = local.Close()
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidNativeVNCTicket(t *testing.T) {
+	for _, ticket := range []string{
+		"native_vnc_0123456789abcdef0123456789abcdef",
+	} {
+		if !validNativeVNCTicket(ticket) {
+			t.Fatalf("valid ticket rejected: %q", ticket)
+		}
+	}
+	for _, ticket := range []string{
+		"native_vnc_0123456789abcdef",
+		"native_vnc_0123456789ABCDEF0123456789ABCDEF",
+		"native_vnc_0123456789abcdef0123456789abcdeg",
+		" native_vnc_0123456789abcdef0123456789abcdef",
+	} {
+		if validNativeVNCTicket(ticket) {
+			t.Fatalf("invalid ticket accepted: %q", ticket)
+		}
+	}
+}
+
+func TestNativeVNCLoopbackHost(t *testing.T) {
+	for _, host := range []string{"localhost", "LOCALHOST", "127.0.0.1", "::1"} {
+		if !isNativeVNCLoopbackHost(host) {
+			t.Fatalf("loopback host rejected: %q", host)
+		}
+	}
+	for _, host := range []string{"", "0.0.0.0", "127.0.0.2", "localhost.example.com"} {
+		if isNativeVNCLoopbackHost(host) {
+			t.Fatalf("non-loopback host accepted: %q", host)
+		}
 	}
 }
 

@@ -156,6 +156,7 @@ const codeViewerTicketTTLSeconds = 120;
 const codeViewerSessionTTLSeconds = 8 * 60 * 60;
 const egressTicketTTLSeconds = 120;
 const runtimeAdapterTicketTTLSeconds = 120;
+const nativeVNCTicketTTLSeconds = 60;
 const runtimeAdapterProvisionalClaimTTLSeconds = 10 * 60;
 const runtimeAdapterDeleteRetryBaseMs = 5_000;
 const runtimeAdapterDeleteRetryMaxMs = 60_000;
@@ -214,6 +215,16 @@ const workspaceSSHHostPublicKeyHeader = "x-crabbox-workspace-ssh-host-public-key
 
 interface WebVNCTicketRecord {
   ticket: string;
+  leaseID: string;
+  owner: string;
+  org: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+interface NativeVNCTicketRecord {
+  ticket: string;
+  workspaceID: string;
   leaseID: string;
   owner: string;
   org: string;
@@ -873,6 +884,9 @@ export class FleetCoordinator {
       }
       if (method === "POST" && parts.join("/") === "v1/workspaces") {
         return await this.createWorkspace(request);
+      }
+      if (method === "GET" && parts.join("/") === "v1/native-vnc/handoff") {
+        return await this.workspaceNativeVNC(request);
       }
       if (
         method === "GET" &&
@@ -3124,6 +3138,9 @@ export class FleetCoordinator {
         { status: 409 },
       );
     }
+    if (method === "POST" && action === "connections" && connection === "native-vnc") {
+      return await this.createWorkspaceNativeVNCTicket(request, key, workspaceID);
+    }
     if (method === "DELETE" && action === undefined) {
       const release = await this.state.runExclusive(async () => {
         const record = await this.state.storage.get<WorkspaceRecord>(key);
@@ -3169,6 +3186,241 @@ export class FleetCoordinator {
       return json(workspaceResponse(record, lease, this.env));
     }
     return json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async createWorkspaceNativeVNCTicket(
+    request: Request,
+    key: string,
+    workspaceID: string,
+  ): Promise<Response> {
+    const brokerURL = workspacePublicURL(this.env);
+    if (!brokerURL) {
+      return json(
+        { error: "native_vnc_unavailable", message: "workspace public URL is not configured" },
+        { status: 409 },
+      );
+    }
+    const result = await this.state.runExclusive(async () => {
+      const workspace = await this.state.storage.get<WorkspaceRecord>(key);
+      if (!workspace || workspace.prewarm || workspace.id !== workspaceID) return undefined;
+      const lease = await this.getLease(workspace.leaseID);
+      const unavailable = workspaceNativeVNCError(workspace, lease, this.env);
+      if (unavailable || !lease) {
+        return { unavailable: unavailable ?? "workspace lease is unavailable" };
+      }
+      const now = new Date();
+      const ticket: NativeVNCTicketRecord = {
+        ticket: newNativeVNCTicket(),
+        workspaceID: workspace.id,
+        leaseID: lease.id,
+        owner: workspace.owner,
+        org: workspace.org,
+        createdAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + nativeVNCTicketTTLSeconds * 1000).toISOString(),
+      };
+      await this.cleanupExpiredNativeVNCTickets(now.getTime());
+      await this.state.storage.put(nativeVNCTicketKey(ticket.ticket), ticket);
+      return { ticket };
+    });
+    if (!result) return notFound();
+    if ("unavailable" in result) {
+      return json(
+        { error: "native_vnc_unavailable", message: result.unavailable },
+        { status: 409 },
+      );
+    }
+    return json(
+      {
+        schema: "crabbox/native-vnc-grant/v1",
+        brokerUrl: brokerURL,
+        leaseId: result.ticket.leaseID,
+        ticket: result.ticket.ticket,
+        expiresAt: result.ticket.expiresAt,
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  }
+
+  private async workspaceNativeVNC(request: Request): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return json({ error: "upgrade_required" }, { status: 426 });
+    }
+    const token = bearerToken(request);
+    if (!validNativeVNCTicket(token)) {
+      return json({ error: "native_vnc_ticket_required" }, { status: 401 });
+    }
+    const lease = await this.state.runExclusive(async () => {
+      const key = nativeVNCTicketKey(token);
+      const ticket = await this.state.storage.get<NativeVNCTicketRecord>(key);
+      await this.state.storage.delete(key);
+      if (!ticket || ticket.ticket !== token || Date.parse(ticket.expiresAt) <= Date.now()) {
+        return undefined;
+      }
+      const workspace = await this.state.storage.get<WorkspaceRecord>(
+        workspaceKey(ticket.owner, ticket.org, ticket.workspaceID),
+      );
+      const current = workspace ? await this.getLease(ticket.leaseID) : undefined;
+      return workspace && current && workspaceOwnsLease(workspace, current)
+        ? { workspace, lease: current }
+        : undefined;
+    });
+    if (!lease) return json({ error: "native_vnc_ticket_invalid" }, { status: 401 });
+    const unavailable = workspaceNativeVNCError(lease.workspace, lease.lease, this.env);
+    if (unavailable) {
+      return json({ error: "native_vnc_unavailable", message: unavailable }, { status: 409 });
+    }
+    const upgrade = this.state.createWebSocketUpgrade({
+      maxPayload: workspaceTerminalMaxBufferedBytes,
+    });
+    void this.connectWorkspaceNativeVNC(upgrade.socket, lease.workspace, lease.lease).catch(
+      (error) => closeSocket(upgrade.socket, 1011, boundedSocketReason(errorMessage(error))),
+    );
+    return upgrade.response;
+  }
+
+  private async connectWorkspaceNativeVNC(
+    socket: WebSocket,
+    workspace: WorkspaceRecord,
+    lease: LeaseRecord,
+  ): Promise<void> {
+    const privateKey = this.env.CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?.trim();
+    const expectedHostKey = workspace.sshHostKeySha256;
+    if (!privateKey || !expectedHostKey || !lease.host) {
+      throw new Error("workspace native VNC SSH access is not configured");
+    }
+
+    let client: SSHClient | undefined;
+    let connectingClient: SSHClient | undefined;
+    let channel: ClientChannel | undefined;
+    let closed = false;
+    let started = false;
+    let resolveStart: (() => void) | undefined;
+    let rejectStart: ((error: Error) => void) | undefined;
+    let inputQueue = Promise.resolve();
+    let queuedInputBytes = 0;
+    let queuedInputFrames = 0;
+    const start = new Promise<void>((resolve, reject) => {
+      resolveStart = resolve;
+      rejectStart = reject;
+    });
+    let startTimer: ReturnType<typeof setTimeout>;
+    let expiryTimer: ReturnType<typeof setTimeout>;
+    const close = (code: number, reason: string) => {
+      if (closed) return;
+      closed = true;
+      clearTimeout(startTimer);
+      clearTimeout(expiryTimer);
+      rejectStart?.(new Error(reason));
+      channel?.close();
+      connectingClient?.end();
+      client?.end();
+      closeSocket(socket, code, boundedSocketReason(reason));
+    };
+    startTimer = setTimeout(
+      () => rejectStart?.(new Error("native VNC viewer did not connect")),
+      30_000,
+    );
+    expiryTimer = setTimeout(
+      () => close(1008, "workspace expired"),
+      Math.min(Math.max(0, Date.parse(lease.expiresAt) - Date.now()), 2_147_483_647),
+    );
+    this.state.acceptEphemeralWebSocket(socket, {
+      message: (data) => {
+        if (closed) return;
+        if (!started) {
+          if (data === "start") {
+            started = true;
+            clearTimeout(startTimer);
+            resolveStart?.();
+          } else {
+            close(1008, "native VNC start required");
+          }
+          return;
+        }
+        const length = workspaceTerminalDataLength(data);
+        if (
+          queuedInputFrames >= workspaceTerminalMaxBufferedFrames ||
+          queuedInputBytes + length > workspaceTerminalMaxBufferedBytes
+        ) {
+          close(1009, "native VNC input buffer exceeded");
+          return;
+        }
+        queuedInputBytes += length;
+        queuedInputFrames += 1;
+        inputQueue = inputQueue
+          .then(async () => {
+            try {
+              const value = await workspaceTerminalMessage(data);
+              if (typeof value === "string") throw new Error("native VNC binary frame required");
+              if (channel) await writeWorkspaceTerminalChannel(channel, value);
+              return undefined;
+            } finally {
+              queuedInputBytes -= length;
+              queuedInputFrames -= 1;
+            }
+          })
+          .catch((error) => close(1011, errorMessage(error)));
+      },
+      close: () => close(1000, "native VNC closed"),
+      error: () => close(1011, "native VNC websocket error"),
+    });
+
+    try {
+      client = await connectWorkspaceSSH(privateKey, expectedHostKey, lease, {
+        shouldStop: () => closed,
+        connecting: (candidate) => {
+          connectingClient = candidate;
+        },
+      });
+      connectingClient = undefined;
+      const password = await readWorkspaceVNCPassword(client, lease);
+      const username = lease.target === "windows" || lease.target === "macos" ? lease.sshUser : "";
+      socket.send(
+        JSON.stringify({
+          schema: "crabbox/native-vnc-ready/v1",
+          leaseId: lease.id,
+          username: username ?? "",
+          password,
+        }),
+      );
+      await start;
+      if (closed) return;
+      const connectedClient = client;
+      channel = await new Promise<ClientChannel>((resolve, reject) => {
+        connectedClient.forwardOut("127.0.0.1", 0, "127.0.0.1", 5900, (error, opened) =>
+          error ? reject(error) : resolve(opened),
+        );
+      });
+      channel.on("data", (data: Uint8Array) => {
+        if (closed || socket.readyState !== WebSocket.OPEN) return;
+        if (
+          data.byteLength > workspaceTerminalMaxBufferedBytes ||
+          workspaceTerminalSocketBufferedBytes(socket) + data.byteLength >
+            workspaceTerminalMaxBufferedBytes
+        ) {
+          close(1009, "native VNC output buffer exceeded");
+          return;
+        }
+        socket.send(data.slice());
+      });
+      channel.once("close", () => close(1000, "native VNC tunnel closed"));
+      connectedClient.once("close", () => close(1011, "SSH connection closed"));
+      connectedClient.once("error", (error) => close(1011, errorMessage(error)));
+    } catch (error) {
+      close(1011, errorMessage(error));
+      throw error;
+    }
+  }
+
+  private async cleanupExpiredNativeVNCTickets(now = Date.now()): Promise<void> {
+    const tickets = await this.state.storage.list<NativeVNCTicketRecord>({
+      prefix: nativeVNCTicketPrefix(),
+    });
+    await Promise.all(
+      [...tickets.entries()]
+        .filter(([, ticket]) => Date.parse(ticket.expiresAt) <= now)
+        .map(([key]) => this.state.storage.delete(key)),
+    );
   }
 
   private async workspaceTerminal(request: Request, workspaceID: string): Promise<Response> {
@@ -3352,83 +3604,13 @@ export class FleetCoordinator {
     });
 
     try {
-      const readyDeadline = Date.now() + workspaceTerminalSSHReadyTimeoutMs;
-      const terminalPorts = uniqueNonEmpty([lease.sshPort, ...(lease.sshFallbackPorts ?? [])]);
-      let lastConnectError: unknown = new Error("workspace SSH service is not ready");
-      let lastObservedHostKey = "";
-      connect: while (Date.now() < readyDeadline) {
-        for (const port of terminalPorts) {
-          if (closed) break connect;
-          const candidate = new SSHClientConstructor();
+      client = await connectWorkspaceSSH(privateKey, expectedHostKey, lease, {
+        shouldStop: () => closed,
+        connecting: (candidate) => {
           connectingClient = candidate;
-          try {
-            // oxlint-disable-next-line eslint/no-await-in-loop -- SSH readiness retries are sequential.
-            await new Promise<void>((resolve, reject) => {
-              let settled = false;
-              const settle = (callback: () => void) => {
-                if (settled) return;
-                settled = true;
-                callback();
-              };
-              candidate
-                .once("ready", () => settle(resolve))
-                .once("error", (error) => settle(() => reject(error)))
-                .once("close", () =>
-                  settle(() => reject(new Error("SSH connection closed before ready"))),
-                )
-                .connect({
-                  host: lease.host,
-                  port: Number.parseInt(port || "22", 10) || 22,
-                  username: lease.sshUser || "root",
-                  privateKey,
-                  readyTimeout: 10_000,
-                  keepaliveInterval: 15_000,
-                  keepaliveCountMax: 3,
-                  algorithms: {
-                    serverHostKey: ["ssh-ed25519"],
-                    cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr"],
-                    hmac: [
-                      "hmac-sha2-256-etm@openssh.com",
-                      "hmac-sha2-512-etm@openssh.com",
-                      "hmac-sha2-256",
-                      "hmac-sha2-512",
-                    ],
-                  },
-                  hostHash: "sha256",
-                  hostVerifier: (fingerprint: string) => {
-                    lastObservedHostKey = fingerprint;
-                    return expectedHostKey === fingerprint;
-                  },
-                });
-            });
-            if (closed) {
-              candidate.end();
-              connectingClient = undefined;
-              break connect;
-            }
-            client = candidate;
-            connectingClient = undefined;
-            lastConnectError = undefined;
-            break connect;
-          } catch (error) {
-            lastConnectError = error;
-            candidate.end();
-            if (connectingClient === candidate) connectingClient = undefined;
-          }
-        }
-        if (!closed && Date.now() < readyDeadline) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- delay before the next SSH sweep.
-          await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
-        }
-      }
-      if (lastConnectError || !client) {
-        if (lastObservedHostKey && lastObservedHostKey !== expectedHostKey) {
-          throw new Error(
-            `workspace SSH host key mismatch expected=${expectedHostKey.slice(0, 16)} observed=${lastObservedHostKey.slice(0, 16)}`,
-          );
-        }
-        throw lastConnectError;
-      }
+        },
+      });
+      connectingClient = undefined;
       if (closed) return;
       const connectedClient = client;
 
@@ -11758,6 +11940,14 @@ function runtimeAdapterTicketKey(ticket: string): string {
   return `${runtimeAdapterTicketPrefix()}${ticket}`;
 }
 
+function nativeVNCTicketPrefix(): string {
+  return "native-vnc-ticket:";
+}
+
+function nativeVNCTicketKey(ticket: string): string {
+  return `${nativeVNCTicketPrefix()}${ticket}`;
+}
+
 function runtimeAdapterIdentityKey(adapterID: string): string {
   return `runtime-adapter-identity:${adapterID}`;
 }
@@ -12312,6 +12502,32 @@ function workspaceTerminalError(
   return undefined;
 }
 
+function workspaceNativeVNCError(
+  workspace: WorkspaceRecord,
+  lease: LeaseRecord | undefined,
+  env: Env,
+): string | undefined {
+  if (!workspace.desktop) return "workspace desktop access was not requested";
+  return workspaceTerminalError(workspace, lease, env);
+}
+
+function workspacePublicURL(env: Env): string | undefined {
+  const value = env.CRABBOX_PUBLIC_URL?.trim();
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && url.hostname === "127.0.0.1")) {
+      return undefined;
+    }
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return undefined;
+  }
+}
+
 // Controller-to-controller URL; callers attach with bearer auth through their browser-facing proxy.
 function workspaceTerminalURL(
   workspace: WorkspaceRecord,
@@ -12343,6 +12559,155 @@ async function workspaceTerminalMessage(
   if (typeof value === "string") return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   return new Uint8Array(await value.arrayBuffer());
+}
+
+async function connectWorkspaceSSH(
+  privateKey: string,
+  expectedHostKey: string,
+  lease: LeaseRecord,
+  options: {
+    shouldStop?: () => boolean;
+    connecting?: (client: SSHClient) => void;
+  } = {},
+): Promise<SSHClient> {
+  const readyDeadline = Date.now() + workspaceTerminalSSHReadyTimeoutMs;
+  const ports = uniqueNonEmpty([lease.sshPort, ...(lease.sshFallbackPorts ?? [])]);
+  let lastError: unknown = new Error("workspace SSH service is not ready");
+  let observedHostKey = "";
+  while (Date.now() < readyDeadline) {
+    for (const port of ports) {
+      if (options.shouldStop?.()) throw new Error("workspace connection closed");
+      const candidate = new SSHClientConstructor();
+      options.connecting?.(candidate);
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- SSH readiness retries are sequential.
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const settle = (callback: () => void) => {
+            if (settled) return;
+            settled = true;
+            callback();
+          };
+          candidate
+            .once("ready", () => settle(resolve))
+            .once("error", (error) => settle(() => reject(error)))
+            .once("close", () =>
+              settle(() => reject(new Error("SSH connection closed before ready"))),
+            )
+            .connect({
+              host: lease.host,
+              port: Number.parseInt(port || "22", 10) || 22,
+              username: lease.sshUser || "root",
+              privateKey,
+              readyTimeout: 10_000,
+              keepaliveInterval: 15_000,
+              keepaliveCountMax: 3,
+              algorithms: {
+                serverHostKey: ["ssh-ed25519"],
+                cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr"],
+                hmac: [
+                  "hmac-sha2-256-etm@openssh.com",
+                  "hmac-sha2-512-etm@openssh.com",
+                  "hmac-sha2-256",
+                  "hmac-sha2-512",
+                ],
+              },
+              hostHash: "sha256",
+              hostVerifier: (fingerprint: string) => {
+                observedHostKey = fingerprint;
+                return expectedHostKey === fingerprint;
+              },
+            });
+        });
+        if (options.shouldStop?.()) {
+          candidate.end();
+          throw new Error("workspace connection closed");
+        }
+        return candidate;
+      } catch (error) {
+        lastError = error;
+        candidate.end();
+      }
+    }
+    if (!options.shouldStop?.() && Date.now() < readyDeadline) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- delay before the next SSH sweep.
+      await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+  if (observedHostKey && observedHostKey !== expectedHostKey) {
+    throw new Error(
+      `workspace SSH host key mismatch expected=${expectedHostKey.slice(0, 16)} observed=${observedHostKey.slice(0, 16)}`,
+    );
+  }
+  throw lastError;
+}
+
+async function readWorkspaceVNCPassword(client: SSHClient, lease: LeaseRecord): Promise<string> {
+  const output = await new Promise<Uint8Array>((resolve, reject) => {
+    client.exec(workspaceVNCPasswordCommand(lease), (error, channel) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      let exitCode: number | undefined;
+      let settled = false;
+      const fail = (failure: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(failure);
+      };
+      channel.on("data", (chunk: Uint8Array) => {
+        if (settled) return;
+        bytes += chunk.byteLength;
+        if (bytes > 4096) {
+          channel.close();
+          fail(new Error("workspace VNC password output is too large"));
+          return;
+        }
+        chunks.push(chunk.slice());
+      });
+      channel.once("exit", (code?: number) => {
+        exitCode = code;
+      });
+      channel.once("close", () => {
+        if (settled) return;
+        if (exitCode !== undefined && exitCode !== 0) {
+          fail(new Error("workspace VNC password command failed"));
+          return;
+        }
+        const joined = new Uint8Array(bytes);
+        let offset = 0;
+        for (const chunk of chunks) {
+          joined.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        settled = true;
+        resolve(joined);
+      });
+    });
+  });
+  const password = new TextDecoder().decode(output).trim();
+  if (
+    !password ||
+    password.length > 256 ||
+    [...password].some((character) => {
+      const code = character.charCodeAt(0);
+      return code === 0 || code === 10 || code === 13;
+    })
+  ) {
+    throw new Error("workspace VNC password is invalid");
+  }
+  return password;
+}
+
+function workspaceVNCPasswordCommand(lease: LeaseRecord): string {
+  if (lease.target === "windows") {
+    return "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"Get-Content -Raw -LiteralPath 'C:\\\\ProgramData\\\\crabbox\\\\vnc.password'\"";
+  }
+  if (lease.target === "macos") return "sudo cat '/var/db/crabbox/vnc.password'";
+  return "cat '/var/lib/crabbox/vnc.password'";
 }
 
 function workspaceTerminalDataLength(value: string | ArrayBuffer | Blob | Uint8Array): number {
@@ -12597,6 +12962,14 @@ function newRuntimeAdapterTicket(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   return `adapter_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function newNativeVNCTicket(): string {
+  return randomHexToken("native_vnc_");
+}
+
+function validNativeVNCTicket(value: string): boolean {
+  return /^native_vnc_[a-f0-9]{32}$/.test(value);
 }
 
 function newCodeViewerTicket(): string {

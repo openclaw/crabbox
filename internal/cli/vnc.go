@@ -5,11 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"nhooyr.io/websocket"
 )
 
 const (
@@ -31,6 +37,8 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	openClient := fs.Bool("open", false, "open the VNC client locally")
 	nativeHandoff := fs.Bool("native-handoff", false, "emit a native-client JSON handoff and keep its tunnel in the foreground")
+	nativeGrantURL := fs.String("native-grant-url", "", "coordinator URL for a one-time native VNC grant")
+	nativeGrantStdin := fs.Bool("native-grant-stdin", false, "read a one-time native VNC grant from stdin")
 	hostManaged := fs.Bool("host-managed", false, "allow opening host-managed static VNC")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
@@ -41,7 +49,13 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	if *nativeHandoff && *openClient {
 		return exit(2, "--native-handoff and --open cannot be used together")
 	}
+	if (*nativeGrantURL != "" || *nativeGrantStdin) && (!*nativeHandoff || *nativeGrantURL == "" || !*nativeGrantStdin) {
+		return exit(2, "--native-grant-url and --native-grant-stdin must be used together with --native-handoff")
+	}
 	setIDFromFirstArg(fs, id)
+	if *nativeGrantURL != "" {
+		return a.vncFromNativeGrant(ctx, *id, *nativeGrantURL, *localPort)
+	}
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
 		return err
@@ -169,6 +183,162 @@ func (a App) vnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(a.Stdout, "Keep the tunnel process running while connected.")
 	}
 	return nil
+}
+
+func (a App) vncFromNativeGrant(ctx context.Context, expectedLeaseID, brokerURL, localPort string) error {
+	parsed, err := url.Parse(strings.TrimSpace(brokerURL))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		(parsed.Scheme != "https" && !(parsed.Scheme == "http" && isNativeVNCLoopbackHost(parsed.Hostname()))) {
+		return exit(2, "--native-grant-url must be an HTTPS coordinator URL or loopback HTTP URL")
+	}
+	ticketBytes, err := io.ReadAll(io.LimitReader(a.input(), 4097))
+	if err != nil {
+		return exit(2, "read native VNC grant: %v", err)
+	}
+	ticket := strings.TrimSuffix(string(ticketBytes), "\n")
+	ticket = strings.TrimSuffix(ticket, "\r")
+	if len(ticketBytes) > 4096 || !validNativeVNCTicket(ticket) {
+		return exit(2, "native VNC grant is invalid")
+	}
+	parsed.Path = "/v1/native-vnc/handoff"
+	parsed.RawPath = ""
+	if parsed.Scheme == "https" {
+		parsed.Scheme = "wss"
+	} else {
+		parsed.Scheme = "ws"
+	}
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+ticket)
+	ws, response, err := websocket.Dial(ctx, parsed.String(), &websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		if response != nil {
+			return exit(5, "native VNC coordinator websocket: http %d", response.StatusCode)
+		}
+		return exit(5, "native VNC coordinator websocket: %v", err)
+	}
+	defer ws.Close(websocket.StatusNormalClosure, "native VNC closed")
+	ws.SetReadLimit(1 << 20)
+	messageType, payload, err := ws.Read(ctx)
+	if err != nil || messageType != websocket.MessageText {
+		return exit(5, "native VNC coordinator returned an invalid ready message")
+	}
+	var ready struct {
+		Schema   string `json:"schema"`
+		LeaseID  string `json:"leaseId"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(payload, &ready); err != nil || ready.Schema != "crabbox/native-vnc-ready/v1" ||
+		ready.LeaseID == "" || len(ready.LeaseID) > 256 || len(ready.Username) > 256 ||
+		ready.Password == "" || len(ready.Password) > 256 ||
+		strings.ContainsAny(ready.LeaseID+ready.Username+ready.Password, "\x00\r\n") {
+		return exit(5, "native VNC coordinator returned an invalid ready message")
+	}
+	if expectedLeaseID != "" && ready.LeaseID != expectedLeaseID {
+		return exit(5, "native VNC grant returned a different lease")
+	}
+	return runNativeVNCWebSocketHandoff(ctx, a.Stdout, ws, localPort, ready.Username, ready.Password)
+}
+
+func runNativeVNCWebSocketHandoff(
+	ctx context.Context,
+	stdout interface{ Write([]byte) (int, error) },
+	ws *websocket.Conn,
+	requestedPort, username, password string,
+) error {
+	address := net.JoinHostPort(vncLoopbackHost, requestedPort)
+	if requestedPort == "" {
+		address = net.JoinHostPort(vncLoopbackHost, "0")
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return exit(5, "reserve native VNC loopback port: %v", err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	handoff := vncNativeHandoff{
+		Schema:   vncNativeHandoffSchema,
+		Host:     vncLoopbackHost,
+		Port:     port,
+		Username: username,
+		Password: password,
+	}
+	if err := json.NewEncoder(stdout).Encode(handoff); err != nil {
+		return err
+	}
+	acceptDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = listener.Close()
+		case <-acceptDone:
+		}
+	}()
+	tcp, err := listener.Accept()
+	close(acceptDone)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return exit(5, "accept native VNC client: %v", err)
+	}
+	defer tcp.Close()
+	if err := ws.Write(ctx, websocket.MessageText, []byte("start")); err != nil {
+		return exit(5, "start native VNC coordinator tunnel: %v", err)
+	}
+	relayCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errors := make(chan error, 2)
+	go func() { errors <- copyNativeVNCWebSocketToTCP(relayCtx, ws, tcp) }()
+	go func() { errors <- copyTCPToWebSocket(relayCtx, ws, tcp) }()
+	err = <-errors
+	cancel()
+	if err != nil && ctx.Err() == nil && !isExpectedNativeVNCRelayClose(err) {
+		return exit(5, "native VNC tunnel: %v", err)
+	}
+	return nil
+}
+
+func validNativeVNCTicket(ticket string) bool {
+	const prefix = "native_vnc_"
+	if len(ticket) != len(prefix)+32 || !strings.HasPrefix(ticket, prefix) {
+		return false
+	}
+	for _, character := range ticket[len(prefix):] {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func isNativeVNCLoopbackHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
+func copyNativeVNCWebSocketToTCP(ctx context.Context, ws *websocket.Conn, tcp net.Conn) error {
+	for {
+		messageType, payload, err := ws.Read(ctx)
+		if err != nil {
+			return err
+		}
+		if messageType != websocket.MessageBinary {
+			return fmt.Errorf("coordinator sent a non-binary VNC frame")
+		}
+		if _, err := tcp.Write(payload); err != nil {
+			return err
+		}
+	}
+}
+
+func isExpectedNativeVNCRelayClose(err error) bool {
+	status := websocket.CloseStatus(err)
+	return status == websocket.StatusNormalClosure || status == websocket.StatusGoingAway
 }
 
 const vncNativeHandoffSchema = "crabbox/vnc-handoff/v1"

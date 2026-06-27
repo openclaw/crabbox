@@ -20,6 +20,9 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   if (path[0] === "v1" && path[1] === "workspaces") {
     return "direct";
   }
+  if (method === "GET" && path.join("/") === "v1/native-vnc/handoff") {
+    return "direct";
+  }
   if (method === "POST" && path.join("/") === "v1/internal/scheduled") {
     return "direct";
   }

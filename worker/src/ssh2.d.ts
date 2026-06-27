@@ -12,6 +12,7 @@ declare module "ssh2" {
     off(event: "close" | "drain", listener: () => void): this;
     once(event: "close", listener: () => void): this;
     once(event: "drain", listener: () => void): this;
+    once(event: "exit", listener: (code?: number) => void): this;
   }
 
   export class Client {
@@ -44,6 +45,17 @@ declare module "ssh2" {
         width: number;
         height: number;
       },
+      callback: (error: Error | undefined, channel: ClientChannel) => void,
+    ): this;
+    exec(
+      command: string,
+      callback: (error: Error | undefined, channel: ClientChannel) => void,
+    ): this;
+    forwardOut(
+      sourceIP: string,
+      sourcePort: number,
+      destinationIP: string,
+      destinationPort: number,
       callback: (error: Error | undefined, channel: ClientChannel) => void,
     ): this;
     end(): void;

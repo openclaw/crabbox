@@ -221,6 +221,26 @@ describe("coordinator auth", () => {
     expect(prepared).toMatchObject({ authenticated: false, response: { status: 401 } });
   });
 
+  it("lets one-time native VNC websocket tickets bypass user authentication", async () => {
+    const prepared = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/native-vnc/handoff", {
+        headers: { upgrade: "websocket", authorization: "Bearer native_vnc_ticket" },
+      }),
+      {} as Env,
+    );
+    expect(prepared).toMatchObject({ authenticated: false });
+    if ("response" in prepared) throw new Error("native VNC websocket was rejected");
+    expect(prepared.request.headers.get("authorization")).toBe("Bearer native_vnc_ticket");
+
+    const plain = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/native-vnc/handoff", {
+        headers: { authorization: "Bearer native_vnc_ticket" },
+      }),
+      {} as Env,
+    );
+    expect(plain).toMatchObject({ authenticated: false, response: { status: 401 } });
+  });
+
   it("accepts the runtime adapter token only for workspace routes", async () => {
     const env = {
       CRABBOX_DEFAULT_ORG: "openclaw",
@@ -231,6 +251,9 @@ describe("coordinator auth", () => {
         new Request("https://example.test/v1/workspaces", { method: "POST" }),
         new Request("https://example.test/v1/workspaces/fleet-is-101"),
         new Request("https://example.test/v1/workspaces/fleet-is-101/connections/desktop", {
+          method: "POST",
+        }),
+        new Request("https://example.test/v1/workspaces/fleet-is-101/connections/native-vnc", {
           method: "POST",
         }),
       ].map((request) => {
@@ -249,6 +272,7 @@ describe("coordinator auth", () => {
             },
       ),
     ).toEqual([
+      { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },
       { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },
       { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },
       { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },

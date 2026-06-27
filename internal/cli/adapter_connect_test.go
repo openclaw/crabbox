@@ -83,6 +83,7 @@ func TestAdapterRelayRouteAllowlist(t *testing.T) {
 		{http.MethodGet, "/v1/workspaces/fleet-a-is-101", true},
 		{http.MethodDelete, "/v1/workspaces/fleet-a-is-101", true},
 		{http.MethodPost, "/v1/workspaces/fleet-a-is-101/connections/desktop", true},
+		{http.MethodPost, "/v1/workspaces/fleet-a-is-101/connections/native-vnc", true},
 		{http.MethodGet, "/healthz", false},
 		{http.MethodPut, "/v1/workspaces/fleet-a-is-101", false},
 		{http.MethodPost, "/v1/workspaces/fleet-a-is-101/reboot", false},

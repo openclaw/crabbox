@@ -3401,6 +3401,52 @@ describe("fleet lease identity and idle", () => {
     );
     expect(otherOwnerDesktop.status).toBe(404);
 
+    const nativeVNC = await fleet.fetch(
+      request("POST", `/v1/workspaces/${body.id}/connections/native-vnc`, { headers }),
+    );
+    expect(nativeVNC.status).toBe(200);
+    expect(nativeVNC.headers.get("cache-control")).toBe("no-store");
+    const nativeVNCGrant = (await nativeVNC.json()) as {
+      schema: string;
+      brokerUrl: string;
+      leaseId: string;
+      ticket: string;
+      expiresAt: string;
+    };
+    expect(nativeVNCGrant).toMatchObject({
+      schema: "crabbox/native-vnc-grant/v1",
+      brokerUrl: "https://crabbox.example.com",
+      leaseId: created.providerResourceId,
+      ticket: expect.stringMatching(/^native_vnc_[a-f0-9]{32}$/),
+      expiresAt: expect.any(String),
+    });
+    expect(Date.parse(nativeVNCGrant.expiresAt)).toBeGreaterThan(Date.now());
+    expect(storage.value(`native-vnc-ticket:${nativeVNCGrant.ticket}`)).toMatchObject({
+      workspaceID: body.id,
+      leaseID: created.providerResourceId,
+    });
+    const invalidNativeVNCTicket = await fleet.fetch(
+      request("GET", "/v1/native-vnc/handoff", {
+        headers: {
+          authorization: "Bearer native_vnc_00000000000000000000000000000000",
+          upgrade: "websocket",
+        },
+      }),
+    );
+    expect(invalidNativeVNCTicket.status).toBe(401);
+    await expect(invalidNativeVNCTicket.json()).resolves.toEqual({
+      error: "native_vnc_ticket_invalid",
+    });
+    const otherOwnerNativeVNC = await fleet.fetch(
+      request("POST", `/v1/workspaces/${body.id}/connections/native-vnc`, {
+        headers: {
+          "x-crabbox-owner": "bob@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(otherOwnerNativeVNC.status).toBe(404);
+
     const duplicate = await fleet.fetch(request("POST", "/v1/workspaces", { headers, body }));
     await expect(duplicate.json()).resolves.toMatchObject({
       providerResourceId: created.providerResourceId,
@@ -4498,6 +4544,9 @@ describe("fleet lease identity and idle", () => {
     const start = source.indexOf("private async connectWorkspaceTerminal");
     const end = source.indexOf("private trackWorkspaceTerminal", start);
     const terminal = source.slice(start, end);
+    const sshStart = source.indexOf("async function connectWorkspaceSSH");
+    const sshEnd = source.indexOf("async function readWorkspaceVNCPassword", sshStart);
+    const ssh = source.slice(sshStart, sshEnd);
 
     expect(terminal).toContain("queuedOutputFrames >= workspaceTerminalMaxBufferedFrames");
     expect(terminal).toContain("queuedOutputBytes + unacknowledgedOutputBytes + data.byteLength");
@@ -4505,26 +4554,26 @@ describe("fleet lease identity and idle", () => {
     expect(terminal).toContain("workspaceTerminalAcknowledgement(value)");
     expect(terminal).toContain("bytes > unacknowledgedOutputBytes");
     expect(terminal).toContain("workspaceTerminalSocketBufferedBytes(socket)");
-    expect(terminal).toContain('serverHostKey: ["ssh-ed25519"]');
-    expect(terminal).toContain('cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr"]');
-    expect(terminal).toContain('"hmac-sha2-256-etm@openssh.com"');
-    expect(terminal).toContain('"hmac-sha2-512"');
-    expect(terminal).toContain("workspace SSH host key mismatch expected=");
+    expect(ssh).toContain('serverHostKey: ["ssh-ed25519"]');
+    expect(ssh).toContain('cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr"]');
+    expect(ssh).toContain('"hmac-sha2-256-etm@openssh.com"');
+    expect(ssh).toContain('"hmac-sha2-512"');
+    expect(ssh).toContain("workspace SSH host key mismatch expected=");
     expect(source).toContain("value.length > workspaceTerminalMaxBufferedBytes");
   });
 
   it("tries every configured SSH port before delaying terminal readiness", async () => {
     const source = await readFile(new URL("../src/fleet.ts", import.meta.url), "utf8");
-    const start = source.indexOf("private async connectWorkspaceTerminal");
-    const end = source.indexOf("private trackWorkspaceTerminal", start);
-    const terminal = source.slice(start, end);
+    const start = source.indexOf("async function connectWorkspaceSSH");
+    const end = source.indexOf("async function readWorkspaceVNCPassword", start);
+    const ssh = source.slice(start, end);
 
-    expect(terminal).toContain("...(lease.sshFallbackPorts ?? [])");
-    expect(terminal).toContain("for (const port of terminalPorts)");
-    expect(terminal).toContain('Number.parseInt(port || "22", 10)');
-    expect(terminal).toContain("connectingClient?.end()");
-    expect(terminal.indexOf("for (const port of terminalPorts)")).toBeLessThan(
-      terminal.indexOf("setTimeout(resolve, 2_000)"),
+    expect(ssh).toContain("...(lease.sshFallbackPorts ?? [])");
+    expect(ssh).toContain("for (const port of ports)");
+    expect(ssh).toContain('Number.parseInt(port || "22", 10)');
+    expect(ssh).toContain("candidate.end()");
+    expect(ssh.indexOf("for (const port of ports)")).toBeLessThan(
+      ssh.indexOf("setTimeout(resolve, 2_000)"),
     );
   });
 

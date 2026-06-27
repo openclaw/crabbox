@@ -38,6 +38,15 @@ describe("runtime adapter relay", () => {
       runtimeAdapterProxyPath(["v1", "workspaces", "example-workspace", "connections", "desktop"]),
     ).toBe("/v1/workspaces/example-workspace/connections/desktop");
     expect(
+      runtimeAdapterProxyPath([
+        "v1",
+        "workspaces",
+        "example-workspace",
+        "connections",
+        "native-vnc",
+      ]),
+    ).toBe("/v1/workspaces/example-workspace/connections/native-vnc");
+    expect(
       runtimeAdapterProxyPath(["v1", "workspaces", "example-workspace", "shell"]),
     ).toBeUndefined();
     expect(runtimeAdapterProxyPath(["v1", "workspaces", ".."])).toBeUndefined();
@@ -54,11 +63,24 @@ describe("runtime adapter relay", () => {
         "/v1/workspaces/example-workspace/connections/desktop",
       ),
     ).toBe(true);
+    expect(
+      runtimeAdapterRelayMethodAllowed(
+        "POST",
+        "/v1/workspaces/example-workspace/connections/native-vnc",
+      ),
+    ).toBe(true);
     expect(runtimeAdapterRelayBodyAllowed("POST", "/v1/workspaces", "{}")).toBe(true);
     expect(
       runtimeAdapterRelayBodyAllowed(
         "POST",
         "/v1/workspaces/example-workspace/connections/desktop",
+        undefined,
+      ),
+    ).toBe(true);
+    expect(
+      runtimeAdapterRelayBodyAllowed(
+        "POST",
+        "/v1/workspaces/example-workspace/connections/native-vnc",
         undefined,
       ),
     ).toBe(true);
