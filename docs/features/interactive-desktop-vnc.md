@@ -68,9 +68,9 @@ A scenario layer on top of Crabbox owns:
 
 | Target | Managed by Crabbox | Desktop access | Primary page |
 | --- | --- | --- | --- |
-| Linux on Hetzner | Yes | Xvfb/XFCE + x11vnc, or Wayland + WayVNC, over SSH tunnel | [Linux VNC](vnc-linux.md) |
-| Linux on AWS | Yes | Xvfb/XFCE + x11vnc, or Wayland + WayVNC, over SSH tunnel | [Linux VNC](vnc-linux.md) |
-| Linux on Azure | Yes | Xvfb/XFCE + x11vnc, or Wayland + WayVNC, over SSH tunnel | [Linux VNC](vnc-linux.md) |
+| Linux on Hetzner | Yes | TigerVNC/XFCE, or Wayland + WayVNC, over SSH tunnel | [Linux VNC](vnc-linux.md) |
+| Linux on AWS | Yes | TigerVNC/XFCE, or Wayland + WayVNC, over SSH tunnel | [Linux VNC](vnc-linux.md) |
+| Linux on Azure | Yes | TigerVNC/XFCE, or Wayland + WayVNC, over SSH tunnel | [Linux VNC](vnc-linux.md) |
 | AWS Windows | Yes | VNC service over SSH tunnel | [Windows VNC](vnc-windows.md) |
 | Azure Windows | Yes | VNC service over SSH tunnel | [Windows VNC](vnc-windows.md) |
 | AWS EC2 Mac | Yes | Screen Sharing/VNC over SSH tunnel | [macOS VNC](vnc-macos.md) |

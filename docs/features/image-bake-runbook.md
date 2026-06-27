@@ -34,7 +34,7 @@ Bake **machine capabilities** that are stable across runs:
 
 - current OS security updates;
 - SSH, Git, rsync, curl, jq, and the readiness helpers;
-- Xvfb / slim XFCE / VNC for desktop leases;
+- TigerVNC / slim XFCE for resize-capable desktop leases;
 - Chrome or Chromium for browser leases;
 - `ffmpeg`, `ffprobe`, `scrot`, `xdotool`, and other capture helpers;
 - Node 24, npm, corepack, pnpm;
@@ -104,7 +104,8 @@ crabbox run \
    command -v pnpm
    command -v ffmpeg
    command -v scrot
-   command -v x11vnc
+   command -v Xtigervnc
+   command -v tigervncpasswd
    command -v google-chrome || command -v chromium || command -v chromium-browser
    test -d /work/crabbox
    sudo mkdir -p /var/cache/crabbox/pnpm

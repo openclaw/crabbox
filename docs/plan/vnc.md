@@ -117,20 +117,21 @@ These are hard requirements and remain enforced:
 - TTL, idle-timeout, and cleanup behavior are unchanged: cleanup is VM deletion
   for managed providers and a no-op for static hosts.
 
-Linux uses loopback-bound x11vnc with `rfbauth`:
+Managed XFCE Linux uses loopback-bound TigerVNC with password authentication
+and client-requested desktop resizing:
 
 ```text
-x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -rfbauth /var/lib/crabbox/vnc.pass
+Xtigervnc :99 -localhost yes -rfbport 5900 -SecurityTypes VncAuth -PasswordFile=/var/lib/crabbox/vnc.pass -AlwaysShared -AcceptSetDesktopSize
 ```
 
 ## Managed Linux Bootstrap (shipped)
 
 The default bootstrap stays tiny; desktop/browser/code packages are installed
 only when the matching capability is requested. The XFCE path installs a
-lightweight visible-session stack (Xvfb, an XFCE session, x11vnc, fonts, dbus),
-runs it under systemd units (`crabbox-xvfb`, `crabbox-desktop`,
-`crabbox-x11vnc`), and gates readiness checks behind `desktop=true` so plain
-leases never run them. `--browser` installs Chrome stable (Chromium fallback)
+lightweight visible-session stack (TigerVNC, an XFCE session, fonts, dbus),
+runs it under systemd units (`crabbox-xvfb`, `crabbox-desktop`, and
+`crabbox-desktop-session`), and gates readiness checks behind `desktop=true` so
+plain leases never run them. `--browser` installs Chrome stable (Chromium fallback)
 and records the discovered binary path; `--code` installs code-server. Wayland
 and GNOME variants follow the same shape with their own units. Source
 `internal/cli/bootstrap.go`; see [runner-bootstrap](../features/runner-bootstrap.md).

@@ -72,7 +72,8 @@ Capabilities are opt-in features requested at warm time and validated against
 the provider's feature set. See [capabilities](../features/capabilities.md).
 
 - `--desktop` provisions a visible UI and loopback-bound VNC for automation and
-  operator takeover. Linux defaults to Xvfb, a slim XFCE, and x11vnc. Use
+  operator takeover. Managed cloud Linux defaults to resize-capable TigerVNC
+  with a slim XFCE session; local containers retain Xvfb/x11vnc. Use
   `--desktop-env wayland` for the experimental labwc/WayVNC profile on
   Ubuntu 26.04-compatible images, or `--desktop-env gnome` for a GNOME-apps
   profile with GNOME Panel taskbars over labwc/WayVNC (GNOME-profile app

@@ -139,7 +139,7 @@ Bootstrap:
 Bootstrap stays intentionally small unless optional lease capabilities are
 requested: OpenSSH, CA certificates, curl, Git, rsync, jq, the work root
 (`/work/crabbox` on Linux), cache directories, and the `crabbox-ready` readiness
-marker. `--desktop` adds Xvfb, a slim XFCE session, and loopback x11vnc;
+marker. `--desktop` adds resize-capable TigerVNC and a slim XFCE session;
 `--browser` adds Chrome stable with a Chromium fallback; `--code` adds
 code-server for the authenticated portal editor. Project runtimes (Go, Node,
 pnpm, Docker, databases) are repository-owned setup, usually driven through

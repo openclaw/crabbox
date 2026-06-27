@@ -4,7 +4,7 @@ Read when:
 
 - using `--desktop` on a managed Linux lease (Hetzner, AWS, or Azure);
 - choosing a desktop environment with `--desktop-env` (xfce, wayland, gnome);
-- debugging Xvfb, the window-manager session, x11vnc/WayVNC, or screenshots on a
+- debugging TigerVNC, the window-manager session, WayVNC, or screenshots on a
   Linux lease;
 - preparing a static (BYO) Linux host to serve a Crabbox VNC desktop.
 
@@ -32,10 +32,10 @@ crabbox warmup --desktop --desktop-env gnome
 
 A managed Linux desktop lease provides:
 
-- Xvfb on `:99` (XFCE) or a Wayland compositor (wayland/gnome);
+- resize-capable TigerVNC on `:99` (XFCE) or a Wayland compositor (wayland/gnome);
 - a window-manager / desktop session (`xfce4-session` with `xfwm4`,
   `xfce4-panel`, and `xfce4-terminal` for XFCE);
-- x11vnc (XFCE) or WayVNC (wayland/gnome) bound to `127.0.0.1:5900`;
+- TigerVNC (XFCE) or WayVNC (wayland/gnome) bound to `127.0.0.1:5900`;
 - screenshot and video capture tools (`scrot` and `ffmpeg`);
 - input helpers (`xdotool`, `wmctrl`) and clipboard tools (`xclip`/`xsel`);
 - a generated per-lease VNC password at `/var/lib/crabbox/vnc.password`;
@@ -100,7 +100,8 @@ with the matching `--desktop-env`.
 
 `target=linux does not expose a loopback X11 VNC desktop`
 
-For managed leases, inspect cloud-init and service logs or warm a fresh box.
+For managed leases, inspect the `crabbox-xvfb.service` TigerVNC unit and desktop
+session logs or warm a fresh box.
 For static hosts, start Xvfb/x11vnc on `127.0.0.1:5900`, or warm with
 `--desktop-env wayland` or `--desktop-env gnome` for a configured Wayland
 target.
