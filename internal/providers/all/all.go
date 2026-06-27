@@ -2,6 +2,7 @@ package all
 
 import (
 	_ "github.com/openclaw/crabbox/internal/providers/agentsandbox"
+	_ "github.com/openclaw/crabbox/internal/providers/agx"
 	_ "github.com/openclaw/crabbox/internal/providers/anthropicsandboxruntime"
 	_ "github.com/openclaw/crabbox/internal/providers/applecontainer"
 	_ "github.com/openclaw/crabbox/internal/providers/applemachine"

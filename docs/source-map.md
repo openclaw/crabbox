@@ -88,9 +88,9 @@ SSH-lease providers:
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
 - Cirrus Labs tart local macOS VM: `internal/providers/tart`
 - Microsoft Hyper-V local Windows VM: `internal/providers/hyperv`
-- Daytona, Morph, exe.dev, KubeVirt, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, Lambda:
+- Daytona, Morph, exe.dev, KubeVirt, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, AGX, Lambda:
   `internal/providers/daytona`, `internal/providers/morph`, `internal/providers/exedev`, `internal/providers/kubevirt`, `internal/providers/external`, `internal/providers/tenki`, `internal/providers/namespace`,
-  `internal/providers/runpod`, `internal/providers/semaphore`, `internal/providers/sprites`, `internal/providers/lambda`
+  `internal/providers/runpod`, `internal/providers/semaphore`, `internal/providers/sprites`, `internal/providers/agx`, `internal/providers/lambda`
 
 Delegated-run providers (no SSH lease):
 

@@ -191,6 +191,7 @@ from the CLI.
 | [Namespace Compute Instance](docs/providers/namespace-instance.md) — `namespace-instance` (`namespace-compute`) | Linux · direct | Namespace Compute instances through `nsc` and SSH. |
 | [Semaphore](docs/providers/semaphore.md) — `semaphore` (`sem`) | Linux · direct | A Semaphore CI job leased as a testbox. |
 | [Sprites](docs/providers/sprites.md) — `sprites` | Linux · direct | Sprites microVMs through `sprite proxy`. |
+| [AGX](docs/providers/agx.md) — `agx` | Linux · direct | AGX microVMs over the `<user>+<instance>` workspace SSH gateway; SSH-only, bring-your-own key. |
 | [Tenki](docs/providers/tenki.md) — `tenki` | Linux · direct | Tenki sandbox VMs through `tenki sandbox ssh-proxy`. |
 | [Coder](docs/providers/coder.md) — `coder` | Linux · direct | Coder workspaces through `coder ssh --stdio`; stops by default, deletes only by opt-in. |
 | [Daytona](docs/providers/daytona.md) — `daytona` | Linux · direct | Daytona-managed dev sandbox over SSH. |

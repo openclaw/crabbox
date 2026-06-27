@@ -1125,6 +1125,7 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 func allBuiltInProviderNames() []string {
 	return []string{
 		"agent-sandbox",
+		"agx",
 		"apple-container",
 		"apple-machine",
 		"apple-vz",

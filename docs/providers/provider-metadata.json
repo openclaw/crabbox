@@ -13,6 +13,20 @@
     "caveat": "No persistent lease, remote box, or SSH access",
     "docs": "anthropic-sandbox-runtime.md"
   },
+  "agx": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "AGX microVM (Firecracker/Drafter)",
+    "location": "provider-managed",
+    "ssh": "provider-specific",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "AGX SSH gateway (provision on connect)",
+    "cleanup": "local claim release; AGX reclaims idle sandboxes",
+    "bestFit": "Fast Linux microVM over the AGX SSH workspace gateway with your own SSH key",
+    "caveat": "Early access (ships Summer 2026); AGX publishes no control-plane API, so leases are SSH-only with a BYO key and there is no remote list/cleanup",
+    "docs": "agx.md"
+  },
   "agent-sandbox": {
     "status": "built-in",
     "category": "delegated-sandbox",
