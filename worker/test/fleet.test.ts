@@ -3349,10 +3349,14 @@ describe("fleet lease identity and idle", () => {
     expect(terminalURL.pathname).toBe("/v1/workspaces/fleet-is-101/terminal");
     expect(terminalURL.search).toBe("?flow=ack-v1");
 
-    const loopbackFleet = testFleet(storage, {}, {
-      CRABBOX_PUBLIC_URL: "http://127.0.0.1:8787",
-      CRABBOX_WORKSPACE_SSH_PRIVATE_KEY: "workspace-private-key",
-    });
+    const loopbackFleet = testFleet(
+      storage,
+      {},
+      {
+        CRABBOX_PUBLIC_URL: "http://127.0.0.1:8787",
+        CRABBOX_WORKSPACE_SSH_PRIVATE_KEY: "workspace-private-key",
+      },
+    );
     const loopbackReady = await loopbackFleet.fetch(
       request("GET", `/v1/workspaces/${body.id}`, { headers }),
     );
