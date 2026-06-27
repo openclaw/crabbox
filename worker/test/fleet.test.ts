@@ -3440,6 +3440,33 @@ describe("fleet lease identity and idle", () => {
       workspaceID: body.id,
       leaseID: created.providerResourceId,
     });
+    const nativeVNCConnectionKey = "workspace:example-org:alice%40example.com:fleet-is-101";
+    const nativeVNCInternals = fleet as unknown as {
+      workspaceTerminals: Map<string, Set<WebSocket>>;
+    };
+    nativeVNCInternals.workspaceTerminals.set(
+      nativeVNCConnectionKey,
+      new Set(
+        Array.from(
+          { length: 4 },
+          () =>
+            ({ readyState: WebSocket.OPEN, close: vi.fn<() => void>() }) as unknown as WebSocket,
+        ),
+      ),
+    );
+    const limitedNativeVNC = await fleet.fetch(
+      request("GET", "/v1/native-vnc/handoff", {
+        headers: {
+          authorization: `Bearer ${nativeVNCGrant.ticket}`,
+          upgrade: "websocket",
+        },
+      }),
+    );
+    expect(limitedNativeVNC.status).toBe(429);
+    await expect(limitedNativeVNC.json()).resolves.toMatchObject({
+      error: "native_vnc_connection_limit",
+    });
+    nativeVNCInternals.workspaceTerminals.delete(nativeVNCConnectionKey);
     const invalidNativeVNCTicket = await fleet.fetch(
       request("GET", "/v1/native-vnc/handoff", {
         headers: {

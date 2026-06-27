@@ -3269,10 +3269,27 @@ export class FleetCoordinator {
     if (unavailable) {
       return json({ error: "native_vnc_unavailable", message: unavailable }, { status: 409 });
     }
-    const upgrade = this.state.createWebSocketUpgrade({
-      maxPayload: workspaceTerminalMaxBufferedBytes,
+    const key = workspaceKey(lease.workspace.owner, lease.workspace.org, lease.workspace.id);
+    const upgrade = await this.state.runExclusive(async () => {
+      if (this.workspaceConnectionLimitReached(key, lease.workspace.owner, lease.workspace.org)) {
+        return undefined;
+      }
+      const accepted = this.state.createWebSocketUpgrade({
+        maxPayload: workspaceTerminalMaxBufferedBytes,
+      });
+      this.trackWorkspaceTerminal(key, accepted.socket);
+      return accepted;
     });
-    void this.connectWorkspaceNativeVNC(upgrade.socket, lease.workspace, lease.lease).catch(
+    if (!upgrade) {
+      return json(
+        {
+          error: "native_vnc_connection_limit",
+          message: "workspace connection limit reached",
+        },
+        { status: 429, headers: { "retry-after": "5" } },
+      );
+    }
+    void this.connectWorkspaceNativeVNC(upgrade.socket, key, lease.workspace, lease.lease).catch(
       (error) => closeSocket(upgrade.socket, 1011, boundedSocketReason(errorMessage(error))),
     );
     return upgrade.response;
@@ -3280,6 +3297,7 @@ export class FleetCoordinator {
 
   private async connectWorkspaceNativeVNC(
     socket: WebSocket,
+    workspaceKeyValue: string,
     workspace: WorkspaceRecord,
     lease: LeaseRecord,
   ): Promise<void> {
@@ -3315,6 +3333,7 @@ export class FleetCoordinator {
       closed = true;
       clearStartTimer();
       clearTimeout(expiryTimer);
+      this.untrackWorkspaceTerminal(workspaceKeyValue, socket);
       rejectStart?.(new Error(reason));
       channel?.close();
       connectingClient?.end();
@@ -3463,28 +3482,7 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      const ownerPrefix = workspaceKey(owner, org, "");
-      let ownerConnections = 0;
-      let globalConnections = 0;
-      for (const [terminalKey, sockets] of this.workspaceTerminals) {
-        globalConnections += sockets.size;
-        if (terminalKey.startsWith(ownerPrefix)) {
-          ownerConnections += sockets.size;
-        }
-      }
-      const transportConnectionLimit = Math.max(
-        1,
-        Math.floor(
-          workspaceTerminalTransportMemoryBudgetBytes /
-            this.state.ephemeralWebSocketMaxPayloadBytes,
-        ),
-      );
-      if (
-        (this.workspaceTerminals.get(key)?.size ?? 0) >=
-          Math.min(workspaceTerminalMaxPerWorkspace, transportConnectionLimit) ||
-        ownerConnections >= Math.min(workspaceTerminalMaxPerOwner, transportConnectionLimit) ||
-        globalConnections >= Math.min(workspaceTerminalMaxGlobal, transportConnectionLimit)
-      ) {
+      if (this.workspaceConnectionLimitReached(key, owner, org)) {
         return json(
           {
             error: "terminal_connection_limit",
@@ -3732,6 +3730,30 @@ export class FleetCoordinator {
     sockets.add(socket);
     this.workspaceTerminals.set(key, sockets);
     socket.addEventListener("close", () => this.untrackWorkspaceTerminal(key, socket));
+  }
+
+  private workspaceConnectionLimitReached(key: string, owner: string, org: string): boolean {
+    const ownerPrefix = workspaceKey(owner, org, "");
+    let ownerConnections = 0;
+    let globalConnections = 0;
+    for (const [terminalKey, sockets] of this.workspaceTerminals) {
+      globalConnections += sockets.size;
+      if (terminalKey.startsWith(ownerPrefix)) {
+        ownerConnections += sockets.size;
+      }
+    }
+    const transportConnectionLimit = Math.max(
+      1,
+      Math.floor(
+        workspaceTerminalTransportMemoryBudgetBytes / this.state.ephemeralWebSocketMaxPayloadBytes,
+      ),
+    );
+    return (
+      (this.workspaceTerminals.get(key)?.size ?? 0) >=
+        Math.min(workspaceTerminalMaxPerWorkspace, transportConnectionLimit) ||
+      ownerConnections >= Math.min(workspaceTerminalMaxPerOwner, transportConnectionLimit) ||
+      globalConnections >= Math.min(workspaceTerminalMaxGlobal, transportConnectionLimit)
+    );
   }
 
   private untrackWorkspaceTerminal(key: string, socket: WebSocket): void {
