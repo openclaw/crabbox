@@ -3303,7 +3303,7 @@ export class FleetCoordinator {
       resolveStart = resolve;
       rejectStart = reject;
     });
-    let startTimer: ReturnType<typeof setTimeout>;
+    let startTimer: ReturnType<typeof setTimeout> | null = null;
     let expiryTimer: ReturnType<typeof setTimeout>;
     const close = (code: number, reason: string) => {
       if (closed) return;
@@ -3316,10 +3316,6 @@ export class FleetCoordinator {
       client?.end();
       closeSocket(socket, code, boundedSocketReason(reason));
     };
-    startTimer = setTimeout(
-      () => rejectStart?.(new Error("native VNC viewer did not connect")),
-      30_000,
-    );
     expiryTimer = setTimeout(
       () => close(1008, "workspace expired"),
       Math.min(Math.max(0, Date.parse(lease.expiresAt) - Date.now()), 2_147_483_647),
@@ -3382,6 +3378,10 @@ export class FleetCoordinator {
           username: username ?? "",
           password,
         }),
+      );
+      startTimer = setTimeout(
+        () => rejectStart?.(new Error("native VNC viewer did not connect")),
+        30_000,
       );
       await start;
       if (closed) return;
@@ -12491,6 +12491,17 @@ function workspaceTerminalError(
   lease: LeaseRecord | undefined,
   env: Env,
 ): string | undefined {
+  const sshError = workspaceSSHError(workspace, lease, env);
+  if (sshError) return sshError;
+  if (!workspaceTerminalPublicURL(env)) return "workspace public URL is not configured";
+  return undefined;
+}
+
+function workspaceSSHError(
+  workspace: WorkspaceRecord,
+  lease: LeaseRecord | undefined,
+  env: Env,
+): string | undefined {
   if (workspaceStatus(workspace, lease) !== "ready") return "workspace is not ready";
   if (!lease || !workspaceOwnsLease(workspace, lease)) return "workspace lease is unavailable";
   if (!lease.host?.trim()) return "workspace SSH host is unavailable";
@@ -12498,7 +12509,6 @@ function workspaceTerminalError(
   if (!env.CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?.trim()) {
     return "workspace terminal SSH access is not configured";
   }
-  if (!workspaceTerminalPublicURL(env)) return "workspace public URL is not configured";
   return undefined;
 }
 
@@ -12508,7 +12518,10 @@ function workspaceNativeVNCError(
   env: Env,
 ): string | undefined {
   if (!workspace.desktop) return "workspace desktop access was not requested";
-  return workspaceTerminalError(workspace, lease, env);
+  const sshError = workspaceSSHError(workspace, lease, env);
+  if (sshError) return sshError;
+  if (!workspacePublicURL(env)) return "workspace public URL is not configured";
+  return undefined;
 }
 
 function workspacePublicURL(env: Env): string | undefined {

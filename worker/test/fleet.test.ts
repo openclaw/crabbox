@@ -4562,6 +4562,23 @@ describe("fleet lease identity and idle", () => {
     expect(source).toContain("value.length > workspaceTerminalMaxBufferedBytes");
   });
 
+  it("starts the native VNC viewer timeout after readiness and accepts loopback broker URLs", async () => {
+    const source = await readFile(new URL("../src/fleet.ts", import.meta.url), "utf8");
+    const start = source.indexOf("private async connectWorkspaceNativeVNC");
+    const end = source.indexOf("private async cleanupExpiredNativeVNCTickets", start);
+    const nativeVNC = source.slice(start, end);
+    const errorStart = source.indexOf("function workspaceNativeVNCError");
+    const errorEnd = source.indexOf("function workspacePublicURL", errorStart);
+    const nativeVNCError = source.slice(errorStart, errorEnd);
+
+    expect(nativeVNC.indexOf("socket.send(")).toBeLessThan(
+      nativeVNC.indexOf("native VNC viewer did not connect"),
+    );
+    expect(nativeVNCError).toContain("workspaceSSHError(workspace, lease, env)");
+    expect(nativeVNCError).toContain("workspacePublicURL(env)");
+    expect(nativeVNCError).not.toContain("workspaceTerminalError");
+  });
+
   it("tries every configured SSH port before delaying terminal readiness", async () => {
     const source = await readFile(new URL("../src/fleet.ts", import.meta.url), "utf8");
     const start = source.indexOf("async function connectWorkspaceSSH");
