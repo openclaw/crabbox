@@ -237,6 +237,20 @@
     "caveat": "Requires the coder CLI, login, template access, and workspace quota",
     "docs": "coder.md"
   },
+  "crownest": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "Crownest Workspace Run sandbox",
+    "location": "cloud",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "no",
+    "lifecycle": "Crownest",
+    "cleanup": "sandbox delete",
+    "bestFit": "Hosted agent-ready Workspace Runs with archive sync and durable evidence",
+    "caveat": "No SSH, env forwarding, artifacts, proof, downloads, or custom Dockerfile templates yet",
+    "docs": "crownest.md"
+  },
   "daytona": {
     "status": "built-in",
     "category": "direct-cloud",

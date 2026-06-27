@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 67 providers (39 SSH lease, 26 delegated run, 2 service control).
+Current built-in surface: 68 providers (39 SSH lease, 27 delegated run, 2 service control).
 
 Access terms:
 
@@ -88,6 +88,7 @@ Access terms:
 | [cloudflare-sandbox](cloudflare-sandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup` | `linux`; Cloudflare Sandbox bridge | `cloud`; GPU: no | Cloudflare Sandbox bridge; sandbox delete | Cloudflare Sandbox Linux command execution through a bridge | Requires a configured bridge URL; no SSH, browser, Tailscale, URL sessions, mounts, or checkpoints |
 | [coder](coder.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Coder workspace | `provider-managed`; GPU: unknown | Coder CLI; workspace stop or delete | Coder-backed Linux workspace over SSH proxy | Requires the coder CLI, login, template access, and workspace quota |
 | [codesandbox](codesandbox.md) (`csb`, `code-sandbox`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `pause-resume`, `run-session` | `linux`; CodeSandbox SDK sandbox | `provider-managed`; GPU: no | CodeSandbox; sandbox delete | Managed CodeSandbox Linux development environments | Requires env-only SDK auth and a local Node bridge |
+| [crownest](crownest.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Crownest Workspace Run sandbox | `cloud`; GPU: no | Crownest; sandbox delete | Hosted agent-ready Workspace Runs with archive sync and durable evidence | No SSH, env forwarding, artifacts, proof, downloads, or custom Dockerfile templates yet |
 | [daytona](daytona.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `archive-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Daytona sandbox | `provider-managed`; GPU: unknown | Daytona; sandbox delete | Managed development sandbox with delegated archive sync and execution | SSH access is short-lived; run and sync use Daytona toolbox APIs |
 | [digitalocean](digitalocean.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; DigitalOcean Droplet | `cloud`; GPU: optional | Crabbox; Droplet and key delete | Simple direct Linux VM | Direct-only; no coordinator scheduling |
 | [docker-sandbox](docker-sandbox.md) | built-in; `delegated-run` · local-sandbox | No SSH; `provider-owned` · direct only; features: `run-session`, `mcp-attachments` | `linux`; Docker Sandbox | `local`; GPU: no | Docker sbx CLI; sandbox delete | Local delegated sandbox with reusable session handles | Requires the standalone sbx CLI |

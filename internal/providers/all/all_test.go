@@ -201,6 +201,21 @@ func TestScalewayRegistersWithoutAliases(t *testing.T) {
 	}
 }
 
+func TestCrownestRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("crownest")
+	if err != nil {
+		t.Fatalf("ProviderFor(crownest): %v", err)
+	}
+	if provider.Name() != "crownest" {
+		t.Fatalf("ProviderFor(crownest).Name=%q", provider.Name())
+	}
+	for _, alias := range []string{"cn", "crow", "nest"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "crownest" {
+			t.Fatalf("%q alias unexpectedly resolves to crownest", alias)
+		}
+	}
+}
+
 func TestNamespaceInstanceRegistersWithoutAliasCollision(t *testing.T) {
 	for _, name := range []string{"namespace-instance", "namespace-compute"} {
 		provider, err := core.ProviderFor(name)
@@ -1140,6 +1155,7 @@ func allBuiltInProviderNames() []string {
 		"cloudflare-sandbox",
 		"codesandbox",
 		"coder",
+		"crownest",
 		"daytona",
 		"digitalocean",
 		"docker-sandbox",

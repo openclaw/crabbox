@@ -218,8 +218,8 @@ transport to the provider's own API or CLI. For these, SSH-specific options
 (`ssh`, `desktop`, `vnc`, `code`, Actions hydration, `--checksum`, `--sync-only`)
 are unavailable or partly restricted, and sync timing is reported as `delegated`.
 Examples include `blacksmith-testbox`, `azure-dynamic-sessions`, `e2b`, `modal`,
-`islo`, `cloudflare`, `cloudflare-dynamic-workers`, `upstash-box`, `tensorlake`,
-and `wandb`. See
+`islo`, `cloudflare`, `cloudflare-dynamic-workers`, `crownest`, `upstash-box`,
+`tensorlake`, and `wandb`. See
 [providers](features/providers.md) for the full adapter list and which surface
 each one supports.
 
