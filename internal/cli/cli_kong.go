@@ -22,6 +22,7 @@ type crabboxKongCLI struct {
 	Run         runKongCmd         `cmd:"" passthrough:"" help:"Sync the repo, run a remote command, stream output."`
 	Bench       benchKongCmd       `cmd:"" help:"Record and report local benchmark timings."`
 	Job         jobKongCmd         `cmd:"" help:"Run named repo-local Crabbox jobs."`
+	Data        dataKongCmd        `cmd:"" help:"Run policy-scoped data commands with manifest proof."`
 	Desktop     desktopKongCmd     `cmd:"" help:"Launch apps into a visible desktop session."`
 	Media       mediaKongCmd       `cmd:"" help:"Create preview artifacts from recorded desktop videos."`
 	Artifacts   artifactsKongCmd   `cmd:"" help:"Collect, transform, and publish QA artifacts."`
@@ -127,7 +128,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "adapter", "admin", "artifacts", "azure", "bench", "cache", "capsule", "checkpoint", "config", "pond", "desktop", "image", "job", "machine", "marketplace", "media", "pool":
+	case "actions", "adapter", "admin", "artifacts", "azure", "bench", "cache", "capsule", "checkpoint", "config", "data", "pond", "desktop", "image", "job", "machine", "marketplace", "media", "pool":
 		return true
 	default:
 		return false
@@ -180,6 +181,28 @@ type jobListKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type jobRunKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type dataKongCmd struct {
+	List     dataListKongCmd     `cmd:"" passthrough:"" help:"List configured data runs."`
+	Plan     dataPlanKongCmd     `cmd:"" passthrough:"" help:"Validate and print the effective data policy."`
+	Run      dataRunKongCmd      `cmd:"" passthrough:"" help:"Run a configured data run."`
+	Promote  dataPromoteKongCmd  `cmd:"" passthrough:"" help:"Promote staged data output (not implemented in POC)."`
+	Manifest dataManifestKongCmd `cmd:"" passthrough:"" help:"Show a data run manifest (not implemented in POC)."`
+}
+type dataListKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type dataPlanKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type dataRunKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type dataPromoteKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type dataManifestKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type syncPlanKongCmd struct {
@@ -611,8 +634,17 @@ func (c *benchRecordKongCmd) Run(ctx context.Context, app App) error {
 func (c *benchReportKongCmd) Run(ctx context.Context, app App) error {
 	return app.benchReport(ctx, c.Args)
 }
-func (c *jobListKongCmd) Run(ctx context.Context, app App) error   { return app.jobList(ctx, c.Args) }
-func (c *jobRunKongCmd) Run(ctx context.Context, app App) error    { return app.jobRun(ctx, c.Args) }
+func (c *jobListKongCmd) Run(ctx context.Context, app App) error  { return app.jobList(ctx, c.Args) }
+func (c *jobRunKongCmd) Run(ctx context.Context, app App) error   { return app.jobRun(ctx, c.Args) }
+func (c *dataListKongCmd) Run(ctx context.Context, app App) error { return app.dataList(ctx, c.Args) }
+func (c *dataPlanKongCmd) Run(ctx context.Context, app App) error { return app.dataPlan(ctx, c.Args) }
+func (c *dataRunKongCmd) Run(ctx context.Context, app App) error  { return app.dataRun(ctx, c.Args) }
+func (c *dataPromoteKongCmd) Run(ctx context.Context, app App) error {
+	return app.dataPromote(ctx, c.Args)
+}
+func (c *dataManifestKongCmd) Run(ctx context.Context, app App) error {
+	return app.dataManifest(ctx, c.Args)
+}
 func (c *syncPlanKongCmd) Run(ctx context.Context, app App) error  { return app.syncPlan(ctx, c.Args) }
 func (c *providersKongCmd) Run(ctx context.Context, app App) error { return app.providers(ctx, c.Args) }
 func (c *historyKongCmd) Run(ctx context.Context, app App) error   { return app.history(ctx, c.Args) }

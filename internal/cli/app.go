@@ -77,6 +77,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.prewarm(ctx, helpArgs), true
 	case "run":
 		return a.runCommand(ctx, helpArgs), true
+	case "data":
+		return nil, false
 	case "job":
 		return nil, false
 	case "sync-plan":
@@ -176,6 +178,7 @@ Commands:
   run         Sync the repo, run a remote command, stream output
   bench       Record and report local benchmark timings
   job         Run named repo-local Crabbox jobs
+  data        Run policy-scoped data commands with manifest proof
   desktop     Launch apps into a visible desktop session
   media       Create preview artifacts from recorded desktop videos
   artifacts   Collect, transform, and publish QA artifacts
@@ -227,6 +230,8 @@ Common Flows:
   crabbox run --timing-record=default -- pnpm test
   crabbox bench run --providers aws,hetzner --repeats 3 -- pnpm test
   crabbox bench report --since 7d
+  crabbox data plan normalize-events
+  crabbox data run --dry-run normalize-events
   crabbox connect blue-lobster
   crabbox ssh --id blue-lobster
   crabbox ports --id blue-lobster --publish 8080

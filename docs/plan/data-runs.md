@@ -1,7 +1,8 @@
 # Crabbox Data Runs
 
-Status: proposal. This is not shipped behavior. Current behavior is documented in
-the run, configuration, provider, and artifact docs.
+Status: POC CLI wrapper shipped. Current behavior is documented in
+[data](../commands/data.md). Broker-native data history, provider-enforced
+source/sink policy, promotion, and manifest lookup remain proposed here.
 
 Read when:
 
@@ -108,6 +109,9 @@ crabbox data promote <run-id>
 crabbox data manifest <run-id>
 ```
 
+The POC implements `list`, `plan`, and `run`. `promote` and `manifest` are
+reserved command names that fail clearly until those phases exist.
+
 Later, the same primitive can sit under `run`:
 
 ```sh
@@ -192,10 +196,10 @@ Enforced policy is applied by Crabbox or a provider adapter. Examples:
 Plan output should be explicit:
 
 ```text
-policy source.mode=read enforced=identity
-policy sink.mode=write-staging enforced=identity
+policy ttl=90m enforced=lease
+policy requireDryRun=true enforced=execute-gate
 policy egress.allow declared=only
-policy maxBytes=500GiB enforced=manifest-check
+policy maxBytes=500GiB declared=only
 ```
 
 Core must stay provider-neutral. If policy enforcement needs cloud-specific
@@ -204,7 +208,7 @@ behavior, add a provider hook instead of adding `provider == ...` logic to core.
 ## Implementation
 
 Phase 1 adds `crabbox data` as a CLI wrapper over today's lease/run primitives.
-No Worker schema change is required.
+No Worker schema change is required. The POC slice is shipped.
 
 Phase 1 includes:
 
@@ -212,7 +216,7 @@ Phase 1 includes:
 - `data list`, `data plan`, `data run --dry-run`, and `data run`;
 - reserved env injection for run name, mode, source URI, sink URI, and manifest
   path;
-- manifest validation after command success;
+- execute manifest validation after command success;
 - artifact collection for the manifest and optional quality report;
 - tests for config validation, command expansion, and manifest failure.
 

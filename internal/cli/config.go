@@ -230,6 +230,7 @@ type Config struct {
 	Presets                       map[string]PresetConfig
 	ProofTemplates                map[string]ProofTemplateConfig
 	Jobs                          map[string]JobConfig
+	DataRuns                      map[string]DataRunConfig
 }
 
 type SyncConfig struct {
@@ -1375,6 +1376,55 @@ type JobActionsConfig struct {
 	Job      string
 	Ref      string
 	Fields   []string
+}
+
+type DataRunConfig struct {
+	Job      JobConfig
+	Source   DataRunEndpointConfig
+	Sink     DataRunEndpointConfig
+	Identity DataRunIdentityConfig
+	Policy   DataRunPolicyConfig
+	Manifest DataRunManifestConfig
+}
+
+type DataRunEndpointConfig struct {
+	Kind      string
+	Mode      string
+	URI       string
+	Watermark string
+}
+
+type DataRunIdentityConfig struct {
+	AWS   DataRunAWSIdentityConfig
+	GCP   DataRunGCPIdentityConfig
+	Azure DataRunAzureIdentityConfig
+}
+
+type DataRunAWSIdentityConfig struct {
+	InstanceProfile string
+}
+
+type DataRunGCPIdentityConfig struct {
+	ServiceAccount string
+}
+
+type DataRunAzureIdentityConfig struct {
+	ManagedIdentity string
+}
+
+type DataRunPolicyConfig struct {
+	RequireDryRun     bool
+	MaxBytes          string
+	MaxRows           int64
+	AllowSchemaChange *bool
+	PIILogging        string
+	EgressAllow       []string
+}
+
+type DataRunManifestConfig struct {
+	Path        string
+	Required    bool
+	RequiredSet bool
 }
 
 type AccessConfig struct {
@@ -2974,6 +3024,7 @@ type fileConfig struct {
 	Presets                  map[string]filePresetConfig         `yaml:"presets,omitempty"`
 	ProofTemplates           map[string]fileProofTemplateConfig  `yaml:"proofTemplates,omitempty"`
 	Jobs                     map[string]fileJobConfig            `yaml:"jobs,omitempty"`
+	DataRuns                 map[string]fileDataRunConfig        `yaml:"dataRuns,omitempty"`
 	TTL                      string                              `yaml:"ttl,omitempty"`
 	IdleTimeout              string                              `yaml:"idleTimeout,omitempty"`
 	WorkRoot                 string                              `yaml:"workRoot,omitempty"`
@@ -4206,6 +4257,56 @@ type fileJobActionsConfig struct {
 	Job      string   `yaml:"job,omitempty"`
 	Ref      string   `yaml:"ref,omitempty"`
 	Fields   []string `yaml:"fields,omitempty"`
+}
+
+type fileDataRunConfig struct {
+	fileJobConfig `yaml:",inline"`
+	Source        *fileDataRunEndpointConfig `yaml:"source,omitempty"`
+	Sink          *fileDataRunEndpointConfig `yaml:"sink,omitempty"`
+	Identity      *fileDataRunIdentityConfig `yaml:"identity,omitempty"`
+	Policy        *fileDataRunPolicyConfig   `yaml:"policy,omitempty"`
+	Manifest      *fileDataRunManifestConfig `yaml:"manifest,omitempty"`
+}
+
+type fileDataRunEndpointConfig struct {
+	Kind      string `yaml:"kind,omitempty"`
+	Mode      string `yaml:"mode,omitempty"`
+	URI       string `yaml:"uri,omitempty"`
+	Watermark string `yaml:"watermark,omitempty"`
+}
+
+type fileDataRunIdentityConfig struct {
+	AWS   *fileDataRunAWSIdentityConfig   `yaml:"aws,omitempty"`
+	GCP   *fileDataRunGCPIdentityConfig   `yaml:"gcp,omitempty"`
+	Azure *fileDataRunAzureIdentityConfig `yaml:"azure,omitempty"`
+}
+
+type fileDataRunAWSIdentityConfig struct {
+	InstanceProfile string `yaml:"instanceProfile,omitempty"`
+}
+
+type fileDataRunGCPIdentityConfig struct {
+	ServiceAccount string `yaml:"serviceAccount,omitempty"`
+}
+
+type fileDataRunAzureIdentityConfig struct {
+	ManagedIdentity string `yaml:"managedIdentity,omitempty"`
+}
+
+type fileDataRunPolicyConfig struct {
+	RequireDryRun     *bool  `yaml:"requireDryRun,omitempty"`
+	MaxBytes          string `yaml:"maxBytes,omitempty"`
+	MaxRows           int64  `yaml:"maxRows,omitempty"`
+	AllowSchemaChange *bool  `yaml:"allowSchemaChange,omitempty"`
+	PIILogging        string `yaml:"piiLogging,omitempty"`
+	Egress            *struct {
+		Allow []string `yaml:"allow,omitempty"`
+	} `yaml:"egress,omitempty"`
+}
+
+type fileDataRunManifestConfig struct {
+	Path     string `yaml:"path,omitempty"`
+	Required *bool  `yaml:"required,omitempty"`
 }
 
 func configPaths() []string {
@@ -6629,6 +6730,18 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Jobs[name] = applyFileJobConfig(cfg.Jobs[name], job)
 		}
 	}
+	if len(file.DataRuns) > 0 {
+		if cfg.DataRuns == nil {
+			cfg.DataRuns = map[string]DataRunConfig{}
+		}
+		for name, run := range file.DataRuns {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			cfg.DataRuns[name] = applyFileDataRunConfig(cfg.DataRuns[name], run)
+		}
+	}
 	return nil
 }
 
@@ -6877,6 +6990,74 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 		job.Stop = file.Stop
 	}
 	return job
+}
+
+func applyFileDataRunConfig(run DataRunConfig, file fileDataRunConfig) DataRunConfig {
+	run.Job = applyFileJobConfig(run.Job, file.fileJobConfig)
+	if file.Source != nil {
+		run.Source = applyFileDataRunEndpointConfig(run.Source, *file.Source)
+	}
+	if file.Sink != nil {
+		run.Sink = applyFileDataRunEndpointConfig(run.Sink, *file.Sink)
+	}
+	if file.Identity != nil {
+		if file.Identity.AWS != nil && file.Identity.AWS.InstanceProfile != "" {
+			run.Identity.AWS.InstanceProfile = file.Identity.AWS.InstanceProfile
+		}
+		if file.Identity.GCP != nil && file.Identity.GCP.ServiceAccount != "" {
+			run.Identity.GCP.ServiceAccount = file.Identity.GCP.ServiceAccount
+		}
+		if file.Identity.Azure != nil && file.Identity.Azure.ManagedIdentity != "" {
+			run.Identity.Azure.ManagedIdentity = file.Identity.Azure.ManagedIdentity
+		}
+	}
+	if file.Policy != nil {
+		if file.Policy.RequireDryRun != nil {
+			run.Policy.RequireDryRun = *file.Policy.RequireDryRun
+		}
+		if file.Policy.MaxBytes != "" {
+			run.Policy.MaxBytes = file.Policy.MaxBytes
+		}
+		if file.Policy.MaxRows > 0 {
+			run.Policy.MaxRows = file.Policy.MaxRows
+		}
+		if file.Policy.AllowSchemaChange != nil {
+			value := *file.Policy.AllowSchemaChange
+			run.Policy.AllowSchemaChange = &value
+		}
+		if file.Policy.PIILogging != "" {
+			run.Policy.PIILogging = file.Policy.PIILogging
+		}
+		if file.Policy.Egress != nil && len(file.Policy.Egress.Allow) > 0 {
+			run.Policy.EgressAllow = appendUniqueStrings(nil, file.Policy.Egress.Allow...)
+		}
+	}
+	if file.Manifest != nil {
+		if file.Manifest.Path != "" {
+			run.Manifest.Path = file.Manifest.Path
+		}
+		if file.Manifest.Required != nil {
+			run.Manifest.Required = *file.Manifest.Required
+			run.Manifest.RequiredSet = true
+		}
+	}
+	return run
+}
+
+func applyFileDataRunEndpointConfig(endpoint DataRunEndpointConfig, file fileDataRunEndpointConfig) DataRunEndpointConfig {
+	if file.Kind != "" {
+		endpoint.Kind = file.Kind
+	}
+	if file.Mode != "" {
+		endpoint.Mode = file.Mode
+	}
+	if file.URI != "" {
+		endpoint.URI = file.URI
+	}
+	if file.Watermark != "" {
+		endpoint.Watermark = file.Watermark
+	}
+	return endpoint
 }
 
 func applyLeaseDuration(target *time.Duration, value string) {

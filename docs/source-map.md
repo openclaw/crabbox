@@ -175,6 +175,7 @@ Provider docs:
 - Native Windows target archive sync and PowerShell command wrapping: `internal/cli/sync_windows_target.go`, `internal/cli/ssh.go`
 - SSH command output, direct SSH touch, per-lease known_hosts and ControlMaster config: `internal/cli/ssh.go`, `internal/cli/ssh_cmd.go`
 - Named repo-local job orchestration: `internal/cli/job.go`
+- POC data-run orchestration and manifest validation: `internal/cli/data.go`
 - GitHub Actions hydrate/register/dispatch bridge: `internal/cli/actions.go`
 - Actions-first failure capsules: `internal/cli/capsule.go`
 - VM/workspace checkpoints (create/list/inspect/restore/fork/delete/prune): `internal/cli/checkpoint.go`, `internal/cli/checkpoint_native.go`, `internal/cli/checkpoint_store.go`
@@ -211,6 +212,7 @@ Provider docs:
 
 - Configuration precedence and YAML schema: `docs/features/configuration.md` (code: `internal/cli/config.go`, `internal/cli/config_cmd.go`)
 - Jobs: `docs/features/jobs.md` (code: `internal/cli/job.go`)
+- Data Runs: `docs/commands/data.md`, `docs/plan/data-runs.md` (code: `internal/cli/data.go`, config in `internal/cli/config.go`)
 - Identifiers (lease IDs, slugs, claims, run IDs): `docs/features/identifiers.md` (code: `internal/cli/lease.go`, `internal/cli/slug.go`, `internal/cli/claim.go`)
 - Doctor checks: `docs/features/doctor.md` (code: `internal/cli/doctor.go`; readiness API in `worker/src/fleet.ts`)
 - Network and reachability: `docs/features/network.md` (code: `internal/cli/network.go`)

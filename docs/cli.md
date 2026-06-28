@@ -65,9 +65,12 @@ See [warmup](commands/warmup.md), [run](commands/run.md),
 crabbox sync-plan [--limit <n>]              preview local sync manifest size hotspots
 crabbox job list                              list repo-local configured jobs
 crabbox job run <name>                        run a configured job
+crabbox data plan <name>                      validate a data run policy
+crabbox data run [--dry-run] <name>           run with data env and manifest proof
 ```
 
-See [sync-plan](commands/sync-plan.md), [job](commands/job.md).
+See [sync-plan](commands/sync-plan.md), [job](commands/job.md),
+[data](commands/data.md).
 
 ### Observability
 

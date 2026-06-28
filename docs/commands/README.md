@@ -18,6 +18,7 @@ same order as the CLI help.
 - [run](run.md)
 - [bench](bench.md)
 - [job](job.md)
+- [data](data.md)
 - [desktop](desktop.md)
 - [media](media.md)
 - [artifacts](artifacts.md)
