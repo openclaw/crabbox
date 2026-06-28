@@ -13,6 +13,11 @@ const ubuntuWSLRootFSURL =
   "https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz";
 const ubuntuWSLRootFSSHA256 = "8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea";
 const googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
+const defaultCodeServerVersion = "4.126.0";
+const defaultCodeServerSHA256 = {
+  amd64: "54b648d010c02b6583aa06bd8d2aaf109fc624479b9bc2ff71cb94807ac39afa",
+  arm64: "441614708ae81b13f14b26db41da8f46f88d7d092c08343a42a0c6c52c51a69d",
+} as const;
 
 export function awsUserData(config: LeaseConfig): string {
   if (config.target === "windows") {
@@ -1464,10 +1469,33 @@ ${themeConfigure}    systemctl daemon-reload
   }
   if (config.code) {
     parts.push(`    retry apt-get install -y --no-install-recommends libatomic1
-    retry env HOME=/root sh -c 'curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local'
+    ${codeServerInstallBootstrap()}
     /usr/local/bin/code-server --version >/dev/null`);
   }
   return parts.join("\n");
+}
+
+function codeServerInstallBootstrap(): string {
+  const version = shellQuote(defaultCodeServerVersion);
+  const amd64SHA = shellQuote(defaultCodeServerSHA256.amd64);
+  const arm64SHA = shellQuote(defaultCodeServerSHA256.arm64);
+  return `CS_VERSION=${version}
+    case "$(uname -m)" in
+      x86_64) CS_ARCH=amd64; CS_SHA256=${amd64SHA} ;;
+      aarch64|arm64) CS_ARCH=arm64; CS_SHA256=${arm64SHA} ;;
+      *) echo "unsupported code-server architecture: $(uname -m)" >&2; exit 3 ;;
+    esac
+    if [ -z "$CS_SHA256" ]; then echo "missing code-server checksum for $CS_ARCH" >&2; exit 3; fi
+    CS_INSTALL_DIR="$(mktemp -d)"
+    trap 'rm -rf "$CS_INSTALL_DIR"' EXIT
+    CS_ARCHIVE="$CS_INSTALL_DIR/code-server.tgz"
+    retry sh -c "curl -fsSL -o \\"$CS_ARCHIVE\\" \\"https://github.com/coder/code-server/releases/download/v\${CS_VERSION}/code-server-\${CS_VERSION}-linux-\${CS_ARCH}.tar.gz\\""
+    printf '%s  %s\\n' "$CS_SHA256" "$CS_ARCHIVE" | sha256sum -c -
+    tar -xzf "$CS_ARCHIVE" -C "$CS_INSTALL_DIR" --strip-components=1
+    rm -rf /usr/local/lib/code-server
+    install -d -m 0755 /usr/local/lib/code-server
+    cp -a "$CS_INSTALL_DIR/." /usr/local/lib/code-server/
+    ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server`;
 }
 
 function indentRuncmdScript(script: string): string {
@@ -1486,9 +1514,6 @@ function indentRuncmdScript(script: string): string {
 }
 
 function tailscaleInstallBootstrap(config: LeaseConfig): string {
-  if (config.tailscaleInstallMode !== "pinned") {
-    return "retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'";
-  }
   const version = shellQuote(config.tailscaleVersion || "1.98.4");
   const amd64SHA = shellQuote(config.tailscaleSHA256?.amd64 || "");
   const arm64SHA = shellQuote(config.tailscaleSHA256?.arm64 || "");
@@ -1498,6 +1523,7 @@ function tailscaleInstallBootstrap(config: LeaseConfig): string {
       aarch64|arm64) TS_ARCH=arm64; TS_SHA256=${arm64SHA} ;;
       *) echo "unsupported Tailscale architecture: $(uname -m)" >&2; exit 3 ;;
     esac
+    if [ -z "$TS_SHA256" ]; then echo "missing Tailscale checksum for $TS_ARCH" >&2; exit 3; fi
     TS_INSTALL_DIR="$(mktemp -d)"
     trap 'rm -rf "$TS_INSTALL_DIR"' EXIT
     TS_ARCHIVE="$TS_INSTALL_DIR/tailscale.tgz"

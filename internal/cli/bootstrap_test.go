@@ -394,15 +394,21 @@ func TestCloudInitCodeProfile(t *testing.T) {
 	cfg.Code = true
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
-		"https://code-server.dev/install.sh",
-		"env HOME=/root",
-		"--method=standalone --prefix=/usr/local",
+		"CS_VERSION='4.126.0'",
+		"x86_64) CS_ARCH=amd64; CS_SHA256='54b648d010c02b6583aa06bd8d2aaf109fc624479b9bc2ff71cb94807ac39afa'",
+		"aarch64|arm64) CS_ARCH=arm64; CS_SHA256='441614708ae81b13f14b26db41da8f46f88d7d092c08343a42a0c6c52c51a69d'",
+		"https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz",
+		"sha256sum -c -",
+		"/usr/local/lib/code-server",
 		"/usr/local/bin/code-server --version >/dev/null",
 		"test -x /usr/local/bin/code-server",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(code) missing %q", want)
 		}
+	}
+	if strings.Contains(got, "https://code-server.dev/install.sh") || strings.Contains(got, "curl -fsSL https://code-server.dev/install.sh | sh") {
+		t.Fatal("cloudInit(code) must not pipe the code-server installer script to root shell")
 	}
 	if strings.Contains(cloudInit(baseConfig(), "ssh-ed25519 test"), "code-server") {
 		t.Fatal("cloudInit should not install code-server by default")
@@ -420,7 +426,8 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	cfg.Tailscale.ExitNodeAllowLANAccess = true
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
-		"https://tailscale.com/install.sh",
+		"https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz",
+		"sha256sum -c -",
 		"install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox",
 		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
 		"printf '%s\\n' 'crabbox-blue-lobster' > /var/lib/crabbox/tailscale-hostname",
@@ -445,13 +452,15 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	if strings.Contains(got, "tailscale logout") || strings.Contains(got, "WantedBy=halt.target reboot.target shutdown.target") {
 		t.Fatal("cloudInit(tailscale) must not install a normal-reboot logout hook")
 	}
+	if strings.Contains(got, "https://tailscale.com/install.sh") {
+		t.Fatal("cloudInit(tailscale) must not pipe the Tailscale installer script to root shell")
+	}
 	if strings.Contains(cloudInit(baseConfig(), "ssh-ed25519 test"), "tailscale up") {
 		t.Fatal("cloudInit should not install Tailscale by default")
 	}
 }
 
 func TestCloudInitTailscalePinnedStaticInstall(t *testing.T) {
-	t.Setenv("CRABBOX_TAILSCALE_INSTALL_MODE", "pinned")
 	t.Setenv("CRABBOX_TAILSCALE_VERSION", "1.98.4")
 	t.Setenv("CRABBOX_TAILSCALE_SHA256_AMD64", "amd64sum")
 	t.Setenv("CRABBOX_TAILSCALE_SHA256_ARM64", "arm64sum")

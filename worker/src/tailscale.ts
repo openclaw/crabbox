@@ -69,10 +69,8 @@ export function tailscaleDefaultTags(env: Env): string[] {
 }
 
 export function tailscaleInstallConfig(env: Env): TailscaleInstallConfig {
-  const requested = (env.CRABBOX_TAILSCALE_INSTALL_MODE ?? "package").trim().toLowerCase();
-  const mode = requested === "pinned" ? "pinned" : "package";
   return {
-    mode,
+    mode: "pinned",
     version: env.CRABBOX_TAILSCALE_VERSION?.trim() || defaultPinnedTailscaleVersion,
     sha256: {
       amd64: env.CRABBOX_TAILSCALE_SHA256_AMD64?.trim() || defaultPinnedTailscaleSHA256.amd64,

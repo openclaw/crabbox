@@ -137,7 +137,7 @@ CRABBOX_TAILSCALE_CLIENT_SECRET
 CRABBOX_TAILSCALE_TAILNET    optional, defaults to "-"
 CRABBOX_TAILSCALE_TAGS       default/allowed comma-separated tags (default tag:crabbox)
 CRABBOX_TAILSCALE_ENABLED    set 0 to force-disable, 1 to force-enable
-CRABBOX_TAILSCALE_INSTALL_MODE package or pinned (default package)
+CRABBOX_TAILSCALE_INSTALL_MODE pinned (legacy package value is treated as pinned)
 CRABBOX_TAILSCALE_VERSION       pinned static build version
 CRABBOX_TAILSCALE_SHA256_AMD64  pinned amd64 archive checksum
 CRABBOX_TAILSCALE_SHA256_ARM64  pinned arm64 archive checksum
@@ -192,11 +192,11 @@ The auth key is never stored in lease records, provider labels, run logs, or loc
 config. The short-lived key can still appear in user-data at the provider, so the
 Worker only mints one-off ephemeral keys — never long-lived reusable keys.
 
-The default installer mode runs Tailscale's package install script. Set
-`CRABBOX_TAILSCALE_INSTALL_MODE=pinned` to download a static Tailscale archive,
-verify the configured SHA-256 checksum, install the `tailscale` and `tailscaled`
-binaries, and record the client version. The built-in pinned defaults track the
-Islo Tailscale build so both bootstrap paths use the same binary version.
+The runner always downloads a pinned static Tailscale archive, verifies the
+configured SHA-256 checksum, installs the `tailscale` and `tailscaled` binaries,
+and records the client version. The legacy `package` install mode is accepted as
+a compatibility value but is treated as pinned; managed Linux bootstrap does not
+pipe the upstream package install script into a root shell.
 
 On release, `crabbox stop` attempts a best-effort remote `tailscale logout` before
 provider cleanup when SSH is still reachable. Coordinator cleanup does not delete a

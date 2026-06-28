@@ -128,7 +128,7 @@ describe("tailscale preflight", () => {
 
     expect(result.status).toBe("disabled");
     expect(result.enabled).toBe(false);
-    expect(result.install.mode).toBe("package");
+    expect(result.install.mode).toBe("pinned");
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -182,5 +182,13 @@ describe("tailscale preflight", () => {
       version: "1.99.1",
       sha256: { amd64: "amd", arm64: "arm" },
     });
+  });
+
+  it("treats legacy package installer mode as pinned static install", () => {
+    expect(
+      tailscaleInstallConfig({
+        CRABBOX_TAILSCALE_INSTALL_MODE: "package",
+      }).mode,
+    ).toBe("pinned");
   });
 });
