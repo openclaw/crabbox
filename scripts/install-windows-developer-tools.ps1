@@ -13,6 +13,10 @@ if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:
 $InstallDocker = $env:CRABBOX_WINDOWS_INSTALL_DOCKER
 if (-not $InstallDocker) { $InstallDocker = "1" }
 $RebootMarker = "C:\ProgramData\crabbox\image-prep-reboot-required"
+$ChocolateyInstallURL = $env:CRABBOX_WINDOWS_CHOCO_INSTALL_URL
+if (-not $ChocolateyInstallURL) { $ChocolateyInstallURL = "https://community.chocolatey.org/install.ps1" }
+$ChocolateyInstallSHA256 = $env:CRABBOX_WINDOWS_CHOCO_INSTALL_SHA256
+if (-not $ChocolateyInstallSHA256) { $ChocolateyInstallSHA256 = "44e045ed5350758616d664c5af631e7f2cd10165f5bf2bd82cbf3a0bb8f63462" }
 
 function Write-Log {
   param([string]$Message)
@@ -59,11 +63,46 @@ function Refresh-SessionPath {
   Add-MachinePath "C:\Program Files\docker"
 }
 
+function Assert-FileSHA256 {
+  param(
+    [string]$Path,
+    [string]$Expected,
+    [string]$Name
+  )
+  if (-not $Expected -or $Expected -notmatch "^[0-9a-fA-F]{64}$") {
+    throw "$Name SHA256 must be a 64-character hex digest"
+  }
+  $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+  $want = $Expected.ToLowerInvariant()
+  if ($actual -ne $want) {
+    throw "$Name SHA256 mismatch: got $actual want $want"
+  }
+}
+
+function Invoke-VerifiedPowerShellInstaller {
+  param(
+    [string]$Url,
+    [string]$SHA256,
+    [string]$Name
+  )
+  $installer = Join-Path $env:TEMP ("crabbox-" + [Guid]::NewGuid().ToString("N") + ".ps1")
+  try {
+    Retry { Invoke-WebRequest -Uri $Url -OutFile $installer -UseBasicParsing }
+    Assert-FileSHA256 -Path $installer -Expected $SHA256 -Name $Name
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installer
+    if ($LASTEXITCODE -ne 0) {
+      throw "$Name failed with exit code $LASTEXITCODE"
+    }
+  } finally {
+    Remove-Item -Force -LiteralPath $installer -ErrorAction SilentlyContinue
+  }
+}
+
 function Install-Chocolatey {
   if (Get-Command choco.exe -ErrorAction SilentlyContinue) { return }
   Write-Log "installing Chocolatey"
   Set-ExecutionPolicy Bypass -Scope Process -Force
-  Invoke-Expression ((New-Object Net.WebClient).DownloadString("https://community.chocolatey.org/install.ps1"))
+  Invoke-VerifiedPowerShellInstaller -Url $ChocolateyInstallURL -SHA256 $ChocolateyInstallSHA256 -Name "Chocolatey installer"
   Add-MachinePath "C:\ProgramData\chocolatey\bin"
 }
 
