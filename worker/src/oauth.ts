@@ -673,10 +673,18 @@ function safePortalReturnTo(value: string | null): string {
   if (!value || !value.startsWith("/portal")) {
     return "/portal";
   }
-  if (value.startsWith("//") || value.includes("://")) {
+  if (value.startsWith("//") || value.includes("://") || hasHeaderControlCharacter(value)) {
     return "/portal";
   }
   return value;
+}
+
+function hasHeaderControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
 }
 
 function escapeHTML(value: string): string {
