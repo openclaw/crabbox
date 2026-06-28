@@ -83,7 +83,7 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 		case "/sandbox/missing":
 			http.Error(w, `{"message":"sandbox not found"}`, http.StatusNotFound)
 		case "/sandbox/denied":
-			http.Error(w, `{"message":"bad token"}`, http.StatusUnauthorized)
+			http.Error(w, `{"authorization":"Bearer api-token","message":"bad token api-token"}`, http.StatusUnauthorized)
 		default:
 			http.NotFound(w, r)
 		}
@@ -112,6 +112,9 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "denied")
 	if err == nil || !strings.Contains(err.Error(), "daytona get sandbox: 401 Unauthorized") {
 		t.Fatalf("denied err=%v, want preserved get-sandbox failure", err)
+	}
+	if strings.Contains(err.Error(), "api-token") {
+		t.Fatalf("denied err=%v still contains token", err)
 	}
 	if strings.Contains(err.Error(), "sandbox not found") {
 		t.Fatalf("denied err=%v, want no not-found rewrite", err)
