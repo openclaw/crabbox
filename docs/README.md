@@ -177,6 +177,7 @@ Pick whichever matches your intent:
   [Security](security.md), [Auth and admin](features/auth-admin.md),
   [Repository onboarding](features/repository-onboarding.md),
   [SSH keys](features/ssh-keys.md), [Source Map](source-map.md).
+- **Forward-looking plans:** [Data Runs](plan/data-runs.md) proposal.
 
 ## About these docs
 

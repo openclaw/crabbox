@@ -16,6 +16,7 @@ const sections = [
     "Operate",
     ["operations.md", "observability.md", "troubleshooting.md", "performance.md", "infrastructure.md", "security.md"],
   ],
+  ["Plans", rels("plan")],
 ];
 
 fs.rmSync(outDir, { recursive: true, force: true });
@@ -370,7 +371,7 @@ function standardHero(page, sectionName, editUrl) {
 function landingHero(rootPrefix) {
   const features = [
     ["Local loop, remote box", "Keep your editor and git workflow. Crabbox rsyncs your dirty checkout to a leased remote box and streams the run back."],
-    ["Brokered, not BYO creds", "A Cloudflare Worker holds provider credentials and serializes lease state. Your CLI only carries a bearer token."],
+    ["Brokered, not BYO creds", "A coordinator holds provider credentials and serializes lease state. Your CLI only carries a bearer token."],
     ["Cost-aware leases", "TTL-bounded machines, monthly spend caps, and per-user / per-org / per-provider usage from the broker."],
     ["Reuse what's warm", "<code>crabbox warmup</code> keeps a box hot. Reuse it with <code>--id</code> across runs, SSH, and CI hydration."],
     ["Many providers, one loop", "Brokered Hetzner / AWS / Azure, delegated E2B / Daytona / Blacksmith / Semaphore, or static SSH targets - Linux, Windows, and macOS."],
@@ -383,9 +384,9 @@ function landingHero(rootPrefix) {
     .join("");
   return `<header class="hero hero-home">
         <div class="hero-text">
-          <p class="eyebrow">OpenClaw - remote testbox</p>
+          <p class="eyebrow">Remote testbox</p>
           <h1>A short-lived box for every <em>run</em>.</h1>
-          <p class="lede">Crabbox gives maintainers and agents a fast local loop on shared cloud capacity: lease, sync, run, release. The CLI keeps the developer story simple; a Cloudflare-hosted broker keeps the fleet safe.</p>
+          <p class="lede">Crabbox gives maintainers and agents a fast local loop on shared cloud capacity: lease, sync, run, release. The CLI keeps the developer story simple; the coordinator keeps the fleet safe.</p>
           <div class="cta">
             <a class="cta-primary" href="${rootPrefix}how-it-works.html">Read the overview</a>
             <a class="cta-secondary" href="https://github.com/openclaw/crabbox" rel="noopener">View on GitHub</a>
