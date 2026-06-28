@@ -143,6 +143,9 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 				return LeaseTarget{}, err
 			}
 			server = annotateAWSServerRegion(server, cfg.AWSRegion)
+			if !isCrabboxAWSLease(server) {
+				return LeaseTarget{}, exit(4, "lease/server not found: %s (instance exists but is not Crabbox-managed)", req.ID)
+			}
 			leaseID := blank(server.Labels["lease"], req.ID)
 			target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 			useStoredTestboxKey(&target, leaseID)
@@ -165,6 +168,19 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
 	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
+}
+
+func isCrabboxAWSLease(server Server) bool {
+	if server.Labels == nil {
+		return false
+	}
+	if server.Labels["crabbox"] != "true" {
+		return false
+	}
+	if provider := server.Labels["provider"]; provider != "" && provider != "aws" {
+		return false
+	}
+	return true
 }
 
 func (b *awsLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {

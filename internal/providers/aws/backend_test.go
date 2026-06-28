@@ -188,6 +188,72 @@ func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	}
 }
 
+func TestAWSResolveRawInstanceRejectsExternalServer(t *testing.T) {
+	external := Server{
+		CloudID:  "i-external",
+		Provider: "aws",
+		Name:     "prod-db",
+		Labels:   map[string]string{},
+	}
+	external.PublicNet.IPv4.IP = "203.0.113.44"
+	fake := &fakeAWSClient{servers: []Server{external}}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-east-1"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "i-external", ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("lease=%#v err=%v, want not Crabbox-managed rejection", lease, err)
+	}
+
+	if err == nil {
+		_ = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease})
+	}
+	if len(fake.deletedInstances) != 0 {
+		t.Fatalf("deleted instances=%v, want no release for external raw instance", fake.deletedInstances)
+	}
+}
+
+func TestAWSResolveRawInstanceRejectsWrongProviderLabel(t *testing.T) {
+	server := awsTestServer("i-wrong-provider", "cbx_wrong", "wrong-provider", "us-east-1")
+	server.Labels["provider"] = "gcp"
+	fake := &fakeAWSClient{servers: []Server{server}}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-east-1"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "i-wrong-provider"})
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("err=%v, want wrong-provider rejection", err)
+	}
+}
+
+func TestAWSResolveRawInstanceAllowsManagedServerWithoutProviderLabel(t *testing.T) {
+	server := awsTestServer("i-managed", "cbx_managed", "managed", "us-east-1")
+	delete(server.Labels, "provider")
+	fake := &fakeAWSClient{servers: []Server{server}}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-east-1"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "i-managed", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "i-managed" || lease.LeaseID != "cbx_managed" {
+		t.Fatalf("lease=%#v, want managed raw instance", lease)
+	}
+}
+
 func TestAWSReleaseRemovesClaimWhenProviderKeyDeletionFails(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
