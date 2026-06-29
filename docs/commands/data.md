@@ -52,6 +52,9 @@ The POC enforces:
 Source/sink access, identity, egress, row/byte caps, and PII logging policy are
 declared-only in the POC.
 
+Execute mode with a required manifest needs run-file download support. Delegated
+providers without that capability are rejected before lease creation.
+
 ## data run
 
 ```sh
@@ -121,6 +124,7 @@ dataRuns:
       maxRows: 200000000
       piiLogging: forbid
 
+    shell: true
     command: >
       python pipelines/normalize_events.py
         --source "$CRABBOX_DATA_SOURCE_URI"

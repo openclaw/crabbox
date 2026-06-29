@@ -41,7 +41,7 @@ func TestLoadConfigDataRuns(t *testing.T) {
         allow:
           - s3.amazonaws.com
     manifest:
-      path: .crabbox/data/custom.json
+      path: crabbox-data/custom.json
       required: true
     shell: true
     command: python pipelines/normalize_events.py
@@ -69,7 +69,7 @@ func TestLoadConfigDataRuns(t *testing.T) {
 	if !run.Policy.RequireDryRun || run.Policy.MaxBytes != "500GiB" || run.Policy.MaxRows != 200000000 || len(run.Policy.EgressAllow) != 1 {
 		t.Fatalf("policy not loaded: %#v", run.Policy)
 	}
-	if run.Manifest.Path != ".crabbox/data/custom.json" || !run.Manifest.Required || !run.Manifest.RequiredSet {
+	if run.Manifest.Path != "crabbox-data/custom.json" || !run.Manifest.Required || !run.Manifest.RequiredSet {
 		t.Fatalf("manifest not loaded: %#v", run.Manifest)
 	}
 }
@@ -109,9 +109,9 @@ func TestDataPlanPrintsEffectivePolicyAndRunCommand(t *testing.T) {
 		"data run normalize-events mode=execute status=poc",
 		"policy requireDryRun=true enforced=execute-gate",
 		"policy maxRows=100 declared=only",
-		"CRABBOX_DATA_MANIFEST=.crabbox/data/normalize-events/execute-manifest.json",
+		"CRABBOX_DATA_MANIFEST=crabbox-data/normalize-events/execute-manifest.json",
 		"crabbox run --provider aws --target linux --ttl 1h30m0s --id '<lease>' --no-hydrate --label data:normalize-events:execute --allow-env",
-		"--require-artifact .crabbox/data/normalize-events/execute-manifest.json",
+		"--require-artifact crabbox-data/normalize-events/execute-manifest.json",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("plan output missing %q:\n%s", want, got)
@@ -158,18 +158,61 @@ func TestDataRunArgsRequireAndDownloadExecuteManifest(t *testing.T) {
 		Source: DataRunEndpointConfig{Kind: "s3", URI: "s3://example-raw/events/"},
 		Sink:   DataRunEndpointConfig{Kind: "s3", URI: "s3://example-clean/events-staging/"},
 	}
-	args := dataRunRunArgs(cfg, "normalize-events", run, "blue-lobster", true, dataRunModeExecute, ".crabbox/data/normalize-events/execute-manifest.json", "/tmp/manifest.json")
+	args := dataRunRunArgs(cfg, "normalize-events", run, "blue-lobster", true, dataRunModeExecute, "crabbox-data/normalize-events/execute-manifest.json", "/tmp/manifest.json")
 	got := strings.Join(args, " ")
 	for _, want := range []string{
 		"--allow-env",
 		"CRABBOX_DATA_MANIFEST",
-		"--require-artifact .crabbox/data/normalize-events/execute-manifest.json",
-		"--download .crabbox/data/normalize-events/execute-manifest.json=/tmp/manifest.json",
+		"--require-artifact crabbox-data/normalize-events/execute-manifest.json",
+		"--download crabbox-data/normalize-events/execute-manifest.json=/tmp/manifest.json",
 		"-- python pipelines/normalize_events.py",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("run args missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestValidateDataRunExecutionSupportRejectsDelegatedWithoutDownloads(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "e2b"
+	run := DataRunConfig{}
+
+	err := validateDataRunExecutionSupport(cfg, "normalize-events", run, dataRunModeExecute)
+	if err == nil || !strings.Contains(err.Error(), "requires manifest download support") {
+		t.Fatalf("execute support err=%v, want delegated manifest download rejection", err)
+	}
+	if err := validateDataRunExecutionSupport(cfg, "normalize-events", run, dataRunModeDryRun); err != nil {
+		t.Fatalf("dry-run should not require manifest download support: %v", err)
+	}
+	run.Manifest.Required = false
+	run.Manifest.RequiredSet = true
+	if err := validateDataRunExecutionSupport(cfg, "normalize-events", run, dataRunModeExecute); err != nil {
+		t.Fatalf("manifest.required=false should not require manifest download support: %v", err)
+	}
+}
+
+func TestValidateDataRunExecutionSupportRejectsIgnoredManifestPath(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	run := DataRunConfig{Manifest: DataRunManifestConfig{Path: ".crabbox/data/manifest.json"}}
+
+	err := validateDataRunExecutionSupport(cfg, "normalize-events", run, dataRunModeExecute)
+	if err == nil || !strings.Contains(err.Error(), "manifest.path must not be under .crabbox") {
+		t.Fatalf("execute support err=%v, want ignored manifest path rejection", err)
+	}
+}
+
+func TestDataRunLeaseSlugIsRequestedSlugSafe(t *testing.T) {
+	slug := dataRunLeaseSlug("Normalize Events With A Very Long Name That Needs Truncation")
+	if slug != normalizeLeaseSlug(slug) {
+		t.Fatalf("slug %q is not normalized", slug)
+	}
+	if len(slug) > maxRequestedLeaseSlugLength {
+		t.Fatalf("slug length=%d, want <= %d: %q", len(slug), maxRequestedLeaseSlugLength, slug)
+	}
+	if !strings.HasPrefix(slug, "data-normalize-events") {
+		t.Fatalf("slug %q missing data-run prefix", slug)
 	}
 }
 

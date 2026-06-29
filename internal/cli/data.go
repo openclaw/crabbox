@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -77,6 +78,9 @@ func (a App) dataPlan(_ context.Context, args []string) error {
 	if err := validateDataRunConfig(name, run); err != nil {
 		return err
 	}
+	if err := validateDataRunExecutionSupport(cfg, name, run, mode); err != nil {
+		return err
+	}
 	manifestPath, err := dataRunManifestPath(name, mode, run)
 	if err != nil {
 		return err
@@ -117,6 +121,9 @@ func (a App) dataRun(ctx context.Context, args []string) (err error) {
 	if mode == dataRunModeExecute && run.Policy.RequireDryRun {
 		return exit(2, "data run %q requires dry-run first; run `crabbox data run --dry-run %s`, then set policy.requireDryRun=false for execute until broker dry-run history exists", name, name)
 	}
+	if err := validateDataRunExecutionSupport(cfg, name, run, mode); err != nil {
+		return err
+	}
 	stopPolicy := normalizeJobStopPolicy(run.Job.Stop, *stopOverride)
 	if err := validateJobStopPolicy(stopPolicy); err != nil {
 		return err
@@ -130,12 +137,17 @@ func (a App) dataRun(ctx context.Context, args []string) (err error) {
 	runNoHydrate := *noHydrate || !run.Job.Hydrate.Actions
 	if createdLease {
 		var out strings.Builder
+		requestedSlug := dataRunLeaseSlug(name)
 		warmupApp := App{Stdout: io.MultiWriter(a.Stdout, &out), Stderr: a.Stderr}
-		if err := warmupApp.warmup(ctx, append(jobLeaseCreateArgs(cfg, run.Job), "--keep=true")); err != nil {
+		if err := warmupApp.warmup(ctx, append(jobLeaseCreateArgs(cfg, run.Job), "--keep=true", "--slug", requestedSlug)); err != nil {
 			return err
 		}
 		leaseID = parseWarmupLeaseID(out.String())
 		if leaseID == "" {
+			stopArgs := append(jobStopRoutingArgs(run.Job), requestedSlug)
+			if stopErr := a.stop(context.Background(), stopArgs); stopErr != nil {
+				return exit(2, "data run %q could not parse warmup lease id; cleanup by slug %s failed: %v", name, requestedSlug, stopErr)
+			}
 			return exit(2, "data run %q could not parse warmup lease id", name)
 		}
 	}
@@ -258,6 +270,35 @@ func validateDataRunConfig(name string, run DataRunConfig) error {
 	return nil
 }
 
+func validateDataRunExecutionSupport(cfg Config, name string, run DataRunConfig, mode string) error {
+	if !dataRunManifestRequired(mode, run) {
+		return nil
+	}
+	manifestPath, err := dataRunManifestPath(name, mode, run)
+	if err != nil {
+		return err
+	}
+	if dataRunManifestPathIgnoredByArtifacts(manifestPath) {
+		return exit(2, "data run %q manifest.path must not be under .crabbox when manifest is required", name)
+	}
+	providerName := strings.TrimSpace(firstNonBlank(run.Job.Provider, cfg.Provider))
+	if providerName == "" {
+		return nil
+	}
+	provider, err := ProviderFor(providerName)
+	if err != nil {
+		return err
+	}
+	spec := provider.Spec()
+	if spec.Kind != ProviderKindDelegatedRun {
+		return nil
+	}
+	if featureSetHas(spec.Features, FeatureRunDownloads) {
+		return nil
+	}
+	return exit(2, "data run %q execute mode requires manifest download support; provider %s delegates run execution and cannot download required artifacts", name, spec.Name)
+}
+
 func normalizeDataRunMode(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", dataRunModeExecute:
@@ -284,13 +325,34 @@ func dataRunManifestRequired(mode string, run DataRunConfig) bool {
 func dataRunManifestPath(name, mode string, run DataRunConfig) (string, error) {
 	value := strings.TrimSpace(run.Manifest.Path)
 	if value == "" {
-		value = ".crabbox/data/" + safeCaptureName(name) + "/" + mode + "-manifest.json"
+		value = "crabbox-data/" + safeCaptureName(name) + "/" + mode + "-manifest.json"
 	}
 	clean, err := cleanDataRunManifestPath(value)
 	if err != nil {
 		return "", err
 	}
 	return clean, nil
+}
+
+func dataRunManifestPathIgnoredByArtifacts(value string) bool {
+	clean := path.Clean(strings.TrimSpace(strings.ReplaceAll(value, `\`, "/")))
+	return clean == ".crabbox" || strings.HasPrefix(clean, ".crabbox/")
+}
+
+func dataRunLeaseSlug(name string) string {
+	base := normalizeLeaseSlug("data-" + name)
+	if base == "" {
+		base = "data-run"
+	}
+	suffix := fmt.Sprintf("%06x", uint64(time.Now().UnixNano())&0xffffff)
+	maxBase := maxRequestedLeaseSlugLength - len(suffix) - 1
+	if len(base) > maxBase {
+		base = strings.Trim(base[:maxBase], "-")
+	}
+	if base == "" {
+		base = "data"
+	}
+	return base + "-" + suffix
 }
 
 func cleanDataRunManifestPath(value string) (string, error) {

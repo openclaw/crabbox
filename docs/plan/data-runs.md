@@ -91,6 +91,7 @@ dataRuns:
       maxRows: 200000000
       piiLogging: forbid
 
+    shell: true
     command: >
       python pipelines/normalize_events.py
         --source "$CRABBOX_DATA_SOURCE_URI"
@@ -140,7 +141,7 @@ metadata and keeps the full file as a normal artifact.
 Suggested path:
 
 ```text
-.crabbox/data/<run-id>/data-manifest.json
+crabbox-data/<run-id>/data-manifest.json
 ```
 
 Minimal shape:
@@ -220,8 +221,8 @@ Phase 1 includes:
 - artifact collection for the manifest and optional quality report;
 - tests for config validation, command expansion, and manifest failure.
 
-Delegated providers that cannot download files after a run may return a bounded
-stdout manifest summary:
+Future delegated-provider support can use a bounded stdout manifest summary
+when the provider cannot download files after a run:
 
 ```text
 CRABBOX_DATA_MANIFEST_BEGIN
@@ -229,7 +230,8 @@ CRABBOX_DATA_MANIFEST_BEGIN
 CRABBOX_DATA_MANIFEST_END
 ```
 
-The file manifest remains preferred for SSH leases.
+The shipped POC validates downloaded file manifests. It rejects delegated
+providers that cannot download run files before lease creation.
 
 Phase 2 makes data runs first-class in brokered run history: run kind, data run
 name, mode, bounded manifest summary, portal/history rendering, and cost/usage
