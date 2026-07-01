@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -84,6 +85,116 @@ func TestBridgeClientClassifiesOnlyHTTP404AsNotFound(t *testing.T) {
 	status = http.StatusUnauthorized
 	if _, err := api.GetSandbox(context.Background(), "missing"); err == nil || isCloudflareSandboxNotFound(err) {
 		t.Fatalf("401 err=%v, want non-not-found error", err)
+	}
+}
+
+func TestBridgeClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
+	var targetRequests int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests++
+		t.Errorf("redirect target received %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer target.Close()
+
+	location := strings.Replace(target.URL, "http://", "http://user:password@", 1) + "/stolen?query-secret=1#fragment-secret"
+	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", location)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer trusted.Close()
+
+	cfg := testConfig()
+	cfg.CloudflareSandbox.BridgeURL = trusted.URL
+	cfg.CloudflareSandbox.Token = "cf_sandbox_test_token"
+	api, err := newBridgeClient(cfg, Runtime{HTTP: trusted.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.CreateSandbox(context.Background(), createSandboxRequest{Name: "test"})
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("CreateSandbox error = %v, want cross-origin refusal", err)
+	}
+	if targetRequests != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", targetRequests)
+	}
+	for _, secret := range []string{"cf_sandbox_test_token", "user", "password", "query-secret", "fragment-secret"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("redirect error leaked %q: %v", secret, err)
+		}
+	}
+}
+
+func TestBridgeClientFollowsSameOriginRedirect(t *testing.T) {
+	var redirectedAuth, redirectedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/sandbox":
+			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+		case "/redirected":
+			redirectedAuth = r.Header.Get("Authorization")
+			body, _ := io.ReadAll(r.Body)
+			redirectedBody = string(body)
+			writeTestJSON(w, sandboxSummary{ID: "sb_123"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.CloudflareSandbox.BridgeURL = server.URL
+	cfg.CloudflareSandbox.Token = "cf_sandbox_test_token"
+	api, err := newBridgeClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := api.CreateSandbox(context.Background(), createSandboxRequest{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ID != "sb_123" || redirectedAuth != "Bearer cf_sandbox_test_token" || !strings.Contains(redirectedBody, `"name":"test"`) {
+		t.Fatalf("result=%#v auth=%q body=%q", result, redirectedAuth, redirectedBody)
+	}
+}
+
+func TestBridgeClientPreservesCallerRedirectPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/redirected", http.StatusFound)
+	}))
+	defer server.Close()
+
+	callerErr := errors.New("caller refused redirect")
+	callerChecks := 0
+	httpClient := server.Client()
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		callerChecks++
+		return callerErr
+	}
+	cfg := testConfig()
+	cfg.CloudflareSandbox.BridgeURL = server.URL
+	api, err := newBridgeClient(cfg, Runtime{HTTP: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.OpenAPI(context.Background())
+	if err == nil || !strings.Contains(err.Error(), callerErr.Error()) || callerChecks != 1 {
+		t.Fatalf("OpenAPI error = %v, caller checks = %d", err, callerChecks)
+	}
+}
+
+func TestBridgeClientRetainsDefaultRedirectLimitWithoutMutatingSource(t *testing.T) {
+	source := &http.Client{}
+	secured := secureCloudflareSandboxHTTPClient(source, "http://localhost")
+	req, err := http.NewRequest(http.MethodGet, "http://localhost/redirected", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := secured.CheckRedirect(req, make([]*http.Request, 10)); err == nil || !strings.Contains(err.Error(), "stopped after 10 redirects") {
+		t.Fatalf("CheckRedirect error = %v, want default redirect limit", err)
+	}
+	if source.CheckRedirect != nil {
+		t.Fatal("secure client mutated caller-provided http.Client")
 	}
 }
 

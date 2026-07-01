@@ -71,6 +71,7 @@
 
 ### Fixed
 
+- Prevented Cloudflare Sandbox bridge credentials and request bodies from following redirects outside the configured bridge origin while preserving same-origin redirects. Thanks @coygeek.
 - Dropped invalid allowlisted environment names before rendering remote POSIX or Windows commands, preventing shell metacharacters in ambient names from creating unintended commands. Thanks @coygeek.
 - Pinned Windows Chocolatey image bootstrap to a checksum-verified versioned package before privileged installation. Thanks @TurboTheTurtle.
 - Redacted Daytona API and upload credentials from provider error diagnostics, including reflected authorization headers and token-bearing JSON fields. Thanks @TurboTheTurtle.
