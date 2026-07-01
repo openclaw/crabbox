@@ -13672,6 +13672,95 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value(`runtime-adapter-ticket:${adapterTicket}`)).toBeUndefined();
   });
 
+  it("accepts query bridge tickets only when the legacy compatibility flag is enabled", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, undefined, { CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS: "1" });
+    const lease = testLease({
+      id: "cbx_000000000001",
+      slug: "bound-lease",
+      owner: "owner@example.com",
+      org: "example-org",
+      desktop: true,
+      code: true,
+      state: "active",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+
+    const createdAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const webVNCTicket = `wvnc_${"e".repeat(32)}`;
+    const codeTicket = `code_${"f".repeat(32)}`;
+    const egressTicket = `egress_${"0".repeat(32)}`;
+    storage.seed(`webvnc-ticket:${webVNCTicket}`, {
+      ticket: webVNCTicket,
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      createdAt,
+      expiresAt,
+    });
+    storage.seed(`code-ticket:${codeTicket}`, {
+      ticket: codeTicket,
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      createdAt,
+      expiresAt,
+    });
+    storage.seed(`egress-ticket:${egressTicket}`, {
+      ticket: egressTicket,
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      role: "host",
+      sessionID: "egress_bound2",
+      createdAt,
+      expiresAt,
+    });
+
+    const consumers = fleet as unknown as {
+      consumeWebVNCTicket(request: Request, identifier: string): Promise<{ status: string }>;
+      consumeCodeTicket(request: Request, identifier: string): Promise<{ status: string }>;
+      consumeEgressTicket(
+        request: Request,
+        identifier: string,
+        role: "host" | "client",
+      ): Promise<{ status: string }>;
+    };
+    const queryOnlyRequest = (path: string, ticket: string) =>
+      request("GET", `${path}?ticket=${ticket}`, {
+        headers: {
+          upgrade: "websocket",
+        },
+      });
+
+    await expect(
+      consumers.consumeWebVNCTicket(
+        queryOnlyRequest(`/v1/leases/${lease.id}/webvnc/agent`, webVNCTicket),
+        lease.id,
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`webvnc-ticket:${webVNCTicket}`)).toBeUndefined();
+
+    await expect(
+      consumers.consumeCodeTicket(
+        queryOnlyRequest(`/v1/leases/${lease.id}/code/agent`, codeTicket),
+        lease.id,
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`code-ticket:${codeTicket}`)).toBeUndefined();
+
+    await expect(
+      consumers.consumeEgressTicket(
+        queryOnlyRequest(`/v1/leases/${lease.id}/egress/host`, egressTicket),
+        lease.id,
+        "host",
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`egress-ticket:${egressTicket}`)).toBeUndefined();
+  });
+
   it("stops code bridge polling after terminal status responses", async () => {
     const page = await portalCode(
       testLease({
@@ -13740,6 +13829,22 @@ describe("fleet lease identity and idle", () => {
         ),
       ).toBe("edge-identity-token");
     }
+  });
+
+  it("allows query-string bridge tickets only in compatibility mode", () => {
+    const ticket = `code_${"a".repeat(32)}`;
+    expect(
+      bridgeTicketFromRequest(
+        request("GET", `/v1/leases/blue-lobster/code/agent?ticket=${ticket}`),
+        { CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS: "1" },
+      ),
+    ).toBe(ticket);
+    expect(
+      bridgeTicketFromRequest(
+        request("GET", `/v1/leases/blue-lobster/code/agent?ticket=${ticket}`),
+        { CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS: "0" },
+      ),
+    ).toBe("");
   });
 
   it("uses a VS Code-compatible CSP for code proxy responses", () => {
