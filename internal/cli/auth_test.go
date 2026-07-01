@@ -781,6 +781,26 @@ func TestCanonicalBrokerURLFromLoginURL(t *testing.T) {
 	}
 }
 
+func TestSameBrokerURLNormalizesDefaultPorts(t *testing.T) {
+	tests := []struct {
+		name  string
+		left  string
+		right string
+		want  bool
+	}{
+		{name: "https default port", left: "https://broker.example.com", right: "https://BROKER.example.com:443/", want: true},
+		{name: "http default port", left: "http://broker.example.com", right: "HTTP://broker.example.com:80", want: true},
+		{name: "custom port", left: "https://broker.example.com", right: "https://broker.example.com:8443"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := sameBrokerURL(test.left, test.right); got != test.want {
+				t.Fatalf("sameBrokerURL(%q, %q)=%v, want %v", test.left, test.right, got, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateGitHubLoginURL(t *testing.T) {
 	tests := []struct {
 		name    string

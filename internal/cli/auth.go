@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os/exec"
 	"runtime"
@@ -298,6 +299,22 @@ func normalizedBrokerURL(value string) string {
 	u, err := url.Parse(value)
 	if err != nil {
 		return strings.TrimRight(value, "/")
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	hostname := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if hostname != "" {
+		switch {
+		case port != "":
+			u.Host = net.JoinHostPort(hostname, port)
+		case strings.Contains(hostname, ":"):
+			u.Host = "[" + hostname + "]"
+		default:
+			u.Host = hostname
+		}
 	}
 	u.Path = strings.TrimRight(u.Path, "/")
 	u.RawQuery = ""
