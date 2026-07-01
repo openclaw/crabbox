@@ -1568,11 +1568,13 @@ func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshot
 	if err != nil {
 		return NativeCheckpointImage{}, fmt.Errorf("get snapshot source vm: %w", err)
 	}
-	if vm.Properties == nil || vm.Properties.StorageProfile == nil || vm.Properties.StorageProfile.OSDisk == nil ||
-		vm.Properties.StorageProfile.OSDisk.ManagedDisk == nil || vm.Properties.StorageProfile.OSDisk.ManagedDisk.ID == nil {
+	if vm.Properties == nil || vm.Properties.StorageProfile == nil {
 		return NativeCheckpointImage{}, errors.New("snapshot source VM has no managed OS disk")
 	}
-	diskID := *vm.Properties.StorageProfile.OSDisk.ManagedDisk.ID
+	diskID, err := azureSnapshotOSDiskID(vmName, vm.Properties.StorageProfile.OSDisk)
+	if err != nil {
+		return NativeCheckpointImage{}, err
+	}
 
 	deallocate, err := c.vmc.BeginDeallocate(ctx, c.ResourceGroup, vmName, nil)
 	if err != nil {
@@ -1623,6 +1625,23 @@ func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshot
 		Direct:     true,
 	}
 	return image, nil
+}
+
+func azureSnapshotOSDiskID(vmName string, osDisk *armcompute.OSDisk) (string, error) {
+	if osDisk == nil {
+		return "", errors.New("snapshot source VM has no managed OS disk")
+	}
+	if osDisk.DiffDiskSettings != nil && osDisk.DiffDiskSettings.Option != nil &&
+		*osDisk.DiffDiskSettings.Option == armcompute.DiffDiskOptionsLocal {
+		return "", fmt.Errorf(
+			"azure ephemeral OS disk on vm %s cannot be snapshotted; use --mode archive or relaunch the lease with a managed Azure OS disk",
+			vmName,
+		)
+	}
+	if osDisk.ManagedDisk == nil || osDisk.ManagedDisk.ID == nil {
+		return "", errors.New("snapshot source VM has no managed OS disk")
+	}
+	return *osDisk.ManagedDisk.ID, nil
 }
 
 func (c *AzureClient) GetOSDiskSnapshot(ctx context.Context, snapshotID string) (NativeCheckpointImage, error) {

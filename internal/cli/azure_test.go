@@ -553,6 +553,60 @@ func TestAzureCreateServerWithFallbackRejectsEphemeralPreviewBeforeSharedInfra(t
 	}
 }
 
+func TestAzureSnapshotOSDiskID(t *testing.T) {
+	t.Parallel()
+	managedDiskID := "/subscriptions/test/resourceGroups/test/providers/Microsoft.Compute/disks/source"
+	futureOption := armcompute.DiffDiskOptions("FutureSchemaValue")
+	tests := []struct {
+		name    string
+		osDisk  *armcompute.OSDisk
+		want    string
+		wantErr string
+	}{
+		{
+			name: "ephemeral disk with phantom managed id",
+			osDisk: &armcompute.OSDisk{
+				DiffDiskSettings: &armcompute.DiffDiskSettings{Option: to.Ptr(armcompute.DiffDiskOptionsLocal)},
+				ManagedDisk:      &armcompute.ManagedDiskParameters{ID: to.Ptr(managedDiskID)},
+			},
+			wantErr: "azure ephemeral OS disk on vm source-vm cannot be snapshotted; use --mode archive or relaunch the lease with a managed Azure OS disk",
+		},
+		{
+			name: "unknown future option",
+			osDisk: &armcompute.OSDisk{
+				DiffDiskSettings: &armcompute.DiffDiskSettings{Option: &futureOption},
+				ManagedDisk:      &armcompute.ManagedDiskParameters{ID: to.Ptr(managedDiskID)},
+			},
+			want: managedDiskID,
+		},
+		{
+			name:   "managed disk",
+			osDisk: &armcompute.OSDisk{ManagedDisk: &armcompute.ManagedDiskParameters{ID: to.Ptr(managedDiskID)}},
+			want:   managedDiskID,
+		},
+		{name: "missing disk", wantErr: "snapshot source VM has no managed OS disk"},
+		{name: "missing managed id", osDisk: &armcompute.OSDisk{}, wantErr: "snapshot source VM has no managed OS disk"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := azureSnapshotOSDiskID("source-vm", test.osDisk)
+			if test.wantErr != "" {
+				if err == nil || err.Error() != test.wantErr {
+					t.Fatalf("error=%v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("disk id=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestAzureEphemeralFullCachingVMPayload(t *testing.T) {
 	t.Parallel()
 	vm := armcompute.VirtualMachine{
