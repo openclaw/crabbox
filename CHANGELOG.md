@@ -71,6 +71,7 @@
 
 ### Fixed
 
+- Redacted Daytona API and upload credentials from provider error diagnostics, including reflected authorization headers and token-bearing JSON fields. Thanks @TurboTheTurtle.
 - Replaced fixed-size Xvfb/x11vnc desktops on managed Linux workspaces with loopback-only TigerVNC displays that honor native viewer resize requests while preserving VNC authentication and existing-service health fallbacks.
 - Mounted the implicit local-container Docker-socket cache root at `/work/crabbox` while preserving explicit work roots, restoring access for the unprivileged guest user. Thanks @hxy91819.
 - Rewrote credential-bearing user config atomically so failed updates preserve the previous readable file, owner-only permissions, and configured symlinks. Thanks @clawsweeper.
