@@ -550,6 +550,16 @@ func TestGitHubLoginRejectsMismatchedRedirectOrigin(t *testing.T) {
 	}))
 	defer callbackOrigin.Close()
 
+	repo := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(repo, ".crabbox.yaml"),
+		[]byte("broker:\n  loginRedirectOrigins:\n    - "+callbackOrigin.URL+"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+
 	var startCount int
 	var pollCount int
 	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
