@@ -113,3 +113,4 @@ Only `processcontainer` is enabled by default. Other MXC backends require
 `--mxc-experimental`. The provider is one-shot: `warmup`, persistent lease IDs,
 `status`, and `stop` are intentionally unsupported until MXC state-aware
 lifecycles stabilize beyond the current `isolation_session` preview.
+It therefore omits `run-session`, and `--lease-output` remains unsupported.

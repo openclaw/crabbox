@@ -60,6 +60,8 @@ and the host temp directory in place for inspection.
 
 `warmup`, `list`, `status`, and `stop` are not persistent lifecycle operations
 for this provider. Close the Windows Sandbox window to end a kept session.
+The provider therefore omits `run-session`, and `--lease-output` remains
+unsupported because each run has no stable cleanup handle.
 
 ## Configuration
 
