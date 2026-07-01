@@ -9336,7 +9336,7 @@ export class FleetCoordinator {
       const input = await readJson<RunEventRequest>(request);
       if (input.leaseID && input.leaseID !== run.leaseID) {
         const lease = validLeaseID(input.leaseID) ? await this.getLease(input.leaseID) : undefined;
-        if (!lease || !this.leaseVisibleToRequest(lease, request, isAdminRequest(request))) {
+        if (!lease || !this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
           return notFound();
         }
       }

@@ -685,7 +685,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	recordCommand := runScriptRecordCommand(script, command)
 	timingRecordCommand = recordCommand
 	if useCoordinator {
-		recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr)
+		recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "")
 		defer func() {
 			recorder.Failed(runFailure)
 		}()

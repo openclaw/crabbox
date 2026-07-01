@@ -36,9 +36,13 @@ type runRecorder struct {
 	telemetryDone      chan struct{}
 }
 
-func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, command []string, label string, stderr io.Writer) *runRecorder {
+func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, command []string, label string, stderr io.Writer, createAfterLease bool) *runRecorder {
 	rec := &runRecorder{coord: coord, command: command, label: strings.TrimSpace(label), stderr: stderr}
 	if coord == nil {
+		return rec
+	}
+	if createAfterLease {
+		rec.createPending = true
 		return rec
 	}
 	run, err := coord.CreateRun(ctx, "", cfg, command, rec.label)
