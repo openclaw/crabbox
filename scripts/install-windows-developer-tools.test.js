@@ -4,21 +4,25 @@ import test from "node:test";
 
 const script = await readFile("scripts/install-windows-developer-tools.ps1", "utf8");
 
-test("Windows developer tools prep verifies Chocolatey installer before execution", () => {
-  assert.match(script, /CRABBOX_WINDOWS_CHOCO_INSTALL_URL/);
-  assert.match(script, /CRABBOX_WINDOWS_CHOCO_INSTALL_SHA256/);
-  assert.match(script, /https:\/\/community\.chocolatey\.org\/install\.ps1/);
-  assert.match(script, /44e045ed5350758616d664c5af631e7f2cd10165f5bf2bd82cbf3a0bb8f63462/);
+test("Windows developer tools prep verifies a versioned Chocolatey package before installation", () => {
+  assert.match(script, /CRABBOX_WINDOWS_CHOCO_PACKAGE_URL/);
+  assert.match(script, /CRABBOX_WINDOWS_CHOCO_PACKAGE_SHA256/);
+  assert.match(script, /https:\/\/community\.chocolatey\.org\/api\/v2\/package\/chocolatey\/2\.7\.3/);
+  assert.match(script, /40778cc59245b3eb6ea5147aeef5bea5d577419e5abce22a224189740dc16db5/);
   assert.match(script, /Get-FileHash -LiteralPath \$Path -Algorithm SHA256/);
-  assert.match(script, /Assert-FileSHA256 -Path \$installer -Expected \$SHA256 -Name \$Name/);
-  assert.match(script, /powershell\.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File \$installer/);
+  assert.match(script, /Assert-FileSHA256 -Path \$package -Expected \$SHA256 -Name "Chocolatey package"/);
+  assert.match(script, /Expand-Archive -LiteralPath \$package -DestinationPath \$extractDir -Force/);
+  assert.match(script, /& \$installScript/);
+  assert.doesNotMatch(script, /community\.chocolatey\.org\/install\.ps1/);
   assert.doesNotMatch(script, /DownloadString/);
   assert.doesNotMatch(script, /Invoke-Expression/);
 
-  const download = script.indexOf("Invoke-WebRequest -Uri $Url -OutFile $installer");
-  const verify = script.indexOf("Assert-FileSHA256 -Path $installer");
-  const execute = script.indexOf("powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installer");
-  assert.ok(download >= 0, "installer download must be present");
+  const download = script.indexOf("Invoke-WebRequest -Uri $Url -OutFile $package");
+  const verify = script.indexOf("Assert-FileSHA256 -Path $package");
+  const extract = script.indexOf("Expand-Archive -LiteralPath $package");
+  const execute = script.indexOf("& $installScript");
+  assert.ok(download >= 0, "package download must be present");
   assert.ok(verify > download, "checksum verification must follow the download");
-  assert.ok(execute > verify, "installer execution must follow checksum verification");
+  assert.ok(extract > verify, "package extraction must follow checksum verification");
+  assert.ok(execute > extract, "package installation must follow extraction");
 });
