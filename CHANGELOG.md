@@ -72,6 +72,7 @@
 
 ### Fixed
 
+- Prevented revoked lease managers from retaining mediated-egress bridges after lease sharing was removed or downgraded. Thanks @coygeek.
 - Prevented the Code portal proxy from forwarding coordinator authentication context to lease-controlled code-server requests. Thanks @coygeek.
 - Rejected GitHub login callback origins that differ from the selected broker unless explicitly allowlisted as a trusted alias, preventing OAuth callbacks from silently redirecting stored credentials. Thanks @TurboTheTurtle.
 - Rejected WebVNC, Code, and egress bridge tickets in URL query strings by default while retaining an explicit temporary legacy opt-in. Thanks @TurboTheTurtle.

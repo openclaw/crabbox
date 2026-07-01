@@ -175,11 +175,17 @@ describe("runtime adapter relay", () => {
         kind: "egress-host",
         leaseID: lease.id,
         sessionID: "egress_restart",
+        owner: "alice@example.com",
+        org: "example-org",
+        admin: false,
       }),
       new FakeWebSocket({
         kind: "egress-client",
         leaseID: lease.id,
         sessionID: "egress_restart",
+        owner: "alice@example.com",
+        org: "example-org",
+        admin: false,
       }),
       new FakeWebSocket({
         kind: "runtime-adapter-agent",
@@ -209,6 +215,85 @@ describe("runtime adapter relay", () => {
     };
     expect(relay.codeAgents.get(lease.id)).toBe(restored[0]);
     expect(relay.runtimeAdapterAgents.get("example-adapter")).toBe(restored[3]);
+  });
+
+  it("fails closed restored egress sessions without current manage access", async () => {
+    const storage = new MemoryStorage();
+    const revokedLease = testLease({
+      id: "cbx_000000000011",
+      provider: "external",
+      lifecycle: "registered",
+      owner: "owner@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const legacyLease = testLease({
+      ...revokedLease,
+      id: "cbx_000000000012",
+    });
+    const adminLease = testLease({
+      ...revokedLease,
+      id: "cbx_000000000013",
+    });
+    for (const lease of [revokedLease, legacyLease, adminLease]) {
+      storage.seed(`lease:${lease.id}`, lease);
+    }
+    const revoked = ["egress-host", "egress-client"].map(
+      (kind) =>
+        new FakeWebSocket({
+          kind,
+          leaseID: revokedLease.id,
+          sessionID: "egress_revoked",
+          owner: "former-manager@example.com",
+          org: "example-org",
+          admin: false,
+        }),
+    );
+    const legacy = ["egress-host", "egress-client"].map(
+      (kind) =>
+        new FakeWebSocket({
+          kind,
+          leaseID: legacyLease.id,
+          sessionID: "egress_legacy",
+        }),
+    );
+    const admin = ["egress-host", "egress-client"].map(
+      (kind) =>
+        new FakeWebSocket({
+          kind,
+          leaseID: adminLease.id,
+          sessionID: "egress_admin",
+          owner: "admin@example.com",
+          org: "other-org",
+          admin: true,
+        }),
+    );
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => [...revoked, ...legacy, ...admin] as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    for (const socket of [...revoked, ...legacy]) {
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.closeReason).toBe("lease access revoked");
+    }
+    for (const socket of admin) {
+      expect(socket.closeCode).toBeUndefined();
+    }
+    const relay = fleet as unknown as {
+      egressHosts: Map<string, WebSocket>;
+      egressClients: Map<string, WebSocket>;
+      egressSessions: Map<string, { sessionID: string }>;
+    };
+    expect(relay.egressHosts.size).toBe(1);
+    expect(relay.egressClients.size).toBe(1);
+    expect(relay.egressSessions.has(revokedLease.id)).toBe(false);
+    expect(relay.egressSessions.has(legacyLease.id)).toBe(false);
+    expect(relay.egressSessions.get(adminLease.id)?.sessionID).toBe("egress_admin");
   });
 
   it("rejects hibernated Code viewers whose portal session logged out", async () => {
@@ -8280,6 +8365,90 @@ describe("fleet lease identity and idle", () => {
       JSON.stringify({ retained: true }),
     );
     expect(retainedWebAgent.sentJSON()).toEqual([{ retained: true }]);
+  });
+
+  it("revokes a live egress session when manage access is downgraded", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000001";
+    const ownerHeaders = {
+      "x-crabbox-owner": "owner@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "shared-live-egress",
+        owner: "owner@example.com",
+        org: "example-org",
+        share: {
+          users: {
+            "manager@example.com": "manage",
+            "other-manager@example.com": "manage",
+          },
+        },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const host = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID,
+      sessionID: "egress_shared",
+      owner: "manager@example.com",
+      org: "example-org",
+      admin: false,
+    });
+    const client = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID,
+      sessionID: "egress_shared",
+      owner: "manager@example.com",
+      org: "example-org",
+      admin: false,
+    });
+    const relay = fleet as unknown as {
+      egressHosts: Map<string, WebSocket>;
+      egressClients: Map<string, WebSocket>;
+      egressSessions: Map<
+        string,
+        { sessionID: string; allow: string[]; createdAt: string; updatedAt: string }
+      >;
+    };
+    const key = `${leaseID}\0egress_shared`;
+    relay.egressHosts.set(key, host as unknown as WebSocket);
+    relay.egressClients.set(key, client as unknown as WebSocket);
+    relay.egressSessions.set(leaseID, {
+      sessionID: "egress_shared",
+      allow: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const unrelatedRemoval = await fleet.fetch(
+      request("DELETE", "/v1/leases/shared-live-egress/share", {
+        headers: ownerHeaders,
+        body: { user: "other-manager@example.com" },
+      }),
+    );
+    expect(unrelatedRemoval.status).toBe(200);
+    expect(host.closeCode).toBeUndefined();
+    expect(client.closeCode).toBeUndefined();
+
+    const downgraded = await fleet.fetch(
+      request("PUT", "/v1/leases/shared-live-egress/share", {
+        headers: ownerHeaders,
+        body: { users: { "manager@example.com": "use" } },
+      }),
+    );
+    expect(downgraded.status).toBe(200);
+    expect(host.closeCode).toBe(1008);
+    expect(host.closeReason).toBe("lease access revoked");
+    expect(client.closeCode).toBe(1008);
+    expect(client.closeReason).toBe("lease access revoked");
+    expect(relay.egressHosts.has(key)).toBe(false);
+    expect(relay.egressClients.has(key)).toBe(false);
+    expect(relay.egressSessions.has(leaseID)).toBe(false);
   });
 
   it("revokes org-only live viewers after a portal share update", async () => {
