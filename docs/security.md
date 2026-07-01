@@ -201,6 +201,12 @@ hostname, and effective port remain unchanged. The curl transport fallback
 does not follow redirects and disables ambient curl configuration before
 loading Crabbox's generated request config. Configure the CLI with the final
 canonical coordinator or Access-protected origin, not a redirecting alias.
+GitHub browser login follows the same destination rule by default: a callback
+origin that differs from the selected broker is rejected before browser open,
+polling, or config write. Operators who are deliberately migrating between
+same-deployment broker aliases can allow specific callback origins with trusted
+user config `broker.loginRedirectOrigins` or
+`CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS`.
 
 Provider clients apply the same destination principle where custom endpoints
 are supported. Cloudflare runner and RunPod requests reject cross-origin

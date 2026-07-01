@@ -536,7 +536,66 @@ func TestLoginWithTokenUsesEffectiveRegisteredMode(t *testing.T) {
 	}
 }
 
-func TestGitHubLoginMigratesToCanonicalRedirectOrigin(t *testing.T) {
+func TestGitHubLoginRejectsMismatchedRedirectOrigin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+
+	callbackOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer callbackOrigin.Close()
+
+	var startCount int
+	var pollCount int
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/github/start":
+			startCount++
+			_ = json.NewEncoder(w).Encode(CoordinatorGitHubLoginStart{
+				LoginID:   "login_test",
+				URL:       githubAuthorizeURLForTest(callbackOrigin.URL),
+				ExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339),
+			})
+		case "/v1/auth/github/poll":
+			pollCount++
+			http.Error(w, "unexpected poll", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer broker.Close()
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	err := app.login(context.Background(), []string{"--url", broker.URL, "--provider", "aws", "--no-browser"})
+	if err == nil || !strings.Contains(err.Error(), "redirect_uri broker origin") {
+		t.Fatalf("error=%v", err)
+	}
+	if startCount != 1 || pollCount != 0 {
+		t.Fatalf("counts start=%d poll=%d", startCount, pollCount)
+	}
+	if strings.Contains(stderr.String(), "open this GitHub login URL") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Coordinator == callbackOrigin.URL || cfg.CoordToken != "" {
+		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}
+
+func TestGitHubLoginMigratesToAllowedRedirectOrigin(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -605,6 +664,7 @@ func TestGitHubLoginMigratesToCanonicalRedirectOrigin(t *testing.T) {
 		}
 	}))
 	defer canonical.Close()
+	t.Setenv("CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS", canonical.URL)
 
 	var staleStartCount int
 	stale := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -618,7 +678,7 @@ func TestGitHubLoginMigratesToCanonicalRedirectOrigin(t *testing.T) {
 				ExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339),
 			})
 		case "/v1/auth/github/poll":
-			t.Fatal("poll should restart against canonical redirect origin")
+			t.Fatal("poll should restart against allowed redirect origin")
 		default:
 			http.NotFound(w, r)
 		}
@@ -645,6 +705,62 @@ func TestGitHubLoginMigratesToCanonicalRedirectOrigin(t *testing.T) {
 	}
 	if cfg.Coordinator != canonical.URL || cfg.CoordToken != "canonical-session-token" || cfg.Provider != "aws" {
 		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}
+
+func TestGitHubLoginRejectsAllowedRedirectOriginThatChangesAgain(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+
+	nextOrigin := httptest.NewServer(http.NotFoundHandler())
+	defer nextOrigin.Close()
+
+	var canonical *httptest.Server
+	canonical = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v1/auth/github/start" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorGitHubLoginStart{
+			LoginID:   "login_canonical",
+			URL:       githubAuthorizeURLForTest(nextOrigin.URL),
+			ExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339),
+		})
+	}))
+	defer canonical.Close()
+	t.Setenv("CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS", canonical.URL)
+
+	stale := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v1/auth/github/start" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorGitHubLoginStart{
+			LoginID:   "login_stale",
+			URL:       githubAuthorizeURLForTest(canonical.URL),
+			ExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339),
+		})
+	}))
+	defer stale.Close()
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	err := app.login(context.Background(), []string{"--url", stale.URL, "--provider", "aws", "--no-browser"})
+	if err == nil || !strings.Contains(err.Error(), "does not match approved broker") {
+		t.Fatalf("error=%v", err)
+	}
+	if strings.Contains(stderr.String(), "open this GitHub login URL") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout=%q", stdout.String())
 	}
 }
 

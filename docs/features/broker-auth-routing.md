@@ -141,6 +141,21 @@ needs its own OAuth app: the callback URL must exactly match the public origin, 
 `CRABBOX_PUBLIC_URL` must use that same origin (it is used to build the callback and
 to canonicalize portal redirects).
 
+The CLI treats that callback origin as a credential destination. If a login response
+from one broker points at a different callback origin, `crabbox login` fails before
+opening the browser unless the alternate origin appears in trusted operator config:
+
+```yaml
+broker:
+  url: https://broker-access.example.com
+  loginRedirectOrigins:
+    - https://broker.example.com
+```
+
+Use `broker.loginRedirectOrigins` or `CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS` only for
+known same-deployment aliases during a planned migration. Project config cannot grant
+this exception.
+
 Login is gated by GitHub org membership before a user token is minted:
 
 - The allowed org set comes from `CRABBOX_GITHUB_ALLOWED_ORG` or comma-separated

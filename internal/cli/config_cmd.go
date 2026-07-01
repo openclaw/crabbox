@@ -116,26 +116,27 @@ func effectiveConfigForShow(cfg Config) Config {
 
 func configShowView(cfg Config) map[string]any {
 	return map[string]any{
-		"profile":            cfg.Profile,
-		"provider":           cfg.Provider,
-		"target":             cfg.TargetOS,
-		"architecture":       effectiveArchitectureForConfig(cfg),
-		"os":                 cfg.OSImage,
-		"windowsMode":        cfg.WindowsMode,
-		"class":              cfg.Class,
-		"serverType":         cfg.ServerType,
-		"serverTypeExplicit": cfg.ServerTypeExplicit,
-		"coordinator":        cfg.Coordinator,
-		"brokerMode":         cfg.BrokerMode,
-		"brokerAutoWebVNC":   cfg.BrokerAutoWebVNC,
-		"brokerAuth":         coordinatorTokenState(cfg),
-		"brokerAdminAuth":    tokenState(cfg.CoordAdminToken),
-		"accessAuth":         accessAuthState(cfg.Access),
-		"sshKey":             cfg.SSHKey,
-		"sshUser":            cfg.SSHUser,
-		"sshPort":            cfg.SSHPort,
-		"sshFallbackPorts":   cfg.SSHFallbackPorts,
-		"workRoot":           cfg.WorkRoot,
+		"profile":                    cfg.Profile,
+		"provider":                   cfg.Provider,
+		"target":                     cfg.TargetOS,
+		"architecture":               effectiveArchitectureForConfig(cfg),
+		"os":                         cfg.OSImage,
+		"windowsMode":                cfg.WindowsMode,
+		"class":                      cfg.Class,
+		"serverType":                 cfg.ServerType,
+		"serverTypeExplicit":         cfg.ServerTypeExplicit,
+		"coordinator":                cfg.Coordinator,
+		"brokerMode":                 cfg.BrokerMode,
+		"brokerAutoWebVNC":           cfg.BrokerAutoWebVNC,
+		"brokerLoginRedirectOrigins": cfg.BrokerLoginRedirectOrigins,
+		"brokerAuth":                 coordinatorTokenState(cfg),
+		"brokerAdminAuth":            tokenState(cfg.CoordAdminToken),
+		"accessAuth":                 accessAuthState(cfg.Access),
+		"sshKey":                     cfg.SSHKey,
+		"sshUser":                    cfg.SSHUser,
+		"sshPort":                    cfg.SSHPort,
+		"sshFallbackPorts":           cfg.SSHFallbackPorts,
+		"workRoot":                   cfg.WorkRoot,
 		"sync": map[string]any{
 			"exclude":     configuredExcludes(cfg),
 			"include":     syncIncludes(cfg),
@@ -617,7 +618,7 @@ func configShowView(cfg Config) map[string]any {
 func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "config=%s\n", userConfigPath())
 	fmt.Fprintf(w, "provider=%s target=%s arch=%s os=%s windows_mode=%s class=%s type=%s profile=%s\n", cfg.Provider, cfg.TargetOS, effectiveArchitectureForConfig(cfg), cfg.OSImage, cfg.WindowsMode, cfg.Class, cfg.ServerType, cfg.Profile)
-	fmt.Fprintf(w, "broker=%s mode=%s auto_webvnc=%t auth=%s admin_auth=%s\n", blank(cfg.Coordinator, "-"), cfg.BrokerMode, cfg.BrokerAutoWebVNC, coordinatorTokenState(cfg), tokenState(cfg.CoordAdminToken))
+	fmt.Fprintf(w, "broker=%s mode=%s auto_webvnc=%t login_redirect_origins=%s auth=%s admin_auth=%s\n", blank(cfg.Coordinator, "-"), cfg.BrokerMode, cfg.BrokerAutoWebVNC, blank(strings.Join(cfg.BrokerLoginRedirectOrigins, ","), "-"), coordinatorTokenState(cfg), tokenState(cfg.CoordAdminToken))
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)
 	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg)), len(syncIncludes(cfg)), cfg.Sync.Timeout)
@@ -830,6 +831,7 @@ func (a App) configSetBroker(args []string) error {
 	provider := fs.String("provider", "", "default provider (managed coordinator provider or registered direct provider)")
 	mode := fs.String("mode", "", "lease mode: managed or registered")
 	autoWebVNC := fs.Bool("auto-webvnc", true, "start a portal WebVNC bridge for kept registered desktop leases")
+	loginRedirectOrigins := fs.String("login-redirect-origins", "", "comma-separated callback broker origins allowed for GitHub login migration")
 	tokenStdin := fs.Bool("token-stdin", false, "read broker token from stdin")
 	adminTokenStdin := fs.Bool("admin-token-stdin", false, "read broker admin token from stdin")
 	if err := parseFlags(fs, args); err != nil {
@@ -893,6 +895,9 @@ func (a App) configSetBroker(args []string) error {
 	}
 	if flagWasSet(fs, "auto-webvnc") {
 		file.Broker.AutoWebVNC = autoWebVNC
+	}
+	if flagWasSet(fs, "login-redirect-origins") {
+		file.Broker.LoginRedirectOrigins = splitCommaList(*loginRedirectOrigins)
 	}
 	if token != "" {
 		file.Broker.Token = token

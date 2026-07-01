@@ -47,6 +47,7 @@ type Config struct {
 	Coordinator                   string
 	BrokerMode                    BrokerMode
 	brokerProvider                string
+	BrokerLoginRedirectOrigins    []string
 	BrokerAutoWebVNC              bool
 	CoordToken                    string
 	CoordTokenCommand             []string
@@ -2984,13 +2985,14 @@ type fileWindowsConfig struct {
 }
 
 type fileBrokerConfig struct {
-	URL        string            `yaml:"url,omitempty"`
-	Mode       string            `yaml:"mode,omitempty"`
-	AutoWebVNC *bool             `yaml:"autoWebVNC,omitempty"`
-	Token      string            `yaml:"token,omitempty"`
-	AdminToken string            `yaml:"adminToken,omitempty"`
-	Provider   string            `yaml:"provider,omitempty"`
-	Access     *fileAccessConfig `yaml:"access,omitempty"`
+	URL                  string            `yaml:"url,omitempty"`
+	Mode                 string            `yaml:"mode,omitempty"`
+	AutoWebVNC           *bool             `yaml:"autoWebVNC,omitempty"`
+	LoginRedirectOrigins []string          `yaml:"loginRedirectOrigins,omitempty"`
+	Token                string            `yaml:"token,omitempty"`
+	AdminToken           string            `yaml:"adminToken,omitempty"`
+	Provider             string            `yaml:"provider,omitempty"`
+	Access               *fileAccessConfig `yaml:"access,omitempty"`
 }
 
 type fileAccessConfig struct {
@@ -4478,6 +4480,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Broker.AutoWebVNC != nil {
 			cfg.BrokerAutoWebVNC = *file.Broker.AutoWebVNC
+		}
+		if trusted && len(file.Broker.LoginRedirectOrigins) > 0 {
+			cfg.BrokerLoginRedirectOrigins = normalizeList(file.Broker.LoginRedirectOrigins)
 		}
 		if file.Broker.AdminToken != "" {
 			cfg.CoordAdminToken = file.Broker.AdminToken
@@ -6945,6 +6950,9 @@ func applyEnv(cfg *Config) error {
 	cfg.BrokerMode = BrokerMode(getenv("CRABBOX_COORDINATOR_MODE", string(cfg.BrokerMode)))
 	if value, ok := getenvBool("CRABBOX_COORDINATOR_AUTO_WEBVNC"); ok {
 		cfg.BrokerAutoWebVNC = value
+	}
+	if value := os.Getenv("CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS"); value != "" {
+		cfg.BrokerLoginRedirectOrigins = splitCommaList(value)
 	}
 	if value := os.Getenv("CRABBOX_COORDINATOR_TOKEN"); value != "" {
 		cfg.CoordToken = value

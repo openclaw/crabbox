@@ -87,7 +87,7 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 		return err
 	}
 	pollSecretHash := sha256Hex(pollSecret)
-	client, err := coordinatorClientForLogin(brokerURL, provider)
+	client, cfg, err := coordinatorClientConfigForLogin(brokerURL, provider)
 	if err != nil {
 		return err
 	}
@@ -99,8 +99,16 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 		return exit(3, "GitHub login returned an invalid authorization URL: %v", err)
 	}
 	if canonicalBrokerURL, ok := canonicalBrokerURLFromLoginURL(start.URL); ok && !sameBrokerURL(brokerURL, canonicalBrokerURL) {
+		if !brokerLoginRedirectOriginAllowed(cfg, canonicalBrokerURL) {
+			return exit(
+				3,
+				"GitHub login redirect_uri broker origin %s does not match selected broker %s; add it to broker.loginRedirectOrigins only if this is an intended same-deployment alias",
+				canonicalBrokerURL,
+				normalizedBrokerURL(brokerURL),
+			)
+		}
 		brokerURL = canonicalBrokerURL
-		client, err = coordinatorClientForLogin(brokerURL, provider)
+		client, cfg, err = coordinatorClientConfigForLogin(brokerURL, provider)
 		if err != nil {
 			return err
 		}
@@ -110,6 +118,14 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 		}
 		if err := validateGitHubLoginURL(start.URL); err != nil {
 			return exit(3, "GitHub login returned an invalid authorization URL: %v", err)
+		}
+		if nextBrokerURL, ok := canonicalBrokerURLFromLoginURL(start.URL); ok && !sameBrokerURL(brokerURL, nextBrokerURL) {
+			return exit(
+				3,
+				"GitHub login redirect_uri broker origin %s does not match approved broker %s; check CRABBOX_PUBLIC_URL",
+				nextBrokerURL,
+				normalizedBrokerURL(brokerURL),
+			)
 		}
 	}
 	if noBrowser {
@@ -197,19 +213,24 @@ func (a App) finishLogin(ctx context.Context, coord *CoordinatorClient, path str
 }
 
 func coordinatorClientForLogin(brokerURL, provider string) (*CoordinatorClient, error) {
+	coord, _, err := coordinatorClientConfigForLogin(brokerURL, provider)
+	return coord, err
+}
+
+func coordinatorClientConfigForLogin(brokerURL, provider string) (*CoordinatorClient, Config, error) {
 	cfg, err := loadConfigWithOverrides(brokerURL, provider)
 	if err != nil {
-		return nil, err
+		return nil, Config{}, err
 	}
 	cfg.CoordToken = ""
 	coord, ok, err := newCoordinatorClient(cfg)
 	if err != nil {
-		return nil, err
+		return nil, Config{}, err
 	}
 	if !ok {
-		return nil, exit(2, "login requires a broker URL")
+		return nil, Config{}, exit(2, "login requires a broker URL")
 	}
-	return coord, nil
+	return coord, cfg, nil
 }
 
 func validateGitHubLoginURL(loginURL string) error {
@@ -262,6 +283,15 @@ func canonicalBrokerURLFromLoginURL(loginURL string) (string, bool) {
 
 func sameBrokerURL(left, right string) bool {
 	return normalizedBrokerURL(left) == normalizedBrokerURL(right)
+}
+
+func brokerLoginRedirectOriginAllowed(cfg Config, brokerURL string) bool {
+	for _, origin := range cfg.BrokerLoginRedirectOrigins {
+		if sameBrokerURL(origin, brokerURL) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizedBrokerURL(value string) string {
