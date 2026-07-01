@@ -367,6 +367,7 @@ interface EgressTicketRecord {
   leaseID: string;
   owner: string;
   org: string;
+  admin?: boolean;
   role: EgressRole;
   sessionID: string;
   profile?: string;
@@ -670,8 +671,22 @@ type BridgeAttachment =
       admin?: boolean;
       portalSessionHash?: string;
     }
-  | { kind: "egress-host"; leaseID: string; sessionID: string }
-  | { kind: "egress-client"; leaseID: string; sessionID: string }
+  | {
+      kind: "egress-host";
+      leaseID: string;
+      sessionID: string;
+      owner?: string;
+      org?: string;
+      admin?: boolean;
+    }
+  | {
+      kind: "egress-client";
+      leaseID: string;
+      sessionID: string;
+      owner?: string;
+      org?: string;
+      admin?: boolean;
+    }
   | {
       kind: "runtime-adapter-agent";
       adapterID: string;
@@ -1076,6 +1091,7 @@ export class FleetCoordinator {
     const now = Date.now();
     const revoked = new Map<string, string>();
     const revokedViewers = new Map<WebSocket, string>();
+    const revokedEgressSessions = new Map<string, { leaseID: string; sessionID: string }>();
     const codeViewersToCheck: Array<{ socket: WebSocket; portalSessionHash?: string }> = [];
     for (const socket of this.restoredLeaseBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
@@ -1096,6 +1112,16 @@ export class FleetCoordinator {
         !this.leaseViewerAuthorized(lease, attachment)
       ) {
         revokedViewers.set(socket, "lease access revoked");
+        continue;
+      }
+      if (
+        (attachment.kind === "egress-host" || attachment.kind === "egress-client") &&
+        !this.leaseManagerAuthorized(lease, attachment)
+      ) {
+        revokedEgressSessions.set(egressSocketKey(lease.id, attachment.sessionID), {
+          leaseID: lease.id,
+          sessionID: attachment.sessionID,
+        });
         continue;
       }
       if (attachment.kind === "code-viewer" && attachment.auth === "github") {
@@ -1122,6 +1148,9 @@ export class FleetCoordinator {
     }
     for (const [leaseID, reason] of revoked) {
       this.closeLeaseBridges(leaseID, 1008, reason);
+    }
+    for (const { leaseID, sessionID } of revokedEgressSessions.values()) {
+      this.clearEgressSession(leaseID, sessionID, 1008, "lease access revoked");
     }
     for (const socket of this.restoredLeaseBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
@@ -1306,7 +1335,7 @@ export class FleetCoordinator {
       return;
     }
     if (previous && previous.sessionID !== sessionID) {
-      this.clearEgressSessionSockets(
+      this.clearEgressSession(
         leaseID,
         previous.sessionID,
         1012,
@@ -4772,7 +4801,7 @@ export class FleetCoordinator {
       const previousShare = normalizedLeaseShare(lease.share);
       lease.share = sanitizeLeaseShare(input, requestOwner(request));
       lease.updatedAt = new Date().toISOString();
-      await this.putLeaseShareAndRevokeViewers(lease, previousShare);
+      await this.putLeaseShareAndRevokeBridges(lease, previousShare);
       return json({ leaseID: lease.id, share: normalizedLeaseShare(lease.share) });
     }
     if (method === "DELETE") {
@@ -4792,25 +4821,25 @@ export class FleetCoordinator {
         lease.share = sanitizeLeaseShare(share, requestOwner(request));
       }
       lease.updatedAt = new Date().toISOString();
-      await this.putLeaseShareAndRevokeViewers(lease, previousShare);
+      await this.putLeaseShareAndRevokeBridges(lease, previousShare);
       return json({ leaseID: lease.id, share: normalizedLeaseShare(lease.share) });
     }
     return json({ error: "not_found" }, { status: 404 });
   }
 
-  private async putLeaseShareAndRevokeViewers(
+  private async putLeaseShareAndRevokeBridges(
     lease: LeaseRecord,
     previousShare: NormalizedLeaseShare,
   ): Promise<void> {
     await this.withBridgeTicketLock(async () => {
       await this.putLease(lease);
       if (leaseShareAccessShrank(previousShare, normalizedLeaseShare(lease.share))) {
-        this.revokeUnauthorizedLeaseViewers(lease);
+        this.revokeUnauthorizedLeaseBridges(lease);
       }
     });
   }
 
-  private revokeUnauthorizedLeaseViewers(lease: LeaseRecord): void {
+  private revokeUnauthorizedLeaseBridges(lease: LeaseRecord): void {
     const code = 1008;
     const reason = "lease access revoked";
     for (const viewer of this.openWebVNCViewers(lease.id)) {
@@ -4833,6 +4862,32 @@ export class FleetCoordinator {
       this.clearCodeViewer(lease.id, id, viewer, code, reason);
       closeSocket(viewer, code, reason);
     }
+    const revokedEgressSessions = new Set<string>();
+    for (const socket of [...this.egressHosts.values(), ...this.egressClients.values()]) {
+      const attachment = this.bridgeAttachment(socket);
+      if (
+        (attachment?.kind !== "egress-host" && attachment?.kind !== "egress-client") ||
+        attachment.leaseID !== lease.id ||
+        this.leaseManagerAuthorized(lease, attachment)
+      ) {
+        continue;
+      }
+      revokedEgressSessions.add(attachment.sessionID);
+    }
+    for (const sessionID of revokedEgressSessions) {
+      this.clearEgressSession(lease.id, sessionID, code, reason);
+    }
+  }
+
+  private leaseManagerAuthorized(
+    lease: LeaseRecord,
+    principal: { owner?: string; org?: string; admin?: boolean },
+  ): boolean {
+    if (!completeBridgePrincipal(principal)) {
+      return false;
+    }
+    const role = this.leaseAccessRoleForPrincipal(lease, principal);
+    return role === "owner" || role === "manage";
   }
 
   private leaseViewerAuthorized(
@@ -6012,7 +6067,7 @@ export class FleetCoordinator {
       const previousShare = normalizedLeaseShare(lease.share);
       lease.share = sanitizeLeaseShare(input, requestOwner(request));
       lease.updatedAt = new Date().toISOString();
-      await this.putLeaseShareAndRevokeViewers(lease, previousShare);
+      await this.putLeaseShareAndRevokeBridges(lease, previousShare);
       return json({
         leaseID: lease.id,
         slug: lease.slug || lease.id,
@@ -6049,7 +6104,7 @@ export class FleetCoordinator {
     }
     lease.share = sanitizeLeaseShare(share, requestOwner(request));
     lease.updatedAt = new Date().toISOString();
-    await this.putLeaseShareAndRevokeViewers(lease, previousShare);
+    await this.putLeaseShareAndRevokeBridges(lease, previousShare);
     const embedded = url.searchParams.get("embed") === "1";
     return new Response(null, {
       status: 303,
@@ -6172,6 +6227,7 @@ export class FleetCoordinator {
       leaseID: lease.id,
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
+      admin,
       role,
       sessionID,
       allow: boundedEgressAllowlist(input.allow),
@@ -6204,45 +6260,52 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const consumed = await this.consumeEgressTicket(request, identifier, role);
-    if (consumed.status === "invalid") {
-      return json(
-        { error: "egress_ticket_required", message: "valid egress bridge ticket required" },
-        { status: 401 },
+    return await this.withBridgeTicketLock(async () => {
+      const consumed = await this.consumeEgressTicketUnderLock(request, identifier, role);
+      if (consumed.status === "invalid") {
+        return json(
+          { error: "egress_ticket_required", message: "valid egress bridge ticket required" },
+          { status: 401 },
+        );
+      }
+      if (consumed.status === "not_found") {
+        return notFound();
+      }
+      const { lease, ticket } = consumed;
+      if (lease.state !== "active") {
+        return json(
+          { error: "egress_unavailable", message: "lease is not active" },
+          { status: 409 },
+        );
+      }
+      const upgrade = this.state.createWebSocketUpgrade();
+      const agent = upgrade.socket;
+      const principal = egressTicketPrincipal(ticket);
+      const attachment: BridgeAttachment = {
+        kind: role === "host" ? "egress-host" : "egress-client",
+        leaseID: lease.id,
+        sessionID: ticket.sessionID,
+        ...principal,
+      };
+      const ticketCreatedAt = new Date(ticket.createdAt);
+      this.activateEgressSession(
+        lease.id,
+        ticket.sessionID,
+        ticket.profile,
+        ticket.allow ?? [],
+        ticketCreatedAt,
       );
-    }
-    if (consumed.status === "not_found") {
-      return notFound();
-    }
-    const { lease, ticket } = consumed;
-    if (lease.state !== "active") {
-      return json({ error: "egress_unavailable", message: "lease is not active" }, { status: 409 });
-    }
-    const upgrade = this.state.createWebSocketUpgrade();
-    const agent = upgrade.socket;
-    const attachment: BridgeAttachment = {
-      kind: role === "host" ? "egress-host" : "egress-client",
-      leaseID: lease.id,
-      sessionID: ticket.sessionID,
-    };
-    const ticketCreatedAt = new Date(ticket.createdAt);
-    this.activateEgressSession(
-      lease.id,
-      ticket.sessionID,
-      ticket.profile,
-      ticket.allow ?? [],
-      ticketCreatedAt,
-    );
-    const key = egressSocketKey(lease.id, ticket.sessionID);
-    if (role === "host") {
-      closeSocket(this.egressHosts.get(key), 1012, "replaced by a newer egress host");
-      this.egressHosts.set(key, agent);
-    } else {
-      closeSocket(this.egressClients.get(key), 1012, "replaced by a newer egress client");
-      this.egressClients.set(key, agent);
-    }
-    this.acceptBridgeWebSocket(agent, attachment);
-    return upgrade.response;
+      const key = egressSocketKey(lease.id, ticket.sessionID);
+      if (role === "host") {
+        closeSocket(this.egressHosts.get(key), 1012, "replaced by a newer egress host");
+        this.egressHosts.set(key, agent);
+      } else {
+        closeSocket(this.egressClients.get(key), 1012, "replaced by a newer egress client");
+        this.egressClients.set(key, agent);
+      }
+      this.acceptBridgeWebSocket(agent, attachment);
+      return upgrade.response;
+    });
   }
 
   private async egressStatus(request: Request, identifier: string): Promise<Response> {
@@ -7965,7 +8028,7 @@ export class FleetCoordinator {
     this.clearEgressLease(leaseID, code, reason);
   }
 
-  private clearEgressSessionSockets(
+  private clearEgressSession(
     leaseID: string,
     sessionID: string,
     code: number,
@@ -7976,6 +8039,9 @@ export class FleetCoordinator {
     closeSocket(this.egressClients.get(key), code, reason);
     this.egressHosts.delete(key);
     this.egressClients.delete(key);
+    if (this.egressSessions.get(leaseID)?.sessionID === sessionID) {
+      this.egressSessions.delete(leaseID);
+    }
   }
 
   private async webVNCViewer(request: Request, identifier: string): Promise<Response> {
@@ -8357,30 +8423,42 @@ export class FleetCoordinator {
     identifier: string,
     role: EgressRole,
   ): Promise<LeaseBridgeTicketConsumption<EgressTicketRecord>> {
+    return this.withBridgeTicketLock(() =>
+      this.consumeEgressTicketUnderLock(request, identifier, role),
+    );
+  }
+
+  private async consumeEgressTicketUnderLock(
+    request: Request,
+    identifier: string,
+    role: EgressRole,
+  ): Promise<LeaseBridgeTicketConsumption<EgressTicketRecord>> {
     const value = bridgeTicketFromRequest(request, this.env);
     if (!validEgressTicket(value)) {
       return { status: "invalid" };
     }
-    return this.withBridgeTicketLock(async () => {
-      const key = egressTicketKey(value);
-      const ticket = await this.state.storage.get<EgressTicketRecord>(key);
-      if (!ticket || ticket.ticket !== value) {
-        return { status: "invalid" };
-      }
-      if (Date.parse(ticket.expiresAt) <= Date.now()) {
-        await this.state.storage.delete(key);
-        return { status: "invalid" };
-      }
-      if (ticket.role !== role) {
-        return { status: "invalid" };
-      }
-      const lease = await this.getLease(ticket.leaseID);
-      if (!lease || !identifierMatchesLease(identifier, lease)) {
-        return { status: "not_found" };
-      }
+    const key = egressTicketKey(value);
+    const ticket = await this.state.storage.get<EgressTicketRecord>(key);
+    if (!ticket || ticket.ticket !== value) {
+      return { status: "invalid" };
+    }
+    if (Date.parse(ticket.expiresAt) <= Date.now()) {
       await this.state.storage.delete(key);
-      return { status: "accepted", ticket, lease };
-    });
+      return { status: "invalid" };
+    }
+    if (ticket.role !== role) {
+      return { status: "invalid" };
+    }
+    const lease = await this.getLease(ticket.leaseID);
+    if (!lease || !identifierMatchesLease(identifier, lease)) {
+      return { status: "not_found" };
+    }
+    if (!this.leaseManagerAuthorized(lease, egressTicketPrincipal(ticket))) {
+      await this.state.storage.delete(key);
+      return { status: "invalid" };
+    }
+    await this.state.storage.delete(key);
+    return { status: "accepted", ticket, lease };
   }
 
   private async cleanupExpiredEgressTickets(): Promise<void> {
@@ -13827,7 +13905,9 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
         : undefined;
     case "egress-host":
     case "egress-client":
-      return typeof attachment.leaseID === "string" && typeof attachment.sessionID === "string"
+      return typeof attachment.leaseID === "string" &&
+        typeof attachment.sessionID === "string" &&
+        validOptionalEgressBridgePrincipal(attachment)
         ? attachment
         : undefined;
     case "runtime-adapter-agent":
@@ -13878,6 +13958,23 @@ function completeBridgePrincipal(value: {
     typeof value.org === "string" &&
     typeof value.admin === "boolean"
   );
+}
+
+function validOptionalEgressBridgePrincipal(value: {
+  owner?: unknown;
+  org?: unknown;
+  admin?: unknown;
+}): boolean {
+  const legacy = value.owner === undefined && value.org === undefined && value.admin === undefined;
+  return legacy || completeBridgePrincipal(value);
+}
+
+function egressTicketPrincipal(ticket: EgressTicketRecord): {
+  owner: string;
+  org: string;
+  admin: boolean;
+} {
+  return { owner: ticket.owner, org: ticket.org, admin: ticket.admin === true };
 }
 
 function bridgeTags(attachment: BridgeAttachment): string[] {
@@ -14934,10 +15031,19 @@ function leaseShareAccessShrank(
   previous: NormalizedLeaseShare,
   current: NormalizedLeaseShare,
 ): boolean {
-  if (previous.org && !current.org) {
+  if (leaseShareRoleRank(current.org) < leaseShareRoleRank(previous.org)) {
     return true;
   }
-  return Object.keys(previous.users).some((user) => current.users[user] === undefined);
+  return Object.entries(previous.users).some(
+    ([user, role]) => leaseShareRoleRank(current.users[user]) < leaseShareRoleRank(role),
+  );
+}
+
+function leaseShareRoleRank(role: LeaseShareRole | undefined): number {
+  if (role === "manage") {
+    return 2;
+  }
+  return role === "use" ? 1 : 0;
 }
 
 function sanitizeLeaseShare(input: Partial<LeaseShare>, updatedBy: string): LeaseShare | undefined {

@@ -11,7 +11,7 @@ import {
 import { FleetCoordinator } from "../src/fleet";
 import { githubAuthRoute } from "../src/oauth";
 import { runtimeAdapterRelayFrameLimit } from "../src/runtime-adapter-relay";
-import type { Env } from "../src/types";
+import type { Env, LeaseRecord } from "../src/types";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -19,8 +19,10 @@ afterEach(() => {
 
 class MemoryStorage implements CoordinatorStorage {
   private readonly values = new Map<string, unknown>();
+  beforeGet?: (key: string) => Promise<void>;
 
   async get<T>(key: string): Promise<T | undefined> {
+    await this.beforeGet?.(key);
     return this.values.get(key) as T | undefined;
   }
 
@@ -52,6 +54,7 @@ class MemoryRuntime implements CoordinatorRuntime {
   upgradeOptions?: CoordinatorWebSocketUpgradeOptions;
   acceptedTags?: string[];
   acceptedAttachment?: unknown;
+  readonly socketCloses: Array<{ code?: number; reason?: string }> = [];
   private readonly attachments = new WeakMap<WebSocket, unknown>();
   private exclusiveTail: Promise<void> = Promise.resolve();
 
@@ -78,7 +81,9 @@ class MemoryRuntime implements CoordinatorRuntime {
       socket: {
         readyState: WebSocket.OPEN,
         send: () => undefined,
-        close: () => undefined,
+        close: (code?: number, reason?: string) => {
+          this.socketCloses.push({ code, reason });
+        },
         serializeAttachment: () => undefined,
       } as unknown as WebSocket,
       response: new Response(null),
@@ -157,6 +162,150 @@ describe("coordinator runtimes", () => {
       claimState: "confirmed",
       confirmedAt: expect.any(String),
     });
+  });
+
+  it("binds egress sockets to their ticket principal and reauthorizes before acceptance", async () => {
+    const runtime = new MemoryRuntime();
+    const coordinator = new FleetCoordinator(runtime, {
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env);
+    const lease: LeaseRecord = {
+      id: "cbx_000000000001",
+      slug: "shared-egress",
+      provider: "external",
+      lifecycle: "registered",
+      target: "linux",
+      cloudID: "external-shared-egress",
+      owner: "owner@example.com",
+      org: "example-org",
+      share: { users: { "manager@example.com": "manage" } },
+      profile: "default",
+      class: "default",
+      serverType: "external",
+      serverID: 0,
+      serverName: "shared-egress",
+      providerKey: "external-shared-egress",
+      host: "127.0.0.1",
+      sshUser: "crabbox",
+      sshPort: "22",
+      workRoot: "/work/crabbox",
+      keep: true,
+      ttlSeconds: 3600,
+      estimatedHourlyUSD: 0,
+      maxEstimatedUSD: 0,
+      state: "active",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    await runtime.storage.put(`lease:${lease.id}`, lease);
+    const managerHeaders = {
+      "x-crabbox-owner": "manager@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const ownerHeaders = {
+      "x-crabbox-owner": "owner@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const createTicket = async (sessionID: string): Promise<string> => {
+      const response = await coordinator.fetch(
+        new Request("https://coordinator.test/v1/leases/shared-egress/egress/ticket", {
+          method: "POST",
+          headers: { ...managerHeaders, "content-type": "application/json" },
+          body: JSON.stringify({ role: "host", sessionID }),
+        }),
+      );
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { ticket: string }).ticket;
+    };
+
+    const acceptedTicket = await createTicket("egress_accepted");
+    const accepted = await coordinator.fetch(
+      new Request("https://coordinator.test/v1/leases/shared-egress/egress/host", {
+        headers: {
+          upgrade: "websocket",
+          authorization: `Bearer ${acceptedTicket}`,
+        },
+      }),
+    );
+    expect(accepted.status).toBe(200);
+    expect(runtime.acceptedAttachment).toEqual({
+      kind: "egress-host",
+      leaseID: lease.id,
+      sessionID: "egress_accepted",
+      owner: "manager@example.com",
+      org: "example-org",
+      admin: false,
+    });
+
+    const revokedTicket = await createTicket("egress_revoked");
+    const downgraded = await coordinator.fetch(
+      new Request("https://coordinator.test/v1/leases/shared-egress/share", {
+        method: "PUT",
+        headers: { ...ownerHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ users: { "manager@example.com": "use" } }),
+      }),
+    );
+    expect(downgraded.status).toBe(200);
+    runtime.acceptedAttachment = undefined;
+    const rejected = await coordinator.fetch(
+      new Request("https://coordinator.test/v1/leases/shared-egress/egress/host", {
+        headers: {
+          upgrade: "websocket",
+          authorization: `Bearer ${revokedTicket}`,
+        },
+      }),
+    );
+    expect(rejected.status).toBe(401);
+    expect(runtime.acceptedAttachment).toBeUndefined();
+    expect(runtime.storage.value(`egress-ticket:${revokedTicket}`)).toBeUndefined();
+
+    const restored = await coordinator.fetch(
+      new Request("https://coordinator.test/v1/leases/shared-egress/share", {
+        method: "PUT",
+        headers: { ...ownerHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ users: { "manager@example.com": "manage" } }),
+      }),
+    );
+    expect(restored.status).toBe(200);
+    const raceTicket = await createTicket("egress_race");
+    runtime.socketCloses.length = 0;
+    let releaseTicketRead!: () => void;
+    const ticketReadBlocked = new Promise<void>((resolve) => {
+      releaseTicketRead = resolve;
+    });
+    let signalTicketRead!: () => void;
+    const ticketReadStarted = new Promise<void>((resolve) => {
+      signalTicketRead = resolve;
+    });
+    runtime.storage.beforeGet = async (key) => {
+      if (key === `egress-ticket:${raceTicket}`) {
+        signalTicketRead();
+        await ticketReadBlocked;
+      }
+    };
+    const acceptance = coordinator.fetch(
+      new Request("https://coordinator.test/v1/leases/shared-egress/egress/host", {
+        headers: {
+          upgrade: "websocket",
+          authorization: `Bearer ${raceTicket}`,
+        },
+      }),
+    );
+    await ticketReadStarted;
+    const concurrentDowngrade = coordinator.fetch(
+      new Request("https://coordinator.test/v1/leases/shared-egress/share", {
+        method: "PUT",
+        headers: { ...ownerHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ users: { "manager@example.com": "use" } }),
+      }),
+    );
+    runtime.storage.beforeGet = undefined;
+    releaseTicketRead();
+    const [raceAccepted, raceDowngraded] = await Promise.all([acceptance, concurrentDowngrade]);
+    expect(raceAccepted.status).toBe(200);
+    expect(raceDowngraded.status).toBe(200);
+    expect(runtime.socketCloses).toContainEqual({ code: 1008, reason: "lease access revoked" });
   });
 
   it("keeps provider-backed portal requests outside the lifecycle queue", () => {
