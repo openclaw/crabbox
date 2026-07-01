@@ -317,7 +317,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     sshUser,
     sshPort: input.sshPort ?? "2222",
     sshFallbackPorts: validPorts(input.sshFallbackPorts ?? ["22"]),
-    providerKey: input.providerKey ?? "crabbox-steipete",
+    providerKey: input.providerKey?.trim() ?? "",
     workRoot: input.workRoot ?? defaultWorkRoot(target, windowsMode, sshUser),
     ttlSeconds,
     idleTimeoutSeconds,

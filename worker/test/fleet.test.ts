@@ -3239,6 +3239,49 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it("derives a lease-scoped provider key for direct leases that omit one", async () => {
+    const storage = new MemoryStorage();
+    let preparedProviderKey = "";
+    let createdProviderKey = "";
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(
+        (config) => {
+          createdProviderKey = config.providerKey;
+        },
+        {
+          provider: "aws",
+          onPrepareLeaseConfig: (config) => {
+            preparedProviderKey = config.providerKey;
+            return config;
+          },
+        },
+      ),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          serverType: "c7a.8xlarge",
+          sshPublicKey: "ssh-ed25519 direct-test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const expectedProviderKey = "crabbox-cbx-abcdef123456";
+    expect(preparedProviderKey).toBe(expectedProviderKey);
+    expect(createdProviderKey).toBe(expectedProviderKey);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.providerKey).toBe(
+      expectedProviderKey,
+    );
+  });
+
   it("adapts workspaces onto owner-scoped lease lifecycle", async () => {
     const storage = new MemoryStorage();
     let createdClass = "";

@@ -1722,6 +1722,10 @@ export class FleetCoordinator {
     if (retainedMacHostLease && !config.serverTypeExplicit) {
       config = { ...config, serverType: retainedMacHostLease.serverType };
     }
+    const leaseID = validLeaseID(input.leaseID) ? input.leaseID : newLeaseID();
+    if (!config.providerKey) {
+      config = { ...config, providerKey: providerKeyForLease(leaseID) };
+    }
     config =
       (await this.provider(
         config.provider,
@@ -1743,7 +1747,6 @@ export class FleetCoordinator {
         { status: 424 },
       );
     }
-    const leaseID = validLeaseID(input.leaseID) ? input.leaseID : newLeaseID();
     const provider = this.provider(
       config.provider,
       providerRegionForConfig(config),
@@ -12102,6 +12105,10 @@ function newLeaseID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
   return `cbx_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function providerKeyForLease(leaseID: string): string {
+  return `crabbox-${leaseID.replaceAll("_", "-")}`;
 }
 
 function validWorkspaceID(value: string | undefined): value is string {
