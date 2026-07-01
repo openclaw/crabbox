@@ -78,6 +78,19 @@ func TestProviderSupportsDirectWindowsOSDiskCheckpoints(t *testing.T) {
 	}
 }
 
+func TestProviderRejectsWindowsImageCheckpoints(t *testing.T) {
+	t.Parallel()
+	_, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
+		Config:   core.Config{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+		Server:   core.Server{CloudID: "crabbox-source"},
+		Target:   core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+		Strategy: core.CheckpointStrategyImage,
+	})
+	if ok {
+		t.Fatal("Azure Windows leases must not advertise managed image checkpoints")
+	}
+}
+
 func TestProviderRejectsDirectWSL2OSDiskCheckpoints(t *testing.T) {
 	t.Parallel()
 	_, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{

@@ -121,6 +121,9 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	}
 	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
 	if targetOS == core.TargetWindows && firstNonBlank(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal {
+		if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
+			return core.NativeCheckpointCapability{}, false
+		}
 		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAzureOS, Direct: true}, true
 	}
 	if req.Config.Coordinator == "" || targetOS != core.TargetLinux {
