@@ -13891,17 +13891,80 @@ describe("fleet lease identity and idle", () => {
     ).toBe("/portal/leases/cbx_000000000001/code/");
   });
 
-  it("forwards only the VS Code token cookie to code-server", () => {
+  it("forwards browser headers without Crabbox auth context to code-server", () => {
     const headers = codeForwardHeaders(
       new Headers({
         cookie: "crabbox_session=secret; vscode-tkn=remote-token; other=value",
         origin: "https://broker.example.com",
+        "sec-websocket-protocol": "vscode",
+        "x-client-trace": "trace-1",
+        "x-crabbox-auth": "github",
+        "X-Crabbox-Admin": "true",
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+        "x-crabbox-github-login": "alice",
+        "x-crabbox-token-expires-at": "2026-07-01T12:00:00Z",
       }),
     );
 
     expect(headers["cookie"]).toBe("vscode-tkn=remote-token");
     expect(headers["cookie"]).not.toContain("crabbox_session");
     expect(headers.origin).toBe("https://broker.example.com");
+    expect(headers["sec-websocket-protocol"]).toBe("vscode");
+    expect(headers["x-client-trace"]).toBe("trace-1");
+    expect(Object.keys(headers).filter((key) => key.startsWith("x-crabbox-"))).toEqual([]);
+  });
+
+  it("strips Crabbox auth context from Code proxy bridge messages", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        code: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const agent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const relay = fleet as unknown as { codeAgents: Map<string, WebSocket> };
+    relay.codeAgents.set(leaseID, agent as unknown as WebSocket);
+    let forwarded: { id: string; headers: Record<string, string> } | undefined;
+    agent.onSend = (data) => {
+      forwarded = JSON.parse(data) as { id: string; headers: Record<string, string> };
+      void fleet.webSocketMessage(
+        agent as unknown as WebSocket,
+        JSON.stringify({ type: "http", id: forwarded.id, status: 204 }),
+      );
+    };
+
+    const response = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/code/api/status", {
+        headers: {
+          "x-crabbox-auth": "github",
+          "x-crabbox-admin": "false",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+          "x-crabbox-github-login": "alice",
+          "x-crabbox-token-expires-at": "2026-07-01T12:00:00Z",
+          "x-client-trace": "trace-1",
+          origin: "https://broker.example.com",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(204);
+    expect(forwarded?.headers).toMatchObject({
+      origin: "https://broker.example.com",
+      "x-client-trace": "trace-1",
+    });
+    expect(
+      Object.keys(forwarded?.headers ?? {}).filter((key) => key.startsWith("x-crabbox-")),
+    ).toEqual([]);
   });
 
   it("creates scoped egress tickets and reports bridge status", async () => {

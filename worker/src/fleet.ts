@@ -13689,6 +13689,9 @@ export function codeForwardHeaders(headers: Headers): Record<string, string> {
   ]);
   for (const [key, value] of headers) {
     const lower = key.toLowerCase();
+    if (lower.startsWith("x-crabbox-")) {
+      continue;
+    }
     if (allowed.has(lower) || lower.startsWith("x-")) {
       out[lower] = value;
     } else if (lower === "cookie") {
