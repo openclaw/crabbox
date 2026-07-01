@@ -186,8 +186,8 @@ page — it is operator-driven and never opens an HTML view, so it lives under t
 
 Current clients send bridge tickets in an `X-Crabbox-Bridge-Ticket` WebSocket
 upgrade header, with a bearer-header retry for older coordinators. Coordinators
-still accept query tickets from older CLIs, but current clients never place
-bridge credentials in request URLs.
+reject bridge tickets in URL query strings, so bridge credentials stay out of
+request targets and logs.
 
 ## Run detail `/portal/runs/{run-id}`
 

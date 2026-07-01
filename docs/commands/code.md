@@ -42,9 +42,11 @@ The coordinator authenticates the browser through portal auth and authenticates
 the local bridge with a one-use, short-lived ticket. The CLI sends the ticket as
 an `X-Crabbox-Bridge-Ticket` WebSocket upgrade header so it stays out of
 WebSocket URLs while leaving ordinary coordinator authentication intact. A
-bearer-header retry supports older coordinators, and the coordinator accepts
-query tickets only from older CLIs. Because the trusted boundary is the portal
-plus the bridge ticket, `code-server` runs with auth disabled on the runner side.
+bearer-header retry supports older coordinators. Current coordinators reject
+bridge tickets in URL query strings, so older CLIs that still send query-ticket
+bridges must be upgraded before they can connect. Because the trusted boundary
+is the portal plus the bridge ticket, `code-server` runs with auth disabled on
+the runner side.
 
 The portal URL is lease-scoped:
 

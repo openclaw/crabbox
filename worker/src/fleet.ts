@@ -13225,13 +13225,7 @@ export function bridgeTicketFromRequest(request: Request): string {
   if (validBridgeTicket(bearerTicket)) {
     return bearerTicket;
   }
-  // Legacy clients sent tickets in the request target. Keep accepting them for
-  // compatibility, but current clients use the dedicated upgrade header.
-  const queryTicket = new URL(request.url).searchParams.get("ticket") ?? "";
-  if (validBridgeTicket(queryTicket)) {
-    return queryTicket;
-  }
-  return upgradeTicket || bearerTicket || queryTicket;
+  return upgradeTicket || bearerTicket;
 }
 
 function validBridgeTicket(value: string): boolean {

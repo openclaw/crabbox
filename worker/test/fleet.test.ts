@@ -13606,6 +13606,38 @@ describe("fleet lease identity and idle", () => {
       consumeRuntimeAdapterTicket(request: Request, adapterID: string): Promise<{ status: string }>;
     };
 
+    const queryOnlyRequest = (path: string, ticket: string) =>
+      request("GET", `${path}?ticket=${ticket}`, {
+        headers: {
+          upgrade: "websocket",
+        },
+      });
+
+    await expect(
+      consumers.consumeWebVNCTicket(
+        queryOnlyRequest(`/v1/leases/${lease.id}/webvnc/agent`, webVNCTicket),
+        lease.id,
+      ),
+    ).resolves.toMatchObject({ status: "invalid" });
+    expect(storage.value(`webvnc-ticket:${webVNCTicket}`)).toBeDefined();
+
+    await expect(
+      consumers.consumeCodeTicket(
+        queryOnlyRequest(`/v1/leases/${lease.id}/code/agent`, codeTicket),
+        lease.id,
+      ),
+    ).resolves.toMatchObject({ status: "invalid" });
+    expect(storage.value(`code-ticket:${codeTicket}`)).toBeDefined();
+
+    await expect(
+      consumers.consumeEgressTicket(
+        queryOnlyRequest(`/v1/leases/${lease.id}/egress/host`, egressTicket),
+        lease.id,
+        "host",
+      ),
+    ).resolves.toMatchObject({ status: "invalid" });
+    expect(storage.value(`egress-ticket:${egressTicket}`)).toBeDefined();
+
     await expect(
       consumers.consumeWebVNCTicket(
         bridgeRequest(`/v1/leases/${lease.id}/webvnc/agent`, webVNCTicket),
@@ -13663,7 +13695,7 @@ describe("fleet lease identity and idle", () => {
     expect(runtime.timers).toEqual([]);
   });
 
-  it("prefers dedicated upgrade bridge tickets over bearer and legacy query credentials", () => {
+  it("prefers dedicated upgrade bridge tickets over bearer credentials", () => {
     const upgradeTicket = `code_${"c".repeat(32)}`;
     const queryTicket = `code_${"a".repeat(32)}`;
     expect(
@@ -13678,7 +13710,7 @@ describe("fleet lease identity and idle", () => {
     ).toBe(upgradeTicket);
   });
 
-  it("prefers bearer bridge tickets over legacy query credentials", () => {
+  it("uses bearer bridge tickets when the dedicated header is absent", () => {
     const headerTicket = `code_${"b".repeat(32)}`;
     expect(
       bridgeTicketFromRequest(
@@ -13689,15 +13721,25 @@ describe("fleet lease identity and idle", () => {
     ).toBe(headerTicket);
   });
 
-  it("accepts legacy query bridge tickets with unrelated proxy authorization", () => {
-    const queryTicket = `code_${"a".repeat(32)}`;
-    expect(
-      bridgeTicketFromRequest(
-        request("GET", `/v1/leases/blue-lobster/code/agent?ticket=${queryTicket}`, {
-          headers: { authorization: "Bearer edge-identity-token" },
-        }),
-      ),
-    ).toBe(queryTicket);
+  it("ignores query-string bridge tickets", () => {
+    for (const ticket of [
+      `wvnc_${"a".repeat(32)}`,
+      `code_${"b".repeat(32)}`,
+      `egress_${"c".repeat(32)}`,
+    ]) {
+      expect(
+        bridgeTicketFromRequest(
+          request("GET", `/v1/leases/blue-lobster/code/agent?ticket=${ticket}`),
+        ),
+      ).toBe("");
+      expect(
+        bridgeTicketFromRequest(
+          request("GET", `/v1/leases/blue-lobster/code/agent?ticket=${ticket}`, {
+            headers: { authorization: "Bearer edge-identity-token" },
+          }),
+        ),
+      ).toBe("edge-identity-token");
+    }
   });
 
   it("uses a VS Code-compatible CSP for code proxy responses", () => {
