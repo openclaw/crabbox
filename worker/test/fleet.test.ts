@@ -18003,6 +18003,39 @@ describe("fleet identity", () => {
     expect(callback.headers.get("set-cookie")).toContain("crabbox_session=cbxu_");
   });
 
+  it.each([
+    ["CRLF", "/portal/leases/cbx_1/vnc%0d%0aSet-Cookie:%20oops"],
+    ["CR", "/portal/leases/cbx_1/vnc%0dSet-Cookie:%20oops"],
+    ["LF", "/portal/leases/cbx_1/vnc%0aSet-Cookie:%20oops"],
+    ["NUL", "/portal/leases/cbx_1/vnc%00oops"],
+    ["DEL", "/portal/leases/cbx_1/vnc%7foops"],
+  ])("drops portal return targets containing %s", async (_label, returnTo) => {
+    const storage = new MemoryStorage();
+    const fleet = new FleetDurableObject(
+      { storage } as unknown as DurableObjectState,
+      {
+        CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_GITHUB_CLIENT_ID: "github-client",
+        CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+        CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SESSION_SECRET: "session-secret",
+      } as Env,
+    );
+    const start = await fleet.fetch(request("GET", `/portal/login?returnTo=${returnTo}`));
+    expect(start.status).toBe(302);
+    const location = start.headers.get("location") ?? "";
+    const state = new URL(location).searchParams.get("state");
+    expect(state).toBeTruthy();
+
+    vi.stubGlobal("fetch", githubFetchMock({ member: true }));
+    const callback = await fleet.fetch(
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+    );
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe("/portal");
+    expect(callback.headers.get("set-cookie")).toContain("crabbox_session=cbxu_");
+  });
+
   it("clears portal session on logout without restarting OAuth", async () => {
     const fleet = testFleet();
     const logout = await fleet.fetch(request("GET", "/portal/logout"));
