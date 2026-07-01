@@ -18003,7 +18003,13 @@ describe("fleet identity", () => {
     expect(callback.headers.get("set-cookie")).toContain("crabbox_session=cbxu_");
   });
 
-  it("drops portal return targets with header control characters", async () => {
+  it.each([
+    ["CRLF", "/portal/leases/cbx_1/vnc%0d%0aSet-Cookie:%20oops"],
+    ["CR", "/portal/leases/cbx_1/vnc%0dSet-Cookie:%20oops"],
+    ["LF", "/portal/leases/cbx_1/vnc%0aSet-Cookie:%20oops"],
+    ["NUL", "/portal/leases/cbx_1/vnc%00oops"],
+    ["DEL", "/portal/leases/cbx_1/vnc%7foops"],
+  ])("drops portal return targets containing %s", async (_label, returnTo) => {
     const storage = new MemoryStorage();
     const fleet = new FleetDurableObject(
       { storage } as unknown as DurableObjectState,
@@ -18015,9 +18021,7 @@ describe("fleet identity", () => {
         CRABBOX_SESSION_SECRET: "session-secret",
       } as Env,
     );
-    const start = await fleet.fetch(
-      request("GET", "/portal/login?returnTo=/portal/leases/cbx_1/vnc%0d%0aSet-Cookie:%20oops"),
-    );
+    const start = await fleet.fetch(request("GET", `/portal/login?returnTo=${returnTo}`));
     expect(start.status).toBe(302);
     const location = start.headers.get("location") ?? "";
     const state = new URL(location).searchParams.get("state");
