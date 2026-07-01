@@ -72,6 +72,7 @@
 
 ### Fixed
 
+- Pinned the Google Chrome Linux APT trust key to Google's published primary fingerprint and scoped it to the Chrome repository before managed browser installation. Thanks @coygeek.
 - Prevented revoked lease managers from retaining mediated-egress bridges after lease sharing was removed or downgraded. Thanks @coygeek.
 - Prevented the Code portal proxy from forwarding coordinator authentication context to lease-controlled code-server requests. Thanks @coygeek.
 - Rejected GitHub login callback origins that differ from the selected broker unless explicitly allowlisted as a trusted alias, preventing OAuth callbacks from silently redirecting stored credentials. Thanks @TurboTheTurtle.

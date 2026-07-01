@@ -301,6 +301,20 @@ digests embedded alongside their URLs. Generated PowerShell verifies every
 download before extraction, execution, or WSL import, removes mismatched bytes,
 and fails bootstrap closed. URL and digest updates are reviewed together.
 
+## Managed Linux Browser Trust
+
+Managed Linux browser bootstrap pins Google's active Linux package-signing
+primary fingerprint. The bootstrap imports downloaded key material into an
+isolated temporary GnuPG home, exports only the approved primary key and its
+signing subkeys into a repository-scoped keyring, and binds the Chrome APT
+source to that keyring with `signed-by`. A missing or changed primary key fails
+closed before replacing the prior keyring or repository source.
+
+Signing-subkey rotations beneath the approved primary key continue without a
+Crabbox update. A Google primary-key rotation requires a reviewed fingerprint
+update against [Google's official Linux repository key page](https://www.google.com/linuxrepositories/)
+and fresh bootstrap proof; there is no fallback to an unpinned key.
+
 ## SSH
 
 SSH is the control and data path to a leased box; the broker manages leases but
