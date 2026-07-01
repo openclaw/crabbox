@@ -14,6 +14,7 @@ chrome_policy_dir="${CRABBOX_LINUX_CHROME_POLICY_DIR:-/etc/opt/chrome/policies/m
 chromium_policy_dir="${CRABBOX_LINUX_CHROMIUM_POLICY_DIR:-/etc/chromium/policies/managed}"
 browser_bin_dir="${CRABBOX_LINUX_BROWSER_BIN_DIR:-/usr/local/bin}"
 browser_state_dir="${CRABBOX_LINUX_BROWSER_STATE_DIR:-/var/lib/crabbox}"
+google_linux_signing_key_fingerprint="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
 
 log() {
   printf 'linux-tools: %s\n' "$*" >&2
@@ -64,11 +65,37 @@ os_release_value() {
 install_apt_keyring() {
   local url="$1"
   local target="$2"
+  local expected_fingerprint="${3:-}"
+  local actual_fingerprint=""
+  local downloaded_key=""
+  local key_home=""
   local tmp_dir
   local tmp_key
   install -d -m 0755 "$(dirname "$target")"
   tmp_dir="$(mktemp -d "${target}.tmp.XXXXXX")"
   tmp_key="$tmp_dir/keyring.gpg"
+  if [[ -n "$expected_fingerprint" ]]; then
+    downloaded_key="$tmp_dir/downloaded.asc"
+    key_home="$tmp_dir/gnupg"
+    install -d -m 0700 "$key_home"
+    if curl -fsSL "$url" >"$downloaded_key" &&
+      GNUPGHOME="$key_home" gpg --batch --import "$downloaded_key" >/dev/null 2>&1; then
+      actual_fingerprint="$(
+        GNUPGHOME="$key_home" gpg --batch --with-colons --fingerprint "$expected_fingerprint" 2>/dev/null |
+          awk -F: '$1 == "fpr" { print $10; exit }' || true
+      )"
+      if [[ "$actual_fingerprint" == "$expected_fingerprint" ]] &&
+        GNUPGHOME="$key_home" gpg --batch --export "$expected_fingerprint" >"$tmp_key" &&
+        [[ -s "$tmp_key" ]]; then
+        chmod 0644 "$tmp_key"
+        mv -f "$tmp_key" "$target"
+        rm -rf "$tmp_dir"
+        return 0
+      fi
+    fi
+    rm -rf "$tmp_dir"
+    return 1
+  fi
   if curl -fsSL "$url" | gpg --batch --yes --dearmor -o "$tmp_key"; then
     chmod 0644 "$tmp_key"
     mv -f "$tmp_key" "$target"
@@ -139,14 +166,20 @@ install_chrome_or_chromium() {
   local browser_path=""
   if [[ "$(dpkg --print-architecture)" == "amd64" ]]; then
     install -d -m 0755 "$apt_sources_dir"
-    install_apt_keyring https://dl.google.com/linux/linux_signing_key.pub "$apt_keyrings_dir/google-linux.gpg"
-    printf 'deb [arch=amd64 signed-by=%s/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' "$apt_keyrings_dir" \
-      >"$apt_sources_dir/google-chrome.list"
-    if retry apt-get update && apt_install google-chrome-stable; then
-      browser_path="$(command -v google-chrome || true)"
+    if install_apt_keyring \
+      https://dl.google.com/linux/linux_signing_key.pub \
+      "$apt_keyrings_dir/google-linux.gpg" \
+      "$google_linux_signing_key_fingerprint"; then
+      printf 'deb [arch=amd64 signed-by=%s/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' "$apt_keyrings_dir" \
+        >"$apt_sources_dir/google-chrome.list"
+      if retry apt-get update && apt_install google-chrome-stable; then
+        browser_path="$(command -v google-chrome || true)"
+      else
+        rm -f "$apt_sources_dir/google-chrome.list"
+        retry apt-get update || true
+      fi
     else
-      rm -f "$apt_sources_dir/google-chrome.list"
-      retry apt-get update || true
+      log "Google Linux signing key verification failed; trying Chromium fallback"
     fi
   fi
   if [[ -z "$browser_path" ]]; then
