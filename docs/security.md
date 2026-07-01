@@ -308,7 +308,8 @@ primary fingerprint. The bootstrap imports downloaded key material into an
 isolated temporary GnuPG home, exports only the approved primary key and its
 signing subkeys into a repository-scoped keyring, and binds the Chrome APT
 source to that keyring with `signed-by`. A missing or changed primary key fails
-closed before replacing the prior keyring or repository source.
+closed before replacing the prior keyring or repository source; browser setup
+then tries the distro Chromium package without trusting the unexpected key.
 
 Signing-subkey rotations beneath the approved primary key continue without a
 Crabbox update. A Google primary-key rotation requires a reviewed fingerprint

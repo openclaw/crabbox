@@ -166,17 +166,20 @@ install_chrome_or_chromium() {
   local browser_path=""
   if [[ "$(dpkg --print-architecture)" == "amd64" ]]; then
     install -d -m 0755 "$apt_sources_dir"
-    install_apt_keyring \
+    if install_apt_keyring \
       https://dl.google.com/linux/linux_signing_key.pub \
       "$apt_keyrings_dir/google-linux.gpg" \
-      "$google_linux_signing_key_fingerprint"
-    printf 'deb [arch=amd64 signed-by=%s/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' "$apt_keyrings_dir" \
-      >"$apt_sources_dir/google-chrome.list"
-    if retry apt-get update && apt_install google-chrome-stable; then
-      browser_path="$(command -v google-chrome || true)"
+      "$google_linux_signing_key_fingerprint"; then
+      printf 'deb [arch=amd64 signed-by=%s/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' "$apt_keyrings_dir" \
+        >"$apt_sources_dir/google-chrome.list"
+      if retry apt-get update && apt_install google-chrome-stable; then
+        browser_path="$(command -v google-chrome || true)"
+      else
+        rm -f "$apt_sources_dir/google-chrome.list"
+        retry apt-get update || true
+      fi
     else
-      rm -f "$apt_sources_dir/google-chrome.list"
-      retry apt-get update || true
+      log "Google Linux signing key verification failed; trying Chromium fallback"
     fi
   fi
   if [[ -z "$browser_path" ]]; then

@@ -197,11 +197,15 @@ exit 1
 	);
 });
 
-test("linux developer tool setup preserves the existing Google keyring on fingerprint mismatch", () => {
+test("linux developer tool setup preserves Google trust files and falls back on fingerprint mismatch", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-tools-mismatch-"));
 	const bin = path.join(dir, "bin");
 	const keyrings = path.join(dir, "keyrings");
 	const sources = path.join(dir, "sources");
+	const chromePolicy = path.join(dir, "chrome-policy");
+	const chromiumPolicy = path.join(dir, "chromium-policy");
+	const browserBin = path.join(dir, "browser-bin");
+	const browserState = path.join(dir, "browser-state");
 	const target = path.join(keyrings, "google-linux.gpg");
 	const source = path.join(sources, "google-chrome.list");
 	const log = path.join(dir, "gpg.log");
@@ -222,6 +226,24 @@ printf 'fake-key:%s\\n' "$*"
 		path.join(bin, "dpkg"),
 		`#!/usr/bin/env bash
 [[ "$*" == "--print-architecture" ]] && printf 'amd64\\n'
+`,
+	);
+	writeExecutable(
+		path.join(bin, "apt-cache"),
+		`#!/usr/bin/env bash
+[[ "$*" == "show chromium" ]]
+`,
+	);
+	writeExecutable(
+		path.join(bin, "apt-get"),
+		`#!/usr/bin/env bash
+exit 0
+`,
+	);
+	writeExecutable(
+		path.join(bin, "chromium"),
+		`#!/usr/bin/env bash
+exit 0
 `,
 	);
 	writeFakeGPG(bin);
@@ -245,15 +267,21 @@ printf 'fake-key:%s\\n' "$*"
 				CRABBOX_FAKE_GPG_LOG: log,
 				CRABBOX_LINUX_APT_KEYRINGS_DIR: keyrings,
 				CRABBOX_LINUX_APT_SOURCES_DIR: sources,
+				CRABBOX_LINUX_CHROME_POLICY_DIR: chromePolicy,
+				CRABBOX_LINUX_CHROMIUM_POLICY_DIR: chromiumPolicy,
+				CRABBOX_LINUX_BROWSER_BIN_DIR: browserBin,
+				CRABBOX_LINUX_BROWSER_STATE_DIR: browserState,
 			},
 			encoding: "utf8",
 		},
 	);
 
-	assert.notEqual(result.status, 0, "fingerprint mismatch should fail closed");
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stderr, /verification failed; trying Chromium fallback/);
 	assert.equal(fs.readFileSync(target, "utf8"), "existing-keyring\n");
 	assert.equal(fs.readFileSync(source, "utf8"), "existing-source\n");
 	assert.equal(fs.readFileSync(log, "utf8"), "", "mismatched keys should not be exported");
+	assert.match(fs.readFileSync(path.join(browserBin, "crabbox-browser"), "utf8"), new RegExp(`${bin}/chromium`));
 	assert.equal(
 		fs.readdirSync(keyrings).filter((name) => name.includes(".tmp.")).length,
 		0,

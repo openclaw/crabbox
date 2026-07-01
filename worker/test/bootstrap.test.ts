@@ -371,6 +371,7 @@ describe("cloud-init bootstrap", () => {
       'mv -f "$google_key_tmp/google-linux.gpg" /etc/apt/keyrings/google-linux.gpg',
     );
     expect(got).toContain("signed-by=/etc/apt/keyrings/google-linux.gpg");
+    expect(got).toContain("Google Linux signing key verification failed; trying Chromium fallback");
     expect(got).not.toContain("/etc/apt/trusted.gpg.d/google.asc");
     expect(got).toContain("https://dl.google.com/linux/chrome/deb/");
     expect(got).toContain("google-chrome-stable");

@@ -1402,29 +1402,29 @@ ${themeConfigure}    systemctl daemon-reload
       google_key_tmp="$(mktemp -d /etc/apt/keyrings/google-linux.gpg.tmp.XXXXXX)"
       google_key_home="$google_key_tmp/gnupg"
       install -d -m 0700 "$google_key_home"
-      if ! curl -fsSL https://dl.google.com/linux/linux_signing_key.pub > "$google_key_tmp/google.asc" ||
-         ! GNUPGHOME="$google_key_home" gpg --batch --import "$google_key_tmp/google.asc" >/dev/null 2>&1; then
-        rm -rf "$google_key_tmp"
-        echo "failed to import Google Linux signing key" >&2
-        exit 1
+      google_key_ready=0
+      if curl -fsSL https://dl.google.com/linux/linux_signing_key.pub > "$google_key_tmp/google.asc" &&
+         GNUPGHOME="$google_key_home" gpg --batch --import "$google_key_tmp/google.asc" >/dev/null 2>&1; then
+        google_key_fingerprint="$(GNUPGHOME="$google_key_home" gpg --batch --with-colons --fingerprint ${googleLinuxSigningKeyFingerprint} 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')"
+        if [ "$google_key_fingerprint" = "${googleLinuxSigningKeyFingerprint}" ] &&
+           GNUPGHOME="$google_key_home" gpg --batch --export ${googleLinuxSigningKeyFingerprint} > "$google_key_tmp/google-linux.gpg" &&
+           [ -s "$google_key_tmp/google-linux.gpg" ]; then
+          chmod 0644 "$google_key_tmp/google-linux.gpg"
+          mv -f "$google_key_tmp/google-linux.gpg" /etc/apt/keyrings/google-linux.gpg
+          google_key_ready=1
+        fi
       fi
-      google_key_fingerprint="$(GNUPGHOME="$google_key_home" gpg --batch --with-colons --fingerprint ${googleLinuxSigningKeyFingerprint} 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')"
-      if [ "$google_key_fingerprint" != "${googleLinuxSigningKeyFingerprint}" ] ||
-         ! GNUPGHOME="$google_key_home" gpg --batch --export ${googleLinuxSigningKeyFingerprint} > "$google_key_tmp/google-linux.gpg" ||
-         [ ! -s "$google_key_tmp/google-linux.gpg" ]; then
-        rm -rf "$google_key_tmp"
-        echo "Google Linux signing key fingerprint mismatch" >&2
-        exit 1
-      fi
-      chmod 0644 "$google_key_tmp/google-linux.gpg"
-      mv -f "$google_key_tmp/google-linux.gpg" /etc/apt/keyrings/google-linux.gpg
       rm -rf "$google_key_tmp"
-      echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
-      if apt-get update && retry apt-get install -y --no-install-recommends google-chrome-stable; then
-        browser_path="$(command -v google-chrome || true)"
+      if [ "$google_key_ready" = 1 ]; then
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+        if apt-get update && retry apt-get install -y --no-install-recommends google-chrome-stable; then
+          browser_path="$(command -v google-chrome || true)"
+        else
+          rm -f /etc/apt/sources.list.d/google-chrome.list
+          retry apt-get update || true
+        fi
       else
-        rm -f /etc/apt/sources.list.d/google-chrome.list
-        retry apt-get update || true
+        echo "Google Linux signing key verification failed; trying Chromium fallback" >&2
       fi
     fi
     if [ -z "$browser_path" ]; then
