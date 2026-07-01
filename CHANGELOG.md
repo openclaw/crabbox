@@ -71,6 +71,7 @@
 
 ### Fixed
 
+- Pinned Windows Chocolatey image bootstrap to a checksum-verified versioned package before privileged installation. Thanks @TurboTheTurtle.
 - Redacted Daytona API and upload credentials from provider error diagnostics, including reflected authorization headers and token-bearing JSON fields. Thanks @TurboTheTurtle.
 - Recognized current Windows 11 Sandbox host processes during run monitoring and cleanup, preventing false early exits and orphaned sandboxes on 24H2 and newer builds. Thanks @paulcam206.
 - Replaced fixed-size Xvfb/x11vnc desktops on managed Linux workspaces with loopback-only TigerVNC displays that honor native viewer resize requests while preserving VNC authentication and existing-service health fallbacks.
