@@ -366,6 +366,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("https://dl.google.com/linux/linux_signing_key.pub");
     expect(got).toContain("EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796");
     expect(got).toContain('GNUPGHOME="$google_key_home" gpg --batch --import');
+    expect(got).toContain(`awk -F: '$1 == "fpr" { print $10; exit }' || true`);
     expect(got).toContain("gpg --batch --export EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796");
     expect(got).toContain(
       'mv -f "$google_key_tmp/google-linux.gpg" /etc/apt/keyrings/google-linux.gpg',

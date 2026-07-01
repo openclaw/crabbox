@@ -1405,7 +1405,7 @@ ${themeConfigure}    systemctl daemon-reload
       google_key_ready=0
       if curl -fsSL https://dl.google.com/linux/linux_signing_key.pub > "$google_key_tmp/google.asc" &&
          GNUPGHOME="$google_key_home" gpg --batch --import "$google_key_tmp/google.asc" >/dev/null 2>&1; then
-        google_key_fingerprint="$(GNUPGHOME="$google_key_home" gpg --batch --with-colons --fingerprint ${googleLinuxSigningKeyFingerprint} 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')"
+        google_key_fingerprint="$(GNUPGHOME="$google_key_home" gpg --batch --with-colons --fingerprint ${googleLinuxSigningKeyFingerprint} 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }' || true)"
         if [ "$google_key_fingerprint" = "${googleLinuxSigningKeyFingerprint}" ] &&
            GNUPGHOME="$google_key_home" gpg --batch --export ${googleLinuxSigningKeyFingerprint} > "$google_key_tmp/google-linux.gpg" &&
            [ -s "$google_key_tmp/google-linux.gpg" ]; then
