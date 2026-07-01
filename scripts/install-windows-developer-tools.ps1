@@ -13,6 +13,10 @@ if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:
 $InstallDocker = $env:CRABBOX_WINDOWS_INSTALL_DOCKER
 if (-not $InstallDocker) { $InstallDocker = "1" }
 $RebootMarker = "C:\ProgramData\crabbox\image-prep-reboot-required"
+$ChocolateyPackageURL = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_URL
+if (-not $ChocolateyPackageURL) { $ChocolateyPackageURL = "https://community.chocolatey.org/api/v2/package/chocolatey/2.7.3" }
+$ChocolateyPackageSHA256 = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_SHA256
+if (-not $ChocolateyPackageSHA256) { $ChocolateyPackageSHA256 = "40778cc59245b3eb6ea5147aeef5bea5d577419e5abce22a224189740dc16db5" }
 
 function Write-Log {
   param([string]$Message)
@@ -59,11 +63,63 @@ function Refresh-SessionPath {
   Add-MachinePath "C:\Program Files\docker"
 }
 
+function Assert-FileSHA256 {
+  param(
+    [string]$Path,
+    [string]$Expected,
+    [string]$Name
+  )
+  if (-not $Expected -or $Expected -notmatch "^[0-9a-fA-F]{64}$") {
+    throw "$Name SHA256 must be a 64-character hex digest"
+  }
+  $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+  $want = $Expected.ToLowerInvariant()
+  if ($actual -ne $want) {
+    throw "$Name SHA256 mismatch: got $actual want $want"
+  }
+}
+
+function Install-VerifiedChocolateyPackage {
+  param(
+    [string]$Url,
+    [string]$SHA256
+  )
+  $workDir = Join-Path $env:TEMP ("crabbox-chocolatey-" + [Guid]::NewGuid().ToString("N"))
+  $package = Join-Path $workDir "chocolatey.zip"
+  $extractDir = Join-Path $workDir "package"
+  try {
+    New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+    Retry { Invoke-WebRequest -Uri $Url -OutFile $package -UseBasicParsing }
+    Assert-FileSHA256 -Path $package -Expected $SHA256 -Name "Chocolatey package"
+    Expand-Archive -LiteralPath $package -DestinationPath $extractDir -Force
+
+    $installScript = Join-Path $extractDir "tools\chocolateyInstall.ps1"
+    if (-not (Test-Path -LiteralPath $installScript -PathType Leaf)) {
+      throw "Chocolatey package is missing tools\chocolateyInstall.ps1"
+    }
+
+    & $installScript
+
+    $installRoot = [Environment]::GetEnvironmentVariable("ChocolateyInstall", "Machine")
+    if (-not $installRoot) { $installRoot = "C:\ProgramData\chocolatey" }
+    $chocoExe = Join-Path $installRoot "bin\choco.exe"
+    if (-not (Test-Path -LiteralPath $chocoExe -PathType Leaf)) {
+      throw "Chocolatey package installation did not create $chocoExe"
+    }
+
+    $packageDir = Join-Path $installRoot "lib\chocolatey"
+    New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+    Copy-Item -LiteralPath $package -Destination (Join-Path $packageDir "chocolatey.nupkg") -Force
+  } finally {
+    Remove-Item -Recurse -Force -LiteralPath $workDir -ErrorAction SilentlyContinue
+  }
+}
+
 function Install-Chocolatey {
   if (Get-Command choco.exe -ErrorAction SilentlyContinue) { return }
   Write-Log "installing Chocolatey"
   Set-ExecutionPolicy Bypass -Scope Process -Force
-  Invoke-Expression ((New-Object Net.WebClient).DownloadString("https://community.chocolatey.org/install.ps1"))
+  Install-VerifiedChocolateyPackage -Url $ChocolateyPackageURL -SHA256 $ChocolateyPackageSHA256
   Add-MachinePath "C:\ProgramData\chocolatey\bin"
 }
 
