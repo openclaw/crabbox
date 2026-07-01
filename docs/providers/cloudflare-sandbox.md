@@ -87,6 +87,7 @@ CF_API_EMAIL
 crabbox doctor --provider cloudflare-sandbox --json
 crabbox warmup --provider cloudflare-sandbox --slug cfsbx-smoke
 crabbox run --provider cloudflare-sandbox -- go test ./...
+crabbox run --provider cloudflare-sandbox --keep --lease-output /tmp/cloudflare-sandbox-session.json -- go test ./...
 crabbox run --provider cloudflare-sandbox --id cfsbx-smoke --shell 'pnpm install && pnpm test'
 crabbox run --provider cloudflare-sandbox --id cfsbx-smoke --sync-only
 crabbox status --provider cloudflare-sandbox --id cfsbx-smoke --wait --json
@@ -98,6 +99,9 @@ crabbox cleanup --provider cloudflare-sandbox --dry-run
 `warmup` keeps the sandbox until explicit `stop`, even if `--keep` is omitted.
 A `run` without `--id` creates a sandbox and deletes it after the command unless
 `--keep` or `--keep-on-failure` retains it.
+`run --lease-output <path>` writes the stable lease ID, slug, reuse/retention
+state, and exact `crabbox stop --provider cloudflare-sandbox --id ...` cleanup
+command for orchestration handoff.
 
 ## Config
 
@@ -172,6 +176,8 @@ Sandbox sizing is not exposed through Crabbox's v1 bridge contract.
 
 - SSH: no.
 - Crabbox sync: yes, via portable archive upload and in-sandbox extraction.
+- Run-session output: yes. `--lease-output` records retained and reused sandbox
+  handles plus the exact cleanup command; it does not create a separate run ID.
 - Env forwarding: yes, off-argv in the bridge request body; provider auth
   variables are stripped.
 - Exec output: server-sent events when the bridge returns `text/event-stream`,
@@ -190,6 +196,6 @@ this provider page as proof of live Cloudflare account writes, quota behavior,
 or bridge deployment compatibility. Run `doctor` against your bridge before
 `run`, and use a disposable sandbox for any future live smoke.
 
-Cloudflare Sandbox platform features such as URL bridges, persistent sessions,
-storage mounts, and checkpoints are future candidates. They should be documented
-here only after Crabbox implements and verifies those surfaces.
+Cloudflare Sandbox platform features such as URL bridges, provider-native
+session APIs, storage mounts, and checkpoints are future candidates. They should
+be documented here only after Crabbox implements and verifies those surfaces.
