@@ -241,6 +241,9 @@ if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TOOL_CACHE)) {
 `)
 	}
 	for key, value := range env {
+		if !validEnvName(key) {
+			continue
+		}
 		b.WriteString(`$env:` + key + ` = ` + psQuote(value) + "\n")
 	}
 }

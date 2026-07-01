@@ -31,7 +31,7 @@ func loadEnvProfiles(paths []string) (map[string]string, error) {
 func allowedEnvFromProfiles(allow []string, profileEnv map[string]string) map[string]string {
 	out := allowedEnv(allow)
 	for key, value := range profileEnv {
-		if envAllowed(key, allow) {
+		if validEnvName(key) && envAllowed(key, allow) {
 			out[key] = value
 		}
 	}
@@ -41,7 +41,7 @@ func allowedEnvFromProfiles(allow []string, profileEnv map[string]string) map[st
 func allowedProfileEnv(allow []string, profileEnv map[string]string) map[string]string {
 	out := map[string]string{}
 	for key, value := range profileEnv {
-		if envAllowed(key, allow) {
+		if validEnvName(key) && envAllowed(key, allow) {
 			out[key] = value
 		}
 	}

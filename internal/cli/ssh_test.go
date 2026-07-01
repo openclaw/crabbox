@@ -43,6 +43,20 @@ func TestRemoteCommandQuotesWorkdirEnvAndArgs(t *testing.T) {
 	}
 }
 
+func TestRemoteCommandDropsInvalidEnvNames(t *testing.T) {
+	invalid := `PROJECT_$(touch /tmp/cbx-env-pwn)#`
+	got := remoteCommand("/work/repo", map[string]string{
+		"CI":    "1",
+		invalid: "ignored",
+	}, []string{"true"})
+	if !strings.Contains(got, "CI='1'") {
+		t.Fatalf("remoteCommand() missing valid environment variable in %q", got)
+	}
+	if strings.Contains(got, invalid) || strings.Contains(got, "$(touch") {
+		t.Fatalf("remoteCommand() rendered invalid environment name in %q", got)
+	}
+}
+
 func TestRemoteShellCommandRunsScript(t *testing.T) {
 	got := remoteShellCommand("/work/crabbox/cbx_1/repo", map[string]string{"CI": "1"}, "pnpm install && pnpm test")
 	for _, want := range []string{
@@ -126,6 +140,21 @@ func TestWindowsNativeRemoteCommandUsesPowerShell(t *testing.T) {
 	decoded := decodePowerShellCommand(t, got)
 	if !strings.HasPrefix(decoded, "$ProgressPreference = \"SilentlyContinue\"\n") {
 		t.Fatalf("windows command should suppress PowerShell progress records: %q", decoded)
+	}
+}
+
+func TestWindowsNativeRemoteCommandDropsInvalidEnvNames(t *testing.T) {
+	invalid := `PROJECT_$(touch C:\cbx-env-pwn)#`
+	got := windowsRemoteCommandWithEnvFile(`C:\crabbox\cbx\repo`, map[string]string{
+		"CI":    "1",
+		invalid: "ignored",
+	}, "", []string{"cmd.exe", "/c", "exit", "0"})
+	decoded := decodePowerShellCommand(t, got)
+	if !strings.Contains(decoded, `$env:CI = '1'`) {
+		t.Fatalf("windows command missing valid environment variable in %q", decoded)
+	}
+	if strings.Contains(decoded, invalid) || strings.Contains(decoded, "$(touch") {
+		t.Fatalf("windows command rendered invalid environment name in %q", decoded)
 	}
 }
 
@@ -401,6 +430,15 @@ func TestEnvAllowlistRejectsEmptyWildcardPrefix(t *testing.T) {
 	}
 	if !envAllowed("PROJECT_FLAG", []string{"PROJECT_*"}) {
 		t.Fatal("non-empty prefix wildcard should still work")
+	}
+}
+
+func TestAllowedEnvDropsInvalidNames(t *testing.T) {
+	invalid := `PROJECT_$(touch /tmp/cbx-env-pwn)#`
+	t.Setenv(invalid, "1")
+	got := allowedEnv([]string{"PROJECT_*"})
+	if _, ok := got[invalid]; ok {
+		t.Fatalf("allowedEnv() forwarded invalid environment name: %#v", got)
 	}
 }
 
