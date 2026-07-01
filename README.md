@@ -8,20 +8,43 @@
 
 **Warm a box, sync the diff, run the suite.**
 
-Crabbox is a remote software testing and execution control plane for maintainers
-and AI agents. Lease fast managed cloud capacity, point at an existing SSH host,
-or use an agent sandbox provider — then sync your dirty checkout, run commands
-remotely, stream output, collect evidence, and release. Local edit-save-run
-loop, cloud-grade compute, agent-ready observability.
+Crabbox is a generic remote software testing and execution control plane. It is
+for maintainers, contributors, and automation that need to run repository
+commands somewhere other than the laptop in front of them: on managed cloud
+capacity, an existing SSH host, or a delegated sandbox provider. Crabbox keeps
+the local edit-save-run workflow, but moves the expensive or evidence-producing
+work onto a remote runner.
 
 ```sh
 crabbox run -- pnpm test
 ```
 
-Behind that one command: a Go CLI on your laptop, an optional coordinator that
-owns provider credentials and lease state, and a managed or delegated runner.
-Run the coordinator on Cloudflare Workers with a Durable Object, or as a
-Node.js service backed by PostgreSQL.
+Behind that one command, Crabbox leases or selects a runner, syncs the current
+working tree, runs the command remotely, streams output back, records evidence,
+and releases or unclaims the target. The system is a Go CLI on your machine, an
+optional coordinator that owns provider credentials and lease state, and a
+managed or delegated runner. Run the coordinator on Cloudflare Workers with a
+Durable Object, or as a Node.js service backed by PostgreSQL.
+
+## Who Crabbox is for
+
+Crabbox fits teams and tools that need repeatable remote execution without
+turning every test run into a bespoke CI job:
+
+- maintainers who need faster or larger machines for test suites, builds,
+  browser checks, or platform-specific validation;
+- contributors who want a disposable environment that matches a repository's
+  setup scripts and can be released when the run finishes;
+- AI agents and other automation that need command output, logs, artifacts, and
+  run history from an auditable remote box;
+- teams that want coordinator-owned cloud credentials, spend caps, cleanup, and
+  shared usage history instead of local long-lived provider keys.
+
+Use Crabbox when local compute is too slow, the target platform is somewhere
+else, a workflow needs a clean disposable runner, or a reviewer needs streamed
+evidence from the exact command that ran. Do not use it as a replacement for CI,
+a hostile multi-tenant sandbox, a secrets scrubber, or an isolation boundary
+between mutually untrusted users.
 
 ## Trust model
 
