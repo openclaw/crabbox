@@ -16956,6 +16956,118 @@ describe("fleet run history", () => {
     ).toBe(404);
   });
 
+  it("allows use-share users to create validated lease-attributed runs", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const ownerHeaders = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const actorHeaders = {
+      "x-crabbox-owner": "bob@example.com",
+      "x-crabbox-org": "elsewhere",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        share: { users: { "bob@example.com": "use" } },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers: actorHeaders,
+        body: {
+          leaseID: "cbx_000000000001",
+          command: ["pnpm", "test"],
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const { run } = (await create.json()) as { run: RunRecord };
+    expect(run).toMatchObject({
+      owner: "bob@example.com",
+      org: "elsewhere",
+      leaseID: "cbx_000000000001",
+      leaseIDs: ["cbx_000000000001"],
+      leaseOwners: [{ owner: "alice@example.com", org: "example-org" }],
+    });
+
+    const ownerList = await fleet.fetch(
+      request("GET", "/v1/runs?leaseID=cbx_000000000001", { headers: ownerHeaders }),
+    );
+    await expect(ownerList.json()).resolves.toMatchObject({
+      runs: [{ id: run.id, owner: "bob@example.com" }],
+    });
+  });
+
+  it("blocks use-share users from re-tagging unrelated runs into lease owner audits", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const ownerHeaders = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const actorHeaders = {
+      "x-crabbox-owner": "bob@example.com",
+      "x-crabbox-org": "elsewhere",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        share: { users: { "bob@example.com": "use" } },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers: actorHeaders,
+        body: {
+          command: ["pnpm", "test"],
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const { run } = (await create.json()) as { run: RunRecord };
+    expect(run.leaseID).toBe("");
+
+    const reattribute = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/events`, {
+        headers: actorHeaders,
+        body: {
+          type: "lease.created",
+          leaseID: "cbx_000000000001",
+          slug: "blue-lobster",
+        },
+      }),
+    );
+    expect(reattribute.status).toBe(404);
+
+    expect(storage.value<RunRecord>(`run:${run.id}`)).toMatchObject({
+      leaseID: "",
+      leaseIDs: [],
+      leaseOwners: [],
+      eventCount: 1,
+    });
+    const ownerList = await fleet.fetch(
+      request("GET", "/v1/runs?leaseID=cbx_000000000001", { headers: ownerHeaders }),
+    );
+    await expect(ownerList.json()).resolves.toEqual({ runs: [] });
+    expect(
+      (await fleet.fetch(request("GET", `/v1/runs/${run.id}`, { headers: ownerHeaders }))).status,
+    ).toBe(404);
+  });
+
   it("reconstructs backing lease audit access for legacy runs", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

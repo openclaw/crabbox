@@ -130,7 +130,7 @@ func TestRunRecorderDefersCreateWhenCoordinatorRequiresLeaseID(t *testing.T) {
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
-	}, []string{"pnpm", "test"}, "", &stderr)
+	}, []string{"pnpm", "test"}, "", &stderr, false)
 	rec.Event("leasing.started", "leasing", "")
 	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
 		Provider:   "aws",
@@ -146,6 +146,61 @@ func TestRunRecorderDefersCreateWhenCoordinatorRequiresLeaseID(t *testing.T) {
 	}
 	if got := createBodies[1]["leaseID"]; got != "cbx_abcdef123456" {
 		t.Fatalf("second create leaseID=%#v", got)
+	}
+	if got := eventBody["type"]; got != "lease.created" {
+		t.Fatalf("event body=%#v", eventBody)
+	}
+	if text := stderr.String(); strings.Contains(text, "warning:") || !strings.Contains(text, "recording run run_123") {
+		t.Fatalf("stderr=%q", text)
+	}
+}
+
+func TestRunRecorderDefersCreateForExplicitLeaseRuns(t *testing.T) {
+	var stderr bytes.Buffer
+	var createBodies []map[string]any
+	var eventBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			createBodies = append(createBodies, body)
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_abcdef123456","owner":"bob@example.com","org":"elsewhere","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/events":
+			if err := json.NewDecoder(r.Body).Decode(&eventBody); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"event":{"runID":"run_123","seq":1,"type":"lease.created","leaseID":"cbx_abcdef123456","createdAt":"2026-05-02T00:00:01Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	rec := newRunRecorder(context.Background(), client, Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+	}, []string{"pnpm", "test"}, "", &stderr, true)
+	rec.Event("leasing.started", "leasing", "")
+	if len(createBodies) != 0 {
+		t.Fatalf("create requests before lease=%d want 0", len(createBodies))
+	}
+
+	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+	})
+
+	if len(createBodies) != 1 {
+		t.Fatalf("create requests=%d want 1", len(createBodies))
+	}
+	if got := createBodies[0]["leaseID"]; got != "cbx_abcdef123456" {
+		t.Fatalf("create leaseID=%#v", got)
 	}
 	if got := eventBody["type"]; got != "lease.created" {
 		t.Fatalf("event body=%#v", eventBody)
@@ -188,7 +243,7 @@ func TestRunRecorderRetriesTransientCreateFailureAfterLease(t *testing.T) {
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
-	}, []string{"go", "test"}, "", &stderr)
+	}, []string{"go", "test"}, "", &stderr, false)
 	rec.Event("leasing.started", "leasing", "")
 	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
 		Provider:   "aws",
@@ -247,7 +302,7 @@ func TestRunRecorderMarksHistoryUnavailableAfterPersistentCreateFailure(t *testi
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
-	}, []string{"go", "test"}, "", &stderr)
+	}, []string{"go", "test"}, "", &stderr, false)
 	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
 		Provider:   "aws",
 		Class:      "standard",
@@ -307,7 +362,7 @@ func TestRunRecorderRetriesFailedLeaseCreateOnReplacementLease(t *testing.T) {
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
-	}, []string{"go", "test"}, "", &stderr)
+	}, []string{"go", "test"}, "", &stderr, false)
 	rec.AttachLease("cbx_initial123456", "blue-lobster", Config{
 		Provider:   "aws",
 		Class:      "standard",
@@ -407,7 +462,7 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
-	}, []string{"pnpm", "test"}, "", &stderr)
+	}, []string{"pnpm", "test"}, "", &stderr, false)
 	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
 		Provider:   "aws",
 		Class:      "standard",
