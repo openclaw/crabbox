@@ -1342,11 +1342,21 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
       fi
       rm -rf "$google_key_tmp"
       if [ "$google_key_ready" = 1 ]; then
-        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+        install -d -m 0755 /etc/default
+        google_defaults_tmp="$(mktemp /etc/default/google-chrome.tmp.XXXXXX)"
+        if [ -f /etc/default/google-chrome ]; then
+          awk '!/^[[:space:]]*repo_add_once=/ && !/^[[:space:]]*repo_reenable_on_distupgrade=/' /etc/default/google-chrome > "$google_defaults_tmp"
+        fi
+        printf '%s\n' 'repo_add_once="false"' 'repo_reenable_on_distupgrade="false"' >> "$google_defaults_tmp"
+        chmod 0644 "$google_defaults_tmp"
+        mv -f "$google_defaults_tmp" /etc/default/google-chrome
+        rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/crabbox-google-chrome.list
         if apt-get update && retry apt-get install -y --no-install-recommends google-chrome-stable; then
+          rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           browser_path="$(command -v google-chrome || true)"
         else
-          rm -f /etc/apt/sources.list.d/google-chrome.list
+          rm -f /etc/apt/sources.list.d/crabbox-google-chrome.list /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           retry apt-get update || true
         fi
       else

@@ -353,6 +353,10 @@ func TestCloudInitBrowserWrapper(t *testing.T) {
 		"gpg --batch --export " + googleLinuxSigningKeyFingerprint,
 		`mv -f "$google_key_tmp/google-linux.gpg" /etc/apt/keyrings/google-linux.gpg`,
 		"signed-by=/etc/apt/keyrings/google-linux.gpg",
+		`repo_add_once="false"`,
+		`repo_reenable_on_distupgrade="false"`,
+		"/etc/apt/sources.list.d/crabbox-google-chrome.list",
+		"rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources",
 		"Google Linux signing key verification failed; trying Chromium fallback",
 		"https://dl.google.com/linux/chrome/deb/",
 		"google-chrome-stable",
@@ -373,6 +377,8 @@ func TestCloudInitBrowserWrapper(t *testing.T) {
 	}
 	for _, notWant := range []string{
 		"/etc/apt/trusted.gpg.d/google.asc",
+		"> /etc/apt/sources.list.d/google-chrome.list",
+		"> /etc/apt/sources.list.d/google-chrome.sources",
 		"<<'EOF'",
 		"<<EOF",
 		"\nEOF",
