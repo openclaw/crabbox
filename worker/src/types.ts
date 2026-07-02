@@ -347,6 +347,8 @@ export interface LeaseRecord {
   serverName: string;
   providerKey: string;
   providerKeyCleanupOwned?: boolean;
+  providerKeyCleanupPending?: boolean;
+  providerKeyCleanupID?: string;
   host: string;
   sshUser: string;
   sshPort: string;

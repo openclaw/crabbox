@@ -47,6 +47,7 @@ import {
 import { GCPClient } from "./gcp";
 import {
   HetznerClient,
+  HetznerProvisioningError,
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
 } from "./hetzner";
@@ -2277,6 +2278,13 @@ export class FleetCoordinator {
             config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
           record.provisioningFailureRetryable =
             config.provider === "hetzner" && hetznerProvisioningFailureRetryable(error);
+          if (
+            error instanceof HetznerProvisioningError &&
+            error.providerKeyCleanupID !== undefined
+          ) {
+            record.providerKeyCleanupPending = true;
+            record.providerKeyCleanupID = String(error.providerKeyCleanupID);
+          }
           if (record.provisioningResourceMayExist || record.provisioningFailureRetryable) {
             delete record.failureError;
           } else {
@@ -2845,6 +2853,9 @@ export class FleetCoordinator {
         workspace,
         "workspace lease reservation conflicts with another lifecycle",
       );
+      return;
+    }
+    if (lease?.providerKeyCleanupPending) {
       return;
     }
     if (!lease && workspaceProvisionDeadline(workspace) <= Date.now()) {
@@ -3974,6 +3985,7 @@ export class FleetCoordinator {
         currentWorkspace.leaseID !== workspace.leaseID ||
         currentWorkspace.releaseRequestedAt ||
         !currentLease ||
+        currentLease.providerKeyCleanupPending ||
         !workspaceOwnsLease(currentWorkspace, currentLease) ||
         !(
           (currentLease.state === "provisioning" && !currentLease.provisioningRequestStartedAt) ||
@@ -10058,6 +10070,8 @@ export class FleetCoordinator {
             current.endedAt = nowISO;
             delete current.releaseDeletesServer;
             clearLeaseCleanupMetadata(current);
+            delete current.providerKeyCleanupPending;
+            delete current.providerKeyCleanupID;
             delete current.cleanupStartedAt;
             delete current.cleanupClaimExpiresAt;
             await this.putLease(current);
@@ -11538,10 +11552,11 @@ export class FleetCoordinator {
       const deleteServer = options.deleteServer && !isRegisteredLease(current);
       const shouldDelete = Boolean(
         deleteServer &&
-        current.cloudID &&
-        (leaseIsLive(current) ||
-          current.releaseDeletesServer !== undefined ||
-          current.cleanupError),
+        (current.providerKeyCleanupPending ||
+          (current.cloudID &&
+            (leaseIsLive(current) ||
+              current.releaseDeletesServer !== undefined ||
+              current.cleanupError))),
       );
       if (!shouldDelete) {
         const released = finalizedReleasedLease(current, deleteServer, options.keep);
@@ -11605,6 +11620,8 @@ export class FleetCoordinator {
         return current ?? preparation.lease;
       }
       const released = finalizedReleasedLease(current, true, options.keep);
+      delete released.providerKeyCleanupPending;
+      delete released.providerKeyCleanupID;
       await this.putLease(released);
       await this.clearWorkspaceReleaseError(released);
       await this.markAWSIngressReconcilePending(released);
@@ -12562,6 +12579,9 @@ function workspaceProvisioningNeedsRecovery(
   lease: LeaseRecord,
   now = Date.now(),
 ): boolean {
+  if (lease.providerKeyCleanupPending) {
+    return false;
+  }
   if (lease.cloudID) {
     return false;
   }
@@ -12585,6 +12605,14 @@ function workspaceNextReconcileAt(
   now = Date.now(),
 ): number | undefined {
   if (lease && !workspaceOwnsLease(workspace, lease)) return workspace.error ? undefined : now;
+  if (lease?.providerKeyCleanupPending) {
+    const claimDeadline = cleanupClaimDeadline(lease);
+    if (lease.cleanupStartedAt && Number.isFinite(claimDeadline)) {
+      return claimDeadline;
+    }
+    const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
+    return Number.isFinite(retryAt) && retryAt > now ? retryAt : now;
+  }
   const claimExpiresAt = Date.parse(workspace.provisionClaimExpiresAt ?? "");
   const deferredUntil = Date.parse(workspace.reconcileAfter ?? "");
   const provisioningDeadline =
@@ -14889,7 +14917,9 @@ function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
     return true;
   }
   return Boolean(
-    !leaseIsLive(lease) && lease.cloudID && (lease.cleanupError || lease.cleanupStartedAt),
+    !leaseIsLive(lease) &&
+    ((lease.cloudID && (lease.cleanupError || lease.cleanupStartedAt)) ||
+      lease.providerKeyCleanupPending),
   );
 }
 
@@ -14981,6 +15011,10 @@ function nextLeaseAlarmTime(lease: LeaseRecord): number {
     return leaseIsLive(lease) && Number.isFinite(expiresAt)
       ? Math.min(expiresAt, deleteAlarm)
       : deleteAlarm;
+  }
+  if (lease.providerKeyCleanupPending && !lease.cleanupStartedAt) {
+    const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
+    return Number.isFinite(retryAt) && retryAt > now ? retryAt : now + 1;
   }
   const claimDeadline = cleanupClaimDeadline(lease);
   if (lease.cleanupStartedAt && Number.isFinite(claimDeadline)) {
@@ -15775,12 +15809,22 @@ export class HetznerProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    try {
-      await this.deleteServer(String(lease.serverID));
-    } catch (error) {
-      if (!providerResourceNotFound(error)) {
-        throw error;
+    if (!lease.providerKeyCleanupPending) {
+      try {
+        await this.deleteServer(String(lease.serverID));
+      } catch (error) {
+        if (!providerResourceNotFound(error)) {
+          throw error;
+        }
       }
+    }
+    if (lease.providerKeyCleanupPending) {
+      const providerKeyID = Number(lease.providerKeyCleanupID);
+      if (!Number.isSafeInteger(providerKeyID) || providerKeyID <= 0) {
+        throw new Error("invalid pending Hetzner SSH key cleanup id");
+      }
+      await this.client.deleteSSHKeyByID(providerKeyID);
+      return;
     }
     if (leaseUsesCanonicalProviderKey(lease)) {
       await this.deleteSSHKey(lease.providerKey, lease.id);
