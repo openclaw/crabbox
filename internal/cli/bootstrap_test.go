@@ -400,12 +400,21 @@ func TestCloudInitCodeProfile(t *testing.T) {
 		"https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz",
 		"sha256sum -c -",
 		"/usr/local/lib/code-server",
+		"chmod 0755 /usr/local/lib/code-server",
+		`rm -rf "$CS_INSTALL_DIR"`,
+		"trap - EXIT",
 		"/usr/local/bin/code-server --version >/dev/null",
 		"test -x /usr/local/bin/code-server",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(code) missing %q", want)
 		}
+	}
+	copyIndex := strings.Index(got, `cp -a "$CS_INSTALL_DIR/." /usr/local/lib/code-server/`)
+	chmodIndex := strings.Index(got, "chmod 0755 /usr/local/lib/code-server")
+	linkIndex := strings.Index(got, "ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server")
+	if copyIndex < 0 || chmodIndex <= copyIndex || linkIndex <= chmodIndex {
+		t.Fatal("cloudInit(code) must restore install-root traversal after copying and before exposing the binary")
 	}
 	if strings.Contains(got, "https://code-server.dev/install.sh") || strings.Contains(got, "curl -fsSL https://code-server.dev/install.sh | sh") {
 		t.Fatal("cloudInit(code) must not pipe the code-server installer script to root shell")
