@@ -3123,6 +3123,155 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it.each([
+    { cleanupStatus: 204, label: "deletes the allocated server" },
+    { cleanupStatus: 404, label: "accepts an already-absent allocated server" },
+  ])("rolls back ordinary Hetzner readiness failures when it $label", async ({ cleanupStatus }) => {
+    const fetchMock = hetznerReadinessFailureFetch(cleanupStatus);
+    vi.stubGlobal("fetch", fetchMock);
+    const wait = vi
+      .spyOn(HetznerClient.prototype, "waitForServerIP")
+      .mockRejectedValueOnce(new Error("timed out waiting for server IP: 123"));
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+    const config = leaseConfig({
+      provider: "hetzner",
+      providerKey: "ordinary-key",
+      sshPublicKey: "ssh-ed25519 ordinary-test",
+    });
+
+    try {
+      const error = await client
+        .createServerWithFallback(config, "cbx_abcdef123456", "ordinary", "alice@example.com")
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HetznerProvisioningError);
+      expect(error).toMatchObject({ resourceMayExist: false, retryable: true });
+      expect((error as HetznerProvisioningError).serverID).toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.hetzner.cloud/v1/servers/123",
+        expect.objectContaining({ method: "DELETE" }),
+      );
+    } finally {
+      wait.mockRestore();
+    }
+  });
+
+  it("keeps the allocated Hetzner server ID when readiness rollback fails", async () => {
+    const fetchMock = hetznerReadinessFailureFetch(503);
+    vi.stubGlobal("fetch", fetchMock);
+    const wait = vi
+      .spyOn(HetznerClient.prototype, "waitForServerIP")
+      .mockRejectedValueOnce(new Error("timed out waiting for server IP: 123"));
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+    const config = leaseConfig({
+      provider: "hetzner",
+      providerKey: "ordinary-key",
+      sshPublicKey: "ssh-ed25519 ordinary-test",
+    });
+
+    try {
+      const error = await client
+        .createServerWithFallback(config, "cbx_abcdef123456", "ordinary", "alice@example.com")
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(HetznerProvisioningError);
+      expect(error).toMatchObject({ resourceMayExist: true, retryable: true, serverID: 123 });
+      expect((error as Error).message).toContain("rollback failed");
+    } finally {
+      wait.mockRestore();
+    }
+  });
+
+  it("leaves workspace Hetzner readiness recovery unchanged", async () => {
+    const fetchMock = hetznerReadinessFailureFetch(204);
+    vi.stubGlobal("fetch", fetchMock);
+    const wait = vi
+      .spyOn(HetznerClient.prototype, "waitForServerIP")
+      .mockRejectedValueOnce(new Error("timed out waiting for server IP: 123"));
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+    const config = leaseConfig({
+      provider: "hetzner",
+      providerKey: "crabbox-workspace-deadbeef0000",
+      sshPublicKey: "ssh-ed25519 workspace-test",
+    });
+
+    try {
+      const error = await client
+        .createServerWithFallback(config, "cbx_abcdef123456", "workspace", "alice@example.com")
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ resourceMayExist: true, retryable: true, serverID: 123 });
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        "https://api.hetzner.cloud/v1/servers/123",
+        expect.objectContaining({ method: "DELETE" }),
+      );
+    } finally {
+      wait.mockRestore();
+    }
+  });
+
+  it("persists failed ordinary Hetzner cleanup and retries by server ID", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(
+        async () => {
+          throw new HetznerProvisioningError(
+            "timed out waiting for server IP: 777; rollback failed: provider unavailable",
+            true,
+            true,
+            777,
+          );
+        },
+        {},
+        async (id) => {
+          deleted.push(id);
+        },
+      ),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "hetzner",
+          sshPublicKey: "ssh-ed25519 ordinary-test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const failed = storage.value<LeaseRecord>("lease:cbx_abcdef123456")!;
+    expect(failed).toMatchObject({
+      state: "failed",
+      cloudID: "777",
+      serverID: 777,
+      releaseDeletesServer: true,
+      provisioningResourceMayExist: true,
+      cleanupRetryAt: expect.any(String),
+    });
+    expect(storage.alarm()).toBe(Date.parse(failed.cleanupRetryAt ?? ""));
+
+    failed.cleanupRetryAt = new Date(Date.now() - 1_000).toISOString();
+    storage.seed("lease:cbx_abcdef123456", failed);
+    await fleet.alarm();
+
+    expect(deleted).toEqual(["777"]);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      state: "failed",
+      cloudID: "777",
+      serverID: 777,
+    });
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.cleanupError).toBeUndefined();
+    expect(
+      storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.releaseDeletesServer,
+    ).toBeUndefined();
+  });
+
   it("uses the terminating Hetzner fallback error to decide retryability", async () => {
     const responses = [
       jsonResponse({ ssh_keys: [] }),
@@ -19018,6 +19167,50 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function hetznerReadinessFailureFetch(cleanupStatus: number) {
+  return vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+    async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const parsed = new URL(url);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && parsed.pathname === "/v1/ssh_keys") {
+        return jsonResponse({ ssh_keys: [] });
+      }
+      if (method === "POST" && parsed.pathname === "/v1/ssh_keys") {
+        return jsonResponse({
+          ssh_key: {
+            id: 1,
+            name: "ordinary-key",
+            public_key: "ssh-ed25519 ordinary-test",
+          },
+        });
+      }
+      if (method === "POST" && parsed.pathname === "/v1/servers") {
+        return jsonResponse({
+          server: {
+            id: 123,
+            name: "crabbox-ordinary",
+            status: "initializing",
+            server_type: { name: "cpx62" },
+            public_net: { ipv4: { ip: "" } },
+            labels: {},
+          },
+        });
+      }
+      if (method === "DELETE" && parsed.pathname === "/v1/servers/123") {
+        return cleanupStatus === 204
+          ? new Response(null, { status: 204 })
+          : jsonResponse(
+              { error: { code: cleanupStatus === 404 ? "not_found" : "server_error" } },
+              cleanupStatus,
+            );
+      }
+      return jsonResponse({ error: { code: "unexpected_request" } }, 500);
+    },
+  );
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {

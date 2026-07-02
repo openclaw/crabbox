@@ -49,6 +49,7 @@ import {
   HetznerClient,
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
+  hetznerProvisioningResourceID,
   sshPublicKeyIdentity,
 } from "./hetzner";
 import { bearerToken, errorMessage, json, pathParts, readJson, requestOwner } from "./http";
@@ -2235,6 +2236,18 @@ export class FleetCoordinator {
             config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
           record.provisioningFailureRetryable =
             config.provider === "hetzner" && hetznerProvisioningFailureRetryable(error);
+          const hetznerServerID =
+            config.provider === "hetzner" && !workspaceID
+              ? hetznerProvisioningResourceID(error)
+              : undefined;
+          if (hetznerServerID !== undefined) {
+            record.cloudID = String(hetznerServerID);
+            record.serverID = hetznerServerID;
+            record.releaseDeletesServer = true;
+            record.cleanupRetryAt = new Date(
+              Date.parse(failedAt) + leaseCleanupRetryDelayMs,
+            ).toISOString();
+          }
           if (record.provisioningResourceMayExist || record.provisioningFailureRetryable) {
             delete record.failureError;
           } else {

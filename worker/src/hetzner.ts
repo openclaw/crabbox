@@ -46,6 +46,7 @@ export class HetznerProvisioningError extends Error {
     message: string,
     readonly resourceMayExist: boolean,
     readonly retryable: boolean,
+    readonly serverID?: number,
   ) {
     super(message);
     this.name = "HetznerProvisioningError";
@@ -53,17 +54,20 @@ export class HetznerProvisioningError extends Error {
 }
 
 export function hetznerProvisioningFailureMayHaveResource(error: unknown): boolean {
-  return (
-    (error instanceof HetznerProvisioningError && error.resourceMayExist) ||
-    errorText(error).includes("timed out waiting for server IP")
-  );
+  return error instanceof HetznerProvisioningError
+    ? error.resourceMayExist
+    : errorText(error).includes("timed out waiting for server IP");
 }
 
 export function hetznerProvisioningFailureRetryable(error: unknown): boolean {
-  return (
-    (error instanceof HetznerProvisioningError && error.retryable) ||
-    errorText(error).includes("timed out waiting for server IP")
-  );
+  return error instanceof HetznerProvisioningError
+    ? error.retryable
+    : errorText(error).includes("timed out waiting for server IP");
+}
+
+export function hetznerProvisioningResourceID(error: unknown): number | undefined {
+  const serverID = error instanceof HetznerProvisioningError ? error.serverID : undefined;
+  return Number.isSafeInteger(serverID) && (serverID ?? 0) > 0 ? serverID : undefined;
 }
 
 export class HetznerClient {
@@ -188,6 +192,7 @@ export class HetznerClient {
     const failures: string[] = [];
     let resourceMayExist = false;
     let retryable = false;
+    let serverID: number | undefined;
     for (const serverType of candidates) {
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- server-type fallback must stay sequential.
@@ -204,12 +209,13 @@ export class HetznerClient {
         failures.push(`${serverType}: ${message}`);
         resourceMayExist = hetznerProvisioningFailureMayHaveResource(error);
         retryable = hetznerProvisioningFailureRetryable(error);
+        serverID = hetznerProvisioningResourceID(error);
         if (resourceMayExist || !isRetryableProvisioningError(message)) {
           break;
         }
       }
     }
-    throw new HetznerProvisioningError(failures.join("; "), resourceMayExist, retryable);
+    throw new HetznerProvisioningError(failures.join("; "), resourceMayExist, retryable, serverID);
   }
 
   async getServer(id: number): Promise<HetznerServer> {
@@ -291,7 +297,23 @@ export class HetznerClient {
     try {
       return await this.waitForServerIP(response.server.id, requireRunning);
     } catch (error) {
-      throw new HetznerProvisioningError(errorText(error), true, true);
+      const message = errorText(error);
+      if (requireRunning) {
+        throw new HetznerProvisioningError(message, true, true, response.server.id);
+      }
+      try {
+        await this.deleteServer(response.server.id);
+      } catch (cleanupError) {
+        if (!hetznerResourceNotFound(cleanupError)) {
+          throw new HetznerProvisioningError(
+            `${message}; rollback failed: ${errorText(cleanupError)}`,
+            true,
+            true,
+            response.server.id,
+          );
+        }
+      }
+      throw new HetznerProvisioningError(message, false, true);
     }
   }
 
@@ -391,4 +413,8 @@ function transientHetznerError(message: string): boolean {
     Number.parseInt(status, 10) === 429 ||
     Number.parseInt(status, 10) >= 500
   );
+}
+
+function hetznerResourceNotFound(error: unknown): boolean {
+  return /hetzner \w+ [^:]+: http 404(?:\D|$)/u.test(errorText(error));
 }
