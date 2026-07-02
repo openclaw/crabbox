@@ -24,6 +24,10 @@
 ### Fixed
 
 - Rolled back ordinary brokered Hetzner servers when post-create readiness fails and persisted the server ID for alarm-driven cleanup when rollback cannot complete. Thanks @coygeek.
+- Prevented Sprites API credentials from targeting unsafe endpoint URLs or following redirects outside the configured API origin. Thanks @coygeek.
+- Recovered ASCII Box release when the service temporarily requires a recent snapshot by shortening the sandbox TTL, waiting for the managed stop transition, and retrying deletion.
+- Isolated brokered artifact uploads by opaque organization and owner namespaces so identities and caller prefixes cannot collide across authorization scopes. Thanks @coygeek.
+- Prevented ASCII Box API credentials from reaching unsafe explicit base URLs by requiring HTTPS except for loopback development endpoints, rejecting ambiguous URL components, and supporting config discovery in the current Box CLI. Thanks @coygeek.
 - Pinned the Google Linux package signing fingerprint, preserved its source-scoped APT keyring across Chrome installation, and failed closed to Chromium when verification fails. Thanks @coygeek.
 - Hardened coordinator image deletion so admin `image delete` requests fail closed unless stored Crabbox-created metadata proves ownership of the AWS, Azure, or GCP image or snapshot.
 - Prevented unused WebVNC and Code bridge tickets from surviving manager share revocation. Thanks @coygeek.

@@ -9405,9 +9405,14 @@ export class FleetCoordinator {
   private async createArtifactUploads(request: Request): Promise<Response> {
     try {
       const input = await readJson<ArtifactUploadRequest>(request);
-      return json(await artifactUploadResponse(this.env, input, requestOwner(request)), {
-        status: 201,
-      });
+      return json(
+        await artifactUploadResponse(this.env, input, {
+          owner: requestOwner(request),
+          // Artifact keys encode auth identity bytes exactly; usage org normalization is lossy.
+          org: request.headers.get("x-crabbox-org") ?? this.env.CRABBOX_DEFAULT_ORG ?? "",
+        }),
+        { status: 201 },
+      );
     } catch (error) {
       return json(
         { error: "artifact_upload_unavailable", message: errorMessage(error) },

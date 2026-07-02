@@ -70,17 +70,16 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev new --ttl 1800",
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev ssh bx_1 -- true",
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev info bx_1",
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev list",
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev stop bx_1",
-		"box --no-update --json config",
 		"box --no-update --json --api-url https://ascii.dev delete bx_1",
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
@@ -99,6 +98,186 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 	}
 	if !hasEnv(runner.env[3], "SSH_AUTH_SOCK=") {
 		t.Fatalf("ssh setup env should disable agent identities: %v", runner.env[3])
+	}
+}
+
+func TestReleaseBoxRecoversFromRecentSnapshotGuard(t *testing.T) {
+	runner := &releaseCommandRunner{
+		configPath: filepath.Join(t.TempDir(), "config.json"),
+		outcomes: map[string][]commandOutcome{
+			"stop":   {snapshotGuardOutcome()},
+			"delete": {snapshotGuardOutcome(), {result: LocalCommandResult{Stdout: `{"id":"bx_guard","status":"deleted"}`}}},
+			"extend": {{result: LocalCommandResult{Stdout: `{"id":"bx_guard","archiveAfter":"soon"}`}}},
+			"info": {
+				{result: LocalCommandResult{Stdout: `{"box":{"id":"bx_guard","state":"idle"}}`}},
+				{result: LocalCommandResult{Stdout: `{"box":{"id":"bx_guard","state":"idle","status":"stopping"}}`}},
+			},
+		},
+	}
+	client := &client{
+		apiKey:              "box_key",
+		apiURL:              "https://ascii.dev",
+		cliPath:             "box",
+		home:                t.TempDir(),
+		runner:              runner,
+		releasePollInterval: time.Nanosecond,
+	}
+
+	if err := client.ReleaseBox(context.Background(), "bx_guard"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"box --no-update --json --api-url https://ascii.dev status",
+		"box --no-update --json --api-url https://ascii.dev stop bx_guard",
+		"box --no-update --json --api-url https://ascii.dev delete bx_guard",
+		"box --no-update --json --api-url https://ascii.dev extend bx_guard --ttl 1",
+		"box --no-update --json --api-url https://ascii.dev info bx_guard",
+		"box --no-update --json --api-url https://ascii.dev info bx_guard",
+		"box --no-update --json --api-url https://ascii.dev delete bx_guard",
+	}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("commands=%v want=%v", runner.commands, want)
+	}
+}
+
+func TestReleaseBoxDoesNotRecoverUnrelatedDeleteFailure(t *testing.T) {
+	runner := &releaseCommandRunner{
+		configPath: filepath.Join(t.TempDir(), "config.json"),
+		outcomes: map[string][]commandOutcome{
+			"stop":   {{result: LocalCommandResult{}}},
+			"delete": {{result: LocalCommandResult{Stderr: "permission denied"}, err: fmt.Errorf("exit status 1")}},
+		},
+	}
+	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
+
+	err := client.ReleaseBox(context.Background(), "bx_guard")
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("ReleaseBox err=%v", err)
+	}
+	if containsCommand(runner.commands, "box --no-update --json --api-url https://ascii.dev extend bx_guard --ttl 1") {
+		t.Fatalf("unexpected snapshot recovery commands=%v", runner.commands)
+	}
+}
+
+func TestReleaseBoxReportsSnapshotRecoveryExtendFailure(t *testing.T) {
+	runner := &releaseCommandRunner{
+		configPath: filepath.Join(t.TempDir(), "config.json"),
+		outcomes: map[string][]commandOutcome{
+			"stop":   {snapshotGuardOutcome()},
+			"delete": {snapshotGuardOutcome()},
+			"extend": {{result: LocalCommandResult{Stderr: "extend throttled"}, err: fmt.Errorf("exit status 1")}},
+		},
+	}
+	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
+
+	err := client.ReleaseBox(context.Background(), "bx_guard")
+	if err == nil || !strings.Contains(err.Error(), "snapshot recovery extend: extend throttled") {
+		t.Fatalf("ReleaseBox err=%v", err)
+	}
+}
+
+func TestReleaseBoxSkipsSnapshotRecoveryAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &releaseCommandRunner{
+		configPath: filepath.Join(t.TempDir(), "config.json"),
+		outcomes: map[string][]commandOutcome{
+			"stop":   {snapshotGuardOutcome()},
+			"delete": {snapshotGuardOutcome()},
+		},
+		onAction: func(action string) {
+			if action == "delete" {
+				cancel()
+			}
+		},
+	}
+	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
+
+	err := client.ReleaseBox(ctx, "bx_guard")
+	if err == nil || !strings.Contains(err.Error(), "snapshot recovery: context canceled") {
+		t.Fatalf("ReleaseBox err=%v", err)
+	}
+	if containsCommand(runner.commands, "box --no-update --json --api-url https://ascii.dev extend bx_guard --ttl 1") {
+		t.Fatalf("unexpected snapshot recovery commands=%v", runner.commands)
+	}
+}
+
+func TestAsciiBoxBaseURLValidation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "canonical https", raw: "HTTPS://ASCII.DEV:443/", want: "https://ascii.dev"},
+		{name: "https path", raw: "https://ascii.dev/api/", want: "https://ascii.dev/api"},
+		{name: "escaped path", raw: "https://ascii.dev/tenant%2F/", want: "https://ascii.dev/tenant%2F"},
+		{name: "localhost", raw: "http://localhost:8080/", want: "http://localhost:8080"},
+		{name: "ipv4 loopback", raw: "http://127.0.0.2:8080/api", want: "http://127.0.0.2:8080/api"},
+		{name: "ipv6 loopback", raw: "http://[::1]:80/", want: "http://[::1]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := validateAsciiBoxBaseURL(test.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("url=%q want %q", got, test.want)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "public http", raw: "http://ascii.dev"},
+		{name: "relative", raw: "/api"},
+		{name: "schemeless", raw: "ascii.dev"},
+		{name: "missing host", raw: "https:///api"},
+		{name: "opaque", raw: "https:ascii.dev"},
+		{name: "other scheme", raw: "ftp://ascii.dev"},
+		{name: "userinfo", raw: "https://token@ascii.dev"},
+		{name: "query", raw: "https://ascii.dev?token=1"},
+		{name: "bare query", raw: "https://ascii.dev?"},
+		{name: "fragment", raw: "https://ascii.dev#fragment"},
+		{name: "malformed port", raw: "https://ascii.dev:bad"},
+		{name: "loopback lookalike", raw: "http://localhost.example.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := validateAsciiBoxBaseURL(test.raw); err == nil {
+				t.Fatalf("expected %q to be rejected", test.raw)
+			}
+		})
+	}
+}
+
+func TestNewAPIRejectsUnsafeBaseURLBeforeCommandOrConfigWrite(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.json")
+	runner := &fakeCommandRunner{configPath: configPath}
+	cfg := testConfig()
+	cfg.AsciiBox.BaseURL = "http://ascii.dev"
+
+	client, err := newAPI(cfg, Runtime{Exec: runner})
+	if err == nil || client != nil || !strings.Contains(err.Error(), "must use HTTPS") {
+		t.Fatalf("client=%#v err=%v", client, err)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("commands=%v", runner.commands)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("config path exists or returned unexpected error: %v", err)
+	}
+}
+
+func TestNewAPICanonicalizesBaseURL(t *testing.T) {
+	cfg := testConfig()
+	cfg.AsciiBox.BaseURL = " HTTPS://ASCII.DEV:443/api/ "
+	got, err := newAPI(cfg, Runtime{Exec: &fakeCommandRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.(*client).apiURL != "https://ascii.dev/api" {
+		t.Fatalf("apiURL=%q", got.(*client).apiURL)
 	}
 }
 
@@ -505,13 +684,60 @@ type fakeCommandRunner struct {
 	infoResponses []string
 }
 
+type commandOutcome struct {
+	result LocalCommandResult
+	err    error
+}
+
+type releaseCommandRunner struct {
+	commands   []string
+	configPath string
+	outcomes   map[string][]commandOutcome
+	onAction   func(string)
+}
+
+func (r *releaseCommandRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	r.commands = append(r.commands, strings.Join(append([]string{req.Name}, req.Args...), " "))
+	action := boxCLIAction(req.Args)
+	if action == "status" {
+		return LocalCommandResult{Stdout: fmt.Sprintf(`{"account":null,"api":{},"config":{"path":%q}}`, r.configPath)}, nil
+	}
+	queue := r.outcomes[action]
+	if len(queue) == 0 {
+		return LocalCommandResult{Stderr: "unexpected command"}, fmt.Errorf("unexpected %s command", action)
+	}
+	outcome := queue[0]
+	r.outcomes[action] = queue[1:]
+	if r.onAction != nil {
+		r.onAction(action)
+	}
+	return outcome.result, outcome.err
+}
+
+func boxCLIAction(args []string) string {
+	for _, arg := range args {
+		switch arg {
+		case "status", "stop", "delete", "extend", "info":
+			return arg
+		}
+	}
+	return ""
+}
+
+func snapshotGuardOutcome() commandOutcome {
+	return commandOutcome{
+		result: LocalCommandResult{Stdout: `{"code":"snapshot_required","error":"Refusing request: no successful snapshot in the last 30 minutes.","status":409}`},
+		err:    fmt.Errorf("exit status 1"),
+	}
+}
+
 func (r *fakeCommandRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	r.commands = append(r.commands, strings.Join(append([]string{req.Name}, req.Args...), " "))
 	r.env = append(r.env, req.Env)
 	joined := strings.Join(req.Args, " ")
 	switch {
-	case strings.Contains(joined, " config"):
-		return LocalCommandResult{Stdout: fmt.Sprintf(`{"loggedIn":false,"path":%q}`, r.configPath)}, nil
+	case strings.Contains(joined, " status"):
+		return LocalCommandResult{Stdout: fmt.Sprintf(`{"account":null,"api":{},"config":{"path":%q}}`, r.configPath)}, nil
 	case strings.Contains(joined, " new "):
 		if r.newStdout != "" || r.newErr != nil {
 			return LocalCommandResult{Stdout: r.newStdout}, r.newErr
