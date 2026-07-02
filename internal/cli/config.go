@@ -193,6 +193,7 @@ type Config struct {
 	VercelSandbox                 VercelSandboxConfig
 	CloudflareSandbox             CloudflareSandboxConfig
 	Superserve                    SuperserveConfig
+	Crownest                      CrownestConfig
 	DockerSandbox                 DockerSandboxConfig
 	AnthropicSRT                  AnthropicSRTConfig
 	Modal                         ModalConfig
@@ -843,6 +844,18 @@ type SuperserveConfig struct {
 	NetworkAllowOut []string
 	NetworkDenyOut  []string
 	ForgetMissing   bool
+}
+
+// CrownestConfig configures the delegated CrowNest provider. The API key is
+// intentionally absent: it is read at runtime from
+// CRABBOX_CROWNEST_API_KEY / CROWNEST_API_KEY and sent only in request headers,
+// never persisted in Crabbox config or placed on argv.
+type CrownestConfig struct {
+	APIURL        string
+	ProjectID     string
+	Template      string
+	TimeoutSecs   int
+	ForgetMissing bool
 }
 
 type DockerSandboxConfig struct {
@@ -2725,6 +2738,11 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			ExecTimeoutSecs: 600,
 		},
+		Crownest: CrownestConfig{
+			APIURL:      "https://api.crownest.dev",
+			Template:    "python-node",
+			TimeoutSecs: 600,
+		},
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
 			Agent:   "shell",
@@ -2950,6 +2968,7 @@ type fileConfig struct {
 	VercelSandbox            *fileVercelSandboxConfig            `yaml:"vercelSandbox,omitempty"`
 	CloudflareSandbox        *fileCloudflareSandboxConfig        `yaml:"cloudflareSandbox,omitempty"`
 	Superserve               *fileSuperserveConfig               `yaml:"superserve,omitempty"`
+	Crownest                 *fileCrownestConfig                 `yaml:"crownest,omitempty"`
 	DockerSandbox            *fileDockerSandboxConfig            `yaml:"dockerSandbox,omitempty"`
 	AnthropicSRT             *fileAnthropicSRTConfig             `yaml:"anthropicSandboxRuntime,omitempty"`
 	Modal                    *fileModalConfig                    `yaml:"modal,omitempty"`
@@ -3680,6 +3699,14 @@ type fileSuperserveConfig struct {
 	NetworkAllowOut []string `yaml:"networkAllowOut,omitempty"`
 	NetworkDenyOut  []string `yaml:"networkDenyOut,omitempty"`
 	ForgetMissing   *bool    `yaml:"forgetMissing,omitempty"`
+}
+
+type fileCrownestConfig struct {
+	APIURL        string  `yaml:"apiUrl,omitempty"`
+	ProjectID     *string `yaml:"projectId,omitempty"`
+	Template      *string `yaml:"template,omitempty"`
+	TimeoutSecs   *int    `yaml:"timeoutSecs,omitempty"`
+	ForgetMissing *bool   `yaml:"forgetMissing,omitempty"`
 }
 
 type fileDockerSandboxConfig struct {
@@ -6129,6 +6156,26 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Superserve.ForgetMissing = *file.Superserve.ForgetMissing
 		}
 	}
+	if file.Crownest != nil {
+		if trusted && strings.TrimSpace(file.Crownest.APIURL) != "" {
+			cfg.Crownest.APIURL = file.Crownest.APIURL
+		}
+		if file.Crownest.ProjectID != nil {
+			cfg.Crownest.ProjectID = *file.Crownest.ProjectID
+		}
+		if file.Crownest.Template != nil {
+			cfg.Crownest.Template = *file.Crownest.Template
+		}
+		if file.Crownest.TimeoutSecs != nil {
+			if *file.Crownest.TimeoutSecs < 0 {
+				return exit(2, "crownest timeoutSecs must be non-negative")
+			}
+			cfg.Crownest.TimeoutSecs = *file.Crownest.TimeoutSecs
+		}
+		if file.Crownest.ForgetMissing != nil {
+			cfg.Crownest.ForgetMissing = *file.Crownest.ForgetMissing
+		}
+	}
 	if file.DockerSandbox != nil {
 		if file.DockerSandbox.CLIPath != "" {
 			cfg.DockerSandbox.CLIPath = file.DockerSandbox.CLIPath
@@ -7961,6 +8008,30 @@ func applyEnv(cfg *Config) error {
 		cfg.credentialProvenance.cloudflareToken = credentialSourceEnvironment
 	}
 	cfg.Cloudflare.Workdir = getenv("CRABBOX_CLOUDFLARE_WORKDIR", cfg.Cloudflare.Workdir)
+	cfg.Crownest.APIURL = getenv("CRABBOX_CROWNEST_API_URL", getenv("CROWNEST_API_URL", cfg.Crownest.APIURL))
+	cfg.Crownest.ProjectID = getenv("CRABBOX_CROWNEST_PROJECT_ID", getenv("CROWNEST_PROJECT_ID", cfg.Crownest.ProjectID))
+	cfg.Crownest.Template = getenv("CRABBOX_CROWNEST_TEMPLATE", getenv("CROWNEST_TEMPLATE", cfg.Crownest.Template))
+	crownestTimeoutEnv := "CRABBOX_CROWNEST_TIMEOUT_SECS"
+	crownestTimeoutValue := os.Getenv(crownestTimeoutEnv)
+	if crownestTimeoutValue == "" {
+		crownestTimeoutEnv = "CROWNEST_TIMEOUT_SECS"
+		crownestTimeoutValue = os.Getenv(crownestTimeoutEnv)
+	}
+	if crownestTimeoutValue != "" {
+		parsed, parseErr := strconv.Atoi(crownestTimeoutValue)
+		if parseErr != nil {
+			return exit(2, "%s must be an integer", crownestTimeoutEnv)
+		}
+		if parsed < 0 {
+			return exit(2, "%s must be non-negative", crownestTimeoutEnv)
+		}
+		cfg.Crownest.TimeoutSecs = parsed
+	}
+	if v, ok := getenvBool("CRABBOX_CROWNEST_FORGET_MISSING"); ok {
+		cfg.Crownest.ForgetMissing = v
+	} else if v, ok := getenvBool("CROWNEST_FORGET_MISSING"); ok {
+		cfg.Crownest.ForgetMissing = v
+	}
 	cfg.CloudflareDynamicWorkers.LoaderURL = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL", getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL", cfg.CloudflareDynamicWorkers.LoaderURL))
 	cfg.CloudflareDynamicWorkers.Token = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN", cfg.CloudflareDynamicWorkers.Token)
 	cfg.CloudflareDynamicWorkers.CompatibilityDate = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_DATE", cfg.CloudflareDynamicWorkers.CompatibilityDate)
