@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added Vast.ai direct Linux GPU SSH leases with guarded offer cost and reliability selection, per-lease keys, account-bound cleanup, required-tool bootstrap, and billable live-smoke coverage. Thanks @coygeek.
+
 ### Fixed
 
 - Restricted brokered Azure image and OS-disk selectors to admin-authenticated requests while preserving user-selectable Azure placement. Thanks @coygeek.
@@ -19,8 +23,6 @@
 - Added `crabbox checkpoint fork --count` for provider-neutral fan-out from archive checkpoints, native checkpoints, and direct Parallels snapshots without adding runtime-specific fork flags.
 - Added `provider: vultr` for direct Linux SSH leases with per-lease keys, account-bound cleanup, optional existing firewall/VPC attachment, and guarded live smoke coverage. Thanks @coygeek.
 - Added the Crownest delegated-run provider for hosted Linux Workspace Runs with staged archive sync, streamed output, reusable sandbox claims, and guarded lifecycle cleanup. Thanks @tristanmanchester.
-- Added Vast.ai direct Linux GPU SSH leases with guarded offer cost and reliability selection, per-lease keys, account-bound cleanup, required-tool bootstrap, and billable live-smoke coverage. Thanks @coygeek.
-
 - Added normalized provider runtime, reachability, and lifecycle capabilities plus matching `--runtime`, `--reachability`, and `--lifecycle` filters to `crabbox providers` and `crabbox providers recommend`.
 - Added `crabbox providers recommend` profiles for fan-out testing, offline validation, failure diagnostics, warm starts, resource observability, code interpretation, disposable execution, web-app smoke, and interactive debugging.
 
