@@ -98,8 +98,8 @@ and built artifacts out of the image. See
 
 ## Tailscale
 
-`--tailscale` on a managed Linux lease is also optional. Bootstrap installs the
-Tailscale package, brings the box up on the configured tailnet, writes non-secret
+`--tailscale` on a managed Linux lease is also optional. Bootstrap installs a
+checksum-verified pinned Tailscale archive, brings the box up on the configured tailnet, writes non-secret
 metadata under `/var/lib/crabbox` (such as `tailscale-ipv4`, `tailscale-hostname`,
 and exit-node details), and extends `crabbox-ready` with a bounded check that a
 `100.x` address has appeared.

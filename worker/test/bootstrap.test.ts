@@ -413,11 +413,55 @@ describe("cloud-init bootstrap", () => {
     const plain = cloudInit(config);
     expect(plain).not.toContain("code-server");
     const got = cloudInit({ ...config, code: true });
-    expect(got).toContain("https://code-server.dev/install.sh");
-    expect(got).toContain("env HOME=/root");
-    expect(got).toContain("--method=standalone --prefix=/usr/local");
+    expect(got).not.toContain("https://code-server.dev/install.sh");
+    expect(got).not.toContain("curl -fsSL https://code-server.dev/install.sh | sh");
+    expect(got).toContain("CS_VERSION='4.126.0'");
+    expect(got).toContain(
+      "x86_64) CS_ARCH=amd64; CS_SHA256='54b648d010c02b6583aa06bd8d2aaf109fc624479b9bc2ff71cb94807ac39afa'",
+    );
+    expect(got).toContain(
+      "aarch64|arm64) CS_ARCH=arm64; CS_SHA256='441614708ae81b13f14b26db41da8f46f88d7d092c08343a42a0c6c52c51a69d'",
+    );
+    expect(got).toContain(
+      "https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz",
+    );
+    expect(got).toContain("sha256sum -c -");
+    expect(got).toContain("/usr/local/lib/code-server");
+    expect(got).toContain("chmod 0755 /usr/local/lib/code-server");
     expect(got).toContain("/usr/local/bin/code-server --version >/dev/null");
     expect(got).toContain("test -x /usr/local/bin/code-server");
+    const copyIndex = got.indexOf('cp -a "$CS_INSTALL_DIR/." /usr/local/lib/code-server/');
+    const archiveCleanupIndex = got.indexOf('rm -f "$CS_ARCHIVE"');
+    const chmodIndex = got.indexOf("chmod 0755 /usr/local/lib/code-server");
+    const linkIndex = got.indexOf(
+      "ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server",
+    );
+    expect(copyIndex).toBeGreaterThanOrEqual(0);
+    expect(archiveCleanupIndex).toBeGreaterThanOrEqual(0);
+    expect(copyIndex).toBeGreaterThan(archiveCleanupIndex);
+    expect(chmodIndex).toBeGreaterThan(copyIndex);
+    expect(linkIndex).toBeGreaterThan(chmodIndex);
+  });
+
+  it("cleans pinned install directories when code-server and Tailscale are combined", () => {
+    const got = cloudInit({
+      ...config,
+      code: true,
+      tailscale: true,
+      tailscaleHostname: "crabbox-blue-lobster",
+      tailscaleAuthKey: "tskey-secret",
+      tailscaleInstallMode: "pinned",
+    });
+
+    const tailscaleTrap = got.indexOf(`trap 'rm -rf "$TS_INSTALL_DIR"' EXIT`);
+    const tailscaleCleanup = got.indexOf(`rm -rf "$TS_INSTALL_DIR"\n    trap - EXIT`);
+    const codeServerTrap = got.indexOf(`trap 'rm -rf "$CS_INSTALL_DIR"' EXIT`);
+    const codeServerCleanup = got.indexOf(`rm -rf "$CS_INSTALL_DIR"\n    trap - EXIT`);
+
+    expect(tailscaleTrap).toBeGreaterThanOrEqual(0);
+    expect(tailscaleCleanup).toBeGreaterThan(tailscaleTrap);
+    expect(codeServerTrap).toBeGreaterThan(tailscaleCleanup);
+    expect(codeServerCleanup).toBeGreaterThan(codeServerTrap);
   });
 
   it("adds Tailscale setup only when requested", () => {
@@ -433,7 +477,16 @@ describe("cloud-init bootstrap", () => {
       tailscaleExitNode: "mac-studio.tailnet.ts.net",
       tailscaleExitNodeAllowLanAccess: true,
     });
-    expect(got).toContain("https://tailscale.com/install.sh");
+    expect(got).not.toContain("https://tailscale.com/install.sh");
+    expect(got).toContain(
+      "https://pkgs.tailscale.com/stable/${TS_DIST_ID}/${TS_CODENAME}.noarmor.gpg",
+    );
+    expect(got).toContain("3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39");
+    expect(got).toContain(
+      "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/%s %s main",
+    );
+    expect(got).toContain("retry apt-get install -y --no-install-recommends tailscale");
+    expect(got).not.toContain("tailscale_${TS_VERSION}_${TS_ARCH}.tgz");
     expect(got).toContain("systemctl disable crabbox-tailscale-logout.service");
     expect(got).not.toContain("tailscale logout");
     expect(got).not.toContain("WantedBy=halt.target reboot.target shutdown.target");

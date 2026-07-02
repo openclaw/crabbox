@@ -183,4 +183,13 @@ describe("tailscale preflight", () => {
       sha256: { amd64: "amd", arm64: "arm" },
     });
   });
+
+  it("preserves package installer mode and defaults to it", () => {
+    expect(
+      tailscaleInstallConfig({
+        CRABBOX_TAILSCALE_INSTALL_MODE: "package",
+      }).mode,
+    ).toBe("package");
+    expect(tailscaleInstallConfig({}).mode).toBe("package");
+  });
 });
