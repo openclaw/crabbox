@@ -16888,7 +16888,7 @@ describe("fleet lease identity and idle", () => {
 
     const response = await fleet.fetch(
       request("POST", "/v1/artifacts/uploads", {
-        headers: { "x-crabbox-owner": "peter@example.com" },
+        headers: { "x-crabbox-owner": "alice@example.com" },
         body: {
           prefix: "pr-42",
           files: [
@@ -16918,7 +16918,7 @@ describe("fleet lease identity and idle", () => {
     expect(body.backend).toBe("r2");
     expect(body.bucket).toBe("qa-artifacts");
     const org = Buffer.from("default-org").toString("base64url");
-    const owner = Buffer.from("peter@example.com").toString("base64url");
+    const owner = Buffer.from("alice@example.com").toString("base64url");
     expect(body.prefix).toBe(`qa/v2/org/${org}/owner/${owner}/pr-42`);
     expect(body.files[0].key).toBe(`qa/v2/org/${org}/owner/${owner}/pr-42/screenshots/after.png`);
     expect(body.files[0].url).toBe(
