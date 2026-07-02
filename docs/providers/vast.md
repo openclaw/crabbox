@@ -152,9 +152,11 @@ URLs.
    configured image, template, disk, user, and Crabbox environment marker.
 6. Attach the per-lease public SSH key to the instance.
 7. Wait until the instance is running and exposes a direct SSH host and port.
-8. Update the Vast label from provisioning to ready.
-9. Wait for Crabbox SSH bootstrap readiness and write a local lease claim.
-10. Run normal Crabbox SSH sync, command execution, status, list, and cleanup.
+8. Connect with a transport-only SSH probe and install `git`, `rsync`, `tar`,
+   and `python3` through the image's package manager when they are missing.
+9. Update the Vast label from provisioning to ready.
+10. Wait for Crabbox SSH bootstrap readiness and write a local lease claim.
+11. Run normal Crabbox SSH sync, command execution, status, list, and cleanup.
 
 The provider requires Linux. It does not advertise desktop, browser, code-server,
 Tailscale, coordinator, or provider-managed sync support in this release.

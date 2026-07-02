@@ -32,6 +32,7 @@ type backend struct {
 	rt             core.Runtime
 	apiFactory     func(core.Runtime) (vastAPI, error)
 	waitSSH        func(context.Context, *core.SSHTarget, string, time.Duration) error
+	runSSH         func(context.Context, core.SSHTarget, string) error
 	sleep          func(context.Context, time.Duration) error
 	pollTimeout    time.Duration
 	cleanupTimeout time.Duration
@@ -45,6 +46,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *backe
 	b.waitSSH = func(ctx context.Context, target *core.SSHTarget, phase string, timeout time.Duration) error {
 		return core.WaitForSSHReady(ctx, target, b.stderr(), phase, timeout)
 	}
+	b.runSSH = core.RunSSHQuiet
 	b.sleep = func(ctx context.Context, d time.Duration) error {
 		timer := time.NewTimer(d)
 		defer timer.Stop()
@@ -256,6 +258,15 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	bootstrapSSH := ssh
+	bootstrapSSH.ReadyCheck = "true"
+	if err := b.waitSSH(ctx, &bootstrapSSH, "vast ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	ssh.Port = bootstrapSSH.Port
+	if err := b.bootstrapVastTools(ctx, ssh); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if err := b.waitSSH(ctx, &ssh, "vast bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -271,6 +282,35 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	committed = true
 	fmt.Fprintf(b.stderr(), "provisioned lease=%s vast=%d gpu=%s state=ready\n", leaseID, instanceID, server.ServerType.Name)
 	return target, nil
+}
+
+func (b *backend) bootstrapVastTools(ctx context.Context, target core.SSHTarget) error {
+	fmt.Fprintln(b.stderr(), "bootstrapping vast instance tools")
+	if err := b.runSSH(ctx, target, vastBootstrapToolsCommand()); err != nil {
+		return exit(1, "vast instance tool bootstrap failed: %v", err)
+	}
+	return nil
+}
+
+func vastBootstrapToolsCommand() string {
+	return strings.Join([]string{
+		"set -e",
+		"if command -v git >/dev/null 2>&1 && command -v rsync >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then exit 0; fi",
+		"SUDO=; if [ \"$(id -u)\" != 0 ]; then SUDO=sudo; fi",
+		"if command -v apt-get >/dev/null 2>&1; then",
+		"  $SUDO apt-get update >/tmp/crabbox-vast-apt-update.log 2>&1",
+		"  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git rsync tar python3 >/tmp/crabbox-vast-apt-install.log 2>&1",
+		"elif command -v dnf >/dev/null 2>&1; then",
+		"  $SUDO dnf install -y git rsync tar python3 >/tmp/crabbox-vast-dnf-install.log 2>&1",
+		"elif command -v yum >/dev/null 2>&1; then",
+		"  $SUDO yum install -y git rsync tar python3 >/tmp/crabbox-vast-yum-install.log 2>&1",
+		"elif command -v apk >/dev/null 2>&1; then",
+		"  $SUDO apk add --no-cache git rsync tar python3 >/tmp/crabbox-vast-apk-install.log 2>&1",
+		"else",
+		"  echo 'vast tool bootstrap requires apt-get, dnf, yum, or apk' >&2; exit 1",
+		"fi",
+		"command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
+	}, "\n")
 }
 
 func selectVastOffer(offers []vastOffer) (vastOffer, error) {

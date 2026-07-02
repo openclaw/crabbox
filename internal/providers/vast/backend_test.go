@@ -195,6 +195,7 @@ func newTestBackend(t *testing.T, api *fakeVastAPI) *backend {
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard})
 	b.apiFactory = func(core.Runtime) (vastAPI, error) { return api, nil }
 	b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
+	b.runSSH = func(context.Context, core.SSHTarget, string) error { return nil }
 	b.sleep = func(context.Context, time.Duration) error { return nil }
 	return b
 }
@@ -257,9 +258,9 @@ func TestListFiltersOwnedByDefaultAndAllShowsManual(t *testing.T) {
 func TestAcquireCreatesAttachesPollsReadinessAndClaims(t *testing.T) {
 	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, AskID: 84, GPUName: "RTX 4090", GPUCount: 1, Rentable: true}}}
 	b := newTestBackend(t, api)
-	var readyTarget core.SSHTarget
+	var waitedTargets []core.SSHTarget
 	b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ string, _ time.Duration) error {
-		readyTarget = *target
+		waitedTargets = append(waitedTargets, *target)
 		return nil
 	}
 	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "gpu-box", Keep: true})
@@ -272,8 +273,8 @@ func TestAcquireCreatesAttachesPollsReadinessAndClaims(t *testing.T) {
 	if lease.SSH.ReadyCheck != vastReadyCheck || strings.Contains(lease.SSH.ReadyCheck, "crabbox-ready") {
 		t.Fatalf("lease ready check=%q", lease.SSH.ReadyCheck)
 	}
-	if readyTarget.ReadyCheck != vastReadyCheck {
-		t.Fatalf("waitSSH target ready check=%q", readyTarget.ReadyCheck)
+	if len(waitedTargets) != 2 || waitedTargets[0].ReadyCheck != "true" || waitedTargets[1].ReadyCheck != vastReadyCheck {
+		t.Fatalf("waitSSH targets=%#v", waitedTargets)
 	}
 	if len(api.searches) != 1 || api.searches[0].Config.Order != "dlperf_per_dphtotal desc" {
 		t.Fatalf("searches=%#v", api.searches)
@@ -293,6 +294,37 @@ func TestAcquireCreatesAttachesPollsReadinessAndClaims(t *testing.T) {
 	claim, ok, err := core.ResolveLeaseClaimForProvider("gpu-box", providerName)
 	if err != nil || !ok || claim.CloudID != "100" || claim.Labels[vastOfferIDLabel] != "84" || claim.Labels[vastAccountIDLabel] != "7" || claim.Labels[vastAPIURLLabel] != "https://console.vast.ai/api/v0" || claim.Labels[vastKeyIDLabel] != "key-100" || claim.Labels[vastReleaseActionLabel] != "destroy" {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
+func TestVastBootstrapToolsCommand(t *testing.T) {
+	command := vastBootstrapToolsCommand()
+	for _, want := range []string{
+		"command -v git",
+		"command -v rsync",
+		"command -v tar",
+		"command -v python3",
+		"apt-get install -y --no-install-recommends git rsync tar python3",
+		"dnf install -y git rsync tar python3",
+		"yum install -y git rsync tar python3",
+		"apk add --no-cache git rsync tar python3",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("bootstrap command missing %q: %s", want, command)
+		}
+	}
+}
+
+func TestAcquireRollsBackWhenToolBootstrapFails(t *testing.T) {
+	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+	b := newTestBackend(t, api)
+	b.runSSH = func(context.Context, core.SSHTarget, string) error { return errors.New("package manager failed") }
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "bootstrap-fail"})
+	if err == nil || !strings.Contains(err.Error(), "vast instance tool bootstrap failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.destroyed) != 1 || len(api.detached) != 1 {
+		t.Fatalf("destroyed=%v detached=%v", api.destroyed, api.detached)
 	}
 }
 
