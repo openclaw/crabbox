@@ -1567,12 +1567,47 @@ func isDefaultWorkRoot(value string) bool {
 	return value == "" || value == "/work/crabbox"
 }
 
+const localContainerDockerSigningKeyFingerprint = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+
+const installVerifiedAPTKeyringScript = `
+install_verified_apt_keyring() {
+  apt_key_url="$1"
+  apt_key_target="$2"
+  apt_key_expected_fingerprint="$3"
+  install -m 0755 -d "$(dirname "$apt_key_target")"
+  apt_key_tmp_dir="$(mktemp -d "${apt_key_target}.tmp.XXXXXX")"
+  apt_key_download="$apt_key_tmp_dir/downloaded.asc"
+  apt_key_home="$apt_key_tmp_dir/gnupg"
+  apt_key_output="$apt_key_tmp_dir/keyring.gpg"
+  install -m 0700 -d "$apt_key_home"
+  if curl -fsSL "$apt_key_url" >"$apt_key_download" &&
+    GNUPGHOME="$apt_key_home" gpg --batch --import "$apt_key_download" >/dev/null 2>&1; then
+    apt_key_actual_fingerprint="$(
+      GNUPGHOME="$apt_key_home" gpg --batch --with-colons --fingerprint "$apt_key_expected_fingerprint" 2>/dev/null |
+        awk -F: '$1 == "fpr" { print $10; exit }' || true
+    )"
+    if [ "$apt_key_actual_fingerprint" = "$apt_key_expected_fingerprint" ] &&
+      GNUPGHOME="$apt_key_home" gpg --batch --export "$apt_key_expected_fingerprint" >"$apt_key_output" &&
+      [ -s "$apt_key_output" ]; then
+      chmod 0644 "$apt_key_output"
+      mv -f "$apt_key_output" "$apt_key_target"
+      rm -rf "$apt_key_tmp_dir"
+      return 0
+    fi
+  fi
+  rm -rf "$apt_key_tmp_dir"
+  return 1
+}
+`
+
 const bootstrapScript = `
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 user="${CRABBOX_SSH_USER:-crabbox}"
 work_root="${CRABBOX_WORK_ROOT:-/work/crabbox}"
 ssh_port="${CRABBOX_SSH_PORT:-2222}"
+docker_signing_key_fingerprint="` + localContainerDockerSigningKeyFingerprint + `"
+` + installVerifiedAPTKeyringScript + `
 home_dir=""
 if [ -r /etc/passwd ]; then
   while IFS=: read -r account _ _ _ _ account_home _; do
@@ -1682,26 +1717,38 @@ fi
 if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
   apt-get update
   install_docker_cli=0
-  if [ -r /etc/os-release ]; then
-    . /etc/os-release
-    case "${ID:-}" in
-      debian|ubuntu)
-        install -m 0755 -d /etc/apt/keyrings
-        if curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc; then
-          chmod a+r /etc/apt/keyrings/docker.asc
-          codename="${VERSION_CODENAME:-}"
-          if [ -n "$codename" ]; then
-            arch="$(dpkg --print-architecture)"
-            printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' "$arch" "$ID" "$codename" > /etc/apt/sources.list.d/docker.list
-            if apt-get update && apt-get install -y --no-install-recommends docker-ce-cli; then
-              install_docker_cli=1
-            else
-              rm -f /etc/apt/sources.list.d/docker.list
+  if command -v gpg >/dev/null 2>&1 || apt-get install -y --no-install-recommends gnupg; then
+    if [ -r /etc/os-release ]; then
+      . /etc/os-release
+      case "${ID:-}" in
+        debian|ubuntu)
+          install -m 0755 -d /etc/apt/keyrings /etc/apt/sources.list.d
+          if install_verified_apt_keyring "https://download.docker.com/linux/${ID}/gpg" /etc/apt/keyrings/docker.gpg "$docker_signing_key_fingerprint"; then
+            codename="${VERSION_CODENAME:-}"
+            if [ -n "$codename" ]; then
+              arch="$(dpkg --print-architecture)"
+              docker_source_tmp="$(mktemp /etc/apt/sources.list.d/docker.list.tmp.XXXXXX)"
+              if printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/%s %s stable\n' "$arch" "$ID" "$codename" >"$docker_source_tmp" &&
+                chmod 0644 "$docker_source_tmp" &&
+                mv -f "$docker_source_tmp" /etc/apt/sources.list.d/docker.list; then
+                rm -f /etc/apt/keyrings/docker.asc
+                if apt-get update && apt-get install -y --no-install-recommends docker-ce-cli; then
+                  install_docker_cli=1
+                else
+                  rm -f /etc/apt/sources.list.d/docker.list
+                fi
+              else
+                rm -f "$docker_source_tmp"
+              fi
             fi
+          else
+            echo "Docker APT signing key verification failed; falling back to distro Docker CLI" >&2
           fi
-        fi
-        ;;
-    esac
+          ;;
+      esac
+    fi
+  else
+    echo "Docker APT signing key verification unavailable; falling back to distro Docker CLI" >&2
   fi
   if [ "$install_docker_cli" != "1" ]; then
     apt-get install -y --no-install-recommends docker.io

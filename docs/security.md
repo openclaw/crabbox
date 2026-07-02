@@ -310,19 +310,28 @@ versions require matching SHA-256 environment overrides, and missing, malformed,
 or mismatched values fail closed before installation, extraction, or service
 registration.
 
-## Managed Linux Browser Trust
+## Managed Linux APT Trust
 
-Managed Linux browser bootstrap pins Google's active Linux package-signing
-primary fingerprint. The bootstrap imports downloaded key material into an
-isolated temporary GnuPG home, exports only the approved primary key and its
-signing subkeys into a repository-scoped keyring, and binds the Chrome APT
-source to that keyring with `signed-by`. A missing or changed primary key fails
-closed before replacing the prior keyring or repository source; browser setup
-then tries the distro Chromium package without trusting the unexpected key.
+Managed Linux developer-image bootstrap pins the active NodeSource, Docker, and
+Google Linux package-signing primary fingerprints. Local-container Docker
+socket bootstrap applies the same Docker pin before adding Docker's CLI
+repository. Each path imports downloaded key material into an isolated
+temporary GnuPG home, exports only the approved primary key and its signing
+subkeys into a repository-scoped keyring, and binds the matching APT source to
+that keyring with `signed-by`.
 
-Signing-subkey rotations beneath the approved primary key continue without a
-Crabbox update. A Google primary-key rotation requires a reviewed fingerprint
-update against [Google's official Linux repository key page](https://www.google.com/linuxrepositories/)
+A missing or changed primary key fails closed before replacing the prior
+keyring or repository source. Managed image preparation stops rather than
+trusting unexpected NodeSource or Docker key material. Browser setup instead
+tries the distro Chromium package, and local-container Docker CLI setup instead
+tries the distro `docker.io` package.
+
+Signing-subkey rotations beneath an approved primary key continue without a
+Crabbox update. A primary-key rotation requires a reviewed fingerprint update
+against the official [NodeSource setup](https://github.com/nodesource/distributions/blob/master/scripts/deb/setup_24.x),
+[Docker Ubuntu](https://docs.docker.com/engine/install/ubuntu/),
+[Docker Debian](https://docs.docker.com/engine/install/debian/), or
+[Google Linux repository key](https://www.google.com/linuxrepositories/) source
 and fresh bootstrap proof; there is no fallback to an unpinned key.
 
 ## SSH

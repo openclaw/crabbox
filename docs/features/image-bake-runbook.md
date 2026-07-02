@@ -312,10 +312,12 @@ scripts/mint-aws-devtools-image.sh \
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, Chrome or Chromium for browser
   lanes, desktop/VNC helpers, Docker Engine, Compose, buildx, and a small
-  default Docker image set. Chrome's APT repository uses a scoped keyring whose
-  Google-published primary fingerprint is checked before installation; primary
-  key rotations require a reviewed code update and a fresh image-bake smoke;
-  failed verification skips Chrome and tries the distro Chromium package.
+  default Docker image set. NodeSource, Docker, and Chrome APT repositories use
+  scoped keyrings whose primary fingerprints are checked before installation;
+  primary-key rotations require a reviewed code update and a fresh image-bake
+  smoke. Failed NodeSource or Docker verification stops image preparation;
+  failed Google verification skips Chrome and tries the distro Chromium
+  package.
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, and Windows Server container
   support with Docker Engine. It deliberately avoids Docker Desktop because

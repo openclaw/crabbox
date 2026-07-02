@@ -109,6 +109,12 @@ ownership under those paths. System paths such as `/etc`, `/usr`, `/var`,
 `/home`, and `/tmp` are also rejected; use an application mount point such as
 `/mnt/my-app` or `/cache`.
 
+`--local-container-docker-socket` installs Docker's CLI when the image does not
+already provide it. On Debian and Ubuntu, Crabbox accepts Docker's APT
+repository only after its primary signing fingerprint matches the reviewed
+pin; failed verification preserves existing trust files and falls back to the
+distro `docker.io` package.
+
 **Host access:** This flag is CLI-only. Crabbox does not load bind mounts from
 repo-local `.crabbox.yaml`; operators must name each host path explicitly on
 the command line.

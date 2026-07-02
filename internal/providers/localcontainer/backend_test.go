@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -1469,6 +1470,14 @@ func TestBootstrapScriptSupportsDockerSocketCLI(t *testing.T) {
 	for _, want := range []string{
 		`[ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker`,
 		`https://download.docker.com/linux/${ID}/gpg`,
+		localContainerDockerSigningKeyFingerprint,
+		`install_verified_apt_keyring`,
+		`GNUPGHOME="$apt_key_home" gpg --batch --import`,
+		`GNUPGHOME="$apt_key_home" gpg --batch --export`,
+		`signed-by=/etc/apt/keyrings/docker.gpg`,
+		`mv -f "$apt_key_output" "$apt_key_target"`,
+		`rm -f /etc/apt/keyrings/docker.asc`,
+		`Docker APT signing key verification failed; falling back to distro Docker CLI`,
 		`if apt-get update && apt-get install -y --no-install-recommends docker-ce-cli; then`,
 		`rm -f /etc/apt/sources.list.d/docker.list`,
 		`apt-get install -y --no-install-recommends docker-ce-cli`,
@@ -1480,6 +1489,102 @@ func TestBootstrapScriptSupportsDockerSocketCLI(t *testing.T) {
 		if !strings.Contains(bootstrapScript, want) {
 			t.Fatalf("bootstrap script missing %q", want)
 		}
+	}
+	if strings.Contains(bootstrapScript, `curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc`) {
+		t.Fatal("bootstrap script downloads Docker trust directly into the final keyring")
+	}
+	cmd := exec.Command("sh", "-n")
+	cmd.Stdin = strings.NewReader(bootstrapScript)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bootstrap script syntax: %v\n%s", err, output)
+	}
+}
+
+func TestInstallVerifiedAPTKeyringScript(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		actualFingerprint string
+		wantSuccess       bool
+	}{
+		{name: "matching primary", actualFingerprint: localContainerDockerSigningKeyFingerprint, wantSuccess: true},
+		{name: "mismatched primary", actualFingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", wantSuccess: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "bin")
+			if err := os.Mkdir(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			curlScript := "#!/bin/sh\nset -eu\nprintf 'fake-docker-key\\n'\n"
+			if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(curlScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			gpgScript := `#!/bin/sh
+set -eu
+mode=""
+value=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --batch|--with-colons) shift ;;
+    --import|--fingerprint|--export)
+      mode="${1#--}"
+      value="${2:-}"
+      shift 2
+      ;;
+    *) exit 64 ;;
+  esac
+done
+case "$mode" in
+  import) [ -s "$value" ] ;;
+  fingerprint) printf 'fpr:::::::::%s:\n' "$FAKE_GPG_FINGERPRINT" ;;
+  export) printf 'fake-export:%s\n' "$value" ;;
+  *) exit 65 ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(bin, "gpg"), []byte(gpgScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(dir, "keyrings", "docker.gpg")
+			if err := os.Mkdir(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, []byte("existing-keyring\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			script := "set -eu\n" + installVerifiedAPTKeyringScript + `
+install_verified_apt_keyring "$1" "$2" "$3"
+`
+			cmd := exec.Command("sh", "-c", script, "test", "https://download.docker.com/linux/ubuntu/gpg", target, localContainerDockerSigningKeyFingerprint)
+			cmd.Env = append(os.Environ(),
+				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"FAKE_GPG_FINGERPRINT="+tc.actualFingerprint,
+			)
+			output, err := cmd.CombinedOutput()
+			if tc.wantSuccess && err != nil {
+				t.Fatalf("verified key install failed: %v\n%s", err, output)
+			}
+			if !tc.wantSuccess && err == nil {
+				t.Fatal("mismatched key install succeeded")
+			}
+			got, readErr := os.ReadFile(target)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			want := "existing-keyring\n"
+			if tc.wantSuccess {
+				want = "fake-export:" + localContainerDockerSigningKeyFingerprint + "\n"
+			}
+			if string(got) != want {
+				t.Fatalf("keyring = %q, want %q", got, want)
+			}
+			tempFiles, globErr := filepath.Glob(target + ".tmp.*")
+			if globErr != nil {
+				t.Fatal(globErr)
+			}
+			if len(tempFiles) != 0 {
+				t.Fatalf("temporary key state remains: %v", tempFiles)
+			}
+		})
 	}
 }
 

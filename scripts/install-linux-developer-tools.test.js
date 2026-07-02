@@ -6,6 +6,8 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
+const nodesourceSigningKeyFingerprint = "6F71F525282841EEDAF851B42F59B5F99B1BE0B4";
+const dockerSigningKeyFingerprint = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88";
 const googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
 
 function writeExecutable(file, body) {
@@ -19,24 +21,15 @@ function writeFakeGPG(bin) {
 		`#!/usr/bin/env bash
 set -euo pipefail
 mode=""
-output=""
 value=""
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
-    --batch|--yes|--with-colons)
-      shift
-      ;;
-    --dearmor)
-      mode="dearmor"
+    --batch|--with-colons)
       shift
       ;;
     --import|--fingerprint|--export)
       mode="\${1#--}"
       value="\${2:-}"
-      shift 2
-      ;;
-    -o)
-      output="\${2:-}"
       shift 2
       ;;
     *)
@@ -46,17 +39,12 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 case "$mode" in
-  dearmor)
-    [[ -n "$output" ]] || exit 65
-    cat >"$output"
-    printf '%s\\n' "$output" >>"$CRABBOX_FAKE_GPG_LOG"
-    ;;
   import)
     [[ -s "$value" ]] || exit 66
     ;;
   fingerprint)
     printf 'pub:-:4096:1:7721F63BD38B4796:0::::::scSC::::::23::0:\\n'
-    printf 'fpr:::::::::%s:\\n' "\${CRABBOX_FAKE_GPG_FINGERPRINT:-${googleLinuxSigningKeyFingerprint}}"
+    printf 'fpr:::::::::%s:\\n' "\${CRABBOX_FAKE_GPG_FINGERPRINT:-$value}"
     ;;
   export)
     printf 'fake-export:%s\\n' "$value"
@@ -198,10 +186,149 @@ exit 1
 	assert.equal(fs.existsSync(path.join(browserBin, "crabbox-browser")), true);
 	assert.match(fs.readFileSync(path.join(browserState, "browser.env"), "utf8"), new RegExp(`CHROME_BIN=${browserBin}/crabbox-browser`));
 	assert.equal(
+		fs.readFileSync(path.join(keyrings, "nodesource.gpg"), "utf8"),
+		`fake-export:${nodesourceSigningKeyFingerprint}\n`,
+	);
+	assert.equal(
+		fs.readFileSync(path.join(keyrings, "docker.gpg"), "utf8"),
+		`fake-export:${dockerSigningKeyFingerprint}\n`,
+	);
+	assert.equal(
 		fs.readFileSync(path.join(keyrings, "google-linux.gpg"), "utf8"),
 		`fake-export:${googleLinuxSigningKeyFingerprint}\n`,
 	);
 });
+
+for (const repository of [
+	{
+		name: "NodeSource",
+		functionCall: "node_toolchain_ready() { return 0; }; add_nodesource",
+		keyring: "nodesource.gpg",
+		source: "nodesource.list",
+		expectedFingerprint: nodesourceSigningKeyFingerprint,
+	},
+	{
+		name: "Docker",
+		functionCall: "docker_packages_installed() { return 0; }; add_docker_repo",
+		keyring: "docker.gpg",
+		source: "docker.list",
+		expectedFingerprint: dockerSigningKeyFingerprint,
+	},
+]) {
+	test(`linux developer tool setup preserves installed ${repository.name} trust files on fingerprint mismatch`, () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-tools-repo-mismatch-"));
+		const bin = path.join(dir, "bin");
+		const keyrings = path.join(dir, "keyrings");
+		const sources = path.join(dir, "sources");
+		const osRelease = path.join(dir, "os-release");
+		const target = path.join(keyrings, repository.keyring);
+		const source = path.join(sources, repository.source);
+		const log = path.join(dir, "gpg.log");
+		fs.mkdirSync(bin);
+		fs.mkdirSync(keyrings);
+		fs.mkdirSync(sources);
+		fs.writeFileSync(osRelease, "ID='ubuntu'\nVERSION_CODENAME='noble'\n", "utf8");
+		fs.writeFileSync(target, "existing-keyring\n", "utf8");
+		fs.writeFileSync(source, "existing-source\n", "utf8");
+		fs.writeFileSync(log, "", "utf8");
+		writeExecutable(
+			path.join(bin, "curl"),
+			`#!/usr/bin/env bash
+set -euo pipefail
+printf 'unexpected-key\n'
+`,
+		);
+		writeExecutable(
+			path.join(bin, "dpkg"),
+			`#!/usr/bin/env bash
+[[ "$*" == "--print-architecture" ]] && printf 'amd64\n'
+`,
+		);
+		writeFakeGPG(bin);
+
+		const result = spawnSync(
+			"bash",
+			["-c", ["set -euo pipefail", "source scripts/install-linux-developer-tools.sh", repository.functionCall].join("\n")],
+			{
+				cwd: repoRoot,
+				env: {
+					...process.env,
+					PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+					CRABBOX_FAKE_GPG_FINGERPRINT: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+					CRABBOX_FAKE_GPG_LOG: log,
+					CRABBOX_LINUX_APT_KEYRINGS_DIR: keyrings,
+					CRABBOX_LINUX_APT_SOURCES_DIR: sources,
+					CRABBOX_LINUX_OS_RELEASE_FILE: osRelease,
+				},
+				encoding: "utf8",
+			},
+		);
+
+		assert.notEqual(result.status, 0, "mismatched repository keys must fail closed");
+		assert.equal(fs.readFileSync(target, "utf8"), "existing-keyring\n");
+		assert.equal(fs.readFileSync(source, "utf8"), "existing-source\n");
+		assert.equal(fs.readFileSync(log, "utf8"), "", "mismatched keys should not be exported");
+		assert.equal(
+			fs.readdirSync(keyrings).filter((name) => name.includes(".tmp.")).length,
+			0,
+			"temporary keyring directories should be removed",
+		);
+	});
+
+	test(`linux developer tool setup refreshes installed ${repository.name} trust files after fingerprint verification`, () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-tools-repo-refresh-"));
+		const bin = path.join(dir, "bin");
+		const keyrings = path.join(dir, "keyrings");
+		const sources = path.join(dir, "sources");
+		const osRelease = path.join(dir, "os-release");
+		const target = path.join(keyrings, repository.keyring);
+		const source = path.join(sources, repository.source);
+		const log = path.join(dir, "gpg.log");
+		fs.mkdirSync(bin);
+		fs.mkdirSync(keyrings);
+		fs.mkdirSync(sources);
+		fs.writeFileSync(osRelease, "ID='ubuntu'\nVERSION_CODENAME='noble'\n", "utf8");
+		fs.writeFileSync(target, "existing-keyring\n", "utf8");
+		fs.writeFileSync(source, "existing-source\n", "utf8");
+		fs.writeFileSync(log, "", "utf8");
+		writeExecutable(
+			path.join(bin, "curl"),
+			`#!/usr/bin/env bash
+set -euo pipefail
+printf 'reviewed-key\n'
+`,
+		);
+		writeExecutable(
+			path.join(bin, "dpkg"),
+			`#!/usr/bin/env bash
+[[ "$*" == "--print-architecture" ]] && printf 'amd64\n'
+`,
+		);
+		writeFakeGPG(bin);
+
+		const result = spawnSync(
+			"bash",
+			["-c", ["set -euo pipefail", "source scripts/install-linux-developer-tools.sh", repository.functionCall].join("\n")],
+			{
+				cwd: repoRoot,
+				env: {
+					...process.env,
+					PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+					CRABBOX_FAKE_GPG_LOG: log,
+					CRABBOX_LINUX_APT_KEYRINGS_DIR: keyrings,
+					CRABBOX_LINUX_APT_SOURCES_DIR: sources,
+					CRABBOX_LINUX_OS_RELEASE_FILE: osRelease,
+				},
+				encoding: "utf8",
+			},
+		);
+
+		assert.equal(result.status, 0, result.stderr || result.stdout);
+		assert.equal(fs.readFileSync(target, "utf8"), `fake-export:${repository.expectedFingerprint}\n`);
+		assert.notEqual(fs.readFileSync(source, "utf8"), "existing-source\n");
+		assert.match(fs.readFileSync(source, "utf8"), new RegExp(`signed-by=${keyrings}/${repository.keyring}`));
+	});
+}
 
 test("linux developer tool setup preserves Google trust files and falls back on fingerprint mismatch", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-tools-mismatch-"));
