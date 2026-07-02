@@ -1496,7 +1496,9 @@ function codeServerInstallBootstrap(): string {
     install -d -m 0755 /usr/local/lib/code-server
     cp -a "$CS_INSTALL_DIR/." /usr/local/lib/code-server/
     chmod 0755 /usr/local/lib/code-server
-    ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server`;
+    ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+    rm -rf "$CS_INSTALL_DIR"
+    trap - EXIT`;
 }
 
 function indentRuncmdScript(script: string): string {
@@ -1533,6 +1535,8 @@ function tailscaleInstallBootstrap(config: LeaseConfig): string {
     tar -xzf "$TS_ARCHIVE" -C "$TS_INSTALL_DIR" --strip-components=1
     install -m 0755 "$TS_INSTALL_DIR/tailscale" /usr/local/bin/tailscale
     install -m 0755 "$TS_INSTALL_DIR/tailscaled" /usr/local/sbin/tailscaled
+    rm -rf "$TS_INSTALL_DIR"
+    trap - EXIT
     install -d -m 0755 /var/lib/tailscale /run/tailscale
     {
       printf '%s\\n' '[Unit]'

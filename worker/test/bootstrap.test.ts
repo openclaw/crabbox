@@ -434,6 +434,26 @@ describe("cloud-init bootstrap", () => {
     expect(linkIndex).toBeGreaterThan(chmodIndex);
   });
 
+  it("cleans pinned install directories when code-server and Tailscale are combined", () => {
+    const got = cloudInit({
+      ...config,
+      code: true,
+      tailscale: true,
+      tailscaleHostname: "crabbox-blue-lobster",
+      tailscaleAuthKey: "tskey-secret",
+    });
+
+    const tailscaleTrap = got.indexOf(`trap 'rm -rf "$TS_INSTALL_DIR"' EXIT`);
+    const tailscaleCleanup = got.indexOf(`rm -rf "$TS_INSTALL_DIR"\n    trap - EXIT`);
+    const codeServerTrap = got.indexOf(`trap 'rm -rf "$CS_INSTALL_DIR"' EXIT`);
+    const codeServerCleanup = got.indexOf(`rm -rf "$CS_INSTALL_DIR"\n    trap - EXIT`);
+
+    expect(tailscaleTrap).toBeGreaterThanOrEqual(0);
+    expect(tailscaleCleanup).toBeGreaterThan(tailscaleTrap);
+    expect(codeServerTrap).toBeGreaterThan(tailscaleCleanup);
+    expect(codeServerCleanup).toBeGreaterThan(codeServerTrap);
+  });
+
   it("adds Tailscale setup only when requested", () => {
     const plain = cloudInit(config);
     expect(plain).not.toContain("tailscale up");
