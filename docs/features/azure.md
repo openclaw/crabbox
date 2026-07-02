@@ -130,9 +130,9 @@ used when Crabbox creates an OS disk checkpoint. `azure.osDiskSKU` /
 forked. For latency-sensitive Windows forks, use `Premium_LRS` for both:
 
 ```sh
-crabbox checkpoint create --provider azure --target windows --id <lease> \
+crabbox checkpoint create --provider azure --target windows --id swift-crab \
   --strategy disk-snapshot --no-reboot=false --azure-snapshot-sku Premium_LRS
-crabbox checkpoint fork <checkpoint> --azure-os-disk-sku Premium_LRS
+crabbox checkpoint fork chk_abcdef1234567890 --azure-os-disk-sku Premium_LRS
 ```
 
 ## Quick Start With `az login`
