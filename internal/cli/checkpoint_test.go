@@ -734,6 +734,9 @@ func TestCheckpointCreateModeSupportsAWSWindowsAMI(t *testing.T) {
 			if got := checkpointCreateMode("native", checkpointStrategyImage, cfg, server, target, false); got != checkpointKindAWSAMI {
 				t.Fatalf("native image mode=%q, want %q", got, checkpointKindAWSAMI)
 			}
+			if got := checkpointCreateMode("native", checkpointStrategyAuto, cfg, server, target, false); got != checkpointKindAWSAMI {
+				t.Fatalf("native automatic mode=%q, want %q", got, checkpointKindAWSAMI)
+			}
 			if got := checkpointCreateMode("snapshot", checkpointStrategyDiskSnapshot, cfg, server, target, false); got != "unsupported" {
 				t.Fatalf("disk snapshot mode=%q, want unsupported", got)
 			}

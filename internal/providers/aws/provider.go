@@ -65,7 +65,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
 	strategy := core.NormalizeCheckpointStrategy(req.Strategy)
 	if isWindowsNativeTarget(req) {
-		if strategy != core.CheckpointStrategyImage {
+		if req.StrategyExplicit && strategy != core.CheckpointStrategyImage {
 			return core.NativeCheckpointCapability{}, false
 		}
 		return core.NativeCheckpointCapability{

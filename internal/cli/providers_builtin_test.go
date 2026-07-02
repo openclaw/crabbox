@@ -607,7 +607,7 @@ func (testAWSProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (
 	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
 	strategy := normalizeCheckpointStrategy(req.Strategy)
 	if isWindowsNativeTarget(req.Target) {
-		if strategy != checkpointStrategyImage {
+		if req.StrategyExplicit && strategy != checkpointStrategyImage {
 			return NativeCheckpointCapability{}, false
 		}
 		return NativeCheckpointCapability{

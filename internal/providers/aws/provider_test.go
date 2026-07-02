@@ -8,9 +8,10 @@ import (
 
 func TestNativeCheckpointCapabilitySupportsWindowsImages(t *testing.T) {
 	req := core.NativeCheckpointRequest{
-		Server:   core.Server{CloudID: "i-123"},
-		Target:   core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
-		Strategy: core.CheckpointStrategyImage,
+		Server:           core.Server{CloudID: "i-123"},
+		Target:           core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+		Strategy:         core.CheckpointStrategyImage,
+		StrategyExplicit: true,
 	}
 
 	direct, ok := (Provider{}).NativeCheckpointCapability(req)
@@ -27,5 +28,11 @@ func TestNativeCheckpointCapabilitySupportsWindowsImages(t *testing.T) {
 	req.Strategy = core.CheckpointStrategyDiskSnapshot
 	if capability, ok := (Provider{}).NativeCheckpointCapability(req); ok {
 		t.Fatalf("disk snapshot capability=%#v, want unsupported", capability)
+	}
+
+	req.StrategyExplicit = false
+	automatic, ok := (Provider{}).NativeCheckpointCapability(req)
+	if !ok || automatic.Kind != core.CheckpointKindAWSAMI || automatic.Direct {
+		t.Fatalf("automatic capability=%#v ok=%v, want brokered AWS AMI", automatic, ok)
 	}
 }
