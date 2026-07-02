@@ -182,6 +182,11 @@ per-request aggregate cap before minting upload URLs. When you do not pass
 `--prefix`, hosted publishing adds a unique PR/bundle/timestamp prefix so later
 bundles cannot overwrite links from earlier QA comments.
 
+New brokered grants use a versioned object namespace containing opaque encodings
+of the authenticated organization and owner before the caller prefix. Existing
+object URLs remain unchanged; the coordinator does not dual-write or translate
+legacy keys.
+
 Coordinator artifact variables describe the backend:
 
 - `CRABBOX_ARTIFACTS_BACKEND`: `s3` or `r2`.

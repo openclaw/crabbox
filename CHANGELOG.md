@@ -7,70 +7,30 @@
 - Added a foreground, loopback-only `crabbox vnc --native-handoff` contract for native viewers, including one-time workspace grants that relay VNC through the coordinator without exposing its SSH key; credentials and grants use private pipes and tunnel lifetime remains owned by the client process.
 - Enabled desktop-capable runtime-adapter workspaces instead of discarding Crabfleet's requested desktop capability, and report native VNC separately from browser VNC.
 - Added direct FastAPI Cloud application and deployment inspection through `status`, `list`, and `doctor`, including configured default application support. Thanks @zozo123.
-- Added normalized provider runtime capabilities and `--runtime` filters to `crabbox providers` and `crabbox providers recommend`.
-- Added `crabbox providers recommend fanout-testing` for forkable workspace and best-of-N test selection guidance.
-- Added normalized provider reachability capabilities and `--reachability` filters to `crabbox providers` and `crabbox providers recommend`.
-- Added `crabbox providers recommend offline-validation` for credentialless local, BYO SSH, and external-provider validation guidance.
-- Added normalized provider lifecycle capabilities and `--lifecycle` filters to `crabbox providers` and `crabbox providers recommend`.
-- Added `crabbox providers recommend failure-diagnostics` for failed-run triage guidance across proof, session, artifact, download, preview, and SSH-debuggable providers.
-- Added `crabbox providers recommend warm-start` for low-latency repeated-run guidance across local runtimes, cache volumes, retained sessions, pause/resume, and workspace-state providers.
-- Added `crabbox providers recommend resource-observability` for coordinator usage/cost visibility, SSH resource telemetry, retained run evidence, reusable sessions, and preview URL guidance.
-- Added `crabbox providers recommend code-interpreter` for generated-code and script execution guidance across delegated and local sandbox providers.
-- Added `crabbox providers recommend disposable-execution` for cleanup-capable temporary sandbox guidance across delegated and local sandbox providers.
-- Added `crabbox providers recommend web-app-smoke` for app and service smoke guidance across provider URLs, SSH tunnels, tailnet reachability, browser/code/desktop access, sessions, and retained outputs.
-- Added `crabbox providers recommend interactive-debug` for live inspection guidance across synced SSH, browser/code/desktop access, reusable sessions, provider URLs, and retained evidence.
-- Added a provider live-smoke contract doc for opt-in validation of adapters that need credentials, quota, local runtimes, or private control planes.
-- Tuned `crabbox providers recommend live-smoke` to keep local runtime smoke paths visible when cloud credentials are unavailable.
-- Added Apple Container to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Local Container to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Docker Sandbox to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added SmolVM to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Superserve to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Vercel Sandbox to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Linode to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added DigitalOcean to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Nebius to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added OVHcloud to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added NVIDIA Brev to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Phala to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Anthropic Sandbox Runtime to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added OpenSandbox to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Proxmox to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added XCP-ng to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Agent Sandbox live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Scaleway live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added KubeVirt live-smoke dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Daytona live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Namespace Devbox live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Namespace Compute live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added local runtime live-smoke documentation coverage for Apple Container, Local Container, Multipass, Tart, and Apple VZ.
-- Added Semaphore live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Sprites live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Blacksmith Testbox live-smoke documentation and workflow preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added W&B live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Incus live-smoke documentation and preflight regression coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added External live-smoke documentation and configuration preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added E2B live-smoke documentation and API-key preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Modal live-smoke documentation and Python-client preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Tenki live-smoke documentation and CLI-auth preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Morph live-smoke documentation and snapshot preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
-- Added Multipass to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added Tart to the guarded `scripts/live-smoke.sh` provider smoke matrix.
-- Added run-session metadata for Vercel Sandbox runs so retained and reused sandboxes can be written through `--lease-output`.
-- Added run-session metadata for CodeSandbox runs so retained and reused sandboxes can be written through `--lease-output`.
-- Added run-session metadata for OpenSandbox runs so retained and reused sandboxes can be written through `--lease-output`.
-- Added run-session metadata for Upstash Box runs so retained and reused boxes can be written through `--lease-output`.
-- Added run-session metadata for Azure Dynamic Sessions runs so retained and reused sessions can be written through `--lease-output`.
-- Added run-session metadata for Freestyle runs so retained and reused VMs can be written through `--lease-output`.
-- Added run-session metadata for Tensorlake runs so retained and reused sandboxes can be written through `--lease-output`.
-- Added run-session metadata for Superserve runs so retained and reused sandboxes can be written through `--lease-output`.
-- Added run-session metadata for SmolVM runs so retained and reused machines can be written through `--lease-output`.
-- Added run-session metadata for OpenComputer runs so retained and reused sandboxes can be written through `--lease-output`.
-- Added run-session metadata for Agent Sandbox runs so retained and reused claims can be written through `--lease-output`.
-- Added run-session metadata for Apple Machine runs so retained and reused machines can be written through `--lease-output`.
+- Added `crabbox checkpoint fork --count` for provider-neutral fan-out from archive checkpoints, native checkpoints, and direct Parallels snapshots without adding runtime-specific fork flags.
+- Added `provider: vultr` for direct Linux SSH leases with per-lease keys, account-bound cleanup, optional existing firewall/VPC attachment, and guarded live smoke coverage. Thanks @coygeek.
+
+- Added normalized provider runtime, reachability, and lifecycle capabilities plus matching `--runtime`, `--reachability`, and `--lifecycle` filters to `crabbox providers` and `crabbox providers recommend`.
+- Added `crabbox providers recommend` profiles for fan-out testing, offline validation, failure diagnostics, warm starts, resource observability, code interpretation, disposable execution, web-app smoke, and interactive debugging.
+
+- Added a provider live-smoke contract for adapters that need credentials, quota, local runtimes, or private control planes, and kept credentialless local runtime smoke paths visible in `crabbox providers recommend live-smoke`.
+- Expanded the guarded `scripts/live-smoke.sh` matrix to Apple Container, Local Container, Docker Sandbox, SmolVM, Superserve, Vercel Sandbox, Linode, DigitalOcean, Nebius, OVHcloud, NVIDIA Brev, Phala, Anthropic Sandbox Runtime, OpenSandbox, Proxmox, XCP-ng, Multipass, and Tart.
+- Added live-smoke documentation and dispatch regression coverage for Agent Sandbox, Scaleway, KubeVirt, Daytona, Namespace Devbox, Namespace Compute, Semaphore, Sprites, and W&B.
+- Added live-smoke workflow, configuration, and credential preflight coverage for Blacksmith Testbox, Incus, External, E2B, Modal, Tenki, and Morph.
+- Documented local runtime live-smoke coverage for Apple Container, Local Container, Multipass, Tart, and Apple VZ.
+
+- Added reusable `--lease-output` run-session metadata for Cloudflare Sandbox, Vercel Sandbox, CodeSandbox, OpenSandbox, Upstash Box, Azure Dynamic Sessions, Freestyle, Tensorlake, Superserve, SmolVM, OpenComputer, Agent Sandbox, and Apple Machine.
 
 ### Fixed
 
+- Isolated brokered artifact uploads by opaque organization and owner namespaces so identities and caller prefixes cannot collide across authorization scopes. Thanks @coygeek.
+- Prevented ASCII Box API credentials from reaching unsafe explicit base URLs by requiring HTTPS except for loopback development endpoints, rejecting ambiguous URL components, and supporting config discovery in the current Box CLI. Thanks @coygeek.
+- Pinned the Google Linux package signing fingerprint, preserved its source-scoped APT keyring across Chrome installation, and failed closed to Chromium when verification fails. Thanks @coygeek.
+- Hardened coordinator image deletion so admin `image delete` requests fail closed unless stored Crabbox-created metadata proves ownership of the AWS, Azure, or GCP image or snapshot.
+- Prevented unused WebVNC and Code bridge tickets from surviving manager share revocation. Thanks @coygeek.
+- Prevented revoked lease managers from retaining mediated-egress bridges after lease sharing was removed or downgraded. Thanks @coygeek.
+- Prevented the Code portal proxy from forwarding coordinator authentication context to lease-controlled code-server requests. Thanks @coygeek.
+- Rejected GitHub login callback origins that differ from the selected broker unless explicitly allowlisted as a trusted alias, preventing OAuth callbacks from silently redirecting stored credentials. Thanks @TurboTheTurtle.
 - Rejected WebVNC, Code, and egress bridge tickets in URL query strings by default while retaining an explicit temporary legacy opt-in. Thanks @TurboTheTurtle.
 - Required manage access for post-create run lease attribution, preventing use-share users from retagging unrelated runs into another owner's audit history. Thanks @TurboTheTurtle.
 - Derived omitted coordinator lease provider keys from the finalized lease ID instead of a shared fallback, preventing cross-lease SSH key reuse. Thanks @TurboTheTurtle.
@@ -214,14 +174,12 @@
 - Added `provider: cloudflare-dynamic-workers` for authenticated Worker-runtime module execution through Cloudflare Dynamic Workers, including blocked-by-default egress, stable caching, durable run metadata, lifecycle commands, and isolated live smoke coverage. Thanks @coygeek.
 - Added `provider: agent-sandbox` for delegated Linux runs through Agent Sandbox `v0.5.0rc1` `v1beta1` warm pools, using the operator's `kubectl` for dependency-light discovery, lifecycle, archive sync, exec, guarded ownership cleanup, and live smoke coverage. Thanks @coygeek.
 - Added `provider: vercel-sandbox` for delegated Linux microVM runs through the official Vercel Sandbox SDK, including archive sync, streamed output, retained-session resume, ownership-guarded lifecycle operations, and guarded live smoke coverage. Thanks @coygeek.
-- Added `crabbox checkpoint fork --count` for provider-neutral fan-out from archive checkpoints, native checkpoints, and direct Parallels snapshots without adding runtime-specific fork flags.
 - Added generic Job evidence fields plus bounded Islo single-file `--require-artifact` and `--download` support, with provider capability gating and secret-safe archive upload errors. Thanks @zozo123.
 - Added owner-scoped outbound runtime-adapter relays so registered workspaces can be created and deleted through a provider-neutral lifecycle API without exposing the provider control plane, including confirmed Delete actions in the portal.
 
 ### Fixed
 
 - Hardened Agent Sandbox repository-config workload and workdir selection, mount-safe replacement sync, pinned pod-container execution, absolute and multi-file kubeconfig handling, controller-enforced TTL expiry with retained exact-claim cleanup, warm-pool/lifecycle/downstream identity validation, one-shot cleanup arming, cleanup dry-run identity checks, root-rechecked missing-claim handling, downstream-missing claim retention, recoverable ambiguous-create reconciliation, terminal status detection, retained activity bookkeeping, local claim removal reporting, and UID-pinned recovery leases when failed-readiness cleanup cannot reach Kubernetes; thanks @coygeek.
-- Hardened coordinator image deletion so admin `image delete` requests fail closed unless stored Crabbox-created metadata proves ownership of the AWS, Azure, or GCP image or snapshot.
 - Added an explicit `webvnc local --security-type vnc` mode that forces standard VNC password authentication when a server advertises account authentication first.
 - Fixed coordinator hibernation recovery to preserve unambiguous live bridges while rejecting duplicate or stale restored endpoints.
 - Fixed portable Node coordinator startup when the production bundle loads the external CommonJS `ssh2` dependency.
@@ -246,7 +204,6 @@
 - Added `provider: namespace-instance` (`namespace-compute`) for short-lived Namespace Compute Linux leases through `nsc`, including per-lease SSH keys, proxy-backed sync/run, duration safeguards, ownership-filtered cleanup, and guarded live smoke coverage. Thanks @coygeek.
 - Added comprehensive guides for deploying the portable Node/PostgreSQL coordinator and integrating private control planes through generic external providers, registered inventory, sharing, and outbound WebVNC.
 - Added `provider: linode` for direct Linux SSH leases with per-lease keys, account-bound cleanup, preserved operator tags, interface-aware existing firewalls, and guarded live smoke coverage. Thanks @coygeek.
-- Added `provider: vultr` for direct Linux SSH leases with per-lease keys, account-bound cleanup, optional existing firewall/VPC attachment, and guarded live smoke coverage. Thanks @coygeek.
 - Added `provider: windows-sandbox` for disposable native Windows runs through Microsoft Windows Sandbox, including mapped workspace sync, streamed output, timeout and cancellation cleanup, and keep-on-failure inspection. Thanks @zozo123.
 - Added `provider: smolvm` for delegated Linux microVM runs through the hosted smolfleet API, including archive sync, retained leases, status, cleanup, and repository-scoped ownership checks. Thanks @zozo123.
 - Added guarded SmolVM live E2E coverage for retained reuse, archive replacement, environment forwarding, command exit propagation, diagnostics, and targeted cleanup.

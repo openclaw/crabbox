@@ -320,6 +320,12 @@ func TestRunOneShotSyncsExecutesAndDeletes(t *testing.T) {
 	if result.ExitCode != 0 || !result.SyncDelegated || result.Provider != providerName {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Session == nil || result.Session.Provider != providerName || result.Session.Reused || result.Session.Kept {
+		t.Fatalf("session=%#v want fresh cleaned-up session", result.Session)
+	}
+	if result.Session.CleanupCommand != cloudflareSandboxCleanupCommand(result.LeaseID) {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
+	}
 	if len(fake.sandboxes) != 0 {
 		t.Fatalf("one-shot sandbox not deleted: %#v", fake.sandboxes)
 	}
@@ -334,6 +340,46 @@ func TestRunOneShotSyncsExecutesAndDeletes(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "ok\n") {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunKeepPublishesReusableSessionAndCleanupStopsSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	backend := testBackend(fake, io.Discard, io.Discard)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: tempRepo(t)},
+		NoSync:  true,
+		Keep:    true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != result.LeaseID || result.Session.Slug != result.Slug || result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
+	}
+	if result.Session.RunID != "" {
+		t.Fatalf("run id=%q want empty", result.Session.RunID)
+	}
+	if result.Session.CleanupCommand != cloudflareSandboxCleanupCommand(result.LeaseID) {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
+	}
+	if err := backend.Stop(context.Background(), StopRequest{ID: result.Session.LeaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.sandboxes) != 0 {
+		t.Fatalf("cleanup left sandboxes: %#v", fake.sandboxes)
+	}
+	claim, err := readLeaseClaim(result.Session.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.LeaseID != "" {
+		t.Fatalf("cleanup left claim: %#v", claim)
 	}
 }
 
@@ -361,6 +407,9 @@ func TestRetainedRunByIDVerifiesOwnershipAndKeepsClaim(t *testing.T) {
 	}
 	if result.LeaseID != leaseID {
 		t.Fatalf("lease=%q want %q", result.LeaseID, leaseID)
+	}
+	if result.Session == nil || !result.Session.Reused || !result.Session.Kept || result.Session.LeaseID != leaseID || result.Session.Slug != result.Slug {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
 	}
 	if _, err := readLeaseClaim(leaseID); err != nil {
 		t.Fatalf("claim not retained: %v", err)
@@ -526,6 +575,9 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	if err == nil || result.ExitCode != 7 {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
+	if result.Session == nil || result.Session.Reused || !result.Session.Kept || result.Session.CleanupCommand == "" {
+		t.Fatalf("session=%#v", result.Session)
+	}
 	if len(fake.sandboxes) != 1 {
 		t.Fatalf("sandbox should be retained on failure: %#v", fake.sandboxes)
 	}
@@ -553,6 +605,38 @@ func TestRunKeepOnFailureStillDeletesSuccessfulOneShot(t *testing.T) {
 	}
 	if len(fake.sandboxes) != 0 {
 		t.Fatalf("successful keep-on-failure run should delete sandbox: %#v", fake.sandboxes)
+	}
+	if result.Session == nil || result.Session.Kept {
+		t.Fatalf("session=%#v want cleaned-up session", result.Session)
+	}
+}
+
+func TestRunCleanupFailureReturnsRetainedSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	fake.deleteErr = errors.New("bridge delete unavailable")
+	backend := testBackend(fake, io.Discard, io.Discard)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: tempRepo(t)},
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "bridge delete unavailable") {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if result.ExitCode != 1 || result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(fake.sandboxes) != 1 {
+		t.Fatalf("failed cleanup lost sandbox state: %#v", fake.sandboxes)
+	}
+}
+
+func TestCloudflareSandboxCleanupCommandQuotesLeaseID(t *testing.T) {
+	got := cloudflareSandboxCleanupCommand("cfsbx_safe; touch /tmp/unsafe")
+	want := "crabbox stop --provider cloudflare-sandbox --id 'cfsbx_safe; touch /tmp/unsafe'"
+	if got != want {
+		t.Fatalf("cleanup command=%q want %q", got, want)
 	}
 }
 

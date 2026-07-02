@@ -29,8 +29,10 @@ func TestProviderSpecIsDelegatedLinuxAndAliasFree(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v want linux only", spec.Targets)
 	}
-	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
-		t.Fatalf("features=%v want archive-sync and cleanup", spec.Features)
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureRunSession} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("features=%v missing %s", spec.Features, feature)
+		}
 	}
 }
 

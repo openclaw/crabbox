@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -58,6 +60,10 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=%s requires ASCII_BOX_API_KEY", providerName)
 	}
+	apiURL, err := validateAsciiBoxBaseURL(blank(strings.TrimSpace(cfg.AsciiBox.BaseURL), "https://ascii.dev"))
+	if err != nil {
+		return nil, err
+	}
 	if rt.Exec == nil {
 		return nil, exit(2, "provider=%s requires a local command runner", providerName)
 	}
@@ -65,8 +71,56 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	if cliPath == "" {
 		cliPath = "box"
 	}
-	apiURL := strings.TrimRight(blank(strings.TrimSpace(cfg.AsciiBox.BaseURL), "https://ascii.dev"), "/")
 	return &client{apiKey: apiKey, apiURL: apiURL, cliPath: cliPath, home: asciiBoxCLIHome(), runner: rt.Exec}, nil
+}
+
+func validateAsciiBoxBaseURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+		return "", exit(2, "provider=%s API base URL must be an absolute HTTP(S) URL", providerName)
+	}
+	if parsed.User != nil {
+		return "", exit(2, "provider=%s API base URL must not contain userinfo", providerName)
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", exit(2, "provider=%s API base URL must not contain a query", providerName)
+	}
+	if parsed.Fragment != "" {
+		return "", exit(2, "provider=%s API base URL must not contain a fragment", providerName)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	hostname := canonicalAsciiBoxHostname(parsed.Hostname())
+	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !isAsciiBoxLoopbackHost(hostname)) {
+		return "", exit(2, "provider=%s API base URL must use HTTPS except for loopback HTTP", providerName)
+	}
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	parsed.Host = hostname
+	if strings.Contains(hostname, ":") {
+		parsed.Host = "[" + hostname + "]"
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(hostname, port)
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func canonicalAsciiBoxHostname(hostname string) string {
+	hostname = strings.ToLower(hostname)
+	if ip := net.ParseIP(strings.TrimSuffix(hostname, ".")); ip != nil {
+		return ip.String()
+	}
+	return hostname
+}
+
+func isAsciiBoxLoopbackHost(hostname string) bool {
+	if hostname == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, error) {
@@ -194,21 +248,23 @@ func (c *client) ensureConfig(ctx context.Context) error {
 	}
 	result, err := c.runner.Run(ctx, LocalCommandRequest{
 		Name: c.cliPath,
-		Args: []string{"--no-update", "--json", "config"},
+		Args: []string{"--no-update", "--json", "--api-url", c.apiURL, "status"},
 		Env:  c.env(),
 	})
 	if err != nil {
-		return fmt.Errorf("ascii-box CLI config failed: %s", c.formatError(result, err))
+		return fmt.Errorf("ascii-box CLI status failed: %s", c.formatError(result, err))
 	}
 	var cfg struct {
-		Path string `json:"path"`
+		Config struct {
+			Path string `json:"path"`
+		} `json:"config"`
 	}
 	if err := json.Unmarshal([]byte(result.Stdout), &cfg); err != nil {
-		return fmt.Errorf("decode ascii-box CLI config: %w", err)
+		return fmt.Errorf("decode ascii-box CLI status: %w", err)
 	}
-	configPath := strings.TrimSpace(cfg.Path)
+	configPath := strings.TrimSpace(cfg.Config.Path)
 	if configPath == "" {
-		return fmt.Errorf("ascii-box CLI config response missing path")
+		return fmt.Errorf("ascii-box CLI status response missing config path")
 	}
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		return err

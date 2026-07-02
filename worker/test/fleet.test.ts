@@ -175,11 +175,17 @@ describe("runtime adapter relay", () => {
         kind: "egress-host",
         leaseID: lease.id,
         sessionID: "egress_restart",
+        owner: "alice@example.com",
+        org: "example-org",
+        admin: false,
       }),
       new FakeWebSocket({
         kind: "egress-client",
         leaseID: lease.id,
         sessionID: "egress_restart",
+        owner: "alice@example.com",
+        org: "example-org",
+        admin: false,
       }),
       new FakeWebSocket({
         kind: "runtime-adapter-agent",
@@ -209,6 +215,85 @@ describe("runtime adapter relay", () => {
     };
     expect(relay.codeAgents.get(lease.id)).toBe(restored[0]);
     expect(relay.runtimeAdapterAgents.get("example-adapter")).toBe(restored[3]);
+  });
+
+  it("fails closed restored egress sessions without current manage access", async () => {
+    const storage = new MemoryStorage();
+    const revokedLease = testLease({
+      id: "cbx_000000000011",
+      provider: "external",
+      lifecycle: "registered",
+      owner: "owner@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const legacyLease = testLease({
+      ...revokedLease,
+      id: "cbx_000000000012",
+    });
+    const adminLease = testLease({
+      ...revokedLease,
+      id: "cbx_000000000013",
+    });
+    for (const lease of [revokedLease, legacyLease, adminLease]) {
+      storage.seed(`lease:${lease.id}`, lease);
+    }
+    const revoked = ["egress-host", "egress-client"].map(
+      (kind) =>
+        new FakeWebSocket({
+          kind,
+          leaseID: revokedLease.id,
+          sessionID: "egress_revoked",
+          owner: "former-manager@example.com",
+          org: "example-org",
+          admin: false,
+        }),
+    );
+    const legacy = ["egress-host", "egress-client"].map(
+      (kind) =>
+        new FakeWebSocket({
+          kind,
+          leaseID: legacyLease.id,
+          sessionID: "egress_legacy",
+        }),
+    );
+    const admin = ["egress-host", "egress-client"].map(
+      (kind) =>
+        new FakeWebSocket({
+          kind,
+          leaseID: adminLease.id,
+          sessionID: "egress_admin",
+          owner: "admin@example.com",
+          org: "other-org",
+          admin: true,
+        }),
+    );
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => [...revoked, ...legacy, ...admin] as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    for (const socket of [...revoked, ...legacy]) {
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.closeReason).toBe("lease access revoked");
+    }
+    for (const socket of admin) {
+      expect(socket.closeCode).toBeUndefined();
+    }
+    const relay = fleet as unknown as {
+      egressHosts: Map<string, WebSocket>;
+      egressClients: Map<string, WebSocket>;
+      egressSessions: Map<string, { sessionID: string }>;
+    };
+    expect(relay.egressHosts.size).toBe(1);
+    expect(relay.egressClients.size).toBe(1);
+    expect(relay.egressSessions.has(revokedLease.id)).toBe(false);
+    expect(relay.egressSessions.has(legacyLease.id)).toBe(false);
+    expect(relay.egressSessions.get(adminLease.id)?.sessionID).toBe("egress_admin");
   });
 
   it("rejects hibernated Code viewers whose portal session logged out", async () => {
@@ -8282,6 +8367,90 @@ describe("fleet lease identity and idle", () => {
     expect(retainedWebAgent.sentJSON()).toEqual([{ retained: true }]);
   });
 
+  it("revokes a live egress session when manage access is downgraded", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000001";
+    const ownerHeaders = {
+      "x-crabbox-owner": "owner@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "shared-live-egress",
+        owner: "owner@example.com",
+        org: "example-org",
+        share: {
+          users: {
+            "manager@example.com": "manage",
+            "other-manager@example.com": "manage",
+          },
+        },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const host = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID,
+      sessionID: "egress_shared",
+      owner: "manager@example.com",
+      org: "example-org",
+      admin: false,
+    });
+    const client = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID,
+      sessionID: "egress_shared",
+      owner: "manager@example.com",
+      org: "example-org",
+      admin: false,
+    });
+    const relay = fleet as unknown as {
+      egressHosts: Map<string, WebSocket>;
+      egressClients: Map<string, WebSocket>;
+      egressSessions: Map<
+        string,
+        { sessionID: string; allow: string[]; createdAt: string; updatedAt: string }
+      >;
+    };
+    const key = `${leaseID}\0egress_shared`;
+    relay.egressHosts.set(key, host as unknown as WebSocket);
+    relay.egressClients.set(key, client as unknown as WebSocket);
+    relay.egressSessions.set(leaseID, {
+      sessionID: "egress_shared",
+      allow: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const unrelatedRemoval = await fleet.fetch(
+      request("DELETE", "/v1/leases/shared-live-egress/share", {
+        headers: ownerHeaders,
+        body: { user: "other-manager@example.com" },
+      }),
+    );
+    expect(unrelatedRemoval.status).toBe(200);
+    expect(host.closeCode).toBeUndefined();
+    expect(client.closeCode).toBeUndefined();
+
+    const downgraded = await fleet.fetch(
+      request("PUT", "/v1/leases/shared-live-egress/share", {
+        headers: ownerHeaders,
+        body: { users: { "manager@example.com": "use" } },
+      }),
+    );
+    expect(downgraded.status).toBe(200);
+    expect(host.closeCode).toBe(1008);
+    expect(host.closeReason).toBe("lease access revoked");
+    expect(client.closeCode).toBe(1008);
+    expect(client.closeReason).toBe("lease access revoked");
+    expect(relay.egressHosts.has(key)).toBe(false);
+    expect(relay.egressClients.has(key)).toBe(false);
+    expect(relay.egressSessions.has(leaseID)).toBe(false);
+  });
+
   it("revokes org-only live viewers after a portal share update", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -13891,17 +14060,80 @@ describe("fleet lease identity and idle", () => {
     ).toBe("/portal/leases/cbx_000000000001/code/");
   });
 
-  it("forwards only the VS Code token cookie to code-server", () => {
+  it("forwards browser headers without Crabbox auth context to code-server", () => {
     const headers = codeForwardHeaders(
       new Headers({
         cookie: "crabbox_session=secret; vscode-tkn=remote-token; other=value",
         origin: "https://broker.example.com",
+        "sec-websocket-protocol": "vscode",
+        "x-client-trace": "trace-1",
+        "x-crabbox-auth": "github",
+        "X-Crabbox-Admin": "true",
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+        "x-crabbox-github-login": "alice",
+        "x-crabbox-token-expires-at": "2026-07-01T12:00:00Z",
       }),
     );
 
     expect(headers["cookie"]).toBe("vscode-tkn=remote-token");
     expect(headers["cookie"]).not.toContain("crabbox_session");
     expect(headers.origin).toBe("https://broker.example.com");
+    expect(headers["sec-websocket-protocol"]).toBe("vscode");
+    expect(headers["x-client-trace"]).toBe("trace-1");
+    expect(Object.keys(headers).filter((key) => key.startsWith("x-crabbox-"))).toEqual([]);
+  });
+
+  it("strips Crabbox auth context from Code proxy bridge messages", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        code: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const agent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const relay = fleet as unknown as { codeAgents: Map<string, WebSocket> };
+    relay.codeAgents.set(leaseID, agent as unknown as WebSocket);
+    let forwarded: { id: string; headers: Record<string, string> } | undefined;
+    agent.onSend = (data) => {
+      forwarded = JSON.parse(data) as { id: string; headers: Record<string, string> };
+      void fleet.webSocketMessage(
+        agent as unknown as WebSocket,
+        JSON.stringify({ type: "http", id: forwarded.id, status: 204 }),
+      );
+    };
+
+    const response = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/code/api/status", {
+        headers: {
+          "x-crabbox-auth": "github",
+          "x-crabbox-admin": "false",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+          "x-crabbox-github-login": "alice",
+          "x-crabbox-token-expires-at": "2026-07-01T12:00:00Z",
+          "x-client-trace": "trace-1",
+          origin: "https://broker.example.com",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(204);
+    expect(forwarded?.headers).toMatchObject({
+      origin: "https://broker.example.com",
+      "x-client-trace": "trace-1",
+    });
+    expect(
+      Object.keys(forwarded?.headers ?? {}).filter((key) => key.startsWith("x-crabbox-")),
+    ).toEqual([]);
   });
 
   it("creates scoped egress tickets and reports bridge status", async () => {
@@ -16656,7 +16888,7 @@ describe("fleet lease identity and idle", () => {
 
     const response = await fleet.fetch(
       request("POST", "/v1/artifacts/uploads", {
-        headers: { "x-crabbox-owner": "peter@example.com" },
+        headers: { "x-crabbox-owner": "alice@example.com" },
         body: {
           prefix: "pr-42",
           files: [
@@ -16685,10 +16917,12 @@ describe("fleet lease identity and idle", () => {
     };
     expect(body.backend).toBe("r2");
     expect(body.bucket).toBe("qa-artifacts");
-    expect(body.prefix).toBe("qa/peter@example.com/pr-42");
-    expect(body.files[0].key).toBe("qa/peter@example.com/pr-42/screenshots/after.png");
+    const org = Buffer.from("default-org").toString("base64url");
+    const owner = Buffer.from("alice@example.com").toString("base64url");
+    expect(body.prefix).toBe(`qa/v2/org/${org}/owner/${owner}/pr-42`);
+    expect(body.files[0].key).toBe(`qa/v2/org/${org}/owner/${owner}/pr-42/screenshots/after.png`);
     expect(body.files[0].url).toBe(
-      "https://artifacts.example.com/qa/peter%40example.com/pr-42/screenshots/after.png",
+      `https://artifacts.example.com/qa/v2/org/${org}/owner/${owner}/pr-42/screenshots/after.png`,
     );
     expect(body.files[0].upload.headers["content-length"]).toBe("123");
     expect(body.files[0].upload.headers["content-type"]).toBe("image/png");
@@ -16697,6 +16931,89 @@ describe("fleet lease identity and idle", () => {
       "content-length",
     );
     expect(JSON.stringify(body)).not.toContain("super-secret");
+  });
+
+  it("isolates artifact grants by opaque organization and owner identities", async () => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_ARTIFACTS_BACKEND: "r2",
+        CRABBOX_ARTIFACTS_BUCKET: "qa-artifacts",
+        CRABBOX_ARTIFACTS_PREFIX: "qa",
+        CRABBOX_ARTIFACTS_ENDPOINT_URL: "https://account.r2.cloudflarestorage.com",
+        CRABBOX_ARTIFACTS_ACCESS_KEY_ID: "access-key",
+        CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY: "super-secret",
+      },
+    );
+    const grant = async (org: string, owner: string, prefix: string) => {
+      const response = await fleet.fetch(
+        request("POST", "/v1/artifacts/uploads", {
+          headers: { "x-crabbox-org": org, "x-crabbox-owner": owner },
+          body: { prefix, files: [{ name: "proof.txt", size: 1 }] },
+        }),
+      );
+      expect(response.status).toBe(201);
+      return (await response.json()) as {
+        prefix: string;
+        files: Array<{ key: string; url: string; upload: { url: string } }>;
+      };
+    };
+
+    const orgA = await grant("org-a", "alice/team", "run-1");
+    const orgB = await grant("org-b", "alice/team", "run-1");
+    const shiftedBoundary = await grant("org-a", "alice", "team/run-1");
+
+    const slashOrg = await grant("org/team", "alice", "run-1");
+    const backslashOrg = await grant("org\\team", "alice", "run-1");
+
+    for (const [left, right] of [
+      [orgA, orgB],
+      [orgA, shiftedBoundary],
+      [slashOrg, backslashOrg],
+    ]) {
+      expect(left.prefix).not.toBe(right.prefix);
+      expect(left.files[0].key).not.toBe(right.files[0].key);
+      expect(new URL(left.files[0].url).pathname).not.toBe(new URL(right.files[0].url).pathname);
+      expect(new URL(left.files[0].upload.url).pathname).not.toBe(
+        new URL(right.files[0].upload.url).pathname,
+      );
+    }
+    expect(orgA.prefix).toContain(
+      `/org/${Buffer.from("org-a").toString("base64url")}/owner/${Buffer.from("alice/team").toString("base64url")}/`,
+    );
+  });
+
+  it("rejects empty artifact authorization identities", async () => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_DEFAULT_ORG: "",
+        CRABBOX_ARTIFACTS_BACKEND: "r2",
+        CRABBOX_ARTIFACTS_BUCKET: "qa-artifacts",
+        CRABBOX_ARTIFACTS_ENDPOINT_URL: "https://account.r2.cloudflarestorage.com",
+        CRABBOX_ARTIFACTS_ACCESS_KEY_ID: "access-key",
+        CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY: "super-secret",
+      },
+    );
+    const grant = async (headers: Record<string, string>) => {
+      const response = await fleet.fetch(
+        request("POST", "/v1/artifacts/uploads", {
+          headers,
+          body: { files: [{ name: "proof.txt", size: 1 }] },
+        }),
+      );
+      expect(response.status).toBe(400);
+      return (await response.json()) as { message: string };
+    };
+
+    await expect(grant({ "x-crabbox-owner": "alice", "x-crabbox-org": "" })).resolves.toMatchObject(
+      { message: "artifact upload organization identity is required" },
+    );
+    await expect(
+      grant({ "x-crabbox-owner": "", "x-crabbox-org": "example-org" }),
+    ).resolves.toMatchObject({ message: "artifact upload owner identity is required" });
   });
 
   it("reports artifact broker setup errors without provider-specific local credentials", async () => {
