@@ -12,6 +12,12 @@ import {
   type LeaseConfig,
 } from "./config";
 import { osImageSpec } from "./os-image";
+import {
+  leaseIDForProviderKey,
+  providerKeyForLease,
+  providerKeyOwnedByLease,
+  sshPublicKeyIdentity,
+} from "./provider-key";
 import { leaseProviderLabels } from "./provider-labels";
 import { leaseProviderName } from "./slug";
 import type {
@@ -317,7 +323,7 @@ export class EC2SpotClient {
     market?: string;
     attempts?: ProvisioningAttempt[];
   }> {
-    await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
+    await this.ensureSSHKey(config.providerKey, config.sshPublicKey, leaseID);
     let transientImageID = "";
     try {
       const defaultImageID = config.awsSnapshot
@@ -1020,8 +1026,30 @@ export class EC2SpotClient {
     throw lastError;
   }
 
-  async deleteSSHKey(name: string): Promise<void> {
-    await this.ec2("DeleteKeyPair", { KeyName: name }).catch((error: unknown) => {
+  async deleteSSHKey(name: string, leaseID: string): Promise<void> {
+    if (name !== providerKeyForLease(leaseID)) {
+      return;
+    }
+    let described: Record<string, unknown>;
+    try {
+      described = await this.ec2("DescribeKeyPairs", { "KeyName.1": name });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("InvalidKeyPair.NotFound")) {
+        return;
+      }
+      throw error;
+    }
+    const existing = items(record(described["keySet"])["item"]).map(record)[0];
+    if (!existing || !providerKeyOwnedByLease(tagMap(existing["tagSet"]), leaseID)) {
+      console.warn(`AWS SSH key cleanup skipped unowned key lease=${leaseID} key=${name}`);
+      return;
+    }
+    const keyPairID = asString(existing["keyPairId"]);
+    if (!keyPairID) {
+      throw new Error(`AWS SSH key ${name} is missing its immutable key pair ID`);
+    }
+    await this.ec2("DeleteKeyPair", { KeyPairId: keyPairID }).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes("InvalidKeyPair.NotFound")) {
         throw error;
@@ -1035,17 +1063,42 @@ export class EC2SpotClient {
     await this.ec2("CreateTags", params);
   }
 
-  private async ensureSSHKey(name: string, publicKey: string): Promise<void> {
+  private async ensureSSHKey(name: string, publicKey: string, leaseID: string): Promise<void> {
+    const keyLeaseID = leaseIDForProviderKey(name);
+    if (keyLeaseID && keyLeaseID !== leaseID) {
+      throw new Error(`aws ssh key ${name} is reserved for lease ${keyLeaseID}`);
+    }
+    const leaseOwned = keyLeaseID === leaseID;
+    let described: Record<string, unknown> | undefined;
     try {
-      await this.ec2("DescribeKeyPairs", { "KeyName.1": name });
-      return;
+      described = await this.ec2("DescribeKeyPairs", {
+        IncludePublicKey: "true",
+        "KeyName.1": name,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes("InvalidKeyPair.NotFound")) {
         throw error;
       }
     }
-    await this.ec2("ImportKeyPair", {
+    if (described) {
+      const existing = items(record(described["keySet"])["item"]).map(record)[0];
+      if (!existing) {
+        throw new Error(`aws ssh key ${name} could not be read`);
+      }
+      const existingPublicKey = asString(existing["publicKey"]);
+      if (
+        !existingPublicKey ||
+        sshPublicKeyIdentity(existingPublicKey) !== sshPublicKeyIdentity(publicKey)
+      ) {
+        throw new Error(`aws ssh key ${name} exists with different public key`);
+      }
+      if (leaseOwned && !providerKeyOwnedByLease(tagMap(existing["tagSet"]), leaseID)) {
+        throw new Error(`aws ssh key ${name} is not owned by lease ${leaseID}`);
+      }
+      return;
+    }
+    const params: Record<string, string> = {
       KeyName: name,
       PublicKeyMaterial: btoa(publicKey),
       "TagSpecification.1.ResourceType": "key-pair",
@@ -1053,7 +1106,12 @@ export class EC2SpotClient {
       "TagSpecification.1.Tag.1.Value": "true",
       "TagSpecification.1.Tag.2.Key": "created_by",
       "TagSpecification.1.Tag.2.Value": "crabbox",
-    });
+    };
+    if (leaseOwned) {
+      params["TagSpecification.1.Tag.3.Key"] = "lease";
+      params["TagSpecification.1.Tag.3.Value"] = leaseID;
+    }
+    await this.ec2("ImportKeyPair", params);
   }
 
   private async createServer(

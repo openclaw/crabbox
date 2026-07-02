@@ -49,7 +49,6 @@ import {
   HetznerClient,
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
-  sshPublicKeyIdentity,
 } from "./hetzner";
 import { bearerToken, errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import {
@@ -79,6 +78,7 @@ import {
   type PortalMacHostRecord,
   webVNCBridgeCommand,
 } from "./portal";
+import { leaseIDForProviderKey, providerKeyForLease, sshPublicKeyIdentity } from "./provider-key";
 import {
   readRuntimeAdapterRelayBody,
   runtimeAdapterProxyPath,
@@ -1771,9 +1771,38 @@ export class FleetCoordinator {
     if (retainedMacHostLease && !config.serverTypeExplicit) {
       config = { ...config, serverType: retainedMacHostLease.serverType };
     }
+    if (retainedMacHostLease) {
+      config = { ...config, providerKey: retainedMacHostLease.providerKey };
+    }
     const leaseID = validLeaseID(input.leaseID) ? input.leaseID : newLeaseID();
+    const canonicalProviderKey = providerKeyForLease(leaseID);
+    const providerKeyLeaseID = leaseIDForProviderKey(config.providerKey);
+    if (!retainedMacHostLease && providerKeyLeaseID && providerKeyLeaseID !== leaseID) {
+      return json(
+        {
+          error: "reserved_provider_key",
+          message: `provider key ${config.providerKey} is reserved for lease ${providerKeyLeaseID}`,
+        },
+        { status: 400 },
+      );
+    }
+    if (
+      !workspaceID &&
+      !retainedMacHostLease &&
+      !isAdminRequest(request) &&
+      config.providerKey &&
+      config.providerKey !== canonicalProviderKey
+    ) {
+      return json(
+        {
+          error: "admin_required",
+          message: "custom provider key names require admin-token auth",
+        },
+        { status: 403 },
+      );
+    }
     if (!config.providerKey) {
-      config = { ...config, providerKey: providerKeyForLease(leaseID) };
+      config = { ...config, providerKey: canonicalProviderKey };
     }
     config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
     const readiness = this.providerConfigurationReadiness(
@@ -12229,10 +12258,6 @@ function newLeaseID(): string {
   return `cbx_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function providerKeyForLease(leaseID: string): string {
-  return `crabbox-${leaseID.replaceAll("_", "-")}`;
-}
-
 function validWorkspaceID(value: string | undefined): value is string {
   return (
     typeof value === "string" &&
@@ -13515,8 +13540,14 @@ export function recordAzureDeferredCleanup(
   });
 }
 
-function validCrabboxProviderKey(value: string | undefined): value is string {
-  return typeof value === "string" && /^crabbox-cbx-[a-f0-9]{12}$/.test(value);
+function leaseUsesCanonicalProviderKey(
+  lease: Pick<LeaseRecord, "id" | "providerKey" | "providerKeyCleanupOwned">,
+): boolean {
+  return (
+    lease.providerKeyCleanupOwned === true &&
+    validLeaseID(lease.id) &&
+    lease.providerKey === providerKeyForLease(lease.id)
+  );
 }
 
 function validExternalRunnerID(value: string | undefined): value is string {
@@ -15634,7 +15665,7 @@ interface CloudProvider {
     snapshotIDs: string[],
     availabilityZones?: string[],
   ): Promise<ProviderFastSnapshotRestore[]>;
-  deleteSSHKey(name: string): Promise<void>;
+  deleteSSHKey(name: string, leaseID: string): Promise<void>;
   hourlyPriceUSD(
     serverType: string,
     config: ReturnType<typeof leaseConfig>,
@@ -15704,17 +15735,30 @@ export class HetznerProvider implements CloudProvider {
     market?: string;
     attempts?: ProvisioningAttempt[];
   }> {
-    const { server, serverType } = await this.client.createServerWithFallback(
+    const { server, serverType, providerKey } = await this.client.createServerWithFallback(
       config,
       leaseID,
       slug,
       owner,
     );
-    return { server: this.client.toMachine(server), serverType };
+    return { server: { ...this.client.toMachine(server), providerKey }, serverType };
   }
 
   async deleteServer(id: string): Promise<void> {
     await this.client.deleteServer(Number(id));
+  }
+
+  async finalizeLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    server: ProviderMachine,
+  ): Promise<ProviderLeaseCreateFinalization> {
+    const providerKey = server.providerKey?.trim() || config.providerKey;
+    const providerKeyCleanupOwned = providerKey === providerKeyForLease(lease.id);
+    return {
+      config: { ...config, providerKey },
+      lease: { ...lease, providerKey, providerKeyCleanupOwned },
+    };
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
@@ -15725,11 +15769,8 @@ export class HetznerProvider implements CloudProvider {
         throw error;
       }
     }
-    if (
-      !lease.providerKey.startsWith(workspaceProviderKeyPrefix) &&
-      validCrabboxProviderKey(lease.providerKey)
-    ) {
-      await this.deleteSSHKey(lease.providerKey);
+    if (leaseUsesCanonicalProviderKey(lease)) {
+      await this.deleteSSHKey(lease.providerKey, lease.id);
     }
   }
 
@@ -15756,8 +15797,8 @@ export class HetznerProvider implements CloudProvider {
   decorateImage = passthroughProviderImage;
   validateDeleteImage = allowProviderImageDelete;
 
-  async deleteSSHKey(name: string): Promise<void> {
-    await this.client.deleteSSHKey(name);
+  async deleteSSHKey(name: string, leaseID: string): Promise<void> {
+    await this.client.deleteSSHKey(name, leaseID);
   }
 
   hourlyPriceUSD(
@@ -16397,7 +16438,11 @@ export class AWSProvider implements CloudProvider {
     attempts: ProvisioningAttempt[],
   ): Promise<ProviderLeaseCreateFinalization> {
     const nextConfig = server.region ? { ...config, awsRegion: server.region } : config;
-    const nextLease: LeaseRecord = { ...lease, region: server.region ?? nextConfig.awsRegion };
+    const nextLease: LeaseRecord = {
+      ...lease,
+      region: server.region ?? nextConfig.awsRegion,
+      providerKeyCleanupOwned: lease.providerKey === providerKeyForLease(lease.id),
+    };
     const hints = capacityHints(this.env, nextConfig, nextLease, attempts);
     if (hints.length > 0) {
       nextLease.capacityHints = hints;
@@ -16417,8 +16462,8 @@ export class AWSProvider implements CloudProvider {
         `AWS lease cleanup found missing instance lease=${lease.id} cloud=${lease.cloudID}: ${message}`,
       );
     }
-    if (validCrabboxProviderKey(lease.providerKey)) {
-      await this.deleteSSHKey(lease.providerKey);
+    if (leaseUsesCanonicalProviderKey(lease)) {
+      await this.deleteSSHKey(lease.providerKey, lease.id);
     }
   }
 
@@ -16682,8 +16727,8 @@ export class AWSProvider implements CloudProvider {
     return { image: promoted };
   }
 
-  async deleteSSHKey(name: string): Promise<void> {
-    await this.client.deleteSSHKey(name);
+  async deleteSSHKey(name: string, leaseID: string): Promise<void> {
+    await this.client.deleteSSHKey(name, leaseID);
   }
 
   hourlyPriceUSD(
