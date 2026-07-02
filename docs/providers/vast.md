@@ -220,6 +220,11 @@ instances whose provider identity no longer matches the local claim. Vast labels
 are compact strings beginning with `cbx1|`; they encode the lease id, slug, and
 state.
 
+Each new local claim also records the authenticated Vast account id and the
+configured API endpoint. Release validates both before accepting a remote 404,
+stopping, or destroying an instance, so switching credentials or API endpoints
+cannot silently discard cleanup state for a billable instance in another account.
+
 ## Guarded Live Smoke
 
 The repeatable live check is opt-in and billable:

@@ -291,7 +291,7 @@ func TestAcquireCreatesAttachesPollsReadinessAndClaims(t *testing.T) {
 		t.Fatalf("managed=%#v", api.managed)
 	}
 	claim, ok, err := core.ResolveLeaseClaimForProvider("gpu-box", providerName)
-	if err != nil || !ok || claim.CloudID != "100" || claim.Labels[vastOfferIDLabel] != "84" || claim.Labels[vastKeyIDLabel] != "key-100" || claim.Labels[vastReleaseActionLabel] != "destroy" {
+	if err != nil || !ok || claim.CloudID != "100" || claim.Labels[vastOfferIDLabel] != "84" || claim.Labels[vastAccountIDLabel] != "7" || claim.Labels[vastAPIURLLabel] != "https://console.vast.ai/api/v0" || claim.Labels[vastKeyIDLabel] != "key-100" || claim.Labels[vastReleaseActionLabel] != "destroy" {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 }
@@ -431,7 +431,7 @@ func TestAcquirePreservesRecoveryClaimWhenRollbackCleanupFails(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("recover-me", providerName)
-	if claimErr != nil || !ok || claim.Labels["recovery"] != "rollback-cleanup" || claim.CloudID != "100" {
+	if claimErr != nil || !ok || claim.Labels["recovery"] != "rollback-cleanup" || claim.Labels[vastAccountIDLabel] != "7" || claim.Labels[vastAPIURLLabel] != "https://console.vast.ai/api/v0" || claim.CloudID != "100" {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
 	}
 }
@@ -457,6 +457,37 @@ func TestReleaseDestroysByDefaultAndRemovesClaim(t *testing.T) {
 	}
 	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("destroy-me", providerName); claimErr != nil || ok {
 		t.Fatalf("claim ok=%v err=%v", ok, claimErr)
+	}
+}
+
+func TestReleaseRejectsMismatchedVastCleanupIdentity(t *testing.T) {
+	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "identity-bound"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	api.user = vastUser{ID: 8, Username: "other"}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+	if err == nil || !strings.Contains(err.Error(), "account identity does not match") {
+		t.Fatalf("account mismatch err=%v", err)
+	}
+	if len(api.detached) != 0 || len(api.destroyed) != 0 {
+		t.Fatalf("account mismatch detached=%v destroyed=%v", api.detached, api.destroyed)
+	}
+
+	api.user = vastUser{ID: 7, Username: "alice"}
+	b.cfg.Vast.APIURL = "https://other.example.test/api/v0"
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+	if err == nil || !strings.Contains(err.Error(), "API endpoint identity does not match") {
+		t.Fatalf("API mismatch err=%v", err)
+	}
+	if len(api.detached) != 0 || len(api.destroyed) != 0 {
+		t.Fatalf("API mismatch detached=%v destroyed=%v", api.detached, api.destroyed)
+	}
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("identity-bound", providerName); claimErr != nil || !ok {
+		t.Fatalf("claim after mismatch ok=%v err=%v", ok, claimErr)
 	}
 }
 

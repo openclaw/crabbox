@@ -20,6 +20,8 @@ const (
 	vastKeyIDLabel         = "provider_key_id"
 	vastKeyOwnedLabel      = "provider_key_owned"
 	vastOfferIDLabel       = "vast_offer_id"
+	vastAccountIDLabel     = "vast_account_id"
+	vastAPIURLLabel        = "vast_api_url"
 	vastReadyCheck         = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
 	vastReleaseActionLabel = "release_action"
 )
@@ -150,6 +152,15 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	user, err := client.CheckAuth(ctx)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if user.ID == 0 {
+		return core.LeaseTarget{}, exit(5, "vast auth returned no account id")
+	}
+	accountID := strconv.Itoa(user.ID)
+	apiURL := vastAPIEndpointIdentity(b.cfg.Vast.APIURL)
 	instances, err := client.ListInstances(ctx)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -182,7 +193,7 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 			core.RemoveStoredTestboxKey(leaseID)
 			return
 		}
-		_ = b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, instanceID, keyID, "rollback-cleanup", req.Keep, now)
+		_ = b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, instanceID, keyID, accountID, apiURL, "rollback-cleanup", req.Keep, now)
 		if !req.Keep {
 			cleanupErr := rollbackVastAcquire(client, instanceID, keyID)
 			if cleanupErr != nil {
@@ -235,6 +246,8 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	server := serverFromInstance(instance, cfg)
 	server.Labels = vastLeaseLabels(cfg, leaseID, slug, "ready", req.Keep, now)
 	server.Labels[vastOfferIDLabel] = strconv.Itoa(askID)
+	server.Labels[vastAccountIDLabel] = accountID
+	server.Labels[vastAPIURLLabel] = apiURL
 	if keyID != "" {
 		server.Labels[vastKeyIDLabel] = keyID
 	}
@@ -517,6 +530,9 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if claim.CloudID != "" && server.CloudID != "" && claim.CloudID != server.CloudID {
 		return exit(2, "refusing to release Vast instance %s from stale local claim", server.CloudID)
 	}
+	if err := b.validateVastCleanupIdentity(ctx, client, claim); err != nil {
+		return err
+	}
 	instanceID, ok := parseVastInstanceID(firstNonBlank(server.CloudID, claim.CloudID))
 	if !ok {
 		return exit(2, "provider=%s release requires a Vast instance id", providerName)
@@ -654,6 +670,8 @@ func preserveVastClaimMetadata(labels, existing map[string]string) map[string]st
 		vastKeyIDLabel,
 		vastKeyOwnedLabel,
 		vastOfferIDLabel,
+		vastAccountIDLabel,
+		vastAPIURLLabel,
 		"provider_key",
 		"recovery",
 	} {
@@ -779,16 +797,44 @@ func claimTarget(claim core.LeaseClaim) core.LeaseTarget {
 	return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server, SSH: target}
 }
 
-func (b *backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, instanceID int, keyID, reason string, keep bool, now time.Time) error {
+func (b *backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, instanceID int, keyID, accountID, apiURL, reason string, keep bool, now time.Time) error {
 	label := encodeVastOwnershipLabel(leaseID, slug, reason)
 	server := serverFromInstance(vastInstance{ID: instanceID, Label: label, Status: reason}, cfg)
 	server.Labels = vastLeaseLabels(cfg, leaseID, slug, reason, keep, now)
 	server.Labels["recovery"] = reason
+	server.Labels[vastAccountIDLabel] = accountID
+	server.Labels[vastAPIURLLabel] = apiURL
 	if keyID != "" {
 		server.Labels[vastKeyIDLabel] = keyID
 		server.Labels[vastKeyOwnedLabel] = "true"
 	}
 	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repoRoot, cfg.IdleTimeout, true)
+}
+
+func (b *backend) validateVastCleanupIdentity(ctx context.Context, client vastAPI, claim core.LeaseClaim) error {
+	expectedAPIURL := strings.TrimSpace(claim.Labels[vastAPIURLLabel])
+	if expectedAPIURL == "" {
+		return exit(2, "lease=%s has no stored Vast API endpoint identity; refusing cleanup", claim.LeaseID)
+	}
+	if vastAPIEndpointIdentity(b.cfg.Vast.APIURL) != expectedAPIURL {
+		return exit(2, "lease=%s Vast API endpoint identity does not match current configuration; refusing cleanup", claim.LeaseID)
+	}
+	expectedAccountID := strings.TrimSpace(claim.Labels[vastAccountIDLabel])
+	if expectedAccountID == "" {
+		return exit(2, "lease=%s has no stored Vast account identity; refusing cleanup", claim.LeaseID)
+	}
+	user, err := client.CheckAuth(ctx)
+	if err != nil {
+		return err
+	}
+	if strconv.Itoa(user.ID) != expectedAccountID {
+		return exit(2, "lease=%s Vast account identity does not match current credentials; refusing cleanup", claim.LeaseID)
+	}
+	return nil
+}
+
+func vastAPIEndpointIdentity(value string) string {
+	return strings.TrimRight(strings.TrimSpace(value), "/")
 }
 
 func rollbackVastAcquire(client vastAPI, instanceID int, keyID string) error {
