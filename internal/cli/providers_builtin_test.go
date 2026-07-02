@@ -601,14 +601,23 @@ func (p testAWSProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 func (testAWSProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
-	if req.Server.CloudID == "" || isWindowsNativeTarget(req.Target) {
+	if req.Server.CloudID == "" {
 		return NativeCheckpointCapability{}, false
 	}
 	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
+	strategy := normalizeCheckpointStrategy(req.Strategy)
+	if isWindowsNativeTarget(req.Target) {
+		if strategy != checkpointStrategyImage {
+			return NativeCheckpointCapability{}, false
+		}
+		return NativeCheckpointCapability{
+			Kind:   checkpointKindAWSAMI,
+			Direct: req.Config.Coordinator == "",
+		}, true
+	}
 	if targetOS != targetLinux && targetOS != targetMacOS {
 		return NativeCheckpointCapability{}, false
 	}
-	strategy := normalizeCheckpointStrategy(req.Strategy)
 	if req.Config.Coordinator == "" {
 		if targetOS != targetMacOS && strategy != checkpointStrategyImage {
 			return NativeCheckpointCapability{}, false

@@ -84,8 +84,10 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req checkpointNat
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
-	if err := prepareNativeImageSource(ctx, req.Target); err != nil {
-		return CoordinatorImage{}, err
+	if !isWindowsNativeTarget(req.Target) {
+		if err := prepareNativeImageSource(ctx, req.Target); err != nil {
+			return CoordinatorImage{}, err
+		}
 	}
 	image, err := coord.CreateImage(ctx, req.LeaseID, name, req.NoReboot, strategy)
 	if err != nil {

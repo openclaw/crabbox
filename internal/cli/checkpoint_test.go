@@ -720,6 +720,27 @@ func TestCheckpointCreateModeNativeSupportsDirectAWSAMI(t *testing.T) {
 	}
 }
 
+func TestCheckpointCreateModeSupportsAWSWindowsAMI(t *testing.T) {
+	server := Server{Provider: "aws", CloudID: "i-123"}
+	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	for _, coordinator := range []string{"", "https://coordinator.example"} {
+		t.Run(map[bool]string{true: "direct", false: "brokered"}[coordinator == ""], func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Provider = "aws"
+			cfg.Coordinator = coordinator
+			cfg.TargetOS = targetWindows
+			cfg.WindowsMode = windowsModeNormal
+
+			if got := checkpointCreateMode("native", checkpointStrategyImage, cfg, server, target, false); got != checkpointKindAWSAMI {
+				t.Fatalf("native image mode=%q, want %q", got, checkpointKindAWSAMI)
+			}
+			if got := checkpointCreateMode("snapshot", checkpointStrategyDiskSnapshot, cfg, server, target, false); got != "unsupported" {
+				t.Fatalf("disk snapshot mode=%q, want unsupported", got)
+			}
+		})
+	}
+}
+
 func TestCheckpointCreateModeParallelsRejectsImageStrategy(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Provider = "parallels"
