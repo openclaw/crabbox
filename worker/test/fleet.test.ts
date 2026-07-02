@@ -129,6 +129,12 @@ const restrictedBrokerSelectorCases = [
     field: "gcpServiceAccount",
     value: "runner@other-project.iam.gserviceaccount.com",
   },
+  {
+    provider: "azure" as const,
+    field: "azureImage",
+    value: "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest",
+  },
+  { provider: "azure" as const, field: "azureOSDisk", value: "ephemeral" },
 ];
 
 class FakeWebSocket {
@@ -3653,6 +3659,14 @@ describe("fleet lease identity and idle", () => {
       },
       body: { os: "ubuntu:24.04" },
     },
+    {
+      provider: "azure" as const,
+      env: {
+        CRABBOX_AZURE_IMAGE: "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest",
+        CRABBOX_AZURE_OS_DISK: "ephemeral",
+      },
+      body: {},
+    },
   ])(
     "does not treat coordinator $provider defaults as caller-supplied selectors",
     async ({ provider, env, body }) => {
@@ -3681,6 +3695,37 @@ describe("fleet lease identity and idle", () => {
       expect((await storage.list()).size).toBe(0);
     },
   );
+
+  it("allows brokered Azure location selection without admin auth", async () => {
+    const storage = new MemoryStorage();
+    const providerFetch = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", providerFetch);
+    const fleet = testFleet(storage);
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "westus3",
+          sshPublicKey: "ssh-ed25519 azure-location-test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(424);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "provider_not_configured",
+      provider: "azure",
+    });
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect((await storage.list()).size).toBe(0);
+    expect(storage.alarm()).toBeUndefined();
+  });
 
   it("skips broker selector restrictions for internal workspace provisioning", async () => {
     let created = false;

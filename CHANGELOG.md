@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Restricted brokered Azure image and OS-disk selectors to admin-authenticated requests while preserving user-selectable Azure placement. Thanks @coygeek.
+
 ## 0.34.0 - 2026-07-02
 
 ### Added

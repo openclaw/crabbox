@@ -183,8 +183,10 @@ Brokered leases reuse the same Azure service-principal secrets on the coordinato
 `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and
 `AZURE_SUBSCRIPTION_ID`. Operators own the resource group, vnet, subnet, NSG, OS
 disk mode, and SSH CIDR defaults through the `CRABBOX_AZURE_*` env vars on the
-Worker. A lease request may override only `azureLocation`, `azureImage`, and
-`azureOSDisk`.
+Worker. Explicit broker requests for `azureImage` and `azureOSDisk` require
+admin-token authentication. Normal broker users receive coordinator-managed
+image and OS-disk values; `azureLocation` remains user-selectable for capacity
+routing. Direct mode keeps these local overrides.
 Set `CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` on the coordinator when brokered Azure
 Windows ARM64 leases need a default ARM64 Windows image without changing the
 global `CRABBOX_AZURE_IMAGE` fallback used by existing custom-image leases.

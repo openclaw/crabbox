@@ -15840,6 +15840,12 @@ class AzureProvider implements CloudProvider {
     return this.clientValue;
   }
 
+  restrictedLeaseRequestFields(input: LeaseRequest): string[] {
+    return [input.azureImage ? "azureImage" : "", input.azureOSDisk ? "azureOSDisk" : ""].filter(
+      Boolean,
+    );
+  }
+
   listCrabboxServers(): Promise<ProviderMachine[]> {
     return this.client.listCrabboxServers();
   }
