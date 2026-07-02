@@ -353,15 +353,14 @@ func (s *watchSession) run(ctx context.Context) error {
 				}
 				fmt.Fprintf(s.stderr, "watch run=%d result=nonzero watching for changes\n", iteration)
 			}
-			if idleExiting {
-				fmt.Fprintf(s.stderr, "watch idle_exit=%s runs=%d\n", s.idleExit, iteration)
-				return nil
-			}
 			if pending {
 				pending = false
 				changes := pendingChanges
 				pendingChanges = 0
 				startRun(changes)
+			} else if idleExiting {
+				fmt.Fprintf(s.stderr, "watch idle_exit=%s runs=%d\n", s.idleExit, iteration)
+				return nil
 			}
 		case <-idleTimer.C:
 			if running {

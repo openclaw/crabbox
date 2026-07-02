@@ -383,6 +383,30 @@ func TestWatchChangeDuringRunQueuesExactlyOnePendingRerun(t *testing.T) {
 	}
 }
 
+func TestWatchRunsQueuedRerunBeforeIdleExit(t *testing.T) {
+	root := newWatchGitRepo(t)
+	executor := newWatchTestExecutor()
+	executor.release = make(chan struct{}, 1)
+	session := newWatchTestSession(root, executor.run, 25*time.Millisecond, 250*time.Millisecond, nil)
+	done := make(chan error, 1)
+	go func() { done <- session.run(context.Background()) }()
+	executor.awaitStart(t)
+	watchTestWrite(t, root, "queued.txt", "queued while running")
+	time.Sleep(600 * time.Millisecond)
+	executor.release <- struct{}{}
+	executor.awaitStart(t)
+	executor.release <- struct{}{}
+	if err := <-done; err != nil {
+		t.Fatalf("session.run: %v", err)
+	}
+	if executor.callCount() != 2 {
+		t.Fatalf("iterations=%d, want 2 (queued rerun must run before idle exit)", executor.callCount())
+	}
+	if got := executor.call(1); !strings.Contains(strings.Join(got, " "), "watch #2") {
+		t.Fatalf("queued iteration args=%v, want watch #2 label", got)
+	}
+}
+
 func TestWatchContinuesAfterNonzeroRemoteExit(t *testing.T) {
 	root := newWatchGitRepo(t)
 	executor := newWatchTestExecutor()
