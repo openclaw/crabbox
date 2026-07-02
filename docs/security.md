@@ -260,7 +260,9 @@ repo:
 - `CRABBOX_ARTIFACTS_ACCESS_KEY_ID`, `CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY`,
   and optional `CRABBOX_ARTIFACTS_SESSION_TOKEN` — brokered artifact publishing.
   Scope these to the artifact bucket/prefix and use them only to sign
-  short-lived upload/read URLs.
+  short-lived upload/read URLs. New grants encode the exact authenticated
+  owner/org identity in an opaque versioned namespace; existing object URLs are
+  not rewritten or resolved through a legacy lookup path.
 
 Deployments that previously relied on `CRABBOX_SHARED_TOKEN` as the implicit
 user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing

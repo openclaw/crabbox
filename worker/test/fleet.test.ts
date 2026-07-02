@@ -16954,18 +16954,66 @@ describe("fleet lease identity and idle", () => {
         }),
       );
       expect(response.status).toBe(201);
-      return (await response.json()) as { prefix: string; files: Array<{ key: string }> };
+      return (await response.json()) as {
+        prefix: string;
+        files: Array<{ key: string; url: string; upload: { url: string } }>;
+      };
     };
 
     const orgA = await grant("org-a", "alice/team", "run-1");
     const orgB = await grant("org-b", "alice/team", "run-1");
     const shiftedBoundary = await grant("org-a", "alice", "team/run-1");
 
-    expect(orgA.files[0].key).not.toBe(orgB.files[0].key);
-    expect(orgA.files[0].key).not.toBe(shiftedBoundary.files[0].key);
+    const slashOrg = await grant("org/team", "alice", "run-1");
+    const backslashOrg = await grant("org\\team", "alice", "run-1");
+
+    for (const [left, right] of [
+      [orgA, orgB],
+      [orgA, shiftedBoundary],
+      [slashOrg, backslashOrg],
+    ]) {
+      expect(left.prefix).not.toBe(right.prefix);
+      expect(left.files[0].key).not.toBe(right.files[0].key);
+      expect(new URL(left.files[0].url).pathname).not.toBe(new URL(right.files[0].url).pathname);
+      expect(new URL(left.files[0].upload.url).pathname).not.toBe(
+        new URL(right.files[0].upload.url).pathname,
+      );
+    }
     expect(orgA.prefix).toContain(
       `/org/${Buffer.from("org-a").toString("base64url")}/owner/${Buffer.from("alice/team").toString("base64url")}/`,
     );
+  });
+
+  it("rejects empty artifact authorization identities", async () => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_DEFAULT_ORG: "",
+        CRABBOX_ARTIFACTS_BACKEND: "r2",
+        CRABBOX_ARTIFACTS_BUCKET: "qa-artifacts",
+        CRABBOX_ARTIFACTS_ENDPOINT_URL: "https://account.r2.cloudflarestorage.com",
+        CRABBOX_ARTIFACTS_ACCESS_KEY_ID: "access-key",
+        CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY: "super-secret",
+      },
+    );
+    const grant = async (headers: Record<string, string>) => {
+      const response = await fleet.fetch(
+        request("POST", "/v1/artifacts/uploads", {
+          headers,
+          body: { files: [{ name: "proof.txt", size: 1 }] },
+        }),
+      );
+      expect(response.status).toBe(400);
+      return (await response.json()) as { message: string };
+    };
+
+    await expect(grant({ "x-crabbox-owner": "alice", "x-crabbox-org": "" })).resolves.toMatchObject(
+      { message: "artifact upload organization identity is required" },
+    );
+    await expect(
+      grant({ "x-crabbox-owner": "", "x-crabbox-org": "example-org" }),
+    ).resolves.toMatchObject({ message: "artifact upload owner identity is required" });
   });
 
   it("reports artifact broker setup errors without provider-specific local credentials", async () => {

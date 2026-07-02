@@ -9393,12 +9393,11 @@ export class FleetCoordinator {
     try {
       const input = await readJson<ArtifactUploadRequest>(request);
       return json(
-        await artifactUploadResponse(
-          this.env,
-          input,
-          requestOwner(request),
-          requestOrg(request, this.env),
-        ),
+        await artifactUploadResponse(this.env, input, {
+          owner: requestOwner(request),
+          // Artifact keys encode auth identity bytes exactly; usage org normalization is lossy.
+          org: request.headers.get("x-crabbox-org") ?? this.env.CRABBOX_DEFAULT_ORG ?? "",
+        }),
         { status: 201 },
       );
     } catch (error) {

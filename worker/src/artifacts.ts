@@ -35,6 +35,11 @@ export interface ArtifactUploadResponse {
   files: ArtifactUploadGrant[];
 }
 
+export interface ArtifactUploadScope {
+  org: string;
+  owner: string;
+}
+
 interface ArtifactConfig {
   backend: "s3" | "r2";
   bucket: string;
@@ -58,10 +63,11 @@ const maxArtifactBatchBytes = 5 * 1024 * 1024 * 1024;
 export async function artifactUploadResponse(
   env: Env,
   request: ArtifactUploadRequest,
-  owner: string,
-  org: string,
+  scope: ArtifactUploadScope,
 ): Promise<ArtifactUploadResponse> {
   const config = artifactConfig(env);
+  const org = artifactIdentity(scope.org, "organization");
+  const owner = artifactIdentity(scope.owner, "owner");
   const files = normalizeArtifactFiles(request.files ?? []);
   if (files.length === 0) {
     throw new Error("artifacts upload request requires at least one file");
@@ -210,6 +216,13 @@ function artifactPrefix(
 
 function opaqueArtifactIdentity(value: string): string {
   return base64URL(new TextEncoder().encode(value));
+}
+
+function artifactIdentity(value: string, label: string): string {
+  if (!value.trim()) {
+    throw new Error(`artifact upload ${label} identity is required`);
+  }
+  return value;
 }
 
 function normalizePrefixPart(value: string | undefined): string {
