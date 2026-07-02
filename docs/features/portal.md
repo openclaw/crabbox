@@ -55,8 +55,8 @@ health payload). When
 origin (for example a `*.workers.dev` preview URL), the Worker redirects to
 the canonical host first.
 
-Deployments can isolate lease-controlled code-server content from the
-coordinator and from other leases by setting
+Deployments that expose browser Code must isolate lease-controlled code-server
+content from the coordinator and from other leases by setting
 `CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com` and routing
 `*.code.example.com` to the same coordinator. The existing
 `/portal/leases/{id-or-slug}/code/` URL remains the entrypoint: after normal
@@ -71,10 +71,9 @@ Portal logout revokes isolated Code viewer sessions server-side, so their
 separate host-scoped cookies cannot retain access after the portal cookie is
 cleared.
 
-The setting is opt-in because Crabbox cannot provision an operator's wildcard
-DNS, certificate, or ingress route. When the setting is absent or invalid, Code
-keeps its existing same-origin behavior for compatibility; operators who share
-a coordinator between people should configure the isolated origin.
+Crabbox cannot provision an operator's wildcard DNS, certificate, or ingress
+route. When the setting is absent or invalid, Code health remains available but
+browser HTTP and WebSocket traffic fails closed with `409 Code origin required`.
 
 ## Authentication and scope
 

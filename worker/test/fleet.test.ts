@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { issueUserToken, sha256Hex } from "../src/auth";
 import { EC2SpotClient } from "../src/aws";
+import { codeOriginForLease } from "../src/code-origin";
 import {
   awsPromotedAMIConfigKey,
   leaseConfig,
@@ -13861,7 +13862,7 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it("serves code pages only for code leases and requires a bridge ticket", async () => {
+  it("fails closed without an isolated Code origin while retaining health and bridge tickets", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
     const headers = {
@@ -13894,18 +13895,10 @@ describe("fleet lease identity and idle", () => {
     const page = await fleet.fetch(
       request("GET", "/portal/leases/blue-lobster/code/", { headers }),
     );
-    expect(page.status).toBe(200);
+    expect(page.status).toBe(409);
     const pageBody = await page.text();
-    expect(pageBody).toContain("crabbox code --id blue-lobster --open");
-    expect(pageBody).toContain('class="vnc-page code-wait-page"');
-    expect(pageBody).toContain("<h1>🦀 crabbox</h1>");
-    expect(pageBody).toContain("code blue-lobster");
-    expect(pageBody).toContain('id="code-status"');
-    expect(pageBody).toContain('id="code-copy"');
-    expect(pageBody).toContain("/portal/leases/cbx_000000000001/code/health");
-    expect(pageBody).toContain("window.location.reload()");
-    expect(pageBody).toContain("terminalStatusCodes");
-    expect(pageBody).toContain("stopPolling(message)");
+    expect(pageBody).toContain("Code origin required");
+    expect(pageBody).toContain("CRABBOX_CODE_ORIGIN_TEMPLATE");
 
     const health = await fleet.fetch(
       request("GET", "/portal/leases/blue-lobster/code/health", { headers }),
@@ -13942,6 +13935,94 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(missingTicket.status).toBe(401);
+  });
+
+  it("blocks Code HTTP and WebSocket proxying for invalid origin templates", async () => {
+    await Promise.all(
+      [undefined, "https://code.example.test/{lease}"].map(async (template) => {
+        const storage = new MemoryStorage();
+        const fleet = testFleet(storage, {}, { CRABBOX_CODE_ORIGIN_TEMPLATE: template });
+        const leaseID = "cbx_000000000001";
+        storage.seed(
+          `lease:${leaseID}`,
+          testLease({
+            id: leaseID,
+            slug: "blue-lobster",
+            owner: "alice@example.com",
+            org: "example-org",
+            code: true,
+            expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          }),
+        );
+        const agent = new FakeWebSocket({ kind: "code-agent", leaseID });
+        const relay = fleet as unknown as { codeAgents: Map<string, WebSocket> };
+        relay.codeAgents.set(leaseID, agent as unknown as WebSocket);
+        const headers = {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        };
+
+        const page = await fleet.fetch(
+          request("GET", "/portal/leases/blue-lobster/code/api/status", { headers }),
+        );
+        expect(page.status).toBe(409);
+        const socket = await fleet.fetch(
+          request("GET", "/portal/leases/blue-lobster/code/websocket", {
+            headers: { ...headers, origin: "https://example.test", upgrade: "websocket" },
+          }),
+        );
+        expect(socket.status).toBe(409);
+        expect(agent.sentJSON()).toEqual([]);
+      }),
+    );
+  });
+
+  it("redirects owners, managers, and admins to the isolated Code origin", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test" };
+    const fleet = testFleet(storage, {}, env);
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "owner@example.com",
+        org: "example-org",
+        code: true,
+        share: { users: { "manager@example.com": "manage" } },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const isolatedOrigin = await codeOriginForLease(env, leaseID);
+    expect(isolatedOrigin).toBeDefined();
+    const viewers = [
+      {
+        "x-crabbox-auth": "bearer",
+        "x-crabbox-owner": "owner@example.com",
+        "x-crabbox-org": "example-org",
+      },
+      {
+        "x-crabbox-auth": "bearer",
+        "x-crabbox-owner": "manager@example.com",
+        "x-crabbox-org": "other-org",
+      },
+      {
+        "x-crabbox-auth": "bearer",
+        "x-crabbox-owner": "admin@example.com",
+        "x-crabbox-org": "other-org",
+        "x-crabbox-admin": "true",
+      },
+    ];
+    await Promise.all(
+      viewers.map(async (headers) => {
+        const redirect = await fleet.fetch(
+          request("GET", "/portal/leases/blue-lobster/code/", { headers }),
+        );
+        expect(redirect.status).toBe(302);
+        expect(new URL(redirect.headers.get("location") || "").origin).toBe(isolatedOrigin);
+      }),
+    );
   });
 
   it("bootstraps a one-time lease-scoped Code session on an isolated origin", async () => {
@@ -14610,7 +14691,8 @@ describe("fleet lease identity and idle", () => {
 
   it("strips Crabbox auth context from Code proxy bridge messages", async () => {
     const storage = new MemoryStorage();
-    const fleet = testFleet(storage);
+    const env = { CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test" };
+    const fleet = testFleet(storage, {}, env);
     const leaseID = "cbx_000000000001";
     storage.seed(
       `lease:${leaseID}`,
@@ -14626,6 +14708,19 @@ describe("fleet lease identity and idle", () => {
     const agent = new FakeWebSocket({ kind: "code-agent", leaseID });
     const relay = fleet as unknown as { codeAgents: Map<string, WebSocket> };
     relay.codeAgents.set(leaseID, agent as unknown as WebSocket);
+    const session = `code_session_${"a".repeat(32)}`;
+    storage.seed(`code-viewer-session:${session}`, {
+      session,
+      leaseID,
+      auth: "bearer",
+      admin: false,
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+    const isolatedOrigin = await codeOriginForLease(env, leaseID);
+    expect(isolatedOrigin).toBeDefined();
     let forwarded: { id: string; headers: Record<string, string> } | undefined;
     agent.onSend = (data) => {
       forwarded = JSON.parse(data) as { id: string; headers: Record<string, string> };
@@ -14636,23 +14731,18 @@ describe("fleet lease identity and idle", () => {
     };
 
     const response = await fleet.fetch(
-      request("GET", "/portal/leases/blue-lobster/code/api/status", {
+      new Request(`${isolatedOrigin}/portal/leases/${leaseID}/code/api/status`, {
         headers: {
-          "x-crabbox-auth": "github",
-          "x-crabbox-admin": "false",
-          "x-crabbox-owner": "alice@example.com",
-          "x-crabbox-org": "example-org",
-          "x-crabbox-github-login": "alice",
-          "x-crabbox-token-expires-at": "2026-07-01T12:00:00Z",
+          cookie: `crabbox_code_session=${session}`,
           "x-client-trace": "trace-1",
-          origin: "https://broker.example.com",
+          origin: isolatedOrigin || "",
         },
       }),
     );
 
     expect(response.status).toBe(204);
     expect(forwarded?.headers).toMatchObject({
-      origin: "https://broker.example.com",
+      origin: isolatedOrigin,
       "x-client-trace": "trace-1",
     });
     expect(

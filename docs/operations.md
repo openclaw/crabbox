@@ -362,7 +362,7 @@ provider. Shared-token automation needs `CRABBOX_SHARED_TOKEN` and
 Provider choices are `HETZNER_TOKEN`, an AWS credential set, an Azure service
 principal, or a GCP service account. Node additionally requires `DATABASE_URL`.
 
-For a shared portal, configure
+For any portal that exposes browser Code, configure
 `CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com` and route the
 matching wildcard hostname to the same coordinator with TLS and WebSocket
 support. This preserves the normal Code links while moving each lease's
@@ -384,7 +384,7 @@ CRABBOX_WORKSPACE_PREWARM_COUNT   optional ready spares per active organization;
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login
 CRABBOX_SESSION_SECRET            required for browser login; must differ from CRABBOX_SHARED_TOKEN
-CRABBOX_CODE_ORIGIN_TEMPLATE      optional per-lease Code origin isolation
+CRABBOX_CODE_ORIGIN_TEMPLATE      required for browser Code; per-lease HTTPS origin template
 CRABBOX_GITHUB_ALLOWED_ORG or CRABBOX_GITHUB_ALLOWED_ORGS
 CRABBOX_GITHUB_ALLOWED_TEAMS      optional
 CRABBOX_ACCESS_TEAM_DOMAIN        required for Access JWT verification

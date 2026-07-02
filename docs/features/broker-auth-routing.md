@@ -20,8 +20,8 @@ A deployment needs one canonical HTTPS origin:
 https://broker.example.com                       # public CLI + browser-login route
 ```
 
-For Code portal origin isolation, the same coordinator can also receive a
-wildcard route configured through:
+Browser Code requires the same coordinator to receive an isolated wildcard
+route configured through:
 
 ```text
 CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com

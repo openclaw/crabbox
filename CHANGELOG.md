@@ -27,6 +27,7 @@
 
 - Bound GitHub browser-login owners to verified email addresses, recorded that provenance in a versioned user-token schema, and invalidated legacy tokens that could retain unverified owner identities. Thanks @coygeek.
 - Required exact local claims before Freestyle or Islo delete, pause, resume, and SSH reuse operations, while preserving explicit `--reclaim` adoption and read-only canonical-name recovery. Thanks @coygeek.
+- Required a valid isolated per-lease origin before serving browser Code HTTP or WebSocket traffic, preventing lease-controlled pages from inheriting coordinator portal authority. Thanks @coygeek.
 - Restricted brokered AWS and GCP resource selectors to admin-authenticated requests so normal users cannot steer coordinator cloud credentials toward caller-selected networks, images, projects, tags, or instance identities. Thanks @coygeek.
 - Pinned NodeSource and Docker APT signing fingerprints across managed Linux image preparation and local-container Docker CLI bootstrap, preserving existing trust files, stopping image preparation on mismatch, and using distro packages for local-container fallback. Thanks @coygeek.
 - Bound non-admin coordinator provider-key names and automatic cleanup to verified, persisted lease ownership metadata, rejecting unsafe AWS and Hetzner name collisions while retaining legacy and Hetzner provider-unique shared key identities. Thanks @coygeek.
