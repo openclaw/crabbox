@@ -6530,6 +6530,133 @@ describe("fleet lease identity and idle", () => {
     expect(cleanedLease.providerKeyCleanupID).toBeUndefined();
   });
 
+  it.each([
+    { case: "server and key", cloudID: "123", serverID: 123 },
+    { case: "key only", cloudID: "", serverID: 0 },
+  ])(
+    "preserves pending Hetzner $case cleanup after a no-delete release until explicit deletion",
+    async ({ cloudID, serverID }) => {
+      const storage = new MemoryStorage();
+      const cleanupLeases: LeaseRecord[] = [];
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(undefined, {
+          provider: "hetzner",
+          onReleaseLease(lease) {
+            cleanupLeases.push(structuredClone(lease));
+          },
+        }),
+      });
+      const lease = testLease({
+        id: "cbx_abcdef123456",
+        owner: "alice@example.com",
+        org: "example-org",
+        state: "failed",
+        cloudID,
+        serverID,
+        releaseDeletesServer: true,
+        providerKeyCleanupPending: true,
+        providerKeyCleanupID: "7",
+        cleanupAttempts: 1,
+        cleanupError: "temporary cleanup failure",
+        cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const headers = {
+        "x-crabbox-owner": lease.owner,
+        "x-crabbox-org": lease.org,
+      };
+
+      const retain = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, {
+          headers,
+          body: { delete: false },
+        }),
+      );
+      expect(retain.status).toBe(200);
+      await expect(retain.json()).resolves.toMatchObject({
+        lease: {
+          state: "released",
+          releaseDeletesServer: false,
+          providerKeyCleanupPending: true,
+          providerKeyCleanupID: "7",
+        },
+      });
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupRetryAt).toBeUndefined();
+      expect(storage.alarm()).toBeUndefined();
+
+      await fleet.alarm();
+      expect(cleanupLeases).toHaveLength(0);
+      expect(storage.alarm()).toBeUndefined();
+
+      const remove = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, {
+          headers,
+          body: { delete: true },
+        }),
+      );
+      expect(remove.status).toBe(200);
+      expect(cleanupLeases).toHaveLength(1);
+      expect(cleanupLeases[0]).toMatchObject({
+        cloudID,
+        serverID,
+        providerKeyCleanupPending: true,
+        providerKeyCleanupID: "7",
+      });
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+        state: "released",
+      });
+      expect(
+        storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerKeyCleanupPending,
+      ).toBeUndefined();
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerKeyCleanupID).toBeUndefined();
+    },
+  );
+
+  it("does not reschedule workspace alarms for retained pending key cleanup", async () => {
+    const storage = new MemoryStorage();
+    const now = new Date().toISOString();
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      workspaceID: "fleet-is-retained",
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "released",
+      releaseDeletesServer: false,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+      releasedAt: now,
+      endedAt: now,
+      updatedAt: now,
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    storage.seed("workspace:example-org:alice%40example.com:fleet-is-retained", {
+      id: "fleet-is-retained",
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      profile: lease.profile,
+      provider: lease.provider,
+      class: lease.class,
+      desktop: false,
+      ttlSeconds: lease.ttlSeconds,
+      idleTimeoutSeconds: 360,
+      createdAt: now,
+      updatedAt: now,
+      releaseRequestedAt: now,
+    });
+    const fleet = testFleet(storage);
+
+    await fleet.alarm();
+
+    expect(storage.alarm()).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      state: "released",
+      releaseDeletesServer: false,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+  });
+
   it("fails deterministic workspace provisioning errors without waiting for the lease TTL", async () => {
     const storage = new MemoryStorage();
     let providerLookups = 0;

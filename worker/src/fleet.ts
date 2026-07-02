@@ -12621,6 +12621,9 @@ function workspaceNextReconcileAt(
   now = Date.now(),
 ): number | undefined {
   if (lease && !workspaceOwnsLease(workspace, lease)) return workspace.error ? undefined : now;
+  if (lease?.state === "released" && lease.releaseDeletesServer === false) {
+    return undefined;
+  }
   if (lease?.providerKeyCleanupPending) {
     const claimDeadline = cleanupClaimDeadline(lease);
     if (lease.cleanupStartedAt && Number.isFinite(claimDeadline)) {
@@ -14932,6 +14935,9 @@ function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
   if (leaseIsLive(lease) && Date.parse(lease.expiresAt) <= now) {
     return true;
   }
+  if (lease.state === "released" && lease.releaseDeletesServer === false) {
+    return false;
+  }
   return Boolean(
     !leaseIsLive(lease) &&
     ((lease.cloudID && (lease.cleanupError || lease.cleanupStartedAt)) ||
@@ -15112,7 +15118,11 @@ function finalizedReleasedLease(
   lease.endedAt = now;
   if (wasUnprovisionedRelease) {
     lease.releaseDeletesServer = deleteServer;
-  } else if (!deleteServer && !isRegisteredLease(lease) && lease.cloudID) {
+  } else if (
+    !deleteServer &&
+    !isRegisteredLease(lease) &&
+    (lease.cloudID || lease.providerKeyCleanupPending)
+  ) {
     lease.releaseDeletesServer = false;
   } else {
     delete lease.releaseDeletesServer;
