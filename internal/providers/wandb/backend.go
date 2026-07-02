@@ -71,13 +71,18 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		if req.EnvSummary {
 			printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 		}
-	} else if len(req.Env) > 0 && !wandbExistingIDEnvIsImplicitDefault(req) {
-		// CoreWeave Sandboxes apply environment variables at Start time only;
-		// the v1beta2 Exec RPC has no env field, so we can't honour
-		// selected env on an already-running sandbox. The only exception is
-		// Crabbox's built-in implicit CI/NODE_OPTIONS allowlist, which older
-		// configs may select without the user asking for env forwarding.
-		return RunResult{}, exit(2, "provider=%s cannot forward env vars to an existing sandbox (--id); rerun without --id or omit --allow-env", providerName)
+	} else {
+		if len(req.Env) > 0 && !wandbExistingIDEnvIsImplicitDefault(req) {
+			// CoreWeave Sandboxes apply environment variables at Start time only;
+			// the v1beta2 Exec RPC has no env field, so we can't honour
+			// selected env on an already-running sandbox. The only exception is
+			// Crabbox's built-in implicit CI/NODE_OPTIONS allowlist, which older
+			// configs may select without the user asking for env forwarding.
+			return RunResult{}, exit(2, "provider=%s cannot forward env vars to an existing sandbox (--id); rerun without --id or omit --allow-env", providerName)
+		}
+		if err := requireWandbOwnership(ctx, client, sandboxID); err != nil {
+			return RunResult{}, err
+		}
 	}
 
 	// Stop semantics match the modal/e2b/islo/tensorlake sibling pattern:
@@ -164,6 +169,19 @@ func wandbCleanupCommand(sandboxID string) string {
 	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, shellQuote(sandboxID))
 }
 
+func requireWandbOwnership(ctx context.Context, client wandbAPI, sandboxID string) error {
+	sandboxes, err := client.List(ctx, []string{"crabbox"}, "all")
+	if err != nil {
+		return err
+	}
+	for _, sandbox := range sandboxes {
+		if sandbox.ID == sandboxID {
+			return nil
+		}
+	}
+	return exit(4, "wandb sandbox %q is not Crabbox-managed or no longer exists", sandboxID)
+}
+
 func (b *wandbBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
 	client, err := b.api()
 	if err != nil {
@@ -192,7 +210,8 @@ func (b *wandbBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 }
 
 func (b *wandbBackend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
-	if req.ID == "" {
+	sandboxID := strings.TrimSpace(req.ID)
+	if sandboxID == "" {
 		return StatusView{}, exit(2, "provider=%s status requires --id <sandbox-id>", providerName)
 	}
 	client, err := b.api()
@@ -200,7 +219,10 @@ func (b *wandbBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 		return StatusView{}, err
 	}
 	defer b.closeClientAfterOperation()
-	sb, err := client.Status(ctx, req.ID)
+	if err := requireWandbOwnership(ctx, client, sandboxID); err != nil {
+		return StatusView{}, err
+	}
+	sb, err := client.Status(ctx, sandboxID)
 	if err != nil {
 		return StatusView{}, err
 	}
@@ -221,7 +243,8 @@ func (b *wandbBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 }
 
 func (b *wandbBackend) Stop(ctx context.Context, req StopRequest) error {
-	if req.ID == "" {
+	sandboxID := strings.TrimSpace(req.ID)
+	if sandboxID == "" {
 		return exit(2, "provider=%s stop requires --id <sandbox-id>", providerName)
 	}
 	client, err := b.api()
@@ -229,7 +252,10 @@ func (b *wandbBackend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	defer b.closeClientAfterOperation()
-	return client.Stop(ctx, req.ID, 10, false)
+	if err := requireWandbOwnership(ctx, client, sandboxID); err != nil {
+		return err
+	}
+	return client.Stop(ctx, sandboxID, 10, false)
 }
 
 // Doctor mirrors the modal/e2b/runpod pattern: dial, probe auth via a cheap

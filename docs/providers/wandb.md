@@ -111,17 +111,19 @@ Environment overrides:
 
 `crabbox run`:
 
-1. With `--id <sandbox-id>`, `Exec` against the existing sandbox and leave it
-   running.
+1. With `--id <sandbox-id>`, verify the sandbox appears in W&B inventory with
+   the provider-side `crabbox` tag, then `Exec` against it and leave it running.
 2. Otherwise, `Start` a sandbox with an idle keep-alive command, poll until it
    reaches `RUNNING` (200 ms backoff, ×1.5, capped at 2 s), `Exec` the
    command, then `Stop` it unless `--keep` is set.
 
-`status` renders the sandbox state (for example `running`; a `COMPLETED`
-sandbox is reported as `stopped` so `status --wait` treats it as terminal).
-`list` paginates sandboxes tagged `crabbox`. `stop` issues a graceful stop
-(15 s timeout). Acquire and exec apply a startup timeout that is the lesser of
-five minutes and the sandbox lifetime.
+`status` and `stop` likewise require the sandbox ID to appear in tagged
+Crabbox inventory before issuing Get or Stop. Unknown or untagged IDs fail
+closed. `status` renders the sandbox state (for example `running`; a
+`COMPLETED` sandbox is reported as `stopped` so `status --wait` treats it as
+terminal). `list` paginates sandboxes tagged `crabbox`. `stop` issues a
+graceful stop (15 s timeout). Acquire and exec apply a startup timeout that is
+the lesser of five minutes and the sandbox lifetime.
 
 ## Capabilities
 
@@ -146,6 +148,8 @@ five minutes and the sandbox lifetime.
   `--full-resync`, `--download`, `--artifact-glob`, and `--require-artifact`
   are rejected: W&B owns the sandbox lifecycle and there is no Crabbox
   SSH/rsync target.
+- `--reclaim` remains unsupported because the pinned W&B API has no safe way
+  to add the ownership tag to an existing sandbox after creation.
 - `--keep` retains a newly acquired sandbox after the run; `--keep-on-failure`
   retains it only when the command fails, so you can debug.
 - gRPC failures map to sysexits-aligned exit codes:

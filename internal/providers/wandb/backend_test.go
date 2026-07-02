@@ -201,6 +201,7 @@ type fakeWandbAPI struct {
 	listErr          error
 	listTags         []string
 	listStatusFilter string
+	statusID         string
 	statusValue      wandbSandbox
 	statusErr        error
 }
@@ -243,7 +244,8 @@ func (f *fakeWandbAPI) List(_ context.Context, tags []string, statusFilter strin
 	return f.listValue, f.listErr
 }
 
-func (f *fakeWandbAPI) Status(_ context.Context, _ string) (wandbSandbox, error) {
+func (f *fakeWandbAPI) Status(_ context.Context, id string) (wandbSandbox, error) {
+	f.statusID = id
 	return f.statusValue, f.statusErr
 }
 
@@ -335,7 +337,7 @@ func TestWandbRunClosesCachedClientAfterOperation(t *testing.T) {
 
 func TestWandbRunWithExistingIDSkipsAcquireAndStop(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
-	api := &fakeWandbAPI{execCode: 0}
+	api := &fakeWandbAPI{execCode: 0, listValue: []wandbSandbox{{ID: "sb-supplied"}}}
 	backend := newWandbBackendForTest(api)
 	result, err := backend.Run(context.Background(), RunRequest{
 		ID:      "sb-supplied",
@@ -361,6 +363,34 @@ func TestWandbRunWithExistingIDSkipsAcquireAndStop(t *testing.T) {
 	if api.stopID != "" {
 		t.Fatalf("Stop should not be called for user-supplied id; got %q", api.stopID)
 	}
+	if !contains(api.listTags, "crabbox") || api.listStatusFilter != "all" {
+		t.Fatalf("ownership list tags=%#v status=%q", api.listTags, api.listStatusFilter)
+	}
+}
+
+func TestWandbRunRejectsUnownedExistingID(t *testing.T) {
+	api := &fakeWandbAPI{}
+	backend := newWandbBackendForTest(api)
+	_, err := backend.Run(context.Background(), RunRequest{ID: "sb-foreign", NoSync: true, Command: []string{"echo"}})
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("Run err = %v, want ownership rejection", err)
+	}
+	if api.execID != "" || api.stopID != "" {
+		t.Fatalf("unowned sandbox reached exec=%q stop=%q", api.execID, api.stopID)
+	}
+}
+
+func TestWandbRunFailsClosedWhenOwnershipListFails(t *testing.T) {
+	wantErr := errors.New("list unavailable")
+	api := &fakeWandbAPI{listErr: wantErr}
+	backend := newWandbBackendForTest(api)
+	_, err := backend.Run(context.Background(), RunRequest{ID: "sb-unknown", NoSync: true, Command: []string{"echo"}})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run err = %v, want %v", err, wantErr)
+	}
+	if api.execID != "" {
+		t.Fatalf("ownership list failure reached Exec(%q)", api.execID)
+	}
 }
 
 func TestWandbRunNonZeroExecMapsToExit(t *testing.T) {
@@ -378,7 +408,10 @@ func TestWandbRunNonZeroExecMapsToExit(t *testing.T) {
 
 func TestWandbStatusReturnsView(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
-	api := &fakeWandbAPI{statusValue: wandbSandbox{ID: "sb-abc", Status: "RUNNING", CreatedAt: "2026-05-18T00:00:00Z"}}
+	api := &fakeWandbAPI{
+		listValue:   []wandbSandbox{{ID: "sb-abc"}},
+		statusValue: wandbSandbox{ID: "sb-abc", Status: "RUNNING", CreatedAt: "2026-05-18T00:00:00Z"},
+	}
 	backend := newWandbBackendForTest(api)
 	view, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc"})
 	if err != nil {
@@ -386,6 +419,30 @@ func TestWandbStatusReturnsView(t *testing.T) {
 	}
 	if view.ID != "sb-abc" || view.Provider != providerName || !view.Ready || view.State != "running" {
 		t.Fatalf("view = %#v", view)
+	}
+	if api.statusID != "sb-abc" || !contains(api.listTags, "crabbox") || api.listStatusFilter != "all" {
+		t.Fatalf("status id=%q list tags=%#v filter=%q", api.statusID, api.listTags, api.listStatusFilter)
+	}
+}
+
+func TestWandbStatusRequiresID(t *testing.T) {
+	backend := newWandbBackendForTest(&fakeWandbAPI{})
+	for _, id := range []string{"", "  \t"} {
+		if _, err := backend.Status(context.Background(), StatusRequest{ID: id}); err == nil {
+			t.Fatalf("Status accepted empty id %q", id)
+		}
+	}
+}
+
+func TestWandbStatusRejectsUnownedID(t *testing.T) {
+	api := &fakeWandbAPI{}
+	backend := newWandbBackendForTest(api)
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "sb-foreign"})
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("Status err = %v, want ownership rejection", err)
+	}
+	if api.statusID != "" {
+		t.Fatalf("unowned sandbox reached Status(%q)", api.statusID)
 	}
 }
 
@@ -406,13 +463,15 @@ func TestWandbListEnumeratesSandboxes(t *testing.T) {
 
 func TestWandbStopRequiresID(t *testing.T) {
 	backend := newWandbBackendForTest(&fakeWandbAPI{})
-	if err := backend.Stop(context.Background(), StopRequest{}); err == nil {
-		t.Fatal("Stop accepted empty id")
+	for _, id := range []string{"", "  \t"} {
+		if err := backend.Stop(context.Background(), StopRequest{ID: id}); err == nil {
+			t.Fatalf("Stop accepted empty id %q", id)
+		}
 	}
 }
 
 func TestWandbStopCallsClient(t *testing.T) {
-	api := &fakeWandbAPI{}
+	api := &fakeWandbAPI{listValue: []wandbSandbox{{ID: "sb-abc"}}}
 	backend := newWandbBackendForTest(api)
 	if err := backend.Stop(context.Background(), StopRequest{ID: "sb-abc"}); err != nil {
 		t.Fatalf("Stop err: %v", err)
@@ -422,6 +481,21 @@ func TestWandbStopCallsClient(t *testing.T) {
 	}
 	if api.stopMissingOK {
 		t.Fatal("explicit Stop used missingOK=true")
+	}
+	if !contains(api.listTags, "crabbox") || api.listStatusFilter != "all" {
+		t.Fatalf("ownership list tags=%#v status=%q", api.listTags, api.listStatusFilter)
+	}
+}
+
+func TestWandbStopRejectsUnownedID(t *testing.T) {
+	api := &fakeWandbAPI{}
+	backend := newWandbBackendForTest(api)
+	err := backend.Stop(context.Background(), StopRequest{ID: "sb-foreign"})
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("Stop err = %v, want ownership rejection", err)
+	}
+	if api.stopID != "" {
+		t.Fatalf("unowned sandbox reached Stop(%q)", api.stopID)
 	}
 }
 
