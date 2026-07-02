@@ -249,6 +249,10 @@ signing grants. When `--prefix` is omitted for hosted publishing, the CLI
 derives a unique prefix from the PR number, bundle directory, and current time
 so later QA comments do not overwrite earlier evidence.
 
+The coordinator scopes each new grant under opaque encodings of the exact
+authenticated organization and owner. Caller prefixes cannot cross or replace
+that authorization namespace.
+
 ## Manifest, list, and pull
 
 Every publish writes and publishes an `artifact-manifest.json` by default. The
