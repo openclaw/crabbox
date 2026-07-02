@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Recovered ASCII Box release when the service temporarily requires a recent snapshot by shortening the sandbox TTL, waiting for the managed stop transition, and retrying deletion.
 - Prevented ASCII Box API credentials from reaching unsafe explicit base URLs by requiring HTTPS except for loopback development endpoints, rejecting ambiguous URL components, and supporting config discovery in the current Box CLI. Thanks @coygeek.
 - Pinned the Google Linux package signing fingerprint, preserved its source-scoped APT keyring across Chrome installation, and failed closed to Chromium when verification fails. Thanks @coygeek.
 - Hardened coordinator image deletion so admin `image delete` requests fail closed unless stored Crabbox-created metadata proves ownership of the AWS, Azure, or GCP image or snapshot.
