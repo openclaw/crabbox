@@ -24,6 +24,7 @@
 ### Fixed
 
 - Hardened coordinator image deletion so admin `image delete` requests fail closed unless stored Crabbox-created metadata proves ownership of the AWS, Azure, or GCP image or snapshot.
+- Prevented unused WebVNC and Code bridge tickets from surviving manager share revocation. Thanks @coygeek.
 - Prevented revoked lease managers from retaining mediated-egress bridges after lease sharing was removed or downgraded. Thanks @coygeek.
 - Prevented the Code portal proxy from forwarding coordinator authentication context to lease-controlled code-server requests. Thanks @coygeek.
 - Rejected GitHub login callback origins that differ from the selected broker unless explicitly allowlisted as a trusted alias, preventing OAuth callbacks from silently redirecting stored credentials. Thanks @TurboTheTurtle.

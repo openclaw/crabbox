@@ -218,6 +218,7 @@ interface WebVNCTicketRecord {
   leaseID: string;
   owner: string;
   org: string;
+  admin?: boolean;
   createdAt: string;
   expiresAt: string;
 }
@@ -237,6 +238,7 @@ interface CodeTicketRecord {
   leaseID: string;
   owner: string;
   org: string;
+  admin?: boolean;
   createdAt: string;
   expiresAt: string;
 }
@@ -6156,35 +6158,37 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const consumed = await this.consumeWebVNCTicket(request, identifier);
-    if (consumed.status === "invalid") {
-      return json(
-        { error: "webvnc_ticket_required", message: "valid WebVNC bridge ticket required" },
-        { status: 401 },
-      );
-    }
-    if (consumed.status === "not_found") {
-      return notFound();
-    }
-    const { lease } = consumed;
-    const error = webVNCLeaseError(lease);
-    if (error) {
-      return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
-    }
-    const upgrade = this.state.createWebSocketUpgrade();
-    const agent = upgrade.socket;
+    return await this.withBridgeTicketLock(async () => {
+      const consumed = await this.consumeWebVNCTicketUnderLock(request, identifier);
+      if (consumed.status === "invalid") {
+        return json(
+          { error: "webvnc_ticket_required", message: "valid WebVNC bridge ticket required" },
+          { status: 401 },
+        );
+      }
+      if (consumed.status === "not_found") {
+        return notFound();
+      }
+      const { lease } = consumed;
+      const error = webVNCLeaseError(lease);
+      if (error) {
+        return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
+      }
+      const upgrade = this.state.createWebSocketUpgrade();
+      const agent = upgrade.socket;
 
-    const agentID = newWebVNCSessionID("agent");
-    const capabilities = webVNCAgentCapabilities(request);
-    this.trackWebVNCAgent(lease.id, agentID, agent, capabilities);
-    this.recordWebVNCEvent(lease.id, "bridge_connected");
-    this.acceptBridgeWebSocket(agent, {
-      kind: "webvnc-agent",
-      leaseID: lease.id,
-      id: agentID,
-      capabilities,
+      const agentID = newWebVNCSessionID("agent");
+      const capabilities = webVNCAgentCapabilities(request);
+      this.trackWebVNCAgent(lease.id, agentID, agent, capabilities);
+      this.recordWebVNCEvent(lease.id, "bridge_connected");
+      this.acceptBridgeWebSocket(agent, {
+        kind: "webvnc-agent",
+        leaseID: lease.id,
+        id: agentID,
+        capabilities,
+      });
+      return upgrade.response;
     });
-    return upgrade.response;
   }
 
   private async createEgressTicket(request: Request, identifier: string): Promise<Response> {
@@ -6280,7 +6284,7 @@ export class FleetCoordinator {
       }
       const upgrade = this.state.createWebSocketUpgrade();
       const agent = upgrade.socket;
-      const principal = egressTicketPrincipal(ticket);
+      const principal = leaseBridgeTicketPrincipal(ticket);
       const attachment: BridgeAttachment = {
         kind: role === "host" ? "egress-host" : "egress-client",
         leaseID: lease.id,
@@ -7049,6 +7053,7 @@ export class FleetCoordinator {
       leaseID: lease.id,
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
+      admin,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + webVNCTicketTTLSeconds * 1000).toISOString(),
     };
@@ -7288,6 +7293,7 @@ export class FleetCoordinator {
       leaseID: lease.id,
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
+      admin,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + codeTicketTTLSeconds * 1000).toISOString(),
     };
@@ -7306,29 +7312,31 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const consumed = await this.consumeCodeTicket(request, identifier);
-    if (consumed.status === "invalid") {
-      return json(
-        { error: "code_ticket_required", message: "valid code bridge ticket required" },
-        { status: 401 },
-      );
-    }
-    if (consumed.status === "not_found") {
-      return notFound();
-    }
-    const { lease } = consumed;
-    const error = codeLeaseError(lease);
-    if (error) {
-      return json({ error: "code_unavailable", message: error }, { status: 409 });
-    }
-    const upgrade = this.state.createWebSocketUpgrade();
-    const agent = upgrade.socket;
+    return await this.withBridgeTicketLock(async () => {
+      const consumed = await this.consumeCodeTicketUnderLock(request, identifier);
+      if (consumed.status === "invalid") {
+        return json(
+          { error: "code_ticket_required", message: "valid code bridge ticket required" },
+          { status: 401 },
+        );
+      }
+      if (consumed.status === "not_found") {
+        return notFound();
+      }
+      const { lease } = consumed;
+      const error = codeLeaseError(lease);
+      if (error) {
+        return json({ error: "code_unavailable", message: error }, { status: 409 });
+      }
+      const upgrade = this.state.createWebSocketUpgrade();
+      const agent = upgrade.socket;
 
-    closeSocket(this.codeAgents.get(lease.id), 1012, "replaced by a newer code bridge");
-    this.clearCodeLease(lease.id);
-    this.codeAgents.set(lease.id, agent);
-    this.acceptBridgeWebSocket(agent, { kind: "code-agent", leaseID: lease.id });
-    return upgrade.response;
+      closeSocket(this.codeAgents.get(lease.id), 1012, "replaced by a newer code bridge");
+      this.clearCodeLease(lease.id);
+      this.codeAgents.set(lease.id, agent);
+      this.acceptBridgeWebSocket(agent, { kind: "code-agent", leaseID: lease.id });
+      return upgrade.response;
+    });
   }
 
   private async codePortalProxy(
@@ -8344,27 +8352,36 @@ export class FleetCoordinator {
     request: Request,
     identifier: string,
   ): Promise<LeaseBridgeTicketConsumption<WebVNCTicketRecord>> {
+    return this.withBridgeTicketLock(() => this.consumeWebVNCTicketUnderLock(request, identifier));
+  }
+
+  private async consumeWebVNCTicketUnderLock(
+    request: Request,
+    identifier: string,
+  ): Promise<LeaseBridgeTicketConsumption<WebVNCTicketRecord>> {
     const value = bridgeTicketFromRequest(request, this.env);
     if (!validWebVNCTicket(value)) {
       return { status: "invalid" };
     }
-    return this.withBridgeTicketLock(async () => {
-      const key = webVNCTicketKey(value);
-      const ticket = await this.state.storage.get<WebVNCTicketRecord>(key);
-      if (!ticket || ticket.ticket !== value) {
-        return { status: "invalid" };
-      }
-      if (Date.parse(ticket.expiresAt) <= Date.now()) {
-        await this.state.storage.delete(key);
-        return { status: "invalid" };
-      }
-      const lease = await this.getLease(ticket.leaseID);
-      if (!lease || !identifierMatchesLease(identifier, lease)) {
-        return { status: "not_found" };
-      }
+    const key = webVNCTicketKey(value);
+    const ticket = await this.state.storage.get<WebVNCTicketRecord>(key);
+    if (!ticket || ticket.ticket !== value) {
+      return { status: "invalid" };
+    }
+    if (Date.parse(ticket.expiresAt) <= Date.now()) {
       await this.state.storage.delete(key);
-      return { status: "accepted", ticket, lease };
-    });
+      return { status: "invalid" };
+    }
+    const lease = await this.getLease(ticket.leaseID);
+    if (!lease || !identifierMatchesLease(identifier, lease)) {
+      return { status: "not_found" };
+    }
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
+      await this.state.storage.delete(key);
+      return { status: "invalid" };
+    }
+    await this.state.storage.delete(key);
+    return { status: "accepted", ticket, lease };
   }
 
   private async cleanupExpiredWebVNCTickets(): Promise<void> {
@@ -8383,27 +8400,36 @@ export class FleetCoordinator {
     request: Request,
     identifier: string,
   ): Promise<LeaseBridgeTicketConsumption<CodeTicketRecord>> {
+    return this.withBridgeTicketLock(() => this.consumeCodeTicketUnderLock(request, identifier));
+  }
+
+  private async consumeCodeTicketUnderLock(
+    request: Request,
+    identifier: string,
+  ): Promise<LeaseBridgeTicketConsumption<CodeTicketRecord>> {
     const value = bridgeTicketFromRequest(request, this.env);
     if (!validCodeTicket(value)) {
       return { status: "invalid" };
     }
-    return this.withBridgeTicketLock(async () => {
-      const key = codeTicketKey(value);
-      const ticket = await this.state.storage.get<CodeTicketRecord>(key);
-      if (!ticket || ticket.ticket !== value) {
-        return { status: "invalid" };
-      }
-      if (Date.parse(ticket.expiresAt) <= Date.now()) {
-        await this.state.storage.delete(key);
-        return { status: "invalid" };
-      }
-      const lease = await this.getLease(ticket.leaseID);
-      if (!lease || !identifierMatchesLease(identifier, lease)) {
-        return { status: "not_found" };
-      }
+    const key = codeTicketKey(value);
+    const ticket = await this.state.storage.get<CodeTicketRecord>(key);
+    if (!ticket || ticket.ticket !== value) {
+      return { status: "invalid" };
+    }
+    if (Date.parse(ticket.expiresAt) <= Date.now()) {
       await this.state.storage.delete(key);
-      return { status: "accepted", ticket, lease };
-    });
+      return { status: "invalid" };
+    }
+    const lease = await this.getLease(ticket.leaseID);
+    if (!lease || !identifierMatchesLease(identifier, lease)) {
+      return { status: "not_found" };
+    }
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
+      await this.state.storage.delete(key);
+      return { status: "invalid" };
+    }
+    await this.state.storage.delete(key);
+    return { status: "accepted", ticket, lease };
   }
 
   private async cleanupExpiredCodeTickets(): Promise<void> {
@@ -8453,7 +8479,7 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    if (!this.leaseManagerAuthorized(lease, egressTicketPrincipal(ticket))) {
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
@@ -13969,7 +13995,7 @@ function validOptionalEgressBridgePrincipal(value: {
   return legacy || completeBridgePrincipal(value);
 }
 
-function egressTicketPrincipal(ticket: EgressTicketRecord): {
+function leaseBridgeTicketPrincipal(ticket: { owner: string; org: string; admin?: boolean }): {
   owner: string;
   org: string;
   admin: boolean;
