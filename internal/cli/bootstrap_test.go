@@ -347,7 +347,13 @@ func TestCloudInitBrowserWrapper(t *testing.T) {
 	for _, want := range []string{
 		"gnupg build-essential python3",
 		"https://dl.google.com/linux/linux_signing_key.pub",
-		"chmod 0644 /etc/apt/trusted.gpg.d/google.asc",
+		googleLinuxSigningKeyFingerprint,
+		`GNUPGHOME="$google_key_home" gpg --batch --import`,
+		`awk -F: '$1 == "fpr" { print $10; exit }' || true`,
+		"gpg --batch --export " + googleLinuxSigningKeyFingerprint,
+		`mv -f "$google_key_tmp/google-linux.gpg" /etc/apt/keyrings/google-linux.gpg`,
+		"signed-by=/etc/apt/keyrings/google-linux.gpg",
+		"Google Linux signing key verification failed; trying Chromium fallback",
 		"https://dl.google.com/linux/chrome/deb/",
 		"google-chrome-stable",
 		"apt-cache show chromium",
@@ -366,6 +372,7 @@ func TestCloudInitBrowserWrapper(t *testing.T) {
 		}
 	}
 	for _, notWant := range []string{
+		"/etc/apt/trusted.gpg.d/google.asc",
 		"<<'EOF'",
 		"<<EOF",
 		"\nEOF",
