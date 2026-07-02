@@ -171,16 +171,13 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 }
 
 func isCrabboxAWSLease(server Server) bool {
-	if server.Labels == nil {
-		return false
-	}
-	if server.Labels["crabbox"] != "true" {
-		return false
-	}
-	if provider := server.Labels["provider"]; provider != "" && provider != "aws" {
-		return false
-	}
-	return true
+	labels := server.Labels
+	return labels != nil &&
+		labels["crabbox"] == "true" &&
+		labels["created_by"] == "crabbox" &&
+		labels["provider"] == "aws" &&
+		core.IsCanonicalLeaseID(labels["lease"]) &&
+		strings.TrimSpace(labels["slug"]) != ""
 }
 
 func (b *awsLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -214,6 +211,9 @@ func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (cor
 }
 
 func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	if !isCrabboxAWSLease(req.Lease.Server) || req.Lease.LeaseID != req.Lease.Server.Labels["lease"] {
+		return exit(4, "refusing to release AWS instance %s without matching canonical Crabbox ownership tags", req.Lease.Server.DisplayID())
+	}
 	if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
 		var keyErr *awsProviderKeyCleanupError
 		if errors.As(err, &keyErr) {
@@ -256,6 +256,10 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 	}
 	now := time.Now().UTC()
 	for _, server := range servers {
+		if !isCrabboxAWSLease(server) {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=canonical Crabbox ownership tags missing\n", server.DisplayID(), server.Name)
+			continue
+		}
 		shouldDelete, reason := core.ShouldCleanupServer(server, now)
 		if !shouldDelete {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
@@ -361,6 +365,9 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)
 }
 func deleteServer(ctx context.Context, cfg Config, server Server) error {
+	if !isCrabboxAWSLease(server) {
+		return exit(4, "refusing to delete AWS instance %s without canonical Crabbox ownership tags", server.DisplayID())
+	}
 	client, err := newAWSClient(ctx, cfg)
 	if err != nil {
 		return err
