@@ -308,6 +308,114 @@ describe("coordinator runtimes", () => {
     expect(runtime.socketCloses).toContainEqual({ code: 1008, reason: "lease access revoked" });
   });
 
+  it("reauthorizes WebVNC and Code agent tickets before acceptance", async () => {
+    const runtime = new MemoryRuntime();
+    const coordinator = new FleetCoordinator(runtime, {
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env);
+    const lease: LeaseRecord = {
+      id: "cbx_000000000001",
+      slug: "shared-bridges",
+      provider: "external",
+      lifecycle: "registered",
+      target: "linux",
+      cloudID: "external-shared-bridges",
+      owner: "owner@example.com",
+      org: "example-org",
+      share: { users: { "manager@example.com": "manage" } },
+      profile: "default",
+      class: "default",
+      serverType: "external",
+      serverID: 0,
+      serverName: "shared-bridges",
+      providerKey: "external-shared-bridges",
+      host: "127.0.0.1",
+      sshUser: "crabbox",
+      sshPort: "22",
+      workRoot: "/work/crabbox",
+      keep: true,
+      ttlSeconds: 3600,
+      estimatedHourlyUSD: 0,
+      maxEstimatedUSD: 0,
+      state: "active",
+      desktop: true,
+      code: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    await runtime.storage.put(`lease:${lease.id}`, lease);
+    const managerHeaders = {
+      "x-crabbox-owner": "manager@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const ownerHeaders = {
+      "x-crabbox-owner": "owner@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const adminHeaders = {
+      "x-crabbox-owner": "admin@example.com",
+      "x-crabbox-org": "example-org",
+      "x-crabbox-admin": "true",
+    };
+    const createTicket = async (
+      kind: "webvnc" | "code",
+      headers: Record<string, string> = managerHeaders,
+    ): Promise<string> => {
+      const response = await coordinator.fetch(
+        new Request(`https://coordinator.test/v1/leases/shared-bridges/${kind}/ticket`, {
+          method: "POST",
+          headers,
+        }),
+      );
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { ticket: string }).ticket;
+    };
+    const connect = async (kind: "webvnc" | "code", ticket: string): Promise<Response> =>
+      await coordinator.fetch(
+        new Request(`https://coordinator.test/v1/leases/shared-bridges/${kind}/agent`, {
+          headers: {
+            upgrade: "websocket",
+            authorization: `Bearer ${ticket}`,
+          },
+        }),
+      );
+
+    const acceptedWebVNCTicket = await createTicket("webvnc");
+    expect((await connect("webvnc", acceptedWebVNCTicket)).status).toBe(200);
+    expect(runtime.acceptedAttachment).toMatchObject({
+      kind: "webvnc-agent",
+      leaseID: lease.id,
+    });
+
+    const acceptedCodeTicket = await createTicket("code");
+    expect((await connect("code", acceptedCodeTicket)).status).toBe(200);
+    expect(runtime.acceptedAttachment).toEqual({ kind: "code-agent", leaseID: lease.id });
+
+    expect((await connect("webvnc", await createTicket("webvnc", adminHeaders))).status).toBe(200);
+    expect((await connect("code", await createTicket("code", adminHeaders))).status).toBe(200);
+
+    const revokedWebVNCTicket = await createTicket("webvnc");
+    const revokedCodeTicket = await createTicket("code");
+    const downgraded = await coordinator.fetch(
+      new Request("https://coordinator.test/v1/leases/shared-bridges/share", {
+        method: "PUT",
+        headers: { ...ownerHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ users: { "manager@example.com": "use" } }),
+      }),
+    );
+    expect(downgraded.status).toBe(200);
+
+    runtime.acceptedAttachment = undefined;
+    expect((await connect("webvnc", revokedWebVNCTicket)).status).toBe(401);
+    expect(runtime.acceptedAttachment).toBeUndefined();
+    expect(runtime.storage.value(`webvnc-ticket:${revokedWebVNCTicket}`)).toBeUndefined();
+
+    expect((await connect("code", revokedCodeTicket)).status).toBe(401);
+    expect(runtime.acceptedAttachment).toBeUndefined();
+    expect(runtime.storage.value(`code-ticket:${revokedCodeTicket}`)).toBeUndefined();
+  });
+
   it("keeps provider-backed portal requests outside the lifecycle queue", () => {
     for (const [method, path] of [
       ["GET", "/portal"],

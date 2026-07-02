@@ -218,6 +218,7 @@ interface WebVNCTicketRecord {
   leaseID: string;
   owner: string;
   org: string;
+  admin?: boolean;
   createdAt: string;
   expiresAt: string;
 }
@@ -237,6 +238,7 @@ interface CodeTicketRecord {
   leaseID: string;
   owner: string;
   org: string;
+  admin?: boolean;
   createdAt: string;
   expiresAt: string;
 }
@@ -6280,7 +6282,7 @@ export class FleetCoordinator {
       }
       const upgrade = this.state.createWebSocketUpgrade();
       const agent = upgrade.socket;
-      const principal = egressTicketPrincipal(ticket);
+      const principal = leaseBridgeTicketPrincipal(ticket);
       const attachment: BridgeAttachment = {
         kind: role === "host" ? "egress-host" : "egress-client",
         leaseID: lease.id,
@@ -7049,6 +7051,7 @@ export class FleetCoordinator {
       leaseID: lease.id,
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
+      admin,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + webVNCTicketTTLSeconds * 1000).toISOString(),
     };
@@ -7288,6 +7291,7 @@ export class FleetCoordinator {
       leaseID: lease.id,
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
+      admin,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + codeTicketTTLSeconds * 1000).toISOString(),
     };
@@ -8362,6 +8366,10 @@ export class FleetCoordinator {
       if (!lease || !identifierMatchesLease(identifier, lease)) {
         return { status: "not_found" };
       }
+      if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
+        await this.state.storage.delete(key);
+        return { status: "invalid" };
+      }
       await this.state.storage.delete(key);
       return { status: "accepted", ticket, lease };
     });
@@ -8400,6 +8408,10 @@ export class FleetCoordinator {
       const lease = await this.getLease(ticket.leaseID);
       if (!lease || !identifierMatchesLease(identifier, lease)) {
         return { status: "not_found" };
+      }
+      if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
+        await this.state.storage.delete(key);
+        return { status: "invalid" };
       }
       await this.state.storage.delete(key);
       return { status: "accepted", ticket, lease };
@@ -8453,7 +8465,7 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    if (!this.leaseManagerAuthorized(lease, egressTicketPrincipal(ticket))) {
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
@@ -13969,7 +13981,7 @@ function validOptionalEgressBridgePrincipal(value: {
   return legacy || completeBridgePrincipal(value);
 }
 
-function egressTicketPrincipal(ticket: EgressTicketRecord): {
+function leaseBridgeTicketPrincipal(ticket: { owner: string; org: string; admin?: boolean }): {
   owner: string;
   org: string;
   admin: boolean;
