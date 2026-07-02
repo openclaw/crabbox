@@ -61,13 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-<<<<<<< HEAD
-Current built-in surface: 69 providers (40 SSH lease, 27 delegated run, 2 service control).
-||||||| parent of e0115409 (docs: add vast provider docs and live smoke)
-Current built-in surface: 67 providers (39 SSH lease, 26 delegated run, 2 service control).
-=======
-Current built-in surface: 68 providers (40 SSH lease, 26 delegated run, 2 service control).
->>>>>>> e0115409 (docs: add vast provider docs and live smoke)
+Current built-in surface: 70 providers (41 SSH lease, 27 delegated run, 2 service control).
 
 Access terms:
 
