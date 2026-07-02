@@ -1495,6 +1495,7 @@ function codeServerInstallBootstrap(): string {
     rm -rf /usr/local/lib/code-server
     install -d -m 0755 /usr/local/lib/code-server
     cp -a "$CS_INSTALL_DIR/." /usr/local/lib/code-server/
+    chmod 0755 /usr/local/lib/code-server
     ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server`;
 }
 

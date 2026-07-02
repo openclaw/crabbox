@@ -421,8 +421,17 @@ describe("cloud-init bootstrap", () => {
     );
     expect(got).toContain("sha256sum -c -");
     expect(got).toContain("/usr/local/lib/code-server");
+    expect(got).toContain("chmod 0755 /usr/local/lib/code-server");
     expect(got).toContain("/usr/local/bin/code-server --version >/dev/null");
     expect(got).toContain("test -x /usr/local/bin/code-server");
+    const copyIndex = got.indexOf('cp -a "$CS_INSTALL_DIR/." /usr/local/lib/code-server/');
+    const chmodIndex = got.indexOf("chmod 0755 /usr/local/lib/code-server");
+    const linkIndex = got.indexOf(
+      "ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server",
+    );
+    expect(copyIndex).toBeGreaterThanOrEqual(0);
+    expect(chmodIndex).toBeGreaterThan(copyIndex);
+    expect(linkIndex).toBeGreaterThan(chmodIndex);
   });
 
   it("adds Tailscale setup only when requested", () => {
