@@ -4,6 +4,13 @@ import {
   workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "./config";
+import {
+  leaseIDForProviderKey,
+  providerKeyForLease,
+  providerKeyOwnedByLease,
+  providerKeyOwnershipLabels,
+  sshPublicKeyIdentity,
+} from "./provider-key";
 import { leaseProviderLabels } from "./provider-labels";
 import { leaseProviderName } from "./slug";
 import type { Env, HetznerSSHKey, HetznerServer, ProviderMachine } from "./types";
@@ -94,8 +101,13 @@ export class HetznerClient {
     return response.servers[0];
   }
 
-  async ensureSSHKey(name: string, publicKey: string): Promise<HetznerSSHKey> {
+  async ensureSSHKey(name: string, publicKey: string, leaseID?: string): Promise<HetznerSSHKey> {
     const identity = sshPublicKeyIdentity(publicKey);
+    const keyLeaseID = leaseIDForProviderKey(name);
+    if (keyLeaseID && keyLeaseID !== leaseID) {
+      throw new Error(`hetzner ssh key ${name} is reserved for lease ${keyLeaseID}`);
+    }
+    const leaseOwned = leaseID !== undefined && keyLeaseID === leaseID;
     const byName = await this.request<HetznerListSSHKeysResponse>(
       "GET",
       `/ssh_keys?${new URLSearchParams({ name })}`,
@@ -105,32 +117,41 @@ export class HetznerClient {
         if (sshPublicKeyIdentity(key.public_key) !== identity) {
           throw new Error(`hetzner ssh key ${name} exists with different public key`);
         }
+        if (leaseOwned && !providerKeyOwnedByLease(key.labels ?? {}, leaseID)) {
+          throw new Error(`hetzner ssh key ${name} is not owned by lease ${leaseID}`);
+        }
         return key;
       }
     }
 
-    for (const key of await this.listSSHKeys()) {
-      if (sshPublicKeyIdentity(key.public_key) === identity) {
-        return key;
-      }
+    const existingIdentity = reusableHetznerSSHKey(
+      await this.listSSHKeys(),
+      name,
+      identity,
+      leaseOwned ? leaseID : undefined,
+    );
+    if (existingIdentity) {
+      return existingIdentity;
     }
 
     try {
       const created = await this.request<HetznerSSHKeyResponse>("POST", "/ssh_keys", {
         name,
         public_key: publicKey,
-        labels: {
-          crabbox: "true",
-          created_by: "crabbox",
-        },
+        labels: leaseOwned
+          ? providerKeyOwnershipLabels(leaseID)
+          : { crabbox: "true", created_by: "crabbox" },
       });
       return created.ssh_key;
     } catch (error) {
       if (!String(error).includes("uniqueness_error")) {
         throw error;
       }
-      const key = (await this.listSSHKeys()).find(
-        (entry) => sshPublicKeyIdentity(entry.public_key) === identity,
+      const key = reusableHetznerSSHKey(
+        await this.listSSHKeys(),
+        name,
+        identity,
+        leaseOwned ? leaseID : undefined,
       );
       if (key) {
         return key;
@@ -139,14 +160,19 @@ export class HetznerClient {
     }
   }
 
-  async deleteSSHKey(name: string): Promise<void> {
+  async deleteSSHKey(name: string, leaseID: string): Promise<void> {
+    if (name !== providerKeyForLease(leaseID)) {
+      return;
+    }
     const byName = await this.request<HetznerListSSHKeysResponse>(
       "GET",
       `/ssh_keys?${new URLSearchParams({ name })}`,
     );
     const key = byName.ssh_keys.find((entry) => entry.name === name);
-    if (key) {
+    if (key && providerKeyOwnedByLease(key.labels ?? {}, leaseID)) {
       await this.request<void>("DELETE", `/ssh_keys/${key.id}`);
+    } else if (key) {
+      console.warn(`Hetzner SSH key cleanup skipped unowned key lease=${leaseID} key=${name}`);
     }
   }
 
@@ -171,11 +197,11 @@ export class HetznerClient {
     leaseID: string,
     slug: string,
     owner: string,
-  ): Promise<{ server: HetznerServer; serverType: string }> {
+  ): Promise<{ server: HetznerServer; serverType: string; providerKey: string }> {
     const requireRunning = config.providerKey.startsWith(workspaceProviderKeyPrefix);
     let key: HetznerSSHKey;
     try {
-      key = await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
+      key = await this.ensureSSHKey(config.providerKey, config.sshPublicKey, leaseID);
     } catch (error) {
       const message = errorText(error);
       throw new HetznerProvisioningError(message, false, transientHetznerError(message));
@@ -198,7 +224,7 @@ export class HetznerClient {
           owner,
           requireRunning,
         );
-        return { server, serverType };
+        return { server, serverType, providerKey: key.name };
       } catch (error) {
         const message = errorText(error);
         failures.push(`${serverType}: ${message}`);
@@ -336,11 +362,6 @@ export class HetznerClient {
   }
 }
 
-export function sshPublicKeyIdentity(publicKey: string): string {
-  const [type, encoded] = publicKey.trim().split(/\s+/, 3);
-  return type && encoded ? `${type} ${encoded}` : publicKey.trim();
-}
-
 export function isRetryableProvisioningError(message: string): boolean {
   return (
     message.includes("dedicated_core_limit") ||
@@ -348,6 +369,27 @@ export function isRetryableProvisioningError(message: string): boolean {
     message.includes("server_type_not_available") ||
     message.includes("location_not_available")
   );
+}
+
+function reusableHetznerSSHKey(
+  keys: HetznerSSHKey[],
+  requestedName: string,
+  identity: string,
+  leaseID?: string,
+): HetznerSSHKey | undefined {
+  const exact = keys.find((entry) => entry.name === requestedName);
+  if (exact) {
+    if (sshPublicKeyIdentity(exact.public_key) !== identity) {
+      throw new Error(`hetzner ssh key ${requestedName} exists with different public key`);
+    }
+    if (leaseID !== undefined && !providerKeyOwnedByLease(exact.labels ?? {}, leaseID)) {
+      throw new Error(`hetzner ssh key ${requestedName} is not owned by lease ${leaseID}`);
+    }
+    return exact;
+  }
+  // Hetzner makes public-key material account-unique. A differently named match
+  // is therefore shared and retained; lease finalization records its actual name.
+  return keys.find((entry) => sshPublicKeyIdentity(entry.public_key) === identity);
 }
 
 function prependUnique(first: string, rest: string[]): string[] {

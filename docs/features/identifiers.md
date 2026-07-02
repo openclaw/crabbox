@@ -180,7 +180,18 @@ Keys are `ed25519` by default; AWS and Azure Windows leases use a 4096-bit RSA
 key instead (`ensureTestboxKeyForConfig`). The provisional-to-final lease ID
 move renames the whole directory so the private key, public key, and any
 `known_hosts` entries migrate together. The provider key name registered with
-the cloud account is `crabbox-cbx-abcdef123456` (`providerKeyForLease`).
+the cloud account is `crabbox-cbx-abcdef123456` (`providerKeyForLease`). Ordinary
+coordinator callers cannot override this lease-bound name; custom provider key
+names require admin authentication and are retained when a lease is released.
+Canonical `crabbox-cbx-*` names remain reserved for their encoded lease ID even
+for admin callers.
+AWS reuses an existing lease-bound key only when both its public key material
+and provider ownership metadata match the canonical lease ID. Hetzner applies
+the same check to an exact-name match. Because Hetzner makes public-key material
+account-unique, a differently named identity match is recorded as the lease's
+actual shared provider key without cleanup ownership and is retained. Cleanup
+requires that persisted ownership decision, re-reads provider ownership
+metadata, and leaves legacy, unowned, shared, or custom keys intact.
 
 ## Resolving An Identifier
 

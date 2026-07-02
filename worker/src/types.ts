@@ -346,6 +346,7 @@ export interface LeaseRecord {
   serverID: number;
   serverName: string;
   providerKey: string;
+  providerKeyCleanupOwned?: boolean;
   host: string;
   sshUser: string;
   sshPort: string;
@@ -708,6 +709,7 @@ export interface HetznerSSHKey {
   name: string;
   fingerprint: string;
   public_key: string;
+  labels?: Record<string, string>;
 }
 
 export interface MachineView {
@@ -733,4 +735,5 @@ export interface ProviderMachine {
   hostID?: string;
   host: string;
   labels: Record<string, string>;
+  providerKey?: string;
 }

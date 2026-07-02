@@ -37,6 +37,189 @@ afterEach(() => {
 });
 
 describe("aws provider", () => {
+  it("rejects a canonical SSH key name reserved for another lease", async () => {
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    ) as unknown as {
+      ensureSSHKey(name: string, publicKey: string, leaseID: string): Promise<void>;
+    };
+
+    await expect(
+      client.ensureSSHKey(
+        "crabbox-cbx-000000000001",
+        "ssh-ed25519 requested-key",
+        "cbx_abcdef123456",
+      ),
+    ).rejects.toThrow("is reserved for lease cbx_000000000001");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("binds canonical SSH key reuse and deletion to lease ownership tags", async () => {
+    const actions: string[] = [];
+    let deleteParams: URLSearchParams | undefined;
+    let owned = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        actions.push(action);
+        if (action === "DeleteKeyPair") deleteParams = params;
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse(`<DescribeKeyPairsResponse><keySet><item>
+            <keyName>crabbox-cbx-abcdef123456</keyName>
+            <publicKey>ssh-ed25519 requested-key old-comment</publicKey>
+            <keyPairId>key-immutable-1</keyPairId>
+            <tagSet><item><key>crabbox</key><value>true</value></item><item><key>created_by</key><value>crabbox</value></item><item><key>lease</key><value>${owned ? "cbx_abcdef123456" : "cbx_000000000001"}</value></item></tagSet>
+          </item></keySet></DescribeKeyPairsResponse>`);
+        }
+        return ec2XMLResponse(`<${action}Response />`);
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    );
+    const keyClient = client as unknown as {
+      ensureSSHKey(name: string, publicKey: string, leaseID: string): Promise<void>;
+    };
+
+    await expect(
+      keyClient.ensureSSHKey(
+        "crabbox-cbx-abcdef123456",
+        "ssh-ed25519 requested-key new-comment",
+        "cbx_abcdef123456",
+      ),
+    ).rejects.toThrow("is not owned by lease cbx_abcdef123456");
+    owned = true;
+    await expect(
+      keyClient.ensureSSHKey(
+        "crabbox-cbx-abcdef123456",
+        "ssh-ed25519 requested-key new-comment",
+        "cbx_abcdef123456",
+      ),
+    ).resolves.toBeUndefined();
+
+    owned = false;
+    await client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
+    owned = true;
+    await client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
+    expect(actions).toEqual([
+      "DescribeKeyPairs",
+      "DescribeKeyPairs",
+      "DescribeKeyPairs",
+      "DescribeKeyPairs",
+      "DeleteKeyPair",
+    ]);
+    expect(deleteParams?.get("KeyPairId")).toBe("key-immutable-1");
+    expect(deleteParams?.get("KeyName")).toBeNull();
+  });
+
+  it("tags imported canonical SSH keys with their lease ID", async () => {
+    let importParams: URLSearchParams | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InvalidKeyPair.NotFound</Code><Message>missing</Message></Error></Errors></Response>",
+            400,
+          );
+        }
+        importParams = params;
+        return ec2XMLResponse("<ImportKeyPairResponse />");
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    ) as unknown as {
+      ensureSSHKey(name: string, publicKey: string, leaseID: string): Promise<void>;
+    };
+
+    await client.ensureSSHKey(
+      "crabbox-cbx-abcdef123456",
+      "ssh-ed25519 requested-key",
+      "cbx_abcdef123456",
+    );
+
+    expect(importParams?.get("Action")).toBe("ImportKeyPair");
+    expect(importParams?.get("TagSpecification.1.Tag.3.Key")).toBe("lease");
+    expect(importParams?.get("TagSpecification.1.Tag.3.Value")).toBe("cbx_abcdef123456");
+  });
+
+  it("refuses to delete an owned AWS SSH key without an immutable key pair ID", async () => {
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        actions.push(params.get("Action") ?? "");
+        return ec2XMLResponse(`<DescribeKeyPairsResponse><keySet><item>
+          <keyName>crabbox-cbx-abcdef123456</keyName>
+          <tagSet><item><key>crabbox</key><value>true</value></item><item><key>created_by</key><value>crabbox</value></item><item><key>lease</key><value>cbx_abcdef123456</value></item></tagSet>
+        </item></keySet></DescribeKeyPairsResponse>`);
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    );
+
+    await expect(
+      client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456"),
+    ).rejects.toThrow("missing its immutable key pair ID");
+    expect(actions).toEqual(["DescribeKeyPairs"]);
+  });
+
+  it("rejects an existing SSH key with different public key material", async () => {
+    let describeParams: URLSearchParams | undefined;
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        actions.push(action);
+        if (action === "DescribeKeyPairs") {
+          describeParams = params;
+          return ec2XMLResponse(
+            "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx-abcdef123456</keyName><publicKey>ssh-ed25519 other-key</publicKey></item></keySet></DescribeKeyPairsResponse>",
+          );
+        }
+        return ec2XMLResponse("<UnexpectedResponse />", 500);
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    );
+
+    await expect(
+      client.createServerWithFallback(
+        leaseConfig({
+          provider: "aws",
+          providerKey: "crabbox-cbx-abcdef123456",
+          sshPublicKey: "ssh-ed25519 requested-key",
+        }),
+        "cbx_abcdef123456",
+        "blue-lobster",
+        "alice@example.com",
+      ),
+    ).rejects.toThrow("aws ssh key crabbox-cbx-abcdef123456 exists with different public key");
+    expect(describeParams?.get("IncludePublicKey")).toBe("true");
+    expect(actions).toEqual(["DescribeKeyPairs"]);
+  });
+
   it("separates managed workspace and ordinary runner security groups", () => {
     expect(awsManagedSecurityGroupName({ providerKey: "crabbox-steipete" })).toBe(
       "crabbox-runners",
@@ -1254,7 +1437,9 @@ describe("aws provider", () => {
           return securityGroupResponse;
         }
         if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+          return ec2XMLResponse(
+            `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-rsa ${"a".repeat(724)}</publicKey></item></keySet></DescribeKeyPairsResponse>`,
+          );
         }
         if (action === "DescribeImages") {
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
@@ -1345,7 +1530,9 @@ describe("aws provider", () => {
           return securityGroupResponse;
         }
         if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+          return ec2XMLResponse(
+            "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
+          );
         }
         if (action === "DescribeImages") {
           const architecture = params.get("Filter.1.Value.1") ?? "";
@@ -1460,7 +1647,9 @@ describe("aws provider", () => {
           return securityGroupResponse;
         }
         if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+          return ec2XMLResponse(
+            "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
+          );
         }
         if (action === "DescribeImages") {
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
@@ -1569,7 +1758,9 @@ describe("aws provider", () => {
           return securityGroupResponse;
         }
         if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+          return ec2XMLResponse(
+            "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
+          );
         }
         if (action === "DescribeImages") {
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
@@ -1656,7 +1847,9 @@ describe("aws provider", () => {
         const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
         if (securityGroupResponse) return securityGroupResponse;
         if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+          return ec2XMLResponse(
+            "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
+          );
         }
         if (action === "DescribeHosts") {
           describedHostIDs.push(params.get("HostId.1") ?? "");
@@ -1754,7 +1947,9 @@ describe("aws provider", () => {
           return securityGroupResponse;
         }
         if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+          return ec2XMLResponse(
+            "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
+          );
         }
         if (action === "DescribeImages") {
           const architecture = params.get("Filter.1.Value.1") ?? "";
@@ -1857,7 +2052,9 @@ describe("aws provider", () => {
           return securityGroupResponse;
         }
         if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+          return ec2XMLResponse(
+            "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
+          );
         }
         if (action === "DescribeImages") {
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
@@ -1956,7 +2153,9 @@ describe("aws provider", () => {
           return securityGroupResponse;
         }
         if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+          return ec2XMLResponse(
+            "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
+          );
         }
         if (action === "DescribeHosts") {
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
@@ -2045,7 +2244,9 @@ describe("aws provider", () => {
           return securityGroupResponse;
         }
         if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse("<DescribeKeyPairsResponse />");
+          return ec2XMLResponse(
+            "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
+          );
         }
         if (action === "DescribeSubnets") {
           describeSubnetParams.push(params);

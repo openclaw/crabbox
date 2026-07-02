@@ -3233,7 +3233,139 @@ describe("fleet lease identity and idle", () => {
     ).resolves.toEqual(existing);
   });
 
-  it("finds an existing Hetzner SSH key by identity on a later page", async () => {
+  it("rejects a canonical Hetzner uniqueness race without lease ownership", async () => {
+    const responses = [
+      jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ error: { code: "uniqueness_error" } }, 409),
+      jsonResponse({
+        ssh_keys: [
+          {
+            id: 41,
+            name: "shared-existing-key",
+            fingerprint: "shared-fingerprint",
+            public_key: "ssh-ed25519 lease-test old-comment",
+            labels: { crabbox: "true", created_by: "crabbox" },
+          },
+          {
+            id: 42,
+            name: "crabbox-cbx-abcdef123456",
+            fingerprint: "fingerprint",
+            public_key: "ssh-ed25519 lease-test old-comment",
+            labels: {
+              crabbox: "true",
+              created_by: "crabbox",
+              lease: "cbx_000000000001",
+            },
+          },
+        ],
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responses.shift() ?? jsonResponse({}, 500)),
+    );
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+
+    await expect(
+      client.ensureSSHKey(
+        "crabbox-cbx-abcdef123456",
+        "ssh-ed25519 lease-test new-comment",
+        "cbx_abcdef123456",
+      ),
+    ).rejects.toThrow("is not owned by lease cbx_abcdef123456");
+  });
+
+  it("rejects a canonical Hetzner key name reserved for another lease", async () => {
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+
+    await expect(
+      client.ensureSSHKey(
+        "crabbox-cbx-000000000001",
+        "ssh-ed25519 requested-key",
+        "cbx_abcdef123456",
+      ),
+    ).rejects.toThrow("is reserved for lease cbx_000000000001");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("binds canonical Hetzner SSH key reuse, creation, and deletion to lease labels", async () => {
+    const requests: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [];
+    let mode: "wrong" | "missing" | "owned" = "wrong";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const httpRequest = input instanceof Request ? input : new Request(input, init);
+        const path = new URL(httpRequest.url).pathname;
+        const body = httpRequest.method === "POST" ? await httpRequest.clone().json() : undefined;
+        requests.push({ method: httpRequest.method, path, ...(body ? { body } : {}) });
+        if (httpRequest.method === "DELETE") return jsonResponse({});
+        if (httpRequest.method === "POST") {
+          return jsonResponse({
+            ssh_key: {
+              id: 2,
+              name: "crabbox-cbx-abcdef123456",
+              public_key: "ssh-ed25519 requested-key",
+              labels: { crabbox: "true", lease: "cbx_abcdef123456" },
+            },
+          });
+        }
+        if (mode === "missing") return jsonResponse({ ssh_keys: [] });
+        return jsonResponse({
+          ssh_keys: [
+            {
+              id: 1,
+              name: "crabbox-cbx-abcdef123456",
+              public_key: "ssh-ed25519 requested-key old-comment",
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                lease: mode === "owned" ? "cbx_abcdef123456" : "cbx_000000000001",
+              },
+            },
+          ],
+        });
+      }),
+    );
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+
+    await expect(
+      client.ensureSSHKey(
+        "crabbox-cbx-abcdef123456",
+        "ssh-ed25519 requested-key new-comment",
+        "cbx_abcdef123456",
+      ),
+    ).rejects.toThrow("is not owned by lease cbx_abcdef123456");
+    mode = "owned";
+    await expect(
+      client.ensureSSHKey(
+        "crabbox-cbx-abcdef123456",
+        "ssh-ed25519 requested-key new-comment",
+        "cbx_abcdef123456",
+      ),
+    ).resolves.toMatchObject({ id: 1 });
+    mode = "wrong";
+    await client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
+    mode = "owned";
+    await client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
+    expect(requests.filter((entry) => entry.method === "DELETE")).toEqual([
+      { method: "DELETE", path: "/v1/ssh_keys/1" },
+    ]);
+
+    mode = "missing";
+    await client.ensureSSHKey(
+      "crabbox-cbx-abcdef123456",
+      "ssh-ed25519 requested-key",
+      "cbx_abcdef123456",
+    );
+    expect(requests.findLast((entry) => entry.method === "POST")?.body).toMatchObject({
+      labels: { crabbox: "true", created_by: "crabbox", lease: "cbx_abcdef123456" },
+    });
+  });
+
+  it("reuses a differently named Hetzner SSH key with the same identity", async () => {
     const existing = {
       id: 99,
       name: "older-workspace-key",
@@ -3258,7 +3390,11 @@ describe("fleet lease identity and idle", () => {
     const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
 
     await expect(
-      client.ensureSSHKey("crabbox-workspace-new", "ssh-ed25519 workspace-test new-comment"),
+      client.ensureSSHKey(
+        "crabbox-cbx-abcdef123456",
+        "ssh-ed25519 workspace-test new-comment",
+        "cbx_abcdef123456",
+      ),
     ).resolves.toEqual(existing);
   });
 
@@ -3320,6 +3456,34 @@ describe("fleet lease identity and idle", () => {
     });
 
     await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
+  });
+
+  it("records a shared Hetzner key's actual name so cleanup retains it", async () => {
+    const provider = new HetznerProvider({} as Env);
+    const config = leaseConfig({
+      provider: "hetzner",
+      providerKey: "crabbox-cbx-abcdef123456",
+      sshPublicKey: "ssh-ed25519 shared-test",
+    });
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      provider: "hetzner",
+      providerKey: config.providerKey,
+    });
+
+    const finalized = await provider.finalizeLeaseCreate(
+      config,
+      lease,
+      testMachine({
+        provider: "hetzner",
+        labels: { provider_key: "sanitized-wrong-value" },
+        providerKey: "shared-existing-key!with-unsafe-label-chars",
+      }),
+    );
+
+    expect(finalized.config.providerKey).toBe("shared-existing-key!with-unsafe-label-chars");
+    expect(finalized.lease.providerKey).toBe("shared-existing-key!with-unsafe-label-chars");
+    expect(finalized.lease.providerKeyCleanupOwned).toBe(false);
   });
 
   it("reserves the shared workspace provider key from ordinary leases", async () => {
@@ -3562,6 +3726,85 @@ describe("fleet lease identity and idle", () => {
     await fleet.alarm();
     expect(restrictionChecks).toBe(0);
     expect(created).toBe(true);
+  });
+
+  it("requires admin auth for custom provider key names before provider preparation", async () => {
+    const createdProviderKeys: string[] = [];
+    let prepareCalls = 0;
+    const fleet = testFleet(undefined, {
+      aws: fakeProvider(
+        (config) => {
+          createdProviderKeys.push(config.providerKey);
+        },
+        {
+          provider: "aws",
+          onPrepareLeaseConfig: (config) => {
+            prepareCalls += 1;
+            return config;
+          },
+        },
+      ),
+    });
+    const create = (leaseID: string, providerKey: string, admin = false) =>
+      fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: admin ? { "x-crabbox-admin": "true" } : undefined,
+          body: {
+            leaseID,
+            provider: "aws",
+            providerKey,
+            sshPublicKey: "ssh-ed25519 direct-test",
+          },
+        }),
+      );
+
+    const denied = await create("cbx_abcdef123456", "foreign-key");
+    expect(denied.status).toBe(403);
+    await expect(denied.json()).resolves.toMatchObject({ error: "admin_required" });
+    expect(prepareCalls).toBe(0);
+    expect(createdProviderKeys).toEqual([]);
+
+    const reserved = await create("cbx_abcdef123456", "crabbox-cbx-000000000001", true);
+    expect(reserved.status).toBe(400);
+    await expect(reserved.json()).resolves.toMatchObject({ error: "reserved_provider_key" });
+    expect(prepareCalls).toBe(0);
+    expect(createdProviderKeys).toEqual([]);
+
+    const canonical = "crabbox-cbx-abcdef123456";
+    expect((await create("cbx_abcdef123456", canonical)).status).toBe(201);
+    expect((await create("cbx_abcdef123457", "shared-admin-key", true)).status).toBe(201);
+    expect(prepareCalls).toBe(2);
+    expect(createdProviderKeys).toEqual([canonical, "shared-admin-key"]);
+  });
+
+  it("only deletes provider keys canonically bound to the released lease", async () => {
+    const providers = [
+      new HetznerProvider({} as Env),
+      new AWSProvider({} as Env, "eu-west-1", new MemoryStorage()),
+    ];
+    await Promise.all(
+      providers.map(async (provider) => {
+        vi.spyOn(provider, "deleteServer").mockResolvedValue();
+        const deleteSSHKey = vi.spyOn(provider, "deleteSSHKey").mockResolvedValue();
+        await provider.releaseLease(
+          testLease({
+            id: "cbx_abcdef123456",
+            providerKey: "crabbox-cbx-000000000001",
+          }),
+        );
+        expect(deleteSSHKey).not.toHaveBeenCalled();
+
+        await provider.releaseLease(
+          testLease({
+            id: "cbx_abcdef123456",
+            providerKey: "crabbox-cbx-abcdef123456",
+            providerKeyCleanupOwned: true,
+          }),
+        );
+        expect(deleteSSHKey).toHaveBeenCalledOnce();
+        expect(deleteSSHKey).toHaveBeenCalledWith("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
+      }),
+    );
   });
 
   it("adapts workspaces onto owner-scoped lease lifecycle", async () => {
@@ -5190,7 +5433,6 @@ describe("fleet lease identity and idle", () => {
         body: {
           leaseID: pending.providerResourceId,
           provider: "hetzner",
-          providerKey: "ordinary-key",
           sshPublicKey: "ssh-ed25519 ordinary-test",
         },
       }),
@@ -9616,6 +9858,80 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it.each([
+    { provider: "aws" as const, providerKey: "crabbox-cbx-abcdef123456", cleanupOwned: true },
+    {
+      provider: "hetzner" as const,
+      providerKey: "crabbox-cbx-abcdef123456",
+      cleanupOwned: true,
+    },
+    { provider: "hetzner" as const, providerKey: "shared-existing-key", cleanupOwned: false },
+  ])(
+    "preserves $provider provider-key ownership during provisioning cancellation cleanup",
+    async ({ provider, providerKey, cleanupOwned }) => {
+      const storage = new MemoryStorage();
+      const released: LeaseRecord[] = [];
+      let createStarted!: () => void;
+      let finishCreate!: () => void;
+      const createStartedPromise = new Promise<void>((resolve) => {
+        createStarted = resolve;
+      });
+      const finishCreatePromise = new Promise<void>((resolve) => {
+        finishCreate = resolve;
+      });
+      const fleet = testFleet(storage, {
+        [provider]: fakeProvider(
+          async () => {
+            createStarted();
+            await finishCreatePromise;
+          },
+          {
+            provider,
+            providerKey,
+            onReleaseLease: (lease) => {
+              released.push(structuredClone(lease));
+            },
+          },
+        ),
+      });
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      const createPromise = fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider,
+            ...(provider === "aws" ? { awsUseStockImage: true } : {}),
+            ttlSeconds: 1200,
+            sshPublicKey: "ssh-ed25519 cancellation-test",
+          },
+        }),
+      );
+
+      await createStartedPromise;
+      const release = await fleet.fetch(
+        request("POST", "/v1/leases/cbx_abcdef123456/release", {
+          headers,
+          body: { delete: true },
+        }),
+      );
+      expect(release.status).toBe(200);
+
+      finishCreate();
+      expect((await createPromise).status).toBe(409);
+      expect(released).toHaveLength(1);
+      expect(released[0]).toMatchObject({
+        id: "cbx_abcdef123456",
+        provider,
+        providerKey,
+        providerKeyCleanupOwned: cleanupOwned,
+      });
+    },
+  );
+
   it("rejects a no-delete release after provisioning cleanup has started", async () => {
     const storage = new MemoryStorage();
     let createStarted!: () => void;
@@ -11157,7 +11473,10 @@ describe("fleet lease identity and idle", () => {
     const create = (leaseID: string, providerKey: string) =>
       fleet.fetch(
         request("POST", "/v1/leases", {
-          headers: { "cf-connecting-ip": "198.51.100.10" },
+          headers: {
+            "cf-connecting-ip": "198.51.100.10",
+            "x-crabbox-admin": "true",
+          },
           body: {
             leaseID,
             provider: "aws",
@@ -11630,6 +11949,7 @@ describe("fleet lease identity and idle", () => {
 
   it("requires admin auth for new AWS macOS host pins but reactivates an owner's retained Mac", async () => {
     let created = false;
+    let preparedProviderKey = "";
     const storage = new MemoryStorage();
     const reconciledLeaseIDs: string[][] = [];
     storage.seed(
@@ -11656,6 +11976,10 @@ describe("fleet lease identity and idle", () => {
           provider: "aws",
           serverType: "mac2.metal",
           hostID: "h-000000000001",
+          onPrepareLeaseConfig: (config) => {
+            preparedProviderKey = config.providerKey;
+            return config;
+          },
           onReconcileLeaseAccess: (_lease, context) => {
             reconciledLeaseIDs.push(context.activeLeases.map((candidate) => candidate.id));
           },
@@ -11754,6 +12078,7 @@ describe("fleet lease identity and idle", () => {
     );
     expect(reused.status).toBe(201);
     expect(created).toBe(false);
+    expect(preparedProviderKey).toBe(lease.providerKey);
     const { lease: reactivated } = (await reused.json()) as { lease: LeaseRecord };
     expect(reactivated.id).toBe(lease.id);
     expect(reactivated.state).toBe("active");
@@ -19363,6 +19688,7 @@ function fakeProvider(
     serverType?: string;
     hostID?: string;
     cloudID?: string;
+    providerKey?: string;
     region?: string;
     imageRegion?: string;
     market?: string;
@@ -19436,6 +19762,7 @@ function fakeProvider(
           lease: LeaseRecord;
         }
       | undefined;
+    onReleaseLease?: (lease: LeaseRecord) => Promise<void> | void;
     onRecoverServer?: (
       lease: LeaseRecord,
     ) => Promise<ProviderMachine | undefined> | ProviderMachine | undefined;
@@ -19575,6 +19902,7 @@ function fakeProvider(
           provider: result.provider ?? "hetzner",
           id: 123,
           cloudID: result.cloudID ?? "123",
+          ...(result.providerKey ? { providerKey: result.providerKey } : {}),
           name: `crabbox-${slug}`,
           status: "running",
           serverType: result.serverType ?? "cpx62",
@@ -19599,6 +19927,7 @@ function fakeProvider(
       await onDelete?.(id);
     },
     async releaseLease(lease: LeaseRecord) {
+      await result.onReleaseLease?.(lease);
       await onDelete?.(
         (lease.provider ?? result.provider) === "hetzner" ? String(lease.serverID) : lease.cloudID,
       );
