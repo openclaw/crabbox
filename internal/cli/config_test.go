@@ -804,6 +804,60 @@ func TestGitHubCodespacesConfigDefaultsFileEnvAndShow(t *testing.T) {
 	}
 }
 
+func TestGitHubCodespacesProviderDefaults(t *testing.T) {
+	t.Run("provider defaults", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "github-codespaces"
+		cfg.GitHubCodespaces = GitHubCodespacesConfig{}
+		cfg.TargetOS = ""
+		cfg.SSHFallbackPorts = []string{"2222"}
+		cfg.WorkRoot = ""
+		cfg.SSHPort = ""
+		cfg.ServerType = ""
+
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.GitHubCodespaces.GHPath != "gh" ||
+			cfg.GitHubCodespaces.Machine != "basicLinux32gb" ||
+			cfg.GitHubCodespaces.IdleTimeout != 30*time.Minute ||
+			cfg.GitHubCodespaces.RetentionPeriod != 7*24*time.Hour ||
+			cfg.GitHubCodespaces.WorkRoot != "/workspaces/crabbox" {
+			t.Fatalf("provider defaults not applied: %#v", cfg.GitHubCodespaces)
+		}
+		if cfg.TargetOS != targetLinux || cfg.WorkRoot != "/workspaces/crabbox" || cfg.SSHPort != "22" || cfg.ServerType != "basicLinux32gb" || cfg.SSHFallbackPorts != nil {
+			t.Fatalf("generic defaults not applied: %#v", cfg)
+		}
+	})
+
+	t.Run("explicit generic values", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "github-codespaces"
+		cfg.GitHubCodespaces = GitHubCodespacesConfig{
+			GHPath:          "/opt/gh",
+			Machine:         "premiumLinux",
+			IdleTimeout:     time.Hour,
+			RetentionPeriod: 48 * time.Hour,
+			WorkRoot:        "/workspaces/provider",
+		}
+		cfg.TargetOS = targetLinux
+		cfg.targetExplicit = true
+		cfg.WorkRoot = "/workspaces/explicit"
+		cfg.explicitWorkRoot = cfg.WorkRoot
+		cfg.SSHPort = "2222"
+		cfg.explicitSSHPort = cfg.SSHPort
+		cfg.ServerType = "custom-machine"
+		cfg.ServerTypeExplicit = true
+
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.WorkRoot != "/workspaces/explicit" || cfg.SSHPort != "2222" || cfg.ServerType != "custom-machine" || cfg.SSHFallbackPorts != nil {
+			t.Fatalf("explicit generic values not preserved: %#v", cfg)
+		}
+	})
+}
+
 func TestGitHubCodespacesUntrustedConfigCannotRedirectEndpointCLIOrRepo(t *testing.T) {
 	cfg := baseConfig()
 	cfg.GitHubCodespaces.APIURL = "https://api.trusted.example"
