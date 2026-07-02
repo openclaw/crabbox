@@ -15,9 +15,14 @@ function writeExecutable(file, body) {
 function prepareSmokeRepo(dir) {
   const tempRoot = path.join(dir, "repo");
   const tempScripts = path.join(tempRoot, "scripts");
+  const fixtureDir = path.join(tempScripts, "fixtures", "github-codespaces");
   const smokeScript = path.join(tempScripts, "live-github-codespaces-smoke.sh");
-  fs.mkdirSync(tempScripts, { recursive: true });
+  fs.mkdirSync(fixtureDir, { recursive: true });
   fs.copyFileSync(path.join(repoRoot, "scripts", "live-github-codespaces-smoke.sh"), smokeScript);
+  fs.copyFileSync(
+    path.join(repoRoot, "scripts", "fixtures", "github-codespaces", "devcontainer.json"),
+    path.join(fixtureDir, "devcontainer.json"),
+  );
   fs.chmodSync(smokeScript, 0o755);
   fs.writeFileSync(path.join(tempRoot, "go.mod"), "module example.org/smoke\n", "utf8");
   return { tempRoot, smokeScript };
@@ -34,6 +39,18 @@ if [[ "$*" == "auth status" ]]; then
 fi
 if [[ "$*" == "codespace list --limit 1" ]]; then
   printf '[]\\n'
+  exit 0
+fi
+if [[ "$*" == codespace\\ list\\ --repo\\ *\\ --limit\\ 100\\ --json\\ name,displayName ]]; then
+  if [[ -n "\${CRABBOX_FAKE_REMOTE_SLUG_FILE:-}" && -f "$CRABBOX_FAKE_REMOTE_SLUG_FILE" ]]; then
+    slug="$(cat "$CRABBOX_FAKE_REMOTE_SLUG_FILE")"
+    printf '[{"name":"remote-owned-codespace","displayName":"%s"}]\\n' "$slug"
+    exit 0
+  fi
+  printf '%s\\n' "\${CRABBOX_FAKE_REMOTE_CODESPACES:-[]}"
+  exit 0
+fi
+if [[ "$*" == codespace\\ delete\\ --codespace\\ *\\ --force ]]; then
   exit 0
 fi
 printf 'unexpected gh args: %s\\n' "$*" >&2
@@ -234,7 +251,6 @@ esac
       CRABBOX_GITHUB_CODESPACES_SMOKE_REPO: "example-org/my-app",
       CRABBOX_GITHUB_CODESPACES_SMOKE_REF: "main",
       CRABBOX_GITHUB_CODESPACES_SMOKE_MACHINE: "basicLinux32gb",
-      CRABBOX_GITHUB_CODESPACES_SMOKE_DEVCONTAINER_PATH: ".devcontainer/devcontainer.json",
       GH_TOKEN: "test-secret-token",
     },
     encoding: "utf8",
@@ -245,21 +261,28 @@ esac
   assert.doesNotMatch(result.stdout + result.stderr, /test-secret-token/);
 
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  const smokeSlug = seen[1].match(/--slug (\S+)/)?.[1] ?? "";
+  assert.ok(smokeSlug.length > 0 && smokeSlug.length <= 31, smokeSlug);
   assert.equal(
     seen[0],
-    "doctor --provider github-codespaces --github-codespaces-repo example-org/my-app --github-codespaces-ref main --github-codespaces-machine basicLinux32gb --github-codespaces-devcontainer-path .devcontainer/devcontainer.json --github-codespaces-delete-on-release=true",
+    "doctor --provider github-codespaces --github-codespaces-repo example-org/my-app --github-codespaces-ref main --github-codespaces-machine basicLinux32gb --github-codespaces-delete-on-release=true --github-codespaces-devcontainer-path scripts/fixtures/github-codespaces/devcontainer.json",
   );
   assert.match(
     seen[1],
-    /^warmup --provider github-codespaces --github-codespaces-repo example-org\/my-app --github-codespaces-ref main --github-codespaces-machine basicLinux32gb --github-codespaces-devcontainer-path \.devcontainer\/devcontainer\.json --github-codespaces-delete-on-release=true --slug github-codespaces-smoke-\d{14}-\d+ --keep=false --ttl 20m --idle-timeout 5m$/,
+    /^warmup --provider github-codespaces --github-codespaces-repo example-org\/my-app --github-codespaces-ref main --github-codespaces-machine basicLinux32gb --github-codespaces-delete-on-release=true --github-codespaces-devcontainer-path scripts\/fixtures\/github-codespaces\/devcontainer\.json --slug gcs-\d{14}-\d+ --keep=false --ttl 20m --idle-timeout 5m$/,
   );
-  assert.match(seen[2], /^status --provider github-codespaces --id github-codespaces-smoke-\d{14}-\d+ --wait --wait-timeout 600s$/);
-  assert.match(seen[3], /^run --provider github-codespaces --id github-codespaces-smoke-\d{14}-\d+ --full-resync -- sh -lc test -f go\.mod && echo github-codespaces-smoke-ok$/);
-  assert.match(seen[4], /^ssh --provider github-codespaces --id github-codespaces-smoke-\d{14}-\d+$/);
+  assert.match(seen[2], /^status --provider github-codespaces --id gcs-\d{14}-\d+ --wait --wait-timeout 600s$/);
+  assert.match(seen[3], /^run --provider github-codespaces --id gcs-\d{14}-\d+ --full-resync -- sh -lc test -f go\.mod && echo github-codespaces-smoke-ok$/);
+  assert.match(seen[4], /^ssh --provider github-codespaces --id gcs-\d{14}-\d+$/);
   assert.equal(seen[5], "list --provider github-codespaces --json");
-  assert.match(seen[6], /^stop --provider github-codespaces github-codespaces-smoke-\d{14}-\d+$/);
+  assert.match(seen[6], /^stop --provider github-codespaces gcs-\d{14}-\d+$/);
   assert.equal(seen[7], "cleanup --provider github-codespaces --dry-run");
   assert.equal(seen[8], "list --provider github-codespaces --json");
+  assert.deepEqual(fs.readFileSync(ghCalls, "utf8").trim().split("\n"), [
+    "auth status",
+    "codespace list --limit 1",
+    "codespace list --repo example-org/my-app --limit 100 --json name,displayName",
+  ]);
 });
 
 test("live github codespaces smoke attempts cleanup after partial failure", () => {
@@ -267,6 +290,7 @@ test("live github codespaces smoke attempts cleanup after partial failure", () =
   const binDir = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const stopped = path.join(dir, "stopped.log");
+  const remoteSlug = path.join(dir, "remote-slug.txt");
   const calls = path.join(dir, "calls.log");
   const ghCalls = path.join(dir, "gh.log");
   fs.mkdirSync(binDir, { recursive: true });
@@ -279,6 +303,12 @@ if [[ "$1" == "doctor" ]]; then
   exit 0
 fi
 if [[ "$1" == "warmup" ]]; then
+  for ((i=1; i<=$#; i++)); do
+    if [[ "\${!i}" == "--slug" ]]; then
+      j=$((i + 1))
+      printf '%s\\n' "\${!j}" >${JSON.stringify(remoteSlug)}
+    fi
+  done
   printf 'created codespace before failing\\n' >&2
   exit 37
 fi
@@ -299,6 +329,7 @@ exit 99
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "github-codespaces",
       CRABBOX_GITHUB_CODESPACES_SMOKE_REPO: "example-org/my-app",
+      CRABBOX_FAKE_REMOTE_SLUG_FILE: remoteSlug,
       GH_TOKEN: "test-secret-token",
     },
     encoding: "utf8",
@@ -307,6 +338,10 @@ exit 99
   assert.equal(result.status, 37, result.stdout + result.stderr);
   assert.match(result.stderr, /classification=environment_blocked/);
   assert.match(result.stderr, /created codespace before failing/);
-  assert.match(fs.readFileSync(stopped, "utf8"), /^github-codespaces-smoke-\d{14}-\d+\n$/);
+  assert.match(fs.readFileSync(stopped, "utf8"), /^gcs-\d{14}-\d+\n$/);
+  assert.match(
+    fs.readFileSync(ghCalls, "utf8"),
+    /codespace delete --codespace remote-owned-codespace --force/,
+  );
   assert.doesNotMatch(result.stdout + result.stderr, /test-secret-token/);
 });
