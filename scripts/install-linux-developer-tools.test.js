@@ -80,6 +80,7 @@ test("linux developer tool repository setup rewrites keyrings idempotently", () 
 	const chromiumPolicy = path.join(dir, "chromium-policy");
 	const browserBin = path.join(dir, "browser-bin");
 	const browserState = path.join(dir, "browser-state");
+	const chromeDefaults = path.join(dir, "defaults", "google-chrome");
 	const osRelease = path.join(dir, "os-release");
 	const log = path.join(dir, "gpg.log");
 	fs.mkdirSync(bin);
@@ -169,6 +170,7 @@ exit 1
 				CRABBOX_LINUX_CHROMIUM_POLICY_DIR: chromiumPolicy,
 				CRABBOX_LINUX_BROWSER_BIN_DIR: browserBin,
 				CRABBOX_LINUX_BROWSER_STATE_DIR: browserState,
+				CRABBOX_LINUX_CHROME_DEFAULTS_FILE: chromeDefaults,
 			},
 			encoding: "utf8",
 		},
@@ -186,7 +188,11 @@ exit 1
 	assert.equal(fs.readFileSync(log, "utf8").trim().split("\n").length, 6);
 	assert.match(fs.readFileSync(path.join(sources, "nodesource.list"), "utf8"), new RegExp(`signed-by=${keyrings}/nodesource.gpg`));
 	assert.match(fs.readFileSync(path.join(sources, "docker.list"), "utf8"), new RegExp(`signed-by=${keyrings}/docker.gpg`));
-	assert.match(fs.readFileSync(path.join(sources, "google-chrome.list"), "utf8"), new RegExp(`signed-by=${keyrings}/google-linux.gpg`));
+	assert.match(fs.readFileSync(path.join(sources, "crabbox-google-chrome.list"), "utf8"), new RegExp(`signed-by=${keyrings}/google-linux.gpg`));
+	assert.equal(fs.existsSync(path.join(sources, "google-chrome.list")), false);
+	assert.equal(fs.existsSync(path.join(sources, "google-chrome.sources")), false);
+	assert.match(fs.readFileSync(chromeDefaults, "utf8"), /repo_add_once="false"/);
+	assert.match(fs.readFileSync(chromeDefaults, "utf8"), /repo_reenable_on_distupgrade="false"/);
 	assert.equal(fs.existsSync(path.join(chromePolicy, "crabbox.json")), true);
 	assert.equal(fs.existsSync(path.join(chromiumPolicy, "crabbox.json")), true);
 	assert.equal(fs.existsSync(path.join(browserBin, "crabbox-browser")), true);
@@ -207,7 +213,7 @@ test("linux developer tool setup preserves Google trust files and falls back on 
 	const browserBin = path.join(dir, "browser-bin");
 	const browserState = path.join(dir, "browser-state");
 	const target = path.join(keyrings, "google-linux.gpg");
-	const source = path.join(sources, "google-chrome.list");
+	const source = path.join(sources, "crabbox-google-chrome.list");
 	const log = path.join(dir, "gpg.log");
 	fs.mkdirSync(bin);
 	fs.mkdirSync(keyrings);

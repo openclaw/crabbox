@@ -14,6 +14,7 @@ chrome_policy_dir="${CRABBOX_LINUX_CHROME_POLICY_DIR:-/etc/opt/chrome/policies/m
 chromium_policy_dir="${CRABBOX_LINUX_CHROMIUM_POLICY_DIR:-/etc/chromium/policies/managed}"
 browser_bin_dir="${CRABBOX_LINUX_BROWSER_BIN_DIR:-/usr/local/bin}"
 browser_state_dir="${CRABBOX_LINUX_BROWSER_STATE_DIR:-/var/lib/crabbox}"
+chrome_defaults_file="${CRABBOX_LINUX_CHROME_DEFAULTS_FILE:-/etc/default/google-chrome}"
 google_linux_signing_key_fingerprint="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
 
 log() {
@@ -164,18 +165,29 @@ add_docker_repo() {
 
 install_chrome_or_chromium() {
   local browser_path=""
+  local chrome_defaults_tmp=""
   if [[ "$(dpkg --print-architecture)" == "amd64" ]]; then
     install -d -m 0755 "$apt_sources_dir"
     if install_apt_keyring \
       https://dl.google.com/linux/linux_signing_key.pub \
       "$apt_keyrings_dir/google-linux.gpg" \
       "$google_linux_signing_key_fingerprint"; then
+      install -d -m 0755 "$(dirname "$chrome_defaults_file")"
+      chrome_defaults_tmp="$(mktemp "${chrome_defaults_file}.tmp.XXXXXX")"
+      if [[ -f "$chrome_defaults_file" ]]; then
+        awk '!/^[[:space:]]*repo_add_once=/ && !/^[[:space:]]*repo_reenable_on_distupgrade=/' "$chrome_defaults_file" >"$chrome_defaults_tmp"
+      fi
+      printf '%s\n' 'repo_add_once="false"' 'repo_reenable_on_distupgrade="false"' >>"$chrome_defaults_tmp"
+      chmod 0644 "$chrome_defaults_tmp"
+      mv -f "$chrome_defaults_tmp" "$chrome_defaults_file"
+      rm -f "$apt_sources_dir/google-chrome.list" "$apt_sources_dir/google-chrome.sources"
       printf 'deb [arch=amd64 signed-by=%s/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' "$apt_keyrings_dir" \
-        >"$apt_sources_dir/google-chrome.list"
+        >"$apt_sources_dir/crabbox-google-chrome.list"
       if retry apt-get update && apt_install google-chrome-stable; then
+        rm -f "$apt_sources_dir/google-chrome.list" "$apt_sources_dir/google-chrome.sources"
         browser_path="$(command -v google-chrome || true)"
       else
-        rm -f "$apt_sources_dir/google-chrome.list"
+        rm -f "$apt_sources_dir/crabbox-google-chrome.list" "$apt_sources_dir/google-chrome.list" "$apt_sources_dir/google-chrome.sources"
         retry apt-get update || true
       fi
     else

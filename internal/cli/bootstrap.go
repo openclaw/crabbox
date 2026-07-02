@@ -8,17 +8,18 @@ import (
 )
 
 const (
-	tightVNCMSIURL              = "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi"
-	tightVNCMSISHA256           = "d8fbed7b27ebab86df6f780f6e86f723668f3715cee521ccaa4568812aef5f3e"
-	gitForWindowsSetupURL       = "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe"
-	gitForWindowsSetupSHA256    = "d8de7a3152266c8bb13577eab850ea1df6dccf8c2aa48be5b4a1c58b7190d62c"
-	openSSHWin64ZipURL          = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
-	openSSHWin64ZipSHA256       = "0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54"
-	ubuntuWSLRootFSURL          = "https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
-	ubuntuWSLRootFSSHA256       = "8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea"
-	defaultTailscaleVersion     = "1.98.4"
-	defaultTailscaleAMD64SHA256 = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
-	defaultTailscaleARM64SHA256 = "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7"
+	tightVNCMSIURL                   = "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi"
+	tightVNCMSISHA256                = "d8fbed7b27ebab86df6f780f6e86f723668f3715cee521ccaa4568812aef5f3e"
+	gitForWindowsSetupURL            = "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe"
+	gitForWindowsSetupSHA256         = "d8de7a3152266c8bb13577eab850ea1df6dccf8c2aa48be5b4a1c58b7190d62c"
+	openSSHWin64ZipURL               = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
+	openSSHWin64ZipSHA256            = "0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54"
+	ubuntuWSLRootFSURL               = "https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
+	ubuntuWSLRootFSSHA256            = "8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea"
+	defaultTailscaleVersion          = "1.98.4"
+	defaultTailscaleAMD64SHA256      = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
+	defaultTailscaleARM64SHA256      = "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7"
+	googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
 )
 
 func awsUserData(cfg Config, publicKey string) string {
@@ -1323,15 +1324,43 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
 		parts = append(parts, `    retry apt-get install -y --no-install-recommends gnupg build-essential python3
     browser_path=""
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then
-      install -d -m 0755 /etc/apt/trusted.gpg.d
-      curl -fsSL https://dl.google.com/linux/linux_signing_key.pub > /etc/apt/trusted.gpg.d/google.asc
-      chmod 0644 /etc/apt/trusted.gpg.d/google.asc
-      echo "deb [arch=amd64] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
-      if apt-get update && retry apt-get install -y --no-install-recommends google-chrome-stable; then
-        browser_path="$(command -v google-chrome || true)"
+      install -d -m 0755 /etc/apt/keyrings
+      google_key_tmp="$(mktemp -d /etc/apt/keyrings/google-linux.gpg.tmp.XXXXXX)"
+      google_key_home="$google_key_tmp/gnupg"
+      install -d -m 0700 "$google_key_home"
+      google_key_ready=0
+      if curl -fsSL https://dl.google.com/linux/linux_signing_key.pub > "$google_key_tmp/google.asc" &&
+         GNUPGHOME="$google_key_home" gpg --batch --import "$google_key_tmp/google.asc" >/dev/null 2>&1; then
+        google_key_fingerprint="$(GNUPGHOME="$google_key_home" gpg --batch --with-colons --fingerprint `+googleLinuxSigningKeyFingerprint+` 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }' || true)"
+        if [ "$google_key_fingerprint" = "`+googleLinuxSigningKeyFingerprint+`" ] &&
+           GNUPGHOME="$google_key_home" gpg --batch --export `+googleLinuxSigningKeyFingerprint+` > "$google_key_tmp/google-linux.gpg" &&
+           [ -s "$google_key_tmp/google-linux.gpg" ]; then
+          chmod 0644 "$google_key_tmp/google-linux.gpg"
+          mv -f "$google_key_tmp/google-linux.gpg" /etc/apt/keyrings/google-linux.gpg
+          google_key_ready=1
+        fi
+      fi
+      rm -rf "$google_key_tmp"
+      if [ "$google_key_ready" = 1 ]; then
+        install -d -m 0755 /etc/default
+        google_defaults_tmp="$(mktemp /etc/default/google-chrome.tmp.XXXXXX)"
+        if [ -f /etc/default/google-chrome ]; then
+          awk '!/^[[:space:]]*repo_add_once=/ && !/^[[:space:]]*repo_reenable_on_distupgrade=/' /etc/default/google-chrome > "$google_defaults_tmp"
+        fi
+        printf '%s\n' 'repo_add_once="false"' 'repo_reenable_on_distupgrade="false"' >> "$google_defaults_tmp"
+        chmod 0644 "$google_defaults_tmp"
+        mv -f "$google_defaults_tmp" /etc/default/google-chrome
+        rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/crabbox-google-chrome.list
+        if apt-get update && retry apt-get install -y --no-install-recommends google-chrome-stable; then
+          rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          browser_path="$(command -v google-chrome || true)"
+        else
+          rm -f /etc/apt/sources.list.d/crabbox-google-chrome.list /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          retry apt-get update || true
+        fi
       else
-        rm -f /etc/apt/sources.list.d/google-chrome.list
-        retry apt-get update || true
+        echo "Google Linux signing key verification failed; trying Chromium fallback" >&2
       fi
     fi
     if [ -z "$browser_path" ]; then
