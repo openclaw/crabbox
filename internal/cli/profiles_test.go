@@ -824,6 +824,33 @@ func TestRunStopCommandIncludesHostingerRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesVastRoutingWithoutAPIKey(t *testing.T) {
+	cfg := Config{
+		Provider: "vast-ai",
+		TargetOS: targetLinux,
+		Vast: VastConfig{
+			APIKey:        "vast-secret-api-key",
+			APIURL:        "https://vast.example.test/api/v0",
+			ReleaseAction: "stop",
+		},
+	}
+	MarkDeleteOnReleaseExplicit(&cfg, "vast")
+	got := runStopCommand(cfg, "cbx_123")
+	for _, want := range []string{
+		"--provider vast-ai",
+		"--vast-api-url https://vast.example.test/api/v0",
+		"--vast-release-action stop",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, cfg.Vast.APIKey) {
+		t.Fatalf("stop command leaked Vast API key:\n%s", got)
+	}
+}
+
 func TestRunStopCommandIncludesExplicitNvidiaBrevReleaseAction(t *testing.T) {
 	cfg := Config{
 		Provider: "nvidia-brev",
@@ -903,6 +930,7 @@ func TestRunStopCommandOmitsAmbientReleasePolicy(t *testing.T) {
 		{Provider: "morph", Morph: MorphConfig{DeleteOnRelease: true}},
 		{Provider: "namespace-devbox", Namespace: NamespaceConfig{DeleteOnRelease: true}},
 		{Provider: "nvidia-brev", NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "delete"}},
+		{Provider: "vast", Vast: VastConfig{ReleaseAction: "stop"}},
 	} {
 		if got := runStopCommand(cfg, "cbx_123"); strings.Contains(got, "delete-on-release") || strings.Contains(got, "release-action") {
 			t.Fatalf("ambient release policy leaked into stop command:\n%s", got)

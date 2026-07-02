@@ -468,12 +468,17 @@ func TestAcquirePreservesRecoveryClaimWhenRollbackCleanupFails(t *testing.T) {
 	}
 }
 
-func TestReleaseDestroysByDefaultAndRemovesClaim(t *testing.T) {
+func TestReleaseDestroysWithMatchingCustomEndpointAndRemovesClaim(t *testing.T) {
 	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
 	b := newTestBackend(t, api)
+	b.cfg.Vast.APIURL = "https://vast.example.test/api/v0"
 	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "destroy-me"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("destroy-me", providerName)
+	if claimErr != nil || !ok || claim.Labels[vastAPIURLLabel] != b.cfg.Vast.APIURL {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
 	}
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)

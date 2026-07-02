@@ -1929,6 +1929,13 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if strings.TrimSpace(cfg.Hostinger.APIURL) != "" {
 			args = append(args, "--hostinger-url", cfg.Hostinger.APIURL)
 		}
+	case "vast", "vast-ai", "vastai":
+		if apiURL := strings.TrimSpace(cfg.Vast.APIURL); apiURL != "" {
+			args = append(args, "--vast-api-url", routingSafeURL(apiURL))
+		}
+		if DeleteOnReleaseExplicit(cfg, "vast") {
+			args = append(args, "--vast-release-action", cfg.Vast.ReleaseAction)
+		}
 	case "nvidia-brev":
 		if cli := strings.TrimSpace(cfg.NvidiaBrev.CLI); cli != "" {
 			args = append(args, "--nvidia-brev-cli", cli)
