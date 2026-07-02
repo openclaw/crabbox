@@ -310,6 +310,158 @@ func TestAzureSnapshotQuarantineSecurityGroupDeniesAllInbound(t *testing.T) {
 	}
 }
 
+func TestAzureSnapshotNICReleaseRequestUsesWritableCreatePayload(t *testing.T) {
+	t.Parallel()
+	quarantineNSGID := "/subscriptions/test/resourceGroups/test/providers/Microsoft.Network/networkSecurityGroups/lease-q-nsg"
+	sharedNSGID := "/subscriptions/test/resourceGroups/test/providers/Microsoft.Network/networkSecurityGroups/crabbox-nsg"
+	createRequest := armnetwork.Interface{
+		Location: to.Ptr("westus2"),
+		Tags:     map[string]*string{"lease_id": to.Ptr("cbx_123")},
+		Properties: &armnetwork.InterfacePropertiesFormat{
+			IPConfigurations: []*armnetwork.InterfaceIPConfiguration{{
+				Name: to.Ptr("ipconfig"),
+				Properties: &armnetwork.InterfaceIPConfigurationPropertiesFormat{
+					PrivateIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodDynamic),
+					Subnet:                    &armnetwork.Subnet{ID: to.Ptr("/subscriptions/test/subnets/default")},
+					PublicIPAddress:           &armnetwork.PublicIPAddress{ID: to.Ptr("/subscriptions/test/publicIPAddresses/lease")},
+				},
+			}},
+			NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: to.Ptr(quarantineNSGID)},
+		},
+	}
+
+	releaseRequest, err := azureSnapshotNICReleaseRequest(createRequest, sharedNSGID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *createRequest.Properties.NetworkSecurityGroup.ID; got != quarantineNSGID {
+		t.Fatalf("create request NSG=%q, want quarantine preserved", got)
+	}
+	if got := *releaseRequest.Properties.NetworkSecurityGroup.ID; got != sharedNSGID {
+		t.Fatalf("release request NSG=%q, want shared NSG", got)
+	}
+	payload, err := json.Marshal(releaseRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(payload, &object); err != nil {
+		t.Fatal(err)
+	}
+	for _, readOnly := range []string{"etag", "id", "name", "type"} {
+		if _, ok := object[readOnly]; ok {
+			t.Fatalf("release PUT includes top-level read-only field %q: %s", readOnly, payload)
+		}
+	}
+	properties, ok := object["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("release PUT properties=%T", object["properties"])
+	}
+	for _, readOnly := range []string{"macAddress", "provisioningState", "resourceGuid", "virtualMachine"} {
+		if _, ok := properties[readOnly]; ok {
+			t.Fatalf("release PUT includes read-only property %q: %s", readOnly, payload)
+		}
+	}
+}
+
+func TestAzureSnapshotNICReleaseRequestRequiresProperties(t *testing.T) {
+	t.Parallel()
+	_, err := azureSnapshotNICReleaseRequest(armnetwork.Interface{}, "shared-nsg")
+	if err == nil || err.Error() != "snapshot network interface create request has no properties" {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestAzureSnapshotExposureSequence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		failAt     string
+		wantEvents []string
+		wantErr    string
+	}{
+		{name: "success", wantEvents: []string{"rehydrate", "expose", "cleanup"}},
+		{name: "rehydrate failure stays quarantined", failAt: "rehydrate", wantEvents: []string{"rehydrate"}, wantErr: "rehydrate snapshot credentials"},
+		{name: "exposure failure stays quarantined", failAt: "expose", wantEvents: []string{"rehydrate", "expose"}, wantErr: "expose rehydrated snapshot network"},
+		{name: "cleanup failure fails creation", failAt: "cleanup", wantEvents: []string{"rehydrate", "expose", "cleanup"}, wantErr: "delete snapshot quarantine network security group"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var events []string
+			step := func(name string) func() error {
+				return func() error {
+					events = append(events, name)
+					if test.failAt == name {
+						return errors.New("injected failure")
+					}
+					return nil
+				}
+			}
+			err := runAzureSnapshotExposureSequence(step("rehydrate"), step("expose"), step("cleanup"))
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("error=%v, want containing %q", err, test.wantErr)
+			}
+			if !reflect.DeepEqual(events, test.wantEvents) {
+				t.Fatalf("events=%v, want %v", events, test.wantEvents)
+			}
+		})
+	}
+}
+
+func TestAzureSnapshotQuarantineCleanupRetries(t *testing.T) {
+	t.Parallel()
+	t.Run("retryable error then success", func(t *testing.T) {
+		attempts := 0
+		err := retryAzureSnapshotQuarantineCleanup(context.Background(), 3, 0, func() error {
+			attempts++
+			if attempts < 3 {
+				return errors.New("NetworkSecurityGroupCannotBeDeleted because in use")
+			}
+			return nil
+		})
+		if err != nil || attempts != 3 {
+			t.Fatalf("error=%v attempts=%d", err, attempts)
+		}
+	})
+	t.Run("non-retryable error", func(t *testing.T) {
+		attempts := 0
+		err := retryAzureSnapshotQuarantineCleanup(context.Background(), 3, 0, func() error {
+			attempts++
+			return errors.New("permission denied")
+		})
+		if err == nil || err.Error() != "permission denied" || attempts != 1 {
+			t.Fatalf("error=%v attempts=%d", err, attempts)
+		}
+	})
+	t.Run("retry exhaustion", func(t *testing.T) {
+		attempts := 0
+		err := retryAzureSnapshotQuarantineCleanup(context.Background(), 2, 0, func() error {
+			attempts++
+			return errors.New("NetworkSecurityGroupCannotBeDeleted because in use")
+		})
+		if err == nil || attempts != 2 {
+			t.Fatalf("error=%v attempts=%d", err, attempts)
+		}
+	})
+	t.Run("context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		attempts := 0
+		err := retryAzureSnapshotQuarantineCleanup(ctx, 3, time.Hour, func() error {
+			attempts++
+			return errors.New("NetworkSecurityGroupCannotBeDeleted because in use")
+		})
+		if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) || attempts != 1 {
+			t.Fatalf("error=%v attempts=%d", err, attempts)
+		}
+	})
+}
+
 func TestAzureWindowsSnapshotRehydrateRotatesServiceVNCCredentials(t *testing.T) {
 	t.Parallel()
 	cfg := baseConfig()
@@ -514,17 +666,22 @@ func TestAzureSnapshotPrerequisitesRunConcurrently(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	result := make(chan struct {
-		network string
+		network azureLeaseNetwork
 		disk    string
 		err     error
 	}, 1)
 	go func() {
 		network, disk, err := runAzureSnapshotPrerequisites(
 			context.Background(),
-			func(context.Context) (string, error) {
+			func(context.Context) (azureLeaseNetwork, error) {
 				started <- "network"
 				<-release
-				return "nic-id", nil
+				return azureLeaseNetwork{
+					id: "nic-id",
+					nicCreateRequest: armnetwork.Interface{
+						Location: to.Ptr("westus2"),
+					},
+				}, nil
 			},
 			func(context.Context) (string, error) {
 				started <- "disk"
@@ -533,7 +690,7 @@ func TestAzureSnapshotPrerequisitesRunConcurrently(t *testing.T) {
 			},
 		)
 		result <- struct {
-			network string
+			network azureLeaseNetwork
 			disk    string
 			err     error
 		}{network: network, disk: disk, err: err}
@@ -550,8 +707,11 @@ func TestAzureSnapshotPrerequisitesRunConcurrently(t *testing.T) {
 	}
 	close(release)
 	completed := <-result
-	if completed.err != nil || completed.network != "nic-id" || completed.disk != "disk-id" {
+	if completed.err != nil || completed.network.id != "nic-id" || completed.disk != "disk-id" {
 		t.Fatalf("result=%+v", completed)
+	}
+	if completed.network.nicCreateRequest.Location == nil || *completed.network.nicCreateRequest.Location != "westus2" {
+		t.Fatalf("NIC create request lost across prerequisite result: %#v", completed.network.nicCreateRequest)
 	}
 	if !seen["network"] || !seen["disk"] {
 		t.Fatalf("started=%v", seen)
@@ -663,7 +823,7 @@ func TestAzureSnapshotOSDiskID(t *testing.T) {
 				DiffDiskSettings: &armcompute.DiffDiskSettings{Option: to.Ptr(armcompute.DiffDiskOptionsLocal)},
 				ManagedDisk:      &armcompute.ManagedDiskParameters{ID: to.Ptr(managedDiskID)},
 			},
-			wantErr: "azure ephemeral OS disk on vm source-vm cannot be snapshotted; use --mode archive or relaunch the lease with a managed Azure OS disk",
+			wantErr: `azure differential OS disk option "Local" on vm source-vm cannot be snapshotted; use --mode archive or relaunch the lease with a managed Azure OS disk`,
 		},
 		{
 			name: "unknown future option",
@@ -671,7 +831,7 @@ func TestAzureSnapshotOSDiskID(t *testing.T) {
 				DiffDiskSettings: &armcompute.DiffDiskSettings{Option: &futureOption},
 				ManagedDisk:      &armcompute.ManagedDiskParameters{ID: to.Ptr(managedDiskID)},
 			},
-			want: managedDiskID,
+			wantErr: `azure differential OS disk option "FutureSchemaValue" on vm source-vm cannot be snapshotted; use --mode archive or relaunch the lease with a managed Azure OS disk`,
 		},
 		{
 			name:   "managed disk",
@@ -890,12 +1050,13 @@ func TestIsAzureRetryableDeleteError(t *testing.T) {
 	cases := map[string]bool{
 		"":                  false,
 		"validation failed": false,
-		"NicReservedForAnotherVm retry after 180 seconds": true,
-		"PublicIPAddressCannotBeDeleted because in use":   true,
-		"DiskIsAttachedToVM: disk is still attached":      true,
-		"DiskInUse: managed disk has active lease":        true,
-		"AnotherOperationInProgress":                      true,
-		"OperationNotAllowed retry after 180 seconds":     true,
+		"NicReservedForAnotherVm retry after 180 seconds":    true,
+		"PublicIPAddressCannotBeDeleted because in use":      true,
+		"NetworkSecurityGroupCannotBeDeleted because in use": true,
+		"DiskIsAttachedToVM: disk is still attached":         true,
+		"DiskInUse: managed disk has active lease":           true,
+		"AnotherOperationInProgress":                         true,
+		"OperationNotAllowed retry after 180 seconds":        true,
 	}
 	for msg, want := range cases {
 		var err error

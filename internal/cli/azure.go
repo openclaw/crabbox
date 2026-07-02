@@ -28,23 +28,24 @@ import (
 )
 
 const (
-	azureAddressSpace             = "10.42.0.0/16"
-	azureSubnetCIDR               = "10.42.0.0/24"
-	azureProviderTag              = "crabbox"
-	AzureOSDiskAuto               = "auto"
-	AzureOSDiskEphemeral          = "ephemeral"
-	AzureOSDiskEphemeralPreview   = "ephemeral-preview"
-	AzureOSDiskManaged            = "managed"
-	azureComputePreviewAPIVersion = "2025-04-01"
-	defaultAzureLinuxImage        = "Canonical:ubuntu-26_04-lts:server:latest"
-	defaultAzureLinuxARM64Image   = "Canonical:ubuntu-26_04-lts:server-arm64:latest"
-	azureNobleLinuxImage          = "Canonical:ubuntu-24_04-lts:server:latest"
-	azureNobleLinuxARM64Image     = "Canonical:ubuntu-24_04-lts:server-arm64:latest"
-	legacyAzureJammyImage         = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
-	legacyAzureNobleGen2Image     = "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest"
-	defaultAzureWindowsImage      = "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest"
-	azureDeleteRetryDelay         = 15 * time.Second
-	azureDeleteRetryAttempts      = 13
+	azureAddressSpace                = "10.42.0.0/16"
+	azureSubnetCIDR                  = "10.42.0.0/24"
+	azureProviderTag                 = "crabbox"
+	AzureOSDiskAuto                  = "auto"
+	AzureOSDiskEphemeral             = "ephemeral"
+	AzureOSDiskEphemeralPreview      = "ephemeral-preview"
+	AzureOSDiskManaged               = "managed"
+	azureComputePreviewAPIVersion    = "2025-04-01"
+	defaultAzureLinuxImage           = "Canonical:ubuntu-26_04-lts:server:latest"
+	defaultAzureLinuxARM64Image      = "Canonical:ubuntu-26_04-lts:server-arm64:latest"
+	azureNobleLinuxImage             = "Canonical:ubuntu-24_04-lts:server:latest"
+	azureNobleLinuxARM64Image        = "Canonical:ubuntu-24_04-lts:server-arm64:latest"
+	legacyAzureJammyImage            = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
+	legacyAzureNobleGen2Image        = "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest"
+	defaultAzureWindowsImage         = "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest"
+	azureDeleteRetryDelay            = 15 * time.Second
+	azureDeleteRetryAttempts         = 13
+	azureSnapshotQuarantineNSGSuffix = "-q-nsg"
 )
 
 type AzureClient struct {
@@ -939,7 +940,7 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 	pipName := name + "-pip"
 	nicName := name + "-nic"
 	diskName := name + "-osdisk"
-	quarantineNSGName := name + "-q-nsg"
+	quarantineNSGName := name + azureSnapshotQuarantineNSGSuffix
 
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
@@ -951,19 +952,19 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 		c.SubscriptionID, c.ResourceGroup, c.NSG)
 	quarantinedSnapshot := cfg.AzureSnapshot != "" && cfg.TargetOS == targetWindows
 
-	var nicID string
+	var network azureLeaseNetwork
 	var snapshotDiskID string
 	var err error
 	if cfg.AzureSnapshot != "" {
-		nicID, snapshotDiskID, err = runAzureSnapshotPrerequisites(
+		network, snapshotDiskID, err = runAzureSnapshotPrerequisites(
 			ctx,
-			func(workCtx context.Context) (string, error) {
+			func(workCtx context.Context) (azureLeaseNetwork, error) {
 				nsgID := sharedNSGID
 				if quarantinedSnapshot {
 					var createErr error
 					nsgID, createErr = c.createSnapshotQuarantineNSG(workCtx, quarantineNSGName, tags)
 					if createErr != nil {
-						return "", createErr
+						return azureLeaseNetwork{}, createErr
 					}
 				}
 				return c.createLeaseNetwork(workCtx, pipName, nicName, nsgID, tags)
@@ -979,7 +980,7 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 			},
 		)
 	} else {
-		nicID, err = c.createLeaseNetwork(ctx, pipName, nicName, sharedNSGID, tags)
+		network, err = c.createLeaseNetwork(ctx, pipName, nicName, sharedNSGID, tags)
 	}
 	if err != nil {
 		return Server{}, err
@@ -1028,7 +1029,7 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 			Version:   to.Ptr(c.Image.Version),
 		}
 	}
-	networkInterface := &armcompute.NetworkInterfaceReference{ID: to.Ptr(nicID)}
+	networkInterface := &armcompute.NetworkInterfaceReference{ID: to.Ptr(network.id)}
 	if cfg.AzureSnapshot != "" {
 		networkInterface.Properties = &armcompute.NetworkInterfaceReferenceProperties{
 			DeleteOption: to.Ptr(armcompute.DeleteOptionsDelete),
@@ -1080,16 +1081,21 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 				return Server{}, err
 			}
 		}
-		if err := c.installWindowsBootstrapExtension(ctx, name, tags, command); err != nil {
+		if quarantinedSnapshot {
+			releaseRequest, err := azureSnapshotNICReleaseRequest(network.nicCreateRequest, sharedNSGID)
+			if err != nil {
+				return Server{}, err
+			}
+			if err := runAzureSnapshotExposureSequence(
+				func() error { return c.installWindowsBootstrapExtension(ctx, name, tags, command) },
+				func() error { return c.releaseSnapshotNIC(ctx, nicName, releaseRequest) },
+				func() error { return c.deleteSnapshotQuarantineNSGWithRetry(ctx, quarantineNSGName) },
+			); err != nil {
+				return Server{}, err
+			}
+		} else if err := c.installWindowsBootstrapExtension(ctx, name, tags, command); err != nil {
 			return Server{}, err
 		}
-	}
-	if quarantinedSnapshot {
-		if err := c.releaseSnapshotNIC(ctx, nicName, sharedNSGID); err != nil {
-			return Server{}, err
-		}
-		// The fork is safe and usable once released; lease deletion retries quarantine cleanup.
-		_ = c.deleteSnapshotQuarantineNSG(ctx, quarantineNSGName)
 	}
 	return azureVMToServer(createdVM, "", ""), nil
 }
@@ -1356,29 +1362,35 @@ func (c *AzureClient) azureOSProfile(cfg Config, publicKey, name, leaseID string
 }
 
 type azureSnapshotPrerequisiteResult struct {
-	kind string
-	id   string
-	err  error
+	kind    string
+	network azureLeaseNetwork
+	diskID  string
+	err     error
+}
+
+type azureLeaseNetwork struct {
+	id               string
+	nicCreateRequest armnetwork.Interface
 }
 
 func runAzureSnapshotPrerequisites(
 	ctx context.Context,
-	createNetwork func(context.Context) (string, error),
+	createNetwork func(context.Context) (azureLeaseNetwork, error),
 	createDisk func(context.Context) (string, error),
-) (string, string, error) {
+) (azureLeaseNetwork, string, error) {
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan azureSnapshotPrerequisiteResult, 2)
 	go func() {
-		id, err := createNetwork(workCtx)
-		results <- azureSnapshotPrerequisiteResult{kind: "network", id: id, err: err}
+		network, err := createNetwork(workCtx)
+		results <- azureSnapshotPrerequisiteResult{kind: "network", network: network, err: err}
 	}()
 	go func() {
 		id, err := createDisk(workCtx)
-		results <- azureSnapshotPrerequisiteResult{kind: "disk", id: id, err: err}
+		results <- azureSnapshotPrerequisiteResult{kind: "disk", diskID: id, err: err}
 	}()
 
-	var networkID string
+	var network azureLeaseNetwork
 	var diskID string
 	var errs []error
 	for range 2 {
@@ -1389,18 +1401,18 @@ func runAzureSnapshotPrerequisites(
 			continue
 		}
 		if result.kind == "network" {
-			networkID = result.id
+			network = result.network
 		} else {
-			diskID = result.id
+			diskID = result.diskID
 		}
 	}
 	if len(errs) > 0 {
-		return "", "", joinErrors(errs)
+		return azureLeaseNetwork{}, "", joinErrors(errs)
 	}
-	return networkID, diskID, nil
+	return network, diskID, nil
 }
 
-func (c *AzureClient) createLeaseNetwork(ctx context.Context, pipName, nicName, nsgID string, tags map[string]*string) (string, error) {
+func (c *AzureClient) createLeaseNetwork(ctx context.Context, pipName, nicName, nsgID string, tags map[string]*string) (azureLeaseNetwork, error) {
 	pipPoller, err := c.pipc.BeginCreateOrUpdate(ctx, c.ResourceGroup, pipName, armnetwork.PublicIPAddress{
 		Location: to.Ptr(c.Location),
 		Tags:     tags,
@@ -1412,19 +1424,19 @@ func (c *AzureClient) createLeaseNetwork(ctx context.Context, pipName, nicName, 
 		},
 	}, nil)
 	if err != nil {
-		return "", fmt.Errorf("begin public ip: %w", err)
+		return azureLeaseNetwork{}, fmt.Errorf("begin public ip: %w", err)
 	}
 	pipResp, err := pipPoller.PollUntilDone(ctx, nil)
 	if err != nil {
-		return "", fmt.Errorf("public ip: %w", err)
+		return azureLeaseNetwork{}, fmt.Errorf("public ip: %w", err)
 	}
 	if pipResp.ID == nil || *pipResp.ID == "" {
-		return "", errors.New("public ip has no resource id")
+		return azureLeaseNetwork{}, errors.New("public ip has no resource id")
 	}
 
 	subnetID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s",
 		c.SubscriptionID, c.ResourceGroup, c.VNet, c.Subnet)
-	nicPoller, err := c.nicc.BeginCreateOrUpdate(ctx, c.ResourceGroup, nicName, armnetwork.Interface{
+	nicCreateRequest := armnetwork.Interface{
 		Location: to.Ptr(c.Location),
 		Tags:     tags,
 		Properties: &armnetwork.InterfacePropertiesFormat{
@@ -1438,18 +1450,19 @@ func (c *AzureClient) createLeaseNetwork(ctx context.Context, pipName, nicName, 
 			}},
 			NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: to.Ptr(nsgID)},
 		},
-	}, nil)
+	}
+	nicPoller, err := c.nicc.BeginCreateOrUpdate(ctx, c.ResourceGroup, nicName, nicCreateRequest, nil)
 	if err != nil {
-		return "", fmt.Errorf("begin nic: %w", err)
+		return azureLeaseNetwork{}, fmt.Errorf("begin nic: %w", err)
 	}
 	nicResp, err := nicPoller.PollUntilDone(ctx, nil)
 	if err != nil {
-		return "", fmt.Errorf("nic: %w", err)
+		return azureLeaseNetwork{}, fmt.Errorf("nic: %w", err)
 	}
 	if nicResp.ID == nil || *nicResp.ID == "" {
-		return "", errors.New("nic has no resource id")
+		return azureLeaseNetwork{}, errors.New("nic has no resource id")
 	}
-	return *nicResp.ID, nil
+	return azureLeaseNetwork{id: *nicResp.ID, nicCreateRequest: nicCreateRequest}, nil
 }
 
 func (c *AzureClient) createManagedDiskFromSnapshot(ctx context.Context, diskName, snapshotID, sku string, tags map[string]*string) (string, error) {
@@ -1517,16 +1530,36 @@ func azureSnapshotQuarantineSecurityGroup(location string, tags map[string]*stri
 	}
 }
 
-func (c *AzureClient) releaseSnapshotNIC(ctx context.Context, nicName, sharedNSGID string) error {
-	response, err := c.nicc.Get(ctx, c.ResourceGroup, nicName, nil)
-	if err != nil {
-		return fmt.Errorf("get quarantined snapshot nic: %w", err)
+// azureSnapshotNICReleaseRequest derives the release PUT from the original NIC
+// create request. Azure's GET model includes read-only response fields that
+// must not be echoed into BeginCreateOrUpdate.
+func azureSnapshotNICReleaseRequest(createRequest armnetwork.Interface, sharedNSGID string) (armnetwork.Interface, error) {
+	if createRequest.Properties == nil {
+		return armnetwork.Interface{}, errors.New("snapshot network interface create request has no properties")
 	}
-	if response.Properties == nil {
-		return errors.New("quarantined snapshot nic has no properties")
+	properties := *createRequest.Properties
+	properties.NetworkSecurityGroup = &armnetwork.SecurityGroup{ID: to.Ptr(sharedNSGID)}
+	createRequest.Properties = &properties
+	return createRequest, nil
+}
+
+// runAzureSnapshotExposureSequence keeps copied source credentials unreachable
+// until the guest agent has replaced every per-lease credential and host key.
+func runAzureSnapshotExposureSequence(rehydrate, expose, cleanupQuarantine func() error) error {
+	if err := rehydrate(); err != nil {
+		return fmt.Errorf("rehydrate snapshot credentials: %w", err)
 	}
-	response.Properties.NetworkSecurityGroup = &armnetwork.SecurityGroup{ID: to.Ptr(sharedNSGID)}
-	poller, err := c.nicc.BeginCreateOrUpdate(ctx, c.ResourceGroup, nicName, response.Interface, nil)
+	if err := expose(); err != nil {
+		return fmt.Errorf("expose rehydrated snapshot network: %w", err)
+	}
+	if err := cleanupQuarantine(); err != nil {
+		return fmt.Errorf("delete snapshot quarantine network security group: %w", err)
+	}
+	return nil
+}
+
+func (c *AzureClient) releaseSnapshotNIC(ctx context.Context, nicName string, releaseRequest armnetwork.Interface) error {
+	poller, err := c.nicc.BeginCreateOrUpdate(ctx, c.ResourceGroup, nicName, releaseRequest, nil)
 	if err != nil {
 		return fmt.Errorf("begin release snapshot nic: %w", err)
 	}
@@ -1548,6 +1581,32 @@ func (c *AzureClient) deleteSnapshotQuarantineNSG(ctx context.Context, name stri
 		return fmt.Errorf("delete snapshot quarantine nsg %s: %w", name, err)
 	}
 	return nil
+}
+
+func (c *AzureClient) deleteSnapshotQuarantineNSGWithRetry(ctx context.Context, name string) error {
+	return retryAzureSnapshotQuarantineCleanup(ctx, azureDeleteRetryAttempts, azureDeleteRetryDelay, func() error {
+		return c.deleteSnapshotQuarantineNSG(ctx, name)
+	})
+}
+
+func retryAzureSnapshotQuarantineCleanup(ctx context.Context, attempts int, delay time.Duration, deleteQuarantine func() error) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	for attempt := 0; ; attempt++ {
+		err := deleteQuarantine()
+		if err == nil {
+			return nil
+		}
+		if !isAzureRetryableDeleteError(err) || attempt >= attempts-1 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return joinErrors([]error{err, ctx.Err()})
+		case <-time.After(delay):
+		}
+	}
 }
 
 func (c *AzureClient) installWindowsBootstrapExtension(ctx context.Context, vmName string, tags map[string]*string, command string) error {
@@ -1831,9 +1890,10 @@ func azureSnapshotOSDiskID(vmName string, osDisk *armcompute.OSDisk) (string, er
 		return "", errors.New("snapshot source VM has no managed OS disk")
 	}
 	if osDisk.DiffDiskSettings != nil && osDisk.DiffDiskSettings.Option != nil &&
-		*osDisk.DiffDiskSettings.Option == armcompute.DiffDiskOptionsLocal {
+		strings.TrimSpace(string(*osDisk.DiffDiskSettings.Option)) != "" {
 		return "", fmt.Errorf(
-			"azure ephemeral OS disk on vm %s cannot be snapshotted; use --mode archive or relaunch the lease with a managed Azure OS disk",
+			"azure differential OS disk option %q on vm %s cannot be snapshotted; use --mode archive or relaunch the lease with a managed Azure OS disk",
+			*osDisk.DiffDiskSettings.Option,
 			vmName,
 		)
 	}
@@ -1901,6 +1961,7 @@ func (c *AzureClient) deleteVMResources(ctx context.Context, name string) error 
 func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string) ([]error, bool) {
 	var errs []error
 	retry := false
+	quarantineNSGName := name + azureSnapshotQuarantineNSGSuffix
 	if poller, err := c.vmc.BeginDelete(ctx, c.ResourceGroup, name, &armcompute.VirtualMachinesClientBeginDeleteOptions{
 		ForceDeletion: to.Ptr(true),
 	}); err == nil {
@@ -1927,7 +1988,7 @@ func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string) ([
 			retry = retry || isAzureRetryableDeleteError(err)
 		}
 	}
-	if err := c.deleteSnapshotQuarantineNSG(ctx, name+"-q-nsg"); err != nil {
+	if err := c.deleteSnapshotQuarantineNSG(ctx, quarantineNSGName); err != nil {
 		errs = append(errs, err)
 		retry = retry || isAzureRetryableDeleteError(err)
 	}
@@ -1951,8 +2012,8 @@ func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string) ([
 			_, err := c.diskc.Get(ctx, c.ResourceGroup, name+"-osdisk", nil)
 			return err
 		}},
-		{name: "snapshot quarantine nsg " + name + "-q-nsg", get: func() error {
-			_, err := c.sgc.Get(ctx, c.ResourceGroup, name+"-q-nsg", nil)
+		{name: "snapshot quarantine nsg " + quarantineNSGName, get: func() error {
+			_, err := c.sgc.Get(ctx, c.ResourceGroup, quarantineNSGName, nil)
 			return err
 		}},
 	}
@@ -2154,6 +2215,7 @@ func isAzureRetryableDeleteError(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "NicReservedForAnotherVm") ||
 		strings.Contains(s, "PublicIPAddressCannotBeDeleted") ||
+		strings.Contains(s, "NetworkSecurityGroupCannotBeDeleted") ||
 		strings.Contains(s, "DiskInUse") ||
 		strings.Contains(s, "DiskIsAttachedToVM") ||
 		strings.Contains(s, "DiskAttached") ||
