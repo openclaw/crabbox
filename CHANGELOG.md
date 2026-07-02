@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Prevented ASCII Box API credentials from reaching unsafe explicit base URLs by requiring HTTPS except for loopback development endpoints, rejecting ambiguous URL components, and supporting config discovery in the current Box CLI. Thanks @coygeek.
 - Pinned the Google Linux package signing fingerprint, preserved its source-scoped APT keyring across Chrome installation, and failed closed to Chromium when verification fails. Thanks @coygeek.
 - Hardened coordinator image deletion so admin `image delete` requests fail closed unless stored Crabbox-created metadata proves ownership of the AWS, Azure, or GCP image or snapshot.
 - Prevented unused WebVNC and Code bridge tickets from surviving manager share revocation. Thanks @coygeek.
