@@ -13,6 +13,7 @@
 - Prevented direct Azure list, stop, and cleanup paths from treating weak `crabbox=true` tags as ownership; destructive operations now require canonical Azure ownership tags and an exact matching lease ID, and successful deletion removes local lease keys. Thanks @coygeek.
 - Restricted brokered Azure image and OS-disk selectors to admin-authenticated requests while preserving user-selectable Azure placement. Thanks @coygeek.
 - Required exact resource-bound local lease claims before Apple Container, local-container, or Apple VZ stop operations can delete provider resources; legacy unbound claims require explicit `--reclaim` adoption before stop. Thanks @coygeek.
+- Hardened Azure Windows snapshot forks to fail closed through credential rehydration and quarantine cleanup, reuse only writable NIC payloads, reject unknown differential disks, and retry in-use security-group cleanup. Thanks @fcoury-oai.
 
 ## 0.34.0 - 2026-07-02
 
@@ -39,7 +40,6 @@
 
 ### Fixed
 
-- Hardened Azure Windows snapshot forks to fail closed through credential rehydration and quarantine cleanup, reuse only writable NIC payloads, reject unknown differential disks, and retry in-use security-group cleanup. Thanks @fcoury-oai.
 - Bound GitHub browser-login owners to verified email addresses, recorded that provenance in a versioned user-token schema, and invalidated legacy tokens that could retain unverified owner identities. Thanks @coygeek.
 - Required exact local claims before Freestyle or Islo delete, pause, resume, and SSH reuse operations, while preserving explicit `--reclaim` adoption and read-only canonical-name recovery. Thanks @coygeek.
 - Required a valid isolated per-lease origin before serving browser Code HTTP or WebSocket traffic, preventing lease-controlled pages from inheriting coordinator portal authority. Thanks @coygeek.
