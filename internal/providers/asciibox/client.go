@@ -25,11 +25,12 @@ type api interface {
 }
 
 type client struct {
-	apiKey  string
-	apiURL  string
-	cliPath string
-	home    string
-	runner  CommandRunner
+	apiKey              string
+	apiURL              string
+	cliPath             string
+	home                string
+	runner              CommandRunner
+	releasePollInterval time.Duration
 }
 
 type createRequest struct {
@@ -190,15 +191,143 @@ func (c *client) ListBoxes(ctx context.Context) ([]boxData, error) {
 }
 
 func (c *client) ReleaseBox(ctx context.Context, id string) error {
-	stopResult, stopErr := c.run(ctx, "stop", id)
-	deleteResult, deleteErr := c.run(ctx, "delete", id)
-	if deleteErr != nil {
-		if stopErr != nil {
-			return fmt.Errorf("ascii-box CLI release failed: stop: %s; delete: %s", c.formatError(stopResult, stopErr), c.formatError(deleteResult, deleteErr))
+	if err := c.ensureConfig(ctx); err != nil {
+		return fmt.Errorf("prepare ascii-box CLI release: %w", err)
+	}
+	stopResult, stopErr := c.runPrepared(ctx, "stop", id)
+	deleteResult, deleteErr := c.runPrepared(ctx, "delete", id)
+	if deleteErr == nil {
+		return nil
+	}
+	if !c.snapshotGuardConflict(deleteResult, deleteErr) {
+		return c.releaseError(stopResult, stopErr, deleteResult, deleteErr, "")
+	}
+	return c.releaseAfterSnapshotGuard(ctx, id, stopResult, stopErr, deleteResult, deleteErr)
+}
+
+func (c *client) releaseAfterSnapshotGuard(
+	ctx context.Context,
+	id string,
+	stopResult LocalCommandResult,
+	stopErr error,
+	deleteResult LocalCommandResult,
+	deleteErr error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return c.releaseError(
+			stopResult,
+			stopErr,
+			deleteResult,
+			deleteErr,
+			"snapshot recovery: "+err.Error(),
+		)
+	}
+	recoveryCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	extendResult, extendErr := c.runPrepared(recoveryCtx, "extend", id, "--ttl", "1")
+	if extendErr != nil {
+		return c.releaseError(
+			stopResult,
+			stopErr,
+			deleteResult,
+			deleteErr,
+			"snapshot recovery extend: "+c.formatError(extendResult, extendErr),
+		)
+	}
+
+	pollInterval := c.releasePollInterval
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-recoveryCtx.Done():
+			return c.releaseError(
+				stopResult,
+				stopErr,
+				deleteResult,
+				deleteErr,
+				"snapshot recovery: "+recoveryCtx.Err().Error(),
+			)
+		case <-ticker.C:
+			infoResult, infoErr := c.runPrepared(recoveryCtx, "info", id)
+			if infoErr != nil {
+				return c.releaseError(
+					stopResult,
+					stopErr,
+					deleteResult,
+					deleteErr,
+					"snapshot recovery info: "+c.formatError(infoResult, infoErr),
+				)
+			}
+			box, err := decodeBox([]byte(infoResult.Stdout))
+			if err != nil {
+				return c.releaseError(
+					stopResult,
+					stopErr,
+					deleteResult,
+					deleteErr,
+					"snapshot recovery info: "+err.Error(),
+				)
+			}
+			if !boxReadyForDelete(box) {
+				continue
+			}
+			retryResult, retryErr := c.runPrepared(recoveryCtx, "delete", id)
+			if retryErr == nil {
+				return nil
+			}
+			if c.snapshotGuardConflict(retryResult, retryErr) {
+				continue
+			}
+			return c.releaseError(
+				stopResult,
+				stopErr,
+				deleteResult,
+				deleteErr,
+				"snapshot recovery delete: "+c.formatError(retryResult, retryErr),
+			)
 		}
+	}
+}
+
+func boxReadyForDelete(box boxData) bool {
+	switch boxState(box) {
+	case "stopping", "stopped", "terminated", "deleted", "archived":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *client) snapshotGuardConflict(result LocalCommandResult, err error) bool {
+	message := strings.ToLower(c.formatError(result, err))
+	return strings.Contains(message, "no successful snapshot") &&
+		strings.Contains(message, "last 30 minutes")
+}
+
+func (c *client) releaseError(
+	stopResult LocalCommandResult,
+	stopErr error,
+	deleteResult LocalCommandResult,
+	deleteErr error,
+	recovery string,
+) error {
+	if stopErr == nil && recovery == "" {
 		return fmt.Errorf("ascii-box CLI delete failed: %s", c.formatError(deleteResult, deleteErr))
 	}
-	return nil
+	parts := make([]string, 0, 3)
+	if stopErr != nil {
+		parts = append(parts, "stop: "+c.formatError(stopResult, stopErr))
+	}
+	parts = append(parts, "delete: "+c.formatError(deleteResult, deleteErr))
+	if recovery != "" {
+		parts = append(parts, recovery)
+	}
+	return fmt.Errorf("ascii-box CLI release failed: %s", strings.Join(parts, "; "))
 }
 
 func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, error) {
@@ -209,6 +338,14 @@ func (c *client) runWithEnv(ctx context.Context, env []string, args ...string) (
 	if err := c.ensureConfig(ctx); err != nil {
 		return LocalCommandResult{}, err
 	}
+	return c.runPreparedWithEnv(ctx, env, args...)
+}
+
+func (c *client) runPrepared(ctx context.Context, args ...string) (LocalCommandResult, error) {
+	return c.runPreparedWithEnv(ctx, c.env(), args...)
+}
+
+func (c *client) runPreparedWithEnv(ctx context.Context, env []string, args ...string) (LocalCommandResult, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cliTimeout(args))
@@ -233,7 +370,7 @@ func cliTimeout(args []string) time.Duration {
 	switch args[0] {
 	case "new":
 		return 5 * time.Minute
-	case "ssh", "delete", "stop":
+	case "ssh", "delete", "stop", "extend":
 		return 2 * time.Minute
 	default:
 		return 30 * time.Second
