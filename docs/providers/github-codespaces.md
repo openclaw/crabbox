@@ -71,6 +71,10 @@ behavior intact, including `rsync -e "ssh -F ..."`.
 
 ## Configuration
 
+Use the full example in trusted user config or an explicitly selected
+`CRABBOX_CONFIG` file. Repository-local config cannot change the repository,
+GitHub API or CLI routing, or release deletion policy.
+
 ```yaml
 provider: github-codespaces
 target: linux
@@ -102,7 +106,7 @@ Config keys under `githubCodespaces:`:
 | `geo` | empty | Optional GitHub geographic location preference. |
 | `idleTimeout` | `30m` | Codespaces idle timeout sent to GitHub on create. |
 | `retentionPeriod` | `168h` | Codespaces retention period sent to GitHub on create. |
-| `deleteOnRelease` | `true` | Delete on `stop` unless a retained lease claim says release by stopping. |
+| `deleteOnRelease` | `true` | Trusted config, environment, or CLI only; repository-local config is ignored. Delete on `stop` unless a retained lease claim says release by stopping. |
 | `workRoot` | `/workspaces/<repo>` when repo is known | Remote path Crabbox syncs to and runs from. |
 
 Provider flags:
