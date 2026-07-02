@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Prevented direct AWS raw-instance release from reaching deletion unless canonical Crabbox ownership tags match the resolved lease, with a second guard at the destructive provider boundary. Thanks @TurboTheTurtle.
 - Prevented Sprites API credentials from targeting unsafe endpoint URLs or following redirects outside the configured API origin. Thanks @coygeek.
 - Recovered ASCII Box release when the service temporarily requires a recent snapshot by shortening the sandbox TTL, waiting for the managed stop transition, and retrying deletion.
 - Isolated brokered artifact uploads by opaque organization and owner namespaces so identities and caller prefixes cannot collide across authorization scopes. Thanks @coygeek.
