@@ -233,9 +233,11 @@ bundles.
 
 Lifecycle recovery from raw provider identifiers is provider-specific and
 fails closed when ownership cannot be established. Cloudflare containers need
-a matching local claim; Freestyle and Islo recovery names must already be in
-their canonical Crabbox-generated form before reuse or deletion reaches the
-provider.
+a matching local claim. Freestyle and Islo canonical names remain available
+for read-only discovery, but delete, pause, resume, SSH reuse, and delegated
+reuse require an exact local claim. When local state was intentionally lost,
+an operator can use the provider's supported `--reclaim` reuse path to persist
+a new claim before any provider mutation.
 
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects. Required

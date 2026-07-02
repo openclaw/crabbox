@@ -204,6 +204,7 @@ func TestResolveIsloLeaseIDRejectsUnclaimedRawSandbox(t *testing.T) {
 }
 
 func TestIsloStopRejectsNonCanonicalSandboxBeforeDelete(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{}
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
@@ -216,6 +217,54 @@ func TestIsloStopRejectsNonCanonicalSandboxBeforeDelete(t *testing.T) {
 	}
 	if client.deleteCalls != 0 {
 		t.Fatalf("delete calls=%d, want 0", client.deleteCalls)
+	}
+}
+
+func TestIsloMutationsRejectCanonicalSandboxWithoutExactClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{}
+	restore := swapNewIsloClient(client)
+	t.Cleanup(restore)
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	for name, mutate := range map[string]func() error{
+		"stop":   func() error { return backend.Stop(context.Background(), StopRequest{ID: "crabbox-repo-abcdef"}) },
+		"pause":  func() error { return backend.Pause(context.Background(), PauseRequest{ID: "crabbox-repo-abcdef"}) },
+		"resume": func() error { return backend.Resume(context.Background(), ResumeRequest{ID: "crabbox-repo-abcdef"}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := mutate()
+			if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+				t.Fatalf("error = %v, want exact-claim refusal", err)
+			}
+		})
+	}
+	if client.deleteCalls != 0 || client.pausedName != "" || client.resumedName != "" {
+		t.Fatalf("provider mutation without claim: delete=%d pause=%q resume=%q", client.deleteCalls, client.pausedName, client.resumedName)
+	}
+}
+
+func TestIsloStopDeletesExactlyClaimedSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := claimLeaseForRepoProvider("isb_crabbox-repo-abcdef", "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{}
+	restore := swapNewIsloClient(client)
+	t.Cleanup(restore)
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	if err := backend.Stop(context.Background(), StopRequest{ID: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if client.deleteCalls != 1 {
+		t.Fatalf("delete calls=%d, want 1", client.deleteCalls)
 	}
 }
 
@@ -235,6 +284,42 @@ func TestResolveIsloLeaseIDPreservesClaimSlug(t *testing.T) {
 		if gotLeaseID != leaseID || name != "crabbox-repo-abcdef" || slug != "web" {
 			t.Fatalf("id=%q lease=%q name=%q slug=%q", id, gotLeaseID, name, slug)
 		}
+	}
+}
+
+func TestResolveIsloLeaseIDForRepoRequiresExplicitVerifiedReclaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	backend := &isloBackend{cfg: Config{IdleTimeout: 7 * time.Minute, Pond: "demo"}}
+	client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{
+		Name:   "crabbox-repo-abcdef",
+		Status: "running",
+	}}
+
+	if _, _, _, err := backend.resolveLeaseIDForRepo(context.Background(), client, "crabbox-repo-abcdef", root, false); err == nil || !strings.Contains(err.Error(), "--reclaim") {
+		t.Fatalf("resolve error = %v, want explicit reclaim refusal", err)
+	}
+	leaseID, _, slug, err := backend.resolveLeaseIDForRepo(context.Background(), client, "crabbox-repo-abcdef", root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := resolveExactIsloLeaseClaim(leaseID)
+	if err != nil || !ok || claim.RepoRoot != root || claim.Pond != "demo" || claim.IdleTimeoutSeconds != 420 || claim.Slug != slug {
+		t.Fatalf("claim ok=%t err=%v claim=%#v", ok, err, claim)
+	}
+}
+
+func TestResolveIsloLeaseIDForRepoDoesNotClaimMissingSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	backend := &isloBackend{}
+	client := &fakeIsloSyncClient{getSandboxGone: true}
+	leaseID := "isb_crabbox-repo-abcdef"
+
+	if _, _, _, err := backend.resolveLeaseIDForRepo(context.Background(), client, leaseID, t.TempDir(), true); err == nil || !strings.Contains(err.Error(), "refusing to create a local claim") {
+		t.Fatalf("resolve error = %v, want missing-sandbox refusal", err)
+	}
+	if _, ok, err := resolveExactIsloLeaseClaim(leaseID); err != nil || ok {
+		t.Fatalf("claim created for missing sandbox: ok=%t err=%v", ok, err)
 	}
 }
 
@@ -337,6 +422,11 @@ func TestIsloResolveSSHUsesSandboxHostnameDefaults(t *testing.T) {
 }
 
 func TestIsloResolveSSHHonorsExplicitSSHOverrides(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-repo-abcdef"
+	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
 	client := &fakeIsloSyncClient{
 		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "running"},
 	}
@@ -348,7 +438,7 @@ func TestIsloResolveSSHHonorsExplicitSSHOverrides(t *testing.T) {
 	core.MarkSSHKeyExplicit(&cfg)
 	backend := &isloBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
 
-	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-repo-abcdef"})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,6 +448,8 @@ func TestIsloResolveSSHHonorsExplicitSSHOverrides(t *testing.T) {
 }
 
 func TestIsloResolveSSHResumesPausedSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
 	client := &fakeIsloSyncClient{
 		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"},
 	}
@@ -368,12 +460,43 @@ func TestIsloResolveSSHResumesPausedSandbox(t *testing.T) {
 		rt:  Runtime{Stderr: io.Discard},
 	}
 
-	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-repo-abcdef"})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{
+		ID:      "crabbox-repo-abcdef",
+		Repo:    Repo{Root: root},
+		Reclaim: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if client.resumeCalls != 1 || lease.Server.Status != "running" {
 		t.Fatalf("resumeCalls=%d status=%q", client.resumeCalls, lease.Server.Status)
+	}
+	if claim, ok, err := resolveExactIsloLeaseClaim(lease.LeaseID); err != nil || !ok || claim.RepoRoot != root {
+		t.Fatalf("adopted claim ok=%t err=%v claim=%#v", ok, err, claim)
+	}
+}
+
+func TestIsloResolveSSHRejectsUnclaimedSandboxBeforeResume(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{
+		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"},
+	}
+	restore := swapNewIsloClient(client)
+	t.Cleanup(restore)
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{
+		ID:   "crabbox-repo-abcdef",
+		Repo: Repo{Root: t.TempDir()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "--reclaim") {
+		t.Fatalf("Resolve error = %v, want explicit reclaim refusal", err)
+	}
+	if client.resumeCalls != 0 {
+		t.Fatalf("resume calls=%d, want 0", client.resumeCalls)
 	}
 }
 
@@ -406,6 +529,11 @@ func TestIsloResolveSSHRejectsForeignClaimBeforeResume(t *testing.T) {
 }
 
 func TestIsloResolveSSHWaitsForStartingSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-repo-abcdef"
+	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
 	client := &fakeIsloSyncClient{
 		getSandboxes: []*gosdk.SandboxResponse{
 			{Name: "crabbox-repo-abcdef", Status: "starting"},
@@ -419,7 +547,7 @@ func TestIsloResolveSSHWaitsForStartingSandbox(t *testing.T) {
 		rt:  Runtime{Stderr: io.Discard},
 	}
 
-	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-repo-abcdef"})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1713,6 +1841,9 @@ func TestIsloSDKClientUploadArchiveStreamsMultipartTarball(t *testing.T) {
 
 func TestIsloPauseResumeCallProvider(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := claimLeaseForRepoProvider("isb_crabbox-repo-abcdef", "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
 	client := &fakeIsloSyncClient{}
 	restore := swapNewIsloClient(client)
 	defer restore()

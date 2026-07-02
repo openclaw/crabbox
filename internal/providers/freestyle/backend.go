@@ -363,6 +363,9 @@ func (b *freestyleBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
+	if err := requireFreestyleLeaseClaim(leaseID); err != nil {
+		return err
+	}
 	if err := client.DeleteVM(ctx, id); err != nil {
 		return freestyleError("delete vm", err)
 	}
@@ -409,13 +412,18 @@ func (b *freestyleBackend) createSandbox(ctx context.Context, client freestyleAP
 
 func (b *freestyleBackend) rollbackCreatedVM(client freestyleAPI, vmID string, cause error) error {
 	if cleanupErr := deleteFreestyleVMForCleanup(client, vmID); cleanupErr != nil {
-		leakErr := fmt.Errorf("cleanup freestyle vm %s after acquire failure: %w; run `crabbox stop --provider freestyle --id %s%s` to retry cleanup", vmID, cleanupErr, freestyleLeasePrefix, vmID)
+		leaseID := freestyleLeasePrefix + vmID
+		leakErr := fmt.Errorf("cleanup freestyle vm %s after acquire failure: %w; first run `%s`, then run `%s` to retry cleanup", vmID, cleanupErr, freestyleAdoptCommand(leaseID), freestyleCleanupCommand(leaseID))
 		if b.rt.Stderr != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", leakErr)
 		}
 		return errors.Join(cause, leakErr)
 	}
 	return cause
+}
+
+func freestyleAdoptCommand(leaseID string) string {
+	return fmt.Sprintf("crabbox run --provider %s --id %s --reclaim --no-sync -- true", freestyleProvider, shellQuote(leaseID))
 }
 
 func deleteFreestyleVMForCleanup(client freestyleAPI, vmID string) error {
@@ -545,11 +553,41 @@ func (b *freestyleBackend) resolveLeaseID(ctx context.Context, client freestyleA
 		return "", "", exit(4, "freestyle vm %q is not claimed by Crabbox", id)
 	}
 	if repoRoot != "" {
-		if err := claimLeaseForRepoProviderPond(leaseID, newLeaseSlug(leaseID), freestyleProvider, b.cfg.Pond, repoRoot, b.cfg.IdleTimeout, reclaim); err != nil {
+		claim, ok, err := resolveExactFreestyleLeaseClaim(leaseID)
+		if err != nil {
+			return "", "", err
+		}
+		if ok {
+			if err := claimLeaseForRepoProviderPond(claim.LeaseID, claim.Slug, freestyleProvider, claim.Pond, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
+				return "", "", err
+			}
+		} else if !reclaim {
+			return "", "", exit(4, "freestyle vm %q has no exact local claim; use --reclaim to adopt it before reuse", id)
+		} else if err := claimLeaseForRepoProviderPond(leaseID, newLeaseSlug(leaseID), freestyleProvider, b.cfg.Pond, repoRoot, b.cfg.IdleTimeout, true); err != nil {
 			return "", "", err
 		}
 	}
 	return leaseID, blank(vm.ID, vmID), nil
+}
+
+func resolveExactFreestyleLeaseClaim(leaseID string) (core.LeaseClaim, bool, error) {
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil {
+		return claim, ok, err
+	}
+	if ok && claim.Provider == freestyleProvider && claim.LeaseID == leaseID {
+		return claim, true, nil
+	}
+	return core.LeaseClaim{}, false, nil
+}
+
+func requireFreestyleLeaseClaim(leaseID string) error {
+	if _, ok, err := resolveExactFreestyleLeaseClaim(leaseID); err != nil {
+		return err
+	} else if !ok {
+		return exit(4, "freestyle lease %q has no exact local claim; adopt it with an explicit --reclaim reuse before stop", leaseID)
+	}
+	return nil
 }
 
 func freestyleVMToServer(vm freestyleVM) Server {
