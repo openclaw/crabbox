@@ -67,9 +67,12 @@ every other coordinator route. Normal authentication is resolved in
 3. **Signed user token** — a `cbxu_`-prefixed token issued by GitHub browser
    login. It is an HMAC-SHA256 signature (verified in constant time) over a
    base64url payload signed with `CRABBOX_SESSION_SECRET`, which must be set and
-   must differ from `CRABBOX_SHARED_TOKEN`. The payload carries `owner`, `org`,
-   and GitHub `login`, has a default 180-day expiry, and is rejected if it
-   carries an `admin` claim — browser login can never mint admin tokens.
+   must differ from `CRABBOX_SHARED_TOKEN`. The versioned payload carries a
+   verified-email `owner`, its `github-verified-email` provenance, `org`, and
+   GitHub `login`, has a default 180-day expiry, and is rejected if it carries
+   an `admin` claim — browser login can never mint admin tokens. Tokens from
+   older schemas are rejected; users must log in again after this security
+   upgrade.
 
 ### GitHub browser login
 
@@ -81,6 +84,9 @@ by coordinator config:
   members of the listed GitHub org(s).
 - `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) further
   narrows access to selected team slugs after org membership passes.
+- The GitHub account must expose at least one verified email through the OAuth
+  `user:email` scope. Public profile and unverified emails are never trusted as
+  the token owner.
 
 User tokens can only mutate leases, runs, and usage for their own `owner`/`org`
 identity. Lease owners also have read-only audit access to run history, logs,

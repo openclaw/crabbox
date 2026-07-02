@@ -84,8 +84,10 @@ matches the token in this precedence (`worker/src/auth.ts`):
 3. **Signed user token** — a token with the `cbxu_` prefix, an HMAC-SHA256 signature over a
    base64url payload, verified only with `CRABBOX_SESSION_SECRET`. The session
    secret must be configured and distinct from `CRABBOX_SHARED_TOKEN`. Minted by
-   `crabbox login`, with a default 180-day expiry.
-   User tokens are non-admin unless their GitHub email or login matches
+   `crabbox login` only after GitHub returns a verified owner email, with a
+   default 180-day expiry. The payload records the verified-email provenance;
+   older unversioned user tokens are rejected and require a fresh login.
+   User tokens are non-admin unless their verified GitHub email or login matches
    `CRABBOX_GITHUB_ADMIN_OWNERS` or `CRABBOX_GITHUB_ADMIN_LOGINS`.
 
 Anything else returns `401 unauthorized`.

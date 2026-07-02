@@ -39,7 +39,6 @@ interface OAuthPending {
 interface GitHubUser {
   login?: string;
   name?: string | null;
-  email?: string | null;
 }
 
 interface GitHubEmail {
@@ -241,10 +240,18 @@ async function githubAuthCallback(
     const ttlSeconds = userTokenTTLSeconds(env);
     const tokenInput = {
       owner: identity.owner,
+      ownerSource: identity.ownerSource,
       org,
       login: identity.login,
       ttlSeconds,
-    } as { owner: string; org: string; login: string; name?: string; ttlSeconds: number };
+    } as {
+      owner: string;
+      ownerSource: "github-verified-email";
+      org: string;
+      login: string;
+      name?: string;
+      ttlSeconds: number;
+    };
     if (identity.name) {
       tokenInput.name = identity.name;
     }
@@ -427,6 +434,7 @@ async function exchangeGitHubCode(code: string, redirectURI: string, env: Env): 
 
 async function githubIdentity(accessToken: string): Promise<{
   owner: string;
+  ownerSource: "github-verified-email";
   login: string;
   name?: string;
 }> {
@@ -442,22 +450,30 @@ async function githubIdentity(accessToken: string): Promise<{
   }
   const user = (await userResponse.json()) as GitHubUser;
   const login = user.login || "unknown";
-  let owner = user.email || "";
   const emailResponse = await fetch(`${githubAPIURL}/user/emails`, { headers });
-  if (emailResponse.ok) {
-    const emails = (await emailResponse.json()) as GitHubEmail[];
-    owner =
-      emails.find((email) => email.primary && email.verified)?.email ||
-      emails.find((email) => email.verified)?.email ||
-      owner;
+  if (!emailResponse.ok) {
+    throw new Error(`github email lookup failed: ${emailResponse.status}`);
   }
+  const emails = (await emailResponse.json()) as GitHubEmail[];
+  const verifiedEmails = emails.filter(
+    (email) => email.verified && typeof email.email === "string" && email.email.trim(),
+  );
+  const owner = (
+    verifiedEmails.find((email) => email.primary)?.email || verifiedEmails[0]?.email
+  )?.trim();
   if (!owner) {
-    owner = `${login}@users.noreply.github.com`;
+    throw new GitHubAuthorizationError("GitHub account must have a verified email to use Crabbox.");
   }
   const identity = {
     owner,
+    ownerSource: "github-verified-email",
     login,
-  } as { owner: string; login: string; name?: string };
+  } as {
+    owner: string;
+    ownerSource: "github-verified-email";
+    login: string;
+    name?: string;
+  };
   if (user.name) {
     identity.name = user.name;
   }

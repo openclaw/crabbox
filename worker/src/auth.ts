@@ -10,6 +10,7 @@ const accessKidMaxChars = 256;
 const accessKeySetTTLMS = 5 * 60 * 1000;
 const accessKeySetFailureTTLMS = 30 * 1000;
 const accessKeySetCacheMaxEntries = 8;
+const userTokenVersion = 2;
 const accessKeySetCache = new Map<string, AccessKeySetCacheEntry>();
 const accessKeySetLoads = new Map<string, Promise<AccessKeySetCacheEntry>>();
 
@@ -29,6 +30,8 @@ export interface AuthRequestContext {
 
 interface UserTokenPayload {
   typ: "crabbox-user";
+  version: typeof userTokenVersion;
+  ownerSource: "github-verified-email";
   jti?: string;
   owner: string;
   org: string;
@@ -167,6 +170,7 @@ export async function issueUserToken(
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
   input: {
     owner: string;
+    ownerSource: "github-verified-email";
     org: string;
     login: string;
     name?: string;
@@ -176,6 +180,8 @@ export async function issueUserToken(
   const now = Math.floor(Date.now() / 1000);
   const payload: UserTokenPayload = {
     typ: "crabbox-user",
+    version: userTokenVersion,
+    ownerSource: input.ownerSource,
     jti: crypto.randomUUID(),
     owner: input.owner,
     org: input.org,
@@ -215,6 +221,8 @@ async function verifyUserToken(
   const payload = decodeUserTokenPayload(token);
   if (
     payload.typ !== "crabbox-user" ||
+    payload.version !== userTokenVersion ||
+    payload.ownerSource !== "github-verified-email" ||
     typeof payload.owner !== "string" ||
     typeof payload.org !== "string" ||
     typeof payload.login !== "string" ||

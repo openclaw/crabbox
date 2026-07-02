@@ -14087,6 +14087,7 @@ describe("fleet lease identity and idle", () => {
     );
     const token = await issueUserToken(env, {
       owner: "alice@example.com",
+      ownerSource: "github-verified-email",
       org: "example-org",
       login: "alice",
       ttlSeconds: 60 * 60,
@@ -19284,6 +19285,62 @@ describe("fleet identity", () => {
     expect(body.tokenExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
+  it("rejects GitHub login when only public or unverified emails are available", async () => {
+    const { fleet, loginID, state, pollSecret } = await startGitHubLogin();
+    vi.stubGlobal(
+      "fetch",
+      githubFetchMock({
+        member: true,
+        profileEmail: "victim@example.com",
+        emails: [{ email: "attacker@example.com", primary: true, verified: false }],
+      }),
+    );
+
+    const callback = await fleet.fetch(
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+    );
+    expect(callback.status).toBe(403);
+
+    const poll = await fleet.fetch(
+      request("POST", "/v1/auth/github/poll", {
+        body: { loginID, pollSecret },
+      }),
+    );
+    expect(poll.status).toBe(400);
+    await expect(poll.json()).resolves.toMatchObject({
+      status: "failed",
+      error: "GitHub account must have a verified email to use Crabbox.",
+    });
+  });
+
+  it("does not fall back to a public email when GitHub email lookup fails", async () => {
+    const { fleet, loginID, state, pollSecret } = await startGitHubLogin();
+    vi.stubGlobal(
+      "fetch",
+      githubFetchMock({
+        member: true,
+        profileEmail: "victim@example.com",
+        emailStatus: 500,
+      }),
+    );
+
+    const callback = await fleet.fetch(
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+    );
+    expect(callback.status).toBe(500);
+
+    const poll = await fleet.fetch(
+      request("POST", "/v1/auth/github/poll", {
+        body: { loginID, pollSecret },
+      }),
+    );
+    expect(poll.status).toBe(400);
+    await expect(poll.json()).resolves.toMatchObject({
+      status: "failed",
+      error: "github email lookup failed: 500",
+    });
+  });
+
   it("honors configured GitHub user token TTL", async () => {
     const { fleet, loginID, state, pollSecret } = await startGitHubLogin({
       CRABBOX_USER_TOKEN_TTL_SECONDS: "7200",
@@ -19592,10 +19649,16 @@ function githubFetchMock({
   member,
   org = "openclaw",
   teams = [],
+  profileEmail = null,
+  emails = [{ email: "friend@example.com", primary: true, verified: true }],
+  emailStatus = 200,
 }: {
   member: boolean;
   org?: string;
   teams?: Array<{ slug: string; organization: { login: string } }>;
+  profileEmail?: string | null;
+  emails?: Array<{ email?: string; primary?: boolean; verified?: boolean }>;
+  emailStatus?: number;
 }) {
   return vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
     const url =
@@ -19604,10 +19667,13 @@ function githubFetchMock({
       return jsonResponse({ access_token: "github-access-token" });
     }
     if (url === "https://api.github.com/user") {
-      return jsonResponse({ login: "friend", name: "Friendly User", email: null });
+      return jsonResponse({ login: "friend", name: "Friendly User", email: profileEmail });
     }
     if (url === "https://api.github.com/user/emails") {
-      return jsonResponse([{ email: "friend@example.com", primary: true, verified: true }]);
+      return jsonResponse(
+        emailStatus === 200 ? emails : { message: "email lookup failed" },
+        emailStatus,
+      );
     }
     if (url === `https://api.github.com/user/memberships/orgs/${encodeURIComponent(org)}`) {
       return member
