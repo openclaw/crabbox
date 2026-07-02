@@ -12,7 +12,7 @@ type flagValues struct {
 
 func RegisterAsciiBoxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	return flagValues{
-		BaseURL: fs.String("ascii-box-base-url", defaults.AsciiBox.BaseURL, "ASCII Box API base URL"),
+		BaseURL: fs.String("ascii-box-base-url", defaults.AsciiBox.BaseURL, "trusted ASCII Box API base URL"),
 		CLIPath: fs.String("ascii-box-cli", defaults.AsciiBox.CLIPath, "ASCII Box CLI path"),
 		Workdir: fs.String("ascii-box-workdir", defaults.AsciiBox.Workdir, "absolute working directory inside the ASCII Box"),
 	}

@@ -23,9 +23,9 @@ of exposing SSH.
 
 - Create an ASCII Box account at <https://box.ascii.dev>.
 - Export the API key as `ASCII_BOX_API_KEY` or `CRABBOX_ASCII_BOX_API_KEY`.
-- Install the official `box` CLI. Crabbox writes a private Box CLI config from
-  the API key under its state directory and does not require a pre-existing
-  `box login`.
+- Install the official `box` CLI. Crabbox discovers the platform-specific config
+  path through `box status --json`, writes a private config from the API key
+  under its state directory, and does not require a pre-existing `box login`.
 
 ## Commands
 
@@ -44,7 +44,9 @@ export ASCII_BOX_API_KEY=...
 ```
 
 `CRABBOX_ASCII_BOX_BASE_URL` or `asciiBox.baseUrl` can override the default
-`https://ascii.dev`.
+`https://ascii.dev`. Custom endpoints require HTTPS, except literal loopback
+hosts may use HTTP. Userinfo, queries, and fragments are rejected before the
+API key is written to Box CLI configuration or passed to the CLI.
 
 ## Config
 
