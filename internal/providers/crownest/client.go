@@ -24,7 +24,7 @@ type client interface {
 	DeleteSandbox(context.Context, string) error
 	CreateWorkspaceRun(context.Context, createWorkspaceRunRequest, string) (workspaceRun, error)
 	CreateArchiveTransfer(context.Context, string, createArchiveTransferRequest, string) (archiveTransfer, error)
-	UploadArchive(context.Context, archiveTransfer, io.Reader) error
+	UploadArchive(context.Context, archiveTransfer, io.Reader, int64) error
 	FinalizeArchive(context.Context, string, finalizeArchiveRequest, string) (workspaceRun, error)
 	StartWorkspaceRun(context.Context, string, string) (workspaceRun, error)
 	CancelWorkspaceRun(context.Context, string, string) (workspaceRun, error)
@@ -213,7 +213,7 @@ func (c *httpClient) CreateArchiveTransfer(ctx context.Context, workspaceRunID s
 	return out.Transfer, nil
 }
 
-func (c *httpClient) UploadArchive(ctx context.Context, transfer archiveTransfer, body io.Reader) error {
+func (c *httpClient) UploadArchive(ctx context.Context, transfer archiveTransfer, body io.Reader, size int64) error {
 	method := strings.TrimSpace(transfer.Method)
 	if method == "" {
 		method = http.MethodPut
@@ -226,6 +226,7 @@ func (c *httpClient) UploadArchive(ctx context.Context, transfer archiveTransfer
 	if err != nil {
 		return fmt.Errorf("crownest archive upload request: %w", err)
 	}
+	req.ContentLength = size
 	for name, value := range transfer.Headers {
 		req.Header.Set(name, value)
 	}

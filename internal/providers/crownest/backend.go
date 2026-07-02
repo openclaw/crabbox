@@ -230,7 +230,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
 		return b.setupFailure(ctx, req, api, exit(6, "rewind sync archive: %v", err), started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
-	if err := api.UploadArchive(ctx, transfer, archive); err != nil {
+	if err := api.UploadArchive(ctx, transfer, archive, archiveBytes); err != nil {
 		return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if _, err := api.FinalizeArchive(ctx, workspaceRun.ID, finalizeArchiveRequest{SHA256: archiveSHA, SizeBytes: archiveBytes, UploadID: transfer.ID}, idempotencyKey("finalize", workspaceRun.ID)); err != nil {

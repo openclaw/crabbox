@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bin="${CRABBOX_BIN:-$repo_root/bin/crabbox}"
 smoke_root=""
 slug=""
+crownest_scope=(--provider crownest --crownest-template python-node)
 
 classify() {
   local name="$1"
@@ -23,7 +24,7 @@ classify() {
 cleanup() {
   local status=$?
   if [[ -n "$slug" && -x "$bin" ]]; then
-    "$bin" stop --provider crownest --crownest-forget-missing "$slug" >/dev/null 2>&1 || true
+    "$bin" stop "${crownest_scope[@]}" --crownest-forget-missing "$slug" >/dev/null 2>&1 || true
   fi
   if [[ -n "$smoke_root" ]]; then
     rm -rf -- "$smoke_root"
@@ -92,17 +93,17 @@ git commit -qm "test: seed Crownest smoke fixture"
 doctor_output="$(run_or_classify doctor_failed "$bin" doctor --provider crownest)"
 grep -q 'provider=crownest' <<<"$doctor_output" || classify diagnostic_only "doctor_provider_missing"
 
-run_output="$(run_or_classify run_failed "$bin" run --provider crownest --crownest-template python-node --crownest-timeout-secs 120 -- pnpm test)"
+run_output="$(run_or_classify run_failed "$bin" run "${crownest_scope[@]}" --crownest-timeout-secs 120 -- pnpm test)"
 grep -q 'hello-from-crabbox-crownest' <<<"$run_output" || classify diagnostic_only "pnpm_test_output_missing"
 
 keep_json="$smoke_root/lease.json"
-run_or_classify keep_run_failed "$bin" run --provider crownest --crownest-template python-node --crownest-timeout-secs 120 --keep --lease-output "$keep_json" -- sh -lc 'printf keep-ok' >/dev/null
+run_or_classify keep_run_failed "$bin" run "${crownest_scope[@]}" --crownest-timeout-secs 120 --keep --lease-output "$keep_json" -- sh -lc 'printf keep-ok' >/dev/null
 slug="$(jq -r '.slug' "$keep_json")"
 [[ -n "$slug" && "$slug" != "null" ]] || classify diagnostic_only "lease_slug_missing"
-"$bin" status --provider crownest --id "$slug" >/dev/null
-reuse_output="$(run_or_classify reuse_run_failed "$bin" run --provider crownest --id "$slug" --crownest-timeout-secs 120 -- sh -lc 'printf "reuse-ok\n"')"
+"$bin" status "${crownest_scope[@]}" --id "$slug" >/dev/null
+reuse_output="$(run_or_classify reuse_run_failed "$bin" run "${crownest_scope[@]}" --id "$slug" --crownest-timeout-secs 120 -- sh -lc 'printf "reuse-ok\n"')"
 grep -q 'reuse-ok' <<<"$reuse_output" || classify diagnostic_only "reuse_output_missing"
-"$bin" stop --provider crownest "$slug" >/dev/null
+"$bin" stop "${crownest_scope[@]}" "$slug" >/dev/null
 slug=""
 
 classify live_crownest_smoke_passed

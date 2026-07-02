@@ -75,10 +75,13 @@ esac
     seen[2],
     /^run --provider crownest --crownest-template python-node --crownest-timeout-secs 120 --keep --lease-output .+ -- sh -lc printf keep-ok$/,
   );
-  assert.equal(seen[3], "status --provider crownest --id smoke-slug");
+  assert.equal(
+    seen[3],
+    "status --provider crownest --crownest-template python-node --id smoke-slug",
+  );
   assert.equal(
     seen[4],
-    'run --provider crownest --id smoke-slug --crownest-timeout-secs 120 -- sh -lc printf "reuse-ok\\n"',
+    'run --provider crownest --crownest-template python-node --id smoke-slug --crownest-timeout-secs 120 -- sh -lc printf "reuse-ok\\n"',
   );
-  assert.equal(seen[5], "stop --provider crownest smoke-slug");
+  assert.equal(seen[5], "stop --provider crownest --crownest-template python-node smoke-slug");
 });

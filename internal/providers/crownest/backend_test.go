@@ -50,8 +50,8 @@ func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
 	if api.created.Command != result.CommandText || api.created.Template != "python-node" || api.created.Keep {
 		t.Fatalf("create request=%#v", api.created)
 	}
-	if api.uploadBytes == 0 || api.finalized.UploadID != "upl_123" || !api.started || api.deletedSandboxID != "" {
-		t.Fatalf("fake api state upload=%d finalized=%#v started=%v deleted=%q", api.uploadBytes, api.finalized, api.started, api.deletedSandboxID)
+	if api.uploadBytes == 0 || api.uploadSize != int64(api.uploadBytes) || api.finalized.UploadID != "upl_123" || !api.started || api.deletedSandboxID != "" {
+		t.Fatalf("fake api state upload=%d size=%d finalized=%#v started=%v deleted=%q", api.uploadBytes, api.uploadSize, api.finalized, api.started, api.deletedSandboxID)
 	}
 	if result.Session == nil || result.Session.Provider != providerName || result.Session.Kept {
 		t.Fatalf("session=%#v", result.Session)
@@ -733,6 +733,7 @@ type fakeCrownestClient struct {
 	createRunErr     error
 	finalized        finalizeArchiveRequest
 	uploadBytes      int
+	uploadSize       int64
 	started          bool
 	startSandboxID   string
 	latestRun        workspaceRun
@@ -783,12 +784,13 @@ func (f *fakeCrownestClient) CreateArchiveTransfer(_ context.Context, id string,
 	return archiveTransfer{ID: "upl_123", Method: "PUT", UploadURL: "/upload", MaxSizeBytes: 1 << 30}, nil
 }
 
-func (f *fakeCrownestClient) UploadArchive(_ context.Context, _ archiveTransfer, body io.Reader) error {
+func (f *fakeCrownestClient) UploadArchive(_ context.Context, _ archiveTransfer, body io.Reader, size int64) error {
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return err
 	}
 	f.uploadBytes = len(data)
+	f.uploadSize = size
 	return nil
 }
 

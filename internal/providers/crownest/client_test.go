@@ -42,6 +42,9 @@ func TestClientSandboxWorkspaceRunAndArchiveFlow(t *testing.T) {
 			if r.Header.Get("x-test") != "1" {
 				t.Fatalf("upload header x-test=%q", r.Header.Get("x-test"))
 			}
+			if r.ContentLength != 7 {
+				t.Fatalf("upload Content-Length=%d, want 7", r.ContentLength)
+			}
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/workspace-runs/wsr_123/archive/finalize":
 			writeJSON(w, map[string]any{"workspaceRun": map[string]any{"id": "wsr_123", "status": "archive_uploaded"}})
@@ -74,7 +77,7 @@ func TestClientSandboxWorkspaceRunAndArchiveFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.UploadArchive(context.Background(), transfer, strings.NewReader("archive")); err != nil {
+	if err := client.UploadArchive(context.Background(), transfer, strings.NewReader("archive"), 7); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.FinalizeArchive(context.Background(), run.ID, finalizeArchiveRequest{SHA256: strings.Repeat("a", 64), SizeBytes: 7, UploadID: transfer.ID}, "finalize"); err != nil {
@@ -172,7 +175,7 @@ func TestUploadArchiveRedactsPresignedURLFromTransportError(t *testing.T) {
 	err := client.UploadArchive(context.Background(), archiveTransfer{
 		Method:    http.MethodPut,
 		UploadURL: "https://upload.example.test/archive.tgz?" + signedQuery,
-	}, strings.NewReader("archive"))
+	}, strings.NewReader("archive"), 7)
 	if err == nil {
 		t.Fatal("expected upload error")
 	}
