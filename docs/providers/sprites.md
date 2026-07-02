@@ -87,7 +87,10 @@ SPRITES_API_URL
 CRABBOX_SPRITES_WORK_ROOT
 ```
 
-`CRABBOX_SPRITES_API_URL` wins over `SPRITES_API_URL`. The work root must be a
+`CRABBOX_SPRITES_API_URL` wins over `SPRITES_API_URL`. Custom API URLs must use
+HTTPS, except literal loopback hosts may use HTTP. Userinfo, queries, and
+fragments are rejected, and authenticated requests never follow redirects to a
+different scheme, host, or port. The work root must be a
 dedicated absolute path; broad roots such as `/`, `/home`, `/home/sprite`,
 `/tmp`, `/etc`, `/usr`, `/var`, and similar system directories are rejected
 before sync.
