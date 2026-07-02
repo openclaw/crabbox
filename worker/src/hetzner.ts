@@ -20,6 +20,11 @@ interface HetznerSSHKeyResponse {
   ssh_key: HetznerSSHKey;
 }
 
+interface HetznerSSHKeyResolution {
+  key: HetznerSSHKey;
+  created: boolean;
+}
+
 interface HetznerServerResponse {
   server: HetznerServer;
 }
@@ -47,6 +52,7 @@ export class HetznerProvisioningError extends Error {
     readonly resourceMayExist: boolean,
     readonly retryable: boolean,
     readonly serverID?: number,
+    readonly sshKeyCleanupRequired = false,
   ) {
     super(message);
     this.name = "HetznerProvisioningError";
@@ -68,6 +74,10 @@ export function hetznerProvisioningFailureRetryable(error: unknown): boolean {
 export function hetznerProvisioningResourceID(error: unknown): number | undefined {
   const serverID = error instanceof HetznerProvisioningError ? error.serverID : undefined;
   return Number.isSafeInteger(serverID) && (serverID ?? 0) > 0 ? serverID : undefined;
+}
+
+export function hetznerProvisioningSSHKeyCleanupRequired(error: unknown): boolean {
+  return error instanceof HetznerProvisioningError && error.sshKeyCleanupRequired;
 }
 
 export class HetznerClient {
@@ -99,6 +109,10 @@ export class HetznerClient {
   }
 
   async ensureSSHKey(name: string, publicKey: string): Promise<HetznerSSHKey> {
+    return (await this.resolveSSHKey(name, publicKey)).key;
+  }
+
+  private async resolveSSHKey(name: string, publicKey: string): Promise<HetznerSSHKeyResolution> {
     const identity = sshPublicKeyIdentity(publicKey);
     const byName = await this.request<HetznerListSSHKeysResponse>(
       "GET",
@@ -109,13 +123,13 @@ export class HetznerClient {
         if (sshPublicKeyIdentity(key.public_key) !== identity) {
           throw new Error(`hetzner ssh key ${name} exists with different public key`);
         }
-        return key;
+        return { key, created: false };
       }
     }
 
     for (const key of await this.listSSHKeys()) {
       if (sshPublicKeyIdentity(key.public_key) === identity) {
-        return key;
+        return { key, created: false };
       }
     }
 
@@ -128,7 +142,7 @@ export class HetznerClient {
           created_by: "crabbox",
         },
       });
-      return created.ssh_key;
+      return { key: created.ssh_key, created: true };
     } catch (error) {
       if (!String(error).includes("uniqueness_error")) {
         throw error;
@@ -137,7 +151,7 @@ export class HetznerClient {
         (entry) => sshPublicKeyIdentity(entry.public_key) === identity,
       );
       if (key) {
-        return key;
+        return { key, created: false };
       }
       throw error;
     }
@@ -150,8 +164,12 @@ export class HetznerClient {
     );
     const key = byName.ssh_keys.find((entry) => entry.name === name);
     if (key) {
-      await this.request<void>("DELETE", `/ssh_keys/${key.id}`);
+      await this.deleteSSHKeyByID(key.id);
     }
+  }
+
+  private async deleteSSHKeyByID(id: number): Promise<void> {
+    await this.request<void>("DELETE", `/ssh_keys/${id}`);
   }
 
   async hourlyPriceUSD(name: string, location: string): Promise<number | undefined> {
@@ -177,14 +195,14 @@ export class HetznerClient {
     owner: string,
   ): Promise<{ server: HetznerServer; serverType: string }> {
     const requireRunning = config.providerKey.startsWith(workspaceProviderKeyPrefix);
-    let key: HetznerSSHKey;
+    let keyResolution: HetznerSSHKeyResolution;
     try {
-      key = await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
+      keyResolution = await this.resolveSSHKey(config.providerKey, config.sshPublicKey);
     } catch (error) {
       const message = errorText(error);
       throw new HetznerProvisioningError(message, false, transientHetznerError(message));
     }
-    const resolvedConfig = { ...config, providerKey: key.name };
+    const resolvedConfig = { ...config, providerKey: keyResolution.key.name };
     const candidates = prependUnique(
       resolvedConfig.serverType,
       serverTypeCandidatesForClass(resolvedConfig.class),
@@ -215,7 +233,24 @@ export class HetznerClient {
         }
       }
     }
-    throw new HetznerProvisioningError(failures.join("; "), resourceMayExist, retryable, serverID);
+    let sshKeyCleanupRequired = false;
+    if (keyResolution.created && managedLeaseSSHKey(keyResolution.key.name) && !resourceMayExist) {
+      try {
+        await this.deleteSSHKeyByID(keyResolution.key.id);
+      } catch (cleanupError) {
+        if (!hetznerResourceNotFound(cleanupError)) {
+          failures.push(`ssh key rollback failed: ${errorText(cleanupError)}`);
+          sshKeyCleanupRequired = true;
+        }
+      }
+    }
+    throw new HetznerProvisioningError(
+      failures.join("; "),
+      resourceMayExist,
+      retryable,
+      serverID,
+      sshKeyCleanupRequired,
+    );
   }
 
   async getServer(id: number): Promise<HetznerServer> {
@@ -374,6 +409,11 @@ export function isRetryableProvisioningError(message: string): boolean {
 
 function prependUnique(first: string, rest: string[]): string[] {
   return [first, ...rest.filter((value) => value !== first)];
+}
+
+function managedLeaseSSHKey(name: string): boolean {
+  // Caller-named keys remain user-managed even when Crabbox had to create them.
+  return /^crabbox-cbx-[a-f0-9]{12}$/.test(name);
 }
 
 function eurToUSD(env: Env): number {

@@ -50,6 +50,7 @@ import {
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
   hetznerProvisioningResourceID,
+  hetznerProvisioningSSHKeyCleanupRequired,
   sshPublicKeyIdentity,
 } from "./hetzner";
 import { bearerToken, errorMessage, json, pathParts, readJson, requestOwner } from "./http";
@@ -2240,9 +2241,15 @@ export class FleetCoordinator {
             config.provider === "hetzner" && !workspaceID
               ? hetznerProvisioningResourceID(error)
               : undefined;
-          if (hetznerServerID !== undefined) {
-            record.cloudID = String(hetznerServerID);
-            record.serverID = hetznerServerID;
+          const hetznerSSHKeyCleanupRequired =
+            config.provider === "hetzner" &&
+            !workspaceID &&
+            hetznerProvisioningSSHKeyCleanupRequired(error);
+          if (hetznerServerID !== undefined || hetznerSSHKeyCleanupRequired) {
+            if (hetznerServerID !== undefined) {
+              record.cloudID = String(hetznerServerID);
+              record.serverID = hetznerServerID;
+            }
             record.releaseDeletesServer = true;
             record.cleanupRetryAt = new Date(
               Date.parse(failedAt) + leaseCleanupRetryDelayMs,
@@ -11502,7 +11509,7 @@ export class FleetCoordinator {
       const deleteServer = options.deleteServer && !isRegisteredLease(current);
       const shouldDelete = Boolean(
         deleteServer &&
-        current.cloudID &&
+        leaseHasProviderCleanup(current) &&
         (leaseIsLive(current) ||
           current.releaseDeletesServer !== undefined ||
           current.cleanupError),
@@ -11569,6 +11576,7 @@ export class FleetCoordinator {
         return current ?? preparation.lease;
       }
       const released = finalizedReleasedLease(current, true, options.keep);
+      delete released.releaseDeletesServer;
       await this.putLease(released);
       await this.clearWorkspaceReleaseError(released);
       await this.markAWSIngressReconcilePending(released);
@@ -14851,7 +14859,16 @@ function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
     return true;
   }
   return Boolean(
-    !leaseIsLive(lease) && lease.cloudID && (lease.cleanupError || lease.cleanupStartedAt),
+    !leaseIsLive(lease) &&
+    leaseHasProviderCleanup(lease) &&
+    (lease.cleanupError || lease.cleanupStartedAt),
+  );
+}
+
+function leaseHasProviderCleanup(lease: LeaseRecord): boolean {
+  // Hetzner reuses this marker for key-only cleanup; other providers require a cloud resource ID.
+  return Boolean(
+    lease.cloudID || (lease.provider === "hetzner" && lease.releaseDeletesServer === true),
   );
 }
 
@@ -15717,11 +15734,13 @@ export class HetznerProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    try {
-      await this.deleteServer(String(lease.serverID));
-    } catch (error) {
-      if (!providerResourceNotFound(error)) {
-        throw error;
+    if (Number.isSafeInteger(lease.serverID) && (lease.serverID ?? 0) > 0) {
+      try {
+        await this.deleteServer(String(lease.serverID));
+      } catch (error) {
+        if (!providerResourceNotFound(error)) {
+          throw error;
+        }
       }
     }
     if (
