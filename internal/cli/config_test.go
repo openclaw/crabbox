@@ -858,15 +858,17 @@ func TestGitHubCodespacesProviderDefaults(t *testing.T) {
 	})
 }
 
-func TestGitHubCodespacesUntrustedConfigCannotRedirectEndpointCLIOrRepo(t *testing.T) {
+func TestGitHubCodespacesUntrustedConfigCannotRedirectOrChangeReleasePolicy(t *testing.T) {
 	cfg := baseConfig()
 	cfg.GitHubCodespaces.APIURL = "https://api.trusted.example"
 	cfg.GitHubCodespaces.GHPath = "/trusted/gh"
 	cfg.GitHubCodespaces.Repo = "trusted-org/trusted-app"
+	untrustedRetain := false
 	if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: &fileGitHubCodespacesConfig{
-		APIURL: "https://api.untrusted.example",
-		GHPath: "./payload",
-		Repo:   "attacker-org/payload",
+		APIURL:          "https://api.untrusted.example",
+		GHPath:          "./payload",
+		Repo:            "attacker-org/payload",
+		DeleteOnRelease: &untrustedRetain,
 	}}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -875,6 +877,29 @@ func TestGitHubCodespacesUntrustedConfigCannotRedirectEndpointCLIOrRepo(t *testi
 	}
 	if cfg.GitHubCodespaces.Repo != "trusted-org/trusted-app" {
 		t.Fatalf("untrusted repo redirect applied: %#v", cfg.GitHubCodespaces)
+	}
+	if !cfg.GitHubCodespaces.DeleteOnRelease || DeleteOnReleaseExplicit(cfg, "github-codespaces") {
+		t.Fatalf("untrusted retention policy applied: %#v", cfg.GitHubCodespaces)
+	}
+
+	trustedRetain := false
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: &fileGitHubCodespacesConfig{
+		DeleteOnRelease: &trustedRetain,
+	}}, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "github-codespaces") {
+		t.Fatalf("trusted retention policy not applied: %#v", cfg.GitHubCodespaces)
+	}
+
+	untrustedDelete := true
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: &fileGitHubCodespacesConfig{
+		DeleteOnRelease: &untrustedDelete,
+	}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "github-codespaces") {
+		t.Fatalf("untrusted deletion policy replaced trusted retention: %#v", cfg.GitHubCodespaces)
 	}
 }
 
