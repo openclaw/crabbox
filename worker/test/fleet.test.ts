@@ -9858,6 +9858,80 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it.each([
+    { provider: "aws" as const, providerKey: "crabbox-cbx-abcdef123456", cleanupOwned: true },
+    {
+      provider: "hetzner" as const,
+      providerKey: "crabbox-cbx-abcdef123456",
+      cleanupOwned: true,
+    },
+    { provider: "hetzner" as const, providerKey: "shared-existing-key", cleanupOwned: false },
+  ])(
+    "preserves $provider provider-key ownership during provisioning cancellation cleanup",
+    async ({ provider, providerKey, cleanupOwned }) => {
+      const storage = new MemoryStorage();
+      const released: LeaseRecord[] = [];
+      let createStarted!: () => void;
+      let finishCreate!: () => void;
+      const createStartedPromise = new Promise<void>((resolve) => {
+        createStarted = resolve;
+      });
+      const finishCreatePromise = new Promise<void>((resolve) => {
+        finishCreate = resolve;
+      });
+      const fleet = testFleet(storage, {
+        [provider]: fakeProvider(
+          async () => {
+            createStarted();
+            await finishCreatePromise;
+          },
+          {
+            provider,
+            providerKey,
+            onReleaseLease: (lease) => {
+              released.push(structuredClone(lease));
+            },
+          },
+        ),
+      });
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      const createPromise = fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider,
+            ...(provider === "aws" ? { awsUseStockImage: true } : {}),
+            ttlSeconds: 1200,
+            sshPublicKey: "ssh-ed25519 cancellation-test",
+          },
+        }),
+      );
+
+      await createStartedPromise;
+      const release = await fleet.fetch(
+        request("POST", "/v1/leases/cbx_abcdef123456/release", {
+          headers,
+          body: { delete: true },
+        }),
+      );
+      expect(release.status).toBe(200);
+
+      finishCreate();
+      expect((await createPromise).status).toBe(409);
+      expect(released).toHaveLength(1);
+      expect(released[0]).toMatchObject({
+        id: "cbx_abcdef123456",
+        provider,
+        providerKey,
+        providerKeyCleanupOwned: cleanupOwned,
+      });
+    },
+  );
+
   it("rejects a no-delete release after provisioning cleanup has started", async () => {
     const storage = new MemoryStorage();
     let createStarted!: () => void;
@@ -19614,6 +19688,7 @@ function fakeProvider(
     serverType?: string;
     hostID?: string;
     cloudID?: string;
+    providerKey?: string;
     region?: string;
     imageRegion?: string;
     market?: string;
@@ -19687,6 +19762,7 @@ function fakeProvider(
           lease: LeaseRecord;
         }
       | undefined;
+    onReleaseLease?: (lease: LeaseRecord) => Promise<void> | void;
     onRecoverServer?: (
       lease: LeaseRecord,
     ) => Promise<ProviderMachine | undefined> | ProviderMachine | undefined;
@@ -19826,6 +19902,7 @@ function fakeProvider(
           provider: result.provider ?? "hetzner",
           id: 123,
           cloudID: result.cloudID ?? "123",
+          ...(result.providerKey ? { providerKey: result.providerKey } : {}),
           name: `crabbox-${slug}`,
           status: "running",
           serverType: result.serverType ?? "cpx62",
@@ -19850,6 +19927,7 @@ function fakeProvider(
       await onDelete?.(id);
     },
     async releaseLease(lease: LeaseRecord) {
+      await result.onReleaseLease?.(lease);
       await onDelete?.(
         (lease.provider ?? result.provider) === "hetzner" ? String(lease.serverID) : lease.cloudID,
       );

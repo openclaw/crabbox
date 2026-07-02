@@ -14934,6 +14934,10 @@ function provisionedLeaseRecord(
   serverType: string,
 ): LeaseRecord {
   const providerProject = lease.providerProject ?? providerProjectForConfig(config);
+  const providerKey = server.providerKey?.trim() || config.providerKey;
+  const providerKeyCleanupOwned =
+    (config.provider === "aws" || config.provider === "hetzner") &&
+    providerKey === providerKeyForLease(lease.id);
   return {
     ...lease,
     state: "active",
@@ -14941,6 +14945,8 @@ function provisionedLeaseRecord(
     serverID: server.id,
     serverName: server.name,
     serverType,
+    providerKey,
+    providerKeyCleanupOwned,
     host: server.host,
     region: server.region ?? lease.region ?? providerRegionForConfig(config) ?? "",
     ...(providerProject ? { providerProject } : {}),
