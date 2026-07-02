@@ -667,6 +667,7 @@ func nativeCheckpointForkRecord(record checkpointRecord) NativeCheckpointForkRec
 		HostID:      record.HostID,
 		TargetOS:    record.TargetOS,
 		WindowsMode: record.WindowsMode,
+		Desktop:     record.Desktop,
 		ServerType:  record.ServerType,
 		Metadata:    record.Native.Metadata,
 	}
@@ -695,6 +696,10 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 	}
 	if record.WindowsMode != "" {
 		cfg.WindowsMode = record.WindowsMode
+	}
+	if record.Desktop {
+		// Desktop snapshots must rotate VNC credentials even when the fork omits --desktop.
+		cfg.Desktop = true
 	}
 	provider, err := ProviderFor(cfg.Provider)
 	if err != nil {

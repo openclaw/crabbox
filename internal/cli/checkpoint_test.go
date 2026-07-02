@@ -601,6 +601,27 @@ func TestNewCheckpointRecordStoresHostPinAndServerType(t *testing.T) {
 	}
 }
 
+func TestNewCheckpointRecordStoresDesktopCapabilityFromLease(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "azure"
+	cfg.TargetOS = targetWindows
+	record, _, err := newCheckpointRecord(
+		Repo{Name: "my-app"},
+		cfg,
+		Server{Provider: "azure", Labels: map[string]string{"desktop": "true"}},
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		"cbx_123",
+		`C:\crabbox\cbx_123\my-app`,
+		"desktop checkpoint",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Desktop {
+		t.Fatal("Desktop=false, want source lease desktop capability persisted")
+	}
+}
+
 func TestDefaultCheckpointRestoreWorkdirUsesTargetLease(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.WorkRoot = "/work"
@@ -760,12 +781,12 @@ func TestCheckpointDockerCommitUsesImageStrategy(t *testing.T) {
 
 func TestNativeCheckpointForkRecordCarriesNameAndMetadata(t *testing.T) {
 	metadata := map[string]string{"runtime": "docker"}
-	record := checkpointRecord{Kind: checkpointKindDockerCommit}
+	record := checkpointRecord{Kind: checkpointKindDockerCommit, Desktop: true}
 	record.Native.ImageID = "sha256:123"
 	record.Native.Name = "crabbox-checkpoint-demo-123"
 	record.Native.Metadata = metadata
 	got := nativeCheckpointForkRecord(record)
-	if got.Name != "crabbox-checkpoint-demo-123" || got.Metadata["runtime"] != "docker" {
+	if got.Name != "crabbox-checkpoint-demo-123" || got.Metadata["runtime"] != "docker" || !got.Desktop {
 		t.Fatalf("fork record=%#v", got)
 	}
 }
@@ -1644,6 +1665,23 @@ func TestApplyNativeCheckpointForkConfigForAzureAndGCP(t *testing.T) {
 				t.Fatal("ServerTypeExplicit=true, want false")
 			}
 		})
+	}
+}
+
+func TestApplyNativeCheckpointForkConfigPreservesDesktopCapability(t *testing.T) {
+	fs := newFlagSet("checkpoint fork", io.Discard)
+	_ = fs.String("type", "", "provider type")
+	cfg := defaultConfig()
+	cfg.Desktop = false
+	record := checkpointRecord{Kind: checkpointKindAzureOS, TargetOS: targetWindows, WindowsMode: windowsModeNormal, Desktop: true}
+	record.Native.ImageID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint-azure"
+	record.Native.Region = "eastus"
+
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Desktop {
+		t.Fatal("Desktop=false, want checkpoint desktop capability preserved for credential rotation")
 	}
 }
 

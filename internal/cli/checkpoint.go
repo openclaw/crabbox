@@ -48,6 +48,7 @@ type checkpointRecord struct {
 	Slug           string `json:"slug,omitempty"`
 	TargetOS       string `json:"targetOS,omitempty"`
 	WindowsMode    string `json:"windowsMode,omitempty"`
+	Desktop        bool   `json:"desktop,omitempty"`
 	ServerType     string `json:"serverType,omitempty"`
 	HostID         string `json:"hostId,omitempty"`
 	Workdir        string `json:"workdir,omitempty"`
@@ -1339,6 +1340,7 @@ func newCheckpointRecord(repo Repo, cfg Config, server Server, target SSHTarget,
 		Slug:           serverSlug(server),
 		TargetOS:       firstNonBlank(target.TargetOS, cfg.TargetOS),
 		WindowsMode:    firstNonBlank(target.WindowsMode, cfg.WindowsMode),
+		Desktop:        cfg.Desktop || labelBool(server.Labels["desktop"]),
 		ServerType:     firstNonBlank(server.ServerType.Name, cfg.ServerType),
 		HostID:         firstNonBlank(server.HostID, cfg.HostID, cfg.AWSMacHostID),
 		Workdir:        workdir,
