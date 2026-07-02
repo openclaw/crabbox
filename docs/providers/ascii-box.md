@@ -89,7 +89,10 @@ CRABBOX_ASCII_BOX_WORKDIR
 3. `crabbox status` resolves the local lease claim or raw Box id and reads Box
    state through `box info --json`.
 4. `crabbox stop` releases the Box with `box stop --json`, removes the Box
-   record with `box delete --json`, and removes the local lease claim.
+   record with `box delete --json`, and removes the local lease claim. If the
+   service temporarily refuses deletion until a recent snapshot exists,
+   Crabbox shortens the Box TTL, waits for its managed stop transition, and
+   retries deletion for up to two minutes.
 
 ## Limitations
 
