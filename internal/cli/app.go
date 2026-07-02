@@ -77,6 +77,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.prewarm(ctx, helpArgs), true
 	case "run":
 		return a.runCommand(ctx, helpArgs), true
+	case "watch":
+		return a.watch(ctx, helpArgs), true
 	case "job":
 		return nil, false
 	case "sync-plan":
@@ -174,6 +176,7 @@ Commands:
   warmup      Lease a box and wait until it is ready
   prewarm     Lease and hydrate a reusable test-ready box
   run         Sync the repo, run a remote command, stream output
+  watch       Re-run a command on a warm lease when local files change
   bench       Record and report local benchmark timings
   job         Run named repo-local Crabbox jobs
   desktop     Launch apps into a visible desktop session

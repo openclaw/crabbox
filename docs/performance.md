@@ -48,6 +48,15 @@ bin/crabbox stop swift-crab
 You can pass the lease slug (for example `swift-crab`) or its canonical id
 (`cbx_…`) to `--id`.
 
+[`crabbox watch`](commands/watch.md) automates this loop: it holds one warm
+lease, re-runs the command on every qualifying local change, and exits after a
+quiet period (`--idle-exit`, capped at the lease idle timeout) so an abandoned
+watcher does not keep a box alive:
+
+```sh
+bin/crabbox watch --id swift-crab -- pnpm test:changed:max
+```
+
 ## Sync size
 
 `crabbox run` syncs a Git-derived manifest: tracked files plus non-ignored
