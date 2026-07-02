@@ -50,6 +50,7 @@ import {
   HetznerProvisioningError,
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
+  hetznerProvisioningResourceID,
 } from "./hetzner";
 import { bearerToken, errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import {
@@ -2278,12 +2279,27 @@ export class FleetCoordinator {
             config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
           record.provisioningFailureRetryable =
             config.provider === "hetzner" && hetznerProvisioningFailureRetryable(error);
+          const failedHetznerServerID =
+            config.provider === "hetzner" ? hetznerProvisioningResourceID(error) : undefined;
+          if (failedHetznerServerID !== undefined && !record.workspaceID) {
+            record.cloudID = String(failedHetznerServerID);
+            record.serverID = failedHetznerServerID;
+            record.releaseDeletesServer = true;
+          }
           if (
             error instanceof HetznerProvisioningError &&
             error.providerKeyCleanupID !== undefined
           ) {
             record.providerKeyCleanupPending = true;
             record.providerKeyCleanupID = String(error.providerKeyCleanupID);
+          }
+          if (
+            (failedHetznerServerID !== undefined && !record.workspaceID) ||
+            record.providerKeyCleanupPending
+          ) {
+            record.cleanupRetryAt = new Date(
+              Date.parse(failedAt) + leaseCleanupRetryDelayMs,
+            ).toISOString();
           }
           if (record.provisioningResourceMayExist || record.provisioningFailureRetryable) {
             delete record.failureError;
@@ -15809,9 +15825,10 @@ export class HetznerProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    if (!lease.providerKeyCleanupPending) {
+    const serverID = Number(lease.serverID);
+    if (Number.isSafeInteger(serverID) && serverID > 0) {
       try {
-        await this.deleteServer(String(lease.serverID));
+        await this.deleteServer(String(serverID));
       } catch (error) {
         if (!providerResourceNotFound(error)) {
           throw error;

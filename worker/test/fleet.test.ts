@@ -3417,7 +3417,13 @@ describe("fleet lease identity and idle", () => {
           async () => {
             providerCreates += 1;
             if (providerCreates === 1) {
-              throw new HetznerProvisioningError("cleanup ssh key 7: http 503", false, true, 7);
+              throw new HetznerProvisioningError(
+                "cleanup ssh key 7: http 503",
+                false,
+                true,
+                undefined,
+                7,
+              );
             }
           },
           {
@@ -3461,7 +3467,16 @@ describe("fleet lease identity and idle", () => {
     });
     expect(cleanupLeases).toHaveLength(0);
     expect(providerCreates).toBe(1);
+    expect(Date.parse(failedLease.cleanupRetryAt ?? "")).toBeGreaterThan(Date.now());
+    expect(storage.alarm()).toBe(Date.parse(failedLease.cleanupRetryAt!));
 
+    await fleet.alarm();
+
+    expect(cleanupLeases).toHaveLength(0);
+    storage.seed(`lease:${failedLease.id}`, {
+      ...failedLease,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
     await fleet.alarm();
 
     expect(cleanupLeases).toHaveLength(1);
@@ -3475,6 +3490,10 @@ describe("fleet lease identity and idle", () => {
       cleanupError: "temporary cleanup failure",
     });
     expect(storage.alarm()).toBe(Date.parse(cleanupFailedLease.cleanupRetryAt!));
+
+    await fleet.alarm();
+
+    expect(cleanupLeases).toHaveLength(1);
     storage.seed(`lease:${failedLease.id}`, {
       ...cleanupFailedLease,
       cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
@@ -3537,6 +3556,8 @@ describe("fleet lease identity and idle", () => {
 
     expect(error).toBeInstanceOf(HetznerProvisioningError);
     expect((error as HetznerProvisioningError).resourceMayExist).toBe(true);
+    expect((error as HetznerProvisioningError).serverID).toBe(123);
+    expect((error as HetznerProvisioningError).providerKeyCleanupID).toBe(7);
     expect(error).toHaveProperty("message", expect.stringContaining("cleanup server 123"));
     expect(requests.filter((entry) => entry.method === "DELETE")).toEqual([
       { method: "DELETE", path: "/v1/servers/123" },
@@ -3908,6 +3929,52 @@ describe("fleet lease identity and idle", () => {
     });
 
     await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
+  });
+
+  it("deletes a persisted Hetzner server before its retained SSH key", async () => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        return new Response(null, { status: 204 });
+      }),
+    );
+    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+    const lease = testLease({
+      provider: "hetzner",
+      serverID: 123,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+
+    await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
+
+    expect(requests).toEqual(["DELETE /v1/servers/123", "DELETE /v1/ssh_keys/7"]);
+  });
+
+  it("retains a Hetzner SSH key when persisted server cleanup fails", async () => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        return jsonResponse({ error: { code: "server_error" } }, 503);
+      }),
+    );
+    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+    const lease = testLease({
+      provider: "hetzner",
+      serverID: 123,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+
+    await expect(provider.releaseLease(lease)).rejects.toThrow("http 503");
+
+    expect(requests).toEqual(["DELETE /v1/servers/123"]);
   });
 
   it("records a shared Hetzner key's actual name so cleanup retains it", async () => {
@@ -6370,6 +6437,97 @@ describe("fleet lease identity and idle", () => {
       state: "failed",
       region: "us-central1-b",
     });
+  });
+
+  it("backs off durable Hetzner server and SSH key cleanup after rollback failure", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const cleanupLeases: LeaseRecord[] = [];
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(
+        async () => {
+          throw new HetznerProvisioningError(
+            "IP wait failed; cleanup server 123: http 503",
+            true,
+            true,
+            123,
+            7,
+          );
+        },
+        {
+          provider: "hetzner",
+          onReleaseLease(lease) {
+            cleanupLeases.push(structuredClone(lease));
+            if (cleanupLeases.length === 1) {
+              throw new Error("temporary cleanup failure");
+            }
+          },
+        },
+      ),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "hetzner",
+          target: "linux",
+          sshPublicKey: "ssh-ed25519 rollback-test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const failedLease = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(failedLease).toMatchObject({
+      state: "failed",
+      cloudID: "123",
+      serverID: 123,
+      releaseDeletesServer: true,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+    expect(Date.parse(failedLease.cleanupRetryAt ?? "")).toBeGreaterThan(Date.now());
+    expect(storage.alarm()).toBe(Date.parse(failedLease.cleanupRetryAt!));
+
+    await fleet.alarm();
+    expect(cleanupLeases).toHaveLength(0);
+
+    storage.seed(`lease:${leaseID}`, {
+      ...failedLease,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await fleet.alarm();
+
+    expect(cleanupLeases).toHaveLength(1);
+    expect(cleanupLeases[0]).toMatchObject({
+      serverID: 123,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+    const retryLease = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(retryLease).toMatchObject({
+      cleanupAttempts: 1,
+      cleanupError: "temporary cleanup failure",
+      providerKeyCleanupPending: true,
+    });
+    expect(Date.parse(retryLease.cleanupRetryAt ?? "")).toBeGreaterThan(Date.now());
+    expect(storage.alarm()).toBe(Date.parse(retryLease.cleanupRetryAt!));
+
+    await fleet.alarm();
+    expect(cleanupLeases).toHaveLength(1);
+
+    storage.seed(`lease:${leaseID}`, {
+      ...retryLease,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await fleet.alarm();
+
+    expect(cleanupLeases).toHaveLength(2);
+    const cleanedLease = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(cleanedLease.cleanupRetryAt).toBeUndefined();
+    expect(cleanedLease.providerKeyCleanupPending).toBeUndefined();
+    expect(cleanedLease.providerKeyCleanupID).toBeUndefined();
   });
 
   it("fails deterministic workspace provisioning errors without waiting for the lease TTL", async () => {

@@ -58,6 +58,7 @@ export class HetznerProvisioningError extends Error {
     message: string,
     readonly resourceMayExist: boolean,
     readonly retryable: boolean,
+    readonly serverID?: number,
     readonly providerKeyCleanupID?: number,
   ) {
     super(message);
@@ -77,6 +78,15 @@ export function hetznerProvisioningFailureRetryable(error: unknown): boolean {
     return error.retryable;
   }
   return errorText(error).includes("timed out waiting for server IP");
+}
+
+export function hetznerProvisioningResourceID(error: unknown): number | undefined {
+  if (!(error instanceof HetznerProvisioningError)) {
+    return undefined;
+  }
+  return Number.isSafeInteger(error.serverID) && (error.serverID ?? 0) > 0
+    ? error.serverID
+    : undefined;
 }
 
 export class HetznerClient {
@@ -246,6 +256,7 @@ export class HetznerClient {
     const failures: string[] = [];
     let resourceMayExist = false;
     let retryable = false;
+    let serverID: number | undefined;
     let providerKeyCleanupID: number | undefined;
     for (const serverType of candidates) {
       try {
@@ -263,23 +274,29 @@ export class HetznerClient {
         failures.push(`${serverType}: ${message}`);
         resourceMayExist = hetznerProvisioningFailureMayHaveResource(error);
         retryable = hetznerProvisioningFailureRetryable(error);
+        serverID = hetznerProvisioningResourceID(error);
         if (resourceMayExist || !(retryable || isRetryableProvisioningError(message))) {
           break;
         }
       }
     }
-    if (providerKeyCleanupOwned && !resourceMayExist) {
-      try {
-        await this.deleteSSHKeyByID(ensuredKey.key.id);
-      } catch (error) {
-        failures.push(`cleanup ssh key ${ensuredKey.key.id}: ${errorText(error)}`);
+    if (providerKeyCleanupOwned) {
+      if (resourceMayExist && serverID !== undefined) {
         providerKeyCleanupID = ensuredKey.key.id;
+      } else if (!resourceMayExist) {
+        try {
+          await this.deleteSSHKeyByID(ensuredKey.key.id);
+        } catch (error) {
+          failures.push(`cleanup ssh key ${ensuredKey.key.id}: ${errorText(error)}`);
+          providerKeyCleanupID = ensuredKey.key.id;
+        }
       }
     }
     throw new HetznerProvisioningError(
       failures.join("; "),
       resourceMayExist,
       retryable,
+      serverID,
       providerKeyCleanupID,
     );
   }
@@ -372,6 +389,7 @@ export class HetznerClient {
             `${message}; cleanup server ${response.server.id}: ${errorText(cleanupError)}`,
             true,
             true,
+            response.server.id,
           );
         }
       }
