@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,11 +25,12 @@ type api interface {
 }
 
 type client struct {
-	apiKey  string
-	apiURL  string
-	cliPath string
-	home    string
-	runner  CommandRunner
+	apiKey              string
+	apiURL              string
+	cliPath             string
+	home                string
+	runner              CommandRunner
+	releasePollInterval time.Duration
 }
 
 type createRequest struct {
@@ -58,6 +61,10 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=%s requires ASCII_BOX_API_KEY", providerName)
 	}
+	apiURL, err := validateAsciiBoxBaseURL(blank(strings.TrimSpace(cfg.AsciiBox.BaseURL), "https://ascii.dev"))
+	if err != nil {
+		return nil, err
+	}
 	if rt.Exec == nil {
 		return nil, exit(2, "provider=%s requires a local command runner", providerName)
 	}
@@ -65,8 +72,56 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	if cliPath == "" {
 		cliPath = "box"
 	}
-	apiURL := strings.TrimRight(blank(strings.TrimSpace(cfg.AsciiBox.BaseURL), "https://ascii.dev"), "/")
 	return &client{apiKey: apiKey, apiURL: apiURL, cliPath: cliPath, home: asciiBoxCLIHome(), runner: rt.Exec}, nil
+}
+
+func validateAsciiBoxBaseURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+		return "", exit(2, "provider=%s API base URL must be an absolute HTTP(S) URL", providerName)
+	}
+	if parsed.User != nil {
+		return "", exit(2, "provider=%s API base URL must not contain userinfo", providerName)
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", exit(2, "provider=%s API base URL must not contain a query", providerName)
+	}
+	if parsed.Fragment != "" {
+		return "", exit(2, "provider=%s API base URL must not contain a fragment", providerName)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	hostname := canonicalAsciiBoxHostname(parsed.Hostname())
+	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !isAsciiBoxLoopbackHost(hostname)) {
+		return "", exit(2, "provider=%s API base URL must use HTTPS except for loopback HTTP", providerName)
+	}
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	parsed.Host = hostname
+	if strings.Contains(hostname, ":") {
+		parsed.Host = "[" + hostname + "]"
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(hostname, port)
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func canonicalAsciiBoxHostname(hostname string) string {
+	hostname = strings.ToLower(hostname)
+	if ip := net.ParseIP(strings.TrimSuffix(hostname, ".")); ip != nil {
+		return ip.String()
+	}
+	return hostname
+}
+
+func isAsciiBoxLoopbackHost(hostname string) bool {
+	if hostname == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, error) {
@@ -136,15 +191,143 @@ func (c *client) ListBoxes(ctx context.Context) ([]boxData, error) {
 }
 
 func (c *client) ReleaseBox(ctx context.Context, id string) error {
-	stopResult, stopErr := c.run(ctx, "stop", id)
-	deleteResult, deleteErr := c.run(ctx, "delete", id)
-	if deleteErr != nil {
-		if stopErr != nil {
-			return fmt.Errorf("ascii-box CLI release failed: stop: %s; delete: %s", c.formatError(stopResult, stopErr), c.formatError(deleteResult, deleteErr))
+	if err := c.ensureConfig(ctx); err != nil {
+		return fmt.Errorf("prepare ascii-box CLI release: %w", err)
+	}
+	stopResult, stopErr := c.runPrepared(ctx, "stop", id)
+	deleteResult, deleteErr := c.runPrepared(ctx, "delete", id)
+	if deleteErr == nil {
+		return nil
+	}
+	if !c.snapshotGuardConflict(deleteResult, deleteErr) {
+		return c.releaseError(stopResult, stopErr, deleteResult, deleteErr, "")
+	}
+	return c.releaseAfterSnapshotGuard(ctx, id, stopResult, stopErr, deleteResult, deleteErr)
+}
+
+func (c *client) releaseAfterSnapshotGuard(
+	ctx context.Context,
+	id string,
+	stopResult LocalCommandResult,
+	stopErr error,
+	deleteResult LocalCommandResult,
+	deleteErr error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return c.releaseError(
+			stopResult,
+			stopErr,
+			deleteResult,
+			deleteErr,
+			"snapshot recovery: "+err.Error(),
+		)
+	}
+	recoveryCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	extendResult, extendErr := c.runPrepared(recoveryCtx, "extend", id, "--ttl", "1")
+	if extendErr != nil {
+		return c.releaseError(
+			stopResult,
+			stopErr,
+			deleteResult,
+			deleteErr,
+			"snapshot recovery extend: "+c.formatError(extendResult, extendErr),
+		)
+	}
+
+	pollInterval := c.releasePollInterval
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-recoveryCtx.Done():
+			return c.releaseError(
+				stopResult,
+				stopErr,
+				deleteResult,
+				deleteErr,
+				"snapshot recovery: "+recoveryCtx.Err().Error(),
+			)
+		case <-ticker.C:
+			infoResult, infoErr := c.runPrepared(recoveryCtx, "info", id)
+			if infoErr != nil {
+				return c.releaseError(
+					stopResult,
+					stopErr,
+					deleteResult,
+					deleteErr,
+					"snapshot recovery info: "+c.formatError(infoResult, infoErr),
+				)
+			}
+			box, err := decodeBox([]byte(infoResult.Stdout))
+			if err != nil {
+				return c.releaseError(
+					stopResult,
+					stopErr,
+					deleteResult,
+					deleteErr,
+					"snapshot recovery info: "+err.Error(),
+				)
+			}
+			if !boxReadyForDelete(box) {
+				continue
+			}
+			retryResult, retryErr := c.runPrepared(recoveryCtx, "delete", id)
+			if retryErr == nil {
+				return nil
+			}
+			if c.snapshotGuardConflict(retryResult, retryErr) {
+				continue
+			}
+			return c.releaseError(
+				stopResult,
+				stopErr,
+				deleteResult,
+				deleteErr,
+				"snapshot recovery delete: "+c.formatError(retryResult, retryErr),
+			)
 		}
+	}
+}
+
+func boxReadyForDelete(box boxData) bool {
+	switch boxState(box) {
+	case "stopping", "stopped", "terminated", "deleted", "archived":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *client) snapshotGuardConflict(result LocalCommandResult, err error) bool {
+	message := strings.ToLower(c.formatError(result, err))
+	return strings.Contains(message, "no successful snapshot") &&
+		strings.Contains(message, "last 30 minutes")
+}
+
+func (c *client) releaseError(
+	stopResult LocalCommandResult,
+	stopErr error,
+	deleteResult LocalCommandResult,
+	deleteErr error,
+	recovery string,
+) error {
+	if stopErr == nil && recovery == "" {
 		return fmt.Errorf("ascii-box CLI delete failed: %s", c.formatError(deleteResult, deleteErr))
 	}
-	return nil
+	parts := make([]string, 0, 3)
+	if stopErr != nil {
+		parts = append(parts, "stop: "+c.formatError(stopResult, stopErr))
+	}
+	parts = append(parts, "delete: "+c.formatError(deleteResult, deleteErr))
+	if recovery != "" {
+		parts = append(parts, recovery)
+	}
+	return fmt.Errorf("ascii-box CLI release failed: %s", strings.Join(parts, "; "))
 }
 
 func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, error) {
@@ -155,6 +338,14 @@ func (c *client) runWithEnv(ctx context.Context, env []string, args ...string) (
 	if err := c.ensureConfig(ctx); err != nil {
 		return LocalCommandResult{}, err
 	}
+	return c.runPreparedWithEnv(ctx, env, args...)
+}
+
+func (c *client) runPrepared(ctx context.Context, args ...string) (LocalCommandResult, error) {
+	return c.runPreparedWithEnv(ctx, c.env(), args...)
+}
+
+func (c *client) runPreparedWithEnv(ctx context.Context, env []string, args ...string) (LocalCommandResult, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cliTimeout(args))
@@ -179,7 +370,7 @@ func cliTimeout(args []string) time.Duration {
 	switch args[0] {
 	case "new":
 		return 5 * time.Minute
-	case "ssh", "delete", "stop":
+	case "ssh", "delete", "stop", "extend":
 		return 2 * time.Minute
 	default:
 		return 30 * time.Second
@@ -194,21 +385,23 @@ func (c *client) ensureConfig(ctx context.Context) error {
 	}
 	result, err := c.runner.Run(ctx, LocalCommandRequest{
 		Name: c.cliPath,
-		Args: []string{"--no-update", "--json", "config"},
+		Args: []string{"--no-update", "--json", "--api-url", c.apiURL, "status"},
 		Env:  c.env(),
 	})
 	if err != nil {
-		return fmt.Errorf("ascii-box CLI config failed: %s", c.formatError(result, err))
+		return fmt.Errorf("ascii-box CLI status failed: %s", c.formatError(result, err))
 	}
 	var cfg struct {
-		Path string `json:"path"`
+		Config struct {
+			Path string `json:"path"`
+		} `json:"config"`
 	}
 	if err := json.Unmarshal([]byte(result.Stdout), &cfg); err != nil {
-		return fmt.Errorf("decode ascii-box CLI config: %w", err)
+		return fmt.Errorf("decode ascii-box CLI status: %w", err)
 	}
-	configPath := strings.TrimSpace(cfg.Path)
+	configPath := strings.TrimSpace(cfg.Config.Path)
 	if configPath == "" {
-		return fmt.Errorf("ascii-box CLI config response missing path")
+		return fmt.Errorf("ascii-box CLI status response missing config path")
 	}
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		return err

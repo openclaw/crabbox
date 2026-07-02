@@ -148,7 +148,7 @@ func TestAWSAcquireCleansUpProviderKeyAcrossRegionsOnCreateFailure(t *testing.T)
 
 func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	east := &fakeAWSClient{}
-	west := &fakeAWSClient{servers: []Server{awsTestServer("i-west", "cbx_west", "west", "us-west-2")}}
+	west := &fakeAWSClient{servers: []Server{awsTestServer("i-west", "cbx_fedcba654321", "west", "us-west-2")}}
 	west.servers[0].Labels["provider_key"] = "crabbox-cbx-fedcba654321"
 	oldClient := newAWSClient
 	newAWSClient = func(_ context.Context, cfg Config) (awsClient, error) {
@@ -185,6 +185,137 @@ func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	}
 	if len(west.deletedKeys) != 1 || west.deletedKeys[0] != "crabbox-cbx-fedcba654321" {
 		t.Fatalf("west deleted keys=%v, want provider key", west.deletedKeys)
+	}
+}
+
+func TestAWSResolveRawInstanceRejectsExternalServer(t *testing.T) {
+	external := Server{
+		CloudID:  "i-external",
+		Provider: "aws",
+		Name:     "prod-db",
+		Labels:   map[string]string{},
+	}
+	external.PublicNet.IPv4.IP = "203.0.113.44"
+	fake := &fakeAWSClient{servers: []Server{external}}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-east-1"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "i-external", ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("lease=%#v err=%v, want not Crabbox-managed rejection", lease, err)
+	}
+
+	if err == nil {
+		_ = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease})
+	}
+	if len(fake.deletedInstances) != 0 {
+		t.Fatalf("deleted instances=%v, want no release for external raw instance", fake.deletedInstances)
+	}
+}
+
+func TestIsCrabboxAWSLeaseRequiresCanonicalTags(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]string)
+	}{
+		{name: "crabbox", mutate: func(labels map[string]string) { delete(labels, "crabbox") }},
+		{name: "created by", mutate: func(labels map[string]string) { delete(labels, "created_by") }},
+		{name: "provider", mutate: func(labels map[string]string) { delete(labels, "provider") }},
+		{name: "lease", mutate: func(labels map[string]string) { labels["lease"] = "cbx_not-canonical" }},
+		{name: "slug", mutate: func(labels map[string]string) { labels["slug"] = " " }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := awsTestServer("i-managed", "cbx_123456abcdef", "managed", "us-east-1")
+			test.mutate(server.Labels)
+			if isCrabboxAWSLease(server) {
+				t.Fatalf("labels=%v, want ownership rejection", server.Labels)
+			}
+		})
+	}
+}
+
+func TestAWSResolveRawInstanceRejectsWrongProviderLabel(t *testing.T) {
+	server := awsTestServer("i-wrong-provider", "cbx_123456abcdef", "wrong-provider", "us-east-1")
+	server.Labels["provider"] = "gcp"
+	fake := &fakeAWSClient{servers: []Server{server}}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-east-1"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "i-wrong-provider", ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("err=%v, want wrong-provider rejection", err)
+	}
+}
+
+func TestAWSResolveRawInstanceRejectsMissingProviderLabelForRelease(t *testing.T) {
+	server := awsTestServer("i-managed", "cbx_123456abcdef", "managed", "us-east-1")
+	delete(server.Labels, "provider")
+	fake := &fakeAWSClient{servers: []Server{server}}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-east-1"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "i-managed", ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("err=%v, want missing-provider rejection", err)
+	}
+}
+
+func TestAWSReleaseRejectsForgedOrMismatchedOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mutate  func(*LeaseTarget)
+		message string
+	}{
+		{
+			name: "missing created-by tag",
+			mutate: func(lease *LeaseTarget) {
+				delete(lease.Server.Labels, "created_by")
+			},
+			message: "canonical Crabbox ownership tags",
+		},
+		{
+			name: "mismatched lease tag",
+			mutate: func(lease *LeaseTarget) {
+				lease.LeaseID = "cbx_fedcba654321"
+			},
+			message: "matching canonical Crabbox ownership tags",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeAWSClient{}
+			oldClient := newAWSClient
+			newAWSClient = func(context.Context, Config) (awsClient, error) {
+				return fake, nil
+			}
+			t.Cleanup(func() { newAWSClient = oldClient })
+
+			lease := LeaseTarget{
+				Server:  awsTestServer("i-managed", "cbx_123456abcdef", "managed", "us-east-1"),
+				LeaseID: "cbx_123456abcdef",
+			}
+			test.mutate(&lease)
+			backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-east-1"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease})
+			if err == nil || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("err=%v, want %q", err, test.message)
+			}
+			if len(fake.deletedInstances) != 0 {
+				t.Fatalf("deleted instances=%v, want no destructive call", fake.deletedInstances)
+			}
+		})
 	}
 }
 
@@ -257,11 +388,14 @@ func TestAWSTouchUsesFallbackRegion(t *testing.T) {
 }
 
 func TestAWSCleanupDeletesFallbackRegionServer(t *testing.T) {
-	stale := awsTestServer("i-stale", "cbx_stale", "stale", "us-west-2")
+	stale := awsTestServer("i-stale", "cbx_111111111111", "stale", "us-west-2")
 	stale.Labels["provider_key"] = "crabbox-cbx-111111111111"
 	stale.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	unowned := awsTestServer("i-unowned", "cbx_222222222222", "unowned", "us-west-2")
+	delete(unowned.Labels, "created_by")
+	unowned.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
 	east := &fakeAWSClient{}
-	west := &fakeAWSClient{servers: []Server{stale}}
+	west := &fakeAWSClient{servers: []Server{unowned, stale}}
 	oldClient := newAWSClient
 	newAWSClient = func(_ context.Context, cfg Config) (awsClient, error) {
 		switch cfg.AWSRegion {
@@ -278,9 +412,13 @@ func TestAWSCleanupDeletesFallbackRegionServer(t *testing.T) {
 
 	cfg := Config{Provider: "aws", AWSRegion: "us-east-1"}
 	cfg.Capacity.Regions = []string{"us-east-1", "us-west-2"}
-	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	var stderr strings.Builder
+	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*awsLeaseBackend)
 	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "skip server id=i-unowned") || !strings.Contains(stderr.String(), "canonical Crabbox ownership tags missing") {
+		t.Fatalf("stderr=%q, want unowned skip diagnostic", stderr.String())
 	}
 	if len(east.deletedInstances) != 0 || len(east.deletedKeys) != 0 {
 		t.Fatalf("east cleanup should be untouched: instances=%v keys=%v", east.deletedInstances, east.deletedKeys)
@@ -335,6 +473,7 @@ func awsTestServer(id, leaseID, slug, region string) Server {
 		Name:     slug,
 		Labels: map[string]string{
 			"crabbox":    "true",
+			"created_by": "crabbox",
 			"lease":      leaseID,
 			"slug":       slug,
 			"provider":   "aws",

@@ -260,7 +260,9 @@ repo:
 - `CRABBOX_ARTIFACTS_ACCESS_KEY_ID`, `CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY`,
   and optional `CRABBOX_ARTIFACTS_SESSION_TOKEN` — brokered artifact publishing.
   Scope these to the artifact bucket/prefix and use them only to sign
-  short-lived upload/read URLs.
+  short-lived upload/read URLs. New grants encode the exact authenticated
+  owner/org identity in an opaque versioned namespace; existing object URLs are
+  not rewritten or resolved through a legacy lookup path.
 
 Deployments that previously relied on `CRABBOX_SHARED_TOKEN` as the implicit
 user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
@@ -300,6 +302,21 @@ installer, TightVNC installer, and versioned Ubuntu WSL rootfs to SHA-256
 digests embedded alongside their URLs. Generated PowerShell verifies every
 download before extraction, execution, or WSL import, removes mismatched bytes,
 and fails bootstrap closed. URL and digest updates are reviewed together.
+
+## Managed Linux Browser Trust
+
+Managed Linux browser bootstrap pins Google's active Linux package-signing
+primary fingerprint. The bootstrap imports downloaded key material into an
+isolated temporary GnuPG home, exports only the approved primary key and its
+signing subkeys into a repository-scoped keyring, and binds the Chrome APT
+source to that keyring with `signed-by`. A missing or changed primary key fails
+closed before replacing the prior keyring or repository source; browser setup
+then tries the distro Chromium package without trusting the unexpected key.
+
+Signing-subkey rotations beneath the approved primary key continue without a
+Crabbox update. A Google primary-key rotation requires a reviewed fingerprint
+update against [Google's official Linux repository key page](https://www.google.com/linuxrepositories/)
+and fresh bootstrap proof; there is no fallback to an unpinned key.
 
 ## SSH
 

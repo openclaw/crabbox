@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -52,13 +54,110 @@ func (e *spritesAPIError) Error() string {
 	return e.Status + ": " + e.Body
 }
 
-func newSpritesClient(cfg Config, rt Runtime) spritesAPI {
+func newSpritesClient(cfg Config, rt Runtime) (spritesAPI, error) {
+	apiURL, origin, err := validateSpritesAPIURL(blank(cfg.Sprites.APIURL, "https://api.sprites.dev"))
+	if err != nil {
+		return nil, err
+	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	apiURL := strings.TrimRight(blank(cfg.Sprites.APIURL, "https://api.sprites.dev"), "/")
-	return &spritesClient{token: strings.TrimSpace(cfg.Sprites.Token), apiURL: apiURL, httpClient: httpClient}
+	return &spritesClient{
+		token:      strings.TrimSpace(cfg.Sprites.Token),
+		apiURL:     apiURL,
+		httpClient: secureSpritesHTTPClient(httpClient, origin),
+	}, nil
+}
+
+func validateSpritesAPIURL(raw string) (string, *url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", nil, exit(2, "provider=sprites API URL must be an absolute HTTP(S) URL")
+	}
+	if !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+		return "", nil, exit(2, "provider=sprites API URL must be an absolute HTTP(S) URL")
+	}
+	if parsed.User != nil {
+		return "", nil, exit(2, "provider=sprites API URL must not contain userinfo")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", nil, exit(2, "provider=sprites API URL must not contain a query")
+	}
+	if parsed.Fragment != "" {
+		return "", nil, exit(2, "provider=sprites API URL must not contain a fragment")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	hostname := canonicalSpritesHostname(parsed.Hostname())
+	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !isSpritesLoopbackHost(hostname)) {
+		return "", nil, exit(2, "provider=sprites API URL must use HTTPS except for loopback HTTP")
+	}
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	parsed.Host = hostname
+	if strings.Contains(hostname, ":") {
+		parsed.Host = "[" + hostname + "]"
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(hostname, port)
+	}
+	return strings.TrimRight(parsed.String(), "/"), parsed, nil
+}
+
+func canonicalSpritesHostname(hostname string) string {
+	hostname = strings.ToLower(hostname)
+	if ip := net.ParseIP(strings.TrimSuffix(hostname, ".")); ip != nil {
+		return ip.String()
+	}
+	return hostname
+}
+
+func isSpritesLoopbackHost(hostname string) bool {
+	if hostname == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
+}
+
+func secureSpritesHTTPClient(source *http.Client, origin *url.URL) *http.Client {
+	client := *source
+	checkRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameSpritesOrigin(origin, req.URL) {
+			return fmt.Errorf("sprites redirect changed API origin")
+		}
+		if checkRedirect != nil {
+			return checkRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameSpritesOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		canonicalSpritesHostname(a.Hostname()) == canonicalSpritesHostname(b.Hostname()) &&
+		effectiveSpritesPort(a) == effectiveSpritesPort(b)
+}
+
+func effectiveSpritesPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(value.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(value.Scheme, "http") {
+		return "80"
+	}
+	return ""
 }
 
 func (c *spritesClient) CreateSprite(ctx context.Context, name string, labels []string) (spritesInfo, error) {

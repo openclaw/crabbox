@@ -19,6 +19,7 @@ type DoctorCheck = core.DoctorCheck
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
+type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -91,6 +92,10 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 
 func shellQuote(value string) string {
 	return core.ShellQuote(value)
+}
+
+func cloudflareSandboxCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " --id " + shellQuote(leaseID)
 }
 
 func shellScriptFromArgv(command []string) string {

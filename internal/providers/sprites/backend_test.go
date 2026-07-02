@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -260,6 +262,179 @@ func TestSpritesRejectsUnsafeWorkRootBeforeBackend(t *testing.T) {
 	}
 }
 
+func TestSpritesRejectsUnsafeAPIURLBeforeBackend(t *testing.T) {
+	cfg := Config{Sprites: SpritesConfig{
+		Token:    "test-token",
+		APIURL:   "http://api.sprites.dev",
+		WorkRoot: "/home/sprite/crabbox",
+	}}
+	_, err := NewSpritesBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	if err == nil || !strings.Contains(err.Error(), "must use HTTPS") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestSpritesAPIURLValidation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "canonical https", raw: "HTTPS://API.SPRITES.DEV:443/tenant/", want: "https://api.sprites.dev/tenant"},
+		{name: "escaped path", raw: "https://api.sprites.dev/tenant%2F/", want: "https://api.sprites.dev/tenant%2F"},
+		{name: "localhost", raw: "http://localhost:8080/", want: "http://localhost:8080"},
+		{name: "ipv4 loopback", raw: "http://127.0.0.2:8080/api", want: "http://127.0.0.2:8080/api"},
+		{name: "ipv6 loopback", raw: "http://[::1]:80/", want: "http://[::1]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, _, err := validateSpritesAPIURL(test.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("url=%q want %q", got, test.want)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "public http", raw: "http://api.sprites.dev"},
+		{name: "relative", raw: "/v1/sprites"},
+		{name: "schemeless", raw: "api.sprites.dev"},
+		{name: "missing host", raw: "https:///v1/sprites"},
+		{name: "opaque", raw: "https:api.sprites.dev"},
+		{name: "other scheme", raw: "ftp://api.sprites.dev"},
+		{name: "userinfo", raw: "https://token@api.sprites.dev"},
+		{name: "query", raw: "https://api.sprites.dev?region=us"},
+		{name: "bare query", raw: "https://api.sprites.dev?"},
+		{name: "fragment", raw: "https://api.sprites.dev#fragment"},
+		{name: "malformed port", raw: "https://api.sprites.dev:bad"},
+		{name: "loopback lookalike", raw: "http://localhost.example.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, _, err := validateSpritesAPIURL(test.raw); err == nil {
+				t.Fatalf("expected %q to be rejected", test.raw)
+			}
+		})
+	}
+}
+
+func TestSpritesClientDefaultsAPIURL(t *testing.T) {
+	client, err := newSpritesClient(Config{Sprites: SpritesConfig{Token: "test-token"}}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := client.(*spritesClient).apiURL; got != "https://api.sprites.dev" {
+		t.Fatalf("apiURL=%q", got)
+	}
+}
+
+func TestSpritesClientRejectsCrossOriginRedirect(t *testing.T) {
+	targetRequests := 0
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		targetRequests++
+	}))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/capture", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	client, err := newSpritesClient(
+		Config{Sprites: SpritesConfig{Token: "test-token", APIURL: origin.URL}},
+		Runtime{HTTP: origin.Client()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ListSprites(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "redirect changed API origin") {
+		t.Fatalf("err=%v", err)
+	}
+	if targetRequests != 0 {
+		t.Fatalf("target requests=%d", targetRequests)
+	}
+}
+
+func TestSpritesClientPreservesAuthOnSameOriginRedirect(t *testing.T) {
+	var redirected bool
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sprites" {
+			http.Redirect(w, r, srv.URL+"/redirected", http.StatusTemporaryRedirect)
+			return
+		}
+		redirected = true
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("auth=%q", got)
+		}
+		_ = json.NewEncoder(w).Encode(spritesListResponse{})
+	}))
+	defer srv.Close()
+
+	client, err := newSpritesClient(
+		Config{Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL}},
+		Runtime{HTTP: srv.Client()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ListSprites(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if !redirected {
+		t.Fatal("same-origin redirect was not followed")
+	}
+}
+
+func TestSpritesClientPreservesCustomRedirectPolicy(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	source := srv.Client()
+	source.Timeout = 3 * time.Second
+	source.CheckRedirect = func(*http.Request, []*http.Request) error {
+		called = true
+		return errors.New("custom redirect stop")
+	}
+
+	client, err := newSpritesClient(
+		Config{Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL}},
+		Runtime{HTTP: source},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ListSprites(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "custom redirect stop") {
+		t.Fatalf("err=%v", err)
+	}
+	if !called {
+		t.Fatal("custom redirect policy was not called")
+	}
+	secured := client.(*spritesClient).httpClient
+	if secured == source || secured.Timeout != source.Timeout || secured.Transport != source.Transport {
+		t.Fatal("HTTP client settings were not preserved in a clone")
+	}
+}
+
+func TestSpritesSameOriginUsesEffectiveDefaultPorts(t *testing.T) {
+	a, _ := url.Parse("https://api.sprites.dev/path")
+	b, _ := url.Parse("https://API.SPRITES.DEV:443/other")
+	c, _ := url.Parse("http://api.sprites.dev:443/other")
+	if !sameSpritesOrigin(a, b) {
+		t.Fatal("default HTTPS port should be the same origin")
+	}
+	if sameSpritesOrigin(a, c) {
+		t.Fatal("scheme change should not be the same origin")
+	}
+}
+
 func TestSpritesClientLifecycleRequests(t *testing.T) {
 	var sawCreate bool
 	var sawDelete bool
@@ -295,7 +470,10 @@ func TestSpritesClientLifecycleRequests(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newSpritesClient(Config{Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL}}, Runtime{HTTP: srv.Client()})
+	client, err := newSpritesClient(Config{Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL}}, Runtime{HTTP: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	sprite, err := client.CreateSprite(context.Background(), "crabbox-blue-lobster-12345678", []string{"crabbox"})
 	if err != nil {
 		t.Fatal(err)
@@ -337,8 +515,11 @@ func TestSpritesClientRejectsBadPagination(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			client := newSpritesClient(Config{Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL}}, Runtime{HTTP: srv.Client()})
-			_, err := client.ListSprites(context.Background(), "crabbox-")
+			client, err := newSpritesClient(Config{Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL}}, Runtime{HTTP: srv.Client()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.ListSprites(context.Background(), "crabbox-")
 			if err == nil {
 				t.Fatal("expected pagination error")
 			}

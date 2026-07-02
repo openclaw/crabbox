@@ -364,7 +364,24 @@ describe("cloud-init bootstrap", () => {
     const got = cloudInit({ ...config, browser: true });
     expect(got).toContain("gnupg build-essential python3");
     expect(got).toContain("https://dl.google.com/linux/linux_signing_key.pub");
-    expect(got).toContain("chmod 0644 /etc/apt/trusted.gpg.d/google.asc");
+    expect(got).toContain("EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796");
+    expect(got).toContain('GNUPGHOME="$google_key_home" gpg --batch --import');
+    expect(got).toContain(`awk -F: '$1 == "fpr" { print $10; exit }' || true`);
+    expect(got).toContain("gpg --batch --export EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796");
+    expect(got).toContain(
+      'mv -f "$google_key_tmp/google-linux.gpg" /etc/apt/keyrings/google-linux.gpg',
+    );
+    expect(got).toContain("signed-by=/etc/apt/keyrings/google-linux.gpg");
+    expect(got).toContain('repo_add_once="false"');
+    expect(got).toContain('repo_reenable_on_distupgrade="false"');
+    expect(got).toContain("/etc/apt/sources.list.d/crabbox-google-chrome.list");
+    expect(got).toContain(
+      "rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources",
+    );
+    expect(got).toContain("Google Linux signing key verification failed; trying Chromium fallback");
+    expect(got).not.toContain("/etc/apt/trusted.gpg.d/google.asc");
+    expect(got).not.toContain("> /etc/apt/sources.list.d/google-chrome.list");
+    expect(got).not.toContain("> /etc/apt/sources.list.d/google-chrome.sources");
     expect(got).toContain("https://dl.google.com/linux/chrome/deb/");
     expect(got).toContain("google-chrome-stable");
     expect(got).toContain("apt-cache show chromium");

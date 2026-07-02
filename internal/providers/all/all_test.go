@@ -331,7 +331,7 @@ func TestCloudflareSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("cloudflare-sandbox targets=%#v", spec.Targets)
 	}
-	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup} {
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureRunSession} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("cloudflare-sandbox features=%v missing %s", spec.Features, feature)
 		}
