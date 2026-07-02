@@ -54,6 +54,7 @@ class MemoryRuntime implements CoordinatorRuntime {
   upgradeOptions?: CoordinatorWebSocketUpgradeOptions;
   acceptedTags?: string[];
   acceptedAttachment?: unknown;
+  onAcceptWebSocket?: (attachment: unknown) => void;
   readonly socketCloses: Array<{ code?: number; reason?: string }> = [];
   private readonly attachments = new WeakMap<WebSocket, unknown>();
   private exclusiveTail: Promise<void> = Promise.resolve();
@@ -111,6 +112,7 @@ class MemoryRuntime implements CoordinatorRuntime {
     this.attachments.set(socket, attachment);
     this.acceptedTags = tags;
     this.acceptedAttachment = attachment;
+    this.onAcceptWebSocket?.(attachment);
   }
 
   acceptEphemeralWebSocket(_socket: WebSocket, _handlers: CoordinatorSocketHandlers): void {}
@@ -308,7 +310,7 @@ describe("coordinator runtimes", () => {
     expect(runtime.socketCloses).toContainEqual({ code: 1008, reason: "lease access revoked" });
   });
 
-  it("reauthorizes WebVNC and Code agent tickets before acceptance", async () => {
+  it("reauthorizes WebVNC and Code agent tickets through socket acceptance", async () => {
     const runtime = new MemoryRuntime();
     const coordinator = new FleetCoordinator(runtime, {
       CRABBOX_DEFAULT_ORG: "example-org",
@@ -414,6 +416,70 @@ describe("coordinator runtimes", () => {
     expect((await connect("code", revokedCodeTicket)).status).toBe(401);
     expect(runtime.acceptedAttachment).toBeUndefined();
     expect(runtime.storage.value(`code-ticket:${revokedCodeTicket}`)).toBeUndefined();
+
+    const expectAtomicAcceptance = async (kind: "webvnc" | "code") => {
+      const restored = await coordinator.fetch(
+        new Request("https://coordinator.test/v1/leases/shared-bridges/share", {
+          method: "PUT",
+          headers: { ...ownerHeaders, "content-type": "application/json" },
+          body: JSON.stringify({ users: { "manager@example.com": "manage" } }),
+        }),
+      );
+      expect(restored.status).toBe(200);
+      const ticket = await createTicket(kind);
+      let ticketRead!: () => void;
+      let allowTicketRead!: () => void;
+      const ticketReadStarted = new Promise<void>((resolve) => {
+        ticketRead = resolve;
+      });
+      const ticketReadMayFinish = new Promise<void>((resolve) => {
+        allowTicketRead = resolve;
+      });
+      runtime.storage.beforeGet = async (key) => {
+        if (key === `${kind}-ticket:${ticket}`) {
+          ticketRead();
+          await ticketReadMayFinish;
+        }
+      };
+
+      runtime.acceptedAttachment = undefined;
+      let roleAtAccept: string | undefined;
+      runtime.onAcceptWebSocket = (attachment) => {
+        if ((attachment as { kind?: string }).kind === `${kind}-agent`) {
+          roleAtAccept = runtime.storage.value<LeaseRecord>(`lease:${lease.id}`)?.share?.users?.[
+            "manager@example.com"
+          ];
+        }
+      };
+      const connecting = connect(kind, ticket);
+      await ticketReadStarted;
+      const revoking = coordinator.fetch(
+        new Request("https://coordinator.test/v1/leases/shared-bridges/share", {
+          method: "PUT",
+          headers: { ...ownerHeaders, "content-type": "application/json" },
+          body: JSON.stringify({ users: { "manager@example.com": "use" } }),
+        }),
+      );
+      allowTicketRead();
+
+      expect((await connecting).status).toBe(200);
+      expect((await revoking).status).toBe(200);
+      expect(runtime.acceptedAttachment).toMatchObject({
+        kind: `${kind}-agent`,
+        leaseID: lease.id,
+      });
+      expect(roleAtAccept).toBe("manage");
+      expect(
+        runtime.storage.value<LeaseRecord>(`lease:${lease.id}`)?.share?.users?.[
+          "manager@example.com"
+        ],
+      ).toBe("use");
+      expect(runtime.storage.value(`${kind}-ticket:${ticket}`)).toBeUndefined();
+      runtime.storage.beforeGet = undefined;
+      runtime.onAcceptWebSocket = undefined;
+    };
+    await expectAtomicAcceptance("webvnc");
+    await expectAtomicAcceptance("code");
   });
 
   it("keeps provider-backed portal requests outside the lifecycle queue", () => {
