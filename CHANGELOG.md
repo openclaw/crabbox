@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added configurable Azure snapshot and restored OS-disk storage SKUs, concurrent snapshot-fork prerequisites, and verified parallel resource cleanup. Thanks @fcoury-oai.
 - Added direct Azure Windows managed OS-disk checkpoints and snapshot-backed forks with source restart, fresh SSH/Windows/VNC credentials, and loopback-only desktop access. Thanks @fcoury-oai.
 - Added a foreground, loopback-only `crabbox vnc --native-handoff` contract for native viewers, including one-time workspace grants that relay VNC through the coordinator without exposing its SSH key; credentials and grants use private pipes and tunnel lifetime remains owned by the client process.
 - Enabled desktop-capable runtime-adapter workspaces instead of discarding Crabfleet's requested desktop capability, and report native VNC separately from browser VNC.

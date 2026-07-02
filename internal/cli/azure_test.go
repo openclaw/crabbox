@@ -491,6 +491,73 @@ func TestNormalizeAzureOSDiskMode(t *testing.T) {
 	}
 }
 
+func TestNormalizeAzureSnapshotStorageSKUs(t *testing.T) {
+	t.Parallel()
+	snapshot, err := NormalizeAzureSnapshotSKU(" premium_lrs ")
+	if err != nil || snapshot != "Premium_LRS" {
+		t.Fatalf("snapshot SKU=%q err=%v", snapshot, err)
+	}
+	disk, err := NormalizeAzureDiskSKU("standardssd_lrs")
+	if err != nil || disk != "StandardSSD_LRS" {
+		t.Fatalf("disk SKU=%q err=%v", disk, err)
+	}
+	if _, err := NormalizeAzureSnapshotSKU("UltraSSD_LRS"); err == nil {
+		t.Fatal("expected unsupported snapshot SKU to fail")
+	}
+	if _, err := NormalizeAzureDiskSKU("not-a-sku"); err == nil {
+		t.Fatal("expected unsupported disk SKU to fail")
+	}
+}
+
+func TestAzureSnapshotPrerequisitesRunConcurrently(t *testing.T) {
+	t.Parallel()
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	result := make(chan struct {
+		network string
+		disk    string
+		err     error
+	}, 1)
+	go func() {
+		network, disk, err := runAzureSnapshotPrerequisites(
+			context.Background(),
+			func(context.Context) (string, error) {
+				started <- "network"
+				<-release
+				return "nic-id", nil
+			},
+			func(context.Context) (string, error) {
+				started <- "disk"
+				<-release
+				return "disk-id", nil
+			},
+		)
+		result <- struct {
+			network string
+			disk    string
+			err     error
+		}{network: network, disk: disk, err: err}
+	}()
+
+	seen := map[string]bool{}
+	for range 2 {
+		select {
+		case operation := <-started:
+			seen[operation] = true
+		case <-time.After(time.Second):
+			t.Fatal("snapshot prerequisites did not start concurrently")
+		}
+	}
+	close(release)
+	completed := <-result
+	if completed.err != nil || completed.network != "nic-id" || completed.disk != "disk-id" {
+		t.Fatalf("result=%+v", completed)
+	}
+	if !seen["network"] || !seen["disk"] {
+		t.Fatalf("started=%v", seen)
+	}
+}
+
 func TestAzureUseEphemeralOSDiskModes(t *testing.T) {
 	t.Parallel()
 	client := &AzureClient{}

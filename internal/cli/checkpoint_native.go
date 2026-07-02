@@ -101,7 +101,12 @@ func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req checkpo
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
-	snapshot, err := client.CreateOSDiskSnapshot(ctx, req.Server.CloudID, name)
+	snapshot, err := client.CreateOSDiskSnapshot(
+		ctx,
+		req.Server.CloudID,
+		name,
+		req.Cfg.AzureSnapshotSKU,
+	)
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
