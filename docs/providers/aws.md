@@ -119,6 +119,10 @@ Notes:
 - For brokered AWS, the cloud credentials live in the Worker, not on developer
   machines. See `crabbox config set-broker --provider aws` and the brokered
   IAM policy from `crabbox admin aws-policy`.
+- In brokered mode, explicit `aws.ami`, `aws.securityGroupId`, `aws.subnetId`,
+  and `aws.instanceProfile` selectors require admin-token authentication.
+  Normal broker users receive the coordinator-managed image, network, and
+  instance identity. Direct mode keeps these local configuration overrides.
 
 ## Targets
 

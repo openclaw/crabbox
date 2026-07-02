@@ -1697,6 +1697,24 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    const configProvider = this.provider(
+      config.provider,
+      providerRegionForConfig(config),
+      providerProjectForConfig(config),
+    );
+    if (!workspaceID && !isAdminRequest(request)) {
+      const restrictedFields = configProvider.restrictedLeaseRequestFields?.(input) ?? [];
+      if (restrictedFields.length > 0) {
+        return json(
+          {
+            error: "admin_required",
+            message: `brokered ${config.provider} resource selectors require admin-token auth: ${restrictedFields.join(", ")}`,
+            fields: restrictedFields,
+          },
+          { status: 403 },
+        );
+      }
+    }
     if (!isAdminRequest(request) && hasNativeLeaseSource(config)) {
       return json(
         {
@@ -1757,12 +1775,7 @@ export class FleetCoordinator {
     if (!config.providerKey) {
       config = { ...config, providerKey: providerKeyForLease(leaseID) };
     }
-    config =
-      (await this.provider(
-        config.provider,
-        providerRegionForConfig(config),
-        providerProjectForConfig(config),
-      ).prepareLeaseConfig?.(config)) ?? config;
+    config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
     const readiness = this.providerConfigurationReadiness(
       config.provider,
       providerProjectForConfig(config),
@@ -15542,6 +15555,7 @@ function parseProviderLabelTime(value: string | undefined): number {
 
 interface CloudProvider {
   listCrabboxServers(): Promise<ProviderMachine[]>;
+  restrictedLeaseRequestFields?(input: LeaseRequest): string[];
   recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   findServerByLease?(leaseID: string): Promise<ProviderMachine | undefined>;
   getServer?(id: string): Promise<ProviderMachine>;
@@ -15908,6 +15922,17 @@ class GCPProvider implements CloudProvider {
     return this.clientValue;
   }
 
+  restrictedLeaseRequestFields(input: LeaseRequest): string[] {
+    return [
+      input.gcpProject ? "gcpProject" : "",
+      input.gcpImage ? "gcpImage" : "",
+      input.gcpNetwork ? "gcpNetwork" : "",
+      input.gcpSubnet ? "gcpSubnet" : "",
+      input.gcpTags?.length ? "gcpTags" : "",
+      input.gcpServiceAccount ? "gcpServiceAccount" : "",
+    ].filter(Boolean);
+  }
+
   listCrabboxServers(): Promise<ProviderMachine[]> {
     return this.client.listCrabboxServers();
   }
@@ -16068,6 +16093,15 @@ export class AWSProvider implements CloudProvider {
   private get client(): EC2SpotClient {
     this.clientValue ??= new EC2SpotClient(this.env, this.region);
     return this.clientValue;
+  }
+
+  restrictedLeaseRequestFields(input: LeaseRequest): string[] {
+    return [
+      input.awsAMI ? "awsAMI" : "",
+      input.awsSGID ? "awsSGID" : "",
+      input.awsSubnetID ? "awsSubnetID" : "",
+      input.awsProfile ? "awsProfile" : "",
+    ].filter(Boolean);
   }
 
   listCrabboxServers(): Promise<ProviderMachine[]> {

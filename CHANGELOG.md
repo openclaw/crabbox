@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Restricted brokered AWS and GCP resource selectors to admin-authenticated requests so normal users cannot steer coordinator cloud credentials toward caller-selected networks, images, projects, tags, or instance identities. Thanks @coygeek.
 - Pinned the Windows developer-image Node MSI and Docker Engine archive to reviewed SHA-256 digests before privileged installation, with fail-closed digest requirements for version overrides. Thanks @coygeek.
 - Restored direct and brokered AWS Windows developer-image candidate capture by routing the guarded mint wrapper through native AMI checkpoints while retaining brokered promotion.
 - Prevented direct AWS raw-instance release from reaching deletion unless canonical Crabbox ownership tags match the resolved lease, with a second guard at the destructive provider boundary. Thanks @TurboTheTurtle.

@@ -40,6 +40,7 @@ import type {
   Env,
   ExternalRunnerRecord,
   LeaseRecord,
+  LeaseRequest,
   ProviderFastSnapshotRestore,
   ProviderImage,
   ProviderMachine,
@@ -107,6 +108,27 @@ class HookedMemoryStorage extends MemoryStorage {
     await super.put(key, value);
   }
 }
+
+const restrictedBrokerSelectorCases = [
+  { provider: "aws" as const, field: "awsAMI", value: "ami-000000000001" },
+  { provider: "aws" as const, field: "awsSGID", value: "sg-000000000001" },
+  { provider: "aws" as const, field: "awsSubnetID", value: "subnet-000000000001" },
+  { provider: "aws" as const, field: "awsProfile", value: "crabbox-runner" },
+  { provider: "gcp" as const, field: "gcpProject", value: "other-project" },
+  {
+    provider: "gcp" as const,
+    field: "gcpImage",
+    value: "projects/example/global/images/custom-runner",
+  },
+  { provider: "gcp" as const, field: "gcpNetwork", value: "other-network" },
+  { provider: "gcp" as const, field: "gcpSubnet", value: "other-subnet" },
+  { provider: "gcp" as const, field: "gcpTags", value: ["other-runner"] },
+  {
+    provider: "gcp" as const,
+    field: "gcpServiceAccount",
+    value: "runner@other-project.iam.gserviceaccount.com",
+  },
+];
 
 class FakeWebSocket {
   readyState = WebSocket.OPEN;
@@ -3365,6 +3387,181 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.providerKey).toBe(
       expectedProviderKey,
     );
+  });
+
+  it.each(restrictedBrokerSelectorCases)(
+    "requires admin auth for brokered $provider selector $field",
+    async ({ provider, field, value }) => {
+      const storage = new MemoryStorage();
+      const providerFetch = vi.fn<typeof fetch>();
+      vi.stubGlobal("fetch", providerFetch);
+      const fleet = testFleet(storage);
+
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider,
+            sshPublicKey: "ssh-ed25519 restricted-selector-test",
+            [field]: value,
+          },
+        }),
+      );
+
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        error: "admin_required",
+        fields: [field],
+      });
+      expect(providerFetch).not.toHaveBeenCalled();
+      expect((await storage.list()).size).toBe(0);
+      expect(storage.alarm()).toBeUndefined();
+    },
+  );
+
+  it.each(restrictedBrokerSelectorCases)(
+    "preserves brokered $provider selector $field for admins",
+    async ({ provider, field, value }) => {
+      let preparedConfig: LeaseConfig | undefined;
+      let restrictionChecks = 0;
+      const fleet = testFleet(new MemoryStorage(), {
+        [provider]: fakeProvider(
+          (config) => {
+            preparedConfig = config;
+          },
+          {
+            provider,
+            onRestrictedLeaseRequestFields: () => {
+              restrictionChecks += 1;
+              return [field];
+            },
+          },
+        ),
+      });
+
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: {
+            "x-crabbox-admin": "true",
+            "x-crabbox-owner": "admin@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider,
+            sshPublicKey: "ssh-ed25519 admin-selector-test",
+            [field]: value,
+          },
+        }),
+      );
+
+      expect(response.status).toBe(201);
+      expect(restrictionChecks).toBe(0);
+      expect(preparedConfig?.[field as keyof LeaseConfig]).toEqual(value);
+    },
+  );
+
+  it.each([
+    {
+      provider: "aws" as const,
+      env: {
+        CRABBOX_AWS_AMI: "ami-operator-default",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-operator-default",
+        CRABBOX_AWS_SUBNET_ID: "subnet-operator-default",
+        CRABBOX_AWS_INSTANCE_PROFILE: "operator-default",
+      },
+      body: {},
+    },
+    {
+      provider: "gcp" as const,
+      env: {
+        CRABBOX_GCP_PROJECT: "operator-project",
+        CRABBOX_GCP_IMAGE: "projects/example/global/images/operator-default",
+        CRABBOX_GCP_NETWORK: "operator-network",
+        CRABBOX_GCP_SUBNET: "operator-subnet",
+        CRABBOX_GCP_TAGS: "operator-runner",
+        CRABBOX_GCP_SERVICE_ACCOUNT: "runner@operator-project.iam.gserviceaccount.com",
+      },
+      body: { os: "ubuntu:24.04" },
+    },
+  ])(
+    "does not treat coordinator $provider defaults as caller-supplied selectors",
+    async ({ provider, env, body }) => {
+      const storage = new MemoryStorage();
+      const providerFetch = vi.fn<typeof fetch>();
+      vi.stubGlobal("fetch", providerFetch);
+      const fleet = testFleet(storage, {}, env);
+
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider,
+            sshPublicKey: "ssh-ed25519 operator-default-test",
+            ...body,
+          },
+        }),
+      );
+
+      expect(response.status).toBe(424);
+      await expect(response.json()).resolves.toMatchObject({
+        error: "provider_not_configured",
+        provider,
+      });
+      expect(providerFetch).not.toHaveBeenCalled();
+      expect((await storage.list()).size).toBe(0);
+    },
+  );
+
+  it("skips broker selector restrictions for internal workspace provisioning", async () => {
+    let created = false;
+    let restrictionChecks = 0;
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {
+        aws: fakeProvider(
+          () => {
+            created = true;
+          },
+          {
+            provider: "aws",
+            onRestrictedLeaseRequestFields: () => {
+              restrictionChecks += 1;
+              return ["awsAMI"];
+            },
+          },
+        ),
+      },
+      {
+        CRABBOX_WORKSPACE_PROVIDER: "aws",
+        CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-selector-test",
+        CRABBOX_WORKSPACE_SSH_PRIVATE_KEY: "workspace-private-key",
+      },
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          id: "selector-policy-workspace",
+          runtime: "crabbox",
+          ttlSeconds: 1800,
+          idleTimeoutSeconds: 360,
+        },
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    await fleet.alarm();
+    expect(restrictionChecks).toBe(0);
+    expect(created).toBe(true);
   });
 
   it("adapts workspaces onto owner-scoped lease lifecycle", async () => {
@@ -11923,6 +12120,7 @@ describe("fleet lease identity and idle", () => {
     const create = await fleet.fetch(
       request("POST", "/v1/leases", {
         headers: {
+          "x-crabbox-admin": "true",
           "x-crabbox-owner": "peter@example.com",
           "x-crabbox-org": "openclaw",
         },
@@ -19225,6 +19423,7 @@ function fakeProvider(
       config: LeaseConfig,
       storage: MemoryStorage | undefined,
     ) => Promise<LeaseConfig> | LeaseConfig;
+    onRestrictedLeaseRequestFields?: (input: LeaseRequest) => string[];
     onFinalizeLeaseCreate?: (
       config: LeaseConfig,
       lease: LeaseRecord,
@@ -19254,6 +19453,9 @@ function fakeProvider(
         return await result.onList();
       }
       return result.servers ?? [];
+    },
+    restrictedLeaseRequestFields(input: LeaseRequest) {
+      return result.onRestrictedLeaseRequestFields?.(input) ?? [];
     },
     ...(result.onRecoverServer
       ? {
