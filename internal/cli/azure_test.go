@@ -283,6 +283,33 @@ func TestAzureSnapshotOSDiskTypeMatchesTarget(t *testing.T) {
 	}
 }
 
+func TestAzureSnapshotQuarantineSecurityGroupDeniesAllInbound(t *testing.T) {
+	t.Parallel()
+	tags := map[string]*string{"lease_id": to.Ptr("cbx_123")}
+	group := azureSnapshotQuarantineSecurityGroup("westus2", tags)
+	if group.Location == nil || *group.Location != "westus2" || group.Tags["lease_id"] == nil || *group.Tags["lease_id"] != "cbx_123" {
+		t.Fatalf("quarantine metadata=%#v", group)
+	}
+	if group.Properties == nil || len(group.Properties.SecurityRules) != 1 {
+		t.Fatalf("quarantine rules=%#v, want one explicit rule", group.Properties)
+	}
+	rule := group.Properties.SecurityRules[0]
+	if rule == nil || rule.Properties == nil {
+		t.Fatal("quarantine rule has no properties")
+	}
+	properties := rule.Properties
+	if properties.Protocol == nil || *properties.Protocol != armnetwork.SecurityRuleProtocolAsterisk ||
+		properties.Access == nil || *properties.Access != armnetwork.SecurityRuleAccessDeny ||
+		properties.Direction == nil || *properties.Direction != armnetwork.SecurityRuleDirectionInbound ||
+		properties.Priority == nil || *properties.Priority != 100 ||
+		properties.SourceAddressPrefix == nil || *properties.SourceAddressPrefix != "*" ||
+		properties.SourcePortRange == nil || *properties.SourcePortRange != "*" ||
+		properties.DestinationAddressPrefix == nil || *properties.DestinationAddressPrefix != "*" ||
+		properties.DestinationPortRange == nil || *properties.DestinationPortRange != "*" {
+		t.Fatalf("quarantine rule=%#v, want deny-all inbound", properties)
+	}
+}
+
 func TestAzureWindowsSnapshotRehydrateRotatesServiceVNCCredentials(t *testing.T) {
 	t.Parallel()
 	cfg := baseConfig()

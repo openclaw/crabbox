@@ -112,7 +112,9 @@ Managed Azure Windows leases using `windows.mode=normal` can also create direct
 OS-disk checkpoints for fast prepared-desktop reuse. Snapshot creation requires
 `crabbox checkpoint create --strategy disk-snapshot --no-reboot=false`; Crabbox
 restarts the source VM after the snapshot and rehydrates every fork with fresh
-SSH, Windows, and loopback-only VNC credentials.
+SSH, Windows, and loopback-only VNC credentials. A per-fork deny-all network
+security group keeps the copied VM unreachable until credential rotation
+finishes, then Crabbox attaches the normal shared SSH allowlist.
 
 `azure.osDisk: ephemeral-preview` opts into Azure's public-preview
 full-caching mode for ephemeral OS disks. Crabbox sends Compute API

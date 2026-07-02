@@ -914,6 +914,7 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 	pipName := name + "-pip"
 	nicName := name + "-nic"
 	diskName := name + "-osdisk"
+	quarantineNSGName := name + "-q-nsg"
 
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
@@ -943,8 +944,16 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 
 	subnetID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s",
 		c.SubscriptionID, c.ResourceGroup, c.VNet, c.Subnet)
-	nsgID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkSecurityGroups/%s",
+	sharedNSGID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkSecurityGroups/%s",
 		c.SubscriptionID, c.ResourceGroup, c.NSG)
+	nsgID := sharedNSGID
+	quarantinedSnapshot := cfg.AzureSnapshot != "" && cfg.TargetOS == targetWindows
+	if quarantinedSnapshot {
+		nsgID, err = c.createSnapshotQuarantineNSG(ctx, quarantineNSGName, tags)
+		if err != nil {
+			return Server{}, err
+		}
+	}
 	nicPoller, err := c.nicc.BeginCreateOrUpdate(ctx, c.ResourceGroup, nicName, armnetwork.Interface{
 		Location: to.Ptr(c.Location),
 		Tags:     tags,
@@ -1066,6 +1075,13 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 		if err := c.installWindowsBootstrapExtension(ctx, name, tags, command); err != nil {
 			return Server{}, err
 		}
+	}
+	if quarantinedSnapshot {
+		if err := c.releaseSnapshotNIC(ctx, nicName, sharedNSGID); err != nil {
+			return Server{}, err
+		}
+		// The fork is safe and usable once released; lease deletion retries quarantine cleanup.
+		_ = c.deleteSnapshotQuarantineNSG(ctx, quarantineNSGName)
 	}
 	return azureVMToServer(createdVM, "", ""), nil
 }
@@ -1353,6 +1369,76 @@ func (c *AzureClient) createManagedDiskFromSnapshot(ctx context.Context, diskNam
 		return "", errors.New("snapshot disk has no resource id")
 	}
 	return *response.ID, nil
+}
+
+func (c *AzureClient) createSnapshotQuarantineNSG(ctx context.Context, name string, tags map[string]*string) (string, error) {
+	poller, err := c.sgc.BeginCreateOrUpdate(ctx, c.ResourceGroup, name, azureSnapshotQuarantineSecurityGroup(c.Location, tags), nil)
+	if err != nil {
+		return "", fmt.Errorf("begin snapshot quarantine nsg: %w", err)
+	}
+	response, err := poller.PollUntilDone(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("snapshot quarantine nsg: %w", err)
+	}
+	if response.ID == nil || *response.ID == "" {
+		return "", errors.New("snapshot quarantine nsg has no resource id")
+	}
+	return *response.ID, nil
+}
+
+func azureSnapshotQuarantineSecurityGroup(location string, tags map[string]*string) armnetwork.SecurityGroup {
+	return armnetwork.SecurityGroup{
+		Location: to.Ptr(location),
+		Tags:     tags,
+		Properties: &armnetwork.SecurityGroupPropertiesFormat{
+			SecurityRules: []*armnetwork.SecurityRule{{
+				Name: to.Ptr("deny-inbound-until-rehydrated"),
+				Properties: &armnetwork.SecurityRulePropertiesFormat{
+					Protocol:                 to.Ptr(armnetwork.SecurityRuleProtocolAsterisk),
+					Access:                   to.Ptr(armnetwork.SecurityRuleAccessDeny),
+					Direction:                to.Ptr(armnetwork.SecurityRuleDirectionInbound),
+					Priority:                 to.Ptr(int32(100)),
+					SourceAddressPrefix:      to.Ptr("*"),
+					SourcePortRange:          to.Ptr("*"),
+					DestinationAddressPrefix: to.Ptr("*"),
+					DestinationPortRange:     to.Ptr("*"),
+				},
+			}},
+		},
+	}
+}
+
+func (c *AzureClient) releaseSnapshotNIC(ctx context.Context, nicName, sharedNSGID string) error {
+	response, err := c.nicc.Get(ctx, c.ResourceGroup, nicName, nil)
+	if err != nil {
+		return fmt.Errorf("get quarantined snapshot nic: %w", err)
+	}
+	if response.Properties == nil {
+		return errors.New("quarantined snapshot nic has no properties")
+	}
+	response.Properties.NetworkSecurityGroup = &armnetwork.SecurityGroup{ID: to.Ptr(sharedNSGID)}
+	poller, err := c.nicc.BeginCreateOrUpdate(ctx, c.ResourceGroup, nicName, response.Interface, nil)
+	if err != nil {
+		return fmt.Errorf("begin release snapshot nic: %w", err)
+	}
+	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+		return fmt.Errorf("release snapshot nic: %w", err)
+	}
+	return nil
+}
+
+func (c *AzureClient) deleteSnapshotQuarantineNSG(ctx context.Context, name string) error {
+	poller, err := c.sgc.BeginDelete(ctx, c.ResourceGroup, name, nil)
+	if err != nil {
+		if isAzureNotFoundError(err) {
+			return nil
+		}
+		return fmt.Errorf("begin delete snapshot quarantine nsg: %w", err)
+	}
+	if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
+		return fmt.Errorf("delete snapshot quarantine nsg %s: %w", name, err)
+	}
+	return nil
 }
 
 func (c *AzureClient) installWindowsBootstrapExtension(ctx context.Context, vmName string, tags map[string]*string, command string) error {
@@ -1718,6 +1804,10 @@ func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string) ([
 		}
 	} else if !isAzureNotFoundError(err) {
 		errs = append(errs, fmt.Errorf("begin delete nic: %w", err))
+		retry = retry || isAzureRetryableDeleteError(err)
+	}
+	if err := c.deleteSnapshotQuarantineNSG(ctx, name+"-q-nsg"); err != nil {
+		errs = append(errs, err)
 		retry = retry || isAzureRetryableDeleteError(err)
 	}
 	if err := c.deletePublicIP(ctx, name+"-pip"); err != nil {
