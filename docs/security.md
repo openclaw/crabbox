@@ -40,12 +40,12 @@ per-tenant isolation is not the current security boundary. Local providers and
 portal bridges are development execution surfaces, not a uniform sandbox for
 hostile project configuration or mutually adversarial workloads.
 
-For cooperative shared portals, configure the optional per-lease
+For any portal that exposes browser Code, configure the required per-lease
 `CRABBOX_CODE_ORIGIN_TEMPLATE` described in [Browser portal](features/portal.md).
 It keeps lease-controlled code-server HTML and JavaScript off the coordinator
 origin and off other leases' browser origins without changing the normal Code
-entry URL. This is defense-in-depth for supported sharing and admin inspection;
-it does not turn the broker into a hostile multitenant sandbox.
+entry URL. Browser Code fails closed when this setting is missing or invalid.
+This isolation does not turn the broker into a hostile multitenant sandbox.
 
 ## Authentication
 
@@ -233,9 +233,11 @@ bundles.
 
 Lifecycle recovery from raw provider identifiers is provider-specific and
 fails closed when ownership cannot be established. Cloudflare containers need
-a matching local claim; Freestyle and Islo recovery names must already be in
-their canonical Crabbox-generated form before reuse or deletion reaches the
-provider.
+a matching local claim. Freestyle and Islo canonical names remain available
+for read-only discovery, but delete, pause, resume, SSH reuse, and delegated
+reuse require an exact local claim. When local state was intentionally lost,
+an operator can use the provider's supported `--reclaim` reuse path to persist
+a new claim before any provider mutation.
 
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects. Required

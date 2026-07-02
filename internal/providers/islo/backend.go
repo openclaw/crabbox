@@ -183,7 +183,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		tailnetEnrolled = b.cfg.Tailscale.Enabled
 		tailnetReady = b.cfg.Tailscale.Enabled
 	} else {
-		leaseID, name, slug, err = resolveIsloLeaseID(req.ID, req.Repo.Root, req.Reclaim)
+		leaseID, name, slug, err = b.resolveLeaseIDForRepo(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -550,6 +550,9 @@ func (b *isloBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
+	if err := requireIsloLeaseClaim(leaseID, "stop"); err != nil {
+		return err
+	}
 	if err := client.DeleteSandbox(ctx, name); err != nil {
 		return isloError("delete sandbox", err)
 	}
@@ -569,6 +572,9 @@ func (b *isloBackend) Pause(ctx context.Context, req PauseRequest) error {
 	if err != nil {
 		return err
 	}
+	if err := requireIsloLeaseClaim(leaseID, "pause"); err != nil {
+		return err
+	}
 	if _, err := client.PauseSandbox(ctx, name); err != nil {
 		return isloError("pause sandbox", err)
 	}
@@ -584,6 +590,9 @@ func (b *isloBackend) Resume(ctx context.Context, req ResumeRequest) error {
 	}
 	leaseID, name, _, err := resolveIsloLeaseID(req.ID, "", false)
 	if err != nil {
+		return err
+	}
+	if err := requireIsloLeaseClaim(leaseID, "resume"); err != nil {
 		return err
 	}
 	if _, err := client.ResumeSandbox(ctx, name); err != nil {
@@ -635,13 +644,13 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		if cleanupErr := deleteIsloSandboxForCleanup(client, sandbox.GetName()); cleanupErr != nil {
-			return "", "", "", fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v", err, sandbox.GetName(), cleanupErr)
+			return "", "", "", isloUnclaimedCleanupError(err, sandbox.GetName(), cleanupErr)
 		}
 		return "", "", "", err
 	}
 	if err := claimLeaseForRepoProviderWithPond(leaseID, slug, isloProvider, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		if cleanupErr := deleteIsloSandboxForCleanup(client, sandbox.GetName()); cleanupErr != nil {
-			return "", "", "", fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v", err, sandbox.GetName(), cleanupErr)
+			return "", "", "", isloUnclaimedCleanupError(err, sandbox.GetName(), cleanupErr)
 		}
 		return "", "", "", err
 	}
@@ -657,6 +666,12 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 		return "", "", "", err
 	}
 	return leaseID, sandbox.GetName(), slug, nil
+}
+
+func isloUnclaimedCleanupError(cause error, name string, cleanupErr error) error {
+	leaseID := isloLeasePrefix + name
+	adopt := fmt.Sprintf("crabbox run --provider %s --id %s --reclaim --no-sync -- true", isloProvider, shellQuote(leaseID))
+	return fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v; first run `%s`, then run `%s` to retry cleanup", cause, name, cleanupErr, adopt, isloCleanupCommand(leaseID))
 }
 
 func deleteIsloSandboxForCleanup(client isloAPI, name string) error {
@@ -736,6 +751,41 @@ func resolveIsloLeaseID(id, repoRoot string, reclaim bool) (string, string, stri
 	}
 	leaseID := isloLeasePrefix + id
 	return leaseID, id, newLeaseSlug(leaseID), nil
+}
+
+func (b *isloBackend) resolveLeaseIDForRepo(ctx context.Context, client isloAPI, id, repoRoot string, reclaim bool) (string, string, string, error) {
+	leaseID, name, slug, err := resolveIsloLeaseID(id, repoRoot, reclaim)
+	if err != nil {
+		return "", "", "", err
+	}
+	if _, ok, err := resolveExactIsloLeaseClaim(leaseID); err != nil {
+		return "", "", "", err
+	} else if ok || repoRoot == "" {
+		return leaseID, name, slug, nil
+	}
+	if !reclaim {
+		return "", "", "", exit(4, "islo lease %q has no exact local claim; use --reclaim to adopt it before reuse", leaseID)
+	}
+	sandbox, err := client.GetSandbox(ctx, name)
+	if err != nil {
+		return "", "", "", isloError("get sandbox before reclaim", err)
+	}
+	if sandbox == nil || sandbox.GetName() != name {
+		return "", "", "", exit(4, "islo sandbox %q was not found; refusing to create a local claim", name)
+	}
+	if err := claimLeaseForRepoProviderWithPond(leaseID, slug, isloProvider, b.cfg.Pond, repoRoot, b.cfg.IdleTimeout, true); err != nil {
+		return "", "", "", err
+	}
+	return leaseID, name, slug, nil
+}
+
+func requireIsloLeaseClaim(leaseID, action string) error {
+	if _, ok, err := resolveExactIsloLeaseClaim(leaseID); err != nil {
+		return err
+	} else if !ok {
+		return exit(4, "islo lease %q has no exact local claim; adopt it with an explicit --reclaim reuse before %s", leaseID, action)
+	}
+	return nil
 }
 
 func resolveExactIsloLeaseClaim(leaseID string) (core.LeaseClaim, bool, error) {

@@ -223,6 +223,7 @@ func TestResolveFreestyleLeaseIDRejectsMalformedCrabboxNames(t *testing.T) {
 }
 
 func TestFreestyleStopRejectsMalformedCrabboxNameWithoutDelete(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{getVM: freestyleVM{
 		ID:    "vm123",
 		Name:  "crabbox repo abc123",
@@ -239,6 +240,47 @@ func TestFreestyleStopRejectsMalformedCrabboxNameWithoutDelete(t *testing.T) {
 	}
 	if len(client.deleteIDs) != 0 {
 		t.Fatalf("DeleteVM called for malformed name: %#v", client.deleteIDs)
+	}
+}
+
+func TestFreestyleStopRejectsCanonicalSandboxWithoutExactClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeFreestyleClient{getVM: freestyleVM{
+		ID:    "vm123",
+		Name:  "crabbox-repo-abc123",
+		State: "running",
+	}}
+	oldClient := newFreestyleClient
+	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+	t.Cleanup(func() { newFreestyleClient = oldClient })
+	backend := &freestyleBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+
+	err := backend.Stop(context.Background(), StopRequest{ID: "fsb_vm123"})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("Stop error = %v, want exact-claim refusal", err)
+	}
+	if len(client.deleteIDs) != 0 {
+		t.Fatalf("DeleteVM called without an exact claim: %#v", client.deleteIDs)
+	}
+}
+
+func TestFreestyleStopDeletesExactlyClaimedSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := claimLeaseForRepoProviderPond("fsb_vm123", "web", freestyleProvider, "", root, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeFreestyleClient{}
+	oldClient := newFreestyleClient
+	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+	t.Cleanup(func() { newFreestyleClient = oldClient })
+	backend := &freestyleBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+
+	if err := backend.Stop(context.Background(), StopRequest{ID: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "vm123" {
+		t.Fatalf("DeleteVM calls = %#v, want vm123", client.deleteIDs)
 	}
 }
 
@@ -266,6 +308,45 @@ func TestResolveFreestyleLeaseIDClaimsRawSandboxForRepo(t *testing.T) {
 	}
 	if gotLeaseID != "fsb_vm123" || gotSlug == "" || gotProvider != freestyleProvider || gotPond != "demo" || gotRepo != repoRoot || gotIdle != 7*time.Minute || !gotReclaim {
 		t.Fatalf("claim args lease=%q slug=%q provider=%q pond=%q repo=%q idle=%s reclaim=%v", gotLeaseID, gotSlug, gotProvider, gotPond, gotRepo, gotIdle, gotReclaim)
+	}
+}
+
+func TestResolveFreestyleLeaseIDRequiresExplicitReclaimForUnclaimedReuse(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeFreestyleClient{getVM: freestyleVM{
+		ID:    "vm123",
+		Name:  "crabbox-repo-abc123",
+		State: "running",
+	}}
+	backend := &freestyleBackend{}
+
+	if _, _, err := backend.resolveLeaseID(context.Background(), client, "fsb_vm123", t.TempDir(), false); err == nil || !strings.Contains(err.Error(), "--reclaim") {
+		t.Fatalf("resolve error = %v, want explicit reclaim refusal", err)
+	}
+	if _, ok, err := resolveLeaseClaim("fsb_vm123"); err != nil || ok {
+		t.Fatalf("claim created without reclaim: ok=%t err=%v", ok, err)
+	}
+}
+
+func TestResolveFreestyleLeaseIDAcceptsRawIdentifierWithExactClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := claimLeaseForRepoProviderPond("fsb_vm123", "web", freestyleProvider, "demo", root, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeFreestyleClient{listVMs: []freestyleVM{{
+		ID:    "vm123",
+		Name:  "crabbox-repo-abc123",
+		State: "running",
+	}}}
+	backend := &freestyleBackend{}
+
+	leaseID, vmID, err := backend.resolveLeaseID(context.Background(), client, "vm123", root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseID != "fsb_vm123" || vmID != "vm123" {
+		t.Fatalf("lease=%q vm=%q", leaseID, vmID)
 	}
 }
 
@@ -504,6 +585,7 @@ func TestFreestyleRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
 	result, err := backend.Run(context.Background(), RunRequest{
 		ID:      "fsb_vm123",
 		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		Reclaim: true,
 		NoSync:  true,
 		Command: []string{"test", "-f", "kept.txt"},
 	})
@@ -595,6 +677,7 @@ func TestFreestyleRunPrintsRedactedEnvSummary(t *testing.T) {
 	_, err := backend.Run(context.Background(), RunRequest{
 		ID:         "fsb_vm123",
 		Repo:       Repo{Root: t.TempDir(), Name: "repo"},
+		Reclaim:    true,
 		NoSync:     true,
 		Command:    []string{"printenv", "SECRET_TOKEN"},
 		Env:        map[string]string{"SECRET_TOKEN": "super-secret"},
@@ -742,7 +825,8 @@ func TestFreestyleCreateSandboxReportsBoundedCleanupFailure(t *testing.T) {
 		"claim write failed",
 		"cleanup freestyle vm vm-leaked",
 		"delete failed",
-		"crabbox stop --provider freestyle --id fsb_vm-leaked",
+		"crabbox run --provider freestyle --id 'fsb_vm-leaked' --reclaim --no-sync -- true",
+		"crabbox stop --provider freestyle --id 'fsb_vm-leaked'",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err=%v, want %q", err, want)

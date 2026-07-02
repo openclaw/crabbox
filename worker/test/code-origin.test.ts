@@ -17,7 +17,7 @@ describe("isolated Code origins", () => {
     await expect(codeOriginForLease(env, "cbx_000000000001")).resolves.toBe(first);
   });
 
-  it("rejects invalid templates without changing existing Code behavior", async () => {
+  it("rejects invalid templates so browser Code can fail closed", async () => {
     const templates = [
       "http://{lease}.code.example.test",
       "https://code.example.test/{lease}",

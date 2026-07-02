@@ -14,6 +14,9 @@ crabbox code --id swift-crab --open
 
 - A configured coordinator login. The command refuses to run without one:
   `crabbox login --url broker.example.com` first.
+- A valid coordinator `CRABBOX_CODE_ORIGIN_TEMPLATE` backed by wildcard TLS and
+  WebSocket ingress. Browser Code fails closed when the template is absent or
+  invalid.
 - A lease created with the `code` capability (`crabbox warmup --code`). The
   Linux bootstrap installs `code-server` only for leases that request it, and
   reusing a lease checks for the matching `code=true` label.

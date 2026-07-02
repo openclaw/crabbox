@@ -107,7 +107,7 @@ Core runtime:
 DATABASE_URL                         required PostgreSQL connection string; use verified TLS remotely
 PORT                                 listener port, default 8080
 CRABBOX_PUBLIC_URL                   canonical external origin
-CRABBOX_CODE_ORIGIN_TEMPLATE         optional HTTPS per-lease Code origin template; ingress needs wildcard TLS/WebSockets
+CRABBOX_CODE_ORIGIN_TEMPLATE         required for browser Code; HTTPS per-lease template needs wildcard TLS/WebSockets
 CRABBOX_DATABASE_POOL_SIZE           PostgreSQL pool size, default 10
 CRABBOX_DATABASE_CONNECT_TIMEOUT_MS  connection timeout, default 10000
 CRABBOX_SHUTDOWN_TIMEOUT_MS          graceful shutdown budget, default 120000

@@ -7430,7 +7430,14 @@ export class FleetCoordinator {
       return this.codePortalHealth(lease, agent);
     }
     const isolatedOrigin = await codeOriginForLease(this.env, lease.id);
-    if (!isolated && isolatedOrigin && new URL(request.url).origin !== isolatedOrigin) {
+    if (!isolatedOrigin) {
+      return portalError(
+        "Code origin required",
+        "Browser Code requires a valid CRABBOX_CODE_ORIGIN_TEMPLATE with wildcard TLS and WebSocket routing.",
+        409,
+      );
+    }
+    if (!isolated) {
       return await this.redirectCodeViewer(request, lease, isolatedOrigin);
     }
     if (!agent || agent.readyState !== WebSocket.OPEN) {

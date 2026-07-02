@@ -132,8 +132,18 @@ unavailable, Crabbox falls back to chunked base64 upload through exec. Sync stil
 completes reliably through the fallback path.
 
 The raw VM ID, Crabbox VM name, and generated slug shown by `crabbox list` can
-recover a Crabbox-owned VM after local claim state is lost. Recovery requires
-the provider VM name to already match Crabbox's canonical `crabbox-...` form.
+identify a VM after local claim state is lost. Read-only status recovery still
+requires the provider VM name to match Crabbox's canonical `crabbox-...` form.
+Reuse and deletion additionally require an exact local claim. To intentionally
+adopt a canonical VM, persist that claim before stopping it:
+
+```sh
+crabbox run --provider freestyle --id fsb_vm123 --reclaim --no-sync -- true
+crabbox stop --provider freestyle --id fsb_vm123
+```
+
+`--reclaim` is the explicit operator authorization: canonical name shape alone
+never reaches Freestyle command or delete operations.
 
 `--checksum` is not supported because Freestyle uses archive sync rather than
 Crabbox rsync checksum mode.
