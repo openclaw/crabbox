@@ -497,6 +497,77 @@ func TestQualifyWatchBatch(t *testing.T) {
 	}
 }
 
+func TestQualifyWatchBatchHonorsSyncIncludes(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, "src/app.go", "package app\n")
+	watchTestWrite(t, root, "docs/readme.md", "docs\n")
+	watchTestWrite(t, root, "src/gone.go", "package app\n")
+	watchTestWrite(t, root, "docs/gone.md", "docs\n")
+	watchTestGit(t, root, "add", "src", "docs")
+	watchTestGit(t, root, "commit", "-q", "-m", "add src and docs")
+	for _, rel := range []string{"src/gone.go", "docs/gone.md"} {
+		if err := os.Remove(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	watchTestWrite(t, root, "src/new.txt", "new")
+	watchTestWrite(t, root, "notes.txt", "outside")
+	session := newWatchTestSession(root, nil, time.Millisecond, time.Second, nil)
+	session.cfg.Sync.Includes = []string{"src"}
+	for _, tc := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "tracked inside include", path: "src/app.go", want: true},
+		{name: "untracked inside include", path: "src/new.txt", want: true},
+		{name: "tracked outside include", path: "docs/readme.md", want: false},
+		{name: "untracked outside include", path: "notes.txt", want: false},
+		{name: "root file outside include", path: "main.go", want: false},
+		{name: "deleted tracked inside include", path: "src/gone.go", want: true},
+		{name: "deleted tracked outside include", path: "docs/gone.md", want: false},
+		{name: "deleted untracked outside include", path: "gone.txt", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qualified, err := session.qualifyBatch([]string{tc.path})
+			if err != nil {
+				t.Fatalf("qualifyBatch(%q): %v", tc.path, err)
+			}
+			got := len(qualified) > 0
+			if got != tc.want {
+				t.Fatalf("qualifyBatch(%q)=%v, want qualified=%v", tc.path, qualified, tc.want)
+			}
+		})
+	}
+}
+
+func TestWatchIncludeWhitelistFiltersReruns(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, "src/app.go", "package app\n")
+	watchTestGit(t, root, "add", "src")
+	watchTestGit(t, root, "commit", "-q", "-m", "add src")
+	executor := newWatchTestExecutor()
+	session := newWatchTestSession(root, executor.run, 25*time.Millisecond, 900*time.Millisecond, nil)
+	session.cfg.Sync.Includes = []string{"src"}
+	done := make(chan error, 1)
+	go func() { done <- session.run(context.Background()) }()
+	executor.awaitStart(t)
+	time.Sleep(100 * time.Millisecond)
+	watchTestWrite(t, root, "outside.txt", "not synced")
+	time.Sleep(200 * time.Millisecond)
+	if executor.callCount() != 1 {
+		t.Fatalf("iterations=%d after outside-include churn, want 1", executor.callCount())
+	}
+	watchTestWrite(t, root, "src/app.go", "package app\nvar x = 1\n")
+	executor.awaitStart(t)
+	if err := <-done; err != nil {
+		t.Fatalf("session.run: %v", err)
+	}
+	if executor.callCount() != 2 {
+		t.Fatalf("iterations=%d, want 2", executor.callCount())
+	}
+}
+
 func TestWatchAcquiresLeaseWhenNoID(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_COORDINATOR", "")

@@ -31,7 +31,8 @@ rejected with an error; use `crabbox run` for those.
 The initial run starts immediately. After that, filesystem events are debounced
 (default `250ms`) and each batch is qualified against the exact sync universe:
 Git tracked and non-ignored untracked files, minus the built-in excludes,
-`sync.exclude` config, and `.crabboxignore` rules. Ignored churn such as
+`sync.exclude` config, and `.crabboxignore` rules, and limited to the
+`sync.include` whitelist when one is configured. Ignored churn such as
 `node_modules` or build output never triggers a run and never counts as
 activity. Edits to `.gitignore`, `.crabboxignore`, or repo-local config are
 picked up live. Newly created directories are watched recursively; symlinked

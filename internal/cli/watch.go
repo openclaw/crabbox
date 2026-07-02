@@ -412,6 +412,7 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 		return nil, err
 	}
 	s.excludes = excludes
+	includes := syncIncludes(s.cfg)
 	existing := make([]string, 0, len(paths))
 	missing := make([]string, 0, len(paths))
 	for _, path := range paths {
@@ -431,7 +432,7 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 			return nil, err
 		}
 		for _, rel := range universe {
-			if safeRepoRel(rel) && !pathExcluded(rel, s.excludes) {
+			if safeRepoRel(rel) && !pathExcluded(rel, s.excludes) && pathIncluded(rel, includes) {
 				qualified[rel] = struct{}{}
 			}
 		}
@@ -444,7 +445,9 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 		trackedSet := map[string]struct{}{}
 		for _, rel := range tracked {
 			trackedSet[rel] = struct{}{}
-			qualified[rel] = struct{}{}
+			if pathIncluded(rel, includes) {
+				qualified[rel] = struct{}{}
+			}
 		}
 		untracked := make([]string, 0, len(missing))
 		for _, rel := range missing {
@@ -458,7 +461,7 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 				return nil, err
 			}
 			for _, rel := range untracked {
-				if _, ok := ignored[rel]; !ok {
+				if _, ok := ignored[rel]; !ok && pathIncluded(rel, includes) {
 					qualified[rel] = struct{}{}
 				}
 			}
