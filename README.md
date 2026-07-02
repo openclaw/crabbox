@@ -64,11 +64,11 @@ supported boundary and [Operational security](docs/security.md) for deployment
 guidance.
 
 Within that boundary, credentialed HTTP redirects are confined to their
-configured origin, destructive provider recovery requires a local claim or an
-already-canonical Crabbox resource name, and artifact publication accepts only
-regular files from the selected bundle. Provider diagnostics redact configured
-credentials on the documented clients, but captured output and failure bundles
-are not automatically scrubbed; review them before sharing. See
+configured origin, destructive provider recovery requires an exact local claim
+or stronger provider-side ownership metadata, and artifact publication accepts
+only regular files from the selected bundle. Provider diagnostics redact
+configured credentials on the documented clients, but captured output and
+failure bundles are not automatically scrubbed; review them before sharing. See
 [Operational security](docs/security.md) and [Artifacts](docs/features/artifacts.md).
 
 ## How it works

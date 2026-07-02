@@ -49,8 +49,13 @@ Crabbox lease ID and local slug:
 - `coder` — stops the Coder workspace by default and removes the local claim.
   Set `coder.deleteOnRelease` or pass `--coder-delete-on-release` to delete the
   workspace instead.
-- `islo` — accepts an `isb_...` ID, a Crabbox-created sandbox name, or a local
-  slug and deletes the Islo sandbox.
+- `islo` — accepts an exactly claimed `isb_...` ID, Crabbox-created sandbox
+  name, or local slug and deletes the Islo sandbox. Claimless canonical names
+  must first be adopted through an explicit supported `--reclaim` reuse.
+- `freestyle` — accepts an exactly claimed `fsb_...` ID, Crabbox-created VM
+  name, or local slug and deletes the Freestyle VM. Claimless canonical names
+  remain visible to status/list but cannot be deleted until explicit
+  `--reclaim` reuse persists a claim.
 - `e2b` — accepts a Crabbox lease ID, a local slug, or a Crabbox-owned E2B
   sandbox ID in raw or `e2b_<sandboxID>` form and deletes the E2B sandbox.
 - `vercel-sandbox` — accepts a Crabbox-created local slug or `vsbx_...` lease

@@ -41,6 +41,17 @@ crabbox list --provider islo --json
 Crabbox-created sandbox name printed by `warmup`/`run` can be passed to later
 commands via `--id`.
 
+If local claim state was intentionally lost, adopt a canonical Islo sandbox
+before lifecycle mutation, then use its new claim normally:
+
+```sh
+crabbox run --provider islo --id isb_crabbox-repo-abcdef --reclaim --no-sync -- true
+crabbox stop --provider islo --id isb_crabbox-repo-abcdef
+```
+
+Read-only status lookup can still use a canonical sandbox name without a claim.
+Delete, pause, resume, SSH reuse, and delegated reuse cannot.
+
 ## Auth
 
 ```sh
@@ -156,8 +167,10 @@ rejected before workspace preparation and sync.
   large-archive guardrail.
 - `--shell` passes the raw shell string to `bash -lc` in the workdir.
 - `--id` accepts a Crabbox slug, an `isb_<name>` lease ID, or a canonical
-  normalized sandbox name starting with `crabbox-`. Names that require case,
-  whitespace, or punctuation normalization and non-Crabbox sandboxes are rejected.
+  normalized sandbox name starting with `crabbox-`. A claimless canonical name
+  is read-only until an explicit supported `--reclaim` reuse persists a local
+  claim. Names that require case, whitespace, or punctuation normalization and
+  non-Crabbox sandboxes are rejected.
 
 Related docs:
 

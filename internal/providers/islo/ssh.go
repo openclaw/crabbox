@@ -18,9 +18,14 @@ func (b *isloBackend) Resolve(ctx context.Context, req core.ResolveRequest) (cor
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	leaseID, name, _, err := resolveIsloLeaseID(req.ID, req.Repo.Root, req.Reclaim)
+	leaseID, name, _, err := b.resolveLeaseIDForRepo(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
 	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if !req.StatusOnly {
+		if err := requireIsloLeaseClaim(leaseID, "SSH reuse"); err != nil {
+			return core.LeaseTarget{}, err
+		}
 	}
 	sandbox, err := b.resolveSSHReadySandbox(ctx, client, name, req)
 	if err != nil {
