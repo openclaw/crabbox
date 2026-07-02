@@ -14,6 +14,10 @@ chrome_policy_dir="${CRABBOX_LINUX_CHROME_POLICY_DIR:-/etc/opt/chrome/policies/m
 chromium_policy_dir="${CRABBOX_LINUX_CHROMIUM_POLICY_DIR:-/etc/chromium/policies/managed}"
 browser_bin_dir="${CRABBOX_LINUX_BROWSER_BIN_DIR:-/usr/local/bin}"
 browser_state_dir="${CRABBOX_LINUX_BROWSER_STATE_DIR:-/var/lib/crabbox}"
+chrome_defaults_file="${CRABBOX_LINUX_CHROME_DEFAULTS_FILE:-/etc/default/google-chrome}"
+nodesource_signing_key_fingerprint="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
+docker_signing_key_fingerprint="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+google_linux_signing_key_fingerprint="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
 
 log() {
   printf 'linux-tools: %s\n' "$*" >&2
@@ -64,16 +68,32 @@ os_release_value() {
 install_apt_keyring() {
   local url="$1"
   local target="$2"
+  local expected_fingerprint="$3"
+  local actual_fingerprint=""
+  local downloaded_key
+  local key_home
   local tmp_dir
   local tmp_key
   install -d -m 0755 "$(dirname "$target")"
   tmp_dir="$(mktemp -d "${target}.tmp.XXXXXX")"
   tmp_key="$tmp_dir/keyring.gpg"
-  if curl -fsSL "$url" | gpg --batch --yes --dearmor -o "$tmp_key"; then
-    chmod 0644 "$tmp_key"
-    mv -f "$tmp_key" "$target"
-    rmdir "$tmp_dir" 2>/dev/null || rm -rf "$tmp_dir"
-    return 0
+  downloaded_key="$tmp_dir/downloaded.asc"
+  key_home="$tmp_dir/gnupg"
+  install -d -m 0700 "$key_home"
+  if curl -fsSL "$url" >"$downloaded_key" &&
+    GNUPGHOME="$key_home" gpg --batch --import "$downloaded_key" >/dev/null 2>&1; then
+    actual_fingerprint="$(
+      GNUPGHOME="$key_home" gpg --batch --with-colons --fingerprint "$expected_fingerprint" 2>/dev/null |
+        awk -F: '$1 == "fpr" { print $10; exit }' || true
+    )"
+    if [[ "$actual_fingerprint" == "$expected_fingerprint" ]] &&
+      GNUPGHOME="$key_home" gpg --batch --export "$expected_fingerprint" >"$tmp_key" &&
+      [[ -s "$tmp_key" ]]; then
+      chmod 0644 "$tmp_key"
+      mv -f "$tmp_key" "$target"
+      rm -rf "$tmp_dir"
+      return 0
+    fi
   fi
   rm -rf "$tmp_dir"
   return 1
@@ -89,18 +109,36 @@ docker_packages_installed() {
   return 0
 }
 
+node_toolchain_ready() {
+  command -v node >/dev/null 2>&1 &&
+    node --version | grep -q "^v${node_major}\\." &&
+    command -v npm >/dev/null 2>&1 &&
+    command -v corepack >/dev/null 2>&1
+}
+
 add_nodesource() {
-  if command -v node >/dev/null 2>&1 && node --version | grep -q "^v${node_major}\\."; then
+  local source="$apt_sources_dir/nodesource.list"
+  local source_tmp
+  if node_toolchain_ready && [[ ! -e "$source" ]]; then
     return 0
   fi
   install -d -m 0755 "$apt_sources_dir"
-  install_apt_keyring "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" "$apt_keyrings_dir/nodesource.gpg"
-  printf 'deb [signed-by=%s/nodesource.gpg] https://deb.nodesource.com/node_%s.x nodistro main\n' "$apt_keyrings_dir" "$node_major" \
-    >"$apt_sources_dir/nodesource.list"
+  install_apt_keyring \
+    "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key" \
+    "$apt_keyrings_dir/nodesource.gpg" \
+    "$nodesource_signing_key_fingerprint"
+  source_tmp="$(mktemp "${source}.tmp.XXXXXX")"
+  if ! printf 'deb [signed-by=%s/nodesource.gpg] https://deb.nodesource.com/node_%s.x nodistro main\n' "$apt_keyrings_dir" "$node_major" \
+    >"$source_tmp" || ! chmod 0644 "$source_tmp" || ! mv -f "$source_tmp" "$source"; then
+    rm -f "$source_tmp"
+    return 1
+  fi
 }
 
 add_docker_repo() {
-  if docker_packages_installed; then
+  local source="$apt_sources_dir/docker.list"
+  local source_tmp
+  if docker_packages_installed && [[ ! -e "$source" ]]; then
     return 0
   fi
   local distro_id codename arch
@@ -123,23 +161,47 @@ add_docker_repo() {
     exit 2
   fi
   install -d -m 0755 "$apt_sources_dir"
-  install_apt_keyring "https://download.docker.com/linux/${distro_id}/gpg" "$apt_keyrings_dir/docker.gpg"
-  printf 'deb [arch=%s signed-by=%s/docker.gpg] https://download.docker.com/linux/%s %s stable\n' "$arch" "$apt_keyrings_dir" "$distro_id" "$codename" \
-    >"$apt_sources_dir/docker.list"
+  install_apt_keyring \
+    "https://download.docker.com/linux/${distro_id}/gpg" \
+    "$apt_keyrings_dir/docker.gpg" \
+    "$docker_signing_key_fingerprint"
+  source_tmp="$(mktemp "${source}.tmp.XXXXXX")"
+  if ! printf 'deb [arch=%s signed-by=%s/docker.gpg] https://download.docker.com/linux/%s %s stable\n' "$arch" "$apt_keyrings_dir" "$distro_id" "$codename" \
+    >"$source_tmp" || ! chmod 0644 "$source_tmp" || ! mv -f "$source_tmp" "$source"; then
+    rm -f "$source_tmp"
+    return 1
+  fi
 }
 
 install_chrome_or_chromium() {
   local browser_path=""
+  local chrome_defaults_tmp=""
   if [[ "$(dpkg --print-architecture)" == "amd64" ]]; then
     install -d -m 0755 "$apt_sources_dir"
-    install_apt_keyring https://dl.google.com/linux/linux_signing_key.pub "$apt_keyrings_dir/google-linux.gpg"
-    printf 'deb [arch=amd64 signed-by=%s/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' "$apt_keyrings_dir" \
-      >"$apt_sources_dir/google-chrome.list"
-    if retry apt-get update && apt_install google-chrome-stable; then
-      browser_path="$(command -v google-chrome || true)"
+    if install_apt_keyring \
+      https://dl.google.com/linux/linux_signing_key.pub \
+      "$apt_keyrings_dir/google-linux.gpg" \
+      "$google_linux_signing_key_fingerprint"; then
+      install -d -m 0755 "$(dirname "$chrome_defaults_file")"
+      chrome_defaults_tmp="$(mktemp "${chrome_defaults_file}.tmp.XXXXXX")"
+      if [[ -f "$chrome_defaults_file" ]]; then
+        awk '!/^[[:space:]]*repo_add_once=/ && !/^[[:space:]]*repo_reenable_on_distupgrade=/' "$chrome_defaults_file" >"$chrome_defaults_tmp"
+      fi
+      printf '%s\n' 'repo_add_once="false"' 'repo_reenable_on_distupgrade="false"' >>"$chrome_defaults_tmp"
+      chmod 0644 "$chrome_defaults_tmp"
+      mv -f "$chrome_defaults_tmp" "$chrome_defaults_file"
+      rm -f "$apt_sources_dir/google-chrome.list" "$apt_sources_dir/google-chrome.sources"
+      printf 'deb [arch=amd64 signed-by=%s/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n' "$apt_keyrings_dir" \
+        >"$apt_sources_dir/crabbox-google-chrome.list"
+      if retry apt-get update && apt_install google-chrome-stable; then
+        rm -f "$apt_sources_dir/google-chrome.list" "$apt_sources_dir/google-chrome.sources"
+        browser_path="$(command -v google-chrome || true)"
+      else
+        rm -f "$apt_sources_dir/crabbox-google-chrome.list" "$apt_sources_dir/google-chrome.list" "$apt_sources_dir/google-chrome.sources"
+        retry apt-get update || true
+      fi
     else
-      rm -f "$apt_sources_dir/google-chrome.list"
-      retry apt-get update || true
+      log "Google Linux signing key verification failed; trying Chromium fallback"
     fi
   fi
   if [[ -z "$browser_path" ]]; then
@@ -167,6 +229,8 @@ EOF
 
 install_node_pnpm() {
   apt_install nodejs
+  command -v npm >/dev/null
+  command -v corepack >/dev/null
   corepack enable
   corepack prepare "pnpm@$pnpm_version" --activate
   command -v pnpm >/dev/null

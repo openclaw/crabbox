@@ -5,19 +5,29 @@
 ## What Crabbox is
 
 Crabbox is a generic remote software testing and execution control plane. It
-keeps the local developer story unchanged — edit, save, run — while moving the
-actual compute, tests, and review evidence onto owned or provider-backed remote
-capacity. A maintainer or an AI agent issues one command; Crabbox leases a box,
-ships the working tree, runs the command, streams the output back, and cleans
-up.
+keeps the local developer story unchanged: edit, save, run. The difference is
+where the command executes. Crabbox moves tests, builds, browser checks,
+platform validation, and review evidence onto owned or provider-backed remote
+capacity, then streams the result back to the caller.
 
-A `crabbox run` leases a brokered cloud machine, reuses a static SSH host, or
+It is for maintainers, contributors, and automation that need a repeatable way
+to run repository commands on a machine other than the local laptop. A
+`crabbox run` leases a brokered cloud machine, reuses a static SSH host, or
 delegates to a sandbox provider; syncs your tracked, non-ignored local files;
-executes the command remotely; streams stdout and stderr back; and then
-releases or unclaims the target. An optional coordinator owns cloud provider
-credentials, lease state, cleanup, usage accounting, and cost guardrails so
-individual machines and CLIs never hold those. The coordinator runs either on
-Cloudflare Workers with a Durable Object or on Node.js with PostgreSQL.
+executes the command remotely; streams stdout and stderr back; records evidence;
+and then releases or unclaims the target.
+
+Use Crabbox when local compute is too small or slow, when a workflow needs a
+fresh disposable runner, when the target platform is remote, or when an AI agent
+or reviewer needs auditable command output from the exact environment that ran.
+It is not a CI service, a package manager, a production deployment platform, a
+hostile multi-tenant sandbox, or a tool that automatically sanitizes secrets
+from command output and artifacts.
+
+An optional coordinator owns cloud provider credentials, lease state, cleanup,
+usage accounting, and cost guardrails so individual machines and CLIs never
+hold those. The coordinator runs either on Cloudflare Workers with a Durable
+Object or on Node.js with PostgreSQL.
 
 ## How it fits together
 

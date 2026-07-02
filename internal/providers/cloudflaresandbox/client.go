@@ -111,8 +111,55 @@ func newBridgeClient(cfg Config, rt Runtime) (bridgeClient, error) {
 	return &client{
 		baseURL: baseURL,
 		token:   strings.TrimSpace(cfg.CloudflareSandbox.Token),
-		http:    httpClient,
+		http:    secureCloudflareSandboxHTTPClient(httpClient, baseURL),
 	}, nil
+}
+
+func secureCloudflareSandboxHTTPClient(source *http.Client, baseURL string) *http.Client {
+	client := *source
+	trusted, _ := url.Parse(baseURL)
+	originalCheckRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameCloudflareSandboxOrigin(trusted, req.URL) {
+			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, cloudflareSandboxRedirectOrigin(req.URL))
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameCloudflareSandboxOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveCloudflareSandboxPort(a) == effectiveCloudflareSandboxPort(b)
+}
+
+func effectiveCloudflareSandboxPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
+
+func cloudflareSandboxRedirectOrigin(value *url.URL) string {
+	if value == nil || value.Scheme == "" || value.Host == "" {
+		return "<redacted>"
+	}
+	return value.Scheme + "://" + value.Host
 }
 
 func (c *client) Health(ctx context.Context) (healthResponse, error) {
@@ -431,7 +478,12 @@ func (c *client) doRequest(ctx context.Context, method, route string, authentica
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s %s: %s", providerName, method, route, c.redact(err.Error()))
+		requestErr := err
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && urlErr.Err != nil {
+			requestErr = urlErr.Err
+		}
+		return nil, fmt.Errorf("%s %s %s: %s", providerName, method, route, c.redact(requestErr.Error()))
 	}
 	return resp, nil
 }

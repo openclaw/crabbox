@@ -418,7 +418,7 @@ func (r *adapterRelay) handle(ctx context.Context, request adapterRelayRequest) 
 }
 
 func adapterRelayTimeoutForRequest(request adapterRelayRequest, desktopTimeout time.Duration) time.Duration {
-	if request.Method == http.MethodPost && strings.HasSuffix(request.Path, "/connections/desktop") {
+	if request.Method == http.MethodPost && (strings.HasSuffix(request.Path, "/connections/desktop") || strings.HasSuffix(request.Path, "/connections/native-vnc")) {
 		if desktopTimeout <= 0 {
 			desktopTimeout = adapterRelayDefaultConnectionTime + adapterRelayConnectionOverhead
 		}
@@ -481,12 +481,16 @@ func adapterRelayCanonicalPath(method, requestPath string) (string, bool) {
 		return "", false
 	}
 	rest := strings.TrimPrefix(requestPath, prefix)
-	if method == http.MethodPost && strings.HasSuffix(rest, "/connections/desktop") {
-		workspaceID := strings.TrimSuffix(rest, "/connections/desktop")
+	if method == http.MethodPost && (strings.HasSuffix(rest, "/connections/desktop") || strings.HasSuffix(rest, "/connections/native-vnc")) {
+		suffix := "/connections/desktop"
+		if strings.HasSuffix(rest, "/connections/native-vnc") {
+			suffix = "/connections/native-vnc"
+		}
+		workspaceID := strings.TrimSuffix(rest, suffix)
 		if !validControllerWorkspaceID(workspaceID) {
 			return "", false
 		}
-		return prefix + url.PathEscape(workspaceID) + "/connections/desktop", true
+		return prefix + url.PathEscape(workspaceID) + suffix, true
 	}
 	if (method != http.MethodGet && method != http.MethodDelete) || !validControllerWorkspaceID(rest) {
 		return "", false

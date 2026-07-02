@@ -47,6 +47,7 @@ type Config struct {
 	Coordinator                   string
 	BrokerMode                    BrokerMode
 	brokerProvider                string
+	BrokerLoginRedirectOrigins    []string
 	BrokerAutoWebVNC              bool
 	CoordToken                    string
 	CoordTokenCommand             []string
@@ -66,6 +67,7 @@ type Config struct {
 	AWSProfile                    string
 	AWSRootGB                     int32
 	AWSSSHCIDRs                   []string
+	AWSSSHCIDRsPinned             bool
 	AWSMacHostID                  string
 	AWSLambdaMicroVM              AWSLambdaMicroVMConfig
 	AzureSubscription             string
@@ -77,8 +79,10 @@ type Config struct {
 	AzureImage                    string
 	azureImageExplicit            bool
 	AzureSnapshot                 string
+	AzureSnapshotSKU              string
 	AzureOSDisk                   string
 	AzureOSDiskExplicit           bool
+	AzureOSDiskSKU                string
 	AzureVNet                     string
 	AzureSubnet                   string
 	AzureNSG                      string
@@ -120,6 +124,11 @@ type Config struct {
 	scalewayZoneExplicit          bool
 	scalewayImageExplicit         bool
 	scalewayTypeExplicit          bool
+	TencentCloud                  TencentCloudConfig
+	tencentCloudRegionExplicit    bool
+	tencentCloudZoneExplicit      bool
+	tencentCloudImageExplicit     bool
+	tencentCloudTypeExplicit      bool
 	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
 	Firecracker                   FirecrackerConfig
@@ -198,6 +207,7 @@ type Config struct {
 	LocalContainer                LocalContainerConfig
 	localContainerRuntimeExplicit bool
 	localContainerImageExplicit   bool
+	localContainerRootExplicit    bool
 	AppleContainer                AppleContainerConfig
 	appleContainerImageExplicit   bool
 	AppleVZ                       AppleVZConfig
@@ -349,6 +359,25 @@ type ScalewayConfig struct {
 	OrganizationID string
 	SecurityGroup  string
 	SSHCIDRs       []string
+}
+
+// TencentCloudConfig contains non-secret Tencent Cloud CVM settings. Tencent
+// Cloud API credentials are intentionally read from TENCENTCLOUD_SECRET_ID and
+// TENCENTCLOUD_SECRET_KEY by the provider client and are not persisted in
+// Crabbox config.
+type TencentCloudConfig struct {
+	Region                  string
+	Zone                    string
+	Image                   string
+	Type                    string
+	VPCID                   string
+	SubnetID                string
+	SecurityGroupID         string
+	SSHCIDRs                []string
+	RootGB                  int64
+	InternetChargeType      string
+	InternetMaxBandwidthOut int64
+	APIEndpoint             string
 }
 
 type ActionsConfig struct {
@@ -1787,6 +1816,52 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
+	if cfg.Provider == "tencentcloud" {
+		if cfg.TencentCloud.Region == "" {
+			cfg.TencentCloud.Region = "ap-shanghai"
+		}
+		if cfg.TencentCloud.Zone == "" {
+			cfg.TencentCloud.Zone = "ap-shanghai-2"
+		}
+		if cfg.TencentCloud.Type == "" {
+			cfg.TencentCloud.Type = "SA5.MEDIUM2"
+		}
+		if cfg.TencentCloud.RootGB == 0 {
+			cfg.TencentCloud.RootGB = 50
+		}
+		if cfg.TencentCloud.InternetChargeType == "" {
+			cfg.TencentCloud.InternetChargeType = "TRAFFIC_POSTPAID_BY_HOUR"
+		}
+		if cfg.TencentCloud.InternetMaxBandwidthOut == 0 {
+			cfg.TencentCloud.InternetMaxBandwidthOut = 5
+		}
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+		} else {
+			cfg.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = "ubuntu"
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
 	if cfg.Provider == "hyperv" {
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetWindows
@@ -2177,6 +2252,14 @@ func MarkLocalContainerRuntimeExplicit(cfg *Config) {
 
 func LocalContainerRuntimeExplicit(cfg Config) bool {
 	return cfg.localContainerRuntimeExplicit
+}
+
+func MarkLocalContainerWorkRootExplicit(cfg *Config) {
+	cfg.localContainerRootExplicit = true
+}
+
+func LocalContainerWorkRootExplicit(cfg Config) bool {
+	return cfg.localContainerRootExplicit
 }
 
 func MarkAppleContainerImageExplicit(cfg *Config) {
@@ -2839,6 +2922,7 @@ type fileConfig struct {
 	Nebius                   *fileNebiusConfig                   `yaml:"nebius,omitempty"`
 	OVH                      *fileOVHConfig                      `yaml:"ovh,omitempty"`
 	Scaleway                 *fileScalewayConfig                 `yaml:"scaleway,omitempty"`
+	TencentCloud             *fileTencentCloudConfig             `yaml:"tencentcloud,omitempty"`
 	AWS                      *fileAWSConfig                      `yaml:"aws,omitempty"`
 	AWSLambdaMicroVM         *fileAWSLambdaMicroVMConfig         `yaml:"awsLambdaMicroVM,omitempty"`
 	Azure                    *fileAzureConfig                    `yaml:"azure,omitempty"`
@@ -2922,13 +3006,14 @@ type fileWindowsConfig struct {
 }
 
 type fileBrokerConfig struct {
-	URL        string            `yaml:"url,omitempty"`
-	Mode       string            `yaml:"mode,omitempty"`
-	AutoWebVNC *bool             `yaml:"autoWebVNC,omitempty"`
-	Token      string            `yaml:"token,omitempty"`
-	AdminToken string            `yaml:"adminToken,omitempty"`
-	Provider   string            `yaml:"provider,omitempty"`
-	Access     *fileAccessConfig `yaml:"access,omitempty"`
+	URL                  string            `yaml:"url,omitempty"`
+	Mode                 string            `yaml:"mode,omitempty"`
+	AutoWebVNC           *bool             `yaml:"autoWebVNC,omitempty"`
+	LoginRedirectOrigins []string          `yaml:"loginRedirectOrigins,omitempty"`
+	Token                string            `yaml:"token,omitempty"`
+	AdminToken           string            `yaml:"adminToken,omitempty"`
+	Provider             string            `yaml:"provider,omitempty"`
+	Access               *fileAccessConfig `yaml:"access,omitempty"`
 }
 
 type fileAccessConfig struct {
@@ -3016,6 +3101,21 @@ type fileScalewayConfig struct {
 	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 }
 
+type fileTencentCloudConfig struct {
+	Region                  string   `yaml:"region,omitempty"`
+	Zone                    string   `yaml:"zone,omitempty"`
+	Image                   string   `yaml:"image,omitempty"`
+	Type                    string   `yaml:"type,omitempty"`
+	VPCID                   string   `yaml:"vpcId,omitempty"`
+	SubnetID                string   `yaml:"subnetId,omitempty"`
+	SecurityGroupID         string   `yaml:"securityGroupId,omitempty"`
+	SSHCIDRs                []string `yaml:"sshCIDRs,omitempty"`
+	RootGB                  int64    `yaml:"rootGB,omitempty"`
+	InternetChargeType      string   `yaml:"internetChargeType,omitempty"`
+	InternetMaxBandwidthOut int64    `yaml:"internetMaxBandwidthOut,omitempty"`
+	APIEndpoint             string   `yaml:"apiEndpoint,omitempty"`
+}
+
 type fileAWSConfig struct {
 	Region          string   `yaml:"region,omitempty"`
 	AMI             string   `yaml:"ami,omitempty"`
@@ -3046,6 +3146,8 @@ type fileAzureConfig struct {
 	ResourceGroup  string   `yaml:"resourceGroup,omitempty"`
 	Image          string   `yaml:"image,omitempty"`
 	OSDisk         string   `yaml:"osDisk,omitempty"`
+	SnapshotSKU    string   `yaml:"snapshotSKU,omitempty"`
+	OSDiskSKU      string   `yaml:"osDiskSKU,omitempty"`
 	VNet           string   `yaml:"vnet,omitempty"`
 	Subnet         string   `yaml:"subnet,omitempty"`
 	NSG            string   `yaml:"nsg,omitempty"`
@@ -4200,13 +4302,75 @@ func writeUserFileConfig(cfg fileConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeUserFileConfigAtomic(path, data, replaceClaimFile, fsyncDir); err != nil {
 		return "", exit(2, "write config %s: %v", path, err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return "", exit(2, "secure config %s: %v", path, err)
-	}
 	return path, nil
+}
+
+func writeUserFileConfigAtomic(path string, data []byte, replaceFile func(string, string) error, syncDirectory func(string)) error {
+	writePath, err := resolveConfigWritePath(path)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(writePath)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := replaceFile(tmpPath, writePath); err != nil {
+		return err
+	}
+	removeTemp = false
+	syncDirectory(dir)
+	return nil
+}
+
+func resolveConfigWritePath(path string) (string, error) {
+	writePath := path
+	for i := 0; i < 255; i++ {
+		info, err := os.Lstat(writePath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return writePath, nil
+			}
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return writePath, nil
+		}
+		target, err := os.Readlink(writePath)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(writePath), target)
+		}
+		writePath = target
+	}
+	return "", fmt.Errorf("resolve config path %s: too many symbolic links", path)
 }
 
 func configFilePermissionProblem(path string) string {
@@ -4347,6 +4511,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Broker.AutoWebVNC != nil {
 			cfg.BrokerAutoWebVNC = *file.Broker.AutoWebVNC
+		}
+		if trusted && len(file.Broker.LoginRedirectOrigins) > 0 {
+			cfg.BrokerLoginRedirectOrigins = normalizeList(file.Broker.LoginRedirectOrigins)
 		}
 		if file.Broker.AdminToken != "" {
 			cfg.CoordAdminToken = file.Broker.AdminToken
@@ -4572,6 +4739,48 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Scaleway.SSHCIDRs = file.Scaleway.SSHCIDRs
 		}
 	}
+	if file.TencentCloud != nil {
+		if file.TencentCloud.Region != "" {
+			cfg.TencentCloud.Region = file.TencentCloud.Region
+			cfg.tencentCloudRegionExplicit = true
+		}
+		if file.TencentCloud.Zone != "" {
+			cfg.TencentCloud.Zone = file.TencentCloud.Zone
+			cfg.tencentCloudZoneExplicit = true
+		}
+		if file.TencentCloud.Image != "" {
+			cfg.TencentCloud.Image = file.TencentCloud.Image
+			cfg.tencentCloudImageExplicit = true
+		}
+		if file.TencentCloud.Type != "" {
+			cfg.TencentCloud.Type = file.TencentCloud.Type
+			cfg.tencentCloudTypeExplicit = true
+		}
+		if file.TencentCloud.VPCID != "" {
+			cfg.TencentCloud.VPCID = file.TencentCloud.VPCID
+		}
+		if file.TencentCloud.SubnetID != "" {
+			cfg.TencentCloud.SubnetID = file.TencentCloud.SubnetID
+		}
+		if file.TencentCloud.SecurityGroupID != "" {
+			cfg.TencentCloud.SecurityGroupID = file.TencentCloud.SecurityGroupID
+		}
+		if len(file.TencentCloud.SSHCIDRs) > 0 {
+			cfg.TencentCloud.SSHCIDRs = file.TencentCloud.SSHCIDRs
+		}
+		if file.TencentCloud.RootGB > 0 {
+			cfg.TencentCloud.RootGB = file.TencentCloud.RootGB
+		}
+		if file.TencentCloud.InternetChargeType != "" {
+			cfg.TencentCloud.InternetChargeType = file.TencentCloud.InternetChargeType
+		}
+		if file.TencentCloud.InternetMaxBandwidthOut > 0 {
+			cfg.TencentCloud.InternetMaxBandwidthOut = file.TencentCloud.InternetMaxBandwidthOut
+		}
+		if trusted && file.TencentCloud.APIEndpoint != "" {
+			cfg.TencentCloud.APIEndpoint = file.TencentCloud.APIEndpoint
+		}
+	}
 	if file.AWS != nil {
 		if file.AWS.Region != "" {
 			cfg.AWSRegion = file.AWS.Region
@@ -4650,6 +4859,12 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Azure.OSDisk != "" {
 			cfg.AzureOSDisk = file.Azure.OSDisk
 			cfg.AzureOSDiskExplicit = true
+		}
+		if file.Azure.SnapshotSKU != "" {
+			cfg.AzureSnapshotSKU = file.Azure.SnapshotSKU
+		}
+		if file.Azure.OSDiskSKU != "" {
+			cfg.AzureOSDiskSKU = file.Azure.OSDiskSKU
 		}
 		if file.Azure.VNet != "" {
 			cfg.AzureVNet = file.Azure.VNet
@@ -6125,6 +6340,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.LocalContainer.WorkRoot != "" {
 			cfg.LocalContainer.WorkRoot = file.LocalContainer.WorkRoot
+			cfg.localContainerRootExplicit = true
 		}
 		if file.LocalContainer.CPUs > 0 {
 			cfg.LocalContainer.CPUs = file.LocalContainer.CPUs
@@ -6792,6 +7008,9 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_COORDINATOR_AUTO_WEBVNC"); ok {
 		cfg.BrokerAutoWebVNC = value
 	}
+	if value := os.Getenv("CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS"); value != "" {
+		cfg.BrokerLoginRedirectOrigins = splitCommaList(value)
+	}
 	if value := os.Getenv("CRABBOX_COORDINATOR_TOKEN"); value != "" {
 		cfg.CoordToken = value
 		cfg.credentialProvenance.coordToken = credentialSourceEnvironment
@@ -6880,6 +7099,8 @@ func applyEnv(cfg *Config) error {
 		cfg.AzureOSDisk = value
 		cfg.AzureOSDiskExplicit = true
 	}
+	cfg.AzureSnapshotSKU = getenv("CRABBOX_AZURE_SNAPSHOT_SKU", cfg.AzureSnapshotSKU)
+	cfg.AzureOSDiskSKU = getenv("CRABBOX_AZURE_OS_DISK_SKU", cfg.AzureOSDiskSKU)
 	cfg.AzureVNet = getenv("CRABBOX_AZURE_VNET", cfg.AzureVNet)
 	cfg.AzureSubnet = getenv("CRABBOX_AZURE_SUBNET", cfg.AzureSubnet)
 	cfg.AzureNSG = getenv("CRABBOX_AZURE_NSG", cfg.AzureNSG)
@@ -7062,6 +7283,32 @@ func applyEnv(cfg *Config) error {
 	if cidrs := os.Getenv("CRABBOX_SCALEWAY_SSH_CIDRS"); cidrs != "" {
 		cfg.Scaleway.SSHCIDRs = splitCommaList(cidrs)
 	}
+	if region := os.Getenv("CRABBOX_TENCENTCLOUD_REGION"); region != "" {
+		cfg.TencentCloud.Region = region
+		cfg.tencentCloudRegionExplicit = true
+	}
+	if zone := os.Getenv("CRABBOX_TENCENTCLOUD_ZONE"); zone != "" {
+		cfg.TencentCloud.Zone = zone
+		cfg.tencentCloudZoneExplicit = true
+	}
+	if image := os.Getenv("CRABBOX_TENCENTCLOUD_IMAGE"); image != "" {
+		cfg.TencentCloud.Image = image
+		cfg.tencentCloudImageExplicit = true
+	}
+	if serverType := os.Getenv("CRABBOX_TENCENTCLOUD_TYPE"); serverType != "" {
+		cfg.TencentCloud.Type = serverType
+		cfg.tencentCloudTypeExplicit = true
+	}
+	cfg.TencentCloud.VPCID = getenv("CRABBOX_TENCENTCLOUD_VPC_ID", cfg.TencentCloud.VPCID)
+	cfg.TencentCloud.SubnetID = getenv("CRABBOX_TENCENTCLOUD_SUBNET_ID", cfg.TencentCloud.SubnetID)
+	cfg.TencentCloud.SecurityGroupID = getenv("CRABBOX_TENCENTCLOUD_SECURITY_GROUP_ID", cfg.TencentCloud.SecurityGroupID)
+	if cidrs := os.Getenv("CRABBOX_TENCENTCLOUD_SSH_CIDRS"); cidrs != "" {
+		cfg.TencentCloud.SSHCIDRs = splitCommaList(cidrs)
+	}
+	cfg.TencentCloud.RootGB = getenvInt64("CRABBOX_TENCENTCLOUD_ROOT_GB", cfg.TencentCloud.RootGB)
+	cfg.TencentCloud.InternetChargeType = getenv("CRABBOX_TENCENTCLOUD_INTERNET_CHARGE_TYPE", cfg.TencentCloud.InternetChargeType)
+	cfg.TencentCloud.InternetMaxBandwidthOut = getenvInt64("CRABBOX_TENCENTCLOUD_INTERNET_MAX_BANDWIDTH_OUT", cfg.TencentCloud.InternetMaxBandwidthOut)
+	cfg.TencentCloud.APIEndpoint = getenv("CRABBOX_TENCENTCLOUD_API_ENDPOINT", cfg.TencentCloud.APIEndpoint)
 	if value := os.Getenv("CRABBOX_PROXMOX_API_URL"); value != "" {
 		cfg.Proxmox.APIURL = value
 		cfg.credentialProvenance.proxmoxAPIURL = credentialSourceEnvironment
@@ -7826,7 +8073,10 @@ func applyEnv(cfg *Config) error {
 		cfg.localContainerImageExplicit = true
 	}
 	cfg.LocalContainer.User = getenv("CRABBOX_LOCAL_CONTAINER_USER", cfg.LocalContainer.User)
-	cfg.LocalContainer.WorkRoot = getenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT", cfg.LocalContainer.WorkRoot)
+	if workRoot := os.Getenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT"); workRoot != "" {
+		cfg.LocalContainer.WorkRoot = workRoot
+		cfg.localContainerRootExplicit = true
+	}
 	cfg.LocalContainer.CPUs = getenvInt("CRABBOX_LOCAL_CONTAINER_CPUS", cfg.LocalContainer.CPUs)
 	cfg.LocalContainer.Memory = getenv("CRABBOX_LOCAL_CONTAINER_MEMORY", cfg.LocalContainer.Memory)
 	cfg.LocalContainer.Network = getenv("CRABBOX_LOCAL_CONTAINER_NETWORK", cfg.LocalContainer.Network)
@@ -8613,6 +8863,18 @@ func getenvInt32(name string, fallback int32) int32 {
 		return fallback
 	}
 	return int32(n)
+}
+
+func getenvInt64(name string, fallback int64) int64 {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
 
 func getenvFloat(name string, fallback float64) float64 {

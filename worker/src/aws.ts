@@ -12,6 +12,12 @@ import {
   type LeaseConfig,
 } from "./config";
 import { osImageSpec } from "./os-image";
+import {
+  leaseIDForProviderKey,
+  providerKeyForLease,
+  providerKeyOwnedByLease,
+  sshPublicKeyIdentity,
+} from "./provider-key";
 import { leaseProviderLabels } from "./provider-labels";
 import { leaseProviderName } from "./slug";
 import type {
@@ -57,7 +63,12 @@ const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: strin
 const snapshotDeleteBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const securityGroupVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
 
-export function awsManagedSecurityGroupName(config: Pick<LeaseConfig, "providerKey">): string {
+export function awsManagedSecurityGroupName(
+  config: Pick<LeaseConfig, "providerKey"> & Partial<Pick<LeaseConfig, "awsSGName">>,
+): string {
+  if (config.awsSGName) {
+    return config.awsSGName;
+  }
   return config.providerKey.startsWith(workspaceProviderKeyPrefix)
     ? "crabbox-workspaces"
     : "crabbox-runners";
@@ -312,7 +323,7 @@ export class EC2SpotClient {
     market?: string;
     attempts?: ProvisioningAttempt[];
   }> {
-    await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
+    await this.ensureSSHKey(config.providerKey, config.sshPublicKey, leaseID);
     let transientImageID = "";
     try {
       const defaultImageID = config.awsSnapshot
@@ -324,7 +335,22 @@ export class EC2SpotClient {
           ? ""
           : await this.resolveAMI(config);
       const securityGroupID = await this.ensureSecurityGroup(config, options);
-      const candidates = awsLaunchCandidates(config);
+      const pinnedMacHostID = config.target === "macos" ? config.hostID || config.awsMacHostID : "";
+      // An explicit Mac host is tied to one hardware family. Resolve that family once so a
+      // defaulted --type cannot send an incompatible instance type to the pinned host.
+      const pinnedMacHostType = pinnedMacHostID
+        ? await this.macHostInstanceType(pinnedMacHostID)
+        : "";
+      if (
+        pinnedMacHostType &&
+        config.serverTypeExplicit &&
+        pinnedMacHostType !== config.serverType
+      ) {
+        throw new Error(
+          `EC2 Mac Dedicated Host ${pinnedMacHostID} requires ${pinnedMacHostType}, not requested ${config.serverType}`,
+        );
+      }
+      const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
       const failures: string[] = [];
       const attempts: ProvisioningAttempt[] = [];
       const quotaCache = new Map<string, number | undefined>();
@@ -1000,8 +1026,30 @@ export class EC2SpotClient {
     throw lastError;
   }
 
-  async deleteSSHKey(name: string): Promise<void> {
-    await this.ec2("DeleteKeyPair", { KeyName: name }).catch((error: unknown) => {
+  async deleteSSHKey(name: string, leaseID: string): Promise<void> {
+    if (name !== providerKeyForLease(leaseID)) {
+      return;
+    }
+    let described: Record<string, unknown>;
+    try {
+      described = await this.ec2("DescribeKeyPairs", { "KeyName.1": name });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("InvalidKeyPair.NotFound")) {
+        return;
+      }
+      throw error;
+    }
+    const existing = items(record(described["keySet"])["item"]).map(record)[0];
+    if (!existing || !providerKeyOwnedByLease(tagMap(existing["tagSet"]), leaseID)) {
+      console.warn(`AWS SSH key cleanup skipped unowned key lease=${leaseID} key=${name}`);
+      return;
+    }
+    const keyPairID = asString(existing["keyPairId"]);
+    if (!keyPairID) {
+      throw new Error(`AWS SSH key ${name} is missing its immutable key pair ID`);
+    }
+    await this.ec2("DeleteKeyPair", { KeyPairId: keyPairID }).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes("InvalidKeyPair.NotFound")) {
         throw error;
@@ -1015,17 +1063,42 @@ export class EC2SpotClient {
     await this.ec2("CreateTags", params);
   }
 
-  private async ensureSSHKey(name: string, publicKey: string): Promise<void> {
+  private async ensureSSHKey(name: string, publicKey: string, leaseID: string): Promise<void> {
+    const keyLeaseID = leaseIDForProviderKey(name);
+    if (keyLeaseID && keyLeaseID !== leaseID) {
+      throw new Error(`aws ssh key ${name} is reserved for lease ${keyLeaseID}`);
+    }
+    const leaseOwned = keyLeaseID === leaseID;
+    let described: Record<string, unknown> | undefined;
     try {
-      await this.ec2("DescribeKeyPairs", { "KeyName.1": name });
-      return;
+      described = await this.ec2("DescribeKeyPairs", {
+        IncludePublicKey: "true",
+        "KeyName.1": name,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes("InvalidKeyPair.NotFound")) {
         throw error;
       }
     }
-    await this.ec2("ImportKeyPair", {
+    if (described) {
+      const existing = items(record(described["keySet"])["item"]).map(record)[0];
+      if (!existing) {
+        throw new Error(`aws ssh key ${name} could not be read`);
+      }
+      const existingPublicKey = asString(existing["publicKey"]);
+      if (
+        !existingPublicKey ||
+        sshPublicKeyIdentity(existingPublicKey) !== sshPublicKeyIdentity(publicKey)
+      ) {
+        throw new Error(`aws ssh key ${name} exists with different public key`);
+      }
+      if (leaseOwned && !providerKeyOwnedByLease(tagMap(existing["tagSet"]), leaseID)) {
+        throw new Error(`aws ssh key ${name} is not owned by lease ${leaseID}`);
+      }
+      return;
+    }
+    const params: Record<string, string> = {
       KeyName: name,
       PublicKeyMaterial: btoa(publicKey),
       "TagSpecification.1.ResourceType": "key-pair",
@@ -1033,7 +1106,12 @@ export class EC2SpotClient {
       "TagSpecification.1.Tag.1.Value": "true",
       "TagSpecification.1.Tag.2.Key": "created_by",
       "TagSpecification.1.Tag.2.Value": "crabbox",
-    });
+    };
+    if (leaseOwned) {
+      params["TagSpecification.1.Tag.3.Key"] = "lease";
+      params["TagSpecification.1.Tag.3.Value"] = leaseID;
+    }
+    await this.ec2("ImportKeyPair", params);
   }
 
   private async createServer(
@@ -1133,15 +1211,7 @@ export class EC2SpotClient {
         );
         return run(discovered);
       }
-      if (config.target !== "macos" || !configuredMacHostID || !isAWSInvalidHostIDError(message)) {
-        throw error;
-      }
-      const discovered = await this.discoverMacHostID(
-        config.serverType,
-        configuredMacHostID,
-        macHostAvailabilityZone,
-      );
-      return run(discovered);
+      throw error;
     }
   }
 
@@ -1398,6 +1468,17 @@ export class EC2SpotClient {
     });
     const root = await this.ec2("DescribeHosts", params);
     return items(record(root["hostSet"])["item"]).map((host) => this.macHostFromDescribeHost(host));
+  }
+
+  private async macHostInstanceType(hostID: string): Promise<string> {
+    const host = (await this.describeMacHostsByID([hostID]))[0];
+    if (!host) {
+      throw new Error(`AWS EC2 Mac Dedicated Host not found: ${hostID}`);
+    }
+    if (!host.instanceType.startsWith("mac")) {
+      throw new Error(`AWS Dedicated Host ${hostID} is not an EC2 Mac host`);
+    }
+    return host.instanceType;
   }
 
   private macHostsFromAllocatedIDs(

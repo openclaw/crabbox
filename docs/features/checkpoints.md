@@ -62,12 +62,19 @@ Native checkpoints use one of two provider primitives, selected with
 | --- | --- |
 | AWS Linux | `aws-ebs-snapshot` |
 | AWS macOS | `aws-ami` (AMI-backed; raw EC2 Mac root snapshots lack enough launch metadata to fork reliably) |
-| Azure | `azure-os-disk-snapshot` |
+| Azure Linux or native Windows (`windows.mode=normal`) | `azure-os-disk-snapshot` |
 | GCP | `gcp-disk-snapshot` |
 | Parallels | `parallels-snapshot` |
 
 Disk snapshots are faster to create and (on AWS and GCP) boot with fresh
 per-lease SSH keys via injected user-data.
+
+Native Azure Windows snapshot creation is intentionally disruptive and does not
+support `windows.mode=wsl2`: pass
+`--no-reboot=false` to allow Crabbox to deallocate the source, create a
+consistent managed-OS-disk snapshot, and restart the source. Forks specialize
+the copied disk with fresh SSH host/login keys, Windows credentials, and
+loopback-only TightVNC credentials.
 
 **`image`** — opt in with `--strategy image`.
 
@@ -239,6 +246,9 @@ crabbox checkpoint fork chk_abc123 --count 3 --slug update-flow
 - Native forks acquire a lease from the provider using the snapshot/image, wait
   for boot, then relocate the snapshotted workdir to the new lease's standard
   path.
+- Azure Windows native forks are the exception: they preserve the snapshotted
+  filesystem in place and report `workdir=-` because Windows desktop leases do
+  not use Crabbox's POSIX repository workdir relocation flow.
 - Archive forks acquire a standard lease, upload the tarball, and extract it.
 - Accepts the standard lease-create flags (`--class`, `--type`, `--market`,
   `--slug`, etc.), `--keep` (default true), `--count`, `--workdir`, and

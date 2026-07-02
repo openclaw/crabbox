@@ -67,9 +67,12 @@ every other coordinator route. Normal authentication is resolved in
 3. **Signed user token** — a `cbxu_`-prefixed token issued by GitHub browser
    login. It is an HMAC-SHA256 signature (verified in constant time) over a
    base64url payload signed with `CRABBOX_SESSION_SECRET`, which must be set and
-   must differ from `CRABBOX_SHARED_TOKEN`. The payload carries `owner`, `org`,
-   and GitHub `login`, has a default 180-day expiry, and is rejected if it
-   carries an `admin` claim — browser login can never mint admin tokens.
+   must differ from `CRABBOX_SHARED_TOKEN`. The versioned payload carries a
+   verified-email `owner`, its `github-verified-email` provenance, `org`, and
+   GitHub `login`, has a default 180-day expiry, and is rejected if it carries
+   an `admin` claim — browser login can never mint admin tokens. Tokens from
+   older schemas are rejected; users must log in again after this security
+   upgrade.
 
 ### GitHub browser login
 
@@ -81,6 +84,9 @@ by coordinator config:
   members of the listed GitHub org(s).
 - `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) further
   narrows access to selected team slugs after org membership passes.
+- The GitHub account must expose at least one verified email through the OAuth
+  `user:email` scope. Public profile and unverified emails are never trusted as
+  the token owner.
 
 User tokens can only mutate leases, runs, and usage for their own `owner`/`org`
 identity. Lease owners also have read-only audit access to run history, logs,
@@ -201,6 +207,12 @@ hostname, and effective port remain unchanged. The curl transport fallback
 does not follow redirects and disables ambient curl configuration before
 loading Crabbox's generated request config. Configure the CLI with the final
 canonical coordinator or Access-protected origin, not a redirecting alias.
+GitHub browser login follows the same destination rule by default: a callback
+origin that differs from the selected broker is rejected before browser open,
+polling, or config write. Operators who are deliberately migrating between
+same-deployment broker aliases can allow specific callback origins with trusted
+user config `broker.loginRedirectOrigins` or
+`CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS`.
 
 Provider clients apply the same destination principle where custom endpoints
 are supported. Cloudflare runner and RunPod requests reject cross-origin
@@ -254,7 +266,9 @@ repo:
 - `CRABBOX_ARTIFACTS_ACCESS_KEY_ID`, `CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY`,
   and optional `CRABBOX_ARTIFACTS_SESSION_TOKEN` — brokered artifact publishing.
   Scope these to the artifact bucket/prefix and use them only to sign
-  short-lived upload/read URLs.
+  short-lived upload/read URLs. New grants encode the exact authenticated
+  owner/org identity in an opaque versioned namespace; existing object URLs are
+  not rewritten or resolved through a legacy lookup path.
 
 Deployments that previously relied on `CRABBOX_SHARED_TOKEN` as the implicit
 user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
@@ -287,13 +301,44 @@ and may fail for historical tags that are incompatible with the current
 reviewed release configuration rather than falling back to tag-controlled
 publishing behavior.
 
-## Managed Windows Bootstrap Integrity
+## Managed Windows Artifact Integrity
 
 Managed Windows bootstrap pins the OpenSSH-Win64 archive, Git for Windows
 installer, TightVNC installer, and versioned Ubuntu WSL rootfs to SHA-256
 digests embedded alongside their URLs. Generated PowerShell verifies every
 download before extraction, execution, or WSL import, removes mismatched bytes,
 and fails bootstrap closed. URL and digest updates are reviewed together.
+
+The documented Windows developer-image prep applies the same rule to its
+versioned Chocolatey package, Node MSI, and Docker Engine archive. The bundled
+versions use embedded reviewed digests. Operator-selected Node or Docker
+versions require matching SHA-256 environment overrides, and missing, malformed,
+or mismatched values fail closed before installation, extraction, or service
+registration.
+
+## Managed Linux APT Trust
+
+Managed Linux developer-image bootstrap pins the active NodeSource, Docker, and
+Google Linux package-signing primary fingerprints. Local-container Docker
+socket bootstrap applies the same Docker pin before adding Docker's CLI
+repository. Each path imports downloaded key material into an isolated
+temporary GnuPG home, exports only the approved primary key and its signing
+subkeys into a repository-scoped keyring, and binds the matching APT source to
+that keyring with `signed-by`.
+
+A missing or changed primary key fails closed before replacing the prior
+keyring or repository source. Managed image preparation stops rather than
+trusting unexpected NodeSource or Docker key material. Browser setup instead
+tries the distro Chromium package, and local-container Docker CLI setup instead
+tries the distro `docker.io` package.
+
+Signing-subkey rotations beneath an approved primary key continue without a
+Crabbox update. A primary-key rotation requires a reviewed fingerprint update
+against the official [NodeSource setup](https://github.com/nodesource/distributions/blob/master/scripts/deb/setup_24.x),
+[Docker Ubuntu](https://docs.docker.com/engine/install/ubuntu/),
+[Docker Debian](https://docs.docker.com/engine/install/debian/), or
+[Google Linux repository key](https://www.google.com/linuxrepositories/) source
+and fresh bootstrap proof; there is no fallback to an unpinned key.
 
 ## SSH
 

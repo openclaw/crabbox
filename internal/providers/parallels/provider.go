@@ -114,6 +114,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	}
 	if core.FlagWasSet(fs, "parallels-host") {
 		cfg.Parallels.Host = *v.Host
+		// An explicit host is a direct-host override, not another fleet hint.
+		// Leaving configured fleet candidates here silently replaces the flag.
+		cfg.Parallels.Hosts = nil
+		cfg.Parallels.SelectedHost = ""
 	}
 	if core.FlagWasSet(fs, "parallels-host-user") {
 		cfg.Parallels.HostUser = *v.HostUser

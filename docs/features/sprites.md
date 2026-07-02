@@ -52,6 +52,10 @@ environment:
 - `CRABBOX_SPRITES_API_URL` or `SPRITES_API_URL` → `sprites.apiUrl`
 - `CRABBOX_SPRITES_WORK_ROOT` → `sprites.workRoot`
 
+Custom API URLs require HTTPS unless the host is literal loopback. Userinfo,
+queries, and fragments are rejected, and authenticated requests cannot follow
+redirects to another origin.
+
 Equivalent one-off flags:
 
 ```sh

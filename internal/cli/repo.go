@@ -179,6 +179,9 @@ func allowedEnv(allow []string) map[string]string {
 		if !ok {
 			continue
 		}
+		if !validEnvName(k) {
+			continue
+		}
 		if envAllowed(k, allow) {
 			out[k] = v
 		}

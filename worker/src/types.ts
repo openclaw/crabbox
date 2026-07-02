@@ -69,6 +69,7 @@ export interface Env {
   CRABBOX_GITHUB_ADMIN_LOGINS?: string;
   CRABBOX_PUBLIC_URL?: string;
   CRABBOX_CODE_ORIGIN_TEMPLATE?: string;
+  CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS?: string;
   CRABBOX_WORKSPACE_PROVIDER?: string;
   CRABBOX_WORKSPACE_CLASS?: string;
   CRABBOX_WORKSPACE_PREWARM_COUNT?: string;
@@ -156,6 +157,7 @@ export interface LeaseRequest {
   awsProfile?: string;
   awsRootGB?: number;
   awsSSHCIDRs?: string[];
+  awsSSHCIDRsPinned?: boolean;
   awsMacHostID?: string;
   azureLocation?: string;
   azureImage?: string;
@@ -344,6 +346,7 @@ export interface LeaseRecord {
   serverID: number;
   serverName: string;
   providerKey: string;
+  providerKeyCleanupOwned?: boolean;
   host: string;
   sshUser: string;
   sshPort: string;
@@ -443,6 +446,7 @@ export interface ReadyPoolReturnRequest {
 
 export interface LeaseNetworkState {
   sshSourceCIDRs?: string[];
+  sshPinnedSourceCIDRs?: string[];
   sshSourceCIDRsComplete?: boolean;
   awsSecurityGroupID?: string;
   awsSecurityGroupName?: string;
@@ -705,6 +709,7 @@ export interface HetznerSSHKey {
   name: string;
   fingerprint: string;
   public_key: string;
+  labels?: Record<string, string>;
 }
 
 export interface MachineView {
@@ -730,4 +735,5 @@ export interface ProviderMachine {
   hostID?: string;
   host: string;
   labels: Record<string, string>;
+  providerKey?: string;
 }

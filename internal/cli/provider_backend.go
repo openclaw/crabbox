@@ -271,6 +271,7 @@ type NativeCheckpointForkRecord struct {
 	HostID      string
 	TargetOS    string
 	WindowsMode string
+	Desktop     bool
 	ServerType  string
 	Metadata    map[string]string
 }

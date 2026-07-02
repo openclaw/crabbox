@@ -12,6 +12,7 @@ const openSSHWin64ZipSHA256 = "0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af
 const ubuntuWSLRootFSURL =
   "https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz";
 const ubuntuWSLRootFSSHA256 = "8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea";
+const googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
 
 export function awsUserData(config: LeaseConfig): string {
   if (config.target === "windows") {
@@ -329,8 +330,6 @@ function windowsManagedCorePreludePowerShell(config: LeaseConfig): string {
 	$usernamePath = $windowsUsernamePath
 	$passwordMirrorPath = $windowsPasswordPath
 	$enforceKeyAuth = $false
-	$userVNCStartupPath = "C:\\ProgramData\\crabbox\\start-user-vnc.ps1"
-	$userVNCStartupCommandPath = Join-Path (Join-Path (Join-Path "C:\\Users" $user) "AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup") "crabbox-user-vnc.cmd"
 	$tightVNCInstaller = "$env:TEMP\\tightvnc-2.8.85-gpl-setup-64bit.msi"
 	`;
   }
@@ -469,7 +468,7 @@ crabbox-ready
 
 function windowsDesktopBootstrapPowerShell(): string {
   return `
-	if (-not (Test-Path -LiteralPath "C:\\Program Files\\TightVNC\\tvnserver.exe")) {
+if (-not (Test-Path -LiteralPath "C:\\Program Files\\TightVNC\\tvnserver.exe")) {
 	  Retry { Invoke-WebRequest -Uri ${psQuote(tightVNCMSIURL)} -OutFile $tightVNCInstaller -UseBasicParsing }
 	  Assert-CrabboxFileSHA256 $tightVNCInstaller ${psQuote(tightVNCMSISHA256)}
 	  $vncPassword = Get-Content -Raw -Path $vncPasswordPath
@@ -486,43 +485,13 @@ function windowsDesktopBootstrapPowerShell(): string {
     "SET_ACCEPTHTTPCONNECTIONS=1", "VALUE_OF_ACCEPTHTTPCONNECTIONS=0"
   ) -Wait
 }
-$userVNCStartup = @'
-$ErrorActionPreference = "SilentlyContinue"
-$serverKey = "HKCU:\\Software\\TightVNC\\Server"
-$serviceKey = "HKLM:\\Software\\TightVNC\\Server"
-$serviceConfig = Get-ItemProperty -Path $serviceKey -ErrorAction SilentlyContinue
-function Set-TightVNCBinaryValue($Name) {
-  $hex = ""
-  if ($serviceConfig -and $serviceConfig.$Name) {
-    $bytes = [byte[]]$serviceConfig.$Name
-    if ($bytes -and $bytes.Length -gt 0) {
-      $hex = -join ($bytes | ForEach-Object { $_.ToString("X2") })
-    }
-  }
-  if ($hex) {
-    & reg.exe add "HKCU\\Software\\TightVNC\\Server" /v $Name /t REG_BINARY /d $hex /f | Out-Null
-  }
-}
-New-Item -Force -Path $serverKey | Out-Null
-New-ItemProperty -Force -Path $serverKey -Name UseVncAuthentication -PropertyType DWord -Value 1 | Out-Null
-Set-TightVNCBinaryValue "Password"
-New-ItemProperty -Force -Path $serverKey -Name UseControlAuthentication -PropertyType DWord -Value 1 | Out-Null
-Set-TightVNCBinaryValue "ControlPassword"
-New-ItemProperty -Force -Path $serverKey -Name AllowLoopback -PropertyType DWord -Value 1 | Out-Null
-New-ItemProperty -Force -Path $serverKey -Name AcceptHttpConnections -PropertyType DWord -Value 0 | Out-Null
-$exe = "C:\\Program Files\\TightVNC\\tvnserver.exe"
-Get-Process tvnserver -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq (Get-Process -Id $PID).SessionId } | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 500
-Start-Process -FilePath $exe -ArgumentList "-run" -WindowStyle Minimized
-'@
-Set-Content -Encoding UTF8 -LiteralPath $userVNCStartupPath -Value $userVNCStartup
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent $userVNCStartupCommandPath) | Out-Null
-Set-Content -Encoding ASCII -LiteralPath $userVNCStartupCommandPath -Value ('@echo off' + [Environment]::NewLine + 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $userVNCStartupPath + '"' + [Environment]::NewLine)
 $startupTask = "CrabboxUserVNC"
 cmd.exe /c "schtasks.exe /Delete /TN $startupTask /F 2>NUL" | Out-Null
-schtasks.exe /Create /TN $startupTask /SC ONLOGON /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $userVNCStartupPath" /RU $user /IT /F | Out-Null
-Get-Service -Name tvnserver -ErrorAction SilentlyContinue | Set-Service -StartupType Disabled
-Stop-Service -Name tvnserver -Force -ErrorAction SilentlyContinue
+Remove-Item -Force -LiteralPath "C:\\ProgramData\\crabbox\\start-user-vnc.ps1" -ErrorAction SilentlyContinue
+Remove-Item -Force -LiteralPath (Join-Path (Join-Path (Join-Path "C:\\Users" $user) "AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup") "crabbox-user-vnc.cmd") -ErrorAction SilentlyContinue
+Get-Process tvnserver -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 } | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Service -Name tvnserver | Set-Service -StartupType Automatic
+Start-Service -Name tvnserver
 $winlogon = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon"
 $oobe = "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE"
 if (-not (Test-Path -LiteralPath $oobe)) {
@@ -693,7 +662,6 @@ function optionalReadyChecks(config: LeaseConfig): string {
         "      systemctl is-active --quiet crabbox-xvfb.service",
         "      systemctl is-active --quiet crabbox-desktop.service",
         "      systemctl is-active --quiet crabbox-desktop-session.service",
-        "      systemctl is-active --quiet crabbox-x11vnc.service",
         "      ss -ltn | grep -q '127.0.0.1:5900'",
       );
     }
@@ -812,12 +780,12 @@ ${displayEnv}      EOF
     permissions: '0644'
     content: |
       [Unit]
-      Description=Crabbox Xvfb display
+      Description=Crabbox resize-capable TigerVNC display
       After=network.target
 
       [Service]
       User=crabbox
-      ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac
+      ExecStart=/usr/bin/Xtigervnc :99 -geometry 1920x1080 -depth 24 -localhost yes -rfbport 5900 -SecurityTypes VncAuth -PasswordFile=/var/lib/crabbox/vnc.pass -AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac
       Restart=always
 
       [Install]
@@ -1125,21 +1093,6 @@ ${displayEnv}      EOF
 
       [Install]
       WantedBy=multi-user.target
-  - path: /etc/systemd/system/crabbox-x11vnc.service
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=Crabbox loopback VNC server
-      After=crabbox-xvfb.service
-      Requires=crabbox-xvfb.service
-
-      [Service]
-      User=crabbox
-      ExecStart=/usr/bin/x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -rfbauth /var/lib/crabbox/vnc.pass -wait 16 -defer 8 -nowait_bog
-      Restart=always
-
-      [Install]
-      WantedBy=multi-user.target
 `;
 }
 
@@ -1424,12 +1377,12 @@ ${themeConfigure}    systemctl daemon-reload
     systemctl enable crabbox-desktop.service crabbox-wayvnc.service
     systemctl restart crabbox-desktop.service crabbox-wayvnc.service`);
   } else if (config.desktop) {
-    parts.push(`    retry apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
+    parts.push(`    retry apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
     fi
-    { head -c 8 /var/lib/crabbox/vnc.password; printf '\\n'; head -c 8 /var/lib/crabbox/vnc.password; printf '\\n\\n'; } | x11vnc -storepasswd /var/lib/crabbox/vnc.pass >/dev/null 2>&1
+    head -c 8 /var/lib/crabbox/vnc.password | tigervncpasswd -f > /var/lib/crabbox/vnc.pass
     chown crabbox:crabbox /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     printf 'CRABBOX_DESKTOP_ENV=xfce\\nDISPLAY=:99\\n' >/var/lib/crabbox/desktop.env
@@ -1437,23 +1390,51 @@ ${themeConfigure}    systemctl daemon-reload
     chmod 0644 /var/lib/crabbox/desktop.env
     CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme
     systemctl daemon-reload
-    systemctl disable --now crabbox-wayvnc.service 2>/dev/null || true
-    systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service
-    systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service`);
+    systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true
+    systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service
+    systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service`);
   }
   if (config.browser) {
     parts.push(`    retry apt-get install -y --no-install-recommends gnupg build-essential python3
     browser_path=""
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then
-      install -d -m 0755 /etc/apt/trusted.gpg.d
-      curl -fsSL https://dl.google.com/linux/linux_signing_key.pub > /etc/apt/trusted.gpg.d/google.asc
-      chmod 0644 /etc/apt/trusted.gpg.d/google.asc
-      echo "deb [arch=amd64] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
-      if apt-get update && retry apt-get install -y --no-install-recommends google-chrome-stable; then
-        browser_path="$(command -v google-chrome || true)"
+      install -d -m 0755 /etc/apt/keyrings
+      google_key_tmp="$(mktemp -d /etc/apt/keyrings/google-linux.gpg.tmp.XXXXXX)"
+      google_key_home="$google_key_tmp/gnupg"
+      install -d -m 0700 "$google_key_home"
+      google_key_ready=0
+      if curl -fsSL https://dl.google.com/linux/linux_signing_key.pub > "$google_key_tmp/google.asc" &&
+         GNUPGHOME="$google_key_home" gpg --batch --import "$google_key_tmp/google.asc" >/dev/null 2>&1; then
+        google_key_fingerprint="$(GNUPGHOME="$google_key_home" gpg --batch --with-colons --fingerprint ${googleLinuxSigningKeyFingerprint} 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }' || true)"
+        if [ "$google_key_fingerprint" = "${googleLinuxSigningKeyFingerprint}" ] &&
+           GNUPGHOME="$google_key_home" gpg --batch --export ${googleLinuxSigningKeyFingerprint} > "$google_key_tmp/google-linux.gpg" &&
+           [ -s "$google_key_tmp/google-linux.gpg" ]; then
+          chmod 0644 "$google_key_tmp/google-linux.gpg"
+          mv -f "$google_key_tmp/google-linux.gpg" /etc/apt/keyrings/google-linux.gpg
+          google_key_ready=1
+        fi
+      fi
+      rm -rf "$google_key_tmp"
+      if [ "$google_key_ready" = 1 ]; then
+        install -d -m 0755 /etc/default
+        google_defaults_tmp="$(mktemp /etc/default/google-chrome.tmp.XXXXXX)"
+        if [ -f /etc/default/google-chrome ]; then
+          awk '!/^[[:space:]]*repo_add_once=/ && !/^[[:space:]]*repo_reenable_on_distupgrade=/' /etc/default/google-chrome > "$google_defaults_tmp"
+        fi
+        printf '%s\\n' 'repo_add_once="false"' 'repo_reenable_on_distupgrade="false"' >> "$google_defaults_tmp"
+        chmod 0644 "$google_defaults_tmp"
+        mv -f "$google_defaults_tmp" /etc/default/google-chrome
+        rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/crabbox-google-chrome.list
+        if apt-get update && retry apt-get install -y --no-install-recommends google-chrome-stable; then
+          rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          browser_path="$(command -v google-chrome || true)"
+        else
+          rm -f /etc/apt/sources.list.d/crabbox-google-chrome.list /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          retry apt-get update || true
+        fi
       else
-        rm -f /etc/apt/sources.list.d/google-chrome.list
-        retry apt-get update || true
+        echo "Google Linux signing key verification failed; trying Chromium fallback" >&2
       fi
     fi
     if [ -z "$browser_path" ]; then

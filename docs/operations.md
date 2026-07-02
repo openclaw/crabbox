@@ -372,7 +372,7 @@ proxied HTML and JavaScript to a separate browser origin.
 
 ```text
 AWS_SESSION_TOKEN                  optional
-CRABBOX_HOST_ID                    optional; admin-only explicit brokered host pin
+CRABBOX_HOST_ID                    optional; admin-only except owner reactivation of a retained Mac instance
 CRABBOX_AWS_MAC_HOST_ID            optional legacy AWS alias for CRABBOX_HOST_ID
 CRABBOX_SHARED_OWNER              optional fixed owner identity for shared-token automation
 CRABBOX_ADMIN_TOKEN               required for admin routes and image promotion
@@ -433,6 +433,15 @@ also receives a coordinator-generated SSH host identity whose fingerprint is
 persisted before provisioning, so first attachment does not rely on TOFU.
 The versioned workspace `attachUrl` is a bearer-authenticated server-to-server
 endpoint for control planes such as Crabfleet, not a browser portal URL.
+Desktop workspaces report `capabilities.nativeVnc=true` when the native CLI
+handoff is available. This does not imply a browser desktop endpoint:
+`capabilities.vnc` and `capabilities.desktop` remain false unless
+`POST /v1/workspaces/:id/connections/desktop` is supported.
+`POST /v1/workspaces/:id/connections/native-vnc` mints a one-minute,
+single-use grant. The native CLI passes that grant on stdin, and the coordinator
+uses its dedicated workspace SSH key to relay the loopback VNC service over an
+authenticated WebSocket. The workspace SSH private key never leaves the
+coordinator.
 
 When `CRABBOX_WORKSPACE_PREWARM_COUNT` is positive, the coordinator keeps that
 many hidden ready workspaces for each organization with active workspace demand.

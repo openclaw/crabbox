@@ -168,6 +168,31 @@ func TestUploadDaytonaFileStreamDoesNotPrebuffer(t *testing.T) {
 	}
 }
 
+func TestUploadDaytonaFileStreamRedactsAuthorizationFromError(t *testing.T) {
+	const token = "daytona-provider-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("authorization=%q", got)
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"authorization":"Bearer ` + token + `","message":"upload failed for ` + token + `"}`))
+	}))
+	defer srv.Close()
+
+	err := uploadDaytonaFileStream(t.Context(), srv.Client(), srv.URL+"/files/upload?path=%2Ftmp%2Farchive.tgz", map[string]string{
+		"Authorization": "Bearer " + token,
+	}, strings.NewReader("archive"), "archive.tgz")
+	if err == nil {
+		t.Fatal("expected upload error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("err=%q still contains token", err.Error())
+	}
+	if !strings.Contains(err.Error(), daytonaTokenRedacted) {
+		t.Fatalf("err=%q, want redacted token marker", err.Error())
+	}
+}
+
 func TestDaytonaAuthRequiresOrganizationForJWT(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = daytonaProvider

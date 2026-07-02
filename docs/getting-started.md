@@ -8,6 +8,8 @@ Read this when:
 
 This is a cookbook, not a reference. It walks through one repo from install to
 `crabbox run -- pnpm test`. Each step links to deeper docs when you want more.
+If you are still deciding whether Crabbox fits your workflow, start with
+[What Crabbox is](README.md#what-crabbox-is).
 
 ## Step 1. Install
 

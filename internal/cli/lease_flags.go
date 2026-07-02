@@ -17,6 +17,7 @@ type leaseCreateFlagValues struct {
 	Architecture  *string
 	OSImage       *string
 	ServerType    *string
+	SSHPort       *string
 	Market        *string
 	Slug          *string
 	Pond          *string
@@ -45,6 +46,7 @@ func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlag
 		Architecture:  fs.String("arch", defaults.Architecture, "CPU architecture: amd64 or arm64"),
 		OSImage:       fs.String("os", defaults.OSImage, "portable Linux OS image selector, for example ubuntu:26.04"),
 		ServerType:    fs.String("type", getenv("CRABBOX_SERVER_TYPE", ""), "provider server/instance type"),
+		SSHPort:       fs.String("ssh-port", defaults.SSHPort, "SSH port for the leased target"),
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
 		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
 		Pond:          fs.String("pond", defaults.Pond, "tag this lease with a pond name so peers can be selected with --pond"),
@@ -75,6 +77,13 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	prepareProviderDefaults(cfg)
 	cfg.Profile = *values.Profile
 	cfg.Class = *values.Class
+	if flagWasSet(fs, "ssh-port") {
+		cfg.SSHPort = strings.TrimSpace(*values.SSHPort)
+		if cfg.SSHPort == "" {
+			return exit(2, "--ssh-port must not be empty")
+		}
+		MarkSSHPortExplicit(cfg)
+	}
 	if flagWasSet(fs, "class") {
 		MarkClassExplicit(cfg)
 	}

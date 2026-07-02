@@ -627,6 +627,35 @@ func TestNvidiaBrevUntrustedConfigCannotRedirectCLI(t *testing.T) {
 	}
 }
 
+func TestLocalContainerWorkRootExplicitSources(t *testing.T) {
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, fileConfig{
+		LocalContainer: &fileLocalContainerConfig{
+			WorkRoot: "/workspace/file",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LocalContainer.WorkRoot != "/workspace/file" {
+		t.Fatalf("file local-container work root=%q", cfg.LocalContainer.WorkRoot)
+	}
+	if !LocalContainerWorkRootExplicit(cfg) {
+		t.Fatal("file local-container work root not marked explicit")
+	}
+
+	cfg = baseConfig()
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT", "/workspace/env")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LocalContainer.WorkRoot != "/workspace/env" {
+		t.Fatalf("env local-container work root=%q", cfg.LocalContainer.WorkRoot)
+	}
+	if !LocalContainerWorkRootExplicit(cfg) {
+		t.Fatal("env local-container work root not marked explicit")
+	}
+}
+
 func TestEffectiveNvidiaBrevWorkRootDoesNotInheritAnotherProviderDefault(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "xcp-ng"
@@ -5483,6 +5512,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.LocalContainer.Runtime != "docker" || cfg.LocalContainer.Image != "ubuntu:env" || cfg.LocalContainer.User != "runner-env" || cfg.LocalContainer.WorkRoot != "/workspace/env" || cfg.LocalContainer.CPUs != 6 || cfg.LocalContainer.Memory != "12g" || cfg.LocalContainer.Network != "bridge" || !cfg.LocalContainer.DockerSocket {
 		t.Fatalf("unexpected local-container env: %#v", cfg.LocalContainer)
 	}
+	if !LocalContainerWorkRootExplicit(cfg) {
+		t.Fatal("env local-container work root not marked explicit")
+	}
 	if cfg.Blacksmith.IdleTimeout != 2*time.Hour || !cfg.Blacksmith.Debug {
 		t.Fatalf("unexpected blacksmith env: %#v", cfg.Blacksmith)
 	}
@@ -6187,6 +6219,107 @@ func TestConfigHelperBranches(t *testing.T) {
 	if duration != 15*time.Minute {
 		t.Fatalf("duration=%s", duration)
 	}
+}
+
+func TestWriteUserFileConfigAtomic(t *testing.T) {
+	t.Run("successful rewrite keeps mode 0600", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte("profile: previous\nprovider: aws\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeUserFileConfigAtomic(path, []byte("profile: rewritten\nprovider: aws\n"), os.Rename, func(string) {}); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if file.Profile != "rewritten" || file.Provider != "aws" {
+			t.Fatalf("file config=%#v", file)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("config mode=%04o want 0600", got)
+		}
+	})
+
+	t.Run("rename failure preserves previous readable config", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte("profile: previous\nprovider: aws\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var stagedPath string
+		renameErr := fmt.Errorf("rename failed")
+		err := writeUserFileConfigAtomic(path, []byte("profile: staged\nprovider: aws\n"), func(from, to string) error {
+			stagedPath = from
+			if to != path {
+				t.Fatalf("rename target=%q want %q", to, path)
+			}
+			if _, err := os.Stat(from); err != nil {
+				t.Fatalf("staged config missing before rename: %v", err)
+			}
+			return renameErr
+		}, func(string) {
+			t.Fatal("directory sync should not run after failed rename")
+		})
+		if err == nil || !strings.Contains(err.Error(), renameErr.Error()) {
+			t.Fatalf("rename error=%v want %v", err, renameErr)
+		}
+		if stagedPath == "" {
+			t.Fatal("rename was not attempted")
+		}
+		if _, err := os.Stat(stagedPath); !os.IsNotExist(err) {
+			t.Fatalf("staged temp remains after failed rename: %v", err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if file.Profile != "previous" || file.Provider != "aws" {
+			t.Fatalf("previous config not preserved: %#v", file)
+		}
+	})
+
+	t.Run("symlink rewrite preserves link", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target.yaml")
+		path := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(target, []byte("profile: previous\nprovider: aws\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("target.yaml", path); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+
+		if err := writeUserFileConfigAtomic(path, []byte("profile: rewritten\nprovider: aws\n"), os.Rename, func(string) {}); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("config path mode=%s want symlink", info.Mode())
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if file.Profile != "rewritten" || file.Provider != "aws" {
+			t.Fatalf("file config=%#v", file)
+		}
+		targetInfo, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := targetInfo.Mode().Perm(); got != 0o600 {
+			t.Fatalf("target config mode=%04o want 0600", got)
+		}
+	})
 }
 
 func TestConfigHelperErrorBranches(t *testing.T) {

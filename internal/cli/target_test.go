@@ -358,6 +358,39 @@ func TestLeaseCreateFlagsRejectExeDevNonLinuxTarget(t *testing.T) {
 	}
 }
 
+func TestLeaseCreateFlagsApplyExplicitSSHPort(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "parallels", "--target", "macos", "--ssh-port", "22"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHPort != "22" || !IsSSHPortExplicit(&cfg) {
+		t.Fatalf("ssh port=%q explicit=%t", cfg.SSHPort, IsSSHPortExplicit(&cfg))
+	}
+}
+
+func TestNormalizeTargetConfigForcesAWSMacOSLaunchdSSHPort(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetMacOS
+	cfg.SSHPort = "2222"
+	cfg.SSHFallbackPorts = []string{"22", "2200"}
+
+	normalizeTargetConfig(&cfg)
+
+	if cfg.SSHPort != "22" {
+		t.Fatalf("SSHPort=%q, want launchd Remote Login port 22", cfg.SSHPort)
+	}
+	if cfg.SSHFallbackPorts != nil {
+		t.Fatalf("SSHFallbackPorts=%v, want nil", cfg.SSHFallbackPorts)
+	}
+}
+
 func TestLeaseCreateFlagsDoNotApplyPortableOSImageToAzureWindows(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)

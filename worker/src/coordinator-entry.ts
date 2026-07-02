@@ -54,6 +54,13 @@ export async function prepareCoordinatorRequest(
   if (url.pathname === "/portal/login" || url.pathname === "/portal/logout") {
     return { request: requestWithoutTrustedHeaders(request), authenticated: false };
   }
+  if (
+    request.method === "GET" &&
+    url.pathname === "/v1/native-vnc/handoff" &&
+    request.headers.get("upgrade")?.toLowerCase() === "websocket"
+  ) {
+    return { request: requestWithoutTrustedHeaders(request), authenticated: false };
+  }
   const route = pathParts(request);
   if (route[0] === "v1" && route[1] === "internal") {
     return {

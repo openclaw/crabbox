@@ -192,6 +192,11 @@ CRABBOX_GCP_ROOT_GB
 CRABBOX_GCP_SERVICE_ACCOUNT
 ```
 
+Explicit broker requests for `gcp.project`, `gcp.image`, `gcp.network`,
+`gcp.subnet`, `gcp.tags`, or `gcp.serviceAccount` require admin-token
+authentication. Normal broker users receive the coordinator-managed values.
+Direct mode keeps these local configuration overrides.
+
 Verify configuration:
 
 ```sh

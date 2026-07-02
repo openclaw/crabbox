@@ -83,6 +83,7 @@ func TestAdapterRelayRouteAllowlist(t *testing.T) {
 		{http.MethodGet, "/v1/workspaces/fleet-a-is-101", true},
 		{http.MethodDelete, "/v1/workspaces/fleet-a-is-101", true},
 		{http.MethodPost, "/v1/workspaces/fleet-a-is-101/connections/desktop", true},
+		{http.MethodPost, "/v1/workspaces/fleet-a-is-101/connections/native-vnc", true},
 		{http.MethodGet, "/healthz", false},
 		{http.MethodPut, "/v1/workspaces/fleet-a-is-101", false},
 		{http.MethodPost, "/v1/workspaces/fleet-a-is-101/reboot", false},
@@ -252,6 +253,10 @@ func TestAdapterRelayDesktopTimeoutCoversConnectionSetup(t *testing.T) {
 	desktop := adapterRelayRequest{Method: http.MethodPost, Path: "/v1/workspaces/fleet-a-is-101/connections/desktop"}
 	if got := adapterRelayTimeoutForRequest(desktop, 11*time.Minute); got != 11*time.Minute {
 		t.Fatalf("desktop timeout=%s", got)
+	}
+	nativeVNC := adapterRelayRequest{Method: http.MethodPost, Path: "/v1/workspaces/fleet-a-is-101/connections/native-vnc"}
+	if got := adapterRelayTimeoutForRequest(nativeVNC, 11*time.Minute); got != 11*time.Minute {
+		t.Fatalf("native VNC timeout=%s", got)
 	}
 	ordinary := adapterRelayRequest{Method: http.MethodGet, Path: "/v1/workspaces/fleet-a-is-101"}
 	if got := adapterRelayTimeoutForRequest(ordinary, 11*time.Minute); got != 9*time.Second {

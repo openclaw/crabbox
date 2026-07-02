@@ -45,8 +45,12 @@ export function runtimeAdapterProxyPath(parts: string[]): string | undefined {
   if (parts.length === 3) {
     return `/v1/workspaces/${parts[2]}`;
   }
-  if (parts.length === 5 && parts[3] === "connections" && parts[4] === "desktop") {
-    return `/v1/workspaces/${parts[2]}/connections/desktop`;
+  if (
+    parts.length === 5 &&
+    parts[3] === "connections" &&
+    (parts[4] === "desktop" || parts[4] === "native-vnc")
+  ) {
+    return `/v1/workspaces/${parts[2]}/connections/${parts[4]}`;
   }
   return undefined;
 }
@@ -55,7 +59,7 @@ export function runtimeAdapterRelayMethodAllowed(method: string, path: string): 
   if (path === "/v1/workspaces") {
     return method === "POST";
   }
-  if (path.endsWith("/connections/desktop")) {
+  if (path.endsWith("/connections/desktop") || path.endsWith("/connections/native-vnc")) {
     return method === "POST";
   }
   return method === "GET" || method === "DELETE";
@@ -79,7 +83,9 @@ export function validRuntimeAdapterDesktopRelayTimeout(value: unknown): value is
 }
 
 export function runtimeAdapterRelayTimeoutForPath(path: string, desktopTimeoutMs?: number): number {
-  if (!path.endsWith("/connections/desktop")) return runtimeAdapterRelayTimeoutMs;
+  if (!path.endsWith("/connections/desktop") && !path.endsWith("/connections/native-vnc")) {
+    return runtimeAdapterRelayTimeoutMs;
+  }
   return validRuntimeAdapterDesktopRelayTimeout(desktopTimeoutMs)
     ? desktopTimeoutMs
     : runtimeAdapterDesktopRelayTimeoutMs;

@@ -177,8 +177,16 @@ cadence and grace with
 
 EC2 Mac instances run only on Dedicated Hosts, and host lifecycle is explicit
 operator work. Admin-authenticated brokered mode can pin a host with
-`CRABBOX_HOST_ID` (legacy alias `CRABBOX_AWS_MAC_HOST_ID`); normal broker users
-rely on automatic available-host discovery in the region.
+`CRABBOX_HOST_ID` (legacy alias `CRABBOX_AWS_MAC_HOST_ID`). A normal broker user
+can pin a host only when a released AWS macOS lease proves that the same owner
+and organization previously used it; other host pins remain admin-only. If that
+lease retained its instance, Crabbox reactivates the existing lease and instance
+instead of launching a replacement onto the single-capacity host. Reactivation
+requires the retained instance to already provide every requested desktop,
+browser, and code capability. A terminated Mac instance can leave its host
+unavailable during AWS's sanitization window, so occupied explicit pins fail
+immediately; unpinned launches use automatic available-host discovery in the
+region.
 
 ```sh
 crabbox admin providers identity --provider aws --region eu-west-1
@@ -227,7 +235,7 @@ grants separately with `crabbox admin providers policy --provider aws` and
 AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
 AWS_SESSION_TOKEN              optional
-CRABBOX_HOST_ID               optional; admin-only explicit brokered host pin
+CRABBOX_HOST_ID               optional; admin-only except owner reuse of a released Mac host
 CRABBOX_AWS_MAC_HOST_ID       optional legacy alias for CRABBOX_HOST_ID
 ```
 

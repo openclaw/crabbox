@@ -84,8 +84,10 @@ matches the token in this precedence (`worker/src/auth.ts`):
 3. **Signed user token** — a token with the `cbxu_` prefix, an HMAC-SHA256 signature over a
    base64url payload, verified only with `CRABBOX_SESSION_SECRET`. The session
    secret must be configured and distinct from `CRABBOX_SHARED_TOKEN`. Minted by
-   `crabbox login`, with a default 180-day expiry.
-   User tokens are non-admin unless their GitHub email or login matches
+   `crabbox login` only after GitHub returns a verified owner email, with a
+   default 180-day expiry. The payload records the verified-email provenance;
+   older unversioned user tokens are rejected and require a fresh login.
+   User tokens are non-admin unless their verified GitHub email or login matches
    `CRABBOX_GITHUB_ADMIN_OWNERS` or `CRABBOX_GITHUB_ADMIN_LOGINS`.
 
 Anything else returns `401 unauthorized`.
@@ -140,6 +142,21 @@ The OAuth app requests the scopes `read:user user:email read:org`. A self-hosted
 needs its own OAuth app: the callback URL must exactly match the public origin, and the
 `CRABBOX_PUBLIC_URL` must use that same origin (it is used to build the callback and
 to canonicalize portal redirects).
+
+The CLI treats that callback origin as a credential destination. If a login response
+from one broker points at a different callback origin, `crabbox login` fails before
+opening the browser unless the alternate origin appears in trusted operator config:
+
+```yaml
+broker:
+  url: https://broker-access.example.com
+  loginRedirectOrigins:
+    - https://broker.example.com
+```
+
+Use `broker.loginRedirectOrigins` or `CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS` only for
+known same-deployment aliases during a planned migration. Project config cannot grant
+this exception.
 
 Login is gated by GitHub org membership before a user token is minted:
 

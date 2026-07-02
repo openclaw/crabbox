@@ -51,10 +51,12 @@ export interface LeaseConfig {
   awsPromotedAMIs: Record<string, string>;
   awsSnapshot: string;
   awsSGID: string;
+  awsSGName: string;
   awsSubnetID: string;
   awsProfile: string;
   awsRootGB: number;
   awsSSHCIDRs: string[];
+  awsSSHCIDRsPinned: boolean;
   awsMacHostID: string;
   azureLocation: string;
   azureImage: string;
@@ -284,10 +286,12 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     awsPromotedAMIs: {},
     awsSnapshot: input.awsSnapshot ?? "",
     awsSGID: input.awsSGID ?? "",
+    awsSGName: "",
     awsSubnetID: input.awsSubnetID ?? "",
     awsProfile: input.awsProfile ?? "",
     awsRootGB: input.awsRootGB ?? 400,
     awsSSHCIDRs,
+    awsSSHCIDRsPinned: input.awsSSHCIDRsPinned ?? (input.awsSSHCIDRs?.length ?? 0) > 0,
     awsMacHostID: input.awsMacHostID ?? "",
     azureLocation: input.azureLocation ?? "",
     azureImage,
@@ -313,7 +317,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     sshUser,
     sshPort: input.sshPort ?? "2222",
     sshFallbackPorts: validPorts(input.sshFallbackPorts ?? ["22"]),
-    providerKey: input.providerKey ?? "crabbox-steipete",
+    providerKey: input.providerKey?.trim() ?? "",
     workRoot: input.workRoot ?? defaultWorkRoot(target, windowsMode, sshUser),
     ttlSeconds,
     idleTimeoutSeconds,

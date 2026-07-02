@@ -27,8 +27,12 @@ exchanges the OAuth code, then verifies the user is an **active member of an
 allowed GitHub org** (`CRABBOX_GITHUB_ALLOWED_ORGS`, or the singular
 `CRABBOX_GITHUB_ALLOWED_ORG`) and, if any **allowed teams** are configured
 (`CRABBOX_GITHUB_ALLOWED_TEAMS` / `CRABBOX_GITHUB_ALLOWED_TEAM`), a member of one
-of them. On success the broker issues a signed user token (prefix `cbxu_`,
+of them. The account must also expose a verified email through GitHub's
+`user:email` scope; the broker never uses a public profile or unverified email
+as the owner. On success the broker issues a signed user token (prefix `cbxu_`,
 HMAC-SHA256, default 180-day expiry) and the CLI stores it in the user config.
+Tokens from the older unversioned schema are rejected, so users must log in
+again after upgrading the broker with this security fix.
 
 ```sh
 crabbox login --url https://broker.example.com

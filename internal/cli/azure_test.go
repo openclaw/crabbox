@@ -252,6 +252,109 @@ func TestAzureProvisioningCandidatesSkipsStaleEphemeralPreviewDefault(t *testing
 	}
 }
 
+func TestAzureWindowsSnapshotRehydrateCommandIsBounded(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Desktop = true
+	cfg.SSHUser = "crabbox"
+
+	publicKey := "ssh-ed25519 " + strings.Repeat("A", 68) + " crabbox@snapshot"
+	command, err := azureWindowsSnapshotRehydrateCommand(cfg, publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(command) > 8000 {
+		t.Fatalf("command length=%d", len(command))
+	}
+	if !strings.Contains(command, "FromBase64String") || !strings.Contains(command, "ScriptBlock]::Create") {
+		t.Fatalf("unexpected command: %s", command)
+	}
+}
+
+func TestAzureSnapshotOSDiskTypeMatchesTarget(t *testing.T) {
+	t.Parallel()
+	if got := azureOSDiskType(targetWindows); got != armcompute.OperatingSystemTypesWindows {
+		t.Fatalf("Windows disk type=%q", got)
+	}
+	if got := azureOSDiskType(targetLinux); got != armcompute.OperatingSystemTypesLinux {
+		t.Fatalf("Linux disk type=%q", got)
+	}
+}
+
+func TestAzureSnapshotQuarantineSecurityGroupDeniesAllInbound(t *testing.T) {
+	t.Parallel()
+	tags := map[string]*string{"lease_id": to.Ptr("cbx_123")}
+	group := azureSnapshotQuarantineSecurityGroup("westus2", tags)
+	if group.Location == nil || *group.Location != "westus2" || group.Tags["lease_id"] == nil || *group.Tags["lease_id"] != "cbx_123" {
+		t.Fatalf("quarantine metadata=%#v", group)
+	}
+	if group.Properties == nil || len(group.Properties.SecurityRules) != 1 {
+		t.Fatalf("quarantine rules=%#v, want one explicit rule", group.Properties)
+	}
+	rule := group.Properties.SecurityRules[0]
+	if rule == nil || rule.Properties == nil {
+		t.Fatal("quarantine rule has no properties")
+	}
+	properties := rule.Properties
+	if properties.Protocol == nil || *properties.Protocol != armnetwork.SecurityRuleProtocolAsterisk ||
+		properties.Access == nil || *properties.Access != armnetwork.SecurityRuleAccessDeny ||
+		properties.Direction == nil || *properties.Direction != armnetwork.SecurityRuleDirectionInbound ||
+		properties.Priority == nil || *properties.Priority != 100 ||
+		properties.SourceAddressPrefix == nil || *properties.SourceAddressPrefix != "*" ||
+		properties.SourcePortRange == nil || *properties.SourcePortRange != "*" ||
+		properties.DestinationAddressPrefix == nil || *properties.DestinationAddressPrefix != "*" ||
+		properties.DestinationPortRange == nil || *properties.DestinationPortRange != "*" {
+		t.Fatalf("quarantine rule=%#v, want deny-all inbound", properties)
+	}
+}
+
+func TestAzureWindowsSnapshotRehydrateRotatesServiceVNCCredentials(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Desktop = true
+	cfg.SSHUser = "crabbox"
+
+	script := azureWindowsSnapshotRehydratePowerShell(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"ConvertTo-CrabboxVNCPassword",
+		"0xE8, 0x4A, 0xD6, 0x60, 0xC4, 0x72, 0x1A, 0xE0",
+		`HKLM:\Software\TightVNC\Server`,
+		"-Name Password -PropertyType Binary",
+		"-Name ControlPassword -PropertyType Binary",
+		"Stop-Service -Name tvnserver",
+		"Start-Service -Name tvnserver",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("snapshot rehydrate script missing %q", want)
+		}
+	}
+	if strings.Index(script, "Stop-Service -Name tvnserver") > strings.Index(script, "-Name Password -PropertyType Binary") {
+		t.Fatal("snapshot rehydrate must stop TightVNC before replacing its service password")
+	}
+}
+
+func TestAzureWindowsSnapshotRehydrateDefinesVNCPathWithoutDesktop(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeWSL2
+	cfg.Desktop = false
+	cfg.SSHUser = "crabbox"
+
+	script := azureWindowsSnapshotRehydratePowerShell(cfg, "ssh-ed25519 test")
+	definition := `$vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"`
+	reset := `Remove-Item -LiteralPath $vncPasswordPath, $windowsUsernamePath, $windowsPasswordPath`
+	definitionIndex := strings.Index(script, definition)
+	resetIndex := strings.Index(script, reset)
+	if definitionIndex < 0 || resetIndex < 0 || definitionIndex > resetIndex {
+		t.Fatalf("snapshot credential reset must define the VNC password path before use")
+	}
+}
+
 func TestAzureWindowsVMSizeCandidatesForClass(t *testing.T) {
 	t.Parallel()
 	got := azureWindowsVMSizeCandidatesForClass("beast")
@@ -388,6 +491,73 @@ func TestNormalizeAzureOSDiskMode(t *testing.T) {
 	}
 }
 
+func TestNormalizeAzureSnapshotStorageSKUs(t *testing.T) {
+	t.Parallel()
+	snapshot, err := NormalizeAzureSnapshotSKU(" premium_lrs ")
+	if err != nil || snapshot != "Premium_LRS" {
+		t.Fatalf("snapshot SKU=%q err=%v", snapshot, err)
+	}
+	disk, err := NormalizeAzureDiskSKU("standardssd_lrs")
+	if err != nil || disk != "StandardSSD_LRS" {
+		t.Fatalf("disk SKU=%q err=%v", disk, err)
+	}
+	if _, err := NormalizeAzureSnapshotSKU("UltraSSD_LRS"); err == nil {
+		t.Fatal("expected unsupported snapshot SKU to fail")
+	}
+	if _, err := NormalizeAzureDiskSKU("not-a-sku"); err == nil {
+		t.Fatal("expected unsupported disk SKU to fail")
+	}
+}
+
+func TestAzureSnapshotPrerequisitesRunConcurrently(t *testing.T) {
+	t.Parallel()
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	result := make(chan struct {
+		network string
+		disk    string
+		err     error
+	}, 1)
+	go func() {
+		network, disk, err := runAzureSnapshotPrerequisites(
+			context.Background(),
+			func(context.Context) (string, error) {
+				started <- "network"
+				<-release
+				return "nic-id", nil
+			},
+			func(context.Context) (string, error) {
+				started <- "disk"
+				<-release
+				return "disk-id", nil
+			},
+		)
+		result <- struct {
+			network string
+			disk    string
+			err     error
+		}{network: network, disk: disk, err: err}
+	}()
+
+	seen := map[string]bool{}
+	for range 2 {
+		select {
+		case operation := <-started:
+			seen[operation] = true
+		case <-time.After(time.Second):
+			t.Fatal("snapshot prerequisites did not start concurrently")
+		}
+	}
+	close(release)
+	completed := <-result
+	if completed.err != nil || completed.network != "nic-id" || completed.disk != "disk-id" {
+		t.Fatalf("result=%+v", completed)
+	}
+	if !seen["network"] || !seen["disk"] {
+		t.Fatalf("started=%v", seen)
+	}
+}
+
 func TestAzureUseEphemeralOSDiskModes(t *testing.T) {
 	t.Parallel()
 	client := &AzureClient{}
@@ -474,6 +644,60 @@ func TestAzureCreateServerWithFallbackRejectsEphemeralPreviewBeforeSharedInfra(t
 	}
 	if resolved.ServerType != "Standard_D32ps_v6" {
 		t.Fatalf("resolved server type=%q", resolved.ServerType)
+	}
+}
+
+func TestAzureSnapshotOSDiskID(t *testing.T) {
+	t.Parallel()
+	managedDiskID := "/subscriptions/test/resourceGroups/test/providers/Microsoft.Compute/disks/source"
+	futureOption := armcompute.DiffDiskOptions("FutureSchemaValue")
+	tests := []struct {
+		name    string
+		osDisk  *armcompute.OSDisk
+		want    string
+		wantErr string
+	}{
+		{
+			name: "ephemeral disk with phantom managed id",
+			osDisk: &armcompute.OSDisk{
+				DiffDiskSettings: &armcompute.DiffDiskSettings{Option: to.Ptr(armcompute.DiffDiskOptionsLocal)},
+				ManagedDisk:      &armcompute.ManagedDiskParameters{ID: to.Ptr(managedDiskID)},
+			},
+			wantErr: "azure ephemeral OS disk on vm source-vm cannot be snapshotted; use --mode archive or relaunch the lease with a managed Azure OS disk",
+		},
+		{
+			name: "unknown future option",
+			osDisk: &armcompute.OSDisk{
+				DiffDiskSettings: &armcompute.DiffDiskSettings{Option: &futureOption},
+				ManagedDisk:      &armcompute.ManagedDiskParameters{ID: to.Ptr(managedDiskID)},
+			},
+			want: managedDiskID,
+		},
+		{
+			name:   "managed disk",
+			osDisk: &armcompute.OSDisk{ManagedDisk: &armcompute.ManagedDiskParameters{ID: to.Ptr(managedDiskID)}},
+			want:   managedDiskID,
+		},
+		{name: "missing disk", wantErr: "snapshot source VM has no managed OS disk"},
+		{name: "missing managed id", osDisk: &armcompute.OSDisk{}, wantErr: "snapshot source VM has no managed OS disk"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := azureSnapshotOSDiskID("source-vm", test.osDisk)
+			if test.wantErr != "" {
+				if err == nil || err.Error() != test.wantErr {
+					t.Fatalf("error=%v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("disk id=%q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

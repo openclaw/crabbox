@@ -72,7 +72,8 @@ Capabilities are opt-in features requested at warm time and validated against
 the provider's feature set. See [capabilities](../features/capabilities.md).
 
 - `--desktop` provisions a visible UI and loopback-bound VNC for automation and
-  operator takeover. Linux defaults to Xvfb, a slim XFCE, and x11vnc. Use
+  operator takeover. Managed cloud Linux defaults to resize-capable TigerVNC
+  with a slim XFCE session; local containers retain Xvfb/x11vnc. Use
   `--desktop-env wayland` for the experimental labwc/WayVNC profile on
   Ubuntu 26.04-compatible images, or `--desktop-env gnome` for a GNOME-apps
   profile with GNOME Panel taskbars over labwc/WayVNC (GNOME-profile app
@@ -231,8 +232,9 @@ hydration.
 already allocated Dedicated Host. Crabbox can discover an available host in the
 selected region, or pin one with `CRABBOX_HOST_ID` / `hostId`
 (`CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain AWS compatibility
-aliases). Brokered host pinning requires admin authentication; normal broker
-users rely on automatic available-host discovery. Use `--market on-demand`, and
+aliases). Brokered host pinning requires admin authentication unless the host
+has a retained instance from the same owner and organization's released lease;
+other users rely on automatic available-host discovery. Use `--market on-demand`, and
 expect EC2 Mac host lifecycle rules to dominate cleanup and cost. Warmup never
 allocates a Dedicated Host implicitly; trusted operators manage host lifecycle with
 `crabbox admin hosts offerings|quota|list|allocate|release --provider aws --target macos`.

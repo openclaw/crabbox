@@ -59,14 +59,23 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 }
 
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
-	if req.Server.CloudID == "" || isWindowsNativeTarget(req) {
+	if req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
 	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
+	strategy := core.NormalizeCheckpointStrategy(req.Strategy)
+	if isWindowsNativeTarget(req) {
+		if req.StrategyExplicit && strategy != core.CheckpointStrategyImage {
+			return core.NativeCheckpointCapability{}, false
+		}
+		return core.NativeCheckpointCapability{
+			Kind:   core.CheckpointKindAWSAMI,
+			Direct: req.Config.Coordinator == "",
+		}, true
+	}
 	if targetOS != core.TargetLinux && targetOS != core.TargetMacOS {
 		return core.NativeCheckpointCapability{}, false
 	}
-	strategy := core.NormalizeCheckpointStrategy(req.Strategy)
 	if req.Config.Coordinator == "" {
 		if targetOS != core.TargetMacOS && strategy != core.CheckpointStrategyImage {
 			return core.NativeCheckpointCapability{}, false

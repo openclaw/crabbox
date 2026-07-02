@@ -33,8 +33,14 @@ const (
 func normalizeTargetConfig(cfg *Config) {
 	cfg.TargetOS = normalizeTargetOS(cfg.TargetOS)
 	cfg.WindowsMode = normalizeWindowsMode(cfg.WindowsMode)
-	if cfg.Provider == "aws" && cfg.TargetOS == targetMacOS && cfg.SSHUser == baseConfig().SSHUser {
-		cfg.SSHUser = "ec2-user"
+	if cfg.Provider == "aws" && cfg.TargetOS == targetMacOS {
+		if cfg.SSHUser == baseConfig().SSHUser {
+			cfg.SSHUser = "ec2-user"
+		}
+		// EC2 Mac uses Apple's socket-activated Remote Login service, whose
+		// launchd socket remains on port 22 even when sshd_config lists others.
+		cfg.SSHPort = "22"
+		cfg.SSHFallbackPorts = nil
 	}
 	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 && cfg.SSHUser == baseConfig().SSHUser {
 		cfg.SSHUser = "Administrator"

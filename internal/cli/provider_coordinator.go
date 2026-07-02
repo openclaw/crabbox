@@ -54,6 +54,7 @@ func (b *coordinatorLeaseBackend) acquireOnce(ctx context.Context, keep bool, re
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = cfg.Tailscale.HostnameTemplate
 	}
+	cfg.AWSSSHCIDRsPinned = len(cfg.AWSSSHCIDRs) > 0
 	ensureAWSSSHCIDRs(ctx, &cfg)
 	fmt.Fprintf(b.rt.Stderr, "coordinator lease class=%s preferred_type=%s keep=%v slug=%s idle_timeout=%s ttl=%s\n", cfg.Class, cfg.ServerType, keep, slug, cfg.IdleTimeout, cfg.TTL)
 	lease, err := b.createCoordinatorLeaseWithProgress(ctx, cfg, publicKey, keep, leaseID, slug)

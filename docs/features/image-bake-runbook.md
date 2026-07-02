@@ -34,7 +34,7 @@ Bake **machine capabilities** that are stable across runs:
 
 - current OS security updates;
 - SSH, Git, rsync, curl, jq, and the readiness helpers;
-- Xvfb / slim XFCE / VNC for desktop leases;
+- TigerVNC / slim XFCE for resize-capable desktop leases;
 - Chrome or Chromium for browser leases;
 - `ffmpeg`, `ffprobe`, `scrot`, `xdotool`, and other capture helpers;
 - Node 24, npm, corepack, pnpm;
@@ -104,7 +104,8 @@ crabbox run \
    command -v pnpm
    command -v ffmpeg
    command -v scrot
-   command -v x11vnc
+   command -v Xtigervnc
+   command -v tigervncpasswd
    command -v google-chrome || command -v chromium || command -v chromium-browser
    test -d /work/crabbox
    sudo mkdir -p /var/cache/crabbox/pnpm
@@ -287,6 +288,11 @@ scripts/mint-aws-devtools-image.sh \
   --run
 ```
 
+The wrapper captures its candidate through `crabbox checkpoint create`, so the
+same source/candidate proof works with direct AWS credentials and with an
+admin-authenticated broker. Promotion updates broker-managed image defaults;
+use `--no-promote` when validating a direct-only AWS configuration.
+
 Enable FSR for hot lanes that need lower first-boot variance, in the AZs you
 actually launch from:
 
@@ -306,12 +312,19 @@ scripts/mint-aws-devtools-image.sh \
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, Chrome or Chromium for browser
   lanes, desktop/VNC helpers, Docker Engine, Compose, buildx, and a small
-  default Docker image set.
+  default Docker image set. NodeSource, Docker, and Chrome APT repositories use
+  scoped keyrings whose primary fingerprints are checked before installation;
+  primary-key rotations require a reviewed code update and a fresh image-bake
+  smoke. Failed NodeSource or Docker verification stops image preparation;
+  failed Google verification skips Chrome and tries the distro Chromium
+  package.
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, and Windows Server container
   support with Docker Engine. It deliberately avoids Docker Desktop because
   headless image bakes should not depend on a user-session desktop app or
-  Docker Desktop licensing.
+  Docker Desktop licensing. The Chocolatey package, Node MSI, and Docker Engine
+  archive are pinned to reviewed SHA-256 digests and verified before privileged
+  installation or extraction.
 
 Windows developer bakes are headless by default for faster boot and fewer
 desktop-bootstrap moving parts. Pass `--desktop` only when the image must back
@@ -326,10 +339,18 @@ capture.
 ```bash
 CRABBOX_LINUX_DOCKER_IMAGES='hello-world ubuntu:24.04 node:24-bookworm'
 CRABBOX_WINDOWS_DOCKER_IMAGES='mcr.microsoft.com/windows/servercore:ltsc2022'
+CRABBOX_WINDOWS_NODE_VERSION='<version>'
+CRABBOX_WINDOWS_NODE_SHA256='<reviewed-64-hex-sha256>'
+CRABBOX_WINDOWS_DOCKER_VERSION='<version>'
+CRABBOX_WINDOWS_DOCKER_SHA256='<reviewed-64-hex-sha256>'
 CRABBOX_LINUX_BROWSER=0
 CRABBOX_LINUX_DESKTOP_TOOLS=0
 CRABBOX_WINDOWS_INSTALL_DOCKER=0
 ```
+
+The bundled Node and Docker versions use embedded reviewed digests. Override a
+version only together with its matching SHA-256 value; unpaired or malformed
+overrides fail before the artifact is downloaded.
 
 ### Wrapper behavior
 

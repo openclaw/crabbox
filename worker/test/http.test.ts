@@ -221,6 +221,26 @@ describe("coordinator auth", () => {
     expect(prepared).toMatchObject({ authenticated: false, response: { status: 401 } });
   });
 
+  it("lets one-time native VNC websocket tickets bypass user authentication", async () => {
+    const prepared = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/native-vnc/handoff", {
+        headers: { upgrade: "websocket", authorization: "Bearer native_vnc_ticket" },
+      }),
+      {} as Env,
+    );
+    expect(prepared).toMatchObject({ authenticated: false });
+    if ("response" in prepared) throw new Error("native VNC websocket was rejected");
+    expect(prepared.request.headers.get("authorization")).toBe("Bearer native_vnc_ticket");
+
+    const plain = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/native-vnc/handoff", {
+        headers: { authorization: "Bearer native_vnc_ticket" },
+      }),
+      {} as Env,
+    );
+    expect(plain).toMatchObject({ authenticated: false, response: { status: 401 } });
+  });
+
   it("accepts the runtime adapter token only for workspace routes", async () => {
     const env = {
       CRABBOX_DEFAULT_ORG: "openclaw",
@@ -231,6 +251,9 @@ describe("coordinator auth", () => {
         new Request("https://example.test/v1/workspaces", { method: "POST" }),
         new Request("https://example.test/v1/workspaces/fleet-is-101"),
         new Request("https://example.test/v1/workspaces/fleet-is-101/connections/desktop", {
+          method: "POST",
+        }),
+        new Request("https://example.test/v1/workspaces/fleet-is-101/connections/native-vnc", {
           method: "POST",
         }),
       ].map((request) => {
@@ -249,6 +272,7 @@ describe("coordinator auth", () => {
             },
       ),
     ).toEqual([
+      { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },
       { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },
       { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },
       { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },
@@ -566,6 +590,7 @@ describe("coordinator auth", () => {
     };
     const token = await issueUserToken(env, {
       owner: "friend@example.com",
+      ownerSource: "github-verified-email",
       org: "openclaw",
       login: "friend",
     });
@@ -592,6 +617,7 @@ describe("coordinator auth", () => {
     };
     const token = await issueUserToken(env, {
       owner: "friend@example.com",
+      ownerSource: "github-verified-email",
       org: "example-org",
       login: "friend",
     });
@@ -613,6 +639,7 @@ describe("coordinator auth", () => {
     const env = { CRABBOX_SESSION_SECRET: "session-secret" };
     const input = {
       owner: "friend@example.com",
+      ownerSource: "github-verified-email" as const,
       org: "openclaw",
       login: "friend",
     };
@@ -621,6 +648,36 @@ describe("coordinator auth", () => {
     const second = await issueUserToken(env, input);
 
     expect(second).not.toBe(first);
+  });
+
+  it.each([
+    ["legacy schema", {}],
+    ["unverified owner provenance", { version: 2, ownerSource: "github-public-email" }],
+  ])("rejects signed user tokens with %s", async (_label, schema) => {
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "openclaw",
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signedUserToken("session-secret", {
+      typ: "crabbox-user",
+      ...schema,
+      owner: "friend@example.com",
+      org: "openclaw",
+      login: "friend",
+      iat: now,
+      exp: now + 300,
+    });
+
+    const auth = await authenticateRequest(
+      new Request("https://example.test/v1/whoami", {
+        headers: { authorization: `Bearer ${token}` },
+      }),
+      env,
+    );
+
+    expect(auth).toBeUndefined();
   });
 
   it("promotes configured GitHub user tokens to admin", async () => {
@@ -633,11 +690,13 @@ describe("coordinator auth", () => {
     };
     const ownerToken = await issueUserToken(env, {
       owner: "vincentkoc@ieee.org",
+      ownerSource: "github-verified-email",
       org: "openclaw",
       login: "vincentkoc",
     });
     const loginToken = await issueUserToken(env, {
       owner: "peter@example.com",
+      ownerSource: "github-verified-email",
       org: "openclaw",
       login: "steipete",
     });
@@ -674,6 +733,8 @@ describe("coordinator auth", () => {
     const now = Math.floor(Date.now() / 1000);
     const token = await signedUserToken("session-secret", {
       typ: "crabbox-user",
+      version: 2,
+      ownerSource: "github-verified-email",
       owner: "friend@example.com",
       org: "openclaw",
       login: "friend",
@@ -696,6 +757,8 @@ describe("coordinator auth", () => {
     const now = Math.floor(Date.now() / 1000);
     const token = await signedUserToken("session-secret", {
       typ: "crabbox-user",
+      version: 2,
+      ownerSource: "github-verified-email",
       owner: "friend@example.com",
       org: "openclaw",
       login: "friend",
@@ -729,6 +792,8 @@ describe("coordinator auth", () => {
     const now = Math.floor(Date.now() / 1000);
     const token = await signedUserToken("shared", {
       typ: "crabbox-user",
+      version: 2,
+      ownerSource: "github-verified-email",
       owner: "friend@example.com",
       org: "openclaw",
       login: "friend",
@@ -753,6 +818,7 @@ describe("coordinator auth", () => {
   it("requires independent signing material when issuing user tokens", async () => {
     const input = {
       owner: "friend@example.com",
+      ownerSource: "github-verified-email" as const,
       org: "openclaw",
       login: "friend",
     };

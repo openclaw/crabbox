@@ -197,8 +197,8 @@ service, and interactive user state on Windows; `DISPLAY`, remote `ffmpeg`,
 
 `crabbox desktop doctor` checks the selected lease without syncing the repo. For
 Linux desktop leases it reports VM/session health separately from portal health:
-`DISPLAY`, Xvfb/window manager/panel (or Wayland session for Wayland envs), VNC
-listener, `xdotool`/`wtype`, clipboard tool, browser binary, `ffmpeg`, screen
+`DISPLAY`, TigerVNC/window manager/panel (or Wayland session for Wayland envs),
+VNC listener, `xdotool`/`wtype`, clipboard tool, browser binary, `ffmpeg`, screen
 size, and screenshot capture. On coordinator-backed leases it also reports the
 WebVNC bridge/viewer state. Failures carry a one-line repair suggestion so you
 can tell a session bug apart from a WebVNC/browser-portal bug. Non-Linux targets

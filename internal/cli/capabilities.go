@@ -210,7 +210,7 @@ func probeStaticDesktop(ctx context.Context, cfg Config, target SSHTarget) error
 		if isWaylandDesktopEnv(cfg.DesktopEnv) {
 			return exit(2, "target=linux does not expose a Crabbox Wayland desktop; create %s with CRABBOX_DESKTOP_ENV=wayland or gnome, XDG_RUNTIME_DIR, and WAYLAND_DISPLAY, then start the compositor and WayVNC on 127.0.0.1:5900", desktopEnvPath)
 		}
-		return exit(2, "target=linux does not expose a loopback X11 VNC desktop; start Xvfb/x11vnc on 127.0.0.1:5900 or request --desktop-env wayland or gnome for a configured Wayland target")
+		return exit(2, "target=linux does not expose a loopback X11 VNC desktop; start Xtigervnc or Xvfb/x11vnc on 127.0.0.1:5900, or request --desktop-env wayland or gnome")
 	}
 	return nil
 }
@@ -228,7 +228,7 @@ func staticDesktopProbeCommand(cfg Config, target SSHTarget) string {
 			`test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" && ` +
 			compositorCheck + ` && pgrep -x wayvnc >/dev/null && ` + vncLoopbackCheckCommand(target)
 	}
-	return `pgrep -f 'Xvfb :99' >/dev/null && pgrep -f x11vnc >/dev/null && ` + vncLoopbackCheckCommand(target)
+	return `{ pgrep -f 'Xtigervnc :99' >/dev/null || { pgrep -f 'Xvfb :99' >/dev/null && pgrep -f x11vnc >/dev/null; }; } && ` + vncLoopbackCheckCommand(target)
 }
 
 func probeDesktopEnv(ctx context.Context, target SSHTarget) (map[string]string, error) {

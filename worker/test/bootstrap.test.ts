@@ -122,8 +122,10 @@ describe("cloud-init bootstrap", () => {
 
   it("adds desktop services only when requested", () => {
     const got = cloudInit({ ...config, desktop: true });
-    expect(got).toContain("xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal");
-    expect(got).toContain("xfconf xfce4-settings x11vnc xauth dbus-x11");
+    expect(got).toContain(
+      "tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel",
+    );
+    expect(got).toContain("xfconf xfce4-settings xauth dbus-x11");
     expect(got).toContain("arc-theme");
     expect(got).toContain("util-linux");
     expect(got).toContain("novnc websockify");
@@ -132,7 +134,11 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("/etc/systemd/system/crabbox-desktop.service");
     expect(got).toContain("/usr/local/bin/crabbox-desktop-session");
     expect(got).toContain("/etc/systemd/system/crabbox-desktop-session.service");
-    expect(got).toContain("/etc/systemd/system/crabbox-x11vnc.service");
+    expect(got).not.toContain("/etc/systemd/system/crabbox-x11vnc.service");
+    expect(got).toContain("ExecStart=/usr/bin/Xtigervnc :99");
+    expect(got).toContain("-AcceptSetDesktopSize");
+    expect(got).toContain("-localhost yes");
+    expect(got).toContain("-SecurityTypes VncAuth");
     expect(got).toContain("ExecStart=/usr/bin/startxfce4");
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop.service");
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop-session.service");
@@ -202,15 +208,16 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("xfce4-terminal --title='Crabbox Desktop'");
     expect(got).toContain("xterm -title 'Crabbox Desktop'");
     expect(got).toContain("(umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)");
-    expect(got).toContain("-rfbauth /var/lib/crabbox/vnc.pass");
-    expect(got).toContain("-wait 16 -defer 8 -nowait_bog");
+    expect(got).toContain("tigervncpasswd -f > /var/lib/crabbox/vnc.pass");
     expect(got).toContain("ss -ltn | grep -q '127.0.0.1:5900'");
-    expect(got).toContain("systemctl disable --now crabbox-wayvnc.service 2>/dev/null || true");
     expect(got).toContain(
-      "systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service",
+      "systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true",
     );
     expect(got).toContain(
-      "systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service crabbox-x11vnc.service",
+      "systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
+    );
+    expect(got).toContain(
+      "systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
     );
   });
 
@@ -323,7 +330,9 @@ describe("cloud-init bootstrap", () => {
   it("starts ssh before optional desktop and browser bootstrap", () => {
     const got = cloudInit({ ...config, desktop: true, browser: true });
     const sshIndex = got.indexOf("systemctl restart ssh");
-    const desktopIndex = got.indexOf("retry apt-get install -y --no-install-recommends xvfb");
+    const desktopIndex = got.indexOf(
+      "retry apt-get install -y --no-install-recommends tigervnc-standalone-server",
+    );
     const browserIndex = got.indexOf("retry apt-get install -y --no-install-recommends gnupg");
     const bootstrappedIndex = got.indexOf("touch /var/lib/crabbox/bootstrapped");
     expect(sshIndex).toBeGreaterThanOrEqual(0);
@@ -355,7 +364,24 @@ describe("cloud-init bootstrap", () => {
     const got = cloudInit({ ...config, browser: true });
     expect(got).toContain("gnupg build-essential python3");
     expect(got).toContain("https://dl.google.com/linux/linux_signing_key.pub");
-    expect(got).toContain("chmod 0644 /etc/apt/trusted.gpg.d/google.asc");
+    expect(got).toContain("EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796");
+    expect(got).toContain('GNUPGHOME="$google_key_home" gpg --batch --import');
+    expect(got).toContain(`awk -F: '$1 == "fpr" { print $10; exit }' || true`);
+    expect(got).toContain("gpg --batch --export EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796");
+    expect(got).toContain(
+      'mv -f "$google_key_tmp/google-linux.gpg" /etc/apt/keyrings/google-linux.gpg',
+    );
+    expect(got).toContain("signed-by=/etc/apt/keyrings/google-linux.gpg");
+    expect(got).toContain('repo_add_once="false"');
+    expect(got).toContain('repo_reenable_on_distupgrade="false"');
+    expect(got).toContain("/etc/apt/sources.list.d/crabbox-google-chrome.list");
+    expect(got).toContain(
+      "rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources",
+    );
+    expect(got).toContain("Google Linux signing key verification failed; trying Chromium fallback");
+    expect(got).not.toContain("/etc/apt/trusted.gpg.d/google.asc");
+    expect(got).not.toContain("> /etc/apt/sources.list.d/google-chrome.list");
+    expect(got).not.toContain("> /etc/apt/sources.list.d/google-chrome.sources");
     expect(got).toContain("https://dl.google.com/linux/chrome/deb/");
     expect(got).toContain("google-chrome-stable");
     expect(got).toContain("apt-cache show chromium");
@@ -492,17 +518,12 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("VALUE_OF_ALLOWLOOPBACK=1");
     expect(got).toContain("CrabboxUserVNC");
     expect(got).toContain("crabbox-user-vnc.cmd");
-    expect(got).toContain("AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup");
     expect(got).toContain("start-user-vnc.ps1");
-    expect(got).toContain("Set-TightVNCBinaryValue");
-    expect(got).toContain('reg.exe add "HKCU\\Software\\TightVNC\\Server"');
-    expect(got).toContain('$hex = -join ($bytes | ForEach-Object { $_.ToString("X2") })');
-    expect(got).toContain("/SC ONLOGON");
-    expect(got).toContain("Set-Service -StartupType Disabled");
-    expect(got).toContain("Stop-Service -Name tvnserver");
-    expect(got).not.toContain("/SC ONCE");
-    expect(got).not.toContain("Set-Service -StartupType Manual");
-    expect(got).not.toContain("Start-Service -Name tvnserver");
+    expect(got).toContain("Set-Service -StartupType Automatic");
+    expect(got).toContain("Start-Service -Name tvnserver");
+    expect(got).not.toContain("/SC ONLOGON");
+    expect(got).not.toContain("Set-TightVNCBinaryValue");
+    expect(got).not.toContain('reg.exe add "HKCU\\Software\\TightVNC\\Server"');
     expect(got).toContain("New-CrabboxPassword");
     expect(got).toContain("${userSID}:F");
     expect(got).toContain("$credentialPaths = @($passwordPath)");

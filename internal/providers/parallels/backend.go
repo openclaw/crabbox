@@ -102,7 +102,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		snapshotID = resolved
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=parallels lease=%s slug=%s host=%s source=%s snapshot=%s clone_mode=%s keep=%v\n",
-		leaseID, slug, blank(cfg.Parallels.SelectedHost, "local"), source, blank(snapshotID, "-"), blank(cfg.Parallels.CloneMode, "linked"), keep)
+		leaseID, slug, parallelsHostName(cfg), source, blank(snapshotID, "-"), blank(cfg.Parallels.CloneMode, "linked"), keep)
 	server, err := client.Clone(ctx, source, snapshotID, leaseID, slug, keep)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -172,7 +172,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 			if labels["lease"] == "" {
 				labels = core.DirectLeaseLabels(candidate, firstNonEmpty(leaseID, vm.ID), slug, "parallels", "", true, time.Now().UTC())
 			}
-			labels["host"] = blank(candidate.Parallels.SelectedHost, "local")
+			labels["host"] = parallelsHostName(candidate)
 			server := core.Server{CloudID: vm.ID, Provider: "parallels", Name: vm.Name, Status: strings.ToLower(vm.State), Labels: labels}
 			server.PublicNet.IPv4.IP = vm.IP
 			server.ServerType.Name = core.ServerTypeForProviderClass("parallels", candidate.Class)
@@ -223,7 +223,7 @@ func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 			if leases[i].Labels == nil {
 				leases[i].Labels = map[string]string{}
 			}
-			leases[i].Labels["host"] = blank(cfg.Parallels.SelectedHost, "local")
+			leases[i].Labels["host"] = parallelsHostName(cfg)
 		}
 		out = append(out, leases...)
 	}
@@ -234,7 +234,7 @@ func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 }
 
 func parallelsHostError(cfg Config, action string, err error) error {
-	return fmt.Errorf("host %s %s: %w", blank(cfg.Parallels.SelectedHost, "local"), action, err)
+	return fmt.Errorf("host %s %s: %w", parallelsHostName(cfg), action, err)
 }
 
 func (b *leaseBackend) Doctor(ctx context.Context, req core.DoctorRequest) (core.DoctorResult, error) {
@@ -327,9 +327,9 @@ func parallelsProxyCommand(cfg Config, guestIP string) string {
 	if cfg.Parallels.HostUser != "" {
 		host = cfg.Parallels.HostUser + "@" + host
 	}
-	args := []string{"ssh", "-W", guestIP + ":%p"}
+	args := []string{"ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-W", guestIP + ":%p"}
 	if cfg.Parallels.HostKey != "" {
-		args = append([]string{"ssh", "-i", cfg.Parallels.HostKey, "-o", "IdentitiesOnly=yes", "-W", guestIP + ":%p"}, host)
+		args = append([]string{"ssh", "-i", cfg.Parallels.HostKey, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-W", guestIP + ":%p"}, host)
 	} else {
 		args = append(args, host)
 	}
@@ -340,7 +340,7 @@ func (b *leaseBackend) configForLease(ctx context.Context, lease LeaseTarget) Co
 	host := strings.TrimSpace(lease.Server.Labels["host"])
 	if host != "" {
 		for _, candidate := range core.ParallelsCandidateConfigs(b.Cfg) {
-			if blank(candidate.Parallels.SelectedHost, "local") == host {
+			if parallelsHostName(candidate) == host {
 				return candidate
 			}
 		}
@@ -364,6 +364,10 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func parallelsHostName(cfg Config) string {
+	return firstNonEmpty(cfg.Parallels.SelectedHost, cfg.Parallels.Host, "local")
 }
 
 func blank(value, fallback string) string {

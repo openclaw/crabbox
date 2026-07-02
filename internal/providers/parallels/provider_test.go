@@ -95,6 +95,26 @@ func TestApplyFlagsRejectsInvalidStartupTimeout(t *testing.T) {
 	}
 }
 
+func TestApplyFlagsExplicitHostBypassesConfiguredFleet(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.Parallels.SelectedHost = "stale-fleet-host"
+	cfg.Parallels.Hosts = []core.ParallelsHostConfig{{Name: "fleet", Host: "fleet.example"}}
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	provider := Provider{}
+	values := provider.RegisterFlags(fs, cfg)
+	if err := fs.Parse([]string{"--parallels-host", "100.123.224.76"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Parallels.Host != "100.123.224.76" || cfg.Parallels.SelectedHost != "" || len(cfg.Parallels.Hosts) != 0 {
+		t.Fatalf("explicit host did not bypass fleet: %#v", cfg.Parallels)
+	}
+}
+
 func TestResolveReportsPartialFleetInventory(t *testing.T) {
 	backend := &leaseBackend{
 		DirectSSHBackend: sharedBackend(testParallelsFleetConfig(), &parallelsFleetRunner{}),
@@ -124,6 +144,31 @@ func TestListReportsPartialFleetInventory(t *testing.T) {
 	for _, want := range []string{"fleet inventory incomplete", "bad-host", "ssh failed"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err=%q missing %q", err, want)
+		}
+	}
+}
+
+func TestParallelsHostNameUsesDirectRemoteHost(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Parallels.Host = "mac-studio.example"
+	if got := parallelsHostName(cfg); got != "mac-studio.example" {
+		t.Fatalf("host=%q", got)
+	}
+
+	cfg.Parallels.SelectedHost = "studio-fleet"
+	if got := parallelsHostName(cfg); got != "studio-fleet" {
+		t.Fatalf("selected host=%q", got)
+	}
+}
+
+func TestParallelsProxyCommandIsNonInteractive(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Parallels.Host = "mac-studio.example"
+	cfg.Parallels.HostUser = "builder"
+	got := parallelsProxyCommand(cfg, "192.0.2.10")
+	for _, want := range []string{"BatchMode=yes", "ConnectTimeout=10", "builder@mac-studio.example", "192.0.2.10:%p"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("proxy command missing %q: %s", want, got)
 		}
 	}
 }

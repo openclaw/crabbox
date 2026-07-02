@@ -62,6 +62,57 @@ func (directAWSAMICheckpointDriver) Create(ctx context.Context, req checkpointNa
 	return image, nil
 }
 
+type directAzureOSDiskCheckpointDriver struct{}
+
+const azureSnapshotNameMaxLength = 80
+
+func azureOSDiskSnapshotName(requested, leaseID, repoName string) (string, error) {
+	if requested != "" {
+		if len(requested) > azureSnapshotNameMaxLength || safeCaptureName(requested) != requested {
+			return "", exit(2, "Azure snapshot name must be at most %d characters using only letters, digits, underscores, and hyphens", azureSnapshotNameMaxLength)
+		}
+		return requested, nil
+	}
+	repoName = strings.TrimSpace(repoName)
+	if repoName == "" {
+		repoName = "workspace"
+	}
+	timestamp := time.Now().UTC().Format("20060102-150405")
+	suffix := "-" + timestamp
+	seed := "crabbox-" + safeCaptureName(repoName) + "-" + strings.ReplaceAll(safeCaptureName(leaseID), "_", "-")
+	if maxSeed := azureSnapshotNameMaxLength - len(suffix); len(seed) > maxSeed {
+		seed = strings.TrimRight(seed[:maxSeed], "-_")
+	}
+	return seed + suffix, nil
+}
+
+func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req checkpointNativeCreateRequest) (CoordinatorImage, error) {
+	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+		return CoordinatorImage{}, exit(2, "Azure Windows checkpoints require --strategy disk-snapshot")
+	}
+	if req.NoReboot {
+		return CoordinatorImage{}, exit(2, "Azure Windows checkpoints require a deallocated source VM for a consistent OS-disk snapshot; rerun with --no-reboot=false")
+	}
+	name, err := azureOSDiskSnapshotName(req.Name, req.LeaseID, req.RepoName)
+	if err != nil {
+		return CoordinatorImage{}, err
+	}
+	client, err := NewAzureClient(ctx, req.Cfg)
+	if err != nil {
+		return CoordinatorImage{}, err
+	}
+	snapshot, err := client.CreateOSDiskSnapshot(
+		ctx,
+		req.Server.CloudID,
+		name,
+		req.Cfg.AzureSnapshotSKU,
+	)
+	if err != nil {
+		return CoordinatorImage{}, err
+	}
+	return coordinatorImageFromNativeCheckpoint(snapshot), nil
+}
+
 type coordinatorCheckpointDriver struct{}
 
 func (coordinatorCheckpointDriver) Create(ctx context.Context, req checkpointNativeCreateRequest) (CoordinatorImage, error) {
@@ -84,8 +135,10 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req checkpointNat
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
-	if err := prepareNativeImageSource(ctx, req.Target); err != nil {
-		return CoordinatorImage{}, err
+	if !isWindowsNativeTarget(req.Target) {
+		if err := prepareNativeImageSource(ctx, req.Target); err != nil {
+			return CoordinatorImage{}, err
+		}
 	}
 	image, err := coord.CreateImage(ctx, req.LeaseID, name, req.NoReboot, strategy)
 	if err != nil {
@@ -174,6 +227,8 @@ func nativeCheckpointCreateDriver(cfg Config, server Server, target SSHTarget, s
 		switch kind {
 		case checkpointKindAWSAMI:
 			return directAWSAMICheckpointDriver{}, true
+		case checkpointKindAzureOS:
+			return directAzureOSDiskCheckpointDriver{}, true
 		}
 	}
 	if _, ok := nativeCheckpointKind(cfg, server, target, strategy); ok {
@@ -504,6 +559,54 @@ func directAWSCheckpointConfig(record checkpointRecord) (Config, bool) {
 	return cfg, true
 }
 
+func directAzureCheckpointConfig(record checkpointRecord) (Config, bool) {
+	if record.Kind != checkpointKindAzureOS || !record.Native.Direct {
+		return Config{}, false
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return Config{}, false
+	}
+	cfg.Provider = "azure"
+	if record.Native.Region != "" {
+		cfg.AzureLocation = record.Native.Region
+	}
+	resourceID := nativeCheckpointResourceID(record)
+	parts := strings.Split(strings.Trim(resourceID, "/"), "/")
+	for index := 0; index+1 < len(parts); index += 1 {
+		switch {
+		case strings.EqualFold(parts[index], "subscriptions"):
+			cfg.AzureSubscription = parts[index+1]
+		case strings.EqualFold(parts[index], "resourceGroups"):
+			cfg.AzureResourceGroup = parts[index+1]
+		}
+	}
+	return cfg, cfg.AzureLocation != "" && cfg.AzureResourceGroup != ""
+}
+
+func verifyDirectAzureCheckpoint(ctx context.Context, audit checkpointAudit, cfg Config, providerID string) checkpointAudit {
+	client, err := NewAzureClient(ctx, cfg)
+	if err != nil {
+		audit.ProviderState = "unknown"
+		audit.NextAction = "check_auth_or_provider"
+		audit.Error = err.Error()
+		return audit
+	}
+	snapshot, err := client.GetOSDiskSnapshot(ctx, providerID)
+	if err != nil {
+		if isAzureNotFoundError(err) {
+			audit.ProviderState = "missing"
+			audit.NextAction = "delete_local"
+			return audit
+		}
+		audit.ProviderState = "unknown"
+		audit.NextAction = "check_auth_or_provider"
+		audit.Error = err.Error()
+		return audit
+	}
+	applyCheckpointImageAudit(&audit, coordinatorImageFromNativeCheckpoint(snapshot))
+	return audit
+}
 func verifyDirectAWSCheckpoint(ctx context.Context, audit checkpointAudit, cfg Config, providerID, expectedAccountID string) checkpointAudit {
 	client, clientErr := newAWSClient(ctx, cfg)
 	if clientErr != nil {
@@ -571,6 +674,7 @@ func nativeCheckpointForkRecord(record checkpointRecord) NativeCheckpointForkRec
 		HostID:      record.HostID,
 		TargetOS:    record.TargetOS,
 		WindowsMode: record.WindowsMode,
+		Desktop:     record.Desktop,
 		ServerType:  record.ServerType,
 		Metadata:    record.Native.Metadata,
 	}
@@ -599,6 +703,10 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 	}
 	if record.WindowsMode != "" {
 		cfg.WindowsMode = record.WindowsMode
+	}
+	if record.Desktop {
+		// Desktop snapshots must rotate VNC credentials even when the fork omits --desktop.
+		cfg.Desktop = true
 	}
 	provider, err := ProviderFor(cfg.Provider)
 	if err != nil {

@@ -102,7 +102,8 @@ func uploadDaytonaFileStream(ctx context.Context, client *http.Client, endpoint 
 		_ = pr.CloseWithError(fmt.Errorf("daytona upload archive: %s", resp.Status))
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if len(body) > 0 {
-			return fmt.Errorf("daytona upload archive: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+			message := strings.TrimSpace(redactDaytonaSecrets(string(body), daytonaHeaderSecrets(headers)...))
+			return fmt.Errorf("daytona upload archive: %s: %s", resp.Status, message)
 		}
 		return fmt.Errorf("daytona upload archive: %s", resp.Status)
 	}
@@ -127,4 +128,22 @@ func writeMultipartFile(pipe *io.PipeWriter, writer *multipart.Writer, file io.R
 		return err
 	}
 	return pipe.Close()
+}
+
+func daytonaHeaderSecrets(headers map[string]string) []string {
+	var secrets []string
+	for key, value := range headers {
+		if !strings.EqualFold(key, "Authorization") {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		secrets = append(secrets, value)
+		if strings.HasPrefix(strings.ToLower(value), "bearer ") {
+			secrets = append(secrets, strings.TrimSpace(value[len("bearer "):]))
+		}
+	}
+	return secrets
 }

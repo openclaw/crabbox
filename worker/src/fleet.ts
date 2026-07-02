@@ -49,7 +49,6 @@ import {
   HetznerClient,
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
-  sshPublicKeyIdentity,
 } from "./hetzner";
 import { bearerToken, errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import {
@@ -79,6 +78,7 @@ import {
   type PortalMacHostRecord,
   webVNCBridgeCommand,
 } from "./portal";
+import { leaseIDForProviderKey, providerKeyForLease, sshPublicKeyIdentity } from "./provider-key";
 import {
   readRuntimeAdapterRelayBody,
   runtimeAdapterProxyPath,
@@ -156,6 +156,7 @@ const codeViewerTicketTTLSeconds = 120;
 const codeViewerSessionTTLSeconds = 8 * 60 * 60;
 const egressTicketTTLSeconds = 120;
 const runtimeAdapterTicketTTLSeconds = 120;
+const nativeVNCTicketTTLSeconds = 60;
 const runtimeAdapterProvisionalClaimTTLSeconds = 10 * 60;
 const runtimeAdapterDeleteRetryBaseMs = 5_000;
 const runtimeAdapterDeleteRetryMaxMs = 60_000;
@@ -217,6 +218,17 @@ interface WebVNCTicketRecord {
   leaseID: string;
   owner: string;
   org: string;
+  admin?: boolean;
+  createdAt: string;
+  expiresAt: string;
+}
+
+interface NativeVNCTicketRecord {
+  ticket: string;
+  workspaceID: string;
+  leaseID: string;
+  owner: string;
+  org: string;
   createdAt: string;
   expiresAt: string;
 }
@@ -226,6 +238,7 @@ interface CodeTicketRecord {
   leaseID: string;
   owner: string;
   org: string;
+  admin?: boolean;
   createdAt: string;
   expiresAt: string;
 }
@@ -356,6 +369,7 @@ interface EgressTicketRecord {
   leaseID: string;
   owner: string;
   org: string;
+  admin?: boolean;
   role: EgressRole;
   sessionID: string;
   profile?: string;
@@ -408,6 +422,7 @@ interface WorkspaceRecord {
   provider: Provider;
   class: string;
   desktop: boolean;
+  desktopCapabilityVersion?: 1;
   ttlSeconds: number;
   idleTimeoutSeconds: number;
   createdAt: string;
@@ -658,8 +673,22 @@ type BridgeAttachment =
       admin?: boolean;
       portalSessionHash?: string;
     }
-  | { kind: "egress-host"; leaseID: string; sessionID: string }
-  | { kind: "egress-client"; leaseID: string; sessionID: string }
+  | {
+      kind: "egress-host";
+      leaseID: string;
+      sessionID: string;
+      owner?: string;
+      org?: string;
+      admin?: boolean;
+    }
+  | {
+      kind: "egress-client";
+      leaseID: string;
+      sessionID: string;
+      owner?: string;
+      org?: string;
+      admin?: boolean;
+    }
   | {
       kind: "runtime-adapter-agent";
       adapterID: string;
@@ -873,6 +902,9 @@ export class FleetCoordinator {
       if (method === "POST" && parts.join("/") === "v1/workspaces") {
         return await this.createWorkspace(request);
       }
+      if (method === "GET" && parts.join("/") === "v1/native-vnc/handoff") {
+        return await this.workspaceNativeVNC(request);
+      }
       if (
         method === "GET" &&
         parts[0] === "v1" &&
@@ -1061,6 +1093,7 @@ export class FleetCoordinator {
     const now = Date.now();
     const revoked = new Map<string, string>();
     const revokedViewers = new Map<WebSocket, string>();
+    const revokedEgressSessions = new Map<string, { leaseID: string; sessionID: string }>();
     const codeViewersToCheck: Array<{ socket: WebSocket; portalSessionHash?: string }> = [];
     for (const socket of this.restoredLeaseBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
@@ -1081,6 +1114,16 @@ export class FleetCoordinator {
         !this.leaseViewerAuthorized(lease, attachment)
       ) {
         revokedViewers.set(socket, "lease access revoked");
+        continue;
+      }
+      if (
+        (attachment.kind === "egress-host" || attachment.kind === "egress-client") &&
+        !this.leaseManagerAuthorized(lease, attachment)
+      ) {
+        revokedEgressSessions.set(egressSocketKey(lease.id, attachment.sessionID), {
+          leaseID: lease.id,
+          sessionID: attachment.sessionID,
+        });
         continue;
       }
       if (attachment.kind === "code-viewer" && attachment.auth === "github") {
@@ -1107,6 +1150,9 @@ export class FleetCoordinator {
     }
     for (const [leaseID, reason] of revoked) {
       this.closeLeaseBridges(leaseID, 1008, reason);
+    }
+    for (const { leaseID, sessionID } of revokedEgressSessions.values()) {
+      this.clearEgressSession(leaseID, sessionID, 1008, "lease access revoked");
     }
     for (const socket of this.restoredLeaseBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
@@ -1291,7 +1337,7 @@ export class FleetCoordinator {
       return;
     }
     if (previous && previous.sessionID !== sessionID) {
-      this.clearEgressSessionSockets(
+      this.clearEgressSession(
         leaseID,
         previous.sessionID,
         1012,
@@ -1651,6 +1697,24 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    const configProvider = this.provider(
+      config.provider,
+      providerRegionForConfig(config),
+      providerProjectForConfig(config),
+    );
+    if (!workspaceID && !isAdminRequest(request)) {
+      const restrictedFields = configProvider.restrictedLeaseRequestFields?.(input) ?? [];
+      if (restrictedFields.length > 0) {
+        return json(
+          {
+            error: "admin_required",
+            message: `brokered ${config.provider} resource selectors require admin-token auth: ${restrictedFields.join(", ")}`,
+            fields: restrictedFields,
+          },
+          { status: 403 },
+        );
+      }
+    }
     if (!isAdminRequest(request) && hasNativeLeaseSource(config)) {
       return json(
         {
@@ -1660,7 +1724,26 @@ export class FleetCoordinator {
         { status: 403 },
       );
     }
-    if (!isAdminRequest(request) && (config.hostID || config.awsMacHostID)) {
+    const requestedHostID = config.hostID || config.awsMacHostID;
+    const retainedMacHostLease =
+      requestedHostID && config.provider === "aws" && config.target === "macos"
+        ? (await this.leaseRecords())
+            .filter(
+              (lease) =>
+                lease.state === "released" &&
+                lease.releaseDeletesServer === false &&
+                Boolean(lease.cloudID) &&
+                lease.owner === owner &&
+                lease.org === org &&
+                lease.provider === "aws" &&
+                lease.target === "macos" &&
+                leaseHostID(lease) === requestedHostID &&
+                (!config.serverTypeExplicit || lease.serverType === config.serverType),
+            )
+            .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
+        : undefined;
+    const reusesOwnedReleasedMacHost = Boolean(retainedMacHostLease);
+    if (!isAdminRequest(request) && requestedHostID && !reusesOwnedReleasedMacHost) {
       return json(
         {
           error: "admin_required",
@@ -1669,12 +1752,59 @@ export class FleetCoordinator {
         { status: 403 },
       );
     }
-    config =
-      (await this.provider(
-        config.provider,
-        providerRegionForConfig(config),
-        providerProjectForConfig(config),
-      ).prepareLeaseConfig?.(config)) ?? config;
+    if (retainedMacHostLease) {
+      const missingCapabilities = [
+        config.desktop && !retainedMacHostLease.desktop ? "desktop" : "",
+        config.browser && !retainedMacHostLease.browser ? "browser" : "",
+        config.code && !retainedMacHostLease.code ? "code" : "",
+      ].filter(Boolean);
+      if (missingCapabilities.length > 0) {
+        return json(
+          {
+            error: "retained_instance_capability_mismatch",
+            message: `retained EC2 Mac instance lacks requested capabilities: ${missingCapabilities.join(", ")}`,
+          },
+          { status: 409 },
+        );
+      }
+    }
+    if (retainedMacHostLease && !config.serverTypeExplicit) {
+      config = { ...config, serverType: retainedMacHostLease.serverType };
+    }
+    if (retainedMacHostLease) {
+      config = { ...config, providerKey: retainedMacHostLease.providerKey };
+    }
+    const leaseID = validLeaseID(input.leaseID) ? input.leaseID : newLeaseID();
+    const canonicalProviderKey = providerKeyForLease(leaseID);
+    const providerKeyLeaseID = leaseIDForProviderKey(config.providerKey);
+    if (!retainedMacHostLease && providerKeyLeaseID && providerKeyLeaseID !== leaseID) {
+      return json(
+        {
+          error: "reserved_provider_key",
+          message: `provider key ${config.providerKey} is reserved for lease ${providerKeyLeaseID}`,
+        },
+        { status: 400 },
+      );
+    }
+    if (
+      !workspaceID &&
+      !retainedMacHostLease &&
+      !isAdminRequest(request) &&
+      config.providerKey &&
+      config.providerKey !== canonicalProviderKey
+    ) {
+      return json(
+        {
+          error: "admin_required",
+          message: "custom provider key names require admin-token auth",
+        },
+        { status: 403 },
+      );
+    }
+    if (!config.providerKey) {
+      config = { ...config, providerKey: canonicalProviderKey };
+    }
+    config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
     const readiness = this.providerConfigurationReadiness(
       config.provider,
       providerProjectForConfig(config),
@@ -1690,7 +1820,6 @@ export class FleetCoordinator {
         { status: 424 },
       );
     }
-    const leaseID = validLeaseID(input.leaseID) ? input.leaseID : newLeaseID();
     const provider = this.provider(
       config.provider,
       providerRegionForConfig(config),
@@ -1706,6 +1835,136 @@ export class FleetCoordinator {
       config.ttlSeconds,
       providerHourlyUSD,
     );
+    if (!workspaceID && retainedMacHostLease) {
+      const reactivation = await this.state.runExclusive(async () => {
+        const leases = await this.leaseRecords();
+        const current = leases.find(
+          (lease) =>
+            lease.id === retainedMacHostLease.id &&
+            lease.state === "released" &&
+            lease.releaseDeletesServer === false &&
+            Boolean(lease.cloudID) &&
+            lease.owner === owner &&
+            lease.org === org &&
+            lease.provider === "aws" &&
+            lease.target === "macos" &&
+            leaseHostID(lease) === requestedHostID &&
+            lease.serverType === config.serverType,
+        );
+        if (!current) {
+          return undefined;
+        }
+        const blocked = await reservationGuard?.();
+        if (blocked) {
+          return blocked;
+        }
+        const now = new Date();
+        let reactivated: LeaseRecord = {
+          ...current,
+          profile: config.profile,
+          class: config.class,
+          requestedServerType: config.serverType,
+          keep: config.keep,
+          ttlSeconds: config.ttlSeconds,
+          idleTimeoutSeconds: config.idleTimeoutSeconds,
+          estimatedHourlyUSD: cost.hourlyUSD,
+          maxEstimatedUSD: cost.maxUSD,
+          state: "active",
+          createdAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+          lastTouchedAt: now.toISOString(),
+          expiresAt: leaseExpiresAt(
+            now,
+            now,
+            config.ttlSeconds,
+            config.idleTimeoutSeconds,
+          ).toISOString(),
+        };
+        const sourceCIDRs = awsLeaseSSHSourceCIDRs(
+          config,
+          providerAccessContext(
+            requestSourceCIDRs(request),
+            mergeProviderAccessState(leases, await this.providerAccessRecords()),
+          ),
+        );
+        reactivated = withLeaseSSHSourceCIDRs(
+          reactivated,
+          uniqueNonEmpty([...(current.network?.sshSourceCIDRs ?? []), ...sourceCIDRs]),
+          Boolean(
+            current.network?.sshSourceCIDRsComplete ||
+            sourceCIDRs.length > 0 ||
+            awsGlobalSSHSourceCIDRs(this.env).length > 0,
+          ),
+        );
+        if (config.awsSSHCIDRsPinned) {
+          reactivated.network = {
+            ...reactivated.network,
+            sshPinnedSourceCIDRs: uniqueNonEmpty([
+              ...(current.network?.sshPinnedSourceCIDRs ?? []),
+              ...config.awsSSHCIDRs,
+            ]),
+          };
+        }
+        delete reactivated.releasedAt;
+        delete reactivated.endedAt;
+        delete reactivated.releaseDeletesServer;
+        delete reactivated.failureError;
+        delete reactivated.provisioningRequestStartedAt;
+        clearLeaseCleanupMetadata(reactivated);
+        const otherLeases = mergeProviderAccessState(
+          leases.filter((lease) => lease.id !== current.id),
+          await this.providerAccessRecords(),
+        );
+        const limitError = enforceCostLimits(otherLeases, reactivated, costLimits(this.env), now);
+        if (limitError) {
+          return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
+        }
+        await this.putLease(reactivated);
+        await this.markAWSIngressReconcilePending(reactivated);
+        await this.scheduleAlarm();
+        return { previous: structuredClone(current), reactivated };
+      });
+      if (reactivation instanceof Response) {
+        return reactivation;
+      }
+      if (reactivation) {
+        try {
+          if (provider.reconcileLeaseAccess) {
+            const leases = await this.leaseRecords();
+            const providerAccessLeases = await this.providerAccessRecords();
+            await this.withAWSIngressOperationLock(() =>
+              provider.reconcileLeaseAccess!(
+                reactivation.reactivated,
+                providerAccessContext(
+                  requestSourceCIDRs(request),
+                  mergeProviderAccessState(leases, providerAccessLeases),
+                ),
+              ),
+            );
+          }
+        } catch (error) {
+          await this.state.runExclusive(async () => {
+            const current = await this.getLease(reactivation.reactivated.id);
+            if (
+              current?.state === "active" &&
+              current.updatedAt === reactivation.reactivated.updatedAt
+            ) {
+              await this.putLease(reactivation.previous);
+              await this.scheduleAlarm();
+            }
+          });
+          throw error;
+        }
+        return json({ lease: reactivation.reactivated }, { status: 201 });
+      }
+      return json(
+        {
+          error: "retained_instance_unavailable",
+          message: "retained EC2 Mac instance is no longer available for reactivation",
+        },
+        { status: 409 },
+      );
+    }
     const reservation = await this.state.runExclusive(async () => {
       const blocked = await reservationGuard?.();
       if (blocked) {
@@ -1782,7 +2041,6 @@ export class FleetCoordinator {
       if (providerRegion) {
         record.region = providerRegion;
       }
-      const requestedHostID = config.hostID || config.awsMacHostID;
       if (requestedHostID) {
         record.hostId = requestedHostID;
       }
@@ -2160,7 +2418,7 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    const desktop = false;
+    const desktop = input.capabilities?.desktop === true;
     const key = workspaceKey(owner, org, id);
     const existingResponse = await this.state.runExclusive(async () => {
       const existing = await this.state.storage.get<WorkspaceRecord>(key);
@@ -2280,6 +2538,7 @@ export class FleetCoordinator {
         provider,
         class: machineClass,
         desktop,
+        desktopCapabilityVersion: 1,
         ttlSeconds,
         idleTimeoutSeconds,
         createdAt: nowISO,
@@ -2385,6 +2644,7 @@ export class FleetCoordinator {
       provider: input.provider,
       class: input.class,
       desktop: input.desktop,
+      desktopCapabilityVersion: 1,
       ttlSeconds: input.ttlSeconds,
       idleTimeoutSeconds: input.idleTimeoutSeconds,
       createdAt: nowISO,
@@ -2483,6 +2743,7 @@ export class FleetCoordinator {
               provider: template.provider,
               class: template.class,
               desktop: template.desktop,
+              desktopCapabilityVersion: 1,
               ttlSeconds: template.ttlSeconds,
               idleTimeoutSeconds: template.idleTimeoutSeconds,
               createdAt: nowISO,
@@ -2953,6 +3214,9 @@ export class FleetCoordinator {
         { status: 409 },
       );
     }
+    if (method === "POST" && action === "connections" && connection === "native-vnc") {
+      return await this.createWorkspaceNativeVNCTicket(request, key, workspaceID);
+    }
     if (method === "DELETE" && action === undefined) {
       const release = await this.state.runExclusive(async () => {
         const record = await this.state.storage.get<WorkspaceRecord>(key);
@@ -3000,6 +3264,291 @@ export class FleetCoordinator {
     return json({ error: "not_found" }, { status: 404 });
   }
 
+  private async createWorkspaceNativeVNCTicket(
+    request: Request,
+    key: string,
+    workspaceID: string,
+  ): Promise<Response> {
+    const brokerURL = workspacePublicURL(this.env);
+    if (!brokerURL) {
+      return json(
+        { error: "native_vnc_unavailable", message: "workspace public URL is not configured" },
+        { status: 409 },
+      );
+    }
+    const result = await this.state.runExclusive(async () => {
+      const workspace = await this.state.storage.get<WorkspaceRecord>(key);
+      if (!workspace || workspace.prewarm || workspace.id !== workspaceID) return undefined;
+      const lease = await this.getLease(workspace.leaseID);
+      const unavailable = workspaceNativeVNCError(workspace, lease, this.env);
+      if (unavailable || !lease) {
+        return { unavailable: unavailable ?? "workspace lease is unavailable" };
+      }
+      const now = new Date();
+      const ticket: NativeVNCTicketRecord = {
+        ticket: newNativeVNCTicket(),
+        workspaceID: workspace.id,
+        leaseID: lease.id,
+        owner: workspace.owner,
+        org: workspace.org,
+        createdAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + nativeVNCTicketTTLSeconds * 1000).toISOString(),
+      };
+      await this.cleanupExpiredNativeVNCTickets(now.getTime());
+      await this.state.storage.put(nativeVNCTicketKey(ticket.ticket), ticket);
+      return { ticket };
+    });
+    if (!result) return notFound();
+    if ("unavailable" in result) {
+      return json(
+        { error: "native_vnc_unavailable", message: result.unavailable },
+        { status: 409 },
+      );
+    }
+    return json(
+      {
+        schema: "crabbox/native-vnc-grant/v1",
+        brokerUrl: brokerURL,
+        leaseId: result.ticket.leaseID,
+        ticket: result.ticket.ticket,
+        expiresAt: result.ticket.expiresAt,
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  }
+
+  private async workspaceNativeVNC(request: Request): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return json({ error: "upgrade_required" }, { status: 426 });
+    }
+    const token = bearerToken(request);
+    if (!validNativeVNCTicket(token)) {
+      return json({ error: "native_vnc_ticket_required" }, { status: 401 });
+    }
+    const lease = await this.state.runExclusive(async () => {
+      const key = nativeVNCTicketKey(token);
+      const ticket = await this.state.storage.get<NativeVNCTicketRecord>(key);
+      await this.state.storage.delete(key);
+      if (!ticket || ticket.ticket !== token || Date.parse(ticket.expiresAt) <= Date.now()) {
+        return undefined;
+      }
+      const workspace = await this.state.storage.get<WorkspaceRecord>(
+        workspaceKey(ticket.owner, ticket.org, ticket.workspaceID),
+      );
+      const current = workspace ? await this.getLease(ticket.leaseID) : undefined;
+      return workspace && current && workspaceOwnsLease(workspace, current)
+        ? { workspace, lease: current }
+        : undefined;
+    });
+    if (!lease) return json({ error: "native_vnc_ticket_invalid" }, { status: 401 });
+    const unavailable = workspaceNativeVNCError(lease.workspace, lease.lease, this.env);
+    if (unavailable) {
+      return json({ error: "native_vnc_unavailable", message: unavailable }, { status: 409 });
+    }
+    const key = workspaceKey(lease.workspace.owner, lease.workspace.org, lease.workspace.id);
+    const admission = await this.state.runExclusive(async () => {
+      const currentWorkspace = await this.state.storage.get<WorkspaceRecord>(key);
+      const currentLease = currentWorkspace
+        ? await this.getLease(currentWorkspace.leaseID)
+        : undefined;
+      const currentUnavailable = currentWorkspace
+        ? workspaceNativeVNCError(currentWorkspace, currentLease, this.env)
+        : "workspace is unavailable";
+      if (
+        currentUnavailable ||
+        !currentWorkspace ||
+        !currentLease ||
+        currentLease.id !== lease.lease.id
+      ) {
+        return {
+          error: "unavailable" as const,
+          message: currentUnavailable ?? "workspace lease changed",
+        };
+      }
+      if (this.workspaceConnectionLimitReached(key, lease.workspace.owner, lease.workspace.org)) {
+        return { error: "limit" as const };
+      }
+      const upgrade = this.state.createWebSocketUpgrade({
+        maxPayload: workspaceTerminalMaxBufferedBytes,
+      });
+      this.trackWorkspaceTerminal(key, upgrade.socket);
+      return { upgrade, workspace: currentWorkspace, lease: currentLease };
+    });
+    if ("error" in admission && admission.error === "unavailable") {
+      return json({ error: "native_vnc_unavailable", message: admission.message }, { status: 409 });
+    }
+    if ("error" in admission) {
+      return json(
+        {
+          error: "native_vnc_connection_limit",
+          message: "workspace connection limit reached",
+        },
+        { status: 429, headers: { "retry-after": "5" } },
+      );
+    }
+    void this.connectWorkspaceNativeVNC(
+      admission.upgrade.socket,
+      key,
+      admission.workspace,
+      admission.lease,
+    ).catch((error) =>
+      closeSocket(admission.upgrade.socket, 1011, boundedSocketReason(errorMessage(error))),
+    );
+    return admission.upgrade.response;
+  }
+
+  private async connectWorkspaceNativeVNC(
+    socket: WebSocket,
+    workspaceKeyValue: string,
+    workspace: WorkspaceRecord,
+    lease: LeaseRecord,
+  ): Promise<void> {
+    const privateKey = this.env.CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?.trim();
+    const expectedHostKey = workspace.sshHostKeySha256;
+    if (!privateKey || !expectedHostKey || !lease.host) {
+      throw new Error("workspace native VNC SSH access is not configured");
+    }
+
+    let client: SSHClient | undefined;
+    let connectingClient: SSHClient | undefined;
+    let channel: ClientChannel | undefined;
+    let closed = false;
+    let started = false;
+    let resolveStart: (() => void) | undefined;
+    let rejectStart: ((error: Error) => void) | undefined;
+    let inputQueue = Promise.resolve();
+    let queuedInputBytes = 0;
+    let queuedInputFrames = 0;
+    const start = new Promise<void>((resolve, reject) => {
+      resolveStart = resolve;
+      rejectStart = reject;
+    });
+    let startTimer: ReturnType<typeof setTimeout> | undefined;
+    let expiryTimer: ReturnType<typeof setTimeout>;
+    const clearStartTimer = () => {
+      const timer = startTimer;
+      startTimer = undefined;
+      if (timer !== undefined) clearTimeout(timer as unknown as number);
+    };
+    const close = (code: number, reason: string) => {
+      if (closed) return;
+      closed = true;
+      clearStartTimer();
+      clearTimeout(expiryTimer);
+      this.untrackWorkspaceTerminal(workspaceKeyValue, socket);
+      rejectStart?.(new Error(reason));
+      channel?.close();
+      connectingClient?.end();
+      client?.end();
+      closeSocket(socket, code, boundedSocketReason(reason));
+    };
+    expiryTimer = setTimeout(
+      () => close(1008, "workspace expired"),
+      Math.min(Math.max(0, Date.parse(lease.expiresAt) - Date.now()), 2_147_483_647),
+    );
+    this.state.acceptEphemeralWebSocket(socket, {
+      message: (data) => {
+        if (closed) return;
+        if (!started) {
+          if (data === "start") {
+            started = true;
+            clearStartTimer();
+            resolveStart?.();
+          } else {
+            close(1008, "native VNC start required");
+          }
+          return;
+        }
+        const length = workspaceTerminalDataLength(data);
+        if (
+          queuedInputFrames >= workspaceTerminalMaxBufferedFrames ||
+          queuedInputBytes + length > workspaceTerminalMaxBufferedBytes
+        ) {
+          close(1009, "native VNC input buffer exceeded");
+          return;
+        }
+        queuedInputBytes += length;
+        queuedInputFrames += 1;
+        inputQueue = inputQueue
+          .then(async () => {
+            try {
+              const value = await workspaceTerminalMessage(data);
+              if (typeof value === "string") throw new Error("native VNC binary frame required");
+              if (channel) await writeWorkspaceTerminalChannel(channel, value);
+              return undefined;
+            } finally {
+              queuedInputBytes -= length;
+              queuedInputFrames -= 1;
+            }
+          })
+          .catch((error) => close(1011, errorMessage(error)));
+      },
+      close: () => close(1000, "native VNC closed"),
+      error: () => close(1011, "native VNC websocket error"),
+    });
+
+    try {
+      client = await connectWorkspaceSSH(privateKey, expectedHostKey, lease, {
+        shouldStop: () => closed,
+        connecting: (candidate) => {
+          connectingClient = candidate;
+        },
+      });
+      connectingClient = undefined;
+      const password = await readWorkspaceVNCPassword(client, lease);
+      const username = lease.target === "windows" || lease.target === "macos" ? lease.sshUser : "";
+      socket.send(
+        JSON.stringify({
+          schema: "crabbox/native-vnc-ready/v1",
+          leaseId: lease.id,
+          username: username ?? "",
+          password,
+        }),
+      );
+      startTimer = setTimeout(
+        () => rejectStart?.(new Error("native VNC viewer did not connect")),
+        30_000,
+      );
+      await start;
+      if (closed) return;
+      const connectedClient = client;
+      channel = await new Promise<ClientChannel>((resolve, reject) => {
+        connectedClient.forwardOut("127.0.0.1", 0, "127.0.0.1", 5900, (error, opened) =>
+          error ? reject(error) : resolve(opened),
+        );
+      });
+      channel.on("data", (data: Uint8Array) => {
+        if (closed || socket.readyState !== WebSocket.OPEN) return;
+        if (
+          data.byteLength > workspaceTerminalMaxBufferedBytes ||
+          workspaceTerminalSocketBufferedBytes(socket) + data.byteLength >
+            workspaceTerminalMaxBufferedBytes
+        ) {
+          close(1009, "native VNC output buffer exceeded");
+          return;
+        }
+        socket.send(data.slice());
+      });
+      channel.once("close", () => close(1000, "native VNC tunnel closed"));
+      connectedClient.once("close", () => close(1011, "SSH connection closed"));
+      connectedClient.once("error", (error) => close(1011, errorMessage(error)));
+    } catch (error) {
+      close(1011, errorMessage(error));
+      throw error;
+    }
+  }
+
+  private async cleanupExpiredNativeVNCTickets(now = Date.now()): Promise<void> {
+    const tickets = await this.state.storage.list<NativeVNCTicketRecord>({
+      prefix: nativeVNCTicketPrefix(),
+    });
+    await Promise.all(
+      [...tickets.entries()]
+        .filter(([, ticket]) => Date.parse(ticket.expiresAt) <= now)
+        .map(([key]) => this.state.storage.delete(key)),
+    );
+  }
+
   private async workspaceTerminal(request: Request, workspaceID: string): Promise<Response> {
     if (
       request.headers.get("upgrade")?.toLowerCase() !== "websocket" ||
@@ -3035,28 +3584,7 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      const ownerPrefix = workspaceKey(owner, org, "");
-      let ownerConnections = 0;
-      let globalConnections = 0;
-      for (const [terminalKey, sockets] of this.workspaceTerminals) {
-        globalConnections += sockets.size;
-        if (terminalKey.startsWith(ownerPrefix)) {
-          ownerConnections += sockets.size;
-        }
-      }
-      const transportConnectionLimit = Math.max(
-        1,
-        Math.floor(
-          workspaceTerminalTransportMemoryBudgetBytes /
-            this.state.ephemeralWebSocketMaxPayloadBytes,
-        ),
-      );
-      if (
-        (this.workspaceTerminals.get(key)?.size ?? 0) >=
-          Math.min(workspaceTerminalMaxPerWorkspace, transportConnectionLimit) ||
-        ownerConnections >= Math.min(workspaceTerminalMaxPerOwner, transportConnectionLimit) ||
-        globalConnections >= Math.min(workspaceTerminalMaxGlobal, transportConnectionLimit)
-      ) {
+      if (this.workspaceConnectionLimitReached(key, owner, org)) {
         return json(
           {
             error: "terminal_connection_limit",
@@ -3181,83 +3709,13 @@ export class FleetCoordinator {
     });
 
     try {
-      const readyDeadline = Date.now() + workspaceTerminalSSHReadyTimeoutMs;
-      const terminalPorts = uniqueNonEmpty([lease.sshPort, ...(lease.sshFallbackPorts ?? [])]);
-      let lastConnectError: unknown = new Error("workspace SSH service is not ready");
-      let lastObservedHostKey = "";
-      connect: while (Date.now() < readyDeadline) {
-        for (const port of terminalPorts) {
-          if (closed) break connect;
-          const candidate = new SSHClientConstructor();
+      client = await connectWorkspaceSSH(privateKey, expectedHostKey, lease, {
+        shouldStop: () => closed,
+        connecting: (candidate) => {
           connectingClient = candidate;
-          try {
-            // oxlint-disable-next-line eslint/no-await-in-loop -- SSH readiness retries are sequential.
-            await new Promise<void>((resolve, reject) => {
-              let settled = false;
-              const settle = (callback: () => void) => {
-                if (settled) return;
-                settled = true;
-                callback();
-              };
-              candidate
-                .once("ready", () => settle(resolve))
-                .once("error", (error) => settle(() => reject(error)))
-                .once("close", () =>
-                  settle(() => reject(new Error("SSH connection closed before ready"))),
-                )
-                .connect({
-                  host: lease.host,
-                  port: Number.parseInt(port || "22", 10) || 22,
-                  username: lease.sshUser || "root",
-                  privateKey,
-                  readyTimeout: 10_000,
-                  keepaliveInterval: 15_000,
-                  keepaliveCountMax: 3,
-                  algorithms: {
-                    serverHostKey: ["ssh-ed25519"],
-                    cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr"],
-                    hmac: [
-                      "hmac-sha2-256-etm@openssh.com",
-                      "hmac-sha2-512-etm@openssh.com",
-                      "hmac-sha2-256",
-                      "hmac-sha2-512",
-                    ],
-                  },
-                  hostHash: "sha256",
-                  hostVerifier: (fingerprint: string) => {
-                    lastObservedHostKey = fingerprint;
-                    return expectedHostKey === fingerprint;
-                  },
-                });
-            });
-            if (closed) {
-              candidate.end();
-              connectingClient = undefined;
-              break connect;
-            }
-            client = candidate;
-            connectingClient = undefined;
-            lastConnectError = undefined;
-            break connect;
-          } catch (error) {
-            lastConnectError = error;
-            candidate.end();
-            if (connectingClient === candidate) connectingClient = undefined;
-          }
-        }
-        if (!closed && Date.now() < readyDeadline) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- delay before the next SSH sweep.
-          await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
-        }
-      }
-      if (lastConnectError || !client) {
-        if (lastObservedHostKey && lastObservedHostKey !== expectedHostKey) {
-          throw new Error(
-            `workspace SSH host key mismatch expected=${expectedHostKey.slice(0, 16)} observed=${lastObservedHostKey.slice(0, 16)}`,
-          );
-        }
-        throw lastConnectError;
-      }
+        },
+      });
+      connectingClient = undefined;
       if (closed) return;
       const connectedClient = client;
 
@@ -3374,6 +3832,30 @@ export class FleetCoordinator {
     sockets.add(socket);
     this.workspaceTerminals.set(key, sockets);
     socket.addEventListener("close", () => this.untrackWorkspaceTerminal(key, socket));
+  }
+
+  private workspaceConnectionLimitReached(key: string, owner: string, org: string): boolean {
+    const ownerPrefix = workspaceKey(owner, org, "");
+    let ownerConnections = 0;
+    let globalConnections = 0;
+    for (const [terminalKey, sockets] of this.workspaceTerminals) {
+      globalConnections += sockets.size;
+      if (terminalKey.startsWith(ownerPrefix)) {
+        ownerConnections += sockets.size;
+      }
+    }
+    const transportConnectionLimit = Math.max(
+      1,
+      Math.floor(
+        workspaceTerminalTransportMemoryBudgetBytes / this.state.ephemeralWebSocketMaxPayloadBytes,
+      ),
+    );
+    return (
+      (this.workspaceTerminals.get(key)?.size ?? 0) >=
+        Math.min(workspaceTerminalMaxPerWorkspace, transportConnectionLimit) ||
+      ownerConnections >= Math.min(workspaceTerminalMaxPerOwner, transportConnectionLimit) ||
+      globalConnections >= Math.min(workspaceTerminalMaxGlobal, transportConnectionLimit)
+    );
   }
 
   private untrackWorkspaceTerminal(key: string, socket: WebSocket): void {
@@ -4363,7 +4845,7 @@ export class FleetCoordinator {
       const previousShare = normalizedLeaseShare(lease.share);
       lease.share = sanitizeLeaseShare(input, requestOwner(request));
       lease.updatedAt = new Date().toISOString();
-      await this.putLeaseShareAndRevokeViewers(lease, previousShare);
+      await this.putLeaseShareAndRevokeBridges(lease, previousShare);
       return json({ leaseID: lease.id, share: normalizedLeaseShare(lease.share) });
     }
     if (method === "DELETE") {
@@ -4383,25 +4865,25 @@ export class FleetCoordinator {
         lease.share = sanitizeLeaseShare(share, requestOwner(request));
       }
       lease.updatedAt = new Date().toISOString();
-      await this.putLeaseShareAndRevokeViewers(lease, previousShare);
+      await this.putLeaseShareAndRevokeBridges(lease, previousShare);
       return json({ leaseID: lease.id, share: normalizedLeaseShare(lease.share) });
     }
     return json({ error: "not_found" }, { status: 404 });
   }
 
-  private async putLeaseShareAndRevokeViewers(
+  private async putLeaseShareAndRevokeBridges(
     lease: LeaseRecord,
     previousShare: NormalizedLeaseShare,
   ): Promise<void> {
     await this.withBridgeTicketLock(async () => {
       await this.putLease(lease);
       if (leaseShareAccessShrank(previousShare, normalizedLeaseShare(lease.share))) {
-        this.revokeUnauthorizedLeaseViewers(lease);
+        this.revokeUnauthorizedLeaseBridges(lease);
       }
     });
   }
 
-  private revokeUnauthorizedLeaseViewers(lease: LeaseRecord): void {
+  private revokeUnauthorizedLeaseBridges(lease: LeaseRecord): void {
     const code = 1008;
     const reason = "lease access revoked";
     for (const viewer of this.openWebVNCViewers(lease.id)) {
@@ -4424,6 +4906,32 @@ export class FleetCoordinator {
       this.clearCodeViewer(lease.id, id, viewer, code, reason);
       closeSocket(viewer, code, reason);
     }
+    const revokedEgressSessions = new Set<string>();
+    for (const socket of [...this.egressHosts.values(), ...this.egressClients.values()]) {
+      const attachment = this.bridgeAttachment(socket);
+      if (
+        (attachment?.kind !== "egress-host" && attachment?.kind !== "egress-client") ||
+        attachment.leaseID !== lease.id ||
+        this.leaseManagerAuthorized(lease, attachment)
+      ) {
+        continue;
+      }
+      revokedEgressSessions.add(attachment.sessionID);
+    }
+    for (const sessionID of revokedEgressSessions) {
+      this.clearEgressSession(lease.id, sessionID, code, reason);
+    }
+  }
+
+  private leaseManagerAuthorized(
+    lease: LeaseRecord,
+    principal: { owner?: string; org?: string; admin?: boolean },
+  ): boolean {
+    if (!completeBridgePrincipal(principal)) {
+      return false;
+    }
+    const role = this.leaseAccessRoleForPrincipal(lease, principal);
+    return role === "owner" || role === "manage";
   }
 
   private leaseViewerAuthorized(
@@ -5603,7 +6111,7 @@ export class FleetCoordinator {
       const previousShare = normalizedLeaseShare(lease.share);
       lease.share = sanitizeLeaseShare(input, requestOwner(request));
       lease.updatedAt = new Date().toISOString();
-      await this.putLeaseShareAndRevokeViewers(lease, previousShare);
+      await this.putLeaseShareAndRevokeBridges(lease, previousShare);
       return json({
         leaseID: lease.id,
         slug: lease.slug || lease.id,
@@ -5640,7 +6148,7 @@ export class FleetCoordinator {
     }
     lease.share = sanitizeLeaseShare(share, requestOwner(request));
     lease.updatedAt = new Date().toISOString();
-    await this.putLeaseShareAndRevokeViewers(lease, previousShare);
+    await this.putLeaseShareAndRevokeBridges(lease, previousShare);
     const embedded = url.searchParams.get("embed") === "1";
     return new Response(null, {
       status: 303,
@@ -5692,35 +6200,37 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const consumed = await this.consumeWebVNCTicket(request, identifier);
-    if (consumed.status === "invalid") {
-      return json(
-        { error: "webvnc_ticket_required", message: "valid WebVNC bridge ticket required" },
-        { status: 401 },
-      );
-    }
-    if (consumed.status === "not_found") {
-      return notFound();
-    }
-    const { lease } = consumed;
-    const error = webVNCLeaseError(lease);
-    if (error) {
-      return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
-    }
-    const upgrade = this.state.createWebSocketUpgrade();
-    const agent = upgrade.socket;
+    return await this.withBridgeTicketLock(async () => {
+      const consumed = await this.consumeWebVNCTicketUnderLock(request, identifier);
+      if (consumed.status === "invalid") {
+        return json(
+          { error: "webvnc_ticket_required", message: "valid WebVNC bridge ticket required" },
+          { status: 401 },
+        );
+      }
+      if (consumed.status === "not_found") {
+        return notFound();
+      }
+      const { lease } = consumed;
+      const error = webVNCLeaseError(lease);
+      if (error) {
+        return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
+      }
+      const upgrade = this.state.createWebSocketUpgrade();
+      const agent = upgrade.socket;
 
-    const agentID = newWebVNCSessionID("agent");
-    const capabilities = webVNCAgentCapabilities(request);
-    this.trackWebVNCAgent(lease.id, agentID, agent, capabilities);
-    this.recordWebVNCEvent(lease.id, "bridge_connected");
-    this.acceptBridgeWebSocket(agent, {
-      kind: "webvnc-agent",
-      leaseID: lease.id,
-      id: agentID,
-      capabilities,
+      const agentID = newWebVNCSessionID("agent");
+      const capabilities = webVNCAgentCapabilities(request);
+      this.trackWebVNCAgent(lease.id, agentID, agent, capabilities);
+      this.recordWebVNCEvent(lease.id, "bridge_connected");
+      this.acceptBridgeWebSocket(agent, {
+        kind: "webvnc-agent",
+        leaseID: lease.id,
+        id: agentID,
+        capabilities,
+      });
+      return upgrade.response;
     });
-    return upgrade.response;
   }
 
   private async createEgressTicket(request: Request, identifier: string): Promise<Response> {
@@ -5763,6 +6273,7 @@ export class FleetCoordinator {
       leaseID: lease.id,
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
+      admin,
       role,
       sessionID,
       allow: boundedEgressAllowlist(input.allow),
@@ -5795,45 +6306,52 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const consumed = await this.consumeEgressTicket(request, identifier, role);
-    if (consumed.status === "invalid") {
-      return json(
-        { error: "egress_ticket_required", message: "valid egress bridge ticket required" },
-        { status: 401 },
+    return await this.withBridgeTicketLock(async () => {
+      const consumed = await this.consumeEgressTicketUnderLock(request, identifier, role);
+      if (consumed.status === "invalid") {
+        return json(
+          { error: "egress_ticket_required", message: "valid egress bridge ticket required" },
+          { status: 401 },
+        );
+      }
+      if (consumed.status === "not_found") {
+        return notFound();
+      }
+      const { lease, ticket } = consumed;
+      if (lease.state !== "active") {
+        return json(
+          { error: "egress_unavailable", message: "lease is not active" },
+          { status: 409 },
+        );
+      }
+      const upgrade = this.state.createWebSocketUpgrade();
+      const agent = upgrade.socket;
+      const principal = leaseBridgeTicketPrincipal(ticket);
+      const attachment: BridgeAttachment = {
+        kind: role === "host" ? "egress-host" : "egress-client",
+        leaseID: lease.id,
+        sessionID: ticket.sessionID,
+        ...principal,
+      };
+      const ticketCreatedAt = new Date(ticket.createdAt);
+      this.activateEgressSession(
+        lease.id,
+        ticket.sessionID,
+        ticket.profile,
+        ticket.allow ?? [],
+        ticketCreatedAt,
       );
-    }
-    if (consumed.status === "not_found") {
-      return notFound();
-    }
-    const { lease, ticket } = consumed;
-    if (lease.state !== "active") {
-      return json({ error: "egress_unavailable", message: "lease is not active" }, { status: 409 });
-    }
-    const upgrade = this.state.createWebSocketUpgrade();
-    const agent = upgrade.socket;
-    const attachment: BridgeAttachment = {
-      kind: role === "host" ? "egress-host" : "egress-client",
-      leaseID: lease.id,
-      sessionID: ticket.sessionID,
-    };
-    const ticketCreatedAt = new Date(ticket.createdAt);
-    this.activateEgressSession(
-      lease.id,
-      ticket.sessionID,
-      ticket.profile,
-      ticket.allow ?? [],
-      ticketCreatedAt,
-    );
-    const key = egressSocketKey(lease.id, ticket.sessionID);
-    if (role === "host") {
-      closeSocket(this.egressHosts.get(key), 1012, "replaced by a newer egress host");
-      this.egressHosts.set(key, agent);
-    } else {
-      closeSocket(this.egressClients.get(key), 1012, "replaced by a newer egress client");
-      this.egressClients.set(key, agent);
-    }
-    this.acceptBridgeWebSocket(agent, attachment);
-    return upgrade.response;
+      const key = egressSocketKey(lease.id, ticket.sessionID);
+      if (role === "host") {
+        closeSocket(this.egressHosts.get(key), 1012, "replaced by a newer egress host");
+        this.egressHosts.set(key, agent);
+      } else {
+        closeSocket(this.egressClients.get(key), 1012, "replaced by a newer egress client");
+        this.egressClients.set(key, agent);
+      }
+      this.acceptBridgeWebSocket(agent, attachment);
+      return upgrade.response;
+    });
   }
 
   private async egressStatus(request: Request, identifier: string): Promise<Response> {
@@ -6577,6 +7095,7 @@ export class FleetCoordinator {
       leaseID: lease.id,
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
+      admin,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + webVNCTicketTTLSeconds * 1000).toISOString(),
     };
@@ -6816,6 +7335,7 @@ export class FleetCoordinator {
       leaseID: lease.id,
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
+      admin,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + codeTicketTTLSeconds * 1000).toISOString(),
     };
@@ -6834,29 +7354,31 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const consumed = await this.consumeCodeTicket(request, identifier);
-    if (consumed.status === "invalid") {
-      return json(
-        { error: "code_ticket_required", message: "valid code bridge ticket required" },
-        { status: 401 },
-      );
-    }
-    if (consumed.status === "not_found") {
-      return notFound();
-    }
-    const { lease } = consumed;
-    const error = codeLeaseError(lease);
-    if (error) {
-      return json({ error: "code_unavailable", message: error }, { status: 409 });
-    }
-    const upgrade = this.state.createWebSocketUpgrade();
-    const agent = upgrade.socket;
+    return await this.withBridgeTicketLock(async () => {
+      const consumed = await this.consumeCodeTicketUnderLock(request, identifier);
+      if (consumed.status === "invalid") {
+        return json(
+          { error: "code_ticket_required", message: "valid code bridge ticket required" },
+          { status: 401 },
+        );
+      }
+      if (consumed.status === "not_found") {
+        return notFound();
+      }
+      const { lease } = consumed;
+      const error = codeLeaseError(lease);
+      if (error) {
+        return json({ error: "code_unavailable", message: error }, { status: 409 });
+      }
+      const upgrade = this.state.createWebSocketUpgrade();
+      const agent = upgrade.socket;
 
-    closeSocket(this.codeAgents.get(lease.id), 1012, "replaced by a newer code bridge");
-    this.clearCodeLease(lease.id);
-    this.codeAgents.set(lease.id, agent);
-    this.acceptBridgeWebSocket(agent, { kind: "code-agent", leaseID: lease.id });
-    return upgrade.response;
+      closeSocket(this.codeAgents.get(lease.id), 1012, "replaced by a newer code bridge");
+      this.clearCodeLease(lease.id);
+      this.codeAgents.set(lease.id, agent);
+      this.acceptBridgeWebSocket(agent, { kind: "code-agent", leaseID: lease.id });
+      return upgrade.response;
+    });
   }
 
   private async codePortalProxy(
@@ -7556,7 +8078,7 @@ export class FleetCoordinator {
     this.clearEgressLease(leaseID, code, reason);
   }
 
-  private clearEgressSessionSockets(
+  private clearEgressSession(
     leaseID: string,
     sessionID: string,
     code: number,
@@ -7567,6 +8089,9 @@ export class FleetCoordinator {
     closeSocket(this.egressClients.get(key), code, reason);
     this.egressHosts.delete(key);
     this.egressClients.delete(key);
+    if (this.egressSessions.get(leaseID)?.sessionID === sessionID) {
+      this.egressSessions.delete(leaseID);
+    }
   }
 
   private async webVNCViewer(request: Request, identifier: string): Promise<Response> {
@@ -7869,27 +8394,36 @@ export class FleetCoordinator {
     request: Request,
     identifier: string,
   ): Promise<LeaseBridgeTicketConsumption<WebVNCTicketRecord>> {
-    const value = bridgeTicketFromRequest(request);
+    return this.withBridgeTicketLock(() => this.consumeWebVNCTicketUnderLock(request, identifier));
+  }
+
+  private async consumeWebVNCTicketUnderLock(
+    request: Request,
+    identifier: string,
+  ): Promise<LeaseBridgeTicketConsumption<WebVNCTicketRecord>> {
+    const value = bridgeTicketFromRequest(request, this.env);
     if (!validWebVNCTicket(value)) {
       return { status: "invalid" };
     }
-    return this.withBridgeTicketLock(async () => {
-      const key = webVNCTicketKey(value);
-      const ticket = await this.state.storage.get<WebVNCTicketRecord>(key);
-      if (!ticket || ticket.ticket !== value) {
-        return { status: "invalid" };
-      }
-      if (Date.parse(ticket.expiresAt) <= Date.now()) {
-        await this.state.storage.delete(key);
-        return { status: "invalid" };
-      }
-      const lease = await this.getLease(ticket.leaseID);
-      if (!lease || !identifierMatchesLease(identifier, lease)) {
-        return { status: "not_found" };
-      }
+    const key = webVNCTicketKey(value);
+    const ticket = await this.state.storage.get<WebVNCTicketRecord>(key);
+    if (!ticket || ticket.ticket !== value) {
+      return { status: "invalid" };
+    }
+    if (Date.parse(ticket.expiresAt) <= Date.now()) {
       await this.state.storage.delete(key);
-      return { status: "accepted", ticket, lease };
-    });
+      return { status: "invalid" };
+    }
+    const lease = await this.getLease(ticket.leaseID);
+    if (!lease || !identifierMatchesLease(identifier, lease)) {
+      return { status: "not_found" };
+    }
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
+      await this.state.storage.delete(key);
+      return { status: "invalid" };
+    }
+    await this.state.storage.delete(key);
+    return { status: "accepted", ticket, lease };
   }
 
   private async cleanupExpiredWebVNCTickets(): Promise<void> {
@@ -7908,27 +8442,36 @@ export class FleetCoordinator {
     request: Request,
     identifier: string,
   ): Promise<LeaseBridgeTicketConsumption<CodeTicketRecord>> {
-    const value = bridgeTicketFromRequest(request);
+    return this.withBridgeTicketLock(() => this.consumeCodeTicketUnderLock(request, identifier));
+  }
+
+  private async consumeCodeTicketUnderLock(
+    request: Request,
+    identifier: string,
+  ): Promise<LeaseBridgeTicketConsumption<CodeTicketRecord>> {
+    const value = bridgeTicketFromRequest(request, this.env);
     if (!validCodeTicket(value)) {
       return { status: "invalid" };
     }
-    return this.withBridgeTicketLock(async () => {
-      const key = codeTicketKey(value);
-      const ticket = await this.state.storage.get<CodeTicketRecord>(key);
-      if (!ticket || ticket.ticket !== value) {
-        return { status: "invalid" };
-      }
-      if (Date.parse(ticket.expiresAt) <= Date.now()) {
-        await this.state.storage.delete(key);
-        return { status: "invalid" };
-      }
-      const lease = await this.getLease(ticket.leaseID);
-      if (!lease || !identifierMatchesLease(identifier, lease)) {
-        return { status: "not_found" };
-      }
+    const key = codeTicketKey(value);
+    const ticket = await this.state.storage.get<CodeTicketRecord>(key);
+    if (!ticket || ticket.ticket !== value) {
+      return { status: "invalid" };
+    }
+    if (Date.parse(ticket.expiresAt) <= Date.now()) {
       await this.state.storage.delete(key);
-      return { status: "accepted", ticket, lease };
-    });
+      return { status: "invalid" };
+    }
+    const lease = await this.getLease(ticket.leaseID);
+    if (!lease || !identifierMatchesLease(identifier, lease)) {
+      return { status: "not_found" };
+    }
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
+      await this.state.storage.delete(key);
+      return { status: "invalid" };
+    }
+    await this.state.storage.delete(key);
+    return { status: "accepted", ticket, lease };
   }
 
   private async cleanupExpiredCodeTickets(): Promise<void> {
@@ -7948,30 +8491,42 @@ export class FleetCoordinator {
     identifier: string,
     role: EgressRole,
   ): Promise<LeaseBridgeTicketConsumption<EgressTicketRecord>> {
-    const value = bridgeTicketFromRequest(request);
+    return this.withBridgeTicketLock(() =>
+      this.consumeEgressTicketUnderLock(request, identifier, role),
+    );
+  }
+
+  private async consumeEgressTicketUnderLock(
+    request: Request,
+    identifier: string,
+    role: EgressRole,
+  ): Promise<LeaseBridgeTicketConsumption<EgressTicketRecord>> {
+    const value = bridgeTicketFromRequest(request, this.env);
     if (!validEgressTicket(value)) {
       return { status: "invalid" };
     }
-    return this.withBridgeTicketLock(async () => {
-      const key = egressTicketKey(value);
-      const ticket = await this.state.storage.get<EgressTicketRecord>(key);
-      if (!ticket || ticket.ticket !== value) {
-        return { status: "invalid" };
-      }
-      if (Date.parse(ticket.expiresAt) <= Date.now()) {
-        await this.state.storage.delete(key);
-        return { status: "invalid" };
-      }
-      if (ticket.role !== role) {
-        return { status: "invalid" };
-      }
-      const lease = await this.getLease(ticket.leaseID);
-      if (!lease || !identifierMatchesLease(identifier, lease)) {
-        return { status: "not_found" };
-      }
+    const key = egressTicketKey(value);
+    const ticket = await this.state.storage.get<EgressTicketRecord>(key);
+    if (!ticket || ticket.ticket !== value) {
+      return { status: "invalid" };
+    }
+    if (Date.parse(ticket.expiresAt) <= Date.now()) {
       await this.state.storage.delete(key);
-      return { status: "accepted", ticket, lease };
-    });
+      return { status: "invalid" };
+    }
+    if (ticket.role !== role) {
+      return { status: "invalid" };
+    }
+    const lease = await this.getLease(ticket.leaseID);
+    if (!lease || !identifierMatchesLease(identifier, lease)) {
+      return { status: "not_found" };
+    }
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
+      await this.state.storage.delete(key);
+      return { status: "invalid" };
+    }
+    await this.state.storage.delete(key);
+    return { status: "accepted", ticket, lease };
   }
 
   private async cleanupExpiredEgressTickets(): Promise<void> {
@@ -8879,9 +9434,14 @@ export class FleetCoordinator {
   private async createArtifactUploads(request: Request): Promise<Response> {
     try {
       const input = await readJson<ArtifactUploadRequest>(request);
-      return json(await artifactUploadResponse(this.env, input, requestOwner(request)), {
-        status: 201,
-      });
+      return json(
+        await artifactUploadResponse(this.env, input, {
+          owner: requestOwner(request),
+          // Artifact keys encode auth identity bytes exactly; usage org normalization is lossy.
+          org: request.headers.get("x-crabbox-org") ?? this.env.CRABBOX_DEFAULT_ORG ?? "",
+        }),
+        { status: 201 },
+      );
     } catch (error) {
       return json(
         { error: "artifact_upload_unavailable", message: errorMessage(error) },
@@ -8927,7 +9487,7 @@ export class FleetCoordinator {
       const input = await readJson<RunEventRequest>(request);
       if (input.leaseID && input.leaseID !== run.leaseID) {
         const lease = validLeaseID(input.leaseID) ? await this.getLease(input.leaseID) : undefined;
-        if (!lease || !this.leaseVisibleToRequest(lease, request, isAdminRequest(request))) {
+        if (!lease || !this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
           return notFound();
         }
       }
@@ -11587,6 +12147,14 @@ function runtimeAdapterTicketKey(ticket: string): string {
   return `${runtimeAdapterTicketPrefix()}${ticket}`;
 }
 
+function nativeVNCTicketPrefix(): string {
+  return "native-vnc-ticket:";
+}
+
+function nativeVNCTicketKey(ticket: string): string {
+  return `${nativeVNCTicketPrefix()}${ticket}`;
+}
+
 function runtimeAdapterIdentityKey(adapterID: string): string {
   return `runtime-adapter-identity:${adapterID}`;
 }
@@ -11941,12 +12509,15 @@ function workspaceConflictResponse(
   ttlSeconds: number,
   idleTimeoutSeconds: number,
 ): Response | undefined {
+  const desktopMatches =
+    workspace.desktop === desktop ||
+    (workspace.desktopCapabilityVersion === undefined && !workspace.desktop && desktop);
   if (
     workspace.profile === profile &&
     (workspace.repo ?? "") === repo &&
     (workspace.branch ?? "main") === branch &&
     (workspace.command ?? "exec bash -l") === command &&
-    workspace.desktop === desktop &&
+    desktopMatches &&
     workspace.ttlSeconds === ttlSeconds &&
     workspace.idleTimeoutSeconds === idleTimeoutSeconds
   ) {
@@ -12127,6 +12698,17 @@ function workspaceTerminalError(
   lease: LeaseRecord | undefined,
   env: Env,
 ): string | undefined {
+  const sshError = workspaceSSHError(workspace, lease, env);
+  if (sshError) return sshError;
+  if (!workspaceTerminalPublicURL(env)) return "workspace public URL is not configured";
+  return undefined;
+}
+
+function workspaceSSHError(
+  workspace: WorkspaceRecord,
+  lease: LeaseRecord | undefined,
+  env: Env,
+): string | undefined {
   if (workspaceStatus(workspace, lease) !== "ready") return "workspace is not ready";
   if (!lease || !workspaceOwnsLease(workspace, lease)) return "workspace lease is unavailable";
   if (!lease.host?.trim()) return "workspace SSH host is unavailable";
@@ -12134,8 +12716,36 @@ function workspaceTerminalError(
   if (!env.CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?.trim()) {
     return "workspace terminal SSH access is not configured";
   }
-  if (!workspaceTerminalPublicURL(env)) return "workspace public URL is not configured";
   return undefined;
+}
+
+function workspaceNativeVNCError(
+  workspace: WorkspaceRecord,
+  lease: LeaseRecord | undefined,
+  env: Env,
+): string | undefined {
+  if (!workspace.desktop) return "workspace desktop access was not requested";
+  const sshError = workspaceSSHError(workspace, lease, env);
+  if (sshError) return sshError;
+  if (!workspacePublicURL(env)) return "workspace public URL is not configured";
+  return undefined;
+}
+
+function workspacePublicURL(env: Env): string | undefined {
+  const value = env.CRABBOX_PUBLIC_URL?.trim();
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && url.hostname === "127.0.0.1")) {
+      return undefined;
+    }
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return undefined;
+  }
 }
 
 // Controller-to-controller URL; callers attach with bearer auth through their browser-facing proxy.
@@ -12169,6 +12779,155 @@ async function workspaceTerminalMessage(
   if (typeof value === "string") return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   return new Uint8Array(await value.arrayBuffer());
+}
+
+async function connectWorkspaceSSH(
+  privateKey: string,
+  expectedHostKey: string,
+  lease: LeaseRecord,
+  options: {
+    shouldStop?: () => boolean;
+    connecting?: (client: SSHClient) => void;
+  } = {},
+): Promise<SSHClient> {
+  const readyDeadline = Date.now() + workspaceTerminalSSHReadyTimeoutMs;
+  const ports = uniqueNonEmpty([lease.sshPort, ...(lease.sshFallbackPorts ?? [])]);
+  let lastError: unknown = new Error("workspace SSH service is not ready");
+  let observedHostKey = "";
+  while (Date.now() < readyDeadline) {
+    for (const port of ports) {
+      if (options.shouldStop?.()) throw new Error("workspace connection closed");
+      const candidate = new SSHClientConstructor();
+      options.connecting?.(candidate);
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- SSH readiness retries are sequential.
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const settle = (callback: () => void) => {
+            if (settled) return;
+            settled = true;
+            callback();
+          };
+          candidate
+            .once("ready", () => settle(resolve))
+            .once("error", (error) => settle(() => reject(error)))
+            .once("close", () =>
+              settle(() => reject(new Error("SSH connection closed before ready"))),
+            )
+            .connect({
+              host: lease.host,
+              port: Number.parseInt(port || "22", 10) || 22,
+              username: lease.sshUser || "root",
+              privateKey,
+              readyTimeout: 10_000,
+              keepaliveInterval: 15_000,
+              keepaliveCountMax: 3,
+              algorithms: {
+                serverHostKey: ["ssh-ed25519"],
+                cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr"],
+                hmac: [
+                  "hmac-sha2-256-etm@openssh.com",
+                  "hmac-sha2-512-etm@openssh.com",
+                  "hmac-sha2-256",
+                  "hmac-sha2-512",
+                ],
+              },
+              hostHash: "sha256",
+              hostVerifier: (fingerprint: string) => {
+                observedHostKey = fingerprint;
+                return expectedHostKey === fingerprint;
+              },
+            });
+        });
+        if (options.shouldStop?.()) {
+          candidate.end();
+          throw new Error("workspace connection closed");
+        }
+        return candidate;
+      } catch (error) {
+        lastError = error;
+        candidate.end();
+      }
+    }
+    if (!options.shouldStop?.() && Date.now() < readyDeadline) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- delay before the next SSH sweep.
+      await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+  if (observedHostKey && observedHostKey !== expectedHostKey) {
+    throw new Error(
+      `workspace SSH host key mismatch expected=${expectedHostKey.slice(0, 16)} observed=${observedHostKey.slice(0, 16)}`,
+    );
+  }
+  throw lastError;
+}
+
+async function readWorkspaceVNCPassword(client: SSHClient, lease: LeaseRecord): Promise<string> {
+  const output = await new Promise<Uint8Array>((resolve, reject) => {
+    client.exec(workspaceVNCPasswordCommand(lease), (error, channel) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      let exitCode: number | undefined;
+      let settled = false;
+      const fail = (failure: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(failure);
+      };
+      channel.on("data", (chunk: Uint8Array) => {
+        if (settled) return;
+        bytes += chunk.byteLength;
+        if (bytes > 4096) {
+          channel.close();
+          fail(new Error("workspace VNC password output is too large"));
+          return;
+        }
+        chunks.push(chunk.slice());
+      });
+      channel.once("exit", (code?: number) => {
+        exitCode = code;
+      });
+      channel.once("close", () => {
+        if (settled) return;
+        if (exitCode !== undefined && exitCode !== 0) {
+          fail(new Error("workspace VNC password command failed"));
+          return;
+        }
+        const joined = new Uint8Array(bytes);
+        let offset = 0;
+        for (const chunk of chunks) {
+          joined.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        settled = true;
+        resolve(joined);
+      });
+    });
+  });
+  const password = new TextDecoder().decode(output).trim();
+  if (
+    !password ||
+    password.length > 256 ||
+    [...password].some((character) => {
+      const code = character.charCodeAt(0);
+      return code === 0 || code === 10 || code === 13;
+    })
+  ) {
+    throw new Error("workspace VNC password is invalid");
+  }
+  return password;
+}
+
+function workspaceVNCPasswordCommand(lease: LeaseRecord): string {
+  if (lease.target === "windows") {
+    return "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"Get-Content -Raw -LiteralPath 'C:\\\\ProgramData\\\\crabbox\\\\vnc.password'\"";
+  }
+  if (lease.target === "macos") return "sudo cat '/var/db/crabbox/vnc.password'";
+  return "cat '/var/lib/crabbox/vnc.password'";
 }
 
 function workspaceTerminalDataLength(value: string | ArrayBuffer | Blob | Uint8Array): number {
@@ -12344,6 +13103,7 @@ function workspaceResponse(
 ): Record<string, unknown> {
   const status = workspaceStatus(workspace, lease);
   const terminalUrl = env ? workspaceTerminalURL(workspace, lease, env) : undefined;
+  const nativeVnc = env ? !workspaceNativeVNCError(workspace, lease, env) : false;
   return {
     id: workspace.id,
     workspaceId: workspace.id,
@@ -12355,6 +13115,7 @@ function workspaceResponse(
       takeover: false,
       vnc: false,
       desktop: false,
+      nativeVnc,
       logs: false,
       artifacts: false,
     },
@@ -12422,6 +13183,14 @@ function newRuntimeAdapterTicket(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   return `adapter_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function newNativeVNCTicket(): string {
+  return randomHexToken("native_vnc_");
+}
+
+function validNativeVNCTicket(value: string): boolean {
+  return /^native_vnc_[a-f0-9]{32}$/.test(value);
 }
 
 function newCodeViewerTicket(): string {
@@ -12592,7 +13361,10 @@ function codeViewerSessionCookie(session: CodeViewerSessionRecord, maxAgeSeconds
   ].join("; ");
 }
 
-export function bridgeTicketFromRequest(request: Request): string {
+export function bridgeTicketFromRequest(
+  request: Request,
+  env?: Pick<Env, "CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS">,
+): string {
   const upgradeTicket = request.headers.get("x-crabbox-bridge-ticket")?.trim() ?? "";
   if (validBridgeTicket(upgradeTicket)) {
     return upgradeTicket;
@@ -12603,13 +13375,13 @@ export function bridgeTicketFromRequest(request: Request): string {
   if (validBridgeTicket(bearerTicket)) {
     return bearerTicket;
   }
-  // Legacy clients sent tickets in the request target. Keep accepting them for
-  // compatibility, but current clients use the dedicated upgrade header.
-  const queryTicket = new URL(request.url).searchParams.get("ticket") ?? "";
-  if (validBridgeTicket(queryTicket)) {
-    return queryTicket;
+  if (envFlagEnabled(env?.CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS)) {
+    const queryTicket = new URL(request.url).searchParams.get("ticket") ?? "";
+    if (validBridgeTicket(queryTicket)) {
+      return queryTicket;
+    }
   }
-  return upgradeTicket || bearerTicket || queryTicket;
+  return upgradeTicket || bearerTicket;
 }
 
 function validBridgeTicket(value: string): boolean {
@@ -12768,8 +13540,14 @@ export function recordAzureDeferredCleanup(
   });
 }
 
-function validCrabboxProviderKey(value: string | undefined): value is string {
-  return typeof value === "string" && /^crabbox-cbx-[a-f0-9]{12}$/.test(value);
+function leaseUsesCanonicalProviderKey(
+  lease: Pick<LeaseRecord, "id" | "providerKey" | "providerKeyCleanupOwned">,
+): boolean {
+  return (
+    lease.providerKeyCleanupOwned === true &&
+    validLeaseID(lease.id) &&
+    lease.providerKey === providerKeyForLease(lease.id)
+  );
 }
 
 function validExternalRunnerID(value: string | undefined): value is string {
@@ -13064,6 +13842,9 @@ export function codeForwardHeaders(headers: Headers): Record<string, string> {
   ]);
   for (const [key, value] of headers) {
     const lower = key.toLowerCase();
+    if (lower.startsWith("x-crabbox-")) {
+      continue;
+    }
     if (allowed.has(lower) || lower.startsWith("x-")) {
       out[lower] = value;
     } else if (lower === "cookie") {
@@ -13199,7 +13980,9 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
         : undefined;
     case "egress-host":
     case "egress-client":
-      return typeof attachment.leaseID === "string" && typeof attachment.sessionID === "string"
+      return typeof attachment.leaseID === "string" &&
+        typeof attachment.sessionID === "string" &&
+        validOptionalEgressBridgePrincipal(attachment)
         ? attachment
         : undefined;
     case "runtime-adapter-agent":
@@ -13250,6 +14033,23 @@ function completeBridgePrincipal(value: {
     typeof value.org === "string" &&
     typeof value.admin === "boolean"
   );
+}
+
+function validOptionalEgressBridgePrincipal(value: {
+  owner?: unknown;
+  org?: unknown;
+  admin?: unknown;
+}): boolean {
+  const legacy = value.owner === undefined && value.org === undefined && value.admin === undefined;
+  return legacy || completeBridgePrincipal(value);
+}
+
+function leaseBridgeTicketPrincipal(ticket: { owner: string; org: string; admin?: boolean }): {
+  owner: string;
+  org: string;
+  admin: boolean;
+} {
+  return { owner: ticket.owner, org: ticket.org, admin: ticket.admin === true };
 }
 
 function bridgeTags(attachment: BridgeAttachment): string[] {
@@ -14134,6 +14934,10 @@ function provisionedLeaseRecord(
   serverType: string,
 ): LeaseRecord {
   const providerProject = lease.providerProject ?? providerProjectForConfig(config);
+  const providerKey = server.providerKey?.trim() || config.providerKey;
+  const providerKeyCleanupOwned =
+    (config.provider === "aws" || config.provider === "hetzner") &&
+    providerKey === providerKeyForLease(lease.id);
   return {
     ...lease,
     state: "active",
@@ -14141,6 +14945,8 @@ function provisionedLeaseRecord(
     serverID: server.id,
     serverName: server.name,
     serverType,
+    providerKey,
+    providerKeyCleanupOwned,
     host: server.host,
     region: server.region ?? lease.region ?? providerRegionForConfig(config) ?? "",
     ...(providerProject ? { providerProject } : {}),
@@ -14306,10 +15112,19 @@ function leaseShareAccessShrank(
   previous: NormalizedLeaseShare,
   current: NormalizedLeaseShare,
 ): boolean {
-  if (previous.org && !current.org) {
+  if (leaseShareRoleRank(current.org) < leaseShareRoleRank(previous.org)) {
     return true;
   }
-  return Object.keys(previous.users).some((user) => current.users[user] === undefined);
+  return Object.entries(previous.users).some(
+    ([user, role]) => leaseShareRoleRank(current.users[user]) < leaseShareRoleRank(role),
+  );
+}
+
+function leaseShareRoleRank(role: LeaseShareRole | undefined): number {
+  if (role === "manage") {
+    return 2;
+  }
+  return role === "use" ? 1 : 0;
 }
 
 function sanitizeLeaseShare(input: Partial<LeaseShare>, updatedBy: string): LeaseShare | undefined {
@@ -14777,6 +15592,7 @@ function parseProviderLabelTime(value: string | undefined): number {
 
 interface CloudProvider {
   listCrabboxServers(): Promise<ProviderMachine[]>;
+  restrictedLeaseRequestFields?(input: LeaseRequest): string[];
   recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   findServerByLease?(leaseID: string): Promise<ProviderMachine | undefined>;
   getServer?(id: string): Promise<ProviderMachine>;
@@ -14855,7 +15671,7 @@ interface CloudProvider {
     snapshotIDs: string[],
     availabilityZones?: string[],
   ): Promise<ProviderFastSnapshotRestore[]>;
-  deleteSSHKey(name: string): Promise<void>;
+  deleteSSHKey(name: string, leaseID: string): Promise<void>;
   hourlyPriceUSD(
     serverType: string,
     config: ReturnType<typeof leaseConfig>,
@@ -14925,17 +15741,30 @@ export class HetznerProvider implements CloudProvider {
     market?: string;
     attempts?: ProvisioningAttempt[];
   }> {
-    const { server, serverType } = await this.client.createServerWithFallback(
+    const { server, serverType, providerKey } = await this.client.createServerWithFallback(
       config,
       leaseID,
       slug,
       owner,
     );
-    return { server: this.client.toMachine(server), serverType };
+    return { server: { ...this.client.toMachine(server), providerKey }, serverType };
   }
 
   async deleteServer(id: string): Promise<void> {
     await this.client.deleteServer(Number(id));
+  }
+
+  async finalizeLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    server: ProviderMachine,
+  ): Promise<ProviderLeaseCreateFinalization> {
+    const providerKey = server.providerKey?.trim() || config.providerKey;
+    const providerKeyCleanupOwned = providerKey === providerKeyForLease(lease.id);
+    return {
+      config: { ...config, providerKey },
+      lease: { ...lease, providerKey, providerKeyCleanupOwned },
+    };
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
@@ -14946,11 +15775,8 @@ export class HetznerProvider implements CloudProvider {
         throw error;
       }
     }
-    if (
-      !lease.providerKey.startsWith(workspaceProviderKeyPrefix) &&
-      validCrabboxProviderKey(lease.providerKey)
-    ) {
-      await this.deleteSSHKey(lease.providerKey);
+    if (leaseUsesCanonicalProviderKey(lease)) {
+      await this.deleteSSHKey(lease.providerKey, lease.id);
     }
   }
 
@@ -14977,8 +15803,8 @@ export class HetznerProvider implements CloudProvider {
   decorateImage = passthroughProviderImage;
   validateDeleteImage = allowProviderImageDelete;
 
-  async deleteSSHKey(name: string): Promise<void> {
-    await this.client.deleteSSHKey(name);
+  async deleteSSHKey(name: string, leaseID: string): Promise<void> {
+    await this.client.deleteSSHKey(name, leaseID);
   }
 
   hourlyPriceUSD(
@@ -15143,6 +15969,17 @@ class GCPProvider implements CloudProvider {
     return this.clientValue;
   }
 
+  restrictedLeaseRequestFields(input: LeaseRequest): string[] {
+    return [
+      input.gcpProject ? "gcpProject" : "",
+      input.gcpImage ? "gcpImage" : "",
+      input.gcpNetwork ? "gcpNetwork" : "",
+      input.gcpSubnet ? "gcpSubnet" : "",
+      input.gcpTags?.length ? "gcpTags" : "",
+      input.gcpServiceAccount ? "gcpServiceAccount" : "",
+    ].filter(Boolean);
+  }
+
   listCrabboxServers(): Promise<ProviderMachine[]> {
     return this.client.listCrabboxServers();
   }
@@ -15305,6 +16142,15 @@ export class AWSProvider implements CloudProvider {
     return this.clientValue;
   }
 
+  restrictedLeaseRequestFields(input: LeaseRequest): string[] {
+    return [
+      input.awsAMI ? "awsAMI" : "",
+      input.awsSGID ? "awsSGID" : "",
+      input.awsSubnetID ? "awsSubnetID" : "",
+      input.awsProfile ? "awsProfile" : "",
+    ].filter(Boolean);
+  }
+
   listCrabboxServers(): Promise<ProviderMachine[]> {
     return this.client.listCrabboxServers();
   }
@@ -15348,13 +16194,17 @@ export class AWSProvider implements CloudProvider {
       sourceCIDRs.length > 0 || globalCIDRs.length > 0,
     );
     const configuredSecurityGroupID = awsConfiguredSecurityGroupID(config, this.env);
+    const managedSecurityGroupName = `${awsManagedSecurityGroupName(config)}-${(
+      await sha256Hex(`${lease.org}\0${lease.owner}`)
+    ).slice(0, 12)}`;
     const nextLease: LeaseRecord = {
       ...nextLeaseWithSources,
       network: {
         ...nextLeaseWithSources.network,
+        ...(config.awsSSHCIDRsPinned ? { sshPinnedSourceCIDRs: config.awsSSHCIDRs } : {}),
         ...(configuredSecurityGroupID
           ? { awsSecurityGroupID: configuredSecurityGroupID }
-          : { awsSecurityGroupName: awsManagedSecurityGroupName(config) }),
+          : { awsSecurityGroupName: managedSecurityGroupName }),
         ...(config.awsSubnetID ? { awsSubnetID: config.awsSubnetID } : {}),
       },
     };
@@ -15378,6 +16228,7 @@ export class AWSProvider implements CloudProvider {
     return {
       config: {
         ...config,
+        awsSGName: configuredSecurityGroupID ? "" : managedSecurityGroupName,
         awsSSHCIDRs: activeAWSSSHSourceCIDRs(targetLeases, [...sourceCIDRs, ...globalCIDRs]),
       },
       lease: nextLease,
@@ -15398,7 +16249,13 @@ export class AWSProvider implements CloudProvider {
     }
     const sourceCIDRs = context.requestSourceCIDRs;
     const nextLease =
-      sourceCIDRs.length > 0 ? withLeaseSSHSourceCIDRs(lease, sourceCIDRs, true) : lease;
+      sourceCIDRs.length > 0
+        ? withLeaseSSHSourceCIDRs(
+            lease,
+            uniqueNonEmpty([...(lease.network?.sshPinnedSourceCIDRs ?? []), ...sourceCIDRs]),
+            true,
+          )
+        : lease;
     const activeLeases = replaceProviderAccessState(context.activeLeases, nextLease);
     try {
       await this.reconcileLeaseAccess(nextLease, { ...context, activeLeases });
@@ -15450,30 +16307,33 @@ export class AWSProvider implements CloudProvider {
         hasUnknownActiveAWSSSHSource(targetLeases)
           ? "additive"
           : "authoritative";
-      const config = leaseConfig({
-        provider: "aws",
-        target: targetLease.target,
-        windowsMode: targetLease.windowsMode ?? "normal",
-        class: targetLease.class,
-        serverType: targetLease.serverType,
-        awsSSHCIDRs: cidrs,
-        ...(targetLease.network?.awsSecurityGroupID
-          ? { awsSGID: targetLease.network.awsSecurityGroupID }
-          : {}),
-        ...(targetLease.network?.awsSubnetID
-          ? { awsSubnetID: targetLease.network.awsSubnetID }
-          : {}),
-        capacity: { market: targetLease.market === "spot" ? "spot" : "on-demand" },
-        providerKey: targetLease.providerKey,
-        sshUser: targetLease.sshUser,
-        sshPort: target.port,
-        sshFallbackPorts: [],
-        sshPublicKey: "ssh-ed25519 ingress-reconcile",
-        workRoot: targetLease.workRoot,
-        ...(targetLease.hostId || targetLease.hostID
-          ? { hostId: targetLease.hostId || targetLease.hostID }
-          : {}),
-      });
+      const config = {
+        ...leaseConfig({
+          provider: "aws",
+          target: targetLease.target,
+          windowsMode: targetLease.windowsMode ?? "normal",
+          class: targetLease.class,
+          serverType: targetLease.serverType,
+          awsSSHCIDRs: cidrs,
+          ...(targetLease.network?.awsSecurityGroupID
+            ? { awsSGID: targetLease.network.awsSecurityGroupID }
+            : {}),
+          ...(targetLease.network?.awsSubnetID
+            ? { awsSubnetID: targetLease.network.awsSubnetID }
+            : {}),
+          capacity: { market: targetLease.market === "spot" ? "spot" : "on-demand" },
+          providerKey: targetLease.providerKey,
+          sshUser: targetLease.sshUser,
+          sshPort: target.port,
+          sshFallbackPorts: [],
+          sshPublicKey: "ssh-ed25519 ingress-reconcile",
+          workRoot: targetLease.workRoot,
+          ...(targetLease.hostId || targetLease.hostID
+            ? { hostId: targetLease.hostId || targetLease.hostID }
+            : {}),
+        }),
+        awsSGName: targetLease.network?.awsSecurityGroupName ?? "",
+      };
       const { region } = target;
       const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
       // oxlint-disable-next-line eslint/no-await-in-loop -- each regional shared group is distinct.
@@ -15584,7 +16444,11 @@ export class AWSProvider implements CloudProvider {
     attempts: ProvisioningAttempt[],
   ): Promise<ProviderLeaseCreateFinalization> {
     const nextConfig = server.region ? { ...config, awsRegion: server.region } : config;
-    const nextLease: LeaseRecord = { ...lease, region: server.region ?? nextConfig.awsRegion };
+    const nextLease: LeaseRecord = {
+      ...lease,
+      region: server.region ?? nextConfig.awsRegion,
+      providerKeyCleanupOwned: lease.providerKey === providerKeyForLease(lease.id),
+    };
     const hints = capacityHints(this.env, nextConfig, nextLease, attempts);
     if (hints.length > 0) {
       nextLease.capacityHints = hints;
@@ -15604,8 +16468,8 @@ export class AWSProvider implements CloudProvider {
         `AWS lease cleanup found missing instance lease=${lease.id} cloud=${lease.cloudID}: ${message}`,
       );
     }
-    if (validCrabboxProviderKey(lease.providerKey)) {
-      await this.deleteSSHKey(lease.providerKey);
+    if (leaseUsesCanonicalProviderKey(lease)) {
+      await this.deleteSSHKey(lease.providerKey, lease.id);
     }
   }
 
@@ -15869,8 +16733,8 @@ export class AWSProvider implements CloudProvider {
     return { image: promoted };
   }
 
-  async deleteSSHKey(name: string): Promise<void> {
-    await this.client.deleteSSHKey(name);
+  async deleteSSHKey(name: string, leaseID: string): Promise<void> {
+    await this.client.deleteSSHKey(name, leaseID);
   }
 
   hourlyPriceUSD(

@@ -75,8 +75,9 @@ Interactive tooling is opt-in per lease, never part of the minimal bootstrap.
 Each requested capability appends both its install steps and its `crabbox-ready`
 checks, and is gated by the provider's declared feature set.
 
-- `--desktop` — installs a headless desktop. The default XFCE environment adds
-  Xvfb on display `:99`, an XFCE session, and a loopback `x11vnc` on `127.0.0.1:5900`.
+- `--desktop` — installs a headless desktop. The default managed XFCE environment
+  adds resize-capable TigerVNC on display `:99` and an XFCE session, with VNC on
+  `127.0.0.1:5900`.
   With `--desktop-env wayland` (labwc) or `--desktop-env gnome` it installs a
   Wayland session driven by `wayvnc` instead. Readiness checks the relevant
   systemd units and that something is listening on `127.0.0.1:5900`.

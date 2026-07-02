@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -236,7 +237,7 @@ func (c *daytonaSDKClient) CreateSandbox(ctx context.Context, body daytona.Creat
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
 	out, _, err := req.Execute()
-	return out, err
+	return out, c.redactError(err)
 }
 
 func (c *daytonaSDKClient) GetSandbox(ctx context.Context, id string) (*daytona.Sandbox, error) {
@@ -245,7 +246,7 @@ func (c *daytonaSDKClient) GetSandbox(ctx context.Context, id string) (*daytona.
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
 	out, _, err := req.Execute()
-	return out, err
+	return out, c.redactError(err)
 }
 
 func (c *daytonaSDKClient) ListCrabboxSandboxes(ctx context.Context) ([]daytona.Sandbox, error) {
@@ -262,7 +263,7 @@ func (c *daytonaSDKClient) ListCrabboxSandboxes(ctx context.Context) ([]daytona.
 		}
 		out, _, err := req.Execute()
 		if err != nil {
-			return nil, err
+			return nil, c.redactError(err)
 		}
 		if out == nil {
 			return all, nil
@@ -343,7 +344,7 @@ func (c *daytonaSDKClient) StartSandbox(ctx context.Context, id string) (*dayton
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
 	out, _, err := req.Execute()
-	return out, err
+	return out, c.redactError(err)
 }
 
 func (c *daytonaSDKClient) DeleteSandbox(ctx context.Context, id string) error {
@@ -352,7 +353,7 @@ func (c *daytonaSDKClient) DeleteSandbox(ctx context.Context, id string) error {
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
 	_, _, err := req.Execute()
-	return err
+	return c.redactError(err)
 }
 
 func (c *daytonaSDKClient) ReplaceLabels(ctx context.Context, id string, labels map[string]string) error {
@@ -361,7 +362,7 @@ func (c *daytonaSDKClient) ReplaceLabels(ctx context.Context, id string, labels 
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
 	_, _, err := req.Execute()
-	return err
+	return c.redactError(err)
 }
 
 func (c *daytonaSDKClient) UpdateLastActivity(ctx context.Context, id string) error {
@@ -370,7 +371,7 @@ func (c *daytonaSDKClient) UpdateLastActivity(ctx context.Context, id string) er
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
 	_, err := req.Execute()
-	return err
+	return c.redactError(err)
 }
 
 func (c *daytonaSDKClient) CreateSSHAccess(ctx context.Context, id string, ttl time.Duration) (daytonaSSHAccess, error) {
@@ -380,7 +381,7 @@ func (c *daytonaSDKClient) CreateSSHAccess(ctx context.Context, id string, ttl t
 	}
 	out, _, err := req.Execute()
 	if err != nil {
-		return daytonaSSHAccess{}, err
+		return daytonaSSHAccess{}, c.redactError(err)
 	}
 	if out == nil || out.GetToken() == "" {
 		return daytonaSSHAccess{}, fmt.Errorf("daytona ssh access response missing token")
@@ -388,18 +389,87 @@ func (c *daytonaSDKClient) CreateSSHAccess(ctx context.Context, id string, ttl t
 	return daytonaSSHAccess{Token: out.GetToken(), Command: out.GetSshCommand()}, nil
 }
 
-func daytonaError(action string, err error) error {
+func (c *daytonaSDKClient) redactError(err error) error {
 	if err == nil {
 		return nil
 	}
 	var apiErr *daytona.GenericOpenAPIError
 	if errors.As(err, &apiErr) {
-		body := strings.TrimSpace(summarizeJSON(apiErr.Body()))
+		return &redactedDaytonaAPIError{
+			err:     err,
+			message: redactDaytonaSecrets(apiErr.Error(), c.token),
+			body:    []byte(redactDaytonaSecrets(string(apiErr.Body()), c.token)),
+		}
+	}
+	return err
+}
+
+type redactedDaytonaAPIError struct {
+	err     error
+	message string
+	body    []byte
+}
+
+func (e *redactedDaytonaAPIError) Error() string {
+	return e.message
+}
+
+func (e *redactedDaytonaAPIError) Body() []byte {
+	return e.body
+}
+
+func (e *redactedDaytonaAPIError) Unwrap() error {
+	return e.err
+}
+
+func daytonaError(action string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var redactedAPIError *redactedDaytonaAPIError
+	if errors.As(err, &redactedAPIError) {
+		body := strings.TrimSpace(redactDaytonaSecrets(summarizeJSON(redactedAPIError.Body())))
 		if body != "" {
-			return fmt.Errorf("daytona %s: %s: %s", action, apiErr.Error(), body)
+			return fmt.Errorf("daytona %s: %s: %s", action, redactDaytonaSecrets(redactedAPIError.Error()), body)
+		}
+		return fmt.Errorf("daytona %s: %s", action, redactDaytonaSecrets(redactedAPIError.Error()))
+	}
+	var apiErr *daytona.GenericOpenAPIError
+	if errors.As(err, &apiErr) {
+		body := strings.TrimSpace(redactDaytonaSecrets(summarizeJSON(apiErr.Body())))
+		if body != "" {
+			return fmt.Errorf("daytona %s: %s: %s", action, redactDaytonaSecrets(apiErr.Error()), body)
 		}
 	}
 	return fmt.Errorf("daytona %s: %w", action, err)
+}
+
+var daytonaBearerPattern = regexp.MustCompile(`(?i)\bbearer\s+[^\s"',;\\]+`)
+
+func redactDaytonaSecrets(value string, secrets ...string) string {
+	redacted := value
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret != "" {
+			redacted = strings.ReplaceAll(redacted, secret, daytonaTokenRedacted)
+		}
+	}
+	redacted = daytonaBearerPattern.ReplaceAllString(redacted, "Bearer "+daytonaTokenRedacted)
+	for _, key := range []string{"authorization", "apiKey", "api_key", "accessToken", "access_token", "jwtToken", "jwt_token", "token"} {
+		redacted = redactDaytonaJSONSecretField(redacted, key)
+	}
+	return redacted
+}
+
+func redactDaytonaJSONSecretField(value, key string) string {
+	pattern := regexp.MustCompile(`(?i)"` + regexp.QuoteMeta(key) + `"\s*:\s*"[^"]*"`)
+	return pattern.ReplaceAllStringFunc(value, func(match string) string {
+		colon := strings.Index(match, ":")
+		if colon < 0 {
+			return match
+		}
+		return match[:colon+1] + `"` + daytonaTokenRedacted + `"`
+	})
 }
 
 func daytonaIsNotFoundError(err error) bool {

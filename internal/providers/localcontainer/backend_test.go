@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -896,6 +897,85 @@ func TestCreateContainerCanMountDockerSocket(t *testing.T) {
 	}
 }
 
+func TestCreateContainerMapsDefaultDockerSocketWorkRootToContainerPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("default Docker socket cache-root traversal bug is Linux-specific")
+	}
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	socketDir := t.TempDir()
+	socketPath := filepath.Join(socketDir, "docker.sock")
+	listener := listenUnixSocketOrSkip(t, socketPath)
+	defer listener.Close()
+	t.Setenv("DOCKER_HOST", "unix://"+socketPath)
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.LocalContainer.DockerSocket = true
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	cfg = b.configForRun()
+	hostWorkRoot := defaultDockerSocketWorkRoot()
+	if cfg.LocalContainer.WorkRoot != hostWorkRoot || cfg.WorkRoot != hostWorkRoot {
+		t.Fatalf("default host work root local=%q global=%q want %q", cfg.LocalContainer.WorkRoot, cfg.WorkRoot, hostWorkRoot)
+	}
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	_, _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	for _, want := range []string{
+		"--label\nhost_work_root=" + hostWorkRoot,
+		"--label\nwork_root=/work/crabbox",
+		"-e\nCRABBOX_WORK_ROOT=/work/crabbox",
+		"-v\n" + hostWorkRoot + ":/work/crabbox",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("default docker socket work root args missing %q:\n%s", want, args)
+		}
+	}
+	if strings.Contains(args, "-v\n"+hostWorkRoot+":"+hostWorkRoot) {
+		t.Fatalf("default docker socket work root mounted to host path inside container:\n%s", args)
+	}
+
+	container := inspectContainer{
+		ID:   "container1234567890",
+		Name: "/crabbox-blue",
+		Config: inspectConfig{
+			Image: "ubuntu:24.04",
+			Labels: map[string]string{
+				"crabbox":        "true",
+				"provider":       providerName,
+				"lease":          "cbx_123",
+				"slug":           "blue-lobster",
+				"state":          "ready",
+				"server_type":    "ubuntu:24.04",
+				"ssh_user":       "crabbox",
+				"docker_socket":  "1",
+				"host_work_root": hostWorkRoot,
+				"work_root":      "/work/crabbox",
+			},
+		},
+		State: inspectState{Status: "running", Running: true},
+		NetworkSettings: inspectNetworking{
+			Ports: map[string][]inspectPort{"2222/tcp": {{HostIP: "127.0.0.1", HostPort: "49153"}}},
+		},
+	}
+	lease, err := b.prepareLease(context.Background(), cfg, container, "cbx_123", "blue-lobster", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(lease.SSH.ReadyCheck, "test -d '/work/crabbox'") {
+		t.Fatalf("ready check did not use container work root: %q", lease.SSH.ReadyCheck)
+	}
+	if strings.Contains(lease.SSH.ReadyCheck, hostWorkRoot) || strings.Contains(lease.SSH.ReadyCheck, "/root/") {
+		t.Fatalf("ready check used host-only work root: %q", lease.SSH.ReadyCheck)
+	}
+}
+
 func TestCreateContainerMountsDockerHostUnixSocket(t *testing.T) {
 	socketDir := t.TempDir()
 	socketPath := filepath.Join(socketDir, "docker.sock")
@@ -1081,6 +1161,27 @@ func TestDockerSocketWorkRootsUseLinuxGuestPathForWindows(t *testing.T) {
 	}
 }
 
+func TestDockerSocketWorkRootsUseContainerPathForDefaultLinuxRoot(t *testing.T) {
+	hostDefault := defaultDockerSocketWorkRoot()
+	host, guest := dockerSocketWorkRootsForGOOS(hostDefault, "linux")
+	if host != hostDefault {
+		t.Fatalf("host root=%q, want %q", host, hostDefault)
+	}
+	if guest != "/work/crabbox" {
+		t.Fatalf("guest root=%q, want /work/crabbox", guest)
+	}
+
+	host, guest = dockerSocketWorkRootsForGOOSExplicit(hostDefault, "linux", true)
+	if host != hostDefault || guest != hostDefault {
+		t.Fatalf("explicit default-path work root should preserve existing behavior, host=%q guest=%q", host, guest)
+	}
+
+	host, guest = dockerSocketWorkRootsForGOOS("/tmp/custom-crabbox", "linux")
+	if host != "/tmp/custom-crabbox" || guest != "/tmp/custom-crabbox" {
+		t.Fatalf("custom Linux socket roots host=%q guest=%q", host, guest)
+	}
+}
+
 func TestPrepareLeaseUsesLabeledGuestWorkRootForReadyCheck(t *testing.T) {
 	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
 	cfg := b.configForRun()
@@ -1143,6 +1244,70 @@ func TestConfigForRunUsesHostVisibleWorkRootWithDockerSocket(t *testing.T) {
 	}
 	if !strings.Contains(got.LocalContainer.WorkRoot, "crabbox") || got.WorkRoot != got.LocalContainer.WorkRoot {
 		t.Fatalf("unexpected docker socket work root: workRoot=%q local=%q", got.WorkRoot, got.LocalContainer.WorkRoot)
+	}
+}
+
+func TestConfigForRunPreservesExplicitDockerSocketWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot = "/work/crabbox"
+	cfg.WorkRoot = "/work/crabbox"
+	core.MarkWorkRootExplicit(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	got := b.configForRun()
+	if got.LocalContainer.WorkRoot != "/work/crabbox" || got.WorkRoot != "/work/crabbox" {
+		t.Fatalf("explicit work root was replaced: workRoot=%q local=%q", got.WorkRoot, got.LocalContainer.WorkRoot)
+	}
+}
+
+func TestConfigForRunPreservesProviderSpecificExplicitDockerSocketWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot = "/work/crabbox"
+	cfg.WorkRoot = "/work/crabbox"
+	core.MarkLocalContainerWorkRootExplicit(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	got := b.configForRun()
+	if got.LocalContainer.WorkRoot != "/work/crabbox" || got.WorkRoot != "/work/crabbox" {
+		t.Fatalf("provider-specific explicit work root was replaced: workRoot=%q local=%q", got.WorkRoot, got.LocalContainer.WorkRoot)
+	}
+}
+
+func TestLocalContainerWorkRootFlagMarksWorkRootExplicit(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Set("local-container-work-root", "/work/crabbox"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !core.IsWorkRootExplicit(&cfg) {
+		t.Fatal("local-container work root flag did not mark work root explicit")
+	}
+	if !core.LocalContainerWorkRootExplicit(cfg) {
+		t.Fatal("local-container work root flag did not mark provider work root explicit")
+	}
+}
+
+func TestLocalContainerReadyCheckReportsFailureDiagnostics(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.LocalContainer.WorkRoot = "/work/crabbox"
+	got := localContainerReadyCheck(cfg)
+	for _, want := range []string{
+		"local-container ready-check failed:",
+		"/tmp/crabbox-ready.log",
+		"cat /tmp/crabbox-ready.log >&2",
+		"test -d '/work/crabbox'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ready check missing diagnostic %q: %s", want, got)
+		}
 	}
 }
 
@@ -1305,6 +1470,14 @@ func TestBootstrapScriptSupportsDockerSocketCLI(t *testing.T) {
 	for _, want := range []string{
 		`[ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker`,
 		`https://download.docker.com/linux/${ID}/gpg`,
+		localContainerDockerSigningKeyFingerprint,
+		`install_verified_apt_keyring`,
+		`GNUPGHOME="$apt_key_home" gpg --batch --import`,
+		`GNUPGHOME="$apt_key_home" gpg --batch --export`,
+		`signed-by=/etc/apt/keyrings/docker.gpg`,
+		`mv -f "$apt_key_output" "$apt_key_target"`,
+		`rm -f /etc/apt/keyrings/docker.asc`,
+		`Docker APT signing key verification failed; falling back to distro Docker CLI`,
 		`if apt-get update && apt-get install -y --no-install-recommends docker-ce-cli; then`,
 		`rm -f /etc/apt/sources.list.d/docker.list`,
 		`apt-get install -y --no-install-recommends docker-ce-cli`,
@@ -1316,6 +1489,102 @@ func TestBootstrapScriptSupportsDockerSocketCLI(t *testing.T) {
 		if !strings.Contains(bootstrapScript, want) {
 			t.Fatalf("bootstrap script missing %q", want)
 		}
+	}
+	if strings.Contains(bootstrapScript, `curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc`) {
+		t.Fatal("bootstrap script downloads Docker trust directly into the final keyring")
+	}
+	cmd := exec.Command("sh", "-n")
+	cmd.Stdin = strings.NewReader(bootstrapScript)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bootstrap script syntax: %v\n%s", err, output)
+	}
+}
+
+func TestInstallVerifiedAPTKeyringScript(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		actualFingerprint string
+		wantSuccess       bool
+	}{
+		{name: "matching primary", actualFingerprint: localContainerDockerSigningKeyFingerprint, wantSuccess: true},
+		{name: "mismatched primary", actualFingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", wantSuccess: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "bin")
+			if err := os.Mkdir(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			curlScript := "#!/bin/sh\nset -eu\nprintf 'fake-docker-key\\n'\n"
+			if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(curlScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			gpgScript := `#!/bin/sh
+set -eu
+mode=""
+value=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --batch|--with-colons) shift ;;
+    --import|--fingerprint|--export)
+      mode="${1#--}"
+      value="${2:-}"
+      shift 2
+      ;;
+    *) exit 64 ;;
+  esac
+done
+case "$mode" in
+  import) [ -s "$value" ] ;;
+  fingerprint) printf 'fpr:::::::::%s:\n' "$FAKE_GPG_FINGERPRINT" ;;
+  export) printf 'fake-export:%s\n' "$value" ;;
+  *) exit 65 ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(bin, "gpg"), []byte(gpgScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(dir, "keyrings", "docker.gpg")
+			if err := os.Mkdir(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, []byte("existing-keyring\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			script := "set -eu\n" + installVerifiedAPTKeyringScript + `
+install_verified_apt_keyring "$1" "$2" "$3"
+`
+			cmd := exec.Command("sh", "-c", script, "test", "https://download.docker.com/linux/ubuntu/gpg", target, localContainerDockerSigningKeyFingerprint)
+			cmd.Env = append(os.Environ(),
+				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"FAKE_GPG_FINGERPRINT="+tc.actualFingerprint,
+			)
+			output, err := cmd.CombinedOutput()
+			if tc.wantSuccess && err != nil {
+				t.Fatalf("verified key install failed: %v\n%s", err, output)
+			}
+			if !tc.wantSuccess && err == nil {
+				t.Fatal("mismatched key install succeeded")
+			}
+			got, readErr := os.ReadFile(target)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			want := "existing-keyring\n"
+			if tc.wantSuccess {
+				want = "fake-export:" + localContainerDockerSigningKeyFingerprint + "\n"
+			}
+			if string(got) != want {
+				t.Fatalf("keyring = %q, want %q", got, want)
+			}
+			tempFiles, globErr := filepath.Glob(target + ".tmp.*")
+			if globErr != nil {
+				t.Fatal(globErr)
+			}
+			if len(tempFiles) != 0 {
+				t.Fatalf("temporary key state remains: %v", tempFiles)
+			}
+		})
 	}
 }
 

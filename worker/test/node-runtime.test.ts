@@ -144,6 +144,9 @@ describe("NodeCoordinatorRuntime", () => {
     const start = source.indexOf("private async connectWorkspaceTerminal");
     const end = source.indexOf("private trackWorkspaceTerminal", start);
     const terminal = source.slice(start, end);
+    const sshStart = source.indexOf("async function connectWorkspaceSSH");
+    const sshEnd = source.indexOf("async function readWorkspaceVNCPassword", sshStart);
+    const ssh = source.slice(sshStart, sshEnd);
 
     expect(terminal).toContain("workspaceTerminalMaxBufferedFrames");
     expect(source).toContain("workspaceTerminalTransportMemoryBudgetBytes");
@@ -151,14 +154,14 @@ describe("NodeCoordinatorRuntime", () => {
     expect(terminal).toContain("pending.length + queuedInputFrames");
     expect(terminal).toContain("queuedInputFrames -= 1");
     expect(terminal).toContain("if (length === 0) return");
-    expect(terminal).toContain("lastObservedHostKey = fingerprint");
-    expect(terminal).toContain("return expectedHostKey === fingerprint");
-    expect(terminal).toContain('cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr"]');
-    expect(terminal).toContain('"hmac-sha2-256-etm@openssh.com"');
-    expect(terminal).toContain('"hmac-sha2-512"');
-    expect(terminal).toContain("workspaceTerminalSSHReadyTimeoutMs");
-    expect(terminal).toContain("for (const port of terminalPorts)");
-    expect(terminal).toContain("await new Promise<void>((resolve) => setTimeout(resolve, 2_000))");
+    expect(ssh).toContain("observedHostKey = fingerprint");
+    expect(ssh).toContain("return expectedHostKey === fingerprint");
+    expect(ssh).toContain('cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr"]');
+    expect(ssh).toContain('"hmac-sha2-256-etm@openssh.com"');
+    expect(ssh).toContain('"hmac-sha2-512"');
+    expect(ssh).toContain("workspaceTerminalSSHReadyTimeoutMs");
+    expect(ssh).toContain("for (const port of ports)");
+    expect(ssh).toContain("await new Promise<void>((resolve) => setTimeout(resolve, 2_000))");
     expect(terminal).not.toContain("!workspace.sshHostKeySha256");
   });
 

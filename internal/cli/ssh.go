@@ -1254,6 +1254,9 @@ func writeRemoteCommandPrefix(b *strings.Builder, workdir string, env map[string
 		b.WriteString("; fi && ")
 	}
 	for k, v := range env {
+		if !validEnvName(k) {
+			continue
+		}
 		b.WriteString(k)
 		b.WriteByte('=')
 		b.WriteString(shellQuote(v))
