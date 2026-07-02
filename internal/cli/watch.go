@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -238,6 +239,7 @@ type watchSession struct {
 	execute  watchRunExecutor
 	stderr   io.Writer
 	excludes []string
+	watcher  *fsnotify.Watcher
 }
 
 func (s *watchSession) run(ctx context.Context) error {
@@ -251,6 +253,7 @@ func (s *watchSession) run(ctx context.Context) error {
 		return exit(1, "watch: start watcher: %v", err)
 	}
 	defer watcher.Close()
+	s.watcher = watcher
 	if _, err := addWatchTree(watcher, s.root, s.root, s.excludes); err != nil {
 		return exit(1, "watch: watch %s: %v", s.root, err)
 	}
@@ -411,7 +414,13 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	excludesChanged := !slices.Equal(excludes, s.excludes)
 	s.excludes = excludes
+	if excludesChanged && s.watcher != nil {
+		if _, err := addWatchTree(s.watcher, s.root, s.root, s.excludes); err != nil {
+			return nil, exit(1, "watch: rewatch %s after filter change: %v", s.root, err)
+		}
+	}
 	includes := syncIncludes(s.cfg)
 	existing := make([]string, 0, len(paths))
 	missing := make([]string, 0, len(paths))

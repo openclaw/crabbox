@@ -454,6 +454,29 @@ func TestWatchReloadsCrabboxIgnoreMidSession(t *testing.T) {
 	}
 }
 
+func TestWatchRewatchesDirectoriesWhenExclusionsRelax(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, ".crabboxignore", "generated\n")
+	watchTestWrite(t, root, "generated/seed.txt", "seeded before start")
+	executor := newWatchTestExecutor()
+	session := newWatchTestSession(root, executor.run, 25*time.Millisecond, 3*time.Second, nil)
+	done := make(chan error, 1)
+	go func() { done <- session.run(context.Background()) }()
+	executor.awaitStart(t)
+	time.Sleep(100 * time.Millisecond)
+	watchTestWrite(t, root, ".crabboxignore", "")
+	executor.awaitStart(t)
+	time.Sleep(100 * time.Millisecond)
+	watchTestWrite(t, root, "generated/data.txt", "now visible")
+	executor.awaitStart(t)
+	if err := <-done; err != nil {
+		t.Fatalf("session.run: %v", err)
+	}
+	if executor.callCount() != 3 {
+		t.Fatalf("iterations=%d, want 3 (relaxed exclusion must re-attach watches)", executor.callCount())
+	}
+}
+
 func TestQualifyWatchBatch(t *testing.T) {
 	root := newWatchGitRepo(t)
 	watchTestWrite(t, root, "keep.log", "tracked but gitignored")
