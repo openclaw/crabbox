@@ -1,5 +1,6 @@
 import { AwsClient } from "aws4fetch";
 
+import { base64URL } from "./auth";
 import type { Env } from "./types";
 
 export interface ArtifactUploadRequest {
@@ -58,13 +59,14 @@ export async function artifactUploadResponse(
   env: Env,
   request: ArtifactUploadRequest,
   owner: string,
+  org: string,
 ): Promise<ArtifactUploadResponse> {
   const config = artifactConfig(env);
   const files = normalizeArtifactFiles(request.files ?? []);
   if (files.length === 0) {
     throw new Error("artifacts upload request requires at least one file");
   }
-  const prefix = artifactPrefix(config.prefix, owner, request.prefix);
+  const prefix = artifactPrefix(config.prefix, org, owner, request.prefix);
   const now = new Date();
   const uploadExpiresAt = new Date(
     now.getTime() + config.uploadExpiresSeconds * 1000,
@@ -190,15 +192,24 @@ function normalizeHash(value: string | undefined): string {
 
 function artifactPrefix(
   configPrefix: string,
+  org: string,
   owner: string,
   requestPrefix: string | undefined,
 ): string {
   const parts = [
     normalizePrefixPart(configPrefix),
-    normalizePrefixPart(owner),
+    "v2",
+    "org",
+    opaqueArtifactIdentity(org),
+    "owner",
+    opaqueArtifactIdentity(owner),
     normalizePrefixPart(requestPrefix),
   ].filter(Boolean);
   return parts.join("/");
+}
+
+function opaqueArtifactIdentity(value: string): string {
+  return base64URL(new TextEncoder().encode(value));
 }
 
 function normalizePrefixPart(value: string | undefined): string {

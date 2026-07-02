@@ -9392,9 +9392,15 @@ export class FleetCoordinator {
   private async createArtifactUploads(request: Request): Promise<Response> {
     try {
       const input = await readJson<ArtifactUploadRequest>(request);
-      return json(await artifactUploadResponse(this.env, input, requestOwner(request)), {
-        status: 201,
-      });
+      return json(
+        await artifactUploadResponse(
+          this.env,
+          input,
+          requestOwner(request),
+          requestOrg(request, this.env),
+        ),
+        { status: 201 },
+      );
     } catch (error) {
       return json(
         { error: "artifact_upload_unavailable", message: errorMessage(error) },

@@ -16917,10 +16917,12 @@ describe("fleet lease identity and idle", () => {
     };
     expect(body.backend).toBe("r2");
     expect(body.bucket).toBe("qa-artifacts");
-    expect(body.prefix).toBe("qa/peter@example.com/pr-42");
-    expect(body.files[0].key).toBe("qa/peter@example.com/pr-42/screenshots/after.png");
+    const org = Buffer.from("default-org").toString("base64url");
+    const owner = Buffer.from("peter@example.com").toString("base64url");
+    expect(body.prefix).toBe(`qa/v2/org/${org}/owner/${owner}/pr-42`);
+    expect(body.files[0].key).toBe(`qa/v2/org/${org}/owner/${owner}/pr-42/screenshots/after.png`);
     expect(body.files[0].url).toBe(
-      "https://artifacts.example.com/qa/peter%40example.com/pr-42/screenshots/after.png",
+      `https://artifacts.example.com/qa/v2/org/${org}/owner/${owner}/pr-42/screenshots/after.png`,
     );
     expect(body.files[0].upload.headers["content-length"]).toBe("123");
     expect(body.files[0].upload.headers["content-type"]).toBe("image/png");
@@ -16929,6 +16931,41 @@ describe("fleet lease identity and idle", () => {
       "content-length",
     );
     expect(JSON.stringify(body)).not.toContain("super-secret");
+  });
+
+  it("isolates artifact grants by opaque organization and owner identities", async () => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_ARTIFACTS_BACKEND: "r2",
+        CRABBOX_ARTIFACTS_BUCKET: "qa-artifacts",
+        CRABBOX_ARTIFACTS_PREFIX: "qa",
+        CRABBOX_ARTIFACTS_ENDPOINT_URL: "https://account.r2.cloudflarestorage.com",
+        CRABBOX_ARTIFACTS_ACCESS_KEY_ID: "access-key",
+        CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY: "super-secret",
+      },
+    );
+    const grant = async (org: string, owner: string, prefix: string) => {
+      const response = await fleet.fetch(
+        request("POST", "/v1/artifacts/uploads", {
+          headers: { "x-crabbox-org": org, "x-crabbox-owner": owner },
+          body: { prefix, files: [{ name: "proof.txt", size: 1 }] },
+        }),
+      );
+      expect(response.status).toBe(201);
+      return (await response.json()) as { prefix: string; files: Array<{ key: string }> };
+    };
+
+    const orgA = await grant("org-a", "alice/team", "run-1");
+    const orgB = await grant("org-b", "alice/team", "run-1");
+    const shiftedBoundary = await grant("org-a", "alice", "team/run-1");
+
+    expect(orgA.files[0].key).not.toBe(orgB.files[0].key);
+    expect(orgA.files[0].key).not.toBe(shiftedBoundary.files[0].key);
+    expect(orgA.prefix).toContain(
+      `/org/${Buffer.from("org-a").toString("base64url")}/owner/${Buffer.from("alice/team").toString("base64url")}/`,
+    );
   });
 
   it("reports artifact broker setup errors without provider-specific local credentials", async () => {
