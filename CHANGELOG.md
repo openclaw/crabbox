@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Pinned the Windows developer-image Node MSI and Docker Engine archive to reviewed SHA-256 digests before privileged installation, with fail-closed digest requirements for version overrides. Thanks @coygeek.
 - Prevented direct AWS raw-instance release from reaching deletion unless canonical Crabbox ownership tags match the resolved lease, with a second guard at the destructive provider boundary. Thanks @TurboTheTurtle.
 - Prevented Sprites API credentials from targeting unsafe endpoint URLs or following redirects outside the configured API origin. Thanks @coygeek.
 - Recovered ASCII Box release when the service temporarily requires a recent snapshot by shortening the sandbox TTL, waiting for the managed stop transition, and retrying deletion.

@@ -315,7 +315,9 @@ scripts/mint-aws-devtools-image.sh \
   tooling, GitHub CLI, Node 24, corepack/pnpm, and Windows Server container
   support with Docker Engine. It deliberately avoids Docker Desktop because
   headless image bakes should not depend on a user-session desktop app or
-  Docker Desktop licensing.
+  Docker Desktop licensing. The Chocolatey package, Node MSI, and Docker Engine
+  archive are pinned to reviewed SHA-256 digests and verified before privileged
+  installation or extraction.
 
 Windows developer bakes are headless by default for faster boot and fewer
 desktop-bootstrap moving parts. Pass `--desktop` only when the image must back
@@ -330,10 +332,18 @@ capture.
 ```bash
 CRABBOX_LINUX_DOCKER_IMAGES='hello-world ubuntu:24.04 node:24-bookworm'
 CRABBOX_WINDOWS_DOCKER_IMAGES='mcr.microsoft.com/windows/servercore:ltsc2022'
+CRABBOX_WINDOWS_NODE_VERSION='<version>'
+CRABBOX_WINDOWS_NODE_SHA256='<reviewed-64-hex-sha256>'
+CRABBOX_WINDOWS_DOCKER_VERSION='<version>'
+CRABBOX_WINDOWS_DOCKER_SHA256='<reviewed-64-hex-sha256>'
 CRABBOX_LINUX_BROWSER=0
 CRABBOX_LINUX_DESKTOP_TOOLS=0
 CRABBOX_WINDOWS_INSTALL_DOCKER=0
 ```
+
+The bundled Node and Docker versions use embedded reviewed digests. Override a
+version only together with its matching SHA-256 value; unpaired or malformed
+overrides fail before the artifact is downloaded.
 
 ### Wrapper behavior
 

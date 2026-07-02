@@ -295,13 +295,20 @@ and may fail for historical tags that are incompatible with the current
 reviewed release configuration rather than falling back to tag-controlled
 publishing behavior.
 
-## Managed Windows Bootstrap Integrity
+## Managed Windows Artifact Integrity
 
 Managed Windows bootstrap pins the OpenSSH-Win64 archive, Git for Windows
 installer, TightVNC installer, and versioned Ubuntu WSL rootfs to SHA-256
 digests embedded alongside their URLs. Generated PowerShell verifies every
 download before extraction, execution, or WSL import, removes mismatched bytes,
 and fails bootstrap closed. URL and digest updates are reviewed together.
+
+The documented Windows developer-image prep applies the same rule to its
+versioned Chocolatey package, Node MSI, and Docker Engine archive. The bundled
+versions use embedded reviewed digests. Operator-selected Node or Docker
+versions require matching SHA-256 environment overrides, and missing, malformed,
+or mismatched values fail closed before installation, extraction, or service
+registration.
 
 ## Managed Linux Browser Trust
 

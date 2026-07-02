@@ -2,16 +2,42 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+$DefaultNodeVersion = "24.11.1"
+$DefaultNodeSHA256 = "208ba5ca1dab0b330f457909e0797de340c40b34ddf2edf40d26f382f733297e"
 $NodeVersion = $env:CRABBOX_WINDOWS_NODE_VERSION
-if (-not $NodeVersion) { $NodeVersion = "24.11.1" }
+if (-not $NodeVersion) { $NodeVersion = $DefaultNodeVersion }
+$NodeSHA256 = $env:CRABBOX_WINDOWS_NODE_SHA256
+if (-not $NodeSHA256) {
+  if ($NodeVersion -ne $DefaultNodeVersion) {
+    throw "CRABBOX_WINDOWS_NODE_SHA256 is required when CRABBOX_WINDOWS_NODE_VERSION overrides $DefaultNodeVersion"
+  }
+  $NodeSHA256 = $DefaultNodeSHA256
+}
+if ($NodeSHA256 -notmatch "^[0-9a-fA-F]{64}$") {
+  throw "CRABBOX_WINDOWS_NODE_SHA256 must be a 64-character hex digest"
+}
 $PnpmVersion = $env:CRABBOX_WINDOWS_PNPM_VERSION
 if (-not $PnpmVersion) { $PnpmVersion = "11.1.0" }
-$DockerVersion = $env:CRABBOX_WINDOWS_DOCKER_VERSION
-if (-not $DockerVersion) { $DockerVersion = "29.5.1" }
-$DockerImages = $env:CRABBOX_WINDOWS_DOCKER_IMAGES
-if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:ltsc2022" }
 $InstallDocker = $env:CRABBOX_WINDOWS_INSTALL_DOCKER
 if (-not $InstallDocker) { $InstallDocker = "1" }
+$DefaultDockerVersion = "29.5.1"
+$DefaultDockerSHA256 = "7008d54da30461fa745d4539beb87d3d14dd38c7ab0110657720526e16f5f2d3"
+$DockerVersion = $env:CRABBOX_WINDOWS_DOCKER_VERSION
+if (-not $DockerVersion) { $DockerVersion = $DefaultDockerVersion }
+$DockerSHA256 = $env:CRABBOX_WINDOWS_DOCKER_SHA256
+if ($InstallDocker -eq "1") {
+  if (-not $DockerSHA256) {
+    if ($DockerVersion -ne $DefaultDockerVersion) {
+      throw "CRABBOX_WINDOWS_DOCKER_SHA256 is required when CRABBOX_WINDOWS_DOCKER_VERSION overrides $DefaultDockerVersion"
+    }
+    $DockerSHA256 = $DefaultDockerSHA256
+  }
+  if ($DockerSHA256 -notmatch "^[0-9a-fA-F]{64}$") {
+    throw "CRABBOX_WINDOWS_DOCKER_SHA256 must be a 64-character hex digest"
+  }
+}
+$DockerImages = $env:CRABBOX_WINDOWS_DOCKER_IMAGES
+if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:ltsc2022" }
 $RebootMarker = "C:\ProgramData\crabbox\image-prep-reboot-required"
 $ChocolateyPackageURL = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_URL
 if (-not $ChocolateyPackageURL) { $ChocolateyPackageURL = "https://community.chocolatey.org/api/v2/package/chocolatey/2.7.3" }
@@ -134,11 +160,19 @@ function Install-Node {
     if ($current -eq $NodeVersion) { return }
   }
   $arch = "x64"
-  $msi = Join-Path $env:TEMP "node-v$NodeVersion-$arch.msi"
+  $workDir = Join-Path $env:TEMP ("crabbox-node-" + [Guid]::NewGuid().ToString("N"))
+  $msi = Join-Path $workDir "node-v$NodeVersion-$arch.msi"
   $url = "https://nodejs.org/dist/v$NodeVersion/node-v$NodeVersion-$arch.msi"
   Write-Log "installing Node $NodeVersion"
-  Retry { Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing }
-  Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", $msi, "/qn", "/norestart" -Wait
+  try {
+    New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+    Retry { Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing }
+    Assert-FileSHA256 -Path $msi -Expected $NodeSHA256 -Name "Node MSI"
+    Write-Log "verified Node $NodeVersion $arch MSI SHA256 $($NodeSHA256.ToLowerInvariant())"
+    Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", $msi, "/qn", "/norestart" -Wait
+  } finally {
+    Remove-Item -Recurse -Force -LiteralPath $workDir -ErrorAction SilentlyContinue
+  }
   Add-MachinePath "C:\Program Files\nodejs"
 }
 
@@ -152,16 +186,26 @@ function Install-StaticDockerEngine {
   $dockerBin = Join-Path $env:ProgramFiles "docker"
   $dockerd = Join-Path $dockerBin "dockerd.exe"
   $dockerExe = Join-Path $dockerBin "docker.exe"
-  if (-not (Test-Path $dockerd) -or -not (Test-Path $dockerExe)) {
-    $zip = Join-Path $env:TEMP "docker-$DockerVersion.zip"
+  $dockerService = Get-Service -Name docker -ErrorAction SilentlyContinue
+  # A service-less directory is not installation proof; refresh it from the verified archive before registration.
+  if (-not (Test-Path $dockerd) -or -not (Test-Path $dockerExe) -or -not $dockerService) {
+    $workDir = Join-Path $env:TEMP ("crabbox-docker-" + [Guid]::NewGuid().ToString("N"))
+    $zip = Join-Path $workDir "docker-$DockerVersion.zip"
     $url = "https://download.docker.com/win/static/stable/x86_64/docker-$DockerVersion.zip"
     Write-Log "installing Docker Engine $DockerVersion"
-    Retry { Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing }
-    Expand-Archive -Path $zip -DestinationPath $env:ProgramFiles -Force
+    try {
+      New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+      Retry { Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing }
+      Assert-FileSHA256 -Path $zip -Expected $DockerSHA256 -Name "Docker Engine archive"
+      Write-Log "verified Docker Engine $DockerVersion x86_64 archive SHA256 $($DockerSHA256.ToLowerInvariant())"
+      Expand-Archive -LiteralPath $zip -DestinationPath $env:ProgramFiles -Force
+    } finally {
+      Remove-Item -Recurse -Force -LiteralPath $workDir -ErrorAction SilentlyContinue
+    }
   }
   Add-MachinePath $dockerBin
   Refresh-SessionPath
-  if (-not (Get-Service -Name docker -ErrorAction SilentlyContinue)) {
+  if (-not $dockerService) {
     & $dockerd --register-service
   }
 }
