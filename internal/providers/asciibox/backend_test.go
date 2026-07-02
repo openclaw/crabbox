@@ -70,17 +70,17 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev new --ttl 1800",
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev ssh bx_1 -- true",
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev info bx_1",
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev list",
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev stop bx_1",
-		"box --no-update --json config",
+		"box --no-update --json --api-url https://ascii.dev status",
 		"box --no-update --json --api-url https://ascii.dev delete bx_1",
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
@@ -99,6 +99,86 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 	}
 	if !hasEnv(runner.env[3], "SSH_AUTH_SOCK=") {
 		t.Fatalf("ssh setup env should disable agent identities: %v", runner.env[3])
+	}
+}
+
+func TestAsciiBoxBaseURLValidation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "canonical https", raw: "HTTPS://ASCII.DEV:443/", want: "https://ascii.dev"},
+		{name: "https path", raw: "https://ascii.dev/api/", want: "https://ascii.dev/api"},
+		{name: "escaped path", raw: "https://ascii.dev/tenant%2F/", want: "https://ascii.dev/tenant%2F"},
+		{name: "localhost", raw: "http://localhost:8080/", want: "http://localhost:8080"},
+		{name: "ipv4 loopback", raw: "http://127.0.0.2:8080/api", want: "http://127.0.0.2:8080/api"},
+		{name: "ipv6 loopback", raw: "http://[::1]:80/", want: "http://[::1]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := validateAsciiBoxBaseURL(test.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("url=%q want %q", got, test.want)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "public http", raw: "http://ascii.dev"},
+		{name: "relative", raw: "/api"},
+		{name: "schemeless", raw: "ascii.dev"},
+		{name: "missing host", raw: "https:///api"},
+		{name: "opaque", raw: "https:ascii.dev"},
+		{name: "other scheme", raw: "ftp://ascii.dev"},
+		{name: "userinfo", raw: "https://token@ascii.dev"},
+		{name: "query", raw: "https://ascii.dev?token=1"},
+		{name: "bare query", raw: "https://ascii.dev?"},
+		{name: "fragment", raw: "https://ascii.dev#fragment"},
+		{name: "malformed port", raw: "https://ascii.dev:bad"},
+		{name: "loopback lookalike", raw: "http://localhost.example.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := validateAsciiBoxBaseURL(test.raw); err == nil {
+				t.Fatalf("expected %q to be rejected", test.raw)
+			}
+		})
+	}
+}
+
+func TestNewAPIRejectsUnsafeBaseURLBeforeCommandOrConfigWrite(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.json")
+	runner := &fakeCommandRunner{configPath: configPath}
+	cfg := testConfig()
+	cfg.AsciiBox.BaseURL = "http://ascii.dev"
+
+	client, err := newAPI(cfg, Runtime{Exec: runner})
+	if err == nil || client != nil || !strings.Contains(err.Error(), "must use HTTPS") {
+		t.Fatalf("client=%#v err=%v", client, err)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("commands=%v", runner.commands)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("config path exists or returned unexpected error: %v", err)
+	}
+}
+
+func TestNewAPICanonicalizesBaseURL(t *testing.T) {
+	cfg := testConfig()
+	cfg.AsciiBox.BaseURL = " HTTPS://ASCII.DEV:443/api/ "
+	got, err := newAPI(cfg, Runtime{Exec: &fakeCommandRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.(*client).apiURL != "https://ascii.dev/api" {
+		t.Fatalf("apiURL=%q", got.(*client).apiURL)
 	}
 }
 
@@ -510,8 +590,8 @@ func (r *fakeCommandRunner) Run(_ context.Context, req LocalCommandRequest) (Loc
 	r.env = append(r.env, req.Env)
 	joined := strings.Join(req.Args, " ")
 	switch {
-	case strings.Contains(joined, " config"):
-		return LocalCommandResult{Stdout: fmt.Sprintf(`{"loggedIn":false,"path":%q}`, r.configPath)}, nil
+	case strings.Contains(joined, " status"):
+		return LocalCommandResult{Stdout: fmt.Sprintf(`{"account":null,"api":{},"config":{"path":%q}}`, r.configPath)}, nil
 	case strings.Contains(joined, " new "):
 		if r.newStdout != "" || r.newErr != nil {
 			return LocalCommandResult{Stdout: r.newStdout}, r.newErr
