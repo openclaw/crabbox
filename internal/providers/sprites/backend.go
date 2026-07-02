@@ -68,7 +68,10 @@ func NewSpritesBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, erro
 	if strings.TrimSpace(cfg.Sprites.Token) == "" {
 		return nil, exit(2, "provider=sprites requires SPRITES_TOKEN, SPRITE_TOKEN, SETUP_SPRITE_TOKEN, or CRABBOX_SPRITES_TOKEN")
 	}
-	client := newSpritesClient(cfg, rt)
+	client, err := newSpritesClient(cfg, rt)
+	if err != nil {
+		return nil, err
+	}
 	return &spritesBackend{spec: spec, cfg: cfg, rt: rt, client: client}, nil
 }
 
