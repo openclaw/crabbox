@@ -150,11 +150,59 @@ if has_slug(payload):
   fi
 }
 
+validate_remote_list_json_missing_slug() {
+  local command="$1"
+  local output="$2"
+  local validation_output=""
+  local status=0
+  set +e
+  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" python3 -c '
+import json
+import os
+import sys
+
+slug = os.environ["CRABBOX_SMOKE_SLUG"]
+try:
+    payload = json.load(sys.stdin)
+except Exception as exc:
+    print(f"invalid JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+for item in payload:
+    name = str(item.get("name", ""))
+    display_name = str(item.get("displayName", ""))
+    if slug in name or slug in display_name:
+        print(f"remote Codespaces inventory still included slug {slug}", file=sys.stderr)
+        sys.exit(1)
+' <<<"$output" 2>&1)"
+  status=$?
+  set -e
+  if [[ "$status" -ne 0 ]]; then
+    classify_validation_failure "$command" "$status" "$validation_output"
+    exit "$status"
+  fi
+}
+
+remote_codespace_names_for_slug() {
+  CRABBOX_SMOKE_SLUG="$slug" python3 -c '
+import json
+import os
+import sys
+
+slug = os.environ["CRABBOX_SMOKE_SLUG"]
+for item in json.load(sys.stdin):
+    name = str(item.get("name", ""))
+    display_name = str(item.get("displayName", ""))
+    if name and (slug in name or slug in display_name):
+        print(name)
+'
+}
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 cleanup_armed=0
-slug="github-codespaces-smoke-$(date +%Y%m%d%H%M%S)-$$"
+slug="gcs-$(date +%Y%m%d%H%M%S)-$$"
 crabbox_bin="${CRABBOX_BIN:-bin/crabbox}"
 
 cleanup() {
@@ -166,9 +214,7 @@ cleanup() {
     cleanup_output="$("$crabbox_bin" stop --provider github-codespaces "$slug" 2>&1)"
     cleanup_status=$?
     set -e
-    if [[ "$cleanup_status" -eq 0 ]]; then
-      cleanup_armed=0
-    else
+    if [[ "$cleanup_status" -ne 0 ]]; then
       printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "$crabbox_bin stop --provider github-codespaces $slug" "$cleanup_status" "$slug" >&2
       redact_output "$cleanup_output" >&2
       printf '\n' >&2
@@ -176,6 +222,39 @@ cleanup() {
         status="$cleanup_status"
       fi
     fi
+
+    local remote_output=""
+    local remote_status=0
+    set +e
+    remote_output="$("$gh_bin" codespace list --repo "$repo" --limit 100 --json name,displayName 2>&1)"
+    remote_status=$?
+    set -e
+    if [[ "$remote_status" -eq 0 ]]; then
+      local remote_name=""
+      while IFS= read -r remote_name; do
+        [[ -n "$remote_name" ]] || continue
+        set +e
+        cleanup_output="$("$gh_bin" codespace delete --codespace "$remote_name" --force 2>&1)"
+        cleanup_status=$?
+        set -e
+        if [[ "$cleanup_status" -ne 0 ]]; then
+          printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "$gh_bin codespace delete --codespace $remote_name --force" "$cleanup_status" "$slug" >&2
+          redact_output "$cleanup_output" >&2
+          printf '\n' >&2
+          if [[ "$status" -eq 0 ]]; then
+            status="$cleanup_status"
+          fi
+        fi
+      done < <(printf '%s' "$remote_output" | remote_codespace_names_for_slug)
+    else
+      printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "$gh_bin codespace list --repo $repo --limit 100 --json name,displayName" "$remote_status" "$slug" >&2
+      redact_output "$remote_output" >&2
+      printf '\n' >&2
+      if [[ "$status" -eq 0 ]]; then
+        status="$remote_status"
+      fi
+    fi
+    cleanup_armed=0
   fi
   exit "$status"
 }
@@ -242,11 +321,14 @@ fi
 
 ref="${CRABBOX_GITHUB_CODESPACES_SMOKE_REF:-${CRABBOX_GITHUB_CODESPACES_REF:-main}}"
 machine="${CRABBOX_GITHUB_CODESPACES_SMOKE_MACHINE:-${CRABBOX_GITHUB_CODESPACES_MACHINE:-basicLinux32gb}}"
-devcontainer="${CRABBOX_GITHUB_CODESPACES_SMOKE_DEVCONTAINER_PATH:-${CRABBOX_GITHUB_CODESPACES_DEVCONTAINER_PATH:-.devcontainer/devcontainer.json}}"
+devcontainer="${CRABBOX_GITHUB_CODESPACES_SMOKE_DEVCONTAINER_PATH:-${CRABBOX_GITHUB_CODESPACES_DEVCONTAINER_PATH:-scripts/fixtures/github-codespaces/devcontainer.json}}"
 working_directory="${CRABBOX_GITHUB_CODESPACES_SMOKE_WORKING_DIRECTORY:-${CRABBOX_GITHUB_CODESPACES_WORKING_DIRECTORY:-}}"
 geo="${CRABBOX_GITHUB_CODESPACES_SMOKE_GEO:-${CRABBOX_GITHUB_CODESPACES_GEO:-}}"
 
-provider_args=(--provider github-codespaces --github-codespaces-repo "$repo" --github-codespaces-ref "$ref" --github-codespaces-machine "$machine" --github-codespaces-devcontainer-path "$devcontainer" --github-codespaces-delete-on-release=true)
+provider_args=(--provider github-codespaces --github-codespaces-repo "$repo" --github-codespaces-ref "$ref" --github-codespaces-machine "$machine" --github-codespaces-delete-on-release=true)
+if [[ -n "$devcontainer" ]]; then
+  provider_args+=(--github-codespaces-devcontainer-path "$devcontainer")
+fi
 if [[ -n "$working_directory" ]]; then
   provider_args+=(--github-codespaces-working-directory "$working_directory")
 fi
@@ -280,10 +362,12 @@ list_output="$(run_capture "$crabbox_bin list --provider github-codespaces --jso
 validate_list_json_contains_slug "$crabbox_bin list --provider github-codespaces --json" "$list_output"
 
 run_capture "$crabbox_bin stop --provider github-codespaces $slug" "$crabbox_bin" stop --provider github-codespaces "$slug" >/dev/null
-cleanup_armed=0
 
 run_capture "$crabbox_bin cleanup --provider github-codespaces --dry-run" "$crabbox_bin" cleanup --provider github-codespaces --dry-run >/dev/null
 final_list="$(run_capture "$crabbox_bin list --provider github-codespaces --json" "$crabbox_bin" list --provider github-codespaces --json)"
 validate_list_json_missing_slug "$crabbox_bin list --provider github-codespaces --json" "$final_list"
+remote_list="$(run_capture "$gh_bin codespace list --repo $repo --limit 100 --json name,displayName" "$gh_bin" codespace list --repo "$repo" --limit 100 --json name,displayName)"
+validate_remote_list_json_missing_slug "$gh_bin codespace list --repo $repo --limit 100 --json name,displayName" "$remote_list"
+cleanup_armed=0
 
 printf 'classification=live_github_codespaces_smoke_passed slug=%s repo=%s machine=%s\n' "$slug" "$repo" "$machine"
