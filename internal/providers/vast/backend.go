@@ -201,8 +201,9 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	fmt.Fprintf(b.stderr(), "provisioning provider=vast lease=%s slug=%s offer=%d gpu=%s count=%d max_dph=%.4f keep=%v\n", leaseID, slug, offer.ID, offer.GPUName, offer.GPUCount, cfg.Vast.MaxDphTotal, req.Keep)
-	created, err := client.CreateInstance(ctx, offer.ID, vastCreateInstanceInput{
+	askID := vastOfferAskID(offer)
+	fmt.Fprintf(b.stderr(), "provisioning provider=vast lease=%s slug=%s offer=%d gpu=%s count=%d max_dph=%.4f keep=%v\n", leaseID, slug, askID, offer.GPUName, offer.GPUCount, cfg.Vast.MaxDphTotal, req.Keep)
+	created, err := client.CreateInstance(ctx, askID, vastCreateInstanceInput{
 		Config:      cfg.Vast,
 		Label:       label,
 		SSHKey:      publicKey,
@@ -233,7 +234,7 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	instance.Label = readyLabel
 	server := serverFromInstance(instance, cfg)
 	server.Labels = vastLeaseLabels(cfg, leaseID, slug, "ready", req.Keep, now)
-	server.Labels[vastOfferIDLabel] = strconv.Itoa(offer.ID)
+	server.Labels[vastOfferIDLabel] = strconv.Itoa(askID)
 	if keyID != "" {
 		server.Labels[vastKeyIDLabel] = keyID
 	}
@@ -261,14 +262,18 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 
 func selectVastOffer(offers []vastOffer) (vastOffer, error) {
 	for _, offer := range offers {
-		if offer.ID != 0 && offer.Rentable && !offer.Rented {
+		if vastOfferAskID(offer) != 0 && offer.Rentable && !offer.Rented {
 			return offer, nil
 		}
 	}
-	if len(offers) > 0 && offers[0].ID != 0 {
+	if len(offers) > 0 && vastOfferAskID(offers[0]) != 0 {
 		return offers[0], nil
 	}
 	return vastOffer{}, exit(4, "vast found no eligible offers")
+}
+
+func vastOfferAskID(offer vastOffer) int {
+	return firstNonZero(offer.AskID, offer.ID)
 }
 
 func vastAttachedKeyID(resp vastAttachSSHKeyResponse) string {

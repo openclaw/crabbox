@@ -255,7 +255,7 @@ func TestListFiltersOwnedByDefaultAndAllShowsManual(t *testing.T) {
 }
 
 func TestAcquireCreatesAttachesPollsReadinessAndClaims(t *testing.T) {
-	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, GPUName: "RTX 4090", GPUCount: 1, Rentable: true}}}
+	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, AskID: 84, GPUName: "RTX 4090", GPUCount: 1, Rentable: true}}}
 	b := newTestBackend(t, api)
 	var readyTarget core.SSHTarget
 	b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ string, _ time.Duration) error {
@@ -278,7 +278,7 @@ func TestAcquireCreatesAttachesPollsReadinessAndClaims(t *testing.T) {
 	if len(api.searches) != 1 || api.searches[0].Config.Order != "dlperf_per_dphtotal desc" {
 		t.Fatalf("searches=%#v", api.searches)
 	}
-	if len(api.creates) != 1 || api.creates[0].offerID != 42 || api.creates[0].input.Config.Runtype != "ssh_direct" || api.creates[0].input.Environment["CRABBOX"] != "1" {
+	if len(api.creates) != 1 || api.creates[0].offerID != 84 || api.creates[0].input.Config.Runtype != "ssh_direct" || api.creates[0].input.Environment["CRABBOX"] != "1" {
 		t.Fatalf("creates=%#v", api.creates)
 	}
 	if !isVastCrabboxOwnedLabel(api.creates[0].input.Label) || api.creates[0].input.SSHKey == "" {
@@ -291,7 +291,7 @@ func TestAcquireCreatesAttachesPollsReadinessAndClaims(t *testing.T) {
 		t.Fatalf("managed=%#v", api.managed)
 	}
 	claim, ok, err := core.ResolveLeaseClaimForProvider("gpu-box", providerName)
-	if err != nil || !ok || claim.CloudID != "100" || claim.Labels[vastKeyIDLabel] != "key-100" || claim.Labels[vastReleaseActionLabel] != "destroy" {
+	if err != nil || !ok || claim.CloudID != "100" || claim.Labels[vastOfferIDLabel] != "84" || claim.Labels[vastKeyIDLabel] != "key-100" || claim.Labels[vastReleaseActionLabel] != "destroy" {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 }
