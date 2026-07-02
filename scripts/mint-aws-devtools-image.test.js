@@ -75,10 +75,13 @@ case "$1" in
     fi
     printf 'devtools-smoke-ok\\n'
     ;;
-  image)
+  checkpoint)
     if [[ "$2" == "create" ]]; then
-      printf '{"id":"ami-devtools"}\\n'
-    elif [[ "$2" == "promote" ]]; then
+      printf 'checkpoint created id=chk_devtools kind=aws-ami resource=ami-devtools state=available region=us-west-2 workdir=-\\n'
+    fi
+    ;;
+  image)
+    if [[ "$2" == "promote" ]]; then
       printf '{"image":{"id":"ami-devtools"}}\\n'
     fi
     ;;
@@ -164,7 +167,8 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.doesNotMatch(log, /warmup .*--region us-west-2/);
   assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --script/);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
-  assert.match(log, /image create --id cbx_source --name crabbox-linux-devtools-/);
+  assert.match(log, /env CRABBOX_AWS_REGION=us-west-2 AWS_REGION=us-west-2 CRABBOX_AWS_AMI= args checkpoint create --provider aws --target linux --id cbx_source --name crabbox-linux-devtools-/);
+  assert.match(log, /--mode native --strategy image --no-reboot=false --wait --wait-timeout 60m/);
   assert.match(log, /image promote --target linux --json --region us-west-2 --fast-snapshot-restore --fsr-az us-west-2a ami-devtools/);
 });
 
@@ -376,7 +380,7 @@ test("AWS devtools mint wrapper retries windows prep upload disconnects", async 
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- Write-Output "windows-ssh-ready"/);
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- if \(Test-Path/);
   assert.match(log, /run --provider aws --target windows --id cbx_source --no-sync --shell -- shutdown \/r \/t 5 \/f/);
-  assert.match(log, /image create --id cbx_source --name crabbox-windows-devtools-/);
+  assert.match(log, /checkpoint create --provider aws --target windows --id cbx_source --name crabbox-windows-devtools-/);
 });
 
 test("AWS devtools mint wrapper cleans up lease when warmup fails after allocation", async () => {

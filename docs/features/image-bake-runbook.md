@@ -288,6 +288,11 @@ scripts/mint-aws-devtools-image.sh \
   --run
 ```
 
+The wrapper captures its candidate through `crabbox checkpoint create`, so the
+same source/candidate proof works with direct AWS credentials and with an
+admin-authenticated broker. Promotion updates broker-managed image defaults;
+use `--no-promote` when validating a direct-only AWS configuration.
+
 Enable FSR for hot lanes that need lower first-boot variance, in the AZs you
 actually launch from:
 
