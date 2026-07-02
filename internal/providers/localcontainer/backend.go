@@ -161,6 +161,17 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, err
 	}
 	cfg := b.configForRun()
+	readOnlyStatus := req.StatusOnly && !req.ReleaseOnly
+	if strings.TrimSpace(leaseID) == "" && (!readOnlyStatus || req.Reclaim) {
+		return core.LeaseTarget{}, localContainerOwnershipError(leaseID, container.ID)
+	}
+	owned, conflict, err := b.localContainerClaimStatus(ctx, leaseID, container.ID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if (conflict && (!readOnlyStatus || req.Reclaim)) || (!owned && !readOnlyStatus && (req.ReleaseOnly || !req.Reclaim)) {
+		return core.LeaseTarget{}, localContainerOwnershipError(leaseID, container.ID)
+	}
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: b.serverFromContainer(container, cfg), LeaseID: leaseID}, nil
 	}
@@ -168,8 +179,8 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if req.Repo.Root != "" && (!readOnlyStatus || req.Reclaim) {
+		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -238,6 +249,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if id == "" {
 		return core.Exit(2, "provider=%s release requires a container id", providerName)
 	}
+	if err := b.requireExactLocalContainerClaim(ctx, lease.LeaseID, id); err != nil {
+		return err
+	}
 	hostLeaseRoot := hostLeaseWorkRoot(lease)
 	bootstrapDir := strings.TrimSpace(lease.Server.Labels["bootstrap_dir"])
 	if err := b.removeContainer(ctx, id); err != nil {
@@ -256,6 +270,45 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	core.RemoveStoredTestboxKey(lease.LeaseID)
 	if cleanupErr != nil {
 		return core.Exit(2, "remove local-container host work root %s: %v", hostLeaseRoot, cleanupErr)
+	}
+	return nil
+}
+
+func (b *backend) localContainerClaimStatus(ctx context.Context, leaseID, containerID string) (owned, conflict bool, err error) {
+	leaseID = strings.TrimSpace(leaseID)
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
+	if err != nil {
+		return false, false, err
+	}
+	if !ok || !exact || claim.LeaseID != leaseID {
+		return false, false, nil
+	}
+	claimScope := strings.TrimSpace(claim.ProviderScope)
+	currentScope := strings.TrimSpace(b.claimScope(ctx))
+	claimCloudID := strings.TrimSpace(claim.CloudID)
+	if claimScope != "" && claimScope != currentScope {
+		return false, true, nil
+	}
+	if claimCloudID != "" && claimCloudID != strings.TrimSpace(containerID) {
+		return false, true, nil
+	}
+	if claimScope == "" || currentScope == "" || claimCloudID == "" {
+		return false, false, nil
+	}
+	return true, false, nil
+}
+
+func localContainerOwnershipError(leaseID, containerID string) error {
+	return core.Exit(4, "local-container lease %q has no exact local claim bound to container %q in the current runtime scope; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(containerID))
+}
+
+func (b *backend) requireExactLocalContainerClaim(ctx context.Context, leaseID, containerID string) error {
+	owned, _, err := b.localContainerClaimStatus(ctx, leaseID, containerID)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return localContainerOwnershipError(leaseID, containerID)
 	}
 	return nil
 }
@@ -1057,11 +1110,29 @@ func (b *backend) findContainerForClaim(ctx context.Context, claim core.LeaseCla
 	if err != nil {
 		return inspectContainer{}, "", "", err
 	}
+	if boundID := strings.TrimSpace(claim.CloudID); boundID != "" {
+		for _, container := range containers {
+			if strings.TrimSpace(container.ID) == boundID {
+				labels := container.Config.Labels
+				return container, firstNonBlank(claim.LeaseID, labels["lease"]), firstNonBlank(claim.Slug, labels["slug"]), nil
+			}
+		}
+		return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", firstNonBlank(claim.Slug, claim.LeaseID))
+	}
+	var matched *inspectContainer
 	for _, container := range containers {
 		labels := container.Config.Labels
 		if labels["lease"] == claim.LeaseID {
-			return container, labels["lease"], labels["slug"], nil
+			if matched != nil {
+				return inspectContainer{}, "", "", core.Exit(2, "local-container lease %s matches multiple containers; reclaim by exact container id", claim.LeaseID)
+			}
+			candidate := container
+			matched = &candidate
 		}
+	}
+	if matched != nil {
+		labels := matched.Config.Labels
+		return *matched, labels["lease"], labels["slug"], nil
 	}
 	return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", firstNonBlank(claim.Slug, claim.LeaseID))
 }

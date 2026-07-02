@@ -582,6 +582,239 @@ func TestRemoveContainerUsesDeleteForce(t *testing.T) {
 	}
 }
 
+func TestRequireExactAppleContainerClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_claimed_apple_container"
+	if err := requireExactAppleContainerClaim(leaseID, "owned-container"); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("unclaimed error=%v, want exact-claim rejection", err)
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+		leaseID,
+		"claimed-apple-container",
+		providerName,
+		"",
+		"",
+		t.TempDir(),
+		time.Minute,
+		false,
+		core.Server{CloudID: "owned-container", Provider: providerName, Labels: map[string]string{"provider": providerName, "slug": "claimed-apple-container"}},
+		core.SSHTarget{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireExactAppleContainerClaim(leaseID, "other-container"); err == nil || !strings.Contains(err.Error(), "bound to container") {
+		t.Fatalf("mismatched container error=%v, want resource-binding rejection", err)
+	}
+	if err := requireExactAppleContainerClaim(leaseID, "owned-container"); err != nil {
+		t.Fatalf("claimed lease rejected: %v", err)
+	}
+}
+
+func TestResolveRawAppleContainerRequiresExplicitReclaimAndPersistsBinding(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container resolve only runs on macOS/Apple silicon")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ls", "--all", "--format", "json"}):          {Stdout: sampleInspectJSON("raw-apple-container", "raw-apple", "cbx_raw_apple")},
+		commandKey([]string{"delete", "--force", "raw-apple-container"}): {},
+	}}
+	b := testBackend(runner)
+	repo := core.Repo{Root: t.TempDir()}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "raw-apple-container", Repo: repo}); err == nil || !strings.Contains(err.Error(), "explicit --reclaim") {
+		t.Fatalf("Resolve without reclaim error=%v", err)
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_raw_apple"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("non-reclaim resolve minted claim: %#v", claim)
+	}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "raw-apple-container", Repo: repo, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim("cbx_raw_apple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.CloudID != "raw-apple-container" {
+		t.Fatalf("reclaim binding=%#v", claim)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if !commandWasCalled(runner.calls, "delete") {
+		t.Fatalf("reclaimed container was not released: %#v", runner.calls)
+	}
+}
+
+func TestLegacyAppleContainerClaimRequiresReclaimBeforeStop(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container resolve only runs on macOS/Apple silicon")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_legacy_apple"
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "legacy-apple", providerName, "", "", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ls", "--all", "--format", "json"}):             {Stdout: sampleInspectJSON("legacy-apple-container", "legacy-apple", leaseID)},
+		commandKey([]string{"delete", "--force", "legacy-apple-container"}): {},
+	}}
+	b := testBackend(runner)
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: "legacy-apple-container"}}}); err == nil || !strings.Contains(err.Error(), "explicit --reclaim") {
+		t.Fatalf("legacy direct stop error=%v", err)
+	}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.CloudID != "legacy-apple-container" {
+		t.Fatalf("legacy reclaim binding=%#v", claim)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveReclaimDoesNotRetargetBoundAppleContainerClaim(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container resolve only runs on macOS/Apple silicon")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_bound_apple"
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+		leaseID,
+		"bound-apple",
+		providerName,
+		"",
+		"",
+		t.TempDir(),
+		time.Minute,
+		false,
+		core.Server{CloudID: "container-a", Provider: providerName, Labels: map[string]string{"provider": providerName, "slug": "bound-apple"}},
+		core.SSHTarget{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	listJSON := `[
+		{"status":"running","configuration":{"id":"container-b","image":{"reference":"debian:bookworm"},"labels":{"crabbox":"true","provider":"apple-container","lease":"cbx_bound_apple","slug":"bound-apple","state":"ready","ssh_user":"runner","work_root":"/work/crabbox"}},"networks":[{"address":"192.168.64.8/24"}]},
+		{"status":"running","configuration":{"id":"container-a","image":{"reference":"debian:bookworm"},"labels":{"crabbox":"true","provider":"apple-container","lease":"cbx_stale_label","slug":"stale-label","state":"ready","ssh_user":"runner","work_root":"/work/crabbox"}},"networks":[{"address":"192.168.64.7/24"}]}
+	]`
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ls", "--all", "--format", "json"}): {Stdout: listJSON},
+	}}
+	b := testBackend(runner)
+	repo := core.Repo{Root: t.TempDir()}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: repo, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "container-a" || lease.LeaseID != leaseID {
+		t.Fatalf("exact claim resolved container=%q lease=%q, want container-a/%s", lease.Server.CloudID, lease.LeaseID, leaseID)
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "container-b", Repo: repo, Reclaim: true}); err == nil || !strings.Contains(err.Error(), "bound to container") {
+		t.Fatalf("raw conflicting reclaim error=%v", err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.CloudID != "container-a" {
+		t.Fatalf("bound claim was retargeted: %#v", claim)
+	}
+}
+
+func TestResolveStatusOnlyAllowsClaimlessAppleContainerWithoutClaiming(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container resolve only runs on macOS/Apple silicon")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ls", "--all", "--format", "json"}): {Stdout: sampleInspectJSON("status-apple", "status-apple", "cbx_status_apple")},
+	}}
+	b := testBackend(runner)
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-apple", Repo: core.Repo{Root: t.TempDir()}, StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "status-apple" {
+		t.Fatalf("status lease=%#v", lease)
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_status_apple"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("status-only resolve minted claim: %#v", claim)
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+		"cbx_status_apple",
+		"status-apple",
+		providerName,
+		"",
+		"",
+		t.TempDir(),
+		time.Minute,
+		false,
+		lease.Server,
+		lease.SSH,
+	); err != nil {
+		t.Fatal(err)
+	}
+	before, err := core.ReadLeaseClaim("cbx_status_apple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-apple", Repo: core.Repo{Root: t.TempDir()}, StatusOnly: true}); err != nil {
+		t.Fatalf("owned status-only resolve: %v", err)
+	}
+	after, err := core.ReadLeaseClaim("cbx_status_apple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.RepoRoot != before.RepoRoot || after.LastUsedAt != before.LastUsedAt || after.CloudID != before.CloudID {
+		t.Fatalf("status-only resolve mutated claim: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestResolveReclaimRejectsMetadataLessAppleContainer(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container resolve only runs on macOS/Apple silicon")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ls", "--all", "--format", "json"}): {Stdout: sampleInspectJSON("metadata-less", "", "")},
+	}}
+	b := testBackend(runner)
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "metadata-less", Repo: core.Repo{Root: t.TempDir()}, Reclaim: true}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("metadata-less reclaim error=%v", err)
+	}
+}
+
+func TestReleaseLeaseRejectsUnclaimedContainer(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container release only runs on macOS/Apple silicon")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"delete", "--force", "unclaimed-container"}): {},
+	}}
+	b := testBackend(runner)
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: "cbx_unclaimed_apple_container",
+		Server:  core.Server{CloudID: "unclaimed-container"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("ReleaseLease error=%v, want exact-claim rejection", err)
+	}
+	if commandWasCalled(runner.calls, "delete") {
+		t.Fatalf("unclaimed container reached delete: %#v", runner.calls)
+	}
+}
+
 func TestDoctorReportsMissingCLI(t *testing.T) {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		t.Skip("doctor CLI probe only exercised on macOS/Apple silicon")

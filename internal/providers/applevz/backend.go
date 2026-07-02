@@ -222,11 +222,19 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	slug := firstNonBlank(claim.Slug, inst.Slug)
 	claim.LeaseID = leaseID
 	claim.Slug = slug
+	if leaseID == "" {
+		return core.LeaseTarget{}, exit(4, "apple-vz instance %q has no Crabbox lease metadata; clean it up with `crabbox cleanup --provider apple-vz`", inst.Name)
+	}
+	owned, conflict, err := appleVZClaimStatus(leaseID, inst.Name)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	readOnlyStatus := req.StatusOnly && !req.ReleaseOnly
+	if (conflict && (!readOnlyStatus || req.Reclaim)) || (!owned && !readOnlyStatus && (req.ReleaseOnly || !req.Reclaim)) {
+		return core.LeaseTarget{}, appleVZOwnershipError(leaseID, inst.Name)
+	}
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: leaseID}, nil
-	}
-	if leaseID == "" {
-		return core.LeaseTarget{}, exit(4, "apple-vz instance %q has no Crabbox lease metadata; stop it with `crabbox stop --provider apple-vz %s`", inst.Name, inst.Name)
 	}
 	if !appleVZRunning(inst.Status) && !req.StatusOnly {
 		return core.LeaseTarget{}, exit(5, "apple-vz instance %s is %s; start a new lease with `crabbox run` or clean it up with `crabbox cleanup --provider apple-vz`", inst.Name, core.Blank(inst.Status, "stopped"))
@@ -238,7 +246,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" {
+	if req.Repo.Root != "" && (!readOnlyStatus || req.Reclaim) {
 		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -326,6 +334,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		}
 	}
 	if name != "" {
+		if err := requireExactAppleVZClaim(leaseID, name); err != nil {
+			return err
+		}
 		if err := b.deleteInstance(ctx, cfg, name); err != nil {
 			return err
 		}
@@ -336,6 +347,43 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	if name == "" && leaseID == "" {
 		return exit(2, "provider=%s release requires an apple-vz instance name or lease id", providerName)
+	}
+	return nil
+}
+
+func appleVZClaimStatus(leaseID, instanceName string) (owned, conflict bool, err error) {
+	leaseID = strings.TrimSpace(leaseID)
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
+	if err != nil {
+		return false, false, err
+	}
+	if !ok || !exact || claim.LeaseID != leaseID {
+		return false, false, nil
+	}
+	binding := strings.TrimSpace(claim.ProviderScope)
+	if binding == "" {
+		binding = strings.TrimSpace(claim.Labels["instance"])
+	}
+	if binding == "" {
+		return false, false, nil
+	}
+	if binding != instanceScope(instanceName) {
+		return false, true, nil
+	}
+	return true, false, nil
+}
+
+func appleVZOwnershipError(leaseID, instanceName string) error {
+	return exit(4, "apple-vz lease %q has no exact local claim bound to instance %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName))
+}
+
+func requireExactAppleVZClaim(leaseID, instanceName string) error {
+	owned, _, err := appleVZClaimStatus(leaseID, instanceName)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return appleVZOwnershipError(leaseID, instanceName)
 	}
 	return nil
 }
@@ -650,14 +698,43 @@ func (b *backend) resolveInstance(ctx context.Context, cfg core.Config, identifi
 	if err != nil {
 		return applevzhelper.Instance{}, core.LeaseClaim{}, err
 	}
+	requestedClaim, hasRequestedClaim, err := core.ResolveLeaseClaimForProvider(identifier, providerName)
+	if err != nil {
+		return applevzhelper.Instance{}, core.LeaseClaim{}, err
+	}
+	if hasRequestedClaim {
+		boundName := strings.TrimSpace(requestedClaim.ProviderScope)
+		if boundName == "" {
+			boundName = strings.TrimSpace(requestedClaim.Labels["instance"])
+		}
+		if boundName != "" {
+			for _, inst := range instances {
+				if inst.Name == boundName {
+					return inst, requestedClaim, nil
+				}
+			}
+			return applevzhelper.Instance{}, requestedClaim, &missingInstanceError{
+				err: exit(4, "apple-vz lease %q points to a missing instance; run `crabbox cleanup --provider apple-vz`", identifier),
+			}
+		}
+	}
+	var matched *applevzhelper.Instance
+	var matchedClaim core.LeaseClaim
 	for _, inst := range instances {
 		claim := claims[inst.Name]
 		if inst.Name == identifier || inst.LeaseID == identifier || inst.Slug == identifier || claim.LeaseID == identifier || claim.Slug == identifier {
-			return inst, claim, nil
+			if matched != nil {
+				return applevzhelper.Instance{}, core.LeaseClaim{}, exit(2, "apple-vz identifier %s matches multiple instances; use an exact claimed instance name", identifier)
+			}
+			candidate := inst
+			matched, matchedClaim = &candidate, claim
 		}
 	}
-	if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err == nil && ok {
-		return applevzhelper.Instance{}, claim, &missingInstanceError{
+	if matched != nil {
+		return *matched, matchedClaim, nil
+	}
+	if hasRequestedClaim {
+		return applevzhelper.Instance{}, requestedClaim, &missingInstanceError{
 			err: exit(4, "apple-vz lease %q points to a missing instance; run `crabbox cleanup --provider apple-vz`", identifier),
 		}
 	}

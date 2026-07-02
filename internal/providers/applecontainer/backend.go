@@ -161,6 +161,12 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return core.LeaseTarget{}, err
 	}
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
+		if !req.Keep {
+			_ = b.removeContainer(context.Background(), containerID)
+		}
+		return core.LeaseTarget{}, err
+	}
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s container=%s state=ready\n", leaseID, c.id())
 	return lease, nil
@@ -175,6 +181,17 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	readOnlyStatus := req.StatusOnly && !req.ReleaseOnly
+	if strings.TrimSpace(leaseID) == "" && (!readOnlyStatus || req.Reclaim) {
+		return core.LeaseTarget{}, appleContainerOwnershipError(leaseID, c.id())
+	}
+	owned, conflict, err := appleContainerClaimStatus(leaseID, c.id())
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if (conflict && (!readOnlyStatus || req.Reclaim)) || (!owned && !readOnlyStatus && (req.ReleaseOnly || !req.Reclaim)) {
+		return core.LeaseTarget{}, appleContainerOwnershipError(leaseID, c.id())
+	}
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: b.serverFromContainer(c, cfg), LeaseID: leaseID}, nil
 	}
@@ -182,8 +199,8 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, "", cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if req.Repo.Root != "" && (!readOnlyStatus || req.Reclaim) {
+		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, "", cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -252,11 +269,48 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if id == "" {
 		return exit(2, "provider=%s release requires a container id", providerName)
 	}
+	if err := requireExactAppleContainerClaim(lease.LeaseID, id); err != nil {
+		return err
+	}
 	if err := b.removeContainer(ctx, id); err != nil {
 		return err
 	}
 	core.RemoveLeaseClaim(lease.LeaseID)
 	core.RemoveStoredTestboxKey(lease.LeaseID)
+	return nil
+}
+
+func appleContainerClaimStatus(leaseID, containerID string) (owned, conflict bool, err error) {
+	leaseID = strings.TrimSpace(leaseID)
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
+	if err != nil {
+		return false, false, err
+	}
+	if !ok || !exact || claim.LeaseID != leaseID {
+		return false, false, nil
+	}
+	boundID := strings.TrimSpace(claim.CloudID)
+	if boundID == "" {
+		return false, false, nil
+	}
+	if boundID != strings.TrimSpace(containerID) {
+		return false, true, nil
+	}
+	return true, false, nil
+}
+
+func appleContainerOwnershipError(leaseID, containerID string) error {
+	return exit(4, "apple-container lease %q has no exact local claim bound to container %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(containerID))
+}
+
+func requireExactAppleContainerClaim(leaseID, containerID string) error {
+	owned, _, err := appleContainerClaimStatus(leaseID, containerID)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return appleContainerOwnershipError(leaseID, containerID)
+	}
 	return nil
 }
 
@@ -569,10 +623,12 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 	if identifier == "" {
 		return inspectContainer{}, "", "", exit(2, "provider=%s requires --id <lease-id-or-slug-or-container>", providerName)
 	}
+	var resolvedClaim core.LeaseClaim
 	var wantLease, wantSlug string
 	if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
 		return inspectContainer{}, "", "", err
 	} else if ok {
+		resolvedClaim = claim
 		wantLease = claim.LeaseID
 		wantSlug = claim.Slug
 	}
@@ -580,16 +636,37 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 	if err != nil {
 		return inspectContainer{}, "", "", err
 	}
+	if boundID := strings.TrimSpace(resolvedClaim.CloudID); boundID != "" {
+		for _, c := range containers {
+			if c.id() == boundID {
+				labels := c.labels()
+				return c, firstNonBlank(resolvedClaim.LeaseID, labels["lease"]), firstNonBlank(resolvedClaim.Slug, labels["slug"]), nil
+			}
+		}
+		return inspectContainer{}, "", "", exit(4, "apple-container lease not found: %s", identifier)
+	}
 	normalized := core.NormalizeLeaseSlug(identifier)
+	var matched *inspectContainer
+	var matchedLease, matchedSlug string
 	for _, c := range containers {
 		labels := c.labels()
 		leaseID := labels["lease"]
 		slug := labels["slug"]
 		if wantLease != "" && leaseID == wantLease {
-			return c, leaseID, slug, nil
+			if matched != nil {
+				return inspectContainer{}, "", "", exit(2, "apple-container lease %s matches multiple containers; use an exact claimed container id", wantLease)
+			}
+			candidate := c
+			matched, matchedLease, matchedSlug = &candidate, leaseID, slug
+			continue
 		}
 		if wantSlug != "" && core.NormalizeLeaseSlug(slug) == core.NormalizeLeaseSlug(wantSlug) {
-			return c, leaseID, slug, nil
+			if matched != nil {
+				return inspectContainer{}, "", "", exit(2, "apple-container slug %s matches multiple containers; use a lease id", wantSlug)
+			}
+			candidate := c
+			matched, matchedLease, matchedSlug = &candidate, leaseID, slug
+			continue
 		}
 		if wantLease != "" || wantSlug != "" {
 			continue
@@ -597,6 +674,9 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 		if c.id() == identifier || leaseID == identifier || (normalized != "" && core.NormalizeLeaseSlug(slug) == normalized) {
 			return c, leaseID, slug, nil
 		}
+	}
+	if matched != nil {
+		return *matched, matchedLease, matchedSlug, nil
 	}
 	return inspectContainer{}, "", "", exit(4, "apple-container lease not found: %s", identifier)
 }

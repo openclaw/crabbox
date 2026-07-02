@@ -1630,6 +1630,8 @@ func TestListAndResolveContainers(t *testing.T) {
 			commandKey([]string{"inspect", "abcdef1234567890"}): {Stdout: inspectJSON},
 		},
 	}
+	addDefaultLocalContainerScopeResponses(runner)
+	writeLocalContainerReleaseClaim(t, "cbx_123", "abcdef1234567890")
 	b := testBackend(runner)
 
 	views, err := b.List(context.Background(), core.ListRequest{})
@@ -1755,12 +1757,226 @@ func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 			commandKey([]string{"rm", "-f", "container123"}): {},
 		},
 	}
+	addDefaultLocalContainerScopeResponses(runner)
+	writeLocalContainerReleaseClaim(t, "cbx_release", "container123")
 	b := testBackend(runner)
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_release", Server: core.Server{CloudID: "container123"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("stored key still exists after release: %v", err)
+	}
+}
+
+func TestReleaseLeaseRejectsUnclaimedContainer(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"rm", "-f", "unclaimed-container"}): {},
+	}}
+	b := testBackend(runner)
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: "cbx_unclaimed_local_container",
+		Server:  core.Server{CloudID: "unclaimed-container"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("ReleaseLease error=%v, want exact-claim rejection", err)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "rm" {
+			t.Fatalf("unclaimed container reached rm: %#v", runner.calls)
+		}
+	}
+}
+
+func TestReleaseLeaseRejectsClaimBoundToDifferentContainerOrScope(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		claimID    string
+		claimScope string
+		targetID   string
+	}{
+		{name: "container", claimID: "owned-container", claimScope: "runtime:docker/context:default", targetID: "other-container"},
+		{name: "runtime scope", claimID: "owned-container", claimScope: "runtime:docker/context:remote", targetID: "owned-container"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+			addDefaultLocalContainerScopeResponses(runner)
+			writeLocalContainerReleaseClaimWithScope(t, "cbx_bound_local_container", tc.claimID, tc.claimScope)
+			b := testBackend(runner)
+			err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+				LeaseID: "cbx_bound_local_container",
+				Server:  core.Server{CloudID: tc.targetID},
+			}})
+			if err == nil || !strings.Contains(err.Error(), "current runtime scope") {
+				t.Fatalf("ReleaseLease error=%v, want resource-binding rejection", err)
+			}
+			for _, call := range runner.calls {
+				if len(call.Args) > 0 && call.Args[0] == "rm" {
+					t.Fatalf("mismatched claim reached rm: %#v", runner.calls)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveRawContainerRequiresExplicitReclaimAndPersistsBinding(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	inspectJSON := `[{
+		"Id":"raw-container",
+		"Name":"/crabbox-raw",
+		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_raw_local","slug":"raw-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},
+		"State":{"Status":"running","Running":true},
+		"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49155"}]}}
+	}]`
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "raw-container\n"},
+		commandKey([]string{"inspect", "raw-container"}):  {Stdout: inspectJSON},
+		commandKey([]string{"rm", "-f", "raw-container"}): {},
+	}}
+	addDefaultLocalContainerScopeResponses(runner)
+	b := testBackend(runner)
+	repo := core.Repo{Root: t.TempDir()}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "raw-container", Repo: repo}); err == nil || !strings.Contains(err.Error(), "explicit --reclaim") {
+		t.Fatalf("Resolve without reclaim error=%v", err)
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_raw_local"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("non-reclaim resolve minted claim: %#v", claim)
+	}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "raw-container", Repo: repo, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim("cbx_raw_local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.CloudID != "raw-container" || claim.ProviderScope != "runtime:docker/context:default" {
+		t.Fatalf("reclaim binding=%#v", claim)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(runner.calls, func(call core.LocalCommandRequest) bool {
+		return commandKey(call.Args) == commandKey([]string{"rm", "-f", "raw-container"})
+	}) {
+		t.Fatalf("reclaimed container was not released: %#v", runner.calls)
+	}
+}
+
+func TestLegacyLocalContainerClaimRequiresReclaimBeforeStop(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_legacy_local"
+	if err := writeLocalContainerClaim(t, leaseID, "legacy-local", "runtime:docker/context:default", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	inspectJSON := `[{"Id":"legacy-container","Name":"/legacy-container","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_legacy_local","slug":"legacy-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49160"}]}}}]`
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "legacy-container\n"},
+		commandKey([]string{"inspect", "legacy-container"}):  {Stdout: inspectJSON},
+		commandKey([]string{"rm", "-f", "legacy-container"}): {},
+	}}
+	addDefaultLocalContainerScopeResponses(runner)
+	b := testBackend(runner)
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: "legacy-container"}}}); err == nil || !strings.Contains(err.Error(), "explicit --reclaim") {
+		t.Fatalf("legacy direct stop error=%v", err)
+	}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.CloudID != "legacy-container" || claim.ProviderScope != "runtime:docker/context:default" {
+		t.Fatalf("legacy reclaim binding=%#v", claim)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveReclaimDoesNotRetargetBoundLocalContainerClaim(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	addDefaultLocalContainerScopeResponses(runner)
+	writeLocalContainerReleaseClaim(t, "cbx_bound_local", "container-a")
+	inspectA := `[{"Id":"container-a","Name":"/container-a","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_stale_label","slug":"stale-label","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49156"}]}}}]`
+	inspectB := `[{"Id":"container-b","Name":"/container-b","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_bound_local","slug":"bound-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49157"}]}}}]`
+	runner.responses[commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"})] = core.LocalCommandResult{Stdout: "container-b\ncontainer-a\n"}
+	runner.responses[commandKey([]string{"inspect", "container-a"})] = core.LocalCommandResult{Stdout: inspectA}
+	runner.responses[commandKey([]string{"inspect", "container-b"})] = core.LocalCommandResult{Stdout: inspectB}
+	b := testBackend(runner)
+	repo := core.Repo{Root: t.TempDir()}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_bound_local", Repo: repo, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "container-a" || lease.LeaseID != "cbx_bound_local" {
+		t.Fatalf("exact claim resolved container=%q lease=%q, want container-a/cbx_bound_local", lease.Server.CloudID, lease.LeaseID)
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "container-b", Repo: repo, Reclaim: true}); err == nil || !strings.Contains(err.Error(), "bound to container") {
+		t.Fatalf("raw conflicting reclaim error=%v", err)
+	}
+	claim, err := core.ReadLeaseClaim("cbx_bound_local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.CloudID != "container-a" || claim.ProviderScope != "runtime:docker/context:default" {
+		t.Fatalf("bound claim was retargeted: %#v", claim)
+	}
+}
+
+func TestResolveStatusOnlyAllowsClaimlessLocalContainerWithoutClaiming(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	inspectJSON := `[{"Id":"status-container","Name":"/status-container","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_status_local","slug":"status-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49158"}]}}}]`
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "status-container\n"},
+		commandKey([]string{"inspect", "status-container"}): {Stdout: inspectJSON},
+	}}
+	addDefaultLocalContainerScopeResponses(runner)
+	b := testBackend(runner)
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-container", Repo: core.Repo{Root: t.TempDir()}, StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "status-container" {
+		t.Fatalf("status lease=%#v", lease)
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_status_local"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("status-only resolve minted claim: %#v", claim)
+	}
+	writeLocalContainerReleaseClaim(t, "cbx_status_local", "status-container")
+	before, err := core.ReadLeaseClaim("cbx_status_local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-container", Repo: core.Repo{Root: t.TempDir()}, StatusOnly: true}); err != nil {
+		t.Fatalf("owned status-only resolve: %v", err)
+	}
+	after, err := core.ReadLeaseClaim("cbx_status_local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.RepoRoot != before.RepoRoot || after.LastUsedAt != before.LastUsedAt || after.CloudID != before.CloudID || after.ProviderScope != before.ProviderScope {
+		t.Fatalf("status-only resolve mutated claim: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestResolveReclaimRejectsMetadataLessLocalContainer(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	inspectJSON := `[{"Id":"metadata-less","Name":"/metadata-less","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49159"}]}}}]`
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "metadata-less\n"},
+		commandKey([]string{"inspect", "metadata-less"}): {Stdout: inspectJSON},
+	}}
+	addDefaultLocalContainerScopeResponses(runner)
+	b := testBackend(runner)
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "metadata-less", Repo: core.Repo{Root: t.TempDir()}, Reclaim: true}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("metadata-less reclaim error=%v", err)
 	}
 }
 
@@ -1847,6 +2063,9 @@ func TestReleaseLeaseRemovesBootstrapDirAfterContainer(t *testing.T) {
 	}
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if result, ok := defaultLocalContainerScopeResponse(req); ok {
+			return result, nil
+		}
 		if commandKey(req.Args) == commandKey([]string{"rm", "-f", "container123"}) {
 			if _, err := os.Stat(bootstrapDir); err != nil {
 				t.Fatalf("bootstrap directory removed before container teardown: %v", err)
@@ -1854,6 +2073,7 @@ func TestReleaseLeaseRemovesBootstrapDirAfterContainer(t *testing.T) {
 		}
 		return core.LocalCommandResult{}, nil
 	}
+	writeLocalContainerReleaseClaim(t, "cbx_release", "container123")
 	b := testBackend(runner)
 	lease := core.LeaseTarget{
 		LeaseID: "cbx_release",
@@ -1882,6 +2102,8 @@ func TestReleaseLeaseDoesNotRemoveUntrustedBootstrapDir(t *testing.T) {
 			commandKey([]string{"rm", "-f", "container123"}): {},
 		},
 	}
+	addDefaultLocalContainerScopeResponses(runner)
+	writeLocalContainerReleaseClaim(t, "cbx_release", "container123")
 	b := testBackend(runner)
 	lease := core.LeaseTarget{
 		LeaseID: "cbx_release",
@@ -1911,6 +2133,8 @@ func TestReleaseLeaseRemovesDockerSocketHostWorkRoot(t *testing.T) {
 			commandKey([]string{"rm", "-f", "container123"}): {},
 		},
 	}
+	addDefaultLocalContainerScopeResponses(runner)
+	writeLocalContainerReleaseClaim(t, "cbx_release", "container123")
 	b := testBackend(runner)
 	lease := core.LeaseTarget{
 		LeaseID: "cbx_release",
@@ -1954,6 +2178,8 @@ func TestReleaseLeaseWithIDResolvesHostWorkRoot(t *testing.T) {
 			commandKey([]string{"rm", "-f", "container1234567890"}): {},
 		},
 	}
+	addDefaultLocalContainerScopeResponses(runner)
+	writeLocalContainerReleaseClaim(t, "cbx_release", "container1234567890")
 	b := testBackend(runner)
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_release"}}); err != nil {
 		t.Fatal(err)
@@ -2195,6 +2421,49 @@ func writeLocalContainerClaimAndKey(t *testing.T, leaseID, slug string, scopes .
 		scope = scopes[0]
 	}
 	return writeLocalContainerClaimAndKeyAt(t, leaseID, slug, scope, time.Now().UTC(), time.Minute)
+}
+
+func writeLocalContainerReleaseClaim(t *testing.T, leaseID, containerID string) {
+	writeLocalContainerReleaseClaimWithScope(t, leaseID, containerID, "runtime:docker/context:default")
+}
+
+func writeLocalContainerReleaseClaimWithScope(t *testing.T, leaseID, containerID, scope string) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateHome := os.Getenv("XDG_STATE_HOME")
+	claimDir := filepath.Join(stateHome, "crabbox", "claims")
+	if err := os.MkdirAll(claimDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	data := []byte(`{"leaseID":` + strconv.Quote(leaseID) + `,"slug":"release","provider":` + strconv.Quote(providerName) + `,"cloudID":` + strconv.Quote(containerID) + `,"providerScope":` + strconv.Quote(scope) + `,"repoRoot":` + strconv.Quote(t.TempDir()) + `,"claimedAt":` + strconv.Quote(now) + `,"lastUsedAt":` + strconv.Quote(now) + `,"idleTimeoutSeconds":60}`)
+	if err := os.WriteFile(filepath.Join(claimDir, leaseID+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func defaultLocalContainerScopeResponse(req core.LocalCommandRequest) (core.LocalCommandResult, bool) {
+	switch commandKey(req.Args) {
+	case commandKey([]string{"context", "show"}):
+		return core.LocalCommandResult{Stdout: "default\n"}, true
+	case commandKey([]string{"context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"}):
+		return core.LocalCommandResult{}, true
+	default:
+		return core.LocalCommandResult{}, false
+	}
+}
+
+func addDefaultLocalContainerScopeResponses(runner *recordingRunner) {
+	if runner.responses == nil {
+		runner.responses = map[string]core.LocalCommandResult{}
+	}
+	for _, args := range [][]string{
+		{"context", "show"},
+		{"context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"},
+	} {
+		result, _ := defaultLocalContainerScopeResponse(core.LocalCommandRequest{Args: args})
+		runner.responses[commandKey(args)] = result
+	}
 }
 
 func writeLocalContainerClaimAndKeyAt(t *testing.T, leaseID, slug, scope string, lastUsed time.Time, idle time.Duration) string {

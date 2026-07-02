@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -64,6 +65,23 @@ func mustJSON(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func writeAppleVZInstanceClaim(t *testing.T, inst applevzhelper.Instance) {
+	t.Helper()
+	server := core.Server{CloudID: inst.Name, Provider: providerName, Name: inst.Name, Labels: map[string]string{
+		"instance": inst.Name,
+		"lease":    inst.LeaseID,
+		"provider": providerName,
+		"slug":     inst.Slug,
+	}}
+	target := core.SSHTarget{Host: inst.SSHHost, User: inst.SSHUser}
+	if inst.SSHPort > 0 {
+		target.Port = fmt.Sprint(inst.SSHPort)
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(inst.LeaseID, inst.Slug, providerName, instanceScope(inst.Name), "", t.TempDir(), 5*time.Minute, false, server, target); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func testBackend(t *testing.T, runner *recordingRunner) *backend {
@@ -588,11 +606,8 @@ func TestAcquireResolveListAndRelease(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(t, runner)
 	root, _ := b.stateRoot()
-	name := "crabbox-cbx123-demo"
+	name := ""
 	startInstance := applevzhelper.Instance{
-		Name:      name,
-		LeaseID:   "cbx_fake123456",
-		Slug:      "demo",
 		Status:    applevzhelper.StatusRunning,
 		Image:     b.configForRun().AppleVZ.Image,
 		SSHUser:   b.configForRun().AppleVZ.User,
@@ -605,7 +620,17 @@ func TestAcquireResolveListAndRelease(t *testing.T) {
 	runner.responses[commandKey("helper", []string{
 		"list", "--state-root", root,
 	})] = core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.ListResponse{})}
-	runner.responses["helper\x00start"] = core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.StartResponse{Instance: startInstance})}
+	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if req.Name != "helper" || len(req.Args) == 0 || req.Args[0] != "start" {
+			return core.LocalCommandResult{}, nil, false
+		}
+		name = argumentValue(req.Args, "--name")
+		instance := startInstance
+		instance.Name = name
+		instance.LeaseID = argumentValue(req.Args, "--lease-id")
+		instance.Slug = argumentValue(req.Args, "--slug")
+		return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.StartResponse{Instance: instance})}, nil, true
+	}
 
 	req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "demo"}
 	lease, err := b.Acquire(context.Background(), req)
@@ -674,6 +699,7 @@ func TestResolveStatusOnlyAllowsStartingInstanceWithoutSSHEndpoint(t *testing.T)
 	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
 		Stdout: mustJSON(t, applevzhelper.ListResponse{Instances: []applevzhelper.Instance{inst}}),
 	}
+	writeAppleVZInstanceClaim(t, inst)
 
 	for _, readyProbe := range []bool{false, true} {
 		lease, err := b.Resolve(context.Background(), core.ResolveRequest{
@@ -752,6 +778,208 @@ func TestReleaseLeasePreservesClaimAndKeyWhenInstanceLookupFails(t *testing.T) {
 	}
 }
 
+func TestReleaseLeaseRejectsUnclaimedRawInstance(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		"helper\x00delete": {Stdout: mustJSON(t, applevzhelper.DeleteResponse{Deleted: true})},
+	}}
+	b := testBackend(t, runner)
+	leaseID := "cbx_unclaimed_apple_vz"
+	name := core.LeaseProviderName(leaseID, "unclaimed")
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: leaseID,
+		Server:  core.Server{CloudID: name},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("ReleaseLease error=%v, want exact-claim rejection", err)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "delete" {
+			t.Fatalf("unclaimed instance reached helper delete: %+v", call)
+		}
+	}
+}
+
+func TestRequireExactAppleVZClaimRequiresInstanceBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		providerScope string
+		labelInstance string
+		wantAllowed   bool
+	}{
+		{name: "unbound"},
+		{name: "mismatched scope", providerScope: "other-instance"},
+		{name: "matching scope", providerScope: "owned-instance", wantAllowed: true},
+		{name: "matching legacy label", labelInstance: "owned-instance", wantAllowed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+			_ = testBackend(t, runner)
+			leaseID := "cbx_bound_apple_vz"
+			if err := core.ClaimLeaseForRepoProviderScopePond(
+				leaseID,
+				"bound-apple-vz",
+				providerName,
+				tc.providerScope,
+				"",
+				t.TempDir(),
+				5*time.Minute,
+				false,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if tc.labelInstance != "" {
+				if err := core.UpdateLeaseClaimEndpoint(leaseID, core.Server{Provider: providerName, CloudID: tc.labelInstance, Labels: map[string]string{
+					"instance": tc.labelInstance,
+					"provider": providerName,
+					"slug":     "bound-apple-vz",
+				}}, core.SSHTarget{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := requireExactAppleVZClaim(leaseID, "owned-instance")
+			if tc.wantAllowed && err != nil {
+				t.Fatalf("bound claim rejected: %v", err)
+			}
+			if !tc.wantAllowed && (err == nil || !strings.Contains(err.Error(), "bound to instance")) {
+				t.Fatalf("unbound claim error=%v", err)
+			}
+		})
+	}
+}
+
+func TestResolveRawAppleVZRequiresExplicitReclaimAndPersistsBinding(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	inst := applevzhelper.Instance{
+		Name:      "crabbox-cbx123-raw",
+		LeaseID:   "cbx_raw_apple_vz",
+		Slug:      "raw-apple-vz",
+		Status:    applevzhelper.StatusRunning,
+		Image:     b.configForRun().AppleVZ.Image,
+		SSHUser:   b.configForRun().AppleVZ.User,
+		WorkRoot:  b.configForRun().AppleVZ.WorkRoot,
+		SSHHost:   "127.0.0.1",
+		SSHPort:   43023,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
+		Stdout: mustJSON(t, applevzhelper.ListResponse{Instances: []applevzhelper.Instance{inst}}),
+	}
+	runner.responses["helper\x00delete"] = core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.DeleteResponse{Deleted: true, Instance: inst})}
+	repo := core.Repo{Root: t.TempDir()}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: inst.Name, Repo: repo}); err == nil || !strings.Contains(err.Error(), "explicit --reclaim") {
+		t.Fatalf("Resolve without reclaim error=%v", err)
+	}
+	if claim, err := core.ReadLeaseClaim(inst.LeaseID); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("non-reclaim resolve minted claim: %#v", claim)
+	}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: inst.Name, Repo: repo, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(inst.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.ProviderScope != inst.Name || claim.CloudID != inst.Name {
+		t.Fatalf("reclaim binding=%#v", claim)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(runner.calls, func(call core.LocalCommandRequest) bool {
+		return len(call.Args) > 0 && call.Args[0] == "delete"
+	}) {
+		t.Fatalf("reclaimed instance was not released: %+v", runner.calls)
+	}
+}
+
+func TestResolveReclaimDoesNotRetargetBoundAppleVZClaim(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	instA := applevzhelper.Instance{Name: "instance-a", LeaseID: "cbx_bound_apple_vz", Slug: "bound-apple-vz", Status: applevzhelper.StatusRunning, SSHHost: "127.0.0.1", SSHPort: 43024, SSHUser: "runner"}
+	instB := instA
+	instB.Name = "instance-b"
+	instB.SSHPort = 43025
+	writeAppleVZInstanceClaim(t, instA)
+	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
+		Stdout: mustJSON(t, applevzhelper.ListResponse{Instances: []applevzhelper.Instance{instB, instA}}),
+	}
+	repo := core.Repo{Root: t.TempDir()}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: instA.LeaseID, Repo: repo, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != instA.Name {
+		t.Fatalf("exact claim resolved instance %q, want %q", lease.Server.CloudID, instA.Name)
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: instB.Name, Repo: repo, Reclaim: true}); err == nil || !strings.Contains(err.Error(), "bound to instance") {
+		t.Fatalf("raw conflicting reclaim error=%v", err)
+	}
+	claim, err := core.ReadLeaseClaim(instA.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.ProviderScope != instA.Name || claim.CloudID != instA.Name {
+		t.Fatalf("bound claim was retargeted: %#v", claim)
+	}
+}
+
+func TestResolveStatusOnlyAllowsClaimlessAppleVZWithoutClaiming(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	inst := applevzhelper.Instance{Name: "status-instance", LeaseID: "cbx_status_apple_vz", Slug: "status-apple-vz", Status: applevzhelper.StatusStarting}
+	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
+		Stdout: mustJSON(t, applevzhelper.ListResponse{Instances: []applevzhelper.Instance{inst}}),
+	}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: inst.Name, Repo: core.Repo{Root: t.TempDir()}, StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != inst.Name {
+		t.Fatalf("status lease=%#v", lease)
+	}
+	if claim, err := core.ReadLeaseClaim(inst.LeaseID); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("status-only resolve minted claim: %#v", claim)
+	}
+	writeAppleVZInstanceClaim(t, inst)
+	before, err := core.ReadLeaseClaim(inst.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: inst.Name, Repo: core.Repo{Root: t.TempDir()}, StatusOnly: true}); err != nil {
+		t.Fatalf("owned status-only resolve: %v", err)
+	}
+	after, err := core.ReadLeaseClaim(inst.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.RepoRoot != before.RepoRoot || after.LastUsedAt != before.LastUsedAt || after.CloudID != before.CloudID || after.ProviderScope != before.ProviderScope {
+		t.Fatalf("status-only resolve mutated claim: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestResolveMetadataLessAppleVZDirectsCleanup(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	inst := applevzhelper.Instance{Name: "metadata-less", Status: applevzhelper.StatusStopped}
+	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
+		Stdout: mustJSON(t, applevzhelper.ListResponse{Instances: []applevzhelper.Instance{inst}}),
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: inst.Name, ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "crabbox cleanup --provider apple-vz") {
+		t.Fatalf("metadata-less resolve error=%v", err)
+	}
+}
+
 func TestReleaseLeaseRemovesClaimAndKeyWhenInstanceIsMissing(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
@@ -826,6 +1054,7 @@ func TestResolveStatusReadyProbeIncludesPublishedSSHEndpoint(t *testing.T) {
 	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{
 		Stdout: mustJSON(t, applevzhelper.ListResponse{Instances: []applevzhelper.Instance{inst}}),
 	}
+	writeAppleVZInstanceClaim(t, inst)
 
 	for _, readyProbe := range []bool{false, true} {
 		lease, err := b.Resolve(context.Background(), core.ResolveRequest{

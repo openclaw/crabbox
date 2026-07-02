@@ -5,6 +5,7 @@
 ### Fixed
 
 - Restricted brokered Azure image and OS-disk selectors to admin-authenticated requests while preserving user-selectable Azure placement. Thanks @coygeek.
+- Required exact resource-bound local lease claims before Apple Container, local-container, or Apple VZ stop operations can delete provider resources; legacy unbound claims require explicit `--reclaim` adoption before stop. Thanks @coygeek.
 
 ## 0.34.0 - 2026-07-02
 
