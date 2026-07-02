@@ -3481,18 +3481,27 @@ func TestCrownestConfigDefaultsAndNoPersistentSecretSurface(t *testing.T) {
 
 func TestCrownestUnprefixedEnvAliases(t *testing.T) {
 	cfg := baseConfig()
+	t.Setenv("CROWNEST_API_URL", "https://crownest.example.test")
+	t.Setenv("CROWNEST_PROJECT_ID", "proj_alias")
+	t.Setenv("CROWNEST_TEMPLATE", "go-node")
 	t.Setenv("CROWNEST_TIMEOUT_SECS", "321")
 	t.Setenv("CROWNEST_FORGET_MISSING", "true")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatalf("applyEnv: %v", err)
 	}
-	if cfg.Crownest.TimeoutSecs != 321 || !cfg.Crownest.ForgetMissing {
+	if cfg.Crownest.APIURL != "https://crownest.example.test" || cfg.Crownest.ProjectID != "proj_alias" || cfg.Crownest.Template != "go-node" || cfg.Crownest.TimeoutSecs != 321 || !cfg.Crownest.ForgetMissing {
 		t.Fatalf("crownest env aliases not applied: %#v", cfg.Crownest)
 	}
 }
 
 func TestCrownestPrefixedEnvOverridesUnprefixedAliases(t *testing.T) {
 	cfg := baseConfig()
+	t.Setenv("CROWNEST_API_URL", "https://alias.example.test")
+	t.Setenv("CRABBOX_CROWNEST_API_URL", "https://prefixed.example.test")
+	t.Setenv("CROWNEST_PROJECT_ID", "proj_alias")
+	t.Setenv("CRABBOX_CROWNEST_PROJECT_ID", "proj_prefixed")
+	t.Setenv("CROWNEST_TEMPLATE", "alias-template")
+	t.Setenv("CRABBOX_CROWNEST_TEMPLATE", "prefixed-template")
 	t.Setenv("CROWNEST_TIMEOUT_SECS", "321")
 	t.Setenv("CRABBOX_CROWNEST_TIMEOUT_SECS", "654")
 	t.Setenv("CROWNEST_FORGET_MISSING", "true")
@@ -3500,8 +3509,73 @@ func TestCrownestPrefixedEnvOverridesUnprefixedAliases(t *testing.T) {
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatalf("applyEnv: %v", err)
 	}
-	if cfg.Crownest.TimeoutSecs != 654 || cfg.Crownest.ForgetMissing {
+	if cfg.Crownest.APIURL != "https://prefixed.example.test" || cfg.Crownest.ProjectID != "proj_prefixed" || cfg.Crownest.Template != "prefixed-template" || cfg.Crownest.TimeoutSecs != 654 || cfg.Crownest.ForgetMissing {
 		t.Fatalf("crownest env precedence not applied: %#v", cfg.Crownest)
+	}
+}
+
+func TestCrownestTimeoutEnvValidation(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "CRABBOX_CROWNEST_TIMEOUT_SECS", value: "later", want: "must be an integer"},
+		{name: "CROWNEST_TIMEOUT_SECS", value: "-1", want: "must be non-negative"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := baseConfig()
+			t.Setenv("CRABBOX_CROWNEST_TIMEOUT_SECS", "")
+			t.Setenv("CROWNEST_TIMEOUT_SECS", "")
+			t.Setenv(testCase.name, testCase.value)
+			err := applyEnv(&cfg)
+			if err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("applyEnv error=%v, want %q", err, testCase.want)
+			}
+		})
+	}
+}
+
+func TestCrownestRepoConfigKeepsTrustedAPIURL(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("crownest:\n  apiUrl: https://attacker.example\n  projectId: proj_repo\n  template: repo-template\n  timeoutSecs: 45\n  forgetMissing: true\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Crownest.APIURL != "https://api.crownest.dev" {
+		t.Fatalf("repository config set Crownest API URL to %q", cfg.Crownest.APIURL)
+	}
+	if cfg.Crownest.ProjectID != "proj_repo" || cfg.Crownest.Template != "repo-template" || cfg.Crownest.TimeoutSecs != 45 || !cfg.Crownest.ForgetMissing {
+		t.Fatalf("repository config not applied: %#v", cfg.Crownest)
+	}
+}
+
+func TestCrownestTrustedConfigCanSetAPIURL(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("crownest:\n  apiUrl: https://trusted.example\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Crownest.APIURL != "https://trusted.example" {
+		t.Fatalf("trusted config API URL=%q", cfg.Crownest.APIURL)
+	}
+}
+
+func TestCrownestConfigRejectsNegativeTimeout(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("crownest:\n  timeoutSecs: -1\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	err := applyFileConfigWithTrust(&cfg, file, true)
+	if err == nil || !strings.Contains(err.Error(), "crownest timeoutSecs must be non-negative") {
+		t.Fatalf("config error=%v", err)
 	}
 }
 
