@@ -232,30 +232,37 @@ cannot silently discard cleanup state for a billable instance in another account
 The repeatable live check is opt-in and billable:
 
 ```sh
-CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=vast scripts/live-vast-smoke.sh
+CRABBOX_LIVE=1 \
+  CRABBOX_LIVE_PROVIDERS=vast \
+  CRABBOX_LIVE_VAST_GPU_COUNT=1 \
+  CRABBOX_LIVE_VAST_MAX_DPH_TOTAL=0.50 \
+  CRABBOX_LIVE_VAST_RELEASE_ACTION=destroy \
+  scripts/live-vast-smoke.sh
 ```
 
 The script builds `bin/crabbox`, reads `CRABBOX_VAST_API_KEY` or
-`VAST_API_KEY`, requires an empty Crabbox-owned Vast inventory, creates one kept
-lease, waits for ready status, runs `nvidia-smi`, verifies `list --json`, stops
-the lease, runs dry-run cleanup, and verifies the Crabbox-owned inventory is
-empty afterward.
+`VAST_API_KEY`, requires an explicit positive hourly cost cap, positive minimum
+GPU count, destroy release action, and an empty Crabbox-owned Vast inventory. It
+creates one kept lease, waits for ready status, proves at least the requested GPU
+count with `nvidia-smi -L`, records the actual count, verifies `list --json`,
+destroys the lease, runs dry-run cleanup, and verifies the Crabbox-owned
+inventory is empty afterward.
 
 Optional live-smoke overrides:
 
 ```text
 CRABBOX_LIVE_VAST_GPU_NAME         GPU name selector, default empty
-CRABBOX_LIVE_VAST_GPU_COUNT        Minimum GPU count, default 1
-CRABBOX_LIVE_VAST_MAX_DPH_TOTAL    Max dollars per hour for offer search, default 0
+CRABBOX_LIVE_VAST_GPU_COUNT        Required positive minimum GPU count for live proof
+CRABBOX_LIVE_VAST_MAX_DPH_TOTAL    Required positive max dollars per hour for offer search
 CRABBOX_LIVE_VAST_INSTANCE_TYPE    Offer type, default ondemand
 CRABBOX_LIVE_VAST_IMAGE            Docker image, default from provider config
-CRABBOX_LIVE_VAST_RELEASE_ACTION   Release action, default destroy
+CRABBOX_LIVE_VAST_RELEASE_ACTION   Must be destroy, default destroy
 ```
 
 Final classifications include:
 
 ```text
-classification=live_vast_smoke_passed
+classification=live_vast_smoke_passed ... minimum_gpu_count=N actual_gpu_count=N max_dph_total=N release_action=destroy pre_owned=0 post_owned=0 cleanup=complete
 classification=environment_blocked
 classification=billing_blocked
 classification=quota_blocked

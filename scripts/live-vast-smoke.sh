@@ -79,6 +79,12 @@ classify_validation_failure() {
   printf '%s\n' "$output" | redact_output >&2
 }
 
+fail_safety() {
+  local reason="$1"
+  printf 'classification=validation_failed reason=%s exit=2\n' "$reason" >&2
+  exit 2
+}
+
 run_capture() {
   local command="$1"
   shift
@@ -183,19 +189,24 @@ if payload != []:
   fi
 }
 
-validate_nvidia_smi() {
+validate_minimum_gpu_count() {
   local command="$1"
   local output="$2"
-  if [[ "$output" != *"NVIDIA-SMI"* && "$output" != *"NVIDIA"* ]]; then
-    classify_validation_failure "$command" 1 "remote command output did not include NVIDIA-SMI output"
+  local expected="$3"
+  local actual
+  actual="$(printf '%s\n' "$output" | grep -Ec '^GPU [0-9]+:' || true)"
+  if ((actual < expected)); then
+    classify_validation_failure "$command" 1 "remote GPU count mismatch: expected at least $expected, got $actual"
     exit 1
   fi
+  validated_gpu_count="$actual"
 }
 
 cleanup_armed=0
 lease_acquired=0
 slug=""
 config_file=""
+validated_gpu_count=""
 
 is_pre_acquire_not_found() {
   local output="$1"
@@ -255,16 +266,41 @@ if [[ -z "${CRABBOX_VAST_API_KEY:-}${VAST_API_KEY:-}" ]]; then
   exit 0
 fi
 
-mkdir -p bin
-go build -trimpath -o bin/crabbox ./cmd/crabbox
-
 slug="vast-smoke-$(date +%Y%m%d%H%M%S)-$$"
 vast_gpu_name="${CRABBOX_LIVE_VAST_GPU_NAME:-}"
-vast_gpu_count="${CRABBOX_LIVE_VAST_GPU_COUNT:-1}"
-vast_max_dph_total="${CRABBOX_LIVE_VAST_MAX_DPH_TOTAL:-0}"
+vast_gpu_count="${CRABBOX_LIVE_VAST_GPU_COUNT:-}"
+vast_max_dph_total="${CRABBOX_LIVE_VAST_MAX_DPH_TOTAL:-}"
 vast_instance_type="${CRABBOX_LIVE_VAST_INSTANCE_TYPE:-ondemand}"
 vast_image="${CRABBOX_LIVE_VAST_IMAGE:-nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04}"
 vast_release_action="${CRABBOX_LIVE_VAST_RELEASE_ACTION:-destroy}"
+
+if [[ -z "$vast_max_dph_total" ]]; then
+  fail_safety "VAST_cost_cap_missing"
+fi
+
+if ! python3 -c '
+from decimal import Decimal, InvalidOperation
+import sys
+
+try:
+    value = Decimal(sys.argv[1])
+except InvalidOperation:
+    sys.exit(1)
+sys.exit(0 if value.is_finite() and value > 0 else 1)
+' "$vast_max_dph_total"; then
+  fail_safety "VAST_cost_cap_invalid"
+fi
+
+if [[ ! "$vast_gpu_count" =~ ^[1-9][0-9]*$ ]]; then
+  fail_safety "VAST_gpu_count_invalid"
+fi
+
+if [[ "$vast_release_action" != "destroy" ]]; then
+  fail_safety "VAST_release_action_not_destroy"
+fi
+
+mkdir -p bin
+go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 config_file="$(mktemp)"
 cat >"$config_file" <<YAML
@@ -300,10 +336,10 @@ lease_acquired=1
 run_capture_validation "bin/crabbox status --provider vast --id $slug --wait --wait-timeout 600s" \
   bin/crabbox status --provider vast --id "$slug" --wait --wait-timeout 600s
 
-run_capture_validation "bin/crabbox run --provider vast --id $slug --no-sync -- nvidia-smi" \
-  bin/crabbox run --provider vast --id "$slug" --no-sync -- nvidia-smi
+run_capture_validation "bin/crabbox run --provider vast --id $slug --no-sync -- nvidia-smi -L" \
+  bin/crabbox run --provider vast --id "$slug" --no-sync -- nvidia-smi -L
 nvidia_output="$CAPTURED_OUTPUT"
-validate_nvidia_smi "bin/crabbox run --provider vast --id $slug --no-sync -- nvidia-smi" "$nvidia_output"
+validate_minimum_gpu_count "bin/crabbox run --provider vast --id $slug --no-sync -- nvidia-smi -L" "$nvidia_output" "$vast_gpu_count"
 
 run_capture_validation "bin/crabbox list --provider vast --json" bin/crabbox list --provider vast --json
 list_output="$CAPTURED_OUTPUT"
@@ -311,14 +347,15 @@ printf '%s\n' "$list_output"
 validate_list_json_contains_slug "bin/crabbox list --provider vast --json" "$list_output"
 
 run_capture_validation "bin/crabbox stop --provider vast $slug" bin/crabbox stop --provider vast "$slug"
-cleanup_armed=0
 
 run_capture_validation "bin/crabbox cleanup --provider vast --dry-run" bin/crabbox cleanup --provider vast --dry-run
 cleanup_output="$CAPTURED_OUTPUT"
 run_capture_validation "bin/crabbox list --provider vast --json" bin/crabbox list --provider vast --json
 post_list_output="$CAPTURED_OUTPUT"
 validate_list_json_empty "bin/crabbox list --provider vast --json" "$post_list_output"
+cleanup_armed=0
 
 printf '%s\n' "$cleanup_output"
 printf '%s\n' "$post_list_output"
-printf 'classification=live_vast_smoke_passed slug=%s cleanup=complete\n' "$slug"
+printf 'classification=live_vast_smoke_passed slug=%s minimum_gpu_count=%s actual_gpu_count=%s max_dph_total=%s release_action=destroy pre_owned=0 post_owned=0 cleanup=complete\n' \
+  "$slug" "$vast_gpu_count" "$validated_gpu_count" "$vast_max_dph_total"
