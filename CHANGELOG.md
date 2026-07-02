@@ -16,6 +16,7 @@
 - Required exact provider, resource, and local-claim ownership before Hyper-V, Multipass, or Parallels release and cleanup paths can delete virtual machines. Thanks @coygeek.
 - Required exact resource-bound local lease claims before Apple Container, local-container, or Apple VZ stop operations can delete provider resources; legacy unbound claims require explicit `--reclaim` adoption before stop. Thanks @coygeek.
 - Hardened Azure Windows snapshot forks to fail closed through credential rehydration and quarantine cleanup, reuse only writable NIC payloads, reject unknown differential disks, and retry in-use security-group cleanup. Thanks @fcoury-oai.
+- Rolled back brokered Hetzner servers when post-create readiness fails, deleting only lease-owned SSH keys created by the failed attempt after server cleanup succeeds so billable partial provisioning cannot escape the coordinator lifecycle. Thanks @coygeek.
 
 ## 0.34.0 - 2026-07-02
 
@@ -47,7 +48,6 @@
 - Required a valid isolated per-lease origin before serving browser Code HTTP or WebSocket traffic, preventing lease-controlled pages from inheriting coordinator portal authority. Thanks @coygeek.
 - Restricted brokered AWS and GCP resource selectors to admin-authenticated requests so normal users cannot steer coordinator cloud credentials toward caller-selected networks, images, projects, tags, or instance identities. Thanks @coygeek.
 - Pinned NodeSource and Docker APT signing fingerprints across managed Linux image preparation and local-container Docker CLI bootstrap, preserving existing trust files, stopping image preparation on mismatch, and using distro packages for local-container fallback. Thanks @coygeek.
-- Rolled back brokered Hetzner servers when post-create readiness fails, deleting only lease-owned SSH keys created by the failed attempt after server cleanup succeeds so billable partial provisioning cannot escape the coordinator lifecycle. Thanks @coygeek.
 - Bound non-admin coordinator provider-key names and automatic cleanup to verified, persisted lease ownership metadata, rejecting unsafe AWS and Hetzner name collisions while retaining legacy and Hetzner provider-unique shared key identities. Thanks @coygeek.
 - Pinned the Windows developer-image Node MSI and Docker Engine archive to reviewed SHA-256 digests before privileged installation, with fail-closed digest requirements for version overrides. Thanks @coygeek.
 - Restored direct and brokered AWS Windows developer-image candidate capture by routing the guarded mint wrapper through native AMI checkpoints while retaining brokered promotion.
