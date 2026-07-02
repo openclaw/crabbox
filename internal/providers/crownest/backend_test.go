@@ -499,6 +499,39 @@ func TestRunRemovesOneShotClaimAfterArchiveSetupFailure(t *testing.T) {
 	}
 }
 
+func TestRunDeletesPartialCreateSandboxWhenWorkspaceRunIDIsMissing(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeCrownestClient{
+		baseURL:         "https://api.crownest.dev",
+		createRunResult: workspaceRun{SandboxID: "sbx_partial"},
+		createRunErr:    errors.New("crownest create workspace run returned no id"),
+	}
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  testConfig(),
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	_, err := b.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		Command: []string{"pnpm", "test"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "returned no id") {
+		t.Fatalf("err=%v, want missing workspace run id", err)
+	}
+	if api.deletedSandboxID != "sbx_partial" {
+		t.Fatalf("deletedSandboxID=%q, want partial sandbox cleanup", api.deletedSandboxID)
+	}
+	leaseID := leasePrefix + "sbx_partial"
+	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("claim=%#v err=%v, want no partial-create claim", claim, err)
+	}
+}
+
 func TestRunKeepOnFailureRetainsCreatedSandboxAfterArchiveSetupFailure(t *testing.T) {
 	repoRoot := tempGitRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -696,6 +729,8 @@ type fakeCrownestClient struct {
 	baseURL          string
 	created          createWorkspaceRunRequest
 	createSandboxID  string
+	createRunResult  workspaceRun
+	createRunErr     error
 	finalized        finalizeArchiveRequest
 	uploadBytes      int
 	started          bool
@@ -735,6 +770,9 @@ func (f *fakeCrownestClient) DeleteSandbox(_ context.Context, id string) error {
 
 func (f *fakeCrownestClient) CreateWorkspaceRun(_ context.Context, req createWorkspaceRunRequest, _ string) (workspaceRun, error) {
 	f.created = req
+	if f.createRunErr != nil || f.createRunResult.ID != "" || f.createRunResult.SandboxID != "" {
+		return f.createRunResult, f.createRunErr
+	}
 	return workspaceRun{ID: "wsr_123", Status: "awaiting_archive", SandboxID: f.createSandboxID}, nil
 }
 

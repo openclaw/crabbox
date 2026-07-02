@@ -195,7 +195,7 @@ func (c *httpClient) CreateWorkspaceRun(ctx context.Context, req createWorkspace
 		return workspaceRun{}, err
 	}
 	if out.WorkspaceRun.ID == "" {
-		return workspaceRun{}, exit(5, "crownest create workspace run returned no id")
+		return out.WorkspaceRun, exit(5, "crownest create workspace run returned no id")
 	}
 	return out.WorkspaceRun, nil
 }

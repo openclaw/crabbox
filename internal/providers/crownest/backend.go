@@ -204,6 +204,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		},
 	}, idempotencyKey("create", randomSuffix()))
 	if err != nil {
+		if acquired && workspaceRun.SandboxID != "" {
+			return RunResult{}, b.cleanupCreateFailure(ctx, api, workspaceRun.SandboxID, err)
+		}
 		return RunResult{}, err
 	}
 	if workspaceRun.SandboxID != "" {

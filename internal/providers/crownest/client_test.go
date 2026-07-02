@@ -99,6 +99,26 @@ func TestClientSandboxWorkspaceRunAndArchiveFlow(t *testing.T) {
 	}
 }
 
+func TestClientCreateWorkspaceRunPreservesSandboxIDOnMissingRunID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"workspaceRun": map[string]any{"sandboxId": "sbx_partial"}})
+	}))
+	defer server.Close()
+
+	t.Setenv("CRABBOX_CROWNEST_API_KEY", "cn_test_key")
+	client, err := newClient(testConfigWithURL(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := client.CreateWorkspaceRun(context.Background(), createWorkspaceRunRequest{Command: "pnpm test"}, "create")
+	if err == nil || !strings.Contains(err.Error(), "returned no id") {
+		t.Fatalf("err=%v, want missing workspace run id", err)
+	}
+	if run.SandboxID != "sbx_partial" {
+		t.Fatalf("sandboxID=%q, want partial response sandbox id", run.SandboxID)
+	}
+}
+
 func TestReadSSEParsesEvents(t *testing.T) {
 	var got []streamEvent
 	input := strings.Join([]string{
