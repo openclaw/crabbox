@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Isolated brokered artifact uploads by opaque organization and owner namespaces so identities and caller prefixes cannot collide across authorization scopes. Thanks @coygeek.
 - Prevented ASCII Box API credentials from reaching unsafe explicit base URLs by requiring HTTPS except for loopback development endpoints, rejecting ambiguous URL components, and supporting config discovery in the current Box CLI. Thanks @coygeek.
 - Pinned the Google Linux package signing fingerprint, preserved its source-scoped APT keyring across Chrome installation, and failed closed to Chromium when verification fails. Thanks @coygeek.
 - Hardened coordinator image deletion so admin `image delete` requests fail closed unless stored Crabbox-created metadata proves ownership of the AWS, Azure, or GCP image or snapshot.
