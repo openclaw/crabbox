@@ -127,12 +127,12 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		if !isCrabboxAzureLease(server) {
 			return LeaseTarget{}, exit(4, "lease/server not found: %s (vm exists but is not Crabbox-managed)", req.ID)
 		}
-		leaseID := blank(server.Labels["lease"], req.ID)
+		leaseID := server.Labels["lease"]
 		target := sshTargetFromConfig(b.Cfg, azureServerHost(server, b.Cfg.AzureNetwork))
 		useStoredTestboxKey(&target, leaseID)
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
-	servers, err := client.ListCrabboxServers(ctx)
+	servers, err := listOwnedAzureServers(ctx, client)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -147,16 +147,13 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 }
 
 func isCrabboxAzureLease(server Server) bool {
-	if server.Labels == nil {
-		return false
-	}
-	if server.Labels["crabbox"] != "true" {
-		return false
-	}
-	if provider := server.Labels["provider"]; provider != "" && provider != "azure" {
-		return false
-	}
-	return true
+	labels := server.Labels
+	return labels != nil &&
+		labels["crabbox"] == "true" &&
+		labels["created_by"] == "crabbox" &&
+		labels["provider"] == "azure" &&
+		core.IsCanonicalLeaseID(labels["lease"]) &&
+		strings.TrimSpace(labels["slug"]) != ""
 }
 
 func (b *azureLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -165,7 +162,7 @@ func (b *azureLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 	if err != nil {
 		return nil, err
 	}
-	return client.ListCrabboxServers(ctx)
+	return listOwnedAzureServers(ctx, client)
 }
 
 func (b *azureLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
@@ -179,10 +176,14 @@ func (b *azureLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (c
 }
 
 func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	if !isCrabboxAzureLease(req.Lease.Server) || req.Lease.LeaseID != req.Lease.Server.Labels["lease"] {
+		return exit(4, "refusing to release Azure VM %s without matching canonical Crabbox ownership tags", req.Lease.Server.DisplayID())
+	}
 	if err := deleteServer(ctx, b.Cfg, req.Lease.Server); err != nil {
 		return err
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
+	core.RemoveStoredTestboxKey(req.Lease.LeaseID)
 	return nil
 }
 
@@ -195,11 +196,54 @@ func (b *azureLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server
 }
 
 func (b *azureLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
-	servers, err := b.List(ctx, ListRequest{Options: req.Options})
+	client, err := newAzureClient(ctx, b.Cfg)
 	if err != nil {
 		return err
 	}
-	return b.CleanupServers(ctx, req, servers)
+	servers, err := client.ListCrabboxServers(ctx)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if b.RT.Clock != nil {
+		now = b.RT.Clock.Now().UTC()
+	}
+	for _, server := range servers {
+		if !isCrabboxAzureLease(server) {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=canonical Crabbox ownership tags missing\n", server.DisplayID(), server.Name)
+			continue
+		}
+		shouldDelete, reason := core.ShouldCleanupServer(server, now)
+		if !shouldDelete {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
+			continue
+		}
+		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
+		if req.DryRun {
+			continue
+		}
+		if err := deleteServer(ctx, b.Cfg, server); err != nil {
+			return err
+		}
+		leaseID := server.Labels["lease"]
+		removeLeaseClaim(leaseID)
+		core.RemoveStoredTestboxKey(leaseID)
+	}
+	return nil
+}
+
+func listOwnedAzureServers(ctx context.Context, client azureClient) ([]Server, error) {
+	servers, err := client.ListCrabboxServers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	owned := make([]Server, 0, len(servers))
+	for _, server := range servers {
+		if isCrabboxAzureLease(server) {
+			owned = append(owned, server)
+		}
+	}
+	return owned, nil
 }
 
 func acquireAttemptsRetry(rt Runtime, keep bool, acquire func() (LeaseTarget, error)) (LeaseTarget, error) {
@@ -231,6 +275,9 @@ func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 var bootstrapManagedWindowsDesktop = core.BootstrapManagedWindowsDesktop
 
 func deleteServer(ctx context.Context, cfg Config, server Server) error {
+	if !isCrabboxAzureLease(server) {
+		return exit(4, "refusing to delete Azure VM %s without canonical Crabbox ownership tags", server.DisplayID())
+	}
 	client, err := newAzureClient(ctx, cfg)
 	if err != nil {
 		return err
@@ -241,7 +288,6 @@ func deleteServer(ctx context.Context, cfg Config, server Server) error {
 	}
 	return client.DeleteServer(ctx, name)
 }
-func blank(value, fallback string) string { return core.Blank(value, fallback) }
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
 	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
 		if _, statErr := os.Stat(keyPath); statErr == nil {

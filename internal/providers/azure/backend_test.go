@@ -4,7 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type fakeAzureClient struct {
@@ -16,6 +22,7 @@ type fakeAzureClient struct {
 	createCfg Config
 	createErr error
 	waitErr   error
+	getErr    error
 }
 
 func (c *fakeAzureClient) ListCrabboxServers(context.Context) ([]Server, error) {
@@ -42,8 +49,16 @@ func (c *fakeAzureClient) WaitForServerIP(context.Context, string) (Server, erro
 	return c.created, nil
 }
 
-func (c *fakeAzureClient) GetServer(context.Context, string) (Server, error) {
-	return Server{}, nil
+func (c *fakeAzureClient) GetServer(_ context.Context, id string) (Server, error) {
+	if c.getErr != nil {
+		return Server{}, c.getErr
+	}
+	for _, server := range c.servers {
+		if server.CloudID == id || server.Name == id {
+			return server, nil
+		}
+	}
+	return Server{}, core.Exit(4, "azure vm not found: %s", id)
 }
 
 func (c *fakeAzureClient) DeleteServer(_ context.Context, name string) error {
@@ -183,5 +198,151 @@ func azureAcquireTestConfig() Config {
 		AzureLocation:      "eastus",
 		AzureResourceGroup: "rg",
 		AzureSSHCIDRs:      []string{"198.51.100.7/32"},
+	}
+}
+
+func TestAzureResolveRawVMRejectsWeakTags(t *testing.T) {
+	weak := azureTestServer("crabbox-weak", "cbx_123456abcdef", "weak")
+	delete(weak.Labels, "created_by")
+	fake := &fakeAzureClient{servers: []Server{weak}}
+	oldClient := newAzureClient
+	newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+	t.Cleanup(func() { newAzureClient = oldClient })
+
+	backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: weak.Name, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("lease=%#v err=%v, want ownership rejection", lease, err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%v, want no destructive call", fake.deleted)
+	}
+}
+
+func TestAzureListExcludesWeakTags(t *testing.T) {
+	owned := azureTestServer("crabbox-owned", "cbx_123456abcdef", "owned")
+	weak := azureTestServer("crabbox-weak", "cbx_fedcba654321", "weak")
+	delete(weak.Labels, "provider")
+	fake := &fakeAzureClient{servers: []Server{weak, owned}}
+	oldClient := newAzureClient
+	newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+	t.Cleanup(func() { newAzureClient = oldClient })
+
+	backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	servers, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].CloudID != owned.CloudID {
+		t.Fatalf("servers=%#v, want only canonical owned VM", servers)
+	}
+}
+
+func TestAzureReleaseRejectsForgedOrMismatchedOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*LeaseTarget)
+	}{
+		{
+			name: "missing created-by tag",
+			mutate: func(lease *LeaseTarget) {
+				delete(lease.Server.Labels, "created_by")
+			},
+		},
+		{
+			name: "mismatched lease tag",
+			mutate: func(lease *LeaseTarget) {
+				lease.LeaseID = "cbx_fedcba654321"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeAzureClient{}
+			oldClient := newAzureClient
+			newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+			t.Cleanup(func() { newAzureClient = oldClient })
+
+			lease := LeaseTarget{Server: azureTestServer("crabbox-owned", "cbx_123456abcdef", "owned"), LeaseID: "cbx_123456abcdef"}
+			test.mutate(&lease)
+			backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease})
+			if err == nil || !strings.Contains(err.Error(), "matching canonical Crabbox ownership tags") {
+				t.Fatalf("err=%v, want ownership rejection", err)
+			}
+			if len(fake.deleted) != 0 {
+				t.Fatalf("deleted=%v, want no destructive call", fake.deleted)
+			}
+		})
+	}
+}
+
+func TestAzureReleaseRemovesStoredLeaseKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	leaseID := "cbx_123456abcdef"
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAzureClient{}
+	oldClient := newAzureClient
+	newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+	t.Cleanup(func() { newAzureClient = oldClient })
+
+	lease := LeaseTarget{Server: azureTestServer("crabbox-owned", leaseID, "owned"), LeaseID: leaseID}
+	backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(keyPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored lease key directory still exists: %v", err)
+	}
+}
+
+func TestAzureCleanupSkipsWeakTagsAndDeletesCanonicalExpiredVM(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	owned := azureTestServer("crabbox-owned", "cbx_123456abcdef", "owned")
+	owned.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(Config{}, owned.Labels["lease"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	weak := azureTestServer("crabbox-weak", "cbx_fedcba654321", "weak")
+	delete(weak.Labels, "created_by")
+	weak.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	fake := &fakeAzureClient{servers: []Server{weak, owned}}
+	oldClient := newAzureClient
+	newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+	t.Cleanup(func() { newAzureClient = oldClient })
+
+	var stderr strings.Builder
+	backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: &stderr}).(*azureLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "skip server id=crabbox-weak") || !strings.Contains(stderr.String(), "canonical Crabbox ownership tags missing") {
+		t.Fatalf("stderr=%q, want weak-tag skip diagnostic", stderr.String())
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != owned.CloudID {
+		t.Fatalf("deleted=%v, want only canonical owned VM", fake.deleted)
+	}
+	if _, err := os.Stat(filepath.Dir(keyPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored lease key directory still exists: %v", err)
+	}
+}
+
+func azureTestServer(id, leaseID, slug string) Server {
+	return Server{
+		CloudID:  id,
+		Name:     id,
+		Provider: "azure",
+		Labels: map[string]string{
+			"crabbox":    "true",
+			"created_by": "crabbox",
+			"provider":   "azure",
+			"lease":      leaseID,
+			"slug":       slug,
+		},
 	}
 }
