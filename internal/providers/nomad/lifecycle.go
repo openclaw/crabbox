@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -73,15 +74,15 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	}
 	if evalID != "" {
 		if err := b.waitForEvaluation(ctx, client, evalID); err != nil {
-			return b.cleanupUnclaimedJob(ctx, client, jobID, err)
+			return b.cleanupUnclaimedJob(ctx, client, job, err)
 		}
 	}
 	ready, err := b.waitForAllocation(ctx, client, jobID, b.allocReadyTimeout())
 	if err != nil {
-		return b.cleanupUnclaimedJob(ctx, client, jobID, err)
+		return b.cleanupUnclaimedJob(ctx, client, job, err)
 	}
 	if _, err := writeNomadClaim(b.cfg, leaseID, slug, req.Repo, req.Reclaim, ready, expiresAt); err != nil {
-		return b.cleanupUnclaimedJob(ctx, client, jobID, err)
+		return b.cleanupUnclaimedJob(ctx, client, job, err)
 	}
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s job=%s allocation=%s task=%s workdir=%s\n", leaseID, slug, providerName, jobID, ready.AllocationID, b.cfg.Nomad.Task, b.cfg.Nomad.Workdir)
 	if !req.Keep {
@@ -353,27 +354,67 @@ func (b *backend) createRunJob(ctx context.Context, client Client, req RunReques
 	}
 	if evalID != "" {
 		if err := b.waitForEvaluation(ctx, client, evalID); err != nil {
-			return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, jobID, err)
+			return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, job, err)
 		}
 	}
 	ready, err := b.waitForAllocation(ctx, client, jobID, b.allocReadyTimeout())
 	if err != nil {
-		return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, jobID, err)
+		return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, job, err)
 	}
 	claim, err := writeNomadClaim(b.cfg, leaseID, slug, req.Repo, req.Reclaim, ready, expiresAt)
 	if err != nil {
-		return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, jobID, err)
+		return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, job, err)
 	}
 	return leaseID, slug, ready, claim, nil
 }
 
-func (b *backend) cleanupUnclaimedJob(ctx context.Context, client Client, jobID string, cause error) error {
+func (b *backend) cleanupUnclaimedJob(ctx context.Context, client Client, expected *nomadapi.Job, cause error) error {
 	cleanupCtx, cancel := b.cleanupContext(ctx)
 	defer cancel()
-	if _, cleanupErr := client.DeregisterJob(cleanupCtx, jobID, true); cleanupErr != nil {
+	jobID := stringValue(expected.ID)
+	job, err := client.JobInfo(cleanupCtx, jobID)
+	if err != nil {
+		if isNotFoundError(err) {
+			return cause
+		}
+		return errors.Join(cause, fmt.Errorf("inspect nomad job %s before setup cleanup: %w", jobID, err))
+	}
+	if job == nil || stringValue(job.ID) != jobID || !metadataMatches(job.Meta, expected.Meta) {
+		return errors.Join(cause, exit(4, "refusing cleanup of nomad job %s after setup failure: ownership changed", jobID))
+	}
+	if cleanupErr := b.deregisterJobAndConfirmAbsent(cleanupCtx, client, jobID); cleanupErr != nil {
 		return errors.Join(cause, fmt.Errorf("cleanup nomad job %s after unclaimed setup failure: %w", jobID, cleanupErr))
 	}
 	return cause
+}
+
+func (b *backend) deregisterJobAndConfirmAbsent(ctx context.Context, client Client, jobID string) error {
+	evalID, err := client.DeregisterJob(ctx, jobID, true)
+	if err != nil {
+		return err
+	}
+	if evalID != "" {
+		if err := b.waitForEvaluation(ctx, client, evalID); err != nil {
+			return fmt.Errorf("wait for nomad deregistration evaluation %s: %w", evalID, err)
+		}
+	}
+	for {
+		job, err := client.JobInfo(ctx, jobID)
+		if isNotFoundError(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("confirm nomad job %s removal: %w", jobID, err)
+		}
+		if job == nil {
+			return fmt.Errorf("confirm nomad job %s removal: empty response", jobID)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("confirm nomad job %s removal: %w", jobID, ctx.Err())
+		case <-time.After(statusPollInterval):
+		}
+	}
 }
 
 func (b *backend) deleteOwnedRunJob(ctx context.Context, client Client, expected LeaseClaim) error {
@@ -401,7 +442,7 @@ func (b *backend) deleteOwnedRunJob(ctx context.Context, client Client, expected
 	if err := validateRemoteOwnership(b.cfg, claim, job); err != nil {
 		return err
 	}
-	if _, err := client.DeregisterJob(ctx, jobID, true); err != nil {
+	if err := b.deregisterJobAndConfirmAbsent(ctx, client, jobID); err != nil {
 		return err
 	}
 	return removeLeaseClaimIfUnchanged(claim.LeaseID, claim)
@@ -494,7 +535,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if view.State == "terminal" || view.State == "missing-or-inaccessible" {
+		if view.State == "terminal" || view.State == "missing" {
 			return StatusView{}, exit(5, "nomad job %s reached state %s before becoming ready", claim.Labels[claimLabelJobID], view.State)
 		}
 		select {
@@ -521,8 +562,10 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	job, err := client.JobInfo(ctx, jobID)
 	if err != nil {
 		if isNotFoundError(err) {
-			removeLeaseClaim(claim.LeaseID)
-			fmt.Fprintf(b.rt.Stderr, "removed stale nomad claim lease=%s job=%s reason=missing-or-inaccessible\n", claim.LeaseID, jobID)
+			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+				return err
+			}
+			fmt.Fprintf(b.rt.Stderr, "removed stale nomad claim lease=%s job=%s reason=missing\n", claim.LeaseID, jobID)
 			return nil
 		}
 		return err
@@ -530,10 +573,12 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err := validateRemoteOwnership(b.cfg, claim, job); err != nil {
 		return err
 	}
-	if _, err := client.DeregisterJob(ctx, jobID, true); err != nil {
+	if err := b.deregisterJobAndConfirmAbsent(ctx, client, jobID); err != nil {
 		return err
 	}
-	removeLeaseClaim(claim.LeaseID)
+	if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		return err
+	}
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s job=%s\n", claim.LeaseID, jobID)
 	return nil
 }
@@ -571,13 +616,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				return err
 			}
 			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would remove nomad claim lease=%s job=%s reason=missing-or-inaccessible\n", claim.LeaseID, jobID)
+				fmt.Fprintf(b.rt.Stdout, "would remove nomad claim lease=%s job=%s reason=missing\n", claim.LeaseID, jobID)
 				continue
 			}
 			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 				return err
 			}
-			fmt.Fprintf(b.rt.Stdout, "remove nomad claim lease=%s job=%s reason=missing-or-inaccessible\n", claim.LeaseID, jobID)
+			fmt.Fprintf(b.rt.Stdout, "remove nomad claim lease=%s job=%s reason=missing\n", claim.LeaseID, jobID)
 			removed++
 			continue
 		}
@@ -593,7 +638,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would deregister nomad job=%s lease=%s reason=%s\n", jobID, claim.LeaseID, reason)
 			continue
 		}
-		if _, err := client.DeregisterJob(ctx, jobID, true); err != nil {
+		if err := b.deregisterJobAndConfirmAbsent(ctx, client, jobID); err != nil {
 			return err
 		}
 		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
@@ -626,7 +671,7 @@ func (b *backend) statusFromClaim(ctx context.Context, client Client, claim Leas
 	job, err := client.JobInfo(ctx, jobID)
 	if err != nil {
 		if isNotFoundError(err) {
-			base.State = "missing-or-inaccessible"
+			base.State = "missing"
 			base.Labels[claimLabelState] = base.State
 			base.Labels["reason"] = err.Error()
 			return base, nil
@@ -660,6 +705,9 @@ func (b *backend) waitForEvaluation(ctx context.Context, client Client, evalID s
 		eval, err := client.EvaluationInfo(pollCtx, evalID)
 		if err != nil {
 			return err
+		}
+		if eval == nil {
+			return exit(5, "nomad evaluation %s returned no data", evalID)
 		}
 		switch strings.TrimSpace(eval.Status) {
 		case nomadapi.EvalStatusComplete:
@@ -719,7 +767,7 @@ func selectAllocation(allocs []*nomadapi.AllocationListStub, jobID, taskName str
 			continue
 		}
 		state, ok := alloc.TaskStates[taskName]
-		if !ok {
+		if !ok || state == nil {
 			continue
 		}
 		ready := allocationReadiness{
@@ -836,8 +884,6 @@ func isNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if classifyError(err) == "not_found" {
-		return true
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "404")
+	var statusErr interface{ StatusCode() int }
+	return errors.As(err, &statusErr) && statusErr.StatusCode() == http.StatusNotFound
 }

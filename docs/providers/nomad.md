@@ -32,20 +32,22 @@ fleet. Select it as `nomad`.
 ## Prerequisites
 
 - A reachable Nomad HTTP API endpoint.
-- A Nomad ACL token available in the environment. The default variable is
-  `NOMAD_TOKEN`; configure `nomad.tokenEnv` or `--nomad-token-env` to point at
-  a different variable name.
+- For ACL-enabled clusters, a Nomad ACL token available in the environment. The
+  default variable is `NOMAD_TOKEN`; configure `nomad.tokenEnv` or
+  `--nomad-token-env` to point at a different variable name. ACL-disabled local
+  and development clusters may leave it unset.
 - A Nomad namespace and region if your cluster requires them.
 - A client pool that can run the configured task driver. The default driver is
   `docker` with image `ubuntu:24.04`.
 - A task image or template that provides `/bin/sh`, `bash`, `tar`, `cat`,
   `mkdir`, and a writable absolute workdir.
-- ACL privileges for job registration, job reads, allocation reads, evaluation
-  reads, allocation exec, and job deregistration in the selected namespace.
+- On ACL-enabled clusters, privileges for job registration, job reads,
+  allocation reads, evaluation reads, allocation exec, and job deregistration
+  in the selected namespace.
 
 Keep Nomad tokens in environment variables or your existing shell secret
-manager. Do not store token values in repo-local config, committed docs, shell
-history, or command-line arguments.
+manager when ACLs are enabled. Do not store token values in repo-local config,
+committed docs, shell history, or command-line arguments.
 
 ## Commands
 
@@ -62,10 +64,11 @@ crabbox stop --provider nomad nomad-smoke
 crabbox cleanup --provider nomad --dry-run
 ```
 
-`doctor` is read-only. It verifies that the address is configured, that the
-token environment variable contains a value, that `agent.self` is reachable, and
-that configured region and namespace values resolve. It prints
-`mutation=false` in its checks.
+`doctor` is read-only. It verifies that the address is configured, probes
+`agent.self` with the configured token when present, and checks configured
+region and namespace values. A reachable ACL-disabled cluster passes without a
+token; an anonymous `401`/`403` reports the missing token environment variable.
+Every check prints `mutation=false`.
 
 `warmup` creates a Nomad job and local Crabbox claim. The job stays running
 until explicit `stop` or `cleanup`, even if `--keep` is omitted. A `run` without
@@ -212,6 +215,9 @@ placeholders:
 Template validation requires the rendered job ID, matching Crabbox ownership
 metadata, and a task whose name equals `nomad.task`.
 
+Job registration is create-only: Nomad's modify-index guard must prove the job
+ID is unused, so a collision cannot retarget an existing job.
+
 ## Lifecycle
 
 1. `warmup` or `run` without `--id` creates a lease ID (`cbx_...`), allocates a
@@ -220,18 +226,21 @@ metadata, and a task whose name equals `nomad.task`.
 2. `status` and `list` start from local `cbx_...` claims scoped to the selected
    Nomad address, namespace, region, and task. They verify remote job ownership
    before reporting readiness.
-3. Unless `--no-sync` is set, `run` creates a portable archive of the checkout,
+3. `stop` and cleanup retain the local claim unless the remote job has matching
+   ownership metadata and its removal is confirmed, or an exact Nomad `404`
+   proves it is already absent. Auth, transport, and other lookup failures keep
+   the claim for a safe retry.
+4. Unless `--no-sync` is set, `run` creates a portable archive of the checkout,
    uploads it through allocation exec, and extracts it inside `nomad.workdir`.
    With `sync.delete: true`, archive sync replaces stale remote files according
    to the delegated archive-sync contract.
-4. Commands run through Nomad allocation exec against the configured task. Exit
+5. Commands run through Nomad allocation exec against the configured task. Exit
    codes are mirrored by `crabbox run`.
-5. `--sync-only` performs only archive sync, prints the remote workdir, and
+6. `--sync-only` performs only archive sync, prints the remote workdir, and
    follows normal keep/cleanup behavior.
-6. `stop` deregisters only a job with matching Crabbox ownership metadata and
-   removes the local claim. If the job is already missing, it removes the stale
-   local claim for that lease.
-7. `cleanup` sweeps only local Nomad claims in the active provider scope. It
+7. `stop` deregisters only a job with matching Crabbox ownership metadata and
+   removes the local claim after confirming absence.
+8. `cleanup` sweeps only local Nomad claims in the active provider scope. It
    deregisters TTL-expired or idle-expired Crabbox-owned jobs, removes missing
    stale claims, and skips active claims. `--dry-run` prints the planned action
    without mutating Nomad or local claim state.
@@ -263,6 +272,7 @@ Nomad live proof is opt-in because it creates and deregisters a real job:
 export CRABBOX_LIVE=1
 export CRABBOX_LIVE_PROVIDERS=nomad
 export NOMAD_ADDR=https://nomad.example.com:4646
+# Required only when Nomad ACLs are enabled.
 export NOMAD_TOKEN=...
 scripts/live-nomad-smoke.sh
 ```
@@ -291,9 +301,10 @@ It emits one classification:
 - `quota_blocked`
 - `diagnostic_only`
 
-Missing `CRABBOX_LIVE=1`, missing `CRABBOX_LIVE_PROVIDERS=nomad`, missing
-`NOMAD_ADDR` or trusted `nomad.address` from `CRABBOX_CONFIG`, and a missing
-token env value are classified as `environment_blocked` before any mutation. If
+Missing `CRABBOX_LIVE=1`, missing `CRABBOX_LIVE_PROVIDERS=nomad`, and missing
+`NOMAD_ADDR` or trusted `nomad.address` from `CRABBOX_CONFIG` are classified as
+`environment_blocked` before any mutation. ACL-enabled endpoints that reject an
+unset or invalid token fail during read-only `doctor` before job creation. If
 the smoke is interrupted after a job is created, rerun:
 
 ```sh
@@ -305,8 +316,9 @@ crabbox cleanup --provider nomad --dry-run
 
 - `nomad address is required`: set `NOMAD_ADDR`, set `nomad.address` in an
   explicit trusted `CRABBOX_CONFIG` file, or pass `--nomad-address`.
-- `missing_token`: export the environment variable named by `tokenEnv`
-  (`NOMAD_TOKEN` by default). Do not place the token on argv.
+- `missing_token`: the cluster rejected anonymous access; export the environment
+  variable named by `tokenEnv` (`NOMAD_TOKEN` by default). Do not place the
+  token on argv.
 - TLS or `x509` errors: configure `caCert`, `caPath`, `clientCert`,
   `clientKey`, or `tlsServerName`. Use `skipVerify` only for disposable local
   clusters where trust is handled another way.
@@ -317,9 +329,10 @@ crabbox cleanup --provider nomad --dry-run
   resource sizing.
 - `alloc-exec` or permission denied failures: add the allocation exec and job
   read/write capabilities to the token policy in the selected namespace.
-- Stale local claims: `crabbox list --provider nomad --json` shows
-  `missing-or-inaccessible`; `crabbox stop --provider nomad <id>` removes a
-  claim only after resolving the active provider scope.
+- Stale local claims: a verified Nomad `404` appears as `missing` in
+  `crabbox list --provider nomad --json`; auth, transport, and other lookup
+  errors fail closed and preserve the claim. `crabbox stop --provider nomad
+  <id>` removes a stale claim only after resolving the active provider scope.
 - Cleanup surprises: `crabbox cleanup --provider nomad --dry-run` prints
   `would deregister`, `would remove`, or `skip` decisions. Cleanup never
   enumerates arbitrary Nomad jobs and never mutates jobs without matching

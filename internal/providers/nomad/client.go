@@ -79,7 +79,10 @@ func (c liveClient) NamespaceInfo(ctx context.Context, namespace string) (*nomad
 }
 
 func (c liveClient) RegisterJob(ctx context.Context, job *nomadapi.Job) (string, error) {
-	resp, _, err := c.client.Jobs().Register(job, c.writeOptions(ctx))
+	resp, _, err := c.client.Jobs().RegisterOpts(job, &nomadapi.RegisterOptions{
+		EnforceIndex: true,
+		ModifyIndex:  0,
+	}, c.writeOptions(ctx))
 	if err != nil {
 		return "", err
 	}

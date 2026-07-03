@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,17 +18,19 @@ import (
 )
 
 type lifecycleFakeClient struct {
-	jobs          map[string]*nomadapi.Job
-	evals         map[string]*nomadapi.Evaluation
-	allocs        map[string][]*nomadapi.AllocationListStub
-	registers     int
-	deregisters   []string
-	deregistered  map[string]bool
-	jobInfoErr    map[string]error
-	execs         []recordedNomadExec
-	execResults   []fakeNomadExecResult
-	evalStatus    string
-	deregisterErr error
+	jobs                      map[string]*nomadapi.Job
+	evals                     map[string]*nomadapi.Evaluation
+	allocs                    map[string][]*nomadapi.AllocationListStub
+	registers                 int
+	deregisters               []string
+	deregistered              map[string]bool
+	jobInfoErr                map[string]error
+	jobInfoAfterDeregisterErr map[string]error
+	execs                     []recordedNomadExec
+	execResults               []fakeNomadExecResult
+	evalStatus                string
+	nilEvaluation             string
+	deregisterErr             error
 }
 
 type recordedNomadExec struct {
@@ -47,13 +50,19 @@ type fakeNomadExecResult struct {
 	Err      error
 }
 
+type fakeHTTPStatusError int
+
+func (e fakeHTTPStatusError) Error() string   { return "nomad response status" }
+func (e fakeHTTPStatusError) StatusCode() int { return int(e) }
+
 func newLifecycleFakeClient() *lifecycleFakeClient {
 	return &lifecycleFakeClient{
-		jobs:         map[string]*nomadapi.Job{},
-		evals:        map[string]*nomadapi.Evaluation{},
-		allocs:       map[string][]*nomadapi.AllocationListStub{},
-		deregistered: map[string]bool{},
-		jobInfoErr:   map[string]error{},
+		jobs:                      map[string]*nomadapi.Job{},
+		evals:                     map[string]*nomadapi.Evaluation{},
+		allocs:                    map[string][]*nomadapi.AllocationListStub{},
+		deregistered:              map[string]bool{},
+		jobInfoErr:                map[string]error{},
+		jobInfoAfterDeregisterErr: map[string]error{},
 	}
 }
 
@@ -86,9 +95,15 @@ func (f *lifecycleFakeClient) JobInfo(_ context.Context, jobID string) (*nomadap
 	if err := f.jobInfoErr[jobID]; err != nil {
 		return nil, err
 	}
+	if f.deregistered[jobID] {
+		if err := f.jobInfoAfterDeregisterErr[jobID]; err != nil {
+			return nil, err
+		}
+		return nil, fakeHTTPStatusError(http.StatusNotFound)
+	}
 	job := f.jobs[jobID]
-	if job == nil || f.deregistered[jobID] {
-		return nil, errors.New("Unexpected response code: 404")
+	if job == nil {
+		return nil, fakeHTTPStatusError(http.StatusNotFound)
 	}
 	return cloneJob(job), nil
 }
@@ -98,6 +113,9 @@ func (f *lifecycleFakeClient) JobAllocations(_ context.Context, jobID string, _ 
 }
 
 func (f *lifecycleFakeClient) EvaluationInfo(_ context.Context, evalID string) (*nomadapi.Evaluation, error) {
+	if evalID == f.nilEvaluation {
+		return nil, nil
+	}
 	if eval := f.evals[evalID]; eval != nil {
 		return eval, nil
 	}
@@ -396,6 +414,16 @@ func TestWarmupCleansRegisteredJobWhenReadinessFailsBeforeClaim(t *testing.T) {
 	}
 }
 
+func TestWaitForEvaluationRejectsEmptyResponse(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.nilEvaluation = "eval-empty"
+	b, _, _ := testBackend(t, fake)
+	err := b.waitForEvaluation(context.Background(), fake, "eval-empty")
+	if err == nil || !strings.Contains(err.Error(), "returned no data") {
+		t.Fatalf("err=%v, want empty evaluation response failure", err)
+	}
+}
+
 func TestListAndStatusKeepMissingJobsVisible(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	b, _, _ := testBackend(t, fake)
@@ -405,14 +433,14 @@ func TestListAndStatusKeepMissingJobsVisible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(views) != 1 || views[0].Status != "missing-or-inaccessible" {
+	if len(views) != 1 || views[0].Status != "missing" {
 		t.Fatalf("views=%#v", views)
 	}
 	status, err := b.Status(context.Background(), StatusRequest{ID: "quiet-crab"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.State != "missing-or-inaccessible" || status.Ready {
+	if status.State != "missing" || status.Ready {
 		t.Fatalf("status=%#v", status)
 	}
 }
@@ -452,6 +480,63 @@ func TestStopRemovesClaimWhenOwnedJobAlreadyGone(t *testing.T) {
 	}
 	if retained, err := readLeaseClaim(claim.LeaseID); err != nil || retained.LeaseID != "" {
 		t.Fatalf("retained=%#v err=%v", retained, err)
+	}
+}
+
+func TestStopRetainsClaimWhenLookupErrorOnlyMentions404(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	b, _, _ := testBackend(t, fake)
+	claim := createClaim(t, b, "cbx_454545454545", "retry-crab", "crabbox-454545454545", "alloc-45")
+	jobID := claim.Labels[claimLabelJobID]
+	fake.jobInfoErr[jobID] = errors.New("proxy returned a 404 page while upstream was unavailable")
+
+	err := b.Stop(context.Background(), StopRequest{ID: claim.Slug})
+	if err == nil || !strings.Contains(err.Error(), "404 page") {
+		t.Fatalf("err=%v, want lookup failure", err)
+	}
+	if len(fake.deregisters) != 0 {
+		t.Fatalf("deregisters=%v", fake.deregisters)
+	}
+	if retained, readErr := readLeaseClaim(claim.LeaseID); readErr != nil || retained.LeaseID != claim.LeaseID {
+		t.Fatalf("retained=%#v err=%v", retained, readErr)
+	}
+}
+
+func TestStopRetainsClaimWhenRemovalCannotBeConfirmed(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	b, _, _ := testBackend(t, fake)
+	claim := createClaim(t, b, "cbx_464646464646", "confirm-crab", "crabbox-464646464646", "alloc-46")
+	jobID := claim.Labels[claimLabelJobID]
+	fake.jobInfoAfterDeregisterErr[jobID] = errors.New("nomad inventory temporarily unavailable")
+
+	err := b.Stop(context.Background(), StopRequest{ID: claim.Slug})
+	if err == nil || !strings.Contains(err.Error(), "confirm nomad job") {
+		t.Fatalf("err=%v, want confirmation failure", err)
+	}
+	if len(fake.deregisters) != 1 {
+		t.Fatalf("deregisters=%v", fake.deregisters)
+	}
+	if retained, readErr := readLeaseClaim(claim.LeaseID); readErr != nil || retained.LeaseID != claim.LeaseID {
+		t.Fatalf("retained=%#v err=%v", retained, readErr)
+	}
+}
+
+func TestSetupFailureRefusesCleanupAfterRemoteOwnershipChanges(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	b, _, _ := testBackend(t, fake)
+	expected, err := buildJobSpec(b.cfg, jobSpecInput{LeaseID: "cbx_474747474747", Slug: "changed-crab", JobID: "crabbox-474747474747"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.jobs[stringValue(expected.ID)] = cloneJob(expected)
+	fake.jobs[stringValue(expected.ID)].Meta[metadataLeaseID] = "cbx_someone_else"
+
+	err = b.cleanupUnclaimedJob(context.Background(), fake, expected, errors.New("readiness failed"))
+	if err == nil || !strings.Contains(err.Error(), "ownership changed") {
+		t.Fatalf("err=%v, want ownership refusal", err)
+	}
+	if len(fake.deregisters) != 0 {
+		t.Fatalf("deregisters=%v", fake.deregisters)
 	}
 }
 
@@ -834,6 +919,18 @@ func TestSelectAllocationDoesNotReportRunningForPendingTask(t *testing.T) {
 	}
 	if ready.AllocationID != "alloc-pending" || ready.State() != "not-ready" {
 		t.Fatalf("ready=%#v, want pending allocation to remain not-ready", ready)
+	}
+}
+
+func TestSelectAllocationSkipsNilTaskState(t *testing.T) {
+	alloc := runningAlloc("job", "alloc-nil", "node-0", "worker-0", "crabbox")
+	alloc.TaskStates["crabbox"] = nil
+	ready, err := selectAllocation([]*nomadapi.AllocationListStub{alloc}, "job", "crabbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.AllocationID != "" || ready.State() != "not-ready" {
+		t.Fatalf("ready=%#v, want missing task state to remain not-ready", ready)
 	}
 }
 

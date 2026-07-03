@@ -85,29 +85,50 @@ func TestDoctorReportsMissingConfigWithoutClientCall(t *testing.T) {
 	}
 }
 
-func TestDoctorReportsMissingTokenWithoutClientCall(t *testing.T) {
+func TestDoctorAllowsMissingTokenWhenClusterAcceptsAnonymousReads(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	cfg.Nomad.Address = "https://nomad.example.test:4646"
 	cfg.Nomad.TokenEnv = "TEAM_A_NOMAD_TOKEN"
-	called := false
+	fake := &fakeClient{}
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
 		clientFactory: func(Config, Runtime) (Client, error) {
-			called = true
-			return &fakeClient{}, nil
+			return fake, nil
 		},
 	}
 	result, err := b.Doctor(context.Background(), DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if called {
-		t.Fatal("client factory called despite missing token")
+	if result.Status != "ok" || len(result.Checks) < 2 || result.Checks[0].Check != "auth" || result.Checks[0].Details["class"] != "not_required" || result.Checks[0].Details["token_env"] != "TEAM_A_NOMAD_TOKEN" {
+		t.Fatalf("result=%#v", result)
 	}
-	if result.Status != "failed" || len(result.Checks) != 1 || result.Checks[0].Check != "auth" || result.Checks[0].Details["token_env"] != "TEAM_A_NOMAD_TOKEN" {
+	if fake.selfCalls != 1 {
+		t.Fatalf("selfCalls=%d", fake.selfCalls)
+	}
+}
+
+func TestDoctorReportsMissingTokenWhenClusterRejectsAnonymousReads(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.Nomad.Address = "https://nomad.example.test:4646"
+	cfg.Nomad.TokenEnv = "TEAM_A_NOMAD_TOKEN"
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		clientFactory: func(Config, Runtime) (Client, error) {
+			return &fakeClient{selfErr: fakeHTTPStatusError(403)}, nil
+		},
+	}
+	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "failed" || len(result.Checks) != 1 || result.Checks[0].Check != "auth" || result.Checks[0].Details["class"] != "missing_token" {
 		t.Fatalf("result=%#v", result)
 	}
 }

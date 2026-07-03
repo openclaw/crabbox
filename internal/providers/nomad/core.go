@@ -69,10 +69,6 @@ func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labe
 	return core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-}
-
 func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
 }
