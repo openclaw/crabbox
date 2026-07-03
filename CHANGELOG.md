@@ -4,7 +4,6 @@
 
 ### Added
 
-- Added a delegated HashiCorp Nomad provider with create-only owned jobs, archive sync, retained lease reuse, exact-claim lifecycle cleanup, optional env-only ACL auth, and zero-residue live-smoke coverage. Thanks @coygeek.
 - Added `crabbox watch` to reuse one warm SSH lease, coalesce qualifying local changes into sequential runs through the normal sync/history pipeline, and release newly acquired leases on bounded idle or exit. Thanks @yetval.
 - Added `crabbox checkpoint fork -- <command...>` to run the normal `crabbox run` flow across fork fan-out leases with `{{index}}`, `{{total}}`, `{{lease}}`, and `{{slug}}` template variables.
 - Added Vast.ai direct Linux GPU SSH leases with guarded offer cost and reliability selection, per-lease keys, account-bound cleanup, required-tool bootstrap, and billable live-smoke coverage. Thanks @coygeek.
