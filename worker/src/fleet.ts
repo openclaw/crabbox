@@ -2281,7 +2281,7 @@ export class FleetCoordinator {
             config.provider === "hetzner" && hetznerProvisioningFailureRetryable(error);
           const failedHetznerServerID =
             config.provider === "hetzner" ? hetznerProvisioningResourceID(error) : undefined;
-          if (failedHetznerServerID !== undefined && !record.workspaceID) {
+          if (failedHetznerServerID !== undefined) {
             record.cloudID = String(failedHetznerServerID);
             record.serverID = failedHetznerServerID;
             record.releaseDeletesServer = true;
@@ -2293,10 +2293,7 @@ export class FleetCoordinator {
             record.providerKeyCleanupPending = true;
             record.providerKeyCleanupID = String(error.providerKeyCleanupID);
           }
-          if (
-            (failedHetznerServerID !== undefined && !record.workspaceID) ||
-            record.providerKeyCleanupPending
-          ) {
+          if (failedHetznerServerID !== undefined || record.providerKeyCleanupPending) {
             record.cleanupRetryAt = new Date(
               Date.parse(failedAt) + leaseCleanupRetryDelayMs,
             ).toISOString();

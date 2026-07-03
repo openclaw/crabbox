@@ -6657,6 +6657,78 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("persists failed Hetzner workspace resources for durable rollback cleanup", async () => {
+    const storage = new MemoryStorage();
+    const cleanupLeases: LeaseRecord[] = [];
+    const fleet = testFleet(
+      storage,
+      {
+        hetzner: fakeProvider(
+          async () => {
+            throw new HetznerProvisioningError(
+              "IP wait failed; cleanup server 123: http 503",
+              true,
+              true,
+              123,
+              7,
+            );
+          },
+          {
+            provider: "hetzner",
+            onReleaseLease(lease) {
+              cleanupLeases.push(structuredClone(lease));
+            },
+          },
+        ),
+      },
+      { CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test" },
+    );
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const body = {
+      id: "fleet-is-rollback",
+      runtime: "crabbox",
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      capabilities: { desktop: false },
+    };
+    await fleet.fetch(request("POST", "/v1/workspaces", { headers, body }));
+
+    await fleet.alarm();
+
+    const failedLease = [...(await storage.list<LeaseRecord>({ prefix: "lease:" })).values()][0]!;
+    expect(failedLease).toMatchObject({
+      workspaceID: body.id,
+      state: "failed",
+      cloudID: "123",
+      serverID: 123,
+      releaseDeletesServer: true,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+    expect(Date.parse(failedLease.cleanupRetryAt ?? "")).toBeGreaterThan(Date.now());
+    expect(cleanupLeases).toHaveLength(0);
+
+    storage.seed(`lease:${failedLease.id}`, {
+      ...failedLease,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await fleet.alarm();
+
+    expect(cleanupLeases).toHaveLength(1);
+    expect(cleanupLeases[0]).toMatchObject({
+      cloudID: "123",
+      serverID: 123,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+    expect(
+      storage.value<LeaseRecord>(`lease:${failedLease.id}`)?.providerKeyCleanupPending,
+    ).toBeUndefined();
+  });
+
   it("fails deterministic workspace provisioning errors without waiting for the lease TTL", async () => {
     const storage = new MemoryStorage();
     let providerLookups = 0;
