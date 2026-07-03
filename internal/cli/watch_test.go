@@ -588,6 +588,19 @@ func TestQualifyWatchBatchHonorsSyncIncludes(t *testing.T) {
 	}
 }
 
+func TestWatchGitPathsTreatsEventNamesLiterally(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, "*.go", "literal filename\n")
+
+	got, err := watchGitPaths(root, []string{"*.go"}, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "*.go" {
+		t.Fatalf("paths=%q, want only the literal event path", got)
+	}
+}
+
 func TestWatchIncludeWhitelistFiltersReruns(t *testing.T) {
 	root := newWatchGitRepo(t)
 	watchTestWrite(t, root, "src/app.go", "package app\n")
@@ -868,6 +881,42 @@ func TestWatchUsageValidation(t *testing.T) {
 	}
 }
 
+func TestWatchAllowsCommandlessPreset(t *testing.T) {
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).watch(context.Background(), []string{
+		"--provider", "e2b",
+		"--preset", "qa",
+		"--",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "does not support watch") {
+		t.Fatalf("watch error=%v, want commandless preset to pass usage validation", err)
+	}
+}
+
+func TestWatchValidatesSelectedProfileBeforeLoadingProvider(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), ".crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte(`
+profiles:
+  invalid:
+    doctor:
+      enabled: true
+      tools: [not-a-real-tool]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).watch(context.Background(), []string{
+		"--provider", "e2b",
+		"--profile", "invalid",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "unknown preflight tool") {
+		t.Fatalf("watch error=%v, want profile validation before provider loading", err)
+	}
+}
+
 func TestPartitionWatchRunArgs(t *testing.T) {
 	newFS := func() *flag.FlagSet {
 		fs := newFlagSet("watch", io.Discard)
@@ -876,6 +925,7 @@ func TestPartitionWatchRunArgs(t *testing.T) {
 		fs.Duration("debounce", 0, "")
 		fs.Duration("idle-exit", 0, "")
 		fs.String("slug", "", "")
+		fs.String("preset", "", "")
 		fs.String("provider", "", "")
 		fs.Bool("desktop", false, "")
 		return fs
@@ -892,6 +942,7 @@ func TestPartitionWatchRunArgs(t *testing.T) {
 		{name: "owned equals value", args: []string{"--debounce=1s"}, wantWatch: "--debounce=1s", wantRun: ""},
 		{name: "owned bool", args: []string{"--keep"}, wantWatch: "--keep", wantRun: ""},
 		{name: "slug never forwarded", args: []string{"--slug", "fast-crab"}, wantWatch: "--slug fast-crab", wantRun: ""},
+		{name: "preset forwarded and parsed", args: []string{"--preset", "qa"}, wantWatch: "--preset qa", wantRun: "--preset qa"},
 		{name: "shared goes to both", args: []string{"--provider", "hetzner"}, wantWatch: "--provider hetzner", wantRun: "--provider hetzner"},
 		{name: "shared bool goes to both", args: []string{"--desktop"}, wantWatch: "--desktop", wantRun: "--desktop"},
 		{name: "unknown forwarded with value", args: []string{"--junit", "results.xml"}, wantWatch: "", wantRun: "--junit results.xml"},

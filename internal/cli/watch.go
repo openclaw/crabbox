@@ -86,6 +86,7 @@ func (a App) watch(ctx context.Context, args []string) error {
 	leaseIDFlag := fs.String("id", "", "existing lease or server id")
 	keep := fs.Bool("keep", false, "keep an acquired lease when the watch loop exits")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	preset := fs.String("preset", "", "configured profile preset that provides the watched command")
 	debounce := fs.Duration("debounce", 250*time.Millisecond, "quiet period before a change batch triggers a rerun")
 	idleExit := fs.Duration("idle-exit", 0, "exit after this period without qualifying local changes; defaults to the lease idle timeout")
 	flagArgs, command := splitWatchArgs(args)
@@ -99,7 +100,7 @@ func (a App) watch(ctx context.Context, args []string) error {
 	if fs.NArg() > 0 {
 		return exit(2, "unexpected argument %q; place the command after --", fs.Arg(0))
 	}
-	if len(command) == 0 {
+	if len(command) == 0 && strings.TrimSpace(*preset) == "" {
 		return exit(2, "usage: crabbox watch [flags] -- <command...>")
 	}
 	if *debounce <= 0 {
@@ -114,6 +115,10 @@ func (a App) watch(ctx context.Context, args []string) error {
 	}
 	cfg, err := loadConfig()
 	if err != nil {
+		return err
+	}
+	cfg.Profile = *leaseFlags.Profile
+	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return err
 	}
 	if err := applyLeaseCreateFlagsForLease(&cfg, fs, leaseFlags, *leaseIDFlag); err != nil {
@@ -484,7 +489,11 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 }
 
 func watchGitPaths(root string, paths []string, gitArgs ...string) ([]string, error) {
-	cmd := exec.Command("git", append(gitArgs, paths...)...)
+	args := make([]string, 0, len(gitArgs)+len(paths)+1)
+	args = append(args, "--literal-pathspecs")
+	args = append(args, gitArgs...)
+	args = append(args, paths...)
+	cmd := exec.Command("git", args...)
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
