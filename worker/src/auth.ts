@@ -1,4 +1,5 @@
 import { bearerToken } from "./http";
+import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";
 
 const tokenPrefix = "cbxu_";
@@ -62,7 +63,7 @@ export async function authenticateRequest(
 ): Promise<AuthContext | undefined> {
   const token = bearerToken(request);
   const trustedIdentity = context.trustedProxy ? trustedProxyIdentity(request, env) : undefined;
-  if (env.CRABBOX_ADMIN_TOKEN && token === env.CRABBOX_ADMIN_TOKEN) {
+  if (env.CRABBOX_ADMIN_TOKEN && timingSafeEqual(token ?? "", env.CRABBOX_ADMIN_TOKEN)) {
     const accessIdentity = await verifiedAccessIdentity(request, env).catch(() => undefined);
     return {
       authorized: true,
@@ -76,7 +77,7 @@ export async function authenticateRequest(
       org: request.headers.get("x-crabbox-org") ?? env.CRABBOX_DEFAULT_ORG ?? "unknown",
     };
   }
-  if (env.CRABBOX_SHARED_TOKEN && token === env.CRABBOX_SHARED_TOKEN) {
+  if (env.CRABBOX_SHARED_TOKEN && timingSafeEqual(token ?? "", env.CRABBOX_SHARED_TOKEN)) {
     const accessIdentity = await verifiedAccessIdentity(request, env).catch(() => undefined);
     return {
       authorized: true,
@@ -215,7 +216,7 @@ async function verifyUserToken(
   }
   const { encodedPayload, signature } = parts;
   const expected = await sign(encodedPayload, sessionSecret(env));
-  if (!constantTimeEqual(signature, expected)) {
+  if (!timingSafeEqual(signature, expected)) {
     return undefined;
   }
   const payload = decodeUserTokenPayload(token);
@@ -274,7 +275,10 @@ export function userTokenSigningConfigurationError(
   if (!env.CRABBOX_SESSION_SECRET) {
     return "CRABBOX_SESSION_SECRET is required for signed user tokens";
   }
-  if (env.CRABBOX_SHARED_TOKEN && env.CRABBOX_SESSION_SECRET === env.CRABBOX_SHARED_TOKEN) {
+  if (
+    env.CRABBOX_SHARED_TOKEN &&
+    timingSafeEqual(env.CRABBOX_SESSION_SECRET, env.CRABBOX_SHARED_TOKEN)
+  ) {
     return "CRABBOX_SESSION_SECRET must differ from CRABBOX_SHARED_TOKEN";
   }
   return undefined;
@@ -296,7 +300,7 @@ function trustedProxyIdentity(
   if (
     requiredSecret !== undefined &&
     (!requiredSecret ||
-      !constantTimeEqual(request.headers.get("x-crabbox-proxy-secret") ?? "", requiredSecret))
+      !timingSafeEqual(request.headers.get("x-crabbox-proxy-secret") ?? "", requiredSecret))
   ) {
     return undefined;
   }
@@ -619,15 +623,4 @@ function base64URLDecode(value: string): Uint8Array {
     out[i] = binary.charCodeAt(i);
   }
   return out;
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
 }

@@ -8,6 +8,7 @@ import {
 import { codeProxyRequestBodyBytes, isIsolatedCodeRequest } from "./code-origin";
 import { bearerToken, json, pathParts } from "./http";
 import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
+import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";
 
 export type CoordinatorFetch = (request: Request) => Promise<Response>;
@@ -155,7 +156,7 @@ function runtimeAdapterServiceAuth(
     return undefined;
   }
   const expected = env.CRABBOX_RUNTIME_ADAPTER_TOKEN?.trim();
-  if (!expected || bearerToken(request) !== expected) {
+  if (!expected || !timingSafeEqual(bearerToken(request) ?? "", expected)) {
     return undefined;
   }
   return {

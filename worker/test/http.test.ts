@@ -60,10 +60,22 @@ describe("coordinator auth", () => {
 
   it("requires the configured bearer token", async () => {
     const denied = new Request("https://example.test/v1/pool");
+    const wrongSameLength = new Request("https://example.test/v1/pool", {
+      headers: { authorization: "Bearer secres" },
+    });
+    const wrongLength = new Request("https://example.test/v1/pool", {
+      headers: { authorization: "Bearer secret-extra" },
+    });
     const allowed = new Request("https://example.test/v1/pool", {
       headers: { authorization: "Bearer secret" },
     });
     await expect(isAuthorized(denied, { CRABBOX_SHARED_TOKEN: "secret" })).resolves.toBe(false);
+    await expect(isAuthorized(wrongSameLength, { CRABBOX_SHARED_TOKEN: "secret" })).resolves.toBe(
+      false,
+    );
+    await expect(isAuthorized(wrongLength, { CRABBOX_SHARED_TOKEN: "secret" })).resolves.toBe(
+      false,
+    );
     await expect(isAuthorized(allowed, { CRABBOX_SHARED_TOKEN: "secret" })).resolves.toBe(true);
   });
 
