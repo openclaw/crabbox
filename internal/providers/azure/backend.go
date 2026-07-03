@@ -183,6 +183,7 @@ func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 		return err
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
+	core.RemoveStoredTestboxKey(req.Lease.LeaseID)
 	return nil
 }
 
@@ -224,6 +225,9 @@ func (b *azureLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 		if err := deleteServer(ctx, b.Cfg, server); err != nil {
 			return err
 		}
+		leaseID := server.Labels["lease"]
+		removeLeaseClaim(leaseID)
+		core.RemoveStoredTestboxKey(leaseID)
 	}
 	return nil
 }

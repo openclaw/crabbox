@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -274,9 +276,38 @@ func TestAzureReleaseRejectsForgedOrMismatchedOwnership(t *testing.T) {
 	}
 }
 
+func TestAzureReleaseRemovesStoredLeaseKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	leaseID := "cbx_123456abcdef"
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAzureClient{}
+	oldClient := newAzureClient
+	newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+	t.Cleanup(func() { newAzureClient = oldClient })
+
+	lease := LeaseTarget{Server: azureTestServer("crabbox-owned", leaseID, "owned"), LeaseID: leaseID}
+	backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(keyPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored lease key directory still exists: %v", err)
+	}
+}
+
 func TestAzureCleanupSkipsWeakTagsAndDeletesCanonicalExpiredVM(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	owned := azureTestServer("crabbox-owned", "cbx_123456abcdef", "owned")
 	owned.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(Config{}, owned.Labels["lease"])
+	if err != nil {
+		t.Fatal(err)
+	}
 	weak := azureTestServer("crabbox-weak", "cbx_fedcba654321", "weak")
 	delete(weak.Labels, "created_by")
 	weak.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
@@ -295,6 +326,9 @@ func TestAzureCleanupSkipsWeakTagsAndDeletesCanonicalExpiredVM(t *testing.T) {
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != owned.CloudID {
 		t.Fatalf("deleted=%v, want only canonical owned VM", fake.deleted)
+	}
+	if _, err := os.Stat(filepath.Dir(keyPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored lease key directory still exists: %v", err)
 	}
 }
 
