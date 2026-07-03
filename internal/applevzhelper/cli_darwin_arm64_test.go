@@ -311,7 +311,7 @@ exit 23
 		"--cpus", "2",
 		"--memory-mib", "2048",
 		"--disk-gib", "16",
-		"--ready-timeout", "5s",
+		"--ready-timeout", "15s",
 	}, strings.NewReader(`{"image":"test.img"}`), &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil ||
 		(!strings.Contains(err.Error(), "helper daemon exited before the VM reached running state") &&

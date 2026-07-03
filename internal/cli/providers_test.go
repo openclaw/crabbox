@@ -17,6 +17,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var digitalOcean *providerMatrixEntry
 	var vultr *providerMatrixEntry
 	var firecracker *providerMatrixEntry
+	var vast *providerMatrixEntry
 	var nvidiaBrev *providerMatrixEntry
 	var linode *providerMatrixEntry
 	var nebius *providerMatrixEntry
@@ -42,6 +43,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "firecracker" {
 			firecracker = &entries[i]
+		}
+		if entries[i].Provider == "vast" {
+			vast = &entries[i]
 		}
 		if entries[i].Provider == "nvidia-brev" {
 			nvidiaBrev = &entries[i]
@@ -88,6 +92,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if firecracker == nil {
 		t.Fatal("firecracker provider not found")
+	}
+	if vast == nil {
+		t.Fatal("vast provider not found")
 	}
 	if nvidiaBrev == nil {
 		t.Fatal("nvidia-brev provider not found")
@@ -242,6 +249,18 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if !containsString(nvidiaBrev.Aliases, "brev") || !containsString(nvidiaBrev.Aliases, "nvidia") {
 		t.Fatalf("nvidia-brev aliases=%v", nvidiaBrev.Aliases)
+	}
+	if vast.Kind != ProviderKindSSHLease || vast.Family != "vast" || vast.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("vast kind/family/coordinator=%q/%q/%q", vast.Kind, vast.Family, vast.Coordinator)
+	}
+	if !containsString(vast.Targets, targetLinux) {
+		t.Fatalf("vast targets=%v", vast.Targets)
+	}
+	if !containsFeature(vast.Features, FeatureSSH) || !containsFeature(vast.Features, FeatureCrabboxSync) || !containsFeature(vast.Features, FeatureCleanup) {
+		t.Fatalf("vast features=%v", vast.Features)
+	}
+	if !containsString(vast.Aliases, "vast-ai") || !containsString(vast.Aliases, "vastai") {
+		t.Fatalf("vast aliases=%v", vast.Aliases)
 	}
 	for _, capability := range []string{"local-runtime", "ssh-host"} {
 		if !containsString(localContainer.Runtime, capability) {
