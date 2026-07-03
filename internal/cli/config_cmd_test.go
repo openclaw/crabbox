@@ -337,7 +337,7 @@ func TestConfigShowExportsControllerProviderContract(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", configPath)
-	config := "provider: external\nbroker:\n  url: https://broker.example.test/root/\n  mode: registered\nexternal:\n  command: provider-a\n  capabilities:\n    idempotentLeaseId: true\n"
+	config := "provider: external\nbroker:\n  url: https://broker-user:broker-pass@broker.example.test/root/?token=query-secret#fragment-secret\n  mode: registered\nexternal:\n  command: provider-a\n  capabilities:\n    idempotentLeaseId: true\n"
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -355,8 +355,13 @@ func TestConfigShowExportsControllerProviderContract(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Provider != "external" || got.ProviderScope != "test-external:provider-a" || !got.IdempotentLeaseID || got.CoordinatorRegistrationURL != "https://broker.example.test/root" {
+	if got.Provider != "external" || got.ProviderScope != "test-external:provider-a" || !got.IdempotentLeaseID || got.CoordinatorRegistrationURL != "https://<redacted>@broker.example.test/root" {
 		t.Fatalf("controller provider contract=%#v", got)
+	}
+	for _, secret := range []string{"broker-user", "broker-pass", "query-secret", "fragment-secret"} {
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatalf("config show json leaked coordinator registration secret %q: %q", secret, stdout.String())
+		}
 	}
 }
 
@@ -1731,7 +1736,7 @@ func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	config := []byte(`xcpNg:
-  apiUrl: https://pool-user:pool-pass@xcp-ng.example.test/path?view=1
+  apiUrl: https://pool-user:pool-pass@xcp-ng.example.test/path?token=query-secret#fragment-secret
   username: root
   password: xcp-ng-secret
 `)
@@ -1745,11 +1750,11 @@ func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := stdout.String()
-	wantURL := "https://<redacted>@xcp-ng.example.test/path?view=1"
+	wantURL := "https://<redacted>@xcp-ng.example.test/path"
 	if !strings.Contains(text, "xcp_ng api_url="+wantURL) {
 		t.Fatalf("config show text missing redacted XCP-ng API URL: %q", text)
 	}
-	for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass", "xcp-ng-secret"} {
+	for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass", "xcp-ng-secret", "query-secret", "fragment-secret"} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("config show text leaked %q: %q", secret, text)
 		}
@@ -1771,7 +1776,7 @@ func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
 	if got.XCPNg.APIURL != wantURL || got.XCPNg.Auth != "configured" {
 		t.Fatalf("unexpected xcp-ng json: %#v", got.XCPNg)
 	}
-	for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass", "xcp-ng-secret"} {
+	for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass", "xcp-ng-secret", "query-secret", "fragment-secret"} {
 		if strings.Contains(stdout.String(), secret) {
 			t.Fatalf("config show json leaked %q: %q", secret, stdout.String())
 		}
@@ -1799,7 +1804,7 @@ func TestConfigShowRedactsProxmoxAPIURLUserinfo(t *testing.T) {
 	if err := app.configShow(nil); err != nil {
 		t.Fatal(err)
 	}
-	wantURL := "https://<redacted>@pve.example.test:8006/api2/json?view=1"
+	wantURL := "https://<redacted>@pve.example.test:8006/api2/json"
 	if !strings.Contains(stdout.String(), "proxmox api_url="+wantURL) {
 		t.Fatalf("config show text missing redacted Proxmox API URL: %q", stdout.String())
 	}
@@ -1854,7 +1859,7 @@ func TestConfigShowRedactsSchemeLessXCPNgAPIURLUserinfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := stdout.String()
-	wantURL := "<redacted>@xcp-ng.example.test/path?view=1"
+	wantURL := "<redacted>@xcp-ng.example.test/path"
 	if !strings.Contains(text, "xcp_ng api_url="+wantURL) {
 		t.Fatalf("config show text missing redacted scheme-less XCP-ng API URL: %q", text)
 	}
@@ -1911,6 +1916,77 @@ func TestRedactedConfigURLRedactsUserinfoOnMalformedURL(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRedactedConfigURLRemovesQueryAndFragment(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "absolute without userinfo",
+			raw:  "https://api.example.test/v1?token=query-secret#fragment-secret",
+			want: "https://api.example.test/v1",
+		},
+		{
+			name: "absolute with userinfo",
+			raw:  "https://user:password@api.example.test/v1?view=1#section",
+			want: "https://<redacted>@api.example.test/v1",
+		},
+		{
+			name: "scheme-less",
+			raw:  "api.example.test/v1?token=query-secret#fragment-secret",
+			want: "api.example.test/v1",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := redactedConfigURL(test.raw); got != test.want {
+				t.Fatalf("redactedConfigURL(%q)=%q, want %q", test.raw, got, test.want)
+			}
+		})
+	}
+}
+
+func TestConfigShowRedactsAllEndpointURLComponents(t *testing.T) {
+	const rawURL = "https://api-user:api-password@api.example.test/v1?token=query-secret#fragment-secret"
+	cfg := Config{Coordinator: rawURL}
+	cfg.NamespaceInstance.Endpoint = rawURL
+	cfg.Morph.APIURL = rawURL
+	cfg.E2B.APIURL = rawURL
+	cfg.UpstashBox.BaseURL = rawURL
+	cfg.Smolvm.BaseURL = rawURL
+	cfg.Blaxel.APIURL = rawURL
+	cfg.AsciiBox.BaseURL = rawURL
+	cfg.Superserve.BaseURL = rawURL
+	cfg.Cloudflare.APIURL = rawURL
+	cfg.FastAPICloud.APIURL = rawURL
+	cfg.CloudflareDynamicWorkers.LoaderURL = rawURL
+	cfg.CloudflareSandbox.BridgeURL = rawURL
+	cfg.Vast.APIURL = rawURL
+	cfg.Hostinger.APIURL = rawURL
+	cfg.OVH.Endpoint = rawURL
+	cfg.TencentCloud.APIEndpoint = rawURL
+	cfg.AzureDynamicSessions.Endpoint = rawURL
+	cfg.Proxmox.APIURL = rawURL
+	cfg.XCPNg.APIURL = rawURL
+
+	var text bytes.Buffer
+	writeConfigShowText(&text, cfg)
+	jsonData, err := json.Marshal(configShowView(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, output := range map[string]string{"text": text.String(), "json": string(jsonData)} {
+		if !strings.Contains(output, "api.example.test/v1") {
+			t.Fatalf("%s output omitted safe endpoint: %s", name, output)
+		}
+		for _, secret := range []string{"api-user", "api-password", "query-secret", "fragment-secret"} {
+			if strings.Contains(output, secret) {
+				t.Fatalf("%s output leaked %q: %s", name, secret, output)
+			}
+		}
 	}
 }
 
