@@ -296,6 +296,52 @@ func TestListAndResolveInstancesWithClaim(t *testing.T) {
 	}
 }
 
+func TestResolveReclaimBindsLegacyClaimEndpoint(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	const leaseID = "cbx_legacy123456"
+	const name = "crabbox-blue-1234abcd"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "blue-lobster", providerName, instanceScope(name), "", t.TempDir(), 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"list", "--format", "json"}):       {Stdout: sampleListJSON()},
+		commandKey([]string{"info", "--format", "json", name}): {Stdout: sampleInfoJSON(name)},
+	}}
+	b := testBackend(runner)
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{
+		ID:   leaseID,
+		Repo: core.Repo{Root: t.TempDir()},
+	}); err == nil || !strings.Contains(err.Error(), "explicit --reclaim") {
+		t.Fatalf("normal resolve legacy claim err=%v", err)
+	}
+	if owned, err := exactMultipassClaimOwned(leaseID, name); err != nil {
+		t.Fatal(err)
+	} else if owned {
+		t.Fatal("normal resolve silently adopted a legacy claim")
+	}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{
+		ID:      leaseID,
+		Reclaim: true,
+		Repo:    core.Repo{Root: t.TempDir()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != name {
+		t.Fatalf("CloudID=%q want %q", lease.Server.CloudID, name)
+	}
+	owned, err := exactMultipassClaimOwned(leaseID, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owned {
+		t.Fatal("reclaim did not persist an exact resource-bound claim")
+	}
+}
+
 func TestDoctorReady(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		commandKey([]string{"version"}):                  {Stdout: "multipass 1.16.0\nmultipassd 1.16.0\n"},
@@ -640,6 +686,40 @@ func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
 	server := Server{Status: "running", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
+	}
+}
+
+func TestShouldCleanupSkipsStoppedMissingClaim(t *testing.T) {
+	server := Server{Status: "stopped", Labels: map[string]string{}}
+	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
+		t.Fatalf("cleanup=%v reason=%s", ok, reason)
+	}
+}
+
+func TestReleaseRequiresExactClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_release123456"
+	const name = "crabbox-release-1234"
+	runner := &recordingRunner{}
+	b := testBackend(runner)
+	lease := LeaseTarget{
+		LeaseID: leaseID,
+		Server:  Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
+	}
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("ReleaseLease unclaimed err=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("unclaimed release mutated provider: %#v", runner.calls)
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "release", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, lease.Server, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatalf("ReleaseLease exact claim: %v", err)
+	}
+	if got := recordedArgsForCommand(t, runner, "delete"); !strings.Contains(got, "--purge\n"+name) {
+		t.Fatalf("delete args=%q", got)
 	}
 }
 

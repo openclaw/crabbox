@@ -195,12 +195,22 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if claim.LeaseID == "" {
 		return LeaseTarget{}, exit(4, "multipass instance %q has no Crabbox lease claim; use `crabbox stop --provider multipass %s` to delete it or warm a new lease", inst.Name, inst.Name)
 	}
+	owned, err := exactMultipassClaimOwned(claim.LeaseID, inst.Name)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if !owned && !req.Reclaim {
+		return LeaseTarget{}, exit(4, "multipass lease %q has a legacy claim not bound to instance %q; adopt it with an explicit --reclaim reuse", claim.LeaseID, inst.Name)
+	}
+	if !owned && req.Repo.Root == "" {
+		return LeaseTarget{}, exit(2, "multipass --reclaim requires repository context before binding instance %q", inst.Name)
+	}
 	lease, err := b.prepareLease(ctx, cfg, inst, claim, false)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		if err := claimLeaseForRepoProviderScopePondEndpoint(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
 			return LeaseTarget{}, err
 		}
 	}
@@ -265,6 +275,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if name == "" {
 		return exit(2, "provider=%s release requires a Multipass instance name", providerName)
 	}
+	if err := requireExactMultipassClaim(lease.LeaseID, name); err != nil {
+		return err
+	}
 	if err := b.removeInstance(ctx, name); err != nil {
 		return err
 	}
@@ -301,6 +314,14 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		shouldDelete, reason := shouldCleanup(server, claim, claim.LeaseID != "", now)
 		if !shouldDelete {
 			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=%s\n", inst.Name, reason)
+			continue
+		}
+		owned, err := exactMultipassClaimOwned(claim.LeaseID, inst.Name)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=ownership: missing exact local claim\n", inst.Name)
 			continue
 		}
 		if req.DryRun {
@@ -729,24 +750,45 @@ func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time
 	if strings.EqualFold(server.Labels["keep"], "true") {
 		return false, "keep=true"
 	}
+	if !hasClaim {
+		return false, "missing claim"
+	}
 	if !instanceRunning(server.Status) && server.Status != "ready" {
 		return true, "instance state=" + blank(server.Status, "unknown")
 	}
-	if hasClaim {
-		lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-		if err != nil || lastUsed.IsZero() {
-			return false, "claim active"
-		}
-		idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-		if idle <= 0 {
-			return false, "claim active"
-		}
-		if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
-			return true, "claim expired"
-		}
+	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
+	if err != nil || lastUsed.IsZero() {
 		return false, "claim active"
 	}
-	return false, "missing claim"
+	idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
+	if idle <= 0 {
+		return false, "claim active"
+	}
+	if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
+		return true, "claim expired"
+	}
+	return false, "claim active"
+}
+
+func requireExactMultipassClaim(leaseID, instanceName string) error {
+	owned, err := exactMultipassClaimOwned(leaseID, instanceName)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return exit(4, "multipass lease %q has no exact local claim bound to instance %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName))
+	}
+	return nil
+}
+
+func exactMultipassClaimOwned(leaseID, instanceName string) (bool, error) {
+	leaseID = strings.TrimSpace(leaseID)
+	instanceName = strings.TrimSpace(instanceName)
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
+	if err != nil {
+		return false, err
+	}
+	return ok && exact && claim.LeaseID == leaseID && claim.CloudID == instanceName && claim.ProviderScope == instanceScope(instanceName) && instanceNameFromClaim(claim) == instanceName, nil
 }
 
 func (b *backend) multipass(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {

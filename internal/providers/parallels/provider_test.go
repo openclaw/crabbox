@@ -231,6 +231,31 @@ func TestCleanupKeepsClaimAndStoredKeyWhenDeleteFails(t *testing.T) {
 	}
 }
 
+func TestReleaseRequiresExactClaim(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	runner := &parallelsCleanupRunner{}
+	backend := &leaseBackend{
+		DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), runner),
+	}
+	lease := LeaseTarget{
+		LeaseID: "cbx_unclaimed",
+		Server: core.Server{
+			CloudID: "vm-good",
+			Name:    "crabbox-cbx-unclaimed-blue",
+			Labels:  map[string]string{"lease": "cbx_unclaimed", "host": "local"},
+		},
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("ReleaseLease unclaimed err=%v", err)
+	}
+	if runner.deleteCalls != 0 {
+		t.Fatalf("deleteCalls=%d want 0", runner.deleteCalls)
+	}
+}
+
 func TestAcquireRemovesStoredKeyAfterPostKeyFailure(t *testing.T) {
 	if _, err := exec.LookPath("ssh-keygen"); err != nil {
 		t.Skip("ssh-keygen not available")
@@ -342,7 +367,13 @@ func seedParallelsCleanupState(t *testing.T) (string, string) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	leaseID := "cbx_good"
-	if err := core.ClaimLeaseForRepoProvider(leaseID, "blue", "parallels", "/repo", time.Minute, false); err != nil {
+	server := core.Server{
+		CloudID:  "vm-good",
+		Provider: "parallels",
+		Name:     "crabbox-cbx-good-blue",
+		Labels:   map[string]string{"provider": "parallels", "lease": leaseID, "slug": "blue", "host": "local"},
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "blue", "parallels", "", "", "/repo", time.Minute, false, server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	keyPath, err := core.TestboxKeyPath(leaseID)

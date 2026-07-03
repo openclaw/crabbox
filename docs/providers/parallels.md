@@ -228,8 +228,11 @@ and their base snapshots while any checkpoint or clone depends on them.
 
 ## Safety
 
-Crabbox refuses to delete Parallels VMs unless their name starts with
-`crabbox-`. `stop` and `cleanup` are scoped to clones Crabbox created.
+Crabbox refuses to delete a Parallels VM unless an exact local claim binds the
+lease to the VM ID and selected Parallels host. A `crabbox-` name alone is not
+ownership proof. `stop` and `cleanup` skip unclaimed or mismatched clones;
+intentionally recovered clones must first be adopted through an explicit
+`--reclaim` reuse.
 
 Use `--dry-run` on direct fork, restore, and delete when validating a template
 or snapshot name. `checkpoint list` prints live Parallels state and marks

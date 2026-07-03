@@ -408,8 +408,31 @@ func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
 
 func TestShouldCleanupStoppedVM(t *testing.T) {
 	server := Server{Status: "off", Labels: map[string]string{}}
-	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); !ok {
-		t.Fatalf("should cleanup stopped VM, got cleanup=%v reason=%s", ok, reason)
+	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
+		t.Fatalf("cleanup=%v reason=%s, want false missing claim", ok, reason)
+	}
+}
+
+func TestReleaseRequiresExactClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+	const leaseID = "cbx_unclaimed12345"
+	const name = "crabbox-unclaimed-1234"
+	runner := &recordingRunner{}
+	b := testBackend(runner)
+	lease := LeaseTarget{
+		LeaseID: leaseID,
+		Server:  Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
+	}
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("ReleaseLease unclaimed err=%v", err)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && strings.Contains(call.Args[len(call.Args)-1], "Remove-VM") {
+			t.Fatalf("unclaimed release called Remove-VM: %#v", call)
+		}
 	}
 }
 

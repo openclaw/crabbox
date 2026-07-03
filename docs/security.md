@@ -245,7 +245,10 @@ a matching local claim. Freestyle and Islo canonical names remain available
 for read-only discovery, but delete, pause, resume, SSH reuse, and delegated
 reuse require an exact local claim. When local state was intentionally lost,
 an operator can use the provider's supported `--reclaim` reuse path to persist
-a new claim before any provider mutation.
+a new claim before any provider mutation. Hyper-V, Multipass, and Parallels
+likewise require exact resource-bound local claims before release or cleanup;
+provider names and `crabbox-` resource prefixes are discovery hints, not
+destructive ownership proof.
 
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects. Required
