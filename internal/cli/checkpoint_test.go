@@ -305,6 +305,38 @@ func TestCheckpointForkDryRunFansOutRequestedSlug(t *testing.T) {
 	}
 }
 
+func TestCheckpointForkDryRunFansOutCommand(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{ID: "chk_fork_run_fanout", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	err = app.checkpointFork(context.Background(), []string{
+		record.ID, "--dry-run", "--count", "2", "--slug", "Fanout",
+		"--", "pnpm", "test", "--", "--shard", "{{index}}/{{total}}", "--lease", "{{lease}}", "--slug", "{{slug}}",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		`slug=fanout-1 keep=true index=1/2 command="pnpm test -- --shard 1/2 --lease '' --slug fanout-1"`,
+		`slug=fanout-2 keep=true index=2/2 command="pnpm test -- --shard 2/2 --lease '' --slug fanout-2"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestCheckpointForkRejectsInvalidCount(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
@@ -312,6 +344,27 @@ func TestCheckpointForkRejectsInvalidCount(t *testing.T) {
 	err := app.checkpointFork(context.Background(), []string{"chk_missing", "--count", "0"})
 	if err == nil || !strings.Contains(err.Error(), "--count must be at least 1") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestSplitCheckpointForkRunArgs(t *testing.T) {
+	forkArgs, runArgs := splitCheckpointForkRunArgs([]string{"chk_123", "--count", "2", "--", "pnpm", "test", "--grep", "slow"})
+	if got, want := strings.Join(forkArgs, " "), "chk_123 --count 2"; got != want {
+		t.Fatalf("fork args=%q, want %q", got, want)
+	}
+	if got, want := strings.Join(runArgs, " "), "pnpm test --grep slow"; got != want {
+		t.Fatalf("run args=%q, want %q", got, want)
+	}
+}
+
+func TestCheckpointForkRunCommandExpandsPlaceholders(t *testing.T) {
+	got := checkpointForkRunCommand(
+		[]string{"pnpm", "test", "--shard", "{{index}}/{{total}}", "--lease", "{{lease}}", "--slug", "{{slug}}"},
+		checkpointForkRunContext{Index: 3, Total: 12, LeaseID: "cbx_abc123", Slug: "fanout-03"},
+	)
+	want := []string{"pnpm", "test", "--shard", "3/12", "--lease", "cbx_abc123", "--slug", "fanout-03"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("command=%q, want %q", got, want)
 	}
 }
 
