@@ -145,6 +145,42 @@ func TestReleaseDeleteKeepsLocalStateWhenKubectlMissing(t *testing.T) {
 	}
 }
 
+func TestReleaseDeleteRemovesLocalStateWhenDevboxDisappearsAfterShutdown(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.DeleteOnRelease = true
+	leaseID := "cbx_shutdownrace"
+	slug := "red"
+	name := core.LeaseProviderName(leaseID, slug)
+	server := releaseServer(cfg, leaseID, slug, name)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := persistDevboxKey(leaseID, devboxSecretKeys{PublicKey: "ssh-ed25519 AAA test", PrivateKey: "private\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &lifecycleRunner{
+		outputs:  []string{releaseDevboxJSON(cfg, leaseID, slug, name), "shutdown", ""},
+		stderrs:  []string{"", "", `Error from server (NotFound): devboxes.devbox.sealos.io "` + name + `" not found`},
+		exitCode: []int{0, 0, 1},
+		errors:   []error{nil, nil, errors.New("exit status 1")},
+	}
+	backend := lifecycleBackend(cfg, runner)
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stored key still exists or stat failed unexpectedly: %v", err)
+	}
+	if got := strings.Join(flattenArgs(runner.requests), " "); strings.Contains(got, " delete ") {
+		t.Fatalf("post-shutdown disappearance issued delete: %s", got)
+	}
+}
+
 func TestReleaseDeleteRemovesLocalStateWhenDevboxNotFound(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()

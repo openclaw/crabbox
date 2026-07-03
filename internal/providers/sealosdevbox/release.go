@@ -46,6 +46,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		}
 		item, _, _, _, err = b.validateDevboxIdentity(ctx, name, leaseID, slug)
 		if err != nil {
+			if kubernetesObjectNotFound(err) {
+				core.RemoveLeaseClaim(leaseID)
+				core.RemoveStoredTestboxKey(leaseID)
+				return nil
+			}
 			return err
 		}
 		if !b.itemMatchesScope(item) {
