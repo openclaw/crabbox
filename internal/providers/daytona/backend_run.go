@@ -61,18 +61,15 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=daytona sandbox=%s\n", leaseID, slug, sandbox.ID)
 		acquired = true
 	} else {
-		sandbox, leaseID, err = b.resolveDaytonaToolboxSandbox(ctx, client, req.ID)
+		sandbox, leaseID, err = b.resolveDaytonaToolboxSandbox(ctx, client, req.ID, req.Repo, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
 		slug = newLeaseSlug(leaseID)
-		if claim, ok, claimErr := resolveLeaseClaim(req.ID); claimErr != nil {
+		if claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID, daytonaProvider); claimErr != nil {
 			return RunResult{}, claimErr
-		} else if ok && claim.Provider == daytonaProvider {
+		} else if ok {
 			slug = claim.Slug
-			if err := claimLeaseForRepoConfig(claim.LeaseID, claim.Slug, b.cfg, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
-				return RunResult{}, err
-			}
 		}
 	}
 	shouldStop := acquired && !req.Keep
@@ -213,6 +210,9 @@ func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
+	if err := requireExactDaytonaClaim(leaseID, sandbox); err != nil {
+		return err
+	}
 	if err := client.DeleteSandbox(ctx, sandbox.GetId()); err != nil {
 		return daytonaError("delete sandbox", err)
 	}
@@ -270,7 +270,7 @@ func (b *daytonaLeaseBackend) createDaytonaToolboxSandboxWithClient(ctx context.
 	if err != nil {
 		return nil, "", "", daytonaError("create sandbox", err)
 	}
-	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, Server{Provider: daytonaProvider, CloudID: sandbox.ID, Labels: labels}, SSHTarget{}, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
 		_ = sandbox.Delete(context.Background())
 		return nil, "", "", err
 	}
@@ -282,7 +282,7 @@ func (b *daytonaLeaseBackend) createDaytonaToolboxSandboxWithClient(ctx context.
 	return sandbox, leaseID, slug, nil
 }
 
-func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, sdkClient *sdkdaytona.Client, id string) (*sdkdaytona.Sandbox, string, error) {
+func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, sdkClient *sdkdaytona.Client, id string, repo Repo, reclaim bool) (*sdkdaytona.Sandbox, string, error) {
 	apiClient, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return nil, "", err
@@ -290,6 +290,20 @@ func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, 
 	apiSandbox, leaseID, err := resolveDaytonaSandbox(ctx, apiClient, b.cfg, id)
 	if err != nil {
 		return nil, "", err
+	}
+	server := daytonaSandboxToServer(apiSandbox, b.cfg)
+	if reclaim {
+		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, repo.Root, b.cfg.IdleTimeout, true); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := requireExactDaytonaClaim(leaseID, apiSandbox); err != nil {
+		return nil, "", err
+	}
+	if !reclaim {
+		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, repo.Root, b.cfg.IdleTimeout, false); err != nil {
+			return nil, "", err
+		}
 	}
 	if !daytonaStateReady(daytonaSandboxState(apiSandbox)) {
 		if _, err := apiClient.StartSandbox(ctx, apiSandbox.GetId()); err != nil {

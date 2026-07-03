@@ -10,9 +10,11 @@ import (
 )
 
 type fakeDaytonaDoctorAPI struct {
-	listCalls int
-	mutated   bool
-	sandboxes []apidaytona.Sandbox
+	listCalls    int
+	mutated      bool
+	sandboxes    []apidaytona.Sandbox
+	getSandboxes map[string]*apidaytona.Sandbox
+	deleted      []string
 }
 
 func (a *fakeDaytonaDoctorAPI) CreateSandbox(context.Context, apidaytona.CreateSandbox) (*apidaytona.Sandbox, error) {
@@ -20,8 +22,8 @@ func (a *fakeDaytonaDoctorAPI) CreateSandbox(context.Context, apidaytona.CreateS
 	return nil, nil
 }
 
-func (a *fakeDaytonaDoctorAPI) GetSandbox(context.Context, string) (*apidaytona.Sandbox, error) {
-	return nil, nil
+func (a *fakeDaytonaDoctorAPI) GetSandbox(_ context.Context, id string) (*apidaytona.Sandbox, error) {
+	return a.getSandboxes[id], nil
 }
 
 func (a *fakeDaytonaDoctorAPI) ListCrabboxSandboxes(context.Context) ([]apidaytona.Sandbox, error) {
@@ -34,8 +36,9 @@ func (a *fakeDaytonaDoctorAPI) StartSandbox(context.Context, string) (*apidayton
 	return nil, nil
 }
 
-func (a *fakeDaytonaDoctorAPI) DeleteSandbox(context.Context, string) error {
+func (a *fakeDaytonaDoctorAPI) DeleteSandbox(_ context.Context, id string) error {
 	a.mutated = true
+	a.deleted = append(a.deleted, id)
 	return nil
 }
 
@@ -55,9 +58,17 @@ func (a *fakeDaytonaDoctorAPI) CreateSSHAccess(context.Context, string, time.Dur
 }
 
 func TestDaytonaDoctorListsInventoryOnly(t *testing.T) {
-	sandbox := apidaytona.Sandbox{}
-	sandbox.SetId("sandbox-one")
-	fake := &fakeDaytonaDoctorAPI{sandboxes: []apidaytona.Sandbox{sandbox}}
+	owned := apidaytona.Sandbox{}
+	owned.SetId("sandbox-one")
+	owned.SetLabels(map[string]string{
+		"crabbox":  "true",
+		"provider": daytonaProvider,
+		"lease":    "cbx_666666666666",
+	})
+	weaklyLabelled := apidaytona.Sandbox{}
+	weaklyLabelled.SetId("sandbox-weak")
+	weaklyLabelled.SetLabels(map[string]string{"crabbox": "true"})
+	fake := &fakeDaytonaDoctorAPI{sandboxes: []apidaytona.Sandbox{owned, weaklyLabelled}}
 	old := newDaytonaClient
 	newDaytonaClient = func(Config, Runtime) (daytonaAPI, error) {
 		return fake, nil

@@ -116,8 +116,13 @@ crabbox stop --provider daytona swift-crab
   archive through Daytona toolbox file APIs, extracts it in the sandbox, and
   executes the command through Daytona toolbox process APIs. The command transport
   is Daytona's SDK — not direct SSH.
-- **`list`**, **`status`**, and **`stop`** find Crabbox-owned sandboxes via
-  Daytona sandbox labels.
+- **`list`** and **`status`** discover sandboxes only when Daytona labels bind
+  them to the Daytona provider and a canonical Crabbox lease. Direct IDs with
+  missing or mismatched ownership labels are rejected.
+- **`run --id`**, **`ssh`**, and **`stop`** additionally require a local claim
+  that binds the exact Daytona sandbox ID to that lease. A legacy labelled
+  sandbox with an unbound claim must be adopted explicitly with `--reclaim`
+  from its owning repository before it can be reused or deleted.
 - **`ssh`** mints a fresh Daytona SSH access token (TTL `daytona.sshAccessMinutes`,
   default 30 minutes), parses the host and port from Daytona's returned SSH
   command (falling back to `daytona.sshGatewayHost` and port 22), and prints the

@@ -64,8 +64,8 @@ func TestDaytonaListCrabboxSandboxesUsesCursorPagination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.GetId() != "sandbox-two" || leaseID != "lease-two" {
-		t.Fatalf("resolved=%s lease=%s, want sandbox-two lease-two", resolved.GetId(), leaseID)
+	if resolved.GetId() != "sandbox-two" || leaseID != "cbx_222222222222" {
+		t.Fatalf("resolved=%s lease=%s, want sandbox-two cbx_222222222222", resolved.GetId(), leaseID)
 	}
 	if len(cursors) != 4 || cursors[0] != "" || cursors[1] != "cursor-2" || cursors[2] != "" || cursors[3] != "cursor-2" {
 		t.Fatalf("cursors=%#v, want two cursor-paginated inventory scans", cursors)
@@ -80,6 +80,9 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 			_, _ = w.Write([]byte(`{"items":[],"nextCursor":null}`))
 		case "/sandbox/direct-one":
 			_, _ = w.Write([]byte(daytonaListItemJSON("direct-one", "direct-slug")))
+		case "/sandbox/unowned":
+			unowned := strings.Replace(daytonaListItemJSON("unowned", "unowned"), `"provider": "daytona", `, "", 1)
+			_, _ = w.Write([]byte(unowned))
 		case "/sandbox/missing":
 			http.Error(w, `{"message":"sandbox not found"}`, http.StatusNotFound)
 		case "/sandbox/denied":
@@ -99,8 +102,8 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.GetId() != "direct-one" || leaseID != "lease-one" {
-		t.Fatalf("direct lookup=%s lease=%s, want direct-one lease-one", got.GetId(), leaseID)
+	if got.GetId() != "direct-one" || leaseID != "cbx_111111111111" {
+		t.Fatalf("direct lookup=%s lease=%s, want direct-one cbx_111111111111", got.GetId(), leaseID)
 	}
 
 	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "missing")
@@ -118,6 +121,11 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "sandbox not found") {
 		t.Fatalf("denied err=%v, want no not-found rewrite", err)
+	}
+
+	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "unowned")
+	if !errors.As(err, &exitErr) || exitErr.Code != 4 || !strings.Contains(err.Error(), "is not owned by Crabbox") {
+		t.Fatalf("unowned err=%v, want ownership refusal", err)
 	}
 }
 
@@ -162,6 +170,10 @@ func TestParseDaytonaCLIAuthConfigFallsBackWhenNoActiveProfile(t *testing.T) {
 }
 
 func daytonaListItemJSON(id, slug string) string {
+	leaseID := "cbx_111111111111"
+	if strings.HasSuffix(id, "two") {
+		leaseID = "cbx_222222222222"
+	}
 	return `{
 		"id": "` + id + `",
 		"organizationId": "org-123",
@@ -175,7 +187,7 @@ func daytonaListItemJSON(id, slug string) string {
 		"gpu": 0,
 		"memory": 4,
 		"disk": 20,
-		"labels": {"crabbox": "true", "lease": "lease-` + id[len(id)-3:] + `", "slug": "` + slug + `"},
+		"labels": {"crabbox": "true", "provider": "daytona", "lease": "` + leaseID + `", "slug": "` + slug + `"},
 		"toolboxProxyUrl": "https://toolbox.example/` + id + `",
 		"state": "started"
 	}`

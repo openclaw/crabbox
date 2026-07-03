@@ -358,6 +358,116 @@ func TestDeleteDaytonaToolboxSandboxUsesBoundedContext(t *testing.T) {
 	}
 }
 
+func TestDaytonaStopRequiresExactResourceClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_333333333333"
+	sandbox := apidaytona.Sandbox{}
+	sandbox.SetId("sandbox-owned")
+	sandbox.SetName("crabbox-test-daytona")
+	sandbox.SetLabels(map[string]string{
+		"crabbox":  "true",
+		"provider": daytonaProvider,
+		"lease":    leaseID,
+		"slug":     "daytona-owned",
+	})
+	fake := &fakeDaytonaDoctorAPI{sandboxes: []apidaytona.Sandbox{sandbox}}
+	oldClient := newDaytonaClient
+	newDaytonaClient = func(Config, Runtime) (daytonaAPI, error) { return fake, nil }
+	t.Cleanup(func() { newDaytonaClient = oldClient })
+
+	cfg := baseConfig()
+	cfg.Provider = daytonaProvider
+	backend := &daytonaLeaseBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
+	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("Stop error=%v, want exact-claim refusal", err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("claimless stop deleted sandboxes: %#v", fake.deleted)
+	}
+
+	repoRoot := t.TempDir()
+	server := Server{Provider: daytonaProvider, CloudID: sandbox.GetId(), Labels: sandbox.GetLabels()}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "daytona-owned", cfg, server, SSHTarget{}, repoRoot, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != sandbox.GetId() {
+		t.Fatalf("exact-claim stop deleted %#v, want [%s]", fake.deleted, sandbox.GetId())
+	}
+}
+
+func TestDaytonaResolveRejectsClaimOwnedByAnotherRepo(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_444444444444"
+	sandbox := apidaytona.Sandbox{}
+	sandbox.SetId("sandbox-repo-owned")
+	sandbox.SetName("crabbox-test-daytona")
+	sandbox.SetLabels(map[string]string{
+		"crabbox":  "true",
+		"provider": daytonaProvider,
+		"lease":    leaseID,
+		"slug":     "daytona-repo-owned",
+	})
+	fake := &fakeDaytonaDoctorAPI{sandboxes: []apidaytona.Sandbox{sandbox}}
+	oldClient := newDaytonaClient
+	newDaytonaClient = func(Config, Runtime) (daytonaAPI, error) { return fake, nil }
+	t.Cleanup(func() { newDaytonaClient = oldClient })
+
+	cfg := baseConfig()
+	cfg.Provider = daytonaProvider
+	repoA := t.TempDir()
+	repoB := t.TempDir()
+	server := Server{Provider: daytonaProvider, CloudID: sandbox.GetId(), Labels: sandbox.GetLabels()}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "daytona-repo-owned", cfg, server, SSHTarget{}, repoA, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &daytonaLeaseBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, Repo: Repo{Root: repoB}})
+	if err == nil || !strings.Contains(err.Error(), "is claimed by repo") || !strings.Contains(err.Error(), "use --reclaim") {
+		t.Fatalf("Resolve error=%v, want cross-repository claim refusal", err)
+	}
+	if fake.mutated {
+		t.Fatal("cross-repository resolve mutated the Daytona sandbox")
+	}
+}
+
+func TestDaytonaResolveRefusesImplicitAdoption(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_555555555555"
+	sandbox := apidaytona.Sandbox{}
+	sandbox.SetId("sandbox-unclaimed")
+	sandbox.SetLabels(map[string]string{
+		"crabbox":  "true",
+		"provider": daytonaProvider,
+		"lease":    leaseID,
+		"slug":     "daytona-unclaimed",
+	})
+	fake := &fakeDaytonaDoctorAPI{sandboxes: []apidaytona.Sandbox{sandbox}}
+	oldClient := newDaytonaClient
+	newDaytonaClient = func(Config, Runtime) (daytonaAPI, error) { return fake, nil }
+	t.Cleanup(func() { newDaytonaClient = oldClient })
+
+	cfg := baseConfig()
+	cfg.Provider = daytonaProvider
+	backend := &daytonaLeaseBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, Repo: Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") || !strings.Contains(err.Error(), "use --reclaim") {
+		t.Fatalf("Resolve error=%v, want explicit-adoption refusal", err)
+	}
+	if fake.mutated {
+		t.Fatal("claimless resolve mutated the Daytona sandbox")
+	}
+	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID, daytonaProvider); claimErr != nil {
+		t.Fatal(claimErr)
+	} else if ok {
+		t.Fatal("claimless resolve implicitly created a Daytona claim")
+	}
+}
+
 func TestDaytonaSSHTargetUsesReturnedSSHCommand(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Daytona.SSHGatewayHost = "fallback.example"

@@ -35,6 +35,7 @@ type Server = core.Server
 type Repo = core.Repo
 type LeaseTarget = core.LeaseTarget
 type SSHTarget = core.SSHTarget
+type LeaseClaim = core.LeaseClaim
 type SyncManifest = core.SyncManifest
 type ExitError = core.ExitError
 type timingReport = core.TimingReport
@@ -115,8 +116,12 @@ func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
 
-func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, cfg.Provider, repoRoot, idleTimeout, reclaim)
+func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
+}
+
+func resolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool, error) {
+	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
 
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
