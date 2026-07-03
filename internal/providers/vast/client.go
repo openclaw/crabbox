@@ -36,6 +36,8 @@ type vastClient struct {
 
 const vastMaxResponseBytes = 4 << 20
 
+var errVastInstanceNotFound = errors.New("vast instance not found")
+
 type vastAPIError struct {
 	Operation  string
 	StatusCode int
@@ -461,9 +463,9 @@ func decodeVastInstance(raw json.RawMessage) (vastInstance, error) {
 		return normalizeVastInstance(direct), nil
 	}
 	var envelope struct {
-		Instance  vastInstance `json:"instance"`
-		Instances vastInstance `json:"instances"`
-		Data      vastInstance `json:"data"`
+		Instance  vastInstance    `json:"instance"`
+		Instances json.RawMessage `json:"instances"`
+		Data      vastInstance    `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return vastInstance{}, err
@@ -471,10 +473,26 @@ func decodeVastInstance(raw json.RawMessage) (vastInstance, error) {
 	if envelope.Instance.ID != 0 || envelope.Instance.ContractID != 0 || envelope.Instance.SSHHost != "" {
 		return normalizeVastInstance(envelope.Instance), nil
 	}
-	if envelope.Instances.ID != 0 || envelope.Instances.ContractID != 0 || envelope.Instances.SSHHost != "" {
-		return normalizeVastInstance(envelope.Instances), nil
+	if len(envelope.Instances) > 0 {
+		var instance vastInstance
+		if err := json.Unmarshal(envelope.Instances, &instance); err == nil && (instance.ID != 0 || instance.ContractID != 0 || instance.SSHHost != "") {
+			return normalizeVastInstance(instance), nil
+		}
+		var instances []vastInstance
+		if err := json.Unmarshal(envelope.Instances, &instances); err == nil {
+			if len(instances) == 0 {
+				return vastInstance{}, errVastInstanceNotFound
+			}
+			if len(instances) == 1 {
+				return normalizeVastInstance(instances[0]), nil
+			}
+			return vastInstance{}, fmt.Errorf("decode Vast instance: expected one instance, got %d", len(instances))
+		}
 	}
-	return normalizeVastInstance(envelope.Data), nil
+	if envelope.Data.ID != 0 || envelope.Data.ContractID != 0 || envelope.Data.SSHHost != "" {
+		return normalizeVastInstance(envelope.Data), nil
+	}
+	return vastInstance{}, errors.New("decode Vast instance: response contained no instance")
 }
 
 func decodeVastInstancesPage(raw json.RawMessage) ([]vastInstance, string, error) {

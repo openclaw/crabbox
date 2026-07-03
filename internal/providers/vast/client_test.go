@@ -3,6 +3,7 @@ package vast
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -280,6 +281,21 @@ func TestInstanceSSHKeyMethods(t *testing.T) {
 	}
 	if err := client.DetachInstanceSSHKey(context.Background(), 99, "123"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGetInstanceTreatsEmptyInstancesEnvelopeAsNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v0/instances/99/" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(t, w, map[string]any{"instances": []any{}})
+	}))
+	defer server.Close()
+
+	client := newTestVastClient(t, server)
+	if _, err := client.GetInstance(context.Background(), 99); !errors.Is(err, errVastInstanceNotFound) {
+		t.Fatalf("err=%v", err)
 	}
 }
 

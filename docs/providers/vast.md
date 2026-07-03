@@ -226,6 +226,9 @@ Each new local claim also records the authenticated Vast account id and the
 configured API endpoint. Release validates both before accepting a remote 404,
 stopping, or destroying an instance, so switching credentials or API endpoints
 cannot silently discard cleanup state for a billable instance in another account.
+Runtime state updates preserve that exact non-secret routing metadata. Generated
+stop commands include the credential-free API endpoint and never include the API
+key.
 
 ## Guarded Live Smoke
 
