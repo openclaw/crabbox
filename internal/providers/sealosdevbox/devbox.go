@@ -23,29 +23,31 @@ const (
 )
 
 type devboxManifest struct {
-	APIVersion string      `yaml:"apiVersion"`
-	Kind       string      `yaml:"kind"`
-	Metadata   devboxMeta  `yaml:"metadata"`
-	Spec       devboxSpec  `yaml:"spec"`
+	APIVersion string     `yaml:"apiVersion"`
+	Kind       string     `yaml:"kind"`
+	Metadata   devboxMeta `yaml:"metadata"`
+	Spec       devboxSpec `yaml:"spec"`
 }
 
 type devboxMeta struct {
 	Name              string            `yaml:"name" json:"name"`
 	Namespace         string            `yaml:"namespace,omitempty" json:"namespace,omitempty"`
+	UID               string            `yaml:"-" json:"uid,omitempty"`
+	ResourceVersion   string            `yaml:"-" json:"resourceVersion,omitempty"`
 	CreationTimestamp string            `yaml:"-" json:"creationTimestamp,omitempty"`
 	Labels            map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	Annotations       map[string]string `yaml:"annotations,omitempty" json:"annotations,omitempty"`
 }
 
 type devboxSpec struct {
-	State        string            `yaml:"state,omitempty" json:"state,omitempty"`
+	State        string             `yaml:"state,omitempty" json:"state,omitempty"`
 	Resource     devboxResourceSpec `yaml:"resource,omitempty" json:"resource,omitempty"`
-	Image        string            `yaml:"image,omitempty" json:"image,omitempty"`
-	TemplateID   string            `yaml:"templateID,omitempty" json:"templateID,omitempty"`
-	Config       devboxConfigSpec  `yaml:"config,omitempty" json:"config,omitempty"`
-	StorageLimit string            `yaml:"storageLimit,omitempty" json:"storageLimit,omitempty"`
-	Network      devboxNetworkSpec `yaml:"network,omitempty" json:"network,omitempty"`
-	WorkDir      string            `yaml:"workdir,omitempty" json:"workdir,omitempty"`
+	Image        string             `yaml:"image,omitempty" json:"image,omitempty"`
+	TemplateID   string             `yaml:"templateID,omitempty" json:"templateID,omitempty"`
+	Config       devboxConfigSpec   `yaml:"config,omitempty" json:"config,omitempty"`
+	StorageLimit string             `yaml:"storageLimit,omitempty" json:"storageLimit,omitempty"`
+	Network      devboxNetworkSpec  `yaml:"network,omitempty" json:"network,omitempty"`
+	WorkDir      string             `yaml:"workdir,omitempty" json:"workdir,omitempty"`
 }
 
 type devboxResourceSpec struct {

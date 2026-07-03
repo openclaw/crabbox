@@ -15,8 +15,8 @@ const (
 )
 
 type devboxSecret struct {
-	Metadata devboxMeta         `json:"metadata"`
-	Data     map[string]string  `json:"data"`
+	Metadata   devboxMeta        `json:"metadata"`
+	Data       map[string]string `json:"data"`
 	StringData map[string]string `json:"stringData"`
 }
 

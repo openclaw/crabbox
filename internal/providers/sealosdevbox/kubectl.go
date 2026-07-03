@@ -73,8 +73,8 @@ func (b *backend) canI(ctx context.Context, verb, resource string) core.DoctorCh
 	return doctorCheck("ok", check, "allowed", map[string]string{"mutation": "false", "dry_permission_check": "true"})
 }
 
-func (b *backend) applyDevbox(ctx context.Context, manifest []byte) error {
-	_, err := b.kubectlWithInput(ctx, b.rt.Stdout, strings.NewReader(string(manifest)), true, "apply", "-f", "-")
+func (b *backend) createDevbox(ctx context.Context, manifest []byte) error {
+	_, err := b.kubectlWithInput(ctx, b.rt.Stdout, strings.NewReader(string(manifest)), true, "create", "-f", "-")
 	return err
 }
 
@@ -117,12 +117,17 @@ func (b *backend) getSecret(ctx context.Context, name string) (devboxSecret, err
 	return secret, nil
 }
 
-func (b *backend) patchDevboxState(ctx context.Context, name, state string, annotations map[string]any) error {
+func (b *backend) patchDevboxState(ctx context.Context, name, resourceVersion, state string, annotations map[string]any) error {
+	resourceVersion = strings.TrimSpace(resourceVersion)
+	if resourceVersion == "" {
+		return core.Exit(4, "refusing to patch Sealos DevBox %q without its Kubernetes resourceVersion", name)
+	}
 	patch := map[string]any{
-		"spec": map[string]any{"state": state},
+		"metadata": map[string]any{"resourceVersion": resourceVersion},
+		"spec":     map[string]any{"state": state},
 	}
 	if len(annotations) > 0 {
-		patch["metadata"] = map[string]any{"annotations": annotations}
+		patch["metadata"].(map[string]any)["annotations"] = annotations
 	}
 	payload, err := json.Marshal(patch)
 	if err != nil {
@@ -132,8 +137,12 @@ func (b *backend) patchDevboxState(ctx context.Context, name, state string, anno
 	return err
 }
 
-func (b *backend) deleteDevbox(ctx context.Context, name string) error {
-	_, err := b.kubectl(ctx, b.rt.Stdout, true, "delete", devboxResource+"/"+name, "--ignore-not-found=true")
+func (b *backend) deleteDevbox(ctx context.Context, name, uid string) error {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return core.Exit(4, "refusing to delete Sealos DevBox %q without its Kubernetes UID", name)
+	}
+	_, err := b.kubectl(ctx, b.rt.Stdout, true, "delete", devboxResource+"/"+name, "--ignore-not-found=true", "--preconditions=uid="+uid)
 	return err
 }
 
@@ -180,6 +189,14 @@ func kubectlAPIObjectNotFound(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "error from server (notfound):") && strings.Contains(text, " not found")
+}
+
+func kubectlAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "alreadyexists") || strings.Contains(text, "already exists")
 }
 
 func commandString(req core.LocalCommandRequest) string {

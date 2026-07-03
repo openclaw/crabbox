@@ -14,6 +14,10 @@
 
 ## 0.36.0 - 2026-07-05
 
+### Added
+
+- Added Sealos DevBox Linux SSH leases through the Kubernetes CRD with exact scope-bound claims, Secret-backed SSH routing, conflict-safe creation, and guarded lifecycle cleanup. Thanks @coygeek.
+
 ### Changed
 
 - Renamed the `apple-vz` provider to `apple-vm`; the old provider name/aliases, `appleVZ:` config keys, `--apple-vz-*` flags, and `CRABBOX_APPLE_VZ_*` environment variables keep working as deprecated aliases, existing leases and claims stay manageable, and the state directory migrates automatically.

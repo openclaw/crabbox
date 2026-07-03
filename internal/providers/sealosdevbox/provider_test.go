@@ -166,6 +166,9 @@ func TestDoctorUsesReadOnlyKubectlCommands(t *testing.T) {
 	if crdCheck.Status != "ok" || !strings.Contains(crdCheck.Details["versions"], "v1alpha2") {
 		t.Fatalf("crd check=%#v", crdCheck)
 	}
+	if got := commandString(runner.requests[3]); !strings.Contains(got, ".spec.versions[?(@.served==true)].name") {
+		t.Fatalf("CRD check did not filter served versions: %s", got)
+	}
 	if !strings.Contains(result.Message, "automation_surface=crd_first") || !strings.Contains(result.Message, "mutation=false") {
 		t.Fatalf("message=%q", result.Message)
 	}

@@ -251,7 +251,7 @@ func TestParseAndPersistDevboxSecretKeysRedactsMaterial(t *testing.T) {
 	}
 }
 
-func TestAcquireAppliesManifestPersistsClaimAndKey(t *testing.T) {
+func TestAcquireCreatesManifestPersistsClaimAndKey(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()
 	leaseID := "cbx_123456abcdef"
@@ -259,11 +259,11 @@ func TestAcquireAppliesManifestPersistsClaimAndKey(t *testing.T) {
 	name := core.LeaseProviderName(leaseID, slug)
 	privateKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret-private\n-----END OPENSSH PRIVATE KEY-----\n"
 	publicKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public"
-	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"blue"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"blue"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
 	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"data":{"` + devboxPublicKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(publicKey)) + `","` + devboxPrivateKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(privateKey)) + `"}}`
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[]}`,
-		`devbox applied`,
+		`devbox created`,
 		devboxJSON,
 		secretJSON,
 	}}
@@ -283,10 +283,67 @@ func TestAcquireAppliesManifestPersistsClaimAndKey(t *testing.T) {
 		t.Fatalf("claim=%#v", claim)
 	}
 	if len(runner.inputs) < 2 || !strings.Contains(runner.inputs[1], "apiVersion: "+devboxGroupVersion) {
-		t.Fatalf("apply stdin missing manifest: %#v", runner.inputs)
+		t.Fatalf("create stdin missing manifest: %#v", runner.inputs)
 	}
 	if strings.Contains(strings.Join(flattenArgs(runner.requests), " "), "secret-private") {
 		t.Fatal("private key leaked into kubectl args")
+	}
+}
+
+func TestAcquireRefusesExistingDevboxCollisionWithoutMutation(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_collision123"
+	slug := "occupied"
+	name := core.LeaseProviderName(leaseID, slug)
+	runner := &lifecycleRunner{
+		outputs:  []string{`{"items":[]}`, ""},
+		stderrs:  []string{"", `Error from server (AlreadyExists): devboxes.devbox.sealos.io "` + name + `" already exists`},
+		exitCode: []int{0, 1},
+		errors:   []error{nil, errors.New("exit status 1")},
+	}
+	backend := lifecycleBackend(cfg, runner)
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedLeaseID: leaseID, RequestedSlug: slug, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite existing Sealos DevBox") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	if len(runner.requests) != 2 {
+		t.Fatalf("collision issued follow-up mutation: %#v", runner.requests)
+	}
+	got := strings.Join(flattenArgs(runner.requests), " ")
+	if !strings.Contains(got, "create -f -") || strings.Contains(got, " delete ") || strings.Contains(got, " patch ") {
+		t.Fatalf("collision commands=%s", got)
+	}
+}
+
+func TestAcquireReconcilesAmbiguousCreateWithExactRemoteIdentity(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_ambiguous123"
+	slug := "ambiguous"
+	name := core.LeaseProviderName(leaseID, slug)
+	privateKey := "private\n"
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	secret := `{"metadata":{"name":"` + name + `-ssh"},"data":{"` + devboxPublicKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte("ssh-ed25519 AAA test")) + `","` + devboxPrivateKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(privateKey)) + `"}}`
+	runner := &lifecycleRunner{
+		outputs:  []string{`{"items":[]}`, "", item, item, secret},
+		stderrs:  []string{"", "connection reset after request"},
+		exitCode: []int{0, 1},
+		errors:   []error{nil, io.ErrUnexpectedEOF},
+	}
+	backend := lifecycleBackend(cfg, runner)
+
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedLeaseID: leaseID, RequestedSlug: slug, Repo: core.Repo{Root: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.Name != name {
+		t.Fatalf("lease=%#v", lease)
+	}
+	got := strings.Join(flattenArgs(runner.requests), " ")
+	if strings.Count(got, "create -f -") != 1 || strings.Contains(got, " delete ") {
+		t.Fatalf("ambiguous create commands=%s", got)
 	}
 }
 
@@ -296,10 +353,10 @@ func TestAcquireOnAcquiredErrorRollsBackBeforeLocalState(t *testing.T) {
 	leaseID := "cbx_ackrollback"
 	slug := "reject"
 	name := core.LeaseProviderName(leaseID, slug)
-	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[]}`,
-		`devbox applied`,
+		`devbox created`,
 		devboxJSON,
 		"deleted",
 	}}
@@ -332,7 +389,7 @@ func TestAcquireOnAcquiredErrorRollsBackBeforeLocalState(t *testing.T) {
 		t.Fatal("OnAcquired was not called")
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") {
+	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true --preconditions=uid=uid-test") {
 		t.Fatalf("failed acquire did not delete devbox; commands=%s", got)
 	}
 	if strings.Contains(got, "secret/"+name+"-ssh") {
@@ -346,10 +403,10 @@ func TestAcquireOnAcquiredErrorRollsBackKeptDevbox(t *testing.T) {
 	leaseID := "cbx_ackkeepfail"
 	slug := "rejectkeep"
 	name := core.LeaseProviderName(leaseID, slug)
-	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[]}`,
-		`devbox applied`,
+		`devbox created`,
 		devboxJSON,
 		"deleted",
 	}}
@@ -380,11 +437,11 @@ func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
 	name := core.LeaseProviderName(leaseID, slug)
 	privateKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret-private\n-----END OPENSSH PRIVATE KEY-----\n"
 	publicKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public"
-	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
 	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"data":{"` + devboxPublicKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(publicKey)) + `","` + devboxPrivateKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(privateKey)) + `"}}`
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[]}`,
-		`devbox applied`,
+		`devbox created`,
 		devboxJSON,
 		secretJSON,
 		`{"items":[]}`,
@@ -546,7 +603,7 @@ func TestResolveResumesPausedDevboxBeforeSSHReuse(t *testing.T) {
 	leaseID := "cbx_resume12345"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
-	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused","ssh":{"secretName":"` + name + `-ssh"}}}`
+	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused","ssh":{"secretName":"` + name + `-ssh"}}}`
 	runningItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
 	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"stringData":{"` + devboxPublicKeyField + `":"ssh-ed25519 AAA test","` + devboxPrivateKeyField + `":"private"}}`
 	runner := &lifecycleRunner{outputs: []string{
@@ -597,7 +654,7 @@ func TestResolveResumesPausedNodePortDevboxBeforeRouteLookup(t *testing.T) {
 	leaseID := "cbx_nodeportres"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
-	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused","ssh":{"secretName":"` + name + `-ssh"}}}`
+	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused","ssh":{"secretName":"` + name + `-ssh"}}}`
 	runningItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","network":{"ports":[{"name":"ssh","nodePort":32022}]},"ssh":{"secretName":"` + name + `-ssh"}}}`
 	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"stringData":{"` + devboxPublicKeyField + `":"ssh-ed25519 AAA test","` + devboxPrivateKeyField + `":"private"}}`
 	runner := &lifecycleRunner{outputs: []string{
@@ -737,7 +794,7 @@ func isCanIRequest(req core.LocalCommandRequest) bool {
 
 func isCRDVersionsRequest(req core.LocalCommandRequest) bool {
 	args := strings.Join(req.Args, " ")
-	return strings.Contains(args, "get customresourcedefinition "+devboxCRD) && strings.Contains(args, "jsonpath={.spec.versions[*].name}")
+	return strings.Contains(args, "get customresourcedefinition "+devboxCRD) && strings.Contains(args, "jsonpath={.spec.versions[?(@.served==true)].name}")
 }
 
 func TestPersistDevboxKeyUsesCrabboxKeyPath(t *testing.T) {

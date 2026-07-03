@@ -72,8 +72,27 @@ func TestCleanupDeletesExpiredOwnedDevboxAndRemovesClaimAndKey(t *testing.T) {
 		t.Fatalf("stored key still exists or stat failed unexpectedly: %v", err)
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, "delete "+devboxResource+"/"+name) || !strings.Contains(stdout.String(), "reason=expired") {
+	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true --preconditions=uid=uid-test") || !strings.Contains(stdout.String(), "reason=expired") {
 		t.Fatalf("cleanup output=%q commands=%s", stdout.String(), got)
+	}
+}
+
+func TestCleanupRefusesResourceWhoseScopeChangesBeforeDelete(t *testing.T) {
+	cfg := lifecycleConfig()
+	leaseID := "cbx_scopechange00"
+	slug := "scope-change"
+	name := "devbox-scope-change"
+	owned := cleanupDevboxJSON(cfg, leaseID, slug, name, sealosClaimScopeID(cfg), "2026-06-24T00:00:00Z")
+	changed := cleanupDevboxJSON(cfg, leaseID, slug, name, "other-scope", "2026-06-24T00:00:00Z")
+	runner := &lifecycleRunner{outputs: []string{`{"items":[` + owned + `]}`, changed}}
+	backend := lifecycleBackend(cfg, runner)
+
+	err := backend.Cleanup(context.Background(), core.CleanupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "provider scope changed") {
+		t.Fatalf("cleanup error=%v", err)
+	}
+	if got := strings.Join(flattenArgs(runner.requests), " "); strings.Contains(got, " delete ") {
+		t.Fatalf("scope change reached delete: %s", got)
 	}
 }
 
@@ -107,5 +126,5 @@ func TestCleanupRemovesOnlySameScopeStaleClaims(t *testing.T) {
 }
 
 func cleanupDevboxJSON(cfg core.Config, leaseID, slug, name, scope, expiresAt string) string {
-	return `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + scope + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `","crabbox.dev/expires_at":"` + expiresAt + `"}},"status":{"state":"Shutdown","phase":"Shutdown"}}`
+	return `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + scope + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `","crabbox.dev/expires_at":"` + expiresAt + `"}},"status":{"state":"Shutdown","phase":"Shutdown"}}`
 }

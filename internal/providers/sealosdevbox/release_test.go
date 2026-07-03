@@ -37,7 +37,7 @@ func TestReleaseRetainsLeaseByPausingAndClearingEndpoint(t *testing.T) {
 		t.Fatalf("claim=%#v", claim)
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, "patch "+devboxResource+"/"+name) || !strings.Contains(got, `"state":"Paused"`) {
+	if !strings.Contains(got, "patch "+devboxResource+"/"+name) || !strings.Contains(got, `"state":"Paused"`) || !strings.Contains(got, `"resourceVersion":"rv-test"`) {
 		t.Fatalf("release did not pause devbox: %s", got)
 	}
 	assertReleasePatchUsesScopeFingerprint(t, cfg, runner)
@@ -56,7 +56,7 @@ func TestReleaseRetainsLegacyRawScopeDevboxMigratesScopeAnnotation(t *testing.T)
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	legacyItem := `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `"}},"status":{"state":"Running","phase":"Running"}}`
+	legacyItem := `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `"}},"status":{"state":"Running","phase":"Running"}}`
 	runner := &lifecycleRunner{outputs: []string{
 		legacyItem,
 		"patched",
@@ -100,7 +100,7 @@ func TestReleaseDeleteRemovesDevboxClaimAndKeyAfterValidation(t *testing.T) {
 		t.Fatalf("stored key still exists or stat failed unexpectedly: %v", err)
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, `"state":"Shutdown"`) || !strings.Contains(got, "delete "+devboxResource+"/"+name) {
+	if !strings.Contains(got, `"state":"Shutdown"`) || !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true --preconditions=uid=uid-test") {
 		t.Fatalf("delete release commands=%s", got)
 	}
 	if backend.RetainLeaseClaimAfterRelease(core.LeaseTarget{LeaseID: leaseID, Server: server}) {
@@ -261,7 +261,7 @@ func releaseServer(cfg core.Config, leaseID, slug, name string) core.Server {
 }
 
 func releaseDevboxJSON(cfg core.Config, leaseID, slug, name string) string {
-	return `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `"}},"status":{"state":"Running","phase":"Running"}}`
+	return `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `"}},"status":{"state":"Running","phase":"Running"}}`
 }
 
 func releasePatchPayload(t *testing.T, runner *lifecycleRunner) map[string]any {

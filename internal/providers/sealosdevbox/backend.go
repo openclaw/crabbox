@@ -2,6 +2,7 @@ package sealosdevbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -39,7 +40,7 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 		return doctorResult(checks), nil
 	}
 	add(doctorCheck("ok", "namespace", "found", map[string]string{"namespace": b.cfg.SealosDevbox.Namespace}))
-	versions, err := b.kubectl(ctx, nil, false, "get", "customresourcedefinition", devboxCRD, "-o", "jsonpath={.spec.versions[*].name}")
+	versions, err := b.kubectl(ctx, nil, false, "get", "customresourcedefinition", devboxCRD, "-o", "jsonpath={.spec.versions[?(@.served==true)].name}")
 	if err != nil {
 		add(doctorCheck("failed", "crd.devboxes", err.Error(), map[string]string{"groupVersion": devboxGroupVersion}))
 		return doctorResult(checks), nil
@@ -146,10 +147,24 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	if b.rt.Stderr != nil {
 		fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s devbox=%s namespace=%s keep=%v\n", providerName, leaseID, slug, name, b.cfg.SealosDevbox.Namespace, req.Keep)
 	}
-	if err := b.applyDevbox(ctx, manifest); err != nil {
-		return core.LeaseTarget{}, err
+	applied := false
+	createdUID := ""
+	if createErr := b.createDevbox(ctx, manifest); createErr != nil {
+		if kubectlAlreadyExists(createErr) {
+			return core.LeaseTarget{}, core.Exit(4, "refusing to overwrite existing Sealos DevBox %q: %v", name, createErr)
+		}
+		item, reconcileErr := b.getDevbox(ctx, name)
+		if reconcileErr != nil {
+			return core.LeaseTarget{}, errors.Join(createErr, fmt.Errorf("reconcile Sealos DevBox create: %w", reconcileErr))
+		}
+		actualName, actualLeaseID, actualSlug, identityErr := identityFromDevbox(item, name)
+		if identityErr != nil || !b.itemMatchesScope(item) || actualName != name || actualLeaseID != leaseID || actualSlug != slug {
+			return core.LeaseTarget{}, errors.Join(createErr, core.Exit(4, "refusing to adopt Sealos DevBox %q after an ambiguous create", name), identityErr)
+		}
+		applied = true
+	} else {
+		applied = true
 	}
-	applied := true
 	keyPersisted := false
 	claimPersisted := false
 	forceRollback := false
@@ -159,7 +174,17 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if cleanupErr := b.deleteDevbox(cleanupCtx, name); cleanupErr != nil {
+		if createdUID == "" {
+			rollbackItem, _, rollbackLeaseID, rollbackSlug, rollbackErr := b.validateDevboxIdentity(cleanupCtx, name, leaseID, slug)
+			if rollbackErr != nil || !b.itemMatchesScope(rollbackItem) || rollbackLeaseID != leaseID || rollbackSlug != slug {
+				if b.rt.Stderr != nil {
+					fmt.Fprintf(b.rt.Stderr, "warning: refusing to delete unverified Sealos DevBox %s after acquire failure for lease %s: %v\n", name, leaseID, rollbackErr)
+				}
+				return
+			}
+			createdUID = rollbackItem.Metadata.UID
+		}
+		if cleanupErr := b.deleteDevbox(cleanupCtx, name, createdUID); cleanupErr != nil {
 			if b.rt.Stderr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: failed to delete Sealos DevBox %s after acquire failure for lease %s: %v\n", name, leaseID, cleanupErr)
 			}
@@ -176,6 +201,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	createdUID = item.Metadata.UID
 	server := b.serverFromDevbox(item)
 	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
@@ -324,7 +350,7 @@ func (b *backend) resumeDevboxIfPaused(ctx context.Context, item devboxItem, ser
 	if name == "" {
 		return item, server, core.Exit(5, "Sealos DevBox has no metadata.name")
 	}
-	if err := b.patchDevboxState(ctx, name, devboxStateRun, nil); err != nil {
+	if err := b.patchDevboxState(ctx, name, item.Metadata.ResourceVersion, devboxStateRun, nil); err != nil {
 		return item, server, err
 	}
 	resumed, err := b.waitForDevboxPrepared(ctx, name, bootstrapWaitTimeout(b.cfg))

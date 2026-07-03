@@ -41,10 +41,10 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	server.Labels["lease"] = leaseID
 	server.Labels["slug"] = slug
 	if b.deleteOnRelease(req.Lease) {
-		if err := b.patchDevboxState(ctx, name, devboxStateShutdown, nil); err != nil {
+		if err := b.patchDevboxState(ctx, name, item.Metadata.ResourceVersion, devboxStateShutdown, nil); err != nil {
 			return err
 		}
-		if err := b.deleteDevbox(ctx, name); err != nil {
+		if err := b.deleteDevbox(ctx, name, item.Metadata.UID); err != nil {
 			return err
 		}
 		core.RemoveLeaseClaim(leaseID)
@@ -60,7 +60,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return err
 	}
 	action := func() error {
-		return b.patchDevboxState(ctx, name, devboxStatePaused, annotations)
+		return b.patchDevboxState(ctx, name, item.Metadata.ResourceVersion, devboxStatePaused, annotations)
 	}
 	if claimOK {
 		_, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, core.SSHTarget{}, action)
