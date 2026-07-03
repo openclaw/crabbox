@@ -148,7 +148,6 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 		fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s devbox=%s namespace=%s keep=%v\n", providerName, leaseID, slug, name, b.cfg.SealosDevbox.Namespace, req.Keep)
 	}
 	applied := false
-	createdUID := ""
 	if createErr := b.createDevbox(ctx, manifest); createErr != nil {
 		if kubectlAlreadyExists(createErr) {
 			return core.LeaseTarget{}, core.Exit(4, "refusing to overwrite existing Sealos DevBox %q: %v", name, createErr)
@@ -174,17 +173,14 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if createdUID == "" {
-			rollbackItem, _, rollbackLeaseID, rollbackSlug, rollbackErr := b.validateDevboxIdentity(cleanupCtx, name, leaseID, slug)
-			if rollbackErr != nil || !b.itemMatchesScope(rollbackItem) || rollbackLeaseID != leaseID || rollbackSlug != slug {
-				if b.rt.Stderr != nil {
-					fmt.Fprintf(b.rt.Stderr, "warning: refusing to delete unverified Sealos DevBox %s after acquire failure for lease %s: %v\n", name, leaseID, rollbackErr)
-				}
-				return
+		rollbackItem, _, rollbackLeaseID, rollbackSlug, rollbackErr := b.validateDevboxIdentity(cleanupCtx, name, leaseID, slug)
+		if rollbackErr != nil || !b.itemMatchesScope(rollbackItem) || rollbackLeaseID != leaseID || rollbackSlug != slug {
+			if b.rt.Stderr != nil {
+				fmt.Fprintf(b.rt.Stderr, "warning: refusing to delete unverified Sealos DevBox %s after acquire failure for lease %s: %v\n", name, leaseID, rollbackErr)
 			}
-			createdUID = rollbackItem.Metadata.UID
+			return
 		}
-		if cleanupErr := b.deleteDevbox(cleanupCtx, name, createdUID); cleanupErr != nil {
+		if cleanupErr := b.deleteDevbox(cleanupCtx, name); cleanupErr != nil {
 			if b.rt.Stderr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: failed to delete Sealos DevBox %s after acquire failure for lease %s: %v\n", name, leaseID, cleanupErr)
 			}
@@ -201,7 +197,6 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	createdUID = item.Metadata.UID
 	server := b.serverFromDevbox(item)
 	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {

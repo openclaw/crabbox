@@ -44,7 +44,14 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		if err := b.patchDevboxState(ctx, name, item.Metadata.ResourceVersion, devboxStateShutdown, nil); err != nil {
 			return err
 		}
-		if err := b.deleteDevbox(ctx, name, item.Metadata.UID); err != nil {
+		item, _, _, _, err = b.validateDevboxIdentity(ctx, name, leaseID, slug)
+		if err != nil {
+			return err
+		}
+		if !b.itemMatchesScope(item) {
+			return core.Exit(4, "refusing to delete Sealos DevBox %q after its provider scope changed", name)
+		}
+		if err := b.deleteDevbox(ctx, name); err != nil {
 			return err
 		}
 		core.RemoveLeaseClaim(leaseID)

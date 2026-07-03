@@ -137,12 +137,8 @@ func (b *backend) patchDevboxState(ctx context.Context, name, resourceVersion, s
 	return err
 }
 
-func (b *backend) deleteDevbox(ctx context.Context, name, uid string) error {
-	uid = strings.TrimSpace(uid)
-	if uid == "" {
-		return core.Exit(4, "refusing to delete Sealos DevBox %q without its Kubernetes UID", name)
-	}
-	_, err := b.kubectl(ctx, b.rt.Stdout, true, "delete", devboxResource+"/"+name, "--ignore-not-found=true", "--preconditions=uid="+uid)
+func (b *backend) deleteDevbox(ctx context.Context, name string) error {
+	_, err := b.kubectl(ctx, b.rt.Stdout, true, "delete", devboxResource+"/"+name, "--ignore-not-found=true")
 	return err
 }
 

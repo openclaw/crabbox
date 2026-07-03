@@ -41,7 +41,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if !b.cleanupItemMatchesScope(validated) {
 			return core.Exit(4, "refusing to delete Sealos DevBox %q after its provider scope changed", server.Name)
 		}
-		if err := b.deleteDevbox(ctx, server.Name, validated.Metadata.UID); err != nil {
+		if err := b.deleteDevbox(ctx, server.Name); err != nil {
 			return err
 		}
 		if leaseID != "" {

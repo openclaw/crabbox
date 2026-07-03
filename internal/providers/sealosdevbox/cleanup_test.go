@@ -72,7 +72,7 @@ func TestCleanupDeletesExpiredOwnedDevboxAndRemovesClaimAndKey(t *testing.T) {
 		t.Fatalf("stored key still exists or stat failed unexpectedly: %v", err)
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true --preconditions=uid=uid-test") || !strings.Contains(stdout.String(), "reason=expired") {
+	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") || !strings.Contains(stdout.String(), "reason=expired") {
 		t.Fatalf("cleanup output=%q commands=%s", stdout.String(), got)
 	}
 }

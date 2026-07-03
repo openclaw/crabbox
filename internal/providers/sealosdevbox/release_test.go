@@ -87,6 +87,7 @@ func TestReleaseDeleteRemovesDevboxClaimAndKeyAfterValidation(t *testing.T) {
 	runner := &lifecycleRunner{outputs: []string{
 		releaseDevboxJSON(cfg, leaseID, slug, name),
 		"shutdown",
+		releaseDevboxJSON(cfg, leaseID, slug, name),
 		"deleted",
 	}}
 	backend := lifecycleBackend(cfg, runner)
@@ -100,7 +101,7 @@ func TestReleaseDeleteRemovesDevboxClaimAndKeyAfterValidation(t *testing.T) {
 		t.Fatalf("stored key still exists or stat failed unexpectedly: %v", err)
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, `"state":"Shutdown"`) || !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true --preconditions=uid=uid-test") {
+	if !strings.Contains(got, `"state":"Shutdown"`) || !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") {
 		t.Fatalf("delete release commands=%s", got)
 	}
 	if backend.RetainLeaseClaimAfterRelease(core.LeaseTarget{LeaseID: leaseID, Server: server}) {

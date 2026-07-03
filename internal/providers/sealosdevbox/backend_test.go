@@ -358,6 +358,7 @@ func TestAcquireOnAcquiredErrorRollsBackBeforeLocalState(t *testing.T) {
 		`{"items":[]}`,
 		`devbox created`,
 		devboxJSON,
+		devboxJSON,
 		"deleted",
 	}}
 	backend := lifecycleBackend(cfg, runner)
@@ -389,7 +390,7 @@ func TestAcquireOnAcquiredErrorRollsBackBeforeLocalState(t *testing.T) {
 		t.Fatal("OnAcquired was not called")
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true --preconditions=uid=uid-test") {
+	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") {
 		t.Fatalf("failed acquire did not delete devbox; commands=%s", got)
 	}
 	if strings.Contains(got, "secret/"+name+"-ssh") {
@@ -407,6 +408,7 @@ func TestAcquireOnAcquiredErrorRollsBackKeptDevbox(t *testing.T) {
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[]}`,
 		`devbox created`,
+		devboxJSON,
 		devboxJSON,
 		"deleted",
 	}}
@@ -445,6 +447,7 @@ func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
 		devboxJSON,
 		secretJSON,
 		`{"items":[]}`,
+		devboxJSON,
 		"deleted",
 	}}
 	backend := lifecycleBackend(cfg, runner)

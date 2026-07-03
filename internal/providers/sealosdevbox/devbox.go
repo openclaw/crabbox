@@ -32,7 +32,6 @@ type devboxManifest struct {
 type devboxMeta struct {
 	Name              string            `yaml:"name" json:"name"`
 	Namespace         string            `yaml:"namespace,omitempty" json:"namespace,omitempty"`
-	UID               string            `yaml:"-" json:"uid,omitempty"`
 	ResourceVersion   string            `yaml:"-" json:"resourceVersion,omitempty"`
 	CreationTimestamp string            `yaml:"-" json:"creationTimestamp,omitempty"`
 	Labels            map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
