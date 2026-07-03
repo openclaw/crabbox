@@ -52,6 +52,21 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	}
 }
 
+func TestSmolVMClientRedactsReflectedCredential(t *testing.T) {
+	const secret = "smolvm-secret-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"message":"Bearer `+secret+` quota exceeded"}`)
+	}))
+	defer server.Close()
+
+	client := &client{apiKey: secret, base: server.URL, http: server.Client()}
+	_, err := client.GetMachine(context.Background(), "machine_1")
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
+		t.Fatalf("GetMachine error=%v, want redacted useful provider error", err)
+	}
+}
+
 func TestClientUsesSmolvmRESTShape(t *testing.T) {
 	var createBody map[string]any
 	injectSeen := false

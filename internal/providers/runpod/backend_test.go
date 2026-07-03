@@ -30,6 +30,24 @@ func TestRunpodProviderSpec(t *testing.T) {
 	}
 }
 
+func TestRunpodClientRedactsReflectedCredential(t *testing.T) {
+	const secret = "runpod-secret-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"message":"Bearer `+secret+` quota exceeded"}`)
+	}))
+	defer server.Close()
+
+	client, err := newRunpodClient(Config{Runpod: RunpodConfig{APIKey: secret, APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Whoami(context.Background())
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
+		t.Fatalf("Whoami error=%v, want redacted useful provider error", err)
+	}
+}
+
 func TestRunpodIsRunpodProviderNameAcceptsAliases(t *testing.T) {
 	for _, name := range []string{"runpod", "Run-Pod", "  runpodio  ", "RUNPOD"} {
 		if !isRunpodProviderName(name) {

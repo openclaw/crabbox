@@ -221,9 +221,10 @@ endpoints require HTTPS except for explicit localhost/loopback development
 URLs, and AWS region values are validated before constructing SigV4 service
 hosts.
 
-Configured OpenComputer, Freestyle, Cloudflare runner, Semaphore, and Upstash
-Box credentials are redacted from their documented HTTP or streamed error
-diagnostics. GitHub Actions registration metadata and its short-lived runner
+Configured provider credentials are redacted from documented HTTP or streamed
+error diagnostics, including Azure Dynamic Sessions, Cloudflare runner, Daytona,
+E2B, Freestyle, Islo, Morph, OpenComputer, Railway, RunPod, Semaphore, SmolVM,
+and Upstash Box. GitHub Actions registration metadata and its short-lived runner
 token travel over SSH stdin rather than the remote command line. These
 guarantees apply to Crabbox-generated diagnostics and process arguments, not
 to arbitrary command output, downloaded artifacts, screenshots, or failure

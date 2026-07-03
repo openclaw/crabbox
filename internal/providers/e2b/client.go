@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type e2bAPI interface {
@@ -312,7 +314,7 @@ func (c *e2bClient) UploadFile(ctx context.Context, session e2bSession, targetPa
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return &e2bAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: summarizeJSON(data)}
+		return &e2bAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), session.EnvdAccessToken)}
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
@@ -364,9 +366,9 @@ func (c *e2bClient) StartProcess(ctx context.Context, session e2bSession, req e2
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return 1, &e2bAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: summarizeJSON(data)}
+		return 1, &e2bAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), session.EnvdAccessToken)}
 	}
-	return parseE2BProcessStream(resp.Body, req.Stdout, req.Stderr)
+	return parseE2BProcessStream(resp.Body, req.Stdout, req.Stderr, session.EnvdAccessToken)
 }
 
 func (c *e2bClient) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
@@ -406,7 +408,7 @@ func (c *e2bClient) doJSONWithHeaders(ctx context.Context, method, path string, 
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &e2bAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: summarizeJSON(data)}
+		return nil, &e2bAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -484,7 +486,7 @@ func encodeConnectJSONEnvelope(v any) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-func parseE2BProcessStream(r io.Reader, stdout, stderr io.Writer) (int, error) {
+func parseE2BProcessStream(r io.Reader, stdout, stderr io.Writer, secrets ...string) (int, error) {
 	exitCode := 0
 	seenEnd := false
 	for {
@@ -512,7 +514,7 @@ func parseE2BProcessStream(r io.Reader, stdout, stderr io.Writer) (int, error) {
 				}
 			}
 			if end.Error != nil {
-				return 1, fmt.Errorf("%s: %s", end.Error.Code, end.Error.Message)
+				return 1, errors.New(shared.RedactErrorSecrets(end.Error.Code+": "+end.Error.Message, secrets...))
 			}
 			break
 		}
@@ -532,7 +534,7 @@ func parseE2BProcessStream(r io.Reader, stdout, stderr io.Writer) (int, error) {
 			exitCode = event.Event.End.ExitCode
 			seenEnd = true
 			if !event.Event.End.Exited && event.Event.End.Error != "" {
-				fmt.Fprintln(stderr, event.Event.End.Error)
+				fmt.Fprintln(stderr, shared.RedactErrorSecrets(event.Event.End.Error, secrets...))
 			}
 		}
 	}

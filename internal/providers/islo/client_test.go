@@ -5,8 +5,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	gosdk "github.com/islo-labs/go-sdk"
 )
 
 // TestIsloClientDeleteSandboxHandlesEmptyAndMissing verifies the raw DELETE
@@ -64,6 +67,62 @@ func TestIsloClientDeleteSandboxHandlesEmptyAndMissing(t *testing.T) {
 			t.Fatal("expected error for 500 delete, got nil")
 		}
 	})
+}
+
+func TestIsloRawErrorsRedactSessionToken(t *testing.T) {
+	const secret = "islo-session-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"session_token":"`+secret+`"}`)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"message":"Bearer `+secret+` quota exceeded"}`)
+	}))
+	defer server.Close()
+	cfg := Config{}
+	cfg.Islo.APIKey = "test-key"
+	cfg.Islo.BaseURL = server.URL
+	client, err := newIsloClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, call := range map[string]func() error{
+		"delete": func() error { return client.DeleteSandbox(context.Background(), "sandbox") },
+		"upload": func() error {
+			return client.UploadArchive(context.Background(), "sandbox", "/workspace", strings.NewReader("archive"))
+		},
+		"create share": func() error {
+			_, err := client.CreateShare(context.Background(), "sandbox", 8080, time.Minute)
+			return err
+		},
+		"list shares": func() error {
+			_, err := client.ListShares(context.Background(), "sandbox")
+			return err
+		},
+		"exec stream": func() error {
+			_, err := client.ExecStream(context.Background(), "sandbox", &gosdk.ExecRequest{}, io.Discard, io.Discard)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
+				t.Fatalf("error=%v, want redacted useful provider error", err)
+			}
+		})
+	}
+}
+
+func TestIsloSSEErrorRedactsSessionToken(t *testing.T) {
+	const secret = "islo-stream-secret"
+	body := "event: error\ndata: Bearer " + secret + " quota exceeded\n\n"
+	_, err := parseIsloSSE(strings.NewReader(body), io.Discard, io.Discard, secret)
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
+		t.Fatalf("parseIsloSSE error=%v, want redacted useful stream error", err)
+	}
 }
 
 func TestIsloShareFromAPIMarksInvalidExpiryAsSet(t *testing.T) {

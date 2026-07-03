@@ -6,8 +6,24 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestMorphClientRedactsReflectedCredential(t *testing.T) {
+	const secret = "morph-secret-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"message":"Bearer `+secret+` quota exceeded"}`)
+	}))
+	defer server.Close()
+
+	client := &morphClient{apiURL: server.URL, apiKey: secret, httpClient: server.Client()}
+	err := client.DeleteInstance(context.Background(), "inst_1")
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
+		t.Fatalf("DeleteInstance error=%v, want redacted useful provider error", err)
+	}
+}
 
 func TestMorphClientBootSnapshotUsesAPIBaseAndAuth(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -392,6 +392,45 @@ func TestAzureDynamicSessionsExecStreamRejectsIncompleteStream(t *testing.T) {
 	}
 }
 
+func TestAzureDynamicSessionsClientRedactsReflectedCredential(t *testing.T) {
+	const secret = "azure-session-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"message":"Bearer `+secret+` quota exceeded"}`)
+	}))
+	defer server.Close()
+	client := &azureDynamicSessionsClient{endpoint: server.URL, token: secret, httpClient: server.Client()}
+
+	for name, call := range map[string]func() error{
+		"JSON": func() error { return client.CheckRunner(context.Background(), "azds-test") },
+		"stream": func() error {
+			_, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{Command: "true"}, nil, nil)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
+				t.Fatalf("error=%v, want redacted useful provider error", err)
+			}
+		})
+	}
+}
+
+func TestAzureDynamicSessionsClientRedactsStreamErrorCredential(t *testing.T) {
+	const secret = "azure-stream-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"error","error":"Bearer `+secret+` quota exceeded"}`+"\n")
+	}))
+	defer server.Close()
+	client := &azureDynamicSessionsClient{endpoint: server.URL, token: secret, httpClient: server.Client()}
+	_, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{Command: "true"}, nil, nil)
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
+		t.Fatalf("ExecStream error=%v, want redacted useful stream error", err)
+	}
+}
+
 func TestAzureDynamicSessionsExecStreamReturnsWriterErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

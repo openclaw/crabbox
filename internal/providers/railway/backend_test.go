@@ -177,7 +177,7 @@ func TestRailwayClientRejectsEmptyRedeployResponse(t *testing.T) {
 
 func TestRailwayClientSurfacesNon2xxAsAPIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "forbidden by token", http.StatusForbidden)
+		http.Error(w, "forbidden by wrong-token", http.StatusForbidden)
 	}))
 	defer server.Close()
 
@@ -199,14 +199,14 @@ func TestRailwayClientSurfacesNon2xxAsAPIError(t *testing.T) {
 	if apiErr.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", apiErr.StatusCode)
 	}
-	if !strings.Contains(apiErr.Body, "forbidden by token") {
-		t.Fatalf("body = %q, want forbidden snippet", apiErr.Body)
+	if strings.Contains(apiErr.Body, "wrong-token") || !strings.Contains(apiErr.Body, "forbidden by [redacted]") {
+		t.Fatalf("body = %q, want redacted forbidden snippet", apiErr.Body)
 	}
 }
 
 func TestRailwayClientSurfacesGraphQLErrorsAsAPIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"errors":[{"message":"Project not found"}]}`)
+		_, _ = io.WriteString(w, `{"errors":[{"message":"Bearer test-token Project not found"}]}`)
 	}))
 	defer server.Close()
 
@@ -225,8 +225,8 @@ func TestRailwayClientSurfacesGraphQLErrorsAsAPIError(t *testing.T) {
 	if !ok {
 		t.Fatalf("err = %T, want *railwayAPIError", err)
 	}
-	if !strings.Contains(apiErr.Body, "Project not found") {
-		t.Fatalf("err body = %q, want Project not found", apiErr.Body)
+	if strings.Contains(apiErr.Body, "test-token") || !strings.Contains(apiErr.Body, "Bearer [redacted] Project not found") {
+		t.Fatalf("err body = %q, want redacted Project not found", apiErr.Body)
 	}
 }
 

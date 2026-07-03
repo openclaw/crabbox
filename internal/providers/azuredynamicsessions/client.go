@@ -14,6 +14,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type azureDynamicSessionsAPI interface {
@@ -306,7 +308,7 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 			if event.Error == "" {
 				event.Error = "stream error"
 			}
-			return exitCode, errors.New(event.Error)
+			return exitCode, errors.New(shared.RedactErrorSecrets(event.Error, c.token))
 		case "start", "heartbeat":
 		default:
 			return exitCode, fmt.Errorf("unknown %s stream event %q", providerName, event.Type)
@@ -411,7 +413,7 @@ func (c *azureDynamicSessionsClient) doJSONURL(ctx context.Context, method, endp
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &azureDynamicSessionsAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: summarizeJSON(data)}
+		return &azureDynamicSessionsAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.token)}
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -423,7 +425,7 @@ func (c *azureDynamicSessionsClient) doJSONURL(ctx context.Context, method, endp
 
 func (c *azureDynamicSessionsClient) responseError(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return &azureDynamicSessionsAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: summarizeJSON(data)}
+	return &azureDynamicSessionsAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.token)}
 }
 
 func (c *azureDynamicSessionsClient) secureHTTPClient() *http.Client {

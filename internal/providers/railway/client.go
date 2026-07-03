@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // railwayAPI is the minimal Railway GraphQL surface the provider needs.
@@ -209,7 +211,7 @@ func (c *railwayClient) do(ctx context.Context, query string, vars map[string]an
 		return fmt.Errorf("railway response exceeds %d bytes", railwayMaxGraphQLResponseBytes)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &railwayAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(data))}
+		return &railwayAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(strings.TrimSpace(string(data)), c.apiToken)}
 	}
 	var envelope graphqlResponse
 	if err := json.Unmarshal(data, &envelope); err != nil {
@@ -220,7 +222,7 @@ func (c *railwayClient) do(ctx context.Context, query string, vars map[string]an
 		for _, e := range envelope.Errors {
 			msgs = append(msgs, e.Message)
 		}
-		return &railwayAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.Join(msgs, "; ")}
+		return &railwayAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(strings.Join(msgs, "; "), c.apiToken)}
 	}
 	if out != nil {
 		if err := json.Unmarshal(envelope.Data, out); err != nil {

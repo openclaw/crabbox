@@ -22,6 +22,68 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+type e2bRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn e2bRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func TestE2BClientRedactsReflectedCredentials(t *testing.T) {
+	t.Run("API key", func(t *testing.T) {
+		const secret = "e2b-api-secret"
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"message":"X-API-Key: `+secret+` quota exceeded"}`)
+		}))
+		defer server.Close()
+		client := &e2bClient{apiKey: secret, apiURL: server.URL, httpClient: server.Client()}
+		_, err := client.ListSandboxes(context.Background(), nil)
+		assertE2BRedactedError(t, err, secret)
+	})
+
+	t.Run("envd access token", func(t *testing.T) {
+		const secret = "envd-access-secret"
+		httpClient := &http.Client{Transport: e2bRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Status:     "401 Unauthorized",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"message":"Bearer ` + secret + ` quota exceeded"}`)),
+				Request:    req,
+			}, nil
+		})}
+		client := &e2bClient{httpClient: httpClient}
+		_, err := client.StartProcess(context.Background(), e2bSession{SandboxID: "sbx_1", Domain: "example.test", EnvdAccessToken: secret}, e2bProcessRequest{Command: "true"})
+		assertE2BRedactedError(t, err, secret)
+	})
+}
+
+func assertE2BRedactedError(t *testing.T, err error, secret string) {
+	t.Helper()
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
+		t.Fatalf("error=%v, want redacted useful provider error", err)
+	}
+}
+
+func TestE2BProcessStreamRedactsReflectedCredential(t *testing.T) {
+	const secret = "envd-stream-secret"
+	t.Run("end stream error", func(t *testing.T) {
+		body := e2bTestEnvelope(2, map[string]any{"error": map[string]any{"code": "unauthorized", "message": "Bearer " + secret + " quota exceeded"}})
+		_, err := parseE2BProcessStream(bytes.NewReader(body), io.Discard, io.Discard, secret)
+		assertE2BRedactedError(t, err, secret)
+	})
+	t.Run("process end diagnostic", func(t *testing.T) {
+		body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 1, "exited": false, "error": "Bearer " + secret + " quota exceeded"}}})
+		var stderr bytes.Buffer
+		if _, err := parseE2BProcessStream(bytes.NewReader(body), io.Discard, &stderr, secret); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(stderr.String(), secret) || !strings.Contains(stderr.String(), "[redacted]") || !strings.Contains(stderr.String(), "quota exceeded") {
+			t.Fatalf("stderr=%q, want redacted useful process diagnostic", stderr.String())
+		}
+	})
+}
+
 func TestParseE2BProcessStream(t *testing.T) {
 	body := bytes.Join([][]byte{
 		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}),

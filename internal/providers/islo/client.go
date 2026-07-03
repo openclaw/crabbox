@@ -18,6 +18,7 @@ import (
 	"github.com/islo-labs/go-sdk/client"
 	"github.com/islo-labs/go-sdk/customauth"
 	"github.com/islo-labs/go-sdk/option"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type isloAPI interface {
@@ -142,6 +143,7 @@ func (c *isloSDKClient) DeleteSandbox(ctx context.Context, name string) error {
 	if err := c.authorize(ctx, httpReq); err != nil {
 		return err
 	}
+	token := strings.TrimPrefix(httpReq.Header.Get("Authorization"), "Bearer ")
 	httpReq.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -152,7 +154,7 @@ func (c *isloSDKClient) DeleteSandbox(ctx context.Context, name string) error {
 	// 404 carved out so an already-gone sandbox is an idempotent success.
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("islo delete sandbox %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		return fmt.Errorf("islo delete sandbox %s: %s", resp.Status, shared.RedactErrorSecrets(strings.TrimSpace(string(snippet)), token))
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
@@ -185,7 +187,7 @@ func (c *isloSDKClient) UploadArchive(ctx context.Context, name, targetPath stri
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("islo upload archive %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		return fmt.Errorf("islo upload archive %s: %s", resp.Status, shared.RedactErrorSecrets(strings.TrimSpace(string(snippet)), token))
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
@@ -243,6 +245,7 @@ func (c *isloSDKClient) CreateShare(ctx context.Context, name string, port int, 
 	if err := c.authorize(ctx, httpReq); err != nil {
 		return IsloShare{}, err
 	}
+	token := strings.TrimPrefix(httpReq.Header.Get("Authorization"), "Bearer ")
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient.Do(httpReq)
@@ -252,7 +255,7 @@ func (c *isloSDKClient) CreateShare(ctx context.Context, name string, port int, 
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return IsloShare{}, fmt.Errorf("islo create share %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		return IsloShare{}, fmt.Errorf("islo create share %s: %s", resp.Status, shared.RedactErrorSecrets(strings.TrimSpace(string(snippet)), token))
 	}
 	var raw isloShareResponse
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
@@ -269,6 +272,7 @@ func (c *isloSDKClient) ListShares(ctx context.Context, name string) ([]IsloShar
 	if err := c.authorize(ctx, httpReq); err != nil {
 		return nil, err
 	}
+	token := strings.TrimPrefix(httpReq.Header.Get("Authorization"), "Bearer ")
 	httpReq.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -280,7 +284,7 @@ func (c *isloSDKClient) ListShares(ctx context.Context, name string) ([]IsloShar
 	}
 	if resp.StatusCode >= 400 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("islo list shares %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		return nil, fmt.Errorf("islo list shares %s: %s", resp.Status, shared.RedactErrorSecrets(strings.TrimSpace(string(snippet)), token))
 	}
 	var raw []isloShareResponse
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
@@ -343,12 +347,12 @@ func (c *isloSDKClient) ExecStream(ctx context.Context, name string, req *gosdk.
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return 1, fmt.Errorf("islo exec stream %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		return 1, fmt.Errorf("islo exec stream %s: %s", resp.Status, shared.RedactErrorSecrets(strings.TrimSpace(string(snippet)), token))
 	}
-	return parseIsloSSE(resp.Body, stdout, stderr)
+	return parseIsloSSE(resp.Body, stdout, stderr, token)
 }
 
-func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
+func parseIsloSSE(r io.Reader, stdout, stderr io.Writer, secrets ...string) (int, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	exitCode := 0
@@ -418,7 +422,7 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
 	}
 	if !seenExit {
 		if streamErr != "" {
-			return 1, fmt.Errorf("islo exec stream error: %s", streamErr)
+			return 1, fmt.Errorf("islo exec stream error: %s", shared.RedactErrorSecrets(streamErr, secrets...))
 		}
 		return 1, fmt.Errorf("islo exec stream ended without exit event")
 	}

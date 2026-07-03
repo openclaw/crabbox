@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // runpodAPI is the minimal RunPod REST surface the provider needs. The
@@ -204,7 +206,7 @@ func (c *runpodClient) do(ctx context.Context, method, path string, body any, ou
 		return fmt.Errorf("runpod response exceeds %d bytes", runpodMaxResponseBytes)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &runpodAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(data))}
+		return &runpodAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(strings.TrimSpace(string(data)), c.apiKey)}
 	}
 	if out != nil && len(strings.TrimSpace(string(data))) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {

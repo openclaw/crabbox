@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type api interface {
@@ -434,7 +436,7 @@ func (c *client) doJSON(ctx context.Context, method, path string, query url.Valu
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return apiError(resp)
+		return apiError(resp, c.apiKey)
 	}
 	if out == nil {
 		return nil
@@ -457,9 +459,9 @@ func (c *client) addHeaders(req *http.Request) {
 	req.Header.Set("Accept", "application/json")
 }
 
-func apiError(resp *http.Response) error {
+func apiError(resp *http.Response, apiKey string) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	msg := strings.TrimSpace(string(data))
+	msg := shared.RedactErrorSecrets(strings.TrimSpace(string(data)), apiKey)
 	if msg == "" {
 		msg = resp.Status
 	}

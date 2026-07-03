@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type morphAPI interface {
@@ -302,7 +304,7 @@ func (c *morphClient) doRaw(ctx context.Context, method, path string, query url.
 		return nil, &morphAPIError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
-			Body:       summarizeMorphResponse(data),
+			Body:       shared.RedactErrorSecrets(summarizeMorphResponse(data), c.apiKey),
 		}
 	}
 	return data, nil
