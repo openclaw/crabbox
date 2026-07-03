@@ -42,7 +42,8 @@ it reports.
 
 Secrets are never printed. Token-bearing fields are reduced to a status word:
 
-- Proxmox API URL userinfo is replaced with `<redacted>@`.
+- Provider endpoint URL userinfo is replaced with `<redacted>@`; query and
+  fragment components are omitted because they may carry credentials.
 - Broker tokens, Cloudflare/Proxmox/Upstash tokens: `configured` or `missing`.
 - Cloudflare Access auth: `missing`, `service-token` (client ID + secret),
   `token` (service token), `service-token+token`, or `incomplete` (only one of
