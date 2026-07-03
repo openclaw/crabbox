@@ -245,7 +245,7 @@ func TestInstanceSSHKeyMethods(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/v0/instances/99/ssh/":
-			writeJSON(t, w, map[string]any{"keys": []map[string]any{{"id": "key-1", "ssh_key": "ssh-ed25519 AAAA..."}}})
+			writeJSON(t, w, map[string]any{"success": true, "ssh_keys": `[{"id":123,"public_key":"ssh-ed25519 AAAA..."}]`})
 		case "POST /api/v0/instances/99/ssh/":
 			var body map[string]string
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -254,8 +254,8 @@ func TestInstanceSSHKeyMethods(t *testing.T) {
 			if body["ssh_key"] != "ssh-ed25519 AAAA..." {
 				t.Fatalf("attach body=%#v", body)
 			}
-			writeJSON(t, w, map[string]any{"success": true, "key": map[string]any{"id": "key-1"}})
-		case "DELETE /api/v0/instances/99/ssh/key-1/":
+			writeJSON(t, w, map[string]any{"success": true, "key": "ssh-ed25519 AAAA..."})
+		case "DELETE /api/v0/instances/99/ssh/123/":
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -268,17 +268,17 @@ func TestInstanceSSHKeyMethods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 1 || keys[0].ID != "key-1" {
+	if len(keys) != 1 || keys[0].ID != "123" || keys[0].PublicKey != "ssh-ed25519 AAAA..." {
 		t.Fatalf("keys=%#v", keys)
 	}
 	attached, err := client.AttachInstanceSSHKey(context.Background(), 99, "ssh-ed25519 AAAA...")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !attached.Success || attached.Key.ID != "key-1" {
+	if !attached.Success || attached.Key.ID != "" || attached.Key.PublicKey != "ssh-ed25519 AAAA..." {
 		t.Fatalf("attached=%#v", attached)
 	}
-	if err := client.DetachInstanceSSHKey(context.Background(), 99, "key-1"); err != nil {
+	if err := client.DetachInstanceSSHKey(context.Background(), 99, "123"); err != nil {
 		t.Fatal(err)
 	}
 }

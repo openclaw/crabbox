@@ -302,10 +302,12 @@ func (c *vastClient) ListInstanceSSHKeys(ctx context.Context, id int) ([]vastIns
 }
 
 func (c *vastClient) AttachInstanceSSHKey(ctx context.Context, id int, publicKey string) (vastAttachSSHKeyResponse, error) {
-	var out vastAttachSSHKeyResponse
+	var raw json.RawMessage
 	body := map[string]string{"ssh_key": publicKey}
-	err := c.do(ctx, http.MethodPost, "/instances/"+strconv.Itoa(id)+"/ssh/", body, &out)
-	return out, err
+	if err := c.do(ctx, http.MethodPost, "/instances/"+strconv.Itoa(id)+"/ssh/", body, &raw); err != nil {
+		return vastAttachSSHKeyResponse{}, err
+	}
+	return decodeVastAttachSSHKeyResponse(raw)
 }
 
 func (c *vastClient) DetachInstanceSSHKey(ctx context.Context, id int, keyID string) error {
@@ -515,8 +517,9 @@ func decodeVastSSHKeys(raw json.RawMessage) ([]vastInstanceSSHKey, error) {
 		return direct, nil
 	}
 	var envelope struct {
-		Keys []vastInstanceSSHKey `json:"keys"`
-		Data []vastInstanceSSHKey `json:"data"`
+		Keys    []vastInstanceSSHKey `json:"keys"`
+		Data    []vastInstanceSSHKey `json:"data"`
+		SSHKeys json.RawMessage      `json:"ssh_keys"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, err
@@ -524,7 +527,75 @@ func decodeVastSSHKeys(raw json.RawMessage) ([]vastInstanceSSHKey, error) {
 	if envelope.Keys != nil {
 		return envelope.Keys, nil
 	}
-	return envelope.Data, nil
+	if envelope.Data != nil {
+		return envelope.Data, nil
+	}
+	if len(envelope.SSHKeys) == 0 || string(envelope.SSHKeys) == "null" {
+		return nil, nil
+	}
+	var encoded string
+	if err := json.Unmarshal(envelope.SSHKeys, &encoded); err == nil {
+		envelope.SSHKeys = json.RawMessage(encoded)
+	}
+	if err := json.Unmarshal(envelope.SSHKeys, &direct); err != nil {
+		return nil, err
+	}
+	return direct, nil
+}
+
+func decodeVastAttachSSHKeyResponse(raw json.RawMessage) (vastAttachSSHKeyResponse, error) {
+	var envelope struct {
+		Success bool                 `json:"success"`
+		Key     json.RawMessage      `json:"key"`
+		Keys    []vastInstanceSSHKey `json:"keys"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return vastAttachSSHKeyResponse{}, err
+	}
+	out := vastAttachSSHKeyResponse{Success: envelope.Success, Keys: envelope.Keys}
+	if len(envelope.Key) == 0 || string(envelope.Key) == "null" {
+		return out, nil
+	}
+	if err := json.Unmarshal(envelope.Key, &out.Key); err == nil {
+		return out, nil
+	}
+	var key string
+	if err := json.Unmarshal(envelope.Key, &key); err != nil {
+		return vastAttachSSHKeyResponse{}, err
+	}
+	key = strings.TrimSpace(key)
+	if _, err := strconv.Atoi(key); err == nil {
+		out.Key.ID = key
+	} else {
+		out.Key.PublicKey = key
+	}
+	return out, nil
+}
+
+func (k *vastInstanceSSHKey) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID        any    `json:"id"`
+		Name      string `json:"name"`
+		SSHKey    string `json:"ssh_key"`
+		PublicKey string `json:"public_key"`
+		Key       string `json:"key"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	k.Name = raw.Name
+	k.PublicKey = firstNonBlank(raw.SSHKey, raw.PublicKey, raw.Key)
+	switch id := raw.ID.(type) {
+	case string:
+		k.ID = strings.TrimSpace(id)
+	case float64:
+		k.ID = strconv.FormatFloat(id, 'f', -1, 64)
+	case nil:
+		k.ID = ""
+	default:
+		k.ID = strings.TrimSpace(fmt.Sprint(id))
+	}
+	return nil
 }
 
 func normalizeVastInstances(instances []vastInstance) []vastInstance {

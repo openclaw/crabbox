@@ -234,7 +234,19 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		err = attachErr
 		return core.LeaseTarget{}, err
 	} else {
-		keyID = vastAttachedKeyID(attach)
+		keyID = vastAttachedKeyID(attach, publicKey)
+	}
+	if keyID == "" {
+		keys, listErr := client.ListInstanceSSHKeys(ctx, instanceID)
+		if listErr != nil {
+			err = fmt.Errorf("vast confirm attached SSH key: %w", listErr)
+			return core.LeaseTarget{}, err
+		}
+		keyID = vastMatchingSSHKeyID(keys, publicKey)
+		if keyID == "" {
+			err = exit(5, "vast attach SSH key returned no removable key id")
+			return core.LeaseTarget{}, err
+		}
 	}
 	instance, err := b.waitForInstanceReady(ctx, client, instanceID)
 	if err != nil {
@@ -329,13 +341,25 @@ func vastOfferAskID(offer vastOffer) int {
 	return firstNonZero(offer.AskID, offer.ID)
 }
 
-func vastAttachedKeyID(resp vastAttachSSHKeyResponse) string {
-	if strings.TrimSpace(resp.Key.ID) != "" {
-		return strings.TrimSpace(resp.Key.ID)
+func vastAttachedKeyID(resp vastAttachSSHKeyResponse, publicKey string) string {
+	keys := make([]vastInstanceSSHKey, 0, len(resp.Keys)+1)
+	keys = append(keys, resp.Key)
+	keys = append(keys, resp.Keys...)
+	return vastMatchingSSHKeyID(keys, publicKey)
+}
+
+func vastMatchingSSHKeyID(keys []vastInstanceSSHKey, publicKey string) string {
+	publicKey = strings.TrimSpace(publicKey)
+	matches := make(map[string]struct{})
+	for _, key := range keys {
+		id := strings.TrimSpace(key.ID)
+		if strings.TrimSpace(key.PublicKey) == publicKey && id != "" {
+			matches[id] = struct{}{}
+		}
 	}
-	for _, key := range resp.Keys {
-		if strings.TrimSpace(key.ID) != "" {
-			return strings.TrimSpace(key.ID)
+	if len(matches) == 1 {
+		for id := range matches {
+			return id
 		}
 	}
 	return ""

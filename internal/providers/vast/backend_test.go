@@ -14,17 +14,19 @@ import (
 )
 
 type fakeVastAPI struct {
-	user       vastUser
-	offers     []vastOffer
-	instances  []vastInstance
-	authErr    error
-	listErr    error
-	createErr  error
-	getErr     error
-	manageErr  error
-	destroyErr error
-	attachErr  error
-	detachErr  error
+	user               vastUser
+	offers             []vastOffer
+	instances          []vastInstance
+	authErr            error
+	listErr            error
+	createErr          error
+	getErr             error
+	manageErr          error
+	destroyErr         error
+	attachErr          error
+	detachErr          error
+	listKeysErr        error
+	attachWithoutKeyID bool
 
 	searches []vastOfferSearchInput
 	creates  []struct {
@@ -148,7 +150,15 @@ func (f *fakeVastAPI) DestroyInstance(_ context.Context, id int) error {
 	return nil
 }
 
-func (f *fakeVastAPI) ListInstanceSSHKeys(context.Context, int) ([]vastInstanceSSHKey, error) {
+func (f *fakeVastAPI) ListInstanceSSHKeys(_ context.Context, id int) ([]vastInstanceSSHKey, error) {
+	if f.listKeysErr != nil {
+		return nil, f.listKeysErr
+	}
+	for i := len(f.attached) - 1; i >= 0; i-- {
+		if f.attached[i].id == id {
+			return []vastInstanceSSHKey{{ID: "key-" + strconv.Itoa(id), PublicKey: f.attached[i].publicKey}}, nil
+		}
+	}
 	return nil, nil
 }
 
@@ -159,6 +169,9 @@ func (f *fakeVastAPI) AttachInstanceSSHKey(_ context.Context, id int, publicKey 
 	}{id: id, publicKey: publicKey})
 	if f.attachErr != nil {
 		return vastAttachSSHKeyResponse{}, f.attachErr
+	}
+	if f.attachWithoutKeyID {
+		return vastAttachSSHKeyResponse{Success: true, Key: vastInstanceSSHKey{PublicKey: publicKey}}, nil
 	}
 	return vastAttachSSHKeyResponse{Success: true, Key: vastInstanceSSHKey{ID: "key-" + strconv.Itoa(id), PublicKey: publicKey}}, nil
 }
@@ -294,6 +307,55 @@ func TestAcquireCreatesAttachesPollsReadinessAndClaims(t *testing.T) {
 	claim, ok, err := core.ResolveLeaseClaimForProvider("gpu-box", providerName)
 	if err != nil || !ok || claim.CloudID != "100" || claim.Labels[vastOfferIDLabel] != "84" || claim.Labels[vastAccountIDLabel] != "7" || claim.Labels[vastAPIURLLabel] != "https://console.vast.ai/api/v0" || claim.Labels[vastKeyIDLabel] != "key-100" || claim.Labels[vastReleaseActionLabel] != "destroy" {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
+func TestAcquireResolvesStringAttachKeyViaInventory(t *testing.T) {
+	api := &fakeVastAPI{
+		offers:             []vastOffer{{ID: 42, Rentable: true}},
+		attachWithoutKeyID: true,
+	}
+	b := newTestBackend(t, api)
+	repoRoot := t.TempDir()
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repoRoot}, RequestedSlug: "string-key", Keep: true}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider("string-key", providerName)
+	if err != nil || !ok || claim.Labels[vastKeyIDLabel] != "key-100" || claim.Labels[vastKeyOwnedLabel] != "true" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
+func TestAttachedKeyIDRequiresExactPublicKey(t *testing.T) {
+	response := vastAttachSSHKeyResponse{Keys: []vastInstanceSSHKey{
+		{ID: "unrelated", PublicKey: "ssh-ed25519 other"},
+		{ID: "wanted", PublicKey: "ssh-ed25519 exact"},
+	}}
+	if got := vastAttachedKeyID(response, "ssh-ed25519 exact"); got != "wanted" {
+		t.Fatalf("key id=%q want wanted", got)
+	}
+	if got := vastAttachedKeyID(vastAttachSSHKeyResponse{Key: vastInstanceSSHKey{ID: "ambiguous"}}, "ssh-ed25519 exact"); got != "" {
+		t.Fatalf("ambiguous key id=%q want empty", got)
+	}
+	response.Keys = append(response.Keys, vastInstanceSSHKey{ID: "duplicate", PublicKey: "ssh-ed25519 exact"})
+	if got := vastAttachedKeyID(response, "ssh-ed25519 exact"); got != "" {
+		t.Fatalf("duplicate key id=%q want empty", got)
+	}
+}
+
+func TestAcquireRollsBackWhenAttachedKeyIDCannotBeListed(t *testing.T) {
+	api := &fakeVastAPI{
+		offers:             []vastOffer{{ID: 42, Rentable: true}},
+		attachWithoutKeyID: true,
+		listKeysErr:        errors.New("key inventory unavailable"),
+	}
+	b := newTestBackend(t, api)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "key-list-fail"})
+	if err == nil || !strings.Contains(err.Error(), "confirm attached SSH key") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.destroyed) != 1 || api.destroyed[0] != 100 {
+		t.Fatalf("destroyed=%v", api.destroyed)
 	}
 }
 
