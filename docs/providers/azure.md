@@ -300,9 +300,11 @@ Azure does not provision macOS through this provider. Use [AWS](aws.md) or
   Crabbox refuses to mutate them unless they carry the `managed_by=crabbox` tag.
   Tag them to adopt, choose different names in `azure.*` config, or let Crabbox
   create dedicated resources.
-- `crabbox stop --provider azure <name>` only acts on VMs that carry `crabbox=true`
-  (and either no `provider` tag or `provider=azure`). A manually named VM in the
-  resource group will not be deleted by Crabbox.
+- Direct Azure list, stop, and cleanup only treat a VM as Crabbox-owned when its
+  tags include `crabbox=true`, `created_by=crabbox`, `provider=azure`, a canonical
+  `cbx_` lease ID, and a non-empty slug. Stop additionally requires the resolved
+  lease ID to match the VM's lease tag. Legacy or manually tagged VMs are skipped;
+  retagging only with `crabbox=true` never authorizes deletion.
 - When `azure.sshCIDRs` is empty on the public network path, direct Azure
   provisioning detects the operator's outbound IPv4 and creates a `/32` SSH
   rule. If a shared NSG already has a different managed SSH CIDR, set

@@ -7,8 +7,15 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func TestIsCrabboxAzureLeaseRequiresProviderTag(t *testing.T) {
+func TestIsCrabboxAzureLeaseRequiresCanonicalTags(t *testing.T) {
 	t.Parallel()
+	canonical := map[string]string{
+		"crabbox":    "true",
+		"created_by": "crabbox",
+		"provider":   "azure",
+		"lease":      "cbx_123456abcdef",
+		"slug":       "owned",
+	}
 	cases := []struct {
 		name   string
 		labels map[string]string
@@ -17,8 +24,9 @@ func TestIsCrabboxAzureLeaseRequiresProviderTag(t *testing.T) {
 		{name: "nil labels", labels: nil, want: false},
 		{name: "no crabbox tag", labels: map[string]string{"managed_by": "crabbox"}, want: false},
 		{name: "different provider", labels: map[string]string{"crabbox": "true", "provider": "aws"}, want: false},
-		{name: "tagged azure", labels: map[string]string{"crabbox": "true", "provider": "azure"}, want: true},
-		{name: "tagged no provider", labels: map[string]string{"crabbox": "true"}, want: true},
+		{name: "weak azure tags", labels: map[string]string{"crabbox": "true", "provider": "azure"}, want: false},
+		{name: "missing provider", labels: map[string]string{"crabbox": "true", "created_by": "crabbox", "lease": "cbx_123456abcdef", "slug": "owned"}, want: false},
+		{name: "canonical", labels: canonical, want: true},
 	}
 	for _, tc := range cases {
 		tc := tc
