@@ -151,8 +151,9 @@ func TestCreateInstancePayloadAndDecodeNewContract(t *testing.T) {
 		if _, ok := body["template_id"]; ok {
 			t.Fatalf("create body should use template_hash_id: %#v", body)
 		}
-		if body["env"] != "-e CRABBOX=1" {
-			t.Fatalf("env=%#v", body["env"])
+		env, ok := body["env"].(map[string]any)
+		if !ok || env["CRABBOX"] != "1" || env["MESSAGE"] != "space ' value" {
+			t.Fatalf("env=%#v want JSON object", body["env"])
 		}
 		writeJSON(t, w, map[string]any{"success": true, "new_contract": 99})
 	}))
@@ -163,7 +164,7 @@ func TestCreateInstancePayloadAndDecodeNewContract(t *testing.T) {
 		Config:      VastConfig{Image: "nvidia/cuda:12", TemplateID: "tpl-123", Runtype: "ssh_direct", DiskGB: 80},
 		Label:       "cbx1|lease|slug|active",
 		SSHKey:      "ssh-ed25519 AAAA...",
-		Environment: map[string]string{"CRABBOX": "1"},
+		Environment: map[string]string{"CRABBOX": "1", "MESSAGE": "space ' value"},
 	})
 	if err != nil {
 		t.Fatal(err)

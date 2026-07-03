@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -400,43 +399,12 @@ func buildVastCreatePayload(input vastCreateInstanceInput) map[string]any {
 		payload["ssh_key"] = input.SSHKey
 	}
 	if len(input.Environment) > 0 {
-		payload["env"] = vastEnvFlags(input.Environment)
+		payload["env"] = input.Environment
 	}
 	if input.OnStart != "" {
 		payload["onstart"] = input.OnStart
 	}
 	return payload
-}
-
-func vastEnvFlags(env map[string]string) string {
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		key = strings.TrimSpace(key)
-		if key != "" {
-			keys = append(keys, key)
-		}
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		parts = append(parts, "-e", key+"="+shellQuoteVastEnvValue(env[key]))
-	}
-	return strings.Join(parts, " ")
-}
-
-func shellQuoteVastEnvValue(value string) string {
-	if value == "" {
-		return "''"
-	}
-	if strings.IndexFunc(value, func(r rune) bool {
-		return (r < 'A' || r > 'Z') &&
-			(r < 'a' || r > 'z') &&
-			(r < '0' || r > '9') &&
-			!strings.ContainsRune("_-./:", r)
-	}) == -1 {
-		return value
-	}
-	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 func decodeVastOffers(raw json.RawMessage) ([]vastOffer, error) {
