@@ -224,11 +224,12 @@ hosts.
 Configured provider credentials are redacted from documented HTTP or streamed
 error diagnostics, including Azure Dynamic Sessions, Cloudflare runner, Daytona,
 E2B, Freestyle, Islo, Morph, OpenComputer, Railway, RunPod, Semaphore, SmolVM,
-and Upstash Box. GitHub Actions registration metadata and its short-lived runner
-token travel over SSH stdin rather than the remote command line. These
-guarantees apply to Crabbox-generated diagnostics and process arguments, not
-to arbitrary command output, downloaded artifacts, screenshots, or failure
-bundles.
+and Upstash Box. Generated stop and failure-routing commands retain provider
+endpoint routing but remove URL userinfo before they are printed or stored.
+GitHub Actions registration metadata and its short-lived runner token travel
+over SSH stdin rather than the remote command line. These guarantees apply to
+Crabbox-generated diagnostics and process arguments, not to arbitrary command
+output, downloaded artifacts, screenshots, or failure bundles.
 
 ### Resource and artifact boundaries
 

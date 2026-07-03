@@ -1839,7 +1839,7 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		}
 	case "proxmox":
 		if strings.TrimSpace(cfg.Proxmox.APIURL) != "" {
-			args = append(args, "--proxmox-api-url", cfg.Proxmox.APIURL)
+			args = append(args, "--proxmox-api-url", routingSafeURL(cfg.Proxmox.APIURL))
 		}
 		if strings.TrimSpace(cfg.Proxmox.Node) != "" {
 			args = append(args, "--proxmox-node", cfg.Proxmox.Node)
@@ -1898,7 +1898,7 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		args = append(args, fmt.Sprintf("--coder-delete-on-release=%t", cfg.Coder.DeleteOnRelease))
 	case "daytona":
 		if strings.TrimSpace(cfg.Daytona.APIURL) != "" {
-			args = append(args, "--daytona-api-url", cfg.Daytona.APIURL)
+			args = append(args, "--daytona-api-url", routingSafeURL(cfg.Daytona.APIURL))
 		}
 		if strings.TrimSpace(cfg.Daytona.Target) != "" {
 			args = append(args, "--daytona-target", cfg.Daytona.Target)
@@ -1908,7 +1908,7 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		}
 	case "sprites":
 		if strings.TrimSpace(cfg.Sprites.APIURL) != "" {
-			args = append(args, "--sprites-api-url", cfg.Sprites.APIURL)
+			args = append(args, "--sprites-api-url", routingSafeURL(cfg.Sprites.APIURL))
 		}
 	case "semaphore":
 		if strings.TrimSpace(cfg.Semaphore.Host) != "" {
@@ -1920,14 +1920,14 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		}
 	case "morph":
 		if strings.TrimSpace(cfg.Morph.APIURL) != "" {
-			args = append(args, "--morph-api-url", cfg.Morph.APIURL)
+			args = append(args, "--morph-api-url", routingSafeURL(cfg.Morph.APIURL))
 		}
 		if DeleteOnReleaseExplicit(cfg, "morph") {
 			args = append(args, fmt.Sprintf("--morph-delete-on-release=%t", cfg.Morph.DeleteOnRelease))
 		}
 	case "hostinger":
 		if strings.TrimSpace(cfg.Hostinger.APIURL) != "" {
-			args = append(args, "--hostinger-url", cfg.Hostinger.APIURL)
+			args = append(args, "--hostinger-url", routingSafeURL(cfg.Hostinger.APIURL))
 		}
 	case "vast", "vast-ai", "vastai":
 		if apiURL := strings.TrimSpace(cfg.Vast.APIURL); apiURL != "" {

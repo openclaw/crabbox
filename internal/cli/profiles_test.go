@@ -721,6 +721,53 @@ func TestRunStopCommandIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandRedactsProviderURLUserinfo(t *testing.T) {
+	const rawURL = "https://api-user:api-secret@provider.example.test/path?view=1"
+	for _, test := range []struct {
+		name     string
+		cfg      Config
+		wantFlag string
+	}{
+		{
+			name:     "proxmox",
+			cfg:      Config{Provider: "proxmox", Proxmox: ProxmoxConfig{APIURL: rawURL}},
+			wantFlag: "--proxmox-api-url 'https://provider.example.test/path?view=1'",
+		},
+		{
+			name:     "daytona",
+			cfg:      Config{Provider: "daytona", Daytona: DaytonaConfig{APIURL: rawURL}},
+			wantFlag: "--daytona-api-url 'https://provider.example.test/path?view=1'",
+		},
+		{
+			name:     "sprites",
+			cfg:      Config{Provider: "sprites", Sprites: SpritesConfig{APIURL: rawURL}},
+			wantFlag: "--sprites-api-url 'https://provider.example.test/path?view=1'",
+		},
+		{
+			name:     "morph",
+			cfg:      Config{Provider: "morph", Morph: MorphConfig{APIURL: rawURL}},
+			wantFlag: "--morph-api-url 'https://provider.example.test/path?view=1'",
+		},
+		{
+			name:     "hostinger",
+			cfg:      Config{Provider: "hostinger", Hostinger: HostingerConfig{APIURL: rawURL}},
+			wantFlag: "--hostinger-url 'https://provider.example.test/path?view=1'",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := runStopCommand(test.cfg, "cbx_123")
+			if !strings.Contains(got, test.wantFlag) {
+				t.Fatalf("stop command missing safe URL %q:\n%s", test.wantFlag, got)
+			}
+			for _, secret := range []string{"api-user", "api-secret", "api-user:api-secret"} {
+				if strings.Contains(got, secret) {
+					t.Fatalf("stop command leaked %q:\n%s", secret, got)
+				}
+			}
+		})
+	}
+}
+
 func TestRunStopCommandIncludesSemaphoreRoutingFlags(t *testing.T) {
 	got := runStopCommand(Config{
 		Provider: "semaphore",
