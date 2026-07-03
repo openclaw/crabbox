@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -46,7 +47,7 @@ func TestFalTokenFlagIsNotRegistered(t *testing.T) {
 	cfg := Config{}
 	cfg.Fal.APIKey = "secret-key"
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	RegisterFalProviderFlags(fs, cfg)
+	Provider{}.RegisterFlags(fs, cfg)
 	for _, name := range []string{"fal-key", "fal-api-key", "fal-token", "fal-api-token"} {
 		if fs.Lookup(name) != nil {
 			t.Fatalf("fal API key surfaced as a flag --%s", name)
@@ -62,7 +63,7 @@ func TestFalTokenFlagIsNotRegistered(t *testing.T) {
 func TestFalFlagsApplyNonSecretConfig(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	values := RegisterFalProviderFlags(fs, Config{})
+	values := Provider{}.RegisterFlags(fs, Config{})
 	if err := fs.Parse([]string{
 		"--fal-api-url", "https://api.example.test/v1",
 		"--fal-instance-type", string(InstanceTypeH100x8),
@@ -73,7 +74,7 @@ func TestFalFlagsApplyNonSecretConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := Config{Provider: providerName}
-	if err := ApplyFalProviderFlags(&cfg, fs, values); err != nil {
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Fal.APIURL != "https://api.example.test/v1" ||
@@ -118,6 +119,49 @@ func TestConfigureReturnsSSHLeaseBackend(t *testing.T) {
 	}
 	_ = sshBackend
 	_ = cleanup
+	if got := gotBackend.(*backend).Spec(); got.Name != providerName {
+		t.Fatalf("backend spec=%#v", got)
+	}
+	if _, err := (Provider{}).ConfigureDoctor(Config{TargetOS: targetLinux}, newDiscardRuntime()); err != nil {
+		t.Fatalf("ConfigureDoctor: %v", err)
+	}
+}
+
+func TestBackendTimingAndClaimTargetHelpers(t *testing.T) {
+	b := &backend{pollInterval: 25 * time.Millisecond}
+	if got := b.effectivePollInterval(); got != 25*time.Millisecond {
+		t.Fatalf("poll interval=%s", got)
+	}
+	b.pollInterval = 0
+	if got := b.effectivePollInterval(); got != falPollInterval {
+		t.Fatalf("default poll interval=%s", got)
+	}
+
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	claim := core.LeaseClaim{
+		LeaseID:  "falbx_helper",
+		Slug:     "helper",
+		Provider: providerName,
+		CloudID:  "inst_helper",
+		SSHHost:  "192.0.2.10",
+		SSHPort:  2222,
+		Labels: map[string]string{
+			"name":        "helper",
+			"state":       "ready",
+			"server_type": string(InstanceTypeH100x1),
+		},
+	}
+	target, err := leaseTargetFromClaim(claim, Config{SSHUser: "root"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.LeaseID != claim.LeaseID || target.Server.CloudID != claim.CloudID || target.SSH.Host != claim.SSHHost || target.SSH.Port != "2222" {
+		t.Fatalf("target=%#v", target)
+	}
+	claim.Provider = "runpod"
+	if _, err := leaseTargetFromClaim(claim, Config{}, false); err == nil {
+		t.Fatal("expected provider mismatch")
+	}
 }
 
 func TestDoctorReportsMissingAuthWithoutTokenNames(t *testing.T) {

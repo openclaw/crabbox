@@ -2074,6 +2074,50 @@ func TestFalProviderConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestFalProviderEmptyDefaultsAndExplicitOverrides(t *testing.T) {
+	cfg := Config{Provider: "fal"}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Fal.APIURL != "https://api.fal.ai/v1" ||
+		cfg.Fal.InstanceType != "gpu_1x_h100_sxm5" ||
+		cfg.Fal.User != "root" ||
+		cfg.Fal.WorkRoot != defaultPOSIXWorkRoot ||
+		cfg.TargetOS != targetLinux ||
+		cfg.WindowsMode != windowsModeNormal ||
+		cfg.SSHUser != "root" ||
+		cfg.SSHPort != "22" ||
+		cfg.WorkRoot != defaultPOSIXWorkRoot ||
+		cfg.ServerType != "gpu_1x_h100_sxm5" {
+		t.Fatalf("empty fal defaults=%#v", cfg)
+	}
+
+	explicit := Config{
+		Provider:            "fal",
+		TargetOS:            targetLinux,
+		targetExplicit:      true,
+		explicitWindowsMode: windowsModeNormal,
+		explicitWorkRoot:    "/explicit/work",
+		explicitSSHUser:     "ubuntu",
+		explicitSSHPort:     "2222",
+		Fal: FalConfig{
+			WorkRoot: defaultPOSIXWorkRoot,
+		},
+	}
+	if err := applyProviderConfigDefaults(&explicit); err != nil {
+		t.Fatal(err)
+	}
+	if explicit.WorkRoot != "/explicit/work" || explicit.Fal.WorkRoot != "/explicit/work" || explicit.SSHUser != "ubuntu" || explicit.SSHPort != "2222" {
+		t.Fatalf("explicit fal defaults=%#v", explicit)
+	}
+	if got := serverTypeForConfig(Config{Provider: "fal"}); got != "gpu_1x_h100_sxm5" {
+		t.Fatalf("empty serverTypeForConfig=%q", got)
+	}
+	if got := serverTypeForProviderClass("fal", "beast"); got != "gpu_1x_h100_sxm5" {
+		t.Fatalf("serverTypeForProviderClass=%q", got)
+	}
+}
+
 func TestLambdaProviderConfigDefaultsAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

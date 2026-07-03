@@ -107,6 +107,27 @@ func TestClientDecodesStandardErrorBody(t *testing.T) {
 	}
 }
 
+func TestAPIErrorFormatting(t *testing.T) {
+	var nilErr *APIError
+	if got := nilErr.Error(); got != "" {
+		t.Fatalf("nil error=%q", got)
+	}
+	for name, tc := range map[string]struct {
+		err  *APIError
+		want string
+	}{
+		"typed":   {err: &APIError{Type: "quota", Message: "limit reached"}, want: "fal API quota: limit reached"},
+		"status":  {err: &APIError{Status: "Forbidden"}, want: "fal API Forbidden"},
+		"message": {err: &APIError{Message: "bad request"}, want: "fal API bad request"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := tc.err.Error(); got != tc.want {
+				t.Fatalf("Error()=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClientRejectsPlainHTTPExceptLoopback(t *testing.T) {
 	if _, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: "http://api.fal.ai/v1"}}, Runtime{}); err == nil {
 		t.Fatal("accepted non-loopback http")
