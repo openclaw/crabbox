@@ -682,7 +682,7 @@
     "lifecycle": "Nomad job",
     "cleanup": "owned job deregister",
     "bestFit": "Self-hosted delegated Linux execution on an existing Nomad cluster",
-    "caveat": "Requires Nomad HTTP API access, env-only ACL token handling, and allocation exec privileges",
+    "caveat": "Requires Nomad HTTP API access, allocation exec privileges, and an env-only token when ACLs are enabled",
     "docs": "nomad.md"
   },
   "opencomputer": {

@@ -2,10 +2,46 @@ package nomad
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	nomadapi "github.com/hashicorp/nomad/api"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestRegisterJobUsesCreateOnlyModifyIndexGuard(t *testing.T) {
+	var request nomadapi.JobRegisterRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/v1/jobs" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"EvalID":"eval-create"}`))
+	}))
+	defer server.Close()
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.Nomad.Address = server.URL
+	client, err := newNomadClient(cfg, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := "crabbox-create-only"
+	evalID, err := client.RegisterJob(context.Background(), &nomadapi.Job{ID: &jobID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evalID != "eval-create" || !request.EnforceIndex || request.JobModifyIndex != 0 || stringValue(request.Job.ID) != jobID {
+		t.Fatalf("evalID=%q request=%#v", evalID, request)
+	}
+}
 
 func TestNewNomadAPIConfigMapsSafeConfigAndTokenEnv(t *testing.T) {
 	cfg := core.BaseConfig()

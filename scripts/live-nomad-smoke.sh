@@ -64,7 +64,7 @@ inventory_has_created_slug() {
   if ! inventory="$("$bin" list "${provider_args[@]}" --json 2>/dev/null)"; then
     return 2
   fi
-  if jq -e --arg slug "$created_slug" 'any(.[]; ((.slug // .Slug // .labels.slug // "") == $slug) or ((.id // .ID // .lease // .labels.lease // "") == $slug))' <<<"$inventory" >/dev/null 2>&1; then
+  if jq -e --arg slug "$created_slug" 'any(.[]; any([.slug, .Slug, .name, .Name, .CloudID, .cloudId, .lease, .labels.slug, .labels.lease, .labels.job_id][]; . == $slug))' <<<"$inventory" >/dev/null 2>&1; then
     return 0
   fi
   if jq -e 'type == "array"' <<<"$inventory" >/dev/null 2>&1; then
@@ -100,15 +100,19 @@ stop_and_confirm() {
 
 cleanup() {
   local exit_status=$?
+  local cleanup_ok=1
   trap - EXIT
   if [[ -n "$created_slug" && -n "$bin" && -x "$bin" ]]; then
     if ! stop_and_confirm; then
       printf 'cleanup=failed provider=nomad id=%s attempts=3\n' "$created_slug" >&2
       exit_status=1
+      cleanup_ok=0
     fi
   fi
-  if [[ -n "$smoke_root" ]]; then
+  if [[ -n "$smoke_root" && $cleanup_ok -eq 1 ]]; then
     rm -rf -- "$smoke_root"
+  elif [[ -n "$smoke_root" ]]; then
+    printf 'cleanup=state_preserved path=%s\n' "$smoke_root" >&2
   fi
   exit "$exit_status"
 }
@@ -189,9 +193,6 @@ fi
 token_env="${token_env:-NOMAD_TOKEN}"
 if [[ ! "$token_env" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
   classify_and_exit environment_blocked "invalid_nomad_token_env"
-fi
-if [[ -z "${!token_env:-}" ]]; then
-  classify_and_exit environment_blocked "missing_${token_env}"
 fi
 
 bin="${CRABBOX_BIN:-$repo_root/bin/crabbox}"
@@ -283,7 +284,7 @@ fi
 
 "$bin" status "${provider_args[@]}" --id "$created_slug" --wait --json >/dev/null
 "$bin" list "${provider_args[@]}" --json |
-  jq -e --arg slug "$created_slug" 'any(.[]; ((.slug // .Slug // .labels.slug // "") == $slug) or ((.id // .ID // .lease // .labels.lease // "") == $slug))' >/dev/null
+  jq -e --arg slug "$created_slug" 'any(.[]; any([.slug, .Slug, .name, .Name, .CloudID, .cloudId, .lease, .labels.slug, .labels.lease, .labels.job_id][]; . == $slug))' >/dev/null
 
 trap - ERR
 if run_output="$("$bin" run "${provider_args[@]}" --id "$created_slug" --timing-json --allow-env CRABBOX_NOMAD_SMOKE_VALUE -- \
@@ -325,7 +326,8 @@ fi
 
 if ! stop_and_confirm; then
   printf 'cleanup=failed provider=nomad id=%s attempts=3\n' "$created_slug" >&2
-  created_slug=""
+  printf 'cleanup=state_preserved path=%s\n' "$smoke_root" >&2
+  trap - EXIT
   classify_and_exit diagnostic_only "lease_cleanup_unconfirmed"
 fi
 created_slug=""

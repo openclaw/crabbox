@@ -52,7 +52,7 @@ case "$1" in
     ;;
   list)
     if [[ -f "${state}" ]]; then
-      printf '[{"Provider":"nomad","slug":"%s","state":"running","labels":{"lease":"cbx_123456789abc","slug":"%s"}}]\\n' "$(cat "${state}")" "$(cat "${state}")"
+      printf '[{"CloudID":"crabbox-123456789abc","Provider":"nomad","id":0,"name":"crabbox-123456789abc","status":"running","labels":{"lease":"cbx_123456789abc","slug":"%s"}}]\\n' "$(cat "${state}")"
     elif [[ "\${FAKE_CRABBOX_FAIL_EMPTY_LIST:-0}" == "1" ]]; then
       printf 'inventory unavailable\\n' >&2
       exit 1
@@ -188,7 +188,7 @@ test("Nomad smoke ignores repo-local credential destination config", () => {
   }
 });
 
-test("Nomad smoke requires env-only token before mutation", () => {
+test("Nomad smoke supports an ACL-disabled cluster without a token", () => {
   const fake = setupFakeCrabbox();
   const result = spawnSync("bash", ["scripts/live-nomad-smoke.sh"], {
     cwd: repoRoot,
@@ -199,13 +199,15 @@ test("Nomad smoke requires env-only token before mutation", () => {
       CRABBOX_LIVE_PROVIDERS: "nomad",
       NOMAD_ADDR: "https://nomad.example.test:4646",
       NOMAD_TOKEN: "",
+      CRABBOX_NOMAD_CLEANUP_RETRY_DELAY_SECONDS: "0",
     },
     encoding: "utf8",
   });
 
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /classification=environment_blocked reason=missing_NOMAD_TOKEN/);
-  assert.equal(fs.existsSync(fake.calls), false);
+  assert.match(result.stdout, /classification=live_nomad_smoke_passed/);
+  assert.equal(fs.existsSync(fake.state), false);
+  assert.doesNotMatch(fs.readFileSync(fake.calls, "utf8"), /secret-token/);
 });
 
 test("Nomad smoke runs retained lifecycle and stops the created lease", () => {
@@ -302,6 +304,10 @@ test("Nomad smoke fails when cleanup cannot be confirmed", () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /cleanup=failed provider=nomad id=cbx_123456789abc attempts=3/);
+  const preserved = result.stderr.match(/cleanup=state_preserved path=(.+)/);
+  assert.ok(preserved, result.stderr);
+  assert.equal(fs.existsSync(preserved[1].trim()), true);
+  fs.rmSync(preserved[1].trim(), { recursive: true, force: true });
   const stopCalls = fs
     .readFileSync(fake.calls, "utf8")
     .split("\n")

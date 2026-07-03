@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-
-	nomadapi "github.com/hashicorp/nomad/api"
 )
 
 func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
@@ -30,10 +28,6 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 		return finishFailed(), nil
 	}
 	token, envName := nomadToken(b.cfg, os.Getenv)
-	if token == "" {
-		add("failed", "auth", "missing_token", fmt.Sprintf("provider=nomad class=missing_token token_env=%s hint=set %s mutation=false", envName, envName), map[string]string{"token_env": envName, "auth": "missing", "hint": "set_" + envName})
-		return finishFailed(), nil
-	}
 	client, err := b.clientFactory(b.cfg, b.rt)
 	if err != nil {
 		class := classifyError(err)
@@ -42,8 +36,17 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	}
 	if _, err := client.AgentSelf(ctx); err != nil {
 		class := classifyError(err)
+		if token == "" && class == "invalid_auth" {
+			add("failed", "auth", "missing_token", fmt.Sprintf("provider=nomad class=missing_token token_env=%s hint=set %s mutation=false", envName, envName), map[string]string{"token_env": envName, "auth": "missing", "hint": "set_" + envName})
+			return finishFailed(), nil
+		}
 		add("failed", "api", class, fmt.Sprintf("provider=nomad class=%s api=agent.self mutation=false %v", class, err), map[string]string{"api": "agent.self", "error": err.Error()})
 		return finishFailed(), nil
+	}
+	if token == "" {
+		add("ok", "auth", "not_required", fmt.Sprintf("provider=nomad auth=not_configured token_env=%s api=agent.self mutation=false", envName), map[string]string{"token_env": envName, "auth": "not_configured"})
+	} else {
+		add("ok", "auth", "ready", fmt.Sprintf("provider=nomad auth=env token_env=%s mutation=false", envName), map[string]string{"token_env": envName, "auth": "env"})
 	}
 	add("ok", "api", "ready", "provider=nomad api=agent.self mutation=false", map[string]string{"api": "agent.self"})
 
@@ -76,22 +79,26 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 		add("ok", "namespace", "default", "provider=nomad namespace=default mutation=false", map[string]string{"namespace": "default"})
 	}
 
-	return DoctorResult{Provider: providerName, Status: "ok", Message: "auth=ready control_plane=ready api=read mutation=false runtime=unchecked", Checks: checks}, nil
+	auth := "env"
+	if token == "" {
+		auth = "not_required"
+	}
+	return DoctorResult{Provider: providerName, Status: "ok", Message: fmt.Sprintf("auth=%s control_plane=ready api=read mutation=false runtime=unchecked", auth), Checks: checks}, nil
 }
 
 func classifyError(err error) string {
 	if err == nil {
 		return "ready"
 	}
-	var unexpected nomadapi.UnexpectedResponseError
-	if errors.As(err, &unexpected) && unexpected.HasStatusCode() {
-		switch unexpected.StatusCode() {
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) {
+		switch statusErr.StatusCode() {
 		case 401, 403:
 			return "invalid_auth"
 		case 404:
 			return "not_found"
 		}
-		return fmt.Sprintf("http_%d", unexpected.StatusCode())
+		return fmt.Sprintf("http_%d", statusErr.StatusCode())
 	}
 	lower := strings.ToLower(err.Error())
 	switch {
