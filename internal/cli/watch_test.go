@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 const watchTestLeaseID = "cbx_abcdef123456"
@@ -598,6 +600,39 @@ func TestWatchGitPathsTreatsEventNamesLiterally(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "*.go" {
 		t.Fatalf("paths=%q, want only the literal event path", got)
+	}
+}
+
+func TestWatchIgnoresUnchangedMetadataEvents(t *testing.T) {
+	root := newWatchGitRepo(t)
+	path := filepath.Join(root, "main.go")
+	session := &watchSession{root: root}
+	session.rememberPath("main.go", path)
+
+	batch := map[string]struct{}{}
+	if session.observeEvent(nil, fsnotify.Event{Name: path, Op: fsnotify.Chmod}, batch) {
+		t.Fatal("unchanged metadata event qualified")
+	}
+	if len(batch) != 0 {
+		t.Fatalf("batch=%v, want empty", batch)
+	}
+}
+
+func TestWatchKeepsExecutableModeChanges(t *testing.T) {
+	root := newWatchGitRepo(t)
+	path := filepath.Join(root, "main.go")
+	session := &watchSession{root: root}
+	session.rememberPath("main.go", path)
+
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	batch := map[string]struct{}{}
+	if !session.observeEvent(nil, fsnotify.Event{Name: path, Op: fsnotify.Chmod}, batch) {
+		t.Fatal("executable mode change did not qualify")
+	}
+	if _, ok := batch["main.go"]; !ok {
+		t.Fatalf("batch=%v, want main.go", batch)
 	}
 }
 

@@ -245,6 +245,13 @@ type watchSession struct {
 	stderr   io.Writer
 	excludes []string
 	watcher  *fsnotify.Watcher
+	paths    map[string]watchPathState
+}
+
+type watchPathState struct {
+	mode    fs.FileMode
+	size    int64
+	modTime int64
 }
 
 func (s *watchSession) run(ctx context.Context) error {
@@ -259,8 +266,13 @@ func (s *watchSession) run(ctx context.Context) error {
 	}
 	defer watcher.Close()
 	s.watcher = watcher
-	if _, err := addWatchTree(watcher, s.root, s.root, s.excludes); err != nil {
+	files, err := addWatchTree(watcher, s.root, s.root, s.excludes)
+	if err != nil {
 		return exit(1, "watch: watch %s: %v", s.root, err)
+	}
+	s.paths = make(map[string]watchPathState, len(files))
+	for _, rel := range files {
+		s.rememberPath(rel, filepath.Join(s.root, filepath.FromSlash(rel)))
 	}
 	fmt.Fprintf(s.stderr, "watch root=%s debounce=%s idle_exit=%s\n", s.root, s.debounce, s.idleExit)
 
@@ -387,10 +399,17 @@ func (s *watchSession) observeEvent(watcher *fsnotify.Watcher, event fsnotify.Ev
 	if rel == "." || !safeRepoRel(rel) || pathExcluded(rel, s.excludes) {
 		return false
 	}
+	if event.Op == fsnotify.Chmod && !s.rememberPath(rel, event.Name) {
+		return false
+	}
+	if event.Op != fsnotify.Chmod {
+		s.rememberPath(rel, event.Name)
+	}
 	if event.Op&fsnotify.Create != 0 {
 		if info, err := os.Lstat(event.Name); err == nil && info.IsDir() {
 			if files, err := addWatchTree(watcher, s.root, event.Name, s.excludes); err == nil {
 				for _, file := range files {
+					s.rememberPath(file, filepath.Join(s.root, filepath.FromSlash(file)))
 					batch[file] = struct{}{}
 				}
 			}
@@ -398,6 +417,22 @@ func (s *watchSession) observeEvent(watcher *fsnotify.Watcher, event fsnotify.Ev
 	}
 	batch[rel] = struct{}{}
 	return true
+}
+
+func (s *watchSession) rememberPath(rel, name string) bool {
+	if s.paths == nil {
+		s.paths = map[string]watchPathState{}
+	}
+	info, err := os.Lstat(name)
+	if err != nil {
+		_, existed := s.paths[rel]
+		delete(s.paths, rel)
+		return existed
+	}
+	current := watchPathState{mode: info.Mode(), size: info.Size(), modTime: info.ModTime().UnixNano()}
+	previous, existed := s.paths[rel]
+	s.paths[rel] = current
+	return !existed || current != previous
 }
 
 func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
