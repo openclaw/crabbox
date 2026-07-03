@@ -221,6 +221,12 @@ endpoints require HTTPS except for explicit localhost/loopback development
 URLs, and AWS region values are validated before constructing SigV4 service
 hosts.
 
+Cookie-authenticated portal mutations and portal viewer WebSocket upgrades
+require an exact same-origin browser `Origin` matching `CRABBOX_PUBLIC_URL` (or
+the request origin when no public URL is configured). Missing or sibling-origin
+intent is rejected before the portal cookie is converted into bearer authority;
+explicit bearer API clients remain independent of this browser-only boundary.
+
 Configured provider credentials are redacted from documented HTTP or streamed
 error diagnostics, including Azure Dynamic Sessions, Cloudflare runner, Daytona,
 E2B, Freestyle, Islo, Morph, OpenComputer, Railway, RunPod, Semaphore, SmolVM,

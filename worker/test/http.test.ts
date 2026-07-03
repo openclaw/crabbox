@@ -22,6 +22,75 @@ function proxyIdentityRequest(secret?: string): Request {
 }
 
 describe("coordinator auth", () => {
+  it("requires same-origin intent for portal-cookie mutations and viewer sockets", async () => {
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_PUBLIC_URL: "https://broker.example.test",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+    });
+    const cookie = `crabbox_session=${encodeURIComponent(token)}`;
+    const mutationURL = "https://broker.example.test/portal/leases/blue-lobster/share";
+    const viewerURL = "https://broker.example.test/portal/leases/blue-lobster/vnc/viewer";
+
+    const denied = await Promise.all(
+      [
+        new Request(mutationURL, { method: "POST", headers: { cookie } }),
+        new Request(mutationURL, {
+          method: "POST",
+          headers: { cookie, origin: "https://lease.code.example.test" },
+        }),
+        new Request(viewerURL, { headers: { cookie, upgrade: "websocket" } }),
+        new Request(viewerURL, {
+          headers: { cookie, origin: "https://attacker.example", upgrade: "websocket" },
+        }),
+      ].map((request) => prepareCoordinatorRequest(request, env)),
+    );
+    await Promise.all(
+      denied.map(async (prepared) => {
+        expect(prepared).toMatchObject({ authenticated: false, response: { status: 403 } });
+        if (!("response" in prepared)) throw new Error("cross-origin portal request was accepted");
+        await expect(prepared.response.json()).resolves.toEqual({
+          error: "portal_request_origin_forbidden",
+        });
+      }),
+    );
+
+    const accepted = await Promise.all(
+      [
+        new Request(mutationURL, {
+          method: "POST",
+          headers: { cookie, origin: "https://broker.example.test" },
+        }),
+        new Request(viewerURL, {
+          headers: {
+            cookie,
+            origin: "https://broker.example.test",
+            upgrade: "websocket",
+          },
+        }),
+        new Request("https://broker.example.test/portal/leases/blue-lobster", {
+          headers: { cookie },
+        }),
+        new Request(mutationURL, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            origin: "https://automation.example.test",
+          },
+        }),
+      ].map((request) => prepareCoordinatorRequest(request, env)),
+    );
+    for (const prepared of accepted) {
+      expect(prepared).toMatchObject({ authenticated: true });
+    }
+  });
+
   it("routes only the exact per-lease Code origin without portal-cookie authority", async () => {
     const env = {
       CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",

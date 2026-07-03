@@ -92,6 +92,12 @@ export async function prepareCoordinatorRequest(
     };
   }
   const portal = url.pathname.startsWith("/portal");
+  if (portal && !portalCookieRequestIntentAllowed(request, env, url)) {
+    return {
+      response: json({ error: "portal_request_origin_forbidden" }, { status: 403 }),
+      authenticated: false,
+    };
+  }
   const authRequest = portal ? requestWithPortalCookie(request) : request;
   const auth = await authenticateRequest(authRequest, env, authContext);
   if (!auth?.authorized) {
@@ -112,6 +118,25 @@ export async function prepareCoordinatorRequest(
     };
   }
   return { request: requestWithAuthContext(authRequest, auth), authenticated: true };
+}
+
+function portalCookieRequestIntentAllowed(request: Request, env: Env, url: URL): boolean {
+  if (request.headers.get("authorization")) return true;
+  if (!cookieValue(request.headers.get("cookie") ?? "", "crabbox_session")) return true;
+  const method = request.method.toUpperCase();
+  const websocket =
+    method === "GET" && request.headers.get("upgrade")?.toLowerCase() === "websocket";
+  if (!websocket && (method === "GET" || method === "HEAD" || method === "OPTIONS")) return true;
+  const origin = request.headers.get("origin")?.trim();
+  if (!origin) return false;
+  try {
+    const trustedOrigin = env.CRABBOX_PUBLIC_URL
+      ? new URL(env.CRABBOX_PUBLIC_URL).origin
+      : url.origin;
+    return url.origin === trustedOrigin && new URL(origin).origin === trustedOrigin;
+  } catch {
+    return false;
+  }
 }
 
 function isWebVNCAgentUpgrade(request: Request, url: URL): boolean {
