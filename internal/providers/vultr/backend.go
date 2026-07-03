@@ -183,6 +183,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	servers := make([]core.Server, 0, len(instances))
 	byCloudID := map[string]vultrInstance{}
 	for _, item := range instances {
+		if !isOwnedInstance(item) {
+			continue
+		}
 		server := serverFromInstance(item, b.Cfg)
 		servers = append(servers, server)
 		byCloudID[server.CloudID] = item
@@ -225,6 +228,9 @@ func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseV
 	}
 	out := make([]core.LeaseView, 0, len(instances))
 	for _, item := range instances {
+		if !isOwnedInstance(item) {
+			continue
+		}
 		out = append(out, serverFromInstance(item, b.Cfg))
 	}
 	return out, nil
@@ -396,13 +402,22 @@ func (b *backend) targetFromInstance(item vultrInstance, req core.ResolveRequest
 			return core.LeaseTarget{}, core.Exit(2, "refusing to resolve Vultr instance %s from stale local claim", server.CloudID)
 		}
 		preserveVultrIdentity(server.Labels, claim.Labels)
+	} else if req.ReleaseOnly {
+		return core.LeaseTarget{}, core.Exit(2, "vultr lease=%s has no exact local claim; refusing release", leaseID)
+	} else if !req.NoLocalStateMutations {
+		if !req.Reclaim {
+			return core.LeaseTarget{}, core.Exit(2, "vultr lease=%s is unclaimed; use --reclaim to adopt it explicitly", leaseID)
+		}
+		if req.Repo.Root == "" {
+			return core.LeaseTarget{}, core.Exit(2, "vultr lease=%s cannot be reclaimed without a repository root", leaseID)
+		}
 	}
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
 	core.UseStoredTestboxKey(&ssh, leaseID)
-	if req.Repo.Root != "" {
+	if req.Repo.Root != "" && !req.NoLocalStateMutations {
 		if _, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists); err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -479,20 +494,21 @@ func (b *backend) ensureCleanupClaim(server core.Server) (core.LeaseClaim, error
 		return core.LeaseClaim{}, fmt.Errorf("read vultr cleanup claim: %w", err)
 	}
 	if !claimExists {
-		repoRoot, err := os.Getwd()
-		if err != nil {
-			return core.LeaseClaim{}, fmt.Errorf("resolve cleanup claim working directory: %w", err)
-		}
-		claim, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, core.SSHTarget{}, repoRoot, b.Cfg.IdleTimeout, false, claim, false)
-		if err != nil {
-			return core.LeaseClaim{}, fmt.Errorf("persist vultr cleanup claim: %w", err)
-		}
+		return core.LeaseClaim{}, core.Exit(2, "vultr lease=%s has no exact local claim; refusing cleanup", leaseID)
 	}
 	if err := validateVultrClaimIdentity(claim, leaseID, server.Labels["slug"]); err != nil {
 		return core.LeaseClaim{}, err
 	}
-	if claim.CloudID != "" && server.CloudID != "" && claim.CloudID != server.CloudID {
-		return core.LeaseClaim{}, core.Exit(2, "refusing to release Vultr instance %s from stale local claim", server.CloudID)
+	if claim.CloudID != "" {
+		if server.CloudID == "" || claim.CloudID != server.CloudID {
+			return core.LeaseClaim{}, core.Exit(2, "refusing to release Vultr instance %s from stale local claim", server.CloudID)
+		}
+	} else {
+		switch claim.Labels["recovery"] {
+		case "ambiguous-create", "ambiguous-key-create", "rollback-cleanup":
+		default:
+			return core.LeaseClaim{}, core.Exit(2, "vultr lease claim has no instance identity or valid recovery state for lease=%s", leaseID)
+		}
 	}
 	expectedAccount := strings.TrimSpace(claim.Labels[vultrAccountLabel])
 	currentAccount := strings.TrimSpace(server.Labels[vultrAccountLabel])

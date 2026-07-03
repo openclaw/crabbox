@@ -424,7 +424,7 @@ func validateLinodeLabels(labels map[string]string) error {
 		labels["crabbox"] != "true" ||
 		labels["created_by"] != "crabbox" ||
 		labels["provider"] != providerName ||
-		labels["lease"] == "" ||
+		!core.IsCanonicalLeaseID(labels["lease"]) ||
 		labels["slug"] == "" ||
 		labels["target"] != core.TargetLinux {
 		return core.Exit(2, "refusing to operate on non-Crabbox Linode instance")

@@ -464,7 +464,7 @@ func TestDigitalOceanClientReplaceDropletTagsSkipsUnchangedSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	client.baseURL = server.URL
-	tags := []string{tagCrabbox, "crabbox:lease:cbx_1", "crabbox:state:ready"}
+	tags := []string{tagCrabbox, "crabbox:lease:cbx_111111111111", "crabbox:state:ready"}
 	if err := client.ReplaceDropletTags(context.Background(), 42, tags, append([]string(nil), tags...)); err != nil {
 		t.Fatal(err)
 	}
@@ -1191,15 +1191,15 @@ func TestListCrabboxDropletsFiltersAndPaginates(t *testing.T) {
 			t.Fatalf("tag_name=%q", r.URL.Query().Get("tag_name"))
 		}
 		if r.URL.Query().Get("type") == "gpus" {
-			_, _ = w.Write([]byte(`{"droplets":[{"id":4,"name":"gpu-owned","tags":["crabbox","crabbox:provider:digitalocean","crabbox:lease:cbx_4","crabbox:slug:gpu","crabbox:target:linux"]}],"links":{"pages":{}}}`))
+			_, _ = w.Write([]byte(`{"droplets":[{"id":4,"name":"gpu-owned","tags":["crabbox","crabbox:provider:digitalocean","crabbox:lease:cbx_444444444444","crabbox:slug:gpu","crabbox:target:linux"]}],"links":{"pages":{}}}`))
 			return
 		}
 		standardPage++
 		if standardPage == 1 {
-			_, _ = w.Write([]byte(`{"droplets":[{"id":1,"name":"owned","tags":["Crabbox","Crabbox:Provider:DigitalOcean","Crabbox:Lease:cbx_1","Crabbox:Slug:one","Crabbox:Target:Linux"]},{"id":2,"name":"foreign","tags":["Crabbox"]}],"links":{"pages":{"next":"yes"}}}`))
+			_, _ = w.Write([]byte(`{"droplets":[{"id":1,"name":"owned","tags":["Crabbox","Crabbox:Provider:DigitalOcean","Crabbox:Lease:cbx_111111111111","Crabbox:Slug:one","Crabbox:Target:Linux"]},{"id":2,"name":"foreign","tags":["Crabbox"]}],"links":{"pages":{"next":"yes"}}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"droplets":[{"id":3,"name":"owned2","tags":["crabbox","crabbox:provider:digitalocean","crabbox:lease:cbx_2","crabbox:slug:two","crabbox:target:linux"]}],"links":{"pages":{}}}`))
+		_, _ = w.Write([]byte(`{"droplets":[{"id":3,"name":"owned2","tags":["crabbox","crabbox:provider:digitalocean","crabbox:lease:cbx_222222222222","crabbox:slug:two","crabbox:target:linux"]}],"links":{"pages":{}}}`))
 	}))
 	defer server.Close()
 	t.Setenv("DIGITALOCEAN_TOKEN", "token")

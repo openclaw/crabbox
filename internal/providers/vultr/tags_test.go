@@ -24,7 +24,11 @@ func TestVultrTagsRoundTripOwnership(t *testing.T) {
 }
 
 func TestVultrTagsRejectPartialForeignAndConflictingOwnership(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
 	for name, tags := range map[string][]string{
+		"non-canonical lease": leaseTags(cfg, "legacy-lease-1", "blue", "ready", false, time.Unix(1, 0)),
 		"partial": {
 			tagCrabbox,
 			"crabbox:provider:vultr",
@@ -33,7 +37,7 @@ func TestVultrTagsRejectPartialForeignAndConflictingOwnership(t *testing.T) {
 			tagCrabbox,
 			"crabbox:provider:digitalocean",
 			"crabbox:target:linux",
-			"crabbox:lease:cbx_abc",
+			"crabbox:lease:cbx_111111111111",
 			"crabbox:slug:blue",
 		},
 		"conflict": {
@@ -41,7 +45,7 @@ func TestVultrTagsRejectPartialForeignAndConflictingOwnership(t *testing.T) {
 			"crabbox:provider:vultr",
 			"crabbox:provider:other",
 			"crabbox:target:linux",
-			"crabbox:lease:cbx_abc",
+			"crabbox:lease:cbx_111111111111",
 			"crabbox:slug:blue",
 		},
 	} {

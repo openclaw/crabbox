@@ -116,7 +116,7 @@ func TestVultrClientCursorPaginationAndRateLimit(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"instances":[{"id":"one","label":"foreign"}],"meta":{"links":{"next":"` + baseURL + `/instances?cursor=next"}}}`))
 		case "/instances?cursor=next":
-			_, _ = w.Write([]byte(`{"instances":[{"id":"two","label":"cbx_abc-blue","tags":["crabbox","crabbox:provider:vultr","crabbox:target:linux","crabbox:lease:cbx_abc","crabbox:slug:blue"]}],"meta":{"links":{}}}`))
+			_, _ = w.Write([]byte(`{"instances":[{"id":"two","label":"cbx_111111111111-blue","tags":["crabbox","crabbox:provider:vultr","crabbox:target:linux","crabbox:lease:cbx_111111111111","crabbox:slug:blue"]}],"meta":{"links":{}}}`))
 		default:
 			t.Fatalf("unexpected request %s", r.URL.RequestURI())
 		}
@@ -236,7 +236,7 @@ func TestVultrClientRejectsMultipleBootSources(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Vultr.OS = "2284"
 	cfg.Vultr.Image = "image-123"
-	_, err = client.createInstanceBody(context.Background(), cfg, "ssh-ed25519 test", "key", "cbx_abc", "blue", false, time.Now())
+	_, err = client.createInstanceBody(context.Background(), cfg, "ssh-ed25519 test", "key", "cbx_111111111111", "blue", false, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "exactly one boot source") {
 		t.Fatalf("err=%v", err)
 	}

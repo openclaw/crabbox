@@ -300,7 +300,7 @@ func TestListFiltersForeignAndPartialLinodes(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
-	owned := linodeInstance{ID: 1, Label: "crabbox-cbx_one-owned", Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.1"}, Tags: leaseTags(cfg, "cbx_one", "owned", "ready", false, time.Unix(1, 0))}
+	owned := linodeInstance{ID: 1, Label: "crabbox-cbx-111111111111-owned", Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.1"}, Tags: leaseTags(cfg, "cbx_111111111111", "owned", "ready", false, time.Unix(1, 0))}
 	partial := linodeInstance{ID: 2, Label: "partial", Tags: []string{tagCrabbox, "crabbox:provider:linode"}}
 	foreign := linodeInstance{ID: 3, Label: "foreign", Tags: []string{tagCrabbox, "crabbox:provider:aws", "crabbox:target:linux", "crabbox:lease:cbx_two", "crabbox:slug:foreign"}}
 	backend := newTestBackend(t, &fakeLinodeAPI{linodes: []linodeInstance{owned, partial, foreign}})
@@ -356,7 +356,7 @@ func TestResolveNumericSlugBeforeRawLinodeID(t *testing.T) {
 	api := &fakeLinodeAPI{linodes: []linodeInstance{item}}
 	backend := newTestBackend(t, api)
 
-	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "123"})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "123", Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,8 +365,30 @@ func TestResolveNumericSlugBeforeRawLinodeID(t *testing.T) {
 	}
 }
 
+func TestResolveReadOnlyDoesNotClaimVisibleLinode(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = defaultType
+	leaseID := "cbx_abcdef123457"
+	slug := "read-only"
+	item := linodeInstance{ID: 457, Label: core.LeaseProviderName(leaseID, slug), Status: "running", Type: defaultType, IPv4: []string{"203.0.113.124"}, Tags: leaseTags(cfg, leaseID, slug, "ready", false, time.Now())}
+	backend := newTestBackend(t, &fakeLinodeAPI{linodes: []linodeInstance{item}})
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.ID != item.ID {
+		t.Fatalf("lease=%#v", lease)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("read-only resolve wrote claim: exists=%v err=%v", exists, err)
+	}
+}
+
 func TestResolveReleaseOnlyNumericSlugClaimBeforeRawLinodeID(t *testing.T) {
-	leaseID := "cbx_numeric"
+	leaseID := "cbx_222222222222"
 	slug := "123"
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -414,7 +436,7 @@ func TestReleaseRefusesAccountMismatch(t *testing.T) {
 }
 
 func TestReleaseMissingLiveLinodeFinalizesLocalClaim(t *testing.T) {
-	leaseID := "cbx_missing"
+	leaseID := "cbx_333333333333"
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
@@ -456,16 +478,16 @@ func TestCleanupDryRunSkipsKeepAndDeletesExpiredWhenLive(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
-	expiredLabels := core.DirectLeaseLabels(cfg, "cbx_expired", "expired", providerName, "", false, now.Add(-2*time.Hour))
+	expiredLabels := core.DirectLeaseLabels(cfg, "cbx_444444444444", "expired", providerName, "", false, now.Add(-2*time.Hour))
 	expiredLabels["state"] = "ready"
 	expiredLabels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
 	expiredLabels["expires_at"] = "1"
-	keepLabels := core.DirectLeaseLabels(cfg, "cbx_keep", "keep", providerName, "", true, now.Add(-2*time.Hour))
+	keepLabels := core.DirectLeaseLabels(cfg, "cbx_555555555555", "keep", providerName, "", true, now.Add(-2*time.Hour))
 	keepLabels["state"] = "ready"
 	keepLabels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
 	api := &fakeLinodeAPI{linodes: []linodeInstance{
-		{ID: 10, Label: core.LeaseProviderName("cbx_expired", "expired"), Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.10"}, Tags: tagsFromLabels(expiredLabels)},
-		{ID: 11, Label: core.LeaseProviderName("cbx_keep", "keep"), Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.11"}, Tags: tagsFromLabels(keepLabels)},
+		{ID: 10, Label: core.LeaseProviderName("cbx_444444444444", "expired"), Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.10"}, Tags: tagsFromLabels(expiredLabels)},
+		{ID: 11, Label: core.LeaseProviderName("cbx_555555555555", "keep"), Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.11"}, Tags: tagsFromLabels(keepLabels)},
 	}}
 	backend := newTestBackend(t, api)
 	backend.RT.Clock = fakeClock{t: now}
@@ -475,6 +497,20 @@ func TestCleanupDryRunSkipsKeepAndDeletesExpiredWhenLive(t *testing.T) {
 	}
 	if len(api.deleted) != 0 {
 		t.Fatalf("dry-run deleted=%v", api.deleted)
+	}
+	server := serverFromLinode(api.linodes[0], cfg)
+	server.Labels[linodeAccountLabel] = expiredLabels[linodeAccountLabel]
+	if err := core.ClaimLeaseTargetForRepoConfig(
+		"cbx_444444444444",
+		"expired",
+		cfg,
+		server,
+		core.SSHTarget{},
+		t.TempDir(),
+		cfg.IdleTimeout,
+		false,
+	); err != nil {
+		t.Fatal(err)
 	}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)

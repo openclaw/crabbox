@@ -463,6 +463,15 @@ func (b *linodeLeaseBackend) targetFromLinode(item linodeInstance, req core.Reso
 		if claim.CloudID == "" && !isPendingRecoveryClaim(claim, leaseID) {
 			return core.LeaseTarget{}, core.Exit(2, "linode lease claim has no instance identity or valid pending recovery state for lease=%s", leaseID)
 		}
+	} else if req.ReleaseOnly {
+		return core.LeaseTarget{}, core.Exit(2, "linode lease=%s has no exact local claim; refusing release", leaseID)
+	} else if !req.NoLocalStateMutations {
+		if !req.Reclaim {
+			return core.LeaseTarget{}, core.Exit(2, "linode lease=%s is unclaimed; use --reclaim to adopt it explicitly", leaseID)
+		}
+		if req.Repo.Root == "" {
+			return core.LeaseTarget{}, core.Exit(2, "linode lease=%s cannot be reclaimed without a repository root", leaseID)
+		}
 	}
 	if req.ReleaseOnly {
 		target := core.LeaseTarget{Server: server, LeaseID: leaseID}
@@ -477,7 +486,7 @@ func (b *linodeLeaseBackend) targetFromLinode(item linodeInstance, req core.Reso
 			ssh.Key = keyPath
 		}
 	}
-	if req.Repo.Root != "" {
+	if req.Repo.Root != "" && !req.NoLocalStateMutations {
 		if _, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists); err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -675,14 +684,10 @@ func (b *linodeLeaseBackend) deleteServer(ctx context.Context, _ core.Config, se
 			}
 		}
 	}
-	foreignClaim := claim.Provider != providerName
 	if item.ID != 0 {
 		if err := client.DeleteLinode(ctx, server.ID); err != nil {
 			return err
 		}
-	}
-	if foreignClaim {
-		return nil
 	}
 	if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
 		return fmt.Errorf("finalize linode cleanup claim: %w", err)
@@ -702,21 +707,14 @@ func (b *linodeLeaseBackend) ensureCleanupClaim(server core.Server, liveLinodeVe
 			return core.LeaseClaim{}, core.Exit(2, "linode lease claim is incomplete for lease=%s", leaseID)
 		}
 	} else {
-		repoRoot, err := os.Getwd()
-		if err != nil {
-			return core.LeaseClaim{}, fmt.Errorf("resolve cleanup claim working directory: %w", err)
-		}
-		claim, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, core.SSHTarget{}, repoRoot, b.Cfg.IdleTimeout, false, claim, false)
-		if err != nil {
-			return core.LeaseClaim{}, fmt.Errorf("persist linode cleanup claim: %w", err)
-		}
+		return core.LeaseClaim{}, core.Exit(2, "linode lease=%s has no exact local claim; refusing cleanup", leaseID)
 	}
 	cloudID := firstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
 	if claim.Provider == providerName && claim.CloudID != "" && claim.CloudID != cloudID {
 		return core.LeaseClaim{}, core.Exit(2, "refusing to release Linode instance %d from stale local claim", server.ID)
 	}
 	if claim.Provider != providerName {
-		return claim, nil
+		return core.LeaseClaim{}, core.Exit(2, "lease=%s is claimed by provider=%s; refusing linode cleanup", leaseID, claim.Provider)
 	}
 	if err := validateLinodeClaimIdentity(claim, leaseID, server.Labels["slug"]); err != nil {
 		return core.LeaseClaim{}, err
