@@ -110,6 +110,12 @@ func (b *runpodLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 		}
 		return LeaseTarget{}, err
 	}
+	if err := validateCreatedRunpodPod(ready, pod.ID, name); err != nil {
+		if !req.Keep {
+			err = b.cleanupFailedAcquire(client, pod.ID, err)
+		}
+		return LeaseTarget{}, err
+	}
 
 	lease, err := b.prepareLease(ctx, cfg, ready, leaseID, slug, req.Keep, true)
 	if err != nil {
@@ -118,7 +124,7 @@ func (b *runpodLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 		}
 		return LeaseTarget{}, err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
 			err = b.cleanupFailedAcquire(client, pod.ID, err)
 		}
@@ -147,19 +153,51 @@ func (b *runpodLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (L
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	pod, leaseID, slug, err := b.resolvePod(ctx, client, req.ID)
+	if req.ReleaseOnly {
+		claim, ok, err := resolveRunpodClaim(req.ID)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		if !ok {
+			return LeaseTarget{}, unclaimedRunpodError(req.ID)
+		}
+		pod, err := b.resolveClaimedPod(ctx, client, claim, true)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		return LeaseTarget{Server: runpodServer(pod, claim.LeaseID, claim.Slug, cfg, true), LeaseID: claim.LeaseID}, nil
+	}
+	claim, claimed, err := resolveRunpodClaim(req.ID)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	if req.ReleaseOnly {
-		return LeaseTarget{Server: runpodServer(pod, leaseID, slug, cfg, true), LeaseID: leaseID}, nil
+	var (
+		pod     runpodPod
+		leaseID string
+		slug    string
+	)
+	if claimed {
+		pod, err = b.resolveClaimedPod(ctx, client, claim, false)
+		leaseID = claim.LeaseID
+		slug = blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+	} else {
+		pod, leaseID, slug, err = b.resolveUnclaimedPod(ctx, client, req.ID)
+		if err == nil {
+			err = ensureRunpodAdoptionDoesNotRetargetClaim(leaseID, pod)
+		}
+	}
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if req.Repo.Root != "" && (!claimed || !runpodClaimIsBound(claim)) && !req.Reclaim {
+		return LeaseTarget{}, exit(2, "runpod pod %s is not bound to an exact local claim; retry with --reclaim to adopt it", pod.ID)
 	}
 	lease, err := b.prepareLease(ctx, cfg, pod, leaseID, slug, true, false)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if err := claimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 			return LeaseTarget{}, err
 		}
 	}
@@ -200,23 +238,40 @@ func (b *runpodLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseR
 	if err != nil {
 		return err
 	}
-	podID := strings.TrimSpace(req.Lease.Server.CloudID)
-	if podID == "" {
-		// Fall back to a fresh resolve so release works against legacy lease
-		// records that only carry the lease id.
-		pod, _, _, err := b.resolvePod(ctx, client, req.Lease.LeaseID)
+	identifier := strings.TrimSpace(req.Lease.LeaseID)
+	if identifier == "" {
+		identifier = strings.TrimSpace(req.Lease.Server.CloudID)
+	}
+	if identifier == "" {
+		identifier = strings.TrimSpace(req.Lease.Server.Name)
+	}
+	claim, ok, err := resolveRunpodClaim(identifier)
+	if err != nil {
+		return err
+	}
+	if !ok || !runpodClaimIsBound(claim) {
+		return unclaimedRunpodError(identifier)
+	}
+	if leaseID := strings.TrimSpace(req.Lease.LeaseID); leaseID != "" && leaseID != claim.LeaseID {
+		return exit(2, "runpod release lease %s does not match bound claim %s", leaseID, claim.LeaseID)
+	}
+	if podID := strings.TrimSpace(req.Lease.Server.CloudID); podID != "" && podID != claim.CloudID {
+		return exit(2, "runpod release pod %s does not match bound claim pod %s", podID, claim.CloudID)
+	}
+	err = removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		pod, err := b.resolveClaimedPod(ctx, client, claim, true)
 		if err != nil {
 			return err
 		}
-		podID = pod.ID
+		if err := client.TerminatePod(ctx, pod.ID); err != nil {
+			return exit(1, "runpod terminate pod %s failed: %v", pod.ID, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-	if podID == "" {
-		return exit(2, "provider=%s release requires a pod id", providerName)
-	}
-	if err := client.TerminatePod(ctx, podID); err != nil {
-		return exit(1, "runpod terminate pod %s failed: %v", podID, err)
-	}
-	removeLeaseClaim(req.Lease.LeaseID)
+	removeStoredTestboxKey(claim.LeaseID)
 	return nil
 }
 
@@ -376,18 +431,104 @@ func runpodBootstrapToolsCommand() string {
 	}, "\n")
 }
 
-func (b *runpodLeaseBackend) resolvePod(ctx context.Context, client runpodAPI, identifier string) (runpodPod, string, string, error) {
+func resolveRunpodClaim(identifier string) (LeaseClaim, bool, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return LeaseClaim{}, false, exit(2, "provider=%s requires --id <pod-id-or-lease>", providerName)
+	}
+	if claim, ok, exact, err := resolveLeaseClaimForProviderWithExact(identifier, providerName); err != nil {
+		return LeaseClaim{}, false, err
+	} else if exact && !ok {
+		return LeaseClaim{}, false, exit(2, "local claim %s belongs to provider=%s, not provider=%s", identifier, blank(claim.Provider, "<unknown>"), providerName)
+	} else if exact {
+		return claim, true, nil
+	}
+	if claim, ok, err := resolveLeaseClaimForProviderCloudID(identifier, providerName); err != nil {
+		return LeaseClaim{}, false, err
+	} else if ok {
+		return claim, true, nil
+	}
+	claims, err := listLeaseClaims()
+	if err != nil {
+		return LeaseClaim{}, false, err
+	}
+	var match LeaseClaim
+	for _, claim := range claims {
+		if claim.Provider != providerName || strings.TrimSpace(claim.Labels["name"]) != identifier {
+			continue
+		}
+		if match.LeaseID != "" {
+			return LeaseClaim{}, false, exit(2, "multiple provider=%s claims match pod name %s", providerName, identifier)
+		}
+		match = claim
+	}
+	if match.LeaseID != "" {
+		return match, true, nil
+	}
+	return resolveLeaseClaimForProvider(identifier, providerName)
+}
+
+func ensureRunpodAdoptionDoesNotRetargetClaim(leaseID string, pod runpodPod) error {
+	claim, ok, exact, err := resolveLeaseClaimForProviderWithExact(leaseID, providerName)
+	if err != nil {
+		return err
+	}
+	if !exact {
+		return nil
+	}
+	if !ok {
+		return exit(2, "cannot adopt RunPod pod %s as lease %s because that local claim belongs to provider=%s", pod.ID, leaseID, blank(claim.Provider, "<unknown>"))
+	}
+	if !runpodClaimIsBound(claim) {
+		return nil
+	}
+	if claim.CloudID != pod.ID || strings.TrimSpace(claim.Labels["name"]) != pod.Name {
+		return exit(2, "cannot retarget RunPod claim %s from pod %s (%s) to pod %s (%s)", claim.LeaseID, claim.CloudID, claim.Labels["name"], pod.ID, pod.Name)
+	}
+	return nil
+}
+
+func runpodClaimIsBound(claim LeaseClaim) bool {
+	return claim.Provider == providerName &&
+		strings.TrimSpace(claim.LeaseID) != "" &&
+		strings.TrimSpace(claim.CloudID) != "" &&
+		strings.TrimSpace(claim.Labels["name"]) != ""
+}
+
+func (b *runpodLeaseBackend) resolveClaimedPod(ctx context.Context, client runpodAPI, claim LeaseClaim, requireBound bool) (runpodPod, error) {
+	bound := runpodClaimIsBound(claim)
+	if requireBound && !bound {
+		return runpodPod{}, unclaimedRunpodError(claim.LeaseID)
+	}
+	var (
+		pod runpodPod
+		err error
+	)
+	if strings.TrimSpace(claim.CloudID) != "" {
+		pod, err = client.GetPod(ctx, claim.CloudID)
+	} else {
+		slug := blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+		pod, err = b.findPodByName(ctx, client, leaseProviderName(claim.LeaseID, slug))
+	}
+	if err != nil {
+		return runpodPod{}, err
+	}
+	if !bound {
+		return pod, nil
+	}
+	if pod.ID != claim.CloudID {
+		return runpodPod{}, exit(2, "runpod claim %s expects pod %s but provider returned %s", claim.LeaseID, claim.CloudID, blank(pod.ID, "<empty>"))
+	}
+	if name := strings.TrimSpace(claim.Labels["name"]); pod.Name != name {
+		return runpodPod{}, exit(2, "runpod claim %s expects pod name %s but provider returned %s", claim.LeaseID, name, blank(pod.Name, "<empty>"))
+	}
+	return pod, nil
+}
+
+func (b *runpodLeaseBackend) resolveUnclaimedPod(ctx context.Context, client runpodAPI, identifier string) (runpodPod, string, string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		return runpodPod{}, "", "", exit(2, "provider=%s requires --id <pod-id-or-lease>", providerName)
-	}
-	if claim, ok, err := resolveLeaseClaimForProvider(identifier, providerName); err != nil {
-		return runpodPod{}, "", "", err
-	} else if ok {
-		slug := blank(claim.Slug, newLeaseSlug(claim.LeaseID))
-		name := leaseProviderName(claim.LeaseID, slug)
-		pod, err := b.findPodByName(ctx, client, name)
-		return pod, claim.LeaseID, slug, err
 	}
 	if strings.HasPrefix(identifier, "cbx_") {
 		pod, ok, err := b.findPodByLeaseName(ctx, client, identifier)
@@ -415,6 +556,20 @@ func (b *runpodLeaseBackend) resolvePod(ctx context.Context, client runpodAPI, i
 	}
 	leaseID, slug := runpodLeaseIdentity(pod.Name)
 	return pod, leaseID, slug, nil
+}
+
+func unclaimedRunpodError(identifier string) error {
+	return exit(2, "runpod pod %s has no exact resource-bound local claim; adopt it from a reuse command with --reclaim before stopping it", blank(strings.TrimSpace(identifier), "<unknown>"))
+}
+
+func validateCreatedRunpodPod(pod runpodPod, expectedID, expectedName string) error {
+	if strings.TrimSpace(expectedID) == "" || pod.ID != expectedID {
+		return exit(1, "runpod create returned pod %s but readiness resolved %s", blank(expectedID, "<empty>"), blank(pod.ID, "<empty>"))
+	}
+	if strings.TrimSpace(expectedName) == "" || pod.Name != expectedName {
+		return exit(1, "runpod create expected pod name %s but readiness returned %s", blank(expectedName, "<empty>"), blank(pod.Name, "<empty>"))
+	}
+	return nil
 }
 
 func (b *runpodLeaseBackend) findPodByName(ctx context.Context, client runpodAPI, name string) (runpodPod, error) {

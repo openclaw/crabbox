@@ -174,10 +174,11 @@ func VerifyLeaseClaimUnchanged(leaseID string, expected LeaseClaim) error {
 	return verifyLeaseClaimUnchanged(leaseID, expected)
 }
 
+// RemoveLeaseClaimIfUnchangedAfter holds the claim lock across action and
+// removes the claim only when it still matches expected.
 func RemoveLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
 	return removeLeaseClaimIfUnchangedAfter(leaseID, expected, action)
 }
-
 func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {
 	return restoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
 }

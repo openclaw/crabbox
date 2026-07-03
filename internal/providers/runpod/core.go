@@ -27,6 +27,7 @@ type LeaseTarget = core.LeaseTarget
 type Server = core.Server
 type SSHTarget = core.SSHTarget
 type TailscaleConfig = core.TailscaleConfig
+type LeaseClaim = core.LeaseClaim
 
 const (
 	providerName  = "runpod"
@@ -66,16 +67,32 @@ func allocateDirectLeaseSlug(leaseID, requested string, servers []Server) (strin
 	return core.AllocateDirectLeaseSlug(leaseID, requested, servers)
 }
 
-func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
+func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
 }
 
 func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
+func resolveLeaseClaimForProviderWithExact(identifier, provider string) (core.LeaseClaim, bool, bool, error) {
+	return core.ResolveLeaseClaimForProviderWithExact(identifier, provider)
+}
+
+func resolveLeaseClaimForProviderCloudID(cloudID, provider string) (core.LeaseClaim, bool, error) {
+	return core.ResolveLeaseClaimForProviderCloudID(cloudID, provider)
+}
+
+func listLeaseClaims() ([]core.LeaseClaim, error) {
+	return core.ListLeaseClaims()
+}
+
+func removeLeaseClaimIfUnchangedAfter(leaseID string, expected core.LeaseClaim, action func() error) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
+}
+
+func removeStoredTestboxKey(leaseID string) {
+	core.RemoveStoredTestboxKey(leaseID)
 }
 
 func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {

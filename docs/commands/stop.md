@@ -56,6 +56,10 @@ Crabbox lease ID and local slug:
   name, or local slug and deletes the Freestyle VM. Claimless canonical names
   remain visible to status/list but cannot be deleted until explicit
   `--reclaim` reuse persists a claim.
+- `runpod` — accepts a lease ID, pod ID, pod name, or local slug only when an
+  exact local claim binds that RunPod id and provider-returned name. Unclaimed
+  and legacy pods remain visible to status/list but require explicit
+  `--reclaim` reuse before deletion.
 - `e2b` — accepts a Crabbox lease ID, a local slug, or a Crabbox-owned E2B
   sandbox ID in raw or `e2b_<sandboxID>` form and deletes the E2B sandbox.
 - `railway` — refuses unclaimed service IDs. Use `--reclaim` only after

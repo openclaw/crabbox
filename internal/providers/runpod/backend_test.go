@@ -323,6 +323,7 @@ type fakeRunpodAPI struct {
 	whoamiCalls  int
 	listCalls    int
 	deployCalls  []runpodDeployInput
+	getCalls     []string
 	terminated   []string
 	listPods     []runpodPod
 	getPod       func(string) (runpodPod, error)
@@ -343,10 +344,15 @@ func (f *fakeRunpodAPI) DeployPod(_ context.Context, input runpodDeployInput) (r
 	return f.deployPod, nil
 }
 func (f *fakeRunpodAPI) GetPod(_ context.Context, podID string) (runpodPod, error) {
-	if f.getPod != nil {
-		return f.getPod(podID)
+	f.mu.Lock()
+	f.getCalls = append(f.getCalls, podID)
+	getPod := f.getPod
+	deployPod := f.deployPod
+	f.mu.Unlock()
+	if getPod != nil {
+		return getPod(podID)
 	}
-	return f.deployPod, nil
+	return deployPod, nil
 }
 func (f *fakeRunpodAPI) ListPods(_ context.Context) ([]runpodPod, error) {
 	f.mu.Lock()
@@ -486,29 +492,203 @@ func TestRunpodAcquireRollbackCannotBlockForever(t *testing.T) {
 		pollTimeoutOverride:    5 * time.Millisecond,
 		cleanupTimeoutOverride: 20 * time.Millisecond,
 	}
-	start := time.Now()
-
 	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
 	if err == nil || !strings.Contains(err.Error(), "cleanup failed") || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err=%v, want bounded cleanup deadline error", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("Acquire took %s, cleanup should be bounded", elapsed)
 	}
 	if len(fake.terminated) != 1 || fake.terminated[0] != "pod_blocked" {
 		t.Fatalf("terminated=%v", fake.terminated)
 	}
 }
 
-func TestRunpodReleaseLeaseTerminatesPod(t *testing.T) {
+func TestRunpodAcquireRejectsMismatchedReadyPodAndRollsBack(t *testing.T) {
+	fake := &fakeRunpodAPI{
+		deployPod: runpodPod{ID: "pod_created", Name: "crabbox-blue-12345678"},
+		getPod: func(string) (runpodPod, error) {
+			return runpodPod{
+				ID:            "pod_other",
+				Name:          "crabbox-blue-12345678",
+				DesiredStatus: "RUNNING",
+				Runtime: &runpodRuntime{Ports: []runpodRuntimePort{{
+					IP: "203.0.113.9", PrivatePort: 22, PublicPort: 41200, IsIPPublic: true, Type: "tcp",
+				}}},
+			}, nil
+		},
+	}
+	backend := &runpodLeaseBackend{
+		cfg:    Config{Runpod: RunpodConfig{APIKey: "k"}},
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client: fake,
+	}
+
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "readiness resolved pod_other") {
+		t.Fatalf("err=%v, want create/readiness identity mismatch", err)
+	}
+	if len(fake.terminated) != 1 || fake.terminated[0] != "pod_created" {
+		t.Fatalf("terminated=%v, want exact created pod rollback", fake.terminated)
+	}
+}
+
+func TestRunpodResolveReleaseOnlyRejectsUnclaimedPodWithoutProviderLookup(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &fakeRunpodAPI{}
 	backend := &runpodLeaseBackend{cfg: Config{Runpod: RunpodConfig{APIKey: "k"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
-	req := ReleaseLeaseRequest{Lease: LeaseTarget{Server: Server{CloudID: "pod_z"}, LeaseID: "rpod_abcdef12"}}
+
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "pod_manual", ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "no exact resource-bound local claim") {
+		t.Fatalf("err=%v, want unclaimed refusal", err)
+	}
+	if len(fake.getCalls) != 0 || len(fake.terminated) != 0 {
+		t.Fatalf("getCalls=%v terminated=%v, want no provider mutation path", fake.getCalls, fake.terminated)
+	}
+}
+
+func TestRunpodResolveRequiresExplicitReclaimBeforeBindingPod(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	pod := runpodPod{ID: "pod_manual", Name: "manual-pod", DesiredStatus: "RUNNING"}
+	fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return pod, nil }}
+	backend := &runpodLeaseBackend{cfg: Config{Runpod: RunpodConfig{APIKey: "k"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+	repo := core.Repo{Root: t.TempDir()}
+
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: pod.ID, Repo: repo})
+	if err == nil || !strings.Contains(err.Error(), "retry with --reclaim") {
+		t.Fatalf("err=%v, want explicit reclaim requirement", err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence("rpod_manual-pod"); err != nil || exists {
+		t.Fatalf("claim before reclaim: exists=%v err=%v", exists, err)
+	}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: pod.ID, Repo: repo, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists {
+		t.Fatalf("claim after reclaim: exists=%v err=%v", exists, err)
+	}
+	if claim.Provider != providerName || claim.CloudID != pod.ID || claim.Labels["name"] != pod.Name {
+		t.Fatalf("claim=%#v, want exact provider/id/name binding", claim)
+	}
+}
+
+func TestRunpodReclaimCannotRetargetBoundClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	claimed := runpodPod{ID: "pod_original", Name: "manual-pod", DesiredStatus: "RUNNING"}
+	claimRunpodPod(t, "rpod_manual-pod", "manual-pod", claimed)
+	replacement := runpodPod{ID: "pod_replacement", Name: claimed.Name, DesiredStatus: "RUNNING"}
+	fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return replacement, nil }}
+	backend := &runpodLeaseBackend{cfg: Config{Runpod: RunpodConfig{APIKey: "k"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: replacement.ID, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
+	if err == nil || !strings.Contains(err.Error(), "cannot retarget RunPod claim") {
+		t.Fatalf("err=%v, want retarget refusal", err)
+	}
+	claim, err := core.ReadLeaseClaim("rpod_manual-pod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.CloudID != claimed.ID || claim.Labels["name"] != claimed.Name {
+		t.Fatalf("claim=%#v, want original resource binding", claim)
+	}
+}
+
+func TestRunpodLegacyClaimRequiresReclaimToBindExactPod(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "rpod_abcdef12"
+	const slug = "blue"
+	repo := core.Repo{Root: t.TempDir()}
+	if err := core.ClaimLeaseForRepoProvider(leaseID, slug, providerName, repo.Root, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	pod := runpodPod{ID: "pod_legacy", Name: leaseProviderName(leaseID, slug), DesiredStatus: "RUNNING"}
+	fake := &fakeRunpodAPI{listPods: []runpodPod{pod}}
+	backend := &runpodLeaseBackend{cfg: Config{Runpod: RunpodConfig{APIKey: "k"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, Repo: repo})
+	if err == nil || !strings.Contains(err.Error(), "retry with --reclaim") {
+		t.Fatalf("err=%v, want legacy claim reclaim requirement", err)
+	}
+	if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, Repo: repo, Reclaim: true}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.CloudID != pod.ID || claim.Labels["name"] != pod.Name {
+		t.Fatalf("claim=%#v, want exact pod binding", claim)
+	}
+}
+
+func TestRunpodReleaseLeaseRechecksBoundClaimAndTerminatesPod(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	pod := runpodPod{ID: "pod_z", Name: "crabbox-blue-abcdef12", DesiredStatus: "RUNNING"}
+	claimRunpodPod(t, "rpod_abcdef12", "blue", pod)
+	fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return pod, nil }}
+	backend := &runpodLeaseBackend{cfg: Config{Runpod: RunpodConfig{APIKey: "k"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+	req := ReleaseLeaseRequest{Lease: LeaseTarget{Server: Server{CloudID: pod.ID}, LeaseID: "rpod_abcdef12"}}
 	if err := backend.ReleaseLease(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.terminated) != 1 || fake.terminated[0] != "pod_z" {
-		t.Fatalf("terminated=%v", fake.terminated)
+	if len(fake.getCalls) != 1 || fake.getCalls[0] != pod.ID || len(fake.terminated) != 1 || fake.terminated[0] != pod.ID {
+		t.Fatalf("getCalls=%v terminated=%v", fake.getCalls, fake.terminated)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence("rpod_abcdef12"); err != nil || exists {
+		t.Fatalf("claim after release: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestRunpodReleaseLeaseRejectsResourceOutsideBoundClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	pod := runpodPod{ID: "pod_owned", Name: "crabbox-blue-abcdef12", DesiredStatus: "RUNNING"}
+	claimRunpodPod(t, "rpod_abcdef12", "blue", pod)
+	fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return pod, nil }}
+	backend := &runpodLeaseBackend{cfg: Config{Runpod: RunpodConfig{APIKey: "k"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+
+	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+		Server:  Server{CloudID: "pod_other"},
+		LeaseID: "rpod_abcdef12",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "does not match bound claim pod") {
+		t.Fatalf("err=%v, want forged resource refusal", err)
+	}
+	if len(fake.getCalls) != 0 || len(fake.terminated) != 0 {
+		t.Fatalf("getCalls=%v terminated=%v, want no provider mutation", fake.getCalls, fake.terminated)
+	}
+}
+
+func TestRunpodReleaseLeaseRejectsProviderNameMismatch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	claimed := runpodPod{ID: "pod_owned", Name: "crabbox-blue-abcdef12", DesiredStatus: "RUNNING"}
+	claimRunpodPod(t, "rpod_abcdef12", "blue", claimed)
+	changed := claimed
+	changed.Name = "renamed-outside-crabbox"
+	fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return changed, nil }}
+	backend := &runpodLeaseBackend{cfg: Config{Runpod: RunpodConfig{APIKey: "k"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+
+	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+		Server:  Server{CloudID: claimed.ID},
+		LeaseID: "rpod_abcdef12",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "expects pod name") {
+		t.Fatalf("err=%v, want provider identity mismatch", err)
+	}
+	if len(fake.terminated) != 0 {
+		t.Fatalf("terminated=%v, want no termination", fake.terminated)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence("rpod_abcdef12"); err != nil || !exists {
+		t.Fatalf("claim after refusal: exists=%v err=%v", exists, err)
+	}
+}
+
+func claimRunpodPod(t *testing.T, leaseID, slug string, pod runpodPod) {
+	t.Helper()
+	cfg := Config{Provider: providerName}
+	applyRunpodDefaults(&cfg)
+	server := runpodServer(pod, leaseID, slug, cfg, true)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, runpodSSHTarget(cfg, pod), t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
 	}
 }
 

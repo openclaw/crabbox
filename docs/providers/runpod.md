@@ -43,12 +43,17 @@ not manage that key.
 
 - **Acquire** — deploys a pod named `crabbox-<slug>-<leaseSuffix>`, then waits
   for the public TCP mapping for port 22.
-- **Resolve** — looks up an existing pod by lease id, pod id, or pod name.
+- **Resolve** — read-only status can look up a pod by lease id, pod id, or pod
+  name. Reusing an existing pod requires an exact local claim bound to its
+  RunPod id and name; use `--reclaim` once to adopt an unclaimed or legacy pod
+  explicitly.
 - **List** — enumerates the caller's pods via `GET /v1/pods` and filters to the
   `crabbox-` prefix unless `--all` is set.
-- **Release** — calls `DELETE /v1/pods/{id}`, terminating the pod immediately.
-- **Doctor** — runs read-only pod-list checks only; it never creates a pod, so
-  it is safe to run on every CI invocation.
+- **Release** — requires the exact resource-bound local claim, fetches the pod
+  again to match its id and name, then calls `DELETE /v1/pods/{id}`. Raw ids,
+  names, and legacy claims alone cannot terminate a pod.
+- **Doctor** — runs read-only identity and pod-list checks; it never creates a
+  pod, so it is safe to run on every CI invocation.
 
 ## Capabilities
 
@@ -153,8 +158,11 @@ CRABBOX_RUNPOD_WORK_ROOT
 
 Pods are terminated immediately on release. If `--keep` is set, the pod stays
 up and keeps accruing cost until you terminate it. Run
-`crabbox list --provider runpod` to spot leaked pods, and
-`crabbox stop --provider runpod <id>` to clean them up.
+`crabbox list --provider runpod` to spot leaked pods. A Crabbox-claimed pod can
+be cleaned up with `crabbox stop --provider runpod <id>`. Adopt an unclaimed
+pod first through a supported reuse command such as
+`crabbox run --provider runpod --id <pod-id> --reclaim -- true`, or terminate
+it directly in RunPod.
 
 ## Gotchas
 
