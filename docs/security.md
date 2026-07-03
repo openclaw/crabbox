@@ -215,11 +215,11 @@ user config `broker.loginRedirectOrigins` or
 `CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS`.
 
 Provider clients apply the same destination principle where custom endpoints
-are supported. Cloudflare runner and RunPod requests reject cross-origin
-redirects before replaying authorization headers or request bodies. E2B API
-endpoints require HTTPS except for explicit localhost/loopback development
-URLs, and AWS region values are validated before constructing SigV4 service
-hosts.
+are supported. Cloudflare runner, Morph, Railway, and RunPod requests reject
+cross-origin redirects before replaying authorization headers or request
+bodies. E2B API endpoints require HTTPS except for explicit localhost/loopback
+development URLs, and AWS region values are validated before constructing
+SigV4 service hosts.
 
 Cookie-authenticated portal mutations and portal viewer WebSocket upgrades
 require an exact same-origin browser `Origin` matching `CRABBOX_PUBLIC_URL` (or

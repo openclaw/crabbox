@@ -3,11 +3,13 @@ package railway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -129,6 +131,117 @@ func TestRailwayClientSendsBearerAndGraphQLBody(t *testing.T) {
 	}
 	if deployID != "dep-1" {
 		t.Fatalf("deployID = %q, want dep-1", deployID)
+	}
+}
+
+func TestRailwayClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
+	targetRequests := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests++
+		t.Errorf("redirect target received %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+	}))
+	defer target.Close()
+	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	defer trusted.Close()
+
+	api, err := newRailwayClient(
+		Config{Railway: RailwayConfig{APIToken: "test-token", APIURL: trusted.URL}},
+		Runtime{HTTP: trusted.Client()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = api.(*railwayClient).do(context.Background(), "query { me { id } }", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("do error = %v, want cross-origin refusal", err)
+	}
+	if targetRequests != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", targetRequests)
+	}
+}
+
+func TestRailwayClientFollowsSameOriginRedirect(t *testing.T) {
+	var redirectedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/graphql":
+			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+		case "/redirected":
+			redirectedAuth = r.Header.Get("Authorization")
+			_, _ = io.WriteString(w, `{"data":{"me":{"id":"user_1"}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	api, err := newRailwayClient(
+		Config{Railway: RailwayConfig{APIToken: "test-token", APIURL: server.URL + "/graphql"}},
+		Runtime{HTTP: server.Client()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Me struct {
+			ID string `json:"id"`
+		} `json:"me"`
+	}
+	if err := api.(*railwayClient).do(context.Background(), "query { me { id } }", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Me.ID != "user_1" || redirectedAuth != "Bearer test-token" {
+		t.Fatalf("out=%#v auth=%q", out, redirectedAuth)
+	}
+}
+
+func TestRailwayClientPreservesCallerRedirectPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/redirected", http.StatusFound)
+	}))
+	defer server.Close()
+	callerErr := errors.New("caller refused redirect")
+	callerChecks := 0
+	httpClient := server.Client()
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		callerChecks++
+		return callerErr
+	}
+	api, err := newRailwayClient(
+		Config{Railway: RailwayConfig{APIToken: "test-token", APIURL: server.URL}},
+		Runtime{HTTP: httpClient},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = api.(*railwayClient).do(context.Background(), "query { me { id } }", nil, nil)
+	if !errors.Is(err, callerErr) || callerChecks != 1 {
+		t.Fatalf("do error = %v, caller checks = %d", err, callerChecks)
+	}
+}
+
+func TestSameRailwayOrigin(t *testing.T) {
+	trusted, _ := url.Parse("https://api.example.com:443/graphql")
+	for _, test := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "default https port", raw: "https://api.example.com/next", want: true},
+		{name: "case insensitive host", raw: "https://API.EXAMPLE.COM/next", want: true},
+		{name: "scheme drift", raw: "http://api.example.com/next"},
+		{name: "subdomain drift", raw: "https://redirect.api.example.com/next"},
+		{name: "port drift", raw: "https://api.example.com:444/next"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate, _ := url.Parse(test.raw)
+			if got := sameRailwayOrigin(trusted, candidate); got != test.want {
+				t.Fatalf("sameRailwayOrigin(%q)=%v, want %v", test.raw, got, test.want)
+			}
+		})
 	}
 }
 

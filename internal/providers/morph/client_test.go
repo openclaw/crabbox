@@ -3,9 +3,11 @@ package morph
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -59,6 +61,113 @@ func TestMorphClientBootSnapshotUsesAPIBaseAndAuth(t *testing.T) {
 	}
 	if instance.ID != "inst_1" || instance.Refs.SnapshotID != "snapshot_123" {
 		t.Fatalf("unexpected instance: %#v", instance)
+	}
+}
+
+func TestMorphClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
+	targetRequests := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests++
+		t.Errorf("redirect target received %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+	}))
+	defer target.Close()
+	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	defer trusted.Close()
+
+	client, err := newMorphClient(
+		Config{Morph: MorphConfig{APIKey: "test-key", APIURL: trusted.URL}},
+		Runtime{HTTP: trusted.Client()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetSnapshot(context.Background(), "snapshot_123")
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("GetSnapshot error = %v, want cross-origin refusal", err)
+	}
+	if targetRequests != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", targetRequests)
+	}
+}
+
+func TestMorphClientFollowsSameOriginRedirect(t *testing.T) {
+	var redirectedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/snapshot/snapshot_123":
+			http.Redirect(w, r, "/api/redirected", http.StatusTemporaryRedirect)
+		case "/api/redirected":
+			redirectedAuth = r.Header.Get("Authorization")
+			_, _ = io.WriteString(w, `{"id":"snapshot_123"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newMorphClient(
+		Config{Morph: MorphConfig{APIKey: "test-key", APIURL: server.URL}},
+		Runtime{HTTP: server.Client()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := client.GetSnapshot(context.Background(), "snapshot_123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ID != "snapshot_123" || redirectedAuth != "Bearer test-key" {
+		t.Fatalf("snapshot=%#v auth=%q", snapshot, redirectedAuth)
+	}
+}
+
+func TestMorphClientPreservesCallerRedirectPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/api/redirected", http.StatusFound)
+	}))
+	defer server.Close()
+	callerErr := errors.New("caller refused redirect")
+	callerChecks := 0
+	httpClient := server.Client()
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		callerChecks++
+		return callerErr
+	}
+	client, err := newMorphClient(
+		Config{Morph: MorphConfig{APIKey: "test-key", APIURL: server.URL}},
+		Runtime{HTTP: httpClient},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.GetSnapshot(context.Background(), "snapshot_123")
+	if !errors.Is(err, callerErr) || callerChecks != 1 {
+		t.Fatalf("GetSnapshot error = %v, caller checks = %d", err, callerChecks)
+	}
+}
+
+func TestSameMorphOrigin(t *testing.T) {
+	trusted, _ := url.Parse("https://api.example.com:443/v1")
+	for _, test := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "default https port", raw: "https://api.example.com/next", want: true},
+		{name: "case insensitive host", raw: "https://API.EXAMPLE.COM/next", want: true},
+		{name: "scheme drift", raw: "http://api.example.com/next"},
+		{name: "subdomain drift", raw: "https://redirect.api.example.com/next"},
+		{name: "port drift", raw: "https://api.example.com:444/next"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate, _ := url.Parse(test.raw)
+			if got := sameMorphOrigin(trusted, candidate); got != test.want {
+				t.Fatalf("sameMorphOrigin(%q)=%v, want %v", test.raw, got, test.want)
+			}
+		})
 	}
 }
 
