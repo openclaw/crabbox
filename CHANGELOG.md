@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `crabbox watch` to reuse one warm SSH lease, coalesce qualifying local changes into sequential runs through the normal sync/history pipeline, and release newly acquired leases on bounded idle or exit. Thanks @yetval.
 - Added Vast.ai direct Linux GPU SSH leases with guarded offer cost and reliability selection, per-lease keys, account-bound cleanup, required-tool bootstrap, and billable live-smoke coverage. Thanks @coygeek.
 
 ### Fixed

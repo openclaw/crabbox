@@ -20,6 +20,7 @@ type crabboxKongCLI struct {
 	Warmup      warmupKongCmd      `cmd:"" passthrough:"" help:"Lease a box and wait until it is ready."`
 	Prewarm     prewarmKongCmd     `cmd:"" passthrough:"" help:"Lease and hydrate a reusable test-ready box."`
 	Run         runKongCmd         `cmd:"" passthrough:"" help:"Sync the repo, run a remote command, stream output."`
+	Watch       watchKongCmd       `cmd:"" passthrough:"" help:"Re-run a command on a warm lease when local files change."`
 	Bench       benchKongCmd       `cmd:"" help:"Record and report local benchmark timings."`
 	Job         jobKongCmd         `cmd:"" help:"Run named repo-local Crabbox jobs."`
 	Desktop     desktopKongCmd     `cmd:"" help:"Launch apps into a visible desktop session."`
@@ -156,6 +157,9 @@ type prewarmKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type runKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type watchKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type benchKongCmd struct {
@@ -602,6 +606,7 @@ func (c *doctorKongCmd) Run(ctx context.Context, app App) error  { return app.do
 func (c *warmupKongCmd) Run(ctx context.Context, app App) error  { return app.warmup(ctx, c.Args) }
 func (c *prewarmKongCmd) Run(ctx context.Context, app App) error { return app.prewarm(ctx, c.Args) }
 func (c *runKongCmd) Run(ctx context.Context, app App) error     { return app.runCommand(ctx, c.Args) }
+func (c *watchKongCmd) Run(ctx context.Context, app App) error   { return app.watch(ctx, c.Args) }
 func (c *benchRunKongCmd) Run(ctx context.Context, app App) error {
 	return app.benchRun(ctx, c.Args)
 }
