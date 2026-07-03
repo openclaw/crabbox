@@ -224,6 +224,12 @@ crabbox checkpoint fork chk_abc123 --count 3 --slug update-flow
 # checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-2 ...
 # checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-3 ...
 
+# Fan out one checkpoint and run the same command on each fork
+crabbox checkpoint fork chk_abc123 --count 3 --slug update-flow -- pnpm test -- --shard '{{index}}/{{total}}'
+# checkpoint fork command lease=cbx_... slug=update-flow-1 index=1/3 command=...
+# checkpoint fork command lease=cbx_... slug=update-flow-2 index=2/3 command=...
+# checkpoint fork command lease=cbx_... slug=update-flow-3 index=3/3 command=...
+
 # Fork directly from a Parallels snapshot without recording it first
 crabbox checkpoint fork --provider parallels --target macos --id "macOS Tahoe" --snapshot "macOS 26.4" --slug tahoe-test
 crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --slug test-a --dry-run
@@ -255,6 +261,10 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 - *Fan-out:* `--count <n>` repeats the same provider-neutral fork flow. When
   combined with `--slug`, Crabbox appends a stable numeric suffix such as
   `update-flow-1`, `update-flow-2`, and `update-flow-3`.
+- *Command fan-out:* arguments after `--` run through `crabbox run --id <lease>`
+  on each fork, so normal sync, command wrapping, history, and proof behavior are
+  preserved. Use `{{index}}`, `{{total}}`, `{{lease}}`, and `{{slug}}` in command
+  arguments to specialize each fork.
 
 Fork multiple times to run scenarios in parallel:
 
