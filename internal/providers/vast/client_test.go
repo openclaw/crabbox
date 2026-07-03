@@ -299,6 +299,25 @@ func TestGetInstanceTreatsEmptyInstancesEnvelopeAsNotFound(t *testing.T) {
 	}
 }
 
+func TestManageInstanceAllowsSuccessOnlyMutationResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v0/instances/99/" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(t, w, map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestVastClient(t, server)
+	instance, err := client.ManageInstance(context.Background(), 99, vastManageInstanceInput{State: "stopped"})
+	if err != nil || instance.ID != 0 {
+		t.Fatalf("instance=%#v err=%v", instance, err)
+	}
+	if _, err := decodeVastInstance(json.RawMessage(`{"success":true}`)); !errors.Is(err, errVastInstanceMissing) {
+		t.Fatalf("strict decode err=%v", err)
+	}
+}
+
 func TestClientRejectsNonHTTPSExceptLoopback(t *testing.T) {
 	if _, err := newVastClient(VastConfig{APIKey: "secret", APIURL: "http://vast.example.test"}, Runtime{}); err == nil {
 		t.Fatal("expected non-https non-loopback rejection")

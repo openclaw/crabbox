@@ -36,7 +36,10 @@ type vastClient struct {
 
 const vastMaxResponseBytes = 4 << 20
 
-var errVastInstanceNotFound = errors.New("vast instance not found")
+var (
+	errVastInstanceNotFound = errors.New("vast instance not found")
+	errVastInstanceMissing  = errors.New("Vast response contained no instance")
+)
 
 type vastAPIError struct {
 	Operation  string
@@ -288,7 +291,17 @@ func (c *vastClient) ManageInstance(ctx context.Context, id int, input vastManag
 	if err := c.do(ctx, http.MethodPut, "/instances/"+strconv.Itoa(id)+"/", input, &raw); err != nil {
 		return vastInstance{}, err
 	}
-	return decodeVastInstance(raw)
+	instance, err := decodeVastInstance(raw)
+	if !errors.Is(err, errVastInstanceMissing) {
+		return instance, err
+	}
+	var result struct {
+		Success bool `json:"success"`
+	}
+	if json.Unmarshal(raw, &result) == nil && result.Success {
+		return vastInstance{}, nil
+	}
+	return vastInstance{}, err
 }
 
 func (c *vastClient) DestroyInstance(ctx context.Context, id int) error {
@@ -492,7 +505,7 @@ func decodeVastInstance(raw json.RawMessage) (vastInstance, error) {
 	if envelope.Data.ID != 0 || envelope.Data.ContractID != 0 || envelope.Data.SSHHost != "" {
 		return normalizeVastInstance(envelope.Data), nil
 	}
-	return vastInstance{}, errors.New("decode Vast instance: response contained no instance")
+	return vastInstance{}, errVastInstanceMissing
 }
 
 func decodeVastInstancesPage(raw json.RawMessage) ([]vastInstance, string, error) {
