@@ -20,6 +20,9 @@ const (
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
+	if InstanceType(cfg.Fal.InstanceType) != InstanceTypeH100x8 {
+		cfg.Fal.Sector = ""
+	}
 	client, err := b.api()
 	if err != nil {
 		return core.LeaseTarget{}, err

@@ -140,6 +140,23 @@ func TestFalAcquireCreatesInstanceWaitsAndClaimsLease(t *testing.T) {
 	}
 }
 
+func TestFalAcquireDefaultSingleGPUOmitsSector(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	b.cfg.Fal.Sector = string(Sector1)
+
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "single-gpu"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.createRequests) != 1 {
+		t.Fatalf("createRequests=%#v", api.createRequests)
+	}
+	req := api.createRequests[0]
+	if req.InstanceType != InstanceTypeH100x1 || req.Sector != "" {
+		t.Fatalf("create request=%#v", req)
+	}
+}
+
 func TestFalAcquireReturnsSSHPortUpdatedByReadinessProbe(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)

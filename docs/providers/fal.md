@@ -51,7 +51,6 @@ target: linux
 fal:
   apiUrl: https://api.fal.ai/v1
   instanceType: gpu_1x_h100_sxm5
-  sector: sector_1
   user: root
   workRoot: /work/crabbox
 ```
@@ -62,7 +61,7 @@ Config keys under `fal:`:
 | --- | --- | --- | --- |
 | `apiUrl` | `cfg.Fal.APIURL` | `https://api.fal.ai/v1` | fal Platform API base URL. HTTPS is required unless targeting localhost for tests. |
 | `instanceType` | `cfg.Fal.InstanceType` | `gpu_1x_h100_sxm5` | fal Compute instance type. |
-| `sector` | `cfg.Fal.Sector` | `sector_1` | fal Compute sector for supported multi-node instance types. |
+| `sector` | `cfg.Fal.Sector` | unset | fal Compute sector; set only for supported 8× H100 multi-node instance types. |
 | `user` | `cfg.Fal.User` | `root` | SSH user for the instance. |
 | `workRoot` | `cfg.Fal.WorkRoot` | `/work/crabbox` | Remote Crabbox work root. |
 
@@ -169,7 +168,7 @@ Optional live-smoke overrides:
 
 ```text
 CRABBOX_LIVE_FAL_INSTANCE_TYPE   Instance type for the smoke, default gpu_1x_h100_sxm5
-CRABBOX_LIVE_FAL_SECTOR          Sector for the smoke, default sector_1
+CRABBOX_LIVE_FAL_SECTOR          Sector for the smoke; unset by default
 CRABBOX_LIVE_FAL_API_URL         API URL for the smoke, default https://api.fal.ai/v1
 ```
 

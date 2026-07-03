@@ -169,7 +169,7 @@ esac
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen[0], "doctor --provider fal");
   assert.equal(seen[1], "list --provider fal --json");
-  assert.match(seen[2], /^warmup --provider fal --slug fal-smoke-\d{14}-\d+ --keep --fal-instance-type gpu_1x_h100_sxm5 --fal-sector sector_1 --ttl 20m --idle-timeout 5m$/);
+  assert.match(seen[2], /^warmup --provider fal --slug fal-smoke-\d{14}-\d+ --keep --fal-instance-type gpu_1x_h100_sxm5 --ttl 20m --idle-timeout 5m$/);
   assert.match(seen[3], /^status --provider fal --id fal-smoke-\d{14}-\d+ --wait --wait-timeout 600s$/);
   assert.match(seen[4], /^run --provider fal --id fal-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
   assert.equal(seen[5], "list --provider fal --json");

@@ -2863,7 +2863,6 @@ func baseConfig() Config {
 		Fal: FalConfig{
 			APIURL:       "https://api.fal.ai/v1",
 			InstanceType: "gpu_1x_h100_sxm5",
-			Sector:       "sector_1",
 			User:         "root",
 			WorkRoot:     defaultPOSIXWorkRoot,
 		},

@@ -177,7 +177,7 @@ slug="fal-smoke-$(date +%Y%m%d%H%M%S)-$$"
 config_file=""
 fal_key="${CRABBOX_FAL_KEY:-${FAL_KEY:-}}"
 fal_instance_type="${CRABBOX_LIVE_FAL_INSTANCE_TYPE:-gpu_1x_h100_sxm5}"
-fal_sector="${CRABBOX_LIVE_FAL_SECTOR:-sector_1}"
+fal_sector="${CRABBOX_LIVE_FAL_SECTOR:-}"
 fal_api_url="${CRABBOX_LIVE_FAL_API_URL:-https://api.fal.ai/v1}"
 
 cleanup() {
@@ -245,10 +245,12 @@ target: linux
 fal:
   apiUrl: $fal_api_url
   instanceType: $fal_instance_type
-  sector: $fal_sector
   user: root
   workRoot: /work/crabbox
 YAML
+if [[ -n "$fal_sector" ]]; then
+  printf '  sector: %s\n' "$fal_sector" >>"$config_file"
+fi
 
 export CRABBOX_CONFIG="$config_file"
 export CRABBOX_COORDINATOR=
@@ -261,7 +263,12 @@ run_capture "bin/crabbox list --provider fal --json" bin/crabbox list --provider
 initial_list_output="$CAPTURED_OUTPUT"
 validate_list_json_empty "bin/crabbox list --provider fal --json" "$initial_list_output"
 cleanup_armed=1
-run_capture "bin/crabbox warmup --provider fal --slug $slug --keep --fal-instance-type $fal_instance_type --fal-sector $fal_sector --ttl 20m --idle-timeout 5m" bin/crabbox warmup --provider fal --slug "$slug" --keep --fal-instance-type "$fal_instance_type" --fal-sector "$fal_sector" --ttl 20m --idle-timeout 5m
+warmup_args=(bin/crabbox warmup --provider fal --slug "$slug" --keep --fal-instance-type "$fal_instance_type")
+if [[ -n "$fal_sector" ]]; then
+  warmup_args+=(--fal-sector "$fal_sector")
+fi
+warmup_args+=(--ttl 20m --idle-timeout 5m)
+run_capture "${warmup_args[*]}" "${warmup_args[@]}"
 run_capture_validation "bin/crabbox status --provider fal --id $slug --wait --wait-timeout 600s" bin/crabbox status --provider fal --id "$slug" --wait --wait-timeout 600s
 run_capture_validation "bin/crabbox run --provider fal --id $slug --no-sync -- echo ok" bin/crabbox run --provider fal --id "$slug" --no-sync -- echo ok
 run_capture_validation "bin/crabbox list --provider fal --json" bin/crabbox list --provider fal --json

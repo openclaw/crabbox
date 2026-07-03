@@ -3,7 +3,6 @@ package fal
 const (
 	defaultAPIURL       = "https://api.fal.ai/v1"
 	defaultInstanceType = "gpu_1x_h100_sxm5"
-	defaultSector       = "sector_1"
 	defaultUser         = "root"
 	defaultWorkRoot     = "/work/crabbox"
 )
@@ -17,9 +16,6 @@ func applyFalDefaults(cfg *Config) {
 	}
 	if cfg.Fal.InstanceType == "" {
 		cfg.Fal.InstanceType = defaultInstanceType
-	}
-	if cfg.Fal.Sector == "" {
-		cfg.Fal.Sector = defaultSector
 	}
 	if cfg.Fal.User == "" {
 		cfg.Fal.User = defaultUser
