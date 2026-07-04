@@ -2,6 +2,7 @@ package sealosdevbox
 
 import (
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,23 @@ func parseDevboxSecretKeys(secret devboxSecret) (devboxSecretKeys, error) {
 	return devboxSecretKeys{PublicKey: strings.TrimSpace(publicKey), PrivateKey: ensureTrailingNewline(privateKey)}, nil
 }
 
+func validateDevboxSecretOwner(secret devboxSecret, item devboxItem) error {
+	expectedName := strings.TrimSpace(item.Metadata.Name)
+	expectedUID := strings.TrimSpace(item.Metadata.UID)
+	if expectedName == "" || expectedUID == "" {
+		return core.Exit(4, "cannot verify Sealos DevBox Secret without exact DevBox name and UID")
+	}
+	if strings.TrimSpace(secret.Metadata.Name) != expectedName || strings.TrimSpace(secret.Metadata.Namespace) != strings.TrimSpace(item.Metadata.Namespace) {
+		return core.Exit(4, "refusing Sealos DevBox Secret that does not match DevBox %s/%s", item.Metadata.Namespace, expectedName)
+	}
+	for _, owner := range secret.Metadata.OwnerReferences {
+		if owner.Controller && owner.APIVersion == devboxGroupVersion && owner.Kind == devboxKind && owner.Name == expectedName && owner.UID == expectedUID {
+			return nil
+		}
+	}
+	return core.Exit(4, "refusing Sealos DevBox Secret without the exact DevBox controller owner")
+}
+
 func secretField(secret devboxSecret, key string) (string, error) {
 	if value := strings.TrimSpace(secret.StringData[key]); value != "" {
 		return value, nil
@@ -66,14 +84,61 @@ func persistDevboxKey(leaseID string, keys devboxSecretKeys) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", core.Exit(2, "create sealos-devbox key directory: %v", err)
 	}
-	if err := os.WriteFile(path, []byte(keys.PrivateKey), 0o600); err != nil {
-		return "", core.Exit(2, "write sealos-devbox private key: %v", err)
+	publicPath := path + ".pub"
+	previousPublic, previousPublicMode, hadPublic, err := readExistingDevboxKey(publicPath)
+	if err != nil {
+		return "", core.Exit(2, "read existing sealos-devbox public key: %v", err)
 	}
-	_ = os.Chmod(path, 0o600)
-	if err := os.WriteFile(path+".pub", []byte(ensureTrailingNewline(keys.PublicKey)), 0o644); err != nil {
+	if err := writeDevboxKeyFile(publicPath, []byte(ensureTrailingNewline(keys.PublicKey)), 0o644); err != nil {
 		return "", core.Exit(2, "write sealos-devbox public key: %v", err)
 	}
+	if err := writeDevboxKeyFile(path, []byte(keys.PrivateKey), 0o600); err != nil {
+		rollbackErr := os.Remove(publicPath)
+		if hadPublic {
+			rollbackErr = writeDevboxKeyFile(publicPath, previousPublic, previousPublicMode)
+		}
+		if rollbackErr != nil {
+			return "", core.Exit(2, "write sealos-devbox private key: %v (restore public key: %v)", err, rollbackErr)
+		}
+		return "", core.Exit(2, "write sealos-devbox private key: %v", err)
+	}
 	return path, nil
+}
+
+func readExistingDevboxKey(path string) ([]byte, os.FileMode, bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, 0, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return data, info.Mode().Perm(), true, nil
+}
+
+func writeDevboxKeyFile(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".crabbox-key-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func ensureTrailingNewline(value string) string {

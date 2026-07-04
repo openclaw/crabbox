@@ -180,7 +180,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 			}
 			return
 		}
-		if cleanupErr := b.deleteDevbox(cleanupCtx, name); cleanupErr != nil {
+		if cleanupErr := b.deleteDevbox(cleanupCtx, rollbackItem); cleanupErr != nil {
 			if b.rt.Stderr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: failed to delete Sealos DevBox %s after acquire failure for lease %s: %v\n", name, leaseID, cleanupErr)
 			}
@@ -274,6 +274,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	}
 	secret, err := b.getSecret(ctx, devboxSecretName(item))
 	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if err := validateDevboxSecretOwner(secret, item); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	keys, err := parseDevboxSecretKeys(secret)
@@ -492,12 +495,16 @@ func (b *backend) waitForDevboxSecret(ctx context.Context, item devboxItem, time
 	for {
 		secret, err := b.getSecret(ctx, name)
 		if err == nil {
-			return secret, nil
-		}
-		if !kubectlNotFound(err) {
+			if ownerErr := validateDevboxSecretOwner(secret, item); ownerErr == nil {
+				return secret, nil
+			} else {
+				lastErr = ownerErr
+			}
+		} else if !kubectlNotFound(err) {
 			return devboxSecret{}, err
+		} else {
+			lastErr = err
 		}
-		lastErr = err
 		if devboxName != "" {
 			refreshed, refreshErr := b.getDevbox(ctx, devboxName)
 			if refreshErr == nil {

@@ -32,10 +32,20 @@ type devboxManifest struct {
 type devboxMeta struct {
 	Name              string            `yaml:"name" json:"name"`
 	Namespace         string            `yaml:"namespace,omitempty" json:"namespace,omitempty"`
+	UID               string            `yaml:"-" json:"uid,omitempty"`
 	ResourceVersion   string            `yaml:"-" json:"resourceVersion,omitempty"`
 	CreationTimestamp string            `yaml:"-" json:"creationTimestamp,omitempty"`
 	Labels            map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	Annotations       map[string]string `yaml:"annotations,omitempty" json:"annotations,omitempty"`
+	OwnerReferences   []ownerReference  `yaml:"-" json:"ownerReferences,omitempty"`
+}
+
+type ownerReference struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	UID        string `json:"uid"`
+	Controller bool   `json:"controller"`
 }
 
 type devboxSpec struct {
@@ -46,7 +56,6 @@ type devboxSpec struct {
 	Config       devboxConfigSpec   `yaml:"config,omitempty" json:"config,omitempty"`
 	StorageLimit string             `yaml:"storageLimit,omitempty" json:"storageLimit,omitempty"`
 	Network      devboxNetworkSpec  `yaml:"network,omitempty" json:"network,omitempty"`
-	WorkDir      string             `yaml:"workdir,omitempty" json:"workdir,omitempty"`
 }
 
 type devboxResourceSpec struct {
@@ -103,7 +112,6 @@ func (b *backend) renderDevboxManifest(name, leaseID, slug string, keep bool, no
 			TemplateID:   strings.TrimSpace(cfg.TemplateID),
 			StorageLimit: strings.TrimSpace(cfg.StorageLimit),
 			Network:      devboxNetworkSpec{Type: network},
-			WorkDir:      sealosWorkRoot(b.cfg),
 			Config: devboxConfigSpec{
 				User:       strings.TrimSpace(cfg.SSHUser),
 				WorkingDir: sealosWorkRoot(b.cfg),

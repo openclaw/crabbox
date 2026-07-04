@@ -20,15 +20,7 @@ type devboxStatus struct {
 	Network             any               `json:"network"`
 	Conditions          []devboxCondition `json:"conditions"`
 	ContentID           string            `json:"contentID"`
-	NodeName            string            `json:"nodeName"`
 	LastContainerStatus any               `json:"lastContainerStatus"`
-	SecretName          string            `json:"secretName"`
-	SSHSecretName       string            `json:"sshSecretName"`
-	SSH                 devboxSSHStatus   `json:"ssh"`
-}
-
-type devboxSSHStatus struct {
-	SecretName string `json:"secretName"`
 }
 
 type devboxCondition struct {
@@ -51,7 +43,9 @@ type devboxEvent struct {
 }
 
 func normalizeDevboxState(item devboxItem) string {
-	for _, value := range []string{item.Status.State, item.Status.Phase, item.Spec.State} {
+	// spec.state is the requested state, not proof that the controller reached it.
+	// In particular, new manifests request Running before status or SSH routing exists.
+	for _, value := range []string{item.Status.State, item.Status.Phase} {
 		switch strings.ToLower(strings.TrimSpace(value)) {
 		case "running", "ready":
 			return "Running"
@@ -79,11 +73,8 @@ func devboxTerminalFailure(item devboxItem) bool {
 }
 
 func devboxSecretName(item devboxItem) string {
-	for _, value := range []string{item.Status.SSH.SecretName, item.Status.SSHSecretName, item.Status.SecretName} {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
+	// The Sealos v1alpha2 controller creates the SSH Secret with the DevBox name;
+	// status does not publish a separate Secret reference.
 	return strings.TrimSpace(item.Metadata.Name)
 }
 

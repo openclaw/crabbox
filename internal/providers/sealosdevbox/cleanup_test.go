@@ -72,9 +72,10 @@ func TestCleanupDeletesExpiredOwnedDevboxAndRemovesClaimAndKey(t *testing.T) {
 		t.Fatalf("stored key still exists or stat failed unexpectedly: %v", err)
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") || !strings.Contains(stdout.String(), "reason=expired") {
+	if !strings.Contains(stdout.String(), "reason=expired") {
 		t.Fatalf("cleanup output=%q commands=%s", stdout.String(), got)
 	}
+	assertPreconditionedDevboxDelete(t, cfg, runner, name)
 }
 
 func TestCleanupRefusesResourceWhoseScopeChangesBeforeDelete(t *testing.T) {
@@ -125,6 +126,32 @@ func TestCleanupRemovesOnlySameScopeStaleClaims(t *testing.T) {
 	}
 }
 
+func TestCleanupPreservesClaimWhenRemoteIdentityDrifts(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_drift000000"
+	slug := "drift"
+	name := "devbox-drift"
+	server := releaseServer(cfg, leaseID, slug, name)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	drifted := cleanupDevboxJSON(cfg, leaseID, slug, name, "other-scope", "2026-06-24T00:00:00Z")
+	runner := &lifecycleRunner{outputs: []string{`{"items":[` + drifted + `]}`}}
+	var stdout bytes.Buffer
+	backend := lifecycleBackend(cfg, runner)
+	backend.rt.Stdout = &stdout
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
+		t.Fatalf("drifted resource claim exists=%v err=%v", exists, err)
+	}
+	if strings.Contains(stdout.String(), "stale-claim") {
+		t.Fatalf("cleanup erased recovery claim for present drifted resource: %q", stdout.String())
+	}
+}
+
 func cleanupDevboxJSON(cfg core.Config, leaseID, slug, name, scope, expiresAt string) string {
-	return `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + scope + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `","crabbox.dev/expires_at":"` + expiresAt + `"}},"status":{"state":"Shutdown","phase":"Shutdown"}}`
+	return `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + scope + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `","crabbox.dev/expires_at":"` + expiresAt + `"}},"status":{"state":"Shutdown","phase":"Shutdown"}}`
 }

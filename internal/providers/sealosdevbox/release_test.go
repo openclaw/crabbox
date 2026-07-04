@@ -101,9 +101,10 @@ func TestReleaseDeleteRemovesDevboxClaimAndKeyAfterValidation(t *testing.T) {
 		t.Fatalf("stored key still exists or stat failed unexpectedly: %v", err)
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, `"state":"Shutdown"`) || !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") {
+	if !strings.Contains(got, `"state":"Shutdown"`) {
 		t.Fatalf("delete release commands=%s", got)
 	}
+	assertPreconditionedDevboxDelete(t, cfg, runner, name)
 	if backend.RetainLeaseClaimAfterRelease(core.LeaseTarget{LeaseID: leaseID, Server: server}) {
 		t.Fatal("delete release should not retain local claim")
 	}

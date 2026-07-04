@@ -56,7 +56,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		if !b.itemMatchesScope(item) {
 			return core.Exit(4, "refusing to delete Sealos DevBox %q after its provider scope changed", name)
 		}
-		if err := b.deleteDevbox(ctx, name); err != nil {
+		if err := b.deleteDevbox(ctx, item); err != nil {
 			return err
 		}
 		core.RemoveLeaseClaim(leaseID)

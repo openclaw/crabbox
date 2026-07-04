@@ -37,9 +37,6 @@ func (b *backend) sshGateTarget(keyPath string, requireKey bool) (core.SSHTarget
 
 func (b *backend) nodePortTarget(item devboxItem, keyPath string, requireKey bool) (core.SSHTarget, error) {
 	host := strings.TrimSpace(b.cfg.SealosDevbox.NodeHost)
-	if host == "" {
-		host = strings.TrimSpace(item.Status.NodeName)
-	}
 	port, ok := devboxSSHNodePort(item)
 	if !ok {
 		return core.SSHTarget{}, core.Exit(5, "Sealos DevBox %s has no SSH NodePort in status.network", strings.TrimSpace(item.Metadata.Name))
@@ -88,6 +85,11 @@ func devboxSSHNodePort(item devboxItem) (int, bool) {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return 0, false
+	}
+	if network, ok := value.(map[string]any); ok {
+		if port, ok := numericPort(network["nodePort"]); ok {
+			return port, true
+		}
 	}
 	if port, ok := findSSHNodePort(value); ok {
 		return port, true

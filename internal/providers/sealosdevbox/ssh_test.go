@@ -52,6 +52,24 @@ func TestNodePortTargetUsesStatusPortAndNodeHost(t *testing.T) {
 	}
 }
 
+func TestNodePortTargetUsesSealosV1Alpha2NetworkStatus(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.Network = networkNodePort
+	cfg.SealosDevbox.NodeHost = "node.example.test"
+	backend := lifecycleBackend(cfg, &lifecycleRunner{})
+	item := devboxItem{
+		Metadata: devboxMeta{Name: "devbox-blue"},
+		Status:   devboxStatus{Network: map[string]any{"type": "NodePort", "nodePort": float64(32022)}},
+	}
+	target, err := backend.sshTarget(item, "/tmp/cbx-key", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Host != "node.example.test" || target.Port != "32022" {
+		t.Fatalf("target=%#v", target)
+	}
+}
+
 func TestNodePortTargetPrefersSSHPort(t *testing.T) {
 	cfg := lifecycleConfig()
 	cfg.SealosDevbox.Network = networkNodePort
@@ -111,8 +129,9 @@ func TestResolveWaitsForSSHBeforePersistingEndpoint(t *testing.T) {
 	name := core.LeaseProviderName(leaseID, slug)
 	privateKey := "private"
 	publicKey := "ssh-ed25519 AAA test"
-	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"blue"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
-	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"stringData":{"` + devboxPublicKeyField + `":"` + publicKey + `","` + devboxPrivateKeyField + `":"` + privateKey + `"}}`
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"blue"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	devboxJSON = withDevboxUID(devboxJSON)
+	secretJSON := ownedDevboxSecretJSON(name, "team-a", "uid-test", publicKey, privateKey, false)
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[` + devboxJSON + `]}`,
 		secretJSON,

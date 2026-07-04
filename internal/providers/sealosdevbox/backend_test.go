@@ -3,6 +3,7 @@ package sealosdevbox
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -21,6 +22,67 @@ func (c fixedClock) Now() time.Time { return c.t }
 
 func noopSSHReady(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 	return nil
+}
+
+func ownedDevboxSecretJSON(name, namespace, uid, publicKey, privateKey string, encoded bool) string {
+	secret := devboxSecret{
+		Metadata: devboxMeta{
+			Name:      name,
+			Namespace: namespace,
+			OwnerReferences: []ownerReference{{
+				APIVersion: devboxGroupVersion,
+				Kind:       devboxKind,
+				Name:       name,
+				UID:        uid,
+				Controller: true,
+			}},
+		},
+	}
+	if encoded {
+		secret.Data = map[string]string{
+			devboxPublicKeyField:  base64.StdEncoding.EncodeToString([]byte(publicKey)),
+			devboxPrivateKeyField: base64.StdEncoding.EncodeToString([]byte(privateKey)),
+		}
+	} else {
+		secret.StringData = map[string]string{
+			devboxPublicKeyField:  publicKey,
+			devboxPrivateKeyField: privateKey,
+		}
+	}
+	data, err := json.Marshal(secret)
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
+}
+
+func withDevboxResourceVersion(value string) string {
+	return strings.Replace(value, `"uid":"uid-test",`, `"uid":"uid-test","resourceVersion":"rv-test",`, 1)
+}
+
+func withDevboxUID(value string) string {
+	return strings.Replace(value, `"namespace":"team-a",`, `"namespace":"team-a","uid":"uid-test",`, 1)
+}
+
+func assertPreconditionedDevboxDelete(t *testing.T, cfg core.Config, runner *lifecycleRunner, name string) {
+	t.Helper()
+	wantPath := "/apis/devbox.sealos.io/v1alpha2/namespaces/" + cfg.SealosDevbox.Namespace + "/devboxes/" + name
+	for index, req := range runner.requests {
+		if !strings.Contains(commandString(req), "delete --raw "+wantPath+" -f -") {
+			continue
+		}
+		var payload struct {
+			Preconditions map[string]string `json:"preconditions"`
+		}
+		if err := json.Unmarshal([]byte(runner.inputs[index]), &payload); err != nil {
+			t.Fatalf("delete preconditions are not valid JSON: %v", err)
+		}
+		if payload.Preconditions["uid"] != "uid-test" || payload.Preconditions["resourceVersion"] != "rv-test" {
+			t.Fatalf("delete preconditions=%#v", payload.Preconditions)
+		}
+		return
+	}
+	t.Fatalf("no UID/resourceVersion-bound delete for %s in %#v", name, flattenArgs(runner.requests))
 }
 
 type lifecycleRunner struct {
@@ -137,7 +199,7 @@ func TestRenderDevboxManifestStructured(t *testing.T) {
 		t.Fatalf("provider scope annotation=%#v", annotations[annotationBase+"provider-scope"])
 	}
 	spec := doc["spec"].(map[string]any)
-	if spec["state"] != "Running" || spec["image"] != "ubuntu:24.04" || spec["templateID"] != "tpl-devbox" || spec["storageLimit"] != "40Gi" || spec["workdir"] != "/home/devbox/project" {
+	if spec["state"] != "Running" || spec["image"] != "ubuntu:24.04" || spec["templateID"] != "tpl-devbox" || spec["storageLimit"] != "40Gi" {
 		t.Fatalf("spec=%#v", spec)
 	}
 	resource := spec["resource"].(map[string]any)
@@ -259,8 +321,8 @@ func TestAcquireCreatesManifestPersistsClaimAndKey(t *testing.T) {
 	name := core.LeaseProviderName(leaseID, slug)
 	privateKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret-private\n-----END OPENSSH PRIVATE KEY-----\n"
 	publicKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public"
-	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"blue"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
-	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"data":{"` + devboxPublicKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(publicKey)) + `","` + devboxPrivateKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(privateKey)) + `"}}`
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"blue"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	secretJSON := ownedDevboxSecretJSON(name, "team-a", "uid-test", publicKey, privateKey, true)
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[]}`,
 		`devbox created`,
@@ -324,8 +386,8 @@ func TestAcquireReconcilesAmbiguousCreateWithExactRemoteIdentity(t *testing.T) {
 	slug := "ambiguous"
 	name := core.LeaseProviderName(leaseID, slug)
 	privateKey := "private\n"
-	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
-	secret := `{"metadata":{"name":"` + name + `-ssh"},"data":{"` + devboxPublicKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte("ssh-ed25519 AAA test")) + `","` + devboxPrivateKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(privateKey)) + `"}}`
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	secret := ownedDevboxSecretJSON(name, "team-a", "uid-test", "ssh-ed25519 AAA test", privateKey, true)
 	runner := &lifecycleRunner{
 		outputs:  []string{`{"items":[]}`, "", item, item, secret},
 		stderrs:  []string{"", "connection reset after request"},
@@ -353,7 +415,8 @@ func TestAcquireOnAcquiredErrorRollsBackBeforeLocalState(t *testing.T) {
 	leaseID := "cbx_ackrollback"
 	slug := "reject"
 	name := core.LeaseProviderName(leaseID, slug)
-	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	devboxJSON = withDevboxResourceVersion(devboxJSON)
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[]}`,
 		`devbox created`,
@@ -390,9 +453,7 @@ func TestAcquireOnAcquiredErrorRollsBackBeforeLocalState(t *testing.T) {
 		t.Fatal("OnAcquired was not called")
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") {
-		t.Fatalf("failed acquire did not delete devbox; commands=%s", got)
-	}
+	assertPreconditionedDevboxDelete(t, cfg, runner, name)
 	if strings.Contains(got, "secret/"+name+"-ssh") {
 		t.Fatalf("acquire read secret after rejected identity: %s", got)
 	}
@@ -404,7 +465,8 @@ func TestAcquireOnAcquiredErrorRollsBackKeptDevbox(t *testing.T) {
 	leaseID := "cbx_ackkeepfail"
 	slug := "rejectkeep"
 	name := core.LeaseProviderName(leaseID, slug)
-	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	devboxJSON = withDevboxResourceVersion(devboxJSON)
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[]}`,
 		`devbox created`,
@@ -425,10 +487,7 @@ func TestAcquireOnAcquiredErrorRollsBackKeptDevbox(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "controller rejected kept identity") {
 		t.Fatalf("Acquire error=%v", err)
 	}
-	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") {
-		t.Fatalf("kept rejected acquire did not delete devbox; commands=%s", got)
-	}
+	assertPreconditionedDevboxDelete(t, cfg, runner, name)
 }
 
 func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
@@ -439,8 +498,9 @@ func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
 	name := core.LeaseProviderName(leaseID, slug)
 	privateKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret-private\n-----END OPENSSH PRIVATE KEY-----\n"
 	publicKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public"
-	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
-	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"data":{"` + devboxPublicKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(publicKey)) + `","` + devboxPrivateKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(privateKey)) + `"}}`
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	devboxJSON = withDevboxResourceVersion(devboxJSON)
+	secretJSON := ownedDevboxSecretJSON(name, "team-a", "uid-test", publicKey, privateKey, true)
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[]}`,
 		`devbox created`,
@@ -458,10 +518,7 @@ func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "ssh not ready") {
 		t.Fatalf("Acquire error=%v", err)
 	}
-	got := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") {
-		t.Fatalf("failed acquire did not delete devbox; commands=%s", got)
-	}
+	assertPreconditionedDevboxDelete(t, cfg, runner, name)
 	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v after rollback", exists, err)
 	}
@@ -580,7 +637,7 @@ func TestResolveReadOnlyDoesNotPersistSecretKey(t *testing.T) {
 	leaseID := "cbx_readonlykey"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
-	item := `{"items":[{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}]}`
+	item := `{"items":[{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}]}`
 	runner := &lifecycleRunner{outputs: []string{item}}
 	backend := lifecycleBackend(cfg, runner)
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, NoLocalStateMutations: true})
@@ -606,9 +663,10 @@ func TestResolveResumesPausedDevboxBeforeSSHReuse(t *testing.T) {
 	leaseID := "cbx_resume12345"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
-	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused","ssh":{"secretName":"` + name + `-ssh"}}}`
-	runningItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
-	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"stringData":{"` + devboxPublicKeyField + `":"ssh-ed25519 AAA test","` + devboxPrivateKeyField + `":"private"}}`
+	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused"}}`
+	runningItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	runningItem = withDevboxUID(runningItem)
+	secretJSON := ownedDevboxSecretJSON(name, "team-a", "uid-test", "ssh-ed25519 AAA test", "private", false)
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[` + pausedItem + `]}`,
 		"patched",
@@ -644,7 +702,7 @@ func TestResolveResumesPausedDevboxBeforeSSHReuse(t *testing.T) {
 	if !strings.Contains(commands[1], "patch "+devboxResource+"/"+name) || !strings.Contains(commands[1], `"state":"Running"`) {
 		t.Fatalf("resume patch missing: %#v", commands)
 	}
-	if !strings.Contains(commands[2], "get "+devboxResource+"/"+name) || !strings.Contains(commands[3], "get secret/"+name+"-ssh") {
+	if !strings.Contains(commands[2], "get "+devboxResource+"/"+name) || !strings.Contains(commands[3], "get secret/"+name) {
 		t.Fatalf("resume did not refresh before secret read: %#v", commands)
 	}
 }
@@ -657,9 +715,10 @@ func TestResolveResumesPausedNodePortDevboxBeforeRouteLookup(t *testing.T) {
 	leaseID := "cbx_nodeportres"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
-	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused","ssh":{"secretName":"` + name + `-ssh"}}}`
-	runningItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","network":{"ports":[{"name":"ssh","nodePort":32022}]},"ssh":{"secretName":"` + name + `-ssh"}}}`
-	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"stringData":{"` + devboxPublicKeyField + `":"ssh-ed25519 AAA test","` + devboxPrivateKeyField + `":"private"}}`
+	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused"}}`
+	runningItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","network":{"type":"NodePort","nodePort":32022}}}`
+	runningItem = withDevboxUID(runningItem)
+	secretJSON := ownedDevboxSecretJSON(name, "team-a", "uid-test", "ssh-ed25519 AAA test", "private", false)
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[` + pausedItem + `]}`,
 		"patched",
@@ -681,8 +740,32 @@ func TestResolveResumesPausedNodePortDevboxBeforeRouteLookup(t *testing.T) {
 		t.Fatalf("lease=%#v", lease)
 	}
 	commands := strings.Join(flattenArgs(runner.requests), " ")
-	if !strings.Contains(commands, "patch "+devboxResource+"/"+name) || !strings.Contains(commands, "get secret/"+name+"-ssh") {
+	if !strings.Contains(commands, "patch "+devboxResource+"/"+name) || !strings.Contains(commands, "get secret/"+name) {
 		t.Fatalf("missing resume or secret commands: %s", commands)
+	}
+}
+
+func TestResolveRejectsSecretOwnedByAnotherDevbox(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_wrongowner"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	item = withDevboxUID(item)
+	runner := &lifecycleRunner{outputs: []string{
+		`{"items":[` + item + `]}`,
+		ownedDevboxSecretJSON(name, "team-a", "uid-other", "ssh-ed25519 AAA test", "private", false),
+	}}
+	backend := lifecycleBackend(cfg, runner)
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "exact DevBox controller owner") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	target := core.SSHTarget{}
+	core.UseStoredTestboxKey(&target, leaseID)
+	if target.Key != "" {
+		t.Fatalf("unowned Secret key persisted: %s", target.Key)
 	}
 }
 
@@ -739,15 +822,15 @@ func TestItemMatchesScopeAcceptsLegacyRawProviderScope(t *testing.T) {
 	}
 }
 
-func TestWaitForDevboxSecretRefreshesLateSecretName(t *testing.T) {
+func TestWaitForDevboxSecretRefreshesDevboxIdentity(t *testing.T) {
 	cfg := lifecycleConfig()
 	name := "crabbox-blue-12345678"
 	initial := devboxItem{
 		Metadata: devboxMeta{Name: name},
 		Status:   devboxStatus{State: "Running", Phase: "Running"},
 	}
-	refreshedItem := `{"metadata":{"name":"` + name + `"},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
-	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"stringData":{"` + devboxPublicKeyField + `":"ssh-ed25519 AAA test","` + devboxPrivateKeyField + `":"private"}}`
+	refreshedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test"},"status":{"state":"Running","phase":"Running"}}`
+	secretJSON := ownedDevboxSecretJSON(name, "team-a", "uid-test", "ssh-ed25519 AAA test", "private", false)
 	runner := &lifecycleRunner{
 		outputs:  []string{"", refreshedItem, secretJSON},
 		stderrs:  []string{`Error from server (NotFound): secrets "` + name + `" not found`},
@@ -773,7 +856,7 @@ func TestWaitForDevboxSecretRefreshesLateSecretName(t *testing.T) {
 	for _, req := range runner.requests {
 		commands = append(commands, strings.Join(req.Args, " "))
 	}
-	if !strings.Contains(commands[0], "get secret/"+name) || !strings.Contains(commands[1], "get "+devboxResource+"/"+name) || !strings.Contains(commands[2], "get secret/"+name+"-ssh") {
+	if !strings.Contains(commands[0], "get secret/"+name) || !strings.Contains(commands[1], "get "+devboxResource+"/"+name) || !strings.Contains(commands[2], "get secret/"+name) {
 		t.Fatalf("commands=%#v", commands)
 	}
 }

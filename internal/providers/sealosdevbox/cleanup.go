@@ -13,18 +13,22 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	liveLeaseIDs := map[string]bool{}
+	observedLeaseIDs := map[string]bool{}
+	observedNames := map[string]bool{}
 	now := b.now()
 	for _, item := range items {
+		if leaseID := strings.TrimSpace(item.Metadata.Labels[leaseIDLabel]); leaseID != "" {
+			observedLeaseIDs[leaseID] = true
+		}
+		if name := strings.TrimSpace(item.Metadata.Name); name != "" {
+			observedNames[name] = true
+		}
 		if !b.cleanupItemMatchesScope(item) {
 			b.printCleanupSkip(item, "outside active provider scope")
 			continue
 		}
 		server := b.serverFromDevbox(item)
 		leaseID := strings.TrimSpace(server.Labels["lease"])
-		if leaseID != "" {
-			liveLeaseIDs[leaseID] = true
-		}
 		shouldDelete, reason := core.ShouldCleanupServer(server, now)
 		if !shouldDelete {
 			b.printCleanupSkip(item, reason)
@@ -41,7 +45,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if !b.cleanupItemMatchesScope(validated) {
 			return core.Exit(4, "refusing to delete Sealos DevBox %q after its provider scope changed", server.Name)
 		}
-		if err := b.deleteDevbox(ctx, server.Name); err != nil {
+		if err := b.deleteDevbox(ctx, validated); err != nil {
 			return err
 		}
 		if leaseID != "" {
@@ -49,7 +53,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			core.RemoveStoredTestboxKey(leaseID)
 		}
 	}
-	return b.cleanupStaleClaims(liveLeaseIDs, req.DryRun)
+	return b.cleanupStaleClaims(observedLeaseIDs, observedNames, req.DryRun)
 }
 
 func (b *backend) cleanupItemMatchesScope(item devboxItem) bool {
@@ -71,13 +75,16 @@ func (b *backend) printCleanupSkip(item devboxItem, reason string) {
 	fmt.Fprintf(b.rt.Stderr, "skip sealos-devbox devbox=%s lease=%s reason=%s\n", name, core.Blank(leaseID, "-"), reason)
 }
 
-func (b *backend) cleanupStaleClaims(liveLeaseIDs map[string]bool, dryRun bool) error {
+func (b *backend) cleanupStaleClaims(observedLeaseIDs, observedNames map[string]bool, dryRun bool) error {
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return err
 	}
 	for _, claim := range claims {
-		if !b.claimMatchesScope(claim) || strings.TrimSpace(claim.LeaseID) == "" || liveLeaseIDs[claim.LeaseID] {
+		if !b.claimMatchesScope(claim) || strings.TrimSpace(claim.LeaseID) == "" {
+			continue
+		}
+		if observedLeaseIDs[claim.LeaseID] || observedNames[devboxNameFromClaim(claim, b.cfg)] {
 			continue
 		}
 		fmt.Fprintf(b.rt.Stdout, "sealos-devbox cleanup stale-claim lease=%s reason=absent dry_run=%t\n", claim.LeaseID, dryRun)

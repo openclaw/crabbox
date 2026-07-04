@@ -112,7 +112,8 @@ when it uniquely matches the current kubeconfig/context/namespace/route scope.
 The same slug can exist safely in different Sealos environments because local
 claims include that scope.
 
-Status and list operations are read-only. They normalize Sealos states such as
+Status and list operations are read-only. They use observed status rather than
+the desired `spec.state`, normalize Sealos states such as
 `Running`, `Pending`, `Paused`, `Stopped`, `Shutdown`, and `Error`, include
 recent diagnostics when available, and do not read Secret private-key data.
 Commands that need SSH, such as `run` and `ssh`, resolve the live DevBox,
@@ -148,11 +149,12 @@ Crabbox syncs or runs project commands.
 Crabbox never accepts Sealos tokens on argv and should not store kubeconfig
 contents, tokens, Secret data, or private keys in repository config.
 
-When Sealos publishes the DevBox Secret, Crabbox reads only the key fields it
-needs, writes the private key to the normal per-lease local key store with
-restrictive permissions, and keeps key material out of command arguments, logs,
-claims, and status output. `status --json` may show the local key path category
-for the current lease, but it does not print key contents.
+When Sealos publishes the DevBox-named Secret, Crabbox first verifies its exact
+DevBox controller owner name and UID. It then reads only the key fields it needs,
+writes the private key to the normal per-lease local key store with restrictive
+permissions, and keeps key material out of command arguments, logs, claims, and
+status output. `status --json` may show the local key path category for the
+current lease, but it does not print key contents.
 
 ## Release And Cleanup
 
@@ -163,16 +165,20 @@ claim so the lease can be resolved later.
 Set `sealosDevbox.deleteOnRelease: true` or pass
 `--sealos-devbox-delete-on-release` when the DevBox should be disposable. In
 that mode, release validates the live DevBox identity, marks it for shutdown,
-deletes the DevBox CR, and removes the matching local claim and generated key.
+and deletes the DevBox CR with exact Kubernetes UID and resource-version
+preconditions. The matching local claim and generated key are removed only
+after that guarded deletion succeeds or the API confirms absence.
 
 Cleanup is scope-safe:
 
 - dry-run cleanup prints only Crabbox-owned candidates in the active
   kubeconfig/context/namespace/route scope;
 - resources outside the active provider scope are skipped with a reason;
-- non-dry-run cleanup revalidates identity immediately before deleting;
+- non-dry-run cleanup revalidates identity and uses UID/resource-version delete
+  preconditions;
 - stale local claims are removed only after a refreshed inventory proves the
-  DevBox is absent in the active scope.
+  DevBox name and lease ID are absent; a present resource with drifted ownership
+  metadata retains its recovery claim.
 
 ## Live Smoke
 

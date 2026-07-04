@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -137,8 +138,34 @@ func (b *backend) patchDevboxState(ctx context.Context, name, resourceVersion, s
 	return err
 }
 
-func (b *backend) deleteDevbox(ctx context.Context, name string) error {
-	_, err := b.kubectl(ctx, b.rt.Stdout, true, "delete", devboxResource+"/"+name, "--ignore-not-found=true")
+func (b *backend) deleteDevbox(ctx context.Context, item devboxItem) error {
+	name := strings.TrimSpace(item.Metadata.Name)
+	namespace := strings.TrimSpace(item.Metadata.Namespace)
+	if namespace == "" {
+		namespace = strings.TrimSpace(b.cfg.SealosDevbox.Namespace)
+	}
+	uid := strings.TrimSpace(item.Metadata.UID)
+	resourceVersion := strings.TrimSpace(item.Metadata.ResourceVersion)
+	if name == "" || namespace == "" || uid == "" || resourceVersion == "" {
+		return core.Exit(4, "refusing to delete Sealos DevBox without exact name, namespace, UID, and resourceVersion")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"apiVersion": "v1",
+		"kind":       "DeleteOptions",
+		"preconditions": map[string]string{
+			"uid":             uid,
+			"resourceVersion": resourceVersion,
+		},
+		"propagationPolicy": "Background",
+	})
+	if err != nil {
+		return core.Exit(5, "encode Sealos DevBox delete preconditions: %v", err)
+	}
+	rawPath := "/apis/devbox.sealos.io/v1alpha2/namespaces/" + url.PathEscape(namespace) + "/devboxes/" + url.PathEscape(name)
+	_, err = b.kubectlWithInput(ctx, nil, strings.NewReader(string(payload)), false, "delete", "--raw", rawPath, "-f", "-")
+	if err != nil && kubectlAPIObjectNotFound(err) {
+		return nil
+	}
 	return err
 }
 
