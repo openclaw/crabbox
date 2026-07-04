@@ -49,6 +49,10 @@ Ship Station in phases, with separate review for each phase:
 Phase 1 should target SSH-backed lease providers first. Delegated-run providers
 should wait until they expose an explicit station-capable contract.
 
+The agent runtime bridge is a later Station phase, not a shortcut around this
+sequence. See [Agent runtime bridge](agent-runtime-bridge.md) for the HTTP/SSE
+harness bridge, daemon, authorization, egress, and stop contract.
+
 ## Phase 1 Contract
 
 A Station is not just `warmup && run --keep` under a new name. The minimum
@@ -88,6 +92,12 @@ station:
 
 `restartPolicy` should default to `never`. Agent loops are not safely replayable
 by default, so retries are a later product decision.
+
+An agent profile may eventually launch an agent-runtime bridge, but that bridge
+must still be supervised as a Station attempt. It must bind daemon control
+traffic to loopback, route through Crabbox-managed authorization, and keep
+modelAccess disabled unless the separate modelAccess phase is explicitly
+enabled.
 
 ## modelAccess Security Gates
 

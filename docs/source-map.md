@@ -44,6 +44,9 @@ Crabbox has three implementation surfaces:
 - Deterministic perf evidence is contract-only for now:
   `docs/features/deterministic-perf-evidence.md`; no `--perf-budget`,
   `--fuel-budget`, WASI, or wasmtime-fuel implementation is registered yet.
+- Agent runtime bridge is contract-only for now:
+  `docs/features/agent-runtime-bridge.md`; no generic harness HTTP/SSE bridge,
+  sandbox-agent launcher, or `crabbox station` command is registered yet.
 
 ## Leases, Slugs, Claims, And Expiry
 

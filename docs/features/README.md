@@ -88,6 +88,8 @@ Provider deep-dives that live here in `features/`:
 - [Sync](sync.md): Git file-list manifests, rsync, fingerprints, excludes, guardrails, and sanity checks.
 - [Jobs](jobs.md): named repo-local warmup, hydrate, run, and cleanup workflows.
 - [Station profiles](station-profiles.md): planned supervised workload records, agent profile, and model-access security gates.
+- [Agent runtime bridge](agent-runtime-bridge.md): contract for future
+  harness-in-the-box HTTP/SSE bridge support under Station.
 - [Deterministic perf evidence](deterministic-perf-evidence.md): contract for
   future reproducible metric budgets and perf gate evidence.
 - [Actions hydration](actions-hydration.md): let GitHub Actions prepare a runner, then sync local work into that workspace.
