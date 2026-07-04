@@ -206,8 +206,9 @@ present. Missing setup is classified as `environment_blocked`, for example
 `doctor_failed`, or `missing_rbac_create_devboxes`.
 
 When the prerequisites are present, the smoke runs `doctor`, dry-run cleanup,
-`warmup --keep`, `status --json`, `run`, rendered SSH command proof, `stop`,
-post-stop `status --json`, and final dry-run cleanup. Interactive shell proof
+`warmup --keep`, `status --json`, `run`, rendered SSH command proof, a
+delete-on-release `stop`, an empty-inventory assertion, and final dry-run
+cleanup. Interactive shell proof
 for a PR should be collected separately in a `tmux` session by running
 `crabbox ssh --provider sealos-devbox --id <slug>` and recording a redacted pane
 log that reaches the shell and exits cleanly.

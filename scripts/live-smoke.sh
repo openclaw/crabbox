@@ -596,7 +596,7 @@ sealos_smoke() {
   if [[ -n "$node_host" ]]; then
     route_args+=(--sealos-devbox-node-host "$node_host")
   fi
-  route_args+=(--sealos-devbox-delete-on-release=false)
+  route_args+=(--sealos-devbox-delete-on-release=true)
 
   local doctor_json
   if ! doctor_json="$(run_in_repo "$cb" doctor "${route_args[@]}" --json 2>&1)"; then
@@ -653,8 +653,10 @@ sealos_smoke() {
     run_in_repo "$cb" logs "$runid" | tail -80
   fi
   run_in_repo "$cb" stop "${route_args[@]}" "$slug" || run_in_repo "$cb" stop "${route_args[@]}" "$lease"
+  run_in_repo "$cb" list "${route_args[@]}" --json | jq -e --arg lease "$lease" --arg slug "$slug" \
+    'all(.[]; (.id // .leaseID // .labels.lease // "") != $lease and (.slug // .labels.slug // "") != $slug)'
   lease=""
-  run_in_repo "$cb" status "${route_args[@]}" --id "$slug" --json | jq '{id,slug,provider,state,ready,host}'
+  slug=""
   run_in_repo "$cb" cleanup "${route_args[@]}" --dry-run
 }
 

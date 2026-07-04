@@ -624,6 +624,9 @@ case "$1" in
   cleanup)
     printf 'sealos-devbox cleanup dry_run=true\\n'
     ;;
+  list)
+    printf '[]\\n'
+    ;;
   warmup)
     printf 'provisioning provider=sealos-devbox lease=cbx_123456789abc slug=sealos-devbox-smoke-test devbox=crabbox-sealos-devbox-smoke-test namespace=team-a keep=true\\n'
     printf 'provisioned lease=cbx_123456789abc slug=sealos-devbox-smoke-test state=ready\\n'
@@ -641,7 +644,7 @@ case "$1" in
     printf 'log ok\\n'
     ;;
   stop)
-    printf 'paused %s\\n' "\${*: -1}"
+    printf 'deleted %s\\n' "\${*: -1}"
     ;;
   *)
     printf 'unexpected crabbox args: %s\\n' "$*" >&2
@@ -678,10 +681,10 @@ esac
   assert.match(result.stderr, /admin active-lease check skipped/);
   const calls = fs.readFileSync(log, "utf8");
   assert.match(calls, /^doctor --provider sealos-devbox /m);
-  assert.match(calls, /--sealos-devbox-delete-on-release=false/);
+  assert.match(calls, /--sealos-devbox-delete-on-release=true/);
   assert.match(calls, new RegExp(`--sealos-devbox-kubectl ${fakeKubectl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   assert.match(calls, /--sealos-devbox-kubeconfig ~\/\.kube\/config/);
-  assert.doesNotMatch(calls, /--sealos-devbox-delete-on-release(?: |$)/);
+  assert.doesNotMatch(calls, /--sealos-devbox-delete-on-release=false/);
   assert.equal((calls.match(/^cleanup --provider sealos-devbox /gm) ?? []).length, 2);
   assert.match(
     calls,
@@ -691,6 +694,7 @@ esac
   assert.match(calls, /^ssh --provider sealos-devbox .* --id sealos-devbox-smoke-test$/m);
   assert.match(calls, /^run --provider sealos-devbox .* --id sealos-devbox-smoke-test --shell -- /m);
   assert.match(calls, /^stop --provider sealos-devbox .* sealos-devbox-smoke-test$/m);
+  assert.match(calls, /^list --provider sealos-devbox .* --json$/m);
 });
 
 test("Namespace Devbox live smoke requires the devbox CLI before provider mutation", () => {
