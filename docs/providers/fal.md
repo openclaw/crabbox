@@ -146,8 +146,10 @@ crabbox cleanup --provider fal
 claims. Because fal does not expose an account identity for binding the current
 API key, an instance `404` is not sufficient proof that the resource is absent
 from the account that created it; Crabbox retains the local claim for manual
-reconciliation. Recovery-pending claims are likewise retained so the operator
-can investigate an uncertain create or readiness outcome.
+reconciliation and shows it in `crabbox list` as
+`provider-absence-unverified`. Recovery-pending claims are likewise retained
+and listed with their recovery status so empty-inventory checks cannot hide
+local residue.
 
 ## Cost Discipline
 

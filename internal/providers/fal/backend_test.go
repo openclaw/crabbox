@@ -247,6 +247,13 @@ func TestFalStopRecoversAmbiguousCreateWithExactIdempotentRequest(t *testing.T) 
 	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create" {
 		t.Fatalf("recovery claim=%#v ok=%v err=%v", claim, ok, claimErr)
 	}
+	views, err := b.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].Status != "ambiguous-create" || views[0].CloudID != "" {
+		t.Fatalf("recovery views=%#v", views)
+	}
 	target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "unreconciled-create", ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
@@ -640,6 +647,13 @@ func TestFalCleanupRetainsClaimWhenAbsenceIsNotAccountBound(t *testing.T) {
 	}
 	if len(api.deletedIDs) != 0 {
 		t.Fatalf("provider-absent cleanup issued delete: %#v", api.deletedIDs)
+	}
+	views, err := b.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].Status != "provider-absence-unverified" || views[0].CloudID != "inst_absent" {
+		t.Fatalf("provider-absent views=%#v", views)
 	}
 }
 

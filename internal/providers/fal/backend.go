@@ -196,10 +196,20 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 	views := make([]core.LeaseView, 0, len(claims))
 	for _, claim := range claims {
 		if claim.CloudID == "" {
+			server, err := falClaimView(claim, b.configForRun(), firstNonBlank(claim.Labels["recovery"], "recovery-pending"))
+			if err != nil {
+				return nil, err
+			}
+			views = append(views, server)
 			continue
 		}
 		instance, err := client.GetInstance(ctx, claim.CloudID)
 		if isFalNotFound(err) {
+			server, viewErr := falClaimView(claim, b.configForRun(), "provider-absence-unverified")
+			if viewErr != nil {
+				return nil, viewErr
+			}
+			views = append(views, server)
 			continue
 		}
 		if err != nil {
@@ -212,6 +222,17 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 		views = append(views, target.Server)
 	}
 	return views, nil
+}
+
+func falClaimView(claim core.LeaseClaim, cfg Config, status string) (core.LeaseView, error) {
+	server, err := serverFromClaim(claim, cfg)
+	if err != nil {
+		return core.LeaseView{}, err
+	}
+	server.Status = status
+	server.Labels = cloneLabels(server.Labels)
+	server.Labels["state"] = status
+	return server, nil
 }
 
 func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
