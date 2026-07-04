@@ -1,4 +1,4 @@
-//go:build darwin && arm64 && cgo
+//go:build darwin && arm64
 
 package applevzhelper
 
@@ -22,13 +22,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gofrs/flock"
 	"golang.org/x/sys/unix"
 )
 
 var (
-	signalNotify               = signal.Notify
-	signalStop                 = signal.Stop
 	prepareInstanceAssetsFunc  = prepareInstanceAssets
 	helperExecutable           = os.Executable
 	processStartTime           = readProcessStartTime
@@ -58,26 +55,16 @@ type preparationMarker struct {
 }
 
 func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	useLock, err := lockManagedHelperUse()
-	if err != nil {
-		fmt.Fprintf(stderr, "lock managed helper use: %v\n", err)
-		return 1
-	}
-	if useLock != nil {
-		defer useLock.Unlock()
-	}
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: crabbox-apple-vz-helper <doctor|start|serve|list|inspect|delete>")
+		fmt.Fprintln(stderr, "usage: "+ManagedHelperName+" <doctor|start|list|inspect|delete>")
 		return 2
 	}
-	err = nil
+	var err error
 	switch args[0] {
 	case "doctor":
 		err = runDoctor(args[1:], stdin, stdout, stderr)
 	case "start":
 		err = runStart(args[1:], stdin, stdout, stderr)
-	case "serve":
-		err = runServeCommand(args[1:], stdout, stderr)
 	case "list":
 		err = runList(args[1:], stdout, stderr)
 	case "inspect":
@@ -93,21 +80,6 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
-}
-
-func lockManagedHelperUse() (*flock.Flock, error) {
-	path := strings.TrimSpace(os.Getenv(ManagedHelperUseLockEnv))
-	if path == "" {
-		return nil, nil
-	}
-	if !filepath.IsAbs(path) {
-		return nil, fmt.Errorf("%s must be an absolute path", ManagedHelperUseLockEnv)
-	}
-	lock := flock.New(path, flock.SetPermissions(0o600))
-	if err := lock.RLock(); err != nil {
-		return nil, err
-	}
-	return lock, nil
 }
 
 func runDoctor(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -131,6 +103,9 @@ func runDoctor(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 	details, runtimeErr := validateRuntimeConfig(root, imageRequest.Image, imageRequest.SHA256)
+	if runtimeErr == nil {
+		runtimeErr = runVMDProbeFunc(root)
+	}
 	if runtimeErr != nil {
 		if err := json.NewEncoder(stdout).Encode(DoctorResponse{
 			Status:    "error",
@@ -272,10 +247,10 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stderr, "warning: close helper log: %v\n", err)
 		}
 	}()
-	exe, err := helperExecutable()
+	vmdPath, err := ensureVMDFunc(root)
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
-		return fmt.Errorf("resolve helper executable: %w", err)
+		return fmt.Errorf("resolve VM daemon: %w", err)
 	}
 	startupReader, startupWriter, err := os.Pipe()
 	if err != nil {
@@ -283,7 +258,7 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return fmt.Errorf("create helper startup pipe: %w", err)
 	}
 	defer startupWriter.Close()
-	cmd := exec.Command(exe, "serve", "--state-root", root, "--name", *name, "--startup-fd", strconv.Itoa(inheritedStartupFD))
+	cmd := exec.Command(vmdPath, "serve", "--state-root", root, "--name", *name, "--startup-fd", strconv.Itoa(inheritedStartupFD))
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Env = helperDaemonEnv()
@@ -546,45 +521,29 @@ func startedHelperIdentityMatches(inst Instance) (bool, error) {
 	return matches, nil
 }
 
-func runServeCommand(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	stateRoot := fs.String("state-root", "", "apple-vz state root")
-	name := fs.String("name", "", "instance name")
-	startupFD := fs.Int("startup-fd", -1, "inherited startup authorization file descriptor")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	root, err := normalizeStateRoot(*stateRoot)
+// runVMDProbe asks the entitlement-signed VMM daemon to build and validate a
+// throwaway VM configuration, proving the Virtualization.framework runtime
+// works end to end for this host.
+func runVMDProbe(stateRoot string) error {
+	vmdPath, err := ensureVMDFunc(stateRoot)
 	if err != nil {
 		return err
 	}
-	if err := validateInstanceName(*name); err != nil {
-		return err
-	}
-	if *startupFD >= 0 {
-		if err := waitForStartupAuthorization(*startupFD); err != nil {
-			return err
+	ctx, cancel := context.WithTimeout(context.Background(), vmdProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, vmdPath, "probe")
+	cmd.Env = helperDaemonEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		detail := SanitizeDiagnosticText(strings.TrimSpace(string(out)))
+		if detail == "" {
+			return fmt.Errorf("probe VM daemon: %w", err)
 		}
-	}
-	return runServe(root, strings.TrimSpace(*name), stdout, stderr)
-}
-
-func waitForStartupAuthorization(fd int) error {
-	file := os.NewFile(uintptr(fd), "apple-vz-startup")
-	if file == nil {
-		return fmt.Errorf("invalid helper startup file descriptor %d", fd)
-	}
-	defer file.Close()
-	var marker [1]byte
-	if _, err := io.ReadFull(file, marker[:]); err != nil {
-		return fmt.Errorf("helper startup authorization closed before approval: %w", err)
-	}
-	if marker[0] != startupAuthorizationByte {
-		return fmt.Errorf("invalid helper startup authorization marker")
+		return fmt.Errorf("probe VM daemon: %w: %s", err, detail)
 	}
 	return nil
 }
+
+var runVMDProbeFunc = runVMDProbe
 
 func runList(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
@@ -1127,7 +1086,7 @@ func helperDaemonEnv() []string {
 		"LANG=C",
 		"TZ=UTC",
 	}
-	for _, name := range []string{"HOME", "TMPDIR", ManagedHelperUseLockEnv} {
+	for _, name := range []string{"HOME", "TMPDIR"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			env = append(env, name+"="+value)
 		}

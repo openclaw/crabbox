@@ -26,3 +26,7 @@ api.env*
 # These are scratch inputs for the current session, not part of the repo.
 PLAN*.md
 plan*.md
+
+# Swift VM daemon build outputs
+vmd/.build/
+internal/applevzhelper/embedded/
