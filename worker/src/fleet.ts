@@ -15832,7 +15832,15 @@ export class HetznerProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    const serverID = Number(lease.serverID);
+    let serverID = Number(lease.serverID);
+    if (
+      (!Number.isSafeInteger(serverID) || serverID <= 0) &&
+      lease.providerKeyCleanupPending &&
+      lease.provisioningResourceMayExist
+    ) {
+      const recovered = await this.client.findServerByLease(lease.id);
+      serverID = recovered?.id ?? Number.NaN;
+    }
     if (Number.isSafeInteger(serverID) && serverID > 0) {
       try {
         await this.deleteServer(String(serverID));
