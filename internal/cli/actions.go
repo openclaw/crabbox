@@ -2493,17 +2493,37 @@ if [ "$(id -u)" = 0 ]; then
   export RUNNER_ALLOW_RUNASROOT=1
 fi
 if [ "$version" = latest ]; then
-  version="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name' | sed 's/^v//')"
+  release_url=https://api.github.com/repos/actions/runner/releases/latest
+else
+  release_url="https://api.github.com/repos/actions/runner/releases/tags/v${version}"
 fi
+release_json="$(curl -fsSL "$release_url")"
+resolved_version="$(jq -er '.tag_name | strings | sub("^v"; "")' <<<"$release_json")"
+if [ "$version" != latest ] && [ "$resolved_version" != "$version" ]; then
+  echo "runner release metadata resolved unexpected version: wanted=$version got=$resolved_version" >&2
+  exit 1
+fi
+version="$resolved_version"
+archive_name="actions-runner-linux-${runner_arch}-${version}.tar.gz"
+expected_sha="$(jq -er --arg name "$archive_name" '.assets[] | select(.name == $name) | .digest | strings | select(test("^sha256:[0-9a-fA-F]{64}$")) | sub("^sha256:"; "") | ascii_downcase' <<<"$release_json")"
 runner_dir="$HOME/actions-runner"
 mkdir -p "$runner_dir"
 cd "$runner_dir"
-if [ ! -x ./config.sh ] || [ ! -f ".crabbox-runner-version-$version-$runner_arch" ]; then
+version_marker=".crabbox-runner-version-$version-$runner_arch-sha256-$expected_sha"
+if [ ! -x ./config.sh ] || [ ! -f "$version_marker" ]; then
+  archive="$(mktemp "${TMPDIR:-/tmp}/crabbox-actions-runner.XXXXXX.tar.gz")"
+  trap 'rm -f "$archive"' EXIT
+  curl -fsSL -o "$archive" "https://github.com/actions/runner/releases/download/v${version}/${archive_name}"
+  actual_sha="$(sha256sum "$archive" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]')"
+  if [ "$actual_sha" != "$expected_sha" ]; then
+    echo "runner archive checksum mismatch: expected=$expected_sha actual=$actual_sha" >&2
+    exit 1
+  fi
   rm -rf ./*
-  curl -fsSL -o actions-runner.tar.gz "https://github.com/actions/runner/releases/download/v${version}/actions-runner-linux-${runner_arch}-${version}.tar.gz"
-  tar xzf actions-runner.tar.gz
-  rm actions-runner.tar.gz
-  touch ".crabbox-runner-version-$version-$runner_arch"
+  tar xzf "$archive"
+  rm -f "$archive"
+  trap - EXIT
+  touch "$version_marker"
 fi
 if [ -f .runner ]; then
   ./config.sh remove --unattended --token "$RUNNER_TOKEN" || true
@@ -2621,20 +2641,44 @@ switch -Regex ($arch) {
   default { throw "unsupported runner arch: $arch" }
 }
 if ($version -eq "latest") {
-  $release = Invoke-RestMethod -Uri "https://api.github.com/repos/actions/runner/releases/latest" -UseBasicParsing
-  $version = ($release.tag_name -replace "^v", "")
+  $releaseUri = "https://api.github.com/repos/actions/runner/releases/latest"
+} else {
+  $releaseUri = "https://api.github.com/repos/actions/runner/releases/tags/v$version"
 }
+$release = Invoke-RestMethod -Uri $releaseUri -UseBasicParsing
+$resolvedVersion = ($release.tag_name -replace "^v", "")
+if ($version -ne "latest" -and $resolvedVersion -ne $version) {
+  throw "runner release metadata resolved unexpected version: wanted=$version got=$resolvedVersion"
+}
+$version = $resolvedVersion
+$archiveName = "actions-runner-win-$runnerArch-$version.zip"
+$asset = @($release.assets | Where-Object { $_.name -eq $archiveName })
+if ($asset.Count -ne 1) {
+  throw "runner release metadata has no unique asset named $archiveName"
+}
+$digestMatch = [Regex]::Match([string]$asset[0].digest, "^sha256:(?<sha>[0-9a-fA-F]{64})$")
+if (-not $digestMatch.Success) {
+  throw "runner release asset has no valid SHA-256 digest for $archiveName"
+}
+$expectedSha = $digestMatch.Groups["sha"].Value.ToLowerInvariant()
 $runnerDir = Join-Path $HOME "actions-runner"
 New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null
 Set-Location -LiteralPath $runnerDir
-$versionMarker = ".crabbox-runner-version-$version-$runnerArch"
+$versionMarker = ".crabbox-runner-version-$version-$runnerArch-sha256-$expectedSha"
 if (-not (Test-Path -LiteralPath ".\config.cmd") -or -not (Test-Path -LiteralPath $versionMarker)) {
-  Get-ChildItem -Force -LiteralPath $runnerDir | Remove-Item -Recurse -Force
-  $zip = Join-Path $runnerDir "actions-runner.zip"
-  Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$version/actions-runner-win-$runnerArch-$version.zip" -OutFile $zip -UseBasicParsing
-  Expand-Archive -LiteralPath $zip -DestinationPath $runnerDir -Force
-  Remove-Item -LiteralPath $zip -Force
-  New-Item -ItemType File -Path $versionMarker -Force | Out-Null
+  $zip = Join-Path ([IO.Path]::GetTempPath()) ("crabbox-actions-runner-" + [Guid]::NewGuid().ToString("N") + ".zip")
+  try {
+    Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$version/$archiveName" -OutFile $zip -UseBasicParsing
+    $actualSha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualSha -ne $expectedSha) {
+      throw "runner archive checksum mismatch: expected=$expectedSha actual=$actualSha"
+    }
+    Get-ChildItem -Force -LiteralPath $runnerDir | Remove-Item -Recurse -Force
+    Expand-Archive -LiteralPath $zip -DestinationPath $runnerDir -Force
+    New-Item -ItemType File -Path $versionMarker -Force | Out-Null
+  } finally {
+    Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+  }
 }
 if (Test-Path -LiteralPath ".\.runner") {
   & .\config.cmd remove --unattended --token $env:RUNNER_TOKEN
