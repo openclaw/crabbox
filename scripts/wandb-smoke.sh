@@ -114,7 +114,7 @@ if [[ -e "$claim_path" ]]; then
   echo "wandb smoke stop left local claim residue" >&2
   exit 1
 fi
-if ! run_in_repo "$cb" list --provider wandb --json | jq -e --arg id "$sandbox_id" 'map(.id // .CloudID) | index($id) == null' >/dev/null; then
+if ! run_in_repo "$cb" list --provider wandb --json | jq -e --arg id "$sandbox_id" 'map(.CloudID // .id) | index($id) == null' >/dev/null; then
   echo "wandb smoke stop left active remote inventory residue" >&2
   exit 1
 fi

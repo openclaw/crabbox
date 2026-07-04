@@ -59,10 +59,17 @@ case "\${1:-}" in
       printf 'wandb sandbox "sb-live" has no matching local ownership claim\\n' >&2
       exit 4
     fi
-    rm -f "$XDG_STATE_HOME/crabbox/claims/sb-live.json" "${active}"
+    rm -f "$XDG_STATE_HOME/crabbox/claims/sb-live.json"
+    if [[ "\${CRABBOX_FAKE_LEAVE_REMOTE:-}" != "1" ]]; then
+      rm -f "${active}"
+    fi
     ;;
   list)
-    printf '[]\\n'
+    if [[ -e "${active}" ]]; then
+      printf '[{"id":"friendly-name","CloudID":"sb-live"}]\\n'
+    else
+      printf '[]\\n'
+    fi
     ;;
   *)
     printf 'unexpected crabbox args: %s\\n' "$*" >&2
@@ -88,7 +95,20 @@ case "\${1:-}" in
     sed -n 's/.*"leaseId":"\\([^"]*\\)".*/\\1/p' "\${3:?}"
     ;;
   -e)
-    cat >/dev/null
+    input="$(cat)"
+    case "$*" in
+      *'.CloudID // .id'*)
+        if [[ "$input" == *'"CloudID":"sb-live"'* ]]; then
+          exit 1
+        fi
+        ;;
+      *'.id // .CloudID'*)
+        # A display id masks CloudID with this ordering, reproducing the bug.
+        ;;
+      *)
+        exit 64
+        ;;
+    esac
     ;;
   *)
     exit 64
@@ -132,4 +152,21 @@ esac
 	);
 	assert.equal(seen[6], "stop --provider wandb --id sb-live");
 	assert.equal(seen[7], "list --provider wandb --json");
+
+	const residueResult = spawnSync("bash", [path.join(repoRoot, "scripts", "wandb-smoke.sh")], {
+		cwd: caller,
+		env: {
+			...process.env,
+			PATH: `${tools}${path.delimiter}${process.env.PATH ?? ""}`,
+			CRABBOX_LIVE: "1",
+			CRABBOX_BIN: "./bin/crabbox",
+			CRABBOX_LIVE_REPO: target,
+			CRABBOX_FAKE_LEAVE_REMOTE: "1",
+			WANDB_API_KEY: "test-key",
+			WANDB_ENTITY_NAME: "example-org",
+		},
+		encoding: "utf8",
+	});
+	assert.equal(residueResult.status, 1, residueResult.stderr || residueResult.stdout);
+	assert.match(residueResult.stderr, /wandb smoke stop left active remote inventory residue/);
 });
