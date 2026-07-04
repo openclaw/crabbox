@@ -281,9 +281,9 @@ export class HetznerClient {
       }
     }
     if (providerKeyCleanupOwned) {
-      if (resourceMayExist && serverID !== undefined) {
+      if (resourceMayExist) {
         providerKeyCleanupID = ensuredKey.key.id;
-      } else if (!resourceMayExist) {
+      } else {
         try {
           await this.deleteSSHKeyByID(ensuredKey.key.id);
         } catch (error) {

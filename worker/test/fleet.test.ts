@@ -3110,6 +3110,48 @@ describe("fleet lease identity and idle", () => {
 
     expect(error).toBeInstanceOf(HetznerProvisioningError);
     expect((error as HetznerProvisioningError).resourceMayExist).toBe(true);
+    expect((error as HetznerProvisioningError).providerKeyCleanupID).toBeUndefined();
+  });
+
+  it("retains a newly created lease key when the server ID is unknown", async () => {
+    const requests: Array<{ method: string; path: string }> = [];
+    const responses = [
+      jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ ssh_keys: [] }),
+      jsonResponse({
+        ssh_key: {
+          id: 7,
+          name: "crabbox-cbx-abcdef123456",
+          public_key: "ssh-ed25519 rollback-test",
+          labels: { crabbox: "true", created_by: "crabbox", lease: "cbx_abcdef123456" },
+        },
+      }),
+      jsonResponse({ error: { code: "server_error" } }, 503),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        requests.push({ method: init?.method || "GET", path: url.pathname });
+        return responses.shift() ?? jsonResponse({}, 500);
+      }),
+    );
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+    const config = leaseConfig({
+      provider: "hetzner",
+      providerKey: "crabbox-cbx-abcdef123456",
+      sshPublicKey: "ssh-ed25519 rollback-test",
+    });
+
+    const error = await client
+      .createServerWithFallback(config, "cbx_abcdef123456", "rollback", "alice@example.com")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(HetznerProvisioningError);
+    expect((error as HetznerProvisioningError).resourceMayExist).toBe(true);
+    expect((error as HetznerProvisioningError).serverID).toBeUndefined();
+    expect((error as HetznerProvisioningError).providerKeyCleanupID).toBe(7);
+    expect(requests.filter((entry) => entry.method === "DELETE")).toEqual([]);
   });
 
   it("retains newly created shared Hetzner workspace keys after readiness rollback", async () => {
