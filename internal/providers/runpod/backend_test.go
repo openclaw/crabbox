@@ -690,6 +690,44 @@ func TestRunpodLegacyClaimRequiresReclaimToBindExactPod(t *testing.T) {
 	}
 }
 
+func TestRunpodReclaimByPodIDUpgradesLegacySlugClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_abcdef123456"
+	const slug = "blue"
+	repo := core.Repo{Root: t.TempDir()}
+	if err := core.ClaimLeaseForRepoProvider(leaseID, slug, providerName, repo.Root, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	pod := runpodPod{ID: "pod-legacy", Name: leaseProviderName(leaseID, slug), DesiredStatus: "RUNNING"}
+	fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return pod, nil }}
+	backend := &runpodLeaseBackend{cfg: Config{Runpod: RunpodConfig{APIKey: "k"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: pod.ID, Repo: repo, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID {
+		t.Fatalf("leaseID=%q, want legacy claim %q", lease.LeaseID, leaseID)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].LeaseID != leaseID || claims[0].CloudID != pod.ID || claims[0].Labels["name"] != pod.Name {
+		t.Fatalf("claims=%#v, want one upgraded legacy claim", claims)
+	}
+	releaseLease, err := backend.Resolve(context.Background(), ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatalf("resolve upgraded claim by slug: %v", err)
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: releaseLease}); err != nil {
+		t.Fatalf("release upgraded claim by slug: %v", err)
+	}
+	if len(fake.terminated) != 1 || fake.terminated[0] != pod.ID {
+		t.Fatalf("terminated=%v, want %s", fake.terminated, pod.ID)
+	}
+}
+
 func TestRunpodReleaseLeaseRechecksBoundClaimAndTerminatesPod(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	pod := runpodPod{ID: "pod_z", Name: "crabbox-blue-abcdef12", DesiredStatus: "RUNNING"}

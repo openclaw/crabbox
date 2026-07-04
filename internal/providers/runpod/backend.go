@@ -183,6 +183,15 @@ func (b *runpodLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (L
 	} else {
 		pod, leaseID, slug, err = b.resolveUnclaimedPod(ctx, client, req.ID)
 		if err == nil {
+			var legacy bool
+			claim, legacy, err = findRunpodClaimForPodName(pod)
+			if err == nil && legacy {
+				claimed = true
+				leaseID = claim.LeaseID
+				slug = claim.Slug
+			}
+		}
+		if err == nil {
 			err = ensureRunpodAdoptionDoesNotRetargetClaim(leaseID, pod)
 		}
 	}
@@ -470,6 +479,27 @@ func resolveRunpodClaim(identifier string) (LeaseClaim, bool, error) {
 		return match, true, nil
 	}
 	return resolveLeaseClaimForProvider(identifier, providerName)
+}
+
+func findRunpodClaimForPodName(pod runpodPod) (LeaseClaim, bool, error) {
+	claims, err := listLeaseClaims()
+	if err != nil {
+		return LeaseClaim{}, false, err
+	}
+	_, podSlug := runpodLeaseIdentity(pod.Name)
+	var match LeaseClaim
+	for _, claim := range claims {
+		if claim.Provider != providerName ||
+			normalizeLeaseSlug(claim.Slug) != normalizeLeaseSlug(podSlug) ||
+			leaseProviderName(claim.LeaseID, claim.Slug) != pod.Name {
+			continue
+		}
+		if match.LeaseID != "" {
+			return LeaseClaim{}, false, exit(2, "multiple provider=%s claims match pod name %s", providerName, pod.Name)
+		}
+		match = claim
+	}
+	return match, match.LeaseID != "", nil
 }
 
 func ensureRunpodAdoptionDoesNotRetargetClaim(leaseID string, pod runpodPod) error {
