@@ -520,7 +520,11 @@ func (b *backend) ensureCleanupClaim(server core.Server) (core.LeaseClaim, error
 		}
 	} else {
 		switch claim.Labels["recovery"] {
-		case "ambiguous-create", "ambiguous-key-create", "rollback-cleanup":
+		case "ambiguous-create":
+		case "ambiguous-key-create", "rollback-cleanup":
+			if server.CloudID != "" {
+				return core.LeaseClaim{}, core.Exit(2, "vultr key-only recovery claim cannot authorize instance cleanup for lease=%s", leaseID)
+			}
 		default:
 			return core.LeaseClaim{}, core.Exit(2, "vultr lease claim has no instance identity or valid recovery state for lease=%s", leaseID)
 		}

@@ -879,6 +879,46 @@ func TestSSHKeyRollbackCleanupFailurePreservesRecoveryClaim(t *testing.T) {
 	}
 }
 
+func TestKeyOnlyRollbackRecoveryCannotDeleteLiveInstance(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	const leaseID = "cbx_fefefefefefe"
+	const slug = "key-only"
+	labels := core.DirectLeaseLabels(b.Cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels["state"] = "provisioning"
+	labels["recovery"] = "rollback-cleanup"
+	labels[vultrAccountLabel] = "account:test-account"
+	setVultrKeyIdentity(labels, "key-only-rollback", true)
+	claimServer := core.Server{Provider: providerName, Name: core.LeaseProviderName(leaseID, slug), Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, claimServer, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	live := vultrInstance{
+		ID:           "fefefefe-fefe-4efe-8efe-fefefefefefe",
+		Label:        core.LeaseProviderName(leaseID, slug),
+		MainIP:       "203.0.113.91",
+		Status:       "active",
+		PowerStatus:  "running",
+		ServerStatus: "ok",
+		Plan:         b.Cfg.ServerType,
+		Tags:         tagsFromLabels(labels),
+	}
+	api.instances = []vultrInstance{live}
+	server := serverFromInstance(live, b.Cfg)
+	server.Labels[vultrAccountLabel] = "account:test-account"
+
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "key-only recovery claim cannot authorize instance cleanup") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("deleted instance/key: %v %v", api.deleted, api.deletedKeys)
+	}
+	if _, ok, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !ok {
+		t.Fatalf("claim retained ok=%v err=%v", ok, err)
+	}
+}
+
 func TestAcquireRejectsSSHCIDRsWithoutFirewallGroup(t *testing.T) {
 	api := &fakeVultrAPI{}
 	b := newTestBackend(t, api)
