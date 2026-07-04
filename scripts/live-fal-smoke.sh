@@ -167,6 +167,16 @@ if payload != []:
   fi
 }
 
+validate_output_line() {
+	local command="$1"
+	local output="$2"
+	local expected="$3"
+	if ! grep -Fqx -- "$expected" <<<"$output"; then
+		classify_validation_failure "$command" 1 "expected output line: $expected"
+		exit 1
+	fi
+}
+
 is_fal_not_found_output() {
   local output="$1"
   [[ "$output" == *"lease/fal instance not found"* || "$output" == *"no local claim for fal lease"* || "$output" == *"not locally claimed"* ]]
@@ -271,6 +281,8 @@ warmup_args+=(--ttl 20m --idle-timeout 5m)
 run_capture "${warmup_args[*]}" "${warmup_args[@]}"
 run_capture_validation "bin/crabbox status --provider fal --id $slug --wait --wait-timeout 600s" bin/crabbox status --provider fal --id "$slug" --wait --wait-timeout 600s
 run_capture_validation "bin/crabbox run --provider fal --id $slug --no-sync -- echo ok" bin/crabbox run --provider fal --id "$slug" --no-sync -- echo ok
+run_output="$CAPTURED_OUTPUT"
+validate_output_line "bin/crabbox run --provider fal --id $slug --no-sync -- echo ok" "$run_output" "ok"
 run_capture_validation "bin/crabbox list --provider fal --json" bin/crabbox list --provider fal --json
 list_output="$CAPTURED_OUTPUT"
 printf '%s\n' "$list_output"

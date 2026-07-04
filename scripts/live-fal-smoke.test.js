@@ -285,3 +285,60 @@ esac
   assert.match(result.stderr, /status never became ready/);
   assert.match(fs.readFileSync(stopped, "utf8"), /^fal-smoke-\d{14}-\d+\n$/);
 });
+
+test("live fal smoke requires remote command output", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-output-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const stopped = path.join(dir, "stopped.log");
+  const slugFile = path.join(dir, "slug.txt");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor)
+    printf 'auth=ready\n'
+    ;;
+  list)
+    printf '[]\n'
+    ;;
+  warmup)
+    printf '%s\n' "$5" >"${slugFile}"
+    ;;
+  status)
+    printf 'status=ready\n'
+    ;;
+  run)
+    printf 'unexpected-output\n'
+    ;;
+  stop)
+    printf '%s\n' "$4" >>"${stopped}"
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "fal",
+      CRABBOX_FAL_KEY: "test-secret-token",
+      FAL_KEY: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=validation_failed/);
+  assert.match(result.stderr, /expected output line: ok/);
+  assert.match(fs.readFileSync(stopped, "utf8"), /^fal-smoke-\d{14}-\d+\n$/);
+});

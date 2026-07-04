@@ -342,7 +342,11 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if err != nil {
 			return err
 		}
-		remove, reason := core.ShouldCleanupServer(server, b.now())
+		remove := claim.Labels["recovery"] == "rollback-cleanup"
+		reason := "rollback-cleanup"
+		if !remove {
+			remove, reason = core.ShouldCleanupServer(server, b.now())
+		}
 		if !remove {
 			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue

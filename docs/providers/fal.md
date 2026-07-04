@@ -127,6 +127,10 @@ returned instance id before deletion. After that window, it fails closed and
 retains the claim for manual provider reconciliation rather than risking a
 second billable instance.
 
+If an exact instance id is known but rollback deletion fails, the retained
+`rollback-cleanup` claim bypasses normal TTL/idle eligibility so the next
+`cleanup` retries deletion immediately.
+
 ## Ownership And Cleanup
 
 fal cleanup is intentionally local-claim based. Crabbox will not delete a fal
