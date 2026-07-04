@@ -58,6 +58,57 @@ func TestNewProxmoxClientStripsAPIPathAndUsesTokenAuth(t *testing.T) {
 	}
 }
 
+func TestProxmoxClientRedactsCredentialsFromHTTPErrorBody(t *testing.T) {
+	const (
+		tokenID     = "runner@pve!crabbox"
+		tokenSecret = "super-secret-token"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization := r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"authorization": authorization,
+			"message":       "permission denied for " + tokenID,
+			"token_secret":  tokenSecret,
+		})
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Proxmox.APIURL = server.URL
+	cfg.Proxmox.TokenID = tokenID
+	cfg.Proxmox.TokenSecret = tokenSecret
+	cfg.Proxmox.Node = "pve1"
+	client, err := NewProxmoxClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.nextID(context.Background())
+	if err == nil {
+		t.Fatal("nextID succeeded, want HTTP error")
+	}
+	text := err.Error()
+	for _, secret := range []string{tokenID, tokenSecret, "PVEAPIToken=" + tokenID + "=" + tokenSecret} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("Proxmox HTTP error leaked %q: %s", secret, text)
+		}
+	}
+	if !strings.Contains(text, "permission denied for") || !strings.Contains(text, "redacted") {
+		t.Fatalf("Proxmox HTTP error lost useful redacted context: %s", text)
+	}
+	var apiErr *ProxmoxError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error type=%T, want *ProxmoxError", err)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(apiErr.Body), &payload); err != nil {
+		t.Fatalf("redacted error body is not valid JSON: %v: %s", err, apiErr.Body)
+	}
+	if payload["authorization"] != "PVEAPIToken=<redacted>" || payload["message"] != "permission denied for <redacted>" || payload["token_secret"] != "<redacted>" {
+		t.Fatalf("redacted error payload=%#v", payload)
+	}
+}
+
 func TestProxmoxDoctorReadinessChecksNonMutatingPrerequisites(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
