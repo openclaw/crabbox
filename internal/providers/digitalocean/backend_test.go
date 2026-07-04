@@ -981,6 +981,36 @@ func TestResolveReadOnlyDoesNotClaimVisibleDroplet(t *testing.T) {
 	}
 }
 
+func TestResolveReadOnlyIgnoresStaleDropletClaim(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	leaseID := "cbx_abcdef12345a"
+	slug := "stale-read-only"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	item := droplet{ID: 110, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
+	backend := newTestBackend(t, &fakeDigitalOceanAPI{droplets: []droplet{item}})
+	labels[digitalOceanAccountLabel] = "team:test-account"
+	claimServer := core.Server{Provider: providerName, CloudID: "999", ID: 999, Name: item.Name, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, backend.Cfg, claimServer, core.SSHTarget{}, backend.Cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, NoLocalStateMutations: true}); err == nil || !strings.Contains(err.Error(), "stale local claim") {
+		t.Fatalf("identity-bound resolve err=%v", err)
+	}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.ID != item.ID {
+		t.Fatalf("lease=%#v", lease)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || claim.CloudID != "999" {
+		t.Fatalf("read-only resolve changed stale claim: claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+}
+
 func TestResolveNumericIdentifierPrefersDropletIDOverSlug(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

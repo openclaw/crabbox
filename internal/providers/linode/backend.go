@@ -442,7 +442,7 @@ func (b *linodeLeaseBackend) targetFromLinode(item linodeInstance, req core.Reso
 	if claimErr != nil {
 		return core.LeaseTarget{}, fmt.Errorf("read linode lease claim: %w", claimErr)
 	}
-	if claimExists {
+	if claimExists && !req.IsReadOnlyStatus() {
 		if claim.Provider != providerName {
 			return core.LeaseTarget{}, core.Exit(2, "lease=%s is claimed by provider=%s; refusing linode claim rewrite", leaseID, claim.Provider)
 		}
@@ -463,9 +463,9 @@ func (b *linodeLeaseBackend) targetFromLinode(item linodeInstance, req core.Reso
 		if claim.CloudID == "" && !isPendingRecoveryClaim(claim, leaseID) {
 			return core.LeaseTarget{}, core.Exit(2, "linode lease claim has no instance identity or valid pending recovery state for lease=%s", leaseID)
 		}
-	} else if req.ReleaseOnly {
+	} else if !claimExists && req.ReleaseOnly {
 		return core.LeaseTarget{}, core.Exit(2, "linode lease=%s has no exact local claim; refusing release", leaseID)
-	} else if !req.NoLocalStateMutations {
+	} else if !claimExists && !req.NoLocalStateMutations {
 		if !req.Reclaim {
 			return core.LeaseTarget{}, core.Exit(2, "linode lease=%s is unclaimed; use --reclaim to adopt it explicitly", leaseID)
 		}

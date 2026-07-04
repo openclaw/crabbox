@@ -413,6 +413,34 @@ func TestResolveReadOnlyDoesNotClaimVisibleLinode(t *testing.T) {
 	}
 }
 
+func TestResolveReadOnlyIgnoresStaleLinodeClaim(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = defaultType
+	leaseID := "cbx_abcdef123458"
+	slug := "stale-read-only"
+	item := linodeInstance{ID: 458, Label: core.LeaseProviderName(leaseID, slug), Status: "running", Type: defaultType, IPv4: []string{"203.0.113.125"}, Tags: leaseTags(cfg, leaseID, slug, "ready", false, time.Now())}
+	backend := newTestBackend(t, &fakeLinodeAPI{linodes: []linodeInstance{item}})
+	labels := labelsFromTags(item.Tags)
+	labels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
+	claimServer := core.Server{Provider: providerName, CloudID: "999", ID: 999, Name: item.Label, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, backend.Cfg, claimServer, core.SSHTarget{}, backend.Cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.ID != item.ID {
+		t.Fatalf("lease=%#v", lease)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || claim.CloudID != "999" {
+		t.Fatalf("read-only resolve changed stale claim: claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+}
+
 func TestResolveReleaseOnlyNumericSlugClaimBeforeRawLinodeID(t *testing.T) {
 	leaseID := "cbx_222222222222"
 	slug := "123"

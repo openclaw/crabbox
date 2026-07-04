@@ -388,7 +388,7 @@ func (b *backend) targetFromInstance(item vultrInstance, req core.ResolveRequest
 	if err != nil {
 		return core.LeaseTarget{}, fmt.Errorf("read vultr lease claim: %w", err)
 	}
-	if claimExists {
+	if claimExists && !req.IsReadOnlyStatus() {
 		if claim.Provider != providerName {
 			return core.LeaseTarget{}, core.Exit(2, "lease=%s is claimed by provider=%s; refusing vultr claim rewrite", leaseID, claim.Provider)
 		}
@@ -405,9 +405,9 @@ func (b *backend) targetFromInstance(item vultrInstance, req core.ResolveRequest
 			return core.LeaseTarget{}, core.Exit(2, "vultr lease claim has no instance identity or valid pending recovery state for lease=%s", leaseID)
 		}
 		preserveVultrIdentity(server.Labels, claim.Labels)
-	} else if req.ReleaseOnly {
+	} else if !claimExists && req.ReleaseOnly {
 		return core.LeaseTarget{}, core.Exit(2, "vultr lease=%s has no exact local claim; refusing release", leaseID)
-	} else if !req.NoLocalStateMutations {
+	} else if !claimExists && !req.NoLocalStateMutations {
 		if !req.Reclaim {
 			return core.LeaseTarget{}, core.Exit(2, "vultr lease=%s is unclaimed; use --reclaim to adopt it explicitly", leaseID)
 		}

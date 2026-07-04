@@ -629,6 +629,12 @@ type ResolveRequest struct {
 	ExpectedProviderIdentity ProviderIdentityExpectation
 }
 
+// IsReadOnlyStatus reports whether resolution may inspect provider inventory
+// without trusting or rewriting local claim state.
+func (r ResolveRequest) IsReadOnlyStatus() bool {
+	return r.StatusOnly && r.NoLocalStateMutations && !r.ReleaseOnly && !r.Reclaim
+}
+
 type ReleaseLeaseRequest struct {
 	Lease                    LeaseTarget
 	Force                    bool

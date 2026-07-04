@@ -100,6 +100,33 @@ func TestScalewayAcquireListResolveTouchReleaseLifecycle(t *testing.T) {
 	}
 }
 
+func TestScalewayResolveReadOnlyIgnoresStaleClaim(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_121212121212"
+	slug := "stale-read-only"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	fake.server = testServer("srv-live", core.LeaseProviderName(leaseID, slug), tagsFromLabels(labels), "203.0.113.21")
+	claimServer := core.Server{Provider: providerName, CloudID: "srv-stale", Name: fake.server.Name, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.CloudID != fake.server.ID {
+		t.Fatalf("lease=%#v", lease)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || claim.CloudID != "srv-stale" {
+		t.Fatalf("read-only resolve changed stale claim: claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+}
+
 func TestScalewayAcquireOnAcquiredErrorRollsBack(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	_, err := backend.Acquire(context.Background(), core.AcquireRequest{

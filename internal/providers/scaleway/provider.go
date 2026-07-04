@@ -703,16 +703,16 @@ func (b *Backend) targetFromServer(ctx context.Context, client Client, item *ins
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if exists {
+	if exists && !req.IsReadOnlyStatus() {
 		if err := validateScalewayClaimIdentity(claim, server); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		if err := b.validateProviderIdentity(claim.Labels, client); err != nil {
 			return core.LeaseTarget{}, err
 		}
-	} else if req.ReleaseOnly {
+	} else if !exists && req.ReleaseOnly {
 		return core.LeaseTarget{}, core.Exit(2, "scaleway lease=%s has no exact local claim; refusing release", leaseID)
-	} else if !req.NoLocalStateMutations {
+	} else if !exists && !req.NoLocalStateMutations {
 		if !req.Reclaim {
 			return core.LeaseTarget{}, core.Exit(2, "scaleway lease=%s is unclaimed; use --reclaim to adopt it explicitly", leaseID)
 		}

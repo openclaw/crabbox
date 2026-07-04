@@ -323,6 +323,42 @@ func TestResolveReadOnlyDoesNotClaimVisibleInstance(t *testing.T) {
 	}
 }
 
+func TestResolveReadOnlyIgnoresStaleInstanceClaim(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	leaseID := "cbx_222222222225"
+	slug := "stale-read-only"
+	cloudID := "33333333-3333-4333-8333-333333333336"
+	api.instances = []vultrInstance{{
+		ID:           cloudID,
+		Label:        core.LeaseProviderName(leaseID, slug),
+		MainIP:       "203.0.113.42",
+		Status:       "active",
+		PowerStatus:  "running",
+		ServerStatus: "ok",
+		Plan:         b.Cfg.ServerType,
+		Tags:         leaseTags(b.Cfg, leaseID, slug, "ready", false, time.Now()),
+	}}
+	labels := labelsFromTags(api.instances[0].Tags)
+	labels[vultrAccountLabel] = "account:test-account"
+	claimServer := core.Server{Provider: providerName, CloudID: "stale-cloud-id", Name: api.instances[0].Label, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, b.Cfg, claimServer, core.SSHTarget{}, b.Cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: slug, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.CloudID != cloudID {
+		t.Fatalf("lease=%#v", lease)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || claim.CloudID != "stale-cloud-id" {
+		t.Fatalf("read-only resolve changed stale claim: claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+}
+
 func TestResolveRejectsCloudlessClaimBeforeRebinding(t *testing.T) {
 	api := &fakeVultrAPI{}
 	b := newTestBackend(t, api)

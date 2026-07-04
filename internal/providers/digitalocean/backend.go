@@ -698,7 +698,7 @@ func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.Reso
 	if claimErr != nil {
 		return core.LeaseTarget{}, fmt.Errorf("read digitalocean lease claim: %w", claimErr)
 	}
-	if claimExists {
+	if claimExists && !req.IsReadOnlyStatus() {
 		if claim.Provider != providerName {
 			return core.LeaseTarget{}, core.Exit(2, "lease=%s is claimed by provider=%s; refusing digitalocean claim rewrite", leaseID, claim.Provider)
 		}
@@ -720,9 +720,9 @@ func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.Reso
 			return core.LeaseTarget{}, core.Exit(2, "digitalocean lease claim has no Droplet identity or valid pending recovery state for lease=%s", leaseID)
 		}
 		preserveDigitalOceanKeyIdentity(server.Labels, claim.Labels)
-	} else if req.ReleaseOnly {
+	} else if !claimExists && req.ReleaseOnly {
 		return core.LeaseTarget{}, core.Exit(2, "digitalocean lease=%s has no exact local claim; refusing release", leaseID)
-	} else if !req.NoLocalStateMutations {
+	} else if !claimExists && !req.NoLocalStateMutations {
 		if !req.Reclaim {
 			return core.LeaseTarget{}, core.Exit(2, "digitalocean lease=%s is unclaimed; use --reclaim to adopt it explicitly", leaseID)
 		}
