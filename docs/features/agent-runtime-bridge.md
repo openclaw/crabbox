@@ -62,13 +62,16 @@ The bridge contract should be small and explicit:
 
 - start one daemon per station attempt;
 - bind the daemon to lease loopback only;
+- pin downloaded harness artifacts to a reviewed digest or verified signature;
 - route client traffic through an authenticated Crabbox bridge;
 - use a short-lived bridge ticket scoped to org, owner, station id, attempt id,
   lease id, path prefix, and expiry;
 - support HTTP and SSE without exposing raw provider credentials;
 - record the daemon command hash, binary/source identity, port, pid, start time,
   and bridge path in station evidence;
-- stop the daemon process group before lease release or credential revocation.
+- reject secrets in daemon process arguments;
+- stop the daemon and all descendants before lease release or credential
+  revocation.
 
 The bridge is not a public ingress feature. A daemon must never listen on a
 public provider interface by default.
@@ -81,11 +84,13 @@ station:
 - require the current authenticated principal on every bridge request;
 - reject stale tickets after station stop, attempt replacement, lease release,
   manager revocation, or ticket expiry;
-- do not accept bridge tickets in URL query strings by default;
-- strip coordinator auth headers before forwarding to the daemon;
+- never accept bridge tickets in URL query strings;
+- canonicalize the request path before enforcing the ticket's path prefix;
+- forward only an explicit header allowlist and strip coordinator auth headers,
+  cookies, and proxy identity headers before forwarding to the daemon;
 - do not forward Crabbox broker, coordinator, cloud provider, or admin tokens;
-- keep bridge cookies and tickets scoped to an isolated origin or path that
-  cannot be reused by lease-controlled content.
+- keep bridge cookies and tickets on an isolated origin that lease-controlled
+  content cannot reuse.
 
 If the daemon has its own auth header, Crabbox may inject a generated
 daemon-local credential, but that credential must be attempt-scoped, redacted,
@@ -116,6 +121,8 @@ Stop behavior must be deterministic:
 - After the grace window, Crabbox kills remaining child processes.
 - The bridge stops accepting new connections once desired state is stopping.
 - Active SSE streams close with a terminal station event.
+- An unexpected daemon exit makes the attempt terminal unless an explicit,
+  separately reviewed restart policy permits replay.
 - Evidence records stop reason, signal path, exit status, and cleanup result.
 - Lease release waits for daemon cleanup or records why cleanup failed.
 
@@ -126,7 +133,7 @@ Repeating stop must be safe and preserve the original terminal reason.
 Agent runtime evidence should extend Station evidence. Minimum fields:
 
 - station id, attempt id, lease id, run id if one exists;
-- daemon command, shell/argv mode, command hash, and workdir;
+- redacted daemon command, shell/argv mode, command hash, and remote workdir;
 - daemon binary/source identity and version when known;
 - loopback port and bridge path, not raw secret tickets;
 - start and stop timestamps;
@@ -162,16 +169,18 @@ bridges, and stops a long-running daemon before it can claim support.
 Before merging implementation code, verify:
 
 - The daemon binds to loopback, never a public interface by default.
+- Downloaded harness artifacts have reviewed integrity metadata.
 - Bridge requests require current authorization and scoped short-lived tickets.
-- Coordinator auth headers are stripped before forwarding to lease content.
+- Tickets never enter URLs, paths are canonicalized before scope checks, and
+  only allowlisted headers reach lease content.
 - Revoked managers and stopped stations cannot keep bridge access.
-- Stop closes active HTTP/SSE sessions and kills the daemon process group.
+- Stop closes active HTTP/SSE sessions and kills the daemon and all descendants.
 - Bridge credentials, tickets, model/tool credentials, and provider tokens are
   redacted from logs, timing, events, artifacts, and evidence.
 - modelAccess is not implied by agent runtime bridge support.
 - Unsupported providers fail before daemon launch.
 - Tests cover stale tickets, attempt replacement, stop/revoke behavior, header
-  stripping, loopback-only binding, and redaction.
+  allowlisting, path canonicalization, loopback-only binding, and redaction.
 
 ## Non-goals
 
