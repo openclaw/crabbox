@@ -6,7 +6,6 @@
 
 - Renamed the `apple-vz` provider to `apple-vm`; the old provider name/aliases, `appleVZ:` config keys, `--apple-vz-*` flags, and `CRABBOX_APPLE_VZ_*` environment variables keep working as deprecated aliases, existing leases and claims stay manageable, and the state directory migrates automatically.
 - Replaced the Code-Hex/vz cgo dependency with `crabbox-apple-vm-vmd`, a dependency-free Swift Virtualization.framework daemon embedded in the now pure-Go `crabbox-apple-vm-helper`; the helper installs and entitlement-signs the daemon itself, so Crabbox no longer copies or codesigns helper binaries.
-
 - Updated Go SSH and OS support libraries, including upstream authentication-attempt, malformed-session, key-size, KDF, and known-host validation hardening.
 - Updated the Node/PostgreSQL coordinator to pg 8.22 and pg-boss 12.25, including current protocol parsing, startup retry, queue-cache, migration-deadlock, and scheduling fixes.
 
@@ -37,6 +36,7 @@
 - Revalidated live AWS, Azure, and GCP instance identity, ownership, lease binding, cleanup eligibility, and any destructive companion-resource identity immediately before direct cleanup deletion. Thanks @coygeek.
 - Required W&B sandbox reuse, status, and stop to match an exact endpoint/entity/project/resource-bound local claim plus provider inventory ownership. Thanks @coygeek.
 - Required RunPod stop to use an exact pod ID/name-bound local claim, with conflict-safe explicit `--reclaim` adoption for unclaimed or legacy pods. Thanks @coygeek.
+- Required DigitalOcean, Linode, Scaleway, and Vultr inventory and destructive actions to use canonical lease identities and exact provider/resource-bound local claims, with explicit `--reclaim` adoption for claimless resources. Thanks @coygeek and @vincentkoc.
 - Made coordinatorless generic provider live smokes skip coordinator-only history and always clean up acquired leases after later lifecycle failures.
 - Replaced privileged managed Linux Code Server and Tailscale installer scripts with checksum-verified archives or Tailscale's signed package repository with a pinned keyring in both CLI and coordinator bootstrap paths. Thanks @TurboTheTurtle.
 
