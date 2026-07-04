@@ -64,7 +64,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return nil
 	}
 	server.Status = "paused"
-	server.Labels["state"] = "released"
+	server.Labels["state"] = "paused"
 	server.Labels["release"] = "pause"
 	annotations := annotationsFromLeaseLabels(server.Labels)
 	claim, claimOK, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)

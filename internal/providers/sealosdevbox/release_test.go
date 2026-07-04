@@ -21,6 +21,16 @@ func TestReleaseRetainsLeaseByPausingAndClearingEndpoint(t *testing.T) {
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.SSHHost == "" || before.SSHPort == 0 {
+		t.Fatalf("test setup did not persist SSH endpoint: %#v", before)
+	}
 	runner := &lifecycleRunner{outputs: []string{
 		releaseDevboxJSON(cfg, leaseID, slug, name),
 		"patched",
@@ -33,7 +43,7 @@ func TestReleaseRetainsLeaseByPausingAndClearingEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.SSHHost != "" || claim.SSHPort != 0 || claim.Labels["state"] != "released" || claim.Labels["release"] != "pause" {
+	if claim.SSHHost != "" || claim.SSHPort != 0 || claim.Labels["state"] != "paused" || claim.Labels["release"] != "pause" {
 		t.Fatalf("claim=%#v", claim)
 	}
 	got := strings.Join(flattenArgs(runner.requests), " ")
