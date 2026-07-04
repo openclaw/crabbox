@@ -159,6 +159,23 @@ func newWandbClient(cfg Config, _ Runtime) (wandbAPI, error) {
 	return &wandbClient{conn: conn, gw: sandboxv1.NewGatewayServiceClient(conn)}, nil
 }
 
+// wandbProviderScope binds a local claim to the exact remote namespace without
+// retaining the API key. The client validates that entity is present before a
+// production operation reaches ownership checks.
+func wandbProviderScope() (string, error) {
+	endpoint := strings.TrimSpace(os.Getenv("CWSANDBOX_BASE_URL"))
+	if endpoint == "" {
+		endpoint = defaultEndpoint
+	}
+	resolved, _, err := resolveEndpoint(endpoint)
+	if err != nil {
+		return "", err
+	}
+	return "endpoint:" + url.QueryEscape(resolved) +
+		"|entity:" + url.QueryEscape(strings.TrimSpace(os.Getenv("WANDB_ENTITY_NAME"))) +
+		"|project:" + url.QueryEscape(strings.TrimSpace(os.Getenv("WANDB_PROJECT"))), nil
+}
+
 func (c *wandbClient) Close() error {
 	if c == nil || c.conn == nil {
 		return nil

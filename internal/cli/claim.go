@@ -277,9 +277,14 @@ func claimLeaseTargetForConfig(leaseID, slug string, cfg Config, server Server, 
 }
 
 func claimLeaseTargetForConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, idleTimeout time.Duration, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	provider, _ := claimProviderDetailsForConfig(cfg)
+	return claimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug, cfg, providerClaimScope(provider, cfg), server, target, idleTimeout, expected, expectedExists)
+}
+
+func claimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, idleTimeout time.Duration, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
-	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, "", idleTimeout, false, claimMetadata{
+	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, "", idleTimeout, false, claimMetadata{
 		setCacheVolumes:    true,
 		cacheVolumes:       CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 		setEndpoint:        true,
@@ -1007,6 +1012,26 @@ func removeLeaseClaim(leaseID string) {
 
 func removeLeaseClaimIfUnchanged(leaseID string, expected leaseClaim) error {
 	return removeLeaseClaimIfUnchangedAfter(leaseID, expected, nil)
+}
+
+func verifyLeaseClaimUnchanged(leaseID string, expected leaseClaim) error {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	return withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+			return err
+		}
+		if err := unchangedLeaseClaimGuard(leaseID, expected, true)(claim, exists); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func removeLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, action func() error) error {

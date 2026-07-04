@@ -128,6 +128,12 @@ func ClaimLeaseTargetForConfigIfUnchanged(leaseID, slug string, cfg Config, serv
 	return claimLeaseTargetForConfigIfUnchanged(leaseID, slug, cfg, server, target, idleTimeout, expected, expectedExists)
 }
 
+// ClaimLeaseTargetForConfigScopeIfUnchanged lets a provider bind a claim to
+// routing identity that is intentionally not part of the shared Config model.
+func ClaimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, idleTimeout time.Duration, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, server, target, idleTimeout, expected, expectedExists)
+}
+
 func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 	return claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
@@ -162,6 +168,14 @@ func RemoveLeaseClaim(leaseID string) {
 
 func RemoveLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return removeLeaseClaimIfUnchanged(leaseID, expected)
+}
+
+func VerifyLeaseClaimUnchanged(leaseID string, expected LeaseClaim) error {
+	return verifyLeaseClaimUnchanged(leaseID, expected)
+}
+
+func RemoveLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
+	return removeLeaseClaimIfUnchangedAfter(leaseID, expected, action)
 }
 
 func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {

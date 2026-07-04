@@ -536,20 +536,7 @@ semaphore_smoke() {
 }
 
 wandb_smoke() {
-  need_tool jq
-
-  if [[ -z "${CRABBOX_WANDB_API_KEY:-${WANDB_API_KEY:-}}" ]]; then
-    echo "wandb smoke requires CRABBOX_WANDB_API_KEY or WANDB_API_KEY" >&2
-    return 2
-  fi
-
-  run_in_repo "$cb" doctor --provider wandb
-  run_in_repo "$cb" run \
-    --provider wandb \
-    --no-sync \
-    --wandb-max-lifetime 60 \
-    -- echo crabbox-wandb-ok
-  run_in_repo "$cb" list --provider wandb --json | jq 'map({id:(.id // .CloudID),provider:(.provider // .Provider),state:(.status // .state)})'
+  CRABBOX_BIN="$cb" CRABBOX_LIVE_REPO="$repo" "$root/scripts/wandb-smoke.sh"
 }
 
 incus_smoke() {

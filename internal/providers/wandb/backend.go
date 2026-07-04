@@ -47,6 +47,10 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		return RunResult{}, err
 	}
 	defer b.closeClientAfterOperation()
+	providerScope, err := wandbProviderScope()
+	if err != nil {
+		return RunResult{}, err
+	}
 	started := b.now()
 	cfg := b.cfg
 	image := blank(strings.TrimSpace(cfg.Wandb.DefaultImage), "ubuntu:24.04")
@@ -54,6 +58,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 
 	sandboxID := strings.TrimSpace(req.ID)
 	acquired := false
+	var claim LeaseClaim
 	if sandboxID == "" {
 		fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s image=%s max_lifetime=%ds\n", providerName, image, maxLifetime)
 		sb, err := client.Acquire(ctx, wandbAcquireRequest{
@@ -68,6 +73,15 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		sandboxID = sb.ID
 		acquired = true
 		fmt.Fprintf(b.rt.Stderr, "provisioned sandbox=%s status=%s\n", sb.ID, sb.Status)
+		claim, err = claimWandbSandbox(sandboxID, providerScope, cfg)
+		if err != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), wandbStopTimeout)
+			defer cancel()
+			if stopErr := client.Stop(stopCtx, sandboxID, 10, true); stopErr != nil {
+				return RunResult{}, fmt.Errorf("persist wandb sandbox %s ownership claim: %w (rollback stop also failed: %v)", sandboxID, err, stopErr)
+			}
+			return RunResult{}, fmt.Errorf("persist wandb sandbox %s ownership claim: %w", sandboxID, err)
+		}
 		if req.EnvSummary {
 			printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 		}
@@ -80,7 +94,8 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			// configs may select without the user asking for env forwarding.
 			return RunResult{}, exit(2, "provider=%s cannot forward env vars to an existing sandbox (--id); rerun without --id or omit --allow-env", providerName)
 		}
-		if err := requireWandbOwnership(ctx, client, sandboxID); err != nil {
+		claim, sandboxID, err = requireWandbOwnership(ctx, client, sandboxID, providerScope)
+		if err != nil {
 			return RunResult{}, err
 		}
 	}
@@ -96,7 +111,9 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		}
 		stopCtx, cancel := context.WithTimeout(context.Background(), wandbStopTimeout)
 		defer cancel()
-		if err := client.Stop(stopCtx, sandboxID, 10, true); err != nil {
+		if err := removeWandbClaimAfter(claim, func() error {
+			return client.Stop(stopCtx, sandboxID, 10, true)
+		}); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: wandb stop failed for %s: %v\n", sandboxID, err)
 		}
 	}()
@@ -116,12 +133,18 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 	}
 
 	commandStarted := b.now()
-	exitCode, execErr := client.Exec(ctx, wandbExecRequest{
-		SandboxID: sandboxID,
-		Command:   req.Command,
-		Stdout:    b.rt.Stdout,
-		Stderr:    b.rt.Stderr,
-	})
+	var exitCode int
+	var execErr error
+	if err := verifyWandbClaim(claim); err != nil {
+		execErr = err
+	} else {
+		exitCode, execErr = client.Exec(ctx, wandbExecRequest{
+			SandboxID: sandboxID,
+			Command:   req.Command,
+			Stdout:    b.rt.Stdout,
+			Stderr:    b.rt.Stderr,
+		})
+	}
 	if execErr != nil && exitCode == 0 {
 		var ee ExitError
 		if errors.As(execErr, &ee) && ee.Code != 0 {
@@ -169,7 +192,24 @@ func wandbCleanupCommand(sandboxID string) string {
 	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, shellQuote(sandboxID))
 }
 
-func requireWandbOwnership(ctx context.Context, client wandbAPI, sandboxID string) error {
+func requireWandbOwnership(ctx context.Context, client wandbAPI, identifier, providerScope string) (LeaseClaim, string, error) {
+	claim, ok, err := resolveWandbClaim(identifier)
+	if err != nil {
+		return LeaseClaim{}, "", err
+	}
+	if !ok || claim.CloudID == "" {
+		return LeaseClaim{}, "", exit(4, "wandb sandbox %q has no matching local ownership claim", identifier)
+	}
+	if claim.ProviderScope == "" || claim.ProviderScope != providerScope {
+		return LeaseClaim{}, "", exit(4, "wandb sandbox %q ownership claim belongs to a different endpoint, entity, or project", identifier)
+	}
+	if err := requireWandbInventoryOwnership(ctx, client, claim.CloudID); err != nil {
+		return LeaseClaim{}, "", err
+	}
+	return claim, claim.CloudID, nil
+}
+
+func requireWandbInventoryOwnership(ctx context.Context, client wandbAPI, sandboxID string) error {
 	sandboxes, err := client.List(ctx, []string{"crabbox"}, "all")
 	if err != nil {
 		return err
@@ -179,7 +219,7 @@ func requireWandbOwnership(ctx context.Context, client wandbAPI, sandboxID strin
 			return nil
 		}
 	}
-	return exit(4, "wandb sandbox %q is not Crabbox-managed or no longer exists", sandboxID)
+	return exit(4, "wandb sandbox %q is not tagged as Crabbox-managed or no longer exists", sandboxID)
 }
 
 func (b *wandbBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -219,7 +259,12 @@ func (b *wandbBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 		return StatusView{}, err
 	}
 	defer b.closeClientAfterOperation()
-	if err := requireWandbOwnership(ctx, client, sandboxID); err != nil {
+	providerScope, err := wandbProviderScope()
+	if err != nil {
+		return StatusView{}, err
+	}
+	_, sandboxID, err = requireWandbOwnership(ctx, client, sandboxID, providerScope)
+	if err != nil {
 		return StatusView{}, err
 	}
 	sb, err := client.Status(ctx, sandboxID)
@@ -252,10 +297,17 @@ func (b *wandbBackend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	defer b.closeClientAfterOperation()
-	if err := requireWandbOwnership(ctx, client, sandboxID); err != nil {
+	providerScope, err := wandbProviderScope()
+	if err != nil {
 		return err
 	}
-	return client.Stop(ctx, sandboxID, 10, false)
+	claim, sandboxID, err := requireWandbOwnership(ctx, client, sandboxID, providerScope)
+	if err != nil {
+		return err
+	}
+	return removeWandbClaimAfter(claim, func() error {
+		return client.Stop(ctx, sandboxID, 10, false)
+	})
 }
 
 // Doctor mirrors the modal/e2b/runpod pattern: dial, probe auth via a cheap

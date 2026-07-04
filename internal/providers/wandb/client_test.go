@@ -156,6 +156,25 @@ func TestResolveEndpoint(t *testing.T) {
 	}
 }
 
+func TestWandbProviderScopeBindsRoutingWithoutAPIKey(t *testing.T) {
+	t.Setenv("CWSANDBOX_BASE_URL", "https://api.cwsandbox.com:443")
+	t.Setenv("WANDB_ENTITY_NAME", "team|blue")
+	t.Setenv("WANDB_PROJECT", "project one")
+	t.Setenv("CRABBOX_WANDB_API_KEY", "must-not-appear")
+
+	scope, err := wandbProviderScope()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "endpoint:api.cwsandbox.com%3A443|entity:team%7Cblue|project:project+one"
+	if scope != want {
+		t.Fatalf("scope = %q, want %q", scope, want)
+	}
+	if strings.Contains(scope, "must-not-appear") {
+		t.Fatal("provider scope retained API key")
+	}
+}
+
 func TestResolveEndpointRejectsURLPath(t *testing.T) {
 	for _, endpoint := range []string{
 		"https://api.cwsandbox.com:443/v2",

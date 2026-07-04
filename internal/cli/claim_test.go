@@ -268,6 +268,30 @@ func TestConditionalClaimMutationRejectsChangedState(t *testing.T) {
 	}
 }
 
+func TestVerifyLeaseClaimUnchanged(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_guarded_action"
+	cfg := Config{Provider: "external"}
+	server := Server{Provider: "external", CloudID: "resource-1"}
+	if err := claimLeaseTargetForConfig(leaseID, "guarded", cfg, server, SSHTarget{}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyLeaseClaimUnchanged(leaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := claim
+	stale.CloudID = "resource-2"
+	err = verifyLeaseClaimUnchanged(leaseID, stale)
+	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("stale guard err=%v", err)
+	}
+}
+
 func TestConditionalRepoClaimCanBeRestored(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_transaction123"

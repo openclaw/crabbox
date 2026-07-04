@@ -258,15 +258,17 @@ output, downloaded artifacts, screenshots, or failure bundles.
 
 Lifecycle recovery from raw provider identifiers is provider-specific and
 fails closed when ownership cannot be established. Cloudflare containers need
-a matching local claim. Freestyle and Islo canonical names remain available
-for read-only discovery, but delete, pause, resume, SSH reuse, and delegated
-reuse require an exact local claim. When local state was intentionally lost,
-an operator can use the provider's supported `--reclaim` reuse path to persist
-a new claim before any provider mutation. Hyper-V, Multipass, and Parallels
-likewise require exact resource-bound local claims before release or cleanup;
-provider names and `crabbox-` resource prefixes are discovery hints, not
-destructive ownership proof. Railway services are created out-of-band, so stop
-requires either an exact local endpoint/project/environment/service/deployment
+a matching local claim. W&B sandbox reuse, status, and stop require an exact
+local claim bound to the sandbox ID, API endpoint, entity, and project as well
+as the provider-side Crabbox inventory tag. Freestyle and Islo canonical names
+remain available for read-only discovery, but delete, pause, resume, SSH reuse,
+and delegated reuse require an exact local claim. When local state was
+intentionally lost, an operator can use the provider's supported `--reclaim`
+reuse path to persist a new claim before any provider mutation. Hyper-V,
+Multipass, and Parallels likewise require exact resource-bound local claims
+before release or cleanup; provider names and `crabbox-` resource prefixes are
+discovery hints, not destructive ownership proof. Railway services are created
+out-of-band, so stop requires either an exact local endpoint/project/environment/service/deployment
 claim or explicit `stop --reclaim` adoption of the currently inspected
 deployment; a successful stop removes that one-deployment claim.
 Direct Hetzner release and cleanup similarly require canonical provider labels

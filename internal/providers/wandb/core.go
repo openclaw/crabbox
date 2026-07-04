@@ -25,6 +25,8 @@ type StopRequest = core.StopRequest
 type DoctorRequest = core.DoctorRequest
 type DoctorResult = core.DoctorResult
 type Server = core.Server
+type LeaseClaim = core.LeaseClaim
+type SSHTarget = core.SSHTarget
 type Repo = core.Repo
 type ExitError = core.ExitError
 type FeatureSet = core.FeatureSet
@@ -54,6 +56,27 @@ func blank(value, fallback string) string {
 
 func shellQuote(value string) string {
 	return core.ShellQuote(value)
+}
+
+func claimWandbSandbox(leaseID, scope string, cfg Config) (LeaseClaim, error) {
+	server := Server{CloudID: leaseID, Provider: providerName, Name: leaseID}
+	return core.ClaimLeaseTargetForConfigScopeIfUnchanged(leaseID, leaseID, cfg, scope, server, SSHTarget{}, cfg.IdleTimeout, LeaseClaim{}, false)
+}
+
+func resolveWandbClaim(identifier string) (LeaseClaim, bool, error) {
+	claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName)
+	if err != nil || ok {
+		return claim, ok, err
+	}
+	return core.ResolveLeaseClaimForProviderCloudID(identifier, providerName)
+}
+
+func removeWandbClaimAfter(claim LeaseClaim, action func() error) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action)
+}
+
+func verifyWandbClaim(claim LeaseClaim) error {
+	return core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim)
 }
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
