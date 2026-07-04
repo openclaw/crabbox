@@ -2,6 +2,14 @@
 
 ## 0.35.1 - Unreleased
 
+### Changed
+
+- Updated Go SSH and OS support libraries, including upstream authentication-attempt, malformed-session, key-size, KDF, and known-host validation hardening.
+
+### Fixed
+
+- Made coordinatorless generic provider live smokes skip coordinator-only history and always clean up acquired leases after later lifecycle failures.
+
 ## 0.35.0 - 2026-07-04
 
 ### Added

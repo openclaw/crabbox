@@ -679,9 +679,10 @@ esac
   assert.match(calls, /^doctor --provider namespace-instance$/m);
   assert.equal((calls.match(/^list --provider namespace-instance --json$/gm) ?? []).length, 2);
   assert.match(calls, /^warmup --provider namespace-instance --class standard --ttl 10m --idle-timeout 5m$/m);
-  for (const command of ["status", "inspect", "ssh", "cache", "run", "history", "stop"]) {
+  for (const command of ["status", "inspect", "ssh", "cache", "run", "stop"]) {
     assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
   }
+  assert.doesNotMatch(calls, /^history(?: |$)/m);
 });
 
 test("Semaphore live smoke requires host before provider mutation", () => {
@@ -1776,9 +1777,10 @@ esac
   assert.match(result.stdout, /crabbox-live-ok/);
   const calls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(calls, /^warmup --provider apple-container --ttl 15m --idle-timeout 5m$/m);
-  for (const command of ["status", "inspect", "ssh", "cache", "run", "history", "stop"]) {
+  for (const command of ["status", "inspect", "ssh", "cache", "run", "stop"]) {
     assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
   }
+  assert.doesNotMatch(calls, /^history(?: |$)/m);
 });
 
 test("local-container live smoke uses the generic SSH lease lifecycle", () => {
@@ -1857,9 +1859,62 @@ esac
   assert.match(result.stdout, /crabbox-live-ok/);
   const calls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(calls, /^warmup --provider local-container --ttl 15m --idle-timeout 5m$/m);
-  for (const command of ["status", "inspect", "ssh", "cache", "run", "history", "stop"]) {
+  for (const command of ["status", "inspect", "ssh", "cache", "run", "stop"]) {
     assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
   }
+  assert.doesNotMatch(calls, /^history(?: |$)/m);
+});
+
+test("generic coordinatorless live smoke cleans up after lifecycle failure", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-cleanup-failure-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+case "$1" in
+  warmup)
+    printf 'provisioned lease=cbx_123456789abc slug=cleanup-failure state=ready\\n'
+    ;;
+  status)
+    printf 'lease=cbx_123456789abc slug=cleanup-failure state=ready\\n'
+    ;;
+  inspect)
+    printf 'forced inspect failure\\n' >&2
+    exit 42
+    ;;
+  stop)
+    printf 'stopped %s\\n' "\${*: -1}"
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_FAKE_LOG: crabboxLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "local-container",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 42, result.stdout + result.stderr);
+  const calls = fs.readFileSync(crabboxLog, "utf8");
+  assert.match(calls, /^inspect --provider local-container /m);
+  assert.match(calls, /^stop --provider local-container cleanup-failure$/m);
 });
 
 test("docker-sandbox live smoke dispatches to the provider-specific smoke", () => {
@@ -3003,9 +3058,10 @@ esac
   assert.match(result.stdout, /crabbox-live-ok/);
   const calls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(calls, /^warmup --provider multipass --ttl 15m --idle-timeout 5m$/m);
-  for (const command of ["status", "inspect", "ssh", "cache", "run", "history", "stop"]) {
+  for (const command of ["status", "inspect", "ssh", "cache", "run", "stop"]) {
     assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
   }
+  assert.doesNotMatch(calls, /^history(?: |$)/m);
 });
 
 test("tart live smoke uses the generic SSH lease lifecycle", () => {
@@ -3084,9 +3140,10 @@ esac
   assert.match(result.stdout, /crabbox-live-ok/);
   const calls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(calls, /^warmup --provider tart --ttl 30m --idle-timeout 5m$/m);
-  for (const command of ["status", "inspect", "ssh", "cache", "run", "history", "stop"]) {
+  for (const command of ["status", "inspect", "ssh", "cache", "run", "stop"]) {
     assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
   }
+  assert.doesNotMatch(calls, /^history(?: |$)/m);
 });
 
 test("apple-vz live smoke preserves the helper override for the full lifecycle", () => {
@@ -3177,9 +3234,10 @@ esac
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /crabbox-live-ok/);
   const calls = fs.readFileSync(crabboxLog, "utf8");
-  for (const command of ["warmup", "status", "inspect", "ssh", "cache", "run", "history", "stop"]) {
+  for (const command of ["warmup", "status", "inspect", "ssh", "cache", "run", "stop"]) {
     assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
   }
+  assert.doesNotMatch(calls, /^history(?: |$)/m);
   assert.doesNotMatch(calls, /--apple-vz-helper/);
 });
 
