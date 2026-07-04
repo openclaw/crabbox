@@ -49,6 +49,17 @@ test("macOS GoReleaser jobs bound build parallelism", () => {
   );
 });
 
+test("production and snapshot releases have the same build budget", () => {
+  const ciWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
+  const releaseWorkflow = fs.readFileSync(
+    path.join(repoRoot, ".github", "workflows", "release.yml"),
+    "utf8",
+  );
+
+  assert.match(ciWorkflow, /release-check:[\s\S]*?timeout-minutes:\s+45/);
+  assert.match(releaseWorkflow, /goreleaser:[\s\S]*?timeout-minutes:\s+45/);
+});
+
 test("Apple VZ release helper targets macOS 13", () => {
   const ciWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
   const goreleaser = fs.readFileSync(path.join(repoRoot, ".goreleaser.yaml"), "utf8");
