@@ -150,16 +150,30 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   return new Request(request, { headers });
 }
 
+export async function requestWithAdminGrantVersion(
+  request: Request,
+  env: Pick<
+    Env,
+    "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS" | "CRABBOX_GITHUB_ADMIN_LOGINS"
+  >,
+): Promise<Request> {
+  const headers = new Headers(request.headers);
+  headers.set("x-crabbox-admin-grant-version", await adminGrantVersion(env));
+  return new Request(request, { headers });
+}
+
 export function requestWithoutTrustedHeaders(request: Request): Request {
   if (
     !request.headers.has("x-crabbox-internal") &&
-    !request.headers.has("x-crabbox-proxy-secret")
+    !request.headers.has("x-crabbox-proxy-secret") &&
+    !request.headers.has("x-crabbox-admin-grant-version")
   ) {
     return request;
   }
   const headers = new Headers(request.headers);
   headers.delete("x-crabbox-internal");
   headers.delete("x-crabbox-proxy-secret");
+  headers.delete("x-crabbox-admin-grant-version");
   return new Request(request, { headers });
 }
 
@@ -602,6 +616,22 @@ async function sign(value: string, secret: string): Promise<string> {
 export async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export async function adminGrantVersion(
+  env: Pick<
+    Env,
+    "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS" | "CRABBOX_GITHUB_ADMIN_LOGINS"
+  >,
+): Promise<string> {
+  const tokenHash = env.CRABBOX_ADMIN_TOKEN ? await sha256Hex(env.CRABBOX_ADMIN_TOKEN) : "";
+  return sha256Hex(
+    JSON.stringify({
+      tokenHash,
+      owners: [...new Set(envList(env.CRABBOX_GITHUB_ADMIN_OWNERS))].toSorted(),
+      logins: [...new Set(envList(env.CRABBOX_GITHUB_ADMIN_LOGINS))].toSorted(),
+    }),
+  );
 }
 
 export function base64URL(data: Uint8Array): string {
