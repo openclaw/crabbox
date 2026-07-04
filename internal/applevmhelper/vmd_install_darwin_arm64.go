@@ -25,8 +25,6 @@ import (
 // distributed binary cannot ship with entitlements applied (ad-hoc signatures
 // do not survive download quarantine or Homebrew relocation).
 const (
-	ManagedVMDName       = "crabbox-apple-vm-vmd"
-	VMDPathEnv           = "CRABBOX_APPLE_VM_VMD"
 	managedDigestSuffix  = ".digests.json"
 	managedKeepVersions  = 4
 	managedRecentGrace   = time.Hour

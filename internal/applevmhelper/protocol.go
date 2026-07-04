@@ -19,6 +19,12 @@ const (
 	// still recognized when verifying daemons started by older releases.
 	LegacyManagedHelperName = "crabbox-apple-vz-helper"
 
+	// ManagedVMDName is the Swift Virtualization.framework daemon binary; the
+	// helper installs and entitlement-signs a managed copy under the state
+	// root. VMDPathEnv overrides the daemon source for source builds.
+	ManagedVMDName = "crabbox-apple-vm-vmd"
+	VMDPathEnv     = "CRABBOX_APPLE_VM_VMD"
+
 	StatusStarting = "starting"
 	StatusRunning  = "running"
 	StatusStopping = "stopping"
