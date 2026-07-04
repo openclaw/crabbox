@@ -101,6 +101,12 @@ type SSHLeaseBackend interface {
 	ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error
 }
 
+// StatusTouchClaimValidator lets a provider require identity labels that core
+// cannot interpret before status --wait extends a remotely visible lease.
+type StatusTouchClaimValidator interface {
+	StatusTouchClaimMatches(LeaseTarget, LeaseClaim) bool
+}
+
 type ResolvedLeaseTargetRebinder interface {
 	RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error
 }

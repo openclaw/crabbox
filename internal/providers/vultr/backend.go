@@ -270,6 +270,11 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	return server, nil
 }
 
+func (b *backend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
+	expected := strings.TrimSpace(claim.Labels[vultrAccountLabel])
+	return expected != "" && expected == strings.TrimSpace(lease.Server.Labels[vultrAccountLabel])
+}
+
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	return b.deleteServer(ctx, b.Cfg, req.Lease.Server)
 }

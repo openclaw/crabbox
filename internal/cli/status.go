@@ -68,7 +68,7 @@ func (a App) status(ctx context.Context, args []string) error {
 			if err == nil {
 				state, err = statusViewFromLeaseTarget(statusCtx, cfg, lease)
 				if err == nil && *wait {
-					claimed, claimErr := statusLeaseHasExactClaim(lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
+					claimed, claimErr := statusLeaseHasExactClaim(backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
 					if claimErr != nil {
 						fmt.Fprintf(a.Stderr, "warning: touch skipped for %s: %v\n", lease.LeaseID, claimErr)
 					} else if claimed {
@@ -136,7 +136,7 @@ func statusWaitDone(state statusView) bool {
 	return state.Ready || statusTerminalState(state.State)
 }
 
-func statusLeaseHasExactClaim(lease LeaseTarget, fallbackProvider, providerScope string) (bool, error) {
+func statusLeaseHasExactClaim(backend Backend, lease LeaseTarget, fallbackProvider, providerScope string) (bool, error) {
 	provider := canonicalClaimProvider(blank(lease.Server.Provider, fallbackProvider))
 	if lease.LeaseID == "" || provider == "" {
 		return false, nil
@@ -146,9 +146,16 @@ func statusLeaseHasExactClaim(lease LeaseTarget, fallbackProvider, providerScope
 		return false, fmt.Errorf("read exact %s lease claim: %w", provider, err)
 	}
 	resourceID := strings.TrimSpace(lease.Server.CloudID)
-	return claimed && exact &&
+	matched := claimed && exact &&
 		claim.ProviderScope == providerScope &&
-		resourceID != "" && claim.CloudID == resourceID, nil
+		resourceID != "" && claim.CloudID == resourceID
+	if !matched {
+		return false, nil
+	}
+	if validator, ok := backend.(StatusTouchClaimValidator); ok && !validator.StatusTouchClaimMatches(lease, claim) {
+		return false, nil
+	}
+	return true, nil
 }
 
 func statusWaitTerminalError(id string, state statusView) error {

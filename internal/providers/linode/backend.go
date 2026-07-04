@@ -544,6 +544,11 @@ func (b *linodeLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string 
 	return fmt.Sprintf("deleted lease=%s linode=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
+func (b *linodeLeaseBackend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
+	expected := strings.TrimSpace(claim.Labels[linodeAccountLabel])
+	return expected != "" && expected == strings.TrimSpace(lease.Server.Labels[linodeAccountLabel])
+}
+
 func (b *linodeLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
 	if err := validateLinodeLabels(server.Labels); err != nil {

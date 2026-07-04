@@ -359,6 +359,23 @@ func TestResolveReadOnlyIgnoresStaleInstanceClaim(t *testing.T) {
 	}
 }
 
+func TestStatusTouchClaimRequiresMatchingAccount(t *testing.T) {
+	backend := &backend{}
+	claim := core.LeaseClaim{Labels: map[string]string{vultrAccountLabel: "account:account-a"}}
+	lease := core.LeaseTarget{Server: core.Server{Labels: map[string]string{vultrAccountLabel: "account:account-a"}}}
+	if !backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("matching account identity was rejected")
+	}
+	lease.Server.Labels[vultrAccountLabel] = "account:account-b"
+	if backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("mismatched account identity was accepted")
+	}
+	delete(claim.Labels, vultrAccountLabel)
+	if backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("missing claim account identity was accepted")
+	}
+}
+
 func TestResolveRejectsCloudlessClaimBeforeRebinding(t *testing.T) {
 	api := &fakeVultrAPI{}
 	b := newTestBackend(t, api)

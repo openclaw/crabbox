@@ -1011,6 +1011,23 @@ func TestResolveReadOnlyIgnoresStaleDropletClaim(t *testing.T) {
 	}
 }
 
+func TestStatusTouchClaimRequiresMatchingAccount(t *testing.T) {
+	backend := &digitalOceanLeaseBackend{}
+	claim := core.LeaseClaim{Labels: map[string]string{digitalOceanAccountLabel: "team:account-a"}}
+	lease := core.LeaseTarget{Server: core.Server{Labels: map[string]string{digitalOceanAccountLabel: "team:account-a"}}}
+	if !backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("matching account identity was rejected")
+	}
+	lease.Server.Labels[digitalOceanAccountLabel] = "team:account-b"
+	if backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("mismatched account identity was accepted")
+	}
+	delete(claim.Labels, digitalOceanAccountLabel)
+	if backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("missing claim account identity was accepted")
+	}
+}
+
 func TestResolveNumericIdentifierPrefersDropletIDOverSlug(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

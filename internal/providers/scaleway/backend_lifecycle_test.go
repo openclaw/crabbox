@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"strings"
 	"testing"
@@ -124,6 +125,34 @@ func TestScalewayResolveReadOnlyIgnoresStaleClaim(t *testing.T) {
 	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil || !exists || claim.CloudID != "srv-stale" {
 		t.Fatalf("read-only resolve changed stale claim: claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+}
+
+func TestStatusTouchClaimRequiresMatchingProviderIdentity(t *testing.T) {
+	backend := &Backend{}
+	labels := map[string]string{
+		"scaleway_project":      "project-a",
+		"scaleway_organization": "organization-a",
+		"scaleway_zone":         "fr-par-1",
+	}
+	claim := core.LeaseClaim{Labels: maps.Clone(labels)}
+	lease := core.LeaseTarget{Server: core.Server{Labels: maps.Clone(labels)}}
+	if !backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("matching provider identity was rejected")
+	}
+	for _, key := range []string{"scaleway_project", "scaleway_organization", "scaleway_zone"} {
+		mismatched := lease
+		mismatched.Server.Labels = maps.Clone(lease.Server.Labels)
+		mismatched.Server.Labels[key] = "other"
+		if backend.StatusTouchClaimMatches(mismatched, claim) {
+			t.Fatalf("mismatched %s was accepted", key)
+		}
+		missing := claim
+		missing.Labels = maps.Clone(claim.Labels)
+		delete(missing.Labels, key)
+		if backend.StatusTouchClaimMatches(lease, missing) {
+			t.Fatalf("missing claim %s was accepted", key)
+		}
 	}
 }
 

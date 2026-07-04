@@ -796,6 +796,11 @@ func (b *digitalOceanLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) s
 	return fmt.Sprintf("deleted lease=%s droplet=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
+func (b *digitalOceanLeaseBackend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
+	expected := strings.TrimSpace(claim.Labels[digitalOceanAccountLabel])
+	return expected != "" && expected == strings.TrimSpace(lease.Server.Labels[digitalOceanAccountLabel])
+}
+
 func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
 	if err := validateDropletLabels(server.Labels); err != nil {

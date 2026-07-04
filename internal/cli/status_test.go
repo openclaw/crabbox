@@ -144,16 +144,20 @@ func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	providerScope := leaseOptionsFromConfig(cfg).ProviderScope
-	claimed, err := statusLeaseHasExactClaim(LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope)
+	claimed, err := statusLeaseHasExactClaim(backend, LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope)
 	if err != nil || !claimed {
 		t.Fatalf("matching exact claim allowed=%t err=%v", claimed, err)
 	}
-	if claimed, err := statusLeaseHasExactClaim(LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope+"-other"); err != nil || claimed {
+	rejecting := &statusTouchClaimRejectingBackend{statusResolveRecordingBackend: backend}
+	if claimed, err := statusLeaseHasExactClaim(rejecting, LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope); err != nil || claimed {
+		t.Fatalf("provider identity-rejected claim allowed=%t err=%v", claimed, err)
+	}
+	if claimed, err := statusLeaseHasExactClaim(backend, LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope+"-other"); err != nil || claimed {
 		t.Fatalf("scope-mismatched claim allowed=%t err=%v", claimed, err)
 	}
 	wrongResource := claimServer
 	wrongResource.CloudID = "i-other"
-	if claimed, err := statusLeaseHasExactClaim(LeaseTarget{LeaseID: "cbx_status", Server: wrongResource}, "aws", providerScope); err != nil || claimed {
+	if claimed, err := statusLeaseHasExactClaim(backend, LeaseTarget{LeaseID: "cbx_status", Server: wrongResource}, "aws", providerScope); err != nil || claimed {
 		t.Fatalf("resource-mismatched claim allowed=%t err=%v", claimed, err)
 	}
 	err = app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status", "--wait", "--wait-timeout", "1ns"})
@@ -211,6 +215,14 @@ type statusResolveRecordingBackend struct {
 	touches       []TouchRequest
 	block         bool
 	timeoutDetail string
+}
+
+type statusTouchClaimRejectingBackend struct {
+	*statusResolveRecordingBackend
+}
+
+func (*statusTouchClaimRejectingBackend) StatusTouchClaimMatches(LeaseTarget, LeaseClaim) bool {
+	return false
 }
 
 func (b *statusResolveRecordingBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {

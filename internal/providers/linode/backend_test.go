@@ -441,6 +441,23 @@ func TestResolveReadOnlyIgnoresStaleLinodeClaim(t *testing.T) {
 	}
 }
 
+func TestStatusTouchClaimRequiresMatchingAccount(t *testing.T) {
+	backend := &linodeLeaseBackend{}
+	claim := core.LeaseClaim{Labels: map[string]string{linodeAccountLabel: "euuid:account-a"}}
+	lease := core.LeaseTarget{Server: core.Server{Labels: map[string]string{linodeAccountLabel: "euuid:account-a"}}}
+	if !backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("matching account identity was rejected")
+	}
+	lease.Server.Labels[linodeAccountLabel] = "euuid:account-b"
+	if backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("mismatched account identity was accepted")
+	}
+	delete(claim.Labels, linodeAccountLabel)
+	if backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("missing claim account identity was accepted")
+	}
+}
+
 func TestResolveReleaseOnlyNumericSlugClaimBeforeRawLinodeID(t *testing.T) {
 	leaseID := "cbx_222222222222"
 	slug := "123"

@@ -466,6 +466,16 @@ func (b *Backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("deleted lease=%s scaleway_server=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
+func (b *Backend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
+	for _, key := range []string{"scaleway_project", "scaleway_organization", "scaleway_zone"} {
+		expected := strings.TrimSpace(claim.Labels[key])
+		if expected == "" || expected != strings.TrimSpace(lease.Server.Labels[key]) {
+			return false
+		}
+	}
+	return true
+}
+
 func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	client, err := b.newClient(b.cfgForRun(), b.rt)
 	if err != nil {
