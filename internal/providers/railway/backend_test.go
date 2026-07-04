@@ -1051,19 +1051,15 @@ func TestRailwayStopRequiresID(t *testing.T) {
 	}
 }
 
-func TestRailwayStopCallsDeploymentStop(t *testing.T) {
+func TestRailwayStopRejectsUnclaimedServiceBeforeAPI(t *testing.T) {
 	api := &fakeRailwayAPI{deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"}}
-	cfg := Config{Provider: providerName}
-	cfg.Railway.APIToken = "test-token"
-	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
-	cfg.Railway.ProjectID = "proj-1"
-	cfg.Railway.EnvironmentID = "env-1"
-	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
-	if err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"}); err != nil {
-		t.Fatalf("Stop err: %v", err)
+	backend := newRailwayBackendForTest(api)
+	err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"})
+	if err == nil || !strings.Contains(err.Error(), "cannot verify ownership") {
+		t.Fatalf("Stop err=%v, want ownership rejection", err)
 	}
-	if api.stopID != "dep-1" {
-		t.Fatalf("stop called with id=%q, want dep-1", api.stopID)
+	if api.latestCalls != 0 || api.stopID != "" {
+		t.Fatalf("unclaimed stop reached Railway API: latestCalls=%d stopID=%q", api.latestCalls, api.stopID)
 	}
 }
 

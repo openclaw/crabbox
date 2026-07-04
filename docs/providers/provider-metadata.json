@@ -764,9 +764,9 @@
     "sync": "none",
     "gpu": "unknown",
     "lifecycle": "Railway",
-    "cleanup": "service stop only",
-    "bestFit": "Inspecting or stopping an existing Railway service",
-    "caveat": "Cannot execute arbitrary Crabbox run commands",
+    "cleanup": "none; Railway-owned",
+    "bestFit": "Inspecting an existing Railway service",
+    "caveat": "Cannot execute commands or stop unclaimed services",
     "docs": "railway.md"
   },
   "runpod": {

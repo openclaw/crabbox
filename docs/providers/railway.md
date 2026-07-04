@@ -11,14 +11,14 @@ projects, environments, services, and deployments. Its public API is a GraphQL
 endpoint at `https://backboard.railway.com/graphql/v2`, authenticated with an
 account-scoped token (`Authorization: Bearer <token>`) created at
 `/account/tokens`. Railway is a `service-control` provider: it owns service and
-deployment lifecycle, and Crabbox drives service inspection and stopping over
+deployment lifecycle, while Crabbox provides read-only service inspection over
 GraphQL. There is no SSH lease, no workspace sync, no arbitrary command
-execution, and no coordinator path.
+execution, coordinator path, or Crabbox-owned Railway lifecycle.
 
 ## When To Use
 
 Use Railway when the workload is already a Railway service and you need Crabbox
-to inspect or stop that service from the same provider matrix as other backends.
+to inspect that service from the same provider matrix as other backends.
 Railway has no synchronous exec primitive (no shell, no `service.run(cmd)`
 field), so Crabbox rejects generic `run` requests instead of pretending the
 provided command ran. For ad-hoc command execution, pick a provider that owns
@@ -32,11 +32,13 @@ Railway API. Railway runs whatever start command the service is configured with
 (via `railway.toml`, the dashboard, or `serviceInstanceUpdate`), so accepting a
 generic Crabbox command would create false-positive test results.
 
-`status` returns the latest deployment status and readiness. `stop` calls
-`deploymentStop` on the latest deployment for the service. `list` enumerates one
-row per service across every project the token can see. `warmup` is rejected so
-Crabbox never silently provisions billable Railway resources — create the
-service yourself in the dashboard or via `serviceCreate` first.
+`status` returns the latest deployment status and readiness. `list` enumerates
+one row per service across every project the token can see. `stop` fails closed
+before any Railway API call: services are created out of band, so Crabbox has no
+exact ownership claim that can authorize a destructive mutation. Stop services
+with Railway directly. `warmup` is rejected so Crabbox never silently provisions
+billable Railway resources — create the service yourself in the dashboard or via
+`serviceCreate` first.
 
 ## Commands
 
@@ -49,16 +51,16 @@ crabbox run --provider railway --no-sync --id "$RAILWAY_SERVICE_ID" -- false
 crabbox status --provider railway --id "$RAILWAY_SERVICE_ID" \
   --railway-project "$RAILWAY_PROJECT_ID" \
   --railway-environment "$RAILWAY_ENVIRONMENT_ID"
-crabbox stop   --provider railway --id "$RAILWAY_SERVICE_ID" \
-  --railway-project "$RAILWAY_PROJECT_ID" \
-  --railway-environment "$RAILWAY_ENVIRONMENT_ID"
 crabbox list   --provider railway
+
+# fails before any Railway API call; use Railway directly to stop the service
+crabbox stop --provider railway --id "$RAILWAY_SERVICE_ID"
 ```
 
 `warmup` is rejected; service creation must happen out-of-band. `run` is rejected
-because there is no Railway exec API. `status` and `stop` require `--id`,
-`--railway-project`, and `--railway-environment`. `list` needs only the API
-token.
+because there is no Railway exec API. `status` requires `--id`,
+`--railway-project`, and `--railway-environment`. `stop` requires `--id` only to
+name the rejected target and never calls Railway. `list` needs only the API token.
 
 ## Auth
 
@@ -118,6 +120,7 @@ A non-`https` URL is rejected unless it targets `localhost`.
 - Crabbox sync: no. `--no-sync` is required.
 - Provider sync: no.
 - Generic `run`: no. Railway has no arbitrary command execution API.
+- Stop: no. Out-of-band services have no verifiable Crabbox ownership claim.
 - URL bridge: yes (delegated url-bridge feature).
 - Desktop/browser/code: no.
 - Actions hydration: no.
@@ -134,6 +137,8 @@ A non-`https` URL is rejected unless it targets `localhost`.
 - `--shell` and per-run environment forwarding are rejected because Railway runs
   the service's own start command.
 - `warmup` is rejected to avoid silently creating billable Railway resources.
+- `stop` is rejected before authentication or provider calls. Use Railway
+  directly until Crabbox has an explicit, conflict-safe adoption contract.
 - Non-2xx HTTP responses and GraphQL `errors[]` envelopes surface as a single
   Railway API error, mirroring the error shape used by other delegated
   providers.

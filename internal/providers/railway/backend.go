@@ -380,26 +380,11 @@ func (b *railwayBackend) Status(ctx context.Context, req StatusRequest) (StatusV
 	return view, nil
 }
 
-func (b *railwayBackend) Stop(ctx context.Context, req StopRequest) error {
+func (b *railwayBackend) Stop(_ context.Context, req StopRequest) error {
 	if req.ID == "" {
 		return exit(2, "provider=%s stop requires --id <railway-service-id>", providerName)
 	}
-	projectID, environmentID, err := b.requireProjectEnv()
-	if err != nil {
-		return exit(2, "provider=%s stop requires --railway-project and --railway-environment", providerName)
-	}
-	client, err := b.api()
-	if err != nil {
-		return err
-	}
-	deployment, err := client.LatestDeployment(ctx, projectID, environmentID, req.ID)
-	if err != nil {
-		return err
-	}
-	if deployment.ID == "" {
-		return exit(5, "provider=%s service=%s has no deployment to stop", providerName, req.ID)
-	}
-	return client.StopDeployment(ctx, deployment.ID)
+	return exit(2, "provider=%s cannot stop service=%s because Crabbox cannot verify ownership of out-of-band Railway services; stop it with Railway directly", providerName, req.ID)
 }
 
 func (b *railwayBackend) api() (railwayAPI, error) {
