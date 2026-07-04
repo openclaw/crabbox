@@ -53,7 +53,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			core.RemoveStoredTestboxKey(leaseID)
 		}
 	}
-	return b.cleanupStaleClaims(observedLeaseIDs, observedNames, req.DryRun)
+	return b.cleanupStaleClaims(ctx, observedLeaseIDs, observedNames, req.DryRun)
 }
 
 func (b *backend) cleanupItemMatchesScope(item devboxItem) bool {
@@ -75,7 +75,7 @@ func (b *backend) printCleanupSkip(item devboxItem, reason string) {
 	fmt.Fprintf(b.rt.Stderr, "skip sealos-devbox devbox=%s lease=%s reason=%s\n", name, core.Blank(leaseID, "-"), reason)
 }
 
-func (b *backend) cleanupStaleClaims(observedLeaseIDs, observedNames map[string]bool, dryRun bool) error {
+func (b *backend) cleanupStaleClaims(ctx context.Context, observedLeaseIDs, observedNames map[string]bool, dryRun bool) error {
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return err
@@ -84,8 +84,20 @@ func (b *backend) cleanupStaleClaims(observedLeaseIDs, observedNames map[string]
 		if !b.claimMatchesScope(claim) || strings.TrimSpace(claim.LeaseID) == "" {
 			continue
 		}
-		if observedLeaseIDs[claim.LeaseID] || observedNames[devboxNameFromClaim(claim, b.cfg)] {
+		name := strings.TrimSpace(devboxNameFromClaim(claim, b.cfg))
+		if observedLeaseIDs[claim.LeaseID] || observedNames[name] {
 			continue
+		}
+		// The managed inventory is label-filtered. Only a direct name lookup can
+		// prove that a drifted resource is actually absent before recovery state
+		// and its SSH key are discarded.
+		if name == "" {
+			continue
+		}
+		if _, err := b.getDevbox(ctx, name); err == nil {
+			continue
+		} else if !kubernetesObjectNotFound(err) {
+			return err
 		}
 		fmt.Fprintf(b.rt.Stdout, "sealos-devbox cleanup stale-claim lease=%s reason=absent dry_run=%t\n", claim.LeaseID, dryRun)
 		if dryRun {
