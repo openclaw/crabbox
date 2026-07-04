@@ -54,6 +54,7 @@ import {
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
   hetznerProvisioningResourceID,
+  hetznerServerOwnedByLease,
 } from "./hetzner";
 import {
   bearerToken,
@@ -126,6 +127,7 @@ import type {
   ExternalRunnerInput,
   ExternalRunnerRecord,
   ExternalRunnerSyncRequest,
+  HetznerServer,
   LeaseRecord,
   LeaseRegistrationRequest,
   LeaseRequest,
@@ -16466,21 +16468,30 @@ export class HetznerProvider implements CloudProvider {
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
     let serverID = Number(lease.serverID);
+    let server: HetznerServer | undefined;
     if (
       (!Number.isSafeInteger(serverID) || serverID <= 0) &&
       lease.providerKeyCleanupPending &&
       lease.provisioningResourceMayExist
     ) {
-      const recovered = await this.client.findServerByLease(lease.id);
-      serverID = recovered?.id ?? Number.NaN;
+      server = await this.client.findServerByLease(lease.id);
+      serverID = server?.id ?? Number.NaN;
     }
     if (Number.isSafeInteger(serverID) && serverID > 0) {
       try {
-        await this.deleteServer(String(serverID));
+        server ??= await this.client.getServer(serverID);
       } catch (error) {
         if (!providerResourceNotFound(error)) {
           throw error;
         }
+      }
+      if (server) {
+        if (server.id !== serverID || !hetznerServerOwnedByLease(server, lease.id)) {
+          throw new Error(
+            `refusing to delete Hetzner server ${serverID}: ownership does not match lease ${lease.id}`,
+          );
+        }
+        await this.deleteServer(String(serverID));
       }
     }
     if (lease.providerKeyCleanupPending) {

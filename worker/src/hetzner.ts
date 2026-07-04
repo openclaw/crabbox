@@ -89,6 +89,18 @@ export function hetznerProvisioningResourceID(error: unknown): number | undefine
     : undefined;
 }
 
+export function hetznerServerOwnedByLease(server: HetznerServer, leaseID: string): boolean {
+  const labels = server.labels ?? {};
+  return (
+    /^cbx_[a-f0-9]{12}$/.test(leaseID) &&
+    labels["crabbox"] === "true" &&
+    labels["created_by"] === "crabbox" &&
+    labels["provider"] === "hetzner" &&
+    labels["lease"] === leaseID &&
+    (labels["slug"] ?? "").trim().length > 0
+  );
+}
+
 export class HetznerClient {
   private readonly token: string;
 

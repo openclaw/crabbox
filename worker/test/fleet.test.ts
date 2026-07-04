@@ -4357,6 +4357,24 @@ describe("fleet lease identity and idle", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input));
         requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        if ((init?.method ?? "GET") === "GET") {
+          return jsonResponse({
+            server: {
+              id: 123,
+              name: "crabbox-blue-lobster",
+              status: "running",
+              server_type: { name: "cx23" },
+              public_net: { ipv4: { ip: "192.0.2.1" } },
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                provider: "hetzner",
+                lease: "cbx_000000000000",
+                slug: "blue-lobster",
+              },
+            },
+          });
+        }
         return new Response(null, { status: 204 });
       }),
     );
@@ -4370,7 +4388,51 @@ describe("fleet lease identity and idle", () => {
 
     await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
 
-    expect(requests).toEqual(["DELETE /v1/servers/123", "DELETE /v1/ssh_keys/7"]);
+    expect(requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "DELETE /v1/ssh_keys/7",
+    ]);
+  });
+
+  it("refuses to delete a persisted Hetzner server owned by another lease", async () => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        return jsonResponse({
+          server: {
+            id: 123,
+            name: "crabbox-other",
+            status: "running",
+            server_type: { name: "cx23" },
+            public_net: { ipv4: { ip: "192.0.2.1" } },
+            labels: {
+              crabbox: "true",
+              created_by: "crabbox",
+              provider: "hetzner",
+              lease: "cbx_111111111111",
+              slug: "other",
+            },
+          },
+        });
+      }),
+    );
+    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+    const lease = testLease({
+      provider: "hetzner",
+      serverID: 123,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+
+    await expect(provider.releaseLease(lease)).rejects.toThrow(
+      "ownership does not match lease cbx_000000000000",
+    );
+
+    expect(requests).toEqual(["GET /v1/servers/123"]);
   });
 
   it("recovers an unknown Hetzner server before deleting its retained SSH key", async () => {
@@ -4391,7 +4453,13 @@ describe("fleet lease identity and idle", () => {
                 status: "running",
                 server_type: { name: "cx23" },
                 public_net: { ipv4: { ip: "192.0.2.1" } },
-                labels: { crabbox: "true", lease: "cbx_abcdef123456" },
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  provider: "hetzner",
+                  lease: "cbx_abcdef123456",
+                  slug: "rollback",
+                },
               },
             ],
           });
@@ -4439,7 +4507,7 @@ describe("fleet lease identity and idle", () => {
 
     await expect(provider.releaseLease(lease)).rejects.toThrow("http 503");
 
-    expect(requests).toEqual(["DELETE /v1/servers/123"]);
+    expect(requests).toEqual(["GET /v1/servers/123"]);
   });
 
   it("records a shared Hetzner key's actual name so cleanup retains it", async () => {
@@ -4801,8 +4869,29 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("only deletes provider keys canonically bound to the released lease", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          server: {
+            id: 123,
+            name: "crabbox-blue-lobster",
+            status: "running",
+            server_type: { name: "cx23" },
+            public_net: { ipv4: { ip: "192.0.2.1" } },
+            labels: {
+              crabbox: "true",
+              created_by: "crabbox",
+              provider: "hetzner",
+              lease: "cbx_abcdef123456",
+              slug: "blue-lobster",
+            },
+          },
+        }),
+      ),
+    );
     const providers = [
-      new HetznerProvider({} as Env),
+      new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env),
       new AWSProvider({} as Env, "eu-west-1", new MemoryStorage()),
     ];
     await Promise.all(
