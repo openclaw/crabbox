@@ -488,6 +488,22 @@ func TestFalCleanupImmediatelyRetriesRollbackClaim(t *testing.T) {
 	}
 }
 
+func TestFalRollbackRetainsClaimWhenDeleteAbsenceIsUnverified(t *testing.T) {
+	api := &fakeFalAPI{
+		instances: map[string]ComputeInstance{"inst_created": readyFalInstance("inst_created", "203.0.113.42")},
+		deleteErr: &APIError{StatusCode: 404, Status: "404 Not Found", Message: "not found"},
+	}
+	b := newFalTestBackend(t, api)
+	err := b.rollbackAcquire("inst_created", "cbx_abcdef123456", "rollback", b.configForRun(), "", "rollback-cleanup", errors.New("bootstrap failed"))
+	if err == nil || !strings.Contains(err.Error(), "fal cleanup failed") {
+		t.Fatalf("rollback err=%v", err)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider("rollback", providerName)
+	if err != nil || !ok || claim.CloudID != "inst_created" || claim.Labels["recovery"] != "rollback-cleanup" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
 func TestFalResolveListAndReleaseRequireLocalClaim(t *testing.T) {
 	api := &fakeFalAPI{instances: map[string]ComputeInstance{
 		"inst_owned":   readyFalInstance("inst_owned", "203.0.113.10"),

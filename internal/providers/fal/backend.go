@@ -485,7 +485,7 @@ func (b *backend) recoverAmbiguousCreateForRelease(ctx context.Context, client c
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		cleanupErr := client.DeleteInstance(cleanupCtx, instanceID)
-		if cleanupErr == nil || isFalNotFound(cleanupErr) {
+		if cleanupErr == nil {
 			core.RemoveLeaseClaim(claim.LeaseID)
 			core.RemoveStoredTestboxKey(claim.LeaseID)
 			return core.LeaseClaim{}, fmt.Errorf("persist recovered fal instance claim: %w", err)
@@ -520,7 +520,7 @@ func (b *backend) rollbackAcquire(instanceID, leaseID, slug string, cfg Config, 
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := client.DeleteInstance(cleanupCtx, instanceID); err != nil && !isFalNotFound(err) {
+	if err := client.DeleteInstance(cleanupCtx, instanceID); err != nil {
 		return rollbackAcquireError(cause, instanceID, claimErr, err)
 	}
 	core.RemoveLeaseClaim(leaseID)
