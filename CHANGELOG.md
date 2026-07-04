@@ -10,7 +10,6 @@
 
 ### Fixed
 
-- Required exact Daytona provider/resource claims before existing sandboxes can be reused or deleted, rejecting direct IDs without canonical ownership labels and preserving explicit `--reclaim` adoption. Thanks @coygeek.
 - Compared coordinator admin, shared-operator, runtime-adapter, proxy, and signed-session secrets without mismatch-position or early length exits. Thanks @coygeek.
 - Prevented direct Azure list, stop, and cleanup paths from treating weak `crabbox=true` tags as ownership; destructive operations now require canonical Azure ownership tags and an exact matching lease ID, and successful deletion removes local lease keys. Thanks @coygeek.
 - Restricted brokered Azure image and OS-disk selectors to admin-authenticated requests while preserving user-selectable Azure placement. Thanks @coygeek.

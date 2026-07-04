@@ -391,11 +391,52 @@ func TestDaytonaStopRequiresExactResourceClaim(t *testing.T) {
 	if err := claimLeaseTargetForRepoConfig(leaseID, "daytona-owned", cfg, server, SSHTarget{}, repoRoot, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
+	// Daytona's label-filtered inventory can lag immediately after creation.
+	// Exact claims must still resolve their bound sandbox without widening trust.
+	fake.sandboxes = nil
+	fake.getSandboxes = map[string]*apidaytona.Sandbox{sandbox.GetId(): &sandbox}
 	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != sandbox.GetId() {
 		t.Fatalf("exact-claim stop deleted %#v, want [%s]", fake.deleted, sandbox.GetId())
+	}
+}
+
+func TestDaytonaClaimLookupRejectsRemoteOwnershipMismatch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_343434343434"
+	sandbox := apidaytona.Sandbox{}
+	sandbox.SetId("sandbox-mismatch")
+	sandbox.SetLabels(map[string]string{
+		"crabbox":  "true",
+		"provider": daytonaProvider,
+		"lease":    "cbx_353535353535",
+		"slug":     "daytona-mismatch",
+	})
+	cfg := baseConfig()
+	cfg.Provider = daytonaProvider
+	server := Server{Provider: daytonaProvider, CloudID: sandbox.GetId(), Labels: map[string]string{
+		"crabbox":  "true",
+		"provider": daytonaProvider,
+		"lease":    leaseID,
+		"slug":     "daytona-mismatch",
+	}}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "daytona-mismatch", cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeDaytonaDoctorAPI{getSandboxes: map[string]*apidaytona.Sandbox{sandbox.GetId(): &sandbox}}
+	oldClient := newDaytonaClient
+	newDaytonaClient = func(Config, Runtime) (daytonaAPI, error) { return fake, nil }
+	t.Cleanup(func() { newDaytonaClient = oldClient })
+
+	backend := &daytonaLeaseBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
+	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "does not match exact local claim") {
+		t.Fatalf("Stop error=%v, want remote ownership mismatch refusal", err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("mismatched claim deleted sandboxes: %#v", fake.deleted)
 	}
 }
 

@@ -270,14 +270,15 @@ func (b *daytonaLeaseBackend) createDaytonaToolboxSandboxWithClient(ctx context.
 	if err != nil {
 		return nil, "", "", daytonaError("create sandbox", err)
 	}
-	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, Server{Provider: daytonaProvider, CloudID: sandbox.ID, Labels: labels}, SSHTarget{}, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	labels["state"] = "ready"
+	labels["last_touched_at"] = leaseLabelTime(time.Now().UTC())
+	if _, err := establishDaytonaSandboxOwnership(ctx, apiClient, sandbox.ID, leaseID, labels); err != nil {
 		_ = sandbox.Delete(context.Background())
 		return nil, "", "", err
 	}
-	labels["state"] = "ready"
-	labels["last_touched_at"] = leaseLabelTime(time.Now().UTC())
-	if err := apiClient.ReplaceLabels(ctx, sandbox.ID, labels); err != nil {
-		fmt.Fprintf(b.rt.Stderr, "warning: set labels: %v\n", daytonaError("replace labels", err))
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, Server{Provider: daytonaProvider, CloudID: sandbox.ID, Labels: labels}, SSHTarget{}, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+		_ = sandbox.Delete(context.Background())
+		return nil, "", "", err
 	}
 	return sandbox, leaseID, slug, nil
 }
