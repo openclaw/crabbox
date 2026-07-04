@@ -676,15 +676,38 @@ func configShowView(cfg Config) map[string]any {
 			"cloneMode":        cfg.Parallels.CloneMode,
 			"host":             cfg.Parallels.Host,
 			"hostUser":         cfg.Parallels.HostUser,
-			"hostKey":          cfg.Parallels.HostKey,
+			"hostKey":          tokenState(cfg.Parallels.HostKey),
 			"vmRoot":           cfg.Parallels.VMRoot,
 			"user":             cfg.Parallels.User,
 			"workRoot":         cfg.Parallels.WorkRoot,
 			"startupTimeout":   cfg.Parallels.StartupTimeout.String(),
-			"templates":        cfg.Parallels.Templates,
-			"hosts":            cfg.Parallels.Hosts,
+			"templates":        redactedParallelsTemplateConfigs(cfg.Parallels.Templates),
+			"hosts":            redactedParallelsHostConfigs(cfg.Parallels.Hosts),
 		},
 	}
+}
+
+func redactedParallelsTemplateConfigs(templates map[string]ParallelsTemplateConfig) map[string]ParallelsTemplateConfig {
+	if templates == nil {
+		return nil
+	}
+	redacted := make(map[string]ParallelsTemplateConfig, len(templates))
+	for name, template := range templates {
+		template.HostKey = tokenState(template.HostKey)
+		redacted[name] = template
+	}
+	return redacted
+}
+
+func redactedParallelsHostConfigs(hosts []ParallelsHostConfig) []ParallelsHostConfig {
+	if hosts == nil {
+		return nil
+	}
+	redacted := append(make([]ParallelsHostConfig, 0, len(hosts)), hosts...)
+	for i := range redacted {
+		redacted[i].Key = tokenState(redacted[i].Key)
+	}
+	return redacted
 }
 
 func writeConfigShowText(w io.Writer, cfg Config) {

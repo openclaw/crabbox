@@ -2035,6 +2035,68 @@ func TestConfigShowRedactsAllEndpointURLComponents(t *testing.T) {
 	}
 }
 
+func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
+	const (
+		topLevelKey = "top-level-private-key-sentinel"
+		templateKey = "template-private-key-sentinel"
+		hostKey     = "host-private-key-sentinel"
+	)
+	cfg := Config{}
+	cfg.Parallels.HostKey = topLevelKey
+	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
+		"macos": {
+			Source:  "macOS Tahoe",
+			Host:    "template-host.example.test",
+			HostKey: templateKey,
+		},
+	}
+	cfg.Parallels.Hosts = []ParallelsHostConfig{{
+		Name: "builder",
+		Host: "builder.example.test",
+		Key:  hostKey,
+	}}
+
+	var text bytes.Buffer
+	writeConfigShowText(&text, cfg)
+	jsonData, err := json.Marshal(configShowView(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, output := range map[string]string{"text": text.String(), "json": string(jsonData)} {
+		for _, secret := range []string{topLevelKey, templateKey, hostKey} {
+			if strings.Contains(output, secret) {
+				t.Fatalf("%s config output leaked %q: %s", name, secret, output)
+			}
+		}
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(jsonData, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	parallels := decoded["parallels"].(map[string]any)
+	if parallels["hostKey"] != "configured" {
+		t.Fatalf("top-level hostKey=%#v, want configured", parallels["hostKey"])
+	}
+	templates := parallels["templates"].(map[string]any)
+	template := templates["macos"].(map[string]any)
+	if template["HostKey"] != "configured" || template["Source"] != "macOS Tahoe" {
+		t.Fatalf("template view=%#v", template)
+	}
+	hosts := parallels["hosts"].([]any)
+	host := hosts[0].(map[string]any)
+	if host["Key"] != "configured" || host["Host"] != "builder.example.test" {
+		t.Fatalf("host view=%#v", host)
+	}
+
+	if cfg.Parallels.HostKey != topLevelKey || cfg.Parallels.Templates["macos"].HostKey != templateKey || cfg.Parallels.Hosts[0].Key != hostKey {
+		t.Fatal("config-show redaction mutated the effective Parallels config")
+	}
+	if redactedParallelsTemplateConfigs(nil) != nil || redactedParallelsHostConfigs(nil) != nil {
+		t.Fatal("config-show redaction changed nil Parallels collections")
+	}
+}
+
 func TestRoutingSafeURLRedactsUserinfoOnMalformedURL(t *testing.T) {
 	for _, tc := range []struct {
 		name string
