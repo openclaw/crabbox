@@ -190,7 +190,7 @@ validate_blacksmith_workflow() {
   fi
 }
 
-provider_smoke() {
+provider_smoke() (
   need_tool jq
   need_tool rg
 
@@ -200,15 +200,16 @@ provider_smoke() {
   export CRABBOX_PROVIDER
   local lease=""
   local slug=""
+  # shellcheck disable=SC2329 # The subshell EXIT trap invokes this cleanup.
   cleanup() {
-    trap - RETURN ERR
+    trap - EXIT
     if [[ -n "$lease" ]]; then
       stop_provider_lease "$provider" "$lease" "$slug"
       lease=""
       slug=""
     fi
   }
-  trap cleanup RETURN ERR
+  trap cleanup EXIT
 
   local out
   capture_run out run_in_repo "$cb" warmup --provider "$provider" "$@"
@@ -229,13 +230,15 @@ provider_smoke() {
   printf '%s\n' "$runout"
   local runid
   runid="$(printf '%s\n' "$runout" | rg -o 'run_[a-f0-9]{12}' | tail -1 || true)"
-  run_in_repo "$cb" history --lease "$lease" --limit 5
-  if [[ -n "$runid" ]]; then
-    run_in_repo "$cb" logs "$runid" | tail -80
+  if needs_coordinator_preamble; then
+    run_in_repo "$cb" history --lease "$lease" --limit 5
+    if [[ -n "$runid" ]]; then
+      run_in_repo "$cb" logs "$runid" | tail -80
+    fi
   fi
   stop_provider_lease "$provider" "$lease" "$slug"
   lease=""
-}
+)
 
 blacksmith_smoke() {
   need_tool jq
