@@ -4,6 +4,9 @@
 
 ### Added
 
+- Documented the deterministic perf evidence contract for future reproducible
+  metric budgets, separating fuel/instruction-style gates from existing
+  wall-clock timing and benchmark ledger behavior.
 - Documented the delegated-runner contract and live proof bar required before built-in non-SSH provider adapters can advertise a hosted runner integration.
 - Added `crabbox watch` to reuse one warm SSH lease, coalesce qualifying local changes into sequential runs through the normal sync/history pipeline, and release newly acquired leases on bounded idle or exit. Thanks @yetval.
 - Added `crabbox checkpoint fork -- <command...>` to run the normal `crabbox run` flow across fork fan-out leases with `{{index}}`, `{{total}}`, `{{lease}}`, and `{{slug}}` template variables.

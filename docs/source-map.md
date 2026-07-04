@@ -41,6 +41,9 @@ Crabbox has three implementation surfaces:
 - Doctor checks, broker/provider readiness output, and pond doctor: `internal/cli/doctor.go`, `internal/cli/doctor_pond.go`
 - `providers`, `usage`, and admin commands: `internal/cli/providers.go`, `internal/cli/usage.go`, `internal/cli/admin.go`
 - Provider image bake/promote/fsr-status/delete: `internal/cli/image.go`, `internal/cli/os_image.go`, `internal/cli/coordinator.go`
+- Deterministic perf evidence is contract-only for now:
+  `docs/features/deterministic-perf-evidence.md`; no `--perf-budget`,
+  `--fuel-budget`, WASI, or wasmtime-fuel implementation is registered yet.
 
 ## Leases, Slugs, Claims, And Expiry
 

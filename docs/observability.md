@@ -174,6 +174,12 @@ payload. Use [`crabbox bench report`](commands/bench.md) to aggregate local
 observations, and treat insufficient sample counts as a prompt to collect more
 local evidence rather than as a provider ranking.
 
+The benchmark ledger records observed timing; it is not a deterministic budget
+gate. The future deterministic metric contract lives in
+[Deterministic perf evidence](features/deterministic-perf-evidence.md) and
+intentionally separates reproducible fuel/instruction-style counters from noisy
+wall-clock timings.
+
 ### Forwarding live secrets
 
 When local `CRABBOX_ENV_ALLOW` is set, `run` prints the variable names selected
