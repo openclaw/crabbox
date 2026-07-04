@@ -1012,6 +1012,10 @@ if has_provider vultr; then
   "$root/scripts/live-vultr-smoke.sh"
 fi
 
+if has_provider runpod || has_provider run-pod || has_provider runpodio; then
+  "$root/scripts/live-runpod-smoke.sh"
+fi
+
 if has_provider digitalocean || has_provider do; then
   "$root/scripts/live-digitalocean-smoke.sh"
 fi

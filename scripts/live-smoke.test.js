@@ -2426,6 +2426,14 @@ esac
   assert.equal(seen[8], "list --provider linode --json");
 });
 
+test("RunPod live smoke dispatches to the provider-specific script", () => {
+  const script = fs.readFileSync(path.join(repoRoot, "scripts", "live-smoke.sh"), "utf8");
+  assert.match(
+    script,
+    /if has_provider runpod \|\| has_provider run-pod \|\| has_provider runpodio; then\n  "\$root\/scripts\/live-runpod-smoke\.sh"\nfi/,
+  );
+});
+
 test("vultr live smoke dispatches to the provider-specific smoke", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-vultr-dispatch-"));
   const bin = path.join(dir, "bin");
