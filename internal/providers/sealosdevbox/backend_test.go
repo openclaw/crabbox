@@ -168,6 +168,7 @@ func lifecycleBackend(cfg core.Config, runner *lifecycleRunner) *backend {
 func isolateSealosState(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("XDG_STATE_HOME", dir)
 	t.Setenv("HOME", dir)
 }
