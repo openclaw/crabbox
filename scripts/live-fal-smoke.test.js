@@ -231,6 +231,57 @@ exit 99
   assert.doesNotMatch(fs.readFileSync(calls, "utf8"), /^cleanup /m);
 });
 
+test("live fal smoke classifies compute credit requirements as billing blockers", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-credit-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const stopped = path.join(dir, "stopped.log");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor)
+    printf 'auth=ready\\n'
+    ;;
+  list)
+    printf '[]\\n'
+    ;;
+  warmup)
+    printf 'In order to start a compute instance, you have to have at least $500 in your fal credit balance per instance, as well as an automated top up with a trigger at $500.\\n' >&2
+    exit 37
+    ;;
+  stop)
+    printf '%s\\n' "$4" >>"${stopped}"
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "fal",
+      CRABBOX_FAL_KEY: "test-secret-token",
+      FAL_KEY: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=billing_blocked/);
+  assert.match(result.stderr, /credit balance/);
+  assert.match(fs.readFileSync(stopped, "utf8"), /^fal-smoke-\d{14}-\d+\n$/);
+});
+
 test("live fal smoke treats post-create lifecycle failure as validation", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-status-fail-"));
   const binDir = path.join(dir, "bin");

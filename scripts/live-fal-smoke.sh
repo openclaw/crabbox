@@ -40,7 +40,15 @@ classify_known_external_blocker() {
   local classification=""
   local lower
   lower="$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$lower" == *billing* || "$lower" == *"payment"* || "$lower" == *"account-inactive"* || "$lower" == *"account inactive"* || "$lower" == *"inactive account"* ]]; then
+  if [[ "$lower" == *billing* ||
+    "$lower" == *"payment"* ||
+    "$lower" == *credit*balance* ||
+    "$lower" == *"automated top up"* ||
+    "$lower" == *"automated top-up"* ||
+    "$lower" == *"insufficient funds"* ||
+    "$lower" == *"account-inactive"* ||
+    "$lower" == *"account inactive"* ||
+    "$lower" == *"inactive account"* ]]; then
     classification="billing_blocked"
   elif [[ "$lower" == *quota* || "$lower" == *"rate limit"* || "$lower" == *"too many requests"* || "$lower" == *"account limit"* || "$lower" == *"resource exhausted"* ]]; then
     classification="quota_blocked"
