@@ -265,16 +265,41 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
+		if req.DryRun {
+			fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
+			continue
+		}
 		claim, claimErr := requireExactAWSClaim(server, server.Labels["lease"])
 		if claimErr != nil {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=exact local claim missing or stale\n", server.DisplayID(), server.Name)
 			continue
 		}
-		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
-		if req.DryRun {
+		cfg := awsConfigForServer(b.Cfg, server)
+		client, err := newAWSClient(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		live, err := client.GetServer(ctx, server.CloudID)
+		if err != nil {
+			if isAWSResolveNotFound(err) {
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance no longer exists\n", server.DisplayID(), server.Name)
+				if err := removeExactAWSClaim(claim); err != nil {
+					return err
+				}
+				continue
+			}
+			return fmt.Errorf("re-read AWS cleanup candidate %s: %w", server.DisplayID(), err)
+		}
+		if err := validateAWSCleanupLiveServer(server, live); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, err)
 			continue
 		}
-		if err := deleteClaimedAWSServer(ctx, awsConfigForServer(b.Cfg, server), server, claim); err != nil {
+		if shouldDelete, reason := core.ShouldCleanupServer(live, now); !shouldDelete {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance %s\n", server.DisplayID(), server.Name, reason)
+			continue
+		}
+		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", live.DisplayID(), live.Name)
+		if err := deleteClaimedAWSServerWithClient(ctx, client, live, claim); err != nil {
 			return err
 		}
 	}
@@ -377,6 +402,10 @@ func deleteServer(ctx context.Context, cfg Config, server Server) error {
 	if err != nil {
 		return err
 	}
+	return deleteAWSServerWithClient(ctx, client, server)
+}
+
+func deleteAWSServerWithClient(ctx context.Context, client awsClient, server Server) error {
 	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 		return err
 	}
@@ -412,9 +441,17 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 }
 
 func deleteClaimedAWSServer(ctx context.Context, cfg Config, server Server, claim core.LeaseClaim) error {
+	client, err := newAWSClient(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	return deleteClaimedAWSServerWithClient(ctx, client, server, claim)
+}
+
+func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, server Server, claim core.LeaseClaim) error {
 	var cleanupErr error
 	err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
-		cleanupErr = deleteServer(ctx, cfg, server)
+		cleanupErr = deleteAWSServerWithClient(ctx, client, server)
 		var keyErr *awsProviderKeyCleanupError
 		if errors.As(cleanupErr, &keyErr) {
 			// The instance is already gone; retain the key-specific error but do
@@ -427,6 +464,25 @@ func deleteClaimedAWSServer(ctx context.Context, cfg Config, server Server, clai
 		return err
 	}
 	return cleanupErr
+}
+
+func removeExactAWSClaim(claim core.LeaseClaim) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error { return nil })
+}
+
+func validateAWSCleanupLiveServer(expected, live Server) error {
+	cloudID := strings.TrimSpace(expected.CloudID)
+	if cloudID == "" || strings.TrimSpace(live.CloudID) != cloudID {
+		return fmt.Errorf("live cloud id %q does not match cleanup candidate %q", live.CloudID, expected.CloudID)
+	}
+	if !isCrabboxAWSLease(live) {
+		return errors.New("live instance no longer has canonical Crabbox ownership tags")
+	}
+	expectedLeaseID := strings.TrimSpace(expected.Labels["lease"])
+	if liveLeaseID := strings.TrimSpace(live.Labels["lease"]); liveLeaseID != expectedLeaseID {
+		return fmt.Errorf("live instance lease %q does not match cleanup candidate lease %q", liveLeaseID, expectedLeaseID)
+	}
+	return nil
 }
 
 type awsProviderKeyCleanupError struct {
