@@ -448,6 +448,22 @@ describe("runtime adapter relay", () => {
       id: "viewer_retained",
       agentID: "agent_retained",
       owner: "owner@example.com",
+      org: "example-org",
+      admin: false,
+      label: "owner@example.com",
+    });
+    const legacyOwnerWebAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID: lease.id,
+      id: "agent_legacy_owner",
+      capabilities: new Set<string>(),
+    });
+    const legacyOwnerWebViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID: lease.id,
+      id: "viewer_legacy_owner",
+      agentID: "agent_legacy_owner",
+      owner: "owner@example.com",
       label: "owner@example.com",
     });
     const fleet = new FleetDurableObject(
@@ -462,6 +478,8 @@ describe("runtime adapter relay", () => {
             revokedWebViewer,
             retainedWebAgent,
             retainedWebViewer,
+            legacyOwnerWebAgent,
+            legacyOwnerWebViewer,
           ] as unknown as WebSocket[],
       } as unknown as DurableObjectState,
       { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
@@ -476,6 +494,9 @@ describe("runtime adapter relay", () => {
     expect(revokedWebAgent.closeCode).toBe(1011);
     expect(retainedWebViewer.closeCode).toBeUndefined();
     expect(retainedWebAgent.closeCode).toBeUndefined();
+    expect(legacyOwnerWebViewer.closeCode).toBe(1008);
+    expect(legacyOwnerWebViewer.closeReason).toBe("lease access revoked");
+    expect(legacyOwnerWebAgent.closeCode).toBe(1011);
     expect(codeAgent.sentJSON()).toEqual([
       {
         type: "ws_close",

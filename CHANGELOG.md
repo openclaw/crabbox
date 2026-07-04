@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Closed restored WebVNC viewer sockets that lack a complete current organization-bound principal instead of retaining owner-only legacy authorization. Thanks @coygeek.
 - Enforced key-only OpenSSH authentication across managed Windows desktop, core, and WSL2 bootstraps while retaining generated Windows passwords for console and VNC use. Thanks @coygeek.
 - Compared coordinator admin, shared-operator, runtime-adapter, proxy, and signed-session secrets without mismatch-position or early length exits. Thanks @coygeek.
 - Prevented direct Azure list, stop, and cleanup paths from treating weak `crabbox=true` tags as ownership; destructive operations now require canonical Azure ownership tags and an exact matching lease ID, and successful deletion removes local lease keys. Thanks @coygeek.

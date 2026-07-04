@@ -4963,26 +4963,10 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     principal: { owner?: string; org?: string; admin?: boolean },
   ): boolean {
-    if (principal.admin === true) {
-      return true;
-    }
-    if (principal.owner && principal.org) {
-      return (
-        this.leaseAccessRoleForPrincipal(lease, {
-          owner: principal.owner,
-          org: principal.org,
-          admin: false,
-        }) !== undefined
-      );
-    }
-    if (!principal.owner) {
+    if (!completeBridgePrincipal(principal)) {
       return false;
     }
-    // Restored pre-hardening WebVNC attachments have no org binding.
-    return (
-      principal.owner === lease.owner ||
-      normalizedLeaseShare(lease.share).users[normalizeShareUser(principal.owner)] !== undefined
-    );
+    return this.leaseAccessRoleForPrincipal(lease, principal) !== undefined;
   }
 
   private whoami(request: Request): Response {
