@@ -572,6 +572,53 @@ func TestIsloCreateDefaultsTrackExplicitConfigAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestExplicitConfigMarkerAPIs(t *testing.T) {
+	cfg := Config{
+		SSHUser:                    "alice",
+		SSHKey:                     "/keys/id_ed25519",
+		SSHPort:                    "2222",
+		WorkRoot:                   "/workspace",
+		appleVZImageSHA256Explicit: true,
+	}
+
+	MarkIsloImageExplicit(&cfg)
+	MarkIsloVCPUsExplicit(&cfg)
+	MarkIsloMemoryMBExplicit(&cfg)
+	MarkIsloDiskGBExplicit(&cfg)
+	MarkLocalContainerImageExplicit(&cfg)
+	MarkLocalContainerRuntimeExplicit(&cfg)
+	MarkLocalContainerWorkRootExplicit(&cfg)
+	MarkAppleContainerImageExplicit(&cfg)
+	MarkAppleVZImageExplicit(&cfg)
+	if cfg.appleVZImageSHA256Explicit {
+		t.Fatal("explicit Apple VZ image must clear the inherited checksum marker")
+	}
+	MarkAppleVZImageSHA256Explicit(&cfg)
+	MarkAppleVZCPUsExplicit(&cfg)
+	MarkAppleVZMemoryExplicit(&cfg)
+	MarkAppleVZDiskExplicit(&cfg)
+	MarkMultipassImageExplicit(&cfg)
+	MarkTartImageExplicit(&cfg)
+	MarkTartDiskExplicit(&cfg)
+	MarkTartCPUsExplicit(&cfg)
+	MarkTartMemoryExplicit(&cfg)
+	MarkTargetExplicit(&cfg)
+	MarkSSHUserExplicit(&cfg)
+	MarkSSHKeyExplicit(&cfg)
+	MarkSSHPortExplicit(&cfg)
+	MarkWorkRootExplicit(&cfg)
+
+	if !IsloImageExplicit(cfg) || !IsloVCPUsExplicit(cfg) || !IsloMemoryMBExplicit(cfg) || !IsloDiskGBExplicit(cfg) ||
+		!cfg.localContainerImageExplicit || !LocalContainerRuntimeExplicit(cfg) || !LocalContainerWorkRootExplicit(cfg) ||
+		!AppleContainerImageExplicit(cfg) || !AppleVZImageExplicit(cfg) || !cfg.appleVZImageSHA256Explicit ||
+		!AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) ||
+		!cfg.multipassImageExplicit || !cfg.tartImageExplicit || !IsTartDiskExplicit(&cfg) ||
+		!IsTartCPUsExplicit(&cfg) || !IsTartMemoryExplicit(&cfg) || !IsTargetExplicit(&cfg) ||
+		!IsSSHUserExplicit(&cfg) || !IsSSHKeyExplicit(&cfg) || !IsSSHPortExplicit(&cfg) || !IsWorkRootExplicit(&cfg) {
+		t.Fatalf("explicit marker API did not preserve every setting: %#v", cfg)
+	}
+}
+
 func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
