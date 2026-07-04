@@ -349,3 +349,12 @@ func TestStopRejectsIDFlagWithExtraPositional(t *testing.T) {
 		t.Fatalf("expected usage error for --id plus positional, got %v", err)
 	}
 }
+
+func TestStopRejectsReclaimForProviderWithoutAdoptionContract(t *testing.T) {
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+		"--provider", "e2b", "--id", "box_123", "--reclaim",
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support stop --reclaim") {
+		t.Fatalf("stop --reclaim err=%v, want unsupported-provider rejection", err)
+	}
+}
