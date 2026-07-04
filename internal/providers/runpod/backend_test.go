@@ -544,6 +544,36 @@ func TestRunpodResolveReleaseOnlyRejectsUnclaimedPodWithoutProviderLookup(t *tes
 	}
 }
 
+func TestRunpodResolveReleaseOnlyPrefersLocalSlugOverProviderAlias(t *testing.T) {
+	tests := []struct {
+		name       string
+		identifier string
+		pod        runpodPod
+	}{
+		{name: "provider id", identifier: "pod-collision", pod: runpodPod{ID: "pod-collision", Name: "crabbox-remote-456789ab", DesiredStatus: "RUNNING"}},
+		{name: "pod name", identifier: "name-collision", pod: runpodPod{ID: "pod-remote", Name: "name-collision", DesiredStatus: "RUNNING"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			if err := core.ClaimLeaseForRepoProvider("rpod_local123", tt.identifier, providerName, t.TempDir(), 0, false); err != nil {
+				t.Fatal(err)
+			}
+			claimRunpodPod(t, "rpod_456789ab", "remote", tt.pod)
+			fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return tt.pod, nil }}
+			backend := &runpodLeaseBackend{cfg: Config{Runpod: RunpodConfig{APIKey: "k"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+
+			_, err := backend.Resolve(context.Background(), ResolveRequest{ID: tt.identifier, ReleaseOnly: true})
+			if err == nil || !strings.Contains(err.Error(), "no exact resource-bound local claim") {
+				t.Fatalf("err=%v, want local slug claim refusal", err)
+			}
+			if len(fake.getCalls) != 0 || len(fake.terminated) != 0 {
+				t.Fatalf("getCalls=%v terminated=%v, want no access to the colliding pod", fake.getCalls, fake.terminated)
+			}
+		})
+	}
+}
+
 func TestRunpodResolveRequiresExplicitReclaimBeforeBindingPod(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	pod := runpodPod{ID: "pod_manual", Name: "manual-pod", DesiredStatus: "RUNNING"}

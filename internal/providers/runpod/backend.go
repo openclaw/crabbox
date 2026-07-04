@@ -442,6 +442,10 @@ func resolveRunpodClaim(identifier string) (LeaseClaim, bool, error) {
 		return LeaseClaim{}, false, exit(2, "local claim %s belongs to provider=%s, not provider=%s", identifier, blank(claim.Provider, "<unknown>"), providerName)
 	} else if exact {
 		return claim, true, nil
+	} else if ok {
+		// A local lease alias is stronger evidence of operator intent than a
+		// different claim whose provider ID or pod name happens to collide.
+		return claim, true, nil
 	}
 	if claim, ok, err := resolveLeaseClaimForProviderCloudID(identifier, providerName); err != nil {
 		return LeaseClaim{}, false, err
