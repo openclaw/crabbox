@@ -57,7 +57,7 @@ func (Provider) CommandRoutingArgs(cfg core.Config, _ string) []string {
 		"--sealos-devbox-network", normalizeNetwork(values.Network),
 		"--sealos-devbox-ssh-gateway-port", values.SSHGatewayPort,
 		"--sealos-devbox-ssh-user", values.SSHUser,
-		"--sealos-devbox-work-root", values.WorkRoot,
+		"--sealos-devbox-work-root", sealosWorkRoot(cfg),
 	}
 	for _, optional := range []struct {
 		flagName string

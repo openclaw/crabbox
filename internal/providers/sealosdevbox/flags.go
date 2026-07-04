@@ -101,6 +101,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "sealos-devbox-work-root") {
 		cfg.SealosDevbox.WorkRoot = *v.WorkRoot
 		cfg.WorkRoot = *v.WorkRoot
+		core.MarkSealosDevboxWorkRootExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "sealos-devbox-node-host") {
 		cfg.SealosDevbox.NodeHost = *v.NodeHost
@@ -182,5 +183,5 @@ func normalizeNetwork(value string) string {
 }
 
 func sealosWorkRoot(cfg core.Config) string {
-	return core.Blank(strings.TrimSpace(cfg.SealosDevbox.WorkRoot), "/home/devbox/project")
+	return core.EffectiveSealosDevboxWorkRoot(cfg)
 }

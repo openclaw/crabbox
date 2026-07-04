@@ -158,6 +158,7 @@ type Config struct {
 	Blacksmith                    BlacksmithConfig
 	KubeVirt                      KubeVirtConfig
 	SealosDevbox                  SealosDevboxConfig
+	sealosDevboxWorkRootExplicit  bool
 	AgentSandbox                  AgentSandboxConfig
 	deleteOnReleaseExplicit       map[string]bool
 	External                      ExternalConfig
@@ -2524,6 +2525,24 @@ func IsWorkRootExplicit(cfg *Config) bool {
 
 func MarkWorkRootExplicit(cfg *Config) {
 	cfg.explicitWorkRoot = cfg.WorkRoot
+}
+
+func IsSealosDevboxWorkRootExplicit(cfg *Config) bool {
+	return cfg != nil && cfg.sealosDevboxWorkRootExplicit
+}
+
+func MarkSealosDevboxWorkRootExplicit(cfg *Config) {
+	cfg.sealosDevboxWorkRootExplicit = true
+}
+
+func EffectiveSealosDevboxWorkRoot(cfg Config) string {
+	if IsSealosDevboxWorkRootExplicit(&cfg) {
+		return Blank(strings.TrimSpace(cfg.SealosDevbox.WorkRoot), baseConfig().SealosDevbox.WorkRoot)
+	}
+	if IsWorkRootExplicit(&cfg) {
+		return strings.TrimSpace(cfg.WorkRoot)
+	}
+	return Blank(strings.TrimSpace(cfg.SealosDevbox.WorkRoot), baseConfig().SealosDevbox.WorkRoot)
 }
 
 func IsHostingerWorkRootExplicit(cfg *Config) bool {
@@ -5764,6 +5783,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if trusted && file.SealosDevbox.WorkRoot != "" {
 			cfg.SealosDevbox.WorkRoot = file.SealosDevbox.WorkRoot
+			MarkSealosDevboxWorkRootExplicit(cfg)
 		}
 		if trusted && file.SealosDevbox.NodeHost != "" {
 			cfg.SealosDevbox.NodeHost = file.SealosDevbox.NodeHost
@@ -8044,7 +8064,10 @@ func applyEnv(cfg *Config) error {
 	cfg.SealosDevbox.SSHGatewayHost = getenv("CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST", cfg.SealosDevbox.SSHGatewayHost)
 	cfg.SealosDevbox.SSHGatewayPort = getenv("CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_PORT", cfg.SealosDevbox.SSHGatewayPort)
 	cfg.SealosDevbox.SSHUser = getenv("CRABBOX_SEALOS_DEVBOX_SSH_USER", cfg.SealosDevbox.SSHUser)
-	cfg.SealosDevbox.WorkRoot = getenv("CRABBOX_SEALOS_DEVBOX_WORK_ROOT", cfg.SealosDevbox.WorkRoot)
+	if value := os.Getenv("CRABBOX_SEALOS_DEVBOX_WORK_ROOT"); value != "" {
+		cfg.SealosDevbox.WorkRoot = value
+		MarkSealosDevboxWorkRootExplicit(cfg)
+	}
 	cfg.SealosDevbox.NodeHost = getenv("CRABBOX_SEALOS_DEVBOX_NODE_HOST", cfg.SealosDevbox.NodeHost)
 	if value, ok := getenvBool("CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE"); ok {
 		cfg.SealosDevbox.DeleteOnRelease = value

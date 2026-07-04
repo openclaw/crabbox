@@ -87,6 +87,36 @@ func TestCommandRoutingArgsPreservesEffectiveConfig(t *testing.T) {
 	}
 }
 
+func TestCommandRoutingArgsUsesExplicitTopLevelWorkRoot(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.WorkRoot = "/srv/crabbox"
+	core.MarkWorkRootExplicit(&cfg)
+
+	got := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), "\n")
+	if !strings.Contains(got, "--sealos-devbox-work-root\n/srv/crabbox") {
+		t.Fatalf("routing args lost explicit work root:\n%s", got)
+	}
+	if strings.Contains(got, "--sealos-devbox-work-root\n/home/devbox/project") {
+		t.Fatalf("routing args retained stale provider work root:\n%s", got)
+	}
+}
+
+func TestCommandRoutingArgsPrefersExplicitProviderWorkRoot(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.WorkRoot = "/srv/crabbox"
+	core.MarkWorkRootExplicit(&cfg)
+	cfg.SealosDevbox.WorkRoot = "/home/devbox/override"
+	core.MarkSealosDevboxWorkRootExplicit(&cfg)
+
+	got := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), "\n")
+	if !strings.Contains(got, "--sealos-devbox-work-root\n/home/devbox/override") {
+		t.Fatalf("routing args lost provider work root:\n%s", got)
+	}
+	if strings.Contains(got, "--sealos-devbox-work-root\n/srv/crabbox") {
+		t.Fatalf("routing args used lower-priority generic work root:\n%s", got)
+	}
+}
+
 func TestFlagsExpandLocalPathsAndPreserveGuestWorkRoot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -120,6 +150,9 @@ func TestFlagsExpandLocalPathsAndPreserveGuestWorkRoot(t *testing.T) {
 	if !core.DeleteOnReleaseExplicit(cfg, providerName) {
 		t.Fatal("deleteOnRelease flag was not marked explicit")
 	}
+	if !core.IsSealosDevboxWorkRootExplicit(&cfg) {
+		t.Fatal("workRoot flag was not marked explicit")
+	}
 }
 
 func TestValidateRejectsDeferredTailnet(t *testing.T) {
@@ -135,6 +168,19 @@ func TestConfigureRejectsNonLinuxTarget(t *testing.T) {
 	cfg.TargetOS = core.TargetMacOS
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}}); err == nil {
 		t.Fatal("non-linux target accepted")
+	}
+}
+
+func TestConfigurePreservesExplicitTopLevelWorkRoot(t *testing.T) {
+	cfg := testConfig()
+	cfg.WorkRoot = "/srv/crabbox"
+	core.MarkWorkRootExplicit(&cfg)
+	configured, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := configured.(*backend).cfg.WorkRoot; got != "/srv/crabbox" {
+		t.Fatalf("work root=%q want explicit root", got)
 	}
 }
 

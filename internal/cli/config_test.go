@@ -1006,6 +1006,9 @@ func TestSealosDevboxConfigDefaultsFileAndEnv(t *testing.T) {
 	if !DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
 		t.Fatal("file deleteOnRelease was not marked explicit")
 	}
+	if !IsSealosDevboxWorkRootExplicit(&cfg) {
+		t.Fatal("file workRoot was not marked explicit")
+	}
 
 	t.Setenv("CRABBOX_SEALOS_DEVBOX_KUBECTL", "~/env/kubectl")
 	t.Setenv("CRABBOX_SEALOS_DEVBOX_KUBECONFIG", "~/.kube/env.yaml")
@@ -1046,6 +1049,9 @@ func TestSealosDevboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if !DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
 		t.Fatal("env deleteOnRelease was not marked explicit")
+	}
+	if !IsSealosDevboxWorkRootExplicit(&cfg) {
+		t.Fatal("env workRoot was not marked explicit")
 	}
 }
 

@@ -1984,6 +1984,7 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 			args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
 		}
 	case "sealos-devbox":
+		workRoot := EffectiveSealosDevboxWorkRoot(cfg)
 		if strings.TrimSpace(cfg.SealosDevbox.Kubectl) != "" {
 			args = append(args, "--sealos-devbox-kubectl", cfg.SealosDevbox.Kubectl)
 		}
@@ -2001,7 +2002,7 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 			{flagName: "--sealos-devbox-ssh-gateway-port", value: cfg.SealosDevbox.SSHGatewayPort},
 			{flagName: "--sealos-devbox-node-host", value: cfg.SealosDevbox.NodeHost},
 			{flagName: "--sealos-devbox-ssh-user", value: cfg.SealosDevbox.SSHUser},
-			{flagName: "--sealos-devbox-work-root", value: cfg.SealosDevbox.WorkRoot},
+			{flagName: "--sealos-devbox-work-root", value: workRoot},
 		} {
 			if strings.TrimSpace(routing.value) != "" {
 				args = append(args, routing.flagName, routing.value)

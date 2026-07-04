@@ -64,6 +64,9 @@ func normalizeTargetConfig(cfg *Config) {
 	if (cfg.Provider == "namespace-devbox" || cfg.Provider == "namespace") && isDefaultWorkRoot(cfg.WorkRoot) && cfg.Namespace.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Namespace.WorkRoot
 	}
+	if cfg.Provider == "sealos-devbox" && (IsSealosDevboxWorkRootExplicit(cfg) || (!IsWorkRootExplicit(cfg) && isDefaultWorkRoot(cfg.WorkRoot))) {
+		cfg.WorkRoot = EffectiveSealosDevboxWorkRoot(*cfg)
+	}
 }
 
 func isDefaultWorkRoot(value string) bool {

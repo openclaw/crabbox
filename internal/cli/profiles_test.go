@@ -1074,6 +1074,32 @@ func TestRunStopCommandIncludesInheritedKubeconfigForSealos(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandUsesExplicitTopLevelWorkRootForSealos(t *testing.T) {
+	cfg := Config{
+		Provider: "sealos-devbox",
+		TargetOS: targetLinux,
+		WorkRoot: "/srv/crabbox",
+		SealosDevbox: SealosDevboxConfig{
+			Kubectl:        "kubectl",
+			Context:        "dev",
+			Namespace:      "team-devboxes",
+			Network:        "SSHGate",
+			SSHGatewayHost: "ssh.example.test",
+			SSHGatewayPort: "2222",
+			SSHUser:        "devbox",
+			WorkRoot:       "/home/devbox/project",
+		},
+	}
+	MarkWorkRootExplicit(&cfg)
+	got := runStopCommand(cfg, "cbx_123")
+	if !strings.Contains(got, "--sealos-devbox-work-root /srv/crabbox") {
+		t.Fatalf("stop command lost explicit work root:\n%s", got)
+	}
+	if strings.Contains(got, "--sealos-devbox-work-root /home/devbox/project") {
+		t.Fatalf("stop command retained stale provider work root:\n%s", got)
+	}
+}
+
 func TestRunStopCommandIncludesExternalRoutingFlags(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	got := runStopCommand(Config{
