@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Renamed the `apple-vz` provider to `apple-vm`; the old provider name/aliases, `appleVZ:` config keys, `--apple-vz-*` flags, and `CRABBOX_APPLE_VZ_*` environment variables keep working as deprecated aliases, existing leases and claims stay manageable, and the state directory migrates automatically.
+- Replaced the Code-Hex/vz cgo dependency with `crabbox-apple-vm-vmd`, a dependency-free Swift Virtualization.framework daemon embedded in the now pure-Go `crabbox-apple-vm-helper`; the helper installs and entitlement-signs the daemon itself, so Crabbox no longer copies or codesigns helper binaries.
+
 - Updated Go SSH and OS support libraries, including upstream authentication-attempt, malformed-session, key-size, KDF, and known-host validation hardening.
 - Updated the Node/PostgreSQL coordinator to pg 8.22 and pg-boss 12.25, including current protocol parsing, startup retry, queue-cache, migration-deadlock, and scheduling fixes.
 

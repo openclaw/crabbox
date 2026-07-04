@@ -7,7 +7,7 @@ var benchmarkProviderCategories = map[string]string{
 	"anthropic-sandbox-runtime":  "local-sandbox",
 	"apple-container":            "local-runtime",
 	"apple-machine":              "local-vm",
-	"apple-vz":                   "local-vm",
+	"apple-vm":                   "local-vm",
 	"ascii-box":                  "direct-cloud",
 	"aws":                        "brokerable-cloud",
 	"aws-lambda-microvm":         "delegated-sandbox",

@@ -514,14 +514,14 @@ func TestFirecrackerRegistersWithoutAliases(t *testing.T) {
 	}
 }
 
-func TestAppleVZRegistersAsBuiltInProvider(t *testing.T) {
-	for _, name := range []string{"apple-vz", "applevz"} {
+func TestAppleVMRegistersAsBuiltInProvider(t *testing.T) {
+	for _, name := range []string{"apple-vm", "applevm"} {
 		provider, err := core.ProviderFor(name)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != "apple-vz" {
-			t.Fatalf("ProviderFor(%q).Name=%q want apple-vz", name, provider.Name())
+		if provider.Name() != "apple-vm" {
+			t.Fatalf("ProviderFor(%q).Name=%q want apple-vm", name, provider.Name())
 		}
 	}
 }
@@ -1201,7 +1201,7 @@ func allBuiltInProviderNames() []string {
 		"agent-sandbox",
 		"apple-container",
 		"apple-machine",
-		"apple-vz",
+		"apple-vm",
 		"ascii-box",
 		"aws",
 		"aws-lambda-microvm",

@@ -85,7 +85,7 @@ Use these rules before adding a new adapter:
 | Shared team cloud leases | `aws`, `azure`, `gcp`, `hetzner` | They advertise brokerable cloud, cleanup, SSH, and sync capabilities in `crabbox providers` and `providers recommend team-cloud`. |
 | Generic Linux command execution | `aws`, `azure`, `gcp`, `hetzner`, `digitalocean`, `linode`, `ssh` | SSH leases keep the normal Crabbox sync/run/debug path. |
 | Existing owned machine | `ssh` | No provider lifecycle is needed; Crabbox only syncs and runs. |
-| Local disposable Linux | `local-container`, `apple-container`, `apple-vz`, `multipass` | Fast local iteration without cloud credentials. |
+| Local disposable Linux | `local-container`, `apple-container`, `apple-vm`, `multipass` | Fast local iteration without cloud credentials. |
 | Native desktop/browser/code-server | `aws`, `azure`, `hetzner`, `parallels`, `local-container`, `ssh` | These advertise the interactive lease features. |
 | GPU-oriented run | `runpod`, `nvidia-brev`, cloud VM providers with GPU types, `modal`, `wandb` | Pick SSH leases for normal debugging, delegated runs for provider-owned ML execution. |
 | Worker/module execution | `cloudflare-dynamic-workers` | It advertises the `worker-runtime` target and `module-run` feature. |

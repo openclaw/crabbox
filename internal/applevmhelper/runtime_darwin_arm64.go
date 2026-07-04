@@ -1,6 +1,6 @@
 //go:build darwin && arm64
 
-package applevzhelper
+package applevmhelper
 
 import (
 	"bytes"
@@ -125,7 +125,7 @@ func resolveSourceImageWithLimit(ctx context.Context, stateRoot, image, expected
 	if remote {
 		displayImage := RedactImageRef(image)
 		if checksum == "" {
-			return "", fmt.Errorf("apple-vz remote image %q requires a SHA-256 checksum", displayImage)
+			return "", fmt.Errorf("apple-vm remote image %q requires a SHA-256 checksum", displayImage)
 		}
 		if err := ensurePrivateDir(DownloadsDir(stateRoot)); err != nil {
 			return "", fmt.Errorf("create downloads cache: %w", err)
@@ -145,7 +145,7 @@ func resolveSourceImageWithLimit(ctx context.Context, stateRoot, image, expected
 		if err != nil {
 			return "", fmt.Errorf("build image request for %q: invalid URL", displayImage)
 		}
-		req.Header.Set("User-Agent", "crabbox-apple-vz-helper")
+		req.Header.Set("User-Agent", "crabbox-apple-vm-helper")
 		originLoopback := isLoopbackImageHost(parsedURL.Hostname())
 		client := &http.Client{
 			Timeout: 2 * time.Hour,
@@ -484,7 +484,7 @@ func validateRemoteImageURL(image string) (*url.URL, bool, error) {
 		return nil, true, fmt.Errorf("parse image URL %q: invalid URL", RedactImageRef(image))
 	}
 	if parsed.Scheme == "http" && !isLoopbackImageHost(parsed.Hostname()) {
-		return nil, true, fmt.Errorf("apple-vz remote images must use HTTPS; HTTP is allowed only for loopback development")
+		return nil, true, fmt.Errorf("apple-vm remote images must use HTTPS; HTTP is allowed only for loopback development")
 	}
 	return parsed, true, nil
 }
@@ -1166,7 +1166,7 @@ func allZero(buf []byte) bool {
 }
 
 func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workRoot string) (returnErr error) {
-	tmpDir, err := os.MkdirTemp("", "crabbox-apple-vz-seed-*")
+	tmpDir, err := os.MkdirTemp("", "crabbox-apple-vm-seed-*")
 	if err != nil {
 		return fmt.Errorf("create seed temp dir: %w", err)
 	}
@@ -1418,7 +1418,7 @@ func validateRuntimeConfig(stateRoot, image, expectedSHA256 string) (map[string]
 		return nil, err
 	}
 	if remote && strings.TrimSpace(expectedSHA256) == "" {
-		return nil, fmt.Errorf("apple-vz remote image %q requires a SHA-256 checksum", RedactImageRef(image))
+		return nil, fmt.Errorf("apple-vm remote image %q requires a SHA-256 checksum", RedactImageRef(image))
 	}
 	if !remote {
 		if _, err := resolveLocalImagePath(image); err != nil {

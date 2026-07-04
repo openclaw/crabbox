@@ -356,14 +356,14 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_APPLE_CONTAINER_CPUS",
 		"CRABBOX_APPLE_CONTAINER_MEMORY",
 		"CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS",
-		"CRABBOX_APPLE_VZ_HELPER",
-		"CRABBOX_APPLE_VZ_IMAGE",
-		"CRABBOX_APPLE_VZ_IMAGE_SHA256",
-		"CRABBOX_APPLE_VZ_USER",
-		"CRABBOX_APPLE_VZ_WORK_ROOT",
-		"CRABBOX_APPLE_VZ_CPUS",
-		"CRABBOX_APPLE_VZ_MEMORY",
-		"CRABBOX_APPLE_VZ_DISK",
+		"CRABBOX_APPLE_VM_HELPER",
+		"CRABBOX_APPLE_VM_IMAGE",
+		"CRABBOX_APPLE_VM_IMAGE_SHA256",
+		"CRABBOX_APPLE_VM_USER",
+		"CRABBOX_APPLE_VM_WORK_ROOT",
+		"CRABBOX_APPLE_VM_CPUS",
+		"CRABBOX_APPLE_VM_MEMORY",
+		"CRABBOX_APPLE_VM_DISK",
 		"CRABBOX_MULTIPASS_CLI",
 		"CRABBOX_MULTIPASS_IMAGE",
 		"CRABBOX_MULTIPASS_USER",
@@ -584,10 +584,10 @@ func TestProviderExplicitMarkerHelpers(t *testing.T) {
 	MarkIsloVCPUsExplicit(&cfg)
 	MarkIsloMemoryMBExplicit(&cfg)
 	MarkIsloDiskGBExplicit(&cfg)
-	MarkAppleVZImageSHA256Explicit(&cfg)
-	MarkAppleVZCPUsExplicit(&cfg)
-	MarkAppleVZMemoryExplicit(&cfg)
-	MarkAppleVZDiskExplicit(&cfg)
+	MarkAppleVMImageSHA256Explicit(&cfg)
+	MarkAppleVMCPUsExplicit(&cfg)
+	MarkAppleVMMemoryExplicit(&cfg)
+	MarkAppleVMDiskExplicit(&cfg)
 	MarkMultipassImageExplicit(&cfg)
 	MarkTartImageExplicit(&cfg)
 	MarkTartDiskExplicit(&cfg)
@@ -600,7 +600,7 @@ func TestProviderExplicitMarkerHelpers(t *testing.T) {
 	MarkWorkRootExplicit(&cfg)
 
 	if !IsloImageExplicit(cfg) || !IsloVCPUsExplicit(cfg) || !IsloMemoryMBExplicit(cfg) || !IsloDiskGBExplicit(cfg) ||
-		!cfg.appleVZImageSHA256Explicit || !AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) ||
+		!cfg.appleVMImageSHA256Explicit || !AppleVMCPUsExplicit(cfg) || !AppleVMMemoryExplicit(cfg) || !AppleVMDiskExplicit(cfg) ||
 		!cfg.multipassImageExplicit || !cfg.tartImageExplicit || !IsTartDiskExplicit(&cfg) ||
 		!IsTartCPUsExplicit(&cfg) || !IsTartMemoryExplicit(&cfg) || !IsTargetExplicit(&cfg) ||
 		!IsSSHUserExplicit(&cfg) || !IsSSHKeyExplicit(&cfg) || !IsSSHPortExplicit(&cfg) || !IsWorkRootExplicit(&cfg) {
@@ -769,9 +769,9 @@ func TestContainerExplicitMarkerHelpers(t *testing.T) {
 		t.Fatalf("container explicit markers were not retained: %+v", cfg)
 	}
 
-	cfg.appleVZImageSHA256Explicit = true
-	MarkAppleVZImageExplicit(&cfg)
-	if !AppleVZImageExplicit(cfg) || cfg.appleVZImageSHA256Explicit {
+	cfg.appleVMImageSHA256Explicit = true
+	MarkAppleVMImageExplicit(&cfg)
+	if !AppleVMImageExplicit(cfg) || cfg.appleVMImageSHA256Explicit {
 		t.Fatalf("Apple VZ image marker did not invalidate the prior digest marker: %+v", cfg)
 	}
 }
@@ -2747,29 +2747,29 @@ func TestAppleContainerConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
-func TestAppleVZConfigDefaultsFileAndEnv(t *testing.T) {
+func TestAppleVMConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
-	cfg.Provider = "apple-vz"
+	cfg.Provider = "apple-vm"
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AppleVZ.User != "crabbox" || cfg.AppleVZ.WorkRoot != "/work/crabbox" || cfg.AppleVZ.CPUs != 4 || cfg.AppleVZ.MemoryMiB != 8192 || cfg.AppleVZ.DiskGiB != 30 {
-		t.Fatalf("apple-vz defaults not applied: %#v", cfg.AppleVZ)
+	if cfg.AppleVM.User != "crabbox" || cfg.AppleVM.WorkRoot != "/work/crabbox" || cfg.AppleVM.CPUs != 4 || cfg.AppleVM.MemoryMiB != 8192 || cfg.AppleVM.DiskGiB != 30 {
+		t.Fatalf("apple-vm defaults not applied: %#v", cfg.AppleVM)
 	}
-	if cfg.AppleVZ.ImageSHA256 == "" {
-		t.Fatalf("apple-vz default image checksum not applied: %#v", cfg.AppleVZ)
+	if cfg.AppleVM.ImageSHA256 == "" {
+		t.Fatalf("apple-vm default image checksum not applied: %#v", cfg.AppleVM)
 	}
 	if cfg.SSHUser != "crabbox" || cfg.SSHPort != "22" || cfg.WorkRoot != "/work/crabbox" || cfg.TargetOS != targetLinux {
-		t.Fatalf("apple-vz derived defaults not applied: sshUser=%q sshPort=%q workRoot=%q target=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.TargetOS)
+		t.Fatalf("apple-vm derived defaults not applied: sshUser=%q sshPort=%q workRoot=%q target=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.TargetOS)
 	}
 	fileCPUs := 6
 	fileMemoryMiB := 12288
 	fileDiskGiB := 64
 	applyFileConfig(&cfg, fileConfig{
-		Provider: "apple-vz",
-		AppleVZ: &fileAppleVZConfig{
-			HelperPath:  "/opt/bin/crabbox-apple-vz-helper",
+		Provider: "apple-vm",
+		AppleVM: &fileAppleVMConfig{
+			HelperPath:  "/opt/bin/crabbox-apple-vm-helper",
 			Image:       "https://example.test/custom.img",
 			ImageSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			User:        "runner",
@@ -2779,61 +2779,61 @@ func TestAppleVZConfigDefaultsFileAndEnv(t *testing.T) {
 			DiskGiB:     &fileDiskGiB,
 		},
 	})
-	if cfg.Provider != "apple-vz" || cfg.AppleVZ.HelperPath != "/opt/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/custom.img" || cfg.AppleVZ.ImageSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || cfg.AppleVZ.User != "runner" || cfg.AppleVZ.WorkRoot != "/work/example" || cfg.AppleVZ.CPUs != 6 || cfg.AppleVZ.MemoryMiB != 12288 || cfg.AppleVZ.DiskGiB != 64 {
-		t.Fatalf("file appleVZ config not applied: %#v", cfg.AppleVZ)
+	if cfg.Provider != "apple-vm" || cfg.AppleVM.HelperPath != "/opt/bin/crabbox-apple-vm-helper" || cfg.AppleVM.Image != "https://example.test/custom.img" || cfg.AppleVM.ImageSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || cfg.AppleVM.User != "runner" || cfg.AppleVM.WorkRoot != "/work/example" || cfg.AppleVM.CPUs != 6 || cfg.AppleVM.MemoryMiB != 12288 || cfg.AppleVM.DiskGiB != 64 {
+		t.Fatalf("file appleVM config not applied: %#v", cfg.AppleVM)
 	}
-	if !AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
-		t.Fatal("file appleVZ numeric settings should be marked explicit")
+	if !AppleVMCPUsExplicit(cfg) || !AppleVMMemoryExplicit(cfg) || !AppleVMDiskExplicit(cfg) {
+		t.Fatal("file appleVM numeric settings should be marked explicit")
 	}
 
-	t.Setenv("CRABBOX_APPLE_VZ_HELPER", "/usr/local/bin/crabbox-apple-vz-helper")
-	t.Setenv("CRABBOX_APPLE_VZ_IMAGE", "https://example.test/env.img")
-	t.Setenv("CRABBOX_APPLE_VZ_IMAGE_SHA256", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	t.Setenv("CRABBOX_APPLE_VZ_USER", "env-user")
-	t.Setenv("CRABBOX_APPLE_VZ_WORK_ROOT", "/work/env")
-	t.Setenv("CRABBOX_APPLE_VZ_CPUS", "8")
-	t.Setenv("CRABBOX_APPLE_VZ_MEMORY", "16384")
-	t.Setenv("CRABBOX_APPLE_VZ_DISK", "80")
+	t.Setenv("CRABBOX_APPLE_VM_HELPER", "/usr/local/bin/crabbox-apple-vm-helper")
+	t.Setenv("CRABBOX_APPLE_VM_IMAGE", "https://example.test/env.img")
+	t.Setenv("CRABBOX_APPLE_VM_IMAGE_SHA256", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	t.Setenv("CRABBOX_APPLE_VM_USER", "env-user")
+	t.Setenv("CRABBOX_APPLE_VM_WORK_ROOT", "/work/env")
+	t.Setenv("CRABBOX_APPLE_VM_CPUS", "8")
+	t.Setenv("CRABBOX_APPLE_VM_MEMORY", "16384")
+	t.Setenv("CRABBOX_APPLE_VM_DISK", "80")
 	applyEnv(&cfg)
-	if cfg.AppleVZ.HelperPath != "/usr/local/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/env.img" || cfg.AppleVZ.ImageSHA256 != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || cfg.AppleVZ.User != "env-user" || cfg.AppleVZ.WorkRoot != "/work/env" || cfg.AppleVZ.CPUs != 8 || cfg.AppleVZ.MemoryMiB != 16384 || cfg.AppleVZ.DiskGiB != 80 {
-		t.Fatalf("env appleVZ config not applied: %#v", cfg.AppleVZ)
+	if cfg.AppleVM.HelperPath != "/usr/local/bin/crabbox-apple-vm-helper" || cfg.AppleVM.Image != "https://example.test/env.img" || cfg.AppleVM.ImageSHA256 != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || cfg.AppleVM.User != "env-user" || cfg.AppleVM.WorkRoot != "/work/env" || cfg.AppleVM.CPUs != 8 || cfg.AppleVM.MemoryMiB != 16384 || cfg.AppleVM.DiskGiB != 80 {
+		t.Fatalf("env appleVM config not applied: %#v", cfg.AppleVM)
 	}
-	if !AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
-		t.Fatal("env appleVZ numeric settings should be marked explicit")
+	if !AppleVMCPUsExplicit(cfg) || !AppleVMMemoryExplicit(cfg) || !AppleVMDiskExplicit(cfg) {
+		t.Fatal("env appleVM numeric settings should be marked explicit")
 	}
 }
 
-func TestAppleVZNumericSettingsPreserveExplicitZero(t *testing.T) {
+func TestAppleVMNumericSettingsPreserveExplicitZero(t *testing.T) {
 	clearConfigEnv(t)
 	fileZeroCPUs := 0
 	fileZero := 0
 	fileZeroDisk := 0
 	cfg := baseConfig()
-	applyFileConfig(&cfg, fileConfig{AppleVZ: &fileAppleVZConfig{
+	applyFileConfig(&cfg, fileConfig{AppleVM: &fileAppleVMConfig{
 		CPUs:      &fileZeroCPUs,
 		MemoryMiB: &fileZero,
 		DiskGiB:   &fileZeroDisk,
 	}})
-	if cfg.AppleVZ.CPUs != 0 || cfg.AppleVZ.MemoryMiB != 0 || cfg.AppleVZ.DiskGiB != 0 ||
-		!AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
-		t.Fatalf("file appleVZ=%+v explicit=%v/%v/%v", cfg.AppleVZ, AppleVZCPUsExplicit(cfg), AppleVZMemoryExplicit(cfg), AppleVZDiskExplicit(cfg))
+	if cfg.AppleVM.CPUs != 0 || cfg.AppleVM.MemoryMiB != 0 || cfg.AppleVM.DiskGiB != 0 ||
+		!AppleVMCPUsExplicit(cfg) || !AppleVMMemoryExplicit(cfg) || !AppleVMDiskExplicit(cfg) {
+		t.Fatalf("file appleVM=%+v explicit=%v/%v/%v", cfg.AppleVM, AppleVMCPUsExplicit(cfg), AppleVMMemoryExplicit(cfg), AppleVMDiskExplicit(cfg))
 	}
 
 	cfg = baseConfig()
-	t.Setenv("CRABBOX_APPLE_VZ_CPUS", "0")
-	t.Setenv("CRABBOX_APPLE_VZ_MEMORY", "0")
-	t.Setenv("CRABBOX_APPLE_VZ_DISK", "0")
+	t.Setenv("CRABBOX_APPLE_VM_CPUS", "0")
+	t.Setenv("CRABBOX_APPLE_VM_MEMORY", "0")
+	t.Setenv("CRABBOX_APPLE_VM_DISK", "0")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AppleVZ.CPUs != 0 || cfg.AppleVZ.MemoryMiB != 0 || cfg.AppleVZ.DiskGiB != 0 ||
-		!AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
-		t.Fatalf("env appleVZ=%+v explicit=%v/%v/%v", cfg.AppleVZ, AppleVZCPUsExplicit(cfg), AppleVZMemoryExplicit(cfg), AppleVZDiskExplicit(cfg))
+	if cfg.AppleVM.CPUs != 0 || cfg.AppleVM.MemoryMiB != 0 || cfg.AppleVM.DiskGiB != 0 ||
+		!AppleVMCPUsExplicit(cfg) || !AppleVMMemoryExplicit(cfg) || !AppleVMDiskExplicit(cfg) {
+		t.Fatalf("env appleVM=%+v explicit=%v/%v/%v", cfg.AppleVM, AppleVMCPUsExplicit(cfg), AppleVMMemoryExplicit(cfg), AppleVMDiskExplicit(cfg))
 	}
 }
 
-func TestAppleVZNumericSettingsRejectInvalidEnvironmentValues(t *testing.T) {
-	for _, name := range []string{"CRABBOX_APPLE_VZ_CPUS", "CRABBOX_APPLE_VZ_MEMORY", "CRABBOX_APPLE_VZ_DISK"} {
+func TestAppleVMNumericSettingsRejectInvalidEnvironmentValues(t *testing.T) {
+	for _, name := range []string{"CRABBOX_APPLE_VM_CPUS", "CRABBOX_APPLE_VM_MEMORY", "CRABBOX_APPLE_VM_DISK"} {
 		t.Run(name, func(t *testing.T) {
 			clearConfigEnv(t)
 			cfg := baseConfig()
@@ -2845,15 +2845,15 @@ func TestAppleVZNumericSettingsRejectInvalidEnvironmentValues(t *testing.T) {
 	}
 }
 
-func TestAppleVZConfigDefaultsRedactSignedImageServerType(t *testing.T) {
+func TestAppleVMConfigDefaultsRedactSignedImageServerType(t *testing.T) {
 	for _, image := range []string{
 		"https://alice:secret@example.test/images/ubuntu.img?token=private#fragment",
 		"HTTPS://alice:secret@example.test/images/ubuntu.img?token=private#fragment",
 	} {
 		cfg := baseConfig()
-		cfg.Provider = "apple-vz"
-		cfg.AppleVZ.Image = image
-		cfg.AppleVZ.ImageSHA256 = strings.Repeat("a", 64)
+		cfg.Provider = "apple-vm"
+		cfg.AppleVM.Image = image
+		cfg.AppleVM.ImageSHA256 = strings.Repeat("a", 64)
 
 		if err := applyProviderConfigDefaults(&cfg); err != nil {
 			t.Fatal(err)
@@ -2861,8 +2861,8 @@ func TestAppleVZConfigDefaultsRedactSignedImageServerType(t *testing.T) {
 		if cfg.ServerType != "<remote-image>" {
 			t.Fatalf("ServerType=%q", cfg.ServerType)
 		}
-		if !strings.Contains(cfg.AppleVZ.Image, "token=private") {
-			t.Fatalf("AppleVZ.Image should retain the request URL in memory: %q", cfg.AppleVZ.Image)
+		if !strings.Contains(cfg.AppleVM.Image, "token=private") {
+			t.Fatalf("AppleVM.Image should retain the request URL in memory: %q", cfg.AppleVM.Image)
 		}
 	}
 }
@@ -6122,51 +6122,51 @@ func TestAppleContainerExplicitImageSurvivesOSDefault(t *testing.T) {
 	}
 }
 
-func TestAppleVZImageFollowsOSImageDefault(t *testing.T) {
+func TestAppleVMImageFollowsOSImageDefault(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	cfgPath := filepath.Join(home, "crabbox.yaml")
 	t.Setenv("CRABBOX_CONFIG", cfgPath)
-	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\ntarget: linux\nos: ubuntu:24.04\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vm\ntarget: linux\nos: ubuntu:24.04\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(cfg.AppleVZ.Image, "ubuntu-24.04-server-cloudimg-arm64.img") {
-		t.Fatalf("apple-vz image should follow --os default: %q", cfg.AppleVZ.Image)
+	if !strings.Contains(cfg.AppleVM.Image, "ubuntu-24.04-server-cloudimg-arm64.img") {
+		t.Fatalf("apple-vm image should follow --os default: %q", cfg.AppleVM.Image)
 	}
-	if cfg.AppleVZ.ImageSHA256 != "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec" {
-		t.Fatalf("apple-vz checksum should follow --os default: %q", cfg.AppleVZ.ImageSHA256)
+	if cfg.AppleVM.ImageSHA256 != "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec" {
+		t.Fatalf("apple-vm checksum should follow --os default: %q", cfg.AppleVM.ImageSHA256)
 	}
 }
 
-func TestAppleVZExplicitImageSurvivesOSDefault(t *testing.T) {
+func TestAppleVMExplicitImageSurvivesOSDefault(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	cfgPath := filepath.Join(home, "crabbox.yaml")
 	t.Setenv("CRABBOX_CONFIG", cfgPath)
-	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\ntarget: linux\nos: ubuntu:24.04\nappleVZ:\n  image: https://example.test/custom.img\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vm\ntarget: linux\nos: ubuntu:24.04\nappleVM:\n  image: https://example.test/custom.img\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AppleVZ.Image != "https://example.test/custom.img" {
-		t.Fatalf("explicit apple-vz image was overwritten by --os: %q", cfg.AppleVZ.Image)
+	if cfg.AppleVM.Image != "https://example.test/custom.img" {
+		t.Fatalf("explicit apple-vm image was overwritten by --os: %q", cfg.AppleVM.Image)
 	}
-	if cfg.AppleVZ.ImageSHA256 != "" {
-		t.Fatalf("custom apple-vz image should clear default checksum unless explicitly set: %q", cfg.AppleVZ.ImageSHA256)
+	if cfg.AppleVM.ImageSHA256 != "" {
+		t.Fatalf("custom apple-vm image should clear default checksum unless explicitly set: %q", cfg.AppleVM.ImageSHA256)
 	}
 }
 
-func TestAppleVZExplicitChecksumSurvivesOSDefault(t *testing.T) {
+func TestAppleVMExplicitChecksumSurvivesOSDefault(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -6174,35 +6174,35 @@ func TestAppleVZExplicitChecksumSurvivesOSDefault(t *testing.T) {
 	cfgPath := filepath.Join(home, "crabbox.yaml")
 	t.Setenv("CRABBOX_CONFIG", cfgPath)
 	checksum := strings.Repeat("b", 64)
-	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\ntarget: linux\nos: ubuntu:24.04\nappleVZ:\n  imageSHA256: "+checksum+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vm\ntarget: linux\nos: ubuntu:24.04\nappleVM:\n  imageSHA256: "+checksum+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AppleVZ.ImageSHA256 != checksum {
-		t.Fatalf("explicit apple-vz checksum was overwritten by OS defaults: %q", cfg.AppleVZ.ImageSHA256)
+	if cfg.AppleVM.ImageSHA256 != checksum {
+		t.Fatalf("explicit apple-vm checksum was overwritten by OS defaults: %q", cfg.AppleVM.ImageSHA256)
 	}
 
-	t.Setenv("CRABBOX_APPLE_VZ_IMAGE_SHA256", strings.Repeat("c", 64))
+	t.Setenv("CRABBOX_APPLE_VM_IMAGE_SHA256", strings.Repeat("c", 64))
 	cfg, err = loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AppleVZ.ImageSHA256 != strings.Repeat("c", 64) {
-		t.Fatalf("environment apple-vz checksum was overwritten by OS defaults: %q", cfg.AppleVZ.ImageSHA256)
+	if cfg.AppleVM.ImageSHA256 != strings.Repeat("c", 64) {
+		t.Fatalf("environment apple-vm checksum was overwritten by OS defaults: %q", cfg.AppleVM.ImageSHA256)
 	}
 }
 
-func TestAppleVZPreservesExplicitTopLevelWorkRoot(t *testing.T) {
+func TestAppleVMPreservesExplicitTopLevelWorkRoot(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	cfgPath := filepath.Join(home, "crabbox.yaml")
 	t.Setenv("CRABBOX_CONFIG", cfgPath)
-	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\nworkRoot: /custom/crabbox\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vm\nworkRoot: /custom/crabbox\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := loadConfig()
@@ -6214,22 +6214,22 @@ func TestAppleVZPreservesExplicitTopLevelWorkRoot(t *testing.T) {
 	}
 }
 
-func TestAppleVZSpecificWorkRootOverridesTopLevel(t *testing.T) {
+func TestAppleVMSpecificWorkRootOverridesTopLevel(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	cfgPath := filepath.Join(home, "crabbox.yaml")
 	t.Setenv("CRABBOX_CONFIG", cfgPath)
-	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\nworkRoot: /custom/crabbox\nappleVZ:\n  workRoot: /work/apple-vz\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vm\nworkRoot: /custom/crabbox\nappleVM:\n  workRoot: /work/apple-vm\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.WorkRoot != "/work/apple-vz" {
-		t.Fatalf("WorkRoot=%q want /work/apple-vz", cfg.WorkRoot)
+	if cfg.WorkRoot != "/work/apple-vm" {
+		t.Fatalf("WorkRoot=%q want /work/apple-vm", cfg.WorkRoot)
 	}
 }
 

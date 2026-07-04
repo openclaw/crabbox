@@ -1,6 +1,6 @@
 //go:build darwin && arm64
 
-package applevzhelper
+package applevmhelper
 
 import (
 	"bytes"
@@ -71,6 +71,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = runInspect(args[1:], stdout, stderr)
 	case "delete":
 		err = runDelete(args[1:], stdout, stderr)
+	case "vmd-info":
+		err = runVMDInfo(stdout)
 	default:
 		fmt.Fprintf(stderr, "unknown subcommand %q\n", args[0])
 		return 2
@@ -85,7 +87,7 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 func runDoctor(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	stateRoot := fs.String("state-root", "", "apple-vz state root")
+	stateRoot := fs.String("state-root", "", "apple-vm state root")
 	imageRequestStdin := fs.Bool("image-request-stdin", false, "read source image request as JSON from stdin")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -128,7 +130,7 @@ func runDoctor(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	stateRoot := fs.String("state-root", "", "apple-vz state root")
+	stateRoot := fs.String("state-root", "", "apple-vm state root")
 	name := fs.String("name", "", "instance name")
 	leaseID := fs.String("lease-id", "", "lease id")
 	slug := fs.String("slug", "", "lease slug")
@@ -390,7 +392,7 @@ func handleStartReadinessMetadata(stateRoot, name string, inst, expected Instanc
 	}
 }
 
-var errHelperStoppedBeforeReadiness = errors.New("apple-vz helper stopped before reporting readiness")
+var errHelperStoppedBeforeReadiness = errors.New("apple-vm helper stopped before reporting readiness")
 
 func helperStoppedBeforeReadinessError(status string) error {
 	return fmt.Errorf("%w (status=%s)", errHelperStoppedBeforeReadiness, status)
@@ -521,6 +523,20 @@ func startedHelperIdentityMatches(inst Instance) (bool, error) {
 	return matches, nil
 }
 
+// runVMDInfo reports whether this helper build carries an embedded VM
+// daemon payload, so packaging checks can verify release builds.
+func runVMDInfo(stdout io.Writer) error {
+	payload := embeddedVMDPayload()
+	info := struct {
+		Embedded bool   `json:"embedded"`
+		SHA256   string `json:"sha256,omitempty"`
+	}{Embedded: len(payload) > 0}
+	if info.Embedded {
+		info.SHA256 = sha256Hex(payload)
+	}
+	return json.NewEncoder(stdout).Encode(info)
+}
+
 // runVMDProbe asks the entitlement-signed VMM daemon to build and validate a
 // throwaway VM configuration, proving the Virtualization.framework runtime
 // works end to end for this host.
@@ -548,7 +564,7 @@ var runVMDProbeFunc = runVMDProbe
 func runList(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	stateRoot := fs.String("state-root", "", "apple-vz state root")
+	stateRoot := fs.String("state-root", "", "apple-vm state root")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -566,7 +582,7 @@ func runList(args []string, stdout, stderr io.Writer) error {
 func runInspect(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	stateRoot := fs.String("state-root", "", "apple-vz state root")
+	stateRoot := fs.String("state-root", "", "apple-vm state root")
 	name := fs.String("name", "", "instance name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -589,7 +605,7 @@ func runInspect(args []string, stdout, stderr io.Writer) error {
 func runDelete(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	stateRoot := fs.String("state-root", "", "apple-vz state root")
+	stateRoot := fs.String("state-root", "", "apple-vm state root")
 	name := fs.String("name", "", "instance name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -798,9 +814,11 @@ func kernelProcessIdentitySeconds(identity string) (int64, error) {
 }
 
 func helperProcessArgumentsMatch(args []string, subcommand, name string) bool {
-	if len(args) < 2 ||
-		!strings.HasPrefix(filepath.Base(args[0]), ManagedHelperName) ||
-		args[1] != subcommand {
+	if len(args) < 2 || args[1] != subcommand {
+		return false
+	}
+	base := filepath.Base(args[0])
+	if !strings.HasPrefix(base, ManagedHelperName) && !strings.HasPrefix(base, LegacyManagedHelperName) {
 		return false
 	}
 	for i := 2; i+1 < len(args); i++ {

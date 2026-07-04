@@ -884,11 +884,11 @@ func resolveLeaseClaimForProvider(identifier, provider string) (leaseClaim, bool
 	if err != nil || !ok {
 		return claim, ok, err
 	}
-	if claim.Provider == provider {
+	if canonicalClaimProvider(claim.Provider) == provider {
 		return claim, true, nil
 	}
 	claim, ok, err = findLeaseClaim(identifier, func(candidate leaseClaim) bool {
-		return candidate.Provider == provider
+		return canonicalClaimProvider(candidate.Provider) == provider
 	})
 	if err != nil || !ok {
 		return leaseClaim{}, false, err
@@ -905,7 +905,7 @@ func resolveLeaseClaimForProviderWithExact(identifier, provider string) (leaseCl
 		return leaseClaim{}, false, exists, err
 	}
 	if exists {
-		if exact.LeaseID == "" || exact.Provider != provider {
+		if exact.LeaseID == "" || canonicalClaimProvider(exact.Provider) != provider {
 			return exact, false, true, nil
 		}
 		return exact, true, true, nil
@@ -938,7 +938,7 @@ func resolveLeaseClaimForProviderCloudID(cloudID, provider string) (leaseClaim, 
 		if err != nil {
 			return leaseClaim{}, false, err
 		}
-		if claim.Provider != provider || claim.CloudID != cloudID {
+		if canonicalClaimProvider(claim.Provider) != provider || claim.CloudID != cloudID {
 			continue
 		}
 		if match.LeaseID != "" {

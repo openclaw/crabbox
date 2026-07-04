@@ -21,8 +21,8 @@ type osImageSpec struct {
 	LinodeImage     string
 	DockerImage     string
 	ContainerName   string
-	AppleVZImage    string
-	AppleVZSHA256   string
+	AppleVMImage    string
+	AppleVMSHA256   string
 }
 
 var osImageSpecs = map[string]osImageSpec{
@@ -38,8 +38,8 @@ var osImageSpecs = map[string]osImageSpec{
 		LinodeImage:     "linode/ubuntu24.04",
 		DockerImage:     "docker.io/library/ubuntu:24.04",
 		ContainerName:   "ubuntu:24.04",
-		AppleVZImage:    "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img",
-		AppleVZSHA256:   "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec",
+		AppleVMImage:    "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img",
+		AppleVMSHA256:   "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec",
 	},
 	"ubuntu:26.04": {
 		Selector:        "ubuntu:26.04",
@@ -52,8 +52,8 @@ var osImageSpecs = map[string]osImageSpec{
 		HetznerImage:    "ubuntu-24.04",
 		DockerImage:     "docker.io/library/ubuntu:26.04",
 		ContainerName:   "ubuntu:26.04",
-		AppleVZImage:    "https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img",
-		AppleVZSHA256:   "5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b",
+		AppleVMImage:    "https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img",
+		AppleVMSHA256:   "5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b",
 	},
 }
 
@@ -95,7 +95,7 @@ func effectiveArchitectureForConfig(cfg Config) string {
 	if cfg.architectureExplicit {
 		return cfg.Architecture
 	}
-	if cfg.Provider == "apple-vz" || cfg.Provider == "applevz" || cfg.Provider == "aws-lambda-microvm" {
+	if cfg.Provider == "apple-vm" || cfg.Provider == "applevm" || cfg.Provider == "aws-lambda-microvm" {
 		return ArchitectureARM64
 	}
 	if cfg.TargetOS == targetLinux || cfg.TargetOS == targetWindows {
@@ -153,26 +153,26 @@ func osImageDefaultMultipassImage(value string) (string, error) {
 	return strings.TrimPrefix(spec.Selector, "ubuntu:"), nil
 }
 
-func osImageDefaultAppleVZImage(value string) (string, error) {
+func osImageDefaultAppleVMImage(value string) (string, error) {
 	spec, err := osImageSpecFor(value)
 	if err != nil {
 		return "", err
 	}
-	return spec.AppleVZImage, nil
+	return spec.AppleVMImage, nil
 }
 
-func OSImageDefaultAppleVZImage(value string) (string, error) {
-	return osImageDefaultAppleVZImage(value)
+func OSImageDefaultAppleVMImage(value string) (string, error) {
+	return osImageDefaultAppleVMImage(value)
 }
 
-func osImageDefaultAppleVZSHA256(value string) (string, error) {
+func osImageDefaultAppleVMSHA256(value string) (string, error) {
 	spec, err := osImageSpecFor(value)
 	if err != nil {
 		return "", err
 	}
-	return spec.AppleVZSHA256, nil
+	return spec.AppleVMSHA256, nil
 }
 
-func OSImageDefaultAppleVZSHA256(value string) (string, error) {
-	return osImageDefaultAppleVZSHA256(value)
+func OSImageDefaultAppleVMSHA256(value string) (string, error) {
+	return osImageDefaultAppleVMSHA256(value)
 }

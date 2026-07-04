@@ -1,4 +1,4 @@
-package applevzhelper
+package applevmhelper
 
 import (
 	"os"
@@ -8,7 +8,7 @@ import (
 )
 
 func TestProtocolPathsAndStatusHelpers(t *testing.T) {
-	root := filepath.Join(string(filepath.Separator), "tmp", "crabbox-apple-vz")
+	root := filepath.Join(string(filepath.Separator), "tmp", "crabbox-apple-vm")
 	name := "crabbox-cbx123-demo"
 
 	if got := InstancesDir(root); got != filepath.Join(root, "instances") {

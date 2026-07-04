@@ -66,14 +66,10 @@ jobs:
       - name: Build
         run: go build -trimpath -o /tmp/crabbox ./cmd/crabbox
 
-  apple-vz:
-    name: Apple VZ
+  apple-vm:
+    name: Apple VM
     runs-on: macos-15
     timeout-minutes: 15
-    env:
-      CGO_CFLAGS: -mmacosx-version-min=13.0
-      CGO_LDFLAGS: -mmacosx-version-min=13.0
-      MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
       - name: Check out
@@ -89,18 +85,19 @@ jobs:
           cache: false
 
       - name: Vet native helper
-        run: go vet ./internal/applevzhelper ./cmd/crabbox-apple-vz-helper
+        run: go vet ./internal/applevmhelper ./cmd/crabbox-apple-vm-helper
 
       - name: Test native helper and provider
-        run: go test -race ./internal/applevzhelper ./internal/providers/applevz
+        run: go test -race ./internal/applevmhelper ./internal/providers/applevm
 
-      - name: Build native helper
-        run: go build -trimpath -o /tmp/crabbox-apple-vz-helper ./cmd/crabbox-apple-vz-helper
+      - name: Build Swift VM daemon
+        run: sh scripts/build-vmd.sh
 
-      - name: Verify native helper deployment target
-        run: |
-          minos="$(vtool -show-build /tmp/crabbox-apple-vz-helper | awk '$1 == "minos" { print $2; exit }')"
-          test "$minos" = "13.0"
+      - name: Build native helper with embedded daemon
+        run: go build -trimpath -tags vmdembed -o /tmp/crabbox-apple-vm-helper ./cmd/crabbox-apple-vm-helper
+
+      - name: Verify embedded daemon payload
+        run: /tmp/crabbox-apple-vm-helper vmd-info | grep -q '"embedded":true'
 
   worker:
     name: Worker
@@ -236,15 +233,14 @@ jobs:
           version: "~> v2"
           args: release --snapshot --clean --skip=publish --parallelism 1
 
-      - name: Verify snapshot helper deployment target
+      - name: Verify snapshot helper embeds VM daemon
         run: |
-          helper="$(find dist -type f -name crabbox-apple-vz-helper -print -quit)"
+          helper="$(find dist -type f -name crabbox-apple-vm-helper -print -quit)"
           if [ -z "$helper" ] || [ ! -x "$helper" ]; then
-            echo "::error::snapshot Apple VZ helper not found"
+            echo "::error::snapshot Apple VM helper not found"
             exit 1
           fi
-          minos="$(vtool -show-build "$helper" | awk '$1 == "minos" { print $2; exit }')"
-          if [ "$minos" != "13.0" ]; then
-            echo "::error::Apple VZ helper minimum macOS is $minos, expected 13.0"
+          if ! "$helper" vmd-info | grep -q '"embedded":true'; then
+            echo "::error::snapshot Apple VM helper is missing the embedded VM daemon"
             exit 1
           fi

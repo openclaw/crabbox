@@ -1,4 +1,4 @@
-package applevz
+package applevm
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openclaw/crabbox/internal/applevzhelper"
+	"github.com/openclaw/crabbox/internal/applevmhelper"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -51,7 +51,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 	b.prepareHelper = func(_ context.Context, cfg core.Config) (string, error) {
 		return resolveHelperSourcePath(cfg)
 	}
-	b.stateRoot = b.appleVZStateRoot
+	b.stateRoot = b.appleVMStateRoot
 	b.waitForSSH = core.WaitForSSHReady
 	return b
 }
@@ -65,48 +65,48 @@ func applyDefaults(cfg *core.Config) {
 		cfg.WindowsMode = ""
 	}
 	cfg.SSHFallbackPorts = []string{}
-	if cfg.AppleVZ.Image == "" {
-		cfg.AppleVZ.Image = defaultAppleVZImage(cfg.OSImage)
+	if cfg.AppleVM.Image == "" {
+		cfg.AppleVM.Image = defaultAppleVMImage(cfg.OSImage)
 	}
-	if cfg.AppleVZ.ImageSHA256 == "" && cfg.AppleVZ.Image == defaultAppleVZImage(cfg.OSImage) {
-		cfg.AppleVZ.ImageSHA256 = defaultAppleVZImageSHA256(cfg.OSImage)
+	if cfg.AppleVM.ImageSHA256 == "" && cfg.AppleVM.Image == defaultAppleVMImage(cfg.OSImage) {
+		cfg.AppleVM.ImageSHA256 = defaultAppleVMImageSHA256(cfg.OSImage)
 	}
-	if cfg.AppleVZ.User == "" {
-		cfg.AppleVZ.User = defaultUser
+	if cfg.AppleVM.User == "" {
+		cfg.AppleVM.User = defaultUser
 	}
-	if cfg.AppleVZ.WorkRoot == "" {
+	if cfg.AppleVM.WorkRoot == "" {
 		if workRoot := strings.TrimSpace(cfg.WorkRoot); workRoot != "" && workRoot != defaultWorkRoot {
-			cfg.AppleVZ.WorkRoot = workRoot
+			cfg.AppleVM.WorkRoot = workRoot
 		} else {
-			cfg.AppleVZ.WorkRoot = defaultWorkRoot
+			cfg.AppleVM.WorkRoot = defaultWorkRoot
 		}
-	} else if workRoot := strings.TrimSpace(cfg.WorkRoot); workRoot != "" && workRoot != defaultWorkRoot && cfg.AppleVZ.WorkRoot == defaultWorkRoot {
-		cfg.AppleVZ.WorkRoot = workRoot
+	} else if workRoot := strings.TrimSpace(cfg.WorkRoot); workRoot != "" && workRoot != defaultWorkRoot && cfg.AppleVM.WorkRoot == defaultWorkRoot {
+		cfg.AppleVM.WorkRoot = workRoot
 	}
-	if cfg.AppleVZ.CPUs == 0 && !core.AppleVZCPUsExplicit(*cfg) {
-		cfg.AppleVZ.CPUs = defaultCPUs
+	if cfg.AppleVM.CPUs == 0 && !core.AppleVMCPUsExplicit(*cfg) {
+		cfg.AppleVM.CPUs = defaultCPUs
 	}
-	if cfg.AppleVZ.MemoryMiB == 0 && !core.AppleVZMemoryExplicit(*cfg) {
-		cfg.AppleVZ.MemoryMiB = defaultMemoryMiB
+	if cfg.AppleVM.MemoryMiB == 0 && !core.AppleVMMemoryExplicit(*cfg) {
+		cfg.AppleVM.MemoryMiB = defaultMemoryMiB
 	}
-	if cfg.AppleVZ.DiskGiB == 0 && !core.AppleVZDiskExplicit(*cfg) {
-		cfg.AppleVZ.DiskGiB = defaultDiskGiB
+	if cfg.AppleVM.DiskGiB == 0 && !core.AppleVMDiskExplicit(*cfg) {
+		cfg.AppleVM.DiskGiB = defaultDiskGiB
 	}
-	cfg.SSHUser = cfg.AppleVZ.User
-	cfg.SSHPort = strconv.Itoa(int(applevzhelper.GuestSSHPort))
-	cfg.WorkRoot = cfg.AppleVZ.WorkRoot
-	cfg.ServerType = applevzhelper.ImageIdentity(cfg.AppleVZ.Image, cfg.AppleVZ.ImageSHA256)
+	cfg.SSHUser = cfg.AppleVM.User
+	cfg.SSHPort = strconv.Itoa(int(applevmhelper.GuestSSHPort))
+	cfg.WorkRoot = cfg.AppleVM.WorkRoot
+	cfg.ServerType = applevmhelper.ImageIdentity(cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256)
 }
 
-func defaultAppleVZImage(osImage string) string {
-	if image, err := core.OSImageDefaultAppleVZImage(osImage); err == nil && strings.TrimSpace(image) != "" {
+func defaultAppleVMImage(osImage string) string {
+	if image, err := core.OSImageDefaultAppleVMImage(osImage); err == nil && strings.TrimSpace(image) != "" {
 		return image
 	}
 	return "https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img"
 }
 
-func defaultAppleVZImageSHA256(osImage string) string {
-	if checksum, err := core.OSImageDefaultAppleVZSHA256(osImage); err == nil && strings.TrimSpace(checksum) != "" {
+func defaultAppleVMImageSHA256(osImage string) string {
+	if checksum, err := core.OSImageDefaultAppleVMSHA256(osImage); err == nil && strings.TrimSpace(checksum) != "" {
 		return checksum
 	}
 	return "5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b"
@@ -166,8 +166,8 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return rollbackErr
 	}
-	displayImage := applevzhelper.ImageIdentity(cfg.AppleVZ.Image, cfg.AppleVZ.ImageSHA256)
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMiB disk=%dGiB keep=%v\n", providerName, leaseID, slug, displayImage, cfg.AppleVZ.CPUs, cfg.AppleVZ.MemoryMiB, cfg.AppleVZ.DiskGiB, req.Keep)
+	displayImage := applevmhelper.ImageIdentity(cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256)
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMiB disk=%dGiB keep=%v\n", providerName, leaseID, slug, displayImage, cfg.AppleVM.CPUs, cfg.AppleVM.MemoryMiB, cfg.AppleVM.DiskGiB, req.Keep)
 	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
@@ -179,11 +179,11 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	labels["instance"] = name
 	labels["image"] = displayImage
 	labels["server_type"] = displayImage
-	labels["ssh_user"] = cfg.AppleVZ.User
+	labels["ssh_user"] = cfg.AppleVM.User
 	if inst.SSHPort > 0 {
 		labels["ssh_port"] = strconv.Itoa(inst.SSHPort)
 	}
-	labels["work_root"] = cfg.AppleVZ.WorkRoot
+	labels["work_root"] = cfg.AppleVM.WorkRoot
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
 	lease, err := b.prepareLease(ctx, cfg, inst, claim, true)
 	if err != nil {
@@ -211,21 +211,21 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	claim.LeaseID = leaseID
 	claim.Slug = slug
 	if leaseID == "" {
-		return core.LeaseTarget{}, exit(4, "apple-vz instance %q has no Crabbox lease metadata; clean it up with `crabbox cleanup --provider apple-vz`", inst.Name)
+		return core.LeaseTarget{}, exit(4, "apple-vm instance %q has no Crabbox lease metadata; clean it up with `crabbox cleanup --provider apple-vm`", inst.Name)
 	}
-	owned, conflict, err := appleVZClaimStatus(leaseID, inst.Name)
+	owned, conflict, err := appleVMClaimStatus(leaseID, inst.Name)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
 	readOnlyStatus := req.StatusOnly && !req.ReleaseOnly
 	if (conflict && (!readOnlyStatus || req.Reclaim)) || (!owned && !readOnlyStatus && (req.ReleaseOnly || !req.Reclaim)) {
-		return core.LeaseTarget{}, appleVZOwnershipError(leaseID, inst.Name)
+		return core.LeaseTarget{}, appleVMOwnershipError(leaseID, inst.Name)
 	}
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: leaseID}, nil
 	}
-	if !appleVZRunning(inst.Status) && !req.StatusOnly {
-		return core.LeaseTarget{}, exit(5, "apple-vz instance %s is %s; start a new lease with `crabbox run` or clean it up with `crabbox cleanup --provider apple-vz`", inst.Name, core.Blank(inst.Status, "stopped"))
+	if !appleVMRunning(inst.Status) && !req.StatusOnly {
+		return core.LeaseTarget{}, exit(5, "apple-vm instance %s is %s; start a new lease with `crabbox run` or clean it up with `crabbox cleanup --provider apple-vm`", inst.Name, core.Blank(inst.Status, "stopped"))
 	}
 	if req.StatusOnly && (inst.SSHHost == "" || inst.SSHPort <= 0) {
 		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: leaseID}, nil
@@ -275,21 +275,21 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
-	var resp applevzhelper.DoctorResponse
-	if err := b.runHelperJSONInput(ctx, helperPath, []string{"doctor", "--state-root", root, "--image-request-stdin"}, applevzhelper.ImageRequest{
-		Image:  cfg.AppleVZ.Image,
-		SHA256: cfg.AppleVZ.ImageSHA256,
+	var resp applevmhelper.DoctorResponse
+	if err := b.runHelperJSONInput(ctx, helperPath, []string{"doctor", "--state-root", root, "--image-request-stdin"}, applevmhelper.ImageRequest{
+		Image:  cfg.AppleVM.Image,
+		SHA256: cfg.AppleVM.ImageSHA256,
 	}, &resp); err != nil {
 		return core.DoctorResult{}, err
 	}
 	if strings.TrimSpace(resp.Status) != "ok" {
-		return core.DoctorResult{}, exit(2, "apple-vz doctor failed: %s", core.Blank(resp.Message, "unknown error"))
+		return core.DoctorResult{}, exit(2, "apple-vm doctor failed: %s", core.Blank(resp.Message, "unknown error"))
 	}
 	if image := strings.TrimSpace(resp.Details["image"]); image != "" {
-		resp.Details["image"] = applevzhelper.RedactImageRef(image)
+		resp.Details["image"] = applevmhelper.RedactImageRef(image)
 	}
 	runtimeLabel := core.Blank(resp.Details["runtime"], "ready")
-	msg := fmt.Sprintf("helper=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s image=%s path=%s", resp.Instances, runtimeLabel, applevzhelper.ImageIdentity(cfg.AppleVZ.Image, cfg.AppleVZ.ImageSHA256), helperPath)
+	msg := fmt.Sprintf("helper=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s image=%s path=%s", resp.Instances, runtimeLabel, applevmhelper.ImageIdentity(cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256), helperPath)
 	return core.DoctorResult{
 		Provider: providerName,
 		Message:  msg,
@@ -322,7 +322,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		}
 	}
 	if name != "" {
-		if err := requireExactAppleVZClaim(leaseID, name); err != nil {
+		if err := requireExactAppleVMClaim(leaseID, name); err != nil {
 			return err
 		}
 		if err := b.deleteInstance(ctx, cfg, name); err != nil {
@@ -334,12 +334,12 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		core.RemoveStoredTestboxKey(leaseID)
 	}
 	if name == "" && leaseID == "" {
-		return exit(2, "provider=%s release requires an apple-vz instance name or lease id", providerName)
+		return exit(2, "provider=%s release requires an apple-vm instance name or lease id", providerName)
 	}
 	return nil
 }
 
-func appleVZClaimStatus(leaseID, instanceName string) (owned, conflict bool, err error) {
+func appleVMClaimStatus(leaseID, instanceName string) (owned, conflict bool, err error) {
 	leaseID = strings.TrimSpace(leaseID)
 	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
 	if err != nil {
@@ -361,17 +361,17 @@ func appleVZClaimStatus(leaseID, instanceName string) (owned, conflict bool, err
 	return true, false, nil
 }
 
-func appleVZOwnershipError(leaseID, instanceName string) error {
-	return exit(4, "apple-vz lease %q has no exact local claim bound to instance %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName))
+func appleVMOwnershipError(leaseID, instanceName string) error {
+	return exit(4, "apple-vm lease %q has no exact local claim bound to instance %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName))
 }
 
-func requireExactAppleVZClaim(leaseID, instanceName string) error {
-	owned, _, err := appleVZClaimStatus(leaseID, instanceName)
+func requireExactAppleVMClaim(leaseID, instanceName string) error {
+	owned, _, err := appleVMClaimStatus(leaseID, instanceName)
 	if err != nil {
 		return err
 	}
 	if !owned {
-		return appleVZOwnershipError(leaseID, instanceName)
+		return appleVMOwnershipError(leaseID, instanceName)
 	}
 	return nil
 }
@@ -412,7 +412,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if !hasClaim && leaseID != "" {
 			refreshed, claimExists, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 			if err != nil {
-				return fmt.Errorf("recheck apple-vz claim %s before cleanup: %w", leaseID, err)
+				return fmt.Errorf("recheck apple-vm claim %s before cleanup: %w", leaseID, err)
 			}
 			if claimExists {
 				if refreshed.LeaseID != "" {
@@ -478,26 +478,26 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	return server, nil
 }
 
-func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst applevzhelper.Instance, claim core.LeaseClaim, wait bool) (core.LeaseTarget, error) {
+func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst applevmhelper.Instance, claim core.LeaseClaim, wait bool) (core.LeaseTarget, error) {
 	server := b.serverFromInstance(inst, claim, cfg)
 	user := strings.TrimSpace(server.Labels["ssh_user"])
 	if user != "" {
-		cfg.AppleVZ.User = user
+		cfg.AppleVM.User = user
 		cfg.SSHUser = user
 	}
 	root := strings.TrimSpace(server.Labels["work_root"])
 	if root != "" {
-		cfg.AppleVZ.WorkRoot = root
+		cfg.AppleVM.WorkRoot = root
 		cfg.WorkRoot = root
 	}
 	leaseID := firstNonBlank(claim.LeaseID, inst.LeaseID)
-	if !appleVZRunning(inst.Status) {
-		server.Status = appleVZState(inst.Status)
+	if !appleVMRunning(inst.Status) {
+		server.Status = appleVMState(inst.Status)
 		server.Labels["state"] = server.Status
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	if inst.SSHHost == "" || inst.SSHPort <= 0 {
-		return core.LeaseTarget{}, exit(5, "apple-vz instance %s has no local SSH endpoint", inst.Name)
+		return core.LeaseTarget{}, exit(5, "apple-vm instance %s has no local SSH endpoint", inst.Name)
 	}
 	if leaseID != "" {
 		if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
@@ -511,7 +511,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst applev
 	target.FallbackPorts = []string{}
 	target.ReadyCheck = "/usr/local/bin/crabbox-ready"
 	if wait {
-		if err := b.waitForSSH(ctx, &target, b.rt.Stderr, "apple-vz ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+		if err := b.waitForSSH(ctx, &target, b.rt.Stderr, "apple-vm ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		server.Status = "ready"
@@ -520,16 +520,16 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst applev
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *backend) startInstance(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string) (applevzhelper.Instance, error) {
+func (b *backend) startInstance(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string) (applevmhelper.Instance, error) {
 	helperPath, err := b.prepareHelper(ctx, cfg)
 	if err != nil {
-		return applevzhelper.Instance{}, err
+		return applevmhelper.Instance{}, err
 	}
 	root, err := b.stateRoot()
 	if err != nil {
-		return applevzhelper.Instance{}, err
+		return applevmhelper.Instance{}, err
 	}
-	var resp applevzhelper.StartResponse
+	var resp applevmhelper.StartResponse
 	if err := b.runHelperJSONInput(ctx, helperPath, []string{
 		"start",
 		"--state-root", root,
@@ -537,18 +537,18 @@ func (b *backend) startInstance(ctx context.Context, cfg core.Config, name, leas
 		"--lease-id", leaseID,
 		"--slug", slug,
 		"--image-request-stdin",
-		"--ssh-user", cfg.AppleVZ.User,
+		"--ssh-user", cfg.AppleVM.User,
 		"--ssh-public-key", publicKey,
-		"--work-root", cfg.AppleVZ.WorkRoot,
-		"--cpus", strconv.Itoa(cfg.AppleVZ.CPUs),
-		"--memory-mib", strconv.Itoa(cfg.AppleVZ.MemoryMiB),
-		"--disk-gib", strconv.Itoa(cfg.AppleVZ.DiskGiB),
+		"--work-root", cfg.AppleVM.WorkRoot,
+		"--cpus", strconv.Itoa(cfg.AppleVM.CPUs),
+		"--memory-mib", strconv.Itoa(cfg.AppleVM.MemoryMiB),
+		"--disk-gib", strconv.Itoa(cfg.AppleVM.DiskGiB),
 		"--ready-timeout", core.BootstrapWaitTimeout(cfg).String(),
-	}, applevzhelper.ImageRequest{
-		Image:  cfg.AppleVZ.Image,
-		SHA256: cfg.AppleVZ.ImageSHA256,
+	}, applevmhelper.ImageRequest{
+		Image:  cfg.AppleVM.Image,
+		SHA256: cfg.AppleVM.ImageSHA256,
 	}, &resp); err != nil {
-		return applevzhelper.Instance{}, err
+		return applevmhelper.Instance{}, err
 	}
 	return resp.Instance, nil
 }
@@ -556,20 +556,20 @@ func (b *backend) startInstance(ctx context.Context, cfg core.Config, name, leas
 func (b *backend) rollbackInstance(cfg core.Config, name, leaseID string, cause error) (error, bool) {
 	root, err := b.stateRoot()
 	if err != nil {
-		return appendErrorDetails(cause, fmt.Errorf("resolve apple-vz state for rollback: %w", err)), false
+		return appendErrorDetails(cause, fmt.Errorf("resolve apple-vm state for rollback: %w", err)), false
 	}
 	cause = appendErrorDetails(cause, instanceDiagnostics(root, name))
-	if _, err := os.Stat(applevzhelper.InstanceDir(root, name)); err != nil {
+	if _, err := os.Stat(applevmhelper.InstanceDir(root, name)); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			core.RemoveLeaseClaim(leaseID)
 			return cause, true
 		}
-		return appendErrorDetails(cause, fmt.Errorf("inspect apple-vz instance %s for rollback: %w", name, err)), false
+		return appendErrorDetails(cause, fmt.Errorf("inspect apple-vm instance %s for rollback: %w", name, err)), false
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
 	defer cancel()
 	if err := b.deleteInstance(cleanupCtx, cfg, name); err != nil {
-		return appendErrorDetails(cause, fmt.Errorf("apple-vz cleanup failed for instance %s: %w", name, err)), false
+		return appendErrorDetails(cause, fmt.Errorf("apple-vm cleanup failed for instance %s: %w", name, err)), false
 	}
 	core.RemoveLeaseClaim(leaseID)
 	return cause, true
@@ -590,8 +590,8 @@ func instanceDiagnostics(stateRoot, name string) error {
 		label string
 		path  string
 	}{
-		{label: applevzhelper.HelperLogFileName, path: applevzhelper.HelperLogPath(stateRoot, name)},
-		{label: applevzhelper.ConsoleLogFileName, path: applevzhelper.ConsoleLogPath(stateRoot, name)},
+		{label: applevmhelper.HelperLogFileName, path: applevmhelper.HelperLogPath(stateRoot, name)},
+		{label: applevmhelper.ConsoleLogFileName, path: applevmhelper.ConsoleLogPath(stateRoot, name)},
 	} {
 		tail, err := readFileTail(log.path, diagnosticTailBytes)
 		if err != nil {
@@ -601,13 +601,13 @@ func instanceDiagnostics(stateRoot, name string) error {
 			continue
 		}
 		if tail != "" {
-			parts = append(parts, fmt.Sprintf("%s tail:\n%s", log.label, applevzhelper.SanitizeDiagnosticText(tail)))
+			parts = append(parts, fmt.Sprintf("%s tail:\n%s", log.label, applevmhelper.SanitizeDiagnosticText(tail)))
 		}
 	}
 	if len(parts) == 0 {
 		return nil
 	}
-	return fmt.Errorf("apple-vz diagnostics for %s:\n%s", name, strings.Join(parts, "\n"))
+	return fmt.Errorf("apple-vm diagnostics for %s:\n%s", name, strings.Join(parts, "\n"))
 }
 
 func readFileTail(path string, limit int64) (string, error) {
@@ -643,21 +643,21 @@ func (b *backend) deleteInstance(ctx context.Context, cfg core.Config, name stri
 	if err != nil {
 		return err
 	}
-	var resp applevzhelper.DeleteResponse
+	var resp applevmhelper.DeleteResponse
 	if err := b.runHelperJSON(ctx, helperPath, []string{"delete", "--state-root", root, "--name", name}, &resp); err != nil {
 		return err
 	}
 	if !resp.Deleted {
-		if _, err := os.Stat(applevzhelper.InstanceDir(root, name)); err == nil {
-			return fmt.Errorf("apple-vz helper did not delete instance %s", name)
+		if _, err := os.Stat(applevmhelper.InstanceDir(root, name)); err == nil {
+			return fmt.Errorf("apple-vm helper did not delete instance %s", name)
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("verify apple-vz instance %s deletion: %w", name, err)
+			return fmt.Errorf("verify apple-vm instance %s deletion: %w", name, err)
 		}
 	}
 	return nil
 }
 
-func (b *backend) listInstances(ctx context.Context, cfg core.Config) ([]applevzhelper.Instance, error) {
+func (b *backend) listInstances(ctx context.Context, cfg core.Config) ([]applevmhelper.Instance, error) {
 	helperPath, err := b.prepareHelper(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -666,29 +666,29 @@ func (b *backend) listInstances(ctx context.Context, cfg core.Config) ([]applevz
 	if err != nil {
 		return nil, err
 	}
-	var resp applevzhelper.ListResponse
+	var resp applevmhelper.ListResponse
 	if err := b.runHelperJSON(ctx, helperPath, []string{"list", "--state-root", root}, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Instances, nil
 }
 
-func (b *backend) resolveInstance(ctx context.Context, cfg core.Config, identifier string) (applevzhelper.Instance, core.LeaseClaim, error) {
+func (b *backend) resolveInstance(ctx context.Context, cfg core.Config, identifier string) (applevmhelper.Instance, core.LeaseClaim, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
-		return applevzhelper.Instance{}, core.LeaseClaim{}, exit(2, "provider=%s requires a lease id, slug, or instance name", providerName)
+		return applevmhelper.Instance{}, core.LeaseClaim{}, exit(2, "provider=%s requires a lease id, slug, or instance name", providerName)
 	}
 	instances, err := b.listInstances(ctx, cfg)
 	if err != nil {
-		return applevzhelper.Instance{}, core.LeaseClaim{}, err
+		return applevmhelper.Instance{}, core.LeaseClaim{}, err
 	}
 	claims, err := providerClaims()
 	if err != nil {
-		return applevzhelper.Instance{}, core.LeaseClaim{}, err
+		return applevmhelper.Instance{}, core.LeaseClaim{}, err
 	}
 	requestedClaim, hasRequestedClaim, err := core.ResolveLeaseClaimForProvider(identifier, providerName)
 	if err != nil {
-		return applevzhelper.Instance{}, core.LeaseClaim{}, err
+		return applevmhelper.Instance{}, core.LeaseClaim{}, err
 	}
 	if hasRequestedClaim {
 		boundName := strings.TrimSpace(requestedClaim.ProviderScope)
@@ -701,18 +701,18 @@ func (b *backend) resolveInstance(ctx context.Context, cfg core.Config, identifi
 					return inst, requestedClaim, nil
 				}
 			}
-			return applevzhelper.Instance{}, requestedClaim, &missingInstanceError{
-				err: exit(4, "apple-vz lease %q points to a missing instance; run `crabbox cleanup --provider apple-vz`", identifier),
+			return applevmhelper.Instance{}, requestedClaim, &missingInstanceError{
+				err: exit(4, "apple-vm lease %q points to a missing instance; run `crabbox cleanup --provider apple-vm`", identifier),
 			}
 		}
 	}
-	var matched *applevzhelper.Instance
+	var matched *applevmhelper.Instance
 	var matchedClaim core.LeaseClaim
 	for _, inst := range instances {
 		claim := claims[inst.Name]
 		if inst.Name == identifier || inst.LeaseID == identifier || inst.Slug == identifier || claim.LeaseID == identifier || claim.Slug == identifier {
 			if matched != nil {
-				return applevzhelper.Instance{}, core.LeaseClaim{}, exit(2, "apple-vz identifier %s matches multiple instances; use an exact claimed instance name", identifier)
+				return applevmhelper.Instance{}, core.LeaseClaim{}, exit(2, "apple-vm identifier %s matches multiple instances; use an exact claimed instance name", identifier)
 			}
 			candidate := inst
 			matched, matchedClaim = &candidate, claim
@@ -722,11 +722,11 @@ func (b *backend) resolveInstance(ctx context.Context, cfg core.Config, identifi
 		return *matched, matchedClaim, nil
 	}
 	if hasRequestedClaim {
-		return applevzhelper.Instance{}, requestedClaim, &missingInstanceError{
-			err: exit(4, "apple-vz lease %q points to a missing instance; run `crabbox cleanup --provider apple-vz`", identifier),
+		return applevmhelper.Instance{}, requestedClaim, &missingInstanceError{
+			err: exit(4, "apple-vm lease %q points to a missing instance; run `crabbox cleanup --provider apple-vm`", identifier),
 		}
 	}
-	return applevzhelper.Instance{}, core.LeaseClaim{}, exit(4, "apple-vz lease not found: %s", identifier)
+	return applevmhelper.Instance{}, core.LeaseClaim{}, exit(4, "apple-vm lease not found: %s", identifier)
 }
 
 type missingInstanceError struct {
@@ -741,7 +741,7 @@ func (e *missingInstanceError) Unwrap() error {
 	return e.err
 }
 
-func (b *backend) serverFromInstance(inst applevzhelper.Instance, claim core.LeaseClaim, cfg core.Config) core.Server {
+func (b *backend) serverFromInstance(inst applevmhelper.Instance, claim core.LeaseClaim, cfg core.Config) core.Server {
 	labels := map[string]string{}
 	for key, value := range claim.Labels {
 		labels[key] = value
@@ -761,17 +761,17 @@ func (b *backend) serverFromInstance(inst applevzhelper.Instance, claim core.Lea
 	if labels["slug"] == "" {
 		labels["slug"] = firstNonBlank(claim.Slug, inst.Slug)
 	}
-	imageIdentity := applevzhelper.ImageIdentity(cfg.AppleVZ.Image, cfg.AppleVZ.ImageSHA256)
+	imageIdentity := applevmhelper.ImageIdentity(cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256)
 	if labels["server_type"] == "" {
 		labels["server_type"] = firstNonBlank(inst.Image, imageIdentity)
 	}
-	labels["server_type"] = applevzhelper.RedactImageRef(labels["server_type"])
+	labels["server_type"] = applevmhelper.RedactImageRef(labels["server_type"])
 	if labels["image"] == "" {
 		labels["image"] = firstNonBlank(inst.Image, imageIdentity)
 	}
-	labels["image"] = applevzhelper.RedactImageRef(labels["image"])
+	labels["image"] = applevmhelper.RedactImageRef(labels["image"])
 	if labels["ssh_user"] == "" {
-		labels["ssh_user"] = firstNonBlank(inst.SSHUser, cfg.AppleVZ.User)
+		labels["ssh_user"] = firstNonBlank(inst.SSHUser, cfg.AppleVM.User)
 	}
 	if inst.SSHPort > 0 {
 		labels["ssh_port"] = strconv.Itoa(inst.SSHPort)
@@ -779,10 +779,10 @@ func (b *backend) serverFromInstance(inst applevzhelper.Instance, claim core.Lea
 		labels["ssh_port"] = cfg.SSHPort
 	}
 	if labels["work_root"] == "" {
-		labels["work_root"] = firstNonBlank(inst.WorkRoot, cfg.AppleVZ.WorkRoot)
+		labels["work_root"] = firstNonBlank(inst.WorkRoot, cfg.AppleVM.WorkRoot)
 	}
-	status := appleVZState(inst.Status)
-	if appleVZRunning(inst.Status) && labels["state"] == "ready" {
+	status := appleVMState(inst.Status)
+	if appleVMRunning(inst.Status) && labels["state"] == "ready" {
 		status = "ready"
 	}
 	labels["state"] = status
@@ -794,7 +794,7 @@ func (b *backend) serverFromInstance(inst applevzhelper.Instance, claim core.Lea
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = inst.SSHHost
-	server.ServerType.Name = applevzhelper.RedactImageRef(firstNonBlank(labels["server_type"], imageIdentity))
+	server.ServerType.Name = applevmhelper.RedactImageRef(firstNonBlank(labels["server_type"], imageIdentity))
 	return server
 }
 
@@ -807,30 +807,30 @@ func (b *backend) runHelperJSONInput(ctx context.Context, helperPath string, arg
 	if input != nil {
 		data, err := json.Marshal(input)
 		if err != nil {
-			return exit(2, "encode apple-vz helper input: %v", err)
+			return exit(2, "encode apple-vm helper input: %v", err)
 		}
 		stdin = strings.NewReader(string(data))
 	}
 	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:              helperPath,
 		Args:              args,
-		Env:               appleVZHelperEnv(helperPath),
+		Env:               appleVMHelperEnv(helperPath),
 		Stdin:             stdin,
 		CancelGracePeriod: helperCancelGracePeriod,
 	})
 	if err != nil {
-		return exit(2, "apple-vz helper %s failed: %s", strings.Join(args, " "), localCommandDetail(result, err))
+		return exit(2, "apple-vm helper %s failed: %s", strings.Join(args, " "), localCommandDetail(result, err))
 	}
 	if out == nil {
 		return nil
 	}
 	if err := json.Unmarshal([]byte(result.Stdout), out); err != nil {
-		return exit(2, "apple-vz helper %s returned invalid JSON: %v", strings.Join(args, " "), err)
+		return exit(2, "apple-vm helper %s returned invalid JSON: %v", strings.Join(args, " "), err)
 	}
 	return nil
 }
 
-func appleVZHelperEnv(helperPath string) []string {
+func appleVMHelperEnv(helperPath string) []string {
 	env := []string{
 		"PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
 		"LC_ALL=C",
@@ -853,8 +853,8 @@ func appleVZHelperEnv(helperPath string) []string {
 			env = append(env, name+"="+value)
 		}
 	}
-	if value := strings.TrimSpace(os.Getenv(applevzhelper.VMDPathEnv)); value != "" {
-		env = append(env, applevzhelper.VMDPathEnv+"="+value)
+	if value := strings.TrimSpace(os.Getenv(applevmhelper.VMDPathEnv)); value != "" {
+		env = append(env, applevmhelper.VMDPathEnv+"="+value)
 	}
 	return env
 }
@@ -866,20 +866,30 @@ func ensurePrivateDir(path string) error {
 	return os.Chmod(path, 0o700)
 }
 
-func (b *backend) appleVZStateRoot() (string, error) {
+func (b *backend) appleVMStateRoot() (string, error) {
 	stateDir, err := core.CrabboxStateDir()
 	if err != nil {
 		return "", err
 	}
-	root := filepath.Join(stateDir, "apple-vz")
+	root := filepath.Join(stateDir, "apple-vm")
+	// One-time migration from the pre-rename state directory so existing
+	// instances stay visible to list/delete/cleanup.
+	if _, err := os.Stat(root); errors.Is(err, os.ErrNotExist) {
+		legacy := filepath.Join(stateDir, "apple-vz")
+		if _, legacyErr := os.Stat(legacy); legacyErr == nil {
+			if err := os.Rename(legacy, root); err != nil {
+				return "", exit(2, "migrate apple-vz state directory: %v", err)
+			}
+		}
+	}
 	if err := ensurePrivateDir(root); err != nil {
-		return "", exit(2, "create apple-vz state directory: %v", err)
+		return "", exit(2, "create apple-vm state directory: %v", err)
 	}
 	return root, nil
 }
 
 func resolveHelperSourcePath(cfg core.Config) (string, error) {
-	if helper := strings.TrimSpace(cfg.AppleVZ.HelperPath); helper != "" {
+	if helper := strings.TrimSpace(cfg.AppleVM.HelperPath); helper != "" {
 		path := core.ExpandUserPath(helper)
 		if !filepath.IsAbs(path) {
 			abs, err := filepath.Abs(path)
@@ -891,18 +901,18 @@ func resolveHelperSourcePath(cfg core.Config) (string, error) {
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
 		}
-		return "", exit(2, "apple-vz helper not found at %s", path)
+		return "", exit(2, "apple-vm helper not found at %s", path)
 	}
 	if exe, err := os.Executable(); err == nil {
-		sibling := filepath.Join(filepath.Dir(exe), applevzhelper.ManagedHelperName)
+		sibling := filepath.Join(filepath.Dir(exe), applevmhelper.ManagedHelperName)
 		if _, err := os.Stat(sibling); err == nil {
 			return sibling, nil
 		}
 	}
-	if path, err := exec.LookPath(applevzhelper.ManagedHelperName); err == nil {
+	if path, err := exec.LookPath(applevmhelper.ManagedHelperName); err == nil {
 		return path, nil
 	}
-	return "", exit(2, "apple-vz helper binary not found. Reinstall Crabbox on Apple Silicon, put `%s` on PATH, or explicitly pass --apple-vz-helper for a source build", applevzhelper.ManagedHelperName)
+	return "", exit(2, "apple-vm helper binary not found. Reinstall Crabbox on Apple Silicon, put `%s` on PATH, or explicitly pass --apple-vm-helper for a source build", applevmhelper.ManagedHelperName)
 }
 
 func providerClaims() (map[string]core.LeaseClaim, error) {
@@ -912,7 +922,7 @@ func providerClaims() (map[string]core.LeaseClaim, error) {
 	}
 	out := map[string]core.LeaseClaim{}
 	for _, claim := range claims {
-		if claim.Provider == providerName {
+		if isAppleVMProviderName(claim.Provider) {
 			name := strings.TrimSpace(claim.ProviderScope)
 			if name == "" {
 				name = strings.TrimSpace(claim.Labels["instance"])
@@ -966,7 +976,7 @@ func macOSMajorVersion(version string) (int, error) {
 	return major, nil
 }
 
-func shouldCleanup(inst applevzhelper.Instance, server core.Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
+func shouldCleanup(inst applevmhelper.Instance, server core.Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
 	labels := server.Labels
 	if labels == nil {
 		return false, "missing labels"
@@ -974,7 +984,7 @@ func shouldCleanup(inst applevzhelper.Instance, server core.Server, claim core.L
 	if strings.EqualFold(labels["keep"], "true") {
 		return false, "keep=true"
 	}
-	if server.Status != "ready" && !appleVZRunning(server.Status) {
+	if server.Status != "ready" && !appleVMRunning(server.Status) {
 		return true, "instance state=" + core.Blank(server.Status, "unknown")
 	}
 	if hasClaim {
@@ -1012,26 +1022,26 @@ func claimWithinStartupGrace(claim core.LeaseClaim, now time.Time) bool {
 	return !latest.IsZero() && !now.After(latest.Add(unclaimedInstanceGrace))
 }
 
-func appleVZRunning(state string) bool {
-	switch appleVZState(state) {
-	case applevzhelper.StatusStarting, applevzhelper.StatusRunning, "ready":
+func appleVMRunning(state string) bool {
+	switch appleVMState(state) {
+	case applevmhelper.StatusStarting, applevmhelper.StatusRunning, "ready":
 		return true
 	default:
 		return false
 	}
 }
 
-func appleVZState(state string) string {
+func appleVMState(state string) string {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "", applevzhelper.StatusStopped:
+	case "", applevmhelper.StatusStopped:
 		return "stopped"
-	case applevzhelper.StatusStarting:
-		return applevzhelper.StatusStarting
-	case applevzhelper.StatusRunning:
-		return applevzhelper.StatusRunning
-	case applevzhelper.StatusStopping:
-		return applevzhelper.StatusStopping
-	case applevzhelper.StatusError:
+	case applevmhelper.StatusStarting:
+		return applevmhelper.StatusStarting
+	case applevmhelper.StatusRunning:
+		return applevmhelper.StatusRunning
+	case applevmhelper.StatusStopping:
+		return applevmhelper.StatusStopping
+	case applevmhelper.StatusError:
 		return "failed"
 	case "ready":
 		return "ready"

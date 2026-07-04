@@ -141,12 +141,12 @@ func validateProviderTarget(cfg Config) error {
 		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
 	machineTarget := cfg.TargetOS != targetWorkerRuntime
-	if machineTarget && (provider.Name() == "tart" || provider.Name() == "apple-vz" || provider.Name() == "aws-lambda-microvm") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
+	if machineTarget && (provider.Name() == "tart" || provider.Name() == "apple-vm" || provider.Name() == "aws-lambda-microvm") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
 		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
 	}
 	if machineTarget && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
-		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vz" && provider.Name() != "aws-lambda-microvm" {
-			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-vz, or provider=aws-lambda-microvm")
+		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vm" && provider.Name() != "aws-lambda-microvm" {
+			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-vm, or provider=aws-lambda-microvm")
 		}
 		if cfg.TargetOS != targetLinux &&
 			!(provider.Name() == "azure" && cfg.TargetOS == targetWindows) &&

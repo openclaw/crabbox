@@ -1,6 +1,6 @@
 //go:build darwin && arm64
 
-package applevzhelper
+package applevmhelper
 
 import (
 	"bytes"
@@ -312,7 +312,7 @@ exit 23
 	}, strings.NewReader(`{"image":"test.img"}`), &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil ||
 		(!strings.Contains(err.Error(), "helper daemon exited before the VM reached running state") &&
-			!strings.Contains(err.Error(), "apple-vz helper stopped before reporting readiness")) {
+			!strings.Contains(err.Error(), "apple-vm helper stopped before reporting readiness")) {
 		t.Fatalf("runStart error=%v, want early helper exit", err)
 	}
 	if strings.Contains(err.Error(), "helper daemon exited before the VM reached running state") &&
@@ -538,9 +538,9 @@ func TestLegacyProcessIdentityMigratesAfterVerifiedMatch(t *testing.T) {
 			t.Fatalf("processArguments pid=%d want %d", pid, inst.PID)
 		}
 		return []string{
-			"/tmp/crabbox-apple-vz-helper-0123456789abcdef",
+			"/tmp/crabbox-apple-vm-helper-0123456789abcdef",
 			"serve",
-			"--state-root", "/tmp/apple-vz",
+			"--state-root", "/tmp/apple-vm",
 			"--name", inst.Name,
 		}, nil
 	}
@@ -1002,7 +1002,7 @@ func TestHandleStartReadinessMetadataStoppedBeforeReadiness(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected stopped-before-readiness error")
 	}
-	if got := err.Error(); !strings.Contains(got, "apple-vz helper stopped before reporting readiness (status=stopped)") {
+	if got := err.Error(); !strings.Contains(got, "apple-vm helper stopped before reporting readiness (status=stopped)") {
 		t.Fatalf("expected stopped-before-readiness error, got %q", got)
 	}
 	if strings.Contains(err.Error(), "helper daemon exited before the VM reached running state") {
@@ -1033,7 +1033,7 @@ func TestHandleStartReadinessMetadataStoppingDeadPIDCleansInstanceDir(t *testing
 	if err == nil {
 		t.Fatal("expected stopped-before-readiness error")
 	}
-	if got := err.Error(); !strings.Contains(got, "apple-vz helper stopped before reporting readiness (status=stopped)") {
+	if got := err.Error(); !strings.Contains(got, "apple-vm helper stopped before reporting readiness (status=stopped)") {
 		t.Fatalf("expected normalized stopped-before-readiness error, got %q", got)
 	}
 	if _, err := os.Stat(InstanceDir(root, name)); !errors.Is(err, os.ErrNotExist) {

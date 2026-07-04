@@ -213,12 +213,12 @@ type Config struct {
 	localContainerRootExplicit    bool
 	AppleContainer                AppleContainerConfig
 	appleContainerImageExplicit   bool
-	AppleVZ                       AppleVZConfig
-	appleVZImageExplicit          bool
-	appleVZImageSHA256Explicit    bool
-	appleVZCPUsExplicit           bool
-	appleVZMemoryExplicit         bool
-	appleVZDiskExplicit           bool
+	AppleVM                       AppleVMConfig
+	appleVMImageExplicit          bool
+	appleVMImageSHA256Explicit    bool
+	appleVMCPUsExplicit           bool
+	appleVMMemoryExplicit         bool
+	appleVMDiskExplicit           bool
 	MXC                           MXCConfig
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
@@ -1148,7 +1148,7 @@ type AppleContainerConfig struct {
 	ExtraRunArgs []string
 }
 
-type AppleVZConfig struct {
+type AppleVMConfig struct {
 	HelperPath  string
 	Image       string
 	ImageSHA256 string
@@ -2053,23 +2053,23 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		return nil
 	}
-	if cfg.Provider == "apple-vz" || cfg.Provider == "applevz" {
-		if cfg.AppleVZ.User != "" {
-			cfg.SSHUser = cfg.AppleVZ.User
+	if cfg.Provider == "apple-vm" || cfg.Provider == "applevm" {
+		if cfg.AppleVM.User != "" {
+			cfg.SSHUser = cfg.AppleVM.User
 		}
 		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
 			cfg.SSHPort = "22"
 		}
 		cfg.SSHFallbackPorts = nil
 		base := baseConfig()
-		if cfg.AppleVZ.WorkRoot != "" && (IsDefaultWorkRoot(cfg.WorkRoot) || cfg.AppleVZ.WorkRoot != base.AppleVZ.WorkRoot) {
-			cfg.WorkRoot = cfg.AppleVZ.WorkRoot
+		if cfg.AppleVM.WorkRoot != "" && (IsDefaultWorkRoot(cfg.WorkRoot) || cfg.AppleVM.WorkRoot != base.AppleVM.WorkRoot) {
+			cfg.WorkRoot = cfg.AppleVM.WorkRoot
 		}
 		if cfg.TargetOS == "" {
 			cfg.TargetOS = targetLinux
 		}
-		if !cfg.ServerTypeExplicit && cfg.AppleVZ.Image != "" {
-			cfg.ServerType = redactRemoteURL(cfg.AppleVZ.Image)
+		if !cfg.ServerTypeExplicit && cfg.AppleVM.Image != "" {
+			cfg.ServerType = redactRemoteURL(cfg.AppleVM.Image)
 		}
 		return nil
 	}
@@ -2293,11 +2293,11 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if err != nil {
 		return
 	}
-	appleVZImage, err := osImageDefaultAppleVZImage(cfg.OSImage)
+	appleVMImage, err := osImageDefaultAppleVMImage(cfg.OSImage)
 	if err != nil {
 		return
 	}
-	appleVZSHA256, err := osImageDefaultAppleVZSHA256(cfg.OSImage)
+	appleVMSHA256, err := osImageDefaultAppleVMSHA256(cfg.OSImage)
 	if err != nil {
 		return
 	}
@@ -2324,11 +2324,11 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if force || cfg.AppleContainer.Image == "" || (!cfg.appleContainerImageExplicit && (cfg.AppleContainer.Image == base.AppleContainer.Image || wasOSDefault)) {
 		cfg.AppleContainer.Image = containerImage
 	}
-	if force || cfg.AppleVZ.Image == "" || (!cfg.appleVZImageExplicit && (cfg.AppleVZ.Image == base.AppleVZ.Image || wasOSDefault)) {
-		cfg.AppleVZ.Image = appleVZImage
+	if force || cfg.AppleVM.Image == "" || (!cfg.appleVMImageExplicit && (cfg.AppleVM.Image == base.AppleVM.Image || wasOSDefault)) {
+		cfg.AppleVM.Image = appleVMImage
 	}
-	if !cfg.appleVZImageSHA256Explicit && (force || (cfg.AppleVZ.ImageSHA256 == "" && cfg.AppleVZ.Image == appleVZImage) || (!cfg.appleVZImageExplicit && (cfg.AppleVZ.ImageSHA256 == "" || wasOSDefault))) {
-		cfg.AppleVZ.ImageSHA256 = appleVZSHA256
+	if !cfg.appleVMImageSHA256Explicit && (force || (cfg.AppleVM.ImageSHA256 == "" && cfg.AppleVM.Image == appleVMImage) || (!cfg.appleVMImageExplicit && (cfg.AppleVM.ImageSHA256 == "" || wasOSDefault))) {
+		cfg.AppleVM.ImageSHA256 = appleVMSHA256
 	}
 	if force || cfg.Multipass.Image == "" || (!cfg.multipassImageExplicit && (cfg.Multipass.Image == base.Multipass.Image || wasOSDefault)) {
 		cfg.Multipass.Image = multipassImage
@@ -2396,41 +2396,41 @@ func AppleContainerImageExplicit(cfg Config) bool {
 	return cfg.appleContainerImageExplicit
 }
 
-func MarkAppleVZImageExplicit(cfg *Config) {
-	cfg.appleVZImageExplicit = true
-	cfg.appleVZImageSHA256Explicit = false
+func MarkAppleVMImageExplicit(cfg *Config) {
+	cfg.appleVMImageExplicit = true
+	cfg.appleVMImageSHA256Explicit = false
 }
 
-func AppleVZImageExplicit(cfg Config) bool {
-	return cfg.appleVZImageExplicit
+func AppleVMImageExplicit(cfg Config) bool {
+	return cfg.appleVMImageExplicit
 }
 
-func MarkAppleVZImageSHA256Explicit(cfg *Config) {
-	cfg.appleVZImageSHA256Explicit = true
+func MarkAppleVMImageSHA256Explicit(cfg *Config) {
+	cfg.appleVMImageSHA256Explicit = true
 }
 
-func AppleVZCPUsExplicit(cfg Config) bool {
-	return cfg.appleVZCPUsExplicit
+func AppleVMCPUsExplicit(cfg Config) bool {
+	return cfg.appleVMCPUsExplicit
 }
 
-func MarkAppleVZCPUsExplicit(cfg *Config) {
-	cfg.appleVZCPUsExplicit = true
+func MarkAppleVMCPUsExplicit(cfg *Config) {
+	cfg.appleVMCPUsExplicit = true
 }
 
-func AppleVZMemoryExplicit(cfg Config) bool {
-	return cfg.appleVZMemoryExplicit
+func AppleVMMemoryExplicit(cfg Config) bool {
+	return cfg.appleVMMemoryExplicit
 }
 
-func MarkAppleVZMemoryExplicit(cfg *Config) {
-	cfg.appleVZMemoryExplicit = true
+func MarkAppleVMMemoryExplicit(cfg *Config) {
+	cfg.appleVMMemoryExplicit = true
 }
 
-func AppleVZDiskExplicit(cfg Config) bool {
-	return cfg.appleVZDiskExplicit
+func AppleVMDiskExplicit(cfg Config) bool {
+	return cfg.appleVMDiskExplicit
 }
 
-func MarkAppleVZDiskExplicit(cfg *Config) {
-	cfg.appleVZDiskExplicit = true
+func MarkAppleVMDiskExplicit(cfg *Config) {
+	cfg.appleVMDiskExplicit = true
 }
 
 func MarkMultipassImageExplicit(cfg *Config) {
@@ -3014,9 +3014,9 @@ func baseConfig() Config {
 			User:     "crabbox",
 			WorkRoot: "/work/crabbox",
 		},
-		AppleVZ: AppleVZConfig{
-			Image:       osImageSpecs[osImage].AppleVZImage,
-			ImageSHA256: osImageSpecs[osImage].AppleVZSHA256,
+		AppleVM: AppleVMConfig{
+			Image:       osImageSpecs[osImage].AppleVMImage,
+			ImageSHA256: osImageSpecs[osImage].AppleVMSHA256,
 			User:        "crabbox",
 			WorkRoot:    "/work/crabbox",
 			CPUs:        4,
@@ -3166,7 +3166,8 @@ type fileConfig struct {
 	Sprites                  *fileSpritesConfig                  `yaml:"sprites,omitempty"`
 	LocalContainer           *fileLocalContainerConfig           `yaml:"localContainer,omitempty"`
 	AppleContainer           *fileAppleContainerConfig           `yaml:"appleContainer,omitempty"`
-	AppleVZ                  *fileAppleVZConfig                  `yaml:"appleVZ,omitempty"`
+	AppleVM                  *fileAppleVMConfig                  `yaml:"appleVM,omitempty"`
+	AppleVZLegacy            *fileAppleVMConfig                  `yaml:"appleVZ,omitempty"`
 	MXC                      *fileMXCConfig                      `yaml:"mxc,omitempty"`
 	Multipass                *fileMultipassConfig                `yaml:"multipass,omitempty"`
 	Tart                     *fileTartConfig                     `yaml:"tart,omitempty"`
@@ -4200,7 +4201,7 @@ type fileAppleContainerConfig struct {
 	ExtraRunArgs []string `yaml:"extraRunArgs,omitempty"`
 }
 
-type fileAppleVZConfig struct {
+type fileAppleVMConfig struct {
 	HelperPath  string `yaml:"helperPath,omitempty"`
 	Image       string `yaml:"image,omitempty"`
 	ImageSHA256 string `yaml:"imageSHA256,omitempty"`
@@ -6779,37 +6780,41 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.AppleContainer.ExtraRunArgs = append([]string(nil), file.AppleContainer.ExtraRunArgs...)
 		}
 	}
-	if file.AppleVZ != nil {
-		if file.AppleVZ.HelperPath != "" {
-			cfg.AppleVZ.HelperPath = file.AppleVZ.HelperPath
+	if file.AppleVM == nil {
+		// Deprecated pre-rename key; appleVM wins when both are present.
+		file.AppleVM = file.AppleVZLegacy
+	}
+	if file.AppleVM != nil {
+		if file.AppleVM.HelperPath != "" {
+			cfg.AppleVM.HelperPath = file.AppleVM.HelperPath
 		}
-		if file.AppleVZ.Image != "" {
-			cfg.AppleVZ.Image = file.AppleVZ.Image
-			cfg.AppleVZ.ImageSHA256 = ""
-			cfg.appleVZImageExplicit = true
-			cfg.appleVZImageSHA256Explicit = false
+		if file.AppleVM.Image != "" {
+			cfg.AppleVM.Image = file.AppleVM.Image
+			cfg.AppleVM.ImageSHA256 = ""
+			cfg.appleVMImageExplicit = true
+			cfg.appleVMImageSHA256Explicit = false
 		}
-		if file.AppleVZ.ImageSHA256 != "" {
-			cfg.AppleVZ.ImageSHA256 = file.AppleVZ.ImageSHA256
-			cfg.appleVZImageSHA256Explicit = true
+		if file.AppleVM.ImageSHA256 != "" {
+			cfg.AppleVM.ImageSHA256 = file.AppleVM.ImageSHA256
+			cfg.appleVMImageSHA256Explicit = true
 		}
-		if file.AppleVZ.User != "" {
-			cfg.AppleVZ.User = file.AppleVZ.User
+		if file.AppleVM.User != "" {
+			cfg.AppleVM.User = file.AppleVM.User
 		}
-		if file.AppleVZ.WorkRoot != "" {
-			cfg.AppleVZ.WorkRoot = file.AppleVZ.WorkRoot
+		if file.AppleVM.WorkRoot != "" {
+			cfg.AppleVM.WorkRoot = file.AppleVM.WorkRoot
 		}
-		if file.AppleVZ.CPUs != nil {
-			cfg.AppleVZ.CPUs = *file.AppleVZ.CPUs
-			cfg.appleVZCPUsExplicit = true
+		if file.AppleVM.CPUs != nil {
+			cfg.AppleVM.CPUs = *file.AppleVM.CPUs
+			cfg.appleVMCPUsExplicit = true
 		}
-		if file.AppleVZ.MemoryMiB != nil {
-			cfg.AppleVZ.MemoryMiB = *file.AppleVZ.MemoryMiB
-			cfg.appleVZMemoryExplicit = true
+		if file.AppleVM.MemoryMiB != nil {
+			cfg.AppleVM.MemoryMiB = *file.AppleVM.MemoryMiB
+			cfg.appleVMMemoryExplicit = true
 		}
-		if file.AppleVZ.DiskGiB != nil {
-			cfg.AppleVZ.DiskGiB = *file.AppleVZ.DiskGiB
-			cfg.appleVZDiskExplicit = true
+		if file.AppleVM.DiskGiB != nil {
+			cfg.AppleVM.DiskGiB = *file.AppleVM.DiskGiB
+			cfg.appleVMDiskExplicit = true
 		}
 	}
 	if file.MXC != nil {
@@ -7348,6 +7353,15 @@ func applyLeaseDuration(target *time.Duration, value string) {
 	if parsed, err := time.ParseDuration(value); err == nil && parsed > 0 {
 		*target = parsed
 	}
+}
+
+// appleVMEnv reads a CRABBOX_APPLE_VM_* variable, falling back to the
+// deprecated CRABBOX_APPLE_VZ_* spelling from before the provider rename.
+func appleVMEnv(name string) string {
+	if value := os.Getenv("CRABBOX_APPLE_VM_" + name); value != "" {
+		return value
+	}
+	return os.Getenv("CRABBOX_APPLE_VZ_" + name)
 }
 
 func applyEnv(cfg *Config) error {
@@ -8579,42 +8593,42 @@ func applyEnv(cfg *Config) error {
 	if extra := strings.Fields(os.Getenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS")); len(extra) > 0 {
 		cfg.AppleContainer.ExtraRunArgs = extra
 	}
-	cfg.AppleVZ.HelperPath = getenv("CRABBOX_APPLE_VZ_HELPER", cfg.AppleVZ.HelperPath)
-	if image := os.Getenv("CRABBOX_APPLE_VZ_IMAGE"); image != "" {
-		cfg.AppleVZ.Image = image
-		cfg.AppleVZ.ImageSHA256 = ""
-		cfg.appleVZImageExplicit = true
-		cfg.appleVZImageSHA256Explicit = false
+	cfg.AppleVM.HelperPath = getenv("CRABBOX_APPLE_VM_HELPER", getenv("CRABBOX_APPLE_VZ_HELPER", cfg.AppleVM.HelperPath))
+	if image := appleVMEnv("IMAGE"); image != "" {
+		cfg.AppleVM.Image = image
+		cfg.AppleVM.ImageSHA256 = ""
+		cfg.appleVMImageExplicit = true
+		cfg.appleVMImageSHA256Explicit = false
 	}
-	if checksum := os.Getenv("CRABBOX_APPLE_VZ_IMAGE_SHA256"); checksum != "" {
-		cfg.AppleVZ.ImageSHA256 = checksum
-		cfg.appleVZImageSHA256Explicit = true
+	if checksum := appleVMEnv("IMAGE_SHA256"); checksum != "" {
+		cfg.AppleVM.ImageSHA256 = checksum
+		cfg.appleVMImageSHA256Explicit = true
 	}
-	cfg.AppleVZ.User = getenv("CRABBOX_APPLE_VZ_USER", cfg.AppleVZ.User)
-	cfg.AppleVZ.WorkRoot = getenv("CRABBOX_APPLE_VZ_WORK_ROOT", cfg.AppleVZ.WorkRoot)
-	if rawCPUs := os.Getenv("CRABBOX_APPLE_VZ_CPUS"); rawCPUs != "" {
+	cfg.AppleVM.User = getenv("CRABBOX_APPLE_VM_USER", getenv("CRABBOX_APPLE_VZ_USER", cfg.AppleVM.User))
+	cfg.AppleVM.WorkRoot = getenv("CRABBOX_APPLE_VM_WORK_ROOT", getenv("CRABBOX_APPLE_VZ_WORK_ROOT", cfg.AppleVM.WorkRoot))
+	if rawCPUs := appleVMEnv("CPUS"); rawCPUs != "" {
 		cpus, err := strconv.Atoi(strings.TrimSpace(rawCPUs))
 		if err != nil {
-			return fmt.Errorf("CRABBOX_APPLE_VZ_CPUS must be an integer: %w", err)
+			return fmt.Errorf("CRABBOX_APPLE_VM_CPUS must be an integer: %w", err)
 		}
-		cfg.AppleVZ.CPUs = cpus
-		cfg.appleVZCPUsExplicit = true
+		cfg.AppleVM.CPUs = cpus
+		cfg.appleVMCPUsExplicit = true
 	}
-	if rawMemory := os.Getenv("CRABBOX_APPLE_VZ_MEMORY"); rawMemory != "" {
+	if rawMemory := appleVMEnv("MEMORY"); rawMemory != "" {
 		memoryMiB, err := strconv.Atoi(strings.TrimSpace(rawMemory))
 		if err != nil {
-			return fmt.Errorf("CRABBOX_APPLE_VZ_MEMORY must be an integer: %w", err)
+			return fmt.Errorf("CRABBOX_APPLE_VM_MEMORY must be an integer: %w", err)
 		}
-		cfg.AppleVZ.MemoryMiB = memoryMiB
-		cfg.appleVZMemoryExplicit = true
+		cfg.AppleVM.MemoryMiB = memoryMiB
+		cfg.appleVMMemoryExplicit = true
 	}
-	if rawDisk := os.Getenv("CRABBOX_APPLE_VZ_DISK"); rawDisk != "" {
+	if rawDisk := appleVMEnv("DISK"); rawDisk != "" {
 		diskGiB, err := strconv.Atoi(strings.TrimSpace(rawDisk))
 		if err != nil {
-			return fmt.Errorf("CRABBOX_APPLE_VZ_DISK must be an integer: %w", err)
+			return fmt.Errorf("CRABBOX_APPLE_VM_DISK must be an integer: %w", err)
 		}
-		cfg.AppleVZ.DiskGiB = diskGiB
-		cfg.appleVZDiskExplicit = true
+		cfg.AppleVM.DiskGiB = diskGiB
+		cfg.appleVMDiskExplicit = true
 	}
 	cfg.MXC.CLIPath = getenv("CRABBOX_MXC_CLI", cfg.MXC.CLIPath)
 	cfg.MXC.Version = getenv("CRABBOX_MXC_VERSION", cfg.MXC.Version)

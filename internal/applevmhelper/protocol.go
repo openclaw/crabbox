@@ -1,4 +1,4 @@
-package applevzhelper
+package applevmhelper
 
 import (
 	"encoding/hex"
@@ -14,7 +14,10 @@ import (
 )
 
 const (
-	ManagedHelperName = "crabbox-apple-vz-helper"
+	ManagedHelperName = "crabbox-apple-vm-helper"
+	// Helper binary name before the apple-vz -> apple-vm provider rename;
+	// still recognized when verifying daemons started by older releases.
+	LegacyManagedHelperName = "crabbox-apple-vz-helper"
 
 	StatusStarting = "starting"
 	StatusRunning  = "running"

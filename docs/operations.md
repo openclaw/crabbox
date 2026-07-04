@@ -73,7 +73,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=apple-container CRABBOX_LIVE_COORDINATOR=0
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=local-container CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=multipass CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=tart CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
-CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=apple-vz CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=apple-vm CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=linode scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-smoke.sh
@@ -180,9 +180,9 @@ Per-provider smoke prerequisites:
   password. `scripts/live-smoke.sh` uses the normal SSH lease lifecycle with a
   longer TTL and no coordinator.
 - **Apple VZ** — Apple silicon macOS, a locally built Crabbox binary
-  (`CRABBOX_BIN`), and the bundled or explicit `crabbox-apple-vz-helper`.
+  (`CRABBOX_BIN`), and the bundled or explicit `crabbox-apple-vm-helper`.
   `scripts/live-smoke.sh` uses the normal SSH lease lifecycle and preserves
-  `CRABBOX_LIVE_APPLE_VZ_HELPER` for the whole run when set.
+  `CRABBOX_LIVE_APPLE_VM_HELPER` for the whole run when set.
 - **W&B** — `WANDB_ENTITY_NAME` plus `CRABBOX_WANDB_API_KEY` or
   `WANDB_API_KEY` (from `wandb login`). `scripts/live-smoke.sh` refuses to call
   W&B until an API key is exported, then runs `doctor`, executes one no-sync

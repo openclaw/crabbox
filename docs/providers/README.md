@@ -35,7 +35,7 @@ SSH-lease providers further differ by how they reach the cloud:
 - **Local runtime** — `local-container` starts a labeled Linux container through
   a Docker-compatible local runtime (Docker Desktop, OrbStack, Colima),
   `apple-container` uses Apple's native `container` runtime on Apple silicon
-  macOS, `apple-vz` launches a headless Linux VM through Apple's
+  macOS, `apple-vm` launches a headless Linux VM through Apple's
   `Virtualization.framework`, `multipass` launches local Ubuntu VMs through
   Canonical Multipass, `tart` runs macOS VMs on Apple Silicon via Cirrus Labs
   tart, and `hyperv` creates local Windows VMs through Microsoft Hyper-V.
@@ -75,7 +75,7 @@ Access terms:
 | [anthropic-sandbox-runtime](anthropic-sandbox-runtime.md) (`srt`) | built-in; `delegated-run` · local-sandbox | No SSH; `provider-owned` · direct only; features: none | `linux`, `macos`; Anthropic Sandbox Runtime process sandbox | `local`; GPU: no | local runtime; one-shot process exit | Local policy-constrained command execution | No persistent lease, remote box, or SSH access |
 | [apple-container](apple-container.md) (`apple`, `applecontainer`) | built-in; `ssh-lease` · local-runtime | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `cache-volume` | `linux`; Apple container runtime | `local`; GPU: no | Crabbox; container delete | Local Linux containers on Apple silicon | Requires Apple's container CLI and macOS |
 | [apple-machine](apple-machine.md) (`applemachine`) | built-in; `delegated-run` · local-vm | No SSH; `provider-owned` · direct only; features: `run-session` | `linux`; Apple container machine | `local`; GPU: no | Apple runtime; machine delete | Local delegated Linux machine execution | Delegated execution, not a normal SSH lease |
-| [apple-vz](apple-vz.md) (`applevz`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Apple Virtualization.framework VM | `local`; GPU: no | Crabbox; VM delete | Headless Linux ARM64 VM on Apple silicon | Apple silicon macOS only |
+| [apple-vm](apple-vm.md) (`applevm`, `apple-vz`, `applevz`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Apple Virtualization.framework VM | `local`; GPU: no | Crabbox; VM delete | Headless Linux ARM64 VM on Apple silicon | Apple silicon macOS only |
 | [ascii-box](ascii-box.md) (`ascii`, `asciibox`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; ASCII Box managed Linux box | `provider-managed`; GPU: unknown | provider CLI; provider delete | Managed Linux box over SSH | Requires the ASCII Box CLI and account |
 | [aws](aws.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`, `windows/normal`, `windows/wsl2`, `macos`; EC2 VM or dedicated Mac host | `cloud`; GPU: optional | Crabbox or coordinator; instance termination | Broad Linux, Windows, WSL2, and macOS cloud coverage | Largest configuration, quota, and cost surface |
 | [aws-lambda-microvm](aws-lambda-microvm.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session`, `pause-resume` | `linux`; AWS Lambda Firecracker MicroVM | `cloud`; GPU: no | Crabbox and Lambda MicroVM API; MicroVM termination | Isolated stateful ARM64 command execution | Requires a compatible Crabbox runner image; launch Regions and lifetime are limited |
@@ -207,7 +207,7 @@ Access terms:
   against each provider's declared feature set. Among the SSH-lease providers,
   desktop/browser/code surfaces are richest on `aws`, `azure`, `hetzner`,
   `parallels`, `ssh`, and `local-container`; `multipass` exposes local VM SSH
-  and sync only in its first implementation, `apple-vz` does the same through a
+  and sync only in its first implementation, `apple-vm` does the same through a
   local helper and host-local SSH proxy, and most direct sandbox/delegated
   providers expose `ssh` and Crabbox sync only.
 - Actions runner hydration requires a normal SSH lease on Linux. Use a
@@ -222,7 +222,7 @@ crabbox run --provider vultr --type vc2-1c-1gb -- pnpm test
 crabbox doctor --provider hostinger
 crabbox run --provider docker -- pnpm test
 crabbox run --provider docker-sandbox -- go test ./...
-crabbox run --provider apple-vz -- go test ./...
+crabbox run --provider apple-vm -- go test ./...
 crabbox run --provider multipass -- go test ./...
 crabbox run --provider blacksmith-testbox --id tbx_123 -- pnpm test
 crabbox run --provider namespace-devbox --id blue-lobster -- pnpm test

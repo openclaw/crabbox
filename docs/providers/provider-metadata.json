@@ -55,7 +55,7 @@
     "caveat": "Delegated execution, not a normal SSH lease",
     "docs": "apple-machine.md"
   },
-  "apple-vz": {
+  "apple-vm": {
     "status": "built-in",
     "category": "local-vm",
     "substrate": "Apple Virtualization.framework VM",
@@ -67,7 +67,7 @@
     "cleanup": "VM delete",
     "bestFit": "Headless Linux ARM64 VM on Apple silicon",
     "caveat": "Apple silicon macOS only",
-    "docs": "apple-vz.md"
+    "docs": "apple-vm.md"
   },
   "ascii-box": {
     "status": "built-in",

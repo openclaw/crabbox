@@ -172,9 +172,9 @@ func TestValidateProviderTargetRejectsTartExplicitAMD64(t *testing.T) {
 	}
 }
 
-func TestValidateProviderTargetDefaultsAppleVZToARM64(t *testing.T) {
+func TestValidateProviderTargetDefaultsAppleVMToARM64(t *testing.T) {
 	cfg := baseConfig()
-	cfg.Provider = "apple-vz"
+	cfg.Provider = "apple-vm"
 	cfg.TargetOS = targetLinux
 	if got := effectiveArchitectureForConfig(cfg); got != ArchitectureARM64 {
 		t.Fatalf("effective architecture=%q want arm64", got)
@@ -184,9 +184,9 @@ func TestValidateProviderTargetDefaultsAppleVZToARM64(t *testing.T) {
 	}
 }
 
-func TestValidateProviderTargetAllowsAppleVZExplicitARM64(t *testing.T) {
+func TestValidateProviderTargetAllowsAppleVMExplicitARM64(t *testing.T) {
 	cfg := baseConfig()
-	cfg.Provider = "apple-vz"
+	cfg.Provider = "apple-vm"
 	cfg.TargetOS = targetLinux
 	cfg.Architecture = ArchitectureARM64
 	cfg.architectureExplicit = true
@@ -195,9 +195,9 @@ func TestValidateProviderTargetAllowsAppleVZExplicitARM64(t *testing.T) {
 	}
 }
 
-func TestValidateProviderTargetRejectsAppleVZExplicitAMD64(t *testing.T) {
+func TestValidateProviderTargetRejectsAppleVMExplicitAMD64(t *testing.T) {
 	cfg := baseConfig()
-	cfg.Provider = "apple-vz"
+	cfg.Provider = "apple-vm"
 	cfg.TargetOS = targetLinux
 	cfg.Architecture = ArchitectureAMD64
 	cfg.architectureExplicit = true

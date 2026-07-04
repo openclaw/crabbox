@@ -1,6 +1,6 @@
 //go:build darwin && arm64 && vmdembed
 
-package applevzhelper
+package applevmhelper
 
 import _ "embed"
 
@@ -8,8 +8,8 @@ import _ "embed"
 // self-contained. Build the payload first (see vmd/) and pass -tags vmdembed:
 //
 //	swift build -c release --package-path vmd
-//	cp vmd/.build/release/crabbox-apple-vm-vmd internal/applevzhelper/embedded/
-//	go build -tags vmdembed ./cmd/crabbox-apple-vz-helper
+//	cp vmd/.build/release/crabbox-apple-vm-vmd internal/applevmhelper/embedded/
+//	go build -tags vmdembed ./cmd/crabbox-apple-vm-helper
 //
 //go:embed embedded/crabbox-apple-vm-vmd
 var embeddedVMD []byte

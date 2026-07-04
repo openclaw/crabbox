@@ -5,6 +5,11 @@ project_name: crabbox
 changelog:
   disable: true
 
+before:
+  hooks:
+    # Build the Swift VM daemon so the helper build below can embed it.
+    - sh scripts/build-vmd.sh
+
 builds:
   - id: crabbox
     main: ./cmd/crabbox
@@ -20,14 +25,13 @@ builds:
       - linux_arm64
       - windows_amd64
       - windows_arm64
-  - id: crabbox-apple-vz-helper
-    main: ./cmd/crabbox-apple-vz-helper
-    binary: crabbox-apple-vz-helper
+  - id: crabbox-apple-vm-helper
+    main: ./cmd/crabbox-apple-vm-helper
+    binary: crabbox-apple-vm-helper
     env:
-      - CGO_ENABLED=1
-      - CGO_CFLAGS=-mmacosx-version-min=13.0
-      - CGO_LDFLAGS=-mmacosx-version-min=13.0
-      - MACOSX_DEPLOYMENT_TARGET=13.0
+      - CGO_ENABLED=0
+    flags:
+      - -tags=vmdembed
     targets:
       - darwin_arm64
 
@@ -35,7 +39,7 @@ archives:
   - id: crabbox
     ids:
       - crabbox
-      - crabbox-apple-vz-helper
+      - crabbox-apple-vm-helper
     allow_different_binary_count: true
     formats:
       - tar.gz
@@ -66,6 +70,6 @@ brews:
     license: MIT
     install: |
       bin.install "crabbox"
-      bin.install "crabbox-apple-vz-helper" if OS.mac? && Hardware::CPU.arm?
+      bin.install "crabbox-apple-vm-helper" if OS.mac? && Hardware::CPU.arm?
     test: |
       system bin/"crabbox", "--version"

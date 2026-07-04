@@ -1,14 +1,14 @@
-package applevz
+package applevm
 
 import (
 	"flag"
 	"strings"
 
-	"github.com/openclaw/crabbox/internal/applevzhelper"
+	"github.com/openclaw/crabbox/internal/applevmhelper"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-const providerName = "apple-vz"
+const providerName = "apple-vm"
 
 func init() {
 	core.RegisterProvider(Provider{})
@@ -18,7 +18,9 @@ type Provider struct{}
 
 func (Provider) Name() string { return providerName }
 
-func (Provider) Aliases() []string { return []string{"applevz"} }
+// The provider was named apple-vz before the vz library was replaced with
+// the native VM daemon; the old names stay routable for existing configs.
+func (Provider) Aliases() []string { return []string{"applevm", "apple-vz", "applevz"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
@@ -40,7 +42,7 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
-	return applevzhelper.ImageIdentity(strings.TrimSpace(cfg.AppleVZ.Image), cfg.AppleVZ.ImageSHA256)
+	return applevmhelper.ImageIdentity(strings.TrimSpace(cfg.AppleVM.Image), cfg.AppleVM.ImageSHA256)
 }
 
 func (Provider) ServerTypeForClass(string) string { return "" }
@@ -83,36 +85,36 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 }
 
 func validateConfigBeforeDefaults(cfg core.Config) error {
-	if cfg.AppleVZ.CPUs < 0 || (cfg.AppleVZ.CPUs == 0 && core.AppleVZCPUsExplicit(cfg)) {
-		return core.Exit(2, "appleVZ.cpus must be positive (got %d)", cfg.AppleVZ.CPUs)
+	if cfg.AppleVM.CPUs < 0 || (cfg.AppleVM.CPUs == 0 && core.AppleVMCPUsExplicit(cfg)) {
+		return core.Exit(2, "appleVM.cpus must be positive (got %d)", cfg.AppleVM.CPUs)
 	}
-	if cfg.AppleVZ.MemoryMiB < 0 || (cfg.AppleVZ.MemoryMiB == 0 && core.AppleVZMemoryExplicit(cfg)) {
-		return core.Exit(2, "appleVZ.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVZ.MemoryMiB)
+	if cfg.AppleVM.MemoryMiB < 0 || (cfg.AppleVM.MemoryMiB == 0 && core.AppleVMMemoryExplicit(cfg)) {
+		return core.Exit(2, "appleVM.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVM.MemoryMiB)
 	}
-	if cfg.AppleVZ.MemoryMiB > 0 && cfg.AppleVZ.MemoryMiB < 1024 {
-		return core.Exit(2, "appleVZ.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVZ.MemoryMiB)
+	if cfg.AppleVM.MemoryMiB > 0 && cfg.AppleVM.MemoryMiB < 1024 {
+		return core.Exit(2, "appleVM.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVM.MemoryMiB)
 	}
-	if cfg.AppleVZ.DiskGiB < 0 || (cfg.AppleVZ.DiskGiB == 0 && core.AppleVZDiskExplicit(cfg)) {
-		return core.Exit(2, "appleVZ.diskGiB must be positive (got %d)", cfg.AppleVZ.DiskGiB)
+	if cfg.AppleVM.DiskGiB < 0 || (cfg.AppleVM.DiskGiB == 0 && core.AppleVMDiskExplicit(cfg)) {
+		return core.Exit(2, "appleVM.diskGiB must be positive (got %d)", cfg.AppleVM.DiskGiB)
 	}
 	return nil
 }
 
 func validateConfig(cfg core.Config) error {
-	if err := applevzhelper.ValidatePOSIXAccountName(cfg.AppleVZ.User); err != nil {
-		return core.Exit(2, "appleVZ.user %s", err)
+	if err := applevmhelper.ValidatePOSIXAccountName(cfg.AppleVM.User); err != nil {
+		return core.Exit(2, "appleVM.user %s", err)
 	}
-	if err := applevzhelper.ValidatePOSIXWorkRoot(cfg.AppleVZ.WorkRoot); err != nil {
-		return core.Exit(2, "appleVZ.workRoot %s", err)
+	if err := applevmhelper.ValidatePOSIXWorkRoot(cfg.AppleVM.WorkRoot); err != nil {
+		return core.Exit(2, "appleVM.workRoot %s", err)
 	}
-	if cfg.AppleVZ.MemoryMiB < 1024 {
-		return core.Exit(2, "appleVZ.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVZ.MemoryMiB)
+	if cfg.AppleVM.MemoryMiB < 1024 {
+		return core.Exit(2, "appleVM.memoryMiB must be at least 1024 MiB (got %d)", cfg.AppleVM.MemoryMiB)
 	}
-	if cfg.AppleVZ.CPUs <= 0 {
-		return core.Exit(2, "appleVZ.cpus must be positive (got %d)", cfg.AppleVZ.CPUs)
+	if cfg.AppleVM.CPUs <= 0 {
+		return core.Exit(2, "appleVM.cpus must be positive (got %d)", cfg.AppleVM.CPUs)
 	}
-	if cfg.AppleVZ.DiskGiB <= 0 {
-		return core.Exit(2, "appleVZ.diskGiB must be positive (got %d)", cfg.AppleVZ.DiskGiB)
+	if cfg.AppleVM.DiskGiB <= 0 {
+		return core.Exit(2, "appleVM.diskGiB must be positive (got %d)", cfg.AppleVM.DiskGiB)
 	}
 	return nil
 }

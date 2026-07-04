@@ -47,7 +47,7 @@ func init() {
 	RegisterProvider(testAgentSandboxProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
-	RegisterProvider(testAppleVZProvider{})
+	RegisterProvider(testAppleVMProvider{})
 	RegisterProvider(testDockerSandboxProvider{})
 	RegisterProvider(testMultipassProvider{})
 	RegisterProvider(testTartProvider{})
@@ -1941,15 +1941,15 @@ func (testLocalContainerProvider) ApplyNativeCheckpointForkFlags(cfg *Config, _ 
 	return nil
 }
 
-type testAppleVZProvider struct{}
+type testAppleVMProvider struct{}
 
-func (testAppleVZProvider) Name() string { return "apple-vz" }
-func (testAppleVZProvider) Aliases() []string {
-	return []string{"applevz"}
+func (testAppleVMProvider) Name() string { return "apple-vm" }
+func (testAppleVMProvider) Aliases() []string {
+	return []string{"applevm"}
 }
-func (testAppleVZProvider) Spec() ProviderSpec {
+func (testAppleVMProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        "apple-vz",
+		Name:        "apple-vm",
 		Family:      "local-vm",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
@@ -1958,7 +1958,7 @@ func (testAppleVZProvider) Spec() ProviderSpec {
 	}
 }
 
-type testAppleVZFlagValues struct {
+type testAppleVMFlagValues struct {
 	HelperPath  *string
 	Image       *string
 	ImageSHA256 *string
@@ -1969,54 +1969,54 @@ type testAppleVZFlagValues struct {
 	DiskGiB     *int
 }
 
-func (testAppleVZProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
-	return testAppleVZFlagValues{
-		HelperPath:  fs.String("apple-vz-helper", defaults.AppleVZ.HelperPath, "apple-vz helper"),
-		Image:       fs.String("apple-vz-image", defaults.AppleVZ.Image, "apple-vz image"),
-		ImageSHA256: fs.String("apple-vz-image-sha256", defaults.AppleVZ.ImageSHA256, "apple-vz image sha256"),
-		User:        fs.String("apple-vz-user", defaults.AppleVZ.User, "apple-vz user"),
-		WorkRoot:    fs.String("apple-vz-work-root", defaults.AppleVZ.WorkRoot, "apple-vz work root"),
-		CPUs:        fs.Int("apple-vz-cpus", defaults.AppleVZ.CPUs, "apple-vz CPUs"),
-		MemoryMiB:   fs.Int("apple-vz-memory", defaults.AppleVZ.MemoryMiB, "apple-vz memory MiB"),
-		DiskGiB:     fs.Int("apple-vz-disk", defaults.AppleVZ.DiskGiB, "apple-vz disk GiB"),
+func (testAppleVMProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testAppleVMFlagValues{
+		HelperPath:  fs.String("apple-vm-helper", defaults.AppleVM.HelperPath, "apple-vm helper"),
+		Image:       fs.String("apple-vm-image", defaults.AppleVM.Image, "apple-vm image"),
+		ImageSHA256: fs.String("apple-vm-image-sha256", defaults.AppleVM.ImageSHA256, "apple-vm image sha256"),
+		User:        fs.String("apple-vm-user", defaults.AppleVM.User, "apple-vm user"),
+		WorkRoot:    fs.String("apple-vm-work-root", defaults.AppleVM.WorkRoot, "apple-vm work root"),
+		CPUs:        fs.Int("apple-vm-cpus", defaults.AppleVM.CPUs, "apple-vm CPUs"),
+		MemoryMiB:   fs.Int("apple-vm-memory", defaults.AppleVM.MemoryMiB, "apple-vm memory MiB"),
+		DiskGiB:     fs.Int("apple-vm-disk", defaults.AppleVM.DiskGiB, "apple-vm disk GiB"),
 	}
 }
-func (testAppleVZProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(testAppleVZFlagValues)
+func (testAppleVMProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testAppleVMFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "apple-vz-helper") {
-		cfg.AppleVZ.HelperPath = *v.HelperPath
+	if flagWasSet(fs, "apple-vm-helper") {
+		cfg.AppleVM.HelperPath = *v.HelperPath
 	}
-	if flagWasSet(fs, "apple-vz-image") {
-		cfg.AppleVZ.Image = *v.Image
-		cfg.AppleVZ.ImageSHA256 = ""
-		cfg.appleVZImageExplicit = true
+	if flagWasSet(fs, "apple-vm-image") {
+		cfg.AppleVM.Image = *v.Image
+		cfg.AppleVM.ImageSHA256 = ""
+		cfg.appleVMImageExplicit = true
 	}
-	if flagWasSet(fs, "apple-vz-image-sha256") {
-		cfg.AppleVZ.ImageSHA256 = *v.ImageSHA256
+	if flagWasSet(fs, "apple-vm-image-sha256") {
+		cfg.AppleVM.ImageSHA256 = *v.ImageSHA256
 	}
-	if flagWasSet(fs, "apple-vz-user") {
-		cfg.AppleVZ.User = *v.User
+	if flagWasSet(fs, "apple-vm-user") {
+		cfg.AppleVM.User = *v.User
 		cfg.SSHUser = *v.User
 	}
-	if flagWasSet(fs, "apple-vz-work-root") {
-		cfg.AppleVZ.WorkRoot = *v.WorkRoot
+	if flagWasSet(fs, "apple-vm-work-root") {
+		cfg.AppleVM.WorkRoot = *v.WorkRoot
 		cfg.WorkRoot = *v.WorkRoot
 	}
-	if flagWasSet(fs, "apple-vz-cpus") {
-		cfg.AppleVZ.CPUs = *v.CPUs
+	if flagWasSet(fs, "apple-vm-cpus") {
+		cfg.AppleVM.CPUs = *v.CPUs
 	}
-	if flagWasSet(fs, "apple-vz-memory") {
-		cfg.AppleVZ.MemoryMiB = *v.MemoryMiB
+	if flagWasSet(fs, "apple-vm-memory") {
+		cfg.AppleVM.MemoryMiB = *v.MemoryMiB
 	}
-	if flagWasSet(fs, "apple-vz-disk") {
-		cfg.AppleVZ.DiskGiB = *v.DiskGiB
+	if flagWasSet(fs, "apple-vm-disk") {
+		cfg.AppleVM.DiskGiB = *v.DiskGiB
 	}
 	return nil
 }
-func (p testAppleVZProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+func (p testAppleVMProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

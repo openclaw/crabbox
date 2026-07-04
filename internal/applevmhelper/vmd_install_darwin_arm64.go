@@ -1,6 +1,6 @@
 //go:build darwin && arm64
 
-package applevzhelper
+package applevmhelper
 
 import (
 	"crypto/sha256"
