@@ -14,6 +14,7 @@
 
 - Redacted configured credentials, authorization headers, signed URLs, URL userinfo, and secret-bearing JSON fields before coordinator provider diagnostics are stored or returned. Thanks @coygeek.
 - Redacted broker URL userinfo, queries, and fragments from `login`, `whoami`, and `doctor` text and JSON output. Thanks @coygeek.
+- Redacted Parallels top-level, template, and fleet-host SSH private keys from `config show --json` while preserving non-secret routing metadata. Thanks @coygeek.
 - Required W&B sandbox reuse, status, and stop to match an exact endpoint/entity/project/resource-bound local claim plus provider inventory ownership. Thanks @coygeek.
 - Required RunPod stop to use an exact pod ID/name-bound local claim, with conflict-safe explicit `--reclaim` adoption for unclaimed or legacy pods. Thanks @coygeek.
 - Made coordinatorless generic provider live smokes skip coordinator-only history and always clean up acquired leases after later lifecycle failures.
