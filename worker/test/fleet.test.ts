@@ -3998,15 +3998,14 @@ describe("fleet lease identity and idle", () => {
 
   it("recovers an unknown Hetzner server before deleting its retained SSH key", async () => {
     const requests: string[] = [];
+    let labelSelector: string | null = null;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input));
         requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
         if ((init?.method ?? "GET") === "GET") {
-          expect(url.searchParams.get("label_selector")).toBe(
-            "crabbox=true,lease=cbx_abcdef123456",
-          );
+          labelSelector = url.searchParams.get("label_selector");
           return jsonResponse({
             servers: [
               {
@@ -4035,6 +4034,7 @@ describe("fleet lease identity and idle", () => {
 
     await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
 
+    expect(labelSelector).toBe("crabbox=true,lease=cbx_abcdef123456");
     expect(requests).toEqual([
       "GET /v1/servers",
       "DELETE /v1/servers/123",
