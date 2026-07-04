@@ -722,6 +722,24 @@ func TestLocalContainerWorkRootExplicitSources(t *testing.T) {
 	}
 }
 
+func TestContainerExplicitMarkerHelpers(t *testing.T) {
+	var cfg Config
+	MarkLocalContainerImageExplicit(&cfg)
+	MarkLocalContainerRuntimeExplicit(&cfg)
+	MarkLocalContainerWorkRootExplicit(&cfg)
+	MarkAppleContainerImageExplicit(&cfg)
+	if !cfg.localContainerImageExplicit || !LocalContainerRuntimeExplicit(cfg) ||
+		!LocalContainerWorkRootExplicit(cfg) || !AppleContainerImageExplicit(cfg) {
+		t.Fatalf("container explicit markers were not retained: %+v", cfg)
+	}
+
+	cfg.appleVZImageSHA256Explicit = true
+	MarkAppleVZImageExplicit(&cfg)
+	if !AppleVZImageExplicit(cfg) || cfg.appleVZImageSHA256Explicit {
+		t.Fatalf("Apple VZ image marker did not invalidate the prior digest marker: %+v", cfg)
+	}
+}
+
 func TestEffectiveNvidiaBrevWorkRootDoesNotInheritAnotherProviderDefault(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "xcp-ng"
