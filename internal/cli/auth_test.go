@@ -98,6 +98,87 @@ func TestWriteBrokerLoginAcceptsDirectProviderInRegisteredMode(t *testing.T) {
 	}
 }
 
+func TestFinishLoginRedactsBrokerURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/whoami" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorWhoami{
+			Owner: "alice@example.test",
+			Org:   "example-org",
+			Auth:  "token",
+		})
+	}))
+	defer server.Close()
+
+	const brokerURL = "https://broker-user:broker-password@broker.example.test/path?token=query-secret#fragment-secret"
+	coord := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	for _, jsonOut := range []bool{false, true} {
+		var stdout bytes.Buffer
+		app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+		if err := app.finishLogin(context.Background(), coord, "/tmp/config.yaml", Config{
+			Coordinator: brokerURL,
+			Provider:    "aws",
+		}, jsonOut); err != nil {
+			t.Fatal(err)
+		}
+		output := stdout.String()
+		brokerOutput := output
+		if jsonOut {
+			var view map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+				t.Fatal(err)
+			}
+			brokerOutput, _ = view["broker"].(string)
+		}
+		if !strings.Contains(brokerOutput, "https://<redacted>@broker.example.test/path") {
+			t.Fatalf("login output missing redacted broker URL: %q", output)
+		}
+		for _, secret := range []string{"broker-user", "broker-password", "query-secret", "fragment-secret"} {
+			if strings.Contains(output, secret) {
+				t.Fatalf("login output leaked %q: %q", secret, output)
+			}
+		}
+	}
+}
+
+func TestWhoamiRedactsBrokerURL(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/whoami" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorWhoami{
+			Owner: "alice@example.test",
+			Org:   "example-org",
+			Auth:  "token",
+		})
+	}))
+	defer server.Close()
+	brokerURL := strings.Replace(server.URL, "http://", "http://broker-user:broker-password@", 1)
+	t.Setenv("CRABBOX_COORDINATOR", brokerURL)
+
+	var stdout bytes.Buffer
+	if err := (App{Stdout: &stdout, Stderr: &bytes.Buffer{}}).whoami(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, strings.Replace(server.URL, "http://", "http://<redacted>@", 1)) {
+		t.Fatalf("whoami output missing redacted broker URL: %q", output)
+	}
+	for _, secret := range []string{"broker-user", "broker-password"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("whoami output leaked %q: %q", secret, output)
+		}
+	}
+}
+
 func TestLoginRejectsInvalidConfigBeforeWriting(t *testing.T) {
 	home := t.TempDir()
 	configPath := filepath.Join(home, "config.yaml")

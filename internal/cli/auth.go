@@ -196,7 +196,7 @@ func (a App) finishLogin(ctx context.Context, coord *CoordinatorClient, path str
 	if jsonOut {
 		view := map[string]any{
 			"config":   path,
-			"broker":   cfg.Coordinator,
+			"broker":   redactedConfigURL(cfg.Coordinator),
 			"provider": cfg.Provider,
 			"identity": who,
 		}
@@ -209,7 +209,7 @@ func (a App) finishLogin(ctx context.Context, coord *CoordinatorClient, path str
 	if who.TokenExpiresAt != "" {
 		expires = " token_expires=" + who.TokenExpiresAt
 	}
-	fmt.Fprintf(a.Stdout, "logged in broker=%s provider=%s user=%s org=%s%s config=%s\n", cfg.Coordinator, cfg.Provider, who.Owner, who.Org, expires, path)
+	fmt.Fprintf(a.Stdout, "logged in broker=%s provider=%s user=%s org=%s%s config=%s\n", redactedConfigURL(cfg.Coordinator), cfg.Provider, who.Owner, who.Org, expires, path)
 	return nil
 }
 
@@ -399,7 +399,7 @@ func (a App) whoami(ctx context.Context, args []string) error {
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(who)
 	}
-	fmt.Fprintf(a.Stdout, "user=%s org=%s auth=%s broker=%s\n", who.Owner, who.Org, who.Auth, cfg.Coordinator)
+	fmt.Fprintf(a.Stdout, "user=%s org=%s auth=%s broker=%s\n", who.Owner, who.Org, who.Auth, redactedConfigURL(cfg.Coordinator))
 	return nil
 }
 
