@@ -566,6 +566,8 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		"Match Group administrators",
 		"Subsystem sftp internal-sftp",
 		"HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key",
+		"PubkeyAuthentication yes",
+		"PasswordAuthentication no",
 		`$openSSHSystemRoot = Join-Path $env:WINDIR "System32\OpenSSH"`,
 		"function Resolve-CrabboxOpenSSHCommand",
 		`$sshKeygen = Resolve-CrabboxOpenSSHCommand "ssh-keygen.exe"`,
@@ -651,6 +653,8 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 		gitForWindowsSetupSHA256,
 		"$passwordPath = $windowsPasswordPath",
 		"$credentialPaths = @($passwordPath)",
+		"PubkeyAuthentication yes",
+		"PasswordAuthentication no",
 		`icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"`,
 		"Restart-Service sshd -Force",
 		"Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
@@ -719,6 +723,8 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		"cat >/usr/local/bin/crabbox-ready",
 		`wslpath -w '/work/crabbox'`,
 		`test -w '/work/crabbox'`,
+		"PubkeyAuthentication yes",
+		"PasswordAuthentication no",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("windows WSL2 bootstrap missing %q", want)

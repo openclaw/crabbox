@@ -246,16 +246,14 @@ foreach ($line in ($sshdConfig -split "\\r?\\n")) {
   if (-not $inMatch -and $line -match '^\\s*Port\\s+\\d+\\s*$') { continue }
   if (-not $inMatch -and $line -match '^\\s*Subsystem\\s+sftp\\s+') { continue }
   if (-not $inMatch -and $line -match '^\\s*HostKey\\s+') { continue }
-  if ($enforceKeyAuth -and -not $inMatch -and $line -match '^\\s*(PasswordAuthentication|PubkeyAuthentication)\\s+') { continue }
+  if (-not $inMatch -and $line -match '^\\s*(PasswordAuthentication|PubkeyAuthentication)\\s+') { continue }
   if ($inMatch) { $matchLines += $line } else { $globalLines += $line }
 }
 foreach ($port in $sshPorts) { $globalLines += "Port $port" }
 $globalLines += "Subsystem sftp internal-sftp"
 $globalLines += "HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key"
-if ($enforceKeyAuth) {
-  $globalLines += "PubkeyAuthentication yes"
-  $globalLines += "PasswordAuthentication no"
-}
+$globalLines += "PubkeyAuthentication yes"
+$globalLines += "PasswordAuthentication no"
 if (($matchLines -join [Environment]::NewLine) -notmatch '(?im)^\\s*Match\\s+Group\\s+administrators\\b') {
   $matchLines += "Match Group administrators"
   $matchLines += "       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys"
@@ -329,7 +327,6 @@ function windowsManagedCorePreludePowerShell(config: LeaseConfig): string {
 	$passwordPath = $vncPasswordPath
 	$usernamePath = $windowsUsernamePath
 	$passwordMirrorPath = $windowsPasswordPath
-	$enforceKeyAuth = $false
 	$tightVNCInstaller = "$env:TEMP\\tightvnc-2.8.85-gpl-setup-64bit.msi"
 	`;
   }
@@ -339,7 +336,6 @@ function windowsManagedCorePreludePowerShell(config: LeaseConfig): string {
 	$passwordPath = $windowsPasswordPath
 	$usernamePath = $windowsUsernamePath
 	$passwordMirrorPath = $null
-	$enforceKeyAuth = $false
 	`;
 }
 
@@ -538,7 +534,6 @@ export function azureWindowsBootstrapPowerShell(config: LeaseConfig): string {
 $passwordPath = Join-Path $base "windows.password"
 $usernamePath = Join-Path $base "windows.username"
 $passwordMirrorPath = $null
-$enforceKeyAuth = $true
 ` +
     windowsBootstrapCorePowerShell() +
     `
