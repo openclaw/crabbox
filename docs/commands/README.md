@@ -17,6 +17,7 @@ same order as the CLI help.
 - [prewarm](prewarm.md)
 - [run](run.md)
 - [watch](watch.md)
+- [shard](shard.md)
 - [bench](bench.md)
 - [job](job.md)
 - [desktop](desktop.md)

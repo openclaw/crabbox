@@ -264,7 +264,9 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 - *Command fan-out:* arguments after `--` run through `crabbox run --id <lease>`
   on each fork, so normal sync, command wrapping, history, and proof behavior are
   preserved. Use `{{index}}`, `{{total}}`, `{{lease}}`, and `{{slug}}` in command
-  arguments to specialize each fork.
+  arguments to specialize each fork. Forks and their commands run one after
+  another; for concurrent shards with one merged test verdict, use
+  [`crabbox shard`](shard.md).
 
 Fork multiple times to run scenarios in parallel:
 

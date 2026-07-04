@@ -232,6 +232,7 @@ type Config struct {
 	Tailscale                     TailscaleConfig
 	Static                        StaticConfig
 	Results                       ResultsConfig
+	Shard                         ShardConfig
 	Cache                         CacheConfig
 	Profiles                      map[string]ProfileConfig
 	Presets                       map[string]PresetConfig
@@ -1226,6 +1227,10 @@ type ResultsConfig struct {
 	JUnit          []string
 	Auto           bool
 	FailOnFailures bool
+}
+
+type ShardConfig struct {
+	MaxCount int
 }
 
 type CacheConfig struct {
@@ -3166,6 +3171,7 @@ type fileConfig struct {
 	Tailscale                *fileTailscaleConfig                `yaml:"tailscale,omitempty"`
 	Static                   *fileStaticConfig                   `yaml:"static,omitempty"`
 	Results                  *fileResultsConfig                  `yaml:"results,omitempty"`
+	Shard                    *fileShardConfig                    `yaml:"shard,omitempty"`
 	Cache                    *fileCacheConfig                    `yaml:"cache,omitempty"`
 	Lease                    *fileLeaseConfig                    `yaml:"lease,omitempty"`
 	Profiles                 map[string]fileProfileConfig        `yaml:"profiles,omitempty"`
@@ -4283,6 +4289,10 @@ type fileResultsConfig struct {
 	JUnit          []string `yaml:"junit,omitempty"`
 	Auto           *bool    `yaml:"auto,omitempty"`
 	FailOnFailures *bool    `yaml:"failOnFailures,omitempty"`
+}
+
+type fileShardConfig struct {
+	MaxCount *int `yaml:"maxCount,omitempty"`
 }
 
 type fileCacheConfig struct {
@@ -6971,6 +6981,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Results.FailOnFailures != nil {
 			cfg.Results.FailOnFailures = *file.Results.FailOnFailures
 		}
+	}
+	if file.Shard != nil && file.Shard.MaxCount != nil {
+		cfg.Shard.MaxCount = *file.Shard.MaxCount
 	}
 	if file.Cache != nil {
 		if file.Cache.Pnpm != nil {

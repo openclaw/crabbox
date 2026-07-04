@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -823,70 +824,87 @@ func checkpointForkFanoutSlug(requestedSlug string, index, total int) string {
 	return base + suffix
 }
 
-func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, record checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedSlug, workdirOverride string, clear bool, runOpts checkpointForkRunOptions) (err error) {
+type checkpointForkProvision struct {
+	Lease   LeaseTarget
+	Workdir string
+	Release func(context.Context)
+}
+
+func (a App) provisionCheckpointFork(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, record checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedSlug, workdirOverride string, clear bool) (checkpointForkProvision, error) {
 	lease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: leaseOptionsFromConfig(cfg), Keep: keep, Reclaim: reclaim, RequestedSlug: requestedSlug})
 	if err != nil {
-		return err
+		return checkpointForkProvision{}, err
 	}
 	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
-	released := false
+	var releaseOnce sync.Once
 	release := func(releaseCtx context.Context) {
-		if released {
-			return
-		}
-		released = true
-		a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+		releaseOnce.Do(func() {
+			a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+		})
 	}
-	defer func() {
-		if !keep {
-			release(context.Background())
-		}
-	}()
 	applyResolvedServerConfig(&cfg, server)
 	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, reclaim); err != nil {
 		release(ctx)
-		return err
+		return checkpointForkProvision{}, err
 	}
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
 		release(ctx)
-		return err
+		return checkpointForkProvision{}, err
 	} else {
 		target = resolved.Target
 		if resolved.FallbackReason != "" {
 			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 		}
 	}
+	forkLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}
 	if isNativeCheckpointKind(record.Kind) {
 		if record.TargetOS == targetWindows {
-			fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=-\n", record.ID, leaseID, blank(serverSlug(server), "-"), nativeCheckpointResourceID(record))
-			return a.runCheckpointForkCommand(ctx, leaseID, serverSlug(server), runOpts)
+			return checkpointForkProvision{Lease: forkLease, Release: release}, nil
 		}
 		workdir := nativeCheckpointForkWorkdir(cfg, leaseID, repo.Name, workdirOverride)
-		if err := validateCheckpointForkWorkdirs(ctx, backend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, record.Workdir, workdir); err != nil {
+		if err := validateCheckpointForkWorkdirs(ctx, backend, forkLease, record.Workdir, workdir); err != nil {
 			release(ctx)
-			return err
+			return checkpointForkProvision{}, err
 		}
 		if err := relocateNativeCheckpointWorkdir(ctx, target, record.Workdir, workdir); err != nil {
 			release(ctx)
-			return err
+			return checkpointForkProvision{}, err
 		}
-		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(serverSlug(server), "-"), nativeCheckpointResourceID(record), workdir)
-		return a.runCheckpointForkCommand(ctx, leaseID, serverSlug(server), runOpts)
+		return checkpointForkProvision{Lease: forkLease, Workdir: workdir, Release: release}, nil
 	}
 	workdir := strings.TrimSpace(workdirOverride)
 	if workdir == "" {
 		workdir = defaultCheckpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir)
 	}
-	if err := validateCheckpointForkWorkdirs(ctx, backend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, workdir); err != nil {
+	if err := validateCheckpointForkWorkdirs(ctx, backend, forkLease, workdir); err != nil {
 		release(ctx)
-		return err
+		return checkpointForkProvision{}, err
 	}
 	if err := restoreCheckpointArchive(ctx, target, checkpointArchivePath(paths, record), record.ID, workdir, clear); err != nil {
 		release(ctx)
+		return checkpointForkProvision{}, err
+	}
+	return checkpointForkProvision{Lease: forkLease, Workdir: workdir, Release: release}, nil
+}
+
+func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, record checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedSlug, workdirOverride string, clear bool, runOpts checkpointForkRunOptions) error {
+	provision, err := a.provisionCheckpointFork(ctx, cfg, backend, sshBackend, repo, record, paths, keep, reclaim, requestedSlug, workdirOverride, clear)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s workdir=%s\n", record.ID, leaseID, blank(serverSlug(server), "-"), workdir)
-	return a.runCheckpointForkCommand(ctx, leaseID, serverSlug(server), runOpts)
+	defer func() {
+		if !keep {
+			provision.Release(context.Background())
+		}
+	}()
+	leaseID := provision.Lease.LeaseID
+	slug := serverSlug(provision.Lease.Server)
+	if isNativeCheckpointKind(record.Kind) {
+		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), nativeCheckpointResourceID(record), blank(provision.Workdir, "-"))
+	} else {
+		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), provision.Workdir)
+	}
+	return a.runCheckpointForkCommand(ctx, leaseID, slug, runOpts)
 }
 
 func (a App) runCheckpointForkCommand(ctx context.Context, leaseID, slug string, opts checkpointForkRunOptions) error {

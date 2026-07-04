@@ -1595,6 +1595,12 @@ afterSync:
 		fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
 	}
 	recorder.Finish(ctx, target, code, timings.sync, timings.command, logBuffer.String(), logBuffer.Truncated(), results, classification)
+	if a.runOutcome != nil {
+		a.runOutcome.Recorded = true
+		a.runOutcome.ExitCode = code
+		a.runOutcome.RunID = recorder.runID
+		a.runOutcome.Results = results
+	}
 	fmt.Fprintf(a.Stderr, "command complete in %s total=%s\n", timings.command.Round(time.Millisecond), total.Round(time.Millisecond))
 	fmt.Fprintln(a.Stderr, formatRunSummary(timings, total, code))
 	labelField := ""

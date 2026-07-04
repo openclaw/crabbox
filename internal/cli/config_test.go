@@ -5127,6 +5127,8 @@ results:
   failOnFailures: true
   junit:
     - junit.xml
+shard:
+  maxCount: 12
 run:
   preflightTools:
     - node
@@ -5297,6 +5299,9 @@ ssh:
 	}
 	if len(cfg.Results.JUnit) != 1 || cfg.Results.JUnit[0] != "junit.xml" || !cfg.Results.Auto || !cfg.Results.FailOnFailures {
 		t.Fatalf("results config not loaded: %#v", cfg.Results)
+	}
+	if cfg.Shard.MaxCount != 12 {
+		t.Fatalf("shard config not loaded: %#v", cfg.Shard)
 	}
 	if len(cfg.Run.PreflightTools) != 2 || cfg.Run.PreflightTools[0] != "node" || cfg.Run.PreflightTools[1] != "bun" {
 		t.Fatalf("run config not loaded: %#v", cfg.Run)

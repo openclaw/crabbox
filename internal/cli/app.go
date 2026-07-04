@@ -13,6 +13,8 @@ type App struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Stdin  io.Reader
+
+	runOutcome *shardRunOutcome
 }
 
 func Run(ctx context.Context, args []string) error {
@@ -79,6 +81,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.runCommand(ctx, helpArgs), true
 	case "watch":
 		return a.watch(ctx, helpArgs), true
+	case "shard":
+		return a.shard(ctx, helpArgs), true
 	case "job":
 		return nil, false
 	case "sync-plan":
@@ -177,6 +181,7 @@ Commands:
   prewarm     Lease and hydrate a reusable test-ready box
   run         Sync the repo, run a remote command, stream output
   watch       Re-run a command on a warm lease when local files change
+  shard       Fork a checkpoint into parallel shards and merge their test results
   bench       Record and report local benchmark timings
   job         Run named repo-local Crabbox jobs
   desktop     Launch apps into a visible desktop session

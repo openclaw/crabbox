@@ -642,7 +642,11 @@ func watchFlagIsBool(fs *flag.FlagSet, name string) bool {
 }
 
 func partitionWatchRunArgs(fs *flag.FlagSet, flagArgs []string) ([]string, []string, error) {
-	watchArgs := []string{}
+	return partitionForwardedRunArgs(fs, flagArgs, watchOwnedOnlyFlags, watchForbiddenRunFlags, "watch: it conflicts with a persistent watch session")
+}
+
+func partitionForwardedRunArgs(fs *flag.FlagSet, flagArgs []string, ownedOnly, forbidden map[string]bool, forbiddenReason string) ([]string, []string, error) {
+	ownArgs := []string{}
 	runArgs := []string{}
 	i := 0
 	for i < len(flagArgs) {
@@ -660,12 +664,12 @@ func partitionWatchRunArgs(fs *flag.FlagSet, flagArgs []string) ([]string, []str
 			return nil, nil, exit(2, "invalid flag %q", token)
 		}
 		if name == "h" || name == "help" {
-			watchArgs = append(watchArgs, token)
+			ownArgs = append(ownArgs, token)
 			i++
 			continue
 		}
-		if watchForbiddenRunFlags[name] {
-			return nil, nil, exit(2, "--%s cannot be used with watch: it conflicts with a persistent watch session", name)
+		if forbidden[name] {
+			return nil, nil, exit(2, "--%s cannot be used with %s", name, forbiddenReason)
 		}
 		known := fs.Lookup(name) != nil
 		consume := 0
@@ -681,15 +685,15 @@ func partitionWatchRunArgs(fs *flag.FlagSet, flagArgs []string) ([]string, []str
 		}
 		tokens := flagArgs[i : i+1+consume]
 		switch {
-		case watchOwnedOnlyFlags[name]:
-			watchArgs = append(watchArgs, tokens...)
+		case ownedOnly[name]:
+			ownArgs = append(ownArgs, tokens...)
 		case known:
-			watchArgs = append(watchArgs, tokens...)
+			ownArgs = append(ownArgs, tokens...)
 			runArgs = append(runArgs, tokens...)
 		default:
 			runArgs = append(runArgs, tokens...)
 		}
 		i += 1 + consume
 	}
-	return watchArgs, runArgs, nil
+	return ownArgs, runArgs, nil
 }
