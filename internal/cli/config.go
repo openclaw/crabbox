@@ -1989,6 +1989,9 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		return validateTargetConfig(*cfg)
 	}
 	if cfg.Provider == "fal" {
+		if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
+			cfg.Fal.InstanceType = strings.TrimSpace(cfg.ServerType)
+		}
 		if cfg.Fal.APIURL == "" {
 			cfg.Fal.APIURL = "https://api.fal.ai/v1"
 		}

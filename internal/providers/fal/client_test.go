@@ -107,6 +107,22 @@ func TestClientDecodesStandardErrorBody(t *testing.T) {
 	}
 }
 
+func TestClientRedactsAPIKeyReflectedByErrorResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"rejected Key test-key"}}`))
+	}))
+	defer server.Close()
+	api, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.ListInstances(context.Background(), 0, "")
+	if err == nil || strings.Contains(err.Error(), "test-key") || !strings.Contains(err.Error(), "<redacted>") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestAPIErrorFormatting(t *testing.T) {
 	var nilErr *APIError
 	if got := nilErr.Error(); got != "" {
@@ -142,6 +158,24 @@ func TestClientRejectsPlainHTTPExceptLoopback(t *testing.T) {
 	}
 	if _, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: "http://127.0.0.1:8080/v1"}}, Runtime{}); err != nil {
 		t.Fatalf("loopback http rejected: %v", err)
+	}
+}
+
+func TestClientRejectsCredentialBearingBaseURLComponents(t *testing.T) {
+	for name, apiURL := range map[string]string{
+		"userinfo": "https://user:secret@api.fal.ai/v1",
+		"query":    "https://api.fal.ai/v1?token=secret",
+		"fragment": "https://api.fal.ai/v1#secret",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: apiURL}}, Runtime{})
+			if err == nil {
+				t.Fatal("accepted credential-bearing API URL")
+			}
+			if message := err.Error(); strings.Contains(message, "secret") || strings.Contains(message, "user") || strings.Contains(message, "token") {
+				t.Fatalf("api url error leaked sensitive component: %q", message)
+			}
+		})
 	}
 }
 

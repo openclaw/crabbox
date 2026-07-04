@@ -29,6 +29,7 @@
 - Added `crabbox checkpoint fork -- <command...>` to run the normal `crabbox run` flow across fork fan-out leases with `{{index}}`, `{{total}}`, `{{lease}}`, and `{{slug}}` template variables.
 - Added Vast.ai direct Linux GPU SSH leases with guarded offer cost and reliability selection, per-lease keys, account-bound cleanup, required-tool bootstrap, and billable live-smoke coverage. Thanks @coygeek.
 - Added an exact-origin `CRABBOX_WEBVNC_AGENT_BASE_URL` override for deployments that route portal APIs and outbound WebVNC agent sockets separately.
+- Added fal Compute direct Linux GPU SSH leases with per-lease keys, claim-bound cleanup, bounded ambiguous-create recovery, and guarded zero-residue live-smoke coverage. Thanks @coygeek.
 
 ### Fixed
 

@@ -31,6 +31,7 @@ needs a long-lived SSH-reachable box for rsync and command execution.
 ```sh
 crabbox doctor --provider fal
 crabbox warmup --provider fal --fal-instance-type gpu_1x_h100_sxm5
+crabbox warmup --provider fal --type gpu_1x_h100_sxm5
 crabbox run --provider fal --fal-instance-type gpu_1x_h100_sxm5 -- go test ./...
 crabbox ssh --provider fal --id my-app
 crabbox list --provider fal --json
@@ -64,6 +65,9 @@ Config keys under `fal:`:
 | `sector` | `cfg.Fal.Sector` | unset | fal Compute sector; set only for supported 8× H100 multi-node instance types. |
 | `user` | `cfg.Fal.User` | `root` | SSH user for the instance. |
 | `workRoot` | `cfg.Fal.WorkRoot` | `/work/crabbox` | Remote Crabbox work root. |
+
+The generic `--type` flag and fal-specific `--fal-instance-type` flag both
+select the Compute instance type. If both are present, explicit `--type` wins.
 
 Provider flags:
 
@@ -116,9 +120,12 @@ lease can be created.
 7. Delete the fal instance and remove the local claim and stored key on `stop`.
 
 If creation or post-create readiness becomes indeterminate, Crabbox preserves a
-local recovery claim when it has enough information to retry `crabbox stop
---provider fal <lease-or-slug>`. Recovery-pending claims are retained until the
-operator can reconcile or remove them.
+local recovery claim for `crabbox stop --provider fal <lease-or-slug>`. A create
+whose response was lost is recovered only by replaying the exact request and
+idempotency key inside fal's bounded idempotency window; Crabbox then binds the
+returned instance id before deletion. After that window, it fails closed and
+retains the claim for manual provider reconciliation rather than risking a
+second billable instance.
 
 ## Ownership And Cleanup
 
@@ -136,10 +143,11 @@ crabbox cleanup --provider fal
 ```
 
 `cleanup --dry-run` prints what would be deleted without mutating fal or local
-claims. If the provider says an instance is already absent, cleanup removes the
-stale local claim only when not in dry-run mode. Recovery-pending claims are
-skipped so the operator can investigate the uncertain create or readiness
-outcome.
+claims. Because fal does not expose an account identity for binding the current
+API key, an instance `404` is not sufficient proof that the resource is absent
+from the account that created it; Crabbox retains the local claim for manual
+reconciliation. Recovery-pending claims are likewise retained so the operator
+can investigate an uncertain create or readiness outcome.
 
 ## Cost Discipline
 
@@ -211,6 +219,8 @@ diagnostic output.
 
 ## Related Docs
 
+- [fal Compute](https://fal.ai/docs/documentation/compute)
+- [Create an instance API](https://fal.ai/docs/platform-apis/v1/compute/instances/create)
 - [Provider reference](README.md)
 - [Provider backends](../provider-backends.md)
 - [Provider feature overview](../features/providers.md)

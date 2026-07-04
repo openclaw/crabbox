@@ -1,5 +1,7 @@
 package fal
 
+import "strings"
+
 const (
 	defaultAPIURL       = "https://api.fal.ai/v1"
 	defaultInstanceType = "gpu_1x_h100_sxm5"
@@ -10,6 +12,9 @@ const (
 func applyFalDefaults(cfg *Config) {
 	if cfg == nil {
 		return
+	}
+	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
+		cfg.Fal.InstanceType = strings.TrimSpace(cfg.ServerType)
 	}
 	if cfg.Fal.APIURL == "" {
 		cfg.Fal.APIURL = defaultAPIURL
@@ -37,7 +42,5 @@ func applyFalDefaults(cfg *Config) {
 	if cfg.WorkRoot == "" {
 		cfg.WorkRoot = cfg.Fal.WorkRoot
 	}
-	if cfg.ServerType == "" {
-		cfg.ServerType = cfg.Fal.InstanceType
-	}
+	cfg.ServerType = cfg.Fal.InstanceType
 }

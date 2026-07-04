@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ const (
 	falPollTimeout              = 10 * time.Minute
 	falCreateReconcileAttempts  = 3
 	falCreateReconcileRetryWait = time.Second
+	falCreateRecoveryWindow     = 9 * time.Minute
 )
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
@@ -45,23 +47,26 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		SSHKey:       publicKey,
 		Sector:       Sector(cfg.Fal.Sector),
 	}
-	created, err := client.CreateInstance(ctx, createRequest, leaseID)
-	if err != nil {
-		if !isAmbiguousFalMutationError(err) {
+	created, createErr := client.CreateInstance(ctx, createRequest, leaseID)
+	if createErr != nil || strings.TrimSpace(created.ID) == "" {
+		if createErr != nil && !isAmbiguousFalMutationError(createErr) {
 			core.RemoveStoredTestboxKey(leaseID)
-			return core.LeaseTarget{}, err
+			return core.LeaseTarget{}, createErr
 		}
-		reconciled, reconcileErr := b.reconcileAmbiguousCreate(ctx, client, createRequest, leaseID, err)
+		if createErr == nil {
+			createErr = exit(5, "fal create instance returned an empty id")
+		}
+		reconciled, reconcileErr := b.reconcileAmbiguousCreate(ctx, client, createRequest, leaseID, createErr)
 		if reconcileErr != nil {
+			claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, "", "ambiguous-create", false)
+			if claimErr != nil {
+				return core.LeaseTarget{}, errors.Join(reconcileErr, fmt.Errorf("persist fal ambiguous-create recovery claim: %w", claimErr))
+			}
 			return core.LeaseTarget{}, reconcileErr
 		}
 		created = reconciled
 	}
 	instanceID := strings.TrimSpace(created.ID)
-	if instanceID == "" {
-		core.RemoveStoredTestboxKey(leaseID)
-		return core.LeaseTarget{}, exit(5, "fal create instance returned an empty id")
-	}
 	if req.OnAcquired != nil {
 		rawTarget := core.LeaseTarget{
 			Server:  falServer(created, cfg, leaseID, slug, req.Keep),
@@ -106,10 +111,10 @@ func (b *backend) reconcileAmbiguousCreate(ctx context.Context, client computeAP
 	for attempt := 1; attempt <= falCreateReconcileAttempts; attempt++ {
 		instance, err := client.CreateInstance(ctx, req, leaseID)
 		if err == nil {
-			if strings.TrimSpace(instance.ID) == "" {
-				return ComputeInstance{}, errors.Join(cause, exit(5, "fal idempotent create retry returned an empty id"))
+			if strings.TrimSpace(instance.ID) != "" {
+				return instance, nil
 			}
-			return instance, nil
+			err = exit(5, "fal idempotent create retry returned an empty id")
 		}
 		lastErr = err
 		if !isAmbiguousFalMutationError(err) {
@@ -147,7 +152,13 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, exit(4, "lease/fal instance not found or not locally claimed: %s", strings.TrimSpace(req.ID))
 	}
 	if claim.CloudID == "" {
-		return core.LeaseTarget{}, exit(4, "fal recovery is still pending for lease=%s; local recovery state retained", claim.LeaseID)
+		if !req.ReleaseOnly {
+			return core.LeaseTarget{}, exit(4, "fal recovery is still pending for lease=%s; local recovery state retained", claim.LeaseID)
+		}
+		claim, err = b.recoverAmbiguousCreateForRelease(ctx, client, claim, cfg)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 	}
 	instance, err := client.GetInstance(ctx, claim.CloudID)
 	if err != nil {
@@ -263,7 +274,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		if strings.TrimSpace(live.ID) != instanceID {
 			return exit(2, "refusing to release fal instance %s after provider identity changed", instanceID)
 		}
-	} else if !isFalNotFound(err) {
+	} else if isFalNotFound(err) {
+		return exit(5, "fal instance %s is not visible to the current credentials; local claim retained because provider absence is not account-bound", instanceID)
+	} else {
 		return err
 	}
 	if err := client.DeleteInstance(ctx, instanceID); err != nil && !isFalNotFound(err) {
@@ -299,11 +312,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		live, getErr := client.GetInstance(ctx, claim.CloudID)
 		if isFalNotFound(getErr) {
-			fmt.Fprintf(b.rt.Stderr, "delete local claim lease=%s fal=%s reason=provider_absent\n", claim.LeaseID, claim.CloudID)
-			if !req.DryRun {
-				core.RemoveLeaseClaim(claim.LeaseID)
-				core.RemoveStoredTestboxKey(claim.LeaseID)
-			}
+			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=provider_absence_not_account_bound\n", server.DisplayID(), server.Name)
 			continue
 		}
 		if getErr != nil {
@@ -386,6 +395,69 @@ func (b *backend) effectivePollInterval() time.Duration {
 		return b.pollInterval
 	}
 	return falPollInterval
+}
+
+func (b *backend) recoverAmbiguousCreateForRelease(ctx context.Context, client computeAPI, claim core.LeaseClaim, cfg Config) (core.LeaseClaim, error) {
+	if claim.Labels["recovery"] != "ambiguous-create" {
+		return core.LeaseClaim{}, exit(4, "fal recovery is still pending for lease=%s; local recovery state retained", claim.LeaseID)
+	}
+	createdAt, err := strconv.ParseInt(strings.TrimSpace(claim.Labels["created_at"]), 10, 64)
+	if err != nil || createdAt <= 0 || !b.now().Before(time.Unix(createdAt, 0).Add(falCreateRecoveryWindow)) {
+		return core.LeaseClaim{}, exit(5, "fal create recovery window expired for lease=%s; local recovery claim retained for manual provider reconciliation", claim.LeaseID)
+	}
+	keyPath, err := core.TestboxKeyPath(claim.LeaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		return core.LeaseClaim{}, exit(5, "fal create recovery key is unavailable for lease=%s; local recovery claim retained", claim.LeaseID)
+	}
+	_, publicKey, err := core.EnsureTestboxKeyForConfig(cfg, claim.LeaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	instanceType := firstNonBlank(claim.Labels["server_type"], cfg.Fal.InstanceType)
+	sector := claim.Labels["sector"]
+	if InstanceType(instanceType) != InstanceTypeH100x8 {
+		sector = ""
+	}
+	created, err := client.CreateInstance(ctx, CreateInstanceRequest{
+		InstanceType: InstanceType(instanceType),
+		SSHKey:       publicKey,
+		Sector:       Sector(sector),
+	}, claim.LeaseID)
+	if err != nil {
+		return core.LeaseClaim{}, exit(5, "fal create recovery retry failed for lease=%s; local recovery claim retained: %v", claim.LeaseID, err)
+	}
+	instanceID := strings.TrimSpace(created.ID)
+	if instanceID == "" {
+		return core.LeaseClaim{}, exit(5, "fal create recovery retry returned an empty id for lease=%s; local recovery claim retained", claim.LeaseID)
+	}
+	cfg.Fal.InstanceType = instanceType
+	cfg.ServerType = instanceType
+	cfg.Fal.Sector = sector
+	if err := b.persistRecoveryClaim(claim.LeaseID, claim.Slug, cfg, claim.RepoRoot, instanceID, "rollback-cleanup", false); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cleanupErr := client.DeleteInstance(cleanupCtx, instanceID)
+		if cleanupErr == nil || isFalNotFound(cleanupErr) {
+			core.RemoveLeaseClaim(claim.LeaseID)
+			core.RemoveStoredTestboxKey(claim.LeaseID)
+			return core.LeaseClaim{}, fmt.Errorf("persist recovered fal instance claim: %w", err)
+		}
+		return core.LeaseClaim{}, errors.Join(
+			fmt.Errorf("persist recovered fal instance claim: %w", err),
+			fmt.Errorf("fal cleanup failed for recovered instance %s: %w", instanceID, cleanupErr),
+		)
+	}
+	updated, ok, err := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if !ok || updated.CloudID != instanceID {
+		return core.LeaseClaim{}, exit(5, "fal recovered instance claim is unavailable for lease=%s", claim.LeaseID)
+	}
+	return updated, nil
 }
 
 func (b *backend) now() time.Time {
@@ -483,7 +555,7 @@ func leaseTargetFromClaimedInstance(item ComputeInstance, claim core.LeaseClaim,
 		return core.LeaseTarget{}, exit(2, "refusing to resolve changed fal instance %s", claim.CloudID)
 	}
 	server := falServer(item, cfg, claim.LeaseID, claim.Slug, claim.Labels["keep"] == "true")
-	server.Labels = mergeLabels(server.Labels, claim.Labels)
+	server.Labels = mergeFalClaimLabels(server.Labels, claim.Labels)
 	server, err := mergeClaimEndpoint(server, claim)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -563,6 +635,7 @@ func mergeClaimEndpoint(server core.Server, claim core.LeaseClaim) (core.Server,
 func falServer(item ComputeInstance, cfg Config, leaseID, slug string, keep bool) core.Server {
 	labels := falLabels(cfg, leaseID, slug, keep, time.Now().UTC())
 	labels["fal_instance_id"] = strings.TrimSpace(item.ID)
+	labels["server_type"] = firstNonBlank(string(item.InstanceType), cfg.Fal.InstanceType, cfg.ServerType)
 	labels["name"] = firstNonBlank(slug, item.ID)
 	if item.Region != "" {
 		labels["region"] = item.Region
@@ -655,6 +728,18 @@ func mergeLabels(base, overlay map[string]string) map[string]string {
 	for key, value := range overlay {
 		if strings.TrimSpace(value) != "" {
 			out[key] = value
+		}
+	}
+	return out
+}
+
+func mergeFalClaimLabels(live, claim map[string]string) map[string]string {
+	out := mergeLabels(live, claim)
+	for _, key := range []string{"creator_user_nickname", "fal_instance_id", "region", "sector", "server_type", "state"} {
+		if value := strings.TrimSpace(live[key]); value != "" {
+			out[key] = value
+		} else {
+			delete(out, key)
 		}
 	}
 	return out

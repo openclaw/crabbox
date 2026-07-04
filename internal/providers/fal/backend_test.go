@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +158,24 @@ func TestFalAcquireDefaultSingleGPUOmitsSector(t *testing.T) {
 	}
 }
 
+func TestFalAcquireUsesExplicitGenericServerType(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	b.cfg.ServerType = " gpu_8x_h100_sxm5 "
+	b.cfg.ServerTypeExplicit = true
+	b.cfg.Fal.Sector = string(Sector2)
+
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "generic-type"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.createRequests) != 1 {
+		t.Fatalf("createRequests=%#v", api.createRequests)
+	}
+	if got := api.createRequests[0]; got.InstanceType != InstanceTypeH100x8 || got.Sector != Sector2 {
+		t.Fatalf("create request=%#v", got)
+	}
+}
+
 func TestFalAcquireReturnsSSHPortUpdatedByReadinessProbe(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
@@ -211,9 +230,11 @@ func TestFalAcquireReconcilesAmbiguousCreateWithIdempotentRetry(t *testing.T) {
 	}
 }
 
-func TestFalAcquireAmbiguousCreateRetryFailureDoesNotPersistUnrecoverableClaim(t *testing.T) {
+func TestFalStopRecoversAmbiguousCreateWithExactIdempotentRequest(t *testing.T) {
 	api := &fakeFalAPI{createErrs: []error{io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF}}
 	b := newFalTestBackend(t, api)
+	b.cfg.Fal.InstanceType = string(InstanceTypeH100x8)
+	b.cfg.Fal.Sector = string(Sector2)
 
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "unreconciled-create"})
 	if err == nil || !strings.Contains(err.Error(), "indeterminate after idempotent retry") {
@@ -222,8 +243,60 @@ func TestFalAcquireAmbiguousCreateRetryFailureDoesNotPersistUnrecoverableClaim(t
 	if len(api.createRequests) != 4 {
 		t.Fatalf("createRequests=%#v", api.createRequests)
 	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("unreconciled-create", providerName)
+	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create" {
+		t.Fatalf("recovery claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "unreconciled-create", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Server.CloudID != "inst_created" {
+		t.Fatalf("target=%#v", target)
+	}
+	if len(api.createRequests) != 5 || api.idempotency[4] != claim.LeaseID {
+		t.Fatalf("createRequests=%d idempotency=%#v", len(api.createRequests), api.idempotency)
+	}
+	if got := api.createRequests[4]; got.InstanceType != InstanceTypeH100x8 || got.Sector != Sector2 || !strings.HasPrefix(got.SSHKey, "ssh-") {
+		t.Fatalf("recovery request=%#v", got)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: target}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deletedIDs) != 1 || api.deletedIDs[0] != "inst_created" {
+		t.Fatalf("deletedIDs=%#v", api.deletedIDs)
+	}
 	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("unreconciled-create", providerName); claimErr != nil || ok {
-		t.Fatalf("unrecoverable empty-ID claim persisted ok=%v err=%v", ok, claimErr)
+		t.Fatalf("recovery claim retained ok=%v err=%v", ok, claimErr)
+	}
+}
+
+func TestFalStopRetainsAmbiguousClaimAfterIdempotencyWindow(t *testing.T) {
+	api := &fakeFalAPI{createErrs: []error{io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF}}
+	b := newFalTestBackend(t, api)
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "expired-recovery"})
+	if err == nil {
+		t.Fatal("expected ambiguous create failure")
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider("expired-recovery", providerName)
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+	labels := cloneLabels(claim.Labels)
+	labels["created_at"] = strconv.FormatInt(time.Now().Add(-falCreateRecoveryWindow-time.Minute).Unix(), 10)
+	claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "recovery window expired") {
+		t.Fatalf("resolve err=%v", err)
+	}
+	if len(api.createRequests) != 4 {
+		t.Fatalf("expired recovery replayed create: requests=%d", len(api.createRequests))
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || !exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
 	}
 }
 
@@ -463,6 +536,9 @@ func TestFalStatusOnlyResolveDoesNotRequireSSHHost(t *testing.T) {
 	if lease.Server.Status != string(InstanceStatusProvisioning) || lease.SSH.Host != "" {
 		t.Fatalf("lease=%#v", lease)
 	}
+	if lease.Server.Labels["state"] != string(InstanceStatusProvisioning) {
+		t.Fatalf("state label=%q, want live provisioning state", lease.Server.Labels["state"])
+	}
 	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "pending"}); err == nil || !strings.Contains(err.Error(), "no SSH host") {
 		t.Fatalf("non-status resolve err=%v", err)
 	}
@@ -548,6 +624,42 @@ func TestFalCleanupDeletesOnlyExpiredClaimedInstances(t *testing.T) {
 	}
 	if _, ok := api.instances["inst_foreign"]; !ok {
 		t.Fatal("cleanup deleted unclaimed foreign instance")
+	}
+}
+
+func TestFalCleanupRetainsClaimWhenAbsenceIsNotAccountBound(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{}}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_absent12345", "absent", "inst_absent", "203.0.113.31", false)
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, ok, err := core.ResolveLeaseClaimForProvider("absent", providerName); err != nil || !ok || claim.CloudID != "inst_absent" {
+		t.Fatalf("provider-absent claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("provider-absent cleanup issued delete: %#v", api.deletedIDs)
+	}
+}
+
+func TestFalReleaseRetainsClaimWhenAbsenceIsNotAccountBound(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{}}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_absent12345", "absent", "inst_absent", "203.0.113.31", false)
+
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: "cbx_absent12345",
+		Server:  core.Server{CloudID: "inst_absent", Provider: providerName, Labels: map[string]string{"lease": "cbx_absent12345"}},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "absence is not account-bound") {
+		t.Fatalf("release err=%v", err)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("delete issued after unverified absence: %#v", api.deletedIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("absent", providerName); err != nil || !ok {
+		t.Fatalf("claim retained=%v err=%v", ok, err)
 	}
 }
 

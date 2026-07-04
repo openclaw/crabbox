@@ -2094,6 +2094,8 @@ func TestFalProviderEmptyDefaultsAndExplicitOverrides(t *testing.T) {
 
 	explicit := Config{
 		Provider:            "fal",
+		ServerType:          " gpu_8x_h100_sxm5 ",
+		ServerTypeExplicit:  true,
 		TargetOS:            targetLinux,
 		targetExplicit:      true,
 		explicitWindowsMode: windowsModeNormal,
@@ -2107,7 +2109,7 @@ func TestFalProviderEmptyDefaultsAndExplicitOverrides(t *testing.T) {
 	if err := applyProviderConfigDefaults(&explicit); err != nil {
 		t.Fatal(err)
 	}
-	if explicit.WorkRoot != "/explicit/work" || explicit.Fal.WorkRoot != "/explicit/work" || explicit.SSHUser != "ubuntu" || explicit.SSHPort != "2222" {
+	if explicit.WorkRoot != "/explicit/work" || explicit.Fal.WorkRoot != "/explicit/work" || explicit.SSHUser != "ubuntu" || explicit.SSHPort != "2222" || explicit.ServerType != "gpu_8x_h100_sxm5" || explicit.Fal.InstanceType != "gpu_8x_h100_sxm5" {
 		t.Fatalf("explicit fal defaults=%#v", explicit)
 	}
 	if got := serverTypeForConfig(Config{Provider: "fal"}); got != "gpu_1x_h100_sxm5" {

@@ -61,29 +61,20 @@ func newClient(cfg Config, rt Runtime) (computeAPI, error) {
 	}
 	apiURL := strings.TrimRight(strings.TrimSpace(blank(cfg.Fal.APIURL, defaultAPIURL)), "/")
 	parsed, err := url.Parse(apiURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, exit(2, "%s api url %q is invalid", providerName, redactedURLForError(apiURL, parsed))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
+		return nil, exit(2, "%s api url is invalid", providerName)
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return nil, exit(2, "%s api url contains unsupported sensitive components", providerName)
 	}
 	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return nil, exit(2, "%s api url %q must use https unless it targets localhost", providerName, redactedURLForError(apiURL, parsed))
+		return nil, exit(2, "%s api url must use https unless it targets localhost", providerName)
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
 	return &client{apiKey: apiKey, apiURL: apiURL, httpClient: secureHTTPClient(httpClient, apiURL)}, nil
-}
-
-func redactedURLForError(raw string, parsed *url.URL) string {
-	if parsed == nil {
-		return "<invalid>"
-	}
-	if parsed.User == nil {
-		return raw
-	}
-	redacted := *parsed
-	redacted.User = url.User("<redacted>")
-	return strings.ReplaceAll(redacted.String(), "%3Credacted%3E", "<redacted>")
 }
 
 func secureHTTPClient(source *http.Client, apiURL string) *http.Client {
@@ -219,7 +210,7 @@ func (c *client) do(ctx context.Context, method, path string, body any, idempote
 		return fmt.Errorf("fal response exceeds %d bytes", maxResponseBytes)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return decodeAPIError(resp, data)
+		return decodeAPIError(resp, bytes.ReplaceAll(data, []byte(c.apiKey), []byte("<redacted>")))
 	}
 	if out != nil && len(strings.TrimSpace(string(data))) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
