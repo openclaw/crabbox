@@ -64,6 +64,7 @@ import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth"
 import { defaultOSImage, normalizeOSImage } from "./os-image";
 import {
   portalCode,
+  portalCodeBootstrapHandoff,
   portalAdmin,
   portalError,
   portalExternalRunnerDetail,
@@ -7653,19 +7654,24 @@ export class FleetCoordinator {
       `/portal/leases/${encodeURIComponent(lease.id)}/code/__crabbox_bootstrap`,
       isolatedOrigin,
     );
-    location.searchParams.set("ticket", ticket.ticket);
-    return new Response(null, {
-      status: 302,
-      headers: {
-        "cache-control": "no-store",
-        location: location.toString(),
-        "referrer-policy": "no-referrer",
-      },
-    });
+    return portalCodeBootstrapHandoff(location, ticket.ticket);
   }
 
   private async bootstrapCodeViewer(request: Request, leaseID: string): Promise<Response> {
-    const value = new URL(request.url).searchParams.get("ticket") ?? "";
+    if (request.method !== "POST") {
+      return json(
+        { error: "method_not_allowed", message: "Code viewer bootstrap requires POST" },
+        { status: 405, headers: { allow: "POST", "cache-control": "no-store" } },
+      );
+    }
+    const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    if (contentType !== "application/x-www-form-urlencoded") {
+      return json(
+        { error: "unsupported_media_type", message: "form-encoded Code viewer ticket required" },
+        { status: 415, headers: { "cache-control": "no-store" } },
+      );
+    }
+    const value = new URLSearchParams(await request.text()).get("ticket") ?? "";
     const ticket = await this.consumeCodeViewerTicket(value, leaseID);
     if (!ticket) {
       return json(

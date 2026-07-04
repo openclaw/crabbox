@@ -1957,6 +1957,52 @@ export function portalCode(lease: LeaseRecord): Response {
   );
 }
 
+export function portalCodeBootstrapHandoff(action: URL, ticket: string): Response {
+  const nonce = scriptNonce();
+  const actionURL = action.toString();
+  const contentSecurityPolicy = [
+    "default-src 'none'",
+    "base-uri 'none'",
+    `form-action ${action.origin}`,
+    "frame-ancestors 'none'",
+    `script-src 'nonce-${nonce}'`,
+    `style-src 'nonce-${nonce}'`,
+  ].join("; ");
+  return new Response(
+    `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Opening Code</title>
+  <style nonce="${nonce}">
+    :root { color-scheme: dark light; font: 16px/1.5 system-ui,sans-serif; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; }
+    form { text-align: center; }
+    button { font: inherit; padding: .55rem 1rem; }
+  </style>
+</head>
+<body>
+  <form id="code-bootstrap" method="post" action="${escapeHTML(actionURL)}" autocomplete="off">
+    <input type="hidden" name="ticket" value="${escapeHTML(ticket)}">
+    <p>Opening Code…</p>
+    <button type="submit">Continue</button>
+  </form>
+  <script nonce="${nonce}">document.getElementById("code-bootstrap").requestSubmit();</script>
+</body>
+</html>`,
+    {
+      headers: {
+        "cache-control": "no-store",
+        "content-security-policy": contentSecurityPolicy,
+        "content-type": "text/html; charset=utf-8",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
+      },
+    },
+  );
+}
+
 export function codeBridgeCommand(lease: LeaseRecord): string {
   return ["crabbox", "code", "--id", lease.slug || lease.id, "--open"].map(shellArg).join(" ");
 }

@@ -15130,11 +15130,12 @@ describe("fleet lease identity and idle", () => {
     ];
     await Promise.all(
       viewers.map(async (headers) => {
-        const redirect = await fleet.fetch(
+        const handoff = await fleet.fetch(
           request("GET", "/portal/leases/blue-lobster/code/", { headers }),
         );
-        expect(redirect.status).toBe(302);
-        expect(new URL(redirect.headers.get("location") || "").origin).toBe(isolatedOrigin);
+        expect(handoff.status).toBe(200);
+        const bootstrap = await readCodeBootstrapHandoff(handoff);
+        expect(bootstrap.url.origin).toBe(isolatedOrigin);
       }),
     );
   });
@@ -15177,18 +15178,29 @@ describe("fleet lease identity and idle", () => {
       code: { agentConnected: false },
     });
 
-    const redirect = await fleet.fetch(
+    const handoff = await fleet.fetch(
       request("GET", "/portal/leases/blue-lobster/code/?folder=%2Fwork%2Frepo", { headers }),
     );
-    expect(redirect.status).toBe(302);
-    expect(redirect.headers.get("cache-control")).toBe("no-store");
-    expect(redirect.headers.get("referrer-policy")).toBe("no-referrer");
-    const bootstrapURL = new URL(redirect.headers.get("location") || "");
+    expect(handoff.status).toBe(200);
+    expect(handoff.headers.get("location")).toBeNull();
+    expect(handoff.headers.get("cache-control")).toBe("no-store");
+    expect(handoff.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(handoff.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(handoff.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    const bootstrapHandoff = await readCodeBootstrapHandoff(handoff);
+    const bootstrapURL = bootstrapHandoff.url;
     expect(bootstrapURL.hostname).toMatch(/^cbx-[a-f0-9]{32}\.code\.example\.test$/);
     expect(bootstrapURL.pathname).toBe(`/portal/leases/${leaseID}/code/__crabbox_bootstrap`);
-    expect(bootstrapURL.searchParams.get("ticket")).toMatch(/^code_view_[a-f0-9]{32}$/);
+    expect(bootstrapURL.search).toBe("");
+    expect(bootstrapHandoff.ticket).toMatch(/^code_view_[a-f0-9]{32}$/);
 
-    const bootstrap = await fleet.fetch(new Request(bootstrapURL));
+    const copiedURL = await fleet.fetch(new Request(bootstrapURL));
+    expect(copiedURL.status).toBe(405);
+    expect(copiedURL.headers.get("set-cookie")).toBeNull();
+
+    const bootstrap = await fleet.fetch(
+      codeBootstrapRequest(bootstrapURL, bootstrapHandoff.ticket),
+    );
     expect(bootstrap.status).toBe(303);
     expect(bootstrap.headers.get("location")).toBe(
       `/portal/leases/${leaseID}/code/?folder=%2Fwork%2Frepo`,
@@ -15202,7 +15214,7 @@ describe("fleet lease identity and idle", () => {
     expect(maxAge).toBeGreaterThanOrEqual(295);
     expect(maxAge).toBeLessThanOrEqual(300);
 
-    const replay = await fleet.fetch(new Request(bootstrapURL));
+    const replay = await fleet.fetch(codeBootstrapRequest(bootstrapURL, bootstrapHandoff.ticket));
     expect(replay.status).toBe(401);
 
     const page = await fleet.fetch(
@@ -15314,8 +15326,9 @@ describe("fleet lease identity and idle", () => {
       ...staleGrant,
     });
     const bootstrap = await fleet.fetch(
-      new Request(
-        `${isolatedOrigin}/portal/leases/${leaseID}/code/__crabbox_bootstrap?ticket=${ticket}`,
+      codeBootstrapRequest(
+        `${isolatedOrigin}/portal/leases/${leaseID}/code/__crabbox_bootstrap`,
+        ticket,
       ),
     );
     expect(bootstrap.status).toBe(303);
@@ -15360,20 +15373,24 @@ describe("fleet lease identity and idle", () => {
       await routeCoordinatorRequest(input, env, async (prepared) => await fleet.fetch(prepared));
     const codeEntry = "https://crabbox.test/portal/leases/blue-lobster/code/";
 
-    const redirect = await throughCoordinator(
+    const handoff = await throughCoordinator(
       new Request(codeEntry, { headers: { cookie: portalCookie } }),
     );
-    expect(redirect.status).toBe(302);
-    const bootstrapURL = redirect.headers.get("location") || "";
-    expect(bootstrapURL).toContain("/__crabbox_bootstrap?ticket=code_view_");
+    expect(handoff.status).toBe(200);
+    const bootstrapHandoff = await readCodeBootstrapHandoff(handoff);
+    const bootstrapURL = bootstrapHandoff.url;
+    expect(bootstrapURL.pathname).toContain("/__crabbox_bootstrap");
+    expect(bootstrapURL.search).toBe("");
 
-    const pendingRedirect = await throughCoordinator(
+    const pendingHandoff = await throughCoordinator(
       new Request(codeEntry, { headers: { cookie: portalCookie } }),
     );
-    const pendingBootstrapURL = pendingRedirect.headers.get("location") || "";
-    expect(pendingRedirect.status).toBe(302);
+    expect(pendingHandoff.status).toBe(200);
+    const pendingBootstrap = await readCodeBootstrapHandoff(pendingHandoff);
 
-    const bootstrap = await throughCoordinator(new Request(bootstrapURL));
+    const bootstrap = await throughCoordinator(
+      codeBootstrapRequest(bootstrapURL, bootstrapHandoff.ticket),
+    );
     expect(bootstrap.status).toBe(303);
     const codeCookie = (bootstrap.headers.get("set-cookie") || "").split(";", 1)[0] || "";
     const isolatedPage = new URL(bootstrap.headers.get("location") || "", bootstrapURL).toString();
@@ -15435,7 +15452,9 @@ describe("fleet lease identity and idle", () => {
       `https://crabbox.test/portal/leases/${leaseID}/code/`,
     );
 
-    const staleBootstrap = await throughCoordinator(new Request(pendingBootstrapURL));
+    const staleBootstrap = await throughCoordinator(
+      codeBootstrapRequest(pendingBootstrap.url, pendingBootstrap.ticket),
+    );
     expect(staleBootstrap.status).toBe(401);
     await expect(staleBootstrap.json()).resolves.toMatchObject({
       error: "code_viewer_session_revoked",
@@ -22043,6 +22062,24 @@ function request(
       ...init.headers,
     },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
+  });
+}
+
+async function readCodeBootstrapHandoff(response: Response): Promise<{ url: URL; ticket: string }> {
+  const body = await response.text();
+  const action = /<form\b[^>]*\baction="([^"]+)"/.exec(body)?.[1];
+  const ticket = /<input\b[^>]*\bname="ticket"[^>]*\bvalue="([^"]+)"/.exec(body)?.[1];
+  if (!action || !ticket) {
+    throw new Error("Code bootstrap handoff form is incomplete");
+  }
+  return { url: new URL(action), ticket };
+}
+
+function codeBootstrapRequest(url: URL | string, ticket: string): Request {
+  return new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ ticket }),
   });
 }
 
