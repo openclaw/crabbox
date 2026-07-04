@@ -292,8 +292,17 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	return b.CleanupServers(ctx, req, servers)
 }
 
-func (b *backend) cleanupEligible(server core.Server) (bool, error) {
-	_, err := b.ensureCleanupClaim(server)
+func (b *backend) cleanupEligible(ctx context.Context, server core.Server) (bool, error) {
+	client, err := b.clientFactory(b.RT)
+	if err != nil {
+		return false, err
+	}
+	accountID, err := client.AccountID(ctx)
+	if err != nil {
+		return false, err
+	}
+	server = shared.ServerWithDefaultLabel(server, vultrAccountLabel, accountID)
+	_, err = b.ensureCleanupClaim(server)
 	return shared.CleanupClaimEligible(err)
 }
 

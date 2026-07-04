@@ -557,16 +557,25 @@ func TestCleanupDryRunSkipsKeepAndDeletesExpiredWhenLive(t *testing.T) {
 	claimlessLabels["state"] = "ready"
 	claimlessLabels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
 	claimlessLabels["expires_at"] = "1"
+	staleLabels := core.DirectLeaseLabels(cfg, "cbx_222222222222", "stale-account", providerName, "", false, now.Add(-2*time.Hour))
+	staleLabels["state"] = "ready"
+	staleLabels["expires_at"] = "1"
 	keepLabels := core.DirectLeaseLabels(cfg, "cbx_555555555555", "keep", providerName, "", true, now.Add(-2*time.Hour))
 	keepLabels["state"] = "ready"
 	keepLabels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
 	api := &fakeLinodeAPI{linodes: []linodeInstance{
+		{ID: 8, Label: core.LeaseProviderName("cbx_222222222222", "stale-account"), Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.8"}, Tags: tagsFromLabels(staleLabels)},
 		{ID: 9, Label: core.LeaseProviderName("cbx_333333333333", "claimless"), Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.9"}, Tags: tagsFromLabels(claimlessLabels)},
 		{ID: 10, Label: core.LeaseProviderName("cbx_444444444444", "expired"), Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.10"}, Tags: tagsFromLabels(expiredLabels)},
 		{ID: 11, Label: core.LeaseProviderName("cbx_555555555555", "keep"), Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.11"}, Tags: tagsFromLabels(keepLabels)},
 	}}
 	backend := newTestBackend(t, api)
 	backend.RT.Clock = fakeClock{t: now}
+	staleServer := serverFromLinode(api.linodes[0], cfg)
+	staleServer.Labels[linodeAccountLabel] = "euuid:stale-account"
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_222222222222", "stale-account", cfg, staleServer, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
@@ -574,7 +583,7 @@ func TestCleanupDryRunSkipsKeepAndDeletesExpiredWhenLive(t *testing.T) {
 	if len(api.deleted) != 0 {
 		t.Fatalf("dry-run deleted=%v", api.deleted)
 	}
-	server := serverFromLinode(api.linodes[1], cfg)
+	server := serverFromLinode(api.linodes[2], cfg)
 	server.Labels[linodeAccountLabel] = expiredLabels[linodeAccountLabel]
 	if err := core.ClaimLeaseTargetForRepoConfig(
 		"cbx_444444444444",
@@ -593,6 +602,9 @@ func TestCleanupDryRunSkipsKeepAndDeletesExpiredWhenLive(t *testing.T) {
 	}
 	if len(api.deleted) != 1 || api.deleted[0] != 10 {
 		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_222222222222", providerName); err != nil || !ok {
+		t.Fatalf("stale-account claim after cleanup ok=%v err=%v", ok, err)
 	}
 }
 

@@ -2313,10 +2313,16 @@ func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	cfg.TTL = time.Nanosecond
+	stale := droplet{ID: 86, Name: "stale-account", Status: "active", Tags: leaseTags(cfg, "cbx_222222222222", "stale-account", "ready", false, time.Now().Add(-time.Hour))}
 	claimless := droplet{ID: 87, Name: "claimless", Status: "active", Tags: leaseTags(cfg, "cbx_111111111111", "claimless", "ready", false, time.Now().Add(-time.Hour))}
 	item := droplet{ID: 88, Name: "old", Status: "active", Tags: leaseTags(cfg, "cbx_deadbeef1234", "old", "ready", false, time.Now().Add(-time.Hour))}
-	api := &fakeDigitalOceanAPI{droplets: []droplet{claimless, item}}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{stale, claimless, item}}
 	backend := newTestBackend(t, api)
+	staleServer := serverFromDroplet(stale, backend.Cfg)
+	staleServer.Labels[digitalOceanAccountLabel] = "team:stale-account"
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_222222222222", "stale-account", backend.Cfg, staleServer, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
 	server := serverFromDroplet(item, backend.Cfg)
 	server.Labels[digitalOceanAccountLabel] = "team:test-account"
 	if err := core.ClaimLeaseTargetForRepoConfig("cbx_deadbeef1234", "old", backend.Cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
@@ -2340,6 +2346,9 @@ func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	}
 	if len(api.deleted) != 1 || api.deleted[0] != 88 {
 		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_222222222222", providerName); err != nil || !ok {
+		t.Fatalf("stale-account claim after cleanup ok=%v err=%v", ok, err)
 	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider("old", providerName); err != nil || ok {
 		t.Fatalf("claim after cleanup ok=%v err=%v", ok, err)

@@ -116,7 +116,7 @@ func TestCleanupServersSkipsIneligibleAndContinues(t *testing.T) {
 	var deleted []string
 	backend := DirectSSHBackend{
 		RT: core.Runtime{Stderr: &stderr, Clock: clock},
-		CleanupEligible: func(server core.Server) (bool, error) {
+		CleanupEligible: func(_ context.Context, server core.Server) (bool, error) {
 			return server.Name == "claimed", nil
 		},
 		Delete: func(_ context.Context, _ core.Config, server core.Server) error {
@@ -149,6 +149,21 @@ func TestCleanupClaimEligible(t *testing.T) {
 	want := errors.New("read claim")
 	if eligible, err := CleanupClaimEligible(want); eligible || !errors.Is(err, want) {
 		t.Fatalf("read failure eligible=%v err=%v", eligible, err)
+	}
+}
+
+func TestServerWithDefaultLabelCopiesLabels(t *testing.T) {
+	original := core.Server{Labels: map[string]string{"lease": "cbx_123456789abc"}}
+	updated := ServerWithDefaultLabel(original, "provider_account", "account:test")
+	if updated.Labels["provider_account"] != "account:test" || updated.Labels["lease"] != original.Labels["lease"] {
+		t.Fatalf("updated labels=%v", updated.Labels)
+	}
+	if _, ok := original.Labels["provider_account"]; ok {
+		t.Fatalf("original labels mutated: %v", original.Labels)
+	}
+	existing := ServerWithDefaultLabel(updated, "provider_account", "account:other")
+	if existing.Labels["provider_account"] != "account:test" {
+		t.Fatalf("existing label overwritten: %v", existing.Labels)
 	}
 }
 

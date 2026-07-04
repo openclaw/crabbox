@@ -890,8 +890,17 @@ func (b *digitalOceanLeaseBackend) Cleanup(ctx context.Context, req core.Cleanup
 	return b.CleanupServers(ctx, req, servers)
 }
 
-func (b *digitalOceanLeaseBackend) cleanupEligible(server core.Server) (bool, error) {
-	_, err := b.ensureCleanupClaim(server, true)
+func (b *digitalOceanLeaseBackend) cleanupEligible(ctx context.Context, server core.Server) (bool, error) {
+	client, err := b.clientFactory(b.RT)
+	if err != nil {
+		return false, err
+	}
+	accountID, err := client.AccountID(ctx)
+	if err != nil {
+		return false, err
+	}
+	server = shared.ServerWithDefaultLabel(server, digitalOceanAccountLabel, accountID)
+	_, err = b.ensureCleanupClaim(server, true)
 	return shared.CleanupClaimEligible(err)
 }
 

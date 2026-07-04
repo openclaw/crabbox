@@ -741,17 +741,24 @@ func TestCleanupSkipsClaimlessBeforeClaimedInstance(t *testing.T) {
 	b := newTestBackend(t, api)
 	b.RT.Stderr = &stderr
 	expired := time.Now().Add(-time.Hour)
+	staleLabels := labelsFromTags(leaseTagsWithExpiry(b.Cfg, "cbx_cccccccccccc", "stale-account", expired))
 	claimlessLabels := labelsFromTags(leaseTagsWithExpiry(b.Cfg, "cbx_aaaaaaaaaaaa", "claimless", expired))
 	claimlessLabels[vultrAccountLabel] = "account:test-account"
 	claimedLabels := labelsFromTags(leaseTagsWithExpiry(b.Cfg, "cbx_bbbbbbbbbbbb", "claimed", expired))
 	claimedLabels[vultrAccountLabel] = "account:test-account"
 	setVultrKeyIdentity(claimedLabels, "", false)
 	api.instances = []vultrInstance{
+		{ID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", Label: core.LeaseProviderName("cbx_cccccccccccc", "stale-account"), Status: "active", PowerStatus: "running", ServerStatus: "ok", Plan: b.Cfg.ServerType, Tags: tagsFromLabels(staleLabels)},
 		{ID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Label: core.LeaseProviderName("cbx_aaaaaaaaaaaa", "claimless"), Status: "active", PowerStatus: "running", ServerStatus: "ok", Plan: b.Cfg.ServerType, Tags: tagsFromLabels(claimlessLabels)},
 		{ID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", Label: core.LeaseProviderName("cbx_bbbbbbbbbbbb", "claimed"), Status: "active", PowerStatus: "running", ServerStatus: "ok", Plan: b.Cfg.ServerType, Tags: tagsFromLabels(claimedLabels)},
 	}
-	claimedID := api.instances[1].ID
-	claimedServer := serverFromInstance(api.instances[1], b.Cfg)
+	staleServer := serverFromInstance(api.instances[0], b.Cfg)
+	staleServer.Labels[vultrAccountLabel] = "account:stale-account"
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_cccccccccccc", "stale-account", b.Cfg, staleServer, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	claimedID := api.instances[2].ID
+	claimedServer := serverFromInstance(api.instances[2], b.Cfg)
 	claimedServer.Labels[vultrAccountLabel] = "account:test-account"
 	if err := core.ClaimLeaseTargetForRepoConfig("cbx_bbbbbbbbbbbb", "claimed", b.Cfg, claimedServer, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
@@ -761,6 +768,9 @@ func TestCleanupSkipsClaimlessBeforeClaimedInstance(t *testing.T) {
 	}
 	if len(api.deleted) != 1 || api.deleted[0] != claimedID {
 		t.Fatalf("deleted=%v stderr=%q, want only claimed instance", api.deleted, stderr.String())
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_cccccccccccc", providerName); err != nil || !ok {
+		t.Fatalf("stale-account claim after cleanup ok=%v err=%v", ok, err)
 	}
 }
 

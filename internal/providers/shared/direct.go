@@ -13,7 +13,7 @@ type DirectSSHBackend struct {
 	Cfg             core.Config
 	RT              core.Runtime
 	Delete          func(context.Context, core.Config, core.Server) error
-	CleanupEligible func(core.Server) (bool, error)
+	CleanupEligible func(context.Context, core.Server) (bool, error)
 	StoredLeaseKeys bool
 }
 
@@ -38,7 +38,7 @@ func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupR
 			continue
 		}
 		if b.CleanupEligible != nil {
-			eligible, err := b.CleanupEligible(s)
+			eligible, err := b.CleanupEligible(ctx, s)
 			if err != nil {
 				return err
 			}
@@ -58,6 +58,18 @@ func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupR
 		}
 	}
 	return nil
+}
+
+func ServerWithDefaultLabel(server core.Server, key, value string) core.Server {
+	labels := make(map[string]string, len(server.Labels)+1)
+	for label, current := range server.Labels {
+		labels[label] = current
+	}
+	if labels[key] == "" {
+		labels[key] = value
+	}
+	server.Labels = labels
+	return server
 }
 
 func CleanupClaimEligible(err error) (bool, error) {
