@@ -467,11 +467,15 @@ func (b *Backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 }
 
 func (b *Backend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
-	for _, key := range []string{"scaleway_project", "scaleway_organization", "scaleway_zone"} {
+	for _, key := range []string{"scaleway_project", "scaleway_zone"} {
 		expected := strings.TrimSpace(claim.Labels[key])
 		if expected == "" || expected != strings.TrimSpace(lease.Server.Labels[key]) {
 			return false
 		}
+	}
+	if organization := strings.TrimSpace(claim.Labels["scaleway_organization"]); organization != "" &&
+		organization != strings.TrimSpace(lease.Server.Labels["scaleway_organization"]) {
+		return false
 	}
 	return true
 }

@@ -140,7 +140,7 @@ func TestStatusTouchClaimRequiresMatchingProviderIdentity(t *testing.T) {
 	if !backend.StatusTouchClaimMatches(lease, claim) {
 		t.Fatal("matching provider identity was rejected")
 	}
-	for _, key := range []string{"scaleway_project", "scaleway_organization", "scaleway_zone"} {
+	for _, key := range []string{"scaleway_project", "scaleway_zone"} {
 		mismatched := lease
 		mismatched.Server.Labels = maps.Clone(lease.Server.Labels)
 		mismatched.Server.Labels[key] = "other"
@@ -153,6 +153,18 @@ func TestStatusTouchClaimRequiresMatchingProviderIdentity(t *testing.T) {
 		if backend.StatusTouchClaimMatches(lease, missing) {
 			t.Fatalf("missing claim %s was accepted", key)
 		}
+	}
+	withoutOrganization := claim
+	withoutOrganization.Labels = maps.Clone(claim.Labels)
+	delete(withoutOrganization.Labels, "scaleway_organization")
+	if !backend.StatusTouchClaimMatches(lease, withoutOrganization) {
+		t.Fatal("optional organization was required")
+	}
+	mismatchedOrganization := lease
+	mismatchedOrganization.Server.Labels = maps.Clone(lease.Server.Labels)
+	mismatchedOrganization.Server.Labels["scaleway_organization"] = "other"
+	if backend.StatusTouchClaimMatches(mismatchedOrganization, claim) {
+		t.Fatal("present organization mismatch was accepted")
 	}
 }
 
