@@ -46,6 +46,12 @@ type managedVMDDigests struct {
 	EntitlementsSHA256 string `json:"entitlementsSHA256"`
 }
 
+// HelperDir hosts the managed, entitlement-signed daemon copies beneath the
+// state root.
+func HelperDir(stateRoot string) string {
+	return filepath.Join(stateRoot, "helper")
+}
+
 // ensureVMD returns the path to a runnable, entitlement-signed VMM daemon,
 // installing a managed copy under the state root when necessary.
 func ensureVMD(stateRoot string) (_ string, returnErr error) {

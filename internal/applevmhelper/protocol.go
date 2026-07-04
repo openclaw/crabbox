@@ -221,10 +221,6 @@ func ImagesDir(stateRoot string) string {
 	return filepath.Join(CacheDir(stateRoot), "images")
 }
 
-func HelperDir(stateRoot string) string {
-	return filepath.Join(stateRoot, "helper")
-}
-
 func InstanceDir(stateRoot, name string) string {
 	return filepath.Join(InstancesDir(stateRoot), name)
 }
