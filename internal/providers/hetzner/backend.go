@@ -454,7 +454,6 @@ func useStoredTestboxKey(target *SSHTarget, leaseID string) {
 func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)
 }
-func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
 
 var (
 	newHetznerClient          = func() (hetznerClient, error) { return core.NewHetznerClient() }
