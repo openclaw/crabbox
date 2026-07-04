@@ -323,6 +323,49 @@ func TestResolveReadOnlyDoesNotClaimVisibleInstance(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsCloudlessClaimBeforeRebinding(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	const (
+		leaseID  = "cbx_222222222224"
+		slug     = "cloudless"
+		cloudID  = "33333333-3333-4333-8333-333333333335"
+		repoRoot = "/tmp/repo"
+	)
+	labels := labelsFromTags(leaseTags(b.Cfg, leaseID, slug, "ready", false, time.Now()))
+	labels[vultrAccountLabel] = "account:test-account"
+	claimServer := core.Server{
+		Provider: providerName,
+		Name:     core.LeaseProviderName(leaseID, slug),
+		Labels:   labels,
+	}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, claimServer, core.SSHTarget{}, repoRoot, b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	api.instances = []vultrInstance{{
+		ID:           cloudID,
+		Label:        core.LeaseProviderName(leaseID, slug),
+		MainIP:       "203.0.113.42",
+		Status:       "active",
+		PowerStatus:  "running",
+		ServerStatus: "ok",
+		Plan:         b.Cfg.ServerType,
+		Tags:         tagsFromLabels(labels),
+	}}
+
+	_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "no instance identity") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	claim, claimErr := core.ReadLeaseClaim(leaseID)
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if claim.CloudID != "" {
+		t.Fatalf("cloudless claim was rebound: %#v", claim)
+	}
+}
+
 func TestReleaseRefusesUnknownKeyOwnershipBeforeDeleting(t *testing.T) {
 	api := &fakeVultrAPI{}
 	b := newTestBackend(t, api)

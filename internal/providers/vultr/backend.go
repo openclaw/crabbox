@@ -401,6 +401,9 @@ func (b *backend) targetFromInstance(item vultrInstance, req core.ResolveRequest
 		if claim.CloudID != "" && claim.CloudID != server.CloudID {
 			return core.LeaseTarget{}, core.Exit(2, "refusing to resolve Vultr instance %s from stale local claim", server.CloudID)
 		}
+		if claim.CloudID == "" && !isPendingVultrRecoveryClaim(claim, leaseID) {
+			return core.LeaseTarget{}, core.Exit(2, "vultr lease claim has no instance identity or valid pending recovery state for lease=%s", leaseID)
+		}
 		preserveVultrIdentity(server.Labels, claim.Labels)
 	} else if req.ReleaseOnly {
 		return core.LeaseTarget{}, core.Exit(2, "vultr lease=%s has no exact local claim; refusing release", leaseID)
@@ -485,6 +488,13 @@ func (b *backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, re
 		Labels:   labels,
 	}
 	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repoRoot, cfg.IdleTimeout, false)
+}
+
+func isPendingVultrRecoveryClaim(claim core.LeaseClaim, leaseID string) bool {
+	return claim.LeaseID == leaseID &&
+		claim.Provider == providerName &&
+		strings.TrimSpace(claim.CloudID) == "" &&
+		claim.Labels["recovery"] == "ambiguous-create"
 }
 
 func (b *backend) ensureCleanupClaim(server core.Server) (core.LeaseClaim, error) {
