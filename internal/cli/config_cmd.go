@@ -243,7 +243,7 @@ func configShowView(cfg Config) map[string]any {
 			"workRoot":      cfg.NvidiaBrev.WorkRoot,
 		},
 		"vast": map[string]any{
-			"apiUrl":         redactedConfigURLWithoutQuery(cfg.Vast.APIURL),
+			"apiUrl":         redactedConfigURL(cfg.Vast.APIURL),
 			"auth":           tokenState(cfg.Vast.APIKey),
 			"instanceType":   cfg.Vast.InstanceType,
 			"gpuName":        cfg.Vast.GPUName,
@@ -401,7 +401,7 @@ func configShowView(cfg Config) map[string]any {
 			"teamId": cfg.FastAPICloud.TeamID,
 		},
 		"cloudflareDynamicWorkers": map[string]any{
-			"loaderUrl":          redactedConfigURLWithoutQuery(cfg.CloudflareDynamicWorkers.LoaderURL),
+			"loaderUrl":          redactedConfigURL(cfg.CloudflareDynamicWorkers.LoaderURL),
 			"auth":               tokenState(cfg.CloudflareDynamicWorkers.Token),
 			"compatibilityDate":  cfg.CloudflareDynamicWorkers.CompatibilityDate,
 			"compatibilityFlags": cfg.CloudflareDynamicWorkers.CompatibilityFlags,
@@ -413,7 +413,7 @@ func configShowView(cfg Config) map[string]any {
 			"metadata":           cfg.CloudflareDynamicWorkers.Metadata,
 		},
 		"cloudflareSandbox": map[string]any{
-			"url":             redactedConfigURLWithoutQuery(cfg.CloudflareSandbox.BridgeURL),
+			"url":             redactedConfigURL(cfg.CloudflareSandbox.BridgeURL),
 			"auth":            tokenState(cfg.CloudflareSandbox.Token),
 			"workdir":         cfg.CloudflareSandbox.Workdir,
 			"execTimeoutSecs": cfg.CloudflareSandbox.ExecTimeoutSecs,
@@ -698,8 +698,8 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "tart image=%s user=%s work_root=%s cpus=%d memory=%d disk=%d\n", cfg.Tart.Image, cfg.Tart.User, cfg.Tart.WorkRoot, cfg.Tart.CPUs, cfg.Tart.Memory, cfg.Tart.Disk)
 	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s\n", blank(redactedConfigURL(cfg.Cloudflare.APIURL), "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token))
 	fmt.Fprintf(w, "fastapi_cloud api_url=%s app_id=%s team_id=%s auth=%s\n", blank(redactedConfigURL(cfg.FastAPICloud.APIURL), "-"), blank(cfg.FastAPICloud.AppID, "-"), blank(cfg.FastAPICloud.TeamID, "-"), tokenState(cfg.FastAPICloud.Token))
-	fmt.Fprintf(w, "cloudflare_dynamic_workers loader_url=%s compatibility_date=%s compatibility_flags=%s cache_mode=%s egress=%s cpu_ms=%d subrequests=%d timeout_secs=%d metadata=%d auth=%s\n", blank(redactedConfigURLWithoutQuery(cfg.CloudflareDynamicWorkers.LoaderURL), "-"), blank(cfg.CloudflareDynamicWorkers.CompatibilityDate, "-"), blank(strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ","), "-"), cfg.CloudflareDynamicWorkers.CacheMode, cfg.CloudflareDynamicWorkers.Egress, cfg.CloudflareDynamicWorkers.CPUMs, cfg.CloudflareDynamicWorkers.Subrequests, cfg.CloudflareDynamicWorkers.TimeoutSecs, len(cfg.CloudflareDynamicWorkers.Metadata), tokenState(cfg.CloudflareDynamicWorkers.Token))
-	fmt.Fprintf(w, "cloudflare_sandbox url=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURLWithoutQuery(cfg.CloudflareSandbox.BridgeURL), "-"), cfg.CloudflareSandbox.Workdir, cfg.CloudflareSandbox.ExecTimeoutSecs, cfg.CloudflareSandbox.ForgetMissing, tokenState(cfg.CloudflareSandbox.Token))
+	fmt.Fprintf(w, "cloudflare_dynamic_workers loader_url=%s compatibility_date=%s compatibility_flags=%s cache_mode=%s egress=%s cpu_ms=%d subrequests=%d timeout_secs=%d metadata=%d auth=%s\n", blank(redactedConfigURL(cfg.CloudflareDynamicWorkers.LoaderURL), "-"), blank(cfg.CloudflareDynamicWorkers.CompatibilityDate, "-"), blank(strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ","), "-"), cfg.CloudflareDynamicWorkers.CacheMode, cfg.CloudflareDynamicWorkers.Egress, cfg.CloudflareDynamicWorkers.CPUMs, cfg.CloudflareDynamicWorkers.Subrequests, cfg.CloudflareDynamicWorkers.TimeoutSecs, len(cfg.CloudflareDynamicWorkers.Metadata), tokenState(cfg.CloudflareDynamicWorkers.Token))
+	fmt.Fprintf(w, "cloudflare_sandbox url=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURL(cfg.CloudflareSandbox.BridgeURL), "-"), cfg.CloudflareSandbox.Workdir, cfg.CloudflareSandbox.ExecTimeoutSecs, cfg.CloudflareSandbox.ForgetMissing, tokenState(cfg.CloudflareSandbox.Token))
 	fmt.Fprintf(w, "static id=%s name=%s host=%s user=%s port=%s work_root=%s\n", blank(cfg.Static.ID, "-"), blank(cfg.Static.Name, "-"), blank(cfg.Static.Host, "-"), blank(cfg.Static.User, "-"), blank(cfg.Static.Port, "-"), blank(cfg.Static.WorkRoot, "-"))
 	fmt.Fprintf(w, "results junit=%s auto=%t fail_on_failures=%t\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"), cfg.Results.Auto, cfg.Results.FailOnFailures)
 	fmt.Fprintf(w, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t volumes=%d\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease, len(cfg.Cache.Volumes))
@@ -718,7 +718,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "vultr region=%s os=%s image=%s snapshot=%s firewall_group=%s vpc_ids=%s ssh_cidrs=%s user_scheme=%s\n", cfg.Vultr.Region, blank(cfg.Vultr.OS, "-"), blank(cfg.Vultr.Image, "-"), blank(cfg.Vultr.Snapshot, "-"), blank(cfg.Vultr.FirewallGroup, "-"), blank(strings.Join(cfg.Vultr.VPCIDs, ","), "-"), blank(strings.Join(cfg.Vultr.SSHCIDRs, ","), "-"), blank(cfg.Vultr.UserScheme, "-"))
 	fmt.Fprintf(w, "linode region=%s image=%s type=%s firewall=%s ssh_cidrs=%s\n", cfg.Linode.Region, cfg.Linode.Image, cfg.Linode.Type, blank(cfg.Linode.FirewallID, "-"), blank(strings.Join(cfg.Linode.SSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "lambda region=%s type=%s image=%s image_family=%s firewall_ruleset=%s ssh_cidrs=%s filesystems=%s mounts=%d auth=%s\n", cfg.Lambda.Region, cfg.Lambda.Type, blank(cfg.Lambda.Image, "-"), blank(cfg.Lambda.ImageFamily, "-"), blank(cfg.Lambda.FirewallRuleset, "-"), blank(strings.Join(cfg.Lambda.SSHCIDRs, ","), "-"), blank(strings.Join(cfg.Lambda.FilesystemNames, ","), "-"), len(cfg.Lambda.FilesystemMounts), lambdaAuthState())
-	fmt.Fprintf(w, "vast api_url=%s instance_type=%s gpu_name=%s gpu_count=%d image=%s template_id=%s runtype=%s disk_gb=%d max_dph_total=%.4g min_reliability=%.4g order=%s user=%s work_root=%s release_action=%s auth=%s\n", blank(redactedConfigURLWithoutQuery(cfg.Vast.APIURL), "-"), blank(cfg.Vast.InstanceType, "-"), blank(cfg.Vast.GPUName, "-"), cfg.Vast.GPUCount, blank(cfg.Vast.Image, "-"), blank(cfg.Vast.TemplateID, "-"), blank(cfg.Vast.Runtype, "-"), cfg.Vast.DiskGB, cfg.Vast.MaxDphTotal, cfg.Vast.MinReliability, blank(cfg.Vast.Order, "-"), blank(cfg.Vast.User, "-"), blank(cfg.Vast.WorkRoot, "-"), blank(cfg.Vast.ReleaseAction, "-"), tokenState(cfg.Vast.APIKey))
+	fmt.Fprintf(w, "vast api_url=%s instance_type=%s gpu_name=%s gpu_count=%d image=%s template_id=%s runtype=%s disk_gb=%d max_dph_total=%.4g min_reliability=%.4g order=%s user=%s work_root=%s release_action=%s auth=%s\n", blank(redactedConfigURL(cfg.Vast.APIURL), "-"), blank(cfg.Vast.InstanceType, "-"), blank(cfg.Vast.GPUName, "-"), cfg.Vast.GPUCount, blank(cfg.Vast.Image, "-"), blank(cfg.Vast.TemplateID, "-"), blank(cfg.Vast.Runtype, "-"), cfg.Vast.DiskGB, cfg.Vast.MaxDphTotal, cfg.Vast.MinReliability, blank(cfg.Vast.Order, "-"), blank(cfg.Vast.User, "-"), blank(cfg.Vast.WorkRoot, "-"), blank(cfg.Vast.ReleaseAction, "-"), tokenState(cfg.Vast.APIKey))
 	fmt.Fprintf(w, "nvidia_brev cli=%s org=%s type=%s gpu_name=%s provider=%s mode=%s launchable=%s startup_script=%s release_action=%s target=%s user=%s work_root=%s auth=cli\n", blank(cfg.NvidiaBrev.CLI, "-"), blank(cfg.NvidiaBrev.Org, "-"), blank(cfg.NvidiaBrev.Type, "-"), blank(cfg.NvidiaBrev.GPUName, "-"), blank(cfg.NvidiaBrev.Provider, "-"), blank(cfg.NvidiaBrev.Mode, "-"), blank(cfg.NvidiaBrev.Launchable, "-"), blank(cfg.NvidiaBrev.StartupScript, "-"), blank(cfg.NvidiaBrev.ReleaseAction, "-"), blank(cfg.NvidiaBrev.Target, "-"), blank(cfg.NvidiaBrev.User, "-"), blank(cfg.NvidiaBrev.WorkRoot, "-"))
 	fmt.Fprintf(w, "nebius cli=%s profile=%s parent_id=%s subnet_id=%s platform=%s preset=%s image_family=%s disk_type=%s disk_size_gib=%d user=%s public_ip=%s security_group_ids=%s service_account_id=%s recovery_policy=%s auth=cli\n", blank(cfg.Nebius.CLI, "-"), blank(cfg.Nebius.Profile, "-"), blank(cfg.Nebius.ParentID, "-"), blank(cfg.Nebius.SubnetID, "-"), blank(cfg.Nebius.Platform, "-"), blank(cfg.Nebius.Preset, "-"), blank(cfg.Nebius.ImageFamily, "-"), blank(cfg.Nebius.DiskType, "-"), cfg.Nebius.DiskSizeGiB, blank(cfg.Nebius.User, "-"), blank(cfg.Nebius.PublicIP, "-"), blank(strings.Join(cfg.Nebius.SecurityGroupIDs, ","), "-"), blank(cfg.Nebius.ServiceAccountID, "-"), blank(cfg.Nebius.RecoveryPolicy, "-"))
 	fmt.Fprintf(w, "hostinger api_url=%s item_id=%s payment_method_id=%s template_id=%s data_center_id=%s hostname_prefix=%s user=%s work_root=%s allow_purchase=%t release_action=%s auth=%s\n", blank(redactedConfigURL(cfg.Hostinger.APIURL), "-"), blank(cfg.Hostinger.ItemID, "-"), blank(cfg.Hostinger.PaymentMethodID, "-"), blank(cfg.Hostinger.TemplateID, "-"), blank(cfg.Hostinger.DataCenterID, "-"), blank(cfg.Hostinger.HostnamePrefix, "-"), blank(cfg.Hostinger.User, "-"), blank(cfg.Hostinger.WorkRoot, "-"), cfg.Hostinger.AllowPurchase, blank(cfg.Hostinger.ReleaseAction, "-"), tokenState(cfg.Hostinger.APIToken))
@@ -745,42 +745,6 @@ func redactedConfigURL(value string) string {
 		addedScheme = true
 	}
 	u, err := url.Parse(parseValue)
-	if err != nil {
-		return sanitizedMalformedConfigURL(parseValue, addedScheme)
-	}
-	redacted := *u
-	if redacted.User != nil {
-		redacted.User = url.User("<redacted>")
-	}
-	redacted.RawQuery = ""
-	redacted.ForceQuery = false
-	redacted.Fragment = ""
-	out := strings.ReplaceAll(redacted.String(), "%3Credacted%3E", "<redacted>")
-	if addedScheme {
-		out = strings.TrimPrefix(out, "https://")
-	}
-	return out
-}
-
-func lambdaAuthState() string {
-	if strings.TrimSpace(os.Getenv("LAMBDA_API_KEY")) != "" {
-		return "env"
-	}
-	return "missing"
-}
-
-func redactedConfigURLWithoutQuery(value string) string {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		return value
-	}
-	addedScheme := false
-	parseValue := raw
-	if !strings.Contains(parseValue, "://") {
-		parseValue = "https://" + parseValue
-		addedScheme = true
-	}
-	u, err := url.Parse(parseValue)
 	if err != nil || u.Opaque != "" || u.Host == "" {
 		return "<redacted>"
 	}
@@ -795,6 +759,13 @@ func redactedConfigURLWithoutQuery(value string) string {
 		out = strings.TrimPrefix(out, "https://")
 	}
 	return out
+}
+
+func lambdaAuthState() string {
+	if strings.TrimSpace(os.Getenv("LAMBDA_API_KEY")) != "" {
+		return "env"
+	}
+	return "missing"
 }
 
 // sanitizedMalformedConfigURL strips any userinfo from a malformed URL so

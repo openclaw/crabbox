@@ -421,25 +421,6 @@ cloudflareDynamicWorkers:
 	}
 }
 
-func TestRedactedConfigURLWithoutQueryStripsQueryAndFragmentWithoutUserinfo(t *testing.T) {
-	got := redactedConfigURLWithoutQuery("https://loader.example.test/v1?token=query-secret#fragment-secret")
-	if got != "https://loader.example.test/v1" {
-		t.Fatalf("redacted URL=%q", got)
-	}
-}
-
-func TestRedactedConfigURLWithoutQueryFailsClosedForMalformedURL(t *testing.T) {
-	for _, raw := range []string{
-		"https://loader.example.test/%zz?token=@query-secret",
-		"https://api-token:443#pass@host/%zz",
-	} {
-		got := redactedConfigURLWithoutQuery(raw)
-		if got != "<redacted>" || strings.Contains(got, "query-secret") || strings.Contains(got, "api-token") {
-			t.Fatalf("redacted URL for %q=%q", raw, got)
-		}
-	}
-}
-
 func TestConfigSetBrokerRejectsDirectOnlyProvider(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
@@ -1892,11 +1873,13 @@ func TestConfigShowRedactsSchemeLessXCPNgAPIURLUserinfo(t *testing.T) {
 	}
 }
 
-func TestRedactedConfigURLRedactsUserinfoOnMalformedURL(t *testing.T) {
+func TestRedactedConfigURLFailsClosedForMalformedURL(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		raw  string
 	}{
+		{"query secret in malformed path", "https://loader.example.test/%zz?token=@query-secret"},
+		{"fragment secret in malformed URL", "https://api-token:443#pass@host/%zz"},
 		{"full URL with bad escape in host", "https://pool-user:pool-pass@%zz"},
 		{"full URL with bad escape in path", "https://pool-user:pool-pass@xcp-ng.example.test/%zz"},
 		{"full URL with bad port", "https://pool-user:pool-pass@xcp-ng.example.test:abc"},
@@ -1910,6 +1893,9 @@ func TestRedactedConfigURLRedactsUserinfoOnMalformedURL(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := redactedConfigURL(tc.raw)
+			if got != "<redacted>" {
+				t.Fatalf("redacted URL for %q=%q, want <redacted>", tc.raw, got)
+			}
 			for _, secret := range []string{"pool-user", "pool-pass", "pool/pass", "pool?pass", "pool#pass", "pool@pass", "pool-user:pool-pass"} {
 				if strings.Contains(got, secret) {
 					t.Fatalf("redacted URL leaked %q for %q: %s", secret, tc.raw, got)
@@ -1964,6 +1950,7 @@ func TestConfigShowRedactsAllEndpointURLComponents(t *testing.T) {
 	cfg.FastAPICloud.APIURL = rawURL
 	cfg.CloudflareDynamicWorkers.LoaderURL = rawURL
 	cfg.CloudflareSandbox.BridgeURL = rawURL
+	cfg.Nomad.Address = rawURL
 	cfg.Vast.APIURL = rawURL
 	cfg.Hostinger.APIURL = rawURL
 	cfg.OVH.Endpoint = rawURL
