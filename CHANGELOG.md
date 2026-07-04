@@ -5,6 +5,7 @@
 ### Changed
 
 - Updated Go SSH and OS support libraries, including upstream authentication-attempt, malformed-session, key-size, KDF, and known-host validation hardening.
+- Updated the Node/PostgreSQL coordinator to pg 8.22 and pg-boss 12.25, including current protocol parsing, startup retry, queue-cache, migration-deadlock, and scheduling fixes.
 
 ### Fixed
 
