@@ -112,10 +112,6 @@ func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
 }
 
-func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
-	return core.ResolveLeaseClaim(identifier)
-}
-
 func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
 }
