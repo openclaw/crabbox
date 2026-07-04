@@ -195,6 +195,10 @@ func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	if err != nil {
 		return err
 	}
+	cloudID := strings.TrimSpace(req.Lease.Server.CloudID)
+	if cloudID == "" {
+		return exit(4, "refusing to delete gcp lease=%s: missing cloud id", req.Lease.LeaseID)
+	}
 	if zone := req.Lease.Server.Labels["zone"]; zone != "" {
 		cfg := b.Cfg
 		cfg.GCPZone = zone
@@ -203,7 +207,24 @@ func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 			return err
 		}
 	}
-	if err := client.DeleteServer(ctx, req.Lease.Server.CloudID); err != nil {
+	live, err := client.GetServer(ctx, cloudID)
+	if err != nil {
+		if core.IsGCPNotFound(err) {
+			removeLeaseClaim(req.Lease.LeaseID)
+			return nil
+		}
+		return err
+	}
+	if strings.TrimSpace(live.CloudID) != cloudID {
+		return exit(4, "refusing to delete gcp lease=%s: live instance cloud id %q does not match stored cloud id %q", req.Lease.LeaseID, live.CloudID, cloudID)
+	}
+	if !isCrabboxGCPLease(live) {
+		return exit(4, "refusing to delete gcp instance %q for lease=%s: live instance is not canonical Crabbox-owned", cloudID, req.Lease.LeaseID)
+	}
+	if liveLeaseID := strings.TrimSpace(live.Labels["lease"]); liveLeaseID != req.Lease.LeaseID {
+		return exit(4, "refusing to delete gcp instance %q for lease=%s: live instance belongs to lease=%s", cloudID, req.Lease.LeaseID, blank(liveLeaseID, "-"))
+	}
+	if err := client.DeleteServer(ctx, cloudID); err != nil {
 		return err
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
