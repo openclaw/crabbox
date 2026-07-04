@@ -68,12 +68,14 @@ SHARD  LEASE          RUN         EXIT  TESTS  FAIL  ERR  SKIP  TIME
 3/3    cbx_g7h8i9     run_t3s2r1  0     121    0     0    1     40.9s
 shard verdict shards=3 failed_shards=0 tests=359 failures=1 errors=0 skipped=3 suite_time=125.9s wall=52.4s
 failed:
-  [2/3]  src/cart.test.ts failure  CartSuite.applies coupon — expected 3 got 2
+  [2/3] run=run_w6v5u4  src/cart.test.ts failure  CartSuite.applies coupon — expected 3 got 2
 ```
 
-The exit code aggregates across shards: if any shard's command exits non-zero,
-shard exits with that code (or `1` when failing shards disagree); shards that
-fail to provision or run exit `7`; and `--fail-on-test-failures` keeps its
+The exit code aggregates across shards: shards that fail to provision or run
+exit `7`, and that takes precedence over everything else because the verdict
+is incomplete; otherwise, if any shard's command exits non-zero, shard exits
+with that code (or `1` when failing shards disagree); and
+`--fail-on-test-failures` keeps its
 documented meaning evaluated against the merged summary, exiting `1` when the
 merged results contain failures or errors even though every command exited
 zero. Inside each shard the flag is forced off so the policy is applied once,

@@ -436,7 +436,7 @@ func (a App) shardVerdict(opts shardOptions, results []shardResult, wall time.Du
 	if len(failedCases) > 0 {
 		fmt.Fprintln(a.Stdout, "failed:")
 		for _, failure := range failedCases {
-			fmt.Fprintf(a.Stdout, "  [%d/%d]", failure.Shard, opts.Count)
+			fmt.Fprintf(a.Stdout, "  [%d/%d] run=%s", failure.Shard, opts.Count, blank(failure.RunID, "-"))
 			printTestFailure(a.Stdout, failure.TestFailure)
 		}
 	}
@@ -480,6 +480,9 @@ func shardExitError(opts shardOptions, results []shardResult, merged *TestResult
 			commandFailures++
 		}
 	}
+	if infraFailures > 0 {
+		return exit(7, "%d of %d shards failed to provision or run", infraFailures, opts.Count)
+	}
 	if commandFailures > 0 {
 		code := 1
 		if len(commandCodes) == 1 {
@@ -490,9 +493,6 @@ func shardExitError(opts shardOptions, results []shardResult, merged *TestResult
 			}
 		}
 		return ExitError{Code: code, Message: fmt.Sprintf("%d of %d shards failed", failedShards, opts.Count)}
-	}
-	if infraFailures > 0 {
-		return exit(7, "%d of %d shards failed to provision or run", infraFailures, opts.Count)
 	}
 	if canceledShards > 0 {
 		return ExitError{Code: 130, Message: fmt.Sprintf("shard interrupted; %d of %d shards canceled", canceledShards, opts.Count)}

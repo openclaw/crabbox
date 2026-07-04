@@ -280,6 +280,20 @@ func TestShardProvisionFailureDoesNotOrphanSiblings(t *testing.T) {
 	}
 }
 
+func TestShardInfraFailureTakesPrecedenceOverCommandFailure(t *testing.T) {
+	provisioner := newShardTestProvisioner()
+	provisioner.errs[3] = errors.New("acquire failed")
+	executor := newShardTestExecutor()
+	executor.outcomes[1] = recordedOutcome(4, nil)
+	executor.outcomes[2] = recordedOutcome(0, nil)
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	err := app.shardRun(context.Background(), shardTestOptions(3), &shardOutputMux{}, provisioner.provision, executor.run)
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 || exitErr.Message != "1 of 3 shards failed to provision or run" {
+		t.Fatalf("err=%v, want infra exit 7 to take precedence over command exit 4", err)
+	}
+}
+
 func TestShardMergedVerdict(t *testing.T) {
 	provisioner := newShardTestProvisioner()
 	executor := newShardTestExecutor()
@@ -295,7 +309,7 @@ func TestShardMergedVerdict(t *testing.T) {
 		"shard results",
 		"shard verdict shards=2 failed_shards=0 tests=30 failures=1 errors=0 skipped=2 suite_time=6.000s",
 		"failed:",
-		"[1/2]",
+		"[1/2] run=run_test",
 		"TestA",
 	} {
 		if !strings.Contains(out, want) {
