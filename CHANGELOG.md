@@ -10,6 +10,7 @@
 ### Fixed
 
 - Made coordinatorless generic provider live smokes skip coordinator-only history and always clean up acquired leases after later lifecycle failures.
+- Replaced privileged managed Linux Code Server and Tailscale installer scripts with checksum-verified archives or Tailscale's signed package repository with a pinned keyring in both CLI and coordinator bootstrap paths. Thanks @TurboTheTurtle.
 
 ## 0.35.0 - 2026-07-04
 

@@ -19,6 +19,10 @@ const (
 	defaultTailscaleVersion          = "1.98.4"
 	defaultTailscaleAMD64SHA256      = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
 	defaultTailscaleARM64SHA256      = "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7"
+	defaultTailscaleKeyringSHA256    = "3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39"
+	defaultCodeServerVersion         = "4.126.0"
+	defaultCodeServerAMD64SHA256     = "54b648d010c02b6583aa06bd8d2aaf109fc624479b9bc2ff71cb94807ac39afa"
+	defaultCodeServerARM64SHA256     = "441614708ae81b13f14b26db41da8f46f88d7d092c08343a42a0c6c52c51a69d"
 	googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
 )
 
@@ -1455,10 +1459,35 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
 	}
 	if cfg.Code {
 		parts = append(parts, `    retry apt-get install -y --no-install-recommends libatomic1
-    retry env HOME=/root sh -c 'curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local'
+    `+cloudInitCodeServerInstallBootstrap()+`
     /usr/local/bin/code-server --version >/dev/null`)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func cloudInitCodeServerInstallBootstrap() string {
+	return `CS_VERSION=` + shellQuote(defaultCodeServerVersion) + `
+    case "$(uname -m)" in
+      x86_64) CS_ARCH=amd64; CS_SHA256=` + shellQuote(defaultCodeServerAMD64SHA256) + ` ;;
+      aarch64|arm64) CS_ARCH=arm64; CS_SHA256=` + shellQuote(defaultCodeServerARM64SHA256) + ` ;;
+      *) echo "unsupported code-server architecture: $(uname -m)" >&2; exit 3 ;;
+    esac
+    if [ -z "$CS_SHA256" ]; then echo "missing code-server checksum for $CS_ARCH" >&2; exit 3; fi
+    CS_INSTALL_DIR="$(mktemp -d)"
+    trap 'rm -rf "$CS_INSTALL_DIR"' EXIT
+    CS_ARCHIVE="$CS_INSTALL_DIR/code-server.tgz"
+    retry sh -c "curl -fsSL -o \"$CS_ARCHIVE\" \"https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz\""
+    printf '%s  %s\n' "$CS_SHA256" "$CS_ARCHIVE" | sha256sum -c -
+    tar -xzf "$CS_ARCHIVE" -C "$CS_INSTALL_DIR" --strip-components=1
+    rm -f "$CS_ARCHIVE"
+    rm -rf /usr/local/lib/code-server
+    install -d -m 0755 /usr/local/lib/code-server
+    cp -a "$CS_INSTALL_DIR/." /usr/local/lib/code-server/
+    # cp -a preserves mktemp's private root mode; restore traversal for lease users.
+    chmod 0755 /usr/local/lib/code-server
+    ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
+    rm -rf "$CS_INSTALL_DIR"
+    trap - EXIT`
 }
 
 func indentCloudInitRuncmd(script string) string {
@@ -1651,8 +1680,8 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 }
 
 func cloudInitTailscaleInstallBootstrap() string {
-	if strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_INSTALL_MODE")) != "pinned" {
-		return "retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'"
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_INSTALL_MODE")), "pinned") {
+		return cloudInitTailscalePackageInstallBootstrap()
 	}
 	version := firstNonEmpty(strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_VERSION")), defaultTailscaleVersion)
 	amd64SHA := firstNonEmpty(strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_SHA256_AMD64")), defaultTailscaleAMD64SHA256)
@@ -1663,6 +1692,7 @@ func cloudInitTailscaleInstallBootstrap() string {
       aarch64|arm64) TS_ARCH=arm64; TS_SHA256=` + shellQuote(arm64SHA) + ` ;;
       *) echo "unsupported Tailscale architecture: $(uname -m)" >&2; exit 3 ;;
     esac
+    if [ -z "$TS_SHA256" ]; then echo "missing Tailscale checksum for $TS_ARCH" >&2; exit 3; fi
     TS_INSTALL_DIR="$(mktemp -d)"
     trap 'rm -rf "$TS_INSTALL_DIR"' EXIT
     TS_ARCHIVE="$TS_INSTALL_DIR/tailscale.tgz"
@@ -1687,7 +1717,37 @@ func cloudInitTailscaleInstallBootstrap() string {
       printf '%s\n' '[Install]'
       printf '%s\n' 'WantedBy=multi-user.target'
     } >/etc/systemd/system/tailscaled.service
+    rm -rf "$TS_INSTALL_DIR"
+    trap - EXIT
     systemctl daemon-reload || true`
+}
+
+func cloudInitTailscalePackageInstallBootstrap() string {
+	return `if [ ! -r /etc/os-release ]; then
+      echo "Tailscale package install requires /etc/os-release" >&2
+      exit 3
+    fi
+    . /etc/os-release
+    TS_DIST_ID="${ID:-}"
+    TS_CODENAME="${VERSION_CODENAME:-}"
+    case "$TS_DIST_ID" in
+      ubuntu|debian) ;;
+      *) echo "unsupported Tailscale package distribution: $TS_DIST_ID" >&2; exit 3 ;;
+    esac
+    case "$TS_CODENAME" in
+      ''|*[!a-z0-9.-]*) echo "invalid Tailscale package codename: $TS_CODENAME" >&2; exit 3 ;;
+    esac
+    install -d -m 0755 /usr/share/keyrings
+    TS_KEYRING_TMP="$(mktemp)"
+    trap 'rm -f "$TS_KEYRING_TMP"' EXIT
+    retry curl -fsSL -o "$TS_KEYRING_TMP" "https://pkgs.tailscale.com/stable/${TS_DIST_ID}/${TS_CODENAME}.noarmor.gpg"
+    printf '%s  %s\n' '` + defaultTailscaleKeyringSHA256 + `' "$TS_KEYRING_TMP" | sha256sum -c -
+    install -m 0644 "$TS_KEYRING_TMP" /usr/share/keyrings/tailscale-archive-keyring.gpg
+    printf 'deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/%s %s main\n' "$TS_DIST_ID" "$TS_CODENAME" >/etc/apt/sources.list.d/tailscale.list
+    rm -f "$TS_KEYRING_TMP"
+    trap - EXIT
+    retry apt-get update
+    retry apt-get install -y --no-install-recommends tailscale`
 }
 
 // cloudInitPondHostsBootstrap installs /usr/local/bin/crabbox-pond-hosts and a

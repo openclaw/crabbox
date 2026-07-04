@@ -192,11 +192,13 @@ The auth key is never stored in lease records, provider labels, run logs, or loc
 config. The short-lived key can still appear in user-data at the provider, so the
 Worker only mints one-off ephemeral keys — never long-lived reusable keys.
 
-The default installer mode runs Tailscale's package install script. Set
-`CRABBOX_TAILSCALE_INSTALL_MODE=pinned` to download a static Tailscale archive,
-verify the configured SHA-256 checksum, install the `tailscale` and `tailscaled`
-binaries, and record the client version. The built-in pinned defaults track the
-Islo Tailscale build so both bootstrap paths use the same binary version.
+The default `package` mode configures Tailscale's signed stable APT repository,
+verifies and scopes its pinned keyring with `signed-by`, installs the current
+package, and records the client version. Set
+`CRABBOX_TAILSCALE_INSTALL_MODE=pinned` to download a static
+archive, verify the configured SHA-256 checksum, and install the `tailscale` and
+`tailscaled` binaries. Neither mode pipes a downloaded installer script into a
+root shell.
 
 On release, `crabbox stop` attempts a best-effort remote `tailscale logout` before
 provider cleanup when SSH is still reachable. Coordinator cleanup does not delete a
