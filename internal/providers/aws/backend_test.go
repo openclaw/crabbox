@@ -387,15 +387,21 @@ func TestAWSTouchUsesFallbackRegion(t *testing.T) {
 	}
 }
 
-func TestAWSCleanupDeletesFallbackRegionServer(t *testing.T) {
-	stale := awsTestServer("i-stale", "cbx_111111111111", "stale", "us-west-2")
-	stale.Labels["provider_key"] = "crabbox-cbx-111111111111"
-	stale.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+func TestAWSCleanupRequiresExactClaimForFallbackRegionServer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	tagOnly := awsTestServer("i-tag-only", "cbx_111111111111", "tag-only", "us-west-2")
+	tagOnly.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	staleClaim := awsTestServer("i-stale", "cbx_333333333333", "stale", "us-west-2")
+	staleClaim.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	owned := awsTestServer("i-owned", "cbx_444444444444", "owned", "us-west-2")
+	owned.Labels["provider_key"] = "crabbox-cbx-444444444444"
+	owned.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
 	unowned := awsTestServer("i-unowned", "cbx_222222222222", "unowned", "us-west-2")
 	delete(unowned.Labels, "created_by")
 	unowned.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
 	east := &fakeAWSClient{}
-	west := &fakeAWSClient{servers: []Server{unowned, stale}}
+	west := &fakeAWSClient{servers: []Server{unowned, tagOnly, staleClaim, owned}}
 	oldClient := newAWSClient
 	newAWSClient = func(_ context.Context, cfg Config) (awsClient, error) {
 		switch cfg.AWSRegion {
@@ -412,6 +418,14 @@ func TestAWSCleanupDeletesFallbackRegionServer(t *testing.T) {
 
 	cfg := Config{Provider: "aws", AWSRegion: "us-east-1"}
 	cfg.Capacity.Regions = []string{"us-east-1", "us-west-2"}
+	claimCfg := Config{Provider: "aws", AWSRegion: "us-west-2"}
+	staleOriginal := awsTestServer("i-stale-original", staleClaim.Labels["lease"], staleClaim.Labels["slug"], "us-west-2")
+	if err := core.ClaimLeaseTargetForConfig(staleClaim.Labels["lease"], staleClaim.Labels["slug"], claimCfg, staleOriginal, SSHTarget{}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.ClaimLeaseTargetForConfig(owned.Labels["lease"], owned.Labels["slug"], claimCfg, owned, SSHTarget{}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
 	var stderr strings.Builder
 	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*awsLeaseBackend)
 	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
@@ -420,14 +434,57 @@ func TestAWSCleanupDeletesFallbackRegionServer(t *testing.T) {
 	if !strings.Contains(stderr.String(), "skip server id=i-unowned") || !strings.Contains(stderr.String(), "canonical Crabbox ownership tags missing") {
 		t.Fatalf("stderr=%q, want unowned skip diagnostic", stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "skip server id=i-tag-only") || !strings.Contains(stderr.String(), "skip server id=i-stale") || !strings.Contains(stderr.String(), "exact local claim missing or stale") {
+		t.Fatalf("stderr=%q, want missing and stale claim skip diagnostics", stderr.String())
+	}
 	if len(east.deletedInstances) != 0 || len(east.deletedKeys) != 0 {
 		t.Fatalf("east cleanup should be untouched: instances=%v keys=%v", east.deletedInstances, east.deletedKeys)
 	}
-	if len(west.deletedInstances) != 1 || west.deletedInstances[0] != "i-stale" {
-		t.Fatalf("west deleted instances=%v, want i-stale", west.deletedInstances)
+	if len(west.deletedInstances) != 1 || west.deletedInstances[0] != "i-owned" {
+		t.Fatalf("west deleted instances=%v, want i-owned", west.deletedInstances)
 	}
-	if len(west.deletedKeys) != 1 || west.deletedKeys[0] != "crabbox-cbx-111111111111" {
-		t.Fatalf("west deleted keys=%v, want stale provider key", west.deletedKeys)
+	if len(west.deletedKeys) != 1 || west.deletedKeys[0] != "crabbox-cbx-444444444444" {
+		t.Fatalf("west deleted keys=%v, want owned provider key", west.deletedKeys)
+	}
+	if _, ok, err := core.ResolveLeaseClaim(owned.Labels["lease"]); err != nil || ok {
+		t.Fatalf("owned claim ok=%v err=%v, want removed after deletion", ok, err)
+	}
+	claim, ok, err := core.ResolveLeaseClaim(staleClaim.Labels["lease"])
+	if err != nil || !ok || claim.CloudID != "i-stale-original" {
+		t.Fatalf("stale claim=%+v ok=%v err=%v, want unchanged", claim, ok, err)
+	}
+}
+
+func TestAWSCleanupDryRunRetainsExactClaim(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	server := awsTestServer("i-dry-run", "cbx_555555555555", "dry-run", "us-west-2")
+	server.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	fake := &fakeAWSClient{servers: []Server{server}}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	cfg := Config{Provider: "aws", AWSRegion: "us-west-2"}
+	if err := core.ClaimLeaseTargetForConfig(server.Labels["lease"], server.Labels["slug"], cfg, server, SSHTarget{}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*awsLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatalf("dry-run cleanup mutated provider: instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+	claim, ok, err := core.ResolveLeaseClaim(server.Labels["lease"])
+	if err != nil || !ok || claim.CloudID != server.CloudID {
+		t.Fatalf("claim=%+v ok=%v err=%v, want retained", claim, ok, err)
+	}
+	if !strings.Contains(stderr.String(), "delete server id=i-dry-run") {
+		t.Fatalf("stderr=%q, want report-only delete candidate", stderr.String())
 	}
 }
 

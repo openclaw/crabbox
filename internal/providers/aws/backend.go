@@ -265,11 +265,16 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
+		claim, claimErr := requireExactAWSClaim(server, server.Labels["lease"])
+		if claimErr != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=exact local claim missing or stale\n", server.DisplayID(), server.Name)
+			continue
+		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
 		if req.DryRun {
 			continue
 		}
-		if err := deleteServer(ctx, awsConfigForServer(b.Cfg, server), server); err != nil {
+		if err := deleteClaimedAWSServer(ctx, awsConfigForServer(b.Cfg, server), server, claim); err != nil {
 			return err
 		}
 	}
@@ -381,6 +386,47 @@ func deleteServer(ctx context.Context, cfg Config, server Server) error {
 		}
 	}
 	return nil
+}
+
+func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClaim, error) {
+	claim, exists, err := core.ReadLeaseClaimWithPresence(expectedLeaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if !exists {
+		return core.LeaseClaim{}, exit(2, "aws lease=%s has no exact local claim; refusing destructive operation", expectedLeaseID)
+	}
+	if !isCrabboxAWSLease(server) ||
+		claim.LeaseID != expectedLeaseID ||
+		claim.Provider != "aws" ||
+		claim.CloudID == "" ||
+		claim.CloudID != server.CloudID ||
+		claim.Slug == "" ||
+		claim.Slug != server.Labels["slug"] ||
+		server.Labels["lease"] != expectedLeaseID ||
+		awsServerRegion(server) == "" ||
+		strings.TrimSpace(claim.Labels["aws_region"]) != awsServerRegion(server) {
+		return core.LeaseClaim{}, exit(2, "refusing to operate on AWS instance %s from a missing or stale exact local claim", server.DisplayID())
+	}
+	return claim, nil
+}
+
+func deleteClaimedAWSServer(ctx context.Context, cfg Config, server Server, claim core.LeaseClaim) error {
+	var cleanupErr error
+	err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		cleanupErr = deleteServer(ctx, cfg, server)
+		var keyErr *awsProviderKeyCleanupError
+		if errors.As(cleanupErr, &keyErr) {
+			// The instance is already gone; retain the key-specific error but do
+			// not retain a claim whose exact cloud resource no longer exists.
+			return nil
+		}
+		return cleanupErr
+	})
+	if err != nil {
+		return err
+	}
+	return cleanupErr
 }
 
 type awsProviderKeyCleanupError struct {
