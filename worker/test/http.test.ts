@@ -10,7 +10,7 @@ import {
 } from "../src/auth";
 import { codeOriginForLease } from "../src/code-origin";
 import { prepareCoordinatorRequest } from "../src/coordinator-entry";
-import { errorMessage, json, requestOwner } from "../src/http";
+import { errorMessage, json, redactDiagnosticSecrets, requestOwner } from "../src/http";
 import type { Env } from "../src/types";
 
 function proxyIdentityRequest(secret?: string): Request {
@@ -1068,6 +1068,48 @@ describe("http responses", () => {
 
   it("keeps public error messages to the first line", () => {
     expect(errorMessage(new Error("boom\n    at hidden"))).toBe("boom");
+  });
+
+  it("redacts configured and structured credentials from diagnostics", () => {
+    const secrets = ["configured-provider-secret", "longer-configured-provider-secret", undefined];
+    const diagnostic = [
+      "provider failed",
+      "longer-configured-provider-secret",
+      "configured-provider-secret",
+      "Authorization: Bearer bearer-secret",
+      "Proxy-Authorization=Basic basic-secret",
+      "X-API-Key=header-secret",
+      "client_secret=plain-secret",
+      '{"token":"json-secret\\\"escaped-tail-leak","clientSecret":"client-secret","x-api-key":"json-api-secret"}',
+      "https://alice:password@example.test/path?api_key=query-secret&X-Amz-Signature=signed-secret",
+      "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
+      "safe suffix",
+    ].join("\n");
+
+    const redacted = redactDiagnosticSecrets(diagnostic, secrets);
+
+    for (const secret of [
+      "configured-provider-secret",
+      "longer-configured-provider-secret",
+      "bearer-secret",
+      "basic-secret",
+      "header-secret",
+      "plain-secret",
+      "json-secret",
+      "escaped-tail-leak",
+      "client-secret",
+      "json-api-secret",
+      "alice",
+      "password",
+      "query-secret",
+      "signed-secret",
+      "PRIVATE KEY",
+      "private-key-body",
+    ]) {
+      expect(redacted).not.toContain(secret);
+    }
+    expect(redacted).toContain("[redacted]");
+    expect(redacted).toContain("safe suffix");
   });
 });
 

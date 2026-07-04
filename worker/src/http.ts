@@ -33,8 +33,58 @@ export function pathParts(request: Request): string[] {
   return new URL(request.url).pathname.split("/").filter(Boolean);
 }
 
-export function errorMessage(error: unknown): string {
-  return firstLine(error instanceof Error ? error.message : String(error));
+export function errorMessage(
+  error: unknown,
+  secrets: readonly (string | undefined)[] = [],
+): string {
+  return redactDiagnosticSecrets(
+    firstLine(error instanceof Error ? error.message : String(error)),
+    secrets,
+  );
+}
+
+export function redactDiagnosticSecrets(
+  value: string,
+  secrets: readonly (string | undefined)[] = [],
+): string {
+  let redacted = value;
+  const exactSecrets = [
+    ...new Set(
+      secrets.flatMap((secret) => {
+        const trimmed = secret?.trim();
+        return trimmed ? [trimmed] : [];
+      }),
+    ),
+  ].toSorted((left, right) => right.length - left.length);
+  for (const secret of exactSecrets) {
+    redacted = redacted.replaceAll(secret, "[redacted]");
+  }
+  redacted = redacted.replaceAll(
+    /\b(authorization|proxy-authorization|x-api-key|api-key|api_key|access-token|access_token|client-secret|client_secret|session-token|session_token|token|password)[ \t]*[:=][ \t]*(?:(?:bearer|basic)[ \t]+)?[^\s"',;\\}]+/gi,
+    (match) => {
+      const colon = match.indexOf(":");
+      const equals = match.indexOf("=");
+      const separator = colon < 0 ? equals : equals < 0 ? colon : Math.min(colon, equals);
+      return separator >= 0 ? `${match.slice(0, separator + 1)} [redacted]` : match;
+    },
+  );
+  redacted = redacted.replaceAll(
+    /"(authorization|proxy-authorization|x-api-key|apiKey|api-key|api_key|accessToken|access-token|access_token|clientSecret|client-secret|client_secret|credential|credentials|privateKey|private-key|private_key|secret|sessionToken|session-token|session_token|token|password)"\s*:\s*"(?:\\[\s\S]|[^"\\])*(?:"|$)/gi,
+    (match) => {
+      const separator = match.indexOf(":");
+      return separator >= 0 ? `${match.slice(0, separator + 1)}"[redacted]"` : match;
+    },
+  );
+  redacted = redacted.replaceAll(
+    /([?&](?:api[_-]?key|access[_-]?token|client[_-]?secret|password|token|signature|sig|x-amz-credential|x-amz-signature|x-amz-security-token)=)[^&#\s]+/gi,
+    "$1[redacted]",
+  );
+  redacted = redacted.replaceAll(/\b(https?:\/\/)[^/\s:@]+:[^@\s/]+@/gi, "$1[redacted]@");
+  redacted = redacted.replaceAll(/\bbearer[ \t]+[^\s"',;\\}]+/gi, "Bearer [redacted]");
+  return redacted.replaceAll(
+    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/gi,
+    "[redacted]",
+  );
 }
 
 function redactStackTraceFields(value: unknown, seen = new WeakSet<object>()): unknown {

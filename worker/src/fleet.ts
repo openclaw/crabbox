@@ -54,7 +54,15 @@ import {
   hetznerProvisioningFailureRetryable,
   hetznerProvisioningResourceID,
 } from "./hetzner";
-import { bearerToken, errorMessage, json, pathParts, readJson, requestOwner } from "./http";
+import {
+  bearerToken,
+  errorMessage,
+  json,
+  pathParts,
+  readJson,
+  redactDiagnosticSecrets,
+  requestOwner,
+} from "./http";
 import {
   MarketplaceInputError,
   marketplaceQuote,
@@ -219,6 +227,36 @@ const workspaceTerminalSSHReadyTimeoutMs = 2 * 60_000;
 const workspaceSSHHostPrivateKeyHeader = "x-crabbox-workspace-ssh-host-private-key";
 const workspaceSSHHostPublicKeyHeader = "x-crabbox-workspace-ssh-host-public-key";
 const adminGrantRevalidationIntervalMs = 1_000;
+
+function coordinatorErrorMessage(env: Env, error: unknown): string {
+  return errorMessage(error, coordinatorDiagnosticSecrets(env));
+}
+
+function coordinatorDiagnosticText(env: Env, value: string): string {
+  return redactDiagnosticSecrets(value, coordinatorDiagnosticSecrets(env));
+}
+
+function coordinatorDiagnosticSecrets(env: Env): Array<string | undefined> {
+  return [
+    env.HETZNER_TOKEN,
+    env.AWS_ACCESS_KEY_ID,
+    env.AWS_SECRET_ACCESS_KEY,
+    env.AWS_SESSION_TOKEN,
+    env.AZURE_CLIENT_SECRET,
+    env.GCP_PRIVATE_KEY,
+    env.CRABBOX_RUNTIME_ADAPTER_TOKEN,
+    env.CRABBOX_SHARED_TOKEN,
+    env.CRABBOX_ADMIN_TOKEN,
+    env.CRABBOX_SESSION_SECRET,
+    env.CRABBOX_GITHUB_CLIENT_SECRET,
+    env.CRABBOX_WORKSPACE_SSH_PRIVATE_KEY,
+    env.CRABBOX_TRUSTED_PROXY_SECRET,
+    env.CRABBOX_TAILSCALE_CLIENT_SECRET,
+    env.CRABBOX_ARTIFACTS_ACCESS_KEY_ID,
+    env.CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY,
+    env.CRABBOX_ARTIFACTS_SESSION_TOKEN,
+  ];
+}
 
 interface CachedAdminGrant {
   auth?: AuthContext["auth"];
@@ -1068,7 +1106,7 @@ export class FleetCoordinator {
       }
       return json({ error: "not_found" }, { status: 404 });
     } catch (error) {
-      return json({ error: errorMessage(error) }, { status: 500 });
+      return json({ error: coordinatorErrorMessage(this.env, error) }, { status: 500 });
     }
   }
 
@@ -1251,7 +1289,10 @@ export class FleetCoordinator {
       this.reconcileRestoredBridgeSockets().then(
         () => true,
         (error) => {
-          console.warn("could not reconcile restored bridges", errorMessage(error));
+          console.warn(
+            "could not reconcile restored bridges",
+            coordinatorErrorMessage(this.env, error),
+          );
           return false;
         },
       );
@@ -2406,7 +2447,7 @@ export class FleetCoordinator {
         ? provision()
         : prepared?.provisioning?.sshIngressReconcile === "additive"
           ? this.withAWSIngressAdditiveOperation(provision).catch(async (error: unknown) => {
-              if (!isAWSSecurityGroupRuleLimitError(errorMessage(error))) {
+              if (!isAWSSecurityGroupRuleLimitError(coordinatorErrorMessage(this.env, error))) {
                 throw error;
               }
               return await this.withAWSIngressOperationLock(async () => {
@@ -2460,7 +2501,7 @@ export class FleetCoordinator {
           record.updatedAt = failedAt;
           record.endedAt = failedAt;
           record.cleanupFailedAt = failedAt;
-          record.cleanupError = errorMessage(error);
+          record.cleanupError = coordinatorErrorMessage(this.env, error);
           record.provisioningResourceMayExist =
             config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
           record.provisioningFailureRetryable =
@@ -2672,7 +2713,7 @@ export class FleetCoordinator {
       provider = workspaceProvider(this.env.CRABBOX_WORKSPACE_PROVIDER);
     } catch (error) {
       return json(
-        { error: "workspace_not_configured", message: errorMessage(error) },
+        { error: "workspace_not_configured", message: coordinatorErrorMessage(this.env, error) },
         { status: 424 },
       );
     }
@@ -2761,7 +2802,9 @@ export class FleetCoordinator {
     try {
       await this.maintainWorkspacePrewarm();
     } catch (error) {
-      console.warn(`workspace prewarm maintenance deferred: ${errorMessage(error)}`);
+      console.warn(
+        `workspace prewarm maintenance deferred: ${coordinatorErrorMessage(this.env, error)}`,
+      );
     }
     await this.state.runExclusive(() => this.scheduleAlarm());
     return json(workspaceResponse(reservation.record, reservation.lease, this.env), {
@@ -3202,7 +3245,7 @@ export class FleetCoordinator {
       if (persistedLease && workspaceOwnsLease(workspace, persistedLease)) {
         await this.deferWorkspaceReconciliation(workspace, true);
       } else {
-        await this.recordWorkspaceError(workspace, errorMessage(error));
+        await this.recordWorkspaceError(workspace, coordinatorErrorMessage(this.env, error));
       }
       return;
     }
@@ -3602,7 +3645,11 @@ export class FleetCoordinator {
       admission.workspace,
       admission.lease,
     ).catch((error) =>
-      closeSocket(admission.upgrade.socket, 1011, boundedSocketReason(errorMessage(error))),
+      closeSocket(
+        admission.upgrade.socket,
+        1011,
+        boundedSocketReason(coordinatorErrorMessage(this.env, error)),
+      ),
     );
     return admission.upgrade.response;
   }
@@ -3691,7 +3738,7 @@ export class FleetCoordinator {
               queuedInputFrames -= 1;
             }
           })
-          .catch((error) => close(1011, errorMessage(error)));
+          .catch((error) => close(1011, coordinatorErrorMessage(this.env, error)));
       },
       close: () => close(1000, "native VNC closed"),
       error: () => close(1011, "native VNC websocket error"),
@@ -3741,9 +3788,11 @@ export class FleetCoordinator {
       });
       channel.once("close", () => close(1000, "native VNC tunnel closed"));
       connectedClient.once("close", () => close(1011, "SSH connection closed"));
-      connectedClient.once("error", (error) => close(1011, errorMessage(error)));
+      connectedClient.once("error", (error) =>
+        close(1011, coordinatorErrorMessage(this.env, error)),
+      );
     } catch (error) {
-      close(1011, errorMessage(error));
+      close(1011, coordinatorErrorMessage(this.env, error));
       throw error;
     }
   }
@@ -3810,7 +3859,7 @@ export class FleetCoordinator {
       const socket = upgrade.socket;
       this.trackWorkspaceTerminal(key, socket);
       void this.connectWorkspaceTerminal(socket, key, workspace, lease).catch((error) => {
-        closeSocket(socket, 1011, boundedSocketReason(errorMessage(error)));
+        closeSocket(socket, 1011, boundedSocketReason(coordinatorErrorMessage(this.env, error)));
       });
       return upgrade.response;
     });
@@ -3912,7 +3961,7 @@ export class FleetCoordinator {
               queuedInputFrames -= 1;
             }
           })
-          .catch((error) => close(1011, errorMessage(error)));
+          .catch((error) => close(1011, coordinatorErrorMessage(this.env, error)));
       },
       close: () => close(1000, "terminal closed"),
       error: () => close(1011, "terminal websocket error"),
@@ -3972,7 +4021,7 @@ export class FleetCoordinator {
             updateOutputBackpressure();
           }
         } catch (error) {
-          close(1011, errorMessage(error));
+          close(1011, coordinatorErrorMessage(this.env, error));
         } finally {
           outputFlushing = false;
           if (
@@ -4016,7 +4065,9 @@ export class FleetCoordinator {
       channel.stderr.on("data", sendOutput);
       channel.once("close", () => close(1000, "terminal process exited"));
       connectedClient.once("close", () => close(1011, "SSH connection closed"));
-      connectedClient.once("error", (error) => close(1011, errorMessage(error)));
+      connectedClient.once("error", (error) =>
+        close(1011, coordinatorErrorMessage(this.env, error)),
+      );
       await writeWorkspaceTerminalChannel(
         channel,
         `${workspaceTerminalBootstrapCommand(workspace, lease)}\n`,
@@ -4032,7 +4083,7 @@ export class FleetCoordinator {
       await flushPending();
       terminalReady = true;
     } catch (error) {
-      close(1011, errorMessage(error));
+      close(1011, coordinatorErrorMessage(this.env, error));
       throw error;
     }
   }
@@ -4792,7 +4843,7 @@ export class FleetCoordinator {
         description: `crabbox ${leaseID} ${slug}`,
       });
     } catch (error) {
-      const message = errorMessage(error);
+      const message = coordinatorErrorMessage(this.env, error);
       if (message.includes("tags not allowed") || message.includes("requires at least one")) {
         return json({ error: "invalid_tailscale_tags", message }, { status: 400 });
       }
@@ -5464,7 +5515,9 @@ export class FleetCoordinator {
         ...(host.allocationTime ? { allocationTime: host.allocationTime } : {}),
       }));
     } catch (error) {
-      console.warn(`portal mac host inventory unavailable: ${errorMessage(error)}`);
+      console.warn(
+        `portal mac host inventory unavailable: ${coordinatorErrorMessage(this.env, error)}`,
+      );
       return [];
     }
   }
@@ -5595,7 +5648,7 @@ export class FleetCoordinator {
         totalLeases: providerLeases.length,
         users,
         recentLeases,
-        error: errorMessage(error),
+        error: coordinatorErrorMessage(this.env, error),
       };
     }
   }
@@ -9336,7 +9389,7 @@ export class FleetCoordinator {
         return json(
           {
             error: "mac_host_quota_failed",
-            message: sanitizeMacHostQuotaError(errorMessage(error)),
+            message: sanitizeMacHostQuotaError(coordinatorErrorMessage(this.env, error)),
           },
           { status: 502 },
         );
@@ -9444,7 +9497,7 @@ export class FleetCoordinator {
               { status: 201 },
             );
           } catch (error) {
-            const message = errorMessage(error);
+            const message = coordinatorErrorMessage(this.env, error);
             failures.push(`${offering.availabilityZone}: ${message}`);
           }
         }
@@ -9537,7 +9590,7 @@ export class FleetCoordinator {
       audit.cleanupAttempts = lease.cleanupAttempts;
     }
     if (lease.cleanupError) {
-      audit.cleanupError = lease.cleanupError;
+      audit.cleanupError = coordinatorDiagnosticText(this.env, lease.cleanupError);
     }
     if (lease.cleanupRetryAt) {
       audit.cleanupRetryAt = lease.cleanupRetryAt;
@@ -9560,7 +9613,7 @@ export class FleetCoordinator {
         cloudServerType: server.serverType,
       };
     } catch (error) {
-      const message = errorMessage(error);
+      const message = coordinatorErrorMessage(this.env, error);
       if (isCloudNotFoundError(message)) {
         return { ...audit, cloudStatus: "missing", message };
       }
@@ -9607,7 +9660,7 @@ export class FleetCoordinator {
       audit.cleanupAttempts = lease.cleanupAttempts;
     }
     if (lease.cleanupError) {
-      audit.cleanupError = lease.cleanupError;
+      audit.cleanupError = coordinatorDiagnosticText(this.env, lease.cleanupError);
     }
     if (lease.cleanupRetryAt) {
       audit.cleanupRetryAt = lease.cleanupRetryAt;
@@ -9635,7 +9688,7 @@ export class FleetCoordinator {
         cloudServerType: server.serverType,
       };
     } catch (error) {
-      const message = errorMessage(error);
+      const message = coordinatorErrorMessage(this.env, error);
       if (isCloudNotFoundError(message)) {
         return { ...audit, cloudStatus: "missing", message };
       }
@@ -9759,7 +9812,10 @@ export class FleetCoordinator {
       );
     } catch (error) {
       return json(
-        { error: "artifact_upload_unavailable", message: errorMessage(error) },
+        {
+          error: "artifact_upload_unavailable",
+          message: coordinatorErrorMessage(this.env, error),
+        },
         { status: 400 },
       );
     }
@@ -10336,7 +10392,7 @@ export class FleetCoordinator {
           try {
             await this.deleteLeaseServer(lease);
           } catch (error) {
-            failure = errorMessage(error);
+            failure = coordinatorErrorMessage(this.env, error);
           }
           await this.state.runExclusive(async () => {
             const current = await this.getLease(lease.id);
@@ -10614,7 +10670,7 @@ export class FleetCoordinator {
               providerAccessContext([], fresh.accessState),
             );
           } catch (error) {
-            failure = errorMessage(error);
+            failure = coordinatorErrorMessage(this.env, error);
             console.warn(
               `AWS SSH ingress reconciliation failed lease=${fresh.target.anchor.id} region=${fresh.target.anchor.region ?? ""}: ${failure}`,
             );
@@ -10696,7 +10752,7 @@ export class FleetCoordinator {
               attempts: current.attempts + 1,
               updatedAt: new Date().toISOString(),
               retryAt: new Date(now + leaseCleanupRetryDelayMs).toISOString(),
-              lastError: errorMessage(error),
+              lastError: coordinatorErrorMessage(this.env, error),
             };
             await this.state.storage.put(key, nextRecord);
             console.warn(
@@ -10814,7 +10870,7 @@ export class FleetCoordinator {
               candidate.action = "terminated";
             } catch (error) {
               candidate.action = "terminate_failed";
-              candidate.error = errorMessage(error);
+              candidate.error = coordinatorErrorMessage(this.env, error);
               console.warn(
                 `aws orphan sweep terminate failed region=${region} cloud=${machine.cloudID}: ${candidate.error}`,
               );
@@ -10846,7 +10902,7 @@ export class FleetCoordinator {
                 candidate.action = "released";
               } catch (error) {
                 candidate.action = "release_failed";
-                candidate.error = errorMessage(error);
+                candidate.error = coordinatorErrorMessage(this.env, error);
                 console.warn(
                   `aws orphan sweep mac host release failed region=${region} host=${host.id}: ${candidate.error}`,
                 );
@@ -10856,7 +10912,7 @@ export class FleetCoordinator {
           }
         }
       } catch (error) {
-        const message = errorMessage(error);
+        const message = coordinatorErrorMessage(this.env, error);
         errors.push({ region, message });
         console.warn(`aws orphan sweep failed region=${region}: ${message}`);
       }
@@ -11022,7 +11078,7 @@ export class FleetCoordinator {
               candidate.action = "terminated";
             } catch (error) {
               candidate.action = "terminate_failed";
-              candidate.error = errorMessage(error);
+              candidate.error = coordinatorErrorMessage(this.env, error);
               console.warn(
                 `azure orphan sweep terminate failed region=${region} cloud=${machine.cloudID}: ${candidate.error}`,
               );
@@ -11031,7 +11087,7 @@ export class FleetCoordinator {
           candidates.push(candidate);
         }
       } catch (error) {
-        const message = errorMessage(error);
+        const message = coordinatorErrorMessage(this.env, error);
         errors.push({ region, message });
         console.warn(`azure orphan sweep failed region=${region}: ${message}`);
       }
@@ -11338,11 +11394,16 @@ export class FleetCoordinator {
   }
 
   private leaseForRequest(lease: LeaseRecord, request: Request, admin: boolean): LeaseRecord {
-    if (!lease.share || this.leaseManageableByRequest(lease, request, admin)) {
-      return lease;
-    }
     const visible = { ...lease };
-    delete visible.share;
+    if (visible.cleanupError) {
+      visible.cleanupError = coordinatorDiagnosticText(this.env, visible.cleanupError);
+    }
+    if (visible.failureError) {
+      visible.failureError = coordinatorDiagnosticText(this.env, visible.failureError);
+    }
+    if (visible.share && !this.leaseManageableByRequest(lease, request, admin)) {
+      delete visible.share;
+    }
     return visible;
   }
 
@@ -11738,7 +11799,7 @@ export class FleetCoordinator {
         delete cleanupLease.cleanupStartedAt;
         delete cleanupLease.cleanupClaimExpiresAt;
         cleanupLease.cleanupFailedAt = failedAt;
-        cleanupLease.cleanupError = errorMessage(error);
+        cleanupLease.cleanupError = coordinatorErrorMessage(this.env, error);
         cleanupLease.cleanupRetryAt = new Date(Date.now() + leaseCleanupRetryDelayMs).toISOString();
         cleanupLease.expiresAt = failedAt;
         cleanupLease.updatedAt = failedAt;
@@ -11903,7 +11964,7 @@ export class FleetCoordinator {
         current.cleanupAttempts = (current.cleanupAttempts ?? 0) + 1;
         delete current.cleanupStartedAt;
         delete current.cleanupClaimExpiresAt;
-        current.cleanupError = errorMessage(error);
+        current.cleanupError = coordinatorErrorMessage(this.env, error);
         current.cleanupFailedAt = failedAt.toISOString();
         current.cleanupRetryAt = new Date(
           failedAt.getTime() + leaseCleanupRetryDelayMs,
@@ -13443,6 +13504,19 @@ function workspaceResponse(
   const status = workspaceStatus(workspace, lease);
   const terminalUrl = env ? workspaceTerminalURL(workspace, lease, env) : undefined;
   const nativeVnc = env ? !workspaceNativeVNCError(workspace, lease, env) : false;
+  const message =
+    workspace.error ??
+    (lease && !workspaceOwnsLease(workspace, lease)
+      ? "workspace lease reservation conflicts with another lifecycle"
+      : undefined) ??
+    lease?.failureError ??
+    (lease?.state === "failed" ? "workspace provisioning recovery pending" : undefined) ??
+    lease?.cleanupError ??
+    (status === "ready"
+      ? "workspace ready"
+      : status === "failed"
+        ? "workspace provisioning failed"
+        : `workspace ${status}`);
   return {
     id: workspace.id,
     workspaceId: workspace.id,
@@ -13460,19 +13534,7 @@ function workspaceResponse(
     },
     ...(terminalUrl ? { attachUrl: terminalUrl } : {}),
     ...(lease?.expiresAt ? { expiresAt: lease.expiresAt } : {}),
-    message:
-      workspace.error ??
-      (lease && !workspaceOwnsLease(workspace, lease)
-        ? "workspace lease reservation conflicts with another lifecycle"
-        : undefined) ??
-      lease?.failureError ??
-      (lease?.state === "failed" ? "workspace provisioning recovery pending" : undefined) ??
-      lease?.cleanupError ??
-      (status === "ready"
-        ? "workspace ready"
-        : status === "failed"
-          ? "workspace provisioning failed"
-          : `workspace ${status}`),
+    message: env ? coordinatorDiagnosticText(env, message) : redactDiagnosticSecrets(message),
   };
 }
 
@@ -16744,7 +16806,9 @@ export class AWSProvider implements CloudProvider {
     try {
       await this.reconcileLeaseAccess(nextLease, { ...context, activeLeases });
     } catch (error) {
-      console.warn(`refresh AWS SSH ingress failed for ${lease.id}: ${errorMessage(error)}`);
+      console.warn(
+        `refresh AWS SSH ingress failed for ${lease.id}: ${coordinatorErrorMessage(this.env, error)}`,
+      );
     }
     return nextLease;
   }
@@ -16944,7 +17008,7 @@ export class AWSProvider implements CloudProvider {
     try {
       await this.deleteServer(lease.cloudID);
     } catch (error) {
-      const message = errorMessage(error);
+      const message = coordinatorErrorMessage(this.env, error);
       if (!isCloudNotFoundError(message)) {
         throw error;
       }
@@ -17119,7 +17183,10 @@ export class AWSProvider implements CloudProvider {
       try {
         imageOS = normalizeOSImage(requestedOS ?? fallbackOS);
       } catch (error) {
-        return json({ error: "invalid_os", message: errorMessage(error) }, { status: 400 });
+        return json(
+          { error: "invalid_os", message: coordinatorErrorMessage(this.env, error) },
+          { status: 400 },
+        );
       }
     }
     const rawRegion = input.region ?? url.searchParams.get("region") ?? known?.region ?? "";

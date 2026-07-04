@@ -5634,6 +5634,56 @@ describe("fleet lease identity and idle", () => {
     expect(providerCreates).toBe(1);
   });
 
+  it("redacts legacy provider diagnostics from workspace responses", async () => {
+    const storage = new MemoryStorage();
+    const configuredSecret = "configured-workspace-secret";
+    const reflectedSecret = "legacy-workspace-secret";
+    const now = new Date().toISOString();
+    storage.seed("workspace:example-org:alice%40example.com:fleet-is-redacted", {
+      id: "fleet-is-redacted",
+      leaseID: "cbx_abcdef123456",
+      owner: "alice@example.com",
+      org: "example-org",
+      profile: "default",
+      provider: "aws",
+      class: "standard",
+      desktop: false,
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      createdAt: now,
+      updatedAt: now,
+    });
+    storage.seed(
+      "lease:cbx_abcdef123456",
+      testLease({
+        id: "cbx_abcdef123456",
+        slug: "fleet-is-redacted",
+        workspaceID: "fleet-is-redacted",
+        owner: "alice@example.com",
+        org: "example-org",
+        provider: "aws",
+        state: "failed",
+        failureError: `provision failed ${configuredSecret} token=${reflectedSecret}`,
+      }),
+    );
+    const fleet = testFleet(storage, {}, { AWS_SECRET_ACCESS_KEY: configuredSecret });
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/workspaces/fleet-is-redacted", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toContain("[redacted]");
+    expect(body).not.toContain(configuredSecret);
+    expect(body).not.toContain(reflectedSecret);
+  });
+
   it("waits for an unexpired provisioning claim when no lease was written", async () => {
     const storage = new MemoryStorage();
     let providerCreates = 0;
@@ -8141,7 +8191,7 @@ describe("fleet lease identity and idle", () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {
       aws: fakeProvider(undefined, { provider: "aws" }, async () => {
-        throw new Error("aws terminate throttled");
+        throw new Error("aws terminate throttled X-API-Key: cleanup-secret");
       }),
     });
     storage.seed(
@@ -8159,7 +8209,8 @@ describe("fleet lease identity and idle", () => {
     const lease = storage.value<LeaseRecord>("lease:cbx_000000000001");
     expect(lease?.state).toBe("active");
     expect(lease?.cleanupAttempts).toBe(1);
-    expect(lease?.cleanupError).toContain("aws terminate throttled");
+    expect(lease?.cleanupError).toBe("aws terminate throttled X-API-Key: [redacted]");
+    expect(lease?.cleanupError).not.toContain("cleanup-secret");
     expect(Date.parse(lease?.cleanupRetryAt ?? "")).toBeGreaterThan(Date.now());
     expect(storage.alarm()).toBe(Date.parse(lease?.cleanupRetryAt ?? ""));
   });
@@ -11018,6 +11069,93 @@ describe("fleet lease identity and idle", () => {
     expect(lease?.endedAt).toBeTruthy();
   });
 
+  it("redacts provider credentials before persisting and returning provisioning failures", async () => {
+    const storage = new MemoryStorage();
+    const configuredSecret = "configured-azure-client-secret";
+    const reflectedSecret = "reflected-provider-secret";
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(
+          () => {
+            throw new Error(
+              `azure create failed ${configuredSecret} Authorization: Bearer ${reflectedSecret}`,
+            );
+          },
+          { provider: "azure", region: "eastus" },
+        ),
+      },
+      { AZURE_CLIENT_SECRET: configuredSecret },
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(500);
+    const stored = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    expect(stored?.cleanupError).toContain("[redacted]");
+    expect(stored?.failureError).toContain("[redacted]");
+    expect(JSON.stringify(stored)).not.toContain(configuredSecret);
+    expect(JSON.stringify(stored)).not.toContain(reflectedSecret);
+    const responseText = await create.text();
+    expect(responseText).toContain("[redacted]");
+    expect(responseText).not.toContain(configuredSecret);
+    expect(responseText).not.toContain(reflectedSecret);
+  });
+
+  it("redacts legacy stored diagnostics from lease get and list responses", async () => {
+    const storage = new MemoryStorage();
+    const configuredSecret = "configured-aws-secret";
+    const reflectedSecret = "legacy-reflected-secret";
+    storage.seed(
+      "lease:cbx_abcdef123456",
+      testLease({
+        id: "cbx_abcdef123456",
+        owner: "alice@example.com",
+        org: "example-org",
+        cleanupError: `cleanup failed ${configuredSecret}`,
+        failureError: `X-API-Key: ${reflectedSecret}`,
+      }),
+    );
+    const fleet = testFleet(storage, {}, { AWS_SECRET_ACCESS_KEY: configuredSecret });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+
+    const [get, list] = await Promise.all([
+      fleet.fetch(request("GET", "/v1/leases/cbx_abcdef123456", { headers })),
+      fleet.fetch(request("GET", "/v1/leases", { headers })),
+    ]);
+
+    const bodies = await Promise.all(
+      [get, list].map(async (response) => {
+        expect(response.status).toBe(200);
+        return await response.text();
+      }),
+    );
+    for (const body of bodies) {
+      expect(body).toContain("[redacted]");
+      expect(body).not.toContain(configuredSecret);
+      expect(body).not.toContain(reflectedSecret);
+    }
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.cleanupError).toContain(
+      configuredSecret,
+    );
+  });
+
   it("can release a provisioning lease before cloud resources are known", async () => {
     const storage = new MemoryStorage();
     const deleted: string[] = [];
@@ -11711,7 +11849,7 @@ describe("fleet lease identity and idle", () => {
         async (id) => {
           deleted.push(id);
           if (failDelete) {
-            throw new Error("azure delete throttled");
+            throw new Error("azure delete throttled Authorization: Bearer release-secret");
           }
         },
       ),
@@ -11755,9 +11893,10 @@ describe("fleet lease identity and idle", () => {
       provider: "azure",
       state: "released",
       cloudID: "vm-cbx-abcdef123456",
-      cleanupError: "azure delete throttled",
+      cleanupError: "azure delete throttled Authorization: [redacted]",
       releaseDeletesServer: true,
     });
+    expect(failedCleanup?.cleanupError).not.toContain("release-secret");
 
     failDelete = false;
     const retryDelete = await fleet.fetch(
@@ -20449,7 +20588,7 @@ describe("fleet identity", () => {
         region: "eu-west-1",
         state: "expired",
         cleanupAttempts: 1,
-        cleanupError: "terminated",
+        cleanupError: "terminated configured-audit-secret",
         createdAt: "2026-05-01T00:01:00.000Z",
       }),
     );
@@ -20476,24 +20615,30 @@ describe("fleet identity", () => {
         state: "active",
       }),
     );
-    const fleet = testFleet(storage, {
-      aws: fakeProvider(undefined, { provider: "aws" }, undefined, async (id) => {
-        if (id === "i-gone") {
-          throw new Error("aws instance not found: i-gone");
-        }
-        return {
-          provider: "aws",
-          id: 123,
-          cloudID: id,
-          region: "eu-west-1",
-          name: `crabbox-${id}`,
-          status: id === "i-terminated" ? "terminated" : "running",
-          serverType: "c7i.2xlarge",
-          host: "192.0.2.20",
-          labels: {},
-        };
-      }),
-    });
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, { provider: "aws" }, undefined, async (id) => {
+          if (id === "i-gone") {
+            throw new Error(
+              "aws instance not found: i-gone https://audit-user:audit-password@example.test",
+            );
+          }
+          return {
+            provider: "aws",
+            id: 123,
+            cloudID: id,
+            region: "eu-west-1",
+            name: `crabbox-${id}`,
+            status: id === "i-terminated" ? "terminated" : "running",
+            serverType: "c7i.2xlarge",
+            host: "192.0.2.20",
+            labels: {},
+          };
+        }),
+      },
+      { AWS_SECRET_ACCESS_KEY: "configured-audit-secret" },
+    );
 
     const response = await fleet.fetch(
       request("GET", "/v1/admin/lease-audit?state=expired&provider=aws", {
@@ -20509,6 +20654,11 @@ describe("fleet identity", () => {
       { leaseID: "cbx_000000000002", cloudStatus: "missing" },
       { leaseID: "cbx_000000000001", cloudStatus: "found", cloudState: "running" },
     ]);
+    const serialized = JSON.stringify(body);
+    expect(serialized).toContain("[redacted]");
+    expect(serialized).not.toContain("configured-audit-secret");
+    expect(serialized).not.toContain("audit-user");
+    expect(serialized).not.toContain("audit-password");
   });
 
   it("audits expired Azure leases against cloud state", async () => {
