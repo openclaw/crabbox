@@ -99,6 +99,9 @@ func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 	if !backend.requests[0].StatusOnly {
 		t.Fatal("plain status should use status-only resolve")
 	}
+	if !backend.requests[0].NoLocalStateMutations {
+		t.Fatal("plain status should not mutate local claims")
+	}
 	if backend.requests[0].ReadyProbe {
 		t.Fatal("plain status should not request a readiness probe")
 	}
@@ -114,6 +117,9 @@ func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 	}
 	if !backend.requests[0].StatusOnly {
 		t.Fatal("status --wait should still use status-only resolve")
+	}
+	if !backend.requests[0].NoLocalStateMutations {
+		t.Fatal("status --wait should not mutate local claims")
 	}
 	if !backend.requests[0].ReadyProbe {
 		t.Fatal("status --wait should request SSH readiness data")
