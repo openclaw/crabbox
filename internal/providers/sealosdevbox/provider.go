@@ -2,6 +2,7 @@ package sealosdevbox
 
 import (
 	"flag"
+	"strconv"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -45,6 +46,35 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	return applyFlags(cfg, fs, values)
+}
+
+func (Provider) CommandRoutingArgs(cfg core.Config, _ string) []string {
+	values := cfg.SealosDevbox
+	args := []string{
+		"--sealos-devbox-kubectl", values.Kubectl,
+		"--sealos-devbox-context", values.Context,
+		"--sealos-devbox-namespace", values.Namespace,
+		"--sealos-devbox-network", normalizeNetwork(values.Network),
+		"--sealos-devbox-ssh-gateway-port", values.SSHGatewayPort,
+		"--sealos-devbox-ssh-user", values.SSHUser,
+		"--sealos-devbox-work-root", values.WorkRoot,
+	}
+	for _, optional := range []struct {
+		flagName string
+		value    string
+	}{
+		{flagName: "--sealos-devbox-kubeconfig", value: values.Kubeconfig},
+		{flagName: "--sealos-devbox-ssh-gateway-host", value: values.SSHGatewayHost},
+		{flagName: "--sealos-devbox-node-host", value: values.NodeHost},
+	} {
+		if strings.TrimSpace(optional.value) != "" {
+			args = append(args, optional.flagName, optional.value)
+		}
+	}
+	if core.DeleteOnReleaseExplicit(cfg, providerName) {
+		args = append(args, "--sealos-devbox-delete-on-release="+strconv.FormatBool(values.DeleteOnRelease))
+	}
+	return args
 }
 
 func (Provider) ValidateConfig(cfg core.Config) error {

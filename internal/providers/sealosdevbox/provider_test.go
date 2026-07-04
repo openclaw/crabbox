@@ -52,6 +52,41 @@ func TestProviderSpecAndAutomationSurface(t *testing.T) {
 	}
 }
 
+func TestCommandRoutingArgsPreservesEffectiveConfig(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.Kubectl = "/opt/bin/kubectl"
+	cfg.SealosDevbox.Kubeconfig = "/tmp/kube config"
+	cfg.SealosDevbox.Context = "dev"
+	cfg.SealosDevbox.Namespace = "team-devboxes"
+	cfg.SealosDevbox.Network = networkNodePort
+	cfg.SealosDevbox.NodeHost = "node.example.test"
+	cfg.SealosDevbox.SSHGatewayHost = "gateway.example.test"
+	cfg.SealosDevbox.SSHGatewayPort = "2222"
+	cfg.SealosDevbox.SSHUser = "alice"
+	cfg.SealosDevbox.WorkRoot = "/home/alice/project"
+	cfg.SealosDevbox.DeleteOnRelease = false
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
+
+	got := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), "\n")
+	for _, want := range []string{
+		"--sealos-devbox-kubectl\n/opt/bin/kubectl",
+		"--sealos-devbox-kubeconfig\n/tmp/kube config",
+		"--sealos-devbox-context\ndev",
+		"--sealos-devbox-namespace\nteam-devboxes",
+		"--sealos-devbox-network\nNodePort",
+		"--sealos-devbox-node-host\nnode.example.test",
+		"--sealos-devbox-ssh-gateway-host\ngateway.example.test",
+		"--sealos-devbox-ssh-gateway-port\n2222",
+		"--sealos-devbox-ssh-user\nalice",
+		"--sealos-devbox-work-root\n/home/alice/project",
+		"--sealos-devbox-delete-on-release=false",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("routing args missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestFlagsExpandLocalPathsAndPreserveGuestWorkRoot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
