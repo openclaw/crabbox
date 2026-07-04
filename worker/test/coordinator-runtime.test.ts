@@ -326,6 +326,7 @@ describe("coordinator runtimes", () => {
     const runtime = new MemoryRuntime();
     const coordinator = new FleetCoordinator(runtime, {
       CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_GITHUB_ADMIN_LOGINS: "admin",
     } as Env);
     const lease: LeaseRecord = {
       id: "cbx_000000000001",
@@ -371,6 +372,8 @@ describe("coordinator runtimes", () => {
       "x-crabbox-owner": "admin@example.com",
       "x-crabbox-org": "example-org",
       "x-crabbox-admin": "true",
+      "x-crabbox-auth": "github",
+      "x-crabbox-github-login": "admin",
     };
     const createTicket = async (
       kind: "webvnc" | "code",

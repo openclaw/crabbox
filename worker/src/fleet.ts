@@ -5,6 +5,7 @@ const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
 import {
   authenticateRequest,
+  githubUserIsAdmin,
   isAdminRequest,
   requestWithAuthContext,
   sha256Hex,
@@ -216,7 +217,13 @@ const workspaceTerminalSSHReadyTimeoutMs = 2 * 60_000;
 const workspaceSSHHostPrivateKeyHeader = "x-crabbox-workspace-ssh-host-private-key";
 const workspaceSSHHostPublicKeyHeader = "x-crabbox-workspace-ssh-host-public-key";
 
-interface WebVNCTicketRecord {
+interface CachedAdminGrant {
+  auth?: AuthContext["auth"];
+  login?: string;
+  adminTokenHash?: string;
+}
+
+interface WebVNCTicketRecord extends CachedAdminGrant {
   ticket: string;
   leaseID: string;
   owner: string;
@@ -236,7 +243,7 @@ interface NativeVNCTicketRecord {
   expiresAt: string;
 }
 
-interface CodeTicketRecord {
+interface CodeTicketRecord extends CachedAdminGrant {
   ticket: string;
   leaseID: string;
   owner: string;
@@ -246,7 +253,7 @@ interface CodeTicketRecord {
   expiresAt: string;
 }
 
-interface CodeViewerTicketRecord {
+interface CodeViewerTicketRecord extends CachedAdminGrant {
   ticket: string;
   leaseID: string;
   auth: AuthContext["auth"];
@@ -261,7 +268,7 @@ interface CodeViewerTicketRecord {
   expiresAt: string;
 }
 
-interface CodeViewerSessionRecord {
+interface CodeViewerSessionRecord extends CachedAdminGrant {
   session: string;
   leaseID: string;
   auth: AuthContext["auth"];
@@ -367,7 +374,7 @@ interface RuntimeAdapterLegacyDeleteCompletion {
 
 type EgressRole = "host" | "client";
 
-interface EgressTicketRecord {
+interface EgressTicketRecord extends CachedAdminGrant {
   ticket: string;
   leaseID: string;
   owner: string;
@@ -663,6 +670,9 @@ type BridgeAttachment =
       owner: string;
       org?: string;
       admin?: boolean;
+      auth?: AuthContext["auth"];
+      login?: string;
+      adminTokenHash?: string;
       label: string;
     }
   | { kind: "code-agent"; leaseID: string }
@@ -674,6 +684,8 @@ type BridgeAttachment =
       owner?: string;
       org?: string;
       admin?: boolean;
+      login?: string;
+      adminTokenHash?: string;
       portalSessionHash?: string;
     }
   | {
@@ -683,6 +695,9 @@ type BridgeAttachment =
       owner?: string;
       org?: string;
       admin?: boolean;
+      auth?: AuthContext["auth"];
+      login?: string;
+      adminTokenHash?: string;
     }
   | {
       kind: "egress-client";
@@ -691,6 +706,9 @@ type BridgeAttachment =
       owner?: string;
       org?: string;
       admin?: boolean;
+      auth?: AuthContext["auth"];
+      login?: string;
+      adminTokenHash?: string;
     }
   | {
       kind: "runtime-adapter-agent";
@@ -705,6 +723,9 @@ type BridgeAttachment =
       owner: string;
       org: string;
       admin?: boolean;
+      auth?: AuthContext["auth"];
+      login?: string;
+      adminTokenHash?: string;
       subscriptions?: Record<string, number>;
     };
 
@@ -732,6 +753,9 @@ interface WebVNCViewerSession {
   owner: string;
   org?: string;
   admin?: boolean;
+  auth?: AuthContext["auth"];
+  login?: string;
+  adminTokenHash?: string;
   label: string;
   connectedAt: string;
 }
@@ -755,7 +779,7 @@ export class FleetCoordinator {
   private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
   private readonly controlSockets = new Map<string, WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
-  private readonly restoredLeaseBridgeSockets = new Set<WebSocket>();
+  private readonly restoredBridgeSockets = new Set<WebSocket>();
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
   private bridgeTicketQueue: Promise<void> = Promise.resolve();
@@ -775,7 +799,7 @@ export class FleetCoordinator {
 
   async fetch(request: Request): Promise<Response> {
     try {
-      if (!(await this.restoredLeaseBridgesReady())) {
+      if (!(await this.restoredBridgesReady())) {
         return json(
           {
             error: "bridge_state_unavailable",
@@ -1087,22 +1111,32 @@ export class FleetCoordinator {
         continue;
       }
       this.trackBridgeSocket(socket, attachment);
-      if ("leaseID" in attachment) {
-        this.restoredLeaseBridgeSockets.add(socket);
-      }
+      this.restoredBridgeSockets.add(socket);
     }
   }
 
-  private async revokeInactiveRestoredBridgeSockets(): Promise<void> {
-    const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+  private async reconcileRestoredBridgeSockets(): Promise<void> {
+    const [leases, adminGrants] = await Promise.all([
+      this.state.storage.list<LeaseRecord>({ prefix: "lease:" }),
+      adminGrantValidation(this.env),
+    ]);
     const now = Date.now();
     const revoked = new Map<string, string>();
+    const revokedAdmins = new Set<WebSocket>();
+    const revokedAdminEgressSessions = new Map<string, { leaseID: string; sessionID: string }>();
     const revokedViewers = new Map<WebSocket, string>();
     const revokedEgressSessions = new Map<string, { leaseID: string; sessionID: string }>();
     const codeViewersToCheck: Array<{ socket: WebSocket; portalSessionHash?: string }> = [];
-    for (const socket of this.restoredLeaseBridgeSockets) {
+    for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
-      if (!attachment || !("leaseID" in attachment)) {
+      if (!attachment) {
+        continue;
+      }
+      if ("admin" in attachment && !cachedAdminGrantIsCurrent(attachment, adminGrants)) {
+        revokedAdmins.add(socket);
+        continue;
+      }
+      if (!("leaseID" in attachment)) {
         continue;
       }
       const lease = leases.get(leaseKey(attachment.leaseID));
@@ -1153,13 +1187,28 @@ export class FleetCoordinator {
         revokedViewers.set(socket, "portal session ended");
       }
     }
+    for (const socket of revokedAdmins) {
+      const attachment = this.bridgeAttachment(socket);
+      if (attachment?.kind === "egress-host" || attachment?.kind === "egress-client") {
+        revokedAdminEgressSessions.set(egressSocketKey(attachment.leaseID, attachment.sessionID), {
+          leaseID: attachment.leaseID,
+          sessionID: attachment.sessionID,
+        });
+        continue;
+      }
+      this.handleBridgeClose(socket, 1008, "admin access revoked");
+      closeSocket(socket, 1008, "admin access revoked");
+    }
+    for (const { leaseID, sessionID } of revokedAdminEgressSessions.values()) {
+      this.clearEgressSession(leaseID, sessionID, 1008, "admin access revoked");
+    }
     for (const [leaseID, reason] of revoked) {
       this.closeLeaseBridges(leaseID, 1008, reason);
     }
     for (const { leaseID, sessionID } of revokedEgressSessions.values()) {
       this.clearEgressSession(leaseID, sessionID, 1008, "lease access revoked");
     }
-    for (const socket of this.restoredLeaseBridgeSockets) {
+    for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
       const reason =
         attachment && "leaseID" in attachment ? revoked.get(attachment.leaseID) : undefined;
@@ -1177,19 +1226,19 @@ export class FleetCoordinator {
         closeSocket(socket, 1008, reason);
       }
     }
-    this.restoredLeaseBridgeSockets.clear();
+    this.restoredBridgeSockets.clear();
   }
 
-  private async restoredLeaseBridgesReady(): Promise<boolean> {
-    if (this.restoredLeaseBridgeSockets.size === 0) {
+  private async restoredBridgesReady(): Promise<boolean> {
+    if (this.restoredBridgeSockets.size === 0) {
       return true;
     }
     const pending =
       this.bridgeRestoreReady ??
-      this.revokeInactiveRestoredBridgeSockets().then(
+      this.reconcileRestoredBridgeSockets().then(
         () => true,
         (error) => {
-          console.warn("could not reconcile restored lease bridges", errorMessage(error));
+          console.warn("could not reconcile restored bridges", errorMessage(error));
           return false;
         },
       );
@@ -1268,6 +1317,9 @@ export class FleetCoordinator {
           owner: attachment.owner,
           ...(attachment.org ? { org: attachment.org } : {}),
           ...(attachment.admin !== undefined ? { admin: attachment.admin } : {}),
+          ...(attachment.auth ? { auth: attachment.auth } : {}),
+          ...(attachment.login ? { login: attachment.login } : {}),
+          ...(attachment.adminTokenHash ? { adminTokenHash: attachment.adminTokenHash } : {}),
           label: attachment.label,
           connectedAt: new Date().toISOString(),
         });
@@ -1370,12 +1422,14 @@ export class FleetCoordinator {
     }
     const upgrade = this.state.createWebSocketUpgrade();
     const server = upgrade.socket;
+    const admin = isAdminRequest(request);
     const attachment: BridgeAttachment = {
       kind: "control",
       clientID: crypto.randomUUID(),
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
-      admin: isAdminRequest(request),
+      admin,
+      ...(await adminGrantForRequest(request, admin)),
       subscriptions: {},
     };
     this.controlSockets.set(attachment.clientID, server);
@@ -1525,8 +1579,8 @@ export class FleetCoordinator {
       this.rejectRestoredBridgeSocket(socket, attachment);
       return;
     }
-    if (!(await this.restoredLeaseBridgesReady())) {
-      this.restoredLeaseBridgeSockets.delete(socket);
+    if (!(await this.restoredBridgesReady())) {
+      this.restoredBridgeSockets.delete(socket);
       this.rejectRestoredBridgeSocket(socket, attachment);
       return;
     }
@@ -1592,7 +1646,7 @@ export class FleetCoordinator {
   }
 
   private handleBridgeClose(socket: WebSocket, code: number, reason: string): void {
-    this.restoredLeaseBridgeSockets.delete(socket);
+    this.restoredBridgeSockets.delete(socket);
     const attachment = this.bridgeAttachment(socket);
     if (!attachment || !this.bridgeSocketIsCurrent(socket, attachment)) {
       return;
@@ -1628,7 +1682,7 @@ export class FleetCoordinator {
   }
 
   async alarm(): Promise<void> {
-    if (!(await this.restoredLeaseBridgesReady())) {
+    if (!(await this.restoredBridgesReady())) {
       throw new Error("restored bridge lease state is temporarily unavailable");
     }
     await this.expireLeases();
@@ -4907,16 +4961,17 @@ export class FleetCoordinator {
     await this.withBridgeTicketLock(async () => {
       await this.putLease(lease);
       if (leaseShareAccessShrank(previousShare, normalizedLeaseShare(lease.share))) {
-        this.revokeUnauthorizedLeaseBridges(lease);
+        await this.revokeUnauthorizedLeaseBridges(lease);
       }
     });
   }
 
-  private revokeUnauthorizedLeaseBridges(lease: LeaseRecord): void {
+  private async revokeUnauthorizedLeaseBridges(lease: LeaseRecord): Promise<void> {
     const code = 1008;
     const reason = "lease access revoked";
+    const adminGrants = await adminGrantValidation(this.env);
     for (const viewer of this.openWebVNCViewers(lease.id)) {
-      if (this.leaseViewerAuthorized(lease, viewer)) {
+      if (this.leaseViewerAuthorized(lease, withCurrentAdminGrant(viewer, adminGrants))) {
         continue;
       }
       this.clearWebVNCViewer(lease.id, viewer.id, viewer.socket);
@@ -4928,7 +4983,7 @@ export class FleetCoordinator {
         attachment?.kind !== "code-viewer" ||
         attachment.leaseID !== lease.id ||
         !completeBridgePrincipal(attachment) ||
-        this.leaseViewerAuthorized(lease, attachment)
+        this.leaseViewerAuthorized(lease, withCurrentAdminGrant(attachment, adminGrants))
       ) {
         continue;
       }
@@ -4941,7 +4996,7 @@ export class FleetCoordinator {
       if (
         (attachment?.kind !== "egress-host" && attachment?.kind !== "egress-client") ||
         attachment.leaseID !== lease.id ||
-        this.leaseManagerAuthorized(lease, attachment)
+        this.leaseManagerAuthorized(lease, withCurrentAdminGrant(attachment, adminGrants))
       ) {
         continue;
       }
@@ -6297,6 +6352,7 @@ export class FleetCoordinator {
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       admin,
+      ...(await adminGrantForRequest(request, admin)),
       role,
       sessionID,
       allow: boundedEgressAllowlist(input.allow),
@@ -7119,6 +7175,7 @@ export class FleetCoordinator {
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       admin,
+      ...(await adminGrantForRequest(request, admin)),
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + webVNCTicketTTLSeconds * 1000).toISOString(),
     };
@@ -7406,6 +7463,7 @@ export class FleetCoordinator {
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       admin,
+      ...(await adminGrantForRequest(request, admin)),
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + codeTicketTTLSeconds * 1000).toISOString(),
     };
@@ -7515,6 +7573,15 @@ export class FleetCoordinator {
     }
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       const auth = viewerSession?.auth ?? requestAuthType(authorizedRequest);
+      const adminGrant: CachedAdminGrant = viewerSession
+        ? {
+            auth: viewerSession.auth,
+            ...(viewerSession.login ? { login: viewerSession.login } : {}),
+            ...(viewerSession.adminTokenHash
+              ? { adminTokenHash: viewerSession.adminTokenHash }
+              : {}),
+          }
+        : await adminGrantForRequest(authorizedRequest, isAdminRequest(authorizedRequest));
       let portalSessionHash = viewerSession?.portalSessionHash;
       if (auth === "github" && !portalSessionHash) {
         const token = bearerToken(authorizedRequest);
@@ -7531,6 +7598,7 @@ export class FleetCoordinator {
         lease,
         agent,
         auth,
+        adminGrant,
         portalSessionHash,
       );
     }
@@ -7545,6 +7613,7 @@ export class FleetCoordinator {
     await this.cleanupExpiredCodeViewerAuth();
     const now = new Date();
     const auth = requestAuthType(request);
+    const admin = isAdminRequest(request);
     let portalSessionHash: string | undefined;
     if (auth === "github") {
       const token = bearerToken(request);
@@ -7560,7 +7629,8 @@ export class FleetCoordinator {
       ticket: newCodeViewerTicket(),
       leaseID: lease.id,
       auth,
-      admin: isAdminRequest(request),
+      admin,
+      ...(await adminGrantForRequest(request, admin)),
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       returnTo: canonicalCodeReturnTo(request, lease.id),
@@ -7632,6 +7702,9 @@ export class FleetCoordinator {
     if (ticket.login) {
       session.login = ticket.login;
     }
+    if (ticket.adminTokenHash) {
+      session.adminTokenHash = ticket.adminTokenHash;
+    }
     if (ticket.portalSessionHash) {
       session.portalSessionHash = ticket.portalSessionHash;
     }
@@ -7675,7 +7748,11 @@ export class FleetCoordinator {
       }
       return undefined;
     }
-    return session;
+    const currentSession = withCurrentAdminGrant(session, await adminGrantValidation(this.env));
+    if (currentSession !== session) {
+      await this.state.storage.put(codeViewerSessionKey(value), currentSession);
+    }
+    return currentSession;
   }
 
   private codeViewerAuthenticationRequired(request: Request, leaseID: string): Response {
@@ -7722,7 +7799,7 @@ export class FleetCoordinator {
         return undefined;
       }
       await this.state.storage.delete(key);
-      return ticket;
+      return withCurrentAdminGrant(ticket, await adminGrantValidation(this.env));
     });
   }
 
@@ -7854,6 +7931,7 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     agent: WebSocket,
     auth: AuthContext["auth"],
+    adminGrant: CachedAdminGrant,
     portalSessionHash?: string,
   ): Promise<Response> {
     return await this.withBridgeTicketLock(async () => {
@@ -7882,6 +7960,7 @@ export class FleetCoordinator {
         owner: requestOwner(request),
         org: requestOrg(request, this.env),
         admin: isAdminRequest(request),
+        ...adminGrant,
         ...(portalSessionHash ? { portalSessionHash } : {}),
       });
       const url = new URL(request.url);
@@ -8213,6 +8292,7 @@ export class FleetCoordinator {
       const owner = requestOwner(request);
       const org = requestOrg(request, this.env);
       const admin = isAdminRequest(request);
+      const adminGrant = await adminGrantForRequest(request, admin);
       const label = webVNCViewerLabel(owner);
 
       this.trackWebVNCViewer(lease.id, {
@@ -8222,6 +8302,7 @@ export class FleetCoordinator {
         owner,
         org,
         admin,
+        ...adminGrant,
         label,
         connectedAt: new Date().toISOString(),
       });
@@ -8238,6 +8319,7 @@ export class FleetCoordinator {
         owner,
         org,
         admin,
+        ...adminGrant,
         label,
       });
       flushPendingWebVNC(this.pendingWebVNCToViewer, webVNCBufferKey(lease.id, agent.id), viewer);
@@ -8495,12 +8577,13 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
+    const currentTicket = withCurrentAdminGrant(ticket, await adminGrantValidation(this.env));
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
     await this.state.storage.delete(key);
-    return { status: "accepted", ticket, lease };
+    return { status: "accepted", ticket: currentTicket, lease };
   }
 
   private async cleanupExpiredWebVNCTickets(): Promise<void> {
@@ -8543,12 +8626,13 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
+    const currentTicket = withCurrentAdminGrant(ticket, await adminGrantValidation(this.env));
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
     await this.state.storage.delete(key);
-    return { status: "accepted", ticket, lease };
+    return { status: "accepted", ticket: currentTicket, lease };
   }
 
   private async cleanupExpiredCodeTickets(): Promise<void> {
@@ -8598,12 +8682,13 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(ticket))) {
+    const currentTicket = withCurrentAdminGrant(ticket, await adminGrantValidation(this.env));
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
     await this.state.storage.delete(key);
-    return { status: "accepted", ticket, lease };
+    return { status: "accepted", ticket: currentTicket, lease };
   }
 
   private async cleanupExpiredEgressTickets(): Promise<void> {
@@ -13416,6 +13501,77 @@ function requestAuthType(request: Request): AuthContext["auth"] {
   return auth === "bearer" || auth === "github" || auth === "proxy" ? auth : "github";
 }
 
+async function adminGrantForRequest(request: Request, admin: boolean): Promise<CachedAdminGrant> {
+  if (!admin) {
+    return {};
+  }
+  const auth = requestAuthType(request);
+  if (auth === "github") {
+    const login = request.headers.get("x-crabbox-github-login")?.trim();
+    return { auth, ...(login ? { login } : {}) };
+  }
+  if (auth === "bearer") {
+    const token = bearerToken(request);
+    return {
+      auth,
+      ...(token ? { adminTokenHash: await sha256Hex(token) } : {}),
+    };
+  }
+  return { auth };
+}
+
+type AdminGrantEnv = Pick<
+  Env,
+  "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS" | "CRABBOX_GITHUB_ADMIN_LOGINS"
+>;
+
+interface AdminGrantValidation {
+  env: AdminGrantEnv;
+  adminTokenHash?: string;
+}
+
+async function adminGrantValidation(env: AdminGrantEnv): Promise<AdminGrantValidation> {
+  return {
+    env,
+    ...(env.CRABBOX_ADMIN_TOKEN
+      ? { adminTokenHash: await sha256Hex(env.CRABBOX_ADMIN_TOKEN) }
+      : {}),
+  };
+}
+
+function cachedAdminGrantIsCurrent(
+  principal: CachedAdminGrant & { admin?: boolean; owner?: string },
+  validation: AdminGrantValidation,
+): boolean {
+  if (principal.admin !== true) {
+    return true;
+  }
+  if (
+    principal.auth === "github" &&
+    typeof principal.owner === "string" &&
+    typeof principal.login === "string"
+  ) {
+    return githubUserIsAdmin({ owner: principal.owner, login: principal.login }, validation.env);
+  }
+  if (
+    principal.auth === "bearer" &&
+    /^[a-f0-9]{64}$/.test(principal.adminTokenHash ?? "") &&
+    validation.adminTokenHash
+  ) {
+    return principal.adminTokenHash === validation.adminTokenHash;
+  }
+  return false;
+}
+
+function withCurrentAdminGrant<T extends CachedAdminGrant & { admin?: boolean; owner?: string }>(
+  principal: T,
+  validation: AdminGrantValidation,
+): T {
+  return cachedAdminGrantIsCurrent(principal, validation)
+    ? principal
+    : { ...principal, admin: false };
+}
+
 function isolatedCodeRequestOriginAllowed(request: Request): boolean {
   const requestOrigin = new URL(request.url).origin;
   const origin = request.headers.get("origin")?.trim();
@@ -14060,20 +14216,27 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
     case "code-agent":
       return typeof attachment.leaseID === "string" ? attachment : undefined;
     case "code-viewer":
-      if (typeof attachment.leaseID !== "string" || typeof attachment.id !== "string") {
+      const serializedCodeViewer = attachment as Omit<typeof attachment, "auth"> & {
+        auth?: AuthContext["auth"];
+      };
+      if (
+        typeof serializedCodeViewer.leaseID !== "string" ||
+        typeof serializedCodeViewer.id !== "string"
+      ) {
         return undefined;
       }
-      if (attachment.auth === undefined) {
-        // Pre-revocation attachments carried no auth binding; restore them only long enough to
-        // fail closed through the normal viewer/agent shutdown path.
-        return { ...attachment, auth: "github" };
+      if (serializedCodeViewer.auth === undefined) {
+        // Old attachments had no auth binding. Treat them as GitHub sessions so the existing
+        // portal-session revocation path closes them before any restored traffic is accepted.
+        return { ...serializedCodeViewer, auth: "github" };
       }
-      return (attachment.auth === "bearer" ||
-        attachment.auth === "github" ||
-        attachment.auth === "proxy") &&
-        validOptionalBridgePrincipal(attachment) &&
-        (attachment.auth !== "github" || validPortalSessionHash(attachment.portalSessionHash))
-        ? attachment
+      return (serializedCodeViewer.auth === "bearer" ||
+        serializedCodeViewer.auth === "github" ||
+        serializedCodeViewer.auth === "proxy") &&
+        validOptionalBridgePrincipal(serializedCodeViewer) &&
+        (serializedCodeViewer.auth !== "github" ||
+          validPortalSessionHash(serializedCodeViewer.portalSessionHash))
+        ? (serializedCodeViewer as Extract<BridgeAttachment, { kind: "code-viewer" }>)
         : undefined;
     case "egress-host":
     case "egress-client":
@@ -14141,12 +14304,21 @@ function validOptionalEgressBridgePrincipal(value: {
   return legacy || completeBridgePrincipal(value);
 }
 
-function leaseBridgeTicketPrincipal(ticket: { owner: string; org: string; admin?: boolean }): {
+function leaseBridgeTicketPrincipal(
+  ticket: CachedAdminGrant & { owner: string; org: string; admin?: boolean },
+): CachedAdminGrant & {
   owner: string;
   org: string;
   admin: boolean;
 } {
-  return { owner: ticket.owner, org: ticket.org, admin: ticket.admin === true };
+  return {
+    owner: ticket.owner,
+    org: ticket.org,
+    admin: ticket.admin === true,
+    ...(ticket.auth ? { auth: ticket.auth } : {}),
+    ...(ticket.login ? { login: ticket.login } : {}),
+    ...(ticket.adminTokenHash ? { adminTokenHash: ticket.adminTokenHash } : {}),
+  };
 }
 
 function bridgeTags(attachment: BridgeAttachment): string[] {

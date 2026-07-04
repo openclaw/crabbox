@@ -108,8 +108,8 @@ export async function authenticateRequest(
   return trustedIdentity;
 }
 
-function githubUserIsAdmin(
-  payload: Pick<UserTokenPayload, "owner" | "login">,
+export function githubUserIsAdmin(
+  payload: { owner: string; login: string },
   env: Pick<Env, "CRABBOX_GITHUB_ADMIN_OWNERS" | "CRABBOX_GITHUB_ADMIN_LOGINS">,
 ): boolean {
   const owner = payload.owner.trim().toLowerCase();

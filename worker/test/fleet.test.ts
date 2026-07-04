@@ -303,6 +303,8 @@ describe("runtime adapter relay", () => {
           owner: "admin@example.com",
           org: "other-org",
           admin: true,
+          auth: "github",
+          login: "current-admin",
         }),
     );
     const fleet = new FleetDurableObject(
@@ -310,7 +312,10 @@ describe("runtime adapter relay", () => {
         storage,
         getWebSockets: () => [...revoked, ...legacy, ...admin] as unknown as WebSocket[],
       } as unknown as DurableObjectState,
-      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+      {
+        CRABBOX_DEFAULT_ORG: "default-org",
+        CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+      } as Env,
     );
 
     expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
@@ -331,6 +336,149 @@ describe("runtime adapter relay", () => {
     expect(relay.egressSessions.has(revokedLease.id)).toBe(false);
     expect(relay.egressSessions.has(legacyLease.id)).toBe(false);
     expect(relay.egressSessions.get(adminLease.id)?.sessionID).toBe("egress_admin");
+  });
+
+  it("revokes stale admin grants on every restored principal-bearing bridge", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_000000000021",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      owner: "owner@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const revokedGrant = {
+      owner: "former-admin@example.com",
+      org: "other-org",
+      admin: true,
+      auth: "github",
+      login: "former-admin",
+    } as const;
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id });
+    const revokedCodeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID: lease.id,
+      id: "code-revoked-admin",
+      portalSessionHash: "a".repeat(64),
+      ...revokedGrant,
+    });
+    const webVNCAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID: lease.id,
+      id: "agent_revoked_admin",
+      capabilities: new Set<string>(),
+    });
+    const revokedWebVNCViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID: lease.id,
+      id: "viewer_revoked_admin",
+      agentID: "agent_revoked_admin",
+      label: "former-admin",
+      ...revokedGrant,
+    });
+    const revokedEgress = ["egress-host", "egress-client"].map(
+      (kind) =>
+        new FakeWebSocket({
+          kind,
+          leaseID: lease.id,
+          sessionID: "egress_revoked_admin",
+          ...revokedGrant,
+        }),
+    );
+    const revokedControl = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-revoked-admin",
+      subscriptions: {},
+      ...revokedGrant,
+    });
+    const legacyControl = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-legacy-admin",
+      owner: "legacy-admin@example.com",
+      org: "other-org",
+      admin: true,
+      subscriptions: {},
+    });
+    const currentGitHubControl = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-current-github-admin",
+      owner: "current-admin@example.com",
+      org: "other-org",
+      admin: true,
+      auth: "github",
+      login: "current-admin",
+      subscriptions: {},
+    });
+    const currentAdminToken = "current-admin-token";
+    const currentBearerControl = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-current-bearer-admin",
+      owner: "bearer-admin@example.com",
+      org: "other-org",
+      admin: true,
+      auth: "bearer",
+      adminTokenHash: await sha256Hex(currentAdminToken),
+      subscriptions: {},
+    });
+    const rotatedBearerControl = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-rotated-bearer-admin",
+      owner: "bearer-admin@example.com",
+      org: "other-org",
+      admin: true,
+      auth: "bearer",
+      adminTokenHash: await sha256Hex("old-admin-token"),
+      subscriptions: {},
+    });
+    const sockets = [
+      codeAgent,
+      revokedCodeViewer,
+      webVNCAgent,
+      revokedWebVNCViewer,
+      ...revokedEgress,
+      revokedControl,
+      legacyControl,
+      currentGitHubControl,
+      currentBearerControl,
+      rotatedBearerControl,
+    ];
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => sockets as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      {
+        CRABBOX_ADMIN_TOKEN: currentAdminToken,
+        CRABBOX_DEFAULT_ORG: "default-org",
+        CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+      } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    for (const socket of [
+      revokedCodeViewer,
+      revokedWebVNCViewer,
+      ...revokedEgress,
+      revokedControl,
+      legacyControl,
+      rotatedBearerControl,
+    ]) {
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.closeReason).toBe("admin access revoked");
+    }
+    expect(currentGitHubControl.closeCode).toBeUndefined();
+    expect(currentBearerControl.closeCode).toBeUndefined();
+    expect(codeAgent.sentJSON()).toEqual([
+      {
+        type: "ws_close",
+        id: "code-revoked-admin",
+        code: 1008,
+        reason: "admin access revoked",
+      },
+    ]);
   });
 
   it("rejects hibernated Code viewers whose portal session logged out", async () => {
@@ -9540,7 +9688,8 @@ describe("fleet lease identity and idle", () => {
 
   it("revokes only unauthorized live viewers after an API share removal", async () => {
     const storage = new MemoryStorage();
-    const fleet = testFleet(storage);
+    const adminToken = "current-admin-token";
+    const fleet = testFleet(storage, {}, { CRABBOX_ADMIN_TOKEN: adminToken });
     const leaseID = "cbx_000000000001";
     const ownerHeaders = {
       "x-crabbox-owner": "owner@example.com",
@@ -9633,6 +9782,7 @@ describe("fleet lease identity and idle", () => {
       owner: "admin@example.com",
       org: "other-org",
       admin: true,
+      adminTokenHash: await sha256Hex(adminToken),
     });
     const legacyCodeViewer = new FakeWebSocket({
       kind: "code-viewer",
@@ -15110,6 +15260,74 @@ describe("fleet lease identity and idle", () => {
     expect(malformedSession.status).toBe(302);
   });
 
+  it("downgrades stale admin grants in durable Code viewer tickets and sessions", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
+      CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+    };
+    const fleet = testFleet(storage, {}, env);
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "owner@example.com",
+        org: "example-org",
+        code: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const isolatedOrigin = await codeOriginForLease(env, leaseID);
+    expect(isolatedOrigin).toBeDefined();
+    const staleGrant = {
+      auth: "github",
+      admin: true,
+      owner: "former-admin@example.com",
+      org: "other-org",
+      login: "former-admin",
+      portalSessionHash: "a".repeat(64),
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    } as const;
+    const session = `code_session_${"a".repeat(32)}`;
+    storage.seed(`code-viewer-session:${session}`, {
+      session,
+      leaseID,
+      ...staleGrant,
+    });
+
+    const staleSession = await fleet.fetch(
+      new Request(`${isolatedOrigin}/portal/leases/${leaseID}/code/health`, {
+        headers: { cookie: `crabbox_code_session=${session}` },
+      }),
+    );
+    expect(staleSession.status).toBe(404);
+    expect(storage.value<{ admin: boolean }>(`code-viewer-session:${session}`)?.admin).toBe(false);
+
+    const ticket = `code_view_${"b".repeat(32)}`;
+    storage.seed(`code-viewer-ticket:${ticket}`, {
+      ticket,
+      leaseID,
+      returnTo: `/portal/leases/${leaseID}/code/`,
+      ...staleGrant,
+    });
+    const bootstrap = await fleet.fetch(
+      new Request(
+        `${isolatedOrigin}/portal/leases/${leaseID}/code/__crabbox_bootstrap?ticket=${ticket}`,
+      ),
+    );
+    expect(bootstrap.status).toBe(303);
+    const issuedSession = /crabbox_code_session=([^;]+)/.exec(
+      bootstrap.headers.get("set-cookie") ?? "",
+    )?.[1];
+    expect(issuedSession).toMatch(/^code_session_[a-f0-9]{32}$/);
+    expect(storage.value<{ admin: boolean }>(`code-viewer-session:${issuedSession}`)?.admin).toBe(
+      false,
+    );
+  });
+
   it("revokes isolated Code viewer access end to end when the portal session logs out", async () => {
     const storage = new MemoryStorage();
     const env = {
@@ -15712,6 +15930,45 @@ describe("fleet lease identity and idle", () => {
     expect(
       Object.keys(forwarded?.headers ?? {}).filter((key) => key.startsWith("x-crabbox-")),
     ).toEqual([]);
+  });
+
+  it("rejects bridge tickets whose cached admin grant was revoked", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, { CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin" });
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "owner@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const ticket = `egress_${"a".repeat(32)}`;
+    storage.seed(`egress-ticket:${ticket}`, {
+      ticket,
+      leaseID,
+      owner: "former-admin@example.com",
+      org: "other-org",
+      admin: true,
+      auth: "github",
+      login: "former-admin",
+      role: "host",
+      sessionID: "egress_revoked_ticket",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster/egress/host", {
+        headers: { authorization: `Bearer ${ticket}`, upgrade: "websocket" },
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(storage.value(`egress-ticket:${ticket}`)).toBeUndefined();
   });
 
   it("creates scoped egress tickets and reports bridge status", async () => {

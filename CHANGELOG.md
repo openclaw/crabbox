@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Revalidated cached GitHub and bearer admin grants before restoring bridge sockets or consuming durable bridge tickets and Code sessions, closing or downgrading sessions after admin revocation. Thanks @coygeek.
 - Replaced raw generated VNC credentials in copied WebVNC links with short-lived, one-time, authorization-checked handoff tickets. Thanks @coygeek.
 - Closed restored WebVNC viewer sockets that lack a complete current organization-bound principal instead of retaining owner-only legacy authorization. Thanks @coygeek.
 - Enforced key-only OpenSSH authentication across managed Windows desktop, core, and WSL2 bootstraps while retaining generated Windows passwords for console and VNC use. Thanks @coygeek.
