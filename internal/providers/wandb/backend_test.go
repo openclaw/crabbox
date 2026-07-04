@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
 )
 
 // wandbRecordingRunner mirrors the recording-runner pattern used by
@@ -549,6 +551,39 @@ func TestWandbStopFailurePreservesClaim(t *testing.T) {
 	claim, ok, resolveErr := resolveWandbClaim("sb-abc")
 	if resolveErr != nil || !ok || claim.CloudID != "sb-abc" {
 		t.Fatalf("failed stop claim=%#v ok=%v err=%v", claim, ok, resolveErr)
+	}
+}
+
+func TestWandbStopRemovesStaleClaimWhenSandboxIsGone(t *testing.T) {
+	api := &fakeWandbAPI{statusErr: &wandbAPIError{Code: codes.NotFound, ExitCode: 4, Stderr: "Get: not found"}}
+	backend := newWandbBackendForTest(t, api)
+	seedWandbClaim(t, backend, "sb-abc")
+
+	if err := backend.Stop(context.Background(), StopRequest{ID: "sb-abc"}); err != nil {
+		t.Fatalf("Stop err: %v", err)
+	}
+	if api.statusID != "sb-abc" || api.stopID != "" {
+		t.Fatalf("statusID=%q stopID=%q, want missing check without provider stop", api.statusID, api.stopID)
+	}
+	if _, ok, err := resolveWandbClaim("sb-abc"); err != nil || ok {
+		t.Fatalf("stale claim remains ok=%v err=%v", ok, err)
+	}
+}
+
+func TestWandbStopPreservesClaimWhenSandboxLostManagedTag(t *testing.T) {
+	api := &fakeWandbAPI{statusValue: wandbSandbox{ID: "sb-abc", Status: "RUNNING"}}
+	backend := newWandbBackendForTest(t, api)
+	seedWandbClaim(t, backend, "sb-abc")
+
+	err := backend.Stop(context.Background(), StopRequest{ID: "sb-abc"})
+	if err == nil || !strings.Contains(err.Error(), "not tagged as Crabbox-managed") {
+		t.Fatalf("Stop err=%v, want untagged refusal", err)
+	}
+	if api.stopID != "" {
+		t.Fatalf("untagged sandbox reached Stop(%q)", api.stopID)
+	}
+	if claim, ok, resolveErr := resolveWandbClaim("sb-abc"); resolveErr != nil || !ok || claim.CloudID != "sb-abc" {
+		t.Fatalf("untagged sandbox claim=%#v ok=%v err=%v", claim, ok, resolveErr)
 	}
 }
 

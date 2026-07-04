@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"google.golang.org/grpc/codes"
 )
 
 const wandbStopTimeout = 15 * time.Second
@@ -192,6 +194,22 @@ func wandbCleanupCommand(sandboxID string) string {
 	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, shellQuote(sandboxID))
 }
 
+type wandbSandboxMissingError struct {
+	sandboxID string
+}
+
+func (e *wandbSandboxMissingError) Error() string {
+	return fmt.Sprintf("wandb sandbox %q is not tagged as Crabbox-managed or no longer exists", e.sandboxID)
+}
+
+func (e *wandbSandboxMissingError) As(target any) bool {
+	if exitErr, ok := target.(*ExitError); ok {
+		*exitErr = ExitError{Code: 4, Message: e.Error()}
+		return true
+	}
+	return false
+}
+
 func requireWandbOwnership(ctx context.Context, client wandbAPI, identifier, providerScope string) (LeaseClaim, string, error) {
 	claim, ok, err := resolveWandbClaim(identifier)
 	if err != nil {
@@ -204,7 +222,7 @@ func requireWandbOwnership(ctx context.Context, client wandbAPI, identifier, pro
 		return LeaseClaim{}, "", exit(4, "wandb sandbox %q ownership claim belongs to a different endpoint, entity, or project", identifier)
 	}
 	if err := requireWandbInventoryOwnership(ctx, client, claim.CloudID); err != nil {
-		return LeaseClaim{}, "", err
+		return claim, claim.CloudID, err
 	}
 	return claim, claim.CloudID, nil
 }
@@ -218,6 +236,13 @@ func requireWandbInventoryOwnership(ctx context.Context, client wandbAPI, sandbo
 		if sandbox.ID == sandboxID {
 			return nil
 		}
+	}
+	if _, err := client.Status(ctx, sandboxID); err != nil {
+		var apiErr *wandbAPIError
+		if errors.As(err, &apiErr) && apiErr.Code == codes.NotFound {
+			return &wandbSandboxMissingError{sandboxID: sandboxID}
+		}
+		return err
 	}
 	return exit(4, "wandb sandbox %q is not tagged as Crabbox-managed or no longer exists", sandboxID)
 }
@@ -303,6 +328,10 @@ func (b *wandbBackend) Stop(ctx context.Context, req StopRequest) error {
 	}
 	claim, sandboxID, err := requireWandbOwnership(ctx, client, sandboxID, providerScope)
 	if err != nil {
+		var missing *wandbSandboxMissingError
+		if errors.As(err, &missing) {
+			return removeWandbClaimAfter(claim, func() error { return nil })
+		}
 		return err
 	}
 	return removeWandbClaimAfter(claim, func() error {

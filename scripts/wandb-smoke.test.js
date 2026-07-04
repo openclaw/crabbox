@@ -20,6 +20,7 @@ test("wandb smoke resolves relative CRABBOX_BIN before changing repo", () => {
 	const calls = path.join(dir, "calls.log");
 	const trap = path.join(dir, "trap.log");
 	const active = path.join(dir, "active");
+	const leftRemoteOnce = path.join(dir, "left-remote-once");
 	fs.mkdirSync(path.join(caller, "bin"), { recursive: true });
 	fs.mkdirSync(path.join(target, "bin"), { recursive: true });
 	fs.mkdirSync(tools);
@@ -60,7 +61,9 @@ case "\${1:-}" in
       exit 4
     fi
     rm -f "$XDG_STATE_HOME/crabbox/claims/sb-live.json"
-    if [[ "\${CRABBOX_FAKE_LEAVE_REMOTE:-}" != "1" ]]; then
+    if [[ "\${CRABBOX_FAKE_LEAVE_REMOTE:-}" == "1" && ! -e "${leftRemoteOnce}" ]]; then
+	  : >"${leftRemoteOnce}"
+	else
       rm -f "${active}"
     fi
     ;;
@@ -169,4 +172,5 @@ esac
 	});
 	assert.equal(residueResult.status, 1, residueResult.stderr || residueResult.stdout);
 	assert.match(residueResult.stderr, /wandb smoke stop left active remote inventory residue/);
+	assert.equal(fs.existsSync(active), false, "cleanup retry left remote sandbox residue");
 });

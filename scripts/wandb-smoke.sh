@@ -109,6 +109,8 @@ run_in_repo "$cb" run \
   --no-sync \
   --id "$sandbox_id" \
   -- echo crabbox-wandb-reuse-ok
+claim_backup="$smoke_root/claim.json"
+cp -- "$claim_path" "$claim_backup"
 run_in_repo "$cb" stop --provider wandb --id "$sandbox_id"
 if [[ -e "$claim_path" ]]; then
   echo "wandb smoke stop left local claim residue" >&2
@@ -118,5 +120,7 @@ if ! run_in_repo "$cb" list --provider wandb --json | jq -e --arg id "$sandbox_i
   echo "wandb smoke stop left active remote inventory residue" >&2
   exit 1
 fi
+rm -- "$claim_backup"
+claim_backup=""
 sandbox_id=""
 printf 'wandb live smoke complete\n'
