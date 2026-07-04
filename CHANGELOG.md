@@ -10,6 +10,7 @@
 ### Fixed
 
 - Required W&B sandbox reuse, status, and stop to match an exact endpoint/entity/project/resource-bound local claim plus provider inventory ownership. Thanks @coygeek.
+- Required RunPod stop to use an exact pod ID/name-bound local claim, with conflict-safe explicit `--reclaim` adoption for unclaimed or legacy pods. Thanks @coygeek.
 - Made coordinatorless generic provider live smokes skip coordinator-only history and always clean up acquired leases after later lifecycle failures.
 - Replaced privileged managed Linux Code Server and Tailscale installer scripts with checksum-verified archives or Tailscale's signed package repository with a pinned keyring in both CLI and coordinator bootstrap paths. Thanks @TurboTheTurtle.
 
@@ -36,7 +37,6 @@
 - Reported Apple VZ helper startup failures deterministically instead of racing them into misleading readiness timeouts. Thanks @coygeek.
 - Preserved the configured controller identity binding when rendering redacted configuration and launching controller subprocesses.
 - Released checkpoint forks with a fresh cleanup context after post-acquire provisioning failures or caller cancellation. Thanks @yetval.
-- Required RunPod stop to use an exact pod ID/name-bound local claim, with conflict-safe explicit `--reclaim` adoption for unclaimed or legacy pods. Thanks @coygeek.
 - Required canonical Hetzner labels plus an exact server-bound local claim before direct stop or cleanup can delete a server, and kept canonical lease IDs from falling through to slug or name aliases. Thanks @coygeek.
 - Kept WebVNC framebuffer and heartbeat traffic responsive while desktop themes apply, and fully detached long-lived Wayland wallpaper processes from their launching SSH sessions.
 - Required an exact local or explicit `stop --reclaim` deployment claim before stopping an out-of-band Railway service, binding adoption to the configured endpoint, project, environment, service, and deployment. Thanks @coygeek.
