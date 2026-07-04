@@ -55,6 +55,7 @@ func init() {
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
 	RegisterProvider(testServiceControlProvider{})
+	RegisterProvider(testStopReclaimProvider{})
 	RegisterProvider(testWindowsSandboxProvider{})
 }
 
@@ -2254,6 +2255,37 @@ type testDelegatedBackend struct {
 	spec        ProviderSpec
 	portsOutput string
 	copyErr     error
+}
+
+type testStopReclaimProvider struct{}
+
+func (testStopReclaimProvider) Name() string      { return "stop-reclaim-test" }
+func (testStopReclaimProvider) Aliases() []string { return nil }
+func (testStopReclaimProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "stop-reclaim-test",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testStopReclaimProvider) RegisterFlags(*flag.FlagSet, Config) any { return nil }
+func (testStopReclaimProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testStopReclaimProvider) Configure(Config, Runtime) (Backend, error) {
+	return testStopReclaimBackend{testDelegatedBackend: testDelegatedBackend{spec: p.Spec()}}, nil
+}
+
+type testStopReclaimBackend struct{ testDelegatedBackend }
+
+var testStopReclaimHook func(StopRequest) error
+
+func (testStopReclaimBackend) ReclaimAndStop(_ context.Context, req StopRequest) error {
+	if testStopReclaimHook != nil {
+		return testStopReclaimHook(req)
+	}
+	return nil
 }
 
 type testIsloBackend struct {

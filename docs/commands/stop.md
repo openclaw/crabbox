@@ -63,6 +63,10 @@ Crabbox lease ID and local slug:
   current deployment; Crabbox persists that exact one-deployment binding before
   stopping it. Failed stops retain the claim for an exact retry, while successful
   stops remove it.
+- `hetzner` — requires canonical remote ownership labels and an exact local
+  claim bound to the server ID and lease ID. Unclaimed resources must first be
+  explicitly reclaimed through a normal reuse command; failed deletion keeps
+  the claim for an exact retry.
 - `vercel-sandbox` — accepts a Crabbox-created local slug or `vsbx_...` lease
   ID, verifies ownership metadata, deletes the Vercel Sandbox, and removes the
   local claim. Missing remote sandboxes preserve the claim unless

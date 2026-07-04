@@ -568,6 +568,32 @@ func TestConditionalClaimActionUpdateRejectsChangedState(t *testing.T) {
 	}
 }
 
+func TestConditionalClaimActionFailureRetainsClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_conditionalfailure123"
+	if err := claimLeaseTargetForRepoConfig(leaseID, "first", Config{Provider: "aws"}, Server{Provider: "aws", CloudID: "i-123"}, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionErr := errors.New("provider stop failed")
+	_, err = updateLeaseClaimLabelsIfUnchangedAfter(leaseID, expected, map[string]string{"state": "stopped"}, func() error {
+		return actionErr
+	})
+	if !errors.Is(err, actionErr) {
+		t.Fatalf("conditional action err=%v, want provider failure", err)
+	}
+	retained, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(retained, expected) {
+		t.Fatalf("claim changed after failed action:\n got %#v\nwant %#v", retained, expected)
+	}
+}
+
 func TestConditionalClaimEndpointActionUpdatesAtomically(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_conditionalendpoint123"

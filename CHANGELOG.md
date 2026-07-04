@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Required canonical Hetzner labels plus an exact server-bound local claim before direct stop or cleanup can delete a server, and kept canonical lease IDs from falling through to slug or name aliases. Thanks @coygeek.
 - Kept WebVNC framebuffer and heartbeat traffic responsive while desktop themes apply, and fully detached long-lived Wayland wallpaper processes from their launching SSH sessions.
 - Required an exact local or explicit `stop --reclaim` deployment claim before stopping an out-of-band Railway service, binding adoption to the configured endpoint, project, environment, service, and deployment. Thanks @coygeek.
 - Refused repository-selected Static SSH, Parallels, and exe.dev control destinations when they would inherit trusted or ambient SSH authentication; explicit host overrides remain available for operator approval. Thanks @coygeek.

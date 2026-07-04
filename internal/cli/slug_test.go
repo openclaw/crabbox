@@ -239,6 +239,21 @@ func TestFindServerByAliasPrefersCanonicalID(t *testing.T) {
 	}
 }
 
+func TestFindServerByAliasDoesNotRetargetMissingCanonicalID(t *testing.T) {
+	id := "cbx_222222222222"
+	servers := []Server{{
+		Name:   id,
+		Labels: map[string]string{"lease": "cbx_111111111111", "slug": id},
+	}}
+	server, leaseID, err := findServerByAlias(servers, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseID != "" || server.DisplayID() != "0" {
+		t.Fatalf("matched server=%s lease=%q, want no alias fallback", server.DisplayID(), leaseID)
+	}
+}
+
 func TestFindServerByAliasMatchesCloudInstanceName(t *testing.T) {
 	servers := []Server{
 		{Name: "crabbox-fallback-zone", CloudID: "crabbox-fallback-zone", Labels: map[string]string{"lease": "cbx_333333333333", "slug": "fallback-zone"}},
