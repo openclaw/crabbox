@@ -735,7 +735,10 @@ func (b *Backend) targetFromServer(ctx context.Context, client Client, item *ins
 }
 
 func (b *Backend) releaseTargetFromClaim(ctx context.Context, client Client, id string) (core.LeaseTarget, error) {
-	claim, ok, err := core.ResolveLeaseClaimForProvider(id, providerName)
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(id, providerName)
+	if err == nil && (exact || core.IsCanonicalLeaseID(id)) && (!exact || !ok || claim.LeaseID != id) {
+		return core.LeaseTarget{}, core.Exit(2, "scaleway exact lease identifier %q does not match a valid scaleway claim", id)
+	}
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}

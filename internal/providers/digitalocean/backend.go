@@ -372,7 +372,7 @@ func (b *digitalOceanLeaseBackend) releaseTargetFromClaim(ctx context.Context, c
 	} else {
 		var exact bool
 		claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, providerName)
-		if err == nil && exact && (!ok || claim.LeaseID != id) {
+		if err == nil && (exact || core.IsCanonicalLeaseID(id)) && (!exact || !ok || claim.LeaseID != id) {
 			return core.LeaseTarget{}, core.Exit(2, "digitalocean exact lease identifier %q does not match a valid digitalocean claim", id)
 		}
 	}

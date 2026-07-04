@@ -82,6 +82,7 @@ func TestLeaseStatusStateCanBeReadyRejectsTerminalStates(t *testing.T) {
 }
 
 func TestStatusWaitRequestsReadyProbe(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 	t.Setenv("CRABBOX_COORDINATOR", "")
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
@@ -123,6 +124,44 @@ func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 	}
 	if !backend.requests[0].ReadyProbe {
 		t.Fatal("status --wait should request SSH readiness data")
+	}
+	if len(backend.touches) != 0 {
+		t.Fatalf("claimless status --wait touch calls=%d want 0", len(backend.touches))
+	}
+
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	claimServer := Server{
+		Provider: "aws",
+		CloudID:  "i-status",
+		Labels: map[string]string{
+			"lease":    "cbx_status",
+			"slug":     "status",
+			"provider": "aws",
+		},
+	}
+	if err := claimLeaseTargetForRepoConfig("cbx_status", "status", cfg, claimServer, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	providerScope := leaseOptionsFromConfig(cfg).ProviderScope
+	claimed, err := statusLeaseHasExactClaim(LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope)
+	if err != nil || !claimed {
+		t.Fatalf("matching exact claim allowed=%t err=%v", claimed, err)
+	}
+	if claimed, err := statusLeaseHasExactClaim(LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope+"-other"); err != nil || claimed {
+		t.Fatalf("scope-mismatched claim allowed=%t err=%v", claimed, err)
+	}
+	wrongResource := claimServer
+	wrongResource.CloudID = "i-other"
+	if claimed, err := statusLeaseHasExactClaim(LeaseTarget{LeaseID: "cbx_status", Server: wrongResource}, "aws", providerScope); err != nil || claimed {
+		t.Fatalf("resource-mismatched claim allowed=%t err=%v", claimed, err)
+	}
+	err = app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status", "--wait", "--wait-timeout", "1ns"})
+	if !AsExitError(err, &exitErr) || exitErr.Code != 5 {
+		t.Fatalf("claimed status --wait error = %#v, want timeout exit 5", err)
+	}
+	if len(backend.touches) != 1 {
+		t.Fatalf("claimed status --wait touch calls=%d want 1", len(backend.touches))
 	}
 }
 
@@ -169,6 +208,7 @@ func TestStatusWaitPreservesBackendTimeoutDetail(t *testing.T) {
 type statusResolveRecordingBackend struct {
 	testSSHBackend
 	requests      []ResolveRequest
+	touches       []TouchRequest
 	block         bool
 	timeoutDetail string
 }
@@ -185,12 +225,21 @@ func (b *statusResolveRecordingBackend) Resolve(ctx context.Context, req Resolve
 	return LeaseTarget{
 		Server: Server{
 			Provider: "aws",
+			CloudID:  "i-status",
 			Status:   "running",
 			Labels: map[string]string{
+				"lease":             "cbx_status",
+				"slug":              "status",
+				"provider":          "aws",
 				"state":             "ready",
 				"idle_timeout_secs": "60",
 			},
 		},
 		LeaseID: "cbx_status",
 	}, nil
+}
+
+func (b *statusResolveRecordingBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+	b.touches = append(b.touches, req)
+	return req.Lease.Server, nil
 }

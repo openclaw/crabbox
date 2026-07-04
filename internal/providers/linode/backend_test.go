@@ -365,6 +365,32 @@ func TestResolveNumericSlugBeforeRawLinodeID(t *testing.T) {
 	}
 }
 
+func TestReleaseCanonicalIdentifierDoesNotFallBackToClaimSlug(t *testing.T) {
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	const (
+		requestedID = "cbx_aaaaaaaaaaaa"
+		lookalikeID = "cbx_bbbbbbbbbbbb"
+	)
+	labels := core.DirectLeaseLabels(backend.Cfg, lookalikeID, requestedID, providerName, "", false, time.Now())
+	labels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
+	server := core.Server{
+		Provider: providerName,
+		CloudID:  "456",
+		ID:       456,
+		Name:     core.LeaseProviderName(lookalikeID, requestedID),
+		Labels:   labels,
+	}
+	if err := core.ClaimLeaseTargetForRepoConfig(lookalikeID, requestedID, backend.Cfg, server, core.SSHTarget{}, t.TempDir(), backend.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: requestedID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "exact lease identifier") {
+		t.Fatalf("Resolve release-only err=%v", err)
+	}
+}
+
 func TestResolveReadOnlyDoesNotClaimVisibleLinode(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

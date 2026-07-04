@@ -2893,7 +2893,8 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 				return server, server.Labels["lease"], nil
 			}
 		}
-		// Canonical lease IDs are exact identities, never aliases.
+		// Canonical IDs are exact identities, never aliases. Falling through to
+		// slug or provider-name matching could retarget a destructive operation.
 		return Server{}, "", nil
 	}
 	matches := make([]Server, 0, 2)

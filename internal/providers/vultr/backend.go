@@ -436,7 +436,7 @@ func (b *backend) releaseTargetFromClaim(id, accountID string) (core.LeaseTarget
 	} else {
 		var exact bool
 		claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, providerName)
-		if err == nil && exact && (!ok || claim.LeaseID != id) {
+		if err == nil && (exact || core.IsCanonicalLeaseID(id)) && (!exact || !ok || claim.LeaseID != id) {
 			return core.LeaseTarget{}, core.Exit(2, "vultr exact lease identifier %q does not match a valid vultr claim", id)
 		}
 	}

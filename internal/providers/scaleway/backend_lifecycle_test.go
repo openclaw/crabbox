@@ -298,6 +298,64 @@ func TestScalewayReleaseOnlyPreservesAmbiguousSlugError(t *testing.T) {
 	}
 }
 
+func TestScalewayReleaseOnlyDoesNotRetargetForeignExactClaimToSlug(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	const (
+		requestedID = "cbx_222222222222"
+		lookalikeID = "cbx_333333333333"
+	)
+
+	foreignCfg := cfg
+	foreignCfg.Provider = "aws"
+	foreignLabels := core.DirectLeaseLabels(foreignCfg, requestedID, "foreign", "aws", "", false, backend.clockNow())
+	if err := core.ClaimLeaseTargetForConfig(requestedID, "foreign", foreignCfg, core.Server{Provider: "aws", CloudID: "i-foreign", Labels: foreignLabels}, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+
+	labels := core.DirectLeaseLabels(cfg, lookalikeID, requestedID, providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	fake.server = testServer("srv-lookalike", "lookalike", tagsFromLabels(labels), "203.0.113.23")
+	server := backend.serverFromScaleway(fake.server)
+	if err := core.ClaimLeaseTargetForConfig(lookalikeID, requestedID, cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: requestedID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "exact lease identifier") {
+		t.Fatalf("Resolve release-only err=%v", err)
+	}
+	if fake.deletedServer || fake.deletedKey {
+		t.Fatalf("retargeted cleanup deleted server=%t key=%t", fake.deletedServer, fake.deletedKey)
+	}
+}
+
+func TestScalewayReleaseOnlyDoesNotFallBackToCanonicalClaimSlug(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	const (
+		requestedID = "cbx_aaaaaaaaaaaa"
+		lookalikeID = "cbx_bbbbbbbbbbbb"
+	)
+	labels := core.DirectLeaseLabels(cfg, lookalikeID, requestedID, providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	fake.server = testServer("srv-lookalike", "lookalike", tagsFromLabels(labels), "203.0.113.24")
+	server := backend.serverFromScaleway(fake.server)
+	if err := core.ClaimLeaseTargetForConfig(lookalikeID, requestedID, cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: requestedID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "exact lease identifier") {
+		t.Fatalf("Resolve release-only err=%v", err)
+	}
+	if fake.deletedServer || fake.deletedKey {
+		t.Fatalf("retargeted cleanup deleted server=%t key=%t", fake.deletedServer, fake.deletedKey)
+	}
+}
+
 func TestScalewayUpdateTailscaleMetadataPersistsTagsAndClaim(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "tailnet"})

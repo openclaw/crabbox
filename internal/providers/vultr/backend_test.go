@@ -558,6 +558,32 @@ func TestReleaseOnlyResolveRejectsExactNonVultrLeaseID(t *testing.T) {
 	}
 }
 
+func TestReleaseCanonicalIdentifierDoesNotFallBackToClaimSlug(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	const (
+		requestedID = "cbx_aaaaaaaaaaaa"
+		lookalikeID = "cbx_bbbbbbbbbbbb"
+	)
+	labels := core.DirectLeaseLabels(b.Cfg, lookalikeID, requestedID, providerName, "", false, time.Now())
+	labels[vultrAccountLabel] = "account:test-account"
+	labels[vultrKeyOwnedLabel] = "false"
+	server := core.Server{
+		Provider: providerName,
+		CloudID:  "99999999-9999-4999-8999-999999999999",
+		Name:     core.LeaseProviderName(lookalikeID, requestedID),
+		Labels:   labels,
+	}
+	if err := core.ClaimLeaseTargetForRepoConfig(lookalikeID, requestedID, b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: requestedID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "exact lease identifier") {
+		t.Fatalf("Resolve release-only err=%v", err)
+	}
+}
+
 func TestTouchAppliesIdleTimeoutOverride(t *testing.T) {
 	api := &fakeVultrAPI{}
 	b := newTestBackend(t, api)
