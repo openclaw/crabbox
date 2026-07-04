@@ -27,6 +27,10 @@ const mocks = vi.hoisted(() => {
   const storage = {
     initialize: vi.fn<() => Promise<void>>(async () => {}),
     close: vi.fn<() => Promise<void>>(async () => {}),
+    get: vi.fn<(key: string) => Promise<unknown>>(async () => undefined),
+    put: vi.fn<(key: string, value: unknown) => Promise<void>>(async () => {}),
+    delete: vi.fn<(key: string) => Promise<void>>(async () => {}),
+    take: vi.fn<(key: string) => Promise<unknown>>(async () => undefined),
   };
   return { boss, storage };
 });
@@ -59,6 +63,18 @@ describe("NodeCoordinatorRuntime", () => {
       "coordinator-alarm",
       expect.objectContaining({ policy: "short" }),
     );
+  });
+
+  it("persists the scheduled alarm time across Node coordinator restarts", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    mocks.storage.get.mockResolvedValueOnce(1234);
+
+    await expect(runtime.getAlarm()).resolves.toBe(1234);
+    await runtime.scheduleAlarm(5678);
+    await runtime.clearAlarm();
+
+    expect(mocks.storage.put).toHaveBeenCalledWith("node-runtime:alarm-time", 5678);
+    expect(mocks.storage.delete).toHaveBeenCalledWith("node-runtime:alarm-time");
   });
 
   it("contains WebSocket message handler failures to the offending socket", async () => {

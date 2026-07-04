@@ -90,6 +90,22 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
     await this.pool.query(`delete from ${table} where key = $1`, [key]);
   }
 
+  async take<T>(key: string): Promise<T | undefined> {
+    const result = await this.pool.query<{ encoded_value: unknown }>(
+      `
+        delete from ${table}
+        where key = $1
+        returning case
+          when value_text_updated_at = updated_at then value_text
+          else value::text
+        end as encoded_value
+      `,
+      [key],
+    );
+    const row = result.rows[0];
+    return row ? decodeStoredValue<T>(row.encoded_value) : undefined;
+  }
+
   async list<T>({ prefix = "" }: { prefix?: string } = {}): Promise<Map<string, T>> {
     const result = await this.pool.query<{ key: string; encoded_value: unknown }>(
       `

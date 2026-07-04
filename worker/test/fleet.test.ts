@@ -74,8 +74,16 @@ class MemoryStorage {
     this.alarmTime = undefined;
   }
 
+  async getAlarm(): Promise<number | null> {
+    return this.alarmTime ?? null;
+  }
+
   async setAlarm(time: number): Promise<void> {
     this.alarmTime = time;
+  }
+
+  async transaction<T>(callback: (transaction: MemoryStorage) => Promise<T>): Promise<T> {
+    return await callback(this);
   }
 
   async list<T>({ prefix = "" }: { prefix?: string } = {}): Promise<Map<string, T>> {
@@ -16047,10 +16055,12 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).toContain("saveShare");
     expect(pageBody).toContain("teammate@example.com");
     expect(pageBody).toContain("shareableWebVNCURL");
-    expect(pageBody).toContain('linkFragment.set("username", username)');
-    expect(pageBody).toContain('linkFragment.set("password", password)');
+    expect(pageBody).toContain("/portal/leases/cbx_000000000001/vnc/handoff");
+    expect(pageBody).toContain('linkFragment.set("handoff", body.ticket)');
+    expect(pageBody).not.toContain('linkFragment.set("username", username)');
+    expect(pageBody).not.toContain('linkFragment.set("password", password)');
     expect(pageBody).toContain("await refreshShareState()");
-    expect(pageBody).toContain("writeClipboardText(shareableWebVNCURL())");
+    expect(pageBody).toContain("writeClipboardText(await shareableWebVNCURL())");
     expect(pageBody).toContain('document.getElementById("vnc-share")');
     expect(pageBody).toContain("vnc-copy-remote");
     expect(pageBody).toContain("vnc-paste");
@@ -16212,6 +16222,72 @@ describe("fleet lease identity and idle", () => {
       viewerConnected: false,
       events: [],
     });
+
+    const issuedHandoff = await fleet.fetch(
+      request("POST", "/portal/leases/blue-lobster/vnc/handoff", {
+        headers,
+        body: { username: "vnc-user", password: "generated-vnc-password" },
+      }),
+    );
+    expect(issuedHandoff.status).toBe(200);
+    expect(issuedHandoff.headers.get("cache-control")).toBe("no-store");
+    const issuedHandoffBody = (await issuedHandoff.json()) as {
+      ticket: string;
+      expiresAt: string;
+    };
+    expect(issuedHandoffBody.ticket).toMatch(/^vnc_handoff_[a-f0-9]{32}$/);
+    expect(storage.alarm()).toBe(Date.parse(issuedHandoffBody.expiresAt));
+    expect(issuedHandoffBody).not.toHaveProperty("username");
+    expect(issuedHandoffBody).not.toHaveProperty("password");
+
+    const friendCannotIssue = await fleet.fetch(
+      request("POST", "/portal/leases/blue-lobster/vnc/handoff", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { username: "vnc-user", password: "generated-vnc-password" },
+      }),
+    );
+    expect(friendCannotIssue.status).toBe(403);
+
+    const outsiderCannotRedeem = await fleet.fetch(
+      request("POST", "/portal/leases/blue-lobster/vnc/handoff", {
+        headers: {
+          "x-crabbox-owner": "outsider@example.com",
+          "x-crabbox-org": "other-org",
+        },
+        body: { ticket: issuedHandoffBody.ticket },
+      }),
+    );
+    expect(outsiderCannotRedeem.status).toBe(404);
+
+    const redeemedHandoff = await fleet.fetch(
+      request("POST", "/portal/leases/blue-lobster/vnc/handoff", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { ticket: issuedHandoffBody.ticket },
+      }),
+    );
+    expect(redeemedHandoff.status).toBe(200);
+    expect(redeemedHandoff.headers.get("cache-control")).toBe("no-store");
+    await expect(redeemedHandoff.json()).resolves.toEqual({
+      username: "vnc-user",
+      password: "generated-vnc-password",
+    });
+
+    const replayedHandoff = await fleet.fetch(
+      request("POST", "/portal/leases/blue-lobster/vnc/handoff", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { ticket: issuedHandoffBody.ticket },
+      }),
+    );
+    expect(replayedHandoff.status).toBe(401);
 
     const invalidTheme = await fleet.fetch(
       request("POST", "/portal/leases/blue-lobster/vnc/theme", {

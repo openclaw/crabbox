@@ -145,6 +145,7 @@ import type {
 } from "./types";
 import { coordinatorProviders, coordinatorProviderSpec, isCoordinatorProvider } from "./types";
 import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } from "./usage";
+import { WebVNCCredentialHandoffs } from "./webvnc-handoff";
 
 const fleetID = "default";
 const maxStoredRunLogBytes = 8 * 1024 * 1024;
@@ -761,12 +762,14 @@ export class FleetCoordinator {
   private awsIngressBarrier: Promise<void> = Promise.resolve();
   private readonly awsIngressAdditiveOperations = new Set<Promise<void>>();
   private providerMaintenanceQueue: Promise<void> = Promise.resolve();
+  private readonly webVNCCredentialHandoffs: WebVNCCredentialHandoffs;
 
   constructor(
     private readonly state: CoordinatorRuntime,
     private readonly env: Env,
     private readonly testProviders: Partial<Record<Provider, CloudProvider>> = {},
   ) {
+    this.webVNCCredentialHandoffs = new WebVNCCredentialHandoffs(state);
     this.restoreBridgeWebSockets();
   }
 
@@ -1629,6 +1632,7 @@ export class FleetCoordinator {
       throw new Error("restored bridge lease state is temporarily unavailable");
     }
     await this.expireLeases();
+    await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.reconcileRuntimeAdapterDeletes();
     await this.maintainWorkspacePrewarm();
     await this.provisionPendingWorkspace();
@@ -5193,6 +5197,16 @@ export class FleetCoordinator {
       });
     }
     if (
+      method === "POST" &&
+      parts[1] === "leases" &&
+      parts[2] &&
+      parts[3] === "vnc" &&
+      parts[4] === "handoff" &&
+      parts[5] === undefined
+    ) {
+      return await this.webVNCCredentialHandoff(request, parts[2]);
+    }
+    if (
       method === "GET" &&
       parts[1] === "leases" &&
       parts[2] &&
@@ -7176,6 +7190,53 @@ export class FleetCoordinator {
           ? `WebVNC daemon not running; run: ${command}`
           : "WebVNC daemon not running; ask a lease manager to start or refresh the bridge",
     });
+  }
+
+  private async webVNCCredentialHandoff(request: Request, identifier: string): Promise<Response> {
+    const lease = await this.resolvePortalLease(identifier, request);
+    if (!lease) {
+      return notFound();
+    }
+    const error = webVNCLeaseError(lease);
+    if (error) {
+      return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
+    }
+    const body = (await request.json().catch(() => undefined)) as
+      | { ticket?: unknown; username?: unknown; password?: unknown }
+      | undefined;
+    if (typeof body?.ticket === "string") {
+      const result = await this.webVNCCredentialHandoffs.consume(lease.id, body.ticket);
+      if (result.status !== "accepted") {
+        const expired = result.status === "expired";
+        return json(
+          {
+            error: expired ? "expired_handoff" : "invalid_handoff",
+            message: expired ? "VNC handoff expired" : "valid VNC handoff required",
+          },
+          { status: 401 },
+        );
+      }
+      return json(
+        { username: result.username, password: result.password },
+        { headers: { "cache-control": "no-store" } },
+      );
+    }
+    if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
+    }
+    const username = typeof body?.username === "string" ? body.username : "";
+    const password = typeof body?.password === "string" ? body.password : "";
+    if ((!username && !password) || username.length > 256 || password.length > 1024) {
+      return json(
+        { error: "invalid_credentials", message: "valid VNC credentials required" },
+        { status: 400 },
+      );
+    }
+    const handoff = await this.webVNCCredentialHandoffs.issue(lease.id, { username, password });
+    return json(
+      { ticket: handoff.ticket, expiresAt: handoff.expiresAt },
+      { headers: { "cache-control": "no-store" } },
+    );
   }
 
   private async webVNCReset(request: Request, identifier: string): Promise<Response> {
@@ -10108,6 +10169,7 @@ export class FleetCoordinator {
       })
       .map((lease) => nextLeaseAlarmTime(lease))
       .filter((time) => Number.isFinite(time));
+    alarmTimes.push(...(await this.webVNCCredentialHandoffs.alarmTimes(now)));
     const leasesByID = new Map([...leases.values()].map((lease) => [lease.id, lease]));
     const workspaceAlarm = [...workspaces.values()]
       .map((workspace) =>

@@ -14,6 +14,7 @@ import type {
 import { PostgresCoordinatorStorage } from "./postgres-storage";
 
 const alarmQueue = "coordinator-alarm";
+const alarmTimeStorageKey = "node-runtime:alarm-time";
 const reconcileQueue = "coordinator-reconcile";
 const bridgeDataAttachmentKinds = new Set([
   "webvnc-agent",
@@ -220,6 +221,15 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     this.acceptWebSocket(socket, { kind: "workspace-terminal" }, [], handlers);
   }
 
+  async getAlarm(): Promise<number | undefined> {
+    const value = await this.storage.get<unknown>(alarmTimeStorageKey);
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  }
+
+  take<T>(key: string): Promise<T | undefined> {
+    return this.storage.take<T>(key);
+  }
+
   async scheduleAlarm(time: number): Promise<void> {
     await this.boss.deleteQueuedJobs(alarmQueue);
     await this.boss.send(alarmQueue, null, {
@@ -229,10 +239,12 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
       retryDelay: 5,
       retryBackoff: true,
     });
+    await this.storage.put(alarmTimeStorageKey, time);
   }
 
   async clearAlarm(): Promise<void> {
     await this.boss.deleteQueuedJobs(alarmQueue);
+    await this.storage.delete(alarmTimeStorageKey);
   }
 
   private runAlarm(): Promise<void> {

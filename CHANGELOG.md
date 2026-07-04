@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Replaced raw generated VNC credentials in copied WebVNC links with short-lived, one-time, authorization-checked handoff tickets. Thanks @coygeek.
 - Closed restored WebVNC viewer sockets that lack a complete current organization-bound principal instead of retaining owner-only legacy authorization. Thanks @coygeek.
 - Enforced key-only OpenSSH authentication across managed Windows desktop, core, and WSL2 bootstraps while retaining generated Windows passwords for console and VNC use. Thanks @coygeek.
 - Compared coordinator admin, shared-operator, runtime-adapter, proxy, and signed-session secrets without mismatch-position or early length exits. Thanks @coygeek.

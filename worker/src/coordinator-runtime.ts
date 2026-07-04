@@ -128,6 +128,8 @@ export interface CoordinatorRuntime {
     handlers: CoordinatorSocketHandlers,
   ): void;
   acceptEphemeralWebSocket(socket: WebSocket, handlers: CoordinatorSocketHandlers): void;
+  take<T>(key: string): Promise<T | undefined>;
+  getAlarm(): Promise<number | undefined>;
   scheduleAlarm(time: number): Promise<void>;
   clearAlarm(): Promise<void>;
 }
@@ -213,6 +215,20 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     });
     socket.addEventListener("error", () => {
       handlers.error();
+    });
+  }
+
+  async getAlarm(): Promise<number | undefined> {
+    return (await this.state.storage.getAlarm()) ?? undefined;
+  }
+
+  take<T>(key: string): Promise<T | undefined> {
+    return this.state.storage.transaction(async (transaction) => {
+      const value = await transaction.get<T>(key);
+      if (value !== undefined) {
+        await transaction.delete(key);
+      }
+      return value;
     });
   }
 

@@ -70,6 +70,20 @@ describe("PostgresCoordinatorStorage", () => {
     ]);
     expect(records).toEqual(new Map([["run:100%_x", { id: "100" }]]));
   });
+
+  it("atomically takes one stored value", async () => {
+    const pool = fakePool([{ encoded_value: '{"ticket":"one-time"}' }]);
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+
+    const value = await storage.take<{ ticket: string }>("handoff:1");
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining("delete from crabbox.coordinator_kv"),
+      ["handoff:1"],
+    );
+    expect(String(pool.query.mock.calls[0]?.[0])).toContain("returning case");
+    expect(value).toEqual({ ticket: "one-time" });
+  });
 });
 
 function fakePool(rows: QueryResultRow[] = []) {

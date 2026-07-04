@@ -117,6 +117,18 @@ class MemoryRuntime implements CoordinatorRuntime {
 
   acceptEphemeralWebSocket(_socket: WebSocket, _handlers: CoordinatorSocketHandlers): void {}
 
+  async take<T>(key: string): Promise<T | undefined> {
+    const value = await this.storage.get<T>(key);
+    if (value !== undefined) {
+      await this.storage.delete(key);
+    }
+    return value;
+  }
+
+  async getAlarm(): Promise<number | undefined> {
+    return this.alarmTime;
+  }
+
   async scheduleAlarm(time: number): Promise<void> {
     this.alarmTime = time;
   }
@@ -609,9 +621,15 @@ describe("coordinator runtimes", () => {
   });
 
   it("maps Cloudflare alarms and hibernating socket attachments", async () => {
+    const transactionGet = vi.fn<() => Promise<unknown>>(async () => ({ ticket: "one-time" }));
+    const transactionDelete = vi.fn<() => Promise<void>>(async () => {});
     const storage = {
+      getAlarm: vi.fn<() => Promise<number | null>>(async () => 1234),
       setAlarm: vi.fn<(time: number) => Promise<void>>(async () => {}),
       deleteAlarm: vi.fn<() => Promise<void>>(async () => {}),
+      transaction: vi.fn<
+        (callback: (transaction: unknown) => Promise<unknown>) => Promise<unknown>
+      >(async (callback) => callback({ get: transactionGet, delete: transactionDelete })),
     };
     const acceptWebSocket = vi.fn<(socket: WebSocket, tags?: string[]) => void>();
     const state = {
@@ -629,12 +647,17 @@ describe("coordinator runtimes", () => {
       close: () => {},
       error: () => {},
     });
+    await expect(runtime.take("ticket:one-time")).resolves.toEqual({ ticket: "one-time" });
+    await expect(runtime.getAlarm()).resolves.toBe(1234);
     await runtime.scheduleAlarm(1234);
     await runtime.clearAlarm();
 
     expect(acceptWebSocket).toHaveBeenCalledWith(socket, ["control:client-1"]);
     expect(serializeAttachment).toHaveBeenCalledWith(attachment);
     expect(runtime.socketAttachment(socket)).toBe(attachment);
+    expect(storage.getAlarm).toHaveBeenCalledOnce();
+    expect(transactionGet).toHaveBeenCalledWith("ticket:one-time");
+    expect(transactionDelete).toHaveBeenCalledWith("ticket:one-time");
     expect(storage.setAlarm).toHaveBeenCalledWith(1234);
     expect(storage.deleteAlarm).toHaveBeenCalledOnce();
   });

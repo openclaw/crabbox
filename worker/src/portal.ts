@@ -1017,6 +1017,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
   const statusPath = `/portal/leases/${encodeURIComponent(lease.id)}/vnc/status`;
   const controlPath = `/portal/leases/${encodeURIComponent(lease.id)}/vnc/control`;
   const themePath = `/portal/leases/${encodeURIComponent(lease.id)}/vnc/theme`;
+  const handoffPath = `/portal/leases/${encodeURIComponent(lease.id)}/vnc/handoff`;
   const sharePath = `/portal/leases/${encodeURIComponent(lease.id)}/share`;
   const shareAPIPath = `${sharePath}?format=json`;
   const canManage = options.canManage === true;
@@ -1132,6 +1133,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       const statusURL = new URL(${JSON.stringify(statusPath)}, window.location.href);
       const controlURL = new URL(${JSON.stringify(controlPath)}, window.location.href);
       const themeURL = new URL(${JSON.stringify(themePath)}, window.location.href);
+      const handoffURL = new URL(${JSON.stringify(handoffPath)}, window.location.href);
       const sharePageURL = new URL(${JSON.stringify(sharePath)}, window.location.href);
       const shareAPIURL = new URL(${JSON.stringify(shareAPIPath)}, window.location.href);
       const shareInitial = ${scriptJSON(shareData)};
@@ -1140,16 +1142,38 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       statusURL.searchParams.set("viewer", viewerID);
       const fragment = new URLSearchParams(window.location.hash.slice(1));
       const target = ${JSON.stringify(target)};
-      const username = fragment.get("username") || "";
-      const password = fragment.get("password") || "";
+      let username = fragment.get("username") || "";
+      let password = fragment.get("password") || "";
+      const handoffTicket = fragment.get("handoff") || "";
+      let credentialsReady = !handoffTicket;
       const takeControlOnConnect = fragment.get("control") === "take";
       const bridgeMissingMessage = ${JSON.stringify(bridgeMissingMessage)};
-      const credentials = {};
-      if (username) credentials.username = username;
-      if (password) credentials.password = password;
-      const options = Object.keys(credentials).length ? { credentials } : {};
       const missingVNCCredentialMessage = "VNC credentials missing; open WebVNC from crabbox webvnc status";
       const failedVNCCredentialMessage = "VNC authentication failed; reopen WebVNC from crabbox webvnc status";
+      function rfbOptions() {
+        const credentials = {};
+        if (username) credentials.username = username;
+        if (password) credentials.password = password;
+        return Object.keys(credentials).length ? { credentials } : {};
+      }
+      async function loadHandoffCredentials() {
+        if (credentialsReady) return;
+        const response = await fetch(handoffURL, {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({ ticket: handoffTicket }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.message || body.error || "VNC handoff failed");
+        username = typeof body.username === "string" ? body.username : "";
+        password = typeof body.password === "string" ? body.password : "";
+        credentialsReady = true;
+        const cleanFragment = new URLSearchParams(window.location.hash.slice(1));
+        cleanFragment.delete("handoff");
+        const cleanURL = new URL(window.location.href);
+        cleanURL.hash = cleanFragment.toString();
+        window.history.replaceState(null, "", cleanURL);
+      }
       function setStatus(value, tone = "") {
         status.textContent = value;
         status.dataset.tone = tone;
@@ -1359,6 +1383,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         authenticationFailed = false;
         screen.replaceChildren();
         try {
+          await loadHandoffCredentials();
           const state = await bridgeState();
           if (state?.terminal) {
             stopPolling(state.message || "WebVNC bridge unavailable");
@@ -1382,7 +1407,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
           }
           setStatus(retryAttempt ? "bridge connected; opening viewer" : "connecting");
           clearDesktopThemeSyncState();
-          rfb = new RFB(screen, wsURL.toString(), options);
+          rfb = new RFB(screen, wsURL.toString(), rfbOptions());
           rfb.showDotCursor = true;
           rfb.focusOnClick = true;
           rfb.scaleViewport = true;
@@ -1509,11 +1534,18 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       function normalizedShareUser(value) {
         return String(value || "").trim().toLowerCase();
       }
-      function shareableWebVNCURL() {
+      async function shareableWebVNCURL() {
+        if (!username && !password) throw new Error(missingVNCCredentialMessage);
+        const response = await fetch(handoffURL, {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.message || body.error || "VNC handoff failed");
         const url = new URL(window.location.href);
         const linkFragment = new URLSearchParams();
-        if (username) linkFragment.set("username", username);
-        if (password) linkFragment.set("password", password);
+        linkFragment.set("handoff", body.ticket);
         url.hash = linkFragment.toString();
         return url.toString();
       }
@@ -1687,7 +1719,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       });
       shareCopyLinkBtn?.addEventListener("click", async () => {
         try {
-          await writeClipboardText(shareableWebVNCURL());
+          await writeClipboardText(await shareableWebVNCURL());
           setShareStatus("WebVNC link copied", "ok");
         } catch (error) {
           setShareStatus(error instanceof Error ? error.message : String(error), "bad");
