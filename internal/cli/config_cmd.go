@@ -15,8 +15,12 @@ func (a App) configShow(args []string) error {
 	fs := newFlagSet("config show", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
 	providerOverride := fs.String("provider", "", "resolve config for this provider")
+	controllerIdentityOut := fs.Bool("controller-provider-identity", false, "internal: print the controller provider identity contract")
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *controllerIdentityOut && !*jsonOut {
+		return exit(2, "--controller-provider-identity requires --json")
 	}
 	cfg, err := loadConfigWithOverrides("", strings.TrimSpace(*providerOverride))
 	if err != nil {
@@ -34,6 +38,16 @@ func (a App) configShow(args []string) error {
 	coordinatorRegistrationURL, err := coordinatorRegistrationURLForConfig(cfg)
 	if err != nil {
 		return err
+	}
+	if *controllerIdentityOut {
+		// This subprocess-only contract is bounded and parsed in-process. Public
+		// config diagnostics use the redacted view below.
+		return json.NewEncoder(a.Stdout).Encode(map[string]any{
+			"provider":                   provider,
+			"providerScope":              providerScope,
+			"idempotentLeaseId":          fixedLeaseID,
+			"coordinatorRegistrationUrl": coordinatorRegistrationURL,
+		})
 	}
 	cfg = effectiveConfigForShow(cfg)
 	if *jsonOut {

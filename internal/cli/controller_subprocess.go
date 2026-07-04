@@ -55,7 +55,7 @@ type controllerChildIdentity struct {
 func (r *execControllerWorkspaceRunner) ProviderIdentity(ctx context.Context) (controllerProviderIdentity, error) {
 	var output controllerLimitedBuffer
 	output.limit = 1 << 20
-	args := []string{"config", "show", "--json"}
+	args := []string{"config", "show", "--json", "--controller-provider-identity"}
 	if provider := strings.TrimSpace(r.opts.Provider); provider != "" {
 		args = append(args, "--provider", provider)
 	}

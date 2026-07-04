@@ -71,7 +71,7 @@ func TestControllerWarmupArgsUseFixedRoutingAndCapabilities(t *testing.T) {
 
 func TestExecControllerRunnerReadsProviderIdentityContract(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "crabbox")
-	script := "#!/bin/sh\nprintf '%s\\n' '{\"provider\":\"external\",\"providerScope\":\"opaque-scope\",\"idempotentLeaseId\":true,\"coordinatorRegistrationUrl\":\"https://coordinator.example.test/root\"}'\n"
+	script := "#!/bin/sh\ncase \" $* \" in *\" --json \"*) ;; *) exit 42 ;; esac\ncase \" $* \" in *\" --controller-provider-identity \"*) ;; *) exit 42 ;; esac\nprintf '%s\\n' '{\"provider\":\"external\",\"providerScope\":\"opaque-scope\",\"idempotentLeaseId\":true,\"coordinatorRegistrationUrl\":\"https://coordinator.example.test/root\"}'\n"
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

@@ -365,6 +365,36 @@ func TestConfigShowExportsControllerProviderContract(t *testing.T) {
 	}
 }
 
+func TestConfigShowExportsRawControllerProviderIdentityContract(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	config := "provider: external\nbroker:\n  url: https://broker-user:broker-pass@broker.example.test/root/?token=query-secret#fragment-secret\n  mode: registered\nexternal:\n  command: provider-a\n  capabilities:\n    idempotentLeaseId: true\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow([]string{"--json", "--controller-provider-identity", "--provider", "external"}); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 || got["provider"] != "external" || got["providerScope"] != "test-external:provider-a" || got["idempotentLeaseId"] != true || got["coordinatorRegistrationUrl"] != "https://broker-user:broker-pass@broker.example.test/root?token=query-secret#fragment-secret" {
+		t.Fatalf("controller provider identity contract=%#v", got)
+	}
+	stdout.Reset()
+	if err := app.configShow([]string{"--controller-provider-identity", "--provider", "external"}); err == nil || !strings.Contains(err.Error(), "requires --json") {
+		t.Fatalf("controller provider identity without JSON error=%v", err)
+	}
+}
+
 func TestConfigShowRedactsCloudflareDynamicWorkers(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
