@@ -268,6 +268,48 @@ func TestConditionalClaimMutationRejectsChangedState(t *testing.T) {
 	}
 }
 
+func TestConditionalConfigClaimCanBindProviderScope(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := Config{Provider: "external"}
+	server := Server{Provider: "external", CloudID: "resource-1"}
+	const providerScope = "account:example-org/project:example-project"
+
+	claimed, err := claimLeaseTargetForConfigScopeIfUnchanged(
+		"cbx_scoped_config",
+		"scoped",
+		cfg,
+		providerScope,
+		server,
+		SSHTarget{Host: "192.0.2.10", Port: "22"},
+		time.Minute,
+		leaseClaim{},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.ProviderScope != providerScope || claimed.CloudID != "resource-1" {
+		t.Fatalf("scoped claim=%#v", claimed)
+	}
+
+	defaultClaim, err := claimLeaseTargetForConfigIfUnchanged(
+		"cbx_default_config",
+		"default",
+		cfg,
+		server,
+		SSHTarget{},
+		time.Minute,
+		leaseClaim{},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultClaim.ProviderScope != "" {
+		t.Fatalf("default claim scope=%q", defaultClaim.ProviderScope)
+	}
+}
+
 func TestVerifyLeaseClaimUnchanged(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_guarded_action"
