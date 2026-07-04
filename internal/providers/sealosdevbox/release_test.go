@@ -120,6 +120,36 @@ func TestReleaseDeleteRemovesDevboxClaimAndKeyAfterValidation(t *testing.T) {
 	}
 }
 
+func TestExplicitRetainOverridesStoredDeletePolicy(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.DeleteOnRelease = false
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
+	backend := lifecycleBackend(cfg, &lifecycleRunner{})
+	lease := core.LeaseTarget{Server: core.Server{Labels: map[string]string{
+		"release":           "delete",
+		"delete_on_release": "true",
+	}}}
+
+	if backend.deleteOnRelease(lease) {
+		t.Fatal("explicit retain policy did not override stored delete policy")
+	}
+	if !backend.RetainLeaseClaimAfterRelease(lease) {
+		t.Fatal("explicit retain policy did not retain claim")
+	}
+}
+
+func TestExplicitDeleteOverridesStoredRetainPolicy(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.DeleteOnRelease = true
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
+	backend := lifecycleBackend(cfg, &lifecycleRunner{})
+	lease := core.LeaseTarget{Server: core.Server{Labels: map[string]string{"release": "pause"}}}
+
+	if !backend.deleteOnRelease(lease) {
+		t.Fatal("explicit delete policy did not override stored retain policy")
+	}
+}
+
 func TestReleaseDeleteKeepsLocalStateWhenKubectlMissing(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()

@@ -240,7 +240,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
+func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (lease core.LeaseTarget, err error) {
 	if req.ReleaseOnly {
 		if lease, ok, err := b.resolveMissingClaimForRelease(ctx, req.ID); err != nil || ok {
 			return lease, err
@@ -269,6 +269,27 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 		return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
+	var previousClaim, preflightClaim core.LeaseClaim
+	var previousClaimExists, rollbackClaim bool
+	defer func() {
+		if err == nil || !rollbackClaim {
+			return
+		}
+		if restoreErr := core.RestoreLeaseClaimIfUnchanged(leaseID, preflightClaim, previousClaim, previousClaimExists); restoreErr != nil && b.rt.Stderr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: restore Sealos DevBox lease claim %s after resolve failure: %v\n", leaseID, restoreErr)
+		}
+	}()
+	if req.Repo.Root != "" {
+		previousClaim, previousClaimExists, err = core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		preflightClaim, err = core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, providerName, b.claimScope(), "", req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		rollbackClaim = true
+	}
 	item, server, err = b.resumeDevboxIfPaused(ctx, item, server)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -292,19 +313,15 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" && !req.NoLocalStateMutations {
-		if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
-			return core.LeaseTarget{}, err
-		}
-	}
 	if err := b.waitForSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
 		events, _ := b.listEvents(ctx, item.Metadata.Name)
 		return core.LeaseTarget{}, core.Exit(5, "%v; Sealos DevBox diagnostics: %s", err, devboxDiagnostics(item, events, nil))
 	}
-	if req.Repo.Root != "" && !req.NoLocalStateMutations {
-		if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
+	if req.Repo.Root != "" {
+		if _, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, server, target); err != nil {
 			return core.LeaseTarget{}, err
 		}
+		rollbackClaim = false
 	}
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }

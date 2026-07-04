@@ -689,6 +689,57 @@ func TestResolveReadOnlyDoesNotPersistSecretKey(t *testing.T) {
 	}
 }
 
+func TestResolveChecksRepoClaimBeforeResumeOrSecretRead(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_claimed00000"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	claimedRepo := t.TempDir()
+	if err := core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, sealosClaimScope(cfg), claimedRepo, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused"}}`
+	runner := &lifecycleRunner{outputs: []string{pausedItem}}
+	backend := lifecycleBackend(cfg, runner)
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "claimed by repo") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	commands := strings.Join(flattenArgs(runner.requests), " ")
+	if strings.Contains(commands, " patch ") || strings.Contains(commands, "secret/") {
+		t.Fatalf("claim rejection mutated resource or read Secret: %s", commands)
+	}
+	target := core.SSHTarget{}
+	core.UseStoredTestboxKey(&target, leaseID)
+	if target.Key != "" {
+		t.Fatalf("claim rejection persisted SSH key: %s", target.Key)
+	}
+}
+
+func TestResolveRestoresClaimAfterPostClaimFailure(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_claimrollback"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	runner := &lifecycleRunner{outputs: []string{
+		`{"items":[` + item + `]}`,
+		ownedDevboxSecretJSON(name, "team-a", "uid-other", "ssh-ed25519 AAA test", "private", false),
+	}}
+	backend := lifecycleBackend(cfg, runner)
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "exact DevBox controller owner") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+		t.Fatalf("failed resolve left preflight claim exists=%v err=%v", exists, readErr)
+	}
+}
+
 func TestResolveResumesPausedDevboxBeforeSSHReuse(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()

@@ -97,6 +97,9 @@ func (b *backend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
 }
 
 func (b *backend) deleteOnRelease(lease core.LeaseTarget) bool {
+	if core.DeleteOnReleaseExplicit(b.cfg, providerName) {
+		return b.cfg.SealosDevbox.DeleteOnRelease
+	}
 	if strings.EqualFold(strings.TrimSpace(lease.Server.Labels["release"]), "delete") {
 		return true
 	}
