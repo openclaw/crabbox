@@ -178,6 +178,9 @@ final class ServeCommand {
   }
 
   private func fail(_ message: String, requestVMStop stopVM: Bool = false) {
+    // finish() closes the proxy listener, which surfaces as an accept error;
+    // never let that teardown echo overwrite a terminal status.
+    if finished { return }
     logLine("apple-vm daemon error: \(message)")
     setStatus("error", error: message)
     if stopVM {
