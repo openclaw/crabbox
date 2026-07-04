@@ -92,6 +92,14 @@ AWS, GCP, Azure, or a container provider, whose image maps already point at a
 6. Delete the server (and managed SSH key) on release, `cleanup`, or — in
    brokered mode — coordinator expiry.
 
+Direct destructive operations require both canonical remote ownership labels
+and the exact local claim bound to the Hetzner server ID. A weakly labeled,
+unclaimed, or stale-claim server remains visible only through Hetzner's own
+tools; Crabbox will not adopt it during cleanup. To recover intentionally lost
+local state, first inspect the canonical server and explicitly reclaim it
+through a normal reuse command before stopping it. Failed server or SSH-key
+cleanup retains the claim for an exact retry.
+
 ## Classes and server types
 
 Classes expand to an ordered list of Hetzner server types; provisioning tries

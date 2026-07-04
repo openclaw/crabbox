@@ -358,3 +358,34 @@ func TestStopRejectsReclaimForProviderWithoutAdoptionContract(t *testing.T) {
 		t.Fatalf("stop --reclaim err=%v, want unsupported-provider rejection", err)
 	}
 }
+
+func TestStopDispatchesExplicitReclaimContract(t *testing.T) {
+	called := false
+	testStopReclaimHook = func(req StopRequest) error {
+		called = true
+		if req.ID != "service-123" {
+			t.Fatalf("reclaim id=%q", req.ID)
+		}
+		return nil
+	}
+	t.Cleanup(func() { testStopReclaimHook = nil })
+
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+		"--provider", "stop-reclaim-test", "--id", "service-123", "--reclaim",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("stop did not dispatch the explicit reclaim contract")
+	}
+}
+
+func TestStopRejectsReclaimForSSHLeaseProvider(t *testing.T) {
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+		"--provider", "ssh", "--static-host", "host.example.test", "--id", "static_host-example-test", "--reclaim",
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support stop --reclaim") {
+		t.Fatalf("stop --reclaim err=%v, want SSH-provider rejection", err)
+	}
+}
