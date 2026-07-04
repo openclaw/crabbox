@@ -278,14 +278,15 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 			liveLeaseIDs[leaseID] = struct{}{}
 		}
 	}
+	now := time.Now().UTC()
 	for _, server := range servers {
-		shouldDelete, reason := core.ShouldCleanupServer(server, time.Now().UTC())
+		shouldDelete, reason := core.ShouldCleanupServer(server, now)
 		if !shouldDelete {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
-		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
 		if req.DryRun {
+			fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
 			continue
 		}
 		cfg := b.Cfg
@@ -296,7 +297,27 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 		if err != nil {
 			return err
 		}
-		if err := client.DeleteServer(ctx, server.CloudID); err != nil {
+		live, err := client.GetServer(ctx, server.CloudID)
+		if err != nil {
+			if core.IsGCPNotFound(err) {
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance no longer exists\n", server.DisplayID(), server.Name)
+				if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
+					removeLeaseClaim(leaseID)
+				}
+				continue
+			}
+			return fmt.Errorf("re-read GCP cleanup candidate %s: %w", server.DisplayID(), err)
+		}
+		if err := validateGCPCleanupLiveServer(server, live); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, err)
+			continue
+		}
+		if shouldDelete, reason := core.ShouldCleanupServer(live, now); !shouldDelete {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance %s\n", server.DisplayID(), server.Name, reason)
+			continue
+		}
+		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", live.DisplayID(), live.Name)
+		if err := client.DeleteServer(ctx, live.CloudID); err != nil {
 			return err
 		}
 		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
@@ -305,6 +326,21 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 	}
 	if err := b.pruneStaleClaims(liveLeaseIDs, req.DryRun); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateGCPCleanupLiveServer(expected, live Server) error {
+	cloudID := strings.TrimSpace(expected.CloudID)
+	if cloudID == "" || strings.TrimSpace(live.CloudID) != cloudID {
+		return fmt.Errorf("live cloud id %q does not match cleanup candidate %q", live.CloudID, expected.CloudID)
+	}
+	if !isCrabboxGCPLease(live) {
+		return fmt.Errorf("live instance no longer has canonical Crabbox ownership labels")
+	}
+	expectedLeaseID := strings.TrimSpace(expected.Labels["lease"])
+	if liveLeaseID := strings.TrimSpace(live.Labels["lease"]); liveLeaseID != expectedLeaseID {
+		return fmt.Errorf("live instance lease %q does not match cleanup candidate lease %q", liveLeaseID, expectedLeaseID)
 	}
 	return nil
 }

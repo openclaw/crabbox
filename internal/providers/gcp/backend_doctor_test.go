@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"google.golang.org/api/googleapi"
 )
 
 type fakeGCPDoctorClient struct {
@@ -165,26 +168,28 @@ func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 	if err := core.ClaimLeaseForRepoProviderScope(otherProjectLeaseID, "other-box", "gcp", "project:project-b", repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeGCPDoctorClient{servers: []Server{
-		{
-			CloudID: core.LeaseProviderName(expiredLeaseID, "expired-box"),
-			Name:    core.LeaseProviderName(expiredLeaseID, "expired-box"),
-			Labels: map[string]string{
-				"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
-				"lease": expiredLeaseID, "slug": "expired-box",
-				"state": "ready", "expires_at": core.LeaseLabelTime(time.Now().Add(-time.Hour)),
-			},
+	expired := Server{
+		CloudID: core.LeaseProviderName(expiredLeaseID, "expired-box"),
+		Name:    core.LeaseProviderName(expiredLeaseID, "expired-box"),
+		Labels: map[string]string{
+			"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
+			"lease": expiredLeaseID, "slug": "expired-box",
+			"state": "ready", "expires_at": core.LeaseLabelTime(time.Now().Add(-time.Hour)),
 		},
-		{
-			CloudID: "crabbox-forged",
-			Name:    "crabbox-forged",
-			Labels: map[string]string{
-				"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
-				"lease": "cbx_444444444444", "slug": "forged",
-				"state": "ready", "expires_at": core.LeaseLabelTime(time.Now().Add(-time.Hour)),
-			},
-		},
-	}}
+	}
+	fake := &fakeGCPDoctorClient{
+		servers: []Server{expired,
+			{
+				CloudID: "crabbox-forged",
+				Name:    "crabbox-forged",
+				Labels: map[string]string{
+					"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
+					"lease": "cbx_444444444444", "slug": "forged",
+					"state": "ready", "expires_at": core.LeaseLabelTime(time.Now().Add(-time.Hour)),
+				},
+			}},
+		get: map[string]Server{expired.CloudID: expired},
+	}
 	old := newGCPClient
 	newGCPClient = func(context.Context, Config) (gcpClient, error) {
 		return fake, nil
@@ -223,6 +228,95 @@ func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 	if !strings.Contains(out, "delete server id="+core.LeaseProviderName(expiredLeaseID, "expired-box")) ||
 		!strings.Contains(out, "remove stale claim lease="+staleLeaseID) {
 		t.Fatalf("cleanup output=%q", out)
+	}
+}
+
+func TestGCPCleanupRevalidatesLiveOwnershipBeforeDelete(t *testing.T) {
+	snapshot := canonicalGCPTestServer("cbx_111111111111", "stale")
+	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	live := snapshot
+	live.Labels = maps.Clone(snapshot.Labels)
+	delete(live.Labels, "created_by")
+	fake := &fakeGCPDoctorClient{
+		servers: []Server{snapshot},
+		get:     map[string]Server{snapshot.CloudID: live},
+	}
+	old := newGCPClient
+	newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+	t.Cleanup(func() { newGCPClient = old })
+
+	var stderr bytes.Buffer
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a"}, Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("cleanup crossed changed ownership: deleted=%v", fake.deleted)
+	}
+	if !strings.Contains(stderr.String(), "live instance no longer has canonical Crabbox ownership labels") {
+		t.Fatalf("stderr=%q, want changed-ownership skip", stderr.String())
+	}
+}
+
+func TestGCPCleanupRevalidatesLiveEligibilityBeforeDelete(t *testing.T) {
+	snapshot := canonicalGCPTestServer("cbx_111111111111", "renewed")
+	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	live := snapshot
+	live.Labels = maps.Clone(snapshot.Labels)
+	live.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(time.Hour))
+	fake := &fakeGCPDoctorClient{servers: []Server{snapshot}, get: map[string]Server{snapshot.CloudID: live}}
+	old := newGCPClient
+	newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+	t.Cleanup(func() { newGCPClient = old })
+
+	var stderr bytes.Buffer
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a"}, Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("cleanup deleted renewed instance: %v", fake.deleted)
+	}
+	if !strings.Contains(stderr.String(), "reason=live instance") {
+		t.Fatalf("stderr=%q, want renewed-live skip", stderr.String())
+	}
+}
+
+func TestGCPCleanupTreatsMissingLiveInstanceAsAlreadyDeleted(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := t.TempDir()
+	leaseID := "cbx_111111111111"
+	slug := "gone"
+	if err := core.ClaimLeaseForRepoProviderScope(leaseID, slug, "gcp", "project:project-a", repo, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := canonicalGCPTestServer(leaseID, slug)
+	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	fake := &fakeGCPDoctorClient{
+		servers: []Server{snapshot},
+		getErr:  &googleapi.Error{Code: http.StatusNotFound, Message: "instance gone"},
+	}
+	old := newGCPClient
+	newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+	t.Cleanup(func() { newGCPClient = old })
+
+	var stderr bytes.Buffer
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a"}, Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("cleanup retried delete for missing instance: %v", fake.deleted)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.LeaseID != "" {
+		t.Fatalf("missing-instance claim was not removed: %#v", claim)
+	}
+	if !strings.Contains(stderr.String(), "live instance no longer exists") {
+		t.Fatalf("stderr=%q, want already-deleted diagnostic", stderr.String())
 	}
 }
 
