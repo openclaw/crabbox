@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Required W&B sandbox reuse, status, and stop to match an exact endpoint/entity/project/resource-bound local claim plus provider inventory ownership. Thanks @coygeek.
 - Made coordinatorless generic provider live smokes skip coordinator-only history and always clean up acquired leases after later lifecycle failures.
 - Replaced privileged managed Linux Code Server and Tailscale installer scripts with checksum-verified archives or Tailscale's signed package repository with a pinned keyring in both CLI and coordinator bootstrap paths. Thanks @TurboTheTurtle.
 
