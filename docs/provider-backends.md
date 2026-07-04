@@ -86,6 +86,12 @@ The delegated backend owns warmup, command execution, output streaming, and
 stop. Core still owns provider selection, config loading, local claims, friendly
 slugs, timing summaries, and normalized list/status rendering.
 
+If the provider needs a custom remote runner model, deployment, or sandbox image
+to translate Crabbox workspaces and commands into provider-native requests, that
+runner must satisfy the
+[Delegated runner contract](features/delegated-runner-contract.md) before the
+provider is treated as merge-ready.
+
 ```go
 type DelegatedRunBackend interface {
 	Backend

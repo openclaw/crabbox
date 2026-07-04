@@ -40,6 +40,13 @@ Two execution models exist, selected by `ProviderSpec.Kind`:
   output back to Crabbox. Use this when you cannot give Crabbox a stable SSH
   contract (for example Blacksmith Testbox, E2B, Modal, Upstash).
 
+For hosted APIs that need a purpose-built runner model, deployment, or sandbox
+image, define that runner against the
+[Delegated runner contract](delegated-runner-contract.md) before adding the
+provider. A built-in provider should not advertise a usable integration when
+the remote runner schema, upload path, command result mapping, and live proof
+bar are still undecided.
+
 If you can give Crabbox SSH, prefer the SSH lease backend. The CLI has more
 invested in the SSH path, including Actions hydration, VNC, code-server,
 screenshot, and cache stats/warm/purge. A delegated backend cannot reuse those
