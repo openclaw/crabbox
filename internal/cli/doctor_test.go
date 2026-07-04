@@ -315,7 +315,8 @@ func TestDoctorJSONCoordinatorOutput(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	brokerURL := strings.Replace(server.URL, "http://", "http://broker-user:broker-password@", 1)
+	t.Setenv("CRABBOX_COORDINATOR", brokerURL)
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "token")
 
 	var stdout, stderr bytes.Buffer
@@ -331,10 +332,25 @@ func TestDoctorJSONCoordinatorOutput(t *testing.T) {
 		t.Fatalf("view=%#v", view)
 	}
 	found := false
+	foundCoordinator := false
 	for _, check := range view.Checks {
+		if check.Check == "coord" {
+			foundCoordinator = true
+			if !strings.Contains(check.Message, "http://<redacted>@") || !strings.Contains(check.Details["url"], "http://<redacted>@") {
+				t.Fatalf("coordinator URL was not redacted: %#v", check)
+			}
+			for _, secret := range []string{"broker-user", "broker-password"} {
+				if strings.Contains(check.Message, secret) || strings.Contains(check.Details["url"], secret) {
+					t.Fatalf("coordinator check leaked %q: %#v", secret, check)
+				}
+			}
+		}
 		if check.Check == "provider" && check.Details["provider"] == "aws" && check.Details["coordinator_secrets"] == "ready" {
 			found = true
 		}
+	}
+	if !foundCoordinator {
+		t.Fatalf("coordinator check missing from JSON: %#v", view.Checks)
 	}
 	if !found {
 		t.Fatalf("provider readiness missing from JSON: %#v", view.Checks)

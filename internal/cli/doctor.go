@@ -256,7 +256,8 @@ func (a App) doctor(ctx context.Context, args []string) error {
 				record("failed", "coord", err.Error(), nil)
 				ok = false
 			} else {
-				record("ok", "coord", fmt.Sprintf("%s access=%s", cfg.Coordinator, accessAuthState(cfg.Access)), map[string]string{"url": cfg.Coordinator, "access": accessAuthState(cfg.Access)})
+				coordinatorURL := redactedConfigURL(cfg.Coordinator)
+				record("ok", "coord", fmt.Sprintf("%s access=%s", coordinatorURL, accessAuthState(cfg.Access)), map[string]string{"url": coordinatorURL, "access": accessAuthState(cfg.Access)})
 				brokerOK := true
 				if whoami, err := coord.Whoami(ctx); err != nil {
 					class := doctorErrorClass(err)
