@@ -98,10 +98,12 @@ and built artifacts out of the image. See
 
 ## Tailscale
 
-`--tailscale` on a managed Linux lease is also optional. Bootstrap installs a
-checksum-verified pinned Tailscale archive, brings the box up on the configured tailnet, writes non-secret
-metadata under `/var/lib/crabbox` (such as `tailscale-ipv4`, `tailscale-hostname`,
-and exit-node details), and extends `crabbox-ready` with a bounded check that a
+`--tailscale` on a managed Linux lease is also optional. The default package
+mode installs Tailscale from its signed APT repository with a pinned keyring;
+the opt-in pinned mode verifies a versioned static archive by SHA-256. Bootstrap
+then brings the box up on the configured tailnet, writes non-secret metadata
+under `/var/lib/crabbox` (such as `tailscale-ipv4`, `tailscale-hostname`, and
+exit-node details), and extends `crabbox-ready` with a bounded check that a
 `100.x` address has appeared.
 
 The auth key is piped to `tailscale up` through stdin and is not persisted or
