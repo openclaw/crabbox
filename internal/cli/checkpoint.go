@@ -844,11 +844,11 @@ func (a App) provisionCheckpointFork(ctx context.Context, cfg Config, backend Ba
 	}
 	applyResolvedServerConfig(&cfg, server)
 	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, reclaim); err != nil {
-		release(ctx)
+		release(context.Background())
 		return checkpointForkProvision{}, err
 	}
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
-		release(ctx)
+		release(context.Background())
 		return checkpointForkProvision{}, err
 	} else {
 		target = resolved.Target
@@ -863,11 +863,11 @@ func (a App) provisionCheckpointFork(ctx context.Context, cfg Config, backend Ba
 		}
 		workdir := nativeCheckpointForkWorkdir(cfg, leaseID, repo.Name, workdirOverride)
 		if err := validateCheckpointForkWorkdirs(ctx, backend, forkLease, record.Workdir, workdir); err != nil {
-			release(ctx)
+			release(context.Background())
 			return checkpointForkProvision{}, err
 		}
 		if err := relocateNativeCheckpointWorkdir(ctx, target, record.Workdir, workdir); err != nil {
-			release(ctx)
+			release(context.Background())
 			return checkpointForkProvision{}, err
 		}
 		return checkpointForkProvision{Lease: forkLease, Workdir: workdir, Release: release}, nil
@@ -877,11 +877,11 @@ func (a App) provisionCheckpointFork(ctx context.Context, cfg Config, backend Ba
 		workdir = defaultCheckpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir)
 	}
 	if err := validateCheckpointForkWorkdirs(ctx, backend, forkLease, workdir); err != nil {
-		release(ctx)
+		release(context.Background())
 		return checkpointForkProvision{}, err
 	}
 	if err := restoreCheckpointArchive(ctx, target, checkpointArchivePath(paths, record), record.ID, workdir, clear); err != nil {
-		release(ctx)
+		release(context.Background())
 		return checkpointForkProvision{}, err
 	}
 	return checkpointForkProvision{Lease: forkLease, Workdir: workdir, Release: release}, nil

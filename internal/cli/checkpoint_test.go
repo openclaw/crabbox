@@ -14,6 +14,43 @@ import (
 	"time"
 )
 
+func TestProvisionCheckpointForkReleasesWithFreshContextWhenCanceled(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.Create(checkpointRecord{ID: "chk_cancel_release", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, paths, err := store.Read(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := newWatchTestBackend()
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cfg := Config{Provider: "watch-test"}
+	_, provisionErr := app.provisionCheckpointFork(ctx, cfg, backend, backend, Repo{Root: t.TempDir(), Name: "my-app"}, record, paths, false, false, "", "", true)
+	if provisionErr == nil {
+		t.Fatal("provision succeeded under canceled context")
+	}
+	acquires, _, releases := backend.counts()
+	if acquires != 1 || releases != 1 {
+		t.Fatalf("acquire=%d release=%d, want 1/1", acquires, releases)
+	}
+	backend.mu.Lock()
+	releaseCtx := backend.releaseCtx
+	backend.mu.Unlock()
+	if releaseCtx == nil || releaseCtx.Err() != nil {
+		t.Fatalf("release used the canceled context: %v", releaseCtx)
+	}
+}
+
 func TestValidateCheckpointID(t *testing.T) {
 	if got, err := validateCheckpointID("chk_abc-123_DEF"); err != nil || got != "chk_abc-123_DEF" {
 		t.Fatalf("valid id got=%q err=%v", got, err)
