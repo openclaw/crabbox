@@ -1,6 +1,7 @@
 package sealosdevbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,15 +31,21 @@ func (b *backend) kubectlWithInput(ctx context.Context, stdout io.Writer, stdin 
 	if runner == nil {
 		return "", core.Exit(5, "kubectl runner unavailable")
 	}
+	// kubectl and kubeconfig exec plugins may print credentials to stderr.
+	// Keep diagnostics private until the error path can redact them.
+	var stderr bytes.Buffer
 	result, err := runner.Run(ctx, core.LocalCommandRequest{
 		Name:   strings.TrimSpace(b.cfg.SealosDevbox.Kubectl),
 		Args:   commandArgs,
 		Stdin:  stdin,
 		Stdout: stdout,
-		Stderr: b.rt.Stderr,
+		Stderr: &stderr,
 	})
 	if err != nil {
 		message := strings.TrimSpace(result.Stderr)
+		if message == "" {
+			message = strings.TrimSpace(stderr.String())
+		}
 		if message == "" {
 			message = strings.TrimSpace(result.Stdout)
 		}

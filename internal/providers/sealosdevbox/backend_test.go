@@ -95,6 +95,15 @@ type lifecycleRunner struct {
 	errors   []error
 }
 
+type stderrStreamingRunner struct {
+	message string
+}
+
+func (r stderrStreamingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	_, _ = io.WriteString(req.Stderr, r.message)
+	return core.LocalCommandResult{ExitCode: 1, Stderr: r.message}, errors.New("exit status 1")
+}
+
 func (r *lifecycleRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.requests = append(r.requests, req)
 	if req.Stdin != nil {
@@ -311,6 +320,28 @@ func TestParseAndPersistDevboxSecretKeysRedactsMaterial(t *testing.T) {
 	}
 	if _, err := os.Stat(keyPath + ".pub"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestKubectlCapturesStderrUntilRedacted(t *testing.T) {
+	const secret = "super-secret-token"
+	var stderr strings.Builder
+	backend := lifecycleBackend(lifecycleConfig(), &lifecycleRunner{})
+	backend.rt.Exec = stderrStreamingRunner{message: "token=" + secret}
+	backend.rt.Stderr = &stderr
+
+	_, err := backend.kubectl(context.Background(), nil, true, "get", devboxResource)
+	if err == nil {
+		t.Fatal("expected kubectl failure")
+	}
+	if strings.Contains(stderr.String(), secret) {
+		t.Fatalf("runtime stderr leaked kubectl diagnostic: %s", stderr.String())
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("returned error leaked kubectl diagnostic: %s", err)
+	}
+	if !strings.Contains(err.Error(), "token=[redacted]") {
+		t.Fatalf("returned error missing redacted diagnostic: %s", err)
 	}
 }
 
