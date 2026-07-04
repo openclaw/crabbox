@@ -30,3 +30,5 @@ plan*.md
 # Swift VM daemon build outputs
 vmd/.build/
 internal/applevzhelper/embedded/
+/crabbox-apple-vm-helper
+/crabbox-apple-vm-vmd

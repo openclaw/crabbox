@@ -89,8 +89,10 @@ SSH-lease providers:
 - Static/BYO SSH host: `internal/providers/ssh`, with target mapping in `internal/cli/static.go`
 - Local Docker container: `internal/providers/localcontainer`
 - Apple `Virtualization.framework` Linux VM helper and provider:
-  `internal/applevmhelper`, `internal/providers/applevm`; native helper release
-  packaging is in `.goreleaser.yaml` and the macOS CI/release jobs
+  `internal/applevmhelper`, `internal/providers/applevm`; the Swift VM daemon
+  lives in `vmd/` and is embedded into the helper by `scripts/build-vmd.sh`
+  plus `-tags vmdembed`; release packaging is in `.goreleaser.yaml` and the
+  macOS CI/release jobs
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
 - Cirrus Labs tart local macOS VM: `internal/providers/tart`
 - Microsoft Hyper-V local Windows VM: `internal/providers/hyperv`
