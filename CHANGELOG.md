@@ -11,6 +11,7 @@
 ### Fixed
 
 - Required an exact local or explicit `stop --reclaim` deployment claim before stopping an out-of-band Railway service, binding adoption to the configured endpoint, project, environment, service, and deployment. Thanks @coygeek.
+- Refused repository-selected Static SSH, Parallels, and exe.dev control destinations when they would inherit trusted or ambient SSH authentication; explicit host overrides remain available for operator approval. Thanks @coygeek.
 - Removed the Code viewer bootstrap bearer ticket from redirect URLs and browser history by handing it to the isolated lease origin through a no-store, POST-only form. Thanks @coygeek.
 - Replaced raw generated VNC credentials in copied WebVNC links with short-lived, one-time, authorization-checked handoff tickets. Thanks @coygeek.
 - Closed restored WebVNC viewer sockets that lack a complete current organization-bound principal instead of retaining owner-only legacy authorization. Thanks @coygeek.

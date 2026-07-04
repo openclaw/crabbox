@@ -451,6 +451,8 @@ func applyParallelsHostRefConfig(cfg *Config, hostRef string) {
 		cfg.Parallels.Host = host.Host
 		cfg.Parallels.HostUser = host.User
 		cfg.Parallels.HostKey = host.Key
+		cfg.credentialProvenance.parallelsHost = host.hostSource
+		cfg.credentialProvenance.parallelsHostKey = host.keySource
 		cfg.Parallels.SelectedHost = firstNonBlank(host.Name, host.Host, "local")
 		if host.VMRoot != "" {
 			cfg.Parallels.VMRoot = host.VMRoot

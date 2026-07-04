@@ -45,6 +45,7 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 	}
 	if flagWasSet(fs, "static-host") {
 		cfg.Static.Host = *values.StaticHost
+		cfg.credentialProvenance.staticHost = credentialSourceFlag
 	}
 	if flagWasSet(fs, "static-user") {
 		cfg.Static.User = *values.StaticUser

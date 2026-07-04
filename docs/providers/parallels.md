@@ -142,6 +142,14 @@ reaches the guest IP through an SSH `ProxyCommand` via the host. Normal SSH
 commands, desktop input helpers, screenshots, and VNC tunnels all use the same
 proxy path.
 
+A repository-defined remote host, including one selected through `templates`
+or `hosts`, cannot silently inherit a host key or ambient SSH authentication
+from a more trusted source. Define the remote host and a relative,
+symlink-resolved key file contained by the repository together, or approve the
+destination explicitly with `--parallels-host` or `CRABBOX_PARALLELS_HOST`.
+Absolute, missing, and repository-escaping key paths require explicit host
+approval.
+
 ### Fleet hosts
 
 ```yaml

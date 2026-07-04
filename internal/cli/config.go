@@ -1094,16 +1094,20 @@ type ParallelsTemplateConfig struct {
 	VMRoot           string
 	User             string
 	WorkRoot         string
+	hostSource       credentialValueSource
+	hostKeySource    credentialValueSource
 }
 
 type ParallelsHostConfig struct {
-	Name    string
-	Host    string
-	User    string
-	Key     string
-	VMRoot  string
-	Targets []string
-	MaxVMs  int
+	Name       string
+	Host       string
+	User       string
+	Key        string
+	VMRoot     string
+	Targets    []string
+	MaxVMs     int
+	hostSource credentialValueSource
+	keySource  credentialValueSource
 }
 
 type SemaphoreConfig struct {
@@ -4631,7 +4635,13 @@ func applyConfigFile(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
-	return applyFileConfigWithTrust(cfg, file, trustedConfigPath(path))
+	trusted := trustedConfigPath(path)
+	if !trusted {
+		if root, err := filepath.Abs(filepath.Dir(path)); err == nil {
+			cfg.credentialProvenance.repositoryRoot = root
+		}
+	}
+	return applyFileConfigWithTrust(cfg, file, trusted)
 }
 
 func applyFileConfig(cfg *Config, file fileConfig) error {
@@ -4661,6 +4671,11 @@ func inlineSSHPublicKey(value string) bool {
 
 func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error {
 	credentialSource := credentialSourceForFile(trusted)
+	if !trusted && cfg.credentialProvenance.repositoryRoot == "" {
+		if root, err := os.Getwd(); err == nil {
+			cfg.credentialProvenance.repositoryRoot = root
+		}
+	}
 	if file.Profile != "" {
 		cfg.Profile = file.Profile
 	}
@@ -5393,12 +5408,14 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Parallels.Host != "" {
 			cfg.Parallels.Host = file.Parallels.Host
+			cfg.credentialProvenance.parallelsHost = credentialSource
 		}
 		if file.Parallels.HostUser != "" {
 			cfg.Parallels.HostUser = file.Parallels.HostUser
 		}
 		if file.Parallels.HostKey != "" {
 			cfg.Parallels.HostKey = expandUserPath(file.Parallels.HostKey)
+			cfg.credentialProvenance.parallelsHostKey = credentialSource
 		}
 		if file.Parallels.VMRoot != "" {
 			cfg.Parallels.VMRoot = expandUserPath(file.Parallels.VMRoot)
@@ -5419,13 +5436,27 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 				if name == "" {
 					continue
 				}
-				cfg.Parallels.Templates[name] = applyFileParallelsTemplateConfig(cfg.Parallels.Templates[name], template)
+				merged := applyFileParallelsTemplateConfig(cfg.Parallels.Templates[name], template)
+				if template.Host != "" {
+					merged.hostSource = credentialSource
+				}
+				if template.HostKey != "" {
+					merged.hostKeySource = credentialSource
+				}
+				cfg.Parallels.Templates[name] = merged
 			}
 		}
 		if len(file.Parallels.Hosts) > 0 {
 			cfg.Parallels.Hosts = cfg.Parallels.Hosts[:0]
 			for _, host := range file.Parallels.Hosts {
-				cfg.Parallels.Hosts = append(cfg.Parallels.Hosts, applyFileParallelsHostConfig(host))
+				merged := applyFileParallelsHostConfig(host)
+				if host.Host != "" {
+					merged.hostSource = credentialSource
+				}
+				if host.Key != "" {
+					merged.keySource = credentialSource
+				}
+				cfg.Parallels.Hosts = append(cfg.Parallels.Hosts, merged)
 			}
 		}
 	}
@@ -5437,6 +5468,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.SSH.Key != "" {
 			cfg.SSHKey = expandUserPath(file.SSH.Key)
 			MarkSSHKeyExplicit(cfg)
+			cfg.credentialProvenance.sshKey = credentialSource
 		}
 		if file.SSH.Port != "" {
 			cfg.SSHPort = file.SSH.Port
@@ -5864,6 +5896,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.ExeDev != nil {
 		if file.ExeDev.ControlHost != "" {
 			cfg.ExeDev.ControlHost = file.ExeDev.ControlHost
+			cfg.credentialProvenance.exeDevControlHost = credentialSource
 		}
 		if file.ExeDev.Image != "" {
 			cfg.ExeDev.Image = file.ExeDev.Image
@@ -6960,6 +6993,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Static.Host != "" {
 			cfg.Static.Host = file.Static.Host
+			cfg.credentialProvenance.staticHost = credentialSource
 		}
 		if file.Static.User != "" {
 			cfg.Static.User = file.Static.User
@@ -7775,9 +7809,17 @@ func applyEnv(cfg *Config) error {
 	cfg.Parallels.SourceSnapshotID = getenv("CRABBOX_PARALLELS_SOURCE_SNAPSHOT_ID", cfg.Parallels.SourceSnapshotID)
 	cfg.Parallels.Template = getenv("CRABBOX_PARALLELS_TEMPLATE", cfg.Parallels.Template)
 	cfg.Parallels.CloneMode = getenv("CRABBOX_PARALLELS_CLONE_MODE", cfg.Parallels.CloneMode)
-	cfg.Parallels.Host = getenv("CRABBOX_PARALLELS_HOST", cfg.Parallels.Host)
+	if value := os.Getenv("CRABBOX_PARALLELS_HOST"); value != "" {
+		cfg.Parallels.Host = value
+		cfg.Parallels.Hosts = nil
+		cfg.Parallels.SelectedHost = ""
+		cfg.credentialProvenance.parallelsHost = credentialSourceEnvironment
+	}
 	cfg.Parallels.HostUser = getenv("CRABBOX_PARALLELS_HOST_USER", cfg.Parallels.HostUser)
-	cfg.Parallels.HostKey = expandUserPath(getenv("CRABBOX_PARALLELS_HOST_KEY", cfg.Parallels.HostKey))
+	if value := os.Getenv("CRABBOX_PARALLELS_HOST_KEY"); value != "" {
+		cfg.Parallels.HostKey = expandUserPath(value)
+		cfg.credentialProvenance.parallelsHostKey = credentialSourceEnvironment
+	}
 	cfg.Parallels.VMRoot = expandUserPath(getenv("CRABBOX_PARALLELS_VM_ROOT", cfg.Parallels.VMRoot))
 	cfg.Parallels.User = getenv("CRABBOX_PARALLELS_USER", cfg.Parallels.User)
 	cfg.Parallels.WorkRoot = getenv("CRABBOX_PARALLELS_WORK_ROOT", cfg.Parallels.WorkRoot)
@@ -7791,6 +7833,7 @@ func applyEnv(cfg *Config) error {
 	if sshKey := os.Getenv("CRABBOX_SSH_KEY"); sshKey != "" {
 		cfg.SSHKey = sshKey
 		MarkSSHKeyExplicit(cfg)
+		cfg.credentialProvenance.sshKey = credentialSourceEnvironment
 	}
 	if sshPort := os.Getenv("CRABBOX_SSH_PORT"); sshPort != "" {
 		cfg.SSHPort = sshPort
@@ -7993,7 +8036,10 @@ func applyEnv(cfg *Config) error {
 	cfg.E2B.Template = getenv("CRABBOX_E2B_TEMPLATE", cfg.E2B.Template)
 	cfg.E2B.Workdir = getenv("CRABBOX_E2B_WORKDIR", cfg.E2B.Workdir)
 	cfg.E2B.User = getenv("CRABBOX_E2B_USER", cfg.E2B.User)
-	cfg.ExeDev.ControlHost = getenv("CRABBOX_EXE_DEV_CONTROL_HOST", getenv("EXE_DEV_CONTROL_HOST", cfg.ExeDev.ControlHost))
+	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_CONTROL_HOST", "EXE_DEV_CONTROL_HOST"); ok {
+		cfg.ExeDev.ControlHost = value
+		cfg.credentialProvenance.exeDevControlHost = credentialSourceEnvironment
+	}
 	cfg.ExeDev.Image = getenv("CRABBOX_EXE_DEV_IMAGE", getenv("EXE_DEV_IMAGE", cfg.ExeDev.Image))
 	cfg.ExeDev.CPUs = getenvInt("CRABBOX_EXE_DEV_CPUS", cfg.ExeDev.CPUs)
 	cfg.ExeDev.Memory = getenv("CRABBOX_EXE_DEV_MEMORY", getenv("EXE_DEV_MEMORY", cfg.ExeDev.Memory))
@@ -8664,7 +8710,10 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.Static.ID = getenv("CRABBOX_STATIC_ID", cfg.Static.ID)
 	cfg.Static.Name = getenv("CRABBOX_STATIC_NAME", cfg.Static.Name)
-	cfg.Static.Host = getenv("CRABBOX_STATIC_HOST", cfg.Static.Host)
+	if value := os.Getenv("CRABBOX_STATIC_HOST"); value != "" {
+		cfg.Static.Host = value
+		cfg.credentialProvenance.staticHost = credentialSourceEnvironment
+	}
 	cfg.Static.User = getenv("CRABBOX_STATIC_USER", cfg.Static.User)
 	cfg.Static.Port = getenv("CRABBOX_STATIC_PORT", cfg.Static.Port)
 	cfg.Static.WorkRoot = getenv("CRABBOX_STATIC_WORK_ROOT", cfg.Static.WorkRoot)
@@ -9025,12 +9074,14 @@ func ApplyParallelsTemplateConfig(cfg *Config, name string) error {
 	}
 	if template.Host != "" {
 		cfg.Parallels.Host = template.Host
+		cfg.credentialProvenance.parallelsHost = template.hostSource
 	}
 	if template.HostUser != "" {
 		cfg.Parallels.HostUser = template.HostUser
 	}
 	if template.HostKey != "" {
 		cfg.Parallels.HostKey = template.HostKey
+		cfg.credentialProvenance.parallelsHostKey = template.hostKeySource
 	}
 	if template.VMRoot != "" {
 		cfg.Parallels.VMRoot = template.VMRoot

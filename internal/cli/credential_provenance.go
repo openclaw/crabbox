@@ -3,6 +3,7 @@ package cli
 import (
 	"flag"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -67,6 +68,12 @@ type credentialDestinationProvenance struct {
 	semaphoreToken      credentialValueSource
 	spritesAPIURL       credentialValueSource
 	spritesToken        credentialValueSource
+	parallelsHost       credentialValueSource
+	parallelsHostKey    credentialValueSource
+	staticHost          credentialValueSource
+	sshKey              credentialValueSource
+	exeDevControlHost   credentialValueSource
+	repositoryRoot      string
 }
 
 type sourcedCredential struct {
@@ -173,6 +180,18 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "azure-dynamic-sessions-endpoint") {
 		provenance.azSessionsEndpoint = credentialSourceFlag
+	}
+	if flagWasSet(fs, "parallels-host") {
+		provenance.parallelsHost = credentialSourceFlag
+	}
+	if flagWasSet(fs, "parallels-host-key") {
+		provenance.parallelsHostKey = credentialSourceFlag
+	}
+	if flagWasSet(fs, "static-host") {
+		provenance.staticHost = credentialSourceFlag
+	}
+	if flagWasSet(fs, "exe-dev-control-host") {
+		provenance.exeDevControlHost = credentialSourceFlag
 	}
 }
 
@@ -310,6 +329,23 @@ func validateProviderCredentialDestination(cfg Config) error {
 			inheritedCredential(sourcedCredential{cfg.Sprites.Token, provenance.spritesToken}) {
 			return repositoryCredentialDestinationError("sprites", "sprites.apiUrl", "CRABBOX_SPRITES_API_URL or --sprites-api-url")
 		}
+	case "parallels":
+		for _, candidate := range ParallelsCandidateConfigs(cfg) {
+			candidateProvenance := candidate.credentialProvenance
+			if candidateProvenance.parallelsHost == credentialSourceRepository &&
+				repositorySSHDestinationUsesInheritedAuth(candidate.Parallels.HostKey, candidateProvenance.parallelsHostKey, candidateProvenance.repositoryRoot) {
+				return repositoryCredentialDestinationError("parallels", "parallels.host", "CRABBOX_PARALLELS_HOST or --parallels-host")
+			}
+		}
+	case staticProvider:
+		if provenance.staticHost == credentialSourceRepository &&
+			repositorySSHDestinationUsesInheritedAuth(cfg.SSHKey, provenance.sshKey, provenance.repositoryRoot) {
+			return repositoryCredentialDestinationError(staticProvider, "static.host", "CRABBOX_STATIC_HOST or --static-host")
+		}
+	case "exe-dev":
+		if provenance.exeDevControlHost == credentialSourceRepository {
+			return repositoryCredentialDestinationError("exe-dev", "exeDev.controlHost", "CRABBOX_EXE_DEV_CONTROL_HOST or --exe-dev-control-host")
+		}
 	}
 	return nil
 }
@@ -348,6 +384,35 @@ func inheritedCredential(credentials ...sourcedCredential) bool {
 		}
 	}
 	return false
+}
+
+func repositorySSHDestinationUsesInheritedAuth(key string, source credentialValueSource, repositoryRoot string) bool {
+	// An empty key delegates authentication to ambient SSH config or an agent.
+	if strings.TrimSpace(key) == "" || source != credentialSourceRepository {
+		return true
+	}
+	return !repositoryContainsSSHKey(repositoryRoot, key)
+}
+
+func repositoryContainsSSHKey(repositoryRoot, key string) bool {
+	key = strings.TrimSpace(key)
+	if repositoryRoot == "" || key == "" || filepath.IsAbs(key) {
+		return false
+	}
+	root, err := filepath.EvalSymlinks(repositoryRoot)
+	if err != nil {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(root, key))
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	info, err := os.Stat(resolved)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func nomadSelectedTokenEnvHasValue(cfg Config) bool {

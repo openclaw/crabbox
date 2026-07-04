@@ -64,6 +64,8 @@ func ParallelsCandidateConfigs(cfg Config) []Config {
 		next.Parallels.Host = host.Host
 		next.Parallels.HostUser = host.User
 		next.Parallels.HostKey = host.Key
+		next.credentialProvenance.parallelsHost = host.hostSource
+		next.credentialProvenance.parallelsHostKey = host.keySource
 		if host.VMRoot != "" {
 			next.Parallels.VMRoot = host.VMRoot
 		}

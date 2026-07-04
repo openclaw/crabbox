@@ -126,6 +126,13 @@ The SSH private key comes from the shared `ssh.key` field (or `CRABBOX_SSH_KEY`)
 There is no per-host key field; the static provider connects with your existing
 key, not a key Crabbox generates.
 
+A repository-defined `static.host` cannot silently inherit a key or ambient SSH
+authentication from user config, the environment, an SSH agent, or local SSH
+config. Define `static.host` and a relative, symlink-resolved `ssh.key` file
+contained by the repository in the same repository config, or approve the
+destination explicitly with `--static-host` or `CRABBOX_STATIC_HOST`. Absolute,
+missing, and repository-escaping key paths require explicit host approval.
+
 ### Flags
 
 ```text

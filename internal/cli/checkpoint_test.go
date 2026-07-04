@@ -512,11 +512,13 @@ func TestApplyParallelsCheckpointHostConfigPreservesFleetHostAuth(t *testing.T) 
 	cfg := baseConfig()
 	cfg.Provider = "ssh"
 	cfg.Parallels.Hosts = []ParallelsHostConfig{{
-		Name:   "mac-fleet-1",
-		Host:   "mac-host.example.net",
-		User:   "builder",
-		Key:    "~/.ssh/mac-host",
-		VMRoot: "/Users/builder/Parallels",
+		Name:       "mac-fleet-1",
+		Host:       "mac-host.example.net",
+		User:       "builder",
+		Key:        "~/.ssh/mac-host",
+		VMRoot:     "/Users/builder/Parallels",
+		hostSource: credentialSourceTrustedFile,
+		keySource:  credentialSourceTrustedFile,
 	}}
 	record := checkpointRecord{Kind: checkpointKindParallels}
 	record.Native.Region = "mac-host.example.net"
@@ -527,6 +529,25 @@ func TestApplyParallelsCheckpointHostConfigPreservesFleetHostAuth(t *testing.T) 
 	}
 	if got := parallelsHostRefForConfig(cfg); got != "mac-fleet-1" {
 		t.Fatalf("host ref=%q", got)
+	}
+	if cfg.credentialProvenance.parallelsHost != credentialSourceTrustedFile || cfg.credentialProvenance.parallelsHostKey != credentialSourceTrustedFile {
+		t.Fatalf("provenance=%#v", cfg.credentialProvenance)
+	}
+}
+
+func TestApplyParallelsCheckpointHostConfigPreservesRepositoryProvenance(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Parallels.Hosts = []ParallelsHostConfig{{
+		Name:       "repo-fleet",
+		Host:       "repo.example.test",
+		hostSource: credentialSourceRepository,
+	}}
+	record := checkpointRecord{Kind: checkpointKindParallels}
+	record.Native.Region = "repo-fleet"
+
+	applyParallelsCheckpointHostConfig(&cfg, record)
+	if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "parallels.host") {
+		t.Fatalf("repository checkpoint host error=%v", err)
 	}
 }
 

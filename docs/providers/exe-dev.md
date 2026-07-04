@@ -15,6 +15,11 @@ coordinator support for this provider.
 The control host calls (`new`, `ls`, `rm`) speak the exe.dev API over SSH. Your
 own shell commands run on the VM SSH target, not through the control host.
 
+Control-host authentication uses your ambient SSH configuration or agent. A
+repository-defined custom `exeDev.controlHost` therefore requires explicit
+operator approval through `--exe-dev-control-host` or
+`CRABBOX_EXE_DEV_CONTROL_HOST` before Crabbox opens an SSH connection.
+
 ## Quick start
 
 ```sh

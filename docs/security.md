@@ -228,6 +228,16 @@ bodies. E2B API endpoints require HTTPS except for explicit localhost/loopback
 development URLs, and AWS region values are validated before constructing
 SigV4 service hosts.
 
+Repository-selected Static SSH, remote Parallels, and exe.dev control hosts
+cannot inherit a key, SSH agent, or local SSH configuration from a more trusted
+source. Put both a Static SSH or Parallels host and a relative, symlink-resolved
+key file contained by the repository in the same repository config, or
+explicitly approve the destination with the matching host flag or environment
+variable. Absolute, missing, and repository-escaping key paths do not count as
+same-source credentials. Because exe.dev control authentication is always
+ambient, a repository-defined custom control host requires an explicit
+`--exe-dev-control-host` or `CRABBOX_EXE_DEV_CONTROL_HOST` override.
+
 Cookie-authenticated portal mutations and portal viewer WebSocket upgrades
 require an exact same-origin browser `Origin` matching `CRABBOX_PUBLIC_URL` (or
 the request origin when no public URL is configured). Missing or sibling-origin

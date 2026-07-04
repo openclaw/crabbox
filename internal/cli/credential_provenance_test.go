@@ -2,6 +2,8 @@ package cli
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -756,4 +758,349 @@ func TestConfigMergeAllowsRepositoryEndpointAndCredentialPair(t *testing.T) {
 	if cfg.Proxmox.Node != "pve-project" {
 		t.Fatalf("proxmox node=%q", cfg.Proxmox.Node)
 	}
+}
+
+func TestRepositorySSHDestinationsRejectInheritedOrAmbientAuthentication(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "static ambient auth",
+			cfg: Config{
+				Provider: staticProvider,
+				Static:   StaticConfig{Host: "repo.example.test"},
+				credentialProvenance: credentialDestinationProvenance{
+					staticHost: credentialSourceRepository,
+				},
+			},
+			want: "static.host",
+		},
+		{
+			name: "static inherited key",
+			cfg: Config{
+				Provider: staticProvider,
+				Static:   StaticConfig{Host: "repo.example.test"},
+				SSHKey:   "/trusted/id_ed25519",
+				credentialProvenance: credentialDestinationProvenance{
+					staticHost: credentialSourceRepository,
+					sshKey:     credentialSourceTrustedFile,
+				},
+			},
+			want: "static.host",
+		},
+		{
+			name: "parallels ambient auth",
+			cfg: Config{
+				Provider:  "parallels",
+				Parallels: ParallelsConfig{Host: "repo.example.test"},
+				credentialProvenance: credentialDestinationProvenance{
+					parallelsHost: credentialSourceRepository,
+				},
+			},
+			want: "parallels.host",
+		},
+		{
+			name: "parallels inherited key",
+			cfg: Config{
+				Provider:  "parallels",
+				Parallels: ParallelsConfig{Host: "repo.example.test", HostKey: "/trusted/id_ed25519"},
+				credentialProvenance: credentialDestinationProvenance{
+					parallelsHost:    credentialSourceRepository,
+					parallelsHostKey: credentialSourceEnvironment,
+				},
+			},
+			want: "parallels.host",
+		},
+		{
+			name: "parallels fleet ambient auth",
+			cfg: Config{
+				Provider: "parallels",
+				Parallels: ParallelsConfig{Hosts: []ParallelsHostConfig{{
+					Host:       "repo.example.test",
+					hostSource: credentialSourceRepository,
+				}}},
+			},
+			want: "parallels.host",
+		},
+		{
+			name: "exe dev ambient auth",
+			cfg: Config{
+				Provider: "exe-dev",
+				ExeDev:   ExeDevConfig{ControlHost: "repo.example.test"},
+				credentialProvenance: credentialDestinationProvenance{
+					exeDevControlHost: credentialSourceRepository,
+				},
+			},
+			want: "exeDev.controlHost",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateProviderCredentialDestination(test.cfg)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v want field %s", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRepositorySSHDestinationsAllowSameSourceKeys(t *testing.T) {
+	repositoryRoot, key := repositorySSHKeyFixture(t)
+	tests := []Config{
+		{
+			Provider: staticProvider,
+			Static:   StaticConfig{Host: "repo.example.test"},
+			SSHKey:   key,
+			credentialProvenance: credentialDestinationProvenance{
+				staticHost:     credentialSourceRepository,
+				sshKey:         credentialSourceRepository,
+				repositoryRoot: repositoryRoot,
+			},
+		},
+		{
+			Provider:  "parallels",
+			Parallels: ParallelsConfig{Host: "repo.example.test", HostKey: key},
+			credentialProvenance: credentialDestinationProvenance{
+				parallelsHost:    credentialSourceRepository,
+				parallelsHostKey: credentialSourceRepository,
+				repositoryRoot:   repositoryRoot,
+			},
+		},
+		{
+			Provider: "parallels",
+			Parallels: ParallelsConfig{Hosts: []ParallelsHostConfig{{
+				Host:       "repo.example.test",
+				Key:        key,
+				hostSource: credentialSourceRepository,
+				keySource:  credentialSourceRepository,
+			}}},
+			credentialProvenance: credentialDestinationProvenance{repositoryRoot: repositoryRoot},
+		},
+	}
+
+	for _, cfg := range tests {
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("provider=%s rejected same-source SSH config: %v", cfg.Provider, err)
+		}
+	}
+}
+
+func TestRepositorySSHDestinationsRejectExternalSameSourceKeyPaths(t *testing.T) {
+	repositoryRoot, key := repositorySSHKeyFixture(t)
+	externalRoot := t.TempDir()
+	externalKey := filepath.Join(externalRoot, "external-key")
+	if err := os.WriteFile(externalKey, []byte("external-test-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	escapingKey, err := filepath.Rel(repositoryRoot, externalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalKey, filepath.Join(repositoryRoot, "outward-link")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, candidate := range []string{
+		filepath.Join(repositoryRoot, key),
+		escapingKey,
+		"outward-link",
+		"missing-key",
+	} {
+		cfg := Config{
+			Provider: staticProvider,
+			Static:   StaticConfig{Host: "repo.example.test"},
+			SSHKey:   candidate,
+			credentialProvenance: credentialDestinationProvenance{
+				staticHost:     credentialSourceRepository,
+				sshKey:         credentialSourceRepository,
+				repositoryRoot: repositoryRoot,
+			},
+		}
+		if err := validateProviderCredentialDestination(cfg); err == nil {
+			t.Fatalf("unsafe repository key path %q was accepted", candidate)
+		}
+	}
+}
+
+func repositorySSHKeyFixture(t *testing.T) (string, string) {
+	t.Helper()
+	repositoryRoot := t.TempDir()
+	key := "repo-test-key"
+	if err := os.WriteFile(filepath.Join(repositoryRoot, key), []byte("repository-test-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return repositoryRoot, key
+}
+
+func TestConfigMergeTracksSSHDestinationSources(t *testing.T) {
+	clearConfigEnv(t)
+
+	t.Run("static inherited key rejected then environment host approved", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = staticProvider
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{SSH: &fileSSHConfig{Key: "/trusted/id_ed25519"}}, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{Static: &fileStaticConfig{Host: "repo.example.test"}}, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err == nil {
+			t.Fatal("repository static host with inherited key was accepted")
+		}
+
+		t.Setenv("CRABBOX_STATIC_HOST", "approved.example.test")
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("explicit static host rejected: %v", err)
+		}
+	})
+
+	t.Run("same repository static host and key allowed", func(t *testing.T) {
+		repositoryRoot, key := repositorySSHKeyFixture(t)
+		cfg := baseConfig()
+		cfg.Provider = staticProvider
+		cfg.credentialProvenance.repositoryRoot = repositoryRoot
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{
+			Static: &fileStaticConfig{Host: "repo.example.test"},
+			SSH:    &fileSSHConfig{Key: key},
+		}, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("same-source static config rejected: %v", err)
+		}
+	})
+
+	t.Run("parallels fleet source follows each host", func(t *testing.T) {
+		repositoryRoot, key := repositorySSHKeyFixture(t)
+		cfg := baseConfig()
+		cfg.Provider = "parallels"
+		cfg.credentialProvenance.repositoryRoot = repositoryRoot
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{Parallels: &fileParallelsConfig{
+			Hosts: []fileParallelsHostConfig{{Host: "repo.example.test", Key: key}},
+		}}, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("same-source fleet host rejected: %v", err)
+		}
+
+		cfg.Parallels.Hosts[0].Key = ""
+		if err := validateProviderCredentialDestination(cfg); err == nil {
+			t.Fatal("repository fleet host with ambient auth was accepted")
+		}
+
+		t.Setenv("CRABBOX_PARALLELS_HOST", "approved.example.test")
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Parallels.Hosts) != 0 {
+			t.Fatalf("explicit host retained repository fleet: %#v", cfg.Parallels.Hosts)
+		}
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("explicit parallels host rejected: %v", err)
+		}
+	})
+
+	t.Run("exe dev environment host approves ambient auth", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "exe-dev"
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{ExeDev: &fileExeDevConfig{ControlHost: "repo.example.test"}}, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err == nil {
+			t.Fatal("repository exe.dev control host was accepted")
+		}
+
+		t.Setenv("CRABBOX_EXE_DEV_CONTROL_HOST", "approved.example.test")
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("explicit exe.dev control host rejected: %v", err)
+		}
+	})
+}
+
+func TestRepositorySSHDestinationsAllowExplicitFlagOverride(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		args []string
+	}{
+		{
+			name: "parallels",
+			cfg: Config{
+				Provider:  "parallels",
+				Parallels: ParallelsConfig{Host: "repo.example.test"},
+				credentialProvenance: credentialDestinationProvenance{
+					parallelsHost: credentialSourceRepository,
+				},
+			},
+			args: []string{"--parallels-host", "approved.example.test"},
+		},
+		{
+			name: "exe dev",
+			cfg: Config{
+				Provider: "exe-dev",
+				ExeDev:   ExeDevConfig{ControlHost: "repo.example.test"},
+				credentialProvenance: credentialDestinationProvenance{
+					exeDevControlHost: credentialSourceRepository,
+				},
+			},
+			args: []string{"--exe-dev-control-host", "approved.example.test"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := test.cfg
+			fs := newFlagSet("test", io.Discard)
+			var parallelsHost *string
+			if cfg.Provider == "parallels" {
+				parallelsHost = fs.String("parallels-host", cfg.Parallels.Host, "")
+			}
+			values := registerProviderFlags(fs, cfg)
+			if err := parseFlags(fs, test.args); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if parallelsHost != nil {
+				cfg.Parallels.Host = *parallelsHost
+				cfg.Parallels.Hosts = nil
+				markCredentialDestinationFlagSources(&cfg, fs)
+			}
+			if err := validateProviderCredentialDestination(cfg); err != nil {
+				t.Fatalf("explicit host flag rejected: %v", err)
+			}
+		})
+	}
+
+	t.Run("static", func(t *testing.T) {
+		cfg := Config{
+			Provider: staticProvider,
+			Static:   StaticConfig{Host: "repo.example.test"},
+			credentialProvenance: credentialDestinationProvenance{
+				staticHost: credentialSourceRepository,
+			},
+		}
+		fs := newFlagSet("test", io.Discard)
+		values := registerTargetFlags(fs, cfg)
+		if err := parseFlags(fs, []string{"--static-host", "approved.example.test"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyTargetFlagOverrides(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("explicit static host rejected: %v", err)
+		}
+	})
 }
