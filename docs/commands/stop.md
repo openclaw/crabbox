@@ -58,6 +58,11 @@ Crabbox lease ID and local slug:
   `--reclaim` reuse persists a claim.
 - `e2b` — accepts a Crabbox lease ID, a local slug, or a Crabbox-owned E2B
   sandbox ID in raw or `e2b_<sandboxID>` form and deletes the E2B sandbox.
+- `railway` — refuses unclaimed service IDs. Use `--reclaim` only after
+  inspecting the configured API endpoint, project, environment, service, and
+  current deployment; Crabbox persists that exact one-deployment binding before
+  stopping it. Failed stops retain the claim for an exact retry, while successful
+  stops remove it.
 - `vercel-sandbox` — accepts a Crabbox-created local slug or `vsbx_...` lease
   ID, verifies ownership metadata, deletes the Vercel Sandbox, and removes the
   local claim. Missing remote sandboxes preserve the claim unless
@@ -122,6 +127,7 @@ client are cleaned up before the provider release runs.
 ```text
 --provider <name>          provider to act against (see crabbox providers)
 --id <lease-or-slug>        lease ID or slug (equivalent to the positional arg)
+--reclaim                   explicitly adopt a provider resource when that provider supports safe stop adoption
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>        static SSH host (provider=ssh)

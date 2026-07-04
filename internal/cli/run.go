@@ -2929,6 +2929,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	fs := newFlagSet("stop", a.Stderr)
 	provider := fs.String("provider", defaults.Provider, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
+	reclaim := fs.Bool("reclaim", false, "adopt an unclaimed provider resource before stopping it")
 	expectedLeaseID := fs.String("expected-provider-lease-id", "", "internal: immutable provider lease identity")
 	expectedAttemptLeaseID := fs.String("expected-provider-attempt-lease-id", "", "internal: immutable provider attempt identity")
 	expectedSlug := fs.String("expected-provider-slug", "", "internal: immutable provider slug identity")
@@ -3071,7 +3072,17 @@ func (a App) stop(ctx context.Context, args []string) error {
 		if !expectedIdentity.empty() {
 			return exit(2, "provider=%s cannot validate an expected release identity", backend.Spec().Name)
 		}
+		if *reclaim {
+			reclaimer, ok := backend.(StopReclaimBackend)
+			if !ok {
+				return exit(2, "provider=%s does not support stop --reclaim", backend.Spec().Name)
+			}
+			return reclaimer.ReclaimAndStop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id})
+		}
 		return delegated.Stop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id})
+	}
+	if *reclaim {
+		return exit(2, "provider=%s does not support stop --reclaim", backend.Spec().Name)
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {

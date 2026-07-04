@@ -255,7 +255,10 @@ an operator can use the provider's supported `--reclaim` reuse path to persist
 a new claim before any provider mutation. Hyper-V, Multipass, and Parallels
 likewise require exact resource-bound local claims before release or cleanup;
 provider names and `crabbox-` resource prefixes are discovery hints, not
-destructive ownership proof.
+destructive ownership proof. Railway services are created out-of-band, so stop
+requires either an exact local endpoint/project/environment/service/deployment
+claim or explicit `stop --reclaim` adoption of the currently inspected
+deployment; a successful stop removes that one-deployment claim.
 
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects. Required

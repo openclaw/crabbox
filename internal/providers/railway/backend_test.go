@@ -625,7 +625,9 @@ type fakeRailwayAPI struct {
 	deploymentBlock chan struct{}
 	services        []railwayService
 	service         railwayService
+	getServiceCalls int
 	stopID          string
+	stopErr         error
 	triggerErr      error
 	logsErr         error
 	listErr         error
@@ -705,7 +707,7 @@ func (f *fakeRailwayAPI) StopDeployment(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stopID = id
-	return nil
+	return f.stopErr
 }
 
 func (f *fakeRailwayAPI) ListServices(_ context.Context) ([]railwayService, error) {
@@ -717,6 +719,7 @@ func (f *fakeRailwayAPI) ListServices(_ context.Context) ([]railwayService, erro
 func (f *fakeRailwayAPI) GetService(_ context.Context, _ string) (railwayService, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.getServiceCalls++
 	return f.service, nil
 }
 
@@ -1051,19 +1054,135 @@ func TestRailwayStopRequiresID(t *testing.T) {
 	}
 }
 
-func TestRailwayStopCallsDeploymentStop(t *testing.T) {
-	api := &fakeRailwayAPI{deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"}}
+func TestRailwayStopRejectsUnclaimedServiceBeforeRemoteReads(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeRailwayAPI{
+		service:    railwayService{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
+		deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"},
+	}
 	cfg := Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
 	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
-	if err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"}); err != nil {
-		t.Fatalf("Stop err: %v", err)
+	err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"})
+	if err == nil || !strings.Contains(err.Error(), "not claimed") {
+		t.Fatalf("Stop err=%v, want unclaimed rejection", err)
+	}
+	if api.getServiceCalls != 0 || api.latestCalls != 0 || api.stopID != "" {
+		t.Fatalf("unclaimed stop touched Railway: service=%d latest=%d stop=%q", api.getServiceCalls, api.latestCalls, api.stopID)
+	}
+}
+
+func TestRailwayReclaimAndStopBindsExactDeployment(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeRailwayAPI{
+		service:    railwayService{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
+		deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"},
+	}
+	backend := newRailwayBackendForTest(api)
+	if err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "svc-1"}); err != nil {
+		t.Fatalf("ReclaimAndStop err: %v", err)
 	}
 	if api.stopID != "dep-1" {
 		t.Fatalf("stop called with id=%q, want dep-1", api.stopID)
+	}
+	if _, ok, err := resolveLeaseClaimForProviderCloudID("svc-1"); err != nil || ok {
+		t.Fatalf("successful stop left claim: ok=%t err=%v", ok, err)
+	}
+}
+
+func TestRailwayFailedStopPreservesClaimForExactRetry(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeRailwayAPI{
+		service:    railwayService{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
+		deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"},
+		stopErr:    errors.New("stop unavailable"),
+	}
+	backend := newRailwayBackendForTest(api)
+	err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "svc-1"})
+	if err == nil || !strings.Contains(err.Error(), "stop unavailable") {
+		t.Fatalf("ReclaimAndStop err=%v, want provider failure", err)
+	}
+	claim, ok, err := resolveLeaseClaimForProviderCloudID("svc-1")
+	if err != nil || !ok {
+		t.Fatalf("failed stop claim: ok=%t err=%v", ok, err)
+	}
+	if claim.Labels[railwayClaimDeploymentLabel] != "dep-1" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+	api.stopErr = nil
+	api.stopID = ""
+	if err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"}); err != nil {
+		t.Fatalf("claimed retry err: %v", err)
+	}
+	if api.stopID != "dep-1" {
+		t.Fatalf("retry stopped %q, want dep-1", api.stopID)
+	}
+}
+
+func TestRailwayStopRejectsChangedDeployment(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeRailwayAPI{
+		service:    railwayService{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
+		deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"},
+		stopErr:    errors.New("retain claim"),
+	}
+	backend := newRailwayBackendForTest(api)
+	if err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "svc-1"}); err == nil {
+		t.Fatal("ReclaimAndStop unexpectedly succeeded")
+	}
+	api.stopErr = nil
+	api.stopID = ""
+	api.deployment = railwayDeployment{ID: "dep-2", Status: "BUILDING"}
+	err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"})
+	if err == nil || !strings.Contains(err.Error(), "latest deployment changed") {
+		t.Fatalf("Stop err=%v, want changed deployment rejection", err)
+	}
+	if api.stopID != "" {
+		t.Fatalf("changed deployment stop called with %q", api.stopID)
+	}
+}
+
+func TestRailwayStopRejectsClaimFromDifferentEnvironmentBeforeRemoteReads(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeRailwayAPI{
+		service:    railwayService{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
+		deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"},
+		stopErr:    errors.New("retain claim"),
+	}
+	backend := newRailwayBackendForTest(api)
+	if err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "svc-1"}); err == nil {
+		t.Fatal("ReclaimAndStop unexpectedly succeeded")
+	}
+	api.getServiceCalls = 0
+	api.latestCalls = 0
+	api.stopErr = nil
+	api.stopID = ""
+	backend.cfg.Railway.EnvironmentID = "env-other"
+	err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"})
+	if err == nil || !strings.Contains(err.Error(), "does not match the configured endpoint") {
+		t.Fatalf("Stop err=%v, want scope rejection", err)
+	}
+	if api.getServiceCalls != 0 || api.latestCalls != 0 || api.stopID != "" {
+		t.Fatalf("scope mismatch touched Railway: service=%d latest=%d stop=%q", api.getServiceCalls, api.latestCalls, api.stopID)
+	}
+}
+
+func TestRailwayReclaimRejectsServiceFromDifferentProject(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeRailwayAPI{
+		service:    railwayService{ID: "svc-1", Name: "api", ProjectID: "proj-other"},
+		deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"},
+	}
+	backend := newRailwayBackendForTest(api)
+	err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "svc-1"})
+	if err == nil || !strings.Contains(err.Error(), "does not belong") {
+		t.Fatalf("ReclaimAndStop err=%v, want project rejection", err)
+	}
+	if api.latestCalls != 0 || api.stopID != "" {
+		t.Fatalf("project mismatch touched deployment: latest=%d stop=%q", api.latestCalls, api.stopID)
 	}
 }
 

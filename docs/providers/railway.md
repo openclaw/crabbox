@@ -32,11 +32,14 @@ Railway API. Railway runs whatever start command the service is configured with
 (via `railway.toml`, the dashboard, or `serviceInstanceUpdate`), so accepting a
 generic Crabbox command would create false-positive test results.
 
-`status` returns the latest deployment status and readiness. `stop` calls
-`deploymentStop` on the latest deployment for the service. `list` enumerates one
-row per service across every project the token can see. `warmup` is rejected so
-Crabbox never silently provisions billable Railway resources — create the
-service yourself in the dashboard or via `serviceCreate` first.
+`status` returns the latest deployment status and readiness. Because Railway
+services are created outside Crabbox, the first `stop` requires explicit
+`--reclaim` adoption. Crabbox binds a local claim to the configured API endpoint,
+project, environment, service, and exact latest deployment before calling
+`deploymentStop`. A changed or unclaimed deployment fails closed. `list`
+enumerates one row per service across every project the token can see. `warmup`
+is rejected so Crabbox never silently provisions billable Railway resources —
+create the service yourself in the dashboard or via `serviceCreate` first.
 
 ## Commands
 
@@ -49,7 +52,7 @@ crabbox run --provider railway --no-sync --id "$RAILWAY_SERVICE_ID" -- false
 crabbox status --provider railway --id "$RAILWAY_SERVICE_ID" \
   --railway-project "$RAILWAY_PROJECT_ID" \
   --railway-environment "$RAILWAY_ENVIRONMENT_ID"
-crabbox stop   --provider railway --id "$RAILWAY_SERVICE_ID" \
+crabbox stop   --provider railway --id "$RAILWAY_SERVICE_ID" --reclaim \
   --railway-project "$RAILWAY_PROJECT_ID" \
   --railway-environment "$RAILWAY_ENVIRONMENT_ID"
 crabbox list   --provider railway
@@ -57,8 +60,10 @@ crabbox list   --provider railway
 
 `warmup` is rejected; service creation must happen out-of-band. `run` is rejected
 because there is no Railway exec API. `status` and `stop` require `--id`,
-`--railway-project`, and `--railway-environment`. `list` needs only the API
-token.
+`--railway-project`, and `--railway-environment`. The first stop of an exact
+deployment also requires `--reclaim`; a provider failure retains that binding so
+a retry can omit `--reclaim`. A successful stop removes it. `list` needs only the
+API token.
 
 ## Auth
 

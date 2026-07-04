@@ -207,6 +207,10 @@ func UpdateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labe
 	return updateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
 }
 
+func UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected LeaseClaim, labels map[string]string, action func() error) (LeaseClaim, error) {
+	return updateLeaseClaimLabelsIfUnchangedAfter(leaseID, expected, labels, action)
+}
+
 // UpdateLeaseClaimTailscale records a tailnet endpoint (IPv4 and/or FQDN) on an
 // existing claim. Used by delegated-run providers that join the tailnet
 // out-of-band rather than through a Crabbox-managed SSH lease.

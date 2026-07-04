@@ -783,6 +783,13 @@ func providerClaimScope(provider string, cfg Config) string {
 		if endpoint != "" && node != "" {
 			return "endpoint:" + endpoint + "|node:" + node
 		}
+	case "railway":
+		endpoint := strings.TrimRight(strings.TrimSpace(routingSafeURL(cfg.Railway.APIURL)), "/")
+		projectID := strings.TrimSpace(cfg.Railway.ProjectID)
+		environmentID := strings.TrimSpace(cfg.Railway.EnvironmentID)
+		if endpoint != "" && projectID != "" && environmentID != "" {
+			return "endpoint:" + endpoint + "|project:" + projectID + "|environment:" + environmentID
+		}
 	}
 	return ""
 }

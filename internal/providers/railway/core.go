@@ -26,6 +26,7 @@ type Repo = core.Repo
 type ExitError = core.ExitError
 type FeatureSet = core.FeatureSet
 type Feature = core.Feature
+type LeaseClaim = core.LeaseClaim
 
 const (
 	providerName = "railway"
@@ -48,4 +49,28 @@ func blank(value, fallback string) string {
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
+}
+
+func claimLeaseTargetForConfigIfUnchanged(leaseID string, cfg Config, server Server, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return core.ClaimLeaseTargetForConfigIfUnchanged(leaseID, "", cfg, server, core.SSHTarget{}, 0, expected, expectedExists)
+}
+
+func resolveLeaseClaim(identifier string) (LeaseClaim, bool, error) {
+	return core.ResolveLeaseClaim(identifier)
+}
+
+func resolveLeaseClaimForProviderCloudID(cloudID string) (LeaseClaim, bool, error) {
+	return core.ResolveLeaseClaimForProviderCloudID(cloudID, providerName)
+}
+
+func providerClaimScope(cfg Config) string {
+	return core.ProviderClaimScope(providerName, cfg)
+}
+
+func updateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected LeaseClaim, labels map[string]string, action func() error) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID, expected, labels, action)
+}
+
+func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
+	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
 }
