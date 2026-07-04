@@ -84,6 +84,9 @@ func TestFalFlagsApplyNonSecretConfig(t *testing.T) {
 		cfg.Fal.WorkRoot != "/srv/crabbox" {
 		t.Fatalf("fal flags not applied: %#v", cfg.Fal)
 	}
+	if cfg.SSHUser != "ubuntu" || cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("effective ssh config user=%q workRoot=%q", cfg.SSHUser, cfg.WorkRoot)
+	}
 	if cfg.Fal.APIKey != "" {
 		t.Fatalf("fal API key should stay env-only, got %q", cfg.Fal.APIKey)
 	}

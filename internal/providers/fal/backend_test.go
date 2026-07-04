@@ -657,6 +657,29 @@ func TestFalCleanupRetainsClaimWhenAbsenceIsNotAccountBound(t *testing.T) {
 	}
 }
 
+func TestFalListShowsClaimsWhenProviderVerificationIsUnavailable(t *testing.T) {
+	api := &fakeFalAPI{getErr: errors.New("control plane unavailable")}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_unverified12", "unverified", "inst_unverified", "203.0.113.32", false)
+
+	views, err := b.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].Status != "provider-verification-unavailable" || views[0].CloudID != "inst_unverified" {
+		t.Fatalf("views=%#v", views)
+	}
+
+	b.cfg.Fal.APIKey = ""
+	views, err = b.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].Status != "provider-verification-unavailable" {
+		t.Fatalf("missing-credential views=%#v", views)
+	}
+}
+
 func TestFalReleaseRetainsClaimWhenAbsenceIsNotAccountBound(t *testing.T) {
 	api := &fakeFalAPI{instances: map[string]ComputeInstance{}}
 	b := newFalTestBackend(t, api)

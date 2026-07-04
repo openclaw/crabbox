@@ -39,9 +39,11 @@ func ApplyFalProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "fal-user") {
 		cfg.Fal.User = *v.User
+		cfg.SSHUser = *v.User
 	}
 	if flagWasSet(fs, "fal-work-root") {
 		cfg.Fal.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
 	}
 	if isFalProviderName(cfg.Provider) {
 		applyFalDefaults(cfg)

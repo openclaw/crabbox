@@ -185,20 +185,35 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 }
 
 func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
-	client, err := b.api()
-	if err != nil {
-		return nil, err
-	}
 	claims, err := falClaims()
 	if err != nil {
 		return nil, err
 	}
 	views := make([]core.LeaseView, 0, len(claims))
+	needsProvider := false
 	for _, claim := range claims {
 		if claim.CloudID == "" {
 			server, err := falClaimView(claim, b.configForRun(), firstNonBlank(claim.Labels["recovery"], "recovery-pending"))
 			if err != nil {
 				return nil, err
+			}
+			views = append(views, server)
+			continue
+		}
+		needsProvider = true
+	}
+	if !needsProvider {
+		return views, nil
+	}
+	client, apiErr := b.api()
+	for _, claim := range claims {
+		if claim.CloudID == "" {
+			continue
+		}
+		if apiErr != nil {
+			server, viewErr := falClaimView(claim, b.configForRun(), "provider-verification-unavailable")
+			if viewErr != nil {
+				return nil, viewErr
 			}
 			views = append(views, server)
 			continue
@@ -213,7 +228,12 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 			continue
 		}
 		if err != nil {
-			return nil, err
+			server, viewErr := falClaimView(claim, b.configForRun(), "provider-verification-unavailable")
+			if viewErr != nil {
+				return nil, viewErr
+			}
+			views = append(views, server)
+			continue
 		}
 		target, err := leaseTargetFromClaimedInstance(instance, claim, b.configForRun(), false)
 		if err != nil {

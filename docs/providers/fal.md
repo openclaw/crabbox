@@ -149,7 +149,9 @@ from the account that created it; Crabbox retains the local claim for manual
 reconciliation and shows it in `crabbox list` as
 `provider-absence-unverified`. Recovery-pending claims are likewise retained
 and listed with their recovery status so empty-inventory checks cannot hide
-local residue.
+local residue. If credentials or the control plane are unavailable, claimed
+instances remain visible as `provider-verification-unavailable` instead of
+being mistaken for an empty inventory.
 
 ## Cost Discipline
 
