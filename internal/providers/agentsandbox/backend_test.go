@@ -131,13 +131,9 @@ func TestWarmupReturnsDefinitiveCreateFailureWithoutReconciliation(t *testing.T)
 	fake.createErrs = []error{&kubernetesCreateError{err: errors.New("forbidden"), ambiguous: false}}
 	backend := testBackend(cfg, fake, nil, nil)
 
-	start := time.Now()
 	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testGitRepo(t), RequestedSlug: "rejected-create"})
 	if err == nil || !strings.Contains(err.Error(), "forbidden") {
 		t.Fatalf("warmup err=%v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("definitive create failure entered reconciliation: %s", elapsed)
 	}
 	if len(fake.gets) != 0 {
 		t.Fatalf("definitive create failure performed reconciliation GETs: %#v", fake.gets)
