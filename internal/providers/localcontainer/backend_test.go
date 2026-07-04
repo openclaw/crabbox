@@ -1371,12 +1371,22 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 		`menubar menuitem`,
 		`desktop-background-$mode.svg`,
 		`swaybg -i "$wallpaper_file" -m fill`,
+		`status=$?`,
+		`[ "$status" -lt 128 ] || exit "$status"`,
+		`exec env XDG_RUNTIME_DIR="$runtime"`,
+		`) </dev/null >/tmp/crabbox-swaybg.log 2>&1 &`,
 		`nohup gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &`,
 		`elif [ "$(id -u)" -ne 0 ] && pgrep -x gnome-panel`,
 	} {
 		if !strings.Contains(bootstrapScript, want) {
 			t.Fatalf("bootstrap script missing %q", want)
 		}
+	}
+	if strings.Contains(bootstrapScript, "2>&1) &") {
+		t.Fatal("bootstrap script leaves a swaybg wrapper attached to its caller")
+	}
+	if strings.Contains(bootstrapScript, `|| XDG_RUNTIME_DIR="$runtime"`) {
+		t.Fatal("bootstrap script can launch a stale fallback swaybg after termination")
 	}
 }
 

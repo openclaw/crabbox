@@ -50,6 +50,12 @@ challenge, and rechecks ownership before printing any credential-bearing
 viewer URL. A missing/zero expected PID, unrelated listener, or unauthenticated
 endpoint never receives a password probe or URL.
 
+Deployments that expose the browser portal and bridge agent through different
+origins can set `CRABBOX_WEBVNC_AGENT_BASE_URL` to the agent's exact HTTPS
+origin. Ticket creation, status, and portal URLs continue using the configured
+coordinator; only the outbound agent WebSocket uses the override. HTTP is
+accepted only for an explicit loopback port.
+
 The data path is:
 
 ```text
@@ -144,6 +150,9 @@ WebVNC keeps the same security boundary as `crabbox vnc`:
   temporary legacy rollout window can set
   `CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS=1`; remove that setting after affected
   clients upgrade.
+- A split agent origin is accepted only from the explicit
+  `CRABBOX_WEBVNC_AGENT_BASE_URL` environment setting and must be one exact
+  HTTPS origin (or loopback HTTP with an explicit port).
 - The noVNC client is served from the coordinator origin, not a third-party CDN.
 - The local `crabbox webvnc` process must keep running while the browser uses
   the desktop.

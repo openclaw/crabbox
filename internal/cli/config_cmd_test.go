@@ -330,6 +330,34 @@ func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 	}
 }
 
+func TestConfigShowReportsWebVNCAgentBaseURLSupport(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_WEBVNC_AGENT_BASE_URL", "https://agent.example.test")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		WebVNCAgentBaseURL string `json:"webvncAgentBaseUrl"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.WebVNCAgentBaseURL != "https://agent.example.test" {
+		t.Fatalf("webvncAgentBaseUrl=%q", got.WebVNCAgentBaseURL)
+	}
+}
+
 func TestConfigShowExportsControllerProviderContract(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

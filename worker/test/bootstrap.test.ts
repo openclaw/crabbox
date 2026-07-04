@@ -304,6 +304,12 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("menubar menuitem");
     expect(got).toContain("desktop-background-$mode.svg");
     expect(got).toContain('swaybg -i "$wallpaper_file" -m fill');
+    expect(got).toContain("status=$?");
+    expect(got).toContain('[ "$status" -lt 128 ] || exit "$status"');
+    expect(got).toContain('exec env XDG_RUNTIME_DIR="$runtime"');
+    expect(got).toContain(") </dev/null >/tmp/crabbox-swaybg.log 2>&1 &");
+    expect(got).not.toContain("2>&1) &");
+    expect(got).not.toContain('|| XDG_RUNTIME_DIR="$runtime"');
     expect(got).toContain("nohup gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &");
     expect(got).toContain('elif [ "$(id -u)" -ne 0 ] && pgrep -x gnome-panel');
     expect(got).toContain("gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &");

@@ -1127,7 +1127,15 @@ function optionalBootstrap(config: LeaseConfig): string {
     export MOZ_ENABLE_WAYLAND=0
     wallpaper_file="$HOME/.config/crabbox/desktop-background-$theme.svg"
     if command -v swaybg >/dev/null 2>&1; then
-      (swaybg -i "$wallpaper_file" -m fill >/tmp/crabbox-swaybg.log 2>&1 || swaybg -c "#0d1117" >/tmp/crabbox-swaybg.log 2>&1) &
+      (
+        if swaybg -i "$wallpaper_file" -m fill; then
+          exit 0
+        else
+          status=$?
+        fi
+        [ "$status" -lt 128 ] || exit "$status"
+        exec swaybg -c "#0d1117"
+      ) </dev/null >/tmp/crabbox-swaybg.log 2>&1 &
     fi
     gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &
     gnome-terminal -- bash -l >/tmp/crabbox-gnome-terminal.log 2>&1 &
@@ -1300,7 +1308,15 @@ set_desktop_background() {
 EOF
   if command -v swaybg >/dev/null 2>&1; then
     pkill -u "$user" -x swaybg >/dev/null 2>&1 || true
-    (XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="\${WAYLAND_DISPLAY:-wayland-0}" swaybg -i "$wallpaper_file" -m fill >/tmp/crabbox-swaybg.log 2>&1 || XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="\${WAYLAND_DISPLAY:-wayland-0}" swaybg -c "$wallpaper_bg" >/tmp/crabbox-swaybg.log 2>&1) &
+    (
+      if XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="\${WAYLAND_DISPLAY:-wayland-0}" swaybg -i "$wallpaper_file" -m fill; then
+        exit 0
+      else
+        status=$?
+      fi
+      [ "$status" -lt 128 ] || exit "$status"
+      exec env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="\${WAYLAND_DISPLAY:-wayland-0}" swaybg -c "$wallpaper_bg"
+    ) </dev/null >/tmp/crabbox-swaybg.log 2>&1 &
   fi
 }
 target_uid="$(id -u "$user" 2>/dev/null || printf 0)"

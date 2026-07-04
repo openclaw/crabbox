@@ -309,6 +309,10 @@ func TestCloudInitGnomeDesktopProfile(t *testing.T) {
 		"menubar menuitem",
 		"desktop-background-$mode.svg",
 		`swaybg -i "$wallpaper_file" -m fill`,
+		`status=$?`,
+		`[ "$status" -lt 128 ] || exit "$status"`,
+		`exec env XDG_RUNTIME_DIR="$runtime"`,
+		`) </dev/null >/tmp/crabbox-swaybg.log 2>&1 &`,
 		`nohup gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &`,
 		`elif [ "$(id -u)" -ne 0 ] && pgrep -x gnome-panel`,
 		"gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &",
@@ -323,6 +327,12 @@ func TestCloudInitGnomeDesktopProfile(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(gnome desktop) missing %q", want)
 		}
+	}
+	if strings.Contains(got, "2>&1) &") {
+		t.Fatal("cloudInit(gnome desktop) leaves a swaybg wrapper attached to its caller")
+	}
+	if strings.Contains(got, `|| XDG_RUNTIME_DIR="$runtime"`) {
+		t.Fatal("cloudInit(gnome desktop) can launch a stale fallback swaybg after termination")
 	}
 	for _, notWant := range []string{
 		"startxfce4",

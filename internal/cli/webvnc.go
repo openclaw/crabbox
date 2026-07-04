@@ -2327,13 +2327,21 @@ func startedTunnelListenerReady(ctx context.Context, localPort string, processID
 }
 
 type webVNCBridge struct {
-	tcp    net.Conn
-	ws     *websocket.Conn
-	target SSHTarget
-	log    io.Writer
+	tcp                   net.Conn
+	ws                    *websocket.Conn
+	target                SSHTarget
+	log                   io.Writer
+	desktopThemeUpdates   chan string
+	applyDesktopThemeFunc func(context.Context, string) error
 }
 
+const webVNCDesktopThemeSSHAttemptTimeout = 35 * time.Second
+
 func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string, target SSHTarget, log io.Writer) (*webVNCBridge, error) {
+	agentBaseURL, err := webVNCAgentBaseURL(coord.BaseURL)
+	if err != nil {
+		return nil, err
+	}
 	tcp, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
 	if err != nil {
 		return nil, err
@@ -2344,28 +2352,172 @@ func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 		return nil, err
 	}
 	capabilities := webVNCBridgeCapabilities(ctx, target)
-	headers, err := bridgeUpgradeTicketHeaders(ctx, coord, ticket.Ticket)
-	if err != nil {
-		_ = tcp.Close()
-		return nil, err
+	splitAgentOrigin := !sameWebVNCOrigin(agentBaseURL, coord.BaseURL)
+	var headers http.Header
+	if splitAgentOrigin {
+		headers = splitWebVNCAgentUpgradeHeaders(ticket.Ticket)
+	} else {
+		headers, err = bridgeUpgradeTicketHeaders(ctx, coord, ticket.Ticket)
+		if err != nil {
+			_ = tcp.Close()
+			return nil, err
+		}
 	}
-	ws, resp, err := websocket.Dial(ctx, webVNCAgentURLWithCapabilities(coord.BaseURL, leaseID, capabilities), &websocket.DialOptions{
-		HTTPHeader: headers,
-	})
+	agentURL := webVNCAgentURLWithCapabilities(agentBaseURL, leaseID, capabilities)
+	ws, resp, err := websocket.Dial(ctx, agentURL, webVNCWebSocketDialOptions(headers))
 	if retryBridgeTicketInAuthorization(resp, err) {
-		ws, _, err = websocket.Dial(ctx, webVNCAgentURLWithCapabilities(coord.BaseURL, leaseID, capabilities), &websocket.DialOptions{
-			HTTPHeader: bridgeTicketHeaders(coord, ticket.Ticket),
-		})
+		var retryHeaders http.Header
+		if splitAgentOrigin {
+			retryHeaders = splitWebVNCAgentAuthorizationHeaders(ticket.Ticket)
+		} else {
+			retryHeaders = bridgeTicketHeaders(coord, ticket.Ticket)
+		}
+		ws, _, err = websocket.Dial(ctx, agentURL, webVNCWebSocketDialOptions(retryHeaders))
 	}
 	if err != nil {
 		_ = tcp.Close()
 		return nil, err
 	}
-	return &webVNCBridge{tcp: tcp, ws: ws, target: target, log: log}, nil
+	return &webVNCBridge{
+		tcp:                 tcp,
+		ws:                  ws,
+		target:              target,
+		log:                 log,
+		desktopThemeUpdates: make(chan string, 1),
+	}, nil
+}
+
+func splitWebVNCAgentUpgradeHeaders(ticket string) http.Header {
+	headers := http.Header{}
+	headers.Set("X-Crabbox-Bridge-Ticket", ticket)
+	return headers
+}
+
+func splitWebVNCAgentAuthorizationHeaders(ticket string) http.Header {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+ticket)
+	return headers
+}
+
+func sameWebVNCOrigin(left, right string) bool {
+	leftScheme, leftHost, leftPort, leftOK := normalizedWebVNCOrigin(left)
+	rightScheme, rightHost, rightPort, rightOK := normalizedWebVNCOrigin(right)
+	return leftOK && rightOK && leftScheme == rightScheme && leftHost == rightHost && leftPort == rightPort
+}
+
+func normalizedWebVNCOrigin(value string) (scheme, host, port string, ok bool) {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Hostname() == "" {
+		return "", "", "", false
+	}
+	scheme = strings.ToLower(parsed.Scheme)
+	host = strings.ToLower(parsed.Hostname())
+	port = parsed.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		default:
+			return "", "", "", false
+		}
+	} else {
+		numericPort, err := strconv.Atoi(port)
+		if err != nil || numericPort < 1 || numericPort > 65535 {
+			return "", "", "", false
+		}
+		port = strconv.Itoa(numericPort)
+	}
+	return scheme, host, port, true
+}
+
+func webVNCWebSocketDialOptions(headers http.Header) *websocket.DialOptions {
+	return &websocket.DialOptions{
+		HTTPClient: &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		HTTPHeader: headers,
+	}
+}
+
+func webVNCAgentBaseURL(base string) (string, error) {
+	const environment = "CRABBOX_WEBVNC_AGENT_BASE_URL"
+	value, configured := os.LookupEnv(environment)
+	if !configured || value == "" {
+		return base, nil
+	}
+	if value != strings.TrimSpace(value) {
+		return "", fmt.Errorf("%s must not contain surrounding whitespace", environment)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return "", fmt.Errorf("%s must be one exact HTTPS origin", environment)
+	}
+	if !validWebVNCOriginPort(parsed.Host) {
+		return "", fmt.Errorf("%s must use a canonical valid nonzero port", environment)
+	}
+	if parsed.Scheme != "https" {
+		host := parsed.Hostname()
+		ip := net.ParseIP(host)
+		if parsed.Scheme != "http" || parsed.Port() == "" || (host != "localhost" && (ip == nil || !ip.IsLoopback())) {
+			return "", fmt.Errorf("%s must be one exact HTTPS origin (HTTP is allowed only for loopback with an explicit port)", environment)
+		}
+	}
+	return strings.TrimSuffix(value, "/"), nil
+}
+
+func validWebVNCOriginPort(host string) bool {
+	rawPort := ""
+	hasPort := false
+	if strings.HasPrefix(host, "[") {
+		closing := strings.LastIndex(host, "]")
+		if closing < 0 {
+			return false
+		}
+		suffix := host[closing+1:]
+		if suffix == "" {
+			return true
+		}
+		if !strings.HasPrefix(suffix, ":") {
+			return false
+		}
+		rawPort, hasPort = suffix[1:], true
+	} else if separator := strings.LastIndex(host, ":"); separator >= 0 {
+		rawPort, hasPort = host[separator+1:], true
+	}
+	if !hasPort {
+		return true
+	}
+	if len(rawPort) < 1 || len(rawPort) > 5 || rawPort[0] == '0' {
+		return false
+	}
+	for _, character := range rawPort {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	numericPort, err := strconv.Atoi(rawPort)
+	return err == nil && numericPort <= 65535
 }
 
 func (b *webVNCBridge) Serve(ctx context.Context) error {
 	defer b.Close()
+	if b.desktopThemeUpdates == nil {
+		b.desktopThemeUpdates = make(chan string, 1)
+	}
+	themeCtx, cancelThemes := context.WithCancel(ctx)
+	themeDone := make(chan struct{})
+	go func() {
+		defer close(themeDone)
+		b.serveDesktopThemeUpdates(themeCtx)
+	}()
+	defer func() {
+		cancelThemes()
+		<-themeDone
+	}()
 	errc := make(chan error, 2)
 	go func() { errc <- b.copyWebSocketToTCP(ctx) }()
 	go func() { errc <- copyTCPToWebSocket(ctx, b.ws, b.tcp) }()
@@ -3521,7 +3673,7 @@ func (b *webVNCBridge) copyWebSocketToTCP(ctx context.Context) error {
 			return err
 		}
 		if typ == websocket.MessageText {
-			handled, err := b.handleControlFrame(ctx, data)
+			handled, err := b.handleControlFrame(data)
 			if err != nil && b.log != nil {
 				fmt.Fprintf(b.log, "bridge: %v\n", err)
 			}
@@ -3535,7 +3687,7 @@ func (b *webVNCBridge) copyWebSocketToTCP(ctx context.Context) error {
 	}
 }
 
-func (b *webVNCBridge) handleControlFrame(ctx context.Context, data []byte) (bool, error) {
+func (b *webVNCBridge) handleControlFrame(data []byte) (bool, error) {
 	if len(data) == 0 || data[0] != '{' {
 		return false, nil
 	}
@@ -3558,15 +3710,63 @@ func (b *webVNCBridge) handleControlFrame(ctx context.Context, data []byte) (boo
 	if b.target.TargetOS != "" && b.target.TargetOS != targetLinux {
 		return true, nil
 	}
+	b.queueDesktopThemeUpdate(theme)
+	return true, nil
+}
+
+func (b *webVNCBridge) queueDesktopThemeUpdate(theme string) {
+	select {
+	case b.desktopThemeUpdates <- theme:
+		return
+	default:
+	}
+	select {
+	case <-b.desktopThemeUpdates:
+	default:
+	}
+	select {
+	case b.desktopThemeUpdates <- theme:
+	default:
+	}
+}
+
+func (b *webVNCBridge) serveDesktopThemeUpdates(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case theme := <-b.desktopThemeUpdates:
+			applyCtx, cancel := context.WithTimeout(ctx, webVNCDesktopThemeApplyTimeout(b.target))
+			err := b.applyDesktopTheme(applyCtx, theme)
+			cancel()
+			if err != nil && ctx.Err() == nil && b.log != nil {
+				fmt.Fprintf(b.log, "bridge: %v\n", err)
+			}
+		}
+	}
+}
+
+func webVNCDesktopThemeApplyTimeout(target SSHTarget) time.Duration {
+	candidates := len(sshPortCandidates(target.Port, target.FallbackPorts))
+	if candidates == 0 {
+		candidates = 1
+	}
+	return time.Duration(candidates) * webVNCDesktopThemeSSHAttemptTimeout
+}
+
+func (b *webVNCBridge) applyDesktopTheme(ctx context.Context, theme string) error {
+	if b.applyDesktopThemeFunc != nil {
+		return b.applyDesktopThemeFunc(ctx, theme)
+	}
 	out, err := runSSHCombinedOutput(ctx, b.target, webVNCDesktopThemeCommand(theme, b.target.User))
 	if err != nil {
 		detail := strings.TrimSpace(out)
 		if detail == "" {
-			return true, fmt.Errorf("apply desktop theme %s: %w", theme, err)
+			return fmt.Errorf("apply desktop theme %s: %w", theme, err)
 		}
-		return true, fmt.Errorf("apply desktop theme %s: %w: %s", theme, err, detail)
+		return fmt.Errorf("apply desktop theme %s: %w: %s", theme, err, detail)
 	}
-	return true, nil
+	return nil
 }
 
 func webVNCDesktopThemeCommand(theme, user string) string {
@@ -3735,7 +3935,15 @@ EOF
 EOF
   if command -v swaybg >/dev/null 2>&1; then
     pkill -u "$user" -x swaybg >/dev/null 2>&1 || true
-    (XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" swaybg -i "$wallpaper_file" -m fill >/tmp/crabbox-swaybg.log 2>&1 || XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" swaybg -c "$wallpaper_bg" >/tmp/crabbox-swaybg.log 2>&1) &
+    (
+      if XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" swaybg -i "$wallpaper_file" -m fill; then
+        exit 0
+      else
+        status=$?
+      fi
+      [ "$status" -lt 128 ] || exit "$status"
+      exec env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" swaybg -c "$wallpaper_bg"
+    ) </dev/null >/tmp/crabbox-swaybg.log 2>&1 &
   fi
   if pgrep -u "$user" -x gnome-panel >/dev/null 2>&1; then
     pkill -TERM -u "$user" -x gnome-panel >/dev/null 2>&1 || true

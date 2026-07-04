@@ -86,6 +86,114 @@ func TestWebVNCURLs(t *testing.T) {
 	}
 }
 
+func TestWebVNCAgentBaseURL(t *testing.T) {
+	const base = "https://portal.example.test"
+	t.Setenv("CRABBOX_WEBVNC_AGENT_BASE_URL", "")
+	if got, err := webVNCAgentBaseURL(base); err != nil || got != base {
+		t.Fatalf("default agent base URL=(%q, %v)", got, err)
+	}
+
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{name: "https", value: "https://agent.example.test", want: "https://agent.example.test"},
+		{name: "trailing slash", value: "https://agent.example.test/", want: "https://agent.example.test"},
+		{name: "loopback http", value: "http://127.0.0.1:8787", want: "http://127.0.0.1:8787"},
+		{name: "maximum port", value: "https://agent.example.test:65535", want: "https://agent.example.test:65535"},
+		{name: "zero port", value: "https://agent.example.test:0", wantErr: true},
+		{name: "zero loopback port", value: "http://127.0.0.1:0", wantErr: true},
+		{name: "empty port", value: "https://agent.example.test:", wantErr: true},
+		{name: "leading zero port", value: "https://agent.example.test:08443", wantErr: true},
+		{name: "padded port", value: "https://agent.example.test:0000000000000000000008443", wantErr: true},
+		{name: "out of range port", value: "https://agent.example.test:65536", wantErr: true},
+		{name: "external http", value: "http://agent.example.test", wantErr: true},
+		{name: "path", value: "https://agent.example.test/base", wantErr: true},
+		{name: "query", value: "https://agent.example.test?x=1", wantErr: true},
+		{name: "userinfo", value: "https://user@agent.example.test", wantErr: true},
+		{name: "empty host", value: "https://:443", wantErr: true},
+		{name: "whitespace", value: " https://agent.example.test", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("CRABBOX_WEBVNC_AGENT_BASE_URL", test.value)
+			got, err := webVNCAgentBaseURL(base)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("agent base URL %q unexpectedly resolved to %q", test.value, got)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("agent base URL %q=(%q, %v), want %q", test.value, got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestSameWebVNCOrigin(t *testing.T) {
+	tests := []struct {
+		name        string
+		left, right string
+		want        bool
+	}{
+		{name: "paths ignored", left: "https://agent.example.test/api", right: "https://agent.example.test", want: true},
+		{name: "default HTTPS port", left: "https://agent.example.test", right: "https://AGENT.EXAMPLE.TEST:443/", want: true},
+		{name: "numeric port normalization", left: "https://agent.example.test:0443", right: "https://agent.example.test:443/", want: true},
+		{name: "default HTTP port", left: "http://127.0.0.1", right: "http://127.0.0.1:80/", want: true},
+		{name: "different port", left: "https://agent.example.test", right: "https://agent.example.test:8443"},
+		{name: "different scheme", left: "https://agent.example.test", right: "http://agent.example.test"},
+		{name: "different host", left: "https://agent.example.test", right: "https://portal.example.test"},
+		{name: "invalid", left: "not a URL", right: "https://agent.example.test"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := sameWebVNCOrigin(test.left, test.right); got != test.want {
+				t.Fatalf("sameWebVNCOrigin(%q, %q)=%v, want %v", test.left, test.right, got, test.want)
+			}
+		})
+	}
+}
+
+func TestWebVNCWebSocketDialRejectsCrossOriginDowngradeRedirect(t *testing.T) {
+	redirected := make(chan http.Header, 1)
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected <- r.Header.Clone()
+		http.Error(w, "unexpected redirect", http.StatusBadRequest)
+	}))
+	defer sink.Close()
+
+	redirect := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, sink.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	options := webVNCWebSocketDialOptions(http.Header{
+		"X-Crabbox-Bridge-Ticket": {"bridge-ticket-must-not-leak"},
+	})
+	options.HTTPClient.Transport = redirect.Client().Transport
+	wsURL := "wss" + strings.TrimPrefix(redirect.URL, "https")
+	conn, response, err := websocket.Dial(context.Background(), wsURL, options)
+	if conn != nil {
+		conn.CloseNow()
+		t.Fatal("WebVNC WebSocket followed a cross-origin HTTPS-to-HTTP redirect")
+	}
+	if err == nil {
+		t.Fatal("WebVNC WebSocket redirect unexpectedly succeeded")
+	}
+	if response == nil || response.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("WebVNC WebSocket redirect response=%v, want HTTP %d", response, http.StatusTemporaryRedirect)
+	}
+	response.Body.Close()
+	select {
+	case headers := <-redirected:
+		t.Fatalf("WebVNC WebSocket redirect reached sink with ticket=%q", headers.Get("X-Crabbox-Bridge-Ticket"))
+	default:
+	}
+}
+
 func TestWebVNCRedactingWriterKeepsCredentialsOutOfDaemonLogs(t *testing.T) {
 	var output bytes.Buffer
 	writer := webVNCRedactingWriter{Writer: &output}
@@ -894,6 +1002,212 @@ func TestConnectWebVNCBridgeRegistersAgentBeforeServe(t *testing.T) {
 	}
 }
 
+func TestConnectWebVNCBridgeSplitOriginSendsOnlyBridgeTicket(t *testing.T) {
+	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpListener.Close()
+	go func() {
+		conn, err := tcpListener.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}()
+
+	agentConnected := make(chan struct{})
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, name := range []string{
+			"Authorization",
+			"CF-Access-Client-Id",
+			"CF-Access-Client-Secret",
+			"CF-Access-Token",
+		} {
+			if got := r.Header.Get(name); got != "" {
+				t.Errorf("split agent header %s=%q", name, got)
+			}
+		}
+		if got := r.Header.Get("X-Crabbox-Bridge-Ticket"); got != "wvnc_abcdef1234567890abcdef1234567890" {
+			t.Errorf("split bridge ticket=%q", got)
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("websocket accept: %v", err)
+			return
+		}
+		close(agentConnected)
+		_, _, _ = conn.Read(context.Background())
+		_ = conn.Close(websocket.StatusNormalClosure, "test done")
+	}))
+	defer agentServer.Close()
+	t.Setenv("CRABBOX_WEBVNC_AGENT_BASE_URL", agentServer.URL)
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/leases/cbx_abcdef123456/webvnc/ticket" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer coordinator-token" {
+			t.Errorf("ticket authorization=%q", got)
+		}
+		for name, want := range map[string]string{
+			"CF-Access-Client-Id":     "access-client-id",
+			"CF-Access-Client-Secret": "access-client-secret",
+			"CF-Access-Token":         "access-jwt",
+		} {
+			if got := r.Header.Get(name); got != want {
+				t.Errorf("ticket header %s=%q, want %q", name, got, want)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorWebVNCTicket{
+			Ticket:  "wvnc_abcdef1234567890abcdef1234567890",
+			LeaseID: "cbx_abcdef123456",
+		})
+	}))
+	defer apiServer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, port, err := net.SplitHostPort(tcpListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	coord := &CoordinatorClient{
+		BaseURL: apiServer.URL,
+		Token:   "coordinator-token",
+		Access: AccessConfig{
+			ClientID:     "access-client-id",
+			ClientSecret: "access-client-secret",
+			Token:        "access-jwt",
+		},
+		Client: apiServer.Client(),
+	}
+	bridge, err := connectWebVNCBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", port, SSHTarget{TargetOS: targetMacOS}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.Close()
+
+	select {
+	case <-agentConnected:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
+func TestWebVNCBridgeThemeControlDoesNotBlockRFB(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	themeStarted := make(chan string, 1)
+	serverResult := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "test done")
+		go func() {
+			for {
+				if _, _, err := conn.Read(ctx); err != nil {
+					return
+				}
+			}
+		}()
+		if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"desktop_theme","theme":"light"}`)); err != nil {
+			serverResult <- err
+			return
+		}
+		if err := conn.Write(ctx, websocket.MessageBinary, []byte("rfb-frame")); err != nil {
+			serverResult <- err
+			return
+		}
+		pingCtx, cancelPing := context.WithTimeout(ctx, time.Second)
+		err = conn.Ping(pingCtx)
+		cancelPing()
+		serverResult <- err
+		<-ctx.Done()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	ws, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridgeTCP, peerTCP := net.Pipe()
+	defer peerTCP.Close()
+	bridge := &webVNCBridge{
+		tcp:                 bridgeTCP,
+		ws:                  ws,
+		target:              SSHTarget{TargetOS: targetLinux},
+		desktopThemeUpdates: make(chan string, 1),
+		applyDesktopThemeFunc: func(ctx context.Context, theme string) error {
+			themeStarted <- theme
+			<-ctx.Done()
+			return context.Cause(ctx)
+		},
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- bridge.Serve(ctx) }()
+
+	select {
+	case theme := <-themeStarted:
+		if theme != "light" {
+			t.Fatalf("theme=%q", theme)
+		}
+	case <-ctx.Done():
+		t.Fatal("theme worker did not start")
+	}
+	if err := peerTCP.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	frame := make([]byte, len("rfb-frame"))
+	if _, err := io.ReadFull(peerTCP, frame); err != nil {
+		t.Fatalf("RFB frame was blocked by desktop theme update: %v", err)
+	}
+	if string(frame) != "rfb-frame" {
+		t.Fatalf("RFB frame=%q", frame)
+	}
+	select {
+	case err := <-serverResult:
+		if err != nil {
+			t.Fatalf("WebSocket ping failed while desktop theme update was blocked: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("WebSocket ping was blocked by desktop theme update")
+	}
+	cancel()
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("bridge did not stop after cancellation")
+	}
+}
+
+func TestWebVNCBridgeThemeUpdatesKeepLatestPendingValue(t *testing.T) {
+	bridge := &webVNCBridge{desktopThemeUpdates: make(chan string, 1)}
+	bridge.queueDesktopThemeUpdate("light")
+	bridge.queueDesktopThemeUpdate("dark")
+	select {
+	case theme := <-bridge.desktopThemeUpdates:
+		if theme != "dark" {
+			t.Fatalf("pending theme=%q", theme)
+		}
+	default:
+		t.Fatal("latest desktop theme update was dropped")
+	}
+}
+
+func TestWebVNCDesktopThemeApplyTimeoutCoversSSHFallbackCandidates(t *testing.T) {
+	target := SSHTarget{Port: "2222", FallbackPorts: []string{"22", "2200", "2222"}}
+	want := 3 * webVNCDesktopThemeSSHAttemptTimeout
+	if got := webVNCDesktopThemeApplyTimeout(target); got != want {
+		t.Fatalf("theme apply timeout=%s, want %s for all SSH port candidates", got, want)
+	}
+}
+
 func TestWebVNCDesktopThemeCommand(t *testing.T) {
 	got := webVNCDesktopThemeCommand("light", "demo user")
 	for _, want := range []string{
@@ -920,6 +1234,10 @@ func TestWebVNCDesktopThemeCommand(t *testing.T) {
 		"menubar menuitem",
 		"desktop-background-$theme.svg",
 		`swaybg -i "$wallpaper_file" -m fill`,
+		`status=$?`,
+		`[ "$status" -lt 128 ] || exit "$status"`,
+		`exec env XDG_RUNTIME_DIR="$runtime"`,
+		`) </dev/null >/tmp/crabbox-swaybg.log 2>&1 &`,
 		"gnome-panel",
 		"gnome-terminal",
 		"gnome-terminal-theme",
@@ -932,6 +1250,12 @@ func TestWebVNCDesktopThemeCommand(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("theme command missing %q in %s", want, got)
 		}
+	}
+	if strings.Contains(got, "2>&1) &") {
+		t.Fatalf("theme command leaves the swaybg wrapper attached to SSH: %s", got)
+	}
+	if strings.Contains(got, `|| XDG_RUNTIME_DIR="$runtime"`) {
+		t.Fatalf("theme command can launch a stale fallback swaybg after termination: %s", got)
 	}
 	if got := webVNCDesktopThemeCommand("light; touch /tmp/pwned", ""); strings.Contains(got, "touch") || strings.Contains(got, "pwned") {
 		t.Fatalf("invalid theme reached remote command: %s", got)

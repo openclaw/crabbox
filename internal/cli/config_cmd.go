@@ -51,11 +51,16 @@ func (a App) configShow(args []string) error {
 	}
 	cfg = effectiveConfigForShow(cfg)
 	if *jsonOut {
+		agentBaseURL, err := webVNCAgentBaseURL("")
+		if err != nil {
+			return err
+		}
 		view := configShowView(cfg)
 		view["provider"] = provider
 		view["providerScope"] = providerScope
 		view["idempotentLeaseId"] = fixedLeaseID
 		view["coordinatorRegistrationUrl"] = redactedConfigURL(coordinatorRegistrationURL)
+		view["webvncAgentBaseUrl"] = agentBaseURL
 		return json.NewEncoder(a.Stdout).Encode(view)
 	}
 	writeConfigShowText(a.Stdout, cfg)
