@@ -1412,13 +1412,3 @@ func argumentValue(args []string, name string) string {
 	}
 	return ""
 }
-
-func codesignCallCount(calls []core.LocalCommandRequest) int {
-	count := 0
-	for _, call := range calls {
-		if call.Name == "codesign" {
-			count++
-		}
-	}
-	return count
-}
