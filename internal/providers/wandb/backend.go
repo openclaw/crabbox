@@ -244,7 +244,7 @@ func requireWandbInventoryOwnership(ctx context.Context, client wandbAPI, sandbo
 		}
 		return err
 	}
-	return exit(4, "wandb sandbox %q is not tagged as Crabbox-managed or no longer exists", sandboxID)
+	return exit(4, "wandb sandbox %q still exists but is not tagged as Crabbox-managed", sandboxID)
 }
 
 func (b *wandbBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {

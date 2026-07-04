@@ -576,14 +576,56 @@ func TestWandbStopPreservesClaimWhenSandboxLostManagedTag(t *testing.T) {
 	seedWandbClaim(t, backend, "sb-abc")
 
 	err := backend.Stop(context.Background(), StopRequest{ID: "sb-abc"})
-	if err == nil || !strings.Contains(err.Error(), "not tagged as Crabbox-managed") {
+	if err == nil || !strings.Contains(err.Error(), "still exists but is not tagged as Crabbox-managed") {
 		t.Fatalf("Stop err=%v, want untagged refusal", err)
 	}
-	if api.stopID != "" {
-		t.Fatalf("untagged sandbox reached Stop(%q)", api.stopID)
+	if api.statusID != "sb-abc" || api.stopID != "" {
+		t.Fatalf("untagged sandbox status=%q stop=%q", api.statusID, api.stopID)
 	}
 	if claim, ok, resolveErr := resolveWandbClaim("sb-abc"); resolveErr != nil || !ok || claim.CloudID != "sb-abc" {
 		t.Fatalf("untagged sandbox claim=%#v ok=%v err=%v", claim, ok, resolveErr)
+	}
+}
+
+func TestWandbStopPreservesClaimWhenOwnershipLookupFails(t *testing.T) {
+	tests := []struct {
+		name string
+		api  *fakeWandbAPI
+	}{
+		{name: "list", api: &fakeWandbAPI{listErr: errors.New("list unavailable")}},
+		{name: "status", api: &fakeWandbAPI{statusErr: errors.New("status unavailable")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := newWandbBackendForTest(t, tt.api)
+			seedWandbClaim(t, backend, "sb-unknown")
+
+			if err := backend.Stop(context.Background(), StopRequest{ID: "sb-unknown"}); err == nil {
+				t.Fatal("Stop succeeded despite ownership lookup failure")
+			}
+			if tt.api.stopID != "" {
+				t.Fatalf("ownership lookup failure reached Stop(%q)", tt.api.stopID)
+			}
+			claim, ok, resolveErr := resolveWandbClaim("sb-unknown")
+			if resolveErr != nil || !ok || claim.CloudID != "sb-unknown" {
+				t.Fatalf("ownership lookup failure claim=%#v ok=%v err=%v", claim, ok, resolveErr)
+			}
+		})
+	}
+}
+
+func TestWandbStatusMissingPreservesClaimAndReturnsExitError(t *testing.T) {
+	api := &fakeWandbAPI{statusErr: &wandbAPIError{Code: codes.NotFound, ExitCode: 4, Stderr: "Get: not found"}}
+	backend := newWandbBackendForTest(t, api)
+	seedWandbClaim(t, backend, "sb-abc")
+
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc"})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 4 {
+		t.Fatalf("Status err=%v, want ExitError code 4", err)
+	}
+	if claim, ok, resolveErr := resolveWandbClaim("sb-abc"); resolveErr != nil || !ok || claim.CloudID != "sb-abc" {
+		t.Fatalf("missing status claim=%#v ok=%v err=%v", claim, ok, resolveErr)
 	}
 }
 

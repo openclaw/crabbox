@@ -125,7 +125,11 @@ Environment overrides:
 before issuing Get or Stop. A tagged sandbox without the matching local claim,
 or a claim from another endpoint, entity, or project, fails closed. Successful
 automatic or explicit stop removes the unchanged claim; failed cleanup keeps
-it so a later retry can still route to the owned resource. `status` renders
+it so a later retry can still route to the owned resource. If tagged inventory
+no longer contains a claimed sandbox, Crabbox probes that exact ID: a confirmed
+provider `NotFound` lets `stop` remove only the unchanged stale claim. An
+untagged but existing sandbox or any lookup error preserves the claim and fails
+closed. `status` renders
 the sandbox state (for example `running`; a
 `COMPLETED` sandbox is reported as `stopped` so `status --wait` treats it as
 terminal). `list` paginates sandboxes tagged `crabbox`. `stop` issues a
