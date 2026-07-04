@@ -1,5 +1,6 @@
 import {
   authenticateRequest,
+  requestWithAdminGrantVersion,
   requestWithAuthContext,
   requestWithoutTrustedHeaders,
   type AuthContext,
@@ -87,7 +88,10 @@ export async function prepareCoordinatorRequest(
   const runtimeAdapterAuth = runtimeAdapterServiceAuth(request, env, route);
   if (runtimeAdapterAuth) {
     return {
-      request: requestWithAuthContext(requestWithoutTrustedHeaders(request), runtimeAdapterAuth),
+      request: await requestWithAdminGrantVersion(
+        requestWithAuthContext(requestWithoutTrustedHeaders(request), runtimeAdapterAuth),
+        env,
+      ),
       authenticated: true,
     };
   }
@@ -117,7 +121,10 @@ export async function prepareCoordinatorRequest(
       authenticated: false,
     };
   }
-  return { request: requestWithAuthContext(authRequest, auth), authenticated: true };
+  return {
+    request: await requestWithAdminGrantVersion(requestWithAuthContext(authRequest, auth), env),
+    authenticated: true,
+  };
 }
 
 function portalCookieRequestIntentAllowed(request: Request, env: Env, url: URL): boolean {

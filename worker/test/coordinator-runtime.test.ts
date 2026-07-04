@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { adminGrantVersion } from "../src/auth";
 import {
   CloudflareCoordinatorRuntime,
   coordinatorRequestQueue,
@@ -324,10 +325,12 @@ describe("coordinator runtimes", () => {
 
   it("reauthorizes WebVNC and Code agent tickets through socket acceptance", async () => {
     const runtime = new MemoryRuntime();
-    const coordinator = new FleetCoordinator(runtime, {
+    const env = {
       CRABBOX_DEFAULT_ORG: "example-org",
       CRABBOX_GITHUB_ADMIN_LOGINS: "admin",
-    } as Env);
+    } as Env;
+    const coordinator = new FleetCoordinator(runtime, env);
+    const currentGrantVersion = await adminGrantVersion(env);
     const lease: LeaseRecord = {
       id: "cbx_000000000001",
       slug: "shared-bridges",
@@ -374,6 +377,7 @@ describe("coordinator runtimes", () => {
       "x-crabbox-admin": "true",
       "x-crabbox-auth": "github",
       "x-crabbox-github-login": "admin",
+      "x-crabbox-admin-grant-version": currentGrantVersion,
     };
     const createTicket = async (
       kind: "webvnc" | "code",

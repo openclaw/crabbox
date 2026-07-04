@@ -5,6 +5,7 @@ const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
 import {
   authenticateRequest,
+  adminGrantVersion as configuredAdminGrantVersion,
   githubUserIsAdmin,
   isAdminRequest,
   requestWithAuthContext,
@@ -223,6 +224,7 @@ interface CachedAdminGrant {
   auth?: AuthContext["auth"];
   login?: string;
   adminTokenHash?: string;
+  adminGrantVersion?: string;
 }
 
 interface WebVNCTicketRecord extends CachedAdminGrant {
@@ -675,6 +677,7 @@ type BridgeAttachment =
       auth?: AuthContext["auth"];
       login?: string;
       adminTokenHash?: string;
+      adminGrantVersion?: string;
       label: string;
     }
   | { kind: "code-agent"; leaseID: string }
@@ -688,6 +691,7 @@ type BridgeAttachment =
       admin?: boolean;
       login?: string;
       adminTokenHash?: string;
+      adminGrantVersion?: string;
       portalSessionHash?: string;
     }
   | {
@@ -700,6 +704,7 @@ type BridgeAttachment =
       auth?: AuthContext["auth"];
       login?: string;
       adminTokenHash?: string;
+      adminGrantVersion?: string;
     }
   | {
       kind: "egress-client";
@@ -711,6 +716,7 @@ type BridgeAttachment =
       auth?: AuthContext["auth"];
       login?: string;
       adminTokenHash?: string;
+      adminGrantVersion?: string;
     }
   | {
       kind: "runtime-adapter-agent";
@@ -728,6 +734,7 @@ type BridgeAttachment =
       auth?: AuthContext["auth"];
       login?: string;
       adminTokenHash?: string;
+      adminGrantVersion?: string;
       subscriptions?: Record<string, number>;
     };
 
@@ -758,6 +765,7 @@ interface WebVNCViewerSession {
   auth?: AuthContext["auth"];
   login?: string;
   adminTokenHash?: string;
+  adminGrantVersion?: string;
   label: string;
   connectedAt: string;
 }
@@ -783,6 +791,7 @@ export class FleetCoordinator {
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
   private readonly restoredBridgeSockets = new Set<WebSocket>();
   private readonly adminGrantValidationTimes = new WeakMap<WebSocket, number>();
+  private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
   private bridgeTicketQueue: Promise<void> = Promise.resolve();
@@ -802,6 +811,7 @@ export class FleetCoordinator {
 
   async fetch(request: Request): Promise<Response> {
     try {
+      this.reconcileAdminGrantVersion(request);
       if (!(await this.restoredBridgesReady())) {
         return json(
           {
@@ -1121,7 +1131,7 @@ export class FleetCoordinator {
   private async reconcileRestoredBridgeSockets(): Promise<void> {
     const [leases, adminGrants] = await Promise.all([
       this.state.storage.list<LeaseRecord>({ prefix: "lease:" }),
-      adminGrantValidation(this.env),
+      this.currentAdminGrantValidation(),
     ]);
     const now = Date.now();
     const revoked = new Map<string, string>();
@@ -1253,6 +1263,61 @@ export class FleetCoordinator {
     return ready;
   }
 
+  private reconcileAdminGrantVersion(request: Request): void {
+    const version = trustedAdminGrantVersion(request);
+    if (!version || version === this.currentAdminGrantVersion) {
+      return;
+    }
+    this.currentAdminGrantVersion = version;
+    const sockets = new Set<WebSocket>([
+      ...this.controlSockets.values(),
+      ...this.codeViewers.values(),
+      ...this.egressHosts.values(),
+      ...this.egressClients.values(),
+    ]);
+    for (const viewers of this.webVNCViewers.values()) {
+      for (const viewer of viewers.values()) {
+        sockets.add(viewer.socket);
+      }
+    }
+    const revokedEgressSessions = new Set<string>();
+    for (const socket of sockets) {
+      const attachment = this.bridgeAttachment(socket);
+      if (
+        !attachment ||
+        !("admin" in attachment) ||
+        attachment.admin !== true ||
+        attachment.adminGrantVersion === version
+      ) {
+        continue;
+      }
+      this.adminGrantValidationTimes.delete(socket);
+      if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
+        const key = egressSocketKey(attachment.leaseID, attachment.sessionID);
+        if (!revokedEgressSessions.has(key)) {
+          revokedEgressSessions.add(key);
+          this.clearEgressSession(
+            attachment.leaseID,
+            attachment.sessionID,
+            1008,
+            "admin access revoked",
+          );
+        }
+        continue;
+      }
+      this.handleBridgeClose(socket, 1008, "admin access revoked");
+      closeSocket(socket, 1008, "admin access revoked");
+    }
+  }
+
+  private async currentAdminGrantValidation(): Promise<AdminGrantValidation> {
+    if (!this.currentAdminGrantVersion) {
+      const derivedVersion = await configuredAdminGrantVersion(this.env);
+      this.currentAdminGrantVersion ||= derivedVersion;
+    }
+    return adminGrantValidation(this.env, this.currentAdminGrantVersion);
+  }
+
   private rejectRestoredBridgeSocket(
     socket: WebSocket,
     attachment: BridgeAttachment | undefined,
@@ -1323,6 +1388,9 @@ export class FleetCoordinator {
           ...(attachment.auth ? { auth: attachment.auth } : {}),
           ...(attachment.login ? { login: attachment.login } : {}),
           ...(attachment.adminTokenHash ? { adminTokenHash: attachment.adminTokenHash } : {}),
+          ...(attachment.adminGrantVersion
+            ? { adminGrantVersion: attachment.adminGrantVersion }
+            : {}),
           label: attachment.label,
           connectedAt: new Date().toISOString(),
         });
@@ -1686,7 +1754,7 @@ export class FleetCoordinator {
     if (now - lastValidatedAt < adminGrantRevalidationIntervalMs) {
       return true;
     }
-    if (cachedAdminGrantIsCurrent(attachment, await adminGrantValidation(this.env))) {
+    if (cachedAdminGrantIsCurrent(attachment, await this.currentAdminGrantValidation())) {
       this.adminGrantValidationTimes.set(socket, now);
       return true;
     }
@@ -5029,7 +5097,7 @@ export class FleetCoordinator {
   private async revokeUnauthorizedLeaseBridges(lease: LeaseRecord): Promise<void> {
     const code = 1008;
     const reason = "lease access revoked";
-    const adminGrants = await adminGrantValidation(this.env);
+    const adminGrants = await this.currentAdminGrantValidation();
     for (const viewer of this.openWebVNCViewers(lease.id)) {
       if (this.leaseViewerAuthorized(lease, withCurrentAdminGrant(viewer, adminGrants))) {
         continue;
@@ -7640,6 +7708,9 @@ export class FleetCoordinator {
             ...(viewerSession.adminTokenHash
               ? { adminTokenHash: viewerSession.adminTokenHash }
               : {}),
+            ...(viewerSession.adminGrantVersion
+              ? { adminGrantVersion: viewerSession.adminGrantVersion }
+              : {}),
           }
         : await adminGrantForRequest(authorizedRequest, isAdminRequest(authorizedRequest));
       let portalSessionHash = viewerSession?.portalSessionHash;
@@ -7770,6 +7841,9 @@ export class FleetCoordinator {
     if (ticket.adminTokenHash) {
       session.adminTokenHash = ticket.adminTokenHash;
     }
+    if (ticket.adminGrantVersion) {
+      session.adminGrantVersion = ticket.adminGrantVersion;
+    }
     if (ticket.portalSessionHash) {
       session.portalSessionHash = ticket.portalSessionHash;
     }
@@ -7813,7 +7887,10 @@ export class FleetCoordinator {
       }
       return undefined;
     }
-    const currentSession = withCurrentAdminGrant(session, await adminGrantValidation(this.env));
+    const currentSession =
+      session.admin === true
+        ? withCurrentAdminGrant(session, await this.currentAdminGrantValidation())
+        : session;
     if (currentSession !== session) {
       await this.state.storage.put(codeViewerSessionKey(value), currentSession);
     }
@@ -7864,7 +7941,9 @@ export class FleetCoordinator {
         return undefined;
       }
       await this.state.storage.delete(key);
-      return withCurrentAdminGrant(ticket, await adminGrantValidation(this.env));
+      return ticket.admin === true
+        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
+        : ticket;
     });
   }
 
@@ -8642,7 +8721,10 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    const currentTicket = withCurrentAdminGrant(ticket, await adminGrantValidation(this.env));
+    const currentTicket =
+      ticket.admin === true
+        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
+        : ticket;
     if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
@@ -8691,7 +8773,10 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    const currentTicket = withCurrentAdminGrant(ticket, await adminGrantValidation(this.env));
+    const currentTicket =
+      ticket.admin === true
+        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
+        : ticket;
     if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
@@ -8747,7 +8832,10 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    const currentTicket = withCurrentAdminGrant(ticket, await adminGrantValidation(this.env));
+    const currentTicket =
+      ticket.admin === true
+        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
+        : ticket;
     if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
@@ -13570,23 +13658,34 @@ function requestAuthType(request: Request): AuthContext["auth"] {
   return auth === "bearer" || auth === "github" || auth === "proxy" ? auth : "github";
 }
 
+function trustedAdminGrantVersion(request: Request): string | undefined {
+  const version = request.headers.get("x-crabbox-admin-grant-version")?.trim();
+  return version && /^[a-f0-9]{64}$/.test(version) ? version : undefined;
+}
+
 async function adminGrantForRequest(request: Request, admin: boolean): Promise<CachedAdminGrant> {
   if (!admin) {
     return {};
   }
   const auth = requestAuthType(request);
+  const adminGrantVersion = trustedAdminGrantVersion(request);
   if (auth === "github") {
     const login = request.headers.get("x-crabbox-github-login")?.trim();
-    return { auth, ...(login ? { login } : {}) };
+    return {
+      auth,
+      ...(login ? { login } : {}),
+      ...(adminGrantVersion ? { adminGrantVersion } : {}),
+    };
   }
   if (auth === "bearer") {
     const token = bearerToken(request);
     return {
       auth,
       ...(token ? { adminTokenHash: await sha256Hex(token) } : {}),
+      ...(adminGrantVersion ? { adminGrantVersion } : {}),
     };
   }
-  return { auth };
+  return { auth, ...(adminGrantVersion ? { adminGrantVersion } : {}) };
 }
 
 type AdminGrantEnv = Pick<
@@ -13597,14 +13696,19 @@ type AdminGrantEnv = Pick<
 interface AdminGrantValidation {
   env: AdminGrantEnv;
   adminTokenHash?: string;
+  adminGrantVersion?: string;
 }
 
-async function adminGrantValidation(env: AdminGrantEnv): Promise<AdminGrantValidation> {
+async function adminGrantValidation(
+  env: AdminGrantEnv,
+  adminGrantVersion?: string,
+): Promise<AdminGrantValidation> {
   return {
     env,
     ...(env.CRABBOX_ADMIN_TOKEN
       ? { adminTokenHash: await sha256Hex(env.CRABBOX_ADMIN_TOKEN) }
       : {}),
+    ...(adminGrantVersion ? { adminGrantVersion } : {}),
   };
 }
 
@@ -13614,6 +13718,9 @@ function cachedAdminGrantIsCurrent(
 ): boolean {
   if (principal.admin !== true) {
     return true;
+  }
+  if (validation.adminGrantVersion) {
+    return principal.adminGrantVersion === validation.adminGrantVersion;
   }
   if (
     principal.auth === "github" &&
@@ -14387,6 +14494,7 @@ function leaseBridgeTicketPrincipal(
     ...(ticket.auth ? { auth: ticket.auth } : {}),
     ...(ticket.login ? { login: ticket.login } : {}),
     ...(ticket.adminTokenHash ? { adminTokenHash: ticket.adminTokenHash } : {}),
+    ...(ticket.adminGrantVersion ? { adminGrantVersion: ticket.adminGrantVersion } : {}),
   };
 }
 

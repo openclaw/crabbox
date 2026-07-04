@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import coordinator, { isAuthorized } from "../src";
 import {
+  adminGrantVersion,
   authenticateRequest,
   base64URL,
   issueUserToken,
@@ -234,7 +235,10 @@ describe("coordinator auth", () => {
         },
       }),
     ];
-    requests.forEach((request) => request.headers.set("x-crabbox-internal", "scheduled"));
+    requests.forEach((request) => {
+      request.headers.set("x-crabbox-internal", "scheduled");
+      request.headers.set("x-crabbox-admin-grant-version", "a".repeat(64));
+    });
 
     const routedRequests = await Promise.all(
       requests.map(async (request) => {
@@ -258,6 +262,33 @@ describe("coordinator auth", () => {
       null,
       null,
     ]);
+    expect(
+      routedRequests.map((request) => request.headers.get("x-crabbox-admin-grant-version")),
+    ).toEqual([null, null, null, null]);
+  });
+
+  it("replaces caller-supplied admin grant versions after authentication", async () => {
+    const env = {
+      CRABBOX_ADMIN_TOKEN: "admin-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const forgedVersion = "a".repeat(64);
+    const prepared = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/admin/leases", {
+        headers: {
+          authorization: "Bearer admin-secret",
+          "x-crabbox-admin-grant-version": forgedVersion,
+        },
+      }),
+      env,
+    );
+
+    expect(prepared).toMatchObject({ authenticated: true });
+    if ("response" in prepared) throw new Error("admin request was rejected");
+    expect(prepared.request.headers.get("x-crabbox-admin-grant-version")).toBe(
+      await adminGrantVersion(env),
+    );
+    expect(prepared.request.headers.get("x-crabbox-admin-grant-version")).not.toBe(forgedVersion);
   });
 
   it("requires normal coordinator authentication for workspace terminals", async () => {

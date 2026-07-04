@@ -1,4 +1,4 @@
-import { authenticateRequest } from "./auth";
+import { authenticateRequest, requestWithAdminGrantVersion } from "./auth";
 import { routeCoordinatorRequest } from "./coordinator-entry";
 import { FleetDurableObject } from "./fleet";
 import type { Env } from "./types";
@@ -20,10 +20,13 @@ export default {
   ): Promise<void> {
     const id = env.FLEET.idFromName("default");
     ctx.waitUntil(
-      env.FLEET.get(id).fetch("https://crabbox.internal/v1/internal/scheduled", {
-        method: "POST",
-        headers: { "x-crabbox-internal": "scheduled" },
-      }),
+      requestWithAdminGrantVersion(
+        new Request("https://crabbox.internal/v1/internal/scheduled", {
+          method: "POST",
+          headers: { "x-crabbox-internal": "scheduled" },
+        }),
+        env,
+      ).then((request) => env.FLEET.get(id).fetch(request)),
     );
   },
 };

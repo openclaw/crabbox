@@ -3,7 +3,7 @@ import { Script, createContext } from "node:vm";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { issueUserToken, sha256Hex } from "../src/auth";
+import { adminGrantVersion, issueUserToken, sha256Hex } from "../src/auth";
 import { EC2SpotClient } from "../src/aws";
 import { codeOriginForLease } from "../src/code-origin";
 import {
@@ -217,6 +217,38 @@ describe("runtime adapter relay", () => {
     expect(internal.controlSockets.has("control-rotated-admin")).toBe(false);
   });
 
+  it("revokes active admin sockets when a new deployment forwards a new grant version", async () => {
+    const oldAdminToken = "old-admin-token";
+    const newAdminToken = "new-admin-token";
+    const oldVersion = await adminGrantVersion({ CRABBOX_ADMIN_TOKEN: oldAdminToken });
+    const newVersion = await adminGrantVersion({ CRABBOX_ADMIN_TOKEN: newAdminToken });
+    const fleet = testFleet(new MemoryStorage(), {}, { CRABBOX_ADMIN_TOKEN: oldAdminToken });
+    const socket = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-old-deployment-admin",
+      owner: "admin@example.com",
+      org: "example-org",
+      admin: true,
+      auth: "bearer",
+      adminTokenHash: await sha256Hex(oldAdminToken),
+      adminGrantVersion: oldVersion,
+      subscriptions: {},
+    });
+    const internal = fleet as unknown as { controlSockets: Map<string, WebSocket> };
+    internal.controlSockets.set("control-old-deployment-admin", socket as unknown as WebSocket);
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/leases", {
+        headers: { "x-crabbox-admin-grant-version": newVersion },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(socket.closeCode).toBe(1008);
+    expect(socket.closeReason).toBe("admin access revoked");
+    expect(internal.controlSockets.has("control-old-deployment-admin")).toBe(false);
+  });
+
   it("revalidates idle admin controls before broadcasting subscribed run events", async () => {
     const oldAdminToken = "old-admin-token";
     const fleet = testFleet(new MemoryStorage(), {}, { CRABBOX_ADMIN_TOKEN: oldAdminToken });
@@ -380,6 +412,9 @@ describe("runtime adapter relay", () => {
     for (const lease of [revokedLease, legacyLease, adminLease]) {
       storage.seed(`lease:${lease.id}`, lease);
     }
+    const currentGrantVersion = await adminGrantVersion({
+      CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+    });
     const revoked = ["egress-host", "egress-client"].map(
       (kind) =>
         new FakeWebSocket({
@@ -410,6 +445,7 @@ describe("runtime adapter relay", () => {
           admin: true,
           auth: "github",
           login: "current-admin",
+          adminGrantVersion: currentGrantVersion,
         }),
     );
     const fleet = new FleetDurableObject(
@@ -455,6 +491,11 @@ describe("runtime adapter relay", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     storage.seed(`lease:${lease.id}`, lease);
+    const currentAdminToken = "current-admin-token";
+    const currentGrantVersion = await adminGrantVersion({
+      CRABBOX_ADMIN_TOKEN: currentAdminToken,
+      CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+    });
     const revokedGrant = {
       owner: "former-admin@example.com",
       org: "other-org",
@@ -515,9 +556,9 @@ describe("runtime adapter relay", () => {
       admin: true,
       auth: "github",
       login: "current-admin",
+      adminGrantVersion: currentGrantVersion,
       subscriptions: {},
     });
-    const currentAdminToken = "current-admin-token";
     const currentBearerControl = new FakeWebSocket({
       kind: "control",
       clientID: "control-current-bearer-admin",
@@ -526,6 +567,7 @@ describe("runtime adapter relay", () => {
       admin: true,
       auth: "bearer",
       adminTokenHash: await sha256Hex(currentAdminToken),
+      adminGrantVersion: currentGrantVersion,
       subscriptions: {},
     });
     const rotatedBearerControl = new FakeWebSocket({
@@ -9794,6 +9836,7 @@ describe("fleet lease identity and idle", () => {
   it("revokes only unauthorized live viewers after an API share removal", async () => {
     const storage = new MemoryStorage();
     const adminToken = "current-admin-token";
+    const currentGrantVersion = await adminGrantVersion({ CRABBOX_ADMIN_TOKEN: adminToken });
     const fleet = testFleet(storage, {}, { CRABBOX_ADMIN_TOKEN: adminToken });
     const leaseID = "cbx_000000000001";
     const ownerHeaders = {
@@ -9888,6 +9931,7 @@ describe("fleet lease identity and idle", () => {
       org: "other-org",
       admin: true,
       adminTokenHash: await sha256Hex(adminToken),
+      adminGrantVersion: currentGrantVersion,
     });
     const legacyCodeViewer = new FakeWebSocket({
       kind: "code-viewer",
