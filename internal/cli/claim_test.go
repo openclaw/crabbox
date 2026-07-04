@@ -176,6 +176,62 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	}
 }
 
+func TestClaimLeaseTargetForConfigIfUnchangedStoresProviderScope(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "railway"
+	cfg.Railway.APIURL = " https://railway.example.test/graphql/v2/ "
+	cfg.Railway.ProjectID = " proj-1 "
+	cfg.Railway.EnvironmentID = " env-1 "
+	server := Server{
+		Provider: "railway",
+		CloudID:  "svc-1",
+		Name:     "api",
+		Labels: map[string]string{
+			"railwayDeploymentId": "dep-1",
+		},
+	}
+	leaseID := "railway_123456789abc"
+	previous, previousExists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claim, err := claimLeaseTargetForConfigIfUnchanged(leaseID, "", cfg, server, SSHTarget{}, 0, previous, previousExists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Provider != "railway" || claim.CloudID != "svc-1" || claim.RepoRoot != "" {
+		t.Fatalf("unexpected provider claim: %#v", claim)
+	}
+	wantScope := "endpoint:https://railway.example.test/graphql/v2|project:proj-1|environment:env-1"
+	if claim.ProviderScope != wantScope {
+		t.Fatalf("ProviderScope=%q, want %q", claim.ProviderScope, wantScope)
+	}
+	if claim.Labels["railwayDeploymentId"] != "dep-1" {
+		t.Fatalf("labels=%#v", claim.Labels)
+	}
+
+	if _, err := claimLeaseTargetForConfigIfUnchanged(leaseID, "", cfg, Server{Provider: "railway", CloudID: "svc-2"}, SSHTarget{}, 0, previous, previousExists); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("stale create-if-absent err=%v", err)
+	}
+}
+
+func TestRailwayProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Railway.APIURL = "https://railway.example.test/graphql/v2/"
+	cfg.Railway.ProjectID = "proj-1"
+	cfg.Railway.EnvironmentID = "env-1"
+	want := "endpoint:https://railway.example.test/graphql/v2|project:proj-1|environment:env-1"
+	if got := providerClaimScope("railway", cfg); got != want {
+		t.Fatalf("providerClaimScope(railway)=%q, want %q", got, want)
+	}
+	cfg.Railway.EnvironmentID = ""
+	if got := providerClaimScope("railway", cfg); got != "" {
+		t.Fatalf("incomplete railway scope=%q, want empty", got)
+	}
+}
+
 func TestConditionalClaimMutationRejectsChangedState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := baseConfig()
