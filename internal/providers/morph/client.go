@@ -60,7 +60,7 @@ func secureMorphHTTPClient(source *http.Client, apiURL string) *http.Client {
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if !sameMorphOrigin(trusted, req.URL) {
-			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, req.URL.Redacted())
+			return &morphRedirectError{origin: morphRedirectOrigin(req.URL)}
 		}
 		if originalCheckRedirect != nil {
 			return originalCheckRedirect(req, via)
@@ -92,6 +92,21 @@ func effectiveMorphPort(value *url.URL) string {
 	default:
 		return ""
 	}
+}
+
+type morphRedirectError struct {
+	origin string
+}
+
+func (e *morphRedirectError) Error() string {
+	return fmt.Sprintf("%s refused cross-origin redirect to %s", providerName, e.origin)
+}
+
+func morphRedirectOrigin(value *url.URL) string {
+	if value == nil || value.Scheme == "" || value.Host == "" {
+		return "<redacted>"
+	}
+	return value.Scheme + "://" + value.Host
 }
 
 type morphAPIError struct {
@@ -333,6 +348,11 @@ func (c *morphClient) doRaw(ctx context.Context, method, path string, query url.
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// net/http wraps CheckRedirect failures with the untrusted Location URL.
+		var redirectErr *morphRedirectError
+		if errors.As(err, &redirectErr) {
+			return nil, redirectErr
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()

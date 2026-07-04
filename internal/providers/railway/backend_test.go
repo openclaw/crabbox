@@ -142,7 +142,7 @@ func TestRailwayClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
 	}))
 	defer target.Close()
 	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, target.URL+"/stolen", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, target.URL+"/stolen?token=redirect-secret", http.StatusTemporaryRedirect)
 	}))
 	defer trusted.Close()
 
@@ -156,6 +156,9 @@ func TestRailwayClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
 	err = api.(*railwayClient).do(context.Background(), "query { me { id } }", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
 		t.Fatalf("do error = %v, want cross-origin refusal", err)
+	}
+	if strings.Contains(err.Error(), "redirect-secret") {
+		t.Fatalf("do error leaked redirect query: %v", err)
 	}
 	if targetRequests != 0 {
 		t.Fatalf("redirect target received %d requests, want 0", targetRequests)

@@ -72,7 +72,7 @@ func TestMorphClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
 	}))
 	defer target.Close()
 	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, target.URL+"/stolen", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, target.URL+"/stolen?token=redirect-secret", http.StatusTemporaryRedirect)
 	}))
 	defer trusted.Close()
 
@@ -86,6 +86,9 @@ func TestMorphClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
 	_, err = client.GetSnapshot(context.Background(), "snapshot_123")
 	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
 		t.Fatalf("GetSnapshot error = %v, want cross-origin refusal", err)
+	}
+	if strings.Contains(err.Error(), "redirect-secret") {
+		t.Fatalf("GetSnapshot error leaked redirect query: %v", err)
 	}
 	if targetRequests != 0 {
 		t.Fatalf("redirect target received %d requests, want 0", targetRequests)

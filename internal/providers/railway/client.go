@@ -179,7 +179,7 @@ func secureRailwayHTTPClient(source *http.Client, apiURL string) *http.Client {
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if !sameRailwayOrigin(trusted, req.URL) {
-			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, req.URL.Redacted())
+			return &railwayRedirectError{origin: railwayRedirectOrigin(req.URL)}
 		}
 		if originalCheckRedirect != nil {
 			return originalCheckRedirect(req, via)
@@ -213,6 +213,21 @@ func effectiveRailwayPort(value *url.URL) string {
 	}
 }
 
+type railwayRedirectError struct {
+	origin string
+}
+
+func (e *railwayRedirectError) Error() string {
+	return fmt.Sprintf("%s refused cross-origin redirect to %s", providerName, e.origin)
+}
+
+func railwayRedirectOrigin(value *url.URL) string {
+	if value == nil || value.Scheme == "" || value.Host == "" {
+		return "<redacted>"
+	}
+	return value.Scheme + "://" + value.Host
+}
+
 type graphqlRequest struct {
 	Query     string         `json:"query"`
 	Variables map[string]any `json:"variables,omitempty"`
@@ -241,6 +256,11 @@ func (c *railwayClient) do(ctx context.Context, query string, vars map[string]an
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// net/http wraps CheckRedirect failures with the untrusted Location URL.
+		var redirectErr *railwayRedirectError
+		if errors.As(err, &redirectErr) {
+			return redirectErr
+		}
 		return err
 	}
 	defer resp.Body.Close()
