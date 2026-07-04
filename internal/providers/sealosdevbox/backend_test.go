@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -789,6 +790,62 @@ func TestResolveRejectsSecretOwnedByAnotherDevbox(t *testing.T) {
 	core.UseStoredTestboxKey(&target, leaseID)
 	if target.Key != "" {
 		t.Fatalf("unowned Secret key persisted: %s", target.Key)
+	}
+}
+
+func TestTouchRefreshesRemoteLeaseAnnotationsWithResourceVersion(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_touch123456"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-touch","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a","crabbox.dev/last_touched_at":"2026-06-01T00:00:00Z"}},"status":{"state":"Running","phase":"Running"}}`
+	runner := &lifecycleRunner{outputs: []string{`{"items":[` + item + `]}`, "patched"}}
+	backend := lifecycleBackend(cfg, runner)
+	server, err := backend.Touch(context.Background(), core.TouchRequest{
+		Lease: core.LeaseTarget{
+			LeaseID: leaseID,
+			Server:  core.Server{Labels: map[string]string{"slug": slug}},
+			SSH:     core.SSHTarget{Host: "ssh.sealos.example.test", User: "devbox", Port: "2222", Key: "/tmp/key"},
+		},
+		State: "running",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTouched := strconv.FormatInt(backend.now().Unix(), 10)
+	if server.Labels["last_touched_at"] != wantTouched {
+		t.Fatalf("last_touched_at=%q", server.Labels["last_touched_at"])
+	}
+	if len(runner.requests) != 2 || !strings.Contains(commandString(runner.requests[1]), "patch "+devboxResource+"/"+name) {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+	args := runner.requests[1].Args
+	patchIndex := -1
+	for i := range args {
+		if args[i] == "-p" && i+1 < len(args) {
+			patchIndex = i + 1
+			break
+		}
+	}
+	if patchIndex < 0 {
+		t.Fatalf("patch payload missing: %#v", args)
+	}
+	var payload struct {
+		Metadata struct {
+			ResourceVersion string         `json:"resourceVersion"`
+			Annotations     map[string]any `json:"annotations"`
+		} `json:"metadata"`
+		Spec map[string]any `json:"spec"`
+	}
+	if err := json.Unmarshal([]byte(args[patchIndex]), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Metadata.ResourceVersion != "rv-touch" || payload.Metadata.Annotations[annotationBase+"last_touched_at"] != wantTouched {
+		t.Fatalf("touch patch=%#v", payload)
+	}
+	if payload.Spec != nil {
+		t.Fatalf("touch must not overwrite desired state: %#v", payload.Spec)
 	}
 }
 

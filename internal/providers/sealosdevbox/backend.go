@@ -364,13 +364,38 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	if id == "" {
 		id = req.Lease.Server.Name
 	}
-	lease, err := b.Resolve(ctx, core.ResolveRequest{ID: id, StatusOnly: true})
+	item, name, leaseID, slug, err := b.resolveDevbox(ctx, id)
 	if err != nil {
 		return core.Server{}, err
 	}
-	server := lease.Server
+	if expectedLeaseID := strings.TrimSpace(req.Lease.LeaseID); expectedLeaseID != "" && leaseID != expectedLeaseID {
+		return core.Server{}, core.Exit(4, "Sealos DevBox %q lease identity changed: expected %s, found %s", name, expectedLeaseID, leaseID)
+	}
+	if expectedSlug := core.NormalizeLeaseSlug(req.Lease.Server.Labels["slug"]); expectedSlug != "" && slug != expectedSlug {
+		return core.Server{}, core.Exit(4, "Sealos DevBox %q slug identity changed: expected %s, found %s", name, expectedSlug, slug)
+	}
+	server := b.serverFromDevbox(item)
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.cfg, req.State, b.now())
-	_ = core.UpdateLeaseClaimEndpoint(lease.LeaseID, server, lease.SSH)
+	action := func() error {
+		return b.patchDevboxAnnotations(ctx, name, item.Metadata.ResourceVersion, annotationsFromLeaseLabels(server.Labels))
+	}
+	claim, claimOK, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil {
+		return core.Server{}, err
+	}
+	if claimOK {
+		_, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, req.Lease.SSH, action)
+		if err != nil {
+			return core.Server{}, err
+		}
+		return server, nil
+	}
+	if err := action(); err != nil {
+		return core.Server{}, err
+	}
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, req.Lease.SSH); err != nil {
+		return core.Server{}, err
+	}
 	return server, nil
 }
 

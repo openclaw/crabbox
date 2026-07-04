@@ -119,13 +119,23 @@ func (b *backend) getSecret(ctx context.Context, name string) (devboxSecret, err
 }
 
 func (b *backend) patchDevboxState(ctx context.Context, name, resourceVersion, state string, annotations map[string]any) error {
+	return b.patchDevbox(ctx, name, resourceVersion, state, annotations)
+}
+
+func (b *backend) patchDevboxAnnotations(ctx context.Context, name, resourceVersion string, annotations map[string]any) error {
+	return b.patchDevbox(ctx, name, resourceVersion, "", annotations)
+}
+
+func (b *backend) patchDevbox(ctx context.Context, name, resourceVersion, state string, annotations map[string]any) error {
 	resourceVersion = strings.TrimSpace(resourceVersion)
 	if resourceVersion == "" {
 		return core.Exit(4, "refusing to patch Sealos DevBox %q without its Kubernetes resourceVersion", name)
 	}
 	patch := map[string]any{
 		"metadata": map[string]any{"resourceVersion": resourceVersion},
-		"spec":     map[string]any{"state": state},
+	}
+	if strings.TrimSpace(state) != "" {
+		patch["spec"] = map[string]any{"state": state}
 	}
 	if len(annotations) > 0 {
 		patch["metadata"].(map[string]any)["annotations"] = annotations
