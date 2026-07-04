@@ -422,12 +422,60 @@ func TestResolvePreservesPersistedVastClaimMetadata(t *testing.T) {
 	}
 }
 
+func TestResolveNumericIDRequiresReclaimForUnclaimedProviderLabel(t *testing.T) {
+	api := &fakeVastAPI{instances: []vastInstance{{
+		ID:      8,
+		Label:   encodeVastOwnershipLabel("cbx_orphan", "orphan", "ready"),
+		Status:  "running",
+		SSHHost: "203.0.113.8",
+		SSHPort: 22,
+	}}}
+	b := newTestBackend(t, api)
+
+	_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "8", Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "vast lease=cbx_orphan is unclaimed; use --reclaim") {
+		t.Fatalf("err=%v", err)
+	}
+	if claim, exists, readErr := core.ReadLeaseClaimWithPresence("cbx_orphan"); readErr != nil || exists {
+		t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, readErr)
+	}
+}
+
+func TestResolveNumericIDReclaimCreatesClaimForProviderLabel(t *testing.T) {
+	api := &fakeVastAPI{instances: []vastInstance{{
+		ID:      8,
+		Label:   encodeVastOwnershipLabel("cbx_orphan", "orphan", "ready"),
+		Status:  "running",
+		SSHHost: "203.0.113.8",
+		SSHPort: 22,
+	}}}
+	b := newTestBackend(t, api)
+
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "8", Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "cbx_orphan" || lease.Server.CloudID != "8" || lease.SSH.Host != "203.0.113.8" {
+		t.Fatalf("lease=%#v", lease)
+	}
+	claim, exists, readErr := core.ReadLeaseClaimWithPresence("cbx_orphan")
+	if readErr != nil || !exists || claim.Provider != providerName || claim.CloudID != "8" || claim.Slug != "orphan" || claim.Labels[vastAccountIDLabel] != "7" || claim.Labels[vastAPIURLLabel] != "https://console.vast.ai/api/v0" {
+		t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, readErr)
+	}
+}
+
 func TestResolveRejectsTerminalStatusForRunButAllowsRelease(t *testing.T) {
 	api := &fakeVastAPI{instances: []vastInstance{{ID: 9, Label: encodeVastOwnershipLabel("cbx_failed", "failed", "ready"), Status: "failed", SSHHost: "203.0.113.9", SSHPort: 22}}}
 	b := newTestBackend(t, api)
 	_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "failed"})
 	if err == nil || !strings.Contains(err.Error(), "terminal status failed") {
 		t.Fatalf("err=%v", err)
+	}
+	server := serverFromInstance(api.instances[0], b.cfg)
+	server.Labels[vastAccountIDLabel] = "7"
+	server.Labels[vastAPIURLLabel] = "https://console.vast.ai/api/v0"
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_failed", "failed", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
 	}
 	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "failed", ReleaseOnly: true})
 	if err != nil {
@@ -477,6 +525,12 @@ func TestResolvePrefersNumericSlugOverInstanceID(t *testing.T) {
 		{ID: 100, Label: encodeVastOwnershipLabel("cbx_numeric", "123", "ready"), Status: "running", SSHHost: "203.0.113.100", SSHPort: 2200},
 	}}
 	b := newTestBackend(t, api)
+	server := serverFromInstance(api.instances[1], b.cfg)
+	server.Labels[vastAccountIDLabel] = "7"
+	server.Labels[vastAPIURLLabel] = "https://console.vast.ai/api/v0"
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_numeric", "123", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
 
 	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "123"})
 	if err != nil {
