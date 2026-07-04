@@ -187,6 +187,111 @@ class FakeWebSocket {
 }
 
 describe("runtime adapter relay", () => {
+  it("revalidates active admin control sockets against the current grant source", async () => {
+    const oldAdminToken = "old-admin-token";
+    const fleet = testFleet(new MemoryStorage(), {}, { CRABBOX_ADMIN_TOKEN: oldAdminToken });
+    const socket = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-rotated-admin",
+      owner: "admin@example.com",
+      org: "example-org",
+      admin: true,
+      auth: "bearer",
+      adminTokenHash: await sha256Hex(oldAdminToken),
+      subscriptions: {},
+    });
+    const internal = fleet as unknown as {
+      env: Env;
+      controlSockets: Map<string, WebSocket>;
+    };
+    internal.controlSockets.set("control-rotated-admin", socket as unknown as WebSocket);
+    internal.env.CRABBOX_ADMIN_TOKEN = "new-admin-token";
+
+    await fleet.webSocketMessage(
+      socket as unknown as WebSocket,
+      JSON.stringify({ type: "subscribe", leaseIDs: [] }),
+    );
+
+    expect(socket.closeCode).toBe(1008);
+    expect(socket.closeReason).toBe("admin access revoked");
+    expect(internal.controlSockets.has("control-rotated-admin")).toBe(false);
+  });
+
+  it("revalidates idle admin controls before broadcasting subscribed run events", async () => {
+    const oldAdminToken = "old-admin-token";
+    const fleet = testFleet(new MemoryStorage(), {}, { CRABBOX_ADMIN_TOKEN: oldAdminToken });
+    const run = testRun({ id: "run_admin_revocation", owner: "other@example.com" });
+    const socket = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-idle-rotated-admin",
+      owner: "admin@example.com",
+      org: "example-org",
+      admin: true,
+      auth: "bearer",
+      adminTokenHash: await sha256Hex(oldAdminToken),
+      subscriptions: { [run.id]: 0 },
+    });
+    const internal = fleet as unknown as {
+      env: Env;
+      controlSockets: Map<string, WebSocket>;
+      broadcastRunEvent(run: RunRecord, event: unknown): Promise<void>;
+    };
+    internal.controlSockets.set("control-idle-rotated-admin", socket as unknown as WebSocket);
+    internal.env.CRABBOX_ADMIN_TOKEN = "new-admin-token";
+
+    await internal.broadcastRunEvent(run, {
+      seq: 1,
+      runID: run.id,
+      type: "log",
+      createdAt: "2026-07-04T00:00:00.000Z",
+      log: "private output",
+    });
+
+    expect(socket.closeCode).toBe(1008);
+    expect(socket.closeReason).toBe("admin access revoked");
+    expect(socket.sentJSON()).toEqual([]);
+  });
+
+  it("revalidates idle admin viewers before forwarding agent data", async () => {
+    const oldAdminToken = "old-admin-token";
+    const fleet = testFleet(new MemoryStorage(), {}, { CRABBOX_ADMIN_TOKEN: oldAdminToken });
+    const leaseID = "cbx_000000000001";
+    const agent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const viewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code-rotated-admin",
+      auth: "bearer",
+      owner: "admin@example.com",
+      org: "example-org",
+      admin: true,
+      adminTokenHash: await sha256Hex(oldAdminToken),
+    });
+    const internal = fleet as unknown as {
+      env: Env;
+      codeAgents: Map<string, WebSocket>;
+      codeViewers: Map<string, WebSocket>;
+    };
+    internal.codeAgents.set(leaseID, agent as unknown as WebSocket);
+    internal.codeViewers.set("code-rotated-admin", viewer as unknown as WebSocket);
+    internal.env.CRABBOX_ADMIN_TOKEN = "new-admin-token";
+
+    await fleet.webSocketMessage(
+      agent as unknown as WebSocket,
+      JSON.stringify({
+        type: "ws_data",
+        id: "code-rotated-admin",
+        frame: "text",
+        body: btoa("private output"),
+      }),
+    );
+
+    expect(viewer.closeCode).toBe(1008);
+    expect(viewer.closeReason).toBe("admin access revoked");
+    expect(viewer.sentJSON()).toEqual([]);
+    expect(internal.codeViewers.has("code-rotated-admin")).toBe(false);
+  });
+
   it("restores unambiguous hibernated bridge sockets after validating lease state", async () => {
     const storage = new MemoryStorage();
     const list = vi.spyOn(storage, "list");

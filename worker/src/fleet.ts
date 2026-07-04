@@ -217,6 +217,7 @@ const workspaceCommandMaxBootstrapBytes = 3_000;
 const workspaceTerminalSSHReadyTimeoutMs = 2 * 60_000;
 const workspaceSSHHostPrivateKeyHeader = "x-crabbox-workspace-ssh-host-private-key";
 const workspaceSSHHostPublicKeyHeader = "x-crabbox-workspace-ssh-host-public-key";
+const adminGrantRevalidationIntervalMs = 1_000;
 
 interface CachedAdminGrant {
   auth?: AuthContext["auth"];
@@ -781,6 +782,7 @@ export class FleetCoordinator {
   private readonly controlSockets = new Map<string, WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
   private readonly restoredBridgeSockets = new Set<WebSocket>();
+  private readonly adminGrantValidationTimes = new WeakMap<WebSocket, number>();
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
   private bridgeTicketQueue: Promise<void> = Promise.resolve();
@@ -1588,11 +1590,16 @@ export class FleetCoordinator {
     if (socket.readyState !== WebSocket.OPEN || !this.bridgeSocketIsCurrent(socket, attachment)) {
       return;
     }
+    if (!(await this.activeBridgeAdminGrantIsCurrent(socket, attachment))) {
+      return;
+    }
     switch (attachment.kind) {
       case "webvnc-agent":
         await forwardOrBufferWebVNC(
           message,
-          this.webVNCViewerForAgent(attachment.leaseID, attachment.id)?.socket,
+          await this.currentBridgeRecipient(
+            this.webVNCViewerForAgent(attachment.leaseID, attachment.id)?.socket,
+          ),
           this.pendingWebVNCToViewer,
           webVNCBufferKey(attachment.leaseID, attachment.id),
         );
@@ -1627,13 +1634,17 @@ export class FleetCoordinator {
       case "egress-host":
         await forwardEgress(
           message,
-          this.egressClients.get(egressSocketKey(attachment.leaseID, attachment.sessionID)),
+          await this.currentBridgeRecipient(
+            this.egressClients.get(egressSocketKey(attachment.leaseID, attachment.sessionID)),
+          ),
         );
         break;
       case "egress-client":
         await forwardEgress(
           message,
-          this.egressHosts.get(egressSocketKey(attachment.leaseID, attachment.sessionID)),
+          await this.currentBridgeRecipient(
+            this.egressHosts.get(egressSocketKey(attachment.leaseID, attachment.sessionID)),
+          ),
         );
         break;
       case "runtime-adapter-agent":
@@ -1644,6 +1655,54 @@ export class FleetCoordinator {
         break;
     }
     void socket;
+  }
+
+  private async currentBridgeRecipient(
+    socket: WebSocket | undefined,
+  ): Promise<WebSocket | undefined> {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return undefined;
+    }
+    const attachment = this.bridgeAttachment(socket);
+    if (
+      !attachment ||
+      !this.bridgeSocketIsCurrent(socket, attachment) ||
+      !(await this.activeBridgeAdminGrantIsCurrent(socket, attachment))
+    ) {
+      return undefined;
+    }
+    return socket;
+  }
+
+  private async activeBridgeAdminGrantIsCurrent(
+    socket: WebSocket,
+    attachment: BridgeAttachment,
+  ): Promise<boolean> {
+    if (!("admin" in attachment) || attachment.admin !== true) {
+      return true;
+    }
+    const now = Date.now();
+    const lastValidatedAt = this.adminGrantValidationTimes.get(socket) ?? 0;
+    if (now - lastValidatedAt < adminGrantRevalidationIntervalMs) {
+      return true;
+    }
+    if (cachedAdminGrantIsCurrent(attachment, await adminGrantValidation(this.env))) {
+      this.adminGrantValidationTimes.set(socket, now);
+      return true;
+    }
+    this.adminGrantValidationTimes.delete(socket);
+    if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
+      this.clearEgressSession(
+        attachment.leaseID,
+        attachment.sessionID,
+        1008,
+        "admin access revoked",
+      );
+      return false;
+    }
+    this.handleBridgeClose(socket, 1008, "admin access revoked");
+    closeSocket(socket, 1008, "admin access revoked");
+    return false;
   }
 
   private handleBridgeClose(socket: WebSocket, code: number, reason: string): void {
@@ -8009,9 +8068,9 @@ export class FleetCoordinator {
     agent.send(JSON.stringify(end));
   }
 
-  private sendCodeDataToViewer(message: CodeWebSocketData): void {
-    const viewer = this.codeViewers.get(message.id);
-    if (viewer?.readyState !== WebSocket.OPEN) {
+  private async sendCodeDataToViewer(message: CodeWebSocketData): Promise<void> {
+    const viewer = await this.currentBridgeRecipient(this.codeViewers.get(message.id));
+    if (!viewer) {
       return;
     }
     const data = base64ToBytes(message.body);
@@ -8075,7 +8134,7 @@ export class FleetCoordinator {
       return;
     }
     if (message.type === "ws_data" && message.id) {
-      this.sendCodeDataToViewer(message as CodeWebSocketData);
+      await this.sendCodeDataToViewer(message as CodeWebSocketData);
       return;
     }
     if (message.type === "ws_start" && message.id) {
@@ -8101,7 +8160,7 @@ export class FleetCoordinator {
       const pending = this.pendingCodeFrames.get(end.chunkID);
       this.pendingCodeFrames.delete(end.chunkID);
       if (pending) {
-        this.sendCodeDataToViewer({
+        await this.sendCodeDataToViewer({
           type: "ws_data",
           id: pending.id,
           frame: pending.frame,
@@ -11421,7 +11480,7 @@ export class FleetCoordinator {
     run.lastEventAt = now;
     await this.state.storage.put(runEventKey(run.id, seq), event);
     await this.putRun(run);
-    this.broadcastRunEvent(run, event);
+    await this.broadcastRunEvent(run, event);
     return event;
   }
 
@@ -11433,13 +11492,17 @@ export class FleetCoordinator {
     }
   }
 
-  private broadcastRunEvent(run: RunRecord, event: RunEventRecord): void {
+  private async broadcastRunEvent(run: RunRecord, event: RunEventRecord): Promise<void> {
     for (const socket of this.controlSockets.values()) {
       if (socket.readyState !== WebSocket.OPEN) {
         continue;
       }
       const attachment = this.bridgeAttachment(socket);
       if (!attachment || attachment.kind !== "control") {
+        continue;
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- validate each control before its event can be sent.
+      if (!(await this.activeBridgeAdminGrantIsCurrent(socket, attachment))) {
         continue;
       }
       const after = attachment.subscriptions?.[run.id];
