@@ -1114,7 +1114,11 @@ func validateScalewayClaimIdentity(claim core.LeaseClaim, server core.Server) er
 		}
 	} else {
 		switch claim.Labels["recovery"] {
-		case "ambiguous-create", "ambiguous-create-response", "ambiguous-key-create", "rollback-cleanup", "rollback-key-cleanup":
+		case "ambiguous-create", "ambiguous-create-response", "rollback-cleanup":
+		case "ambiguous-key-create", "rollback-key-cleanup":
+			if server.CloudID != "" {
+				return core.Exit(2, "scaleway lease claim has no server identity or valid recovery state for lease=%s", leaseID)
+			}
 		default:
 			return core.Exit(2, "scaleway lease claim has no server identity or valid recovery state for lease=%s", leaseID)
 		}

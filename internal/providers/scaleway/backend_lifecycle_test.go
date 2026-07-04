@@ -532,6 +532,32 @@ func TestScalewayReleaseCleansIdentitylessRollbackKeyClaim(t *testing.T) {
 	}
 }
 
+func TestScalewayRejectsKeyOnlyRecoveryClaimForLiveServer(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_565656565656"
+	slug := "key-only-live"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["recovery"] = "rollback-key-cleanup"
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_organization"] = "organization-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-recover"
+	claimServer := core.Server{Provider: providerName, Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	fake.server = testServer("server-live", core.LeaseProviderName(leaseID, slug), tagsFromLabels(labels), "203.0.113.23")
+	server := backend.serverFromScaleway(fake.server)
+	err := backend.deleteServer(context.Background(), fake, server)
+	if err == nil || !strings.Contains(err.Error(), "no server identity or valid recovery state") {
+		t.Fatalf("deleteServer err=%v", err)
+	}
+	if fake.deletedServer || fake.deletedKey {
+		t.Fatalf("key-only recovery mutated live resources: deletedServer=%t deletedKey=%t", fake.deletedServer, fake.deletedKey)
+	}
+}
+
 func TestScalewayReleaseCleansClaimAndKeyWhenServerAlreadyDeleted(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	fake.getErr = &scw.ResourceNotFoundError{}
