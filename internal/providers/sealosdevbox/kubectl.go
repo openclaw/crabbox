@@ -162,6 +162,7 @@ func (b *backend) deleteDevbox(ctx context.Context, item devboxItem) error {
 		return core.Exit(5, "encode Sealos DevBox delete preconditions: %v", err)
 	}
 	rawPath := "/apis/devbox.sealos.io/v1alpha2/namespaces/" + url.PathEscape(namespace) + "/devboxes/" + url.PathEscape(name)
+	// kubectl raw delete sends -f - as the DELETE request body, preserving these preconditions.
 	_, err = b.kubectlWithInput(ctx, nil, strings.NewReader(string(payload)), false, "delete", "--raw", rawPath, "-f", "-")
 	if err != nil && kubectlAPIObjectNotFound(err) {
 		return nil

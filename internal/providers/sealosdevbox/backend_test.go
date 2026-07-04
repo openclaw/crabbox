@@ -745,6 +745,29 @@ func TestResolveResumesPausedNodePortDevboxBeforeRouteLookup(t *testing.T) {
 	}
 }
 
+func TestWaitForDevboxPreparedWaitsForNodePortRoute(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.Network = networkNodePort
+	name := "crabbox-blue-12345678"
+	runner := &lifecycleRunner{outputs: []string{
+		`{"metadata":{"name":"` + name + `"},"status":{"state":"Running","phase":"Running","network":{"type":"NodePort"}}}`,
+		`{"metadata":{"name":"` + name + `"},"status":{"state":"Running","phase":"Running","network":{"type":"NodePort","nodePort":32022}}}`,
+	}}
+	backend := lifecycleBackend(cfg, runner)
+	backend.pollIntervalOverride = time.Millisecond
+	item, err := backend.waitForDevboxPrepared(context.Background(), name, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, ok := devboxSSHNodePort(item)
+	if !ok || port != 32022 {
+		t.Fatalf("NodePort route=%d ok=%t item=%#v", port, ok, item)
+	}
+	if len(runner.requests) != 2 {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+}
+
 func TestResolveRejectsSecretOwnedByAnotherDevbox(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()

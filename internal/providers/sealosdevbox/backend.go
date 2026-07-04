@@ -12,10 +12,11 @@ import (
 )
 
 type backend struct {
-	spec     core.ProviderSpec
-	cfg      core.Config
-	rt       core.Runtime
-	sshReady func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+	spec                 core.ProviderSpec
+	cfg                  core.Config
+	rt                   core.Runtime
+	sshReady             func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+	pollIntervalOverride time.Duration
 }
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
@@ -412,7 +413,7 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		if devboxTerminalFailure(item) {
 			return core.StatusView{}, core.Exit(5, "Sealos DevBox %s reached terminal state before readiness: %s", item.Metadata.Name, view.State)
 		}
-		if err := sleepContext(statusCtx, 2*time.Second); err != nil {
+		if err := sleepContext(statusCtx, b.pollInterval(2*time.Second)); err != nil {
 			return core.StatusView{}, err
 		}
 	}
@@ -465,8 +466,11 @@ func (b *backend) waitForDevboxPrepared(ctx context.Context, name string, timeou
 		item, err := b.getDevbox(ctx, name)
 		if err == nil {
 			last = item
-			if devboxReady(item) {
+			if b.devboxPrepared(item) {
 				return item, nil
+			}
+			if devboxReady(item) {
+				lastErr = core.Exit(5, "Sealos DevBox %s is running but has no SSH NodePort in status.network", name)
 			}
 			if devboxTerminalFailure(item) {
 				events, _ := b.listEvents(ctx, name)
@@ -481,7 +485,7 @@ func (b *backend) waitForDevboxPrepared(ctx context.Context, name string, timeou
 			events, _ := b.listEvents(ctx, name)
 			return last, core.Exit(5, "timed out waiting for Sealos DevBox %s readiness: %s", name, devboxDiagnostics(last, events, lastErr))
 		}
-		if err := sleepContext(ctx, 5*time.Second); err != nil {
+		if err := sleepContext(ctx, b.pollInterval(5*time.Second)); err != nil {
 			return last, err
 		}
 	}
@@ -523,10 +527,28 @@ func (b *backend) waitForDevboxSecret(ctx context.Context, item devboxItem, time
 		if !b.now().Before(deadline) {
 			return devboxSecret{}, core.Exit(5, "timed out waiting for Sealos DevBox Secret %s: %s", name, redactSensitive(lastErr.Error()))
 		}
-		if err := sleepContext(ctx, 5*time.Second); err != nil {
+		if err := sleepContext(ctx, b.pollInterval(5*time.Second)); err != nil {
 			return devboxSecret{}, err
 		}
 	}
+}
+
+func (b *backend) devboxPrepared(item devboxItem) bool {
+	if !devboxReady(item) {
+		return false
+	}
+	if normalizeNetwork(b.cfg.SealosDevbox.Network) != networkNodePort {
+		return true
+	}
+	_, ok := devboxSSHNodePort(item)
+	return ok
+}
+
+func (b *backend) pollInterval(fallback time.Duration) time.Duration {
+	if b.pollIntervalOverride > 0 {
+		return b.pollIntervalOverride
+	}
+	return fallback
 }
 
 func (b *backend) now() time.Time {
