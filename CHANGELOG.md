@@ -51,7 +51,6 @@
 - Required exact resource-bound local lease claims before Apple Container, local-container, or Apple VZ stop operations can delete provider resources; legacy unbound claims require explicit `--reclaim` adoption before stop. Thanks @coygeek.
 - Hardened Azure Windows snapshot forks to fail closed through credential rehydration and quarantine cleanup, reuse only writable NIC payloads, reject unknown differential disks, and retry in-use security-group cleanup. Thanks @fcoury-oai.
 - Rolled back brokered Hetzner servers when post-create readiness fails, deleting only lease-owned SSH keys created by the failed attempt after server cleanup succeeds while preserving explicit no-delete retention until a later delete. Thanks @coygeek.
-- Required an exact resource-bound local claim before RunPod stop can terminate a pod, with explicit conflict-safe `--reclaim` adoption and a fresh provider identity check at deletion. Thanks @coygeek.
 
 ## 0.34.0 - 2026-07-02
 

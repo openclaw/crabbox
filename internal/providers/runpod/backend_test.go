@@ -593,6 +593,45 @@ func TestRunpodReclaimCannotRetargetBoundClaim(t *testing.T) {
 	}
 }
 
+func TestRunpodFindPodByNamePrefersExactMatchOverNormalizedAlias(t *testing.T) {
+	fake := &fakeRunpodAPI{listPods: []runpodPod{
+		{ID: "pod_alias", Name: "manual_pod"},
+		{ID: "pod_exact", Name: "manual-pod"},
+	}}
+	backend := &runpodLeaseBackend{}
+	pod, err := backend.findPodByName(context.Background(), fake, "manual-pod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pod.ID != "pod_exact" {
+		t.Fatalf("pod=%#v, want exact name match", pod)
+	}
+}
+
+func TestRunpodFindPodByNameRejectsAmbiguousNormalizedAlias(t *testing.T) {
+	fake := &fakeRunpodAPI{listPods: []runpodPod{
+		{ID: "pod_a", Name: "manual_pod"},
+		{ID: "pod_b", Name: "manual.pod"},
+	}}
+	backend := &runpodLeaseBackend{}
+	_, err := backend.findPodByName(context.Background(), fake, "manual-pod")
+	if err == nil || !strings.Contains(err.Error(), "multiple RunPod pods match normalized name") {
+		t.Fatalf("err=%v, want ambiguous normalized-name refusal", err)
+	}
+}
+
+func TestRunpodFindPodByLeaseNameRejectsAmbiguousIdentity(t *testing.T) {
+	fake := &fakeRunpodAPI{listPods: []runpodPod{
+		{ID: "pod_a", Name: "crabbox-blue-abcdef12"},
+		{ID: "pod_b", Name: "crabbox-green-abcdef12"},
+	}}
+	backend := &runpodLeaseBackend{}
+	_, _, err := backend.findPodByLeaseName(context.Background(), fake, "rpod_abcdef12")
+	if err == nil || !strings.Contains(err.Error(), "multiple RunPod pods match lease") {
+		t.Fatalf("err=%v, want ambiguous lease-identity refusal", err)
+	}
+}
+
 func TestRunpodLegacyClaimRequiresReclaimToBindExactPod(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "rpod_abcdef12"

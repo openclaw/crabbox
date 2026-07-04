@@ -577,11 +577,30 @@ func (b *runpodLeaseBackend) findPodByName(ctx context.Context, client runpodAPI
 	if err != nil {
 		return runpodPod{}, err
 	}
-	normalized := normalizeLeaseSlug(name)
+	exact := make([]runpodPod, 0, 1)
 	for _, pod := range pods {
-		if pod.Name == name || normalizeLeaseSlug(pod.Name) == normalized || pod.ID == name {
-			return pod, nil
+		if pod.Name == name || pod.ID == name {
+			exact = append(exact, pod)
 		}
+	}
+	if len(exact) == 1 {
+		return exact[0], nil
+	}
+	if len(exact) > 1 {
+		return runpodPod{}, exit(2, "multiple RunPod pods match exact identifier %s", name)
+	}
+	normalized := normalizeLeaseSlug(name)
+	matches := make([]runpodPod, 0, 1)
+	for _, pod := range pods {
+		if normalizeLeaseSlug(pod.Name) == normalized {
+			matches = append(matches, pod)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return runpodPod{}, exit(2, "multiple RunPod pods match normalized name %s", name)
 	}
 	return runpodPod{}, exit(4, "runpod pod not found: %s", name)
 }
@@ -591,10 +610,17 @@ func (b *runpodLeaseBackend) findPodByLeaseName(ctx context.Context, client runp
 	if err != nil {
 		return runpodPod{}, false, err
 	}
+	matches := make([]runpodPod, 0, 1)
 	for _, pod := range pods {
 		if id, _ := runpodLeaseIdentity(pod.Name); id == leaseID {
-			return pod, true, nil
+			matches = append(matches, pod)
 		}
+	}
+	if len(matches) == 1 {
+		return matches[0], true, nil
+	}
+	if len(matches) > 1 {
+		return runpodPod{}, false, exit(2, "multiple RunPod pods match lease %s", leaseID)
 	}
 	return runpodPod{}, false, nil
 }
