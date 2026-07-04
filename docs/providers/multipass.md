@@ -168,10 +168,11 @@ CRABBOX_MULTIPASS_LAUNCH_TIMEOUT
    non-`keep` VMs whose local claim is stale past the idle timeout plus the
    direct-provider grace window.
 
-Multipass does not expose provider labels. Crabbox therefore treats the instance
-name and local lease claim as the source of ownership. Unclaimed user-created
-instances are ignored by `list` unless their name starts with `crabbox-`, and
-`cleanup` skips unclaimed running instances.
+Multipass does not expose provider labels. Crabbox therefore treats the exact
+instance-bound local lease claim as the source of ownership. `stop` and
+`cleanup` skip every unclaimed instance, including stopped `crabbox-`-prefixed
+instances. Adopt intentionally recovered instances through an explicit
+`--reclaim` reuse before destructive lifecycle operations.
 
 ## Limits And Caveats
 

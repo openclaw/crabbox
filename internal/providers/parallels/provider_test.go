@@ -231,6 +231,78 @@ func TestCleanupKeepsClaimAndStoredKeyWhenDeleteFails(t *testing.T) {
 	}
 }
 
+func TestReleaseRequiresExactClaim(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	runner := &parallelsCleanupRunner{}
+	backend := &leaseBackend{
+		DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), runner),
+	}
+	lease := LeaseTarget{
+		LeaseID: "cbx_unclaimed",
+		Server: core.Server{
+			CloudID: "vm-good",
+			Name:    "crabbox-cbx-unclaimed-blue",
+			Labels:  map[string]string{"lease": "cbx_unclaimed", "host": "local"},
+		},
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("ReleaseLease unclaimed err=%v", err)
+	}
+	if runner.deleteCalls != 0 {
+		t.Fatalf("deleteCalls=%d want 0", runner.deleteCalls)
+	}
+}
+
+func TestResolveUnclaimedVMRequiresExplicitAdoption(t *testing.T) {
+	tests := []struct {
+		name    string
+		request ResolveRequest
+		wantErr string
+	}{
+		{name: "reuse", request: ResolveRequest{ID: "vm-good", Repo: core.Repo{Root: "/repo"}}, wantErr: "explicit --reclaim"},
+		{name: "status", request: ResolveRequest{ID: "vm-good", StatusOnly: true}},
+		{name: "reclaim", request: ResolveRequest{ID: "vm-good", Repo: core.Repo{Root: "/repo"}, Reclaim: true}},
+		{name: "release", request: ResolveRequest{ID: "vm-good", ReleaseOnly: true}, wantErr: "no exact local claim"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", filepath.Join(root, "home"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+			backend := &leaseBackend{
+				DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), &parallelsCleanupRunner{}),
+			}
+
+			lease, err := backend.Resolve(context.Background(), test.request)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("Resolve err=%v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.LeaseID != "cbx_good" || lease.Server.CloudID != "vm-good" {
+				t.Fatalf("Resolve lease=%#v", lease)
+			}
+			if test.request.Reclaim {
+				owned, err := exactParallelsClaimOwned(lease.LeaseID, lease.Server.CloudID, "local")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !owned {
+					t.Fatal("explicit reclaim did not persist an exact VM/host claim")
+				}
+			}
+		})
+	}
+}
+
 func TestAcquireRemovesStoredKeyAfterPostKeyFailure(t *testing.T) {
 	if _, err := exec.LookPath("ssh-keygen"); err != nil {
 		t.Skip("ssh-keygen not available")
@@ -342,7 +414,13 @@ func seedParallelsCleanupState(t *testing.T) (string, string) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	leaseID := "cbx_good"
-	if err := core.ClaimLeaseForRepoProvider(leaseID, "blue", "parallels", "/repo", time.Minute, false); err != nil {
+	server := core.Server{
+		CloudID:  "vm-good",
+		Provider: "parallels",
+		Name:     "crabbox-cbx-good-blue",
+		Labels:   map[string]string{"provider": "parallels", "lease": leaseID, "slug": "blue", "host": "local"},
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "blue", "parallels", "", "", "/repo", time.Minute, false, server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	keyPath, err := core.TestboxKeyPath(leaseID)

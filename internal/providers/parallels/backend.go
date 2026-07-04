@@ -143,6 +143,10 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	}
 	server.Status = "ready"
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", time.Now().UTC())
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, target, cfg.IdleTimeout); err != nil {
+		cleanupVM(server.CloudID)
+		return LeaseTarget{}, err
+	}
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s vm=%s ip=%s\n", leaseID, server.DisplayID(), vm.IP)
 	keepKey = true
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
@@ -178,6 +182,11 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 			server.ServerType.Name = core.ServerTypeForProviderClass("parallels", candidate.Class)
 			normalizedID := strings.ReplaceAll(id, "_", "-")
 			if vm.ID == id || vm.Name == id || leaseID == id || strings.ReplaceAll(leaseID, "_", "-") == normalizedID || core.NormalizeLeaseSlug(slug) == core.NormalizeLeaseSlug(id) {
+				leaseID = firstNonEmpty(leaseID, vm.ID)
+				adopt, err := authorizeParallelsResolve(req, leaseID, vm.ID, parallelsHostName(candidate))
+				if err != nil {
+					return LeaseTarget{}, err
+				}
 				if vm.IP == "" && strings.EqualFold(vm.State, "running") {
 					vm, _ = client.WaitForIP(ctx, vm.ID, 30*time.Second)
 				}
@@ -199,7 +208,12 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 					target.ProxyCommand = parallelsProxyCommand(candidate, vm.IP)
 					target.SSHConfigProxy = true
 				}
-				return LeaseTarget{Server: server, SSH: target, LeaseID: firstNonEmpty(leaseID, vm.ID)}, nil
+				if adopt {
+					if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, candidate, server, target, req.Repo.Root, candidate.IdleTimeout, true); err != nil {
+						return LeaseTarget{}, err
+					}
+				}
+				return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 			}
 		}
 	}
@@ -207,6 +221,24 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		return LeaseTarget{}, fmt.Errorf("parallels fleet inventory incomplete while resolving %s: %w", req.ID, errors.Join(hostErrs...))
 	}
 	return LeaseTarget{}, core.Exit(4, "parallels lease not found: %s", req.ID)
+}
+
+func authorizeParallelsResolve(req ResolveRequest, leaseID, vmID, host string) (bool, error) {
+	owned, err := exactParallelsClaimOwned(leaseID, vmID, host)
+	if err != nil {
+		return false, err
+	}
+	readOnlyStatus := req.StatusOnly && !req.ReleaseOnly && !req.Reclaim
+	if owned || readOnlyStatus {
+		return false, nil
+	}
+	if req.ReleaseOnly || !req.Reclaim {
+		return false, parallelsOwnershipError(leaseID, vmID, host)
+	}
+	if strings.TrimSpace(req.Repo.Root) == "" {
+		return false, core.Exit(2, "parallels --reclaim requires repository context before binding VM %q on host %q", strings.TrimSpace(vmID), strings.TrimSpace(host))
+	}
+	return true, nil
 }
 
 func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -278,6 +310,9 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	}
 	id := firstNonEmpty(req.Lease.Server.CloudID, req.Lease.LeaseID)
 	cfg := b.configForLease(ctx, req.Lease)
+	if err := requireExactParallelsClaim(req.Lease.LeaseID, id, parallelsHostName(cfg)); err != nil {
+		return err
+	}
 	if err := core.NewParallelsClient(cfg, b.RT.Exec).Delete(ctx, id); err != nil {
 		return err
 	}
@@ -304,22 +339,57 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.RT.Stderr, "skip vm id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
+		leaseID := server.Labels["lease"]
+		cfg := b.configForLease(ctx, LeaseTarget{
+			Server:  server,
+			LeaseID: leaseID,
+		})
+		owned, err := exactParallelsClaimOwned(leaseID, server.CloudID, parallelsHostName(cfg))
+		if err != nil {
+			return err
+		}
+		if !owned {
+			fmt.Fprintf(b.RT.Stderr, "skip vm id=%s name=%s reason=ownership: missing exact local claim\n", server.DisplayID(), server.Name)
+			continue
+		}
 		fmt.Fprintf(b.RT.Stderr, "delete vm id=%s name=%s\n", server.DisplayID(), server.Name)
 		if req.DryRun {
 			continue
 		}
-		client := core.NewParallelsClient(b.configForLease(ctx, LeaseTarget{
-			Server:  server,
-			LeaseID: server.Labels["lease"],
-		}), b.RT.Exec)
+		client := core.NewParallelsClient(cfg, b.RT.Exec)
 		if err := client.Delete(ctx, server.CloudID); err != nil {
 			return err
 		}
-		leaseID := server.Labels["lease"]
 		core.RemoveLeaseClaim(leaseID)
 		core.RemoveStoredTestboxKey(leaseID)
 	}
 	return nil
+}
+
+func requireExactParallelsClaim(leaseID, vmID, host string) error {
+	owned, err := exactParallelsClaimOwned(leaseID, vmID, host)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return parallelsOwnershipError(leaseID, vmID, host)
+	}
+	return nil
+}
+
+func parallelsOwnershipError(leaseID, vmID, host string) error {
+	return core.Exit(4, "parallels lease %q has no exact local claim bound to VM %q on host %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(vmID), strings.TrimSpace(host))
+}
+
+func exactParallelsClaimOwned(leaseID, vmID, host string) (bool, error) {
+	leaseID = strings.TrimSpace(leaseID)
+	vmID = strings.TrimSpace(vmID)
+	host = strings.TrimSpace(host)
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, "parallels")
+	if err != nil {
+		return false, err
+	}
+	return ok && exact && claim.LeaseID == leaseID && claim.CloudID == vmID && strings.TrimSpace(claim.Labels["host"]) == host, nil
 }
 
 func parallelsProxyCommand(cfg Config, guestIP string) string {

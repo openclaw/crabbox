@@ -254,6 +254,16 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if req.StatusOnly && !req.ReadyProbe {
 		return LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
 	}
+	owned, err := exactHyperVClaimOwned(claim.LeaseID, inst.Name)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if !owned && !req.Reclaim {
+		return LeaseTarget{}, exit(4, "hyperv lease %q has a legacy claim not bound to VM %q; adopt it with an explicit --reclaim reuse", claim.LeaseID, inst.Name)
+	}
+	if !owned && req.Repo.Root == "" {
+		return LeaseTarget{}, exit(2, "hyperv --reclaim requires repository context before binding VM %q", inst.Name)
+	}
 	ip := b.queryLiveIP(ctx, inst.Name)
 	if ip == "" {
 		ip = b.getIPFromClaim(claim)
@@ -263,7 +273,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		if err := claimLeaseForRepoProviderScopePondEndpoint(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
 			return LeaseTarget{}, err
 		}
 	}
@@ -331,6 +341,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if name == "" {
 		return exit(2, "provider=%s release requires a Hyper-V VM name", providerName)
 	}
+	if err := requireExactHyperVClaim(lease.LeaseID, name); err != nil {
+		return err
+	}
 	if err := b.removeVM(ctx, name); err != nil {
 		return err
 	}
@@ -375,6 +388,14 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		shouldDelete, reason := shouldCleanup(server, claim, claim.LeaseID != "", now)
 		if !shouldDelete {
 			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=%s\n", inst.Name, reason)
+			continue
+		}
+		owned, err := exactHyperVClaimOwned(claim.LeaseID, inst.Name)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=ownership: missing exact local claim\n", inst.Name)
 			continue
 		}
 		if req.DryRun {
@@ -1234,33 +1255,54 @@ func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time
 	if strings.EqualFold(server.Labels["keep"], "true") {
 		return false, "keep=true"
 	}
+	if !hasClaim {
+		return false, "missing claim"
+	}
 	if server.Status != "running" && server.Status != "ready" {
 		return true, "instance state=" + blank(server.Status, "unknown")
 	}
-	if hasClaim {
-		expiresAt := strings.TrimSpace(server.Labels["expires_at"])
-		if expiresAt == "" {
-			expiresAt = strings.TrimSpace(claim.Labels["expires_at"])
-		}
-		if display := core.LeaseLabelTimeDisplay(expiresAt); display != "" {
-			if parsed, err := time.Parse(time.RFC3339, display); err == nil && now.After(parsed) {
-				return true, "claim expired"
-			}
-		}
-		lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-		if err != nil || lastUsed.IsZero() {
-			return false, "claim active"
-		}
-		idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-		if idle <= 0 {
-			return false, "claim active"
-		}
-		if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
+	expiresAt := strings.TrimSpace(server.Labels["expires_at"])
+	if expiresAt == "" {
+		expiresAt = strings.TrimSpace(claim.Labels["expires_at"])
+	}
+	if display := core.LeaseLabelTimeDisplay(expiresAt); display != "" {
+		if parsed, err := time.Parse(time.RFC3339, display); err == nil && now.After(parsed) {
 			return true, "claim expired"
 		}
+	}
+	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
+	if err != nil || lastUsed.IsZero() {
 		return false, "claim active"
 	}
-	return false, "missing claim"
+	idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
+	if idle <= 0 {
+		return false, "claim active"
+	}
+	if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
+		return true, "claim expired"
+	}
+	return false, "claim active"
+}
+
+func requireExactHyperVClaim(leaseID, instanceName string) error {
+	owned, err := exactHyperVClaimOwned(leaseID, instanceName)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return exit(4, "hyperv lease %q has no exact local claim bound to VM %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName))
+	}
+	return nil
+}
+
+func exactHyperVClaimOwned(leaseID, instanceName string) (bool, error) {
+	leaseID = strings.TrimSpace(leaseID)
+	instanceName = strings.TrimSpace(instanceName)
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
+	if err != nil {
+		return false, err
+	}
+	return ok && exact && claim.LeaseID == leaseID && claim.CloudID == instanceName && claim.ProviderScope == instanceScope(instanceName) && instanceNameFromClaim(claim) == instanceName, nil
 }
 
 // hypervState maps Hyper-V State enum values to string labels.

@@ -166,13 +166,14 @@ installation.
 3. **List**: Lists all VMs with the `crabbox-` name prefix.
 4. **Release**: Stops the VM (`Stop-VM -Force`) and removes it
    (`Remove-VM -Force`), then cleans up the provider-created VHDX file.
-5. **Cleanup**: Scans for stale `crabbox-` prefixed VMs with expired or missing
-   lease claims and removes them.
+5. **Cleanup**: Scans for stale `crabbox-` prefixed VMs and removes only VMs
+   bound to an exact expired local claim.
 
 ## Notes
 
-- All VMs are named with a `crabbox-` prefix. Cleanup and release operations
-  refuse to touch VMs without this prefix.
+- All VMs are named with a `crabbox-` prefix, but the prefix is not ownership
+  proof. Cleanup and release require an exact local claim bound to the VM name;
+  recovered VMs must first be adopted through an explicit `--reclaim` reuse.
 - The selected SSH account must be a local account name containing only letters,
   digits, `.`, `_`, or `-`. Domain/UPN names and SSH pattern characters are
   rejected so `AllowUsers` cannot broaden access.
