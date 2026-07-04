@@ -311,6 +311,13 @@ func TestResolveReclaimBindsLegacyClaimEndpoint(t *testing.T) {
 		commandKey([]string{"info", "--format", "json", name}): {Stdout: sampleInfoJSON(name)},
 	}}
 	b := testBackend(runner)
+	status, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, StatusOnly: true})
+	if err != nil {
+		t.Fatalf("read-only status for legacy claim: %v", err)
+	}
+	if status.LeaseID != leaseID || status.Server.CloudID != name {
+		t.Fatalf("status=%#v", status)
+	}
 	if _, err := b.Resolve(context.Background(), core.ResolveRequest{
 		ID:   leaseID,
 		Repo: core.Repo{Root: t.TempDir()},

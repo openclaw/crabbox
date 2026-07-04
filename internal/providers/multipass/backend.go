@@ -195,6 +195,9 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if claim.LeaseID == "" {
 		return LeaseTarget{}, exit(4, "multipass instance %q has no Crabbox lease claim; use `crabbox stop --provider multipass %s` to delete it or warm a new lease", inst.Name, inst.Name)
 	}
+	if req.StatusOnly && !req.ReadyProbe {
+		return LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
+	}
 	owned, err := exactMultipassClaimOwned(claim.LeaseID, inst.Name)
 	if err != nil {
 		return LeaseTarget{}, err
