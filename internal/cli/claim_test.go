@@ -218,17 +218,29 @@ func TestClaimLeaseTargetForConfigIfUnchangedStoresProviderScope(t *testing.T) {
 }
 
 func TestRailwayProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
-	cfg := baseConfig()
-	cfg.Railway.APIURL = "https://railway.example.test/graphql/v2/"
-	cfg.Railway.ProjectID = "proj-1"
-	cfg.Railway.EnvironmentID = "env-1"
+	complete := baseConfig()
+	complete.Railway.APIURL = "https://railway.example.test/graphql/v2/"
+	complete.Railway.ProjectID = "proj-1"
+	complete.Railway.EnvironmentID = "env-1"
 	want := "endpoint:https://railway.example.test/graphql/v2|project:proj-1|environment:env-1"
-	if got := providerClaimScope("railway", cfg); got != want {
+	if got := providerClaimScope("railway", complete); got != want {
 		t.Fatalf("providerClaimScope(railway)=%q, want %q", got, want)
 	}
-	cfg.Railway.EnvironmentID = ""
-	if got := providerClaimScope("railway", cfg); got != "" {
-		t.Fatalf("incomplete railway scope=%q, want empty", got)
+	for _, test := range []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{name: "endpoint", mutate: func(cfg *Config) { cfg.Railway.APIURL = "" }},
+		{name: "project", mutate: func(cfg *Config) { cfg.Railway.ProjectID = "" }},
+		{name: "environment", mutate: func(cfg *Config) { cfg.Railway.EnvironmentID = "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := complete
+			test.mutate(&cfg)
+			if got := providerClaimScope("railway", cfg); got != "" {
+				t.Fatalf("incomplete railway scope=%q, want empty", got)
+			}
+		})
 	}
 }
 
