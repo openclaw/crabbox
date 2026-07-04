@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -40,7 +41,16 @@ type hetznerClient interface {
 	SetLabels(context.Context, int64, map[string]string) error
 }
 
-type hetznerLeaseBackend struct{ shared.DirectSSHBackend }
+type hetznerLeaseBackend struct {
+	shared.DirectSSHBackend
+	acquired sync.Map
+}
+
+type acquiredHetznerLease struct {
+	LeaseID string
+	CloudID string
+	ID      int64
+}
 
 func NewHetznerLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
@@ -125,7 +135,9 @@ func (b *hetznerLeaseBackend) acquireOnce(ctx context.Context, keep bool, reques
 		fmt.Fprintf(b.RT.Stderr, "warning: set labels: %v\n", err)
 	}
 	committed = true
-	return LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}, nil
+	target = LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}
+	b.acquired.Store(leaseID, acquiredHetznerLease{LeaseID: leaseID, CloudID: server.CloudID, ID: server.ID})
+	return target, nil
 }
 
 func (b *hetznerLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
@@ -192,14 +204,40 @@ func (b *hetznerLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLease
 	server := normalizeHetznerServer(req.Lease.Server)
 	claim, err := requireExactHetznerClaim(server, req.Lease.LeaseID)
 	if err != nil {
-		return err
+		if !b.matchesAcquiredLease(server, req.Lease.LeaseID) {
+			return err
+		}
+		client, clientErr := newHetznerClient()
+		if clientErr != nil {
+			return clientErr
+		}
+		serverGone, deleteErr := deleteServerWithClient(ctx, client, server, true, req.Lease.LeaseID)
+		if serverGone {
+			b.acquired.Delete(req.Lease.LeaseID)
+		}
+		return deleteErr
 	}
 	client, err := newHetznerClient()
 	if err != nil {
 		return err
 	}
-	_, err = deleteClaimedHetznerServer(ctx, client, server, claim)
+	serverGone, err := deleteClaimedHetznerServer(ctx, client, server, claim)
+	if serverGone {
+		b.acquired.Delete(req.Lease.LeaseID)
+	}
 	return err
+}
+
+func (b *hetznerLeaseBackend) matchesAcquiredLease(server Server, leaseID string) bool {
+	if validateHetznerServerOwnership(server, false) != nil || server.Labels["lease"] != leaseID {
+		return false
+	}
+	value, ok := b.acquired.Load(leaseID)
+	if !ok {
+		return false
+	}
+	acquired, ok := value.(acquiredHetznerLease)
+	return ok && acquired.LeaseID == leaseID && acquired.CloudID == server.CloudID && acquired.ID == server.ID
 }
 
 func (b *hetznerLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
@@ -423,7 +461,8 @@ func ownedHetznerServers(servers []Server) []Server {
 	for _, raw := range servers {
 		server := normalizeHetznerServer(raw)
 		claim, claimExists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"])
-		allowLegacyProvider := err == nil && claimExists && validateHetznerClaim(claim, server, server.Labels["lease"]) == nil
+		allowLegacyProvider := err == nil && claimExists &&
+			(validateHetznerClaim(claim, server, server.Labels["lease"]) == nil || upgradeableHetznerClaim(claim, server))
 		if validateHetznerServerOwnership(server, allowLegacyProvider) == nil {
 			owned = append(owned, server)
 		}

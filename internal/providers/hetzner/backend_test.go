@@ -285,6 +285,59 @@ func TestHetznerReleaseRejectsClaimForDifferentServer(t *testing.T) {
 	}
 }
 
+func TestHetznerReleaseRollsBackExactLeaseAcquiredByBackendBeforeClaim(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	server := crabboxHetznerServer(42, leaseID)
+	client := &fakeHetznerClient{
+		servers:      map[int64]Server{42: server},
+		createServer: server,
+		keyCreated:   true,
+	}
+	installHetznerTestHooks(t, client)
+	installHetznerClaimState(t)
+
+	backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+	lease, err := backend.Acquire(context.Background(), AcquireRequest{})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatalf("ReleaseLease before claim: %v", err)
+	}
+	if len(client.deletedServers) != 1 || client.deletedServers[0] != 42 {
+		t.Fatalf("deletedServers=%v, want [42]", client.deletedServers)
+	}
+	if want := core.ProviderKeyForLease(leaseID); len(client.deletedKeys) != 1 || client.deletedKeys[0] != want {
+		t.Fatalf("deletedKeys=%v, want [%s]", client.deletedKeys, want)
+	}
+}
+
+func TestHetznerReleaseRejectsUnclaimedLeaseAcquiredByDifferentBackend(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	server := crabboxHetznerServer(42, leaseID)
+	client := &fakeHetznerClient{
+		servers:      map[int64]Server{42: server},
+		createServer: server,
+		keyCreated:   true,
+	}
+	installHetznerTestHooks(t, client)
+	installHetznerClaimState(t)
+
+	acquiringBackend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+	lease, err := acquiringBackend.Acquire(context.Background(), AcquireRequest{})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	otherBackend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+	err = otherBackend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("err=%v, want exact-claim refusal", err)
+	}
+	if len(client.deletedServers) != 0 || len(client.deletedKeys) != 0 {
+		t.Fatalf("deleted servers=%v keys=%v, want none", client.deletedServers, client.deletedKeys)
+	}
+}
+
 func TestHetznerCleanupSkipsWeakAndUnclaimedServers(t *testing.T) {
 	now := time.Now().UTC()
 	weak := crabboxHetznerServer(41, "cbx_111111111111")
@@ -331,6 +384,38 @@ func TestHetznerResolveRequiresExplicitReclaimForUnclaimedServer(t *testing.T) {
 	}
 	if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: "42", NoLocalStateMutations: true}); err != nil {
 		t.Fatalf("read-only resolve: %v", err)
+	}
+}
+
+func TestHetznerResolveAliasAllowsExplicitUpgradeOfLegacyClaim(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	server := crabboxHetznerServer(42, leaseID)
+	delete(server.Labels, "provider")
+	client := &fakeHetznerClient{list: []Server{server}}
+	installHetznerTestHooks(t, client)
+	installHetznerClaimState(t)
+	seedHetznerClaim(t, server)
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("ResolveLeaseClaim: claim=%+v ok=%v err=%v", claim, ok, err)
+	}
+	legacy := claim
+	legacy.Provider = ""
+	legacy.CloudID = ""
+	if err := core.ReplaceLeaseClaimIfUnchanged(leaseID, claim, legacy); err != nil {
+		t.Fatalf("replace with legacy claim: %v", err)
+	}
+
+	backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+	if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: "test", Repo: core.Repo{Root: "/repo"}}); err == nil {
+		t.Fatal("legacy alias resolved without explicit reclaim")
+	}
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "test", Repo: core.Repo{Root: "/repo"}, Reclaim: true})
+	if err != nil {
+		t.Fatalf("explicit legacy alias reclaim: %v", err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.CloudID != "42" {
+		t.Fatalf("lease=%+v, want exact legacy server", lease)
 	}
 }
 
