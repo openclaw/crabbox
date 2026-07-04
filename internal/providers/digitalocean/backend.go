@@ -59,6 +59,7 @@ func NewDigitalOceanLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt cor
 		return core.WaitForSSHReady(ctx, target, b.RT.Stderr, phase, timeout)
 	}
 	b.Delete = b.deleteServer
+	b.CleanupEligible = b.cleanupEligible
 	return b
 }
 
@@ -887,6 +888,11 @@ func (b *digitalOceanLeaseBackend) Cleanup(ctx context.Context, req core.Cleanup
 		return err
 	}
 	return b.CleanupServers(ctx, req, servers)
+}
+
+func (b *digitalOceanLeaseBackend) cleanupEligible(server core.Server) (bool, error) {
+	_, err := b.ensureCleanupClaim(server, true)
+	return shared.CleanupClaimEligible(err)
 }
 
 func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {

@@ -730,8 +730,37 @@ func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	if len(api.deleted) != 0 {
 		t.Fatalf("deleted=%v", api.deleted)
 	}
-	if !strings.Contains(stderr.String(), "delete server id=22222222-2222-4222-8222-222222222222") {
+	if !strings.Contains(stderr.String(), "skip server id=22222222-2222-4222-8222-222222222222") || !strings.Contains(stderr.String(), "reason=no-exact-local-claim") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestCleanupSkipsClaimlessBeforeClaimedInstance(t *testing.T) {
+	var stderr bytes.Buffer
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	b.RT.Stderr = &stderr
+	expired := time.Now().Add(-time.Hour)
+	claimlessLabels := labelsFromTags(leaseTagsWithExpiry(b.Cfg, "cbx_aaaaaaaaaaaa", "claimless", expired))
+	claimlessLabels[vultrAccountLabel] = "account:test-account"
+	claimedLabels := labelsFromTags(leaseTagsWithExpiry(b.Cfg, "cbx_bbbbbbbbbbbb", "claimed", expired))
+	claimedLabels[vultrAccountLabel] = "account:test-account"
+	setVultrKeyIdentity(claimedLabels, "", false)
+	api.instances = []vultrInstance{
+		{ID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Label: core.LeaseProviderName("cbx_aaaaaaaaaaaa", "claimless"), Status: "active", PowerStatus: "running", ServerStatus: "ok", Plan: b.Cfg.ServerType, Tags: tagsFromLabels(claimlessLabels)},
+		{ID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", Label: core.LeaseProviderName("cbx_bbbbbbbbbbbb", "claimed"), Status: "active", PowerStatus: "running", ServerStatus: "ok", Plan: b.Cfg.ServerType, Tags: tagsFromLabels(claimedLabels)},
+	}
+	claimedID := api.instances[1].ID
+	claimedServer := serverFromInstance(api.instances[1], b.Cfg)
+	claimedServer.Labels[vultrAccountLabel] = "account:test-account"
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_bbbbbbbbbbbb", "claimed", b.Cfg, claimedServer, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != claimedID {
+		t.Fatalf("deleted=%v stderr=%q, want only claimed instance", api.deleted, stderr.String())
 	}
 }
 

@@ -250,11 +250,15 @@ func TestScalewayCleanupSkipsForeignAndDeletesExpiredOwned(t *testing.T) {
 	ownedLabels["scaleway_project"] = "project-1"
 	ownedLabels["scaleway_zone"] = "fr-par-1"
 	ownedLabels["scaleway_ssh_key_id"] = "key-owned"
+	claimlessLabels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_000000000000", "claimless", providerName, "", false, now.Add(-3*time.Hour))
+	claimlessLabels["scaleway_project"] = "project-1"
+	claimlessLabels["scaleway_zone"] = "fr-par-1"
 	fake.servers = []*instance.Server{
+		testServer("srv-claimless", "crabbox-cbx-claimless", tagsFromLabels(claimlessLabels), "203.0.113.10"),
 		testServer("srv-owned", "crabbox-cbx-owned", tagsFromLabels(ownedLabels), "203.0.113.11"),
 		testServer("srv-foreign", "foreign", []string{"crabbox", "crabbox:provider:other"}, "203.0.113.12"),
 	}
-	claimServer := backend.serverFromScaleway(fake.servers[0])
+	claimServer := backend.serverFromScaleway(fake.servers[1])
 	if err := core.ClaimLeaseTargetForConfig(
 		"cbx_111111111111",
 		"owned",

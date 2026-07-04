@@ -2313,8 +2313,9 @@ func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	cfg.TTL = time.Nanosecond
+	claimless := droplet{ID: 87, Name: "claimless", Status: "active", Tags: leaseTags(cfg, "cbx_111111111111", "claimless", "ready", false, time.Now().Add(-time.Hour))}
 	item := droplet{ID: 88, Name: "old", Status: "active", Tags: leaseTags(cfg, "cbx_deadbeef1234", "old", "ready", false, time.Now().Add(-time.Hour))}
-	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{claimless, item}}
 	backend := newTestBackend(t, api)
 	server := serverFromDroplet(item, backend.Cfg)
 	server.Labels[digitalOceanAccountLabel] = "team:test-account"
@@ -2376,8 +2377,8 @@ func TestCleanupPreservesLocalStateForMismatchedProviderClaim(t *testing.T) {
 	}
 	keyPath := writeStoredTestboxKey(t, leaseID)
 
-	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "claimed by provider=aws") {
-		t.Fatalf("Cleanup err=%v", err)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup should skip mismatched claim: %v", err)
 	}
 	if len(api.deleted) != 0 {
 		t.Fatalf("deleted=%v", api.deleted)

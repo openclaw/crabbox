@@ -13,6 +13,7 @@ type DirectSSHBackend struct {
 	Cfg             core.Config
 	RT              core.Runtime
 	Delete          func(context.Context, core.Config, core.Server) error
+	CleanupEligible func(core.Server) (bool, error)
 	StoredLeaseKeys bool
 }
 
@@ -36,6 +37,16 @@ func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupR
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", s.DisplayID(), s.Name, reason)
 			continue
 		}
+		if b.CleanupEligible != nil {
+			eligible, err := b.CleanupEligible(s)
+			if err != nil {
+				return err
+			}
+			if !eligible {
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=no-exact-local-claim\n", s.DisplayID(), s.Name)
+				continue
+			}
+		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", s.DisplayID(), s.Name)
 		if !req.DryRun {
 			if b.Delete == nil {
@@ -47,6 +58,17 @@ func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupR
 		}
 	}
 	return nil
+}
+
+func CleanupClaimEligible(err error) (bool, error) {
+	if err == nil {
+		return true, nil
+	}
+	var exitErr core.ExitError
+	if core.AsExitError(err, &exitErr) {
+		return false, nil
+	}
+	return false, err
 }
 
 func (b *DirectSSHBackend) Touch(ctx context.Context, server core.Server, state string) core.Server {

@@ -37,6 +37,7 @@ func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 		return core.WaitForSSHReady(ctx, target, b.RT.Stderr, phase, timeout)
 	}
 	b.Delete = b.deleteServer
+	b.CleanupEligible = b.cleanupEligible
 	return b
 }
 
@@ -289,6 +290,11 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		return err
 	}
 	return b.CleanupServers(ctx, req, servers)
+}
+
+func (b *backend) cleanupEligible(server core.Server) (bool, error) {
+	_, err := b.ensureCleanupClaim(server)
+	return shared.CleanupClaimEligible(err)
 }
 
 func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {

@@ -71,6 +71,7 @@ func newLinodeLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runt
 		return core.WaitForSSHReady(ctx, target, b.RT.Stderr, phase, timeout)
 	}
 	b.Delete = b.deleteServer
+	b.CleanupEligible = b.cleanupEligible
 	return b
 }
 
@@ -631,6 +632,11 @@ func (b *linodeLeaseBackend) Cleanup(ctx context.Context, req core.CleanupReques
 		return err
 	}
 	return b.CleanupServers(ctx, req, servers)
+}
+
+func (b *linodeLeaseBackend) cleanupEligible(server core.Server) (bool, error) {
+	_, err := b.ensureCleanupClaim(server, true)
+	return shared.CleanupClaimEligible(err)
 }
 
 func (b *linodeLeaseBackend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {

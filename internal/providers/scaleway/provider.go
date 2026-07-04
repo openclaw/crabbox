@@ -607,6 +607,15 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "skip scaleway_server=%s reason=%s\n", item.ID, reason)
 			continue
 		}
+		_, claimErr := b.cleanupClaim(client, server)
+		eligible, err := shared.CleanupClaimEligible(claimErr)
+		if err != nil {
+			return err
+		}
+		if !eligible {
+			fmt.Fprintf(b.rt.Stderr, "skip scaleway_server=%s reason=no-exact-local-claim\n", item.ID)
+			continue
+		}
 		if req.DryRun {
 			fmt.Fprintf(b.rt.Stdout, "would delete scaleway_server=%s lease=%s reason=%s\n", item.ID, server.Labels["lease"], reason)
 			continue
@@ -811,22 +820,13 @@ func (b *Backend) deleteServer(ctx context.Context, client Client, server core.S
 		return err
 	}
 	leaseID := server.Labels["lease"]
-	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	claim, err := b.cleanupClaim(client, server)
 	if err != nil {
-		return err
-	}
-	if !exists {
-		return core.Exit(2, "scaleway lease=%s has no exact local claim; refusing cleanup", leaseID)
-	}
-	if err := validateScalewayClaimIdentity(claim, server); err != nil {
-		return err
-	}
-	if err := b.validateProviderIdentity(claim.Labels, client); err != nil {
 		return err
 	}
 	if server.CloudID == "" {
 		if server.Labels["recovery"] == "rollback-key-cleanup" {
-			return b.deleteIdentitylessRecoveryKey(ctx, client, server, claim, exists)
+			return b.deleteIdentitylessRecoveryKey(ctx, client, server, claim, true)
 		}
 		// Ambiguous create responses may represent a server that has not reached
 		// inventory yet. Retain its access key and claim for explicit recovery.
@@ -868,6 +868,24 @@ func (b *Backend) deleteServer(ctx context.Context, client Client, server core.S
 	}
 	core.RemoveStoredTestboxKey(leaseID)
 	return nil
+}
+
+func (b *Backend) cleanupClaim(client Client, server core.Server) (core.LeaseClaim, error) {
+	leaseID := server.Labels["lease"]
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if !exists {
+		return core.LeaseClaim{}, core.Exit(2, "scaleway lease=%s has no exact local claim; refusing cleanup", leaseID)
+	}
+	if err := validateScalewayClaimIdentity(claim, server); err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if err := b.validateProviderIdentity(claim.Labels, client); err != nil {
+		return core.LeaseClaim{}, err
+	}
+	return claim, nil
 }
 
 func (b *Backend) deleteServerResource(ctx context.Context, client Client, serverID string) error {
