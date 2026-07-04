@@ -503,6 +503,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("Port $port");
     expect(got).toContain("Subsystem sftp internal-sftp");
     expect(got).toContain("HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key");
+    expect(got).toContain("PubkeyAuthentication yes");
+    expect(got).toContain("PasswordAuthentication no");
     expect(got).toContain('Start-Process -FilePath "C:\\Program Files\\OpenSSH\\ssh-keygen.exe"');
     expect(got).toContain('-q -t ed25519 -N "" -f "');
     expect(got).toContain("$hostKey + '\"'");
@@ -573,6 +575,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("d8de7a3152266c8bb13577eab850ea1df6dccf8c2aa48be5b4a1c58b7190d62c");
     expect(got).toContain("$passwordPath = $windowsPasswordPath");
     expect(got).toContain("$credentialPaths = @($passwordPath)");
+    expect(got).toContain("PubkeyAuthentication yes");
+    expect(got).toContain("PasswordAuthentication no");
     expect(got).toContain(
       'icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"',
     );
@@ -625,6 +629,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain(":WSLInterop:M::MZ::/init:PF");
     expect(got).toContain("test -e /proc/sys/fs/binfmt_misc/WSLInterop");
     expect(got).toContain("test -w '/work/crabbox'");
+    expect(got).toContain("PubkeyAuthentication yes");
+    expect(got).toContain("PasswordAuthentication no");
     expect(got.lastIndexOf("Assert-CrabboxFileSHA256 $wslRootfs")).toBeLessThan(
       got.indexOf("wsl.exe --import $wslDistro"),
     );
