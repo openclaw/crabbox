@@ -498,6 +498,38 @@ func TestReleaseDeleteRemovesOnlyClaimBackedCodespaceAndConfig(t *testing.T) {
 	}
 }
 
+func TestReleaseDeleteRejectsClaimRaceBeforeMutation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-race-delete"] = fakeCodespace("cs-race-delete", "Available")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789aab"
+	server := b.serverFromCodespace(fc.items["cs-race-delete"], b.labelsFor(leaseID, "race-delete-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-race-delete"], "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "race-delete-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	fc.onGet = func(string) {
+		claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+		if err != nil || !ok {
+			t.Fatalf("claim ok=%t err=%v", ok, err)
+		}
+		raced := serverFromClaim(claim)
+		raced.Labels["raced"] = "true"
+		if err := updateLeaseClaimEndpoint(leaseID, raced, SSHTarget{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("deleted after claim race=%#v", fc.deletes)
+	}
+}
+
 func TestReleaseDeleteRequiresLocalClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -650,6 +682,39 @@ func TestCleanupRefusesIdentityMismatch(t *testing.T) {
 	}
 }
 
+func TestCleanupRejectsClaimRaceBeforeMutation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-cleanup-race"] = fakeCodespace("cs-cleanup-race", "Available")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789aac"
+	server := b.serverFromCodespace(fc.items["cs-cleanup-race"], b.labelsFor(leaseID, "cleanup-race-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-cleanup-race"], "ready"))
+	server.Labels["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	if err := claimLeaseTargetForRepoConfig(leaseID, "cleanup-race-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	fc.onGet = func(string) {
+		claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+		if err != nil || !ok {
+			t.Fatalf("claim ok=%t err=%v", ok, err)
+		}
+		raced := serverFromClaim(claim)
+		raced.Labels["raced"] = "true"
+		if err := updateLeaseClaimEndpoint(leaseID, raced, SSHTarget{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := b.Cleanup(context.Background(), CleanupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("deleted after cleanup claim race=%#v", fc.deletes)
+	}
+}
+
 func TestDoctorIsNonMutating(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -794,6 +859,7 @@ type fakeCodespacesClient struct {
 	createResult    codespace
 	useCreateResult bool
 	onCreate        func(createCodespaceRequest)
+	onGet           func(string)
 	listErr         error
 	starts          []string
 	stops           []string
@@ -842,6 +908,9 @@ func (f *fakeCodespacesClient) listCodespaces(context.Context) ([]codespace, err
 }
 
 func (f *fakeCodespacesClient) getCodespace(_ context.Context, name string) (codespace, error) {
+	if f.onGet != nil {
+		f.onGet(name)
+	}
 	if seq := f.getSeq[name]; len(seq) > 0 {
 		item := seq[0]
 		f.getSeq[name] = seq[1:]

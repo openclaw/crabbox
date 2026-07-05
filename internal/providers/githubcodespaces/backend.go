@@ -367,14 +367,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 				return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
 			}
 		}
-		err = api.deleteCodespace(ctx, name)
-		if err != nil && !isGitHubNotFound(err) {
-			return err
-		}
-		if err := removeLeaseClaimIfUnchanged(leaseID, claim); err != nil {
-			return err
-		}
-		return removeStoredSSHConfig(leaseID)
+		return deleteClaimedCodespace(ctx, api, claim, name)
 	}
 	return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
 }
@@ -395,6 +388,19 @@ func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI,
 		return api.stopCodespace(ctx, name)
 	})
 	return err
+}
+
+func deleteClaimedCodespace(ctx context.Context, api codespacesAPI, claim LeaseClaim, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" || claim.CloudID != name || claim.Labels[labelCodespaceName] != name {
+		return exit(4, "refusing github-codespaces delete for lease=%s without its exact bound resource identity", claim.LeaseID)
+	}
+	return removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		if err := api.deleteCodespace(ctx, name); err != nil && !isGitHubNotFound(err) {
+			return err
+		}
+		return removeStoredSSHConfig(claim.LeaseID)
+	})
 }
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
@@ -468,13 +474,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				return err
 			}
 		}
-		if err := api.deleteCodespace(ctx, server.CloudID); err != nil && !isGitHubNotFound(err) {
-			return err
-		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-			return err
-		}
-		if err := removeStoredSSHConfig(claim.LeaseID); err != nil {
+		if err := deleteClaimedCodespace(ctx, api, claim, server.CloudID); err != nil {
 			return err
 		}
 	}
