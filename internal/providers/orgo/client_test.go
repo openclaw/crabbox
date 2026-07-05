@@ -163,3 +163,15 @@ func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
 		t.Fatalf("err=%v, want HTTPS requirement", err)
 	}
 }
+
+func TestNewOrgoClientUsesResolvedConfigBeforeAmbientAPIBase(t *testing.T) {
+	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
+	t.Setenv("CRABBOX_ORGO_API_BASE", "https://ambient.example.test")
+	client, err := newOrgoClient(Config{Orgo: OrgoConfig{APIBase: "https://flag-selected.example.test"}}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := client.(*orgoHTTPClient).baseURL; got != "https://flag-selected.example.test" {
+		t.Fatalf("base URL=%q", got)
+	}
+}

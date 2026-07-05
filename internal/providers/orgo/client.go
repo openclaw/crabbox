@@ -125,9 +125,9 @@ func newOrgoClient(cfg Config, rt Runtime) (orgoAPI, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=%s requires CRABBOX_ORGO_API_KEY, orgo.apiKey, or ORGO_API_KEY", providerName)
 	}
-	baseURL := strings.TrimSpace(os.Getenv("CRABBOX_ORGO_API_BASE"))
+	baseURL := strings.TrimSpace(cfg.Orgo.APIBase)
 	if baseURL == "" {
-		baseURL = strings.TrimSpace(cfg.Orgo.APIBase)
+		baseURL = strings.TrimSpace(os.Getenv("CRABBOX_ORGO_API_BASE"))
 	}
 	if baseURL == "" {
 		baseURL = strings.TrimSpace(os.Getenv("ORGO_API_BASE_URL"))

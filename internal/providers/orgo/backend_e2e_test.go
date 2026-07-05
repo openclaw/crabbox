@@ -17,8 +17,8 @@ import (
 // -> delete workspace.
 //
 // No real secrets: the API key is a dummy value supplied via
-// CRABBOX_ORGO_API_KEY and the base URL is the in-process httptest server via
-// CRABBOX_ORGO_API_BASE, so the test never reaches the live Orgo API.
+// CRABBOX_ORGO_API_KEY and the resolved base URL is the in-process httptest
+// server, so the test never reaches the live Orgo API.
 func TestOrgoBackendEndToEndCreateRunDelete(t *testing.T) {
 	// Isolate the on-disk lease claim so the test never touches real state.
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -80,12 +80,11 @@ func TestOrgoBackendEndToEndCreateRunDelete(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	// Dummy key + fake base URL; the production client is routed at the test server.
+	// Dummy key + resolved fake base URL; the production client is routed at the test server.
 	t.Setenv("CRABBOX_ORGO_API_KEY", dummyKey)
-	t.Setenv("CRABBOX_ORGO_API_BASE", server.URL)
 
 	var out, errBuf bytes.Buffer
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{}, Runtime{
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIBase: server.URL}}, Runtime{
 		Stdout: &out, Stderr: &errBuf, HTTP: server.Client(),
 	}).(*orgoBackend)
 

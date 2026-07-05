@@ -23,6 +23,7 @@ type fakeOrgoAPI struct {
 	deleteComputerErr       error
 	deleteWorkspaceErr      error
 	getWorkspaceErr         error
+	createComputerErr       error
 	missingDeleteNotFound   bool
 	bashCommands            []string
 	bashExitCode            int
@@ -75,6 +76,9 @@ func (f *fakeOrgoAPI) GetWorkspace(_ context.Context, id string) (orgoWorkspace,
 }
 
 func (f *fakeOrgoAPI) CreateComputer(_ context.Context, req orgoCreateComputerRequest) (orgoComputer, error) {
+	if f.createComputerErr != nil {
+		return orgoComputer{}, f.createComputerErr
+	}
 	status := "running"
 	if len(f.computerStatuses) > 0 {
 		status = f.computerStatuses[0]
@@ -316,6 +320,43 @@ func TestCreateComputerCleansUpTerminalStartupFailure(t *testing.T) {
 	}
 	if got := strings.Join(fake.deletedWorkspaces, ","); got != "ws_created" {
 		t.Fatalf("deleted workspaces=%q", got)
+	}
+}
+
+func TestCreateComputerReportsRollbackFailureWithResourceIdentity(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	fake.computerStatuses = []string{"creating", "failed"}
+	fake.deleteComputerErr = errors.New("computer cleanup failed")
+	fake.deleteWorkspaceErr = errors.New("workspace cleanup failed")
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+
+	_, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "rollback-proof", false)
+	if err == nil {
+		t.Fatal("create unexpectedly succeeded")
+	}
+	for _, want := range []string{"entered failed state", "computer_test", "ws_created", "computer cleanup failed", "workspace cleanup failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%q missing %q", err, want)
+		}
+	}
+}
+
+func TestCreateComputerReportsWorkspaceRollbackFailureAfterCreateError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	fake.createComputerErr = errors.New("computer create failed")
+	fake.deleteWorkspaceErr = errors.New("workspace cleanup failed")
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+
+	_, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "rollback-proof", false)
+	if err == nil {
+		t.Fatal("create unexpectedly succeeded")
+	}
+	for _, want := range []string{"computer create failed", "ws_created", "workspace cleanup failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%q missing %q", err, want)
+		}
 	}
 }
 

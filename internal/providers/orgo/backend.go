@@ -353,7 +353,9 @@ func (b *orgoBackend) createComputer(ctx context.Context, client orgoAPI, repo R
 	computer, err := client.CreateComputer(ctx, req)
 	if err != nil {
 		if createdWorkspace != "" {
-			_ = b.cleanupLease(client, orgoLease{CreatedWorkspace: createdWorkspace})
+			if cleanupErr := b.cleanupLease(client, orgoLease{CreatedWorkspace: createdWorkspace}); cleanupErr != nil {
+				return orgoLease{}, errors.Join(err, fmt.Errorf("rollback orgo workspace %s: %w", createdWorkspace, cleanupErr))
+			}
 		}
 		return orgoLease{}, err
 	}
@@ -362,15 +364,20 @@ func (b *orgoBackend) createComputer(ctx context.Context, client orgoAPI, repo R
 	}
 	computer, err = b.waitForComputerRunning(ctx, client, computer, false)
 	if err != nil {
-		_ = b.cleanupLease(client, orgoLease{
+		cleanupErr := b.cleanupLease(client, orgoLease{
 			Computer:         computer,
 			CreatedWorkspace: createdWorkspace,
 		})
+		if cleanupErr != nil {
+			return orgoLease{}, errors.Join(err, fmt.Errorf("rollback orgo computer %s workspace %s: %w", computer.ID, computer.WorkspaceID, cleanupErr))
+		}
 		return orgoLease{}, err
 	}
 	lease := orgoLease{LeaseID: leaseID, Slug: slug, Computer: computer, CreatedWorkspace: createdWorkspace}
 	if err := b.claimLease(repo, lease, reclaim); err != nil {
-		_ = b.cleanupLease(client, lease)
+		if cleanupErr := b.cleanupLease(client, lease); cleanupErr != nil {
+			return orgoLease{}, errors.Join(err, fmt.Errorf("rollback orgo computer %s workspace %s: %w", computer.ID, computer.WorkspaceID, cleanupErr))
+		}
 		return orgoLease{}, err
 	}
 	return lease, nil
