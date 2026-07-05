@@ -20725,6 +20725,7 @@ describe("fleet identity", () => {
       { storage } as unknown as DurableObjectState,
       {
         CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_PUBLIC_URL: "https://broker.example.test",
         CRABBOX_GITHUB_CLIENT_ID: "github-client",
         CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
         CRABBOX_SHARED_TOKEN: "shared",
@@ -20746,6 +20747,9 @@ describe("fleet identity", () => {
     const url = new URL(body.url);
     expect(url.origin + url.pathname).toBe("https://github.com/login/oauth/authorize");
     expect(url.searchParams.get("client_id")).toBe("github-client");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "https://broker.example.test/v1/auth/github/callback",
+    );
     expect(url.searchParams.get("scope")).toBe("read:user user:email read:org");
 
     const poll = await fleet.fetch(
@@ -20760,12 +20764,66 @@ describe("fleet identity", () => {
     await expect(poll.json()).resolves.toMatchObject({ status: "pending" });
   });
 
+  it("requires a canonical public origin before GitHub login starts", async () => {
+    const storage = new MemoryStorage();
+    const fleet = new FleetDurableObject(
+      { storage } as unknown as DurableObjectState,
+      {
+        CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_GITHUB_CLIENT_ID: "github-client",
+        CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+        CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SESSION_SECRET: "session-secret",
+      } as Env,
+    );
+
+    const start = await fleet.fetch(
+      request("POST", "/v1/auth/github/start", {
+        body: { pollSecretHash: await sha256HexForTest("local-poll-secret") },
+      }),
+    );
+    expect(start.status).toBe(503);
+    await expect(start.json()).resolves.toMatchObject({
+      error: "github_public_url_required",
+      message: "CRABBOX_PUBLIC_URL is required before GitHub OAuth can start.",
+    });
+
+    const portal = await fleet.fetch(request("GET", "/portal/login"));
+    expect(portal.status).toBe(503);
+    expect(await portal.text()).toContain(
+      "CRABBOX_PUBLIC_URL is required before GitHub OAuth can start.",
+    );
+    expect((await storage.list({ prefix: "oauth:" })).size).toBe(0);
+  });
+
+  it("rejects GitHub callbacks from a different origin before code exchange", async () => {
+    const { fleet, state } = await startGitHubLogin();
+    const fetchMock = githubFetchMock({ member: true });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrongOrigin = await fleet.fetch(
+      new Request(`https://attacker.example/v1/auth/github/callback?code=ok&state=${state}`),
+    );
+    expect(wrongOrigin.status).toBe(403);
+    expect(await wrongOrigin.text()).toContain(
+      "The GitHub OAuth callback did not arrive on the configured public origin.",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const canonical = await fleet.fetch(
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+    );
+    expect(canonical.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
   it("reports missing signing material before GitHub login starts", async () => {
     const storage = new MemoryStorage();
     const fleet = new FleetDurableObject(
       { storage } as unknown as DurableObjectState,
       {
         CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_PUBLIC_URL: "https://crabbox.test",
         CRABBOX_GITHUB_CLIENT_ID: "github-client",
         CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
         CRABBOX_SHARED_TOKEN: "shared",
@@ -20795,6 +20853,7 @@ describe("fleet identity", () => {
       { storage: new MemoryStorage() } as unknown as DurableObjectState,
       {
         CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_PUBLIC_URL: "https://crabbox.test",
         CRABBOX_GITHUB_CLIENT_ID: "github-client",
         CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
         CRABBOX_SHARED_TOKEN: "shared",
@@ -20820,6 +20879,7 @@ describe("fleet identity", () => {
       { storage } as unknown as DurableObjectState,
       {
         CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_PUBLIC_URL: "https://crabbox.test",
         CRABBOX_GITHUB_CLIENT_ID: "github-client",
         CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
         CRABBOX_SHARED_TOKEN: "shared",
@@ -20855,6 +20915,7 @@ describe("fleet identity", () => {
       { storage } as unknown as DurableObjectState,
       {
         CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_PUBLIC_URL: "https://crabbox.test",
         CRABBOX_GITHUB_CLIENT_ID: "github-client",
         CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
         CRABBOX_SHARED_TOKEN: "shared",
@@ -20894,6 +20955,7 @@ describe("fleet identity", () => {
       { storage } as unknown as DurableObjectState,
       {
         CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_PUBLIC_URL: "https://crabbox.test",
         CRABBOX_GITHUB_CLIENT_ID: "github-client",
         CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
         CRABBOX_SHARED_TOKEN: "shared",
@@ -21318,6 +21380,7 @@ async function startGitHubLogin(env: Partial<Env> = {}): Promise<{
     { storage } as unknown as DurableObjectState,
     {
       CRABBOX_DEFAULT_ORG: "openclaw",
+      CRABBOX_PUBLIC_URL: "https://crabbox.test",
       CRABBOX_GITHUB_CLIENT_ID: "github-client",
       CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
       CRABBOX_SHARED_TOKEN: "shared",

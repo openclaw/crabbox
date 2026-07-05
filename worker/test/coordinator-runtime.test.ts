@@ -545,6 +545,7 @@ describe("coordinator runtimes", () => {
     const runtime = new MemoryRuntime();
     const env = {
       CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_PUBLIC_URL: "https://coordinator.test",
       CRABBOX_GITHUB_CLIENT_ID: "github-client",
       CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
       CRABBOX_SHARED_TOKEN: "shared",

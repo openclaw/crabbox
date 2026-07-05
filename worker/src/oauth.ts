@@ -25,6 +25,7 @@ interface OAuthPending {
   mode?: "cli" | "portal";
   provider?: Provider;
   returnTo?: string;
+  redirectURI: string;
   createdAt: string;
   expiresAt: string;
   token?: string;
@@ -87,6 +88,10 @@ export async function githubPortalLogin(
   if (!clientID || !env.CRABBOX_GITHUB_CLIENT_SECRET) {
     return html("Crabbox login unavailable", "GitHub OAuth is not configured.", 503);
   }
+  const oauthConfig = githubOAuthConfiguration(env);
+  if ("error" in oauthConfig) {
+    return html("Crabbox login unavailable", oauthConfig.message, 503);
+  }
   const signingError = userTokenSigningConfigurationError(env);
   if (signingError) {
     return html("Crabbox login unavailable", signingError, 503);
@@ -99,10 +104,11 @@ export async function githubPortalLogin(
   const pending = newPendingOAuth({
     mode: "portal",
     returnTo: safePortalReturnTo(url.searchParams.get("returnTo")),
+    redirectURI: oauthConfig.redirectURI,
   });
   await storePendingOAuth(storage, pending);
 
-  return redirect(githubAuthorizeURLFor(request, env, clientID, pending.state), 302);
+  return redirect(githubAuthorizeURLFor(clientID, pending.state, pending.redirectURI), 302);
 }
 
 export function githubPortalLogout(): Response {
@@ -129,6 +135,10 @@ async function githubAuthStart(
       { status: 503 },
     );
   }
+  const oauthConfig = githubOAuthConfiguration(env);
+  if ("error" in oauthConfig) {
+    return json({ error: oauthConfig.error, message: oauthConfig.message }, { status: 503 });
+  }
   const signingError = userTokenSigningConfigurationError(env);
   if (signingError) {
     return json({ error: "github_session_secret_invalid", message: signingError }, { status: 503 });
@@ -153,6 +163,7 @@ async function githubAuthStart(
   const pending = newPendingOAuth({
     mode: "cli",
     pollSecretHash: input.pollSecretHash,
+    redirectURI: oauthConfig.redirectURI,
   });
   if (input.provider === "aws" || input.provider === "hetzner" || input.provider === "gcp") {
     pending.provider = input.provider;
@@ -161,7 +172,7 @@ async function githubAuthStart(
 
   return json({
     loginID: pending.id,
-    url: githubAuthorizeURLFor(request, env, clientID, pending.state),
+    url: githubAuthorizeURLFor(clientID, pending.state, pending.redirectURI),
     expiresAt: pending.expiresAt,
   });
 }
@@ -187,15 +198,10 @@ async function storePendingOAuth(
   await storage.put(oauthStateKey(pending.state), pending.id);
 }
 
-function githubAuthorizeURLFor(
-  request: Request,
-  env: Env,
-  clientID: string,
-  state: string,
-): string {
+function githubAuthorizeURLFor(clientID: string, state: string, redirectURI: string): string {
   const authorize = new URL(githubAuthorizeURL);
   authorize.searchParams.set("client_id", clientID);
-  authorize.searchParams.set("redirect_uri", githubRedirectURI(request, env));
+  authorize.searchParams.set("redirect_uri", redirectURI);
   authorize.searchParams.set("scope", "read:user user:email read:org");
   authorize.searchParams.set("state", state);
   return authorize.toString();
@@ -207,6 +213,17 @@ async function githubAuthCallback(
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
+  const oauthConfig = githubOAuthConfiguration(env);
+  if ("error" in oauthConfig) {
+    return html("Crabbox login unavailable", oauthConfig.message, 503);
+  }
+  if (url.origin !== new URL(oauthConfig.redirectURI).origin) {
+    return html(
+      "Crabbox login denied",
+      "The GitHub OAuth callback did not arrive on the configured public origin.",
+      403,
+    );
+  }
   const code = url.searchParams.get("code") ?? "";
   const state = url.searchParams.get("state") ?? "";
   const error = url.searchParams.get("error") ?? "";
@@ -215,6 +232,11 @@ async function githubAuthCallback(
     return claimed.response;
   }
   const { pending, claim } = claimed;
+  if (pending.redirectURI !== oauthConfig.redirectURI) {
+    const message = "The GitHub OAuth public origin changed. Start a new login.";
+    await finishPendingOAuth(runtime, pending.id, claim, { error: message });
+    return html("Crabbox login unavailable", message, 503);
+  }
   if (error || !code) {
     await finishPendingOAuth(runtime, pending.id, claim, {
       error: error || "missing_code",
@@ -227,7 +249,7 @@ async function githubAuthCallback(
     return html("Crabbox login unavailable", signingError, 503);
   }
   try {
-    const accessToken = await exchangeGitHubCode(code, githubRedirectURI(request, env), env);
+    const accessToken = await exchangeGitHubCode(code, pending.redirectURI, env);
     const identity = await githubIdentity(accessToken);
     const requestedOrg = requestOrg(
       new Request(request.url, {
@@ -404,9 +426,42 @@ function userTokenTTLSeconds(env: Pick<Env, "CRABBOX_USER_TOKEN_TTL_SECONDS">): 
   return Math.min(maxUserTokenTTLSeconds, Math.max(minUserTokenTTLSeconds, Math.trunc(value)));
 }
 
-function githubRedirectURI(request: Request, env: Env): string {
-  const base = env.CRABBOX_PUBLIC_URL || new URL(request.url).origin;
-  return `${base.replace(/\/+$/, "")}/v1/auth/github/callback`;
+function githubOAuthConfiguration(
+  env: Pick<Env, "CRABBOX_PUBLIC_URL">,
+): { redirectURI: string } | { error: string; message: string } {
+  const configured = env.CRABBOX_PUBLIC_URL?.trim();
+  if (!configured) {
+    return {
+      error: "github_public_url_required",
+      message: "CRABBOX_PUBLIC_URL is required before GitHub OAuth can start.",
+    };
+  }
+  let publicURL: URL;
+  try {
+    publicURL = new URL(configured);
+  } catch {
+    return {
+      error: "github_public_url_invalid",
+      message: "CRABBOX_PUBLIC_URL must be a valid canonical HTTPS origin.",
+    };
+  }
+  const loopbackHTTP =
+    publicURL.protocol === "http:" &&
+    (publicURL.hostname === "localhost" ||
+      publicURL.hostname === "127.0.0.1" ||
+      publicURL.hostname === "[::1]");
+  if (
+    (publicURL.protocol !== "https:" && !loopbackHTTP) ||
+    publicURL.username !== "" ||
+    publicURL.password !== ""
+  ) {
+    return {
+      error: "github_public_url_invalid",
+      message:
+        "CRABBOX_PUBLIC_URL must be a canonical HTTPS origin (HTTP is allowed only for loopback development).",
+    };
+  }
+  return { redirectURI: `${publicURL.origin}/v1/auth/github/callback` };
 }
 
 async function exchangeGitHubCode(code: string, redirectURI: string, env: Env): Promise<string> {
