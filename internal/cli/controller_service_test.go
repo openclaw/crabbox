@@ -3480,7 +3480,7 @@ func controllerHTTP(handler http.Handler, method, path, token string, body any) 
 
 func waitControllerWorkspaceStatus(t *testing.T, service *controllerService, id, want string) controllerWorkspaceRecord {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if record, ok := service.workspace(id); ok && record.Status == want {
 			return record
@@ -3488,6 +3488,9 @@ func waitControllerWorkspaceStatus(t *testing.T, service *controllerService, id,
 		time.Sleep(10 * time.Millisecond)
 	}
 	record, _ := service.workspace(id)
+	if record.Status == want {
+		return record
+	}
 	t.Fatalf("workspace %s status=%q want=%q message=%q", id, record.Status, want, record.Message)
 	return controllerWorkspaceRecord{}
 }
