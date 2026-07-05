@@ -187,6 +187,13 @@ exits `0` unless another check fails.
 and `checks` fields. Each check includes `status`, `check`, `message`, and
 parsed `details` when available.
 
+Both output modes apply the same final diagnostic redaction to coordinator and
+provider messages and details. Configured credentials, authorization headers,
+credential-bearing URL components, common secret JSON fields, and private-key
+blocks render as `[redacted]`; non-secret routing and failure context remains.
+This protection covers Crabbox-generated diagnostics, not arbitrary output from
+the optional remote command probe.
+
 Exit codes:
 
 - `0` — no failures (skips and warnings do not change this).

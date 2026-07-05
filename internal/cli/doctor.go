@@ -69,6 +69,11 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	ok := true
 	var checks []doctorJSONCheck
 	record := func(status, check, message string, details map[string]string) {
+		secrets := configuredDiagnosticSecrets(cfg)
+		status = RedactDiagnosticSecrets(status, secrets...)
+		check = RedactDiagnosticSecrets(check, secrets...)
+		message = RedactDiagnosticSecrets(message, secrets...)
+		details = redactDiagnosticDetails(details, secrets)
 		if *jsonOut {
 			item := doctorJSONCheck{Status: status, Check: check, Message: message, Details: details}
 			if details != nil {

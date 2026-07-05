@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Centralized credential redaction for provider and `doctor` diagnostics, covering configured secrets, authorization headers, signed URLs, secret-bearing JSON fields, and private keys, and applied it to Sprites API errors. Thanks @coygeek.
 - Restricted production releases to default-branch repository dispatches for existing version tags in reviewed history, so tag pushes and ref-selectable manual workflows cannot run credentialed release configuration. Thanks @coygeek.
 - Bound GitHub OAuth CLI token release to a one-use callback on the initiating device, so forwarding an authorization URL cannot hand the resulting user token to another terminal. Thanks @coygeek.
 - Honored an explicit broker URL and freshly issued credential during immediate post-login identity verification, even when ambient coordinator overrides point elsewhere.

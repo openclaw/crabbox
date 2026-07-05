@@ -357,6 +357,79 @@ func TestDoctorJSONCoordinatorOutput(t *testing.T) {
 	}
 }
 
+func TestDoctorRedactsCoordinatorAndProviderDiagnostics(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	const configuredSecret = "exact-doctor-secret"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{Auth: "token", Owner: "alice@example.test", Org: "example-org"})
+		case "/v1/providers/aws/readiness":
+			_ = json.NewEncoder(w).Encode(CoordinatorProviderReadiness{
+				Provider:   "aws",
+				Configured: true,
+				Checks: []DoctorCheck{{
+					Status:  "warning",
+					Check:   "diagnostic",
+					Message: "quota warning exact=" + configuredSecret + " Authorization: Bearer reflected-bearer",
+					Details: map[string]string{
+						"url":  "https://user:pass@example.test/path?token=query-secret&region=eu",
+						"json": `{"clientSecret":"json-secret","message":"detail retained"}`,
+						"pem":  "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----",
+					},
+				}},
+			})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", configuredSecret)
+
+	for _, jsonOutput := range []bool{false, true} {
+		name := "text"
+		args := []string{"--provider", "aws"}
+		if jsonOutput {
+			name = "json"
+			args = append(args, "--json")
+		}
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), args); err != nil {
+				t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			output := stdout.String()
+			for _, leaked := range []string{configuredSecret, "reflected-bearer", "user", "pass", "query-secret", "json-secret", "private-material"} {
+				if strings.Contains(output, leaked) {
+					t.Fatalf("doctor %s leaked %q:\n%s", name, leaked, output)
+				}
+			}
+			preserved := []string{"quota warning", "[redacted]"}
+			if jsonOutput {
+				preserved = append(preserved, "detail retained", "region=eu")
+			}
+			for _, preserved := range preserved {
+				if !strings.Contains(output, preserved) {
+					t.Fatalf("doctor %s lost %q:\n%s", name, preserved, output)
+				}
+			}
+		})
+	}
+}
+
 func TestDoctorJSONCoordinatorOutputIncludesCapacityWarnings(t *testing.T) {
 	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
 		if _, err := exec.LookPath(tool); err != nil {
