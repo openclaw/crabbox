@@ -193,6 +193,7 @@ const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAWSOrphanSweepGraceSeconds = 15 * 60;
 const defaultAzureOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAzureOrphanSweepGraceSeconds = 15 * 60;
+const leaseRecordScanBatchSize = 128;
 const providerAccessReservationTTLMS = 15 * 60 * 1000;
 const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
@@ -1168,10 +1169,20 @@ export class FleetCoordinator {
   }
 
   private async reconcileRestoredBridgeSockets(): Promise<void> {
-    const [leases, adminGrants] = await Promise.all([
-      this.state.storage.list<LeaseRecord>({ prefix: "lease:" }),
+    const leaseIDs = new Set<string>();
+    for (const socket of this.restoredBridgeSockets) {
+      const attachment = this.bridgeAttachment(socket);
+      if (attachment && "leaseID" in attachment) {
+        leaseIDs.add(attachment.leaseID);
+      }
+    }
+    const [leaseEntries, adminGrants] = await Promise.all([
+      Promise.all(
+        [...leaseIDs].map(async (leaseID) => [leaseID, await this.getLease(leaseID)] as const),
+      ),
       this.currentAdminGrantValidation(),
     ]);
+    const leases = new Map(leaseEntries);
     const now = Date.now();
     const revoked = new Map<string, string>();
     const revokedAdmins = new Set<WebSocket>();
@@ -1191,7 +1202,7 @@ export class FleetCoordinator {
       if (!("leaseID" in attachment)) {
         continue;
       }
-      const lease = leases.get(leaseKey(attachment.leaseID));
+      const lease = leases.get(attachment.leaseID);
       if (!lease || !leaseIsLive(lease) || Date.parse(lease.expiresAt) <= now) {
         revoked.set(
           attachment.leaseID,
@@ -11021,21 +11032,11 @@ export class FleetCoordinator {
     config = this.azureOrphanSweepConfig(),
   ): Promise<AzureOrphanSweepRecord> {
     const startedAt = new Date().toISOString();
-    const leases = await this.state.runExclusive(async () => [
-      ...(await this.state.storage.list<LeaseRecord>({ prefix: "lease:" })).values(),
-    ]);
     const now = Date.now();
-    const liveAzureLeases = leases.filter(
-      (lease) =>
-        lease.provider === "azure" &&
-        !isRegisteredLease(lease) &&
-        leaseOwnsCloudResourceDuringSweep(lease, now),
-    );
-    const liveLeases = new Map(liveAzureLeases.map((lease) => [lease.id, lease]));
-    const liveCloudIDs = new Set(liveAzureLeases.map((lease) => lease.cloudID).filter(Boolean));
     const candidates: AzureOrphanSweepCandidate[] = [];
     const errors: AzureOrphanSweepRecord["errors"] = [];
     const seenCloudIDs = new Set<string>();
+    const inventory: Array<{ machine: ProviderMachine; region: string }> = [];
     let scanned = 0;
     for (const region of config.regions) {
       try {
@@ -11049,46 +11050,71 @@ export class FleetCoordinator {
           seenCloudIDs.add(cloudID);
           scanned += 1;
           const candidateRegion = machine.region || region;
-          const candidate = cloudOrphanSweepCandidate(
-            machine,
-            liveLeases,
-            liveCloudIDs,
-            candidateRegion,
-            config.graceSeconds,
-          );
-          if (!candidate) {
-            continue;
-          }
-          const ownershipLease = cloudOrphanSweepOwnershipLease(
-            machine,
-            leases,
-            "azure",
-            candidateRegion,
-            now,
-          );
-          recordCloudOrphanSweepOwnership(candidate, ownershipLease);
-          if (config.deleteEnabled && ownershipLease) {
-            try {
-              // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
-              await this.provider("azure", candidateRegion).deleteServer(
-                machine.cloudID || machine.name,
-              );
-              candidate.action = "terminated";
-            } catch (error) {
-              candidate.action = "terminate_failed";
-              candidate.error = coordinatorErrorMessage(this.env, error);
-              console.warn(
-                `azure orphan sweep terminate failed region=${region} cloud=${machine.cloudID}: ${candidate.error}`,
-              );
-            }
-          }
-          candidates.push(candidate);
+          inventory.push({ machine, region: candidateRegion });
         }
       } catch (error) {
         const message = coordinatorErrorMessage(this.env, error);
         errors.push({ region, message });
         console.warn(`azure orphan sweep failed region=${region}: ${message}`);
       }
+    }
+    const inventoryKeys = new Set(
+      inventory.map(({ machine, region }) =>
+        cloudOrphanSweepResourceKey(machine.cloudID || machine.name || String(machine.id), region),
+      ),
+    );
+    const liveLeases = new Map<string, LeaseRecord>();
+    const liveCloudIDs = new Set<string>();
+    const ownershipLeases = new Map<string, LeaseRecord>();
+    await this.state.runExclusive(() =>
+      this.visitLeaseRecords((lease) => {
+        if (lease.provider !== "azure" || isRegisteredLease(lease)) {
+          return;
+        }
+        if (leaseOwnsCloudResourceDuringSweep(lease, now)) {
+          liveLeases.set(lease.id, lease);
+          if (lease.cloudID) {
+            liveCloudIDs.add(lease.cloudID);
+          }
+          return;
+        }
+        if (!lease.cloudID || !lease.region || lease.keep || lease.releaseDeletesServer === false) {
+          return;
+        }
+        const resourceKey = cloudOrphanSweepResourceKey(lease.cloudID, lease.region);
+        if (inventoryKeys.has(resourceKey) && !ownershipLeases.has(resourceKey)) {
+          ownershipLeases.set(resourceKey, lease);
+        }
+      }),
+    );
+    for (const { machine, region } of inventory) {
+      const cloudID = machine.cloudID || machine.name || String(machine.id);
+      const candidate = cloudOrphanSweepCandidate(
+        machine,
+        liveLeases,
+        liveCloudIDs,
+        region,
+        config.graceSeconds,
+      );
+      if (!candidate) {
+        continue;
+      }
+      const ownershipLease = ownershipLeases.get(cloudOrphanSweepResourceKey(cloudID, region));
+      recordCloudOrphanSweepOwnership(candidate, ownershipLease);
+      if (config.deleteEnabled && ownershipLease) {
+        try {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
+          await this.provider("azure", region).deleteServer(machine.cloudID || machine.name);
+          candidate.action = "terminated";
+        } catch (error) {
+          candidate.action = "terminate_failed";
+          candidate.error = coordinatorErrorMessage(this.env, error);
+          console.warn(
+            `azure orphan sweep terminate failed region=${region} cloud=${machine.cloudID}: ${candidate.error}`,
+          );
+        }
+      }
+      candidates.push(candidate);
     }
     const finishedAt = new Date().toISOString();
     const record: AzureOrphanSweepRecord = {
@@ -11210,6 +11236,32 @@ export class FleetCoordinator {
   private async leaseRecords(): Promise<LeaseRecord[]> {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
     return [...leases.values()];
+  }
+
+  private async visitLeaseRecords(visitor: (lease: LeaseRecord) => void): Promise<void> {
+    let startAfter: string | undefined;
+    for (;;) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each bounded page starts after the previous page.
+      const page = await this.state.storage.list<LeaseRecord>({
+        prefix: "lease:",
+        limit: leaseRecordScanBatchSize,
+        ...(startAfter ? { startAfter } : {}),
+      });
+      if (page.size === 0) {
+        break;
+      }
+      for (const lease of page.values()) {
+        visitor(lease);
+      }
+      const nextStartAfter = [...page.keys()].at(-1);
+      if (!nextStartAfter || nextStartAfter === startAfter) {
+        throw new Error("lease record scan did not advance");
+      }
+      startAfter = nextStartAfter;
+      if (page.size < leaseRecordScanBatchSize) {
+        break;
+      }
+    }
   }
 
   private async providerAccessRecords(): Promise<LeaseRecord[]> {
@@ -15997,6 +16049,10 @@ function cloudOrphanSweepOwnershipLease(
       lease.releaseDeletesServer !== false &&
       !leaseOwnsCloudResourceDuringSweep(lease, now),
   );
+}
+
+function cloudOrphanSweepResourceKey(cloudID: string, region: string): string {
+  return JSON.stringify([region, cloudID]);
 }
 
 function recordCloudOrphanSweepOwnership(

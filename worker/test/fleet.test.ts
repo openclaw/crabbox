@@ -57,8 +57,10 @@ afterEach(() => {
 class MemoryStorage {
   private readonly values = new Map<string, unknown>();
   private alarmTime: number | undefined;
+  beforeGet?: (key: string) => Promise<void>;
 
   async get<T>(key: string): Promise<T | undefined> {
+    await this.beforeGet?.(key);
     return this.values.get(key) as T | undefined;
   }
 
@@ -86,11 +88,24 @@ class MemoryStorage {
     return await callback(this);
   }
 
-  async list<T>({ prefix = "" }: { prefix?: string } = {}): Promise<Map<string, T>> {
+  async list<T>({
+    prefix = "",
+    limit,
+    startAfter,
+  }: {
+    prefix?: string;
+    limit?: number;
+    startAfter?: string;
+  } = {}): Promise<Map<string, T>> {
     const matches = new Map<string, T>();
-    for (const [key, value] of this.values) {
-      if (key.startsWith(prefix)) {
+    for (const [key, value] of [...this.values].toSorted(([left], [right]) =>
+      left.localeCompare(right),
+    )) {
+      if (key.startsWith(prefix) && (!startAfter || key > startAfter)) {
         matches.set(key, value as T);
+        if (limit !== undefined && matches.size >= limit) {
+          break;
+        }
       }
     }
     return matches;
@@ -382,7 +397,7 @@ describe("runtime adapter relay", () => {
       expect(socket.closeCode).toBeUndefined();
     }
     expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
-    expect(list).toHaveBeenCalledTimes(1);
+    expect(list).not.toHaveBeenCalled();
     const relay = fleet as unknown as {
       codeAgents: Map<string, WebSocket>;
       runtimeAdapterAgents: Map<string, WebSocket>;
@@ -891,7 +906,14 @@ describe("runtime adapter relay", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     storage.seed(`lease:${lease.id}`, lease);
-    const list = vi.spyOn(storage, "list").mockRejectedValueOnce(new Error("storage unavailable"));
+    const get = vi.spyOn(storage, "get");
+    let unavailableOnce = true;
+    storage.beforeGet = async (key) => {
+      if (key === `lease:${lease.id}` && unavailableOnce) {
+        unavailableOnce = false;
+        throw new Error("storage unavailable");
+      }
+    };
     const socket = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id });
     const fleet = new FleetDurableObject(
       {
@@ -906,7 +928,7 @@ describe("runtime adapter relay", () => {
     expect(unavailable.headers.get("retry-after")).toBe("1");
     expect(socket.closeCode).toBeUndefined();
     expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
-    expect(list).toHaveBeenCalledTimes(2);
+    expect(get.mock.calls.filter(([key]) => key === `lease:${lease.id}`)).toHaveLength(2);
     expect(socket.closeCode).toBeUndefined();
   });
 
@@ -8830,6 +8852,7 @@ describe("fleet lease identity and idle", () => {
 
   it("deletes only coordinator-owned Azure orphan sweep candidates", async () => {
     const storage = new MemoryStorage();
+    const list = vi.spyOn(storage, "list");
     const deleted: string[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
     storage.seed(
@@ -8890,6 +8913,16 @@ describe("fleet lease identity and idle", () => {
         releaseDeletesServer: false,
       }),
     );
+    for (let index = 0; index < 129; index += 1) {
+      storage.seed(
+        `lease:cbx_unrelated_${String(index).padStart(4, "0")}`,
+        testLease({
+          id: `cbx_unrelated_${String(index).padStart(4, "0")}`,
+          provider: "aws",
+          state: "expired",
+        }),
+      );
+    }
     const fleet = testFleet(
       storage,
       {
@@ -9004,6 +9037,9 @@ describe("fleet lease identity and idle", () => {
       candidates: Array<Record<string, unknown>>;
     }>("azure-orphan-sweep:last");
     expect(deleted).toEqual(["vm-orphan"]);
+    expect(
+      list.mock.calls.filter(([options]) => options?.prefix === "lease:" && options.limit === 128),
+    ).toHaveLength(2);
     expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
     expect(sweep?.candidates).toEqual([
       expect.objectContaining({

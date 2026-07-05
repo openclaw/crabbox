@@ -229,11 +229,20 @@ class MockDurableObjectStorage {
     this.values.clear();
   }
 
-  async list<T>(options: { prefix?: string } = {}): Promise<Map<string, T>> {
-    const entries = [...this.values.entries()].filter(([key]) =>
-      options.prefix === undefined ? true : key.startsWith(options.prefix),
-    );
-    return new Map(entries) as Map<string, T>;
+  async list<T>(
+    options: { prefix?: string; limit?: number; startAfter?: string } = {},
+  ): Promise<Map<string, T>> {
+    const entries = [...this.values.entries()]
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .filter(
+        ([key]) =>
+          (options.prefix === undefined || key.startsWith(options.prefix)) &&
+          (!options.startAfter || key > options.startAfter),
+      );
+    return new Map(options.limit === undefined ? entries : entries.slice(0, options.limit)) as Map<
+      string,
+      T
+    >;
   }
 
   async setAlarm(scheduledTime: number | Date): Promise<void> {

@@ -2,7 +2,11 @@ export interface CoordinatorStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<unknown>;
-  list<T>(options?: { prefix?: string }): Promise<Map<string, T>>;
+  list<T>(options?: {
+    prefix?: string;
+    limit?: number;
+    startAfter?: string;
+  }): Promise<Map<string, T>>;
 }
 
 export type CoordinatorRequestQueue = "direct" | "lifecycle";

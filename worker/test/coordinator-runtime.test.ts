@@ -35,11 +35,23 @@ class MemoryStorage implements CoordinatorStorage {
     this.values.delete(key);
   }
 
-  async list<T>({ prefix = "" }: { prefix?: string } = {}): Promise<Map<string, T>> {
+  async list<T>({
+    prefix = "",
+    limit,
+    startAfter,
+  }: {
+    prefix?: string;
+    limit?: number;
+    startAfter?: string;
+  } = {}): Promise<Map<string, T>> {
+    const entries = [...this.values]
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .filter(([key]) => key.startsWith(prefix) && (!startAfter || key > startAfter));
     return new Map(
-      [...this.values]
-        .filter(([key]) => key.startsWith(prefix))
-        .map(([key, value]) => [key, value as T]),
+      (limit === undefined ? entries : entries.slice(0, limit)).map(([key, value]) => [
+        key,
+        value as T,
+      ]),
     );
   }
 
