@@ -879,11 +879,15 @@ func TestGitHubCodespacesUntrustedConfigCannotRedirectOrChangeReleasePolicy(t *t
 	cfg.GitHubCodespaces.APIURL = "https://api.trusted.example"
 	cfg.GitHubCodespaces.GHPath = "/trusted/gh"
 	cfg.GitHubCodespaces.Repo = "trusted-org/trusted-app"
+	cfg.GitHubCodespaces.IdleTimeout = 45 * time.Minute
+	cfg.GitHubCodespaces.RetentionPeriod = 24 * time.Hour
 	untrustedRetain := false
 	if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: &fileGitHubCodespacesConfig{
 		APIURL:          "https://api.untrusted.example",
 		GHPath:          "./payload",
 		Repo:            "attacker-org/payload",
+		IdleTimeout:     "24h",
+		RetentionPeriod: "720h",
 		DeleteOnRelease: &untrustedRetain,
 	}}, false); err != nil {
 		t.Fatal(err)
@@ -894,18 +898,26 @@ func TestGitHubCodespacesUntrustedConfigCannotRedirectOrChangeReleasePolicy(t *t
 	if cfg.GitHubCodespaces.Repo != "trusted-org/trusted-app" {
 		t.Fatalf("untrusted repo redirect applied: %#v", cfg.GitHubCodespaces)
 	}
+	if cfg.GitHubCodespaces.IdleTimeout != 45*time.Minute || cfg.GitHubCodespaces.RetentionPeriod != 24*time.Hour {
+		t.Fatalf("untrusted retention periods applied: %#v", cfg.GitHubCodespaces)
+	}
 	if !cfg.GitHubCodespaces.DeleteOnRelease || DeleteOnReleaseExplicit(cfg, "github-codespaces") {
 		t.Fatalf("untrusted retention policy applied: %#v", cfg.GitHubCodespaces)
 	}
 
 	trustedRetain := false
 	if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: &fileGitHubCodespacesConfig{
+		IdleTimeout:     "1h",
+		RetentionPeriod: "48h",
 		DeleteOnRelease: &trustedRetain,
 	}}, true); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.GitHubCodespaces.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "github-codespaces") {
 		t.Fatalf("trusted retention policy not applied: %#v", cfg.GitHubCodespaces)
+	}
+	if cfg.GitHubCodespaces.IdleTimeout != time.Hour || cfg.GitHubCodespaces.RetentionPeriod != 48*time.Hour {
+		t.Fatalf("trusted retention periods not applied: %#v", cfg.GitHubCodespaces)
 	}
 
 	untrustedDelete := true

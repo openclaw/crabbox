@@ -605,6 +605,61 @@ func TestReleaseDeleteFallsBackToStopForDirtyCodespace(t *testing.T) {
 	}
 }
 
+func TestReleaseDeleteRechecksGitStatusAfterStop(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-dirty-race"] = fakeCodespace("cs-dirty-race", "Available")
+	fc.onStop = func(name string) {
+		item := fc.items[name]
+		item.GitStatus.HasUnpushedChanges = true
+		fc.items[name] = item
+	}
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ac5"
+	server := b.serverFromCodespace(fc.items["cs-dirty-race"], b.labelsFor(leaseID, "dirty-race-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-dirty-race"], "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "dirty-race-box", b.cfg, server, SSHTarget{Host: "cs-dirty-race", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.deletes) != 0 || len(fc.stops) != 2 {
+		t.Fatalf("stops=%#v deletes=%#v", fc.stops, fc.deletes)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil || !ok || claim.Labels[labelRelease] != releaseStop || claim.Labels[labelState] != "stopped" {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+}
+
+func TestReleaseDeleteRechecksIdentityAfterStop(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-identity-race"] = fakeCodespace("cs-identity-race", "Available")
+	fc.onStop = func(name string) {
+		item := fc.items[name]
+		item.EnvironmentID = "different-environment"
+		fc.items[name] = item
+	}
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ac6"
+	server := b.serverFromCodespace(fc.items["cs-identity-race"], b.labelsFor(leaseID, "identity-race-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-identity-race"], "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "identity-race-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "environment id changed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("deleted after identity race=%#v", fc.deletes)
+	}
+}
+
 func TestReleaseRetainedStopsAndClearsEndpoint(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -860,6 +915,7 @@ type fakeCodespacesClient struct {
 	useCreateResult bool
 	onCreate        func(createCodespaceRequest)
 	onGet           func(string)
+	onStop          func(string)
 	listErr         error
 	starts          []string
 	stops           []string
@@ -937,6 +993,9 @@ func (f *fakeCodespacesClient) stopCodespace(_ context.Context, name string) err
 	item := f.items[name]
 	item.State = "Shutdown"
 	f.items[name] = item
+	if f.onStop != nil {
+		f.onStop(name)
+	}
 	return nil
 }
 

@@ -55,6 +55,20 @@ func TestGHRunnerErrorRedactsToken(t *testing.T) {
 	}
 }
 
+func TestRedactSecretTextRedactsEmbeddedTokens(t *testing.T) {
+	input := "clone https://x-access-token:ghp_this_token_value_is_redacted@github.com/example-org/my-app.git\nerror=github_pat_this_token_value_is_redacted"
+	got := redactSecretText(input)
+	if strings.Contains(got, "ghp_this_token_value_is_redacted") || strings.Contains(got, "github_pat_this_token_value_is_redacted") {
+		t.Fatalf("token leaked: %q", got)
+	}
+	if want := "https://x-access-token:<redacted>@github.com/example-org/my-app.git"; !strings.Contains(got, want) {
+		t.Fatalf("embedded URL was not preserved safely: %q", got)
+	}
+	if !strings.Contains(got, "error=<redacted>") {
+		t.Fatalf("embedded error token was not redacted: %q", got)
+	}
+}
+
 type recordingRunner struct {
 	calls  []LocalCommandRequest
 	result LocalCommandResult

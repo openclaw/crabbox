@@ -73,7 +73,7 @@ behavior intact, including `rsync -e "ssh -F ..."`.
 
 Use the full example in trusted user config or an explicitly selected
 `CRABBOX_CONFIG` file. Repository-local config cannot change the repository,
-GitHub API or CLI routing, or release deletion policy.
+GitHub API or CLI routing, or retention and release deletion policy.
 
 ```yaml
 provider: github-codespaces
@@ -104,8 +104,8 @@ Config keys under `githubCodespaces:`:
 | `devcontainerPath` | empty | Optional devcontainer path for creation. |
 | `workingDirectory` | empty | Optional Codespaces working directory setting. |
 | `geo` | empty | Optional GitHub geographic location preference. |
-| `idleTimeout` | `30m` | Codespaces idle timeout sent to GitHub on create. |
-| `retentionPeriod` | `168h` | Codespaces retention period sent to GitHub on create. |
+| `idleTimeout` | `30m` | Trusted config, environment, or CLI only; repository-local config is ignored. Codespaces idle timeout sent to GitHub on create. |
+| `retentionPeriod` | `168h` | Trusted config, environment, or CLI only; repository-local config is ignored. Codespaces retention period sent to GitHub on create. |
 | `deleteOnRelease` | `true` | Trusted config, environment, or CLI only; repository-local config is ignored. Delete on `stop` unless a retained lease claim says release by stopping. |
 | `workRoot` | `/workspaces/<repo>` when repo is known | Remote path Crabbox syncs to and runs from. |
 
@@ -161,8 +161,8 @@ Do not put GitHub tokens in Crabbox config or on command lines. Use
 8. Ask `gh codespace ssh --config -c <codespace>` for OpenSSH config, store it
    under Crabbox state, select the matching target, and wait for SSH readiness.
 9. Use normal Crabbox SSH and rsync behavior for `run`, `sync`, and `ssh`.
-10. On `stop`, delete or stop the claim-owned Codespace according to the release
-   policy.
+10. On `stop`, stop the claim-owned Codespace, refetch its identity and Git
+    status, then delete or retain it according to the release policy.
 
 If a create response is lost, Crabbox retains the recovery claim and reconciles
 only one Codespace with the exact expected display name and repository in the
@@ -177,13 +177,15 @@ availability before refreshing the generated SSH config.
 
 GitHub Codespaces does not expose custom user labels. Crabbox therefore uses a
 local claim as the ownership predicate. Release and cleanup require the claim to
-match the provider, API endpoint, repository, Codespace name, and creating
-GitHub login.
+match the provider, API endpoint, repository, Codespace name, environment ID,
+display name, and creating GitHub login.
 
 Deletion is conservative:
 
 - Crabbox refuses to release a Codespace without a local claim.
-- Crabbox refuses to delete when GitHub reports uncommitted or unpushed changes.
+- Crabbox stops and refetches a Codespace immediately before delete, then
+  refuses deletion when GitHub reports uncommitted or unpushed changes or a
+  changed resource identity.
 - Cleanup mutates only expired claim-owned Codespaces.
 - Account switches are rejected when the current `gh` login differs from the
   claim login.

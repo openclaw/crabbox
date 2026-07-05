@@ -199,7 +199,7 @@ func (c client) stopCodespace(ctx context.Context, name string) error {
 	if name == "" {
 		return exit(2, "github-codespaces codespace name is required")
 	}
-	return c.do(ctx, http.MethodPost, "/user/codespaces/"+url.PathEscape(name)+"/stop", nil, nil, nil)
+	return c.do(ctx, http.MethodPost, "/user/codespaces/"+url.PathEscape(name)+"/stop", nil, nil, map[int]bool{http.StatusNotModified: true})
 }
 
 func (c client) deleteCodespace(ctx context.Context, name string) error {

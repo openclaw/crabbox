@@ -123,7 +123,7 @@
 - Required exact resource-bound local lease claims before Apple Container, local-container, or Apple VZ stop operations can delete provider resources; legacy unbound claims require explicit `--reclaim` adoption before stop. Thanks @coygeek.
 - Hardened Azure Windows snapshot forks to fail closed through credential rehydration and quarantine cleanup, reuse only writable NIC payloads, reject unknown differential disks, and retry in-use security-group cleanup. Thanks @fcoury-oai.
 - Rolled back brokered Hetzner servers when post-create readiness fails, deleting only lease-owned SSH keys created by the failed attempt after server cleanup succeeds while preserving explicit no-delete retention until a later delete. Thanks @coygeek.
-- Prevented repository-local configuration from retaining billable GitHub Codespaces or overriding trusted deletion policy. Thanks @coygeek.
+- Prevented repository-local configuration from retaining billable GitHub Codespaces or overriding trusted lifetime and deletion policy. Thanks @coygeek.
 
 ## 0.34.0 - 2026-07-02
 
