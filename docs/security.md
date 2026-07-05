@@ -69,10 +69,13 @@ every other coordinator route. Normal authentication is resolved in
    base64url payload signed with `CRABBOX_SESSION_SECRET`, which must be set and
    must differ from `CRABBOX_SHARED_TOKEN`. The versioned payload carries a
    verified-email `owner`, its `github-verified-email` provenance, `org`, and
-   GitHub `login`, has a default 180-day expiry, and is rejected if it carries
-   an `admin` claim — browser login can never mint admin tokens. Tokens from
-   older schemas are rejected; users must log in again after this security
-   upgrade.
+   GitHub `login`, has a default 180-day expiry, and contains the OAuth
+   credential encrypted under a key derived from the session secret. Every
+   request revalidates current allowed-org/team membership through GitHub, with
+   successful checks cached for five minutes. GitHub errors fail closed after
+   the cache expires. The token is rejected if it carries an `admin` claim —
+   browser login can never mint admin tokens. Tokens from older schemas are
+   rejected; users must log in again after this security upgrade.
 
 ### GitHub browser login
 
@@ -84,6 +87,11 @@ by coordinator config:
   members of the listed GitHub org(s).
 - `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) further
   narrows access to selected team slugs after org membership passes.
+- `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` controls successful request-time
+  membership caching (default 300, maximum 3600; set 0 to check every request).
+- `CRABBOX_GITHUB_REVOKED_USERS` immediately rejects comma-separated GitHub
+  logins or verified emails. Optional `login:` / `owner:` prefixes disambiguate
+  values. Use this for narrow emergency revocation without rotating every token.
 - The GitHub account must expose at least one verified email through the OAuth
   `user:email` scope. Public profile and unverified emails are never trusted as
   the token owner.
@@ -314,7 +322,8 @@ repo:
   lifecycle and desktop-connection APIs only; it cannot attach terminals.
 - `CRABBOX_SHARED_TOKEN` — trusted operator automation only.
 - `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
-  `CRABBOX_SESSION_SECRET` — GitHub browser login and user-token signing. The
+  `CRABBOX_SESSION_SECRET` — GitHub browser login, user-token signing, and
+  encryption of the OAuth credential used for membership revalidation. The
   session secret is required, must be independent from the shared token, and
   should be rotated separately.
 - `CRABBOX_GITHUB_ADMIN_OWNERS`, `CRABBOX_GITHUB_ADMIN_LOGINS` — optional
@@ -337,8 +346,9 @@ user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
 
 Coordinator config values (not secret material):
 
-- `CRABBOX_GITHUB_ALLOWED_ORG(S)`, `CRABBOX_GITHUB_ALLOWED_TEAMS` —
-  browser-login authorization.
+- `CRABBOX_GITHUB_ALLOWED_ORG(S)`, `CRABBOX_GITHUB_ALLOWED_TEAMS`,
+  `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS`, `CRABBOX_GITHUB_REVOKED_USERS` —
+  browser-login and continuing user-token authorization.
 - `CRABBOX_TAILSCALE_TAGS` — allowlist/default for requested Tailscale ACL tags.
   Do not allow arbitrary user-supplied tags.
 - `CRABBOX_ACCESS_TEAM_DOMAIN`, `CRABBOX_ACCESS_AUD` — Access JWT verification.

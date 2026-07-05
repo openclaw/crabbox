@@ -22,6 +22,10 @@ function proxyIdentityRequest(secret?: string): Request {
   });
 }
 
+const allowGitHubMembership = {
+  githubMembership: async (): Promise<void> => {},
+};
+
 describe("coordinator auth", () => {
   it("requires same-origin intent for portal-cookie mutations and viewer sockets", async () => {
     const env = {
@@ -34,6 +38,7 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email",
       org: "example-org",
       login: "alice",
+      githubAccessToken: "github-access-token",
     });
     const cookie = `crabbox_session=${encodeURIComponent(token)}`;
     const mutationURL = "https://broker.example.test/portal/leases/blue-lobster/share";
@@ -50,7 +55,7 @@ describe("coordinator auth", () => {
         new Request(viewerURL, {
           headers: { cookie, origin: "https://attacker.example", upgrade: "websocket" },
         }),
-      ].map((request) => prepareCoordinatorRequest(request, env)),
+      ].map((request) => prepareCoordinatorRequest(request, env, allowGitHubMembership)),
     );
     await Promise.all(
       denied.map(async (prepared) => {
@@ -85,7 +90,7 @@ describe("coordinator auth", () => {
             origin: "https://automation.example.test",
           },
         }),
-      ].map((request) => prepareCoordinatorRequest(request, env)),
+      ].map((request) => prepareCoordinatorRequest(request, env, allowGitHubMembership)),
     );
     for (const prepared of accepted) {
       expect(prepared).toMatchObject({ authenticated: true });
@@ -740,11 +745,12 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email",
       org: "openclaw",
       login: "friend",
+      githubAccessToken: "github-access-token",
     });
     const request = new Request("https://example.test/v1/whoami", {
       headers: { authorization: `Bearer ${token}`, "x-crabbox-owner": "spoof@example.com" },
     });
-    const auth = await authenticateRequest(request, env);
+    const auth = await authenticateRequest(request, env, allowGitHubMembership);
     expect(auth).toMatchObject({
       authorized: true,
       admin: false,
@@ -767,6 +773,7 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email",
       org: "example-org",
       login: "friend",
+      githubAccessToken: "github-access-token",
     });
 
     const authResults = await Promise.all(
@@ -789,6 +796,7 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email" as const,
       org: "openclaw",
       login: "friend",
+      githubAccessToken: "github-access-token",
     };
 
     const first = await issueUserToken(env, input);
@@ -822,6 +830,7 @@ describe("coordinator auth", () => {
         headers: { authorization: `Bearer ${token}` },
       }),
       env,
+      allowGitHubMembership,
     );
 
     expect(auth).toBeUndefined();
@@ -840,12 +849,14 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email",
       org: "openclaw",
       login: "vincentkoc",
+      githubAccessToken: "github-access-token",
     });
     const loginToken = await issueUserToken(env, {
       owner: "peter@example.com",
       ownerSource: "github-verified-email",
       org: "openclaw",
       login: "steipete",
+      githubAccessToken: "github-access-token",
     });
 
     const ownerAuth = await authenticateRequest(
@@ -853,12 +864,14 @@ describe("coordinator auth", () => {
         headers: { authorization: `Bearer ${ownerToken}` },
       }),
       env,
+      allowGitHubMembership,
     );
     const loginAuth = await authenticateRequest(
       new Request("https://example.test/v1/whoami", {
         headers: { authorization: `Bearer ${loginToken}` },
       }),
       env,
+      allowGitHubMembership,
     );
 
     expect(ownerAuth).toMatchObject({ admin: true, owner: "vincentkoc@ieee.org" });
@@ -968,6 +981,7 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email" as const,
       org: "openclaw",
       login: "friend",
+      githubAccessToken: "github-access-token",
     };
 
     await expect(issueUserToken({ CRABBOX_SHARED_TOKEN: "shared" }, input)).rejects.toThrow(
