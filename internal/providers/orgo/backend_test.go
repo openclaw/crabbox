@@ -22,6 +22,8 @@ type fakeOrgoAPI struct {
 	startedComputers        []string
 	deleteComputerErr       error
 	deleteWorkspaceErr      error
+	getWorkspaceErr         error
+	missingDeleteNotFound   bool
 	bashCommands            []string
 	bashExitCode            int
 	bashStdout              string
@@ -55,12 +57,15 @@ func (f *fakeOrgoAPI) ListWorkspaces(context.Context) ([]orgoWorkspace, error) {
 }
 
 func (f *fakeOrgoAPI) GetWorkspace(_ context.Context, id string) (orgoWorkspace, error) {
+	if f.getWorkspaceErr != nil {
+		return orgoWorkspace{}, f.getWorkspaceErr
+	}
 	for _, workspace := range f.workspaces {
 		if workspace.ID == id {
 			return workspace, nil
 		}
 	}
-	var computers []orgoComputer
+	computers := []orgoComputer{}
 	for _, computer := range f.computers {
 		if computer.WorkspaceID == id {
 			computers = append(computers, computer)
@@ -119,6 +124,9 @@ func (f *fakeOrgoAPI) StartComputer(_ context.Context, id string) error {
 func (f *fakeOrgoAPI) DeleteComputer(ctx context.Context, id string) error {
 	_, f.deleteComputerDeadline = ctx.Deadline()
 	f.deletedComputers = append(f.deletedComputers, id)
+	if _, ok := f.computers[id]; !ok && f.missingDeleteNotFound {
+		return exit(4, "missing computer %s", id)
+	}
 	delete(f.computers, id)
 	return f.deleteComputerErr
 }
@@ -360,6 +368,73 @@ func TestStopByComputerIDDeletesTemporaryWorkspaceAndClaim(t *testing.T) {
 	}
 }
 
+func TestStopRefusesUnclaimedComputerID(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	fake.computers["computer_unclaimed"] = orgoComputer{ID: "computer_unclaimed", Status: "running"}
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend.client = fake
+
+	err := backend.Stop(context.Background(), StopRequest{ID: "computer_unclaimed"})
+	if err == nil || !strings.Contains(err.Error(), "refuses to stop unclaimed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fake.deletedComputers) != 0 {
+		t.Fatalf("deleted unclaimed computer: %#v", fake.deletedComputers)
+	}
+}
+
+func TestStopRetriesWorkspaceCleanupAfterComputerWasDeleted(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	fake.missingDeleteNotFound = true
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend.client = fake
+	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "partial-cleanup", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.deleteWorkspaceErr = errors.New("transient workspace delete failure")
+	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err == nil {
+		t.Fatal("first stop unexpectedly succeeded")
+	}
+	fake.deleteWorkspaceErr = nil
+	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(fake.deletedComputers, ","); got != "computer_test" {
+		t.Fatalf("deleted computers=%q", got)
+	}
+	if got := strings.Join(fake.deletedWorkspaces, ","); got != "ws_created,ws_created" {
+		t.Fatalf("deleted workspaces=%q", got)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(lease.LeaseID); err != nil || ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, err)
+	}
+}
+
+func TestStopRetainsClaimWhenNotFoundCouldBeAuthorizationFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend.client = fake
+	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "ambiguous-not-found", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(fake.computers, lease.Computer.ID)
+	fake.getWorkspaceErr = exit(4, "workspace unavailable")
+	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err == nil {
+		t.Fatal("stop unexpectedly accepted ambiguous absence")
+	}
+	if len(fake.deletedComputers) != 0 || len(fake.deletedWorkspaces) != 0 {
+		t.Fatalf("ambiguous absence triggered deletion: computers=%#v workspaces=%#v", fake.deletedComputers, fake.deletedWorkspaces)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(lease.LeaseID); err != nil || !ok {
+		t.Fatalf("claim missing ok=%t err=%v", ok, err)
+	}
+}
+
 func TestWarmupClaimsSlugForStatusAndStop(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
@@ -392,6 +467,22 @@ func TestWarmupClaimsSlugForStatusAndStop(t *testing.T) {
 	}
 	if len(fake.deletedWorkspaces) != 0 {
 		t.Fatalf("explicit workspace should not be deleted: %#v", fake.deletedWorkspaces)
+	}
+}
+
+func TestStatusWaitStopsOnTerminalStates(t *testing.T) {
+	for _, state := range []string{"error", "failed", "deleted"} {
+		t.Run(state, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newFakeOrgoAPI()
+			fake.computers["computer_test"] = orgoComputer{ID: "computer_test", Status: state}
+			backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+			backend.client = fake
+			_, err := backend.Status(context.Background(), StatusRequest{ID: "computer_test", Wait: true})
+			if err == nil || !strings.Contains(err.Error(), "entered "+state+" state") {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	}
 }
 

@@ -213,8 +213,9 @@ func (b *orgoBackend) Status(ctx context.Context, req StatusRequest) (StatusView
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if view.State == "error" {
-			return view, exit(5, "orgo computer %s entered error state", lease.Computer.ID)
+		switch view.State {
+		case "error", "failed", "deleted":
+			return view, exit(5, "orgo computer %s entered %s state", lease.Computer.ID, view.State)
 		}
 		if b.now().After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for orgo computer %s to become ready", lease.Computer.ID)
@@ -240,11 +241,72 @@ func (b *orgoBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	lease, err := b.resolveComputer(ctx, client, req.ID)
+	lease, err := b.resolveClaimedComputer(ctx, client, req.ID)
 	if err != nil {
 		return err
 	}
 	return b.deleteLease(ctx, client, lease)
+}
+
+func (b *orgoBackend) resolveClaimedComputer(ctx context.Context, client orgoAPI, identifier string) (orgoLease, error) {
+	id := strings.TrimSpace(identifier)
+	claim, ok, err := resolveLeaseClaimForProviderCloudID(id)
+	if err != nil {
+		return orgoLease{}, err
+	}
+	if !ok {
+		claim, ok, err = resolveLeaseClaimForProvider(id)
+		if err != nil {
+			return orgoLease{}, err
+		}
+	}
+	if !ok {
+		return orgoLease{}, exit(4, "provider=%s refuses to stop unclaimed computer %s", providerName, id)
+	}
+	computerID := strings.TrimSpace(claim.CloudID)
+	if computerID == "" {
+		return orgoLease{}, exit(4, "provider=%s claim %s has no computer identity", providerName, claim.LeaseID)
+	}
+	lease := orgoLease{
+		LeaseID: claim.LeaseID,
+		Slug:    claim.Slug,
+		Computer: orgoComputer{
+			ID:          computerID,
+			WorkspaceID: strings.TrimSpace(claim.Labels[orgoWorkspaceLabel]),
+		},
+		CreatedWorkspace: strings.TrimSpace(claim.Labels[orgoCreatedWorkspaceLabel]),
+	}
+	computer, err := client.GetComputer(ctx, computerID)
+	if err != nil {
+		if !isOrgoNotFound(err) {
+			return orgoLease{}, err
+		}
+		workspaceID := lease.Computer.WorkspaceID
+		if workspaceID == "" {
+			return orgoLease{}, err
+		}
+		workspace, workspaceErr := client.GetWorkspace(ctx, workspaceID)
+		if workspaceErr != nil {
+			return orgoLease{}, errors.Join(err, fmt.Errorf("verify orgo workspace inventory: %w", workspaceErr))
+		}
+		if workspace.Computers == nil {
+			return orgoLease{}, errors.Join(err, errors.New("verify orgo workspace inventory: response omitted computers"))
+		}
+		for _, candidate := range workspace.Computers {
+			if candidate.ID == computerID {
+				return orgoLease{}, err
+			}
+		}
+		// A readable, complete workspace inventory proves the claimed computer is
+		// absent. Keep the workspace identity so a prior partial cleanup can retry.
+		lease.Computer.ID = ""
+		return lease, nil
+	}
+	if computer.WorkspaceID == "" {
+		computer.WorkspaceID = lease.Computer.WorkspaceID
+	}
+	lease.Computer = computer
+	return lease, nil
 }
 
 func (b *orgoBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
@@ -445,6 +507,11 @@ func (b *orgoBackend) deleteLease(ctx context.Context, client orgoAPI, lease org
 		removeLeaseClaim(lease.LeaseID)
 	}
 	return cleanupErr
+}
+
+func isOrgoNotFound(err error) bool {
+	var exitErr ExitError
+	return errors.As(err, &exitErr) && exitErr.Code == 4
 }
 
 func (b *orgoBackend) cleanupLease(client orgoAPI, lease orgoLease) error {
