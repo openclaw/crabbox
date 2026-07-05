@@ -1514,7 +1514,7 @@ func TestControllerPreAcquireAckFailureRetainsStoppingUntilStableAbsence(t *test
 	var stopping controllerWorkspaceRecord
 	for time.Now().Before(deadline) {
 		current, ok := service.workspace("pre-ack-absent-box")
-		if ok && current.Status == "stopping" && current.FailureAfterCleanup != "" {
+		if ok && current.Status == "stopping" && current.FailureAfterCleanup != "" && current.ProviderAbsentSince != "" {
 			stopping = current
 			break
 		}
@@ -1523,7 +1523,7 @@ func TestControllerPreAcquireAckFailureRetainsStoppingUntilStableAbsence(t *test
 	if stopping.Status != "stopping" || stopping.AttemptLeaseID == "" || stopping.Slug == "" || stopping.CreateObserved {
 		t.Fatalf("pre-ack failure did not retain stable cleanup identity: %#v", stopping)
 	}
-	time.Sleep(100 * time.Millisecond)
+	waitControllerWorkspaceInactive(t, service, stopping.Request.ID)
 	current, _ := service.workspace(stopping.Request.ID)
 	if current.Status != "stopping" || current.AttemptLeaseID != stopping.AttemptLeaseID || current.Slug != stopping.Slug {
 		t.Fatalf("workspace escaped late-materialization recovery window: %#v", current)
