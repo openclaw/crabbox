@@ -60,7 +60,7 @@ export function redactDiagnosticSecrets(
     redacted = redacted.replaceAll(secret, "[redacted]");
   }
   redacted = redacted.replaceAll(
-    /\b(authorization|proxy-authorization|x-api-key|api-key|api_key|access-token|access_token|client-secret|client_secret|session-token|session_token|token|password)[ \t]*[:=][ \t]*(?:(?:bearer|basic)(?:[ \t]+|[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+))?[^\s"',;\\}]+/gi,
+    /\b(authorization|proxy-authorization|x-api-key|api-key|api_key|access-token|access_token|client-secret|client_secret|session-token|session_token|token|password)[ \t]*[:=][ \t]*(?:(?:bearer|basic)(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+))?[^\s"',;\\}]+/gi,
     (match) => {
       const colon = match.indexOf(":");
       const equals = match.indexOf("=");
@@ -81,7 +81,7 @@ export function redactDiagnosticSecrets(
   );
   redacted = redacted.replaceAll(/\b(https?:\/\/)[^/\s:@]+:[^@\s/]+@/gi, "$1[redacted]@");
   redacted = redacted.replaceAll(
-    /\bbearer(?:[ \t]+|[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+)[^\s"',;\\}]+/gi,
+    /\bbearer(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+)[^\s"',;\\}]+/gi,
     "Bearer [redacted]",
   );
   return redacted.replaceAll(

@@ -13,10 +13,12 @@ func TestRedactDiagnosticSecretsCoversCredentialEncodings(t *testing.T) {
 		"Authorization: Bearer: colon-header-token",
 		"Authorization: Bearer\n folded-header-token",
 		"Authorization: Bearer:\r\n folded-colon-header-token",
+		"Authorization: Bearer :\r\n spaced-folded-colon-header-token",
 		"Standalone Bearer   spaced-bearer-token",
 		"Standalone Bearer: colon-bearer-token",
 		"Standalone Bearer\n folded-bearer-token",
 		"Standalone Bearer:\r\n folded-colon-bearer-token",
+		"Standalone Bearer :\r\n spaced-folded-colon-bearer-token",
 		"Standalone Bearer [redacted]",
 		"Proxy-Authorization=Basic proxy-value",
 		`{"clientSecret":"json-secret","privateKey":"json-key","message":"quota exceeded"}`,
@@ -27,7 +29,7 @@ func TestRedactDiagnosticSecretsCoversCredentialEncodings(t *testing.T) {
 
 	got := RedactDiagnosticSecrets(value, exact)
 	for _, leaked := range []string{
-		exact, "header-token", "colon-header-token", "folded-header-token", "folded-colon-header-token", "spaced-bearer-token", "colon-bearer-token", "folded-bearer-token", "folded-colon-bearer-token", "proxy-value", "json-secret", "json-key", "alice", "password",
+		exact, "header-token", "colon-header-token", "folded-header-token", "folded-colon-header-token", "spaced-folded-colon-header-token", "spaced-bearer-token", "colon-bearer-token", "folded-bearer-token", "folded-colon-bearer-token", "spaced-folded-colon-bearer-token", "proxy-value", "json-secret", "json-key", "alice", "password",
 		"query-token", "signed-value", "gcs-credential", "gcs-signature", "single-userinfo-token", "private-material",
 	} {
 		if strings.Contains(got, leaked) {
