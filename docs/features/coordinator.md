@@ -218,7 +218,8 @@ GET    /v1/images/{id}/fast-snapshot-restore
 The portal is the authenticated browser UI served by the same coordinator
 (`worker/src/portal.ts`). Login is unauthenticated; everything else uses the
 `crabbox_session` cookie. Logout confirmation is read-only, while logout itself
-requires a same-origin `POST`.
+requires a same-origin `POST` and closes WebVNC, Code, and mediated-egress
+bridges bound to that portal session.
 
 ```text
 GET    /portal

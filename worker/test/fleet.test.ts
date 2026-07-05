@@ -354,6 +354,238 @@ describe("runtime adapter relay", () => {
     expect(internal.codeViewers.has("code-rotated-admin")).toBe(false);
   });
 
+  it("fails closed active non-admin GitHub WebVNC and egress bridges after revocation", async () => {
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const payload = decodeUserTokenPayload(token);
+    const portalSessionHash = await sha256Hex(token);
+    const grant = {
+      auth: "github" as const,
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: false,
+      login: "alice",
+      portalSessionHash,
+      githubGrant: {
+        tokenID: payload.jti,
+        sealedCredential: payload.githubCredential,
+        expiresAt: new Date(payload.exp * 1000).toISOString(),
+      },
+    };
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    const leaseID = "cbx_000000000001";
+    const webAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_revoked_user",
+      capabilities: new Set<string>(),
+    });
+    const webViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID,
+      id: "viewer_revoked_user",
+      agentID: "agent_revoked_user",
+      ...grant,
+      label: "alice",
+    });
+    const egressHost = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID,
+      sessionID: "egress_revoked_user",
+      ...grant,
+    });
+    const egressClient = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID,
+      sessionID: "egress_revoked_user",
+      ...grant,
+    });
+    const internal = fleet as unknown as {
+      env: Env;
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      webVNCViewers: Map<
+        string,
+        Map<
+          string,
+          {
+            id: string;
+            agentID: string;
+            socket: WebSocket;
+            owner: string;
+            org: string;
+            admin: boolean;
+            auth: "github";
+            login: string;
+            portalSessionHash: string;
+            githubGrant: typeof grant.githubGrant;
+            label: string;
+            connectedAt: string;
+          }
+        >
+      >;
+      egressHosts: Map<string, WebSocket>;
+      egressClients: Map<string, WebSocket>;
+    };
+    internal.webVNCAgents.set(
+      leaseID,
+      new Map([["agent_revoked_user", webAgent as unknown as WebSocket]]),
+    );
+    internal.webVNCViewers.set(
+      leaseID,
+      new Map([
+        [
+          "viewer_revoked_user",
+          {
+            id: "viewer_revoked_user",
+            agentID: "agent_revoked_user",
+            socket: webViewer as unknown as WebSocket,
+            ...grant,
+            label: "alice",
+            connectedAt: new Date().toISOString(),
+          },
+        ],
+      ]),
+    );
+    internal.egressHosts.set(
+      `${leaseID}\u0000egress_revoked_user`,
+      egressHost as unknown as WebSocket,
+    );
+    internal.egressClients.set(
+      `${leaseID}\u0000egress_revoked_user`,
+      egressClient as unknown as WebSocket,
+    );
+    const githubFetch = vi.fn<() => Promise<Response>>(async () => {
+      throw new Error("revoked users must fail before GitHub API access");
+    });
+    vi.stubGlobal("fetch", githubFetch);
+
+    await fleet.webSocketMessage(webViewer as unknown as WebSocket, "vnc-frame");
+    await fleet.webSocketMessage(egressHost as unknown as WebSocket, "egress-frame");
+
+    expect(webViewer.closeCode).toBe(1008);
+    expect(webViewer.closeReason).toBe("user access revoked");
+    expect(webAgent.closeCode).toBe(1011);
+    expect(egressHost.closeCode).toBe(1008);
+    expect(egressHost.closeReason).toBe("user access revoked");
+    expect(egressClient.closeCode).toBe(1008);
+    expect(egressClient.closeReason).toBe("user access revoked");
+    expect(githubFetch).not.toHaveBeenCalled();
+
+    internal.env.CRABBOX_GITHUB_REVOKED_USERS = undefined;
+    const membershipFailureHost = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID,
+      sessionID: "egress_membership_failure",
+      ...grant,
+    });
+    const membershipFailureClient = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID,
+      sessionID: "egress_membership_failure",
+      ...grant,
+    });
+    internal.egressHosts.set(
+      `${leaseID}\u0000egress_membership_failure`,
+      membershipFailureHost as unknown as WebSocket,
+    );
+    internal.egressClients.set(
+      `${leaseID}\u0000egress_membership_failure`,
+      membershipFailureClient as unknown as WebSocket,
+    );
+
+    await fleet.webSocketMessage(membershipFailureHost as unknown as WebSocket, "egress-frame");
+
+    expect(membershipFailureHost.closeCode).toBe(1008);
+    expect(membershipFailureHost.closeReason).toBe("user access revoked");
+    expect(membershipFailureClient.closeCode).toBe(1008);
+    expect(membershipFailureClient.closeReason).toBe("user access revoked");
+    expect(githubFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a WebVNC upgrade revoked before its buffered desktop frames flush", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const payload = decodeUserTokenPayload(token);
+    const portalSessionHash = await sha256Hex(token);
+    const leaseID = "cbx_000000000001";
+    const agentID = "agent_logout_race";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        owner: "alice@example.com",
+        org: "example-org",
+        desktop: true,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    storage.seed(`code-viewer-session-revocation:${portalSessionHash}`, {
+      portalSessionHash,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const fleet = testFleet(storage, {}, env);
+    const agent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: agentID,
+      capabilities: new Set<string>(),
+    });
+    const internal = fleet as unknown as {
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      webVNCViewers: Map<string, Map<string, unknown>>;
+      pendingWebVNCToViewer: Map<string, { chunks: Array<string | ArrayBuffer>; bytes: number }>;
+    };
+    internal.webVNCAgents.set(leaseID, new Map([[agentID, agent as unknown as WebSocket]]));
+    internal.pendingWebVNCToViewer.set(`${leaseID}:${agentID}`, {
+      chunks: ["buffered-desktop-frame"],
+      bytes: 22,
+    });
+
+    const response = await fleet.fetch(
+      request("GET", `/portal/leases/${leaseID}/vnc/viewer`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          upgrade: "websocket",
+          "x-crabbox-auth": "github",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+          "x-crabbox-github-login": "alice",
+          "x-crabbox-github-token-id": payload.jti,
+          "x-crabbox-github-sealed-credential": payload.githubCredential,
+          "x-crabbox-token-expires-at": new Date(payload.exp * 1000).toISOString(),
+        },
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(agent.closeCode).toBeUndefined();
+    expect(internal.webVNCViewers.size).toBe(0);
+    expect(internal.pendingWebVNCToViewer.get(`${leaseID}:${agentID}`)?.chunks).toEqual([
+      "buffered-desktop-frame",
+    ]);
+  });
+
   it("restores unambiguous hibernated bridge sockets after validating lease state", async () => {
     const storage = new MemoryStorage();
     const list = vi.spyOn(storage, "list");
@@ -701,7 +933,7 @@ describe("runtime adapter relay", () => {
     expect(viewer.closeCode).toBe(1008);
     expect(viewer.closeReason).toBe("portal session ended");
     expect(legacyViewer.closeCode).toBe(1008);
-    expect(legacyViewer.closeReason).toBe("portal session ended");
+    expect(legacyViewer.closeReason).toBe("lease access revoked");
     expect(agent.sentJSON()).toEqual([
       {
         type: "ws_close",
@@ -713,7 +945,7 @@ describe("runtime adapter relay", () => {
         type: "ws_close",
         id: "viewer-legacy",
         code: 1008,
-        reason: "portal session ended",
+        reason: "lease access revoked",
       },
     ]);
     const relay = fleet as unknown as { codeViewers: Map<string, WebSocket> };
@@ -831,12 +1063,13 @@ describe("runtime adapter relay", () => {
     expect(revokedCodeViewer.closeReason).toBe("lease access revoked");
     expect(ownerCodeViewer.closeCode).toBeUndefined();
     expect(legacyCodeViewer.closeCode).toBe(1008);
-    expect(legacyCodeViewer.closeReason).toBe("lease access revoked");
+    expect(legacyCodeViewer.closeReason).toBe("user access revoked");
     expect(revokedWebViewer.closeCode).toBe(1008);
     expect(revokedWebViewer.closeReason).toBe("lease access revoked");
     expect(revokedWebAgent.closeCode).toBe(1011);
-    expect(retainedWebViewer.closeCode).toBeUndefined();
-    expect(retainedWebAgent.closeCode).toBeUndefined();
+    expect(retainedWebViewer.closeCode).toBe(1008);
+    expect(retainedWebViewer.closeReason).toBe("bridge authentication expired");
+    expect(retainedWebAgent.closeCode).toBe(1011);
     expect(legacyOwnerWebViewer.closeCode).toBe(1008);
     expect(legacyOwnerWebViewer.closeReason).toBe("lease access revoked");
     expect(legacyOwnerWebAgent.closeCode).toBe(1011);
@@ -851,7 +1084,7 @@ describe("runtime adapter relay", () => {
         type: "ws_close",
         id: "code-legacy",
         code: 1008,
-        reason: "lease access revoked",
+        reason: "user access revoked",
       },
     ]);
   });
@@ -15832,7 +16065,7 @@ describe("fleet lease identity and idle", () => {
     const tokenExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
     const headers = {
       authorization: "Bearer portal-session-token",
-      "x-crabbox-auth": "github",
+      "x-crabbox-auth": "bearer",
       "x-crabbox-owner": "alice@example.com",
       "x-crabbox-org": "example-org",
       "x-crabbox-github-login": "alice",
@@ -15957,7 +16190,7 @@ describe("fleet lease identity and idle", () => {
     const storage = new MemoryStorage();
     const env = {
       CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
-      CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+      CRABBOX_ADMIN_TOKEN: "current-admin-token",
     };
     const fleet = testFleet(storage, {}, env);
     const leaseID = "cbx_000000000001";
@@ -15975,11 +16208,11 @@ describe("fleet lease identity and idle", () => {
     const isolatedOrigin = await codeOriginForLease(env, leaseID);
     expect(isolatedOrigin).toBeDefined();
     const staleGrant = {
-      auth: "github",
+      auth: "bearer",
       admin: true,
       owner: "former-admin@example.com",
       org: "other-org",
-      login: "former-admin",
+      adminTokenHash: await sha256Hex("former-admin-token"),
       portalSessionHash: "a".repeat(64),
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
@@ -16052,12 +16285,14 @@ describe("fleet lease identity and idle", () => {
       githubAccessToken: "github-access-token",
       ttlSeconds: 60 * 60,
     });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("GitHub unavailable during logout");
-      }),
+    const githubFetch = vi.fn<() => Promise<Response>>(
+      async () =>
+        new Response(JSON.stringify({ state: "active", organization: { login: "example-org" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
     );
+    vi.stubGlobal("fetch", githubFetch);
     const portalCookie = `crabbox_session=${encodeURIComponent(token)}`;
     const throughCoordinator = async (input: Request): Promise<Response> =>
       await routeCoordinatorRequest(input, env, async (prepared) => await fleet.fetch(prepared), {
@@ -16090,6 +16325,7 @@ describe("fleet lease identity and idle", () => {
       new Request(isolatedPage, { headers: { cookie: codeCookie } }),
     );
     expect(page.status).toBe(200);
+    githubFetch.mockRejectedValue(new Error("GitHub unavailable during logout"));
 
     const activeViewerID = "active-code-viewer";
     const portalSessionHash = await sha256Hex(token);
@@ -16101,12 +16337,103 @@ describe("fleet lease identity and idle", () => {
       auth: "github",
       portalSessionHash,
     });
+    const activeWebAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_active",
+      capabilities: new Set<string>(),
+    });
+    const activeWebViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID,
+      id: "viewer_active",
+      agentID: "agent_active",
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: false,
+      auth: "github",
+      login: "alice",
+      portalSessionHash,
+      label: "alice",
+    });
+    const activeEgressHost = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID,
+      sessionID: "active-egress-session",
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: false,
+      auth: "github",
+      login: "alice",
+      portalSessionHash,
+    });
+    const activeEgressClient = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID,
+      sessionID: "active-egress-session",
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: false,
+      auth: "github",
+      login: "alice",
+      portalSessionHash,
+    });
     const codeBridgeState = fleet as unknown as {
       codeAgents: Map<string, WebSocket>;
       codeViewers: Map<string, WebSocket>;
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      webVNCViewers: Map<
+        string,
+        Map<
+          string,
+          {
+            id: string;
+            agentID: string;
+            socket: WebSocket;
+            owner: string;
+            org: string;
+            admin: boolean;
+            auth: "github";
+            login: string;
+            portalSessionHash: string;
+            label: string;
+            connectedAt: string;
+          }
+        >
+      >;
+      egressHosts: Map<string, WebSocket>;
+      egressClients: Map<string, WebSocket>;
     };
     codeBridgeState.codeAgents.set(leaseID, activeAgent as unknown as WebSocket);
     codeBridgeState.codeViewers.set(activeViewerID, activeViewer as unknown as WebSocket);
+    codeBridgeState.webVNCAgents.set(
+      leaseID,
+      new Map([["agent_active", activeWebAgent as unknown as WebSocket]]),
+    );
+    codeBridgeState.webVNCViewers.set(
+      leaseID,
+      new Map([
+        [
+          "viewer_active",
+          {
+            id: "viewer_active",
+            agentID: "agent_active",
+            socket: activeWebViewer as unknown as WebSocket,
+            owner: "alice@example.com",
+            org: "example-org",
+            admin: false,
+            auth: "github",
+            login: "alice",
+            portalSessionHash,
+            label: "alice",
+            connectedAt: new Date().toISOString(),
+          },
+        ],
+      ]),
+    );
+    const egressKey = `${leaseID}\u0000active-egress-session`;
+    codeBridgeState.egressHosts.set(egressKey, activeEgressHost as unknown as WebSocket);
+    codeBridgeState.egressClients.set(egressKey, activeEgressClient as unknown as WebSocket);
 
     const expiredRevocationKey = `code-viewer-session-revocation:${"f".repeat(64)}`;
     storage.seed(expiredRevocationKey, {
@@ -16123,6 +16450,9 @@ describe("fleet lease identity and idle", () => {
     expect(crossSiteNavigation.headers.get("set-cookie")).toBeNull();
     expect(await crossSiteNavigation.text()).toContain('method="post"');
     expect(activeViewer.closeCode).toBeUndefined();
+    expect(activeWebViewer.closeCode).toBeUndefined();
+    expect(activeEgressHost.closeCode).toBeUndefined();
+    expect(activeEgressClient.closeCode).toBeUndefined();
 
     const logout = await throughCoordinator(
       new Request("https://crabbox.test/portal/logout", {
@@ -16136,6 +16466,13 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value(expiredRevocationKey)).toBeUndefined();
     expect(activeViewer.closeCode).toBe(1008);
     expect(activeViewer.closeReason).toBe("portal session ended");
+    expect(activeWebViewer.closeCode).toBe(1008);
+    expect(activeWebViewer.closeReason).toBe("portal session ended");
+    expect(activeWebAgent.closeCode).toBe(1011);
+    expect(activeEgressHost.closeCode).toBe(1008);
+    expect(activeEgressHost.closeReason).toBe("portal session ended");
+    expect(activeEgressClient.closeCode).toBe(1008);
+    expect(activeEgressClient.closeReason).toBe("portal session ended");
     expect(activeAgent.sentJSON()).toEqual([
       {
         type: "ws_close",
@@ -23117,9 +23454,19 @@ async function sha256HexForTest(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function decodeUserTokenPayload(token: string): { exp: number; iat: number } {
+function decodeUserTokenPayload(token: string): {
+  exp: number;
+  iat: number;
+  jti: string;
+  githubCredential: string;
+} {
   expect(token).toMatch(/^cbxu_/);
   const [payload] = token.slice("cbxu_".length).split(".");
   const decoded = Buffer.from(payload, "base64url").toString("utf8");
-  return JSON.parse(decoded) as { exp: number; iat: number };
+  return JSON.parse(decoded) as {
+    exp: number;
+    iat: number;
+    jti: string;
+    githubCredential: string;
+  };
 }
