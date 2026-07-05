@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -679,6 +680,136 @@ func TestDownloadArtifactURLStopsStreamingAboveDeclaredSize(t *testing.T) {
 	}
 	if info.Size() > 4 {
 		t.Fatalf("artifact output grew past declared size: %d", info.Size())
+	}
+}
+
+func TestArtifactHTTPFlowsRejectCrossOriginRedirects(t *testing.T) {
+	var targetRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		targetRequests.Add(1)
+	}))
+	defer target.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/collect", http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	dir := t.TempDir()
+	uploadPath := filepath.Join(dir, "upload.txt")
+	mustWriteFile(t, uploadPath, "private artifact")
+	signedURL := redirect.URL + "/artifact?X-Amz-Signature=secret-signature"
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "manifest",
+			run: func() error {
+				_, _, err := readArtifactManifestRef(context.Background(), signedURL)
+				return err
+			},
+		},
+		{
+			name: "download",
+			run: func() error {
+				_, _, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
+					Name: "artifact.txt",
+					URL:  signedURL,
+					Size: 64,
+				}, filepath.Join(dir, "download.txt"))
+				return err
+			},
+		},
+		{
+			name: "upload",
+			run: func() error {
+				return uploadArtifactGrant(context.Background(), uploadPath, CoordinatorArtifactUploadGrant{
+					Name: "artifact.txt",
+					Upload: struct {
+						Method    string            `json:"method"`
+						URL       string            `json:"url"`
+						Headers   map[string]string `json:"headers"`
+						ExpiresAt string            `json:"expiresAt"`
+					}{Method: http.MethodPut, URL: signedURL},
+				})
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.run()
+			if err == nil || !strings.Contains(err.Error(), errArtifactCrossOriginRedirect.Error()) {
+				t.Fatalf("error=%v, want cross-origin redirect rejection", err)
+			}
+			if strings.Contains(err.Error(), "secret-signature") {
+				t.Fatalf("error leaked signed URL: %v", err)
+			}
+		})
+	}
+	if got := targetRequests.Load(); got != 0 {
+		t.Fatalf("cross-origin target received %d requests", got)
+	}
+}
+
+func TestArtifactHTTPFlowsAllowSameOriginRedirects(t *testing.T) {
+	manifest := `{"schemaVersion":1,"generatedAt":"2026-07-05T00:00:00Z","storage":{"backend":"broker"},"files":[]}`
+	payload := "private artifact"
+	var uploadedMethod, uploadedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest-start":
+			http.Redirect(w, r, "/manifest", http.StatusFound)
+		case "/manifest":
+			w.Header().Set("content-type", "application/json")
+			_, _ = io.WriteString(w, manifest)
+		case "/download-start":
+			http.Redirect(w, r, "/download", http.StatusFound)
+		case "/download":
+			_, _ = io.WriteString(w, payload)
+		case "/upload-start":
+			http.Redirect(w, r, "/upload", http.StatusTemporaryRedirect)
+		case "/upload":
+			uploadedMethod = r.Method
+			body, _ := io.ReadAll(r.Body)
+			uploadedBody = string(body)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	listed, _, err := readArtifactManifestRef(context.Background(), server.URL+"/manifest-start")
+	if err != nil || listed.SchemaVersion != 1 {
+		t.Fatalf("manifest=%#v err=%v", listed, err)
+	}
+	dir := t.TempDir()
+	_, size, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
+		Name: "artifact.txt",
+		URL:  server.URL + "/download-start",
+		Size: int64(len(payload)),
+	}, filepath.Join(dir, "download.txt"))
+	if err != nil || size != int64(len(payload)) {
+		t.Fatalf("download size=%d err=%v", size, err)
+	}
+	uploadPath := filepath.Join(dir, "upload.txt")
+	mustWriteFile(t, uploadPath, payload)
+	err = uploadArtifactGrant(context.Background(), uploadPath, CoordinatorArtifactUploadGrant{
+		Name: "artifact.txt",
+		Upload: struct {
+			Method    string            `json:"method"`
+			URL       string            `json:"url"`
+			Headers   map[string]string `json:"headers"`
+			ExpiresAt string            `json:"expiresAt"`
+		}{Method: http.MethodPut, URL: server.URL + "/upload-start"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploadedMethod != http.MethodPut || uploadedBody != payload {
+		t.Fatalf("redirected upload method=%q body=%q", uploadedMethod, uploadedBody)
 	}
 }
 

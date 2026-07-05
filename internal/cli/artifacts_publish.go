@@ -311,11 +311,19 @@ func uploadArtifactGrant(ctx context.Context, path string, grant CoordinatorArti
 		}
 		contentLength = expected
 	}
-	req, err := http.NewRequestWithContext(ctx, method, grant.Upload.URL, file)
+	// Keep redirect replays bound to the already-open file descriptor so a path
+	// replacement cannot change the bytes after the broker signs their length.
+	requestBody := func() io.ReadCloser {
+		return io.NopCloser(io.NewSectionReader(file, 0, contentLength))
+	}
+	req, err := http.NewRequestWithContext(ctx, method, grant.Upload.URL, requestBody())
 	if err != nil {
 		return exit(2, "create artifact upload request for %s: %v", grant.Name, err)
 	}
 	req.ContentLength = contentLength
+	req.GetBody = func() (io.ReadCloser, error) {
+		return requestBody(), nil
+	}
 	for key, value := range grant.Upload.Headers {
 		if strings.EqualFold(strings.TrimSpace(key), "content-length") {
 			continue
@@ -324,9 +332,9 @@ func uploadArtifactGrant(ctx context.Context, path string, grant CoordinatorArti
 			req.Header.Set(key, value)
 		}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := artifactHTTPClient(req.URL).Do(req)
 	if err != nil {
-		return exit(2, "upload artifact %s: %v", grant.Name, err)
+		return exit(2, "upload artifact %s: %v", grant.Name, artifactRequestError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

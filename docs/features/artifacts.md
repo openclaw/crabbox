@@ -167,7 +167,9 @@ crabbox artifacts pull https://artifacts.example.com/runs/abc/artifact-manifest.
 ```
 
 `artifacts pull` verifies SHA256 and size before reporting success and refuses
-path-escaping or symlinked entries. Use `--skip-manifest` (alias `--no-manifest`)
+path-escaping or symlinked entries. Remote manifest fetches, artifact downloads,
+and brokered uploads follow redirects only when the scheme, hostname, and
+effective port remain unchanged. Use `--skip-manifest` (alias `--no-manifest`)
 only for legacy Markdown-only output.
 
 ## Brokered publishing and the broker secret model

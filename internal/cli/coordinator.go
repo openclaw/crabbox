@@ -1764,47 +1764,13 @@ func (c *CoordinatorClient) doHTTP(ctx context.Context, method, path string, dat
 }
 
 func (c *CoordinatorClient) secureHTTPClient() *http.Client {
-	source := c.Client
-	if source == nil {
-		source = http.DefaultClient
-	}
-	client := *source
 	trusted, _ := url.Parse(c.BaseURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameCoordinatorOrigin(trusted, req.URL) {
+	return redirectCheckedHTTPClient(c.Client, func(req *http.Request) error {
+		if !sameHTTPOrigin(trusted, req.URL) {
 			return fmt.Errorf("coordinator refused cross-origin redirect to %s", req.URL.Redacted())
 		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
 		return nil
-	}
-	return &client
-}
-
-func sameCoordinatorOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveCoordinatorPort(a) == effectiveCoordinatorPort(b)
-}
-
-func effectiveCoordinatorPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+	})
 }
 
 func (c *CoordinatorClient) addRequestHeaders(ctx context.Context, headers http.Header) error {
