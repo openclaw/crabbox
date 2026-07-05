@@ -10,6 +10,16 @@ func TestRedactDiagnosticSecretsCoversCredentialEncodings(t *testing.T) {
 	value := strings.Join([]string{
 		"exact=" + exact,
 		"Authorization: Bearer header-token",
+		"Authorization: Bearer: colon-header-token",
+		"Authorization: Bearer\n folded-header-token",
+		"Authorization: Bearer:\r\n folded-colon-header-token",
+		"Authorization: Bearer :\r\n spaced-folded-colon-header-token",
+		"Standalone Bearer   spaced-bearer-token",
+		"Standalone Bearer: colon-bearer-token",
+		"Standalone Bearer\n folded-bearer-token",
+		"Standalone Bearer:\r\n folded-colon-bearer-token",
+		"Standalone Bearer :\r\n spaced-folded-colon-bearer-token",
+		"Standalone Bearer [redacted]",
 		"Proxy-Authorization=Basic proxy-value",
 		`{"clientSecret":"json-secret","privateKey":"json-key","message":"quota exceeded"}`,
 		"https://alice:password@example.test/path?access_token=query-token&x-amz-signature=signed-value&x-goog-credential=gcs-credential&x-goog-signature=gcs-signature&region=eu",
@@ -19,14 +29,14 @@ func TestRedactDiagnosticSecretsCoversCredentialEncodings(t *testing.T) {
 
 	got := RedactDiagnosticSecrets(value, exact)
 	for _, leaked := range []string{
-		exact, "header-token", "proxy-value", "json-secret", "json-key", "alice", "password",
+		exact, "header-token", "colon-header-token", "folded-header-token", "folded-colon-header-token", "spaced-folded-colon-header-token", "spaced-bearer-token", "colon-bearer-token", "folded-bearer-token", "folded-colon-bearer-token", "spaced-folded-colon-bearer-token", "proxy-value", "json-secret", "json-key", "alice", "password",
 		"query-token", "signed-value", "gcs-credential", "gcs-signature", "single-userinfo-token", "private-material",
 	} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("diagnostic redaction leaked %q:\n%s", leaked, got)
 		}
 	}
-	for _, preserved := range []string{"quota exceeded", "example.test/path", "region=eu"} {
+	for _, preserved := range []string{"Standalone Bearer [redacted]", "quota exceeded", "example.test/path", "region=eu"} {
 		if !strings.Contains(got, preserved) {
 			t.Fatalf("diagnostic redaction removed %q:\n%s", preserved, got)
 		}
