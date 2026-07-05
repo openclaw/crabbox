@@ -482,6 +482,10 @@ func validateAWSCleanupLiveServer(expected, live Server) error {
 	if liveLeaseID := strings.TrimSpace(live.Labels["lease"]); liveLeaseID != expectedLeaseID {
 		return fmt.Errorf("live instance lease %q does not match cleanup candidate lease %q", liveLeaseID, expectedLeaseID)
 	}
+	expectedProviderKey := strings.TrimSpace(core.ServerProviderKey(expected))
+	if liveProviderKey := strings.TrimSpace(core.ServerProviderKey(live)); liveProviderKey != expectedProviderKey {
+		return fmt.Errorf("live instance provider key %q does not match cleanup candidate provider key %q", liveProviderKey, expectedProviderKey)
+	}
 	return nil
 }
 
