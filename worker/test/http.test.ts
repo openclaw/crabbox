@@ -92,6 +92,41 @@ describe("coordinator auth", () => {
     }
   });
 
+  it("treats malformed portal cookies as absent across request types", async () => {
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_PUBLIC_URL: "https://broker.example.test",
+    } as Env;
+    const cookie = "crabbox_session=%ZZ";
+
+    const portalGet = await prepareCoordinatorRequest(
+      new Request("https://broker.example.test/portal?provider=aws", { headers: { cookie } }),
+      env,
+    );
+    expect(portalGet).toMatchObject({ authenticated: false, response: { status: 302 } });
+    if (!("response" in portalGet)) throw new Error("malformed portal cookie authenticated");
+    expect(portalGet.response.headers.get("location")).toBe(
+      "/portal/login?returnTo=%2Fportal%3Fprovider%3Daws",
+    );
+
+    const unauthorized = await Promise.all(
+      [
+        new Request("https://broker.example.test/portal/leases/blue-lobster/share", {
+          method: "POST",
+          headers: { cookie, origin: "https://attacker.example" },
+        }),
+        new Request("https://broker.example.test/v1/pool", { headers: { cookie } }),
+      ].map((request) => prepareCoordinatorRequest(request, env)),
+    );
+    await Promise.all(
+      unauthorized.map(async (prepared) => {
+        expect(prepared).toMatchObject({ authenticated: false, response: { status: 401 } });
+        if (!("response" in prepared)) throw new Error("malformed portal cookie authenticated");
+        await expect(prepared.response.json()).resolves.toEqual({ error: "unauthorized" });
+      }),
+    );
+  });
+
   it("routes only the exact per-lease Code origin without portal-cookie authority", async () => {
     const env = {
       CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",

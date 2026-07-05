@@ -40,6 +40,7 @@ import {
   type LeaseConfig,
   type LeaseConfigDefaults,
 } from "./config";
+import { cookieValue } from "./cookies";
 import {
   CloudflareCoordinatorRuntime,
   bufferCoordinatorRequestBody,
@@ -13825,20 +13826,6 @@ function isolatedCodeRequestOriginAllowed(request: Request): boolean {
     (method === "GET" && request.headers.get("upgrade")?.toLowerCase() !== "websocket") ||
     method === "HEAD"
   );
-}
-
-function cookieValue(header: string, name: string): string {
-  for (const part of header.split(";")) {
-    const [key, ...value] = part.trim().split("=");
-    if (key === name) {
-      try {
-        return decodeURIComponent(value.join("="));
-      } catch {
-        return "";
-      }
-    }
-  }
-  return "";
 }
 
 function codeViewerSessionCookie(session: CodeViewerSessionRecord, maxAgeSeconds: number): string {

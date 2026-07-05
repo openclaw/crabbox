@@ -7,6 +7,7 @@ import {
   type AuthRequestContext,
 } from "./auth";
 import { codeProxyRequestBodyBytes, isIsolatedCodeRequest } from "./code-origin";
+import { cookieValue } from "./cookies";
 import { bearerToken, json, pathParts } from "./http";
 import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
 import { timingSafeEqual } from "./timing-safe";
@@ -239,14 +240,4 @@ function requestWithPortalCookie(request: Request): Request {
   const headers = new Headers(request.headers);
   headers.set("authorization", `Bearer ${token}`);
   return new Request(request, { headers });
-}
-
-function cookieValue(header: string, name: string): string {
-  for (const part of header.split(";")) {
-    const [rawKey, ...rawValue] = part.trim().split("=");
-    if (rawKey === name) {
-      return decodeURIComponent(rawValue.join("="));
-    }
-  }
-  return "";
 }

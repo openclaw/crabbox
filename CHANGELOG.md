@@ -16,6 +16,7 @@
 - Redacted broker URL userinfo, queries, and fragments from `login`, `whoami`, and `doctor` text and JSON output. Thanks @coygeek.
 - Redacted Parallels top-level, template, and fleet-host SSH private keys from `config show --json` while preserving non-secret routing metadata. Thanks @coygeek.
 - Redacted Proxmox token IDs, secrets, and authorization values from provider HTTP error bodies before returning diagnostics. Thanks @coygeek.
+- Treated malformed percent-encoded portal cookies as absent instead of throwing before normal authentication handling. Thanks @coygeek.
 - Verified downloaded GitHub Actions runner archives against the exact upstream release-asset SHA-256 digest before replacing or extracting the installed runner. Thanks @coygeek.
 - Required W&B sandbox reuse, status, and stop to match an exact endpoint/entity/project/resource-bound local claim plus provider inventory ownership. Thanks @coygeek.
 - Required RunPod stop to use an exact pod ID/name-bound local claim, with conflict-safe explicit `--reclaim` adoption for unclaimed or legacy pods. Thanks @coygeek.
