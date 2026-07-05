@@ -479,6 +479,34 @@ func TestAWSCleanupRevalidatesLiveOwnershipBeforeDelete(t *testing.T) {
 	}
 }
 
+func TestAWSCleanupRejectsChangedLiveProviderKey(t *testing.T) {
+	snapshot := awsTestServer("i-stale", "cbx_111111111111", "stale", "us-east-1")
+	snapshot.Labels["provider_key"] = "crabbox-cbx-111111111111"
+	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	live := snapshot
+	live.Labels = maps.Clone(snapshot.Labels)
+	live.Labels["provider_key"] = "crabbox-cbx-222222222222"
+	fake := &fakeAWSClient{
+		servers: []Server{snapshot},
+		get:     map[string]Server{snapshot.CloudID: live},
+	}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	var stderr strings.Builder
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-east-1"}, Runtime{Stderr: &stderr}).(*awsLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatalf("cleanup trusted changed provider key: instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+	if !strings.Contains(stderr.String(), "live instance provider key") {
+		t.Fatalf("stderr=%q, want changed-provider-key skip", stderr.String())
+	}
+}
+
 func TestAWSCleanupRevalidatesLiveEligibilityBeforeDelete(t *testing.T) {
 	snapshot := awsTestServer("i-renewed", "cbx_111111111111", "renewed", "us-east-1")
 	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
