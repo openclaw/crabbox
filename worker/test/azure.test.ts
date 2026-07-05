@@ -143,6 +143,17 @@ describe("azure provider", () => {
     ).toBe("Canonical:custom-linux:image:latest");
   });
 
+  it("defaults Azure Linux leases to the stable 24.04 LTS image family", () => {
+    const client = new AzureClient(baseEnv);
+    const imageForConfig = (
+      client as unknown as { imageForConfig(config: LeaseConfig): string }
+    ).imageForConfig.bind(client);
+
+    expect(imageForConfig(testLeaseConfig({ azureImage: "" }))).toBe(
+      "Canonical:ubuntu-24_04-lts:server:latest",
+    );
+  });
+
   it("orders Azure region candidates from defaults, env, and capacity regions", () => {
     expect(
       azureRegionCandidates(

@@ -28,10 +28,12 @@ const MIN_LRO_POLL_INTERVAL_MS = 15_000;
 const DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS = 60_000;
 const DEFAULT_AZURE_VM_CREATE_TIMEOUT_MS = 180_000;
 const DEFAULT_AZURE_SPOT_FALLBACK_MS = 120_000;
-const DEFAULT_AZURE_LINUX_IMAGE = "Canonical:ubuntu-26_04-lts:server:latest";
-const DEFAULT_AZURE_LINUX_ARM64_IMAGE = "Canonical:ubuntu-26_04-lts:server-arm64:latest";
 const AZURE_NOBLE_LINUX_IMAGE = "Canonical:ubuntu-24_04-lts:server:latest";
 const AZURE_NOBLE_LINUX_ARM64_IMAGE = "Canonical:ubuntu-24_04-lts:server-arm64:latest";
+const DEFAULT_AZURE_LINUX_IMAGE = AZURE_NOBLE_LINUX_IMAGE;
+const DEFAULT_AZURE_LINUX_ARM64_IMAGE = AZURE_NOBLE_LINUX_ARM64_IMAGE;
+const AZURE_ORACULAR_LINUX_IMAGE = "Canonical:ubuntu-26_04-lts:server:latest";
+const AZURE_ORACULAR_LINUX_ARM64_IMAGE = "Canonical:ubuntu-26_04-lts:server-arm64:latest";
 const LEGACY_AZURE_JAMMY_IMAGE = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest";
 const LEGACY_AZURE_NOBLE_GEN2_IMAGE =
   "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest";
@@ -1685,6 +1687,8 @@ function isAzureDefaultLinuxImage(image: string): boolean {
     image.trim() === DEFAULT_AZURE_LINUX_ARM64_IMAGE ||
     image.trim() === AZURE_NOBLE_LINUX_IMAGE ||
     image.trim() === AZURE_NOBLE_LINUX_ARM64_IMAGE ||
+    image.trim() === AZURE_ORACULAR_LINUX_IMAGE ||
+    image.trim() === AZURE_ORACULAR_LINUX_ARM64_IMAGE ||
     image.trim() === LEGACY_AZURE_JAMMY_IMAGE ||
     image.trim() === LEGACY_AZURE_NOBLE_GEN2_IMAGE
   );

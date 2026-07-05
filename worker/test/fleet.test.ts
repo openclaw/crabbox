@@ -8812,7 +8812,7 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it("deletes only coordinator-owned Azure orphan sweep candidates", async () => {
+  it("deletes coordinator-owned and stale tag-owned Azure orphan sweep candidates", async () => {
     const storage = new MemoryStorage();
     const deleted: string[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
@@ -8920,6 +8920,16 @@ describe("fleet lease identity and idle", () => {
               }),
               testMachine({
                 provider: "azure",
+                cloudID: "vm-missing-lease-label",
+                region: "westus2",
+                name: "vm-missing-lease-label",
+                labels: {
+                  crabbox: "true",
+                  created_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                provider: "azure",
                 cloudID: "vm-provisioning",
                 name: "vm-provisioning",
                 labels: {
@@ -8987,8 +8997,8 @@ describe("fleet lease identity and idle", () => {
       terminated: number;
       candidates: Array<Record<string, unknown>>;
     }>("azure-orphan-sweep:last");
-    expect(deleted).toEqual(["vm-orphan"]);
-    expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
+    expect(deleted).toEqual(["vm-orphan", "vm-tag-only"]);
+    expect(sweep).toMatchObject({ mode: "delete", terminated: 2 });
     expect(sweep?.candidates).toEqual([
       expect.objectContaining({
         cloudID: "vm-orphan",
@@ -9002,6 +9012,14 @@ describe("fleet lease identity and idle", () => {
       expect.objectContaining({
         cloudID: "vm-tag-only",
         region: "westus2",
+        leaseID: "cbx_missing",
+        ownership: "provider-tags-only",
+        action: "terminated",
+      }),
+      expect.objectContaining({
+        cloudID: "vm-missing-lease-label",
+        region: "westus2",
+        reason: "missing-lease-label",
         ownership: "provider-tags-only",
         action: "reported",
       }),

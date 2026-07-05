@@ -11070,7 +11070,9 @@ export class FleetCoordinator {
             now,
           );
           recordCloudOrphanSweepOwnership(candidate, ownershipLease);
-          if (config.deleteEnabled && ownershipLease) {
+          const deleteTagOwnedAzureOrphan =
+            config.deleteEnabled && azureTagOwnedOrphanSweepCandidateDeletable(candidate);
+          if (config.deleteEnabled && (ownershipLease || deleteTagOwnedAzureOrphan)) {
             try {
               // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
               await this.provider("azure", candidateRegion).deleteServer(
@@ -16011,6 +16013,14 @@ function recordCloudOrphanSweepOwnership(
   }
   candidate.ownership = "coordinator-lease";
   candidate.ownershipLeaseID = lease.id;
+}
+
+function azureTagOwnedOrphanSweepCandidateDeletable(candidate: CloudOrphanSweepCandidate): boolean {
+  return (
+    candidate.ownership === "provider-tags-only" &&
+    Boolean(candidate.leaseID) &&
+    (candidate.reason === "no-active-lease" || candidate.reason === "expired-provider-tag")
+  );
 }
 
 function leaseOwnsCloudResourceDuringSweep(lease: LeaseRecord, now: number): boolean {
