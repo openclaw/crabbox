@@ -238,7 +238,7 @@ func connectAdapterRelay(
 	}
 	defer ws.Close(websocket.StatusNormalClosure, "adapter relay stopped")
 	if status != nil {
-		fmt.Fprintf(status, "adapter relay connected id=%s coordinator=%s local_socket=%s\n", adapterID, coord.BaseURL, localSocket)
+		fmt.Fprintf(status, "adapter relay connected id=%s coordinator=%s local_socket=%s\n", adapterID, redactedConfigURL(coord.BaseURL), localSocket)
 	}
 	return relay.serve(ctx)
 }
