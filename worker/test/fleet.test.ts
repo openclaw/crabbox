@@ -14000,7 +14000,7 @@ describe("fleet lease identity and idle", () => {
     expect(lease.capacityHints?.[0]?.regionsTried).toEqual(["eu-west-1", "eu-west-2"]);
   });
 
-  it("scopes non-admin usage to the current owner", async () => {
+  it("scopes non-admin usage to the current owner and org", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
     const createdAt = new Date().toISOString();
@@ -14029,6 +14029,18 @@ describe("fleet lease identity and idle", () => {
         expiresAt,
       }),
     );
+    storage.seed(
+      "lease:cbx_000000000003",
+      testLease({
+        id: "cbx_000000000003",
+        owner: "friend@example.com",
+        org: "example-org",
+        estimatedHourlyUSD: 1,
+        maxEstimatedUSD: 1,
+        createdAt,
+        expiresAt,
+      }),
+    );
     const usage = await fleet.fetch(
       request("GET", `/v1/usage?scope=all&owner=peter@example.com&month=${createdAt.slice(0, 7)}`, {
         headers: {
@@ -14039,11 +14051,66 @@ describe("fleet lease identity and idle", () => {
     );
     expect(usage.status).toBe(200);
     const body = (await usage.json()) as {
-      usage: { scope: string; owner: string; leases: number };
+      usage: {
+        scope: string;
+        owner: string;
+        org: string;
+        leases: number;
+        byOrg: { key: string }[];
+      };
     };
     expect(body.usage.scope).toBe("user");
     expect(body.usage.owner).toBe("friend@example.com");
+    expect(body.usage.org).toBe("example-org");
     expect(body.usage.leases).toBe(1);
+    expect(body.usage.byOrg.map((group) => group.key)).toEqual(["example-org"]);
+  });
+
+  it("keeps admin user usage cross-org unless an org is explicit", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const createdAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    for (const [id, org] of [
+      ["cbx_000000000001", "org-a"],
+      ["cbx_000000000002", "org-b"],
+    ]) {
+      storage.seed(
+        `lease:${id}`,
+        testLease({
+          id,
+          owner: "alice@example.com",
+          org,
+          createdAt,
+          expiresAt,
+        }),
+      );
+    }
+    const headers = {
+      "x-crabbox-admin": "true",
+      "x-crabbox-owner": "admin@example.com",
+      "x-crabbox-org": "default-org",
+    };
+    const month = createdAt.slice(0, 7);
+
+    const allOrgs = await fleet.fetch(
+      request("GET", `/v1/usage?scope=user&owner=alice@example.com&month=${month}`, { headers }),
+    );
+    const allBody = (await allOrgs.json()) as {
+      usage: { leases: number; org?: string; byOrg: { key: string }[] };
+    };
+    expect(allBody.usage.leases).toBe(2);
+    expect(allBody.usage.org).toBeUndefined();
+    expect(allBody.usage.byOrg.map((group) => group.key)).toEqual(["org-a", "org-b"]);
+
+    const oneOrg = await fleet.fetch(
+      request("GET", `/v1/usage?scope=user&owner=alice@example.com&org=org-a&month=${month}`, {
+        headers,
+      }),
+    );
+    const oneBody = (await oneOrg.json()) as { usage: { leases: number; org?: string } };
+    expect(oneBody.usage.leases).toBe(1);
+    expect(oneBody.usage.org).toBe("org-a");
   });
 
   it("reports marketplace gateway status with credits disabled by default", async () => {
