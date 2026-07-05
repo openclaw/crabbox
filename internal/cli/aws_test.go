@@ -20,6 +20,26 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
+func TestValidateAWSCleanupKeyPair(t *testing.T) {
+	name := "crabbox-cbx-123456abcdef"
+	owned := types.KeyPairInfo{
+		KeyName: aws.String(name),
+		Tags: []types.Tag{
+			{Key: aws.String("crabbox"), Value: aws.String("true")},
+			{Key: aws.String("created_by"), Value: aws.String("crabbox")},
+		},
+	}
+	if err := validateAWSCleanupKeyPair(name, []types.KeyPairInfo{owned}); err != nil {
+		t.Fatalf("owned key rejected: %v", err)
+	}
+	unowned := owned
+	unowned.Tags = []types.Tag{{Key: aws.String("crabbox"), Value: aws.String("true")}}
+	err := validateAWSCleanupKeyPair(name, []types.KeyPairInfo{unowned})
+	if err == nil || !IsAWSCleanupKeyOwnershipError(err) {
+		t.Fatalf("unowned key error=%v", err)
+	}
+}
+
 func TestAWSEnsureSSHKeyAcceptsMatchingExistingFingerprint(t *testing.T) {
 	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 1))
 	fingerprints, err := awsImportedPublicKeyFingerprints(publicKey)

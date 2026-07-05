@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -355,6 +356,54 @@ func (c *AWSClient) DeleteSSHKey(ctx context.Context, name string) error {
 		return nil
 	}
 	return err
+}
+
+type awsCleanupKeyOwnershipError struct{ err error }
+
+func (e *awsCleanupKeyOwnershipError) Error() string { return e.err.Error() }
+func (e *awsCleanupKeyOwnershipError) Unwrap() error { return e.err }
+
+// IsAWSCleanupKeyOwnershipError reports a cleanup-time key ownership mismatch
+// that must skip the instance instead of deleting either resource.
+func IsAWSCleanupKeyOwnershipError(err error) bool {
+	var ownershipErr *awsCleanupKeyOwnershipError
+	return errors.As(err, &ownershipErr)
+}
+
+func NewAWSCleanupKeyOwnershipError(message string) error {
+	return &awsCleanupKeyOwnershipError{err: errors.New(message)}
+}
+
+func validateAWSCleanupKeyPair(name string, keyPairs []types.KeyPairInfo) error {
+	if len(keyPairs) != 1 || strings.TrimSpace(aws.ToString(keyPairs[0].KeyName)) != strings.TrimSpace(name) {
+		return &awsCleanupKeyOwnershipError{err: fmt.Errorf("AWS cleanup key %q did not resolve to one exact key pair", name)}
+	}
+	tags := make(map[string]string, len(keyPairs[0].Tags))
+	for _, tag := range keyPairs[0].Tags {
+		tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+	}
+	if tags["crabbox"] != "true" || tags["created_by"] != "crabbox" {
+		return &awsCleanupKeyOwnershipError{err: fmt.Errorf("AWS cleanup key %q lacks canonical Crabbox ownership tags", name)}
+	}
+	return nil
+}
+
+func (c *AWSClient) ValidateCleanupSSHKey(ctx context.Context, name string) error {
+	out, err := c.ec2.DescribeKeyPairs(ctx, &ec2.DescribeKeyPairsInput{KeyNames: []string{name}})
+	if err != nil {
+		if strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
+			return nil
+		}
+		return err
+	}
+	return validateAWSCleanupKeyPair(name, out.KeyPairs)
+}
+
+func (c *AWSClient) DeleteCleanupSSHKey(ctx context.Context, name string) error {
+	if err := c.ValidateCleanupSSHKey(ctx, name); err != nil {
+		return err
+	}
+	return c.DeleteSSHKey(ctx, name)
 }
 
 func (c *AWSClient) CreateServerWithFallback(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
