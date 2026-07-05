@@ -451,14 +451,6 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 	return claim, nil
 }
 
-func deleteClaimedAWSServer(ctx context.Context, cfg Config, server Server, claim core.LeaseClaim) error {
-	client, err := newAWSClient(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	return deleteClaimedAWSServerWithClient(ctx, client, server, claim)
-}
-
 func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, server Server, claim core.LeaseClaim) error {
 	var cleanupErr error
 	err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
