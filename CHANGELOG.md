@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Required a canonical public origin for GitHub OAuth and bound callbacks to the initiating origin before exchanging codes or issuing sessions. Thanks @coygeek.
 - Redacted configured credentials, authorization headers, signed URLs, URL userinfo, and secret-bearing JSON fields before coordinator provider diagnostics are stored or returned. Thanks @coygeek.
 - Redacted broker URL userinfo, queries, and fragments from `login`, `whoami`, and `doctor` text and JSON output. Thanks @coygeek.
 - Redacted Parallels top-level, template, and fleet-host SSH private keys from `config show --json` while preserving non-secret routing metadata. Thanks @coygeek.

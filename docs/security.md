@@ -220,6 +220,9 @@ polling, or config write. Operators who are deliberately migrating between
 same-deployment broker aliases can allow specific callback origins with trusted
 user config `broker.loginRedirectOrigins` or
 `CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS`.
+The coordinator separately requires `CRABBOX_PUBLIC_URL` before GitHub OAuth can
+start, stores that exact callback with each pending login, and rejects callbacks
+from any other origin before exchanging the authorization code.
 
 Provider clients apply the same destination principle where custom endpoints
 are supported. Cloudflare runner, Morph, Railway, and RunPod requests reject

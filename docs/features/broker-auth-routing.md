@@ -141,7 +141,8 @@ https://broker.example.com/v1/auth/github/callback
 The OAuth app requests the scopes `read:user user:email read:org`. A self-hosted coordinator
 needs its own OAuth app: the callback URL must exactly match the public origin, and the
 `CRABBOX_PUBLIC_URL` must use that same origin (it is used to build the callback and
-to canonicalize portal redirects).
+to canonicalize portal redirects). GitHub OAuth refuses to start without this setting,
+and callbacks from another origin are rejected before code exchange or session issuance.
 
 The CLI treats that callback origin as a credential destination. If a login response
 from one broker points at a different callback origin, `crabbox login` fails before
