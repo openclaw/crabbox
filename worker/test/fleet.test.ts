@@ -57,8 +57,10 @@ afterEach(() => {
 class MemoryStorage {
   private readonly values = new Map<string, unknown>();
   private alarmTime: number | undefined;
+  beforeGet?: (key: string) => Promise<void>;
 
   async get<T>(key: string): Promise<T | undefined> {
+    await this.beforeGet?.(key);
     return this.values.get(key) as T | undefined;
   }
 
@@ -86,11 +88,24 @@ class MemoryStorage {
     return await callback(this);
   }
 
-  async list<T>({ prefix = "" }: { prefix?: string } = {}): Promise<Map<string, T>> {
+  async list<T>({
+    prefix = "",
+    limit,
+    startAfter,
+  }: {
+    prefix?: string;
+    limit?: number;
+    startAfter?: string;
+  } = {}): Promise<Map<string, T>> {
     const matches = new Map<string, T>();
-    for (const [key, value] of this.values) {
-      if (key.startsWith(prefix)) {
+    for (const [key, value] of [...this.values].toSorted(([left], [right]) =>
+      left.localeCompare(right),
+    )) {
+      if (key.startsWith(prefix) && (!startAfter || key > startAfter)) {
         matches.set(key, value as T);
+        if (limit !== undefined && matches.size >= limit) {
+          break;
+        }
       }
     }
     return matches;
@@ -115,6 +130,21 @@ class HookedMemoryStorage extends MemoryStorage {
   override async put<T>(key: string, value: T): Promise<void> {
     await this.beforePut?.(key, value);
     await super.put(key, value);
+  }
+}
+
+class ObservedMemoryStorage extends MemoryStorage {
+  readonly listOptions: Array<{ prefix?: string; limit?: number; startAfter?: string }> = [];
+
+  override async list<T>(
+    options: { prefix?: string; limit?: number; startAfter?: string } = {},
+  ): Promise<Map<string, T>> {
+    this.listOptions.push({ ...options });
+    return await super.list<T>(options);
+  }
+
+  resetListOptions(): void {
+    this.listOptions.length = 0;
   }
 }
 
@@ -382,7 +412,7 @@ describe("runtime adapter relay", () => {
       expect(socket.closeCode).toBeUndefined();
     }
     expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
-    expect(list).toHaveBeenCalledTimes(1);
+    expect(list).not.toHaveBeenCalled();
     const relay = fleet as unknown as {
       codeAgents: Map<string, WebSocket>;
       runtimeAdapterAgents: Map<string, WebSocket>;
@@ -891,7 +921,14 @@ describe("runtime adapter relay", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     storage.seed(`lease:${lease.id}`, lease);
-    const list = vi.spyOn(storage, "list").mockRejectedValueOnce(new Error("storage unavailable"));
+    const get = vi.spyOn(storage, "get");
+    let unavailableOnce = true;
+    storage.beforeGet = async (key) => {
+      if (key === `lease:${lease.id}` && unavailableOnce) {
+        unavailableOnce = false;
+        throw new Error("storage unavailable");
+      }
+    };
     const socket = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id });
     const fleet = new FleetDurableObject(
       {
@@ -906,7 +943,7 @@ describe("runtime adapter relay", () => {
     expect(unavailable.headers.get("retry-after")).toBe("1");
     expect(socket.closeCode).toBeUndefined();
     expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
-    expect(list).toHaveBeenCalledTimes(2);
+    expect(get.mock.calls.filter(([key]) => key === `lease:${lease.id}`)).toHaveLength(2);
     expect(socket.closeCode).toBeUndefined();
   });
 
@@ -8830,6 +8867,7 @@ describe("fleet lease identity and idle", () => {
 
   it("deletes only coordinator-owned Azure orphan sweep candidates", async () => {
     const storage = new MemoryStorage();
+    const list = vi.spyOn(storage, "list");
     const deleted: string[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
     storage.seed(
@@ -8890,6 +8928,16 @@ describe("fleet lease identity and idle", () => {
         releaseDeletesServer: false,
       }),
     );
+    for (let index = 0; index < 129; index += 1) {
+      storage.seed(
+        `lease:cbx_unrelated_${String(index).padStart(4, "0")}`,
+        testLease({
+          id: `cbx_unrelated_${String(index).padStart(4, "0")}`,
+          provider: "aws",
+          state: "expired",
+        }),
+      );
+    }
     const fleet = testFleet(
       storage,
       {
@@ -9004,6 +9052,9 @@ describe("fleet lease identity and idle", () => {
       candidates: Array<Record<string, unknown>>;
     }>("azure-orphan-sweep:last");
     expect(deleted).toEqual(["vm-orphan"]);
+    expect(
+      list.mock.calls.filter(([options]) => options?.prefix === "lease:" && options.limit === 128),
+    ).toHaveLength(2);
     expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
     expect(sweep?.candidates).toEqual([
       expect.objectContaining({
@@ -19316,6 +19367,136 @@ describe("fleet lease identity and idle", () => {
 });
 
 describe("fleet run history", () => {
+  it("pages run history and lease detail scans while retaining only the newest matches", async () => {
+    const storage = new ObservedMemoryStorage();
+    const fleet = testFleet(storage);
+    const ownerHeaders = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const targetLeaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${targetLeaseID}`,
+      testLease({ id: targetLeaseID, owner: "alice@example.com", org: "example-org" }),
+    );
+    for (let index = 0; index < 300; index += 1) {
+      const id = `run_${index.toString().padStart(12, "0")}`;
+      const leaseID = index % 3 === 0 ? targetLeaseID : "cbx_000000000002";
+      storage.seed(
+        `run:${id}`,
+        testRun({
+          id,
+          leaseID,
+          leaseIDs: [leaseID],
+          leaseOwners: [{ owner: "alice@example.com", org: "example-org" }],
+          owner: "alice@example.com",
+          org: "example-org",
+          state: "succeeded",
+          startedAt: new Date(Date.UTC(2026, 4, 1, 0, 0, index)).toISOString(),
+        }),
+      );
+    }
+
+    storage.resetListOptions();
+    const history = await fleet.fetch(
+      request("GET", "/v1/runs?limit=5", { headers: ownerHeaders }),
+    );
+    const historyBody = (await history.json()) as { runs: RunRecord[] };
+    expect(historyBody.runs.map((run) => run.id)).toEqual([
+      "run_000000000299",
+      "run_000000000298",
+      "run_000000000297",
+      "run_000000000296",
+      "run_000000000295",
+    ]);
+    expect(storage.listOptions).toEqual([
+      { prefix: "run:", limit: 128 },
+      { prefix: "run:", limit: 128, startAfter: "run:run_000000000127" },
+      { prefix: "run:", limit: 128, startAfter: "run:run_000000000255" },
+    ]);
+
+    storage.resetListOptions();
+    const portal = await fleet.fetch(
+      request("GET", `/portal/leases/${targetLeaseID}`, { headers: ownerHeaders }),
+    );
+    expect(portal.status).toBe(200);
+    const portalHTML = await portal.text();
+    expect(portalHTML).toContain("run_000000000297");
+    expect(portalHTML).toContain("run_000000000264");
+    expect(portalHTML).not.toContain("run_000000000261");
+    expect(portalHTML).not.toContain("run_000000000299");
+    expect(storage.listOptions).toEqual([
+      { prefix: "run:", limit: 128 },
+      { prefix: "run:", limit: 128, startAfter: "run:run_000000000127" },
+      { prefix: "run:", limit: 128, startAfter: "run:run_000000000255" },
+    ]);
+  });
+
+  it("prunes expired terminal runs and artifacts in resumable batches", async () => {
+    const storage = new ObservedMemoryStorage();
+    const fleet = testFleet(storage);
+    const expiredAt = new Date(Date.now() - 31 * 24 * 60 * 60_000).toISOString();
+    const recentAt = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
+    for (let index = 0; index < 20; index += 1) {
+      const id = `run_${index.toString().padStart(12, "0")}`;
+      storage.seed(
+        `run:${id}`,
+        testRun({
+          id,
+          state: "succeeded",
+          startedAt: expiredAt,
+          lastEventAt: expiredAt,
+          endedAt: expiredAt,
+        }),
+      );
+    }
+    storage.seed(
+      "run:run_recent",
+      testRun({
+        id: "run_recent",
+        state: "succeeded",
+        startedAt: recentAt,
+        endedAt: recentAt,
+      }),
+    );
+    storage.seed(
+      "run:run_still_running",
+      testRun({ id: "run_still_running", state: "running", startedAt: expiredAt }),
+    );
+    storage.seed("runlog:run_000000000000", "legacy log");
+    storage.seed("runlog:run_000000000000:chunk:000000", "chunk");
+    storage.seed("runevent:run_000000000000:000000000001", { seq: 1 });
+
+    storage.resetListOptions();
+    await fleet.alarm();
+
+    for (let index = 0; index < 16; index += 1) {
+      expect(storage.value(`run:run_${index.toString().padStart(12, "0")}`)).toBeUndefined();
+    }
+    expect(storage.value("run:run_000000000016")).toBeDefined();
+    expect(storage.value("run:run_recent")).toBeDefined();
+    expect(storage.value("run:run_still_running")).toBeDefined();
+    expect(storage.value("runlog:run_000000000000")).toBeUndefined();
+    expect(storage.value("runlog:run_000000000000:chunk:000000")).toBeUndefined();
+    expect(storage.value("runevent:run_000000000000:000000000001")).toBeUndefined();
+    expect(storage.value("maintenance:run-prune-cursor")).toBe("run:run_000000000015");
+    expect(storage.alarm()).toBeGreaterThan(Date.now());
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1500);
+    expect(storage.listOptions.findLast((options) => options.prefix === "run:")).toEqual({
+      prefix: "run:",
+      limit: 128,
+    });
+
+    await fleet.alarm();
+
+    for (let index = 0; index < 20; index += 1) {
+      expect(storage.value(`run:run_${index.toString().padStart(12, "0")}`)).toBeUndefined();
+    }
+    expect(storage.value("maintenance:run-prune-cursor")).toBeUndefined();
+    expect(storage.value("run:run_recent")).toBeDefined();
+    expect(storage.value("run:run_still_running")).toBeDefined();
+  });
+
   it("creates early run sessions and appends durable events", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
