@@ -228,6 +228,11 @@ func (b *azureLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 		if err != nil {
 			if isAzureCleanupNotFound(err) {
 				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live VM no longer exists\n", server.DisplayID(), server.Name)
+				leaseID := strings.TrimSpace(server.Labels["lease"])
+				if leaseID != "" {
+					removeLeaseClaim(leaseID)
+					core.RemoveStoredTestboxKey(leaseID)
+				}
 				// Do not delete deterministically named companion resources without a live VM proving this lease still owns them.
 				continue
 			}

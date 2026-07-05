@@ -400,10 +400,16 @@ func TestAzureCleanupRevalidatesLiveEligibilityBeforeDelete(t *testing.T) {
 }
 
 func TestAzureCleanupContinuesWhenLiveCandidateAlreadyGone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	missing := azureTestServer("missing", "cbx_111111111111", "missing")
 	remaining := azureTestServer("remaining", "cbx_222222222222", "remaining")
 	for _, server := range []*Server{&missing, &remaining} {
 		server.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	}
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(Config{}, missing.Labels["lease"])
+	if err != nil {
+		t.Fatal(err)
 	}
 	fake := &fakeAzureClient{
 		servers: []Server{missing, remaining},
@@ -424,6 +430,9 @@ func TestAzureCleanupContinuesWhenLiveCandidateAlreadyGone(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "reason=live VM no longer exists") {
 		t.Fatalf("stderr=%q, want already-gone skip", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Dir(keyPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored lease key directory still exists: %v", err)
 	}
 }
 
