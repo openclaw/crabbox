@@ -22507,37 +22507,50 @@ function decodeUserTokenPayload(token: string): { exp: number; iat: number } {
   return JSON.parse(decoded) as { exp: number; iat: number };
 }
 
+function retentionRunRecord(
+  id: string,
+  startedAt: string,
+  state: RunRecord["state"],
+  endedAt?: string,
+): RunRecord {
+  return {
+    id,
+    leaseID: "lease-x",
+    owner: "owner",
+    org: "default-org",
+    provider: "aws",
+    class: "standard",
+    serverType: "t",
+    command: [],
+    state,
+    logBytes: 0,
+    logTruncated: false,
+    startedAt,
+    ...(endedAt ? { endedAt } : {}),
+  };
+}
+
 describe("fleet run retention", () => {
   it("alarm prunes expired terminal runs, keeps recent and in-flight runs", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString();
     const oneMinuteAgo = new Date(Date.now() - 60_000).toISOString();
-    const run = (id: string, startedAt: string, state: RunRecord["state"], endedAt?: string) =>
-      ({
-        id,
-        leaseID: "lease-x",
-        owner: "owner",
-        org: "default-org",
-        provider: "aws",
-        class: "standard",
-        serverType: "t",
-        command: [],
-        state,
-        logBytes: 0,
-        logTruncated: false,
-        startedAt,
-        ...(endedAt ? { endedAt } : {}),
-      }) satisfies RunRecord;
 
-    storage.seed("run:run_old_done", run("run_old_done", eightDaysAgo, "succeeded", eightDaysAgo));
+    storage.seed(
+      "run:run_old_done",
+      retentionRunRecord("run_old_done", eightDaysAgo, "succeeded", eightDaysAgo),
+    );
     storage.seed("runlog:run_old_done", "old log");
     storage.seed("runlog:run_old_done:chunk:000000", "chunk");
     storage.seed("runevent:run_old_done:000000000000", { seq: 0 });
-    storage.seed("run:run_old_running", run("run_old_running", eightDaysAgo, "running"));
+    storage.seed(
+      "run:run_old_running",
+      retentionRunRecord("run_old_running", eightDaysAgo, "running"),
+    );
     storage.seed(
       "run:run_recent_done",
-      run("run_recent_done", oneMinuteAgo, "succeeded", oneMinuteAgo),
+      retentionRunRecord("run_recent_done", oneMinuteAgo, "succeeded", oneMinuteAgo),
     );
 
     await fleet.alarm();
