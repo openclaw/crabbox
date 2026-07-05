@@ -474,7 +474,7 @@ func removeExactAWSClaim(claim core.LeaseClaim) error {
 }
 
 func deleteAWSCleanupServerWithClient(ctx context.Context, client awsClient, server Server) error {
-	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
+	if err := client.DeleteServer(ctx, server.CloudID); err != nil && !isAWSResolveNotFound(err) {
 		return err
 	}
 	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {

@@ -1857,7 +1857,7 @@ func (c *AzureClient) DeleteCleanupServer(ctx context.Context, expected Server, 
 		}
 		return &azureCleanupSkipError{err: err}
 	}
-	return c.deleteVMResourcesWith(ctx, name, resources)
+	return c.deleteAzureCleanupResourcesWithRetry(ctx, expected, resources, now)
 }
 
 func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshotName, sku string) (image NativeCheckpointImage, err error) {
@@ -1984,10 +1984,18 @@ func (c *AzureClient) DeleteOSDiskSnapshot(ctx context.Context, snapshotID strin
 }
 
 type azureVMDeleteResources struct {
+	// Cleanup retries keep Azure-generated identities so deterministic names
+	// cannot redirect a later delete to replacement resources.
+	vm            bool
+	vmID          string
 	nic           string
+	nicID         string
 	publicIP      string
+	publicIPID    string
 	disk          string
+	diskID        string
 	quarantineNSG string
+	quarantineID  string
 }
 
 func validateAzureCleanupVM(expected, live Server, now time.Time) error {
@@ -2049,9 +2057,28 @@ func requireAzureResourceID(kind, name, actual, expected string) error {
 	return nil
 }
 
+func requireAzureCleanupIdentity(kind, name, actual, expected string) error {
+	actual = strings.TrimSpace(actual)
+	expected = strings.TrimSpace(expected)
+	if actual == "" {
+		return fmt.Errorf("Azure cleanup %s %s has no immutable resource identity", kind, name)
+	}
+	if expected != "" && actual != expected {
+		return fmt.Errorf("Azure cleanup %s %s identity %q does not match validated identity %q", kind, name, actual, expected)
+	}
+	return nil
+}
+
 func (c *AzureClient) azureCleanupDeleteResources(ctx context.Context, vmName string, vm armcompute.VirtualMachine, labels map[string]string) (azureVMDeleteResources, error) {
-	var resources azureVMDeleteResources
-	if vm.Properties == nil || vm.Properties.NetworkProfile == nil || len(vm.Properties.NetworkProfile.NetworkInterfaces) != 1 ||
+	resources := azureVMDeleteResources{vm: true}
+	if vm.Properties == nil {
+		return resources, fmt.Errorf("live Azure VM %s has no properties", vmName)
+	}
+	resources.vmID = stringValue(vm.Properties.VMID)
+	if err := requireAzureCleanupIdentity("VM", vmName, resources.vmID, ""); err != nil {
+		return resources, err
+	}
+	if vm.Properties.NetworkProfile == nil || len(vm.Properties.NetworkProfile.NetworkInterfaces) != 1 ||
 		vm.Properties.NetworkProfile.NetworkInterfaces[0] == nil || vm.Properties.NetworkProfile.NetworkInterfaces[0].ID == nil {
 		return resources, fmt.Errorf("live Azure VM %s does not have exactly one identifiable network interface", vmName)
 	}
@@ -2071,6 +2098,13 @@ func (c *AzureClient) azureCleanupDeleteResources(ctx context.Context, vmName st
 		return resources, err
 	}
 	if err := validateAzureCleanupResourceTags("NIC", nicName, nic.Tags, labels); err != nil {
+		return resources, err
+	}
+	if nic.Properties == nil {
+		return resources, fmt.Errorf("Azure cleanup NIC %s has no properties", nicName)
+	}
+	resources.nicID = stringValue(nic.Properties.ResourceGUID)
+	if err := requireAzureCleanupIdentity("NIC", nicName, resources.nicID, ""); err != nil {
 		return resources, err
 	}
 	resources.nic = nicName
@@ -2112,6 +2146,13 @@ func (c *AzureClient) azureCleanupDeleteResources(ctx context.Context, vmName st
 	if err := validateAzureCleanupResourceTags("public IP", publicIPName, publicIP.Tags, labels); err != nil {
 		return resources, err
 	}
+	if publicIP.Properties == nil {
+		return resources, fmt.Errorf("Azure cleanup public IP %s has no properties", publicIPName)
+	}
+	resources.publicIPID = stringValue(publicIP.Properties.ResourceGUID)
+	if err := requireAzureCleanupIdentity("public IP", publicIPName, resources.publicIPID, ""); err != nil {
+		return resources, err
+	}
 	resources.publicIP = publicIPName
 
 	if vm.Properties.StorageProfile == nil || vm.Properties.StorageProfile.OSDisk == nil {
@@ -2139,9 +2180,15 @@ func (c *AzureClient) azureCleanupDeleteResources(ctx context.Context, vmName st
 		if err := requireAzureResourceID("disk", diskName, stringValue(disk.ID), diskID); err != nil {
 			return resources, err
 		}
-		// Image-created managed OS disks do not inherit VM tags. The exact
-		// storage-profile resource ID, Azure scope, and deterministic name bind
-		// the disk to the already verified live VM.
+		if disk.Properties == nil {
+			return resources, fmt.Errorf("Azure cleanup disk %s has no properties", diskName)
+		}
+		resources.diskID = stringValue(disk.Properties.UniqueID)
+		if err := requireAzureCleanupIdentity("disk", diskName, resources.diskID, ""); err != nil {
+			return resources, err
+		}
+		// Image-created managed OS disks do not inherit VM tags. Azure's unique
+		// disk identity prevents a retry from targeting a same-name replacement.
 		resources.disk = diskName
 	}
 
@@ -2164,6 +2211,13 @@ func (c *AzureClient) azureCleanupDeleteResources(ctx context.Context, vmName st
 		if err := validateAzureCleanupResourceTags("quarantine NSG", nsgName, nsg.Tags, labels); err != nil {
 			return resources, err
 		}
+		if nsg.Properties == nil {
+			return resources, fmt.Errorf("Azure cleanup quarantine NSG %s has no properties", nsgName)
+		}
+		resources.quarantineID = stringValue(nsg.Properties.ResourceGUID)
+		if err := requireAzureCleanupIdentity("quarantine NSG", nsgName, resources.quarantineID, ""); err != nil {
+			return resources, err
+		}
 		resources.quarantineNSG = nsgName
 	} else if !strings.EqualFold(nsgName, c.NSG) && !strings.EqualFold(nsgName, azureRegionalName(c.NSG, c.Location)) {
 		return resources, fmt.Errorf("Azure cleanup NIC %s references unexpected network security group %s", nicName, nsgName)
@@ -2171,8 +2225,144 @@ func (c *AzureClient) azureCleanupDeleteResources(ctx context.Context, vmName st
 	return resources, nil
 }
 
+func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, expected Server, resources azureVMDeleteResources, now time.Time) error {
+	name := strings.TrimSpace(expected.CloudID)
+	for attempt := 0; ; attempt++ {
+		errs, retry := c.deleteVMResourcesOnce(ctx, name, resources)
+		if len(errs) == 0 {
+			return nil
+		}
+		if !retry || attempt >= azureDeleteRetryAttempts-1 {
+			return joinErrors(errs)
+		}
+		select {
+		case <-ctx.Done():
+			errs = append(errs, ctx.Err())
+			return joinErrors(errs)
+		case <-time.After(azureDeleteRetryDelay):
+		}
+		var err error
+		resources, err = c.revalidateAzureCleanupDeleteResources(ctx, expected, resources, now)
+		if err != nil {
+			return err
+		}
+		if !resources.vm && resources.nic == "" && resources.publicIP == "" && resources.disk == "" && resources.quarantineNSG == "" {
+			return nil
+		}
+	}
+}
+
+func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context, expected Server, resources azureVMDeleteResources, now time.Time) (azureVMDeleteResources, error) {
+	name := strings.TrimSpace(expected.CloudID)
+	labels := expected.Labels
+	if resources.vm {
+		response, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil)
+		if err != nil {
+			if isAzureNotFoundError(err) {
+				resources.vm = false
+			} else {
+				return resources, fmt.Errorf("re-read Azure cleanup VM %s before retry: %w", name, err)
+			}
+		} else {
+			live := azureVMToServer(response.VirtualMachine, "", "")
+			if err := validateAzureCleanupVM(expected, live, now); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+			if response.VirtualMachine.Properties == nil {
+				return resources, &azureCleanupSkipError{err: fmt.Errorf("live Azure VM %s has no properties", name)}
+			}
+			if err := requireAzureCleanupIdentity("VM", name, stringValue(response.VirtualMachine.Properties.VMID), resources.vmID); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+		}
+	}
+
+	if resources.nic != "" {
+		response, err := c.nicc.Get(ctx, c.ResourceGroup, resources.nic, nil)
+		if err != nil {
+			if isAzureNotFoundError(err) {
+				resources.nic = ""
+			} else {
+				return resources, fmt.Errorf("re-read Azure cleanup NIC %s before retry: %w", resources.nic, err)
+			}
+		} else {
+			if err := validateAzureCleanupResourceTags("NIC", resources.nic, response.Tags, labels); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+			if response.Properties == nil {
+				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup NIC %s has no properties", resources.nic)}
+			}
+			if err := requireAzureCleanupIdentity("NIC", resources.nic, stringValue(response.Properties.ResourceGUID), resources.nicID); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+		}
+	}
+
+	if resources.publicIP != "" {
+		response, err := c.pipc.Get(ctx, c.ResourceGroup, resources.publicIP, nil)
+		if err != nil {
+			if isAzureNotFoundError(err) {
+				resources.publicIP = ""
+			} else {
+				return resources, fmt.Errorf("re-read Azure cleanup public IP %s before retry: %w", resources.publicIP, err)
+			}
+		} else {
+			if err := validateAzureCleanupResourceTags("public IP", resources.publicIP, response.Tags, labels); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+			if response.Properties == nil {
+				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup public IP %s has no properties", resources.publicIP)}
+			}
+			if err := requireAzureCleanupIdentity("public IP", resources.publicIP, stringValue(response.Properties.ResourceGUID), resources.publicIPID); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+		}
+	}
+
+	if resources.disk != "" {
+		response, err := c.diskc.Get(ctx, c.ResourceGroup, resources.disk, nil)
+		if err != nil {
+			if isAzureNotFoundError(err) {
+				resources.disk = ""
+			} else {
+				return resources, fmt.Errorf("re-read Azure cleanup disk %s before retry: %w", resources.disk, err)
+			}
+		} else {
+			if response.Properties == nil {
+				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup disk %s has no properties", resources.disk)}
+			}
+			if err := requireAzureCleanupIdentity("disk", resources.disk, stringValue(response.Properties.UniqueID), resources.diskID); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+		}
+	}
+
+	if resources.quarantineNSG != "" {
+		response, err := c.sgc.Get(ctx, c.ResourceGroup, resources.quarantineNSG, nil)
+		if err != nil {
+			if isAzureNotFoundError(err) {
+				resources.quarantineNSG = ""
+			} else {
+				return resources, fmt.Errorf("re-read Azure cleanup quarantine NSG %s before retry: %w", resources.quarantineNSG, err)
+			}
+		} else {
+			if err := validateAzureCleanupResourceTags("quarantine NSG", resources.quarantineNSG, response.Tags, labels); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+			if response.Properties == nil {
+				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup quarantine NSG %s has no properties", resources.quarantineNSG)}
+			}
+			if err := requireAzureCleanupIdentity("quarantine NSG", resources.quarantineNSG, stringValue(response.Properties.ResourceGUID), resources.quarantineID); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+		}
+	}
+	return resources, nil
+}
+
 func (c *AzureClient) deleteVMResources(ctx context.Context, name string) error {
 	return c.deleteVMResourcesWith(ctx, name, azureVMDeleteResources{
+		vm:            true,
 		nic:           name + "-nic",
 		publicIP:      name + "-pip",
 		disk:          name + "-osdisk",
@@ -2201,16 +2391,18 @@ func (c *AzureClient) deleteVMResourcesWith(ctx context.Context, name string, re
 func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string, resources azureVMDeleteResources) ([]error, bool) {
 	var errs []error
 	retry := false
-	if poller, err := c.vmc.BeginDelete(ctx, c.ResourceGroup, name, &armcompute.VirtualMachinesClientBeginDeleteOptions{
-		ForceDeletion: to.Ptr(true),
-	}); err == nil {
-		if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
-			errs = append(errs, fmt.Errorf("delete vm %s: %w", name, err))
+	if resources.vm {
+		if poller, err := c.vmc.BeginDelete(ctx, c.ResourceGroup, name, &armcompute.VirtualMachinesClientBeginDeleteOptions{
+			ForceDeletion: to.Ptr(true),
+		}); err == nil {
+			if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
+				errs = append(errs, fmt.Errorf("delete vm %s: %w", name, err))
+				retry = retry || isAzureRetryableDeleteError(err)
+			}
+		} else if !isAzureNotFoundError(err) {
+			errs = append(errs, fmt.Errorf("begin delete vm: %w", err))
 			retry = retry || isAzureRetryableDeleteError(err)
 		}
-	} else if !isAzureNotFoundError(err) {
-		errs = append(errs, fmt.Errorf("begin delete vm: %w", err))
-		retry = retry || isAzureRetryableDeleteError(err)
 	}
 	dependentDeletes := make([]func() error, 0, 3)
 	if resources.nic != "" {
@@ -2238,14 +2430,18 @@ func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string, re
 			retry = retry || isAzureRetryableDeleteError(err)
 		}
 	}
-	absenceChecks := []struct {
+	absenceChecks := make([]struct {
 		name string
 		get  func() error
-	}{
-		{name: "vm " + name, get: func() error {
+	}, 0, 5)
+	if resources.vm {
+		absenceChecks = append(absenceChecks, struct {
+			name string
+			get  func() error
+		}{name: "vm " + name, get: func() error {
 			_, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil)
 			return err
-		}},
+		}})
 	}
 	if resources.nic != "" {
 		absenceChecks = append(absenceChecks, struct {

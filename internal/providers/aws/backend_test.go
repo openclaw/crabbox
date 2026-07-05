@@ -26,6 +26,7 @@ type fakeAWSClient struct {
 	getErr           error
 	getIDs           []string
 	deletedInstances []string
+	deleteServerErr  error
 	deletedKeys      []string
 	deleteKeyErr     error
 	validatedKeys    []string
@@ -82,7 +83,7 @@ func (c *fakeAWSClient) GetServer(_ context.Context, id string) (Server, error) 
 
 func (c *fakeAWSClient) DeleteServer(_ context.Context, id string) error {
 	c.deletedInstances = append(c.deletedInstances, id)
-	return nil
+	return c.deleteServerErr
 }
 
 func (c *fakeAWSClient) DeleteSSHKey(_ context.Context, name string) error {
@@ -677,6 +678,32 @@ func TestAWSCleanupContinuesWhenLiveCandidateAlreadyGone(t *testing.T) {
 	}
 	assertAWSClaimMissing(t, missing.Labels["lease"])
 	assertAWSClaimMissing(t, remaining.Labels["lease"])
+}
+
+func TestAWSCleanupTreatsInstanceMissingAtDeleteBoundaryAsRemoved(t *testing.T) {
+	isolateAWSClaimState(t)
+	server := awsTestServer("i-raced", "cbx_333333333333", "raced", "us-east-1")
+	server.Labels["provider_key"] = "crabbox-cbx-333333333333"
+	server.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	fake := &fakeAWSClient{
+		servers:         []Server{server},
+		get:             map[string]Server{server.CloudID: server},
+		deleteServerErr: core.Exit(4, "aws instance not found: %s", server.CloudID),
+	}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	cfg := Config{Provider: "aws", AWSRegion: "us-east-1"}
+	claimAWSCleanupServer(t, cfg, server)
+	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] != server.Labels["provider_key"] {
+		t.Fatalf("deleted keys=%v, want raced instance key cleanup", fake.deletedKeys)
+	}
+	assertAWSClaimMissing(t, server.Labels["lease"])
 }
 
 func isolateAWSClaimState(t *testing.T) {

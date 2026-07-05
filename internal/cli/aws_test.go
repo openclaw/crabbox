@@ -23,20 +23,62 @@ import (
 func TestValidateAWSCleanupKeyPair(t *testing.T) {
 	name := "crabbox-cbx-123456abcdef"
 	owned := types.KeyPairInfo{
-		KeyName: aws.String(name),
+		KeyName:   aws.String(name),
+		KeyPairId: aws.String("key-0123456789abcdef0"),
 		Tags: []types.Tag{
 			{Key: aws.String("crabbox"), Value: aws.String("true")},
 			{Key: aws.String("created_by"), Value: aws.String("crabbox")},
 		},
 	}
-	if err := validateAWSCleanupKeyPair(name, []types.KeyPairInfo{owned}); err != nil {
-		t.Fatalf("owned key rejected: %v", err)
+	if keyPairID, err := validateAWSCleanupKeyPair(name, []types.KeyPairInfo{owned}); err != nil || keyPairID != "key-0123456789abcdef0" {
+		t.Fatalf("owned key id=%q err=%v", keyPairID, err)
 	}
 	unowned := owned
 	unowned.Tags = []types.Tag{{Key: aws.String("crabbox"), Value: aws.String("true")}}
-	err := validateAWSCleanupKeyPair(name, []types.KeyPairInfo{unowned})
+	_, err := validateAWSCleanupKeyPair(name, []types.KeyPairInfo{unowned})
 	if err == nil || !IsAWSCleanupKeyOwnershipError(err) {
 		t.Fatalf("unowned key error=%v", err)
+	}
+}
+
+func TestAWSDeleteCleanupSSHKeyUsesValidatedImmutableID(t *testing.T) {
+	const (
+		name      = "crabbox-cbx-123456abcdef"
+		keyPairID = "key-0123456789abcdef0"
+	)
+	var actions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		actions = append(actions, params.Get("Action"))
+		switch params.Get("Action") {
+		case "DescribeKeyPairs":
+			writeEC2XML(w, `<DescribeKeyPairsResponse><keySet><item><keyName>`+name+`</keyName><keyPairId>`+keyPairID+`</keyPairId><tagSet><item><key>crabbox</key><value>true</value></item><item><key>created_by</key><value>crabbox</value></item></tagSet></item></keySet></DescribeKeyPairsResponse>`)
+		case "DeleteKeyPair":
+			if got := params.Get("KeyPairId"); got != keyPairID {
+				t.Fatalf("KeyPairId=%q, want %q", got, keyPairID)
+			}
+			if got := params.Get("KeyName"); got != "" {
+				t.Fatalf("KeyName=%q, want empty immutable-id deletion", got)
+			}
+			writeEC2XML(w, `<DeleteKeyPairResponse><return>true</return></DeleteKeyPairResponse>`)
+		default:
+			writeEC2Error(w, "Unexpected", params.Get("Action"), http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	if err := testAWSClient(server.URL).DeleteCleanupSSHKey(context.Background(), name); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(actions, []string{"DescribeKeyPairs", "DeleteKeyPair"}) {
+		t.Fatalf("actions=%v", actions)
 	}
 }
 

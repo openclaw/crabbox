@@ -374,36 +374,53 @@ func NewAWSCleanupKeyOwnershipError(message string) error {
 	return &awsCleanupKeyOwnershipError{err: errors.New(message)}
 }
 
-func validateAWSCleanupKeyPair(name string, keyPairs []types.KeyPairInfo) error {
+func validateAWSCleanupKeyPair(name string, keyPairs []types.KeyPairInfo) (string, error) {
 	if len(keyPairs) != 1 || strings.TrimSpace(aws.ToString(keyPairs[0].KeyName)) != strings.TrimSpace(name) {
-		return &awsCleanupKeyOwnershipError{err: fmt.Errorf("AWS cleanup key %q did not resolve to one exact key pair", name)}
+		return "", &awsCleanupKeyOwnershipError{err: fmt.Errorf("AWS cleanup key %q did not resolve to one exact key pair", name)}
 	}
 	tags := make(map[string]string, len(keyPairs[0].Tags))
 	for _, tag := range keyPairs[0].Tags {
 		tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
 	}
 	if tags["crabbox"] != "true" || tags["created_by"] != "crabbox" {
-		return &awsCleanupKeyOwnershipError{err: fmt.Errorf("AWS cleanup key %q lacks canonical Crabbox ownership tags", name)}
+		return "", &awsCleanupKeyOwnershipError{err: fmt.Errorf("AWS cleanup key %q lacks canonical Crabbox ownership tags", name)}
 	}
-	return nil
+	keyPairID := strings.TrimSpace(aws.ToString(keyPairs[0].KeyPairId))
+	if keyPairID == "" {
+		return "", &awsCleanupKeyOwnershipError{err: fmt.Errorf("AWS cleanup key %q has no immutable key pair id", name)}
+	}
+	return keyPairID, nil
 }
 
 func (c *AWSClient) ValidateCleanupSSHKey(ctx context.Context, name string) error {
+	_, err := c.resolveCleanupSSHKeyID(ctx, name)
+	return err
+}
+
+func (c *AWSClient) resolveCleanupSSHKeyID(ctx context.Context, name string) (string, error) {
 	out, err := c.ec2.DescribeKeyPairs(ctx, &ec2.DescribeKeyPairsInput{KeyNames: []string{name}})
 	if err != nil {
 		if strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
-			return nil
+			return "", nil
 		}
-		return err
+		return "", err
 	}
 	return validateAWSCleanupKeyPair(name, out.KeyPairs)
 }
 
 func (c *AWSClient) DeleteCleanupSSHKey(ctx context.Context, name string) error {
-	if err := c.ValidateCleanupSSHKey(ctx, name); err != nil {
+	keyPairID, err := c.resolveCleanupSSHKeyID(ctx, name)
+	if err != nil {
 		return err
 	}
-	return c.DeleteSSHKey(ctx, name)
+	if keyPairID == "" {
+		return nil
+	}
+	_, err = c.ec2.DeleteKeyPair(ctx, &ec2.DeleteKeyPairInput{KeyPairId: aws.String(keyPairID)})
+	if err != nil && strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
+		return nil
+	}
+	return err
 }
 
 func (c *AWSClient) CreateServerWithFallback(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {

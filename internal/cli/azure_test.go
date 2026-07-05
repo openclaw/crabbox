@@ -132,6 +132,18 @@ func TestAzureScopedResourceName(t *testing.T) {
 	}
 }
 
+func TestRequireAzureCleanupIdentity(t *testing.T) {
+	if err := requireAzureCleanupIdentity("disk", "crabbox-live-osdisk", "disk-guid", "disk-guid"); err != nil {
+		t.Fatalf("matching identity rejected: %v", err)
+	}
+	if err := requireAzureCleanupIdentity("disk", "crabbox-live-osdisk", "", ""); err == nil || !strings.Contains(err.Error(), "no immutable resource identity") {
+		t.Fatalf("missing identity error=%v", err)
+	}
+	if err := requireAzureCleanupIdentity("disk", "crabbox-live-osdisk", "replacement-guid", "disk-guid"); err == nil || !strings.Contains(err.Error(), "does not match validated identity") {
+		t.Fatalf("replacement identity error=%v", err)
+	}
+}
+
 func TestAzureImageForConfig(t *testing.T) {
 	t.Parallel()
 	linux := baseConfig()
