@@ -194,6 +194,9 @@ const defaultAWSOrphanSweepGraceSeconds = 15 * 60;
 const defaultAzureOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAzureOrphanSweepGraceSeconds = 15 * 60;
 const storageRecordScanBatchSize = 128;
+const terminalRunPruneBatchSize = 16;
+const defaultTerminalRunRetentionDays = 30;
+const runPruneCursorKey = "maintenance:run-prune-cursor";
 const providerAccessReservationTTLMS = 15 * 60 * 1000;
 const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
@@ -1871,6 +1874,7 @@ export class FleetCoordinator {
     await this.provisionPendingWorkspace();
     await this.maintainWorkspacePrewarm();
     await this.pruneTerminalWorkspaces();
+    await this.pruneTerminalRuns();
     await this.runAzureDeferredCleanups();
     await this.runAWSOrphanSweepIfDue("alarm");
     await this.runAzureOrphanSweepIfDue("alarm");
@@ -10549,6 +10553,9 @@ export class FleetCoordinator {
     if (awsIngressAlarm !== undefined) {
       alarmTimes.push(awsIngressAlarm);
     }
+    if ((await this.state.storage.get<string>(runPruneCursorKey)) !== undefined) {
+      alarmTimes.push(now + 1000);
+    }
     if (alarmTimes.length === 0) {
       await this.state.clearAlarm();
       return;
@@ -11413,6 +11420,72 @@ export class FleetCoordinator {
       }
     });
     return recent;
+  }
+
+  private async pruneTerminalRuns(): Promise<void> {
+    const cutoff = Date.now() - terminalRunRetentionMs(this.env.CRABBOX_RUN_RETENTION_DAYS);
+    const storedCursor = await this.state.storage.get<string>(runPruneCursorKey);
+    const startAfter = storedCursor?.startsWith("run:") ? storedCursor : undefined;
+    const page = await this.state.storage.list<RunRecord>({
+      prefix: "run:",
+      limit: storageRecordScanBatchSize,
+      ...(startAfter ? { startAfter } : {}),
+    });
+    if (page.size === 0) {
+      if (storedCursor !== undefined) {
+        await this.state.storage.delete(runPruneCursorKey);
+      }
+      return;
+    }
+    let deleted = 0;
+    let lastScanned: string | undefined;
+    for (const [key, run] of page) {
+      lastScanned = key;
+      const terminalAt = terminalRunTimestamp(run);
+      if (key === runKey(run.id) && terminalAt !== undefined && terminalAt <= cutoff) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each run and its artifacts are removed before advancing the maintenance cursor.
+        await this.deleteTerminalRun(run.id, cutoff);
+        deleted += 1;
+        if (deleted >= terminalRunPruneBatchSize) {
+          break;
+        }
+      }
+    }
+    const pageEnd = [...page.keys()].at(-1);
+    if (lastScanned && (lastScanned !== pageEnd || page.size === storageRecordScanBatchSize)) {
+      await this.state.storage.put(runPruneCursorKey, lastScanned);
+    } else {
+      await this.state.storage.delete(runPruneCursorKey);
+    }
+  }
+
+  private async deleteTerminalRun(runID: string, cutoff: number): Promise<void> {
+    await this.state.runExclusive(async () => {
+      const current = await this.getRun(runID);
+      const terminalAt = current ? terminalRunTimestamp(current) : undefined;
+      if (!current || terminalAt === undefined || terminalAt > cutoff) {
+        return;
+      }
+      await this.deleteStoragePrefix(runEventPrefix(runID));
+      await this.deleteStoragePrefix(runLogChunkPrefix(runID));
+      await this.state.storage.delete(runLogKey(runID));
+      await this.state.storage.delete(runKey(runID));
+    });
+  }
+
+  private async deleteStoragePrefix(prefix: string): Promise<void> {
+    for (;;) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- deletion advances by removing each bounded first page.
+      const page = await this.state.storage.list({ prefix, limit: storageRecordScanBatchSize });
+      if (page.size === 0) {
+        return;
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- finish each bounded delete batch before loading the next one.
+      await Promise.all([...page.keys()].map((key) => this.state.storage.delete(key)));
+      if (page.size < storageRecordScanBatchSize) {
+        return;
+      }
+    }
   }
 
   private async externalRunnerRecords(): Promise<ExternalRunnerRecord[]> {
@@ -14119,6 +14192,26 @@ function retainRecentRun(runs: RunRecord[], run: RunRecord, limit: number): void
   if (runs.length > limit) {
     runs.pop();
   }
+}
+
+function terminalRunRetentionMs(value: string | undefined): number {
+  const parsed = Number(value ?? "");
+  const days =
+    Number.isFinite(parsed) && parsed >= 1 ? Math.trunc(parsed) : defaultTerminalRunRetentionDays;
+  return Math.min(days, 3650) * 24 * 60 * 60 * 1000;
+}
+
+function terminalRunTimestamp(run: RunRecord): number | undefined {
+  if (run.state === "running") {
+    return undefined;
+  }
+  for (const value of [run.endedAt, run.lastEventAt, run.startedAt]) {
+    const timestamp = Date.parse(value ?? "");
+    if (Number.isFinite(timestamp)) {
+      return timestamp;
+    }
+  }
+  return undefined;
 }
 
 function clampLimit(value: string | null, fallback: number): number {

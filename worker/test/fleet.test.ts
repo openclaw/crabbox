@@ -19432,6 +19432,71 @@ describe("fleet run history", () => {
     ]);
   });
 
+  it("prunes expired terminal runs and artifacts in resumable batches", async () => {
+    const storage = new ObservedMemoryStorage();
+    const fleet = testFleet(storage);
+    const expiredAt = new Date(Date.now() - 31 * 24 * 60 * 60_000).toISOString();
+    const recentAt = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
+    for (let index = 0; index < 20; index += 1) {
+      const id = `run_${index.toString().padStart(12, "0")}`;
+      storage.seed(
+        `run:${id}`,
+        testRun({
+          id,
+          state: "succeeded",
+          startedAt: expiredAt,
+          lastEventAt: expiredAt,
+          endedAt: expiredAt,
+        }),
+      );
+    }
+    storage.seed(
+      "run:run_recent",
+      testRun({
+        id: "run_recent",
+        state: "succeeded",
+        startedAt: recentAt,
+        endedAt: recentAt,
+      }),
+    );
+    storage.seed(
+      "run:run_still_running",
+      testRun({ id: "run_still_running", state: "running", startedAt: expiredAt }),
+    );
+    storage.seed("runlog:run_000000000000", "legacy log");
+    storage.seed("runlog:run_000000000000:chunk:000000", "chunk");
+    storage.seed("runevent:run_000000000000:000000000001", { seq: 1 });
+
+    storage.resetListOptions();
+    await fleet.alarm();
+
+    for (let index = 0; index < 16; index += 1) {
+      expect(storage.value(`run:run_${index.toString().padStart(12, "0")}`)).toBeUndefined();
+    }
+    expect(storage.value("run:run_000000000016")).toBeDefined();
+    expect(storage.value("run:run_recent")).toBeDefined();
+    expect(storage.value("run:run_still_running")).toBeDefined();
+    expect(storage.value("runlog:run_000000000000")).toBeUndefined();
+    expect(storage.value("runlog:run_000000000000:chunk:000000")).toBeUndefined();
+    expect(storage.value("runevent:run_000000000000:000000000001")).toBeUndefined();
+    expect(storage.value("maintenance:run-prune-cursor")).toBe("run:run_000000000015");
+    expect(storage.alarm()).toBeGreaterThan(Date.now());
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1500);
+    expect(storage.listOptions.findLast((options) => options.prefix === "run:")).toEqual({
+      prefix: "run:",
+      limit: 128,
+    });
+
+    await fleet.alarm();
+
+    for (let index = 0; index < 20; index += 1) {
+      expect(storage.value(`run:run_${index.toString().padStart(12, "0")}`)).toBeUndefined();
+    }
+    expect(storage.value("maintenance:run-prune-cursor")).toBeUndefined();
+    expect(storage.value("run:run_recent")).toBeDefined();
+    expect(storage.value("run:run_still_running")).toBeDefined();
+  });
+
   it("creates early run sessions and appends durable events", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

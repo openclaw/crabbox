@@ -381,6 +381,7 @@ CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for /v1/workspaces terminal attachmen
 CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; hetzner, aws, azure, or gcp
 CRABBOX_WORKSPACE_CLASS           optional workspace machine class; default standard
 CRABBOX_WORKSPACE_PREWARM_COUNT   optional ready spares per active organization; default 0, maximum 4
+CRABBOX_RUN_RETENTION_DAYS        terminal run history retention; default 30 days, minimum 1
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login
 CRABBOX_SESSION_SECRET            required for browser login; must differ from CRABBOX_SHARED_TOKEN
