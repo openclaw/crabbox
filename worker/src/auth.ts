@@ -29,6 +29,13 @@ export interface AuthContext {
   org: string;
   login?: string;
   tokenExpiresAt?: string;
+  githubGrant?: GitHubUserGrant;
+}
+
+export interface GitHubUserGrant {
+  tokenID: string;
+  sealedCredential: string;
+  expiresAt: string;
 }
 
 export interface AuthRequestContext {
@@ -139,6 +146,11 @@ export async function authenticateRequest(
         org: payload.org,
         login: payload.login,
         tokenExpiresAt: new Date(payload.exp * 1000).toISOString(),
+        githubGrant: {
+          tokenID: payload.jti,
+          sealedCredential: payload.githubCredential,
+          expiresAt: new Date(payload.exp * 1000).toISOString(),
+        },
       };
     }
   }
@@ -184,6 +196,13 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   } else {
     headers.delete("x-crabbox-token-expires-at");
   }
+  if (auth.githubGrant) {
+    headers.set("x-crabbox-github-token-id", auth.githubGrant.tokenID);
+    headers.set("x-crabbox-github-sealed-credential", auth.githubGrant.sealedCredential);
+  } else {
+    headers.delete("x-crabbox-github-token-id");
+    headers.delete("x-crabbox-github-sealed-credential");
+  }
   return new Request(request, { headers });
 }
 
@@ -203,7 +222,9 @@ export function requestWithoutTrustedHeaders(request: Request): Request {
   if (
     !request.headers.has("x-crabbox-internal") &&
     !request.headers.has("x-crabbox-proxy-secret") &&
-    !request.headers.has("x-crabbox-admin-grant-version")
+    !request.headers.has("x-crabbox-admin-grant-version") &&
+    !request.headers.has("x-crabbox-github-token-id") &&
+    !request.headers.has("x-crabbox-github-sealed-credential")
   ) {
     return request;
   }
@@ -211,6 +232,8 @@ export function requestWithoutTrustedHeaders(request: Request): Request {
   headers.delete("x-crabbox-internal");
   headers.delete("x-crabbox-proxy-secret");
   headers.delete("x-crabbox-admin-grant-version");
+  headers.delete("x-crabbox-github-token-id");
+  headers.delete("x-crabbox-github-sealed-credential");
   return new Request(request, { headers });
 }
 
@@ -292,7 +315,43 @@ export async function authenticateUserTokenForRevocation(
     org: payload.org,
     login: payload.login,
     tokenExpiresAt: new Date(payload.exp * 1000).toISOString(),
+    githubGrant: {
+      tokenID: payload.jti,
+      sealedCredential: payload.githubCredential,
+      expiresAt: new Date(payload.exp * 1000).toISOString(),
+    },
   };
+}
+
+export async function githubUserGrantIsCurrent(
+  grant: GitHubUserGrant,
+  identity: Pick<GitHubMembershipIdentity, "owner" | "org" | "login">,
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET"> & GitHubMembershipEnv,
+  context: AuthRequestContext = {},
+): Promise<boolean> {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(grant.tokenID) ||
+    !grant.sealedCredential ||
+    !Number.isFinite(Date.parse(grant.expiresAt)) ||
+    Date.parse(grant.expiresAt) <= Date.now()
+  ) {
+    return false;
+  }
+  let accessToken: string;
+  try {
+    const opened = await openGitHubCredential(grant.sealedCredential, sessionSecret(env));
+    if (!opened) return false;
+    accessToken = opened;
+  } catch {
+    return false;
+  }
+  const membership = context.githubMembership ?? requireCurrentGitHubMembership;
+  try {
+    await membership({ accessToken, tokenID: grant.tokenID, ...identity }, env);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function verifyUserToken(

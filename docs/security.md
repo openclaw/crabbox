@@ -179,6 +179,13 @@ flows. Legacy admin attachments without a verifiable source and version fail
 closed after upgrade. Restored Code viewer sessions without a complete
 organization-bound principal also fail closed during restore and whenever lease
 sharing access shrinks.
+Non-admin GitHub WebVNC, Code, and egress sessions bind to the exact portal
+session and preserve only the encrypted GitHub credential from its signed user
+token. Active traffic rechecks portal logout and emergency user revocation, and
+revalidates GitHub membership under the configured membership-cache window.
+Membership errors fail closed. Restored legacy GitHub bridge attachments without
+a complete encrypted grant and portal-session binding close before carrying
+traffic; plaintext GitHub credentials are never stored in bridge state.
 Shared-operator requests do **not** trust caller-supplied `X-Crabbox-Owner` /
 `X-Crabbox-Org` headers — pin that automation's identity with
 `CRABBOX_SHARED_OWNER` (and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed
@@ -270,7 +277,8 @@ intent is rejected before the portal cookie is converted into bearer authority;
 explicit bearer API clients remain independent of this browser-only boundary.
 Portal logout follows the same boundary: `GET /portal/logout` only renders a
 confirmation page, and only a same-origin `POST` clears the portal cookie and
-revokes isolated Code viewer sessions.
+revokes all WebVNC, Code, and mediated-egress bridges bound to that portal
+session.
 
 Configured provider credentials are redacted from documented HTTP or streamed
 error diagnostics, including Azure Dynamic Sessions, Cloudflare runner, Daytona,

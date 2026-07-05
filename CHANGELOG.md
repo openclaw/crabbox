@@ -5,6 +5,7 @@
 ### Fixed
 
 - Changed portal logout to an authenticated, same-origin `POST` with a read-only `GET` confirmation page, preventing cross-site top-level navigation from clearing portal cookies or revoking isolated Code viewer sessions. Thanks @coygeek.
+- Bound non-admin GitHub WebVNC, Code, and egress bridges to their encrypted user grant and portal session, closing active or restored bridges after logout, emergency revocation, membership loss, or membership-check failure without persisting plaintext GitHub credentials. Thanks @coygeek.
 
 ## 0.36.0 - 2026-07-05
 

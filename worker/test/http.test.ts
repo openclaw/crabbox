@@ -5,6 +5,7 @@ import {
   adminGrantVersion,
   authenticateRequest,
   base64URL,
+  githubUserGrantIsCurrent,
   issueUserToken,
   requestWithAuthContext,
 } from "../src/auth";
@@ -151,6 +152,37 @@ describe("coordinator auth", () => {
       membershipUnavailable,
     );
     expect(normalMutation).toMatchObject({ authenticated: false, response: { status: 401 } });
+  });
+
+  it("fails closed when a live GitHub grant can no longer be decrypted", async () => {
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const auth = await authenticateRequest(
+      new Request("https://broker.example.test/v1/whoami", {
+        headers: { authorization: `Bearer ${token}` },
+      }),
+      env,
+      allowGitHubMembership,
+    );
+    expect(auth?.githubGrant).toBeDefined();
+
+    await expect(
+      githubUserGrantIsCurrent(
+        auth!.githubGrant!,
+        { owner: auth!.owner, org: auth!.org, login: auth!.login! },
+        { CRABBOX_SESSION_SECRET: "rotated-session-secret" },
+        allowGitHubMembership,
+      ),
+    ).resolves.toBe(false);
   });
 
   it("treats malformed portal cookies as absent across request types", async () => {
@@ -334,6 +366,8 @@ describe("coordinator auth", () => {
     requests.forEach((request) => {
       request.headers.set("x-crabbox-internal", "scheduled");
       request.headers.set("x-crabbox-admin-grant-version", "a".repeat(64));
+      request.headers.set("x-crabbox-github-token-id", "forged-token-id");
+      request.headers.set("x-crabbox-github-sealed-credential", "forged-credential");
     });
 
     const routedRequests = await Promise.all(
@@ -360,6 +394,12 @@ describe("coordinator auth", () => {
     ]);
     expect(
       routedRequests.map((request) => request.headers.get("x-crabbox-admin-grant-version")),
+    ).toEqual([null, null, null, null]);
+    expect(
+      routedRequests.map((request) => request.headers.get("x-crabbox-github-token-id")),
+    ).toEqual([null, null, null, null]);
+    expect(
+      routedRequests.map((request) => request.headers.get("x-crabbox-github-sealed-credential")),
     ).toEqual([null, null, null, null]);
   });
 
