@@ -142,6 +142,8 @@ func (e *isloRedirectError) Error() string {
 
 func isloSanitizeRedirectError(err error) error {
 	var redirectErr *isloRedirectError
+	// net/http wraps CheckRedirect failures in *url.Error, whose text includes
+	// the rejected URL. Return our origin-only error so Location secrets stay out.
 	if errors.As(err, &redirectErr) {
 		return redirectErr
 	}
