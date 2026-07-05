@@ -327,6 +327,9 @@ func validateAzureCleanupLiveServer(expected, live Server) error {
 	if cloudID == "" || strings.TrimSpace(live.CloudID) != cloudID {
 		return fmt.Errorf("live cloud id %q does not match cleanup candidate %q", live.CloudID, expected.CloudID)
 	}
+	if strings.TrimSpace(expected.ImmutableID) == "" || strings.TrimSpace(live.ImmutableID) != strings.TrimSpace(expected.ImmutableID) {
+		return fmt.Errorf("live VM identity %q does not match cleanup candidate identity %q", live.ImmutableID, expected.ImmutableID)
+	}
 	if !isCrabboxAzureLease(live) {
 		return fmt.Errorf("live VM no longer has canonical Crabbox ownership tags")
 	}

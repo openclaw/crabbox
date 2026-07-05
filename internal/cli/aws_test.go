@@ -74,7 +74,12 @@ func TestAWSDeleteCleanupSSHKeyUsesValidatedImmutableID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := testAWSClient(server.URL).DeleteCleanupSSHKey(context.Background(), name); err != nil {
+	client := testAWSClient(server.URL)
+	resolvedID, err := client.ResolveCleanupSSHKeyID(context.Background(), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeleteCleanupSSHKeyID(context.Background(), resolvedID); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(actions, []string{"DescribeKeyPairs", "DeleteKeyPair"}) {

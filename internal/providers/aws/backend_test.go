@@ -91,16 +91,16 @@ func (c *fakeAWSClient) DeleteSSHKey(_ context.Context, name string) error {
 	return c.deleteKeyErr
 }
 
-func (c *fakeAWSClient) ValidateCleanupSSHKey(_ context.Context, name string) error {
+func (c *fakeAWSClient) ResolveCleanupSSHKeyID(_ context.Context, name string) (string, error) {
 	c.validatedKeys = append(c.validatedKeys, name)
-	return c.validateKeyErr
+	if c.validateKeyErr != nil {
+		return "", c.validateKeyErr
+	}
+	return "key-id-for-" + name, nil
 }
 
-func (c *fakeAWSClient) DeleteCleanupSSHKey(ctx context.Context, name string) error {
-	if err := c.ValidateCleanupSSHKey(ctx, name); err != nil {
-		return err
-	}
-	c.deletedKeys = append(c.deletedKeys, name)
+func (c *fakeAWSClient) DeleteCleanupSSHKeyID(_ context.Context, keyPairID string) error {
+	c.deletedKeys = append(c.deletedKeys, keyPairID)
 	return c.deleteKeyErr
 }
 
@@ -476,7 +476,7 @@ func TestAWSCleanupRequiresExactClaimForFallbackRegionServer(t *testing.T) {
 	if len(west.deletedInstances) != 1 || west.deletedInstances[0] != "i-owned" {
 		t.Fatalf("west deleted instances=%v, want i-owned", west.deletedInstances)
 	}
-	if len(west.deletedKeys) != 1 || west.deletedKeys[0] != "crabbox-cbx-444444444444" {
+	if len(west.deletedKeys) != 1 || west.deletedKeys[0] != "key-id-for-crabbox-cbx-444444444444" {
 		t.Fatalf("west deleted keys=%v, want owned provider key", west.deletedKeys)
 	}
 	if _, ok, err := core.ResolveLeaseClaim(owned.Labels["lease"]); err != nil || ok {
@@ -700,7 +700,7 @@ func TestAWSCleanupTreatsInstanceMissingAtDeleteBoundaryAsRemoved(t *testing.T) 
 	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] != server.Labels["provider_key"] {
+	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] != "key-id-for-"+server.Labels["provider_key"] {
 		t.Fatalf("deleted keys=%v, want raced instance key cleanup", fake.deletedKeys)
 	}
 	assertAWSClaimMissing(t, server.Labels["lease"])

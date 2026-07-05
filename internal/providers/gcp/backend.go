@@ -335,6 +335,9 @@ func validateGCPCleanupLiveServer(expected, live Server) error {
 	if cloudID == "" || strings.TrimSpace(live.CloudID) != cloudID {
 		return fmt.Errorf("live cloud id %q does not match cleanup candidate %q", live.CloudID, expected.CloudID)
 	}
+	if expected.ID == 0 || live.ID != expected.ID {
+		return fmt.Errorf("live instance id %d does not match cleanup candidate id %d", live.ID, expected.ID)
+	}
 	if !isCrabboxGCPLease(live) {
 		return fmt.Errorf("live instance no longer has canonical Crabbox ownership labels")
 	}

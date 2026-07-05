@@ -84,6 +84,7 @@ func canonicalGCPTestServer(leaseID, slug string) Server {
 	return Server{
 		Provider: "gcp",
 		CloudID:  name,
+		ID:       42,
 		Name:     name,
 		Labels: map[string]string{
 			"crabbox":    "true",
@@ -93,6 +94,15 @@ func canonicalGCPTestServer(leaseID, slug string) Server {
 			"slug":       slug,
 			"zone":       "us-central1-b",
 		},
+	}
+}
+
+func TestValidateGCPCleanupLiveServerRejectsReplacementInstance(t *testing.T) {
+	expected := canonicalGCPTestServer("cbx_111111111111", "stale")
+	live := expected
+	live.ID++
+	if err := validateGCPCleanupLiveServer(expected, live); err == nil || !strings.Contains(err.Error(), "instance id") {
+		t.Fatalf("replacement instance error=%v", err)
 	}
 }
 
@@ -171,6 +181,7 @@ func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 	expired := Server{
 		CloudID: core.LeaseProviderName(expiredLeaseID, "expired-box"),
 		Name:    core.LeaseProviderName(expiredLeaseID, "expired-box"),
+		ID:      42,
 		Labels: map[string]string{
 			"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
 			"lease": expiredLeaseID, "slug": "expired-box",
@@ -182,6 +193,7 @@ func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 			{
 				CloudID: "crabbox-forged",
 				Name:    "crabbox-forged",
+				ID:      43,
 				Labels: map[string]string{
 					"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
 					"lease": "cbx_444444444444", "slug": "forged",

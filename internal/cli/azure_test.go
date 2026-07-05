@@ -74,7 +74,8 @@ func TestParseAzureImageRef(t *testing.T) {
 func TestValidateAzureCleanupVM(t *testing.T) {
 	now := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
 	expected := Server{
-		CloudID: "crabbox-live",
+		CloudID:     "crabbox-live",
+		ImmutableID: "vmid-live",
 		Labels: map[string]string{
 			"crabbox":    "true",
 			"created_by": "crabbox",
@@ -86,6 +87,11 @@ func TestValidateAzureCleanupVM(t *testing.T) {
 	}
 	if err := validateAzureCleanupVM(expected, expected, now); err != nil {
 		t.Fatalf("valid cleanup VM rejected: %v", err)
+	}
+	replacement := expected
+	replacement.ImmutableID = "vmid-replacement"
+	if err := validateAzureCleanupVM(expected, replacement, now); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("replacement VM error=%v", err)
 	}
 
 	changedSlug := expected
@@ -1515,11 +1521,16 @@ func TestAzureServerHostFallsBackToPublicWhenNoPrivateIP(t *testing.T) {
 
 func TestAzureVMToServerSetsPrivateIP(t *testing.T) {
 	t.Parallel()
-	server := azureVMToServer(armcompute.VirtualMachine{}, "1.2.3.4", "10.0.0.5")
+	server := azureVMToServer(armcompute.VirtualMachine{
+		Properties: &armcompute.VirtualMachineProperties{VMID: to.Ptr("vmid-live")},
+	}, "1.2.3.4", "10.0.0.5")
 	if server.PublicNet.IPv4.IP != "1.2.3.4" {
 		t.Fatalf("public IP: got %q", server.PublicNet.IPv4.IP)
 	}
 	if server.PrivateNet.IPv4.IP != "10.0.0.5" {
 		t.Fatalf("private IP: got %q", server.PrivateNet.IPv4.IP)
+	}
+	if server.ImmutableID != "vmid-live" {
+		t.Fatalf("immutable ID: got %q, want vmid-live", server.ImmutableID)
 	}
 }

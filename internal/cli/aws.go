@@ -392,12 +392,7 @@ func validateAWSCleanupKeyPair(name string, keyPairs []types.KeyPairInfo) (strin
 	return keyPairID, nil
 }
 
-func (c *AWSClient) ValidateCleanupSSHKey(ctx context.Context, name string) error {
-	_, err := c.resolveCleanupSSHKeyID(ctx, name)
-	return err
-}
-
-func (c *AWSClient) resolveCleanupSSHKeyID(ctx context.Context, name string) (string, error) {
+func (c *AWSClient) ResolveCleanupSSHKeyID(ctx context.Context, name string) (string, error) {
 	out, err := c.ec2.DescribeKeyPairs(ctx, &ec2.DescribeKeyPairsInput{KeyNames: []string{name}})
 	if err != nil {
 		if strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
@@ -408,15 +403,11 @@ func (c *AWSClient) resolveCleanupSSHKeyID(ctx context.Context, name string) (st
 	return validateAWSCleanupKeyPair(name, out.KeyPairs)
 }
 
-func (c *AWSClient) DeleteCleanupSSHKey(ctx context.Context, name string) error {
-	keyPairID, err := c.resolveCleanupSSHKeyID(ctx, name)
-	if err != nil {
-		return err
-	}
+func (c *AWSClient) DeleteCleanupSSHKeyID(ctx context.Context, keyPairID string) error {
 	if keyPairID == "" {
 		return nil
 	}
-	_, err = c.ec2.DeleteKeyPair(ctx, &ec2.DeleteKeyPairInput{KeyPairId: aws.String(keyPairID)})
+	_, err := c.ec2.DeleteKeyPair(ctx, &ec2.DeleteKeyPairInput{KeyPairId: aws.String(keyPairID)})
 	if err != nil && strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
 		return nil
 	}

@@ -406,6 +406,29 @@ func TestAzureCleanupRevalidatesLiveEligibilityBeforeDelete(t *testing.T) {
 	}
 }
 
+func TestAzureCleanupRejectsSameNameReplacementVM(t *testing.T) {
+	snapshot := azureTestServer("crabbox-replaced", "cbx_123456abcdef", "replaced")
+	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	live := snapshot
+	live.ImmutableID = "vmid-replacement"
+	fake := &fakeAzureClient{servers: []Server{snapshot}, get: map[string]Server{snapshot.CloudID: live}}
+	oldClient := newAzureClient
+	newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+	t.Cleanup(func() { newAzureClient = oldClient })
+
+	var stderr strings.Builder
+	backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: &stderr}).(*azureLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("cleanup deleted replacement VM: %v", fake.deleted)
+	}
+	if !strings.Contains(stderr.String(), "VM identity") {
+		t.Fatalf("stderr=%q, want replacement identity skip", stderr.String())
+	}
+}
+
 func TestAzureCleanupDeleteBoundaryUsesOriginalCandidate(t *testing.T) {
 	snapshot := azureTestServer("candidate", "cbx_111111111111", "original")
 	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
@@ -465,9 +488,10 @@ func TestAzureCleanupContinuesWhenLiveCandidateAlreadyGone(t *testing.T) {
 
 func azureTestServer(id, leaseID, slug string) Server {
 	return Server{
-		CloudID:  id,
-		Name:     id,
-		Provider: "azure",
+		CloudID:     id,
+		Name:        id,
+		Provider:    "azure",
+		ImmutableID: "vmid-" + id,
 		Labels: map[string]string{
 			"crabbox":    "true",
 			"created_by": "crabbox",
