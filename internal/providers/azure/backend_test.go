@@ -431,8 +431,8 @@ func TestAzureCleanupContinuesWhenLiveCandidateAlreadyGone(t *testing.T) {
 	if !strings.Contains(stderr.String(), "reason=live VM no longer exists") {
 		t.Fatalf("stderr=%q, want already-gone skip", stderr.String())
 	}
-	if _, err := os.Stat(filepath.Dir(keyPath)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stored lease key directory still exists: %v", err)
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored lease key was not retained for recovery: %v", err)
 	}
 }
 
