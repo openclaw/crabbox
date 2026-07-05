@@ -342,16 +342,18 @@ func (b *orgoBackend) createComputer(ctx context.Context, client orgoAPI, repo R
 	workspaceID := strings.TrimSpace(b.cfg.Orgo.WorkspaceID)
 	createdWorkspace := ""
 	if workspaceID == "" {
-		workspace, err := client.CreateWorkspace(ctx, "crabbox-"+leaseID)
+		workspaceName := "crabbox-" + leaseID
+		workspace, err := client.CreateWorkspace(ctx, workspaceName)
 		if err != nil {
-			return orgoLease{}, err
+			return orgoLease{}, fmt.Errorf("create orgo workspace name=%q: %w", workspaceName, err)
 		}
 		workspaceID = workspace.ID
 		createdWorkspace = workspace.ID
 	}
-	req := b.createComputerRequest(workspaceID, slug)
+	req := b.createComputerRequest(workspaceID, leaseID)
 	computer, err := client.CreateComputer(ctx, req)
 	if err != nil {
+		err = fmt.Errorf("create orgo computer workspace=%s name=%q: %w", workspaceID, req.Name, err)
 		if createdWorkspace != "" {
 			if cleanupErr := b.cleanupLease(client, orgoLease{CreatedWorkspace: createdWorkspace}); cleanupErr != nil {
 				return orgoLease{}, errors.Join(err, fmt.Errorf("rollback orgo workspace %s: %w", createdWorkspace, cleanupErr))
@@ -426,11 +428,11 @@ func (b *orgoBackend) waitForComputerRunning(ctx context.Context, client orgoAPI
 	}
 }
 
-func (b *orgoBackend) createComputerRequest(workspaceID, slug string) orgoCreateComputerRequest {
+func (b *orgoBackend) createComputerRequest(workspaceID, leaseID string) orgoCreateComputerRequest {
 	cfg := b.cfg.Orgo
 	return orgoCreateComputerRequest{
 		WorkspaceID: workspaceID,
-		Name:        "crabbox-" + slug,
+		Name:        "crabbox-" + leaseID,
 		OS:          "linux",
 		RAMGB:       cfg.RAMGB,
 		CPUs:        cfg.CPUs,
@@ -499,15 +501,20 @@ func (b *orgoBackend) resolveComputer(ctx context.Context, client orgoAPI, ident
 }
 
 func (b *orgoBackend) deleteLease(ctx context.Context, client orgoAPI, lease orgoLease) error {
-	var cleanupErr error
+	var computerErr error
 	if strings.TrimSpace(lease.Computer.ID) != "" {
 		if err := client.DeleteComputer(ctx, lease.Computer.ID); err != nil {
-			cleanupErr = errors.Join(cleanupErr, err)
+			computerErr = err
 		}
 	}
+	cleanupErr := computerErr
 	if strings.TrimSpace(lease.CreatedWorkspace) != "" {
 		if err := client.DeleteWorkspace(ctx, lease.CreatedWorkspace); err != nil {
-			cleanupErr = errors.Join(cleanupErr, err)
+			cleanupErr = errors.Join(computerErr, err)
+		} else {
+			// Deleting a Crabbox-created workspace cascades to its computers, so a
+			// successful workspace delete supersedes an earlier computer error.
+			cleanupErr = nil
 		}
 	}
 	if cleanupErr == nil && strings.HasPrefix(lease.LeaseID, "cbx_") {

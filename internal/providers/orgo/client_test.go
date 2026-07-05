@@ -112,6 +112,35 @@ func TestStartComputerRejectsUnsuccessfulResponse(t *testing.T) {
 	}
 }
 
+func TestDeleteResourceRejectsUnsuccessfulResponse(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		path string
+		run  func(*orgoHTTPClient) error
+	}{
+		{name: "computer", path: "/computers/computer_test", run: func(client *orgoHTTPClient) error {
+			return client.DeleteComputer(context.Background(), "computer_test")
+		}},
+		{name: "workspace", path: "/workspaces/workspace_test", run: func(client *orgoHTTPClient) error {
+			return client.DeleteWorkspace(context.Background(), "workspace_test")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete || r.URL.Path != tt.path {
+					t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+				}
+				fmt.Fprint(w, `{"success":false,"status":"still_running"}`)
+			}))
+			t.Cleanup(server.Close)
+			client := &orgoHTTPClient{baseURL: server.URL, apiKey: "test-key", http: server.Client()}
+			if err := tt.run(client); err == nil || !strings.Contains(err.Error(), "did not delete") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestGetWorkspaceReadsOfficialDesktopsField(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/workspaces/workspace_test" {

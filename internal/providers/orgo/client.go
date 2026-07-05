@@ -73,7 +73,7 @@ type orgoBashResponse struct {
 }
 
 type orgoActionResponse struct {
-	Success bool   `json:"success"`
+	Success *bool  `json:"success"`
 	Status  string `json:"status"`
 }
 
@@ -175,7 +175,7 @@ func (c *orgoHTTPClient) CreateWorkspace(ctx context.Context, name string) (orgo
 }
 
 func (c *orgoHTTPClient) DeleteWorkspace(ctx context.Context, id string) error {
-	return c.doJSON(ctx, http.MethodDelete, "/workspaces/"+url.PathEscape(id), nil, nil)
+	return c.deleteResource(ctx, "/workspaces/"+url.PathEscape(id), "workspace", id)
 }
 
 func (c *orgoHTTPClient) ListWorkspaces(ctx context.Context) ([]orgoWorkspace, error) {
@@ -231,14 +231,25 @@ func (c *orgoHTTPClient) StartComputer(ctx context.Context, id string) error {
 	if err := c.doJSON(ctx, http.MethodPost, "/computers/"+url.PathEscape(id)+"/start", nil, &res); err != nil {
 		return err
 	}
-	if !res.Success {
+	if res.Success == nil || !*res.Success {
 		return fmt.Errorf("orgo did not start computer %s (status=%s)", id, strings.TrimSpace(res.Status))
 	}
 	return nil
 }
 
 func (c *orgoHTTPClient) DeleteComputer(ctx context.Context, id string) error {
-	return c.doJSON(ctx, http.MethodDelete, "/computers/"+url.PathEscape(id), nil, nil)
+	return c.deleteResource(ctx, "/computers/"+url.PathEscape(id), "computer", id)
+}
+
+func (c *orgoHTTPClient) deleteResource(ctx context.Context, path, kind, id string) error {
+	var res orgoActionResponse
+	if err := c.doJSON(ctx, http.MethodDelete, path, nil, &res); err != nil {
+		return err
+	}
+	if res.Success != nil && !*res.Success {
+		return fmt.Errorf("orgo did not delete %s %s (status=%s)", kind, id, strings.TrimSpace(res.Status))
+	}
+	return nil
 }
 
 func (c *orgoHTTPClient) RunBash(ctx context.Context, id, command string, stdout, stderr io.Writer) (int, error) {

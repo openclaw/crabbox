@@ -345,7 +345,7 @@ func TestCreateComputerReportsRollbackFailureWithResourceIdentity(t *testing.T) 
 func TestCreateComputerReportsWorkspaceRollbackFailureAfterCreateError(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
-	fake.createComputerErr = errors.New("computer create failed")
+	fake.createComputerErr = &orgoHTTPError{StatusCode: 400, Body: "computer create failed"}
 	fake.deleteWorkspaceErr = errors.New("workspace cleanup failed")
 	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 
@@ -371,6 +371,9 @@ func TestCreateComputerPreservesRequestedWorkspaceWhenResponseOmitsIt(t *testing
 	}
 	if lease.Computer.WorkspaceID != "ws_created" {
 		t.Fatalf("workspace id=%q", lease.Computer.WorkspaceID)
+	}
+	if lease.Computer.Name != "crabbox-"+lease.LeaseID {
+		t.Fatalf("computer name=%q, want lease-unique identity", lease.Computer.Name)
 	}
 	if err := backend.deleteLease(context.Background(), fake, lease); err != nil {
 		t.Fatal(err)
@@ -645,7 +648,7 @@ func TestRunKeepOnFailurePreservesComputer(t *testing.T) {
 	}
 }
 
-func TestDeleteLeaseAttemptsWorkspaceCleanupAfterComputerDeleteFailure(t *testing.T) {
+func TestDeleteLeaseTreatsOwnedWorkspaceDeletionAsAuthoritative(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	computerErr := errors.New("computer delete failed")
 	fake := newFakeOrgoAPI()
@@ -657,8 +660,8 @@ func TestDeleteLeaseAttemptsWorkspaceCleanupAfterComputerDeleteFailure(t *testin
 		Computer:         orgoComputer{ID: "computer_test"},
 		CreatedWorkspace: "ws_created",
 	})
-	if !errors.Is(err, computerErr) {
-		t.Fatalf("err=%v, want computer delete error", err)
+	if err != nil {
+		t.Fatalf("err=%v", err)
 	}
 	if got := strings.Join(fake.deletedComputers, ","); got != "computer_test" {
 		t.Fatalf("deleted computers=%q", got)
