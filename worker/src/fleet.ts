@@ -1200,12 +1200,10 @@ export class FleetCoordinator {
         continue;
       }
       if (
-        (attachment.kind === "webvnc-viewer" ||
-          (attachment.kind === "code-viewer" && completeBridgePrincipal(attachment))) &&
+        (attachment.kind === "webvnc-viewer" || attachment.kind === "code-viewer") &&
         !this.leaseViewerAuthorized(lease, attachment)
       ) {
         revokedViewers.set(socket, "lease access revoked");
-        continue;
       }
       if (
         (attachment.kind === "egress-host" || attachment.kind === "egress-client") &&
@@ -5162,7 +5160,6 @@ export class FleetCoordinator {
       if (
         attachment?.kind !== "code-viewer" ||
         attachment.leaseID !== lease.id ||
-        !completeBridgePrincipal(attachment) ||
         this.leaseViewerAuthorized(lease, withCurrentAdminGrant(attachment, adminGrants))
       ) {
         continue;

@@ -725,6 +725,13 @@ describe("runtime adapter relay", () => {
       org: "example-org",
       admin: false,
     });
+    const legacyCodeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID: lease.id,
+      id: "code-legacy",
+      auth: "github",
+      portalSessionHash: "a".repeat(64),
+    });
     const revokedWebAgent = new FakeWebSocket({
       kind: "webvnc-agent",
       leaseID: lease.id,
@@ -777,6 +784,7 @@ describe("runtime adapter relay", () => {
             codeAgent,
             revokedCodeViewer,
             ownerCodeViewer,
+            legacyCodeViewer,
             revokedWebAgent,
             revokedWebViewer,
             retainedWebAgent,
@@ -792,6 +800,8 @@ describe("runtime adapter relay", () => {
     expect(revokedCodeViewer.closeCode).toBe(1008);
     expect(revokedCodeViewer.closeReason).toBe("lease access revoked");
     expect(ownerCodeViewer.closeCode).toBeUndefined();
+    expect(legacyCodeViewer.closeCode).toBe(1008);
+    expect(legacyCodeViewer.closeReason).toBe("lease access revoked");
     expect(revokedWebViewer.closeCode).toBe(1008);
     expect(revokedWebViewer.closeReason).toBe("lease access revoked");
     expect(revokedWebAgent.closeCode).toBe(1011);
@@ -804,6 +814,12 @@ describe("runtime adapter relay", () => {
       {
         type: "ws_close",
         id: "code-revoked",
+        code: 1008,
+        reason: "lease access revoked",
+      },
+      {
+        type: "ws_close",
+        id: "code-legacy",
         code: 1008,
         reason: "lease access revoked",
       },
@@ -10093,16 +10109,23 @@ describe("fleet lease identity and idle", () => {
     expect(retainedCodeViewer.closeCode).toBeUndefined();
     expect(ownerCodeViewer.closeCode).toBeUndefined();
     expect(adminCodeViewer.closeCode).toBeUndefined();
-    expect(legacyCodeViewer.closeCode).toBeUndefined();
+    expect(legacyCodeViewer.closeCode).toBe(1008);
+    expect(legacyCodeViewer.closeReason).toBe("lease access revoked");
     expect(relay.codeViewers.has("code-revoked")).toBe(false);
     expect(relay.codeViewers.has("code-retained")).toBe(true);
     expect(relay.codeViewers.has("code-owner")).toBe(true);
     expect(relay.codeViewers.has("code-admin")).toBe(true);
-    expect(relay.codeViewers.has("code-legacy")).toBe(true);
+    expect(relay.codeViewers.has("code-legacy")).toBe(false);
     expect(codeAgent.sentJSON()).toEqual([
       {
         type: "ws_close",
         id: "code-revoked",
+        code: 1008,
+        reason: "lease access revoked",
+      },
+      {
+        type: "ws_close",
+        id: "code-legacy",
         code: 1008,
         reason: "lease access revoked",
       },
@@ -10112,8 +10135,8 @@ describe("fleet lease identity and idle", () => {
       retainedCodeViewer as unknown as WebSocket,
       JSON.stringify({ retained: true }),
     );
-    expect(codeAgent.sentJSON()).toHaveLength(2);
-    expect(codeAgent.sentJSON()[1]).toMatchObject({ type: "ws_data", id: "code-retained" });
+    expect(codeAgent.sentJSON()).toHaveLength(3);
+    expect(codeAgent.sentJSON()[2]).toMatchObject({ type: "ws_data", id: "code-retained" });
     await fleet.webSocketMessage(
       retainedWebViewer as unknown as WebSocket,
       JSON.stringify({ retained: true }),

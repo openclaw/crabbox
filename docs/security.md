@@ -162,7 +162,9 @@ Changing any configured admin source revokes older active, restored, ticketed,
 or durable-session grants on the next authenticated request or scheduled
 reconciliation; active senders and recipients are also revalidated while data
 flows. Legacy admin attachments without a verifiable source and version fail
-closed after upgrade.
+closed after upgrade. Restored Code viewer sessions without a complete
+organization-bound principal also fail closed during restore and whenever lease
+sharing access shrinks.
 Shared-operator requests do **not** trust caller-supplied `X-Crabbox-Owner` /
 `X-Crabbox-Org` headers — pin that automation's identity with
 `CRABBOX_SHARED_OWNER` (and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed
