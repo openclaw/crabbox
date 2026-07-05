@@ -22506,3 +22506,50 @@ function decodeUserTokenPayload(token: string): { exp: number; iat: number } {
   const decoded = Buffer.from(payload, "base64url").toString("utf8");
   return JSON.parse(decoded) as { exp: number; iat: number };
 }
+
+describe("fleet run retention", () => {
+  it("alarm prunes expired terminal runs, keeps recent and in-flight runs", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString();
+    const oneMinuteAgo = new Date(Date.now() - 60_000).toISOString();
+    const run = (id: string, startedAt: string, state: RunRecord["state"], endedAt?: string) =>
+      ({
+        id,
+        leaseID: "lease-x",
+        owner: "owner",
+        org: "default-org",
+        provider: "aws",
+        class: "standard",
+        serverType: "t",
+        command: [],
+        state,
+        logBytes: 0,
+        logTruncated: false,
+        startedAt,
+        ...(endedAt ? { endedAt } : {}),
+      }) satisfies RunRecord;
+
+    storage.seed("run:run_old_done", run("run_old_done", eightDaysAgo, "succeeded", eightDaysAgo));
+    storage.seed("runlog:run_old_done", "old log");
+    storage.seed("runlog:run_old_done:chunk:000000", "chunk");
+    storage.seed("runevent:run_old_done:000000000000", { seq: 0 });
+    storage.seed("run:run_old_running", run("run_old_running", eightDaysAgo, "running"));
+    storage.seed(
+      "run:run_recent_done",
+      run("run_recent_done", oneMinuteAgo, "succeeded", oneMinuteAgo),
+    );
+
+    await fleet.alarm();
+
+    // expired terminal run and all of its side data are gone
+    expect(storage.value("run:run_old_done")).toBeUndefined();
+    expect(storage.value("runlog:run_old_done")).toBeUndefined();
+    expect(storage.value("runlog:run_old_done:chunk:000000")).toBeUndefined();
+    expect(storage.value("runevent:run_old_done:000000000000")).toBeUndefined();
+    // never delete an in-flight run, even past the retention window
+    expect(storage.value("run:run_old_running")).toBeDefined();
+    // recent history stays
+    expect(storage.value("run:run_recent_done")).toBeDefined();
+  });
+});

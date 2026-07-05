@@ -214,6 +214,20 @@ const workspaceMinimumTTLSeconds =
   (workspaceProvisionClaimMs + workspaceProvisionRecoveryGraceMs) / 1000;
 const workspaceMaxRecordsPerOwner = 100;
 const workspaceTerminalRetentionMs = 24 * 60 * 60_000;
+// Run history is otherwise unbounded: run IDs are random (not time-ordered) and
+// runs were never deleted, so `run:*` grows until the DO isolate OOMs on any
+// list-all (which then resets the DO mid-lease-create and churns provisioning).
+// Retain a bounded window; drain the backlog in the alarm; cap history reads.
+const runRetentionMs = 7 * 24 * 60 * 60_000;
+const runPruneBatchSize = 100;
+const runPruneCursorKey = "meta:run-prune-cursor";
+// Ceiling on run records pulled into the 128MB isolate by any read path. Run
+// keys are random, so a bounded scan is not guaranteed newest-first; the ceiling
+// is set well above the retained volume so in practice reads cover the whole
+// retained window. If run volume ever exceeds it within the retention window,
+// listRuns can miss some records — the durable fix is a time-ordered run index
+// (tracked in the PR as follow-up), but the ceiling is what prevents the OOM.
+const maxRunScanRecords = 5000;
 const workspacePrewarmOwner = "crabbox-internal-prewarm";
 const workspacePrewarmReplacementLeadMs = 5 * 60_000;
 const workspacePrewarmRetryDelayMs = 5 * 60_000;
@@ -1860,6 +1874,7 @@ export class FleetCoordinator {
     await this.provisionPendingWorkspace();
     await this.maintainWorkspacePrewarm();
     await this.pruneTerminalWorkspaces();
+    await this.pruneOldRuns();
     await this.runAzureDeferredCleanups();
     await this.runAWSOrphanSweepIfDue("alarm");
     await this.runAzureOrphanSweepIfDue("alarm");
@@ -3041,6 +3056,53 @@ export class FleetCoordinator {
         this.reconcileWorkspace(workspace, leasesByID.get(workspace.leaseID)),
       ),
     );
+  }
+
+  // Drains the run-history backlog in bounded, cursor-paginated batches so the
+  // alarm itself never loads the whole `run:*` keyspace (which would OOM the
+  // isolate and wedge maintenance). Each expired run's metadata, log, log
+  // chunks, and events are deleted. The cursor advances every tick and resets at
+  // the end so the scan wraps around and keeps holding retention.
+  private async pruneOldRuns(): Promise<void> {
+    const cutoff = Date.now() - runRetentionMs;
+    const cursor = (await this.state.storage.get<string>(runPruneCursorKey)) ?? "";
+    const batch = await this.state.storage.list<RunRecord>({
+      prefix: "run:",
+      limit: runPruneBatchSize,
+      ...(cursor ? { startAfter: cursor } : {}),
+    });
+    if (batch.size === 0) {
+      if (cursor) {
+        await this.state.storage.delete(runPruneCursorKey);
+      }
+      return;
+    }
+    const keys = [...batch.keys()];
+    const lastKey = keys[keys.length - 1];
+    const expired = [...batch.values()].filter((run) => {
+      // Never delete an in-flight run: its runner still writes events/logs and
+      // reads its record. Retain by completion time so a long run that only just
+      // finished keeps its history for the full window.
+      if (run.state === "running") {
+        return false;
+      }
+      const terminalAt = Date.parse(run.endedAt ?? run.startedAt);
+      return Number.isFinite(terminalAt) && terminalAt <= cutoff;
+    });
+    await this.state.runExclusive(async () => {
+      await Promise.all(
+        expired.map(async (run) => {
+          await this.deleteRunLogChunks(run.id);
+          const events = await this.state.storage.list({ prefix: runEventPrefix(run.id) });
+          await Promise.all(
+            [runLogKey(run.id), ...events.keys(), runKey(run.id)].map((key) =>
+              this.state.storage.delete(key),
+            ),
+          );
+        }),
+      );
+      await this.state.storage.put(runPruneCursorKey, lastKey);
+    });
   }
 
   private async pruneTerminalWorkspaces(): Promise<void> {
@@ -11336,7 +11398,12 @@ export class FleetCoordinator {
   }
 
   private async runRecords(): Promise<RunRecord[]> {
-    const runs = await this.state.storage.list<RunRecord>({ prefix: "run:" });
+    // Bounded: never load the whole `run:*` keyspace into the isolate. See
+    // maxRunScanRecords — the retention prune keeps the true total under it.
+    const runs = await this.state.storage.list<RunRecord>({
+      prefix: "run:",
+      limit: maxRunScanRecords,
+    });
     return [...runs.values()];
   }
 

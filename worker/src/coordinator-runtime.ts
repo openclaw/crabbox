@@ -2,7 +2,14 @@ export interface CoordinatorStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<unknown>;
-  list<T>(options?: { prefix?: string }): Promise<Map<string, T>>;
+  // limit/startAfter map straight to DurableObjectStorage.list; they let callers
+  // page a large key-space (e.g. run history) instead of loading it whole and
+  // OOMing the 128MB isolate.
+  list<T>(options?: {
+    prefix?: string;
+    limit?: number;
+    startAfter?: string;
+  }): Promise<Map<string, T>>;
 }
 
 export type CoordinatorRequestQueue = "direct" | "lifecycle";
