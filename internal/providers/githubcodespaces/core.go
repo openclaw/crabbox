@@ -107,10 +107,6 @@ func updateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected LeaseClai
 	return core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, server, target, action)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-}
-
 func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
 }
