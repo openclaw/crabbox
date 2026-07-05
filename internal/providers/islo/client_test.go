@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -130,14 +131,28 @@ func TestIsloRedirectErrorsHideRejectedLocation(t *testing.T) {
 	defer crossOrigin.Close()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/auth/token":
+		switch {
+		case r.URL.Path == "/auth/token":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"session_token":"test-token"}`)
-		case "/sandboxes/raw-location":
+		case r.URL.Path == "/sandboxes/raw-location":
 			http.Redirect(w, r, crossOrigin.URL+"/stolen?token=redirect-secret#fragment-secret", http.StatusTemporaryRedirect)
-		case "/sandboxes/sdk-location":
+		case r.URL.Path == "/sandboxes/sdk-location":
 			http.Redirect(w, r, crossOrigin.URL+"/sdk-stolen?token=redirect-secret#fragment-secret", http.StatusTemporaryRedirect)
+		case r.URL.Path == "/sandboxes/redirect-limit":
+			http.Redirect(w, r, "/redirect-limit/1", http.StatusTemporaryRedirect)
+		case strings.HasPrefix(r.URL.Path, "/redirect-limit/"):
+			hop, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/redirect-limit/"))
+			if err != nil {
+				t.Errorf("parse redirect hop: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if hop < 9 {
+				http.Redirect(w, r, "/redirect-limit/"+strconv.Itoa(hop+1), http.StatusTemporaryRedirect)
+				return
+			}
+			http.Redirect(w, r, "/limit-secret?token=limit-secret#limit-fragment", http.StatusTemporaryRedirect)
 		default:
 			w.WriteHeader(http.StatusInternalServerError)
 		}
@@ -151,21 +166,32 @@ func TestIsloRedirectErrorsHideRejectedLocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, call := range map[string]func() error{
-		"raw delete": func() error {
-			return client.DeleteSandbox(context.Background(), "raw-location")
+	for name, tc := range map[string]struct {
+		call func() error
+		want string
+	}{
+		"raw delete": {
+			call: func() error { return client.DeleteSandbox(context.Background(), "raw-location") },
+			want: "refusing islo redirect",
 		},
-		"sdk get": func() error {
-			_, err := client.GetSandbox(context.Background(), "sdk-location")
-			return err
+		"sdk get": {
+			call: func() error {
+				_, err := client.GetSandbox(context.Background(), "sdk-location")
+				return err
+			},
+			want: "refusing islo redirect",
+		},
+		"redirect limit": {
+			call: func() error { return client.DeleteSandbox(context.Background(), "redirect-limit") },
+			want: "islo redirect stopped after 10 redirects",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := call()
-			if err == nil || !strings.Contains(err.Error(), "refusing islo redirect") {
-				t.Fatalf("redirect error=%v, want refusal", err)
+			err := tc.call()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("redirect error=%v, want %q", err, tc.want)
 			}
-			for _, leaked := range []string{"redirect-secret", "fragment-secret", "/stolen", "/sdk-stolen"} {
+			for _, leaked := range []string{"redirect-secret", "fragment-secret", "/stolen", "/sdk-stolen", "limit-secret", "limit-fragment"} {
 				if strings.Contains(err.Error(), leaked) {
 					t.Fatalf("redirect error leaked %q: %v", leaked, err)
 				}

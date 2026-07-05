@@ -118,11 +118,11 @@ func isloSameOriginRedirectGuard(baseURL string, next func(*http.Request, []*htt
 	base, _ := url.Parse(baseURL)
 	baseOrigin := isloURLEffectiveOrigin(base)
 	return func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
-			return fmt.Errorf("islo redirect stopped after 10 redirects")
-		}
 		if isloURLEffectiveOrigin(req.URL) != baseOrigin {
 			return &isloRedirectError{from: baseOrigin, to: isloURLEffectiveOrigin(req.URL)}
+		}
+		if len(via) >= 10 {
+			return &isloRedirectLimitError{}
 		}
 		if next != nil {
 			return next(req, via)
@@ -136,6 +136,12 @@ type isloRedirectError struct {
 	to   string
 }
 
+type isloRedirectLimitError struct{}
+
+func (*isloRedirectLimitError) Error() string {
+	return "islo redirect stopped after 10 redirects"
+}
+
 func (e *isloRedirectError) Error() string {
 	return fmt.Sprintf("refusing islo redirect from %s to %s", e.from, e.to)
 }
@@ -146,6 +152,10 @@ func isloSanitizeRedirectError(err error) error {
 	// the rejected URL. Return our origin-only error so Location secrets stay out.
 	if errors.As(err, &redirectErr) {
 		return redirectErr
+	}
+	var limitErr *isloRedirectLimitError
+	if errors.As(err, &limitErr) {
+		return limitErr
 	}
 	return err
 }
