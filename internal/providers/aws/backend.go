@@ -40,6 +40,8 @@ type awsClient interface {
 	GetServer(context.Context, string) (Server, error)
 	DeleteServer(context.Context, string) error
 	DeleteSSHKey(context.Context, string) error
+	ValidateCleanupSSHKey(context.Context, string) error
+	DeleteCleanupSSHKey(context.Context, string) error
 	SetTags(context.Context, string, map[string]string) error
 	CapacityDoctorChecks(context.Context, Config) []core.DoctorCheck
 	SpotPlacementScores(context.Context, Config) ([]ec2types.SpotPlacementScore, error)
@@ -290,8 +292,17 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance %s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
+		if keyName := core.ServerProviderKey(live); core.ValidCrabboxProviderKey(keyName) {
+			if err := client.ValidateCleanupSSHKey(ctx, keyName); err != nil {
+				if core.IsAWSCleanupKeyOwnershipError(err) {
+					fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, err)
+					continue
+				}
+				return fmt.Errorf("re-read AWS cleanup key %s: %w", keyName, err)
+			}
+		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", live.DisplayID(), live.Name)
-		if err := deleteAWSServerWithClient(ctx, client, live); err != nil {
+		if err := deleteAWSCleanupServerWithClient(ctx, client, live); err != nil {
 			return err
 		}
 	}
@@ -403,6 +414,18 @@ func deleteAWSServerWithClient(ctx context.Context, client awsClient, server Ser
 	}
 	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {
 		if err := client.DeleteSSHKey(ctx, keyName); err != nil {
+			return &awsProviderKeyCleanupError{keyName: keyName, err: err}
+		}
+	}
+	return nil
+}
+
+func deleteAWSCleanupServerWithClient(ctx context.Context, client awsClient, server Server) error {
+	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
+		return err
+	}
+	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {
+		if err := client.DeleteCleanupSSHKey(ctx, keyName); err != nil {
 			return &awsProviderKeyCleanupError{keyName: keyName, err: err}
 		}
 	}

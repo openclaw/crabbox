@@ -28,6 +28,8 @@ type fakeAWSClient struct {
 	deletedInstances []string
 	deletedKeys      []string
 	deleteKeyErr     error
+	validatedKeys    []string
+	validateKeyErr   error
 	tagged           []string
 }
 
@@ -84,6 +86,19 @@ func (c *fakeAWSClient) DeleteServer(_ context.Context, id string) error {
 }
 
 func (c *fakeAWSClient) DeleteSSHKey(_ context.Context, name string) error {
+	c.deletedKeys = append(c.deletedKeys, name)
+	return c.deleteKeyErr
+}
+
+func (c *fakeAWSClient) ValidateCleanupSSHKey(_ context.Context, name string) error {
+	c.validatedKeys = append(c.validatedKeys, name)
+	return c.validateKeyErr
+}
+
+func (c *fakeAWSClient) DeleteCleanupSSHKey(ctx context.Context, name string) error {
+	if err := c.ValidateCleanupSSHKey(ctx, name); err != nil {
+		return err
+	}
 	c.deletedKeys = append(c.deletedKeys, name)
 	return c.deleteKeyErr
 }
@@ -504,6 +519,32 @@ func TestAWSCleanupRejectsChangedLiveProviderKey(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "live instance provider key") {
 		t.Fatalf("stderr=%q, want changed-provider-key skip", stderr.String())
+	}
+}
+
+func TestAWSCleanupSkipsUnownedLiveProviderKey(t *testing.T) {
+	server := awsTestServer("i-stale", "cbx_111111111111", "stale", "us-east-1")
+	server.Labels["provider_key"] = "crabbox-cbx-111111111111"
+	server.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	fake := &fakeAWSClient{
+		servers:        []Server{server},
+		get:            map[string]Server{server.CloudID: server},
+		validateKeyErr: core.NewAWSCleanupKeyOwnershipError("provider key ownership changed"),
+	}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	var stderr strings.Builder
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-east-1"}, Runtime{Stderr: &stderr}).(*awsLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatalf("cleanup crossed provider-key ownership mismatch: instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+	if !strings.Contains(stderr.String(), "provider key ownership changed") {
+		t.Fatalf("stderr=%q, want provider-key ownership skip", stderr.String())
 	}
 }
 
