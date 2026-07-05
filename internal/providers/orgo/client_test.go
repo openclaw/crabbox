@@ -82,6 +82,36 @@ func TestRunBashExitCodeFieldPresence(t *testing.T) {
 	}
 }
 
+func TestStartComputerUsesOfficialActionEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method=%s", r.Method)
+		}
+		if r.URL.Path != "/computers/computer_test/start" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"success":true,"status":"starting"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &orgoHTTPClient{baseURL: server.URL, apiKey: "test-key", http: server.Client()}
+	if err := client.StartComputer(context.Background(), "computer_test"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartComputerRejectsUnsuccessfulResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"success":false,"status":"stopped"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &orgoHTTPClient{baseURL: server.URL, apiKey: "test-key", http: server.Client()}
+	if err := client.StartComputer(context.Background(), "computer_test"); err == nil || !strings.Contains(err.Error(), "did not start") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestGetWorkspaceReadsOfficialDesktopsField(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/workspaces/workspace_test" {

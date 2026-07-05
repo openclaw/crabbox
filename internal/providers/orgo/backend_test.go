@@ -12,21 +12,24 @@ import (
 )
 
 type fakeOrgoAPI struct {
-	workspaces         []orgoWorkspace
-	computers          map[string]orgoComputer
-	createdWorkspace   string
-	deletedComputers   []string
-	deletedWorkspaces  []string
-	deleteComputerErr  error
-	deleteWorkspaceErr error
-	bashCommands       []string
-	bashExitCode       int
-	bashStdout         string
-	bashStderr         string
-	omitWorkspaceID    bool
-	computerStatuses   []string
-	getComputerCalls   int
-	bashStatuses       []string
+	workspaces              []orgoWorkspace
+	computers               map[string]orgoComputer
+	createdWorkspace        string
+	deletedComputers        []string
+	deletedWorkspaces       []string
+	deleteComputerDeadline  bool
+	deleteWorkspaceDeadline bool
+	startedComputers        []string
+	deleteComputerErr       error
+	deleteWorkspaceErr      error
+	bashCommands            []string
+	bashExitCode            int
+	bashStdout              string
+	bashStderr              string
+	omitWorkspaceID         bool
+	computerStatuses        []string
+	getComputerCalls        int
+	bashStatuses            []string
 }
 
 func newFakeOrgoAPI() *fakeOrgoAPI {
@@ -41,7 +44,8 @@ func (f *fakeOrgoAPI) CreateWorkspace(_ context.Context, name string) (orgoWorks
 	return orgoWorkspace{ID: "ws_created", Name: name, Status: "active"}, nil
 }
 
-func (f *fakeOrgoAPI) DeleteWorkspace(_ context.Context, id string) error {
+func (f *fakeOrgoAPI) DeleteWorkspace(ctx context.Context, id string) error {
+	_, f.deleteWorkspaceDeadline = ctx.Deadline()
 	f.deletedWorkspaces = append(f.deletedWorkspaces, id)
 	return f.deleteWorkspaceErr
 }
@@ -104,7 +108,16 @@ func (f *fakeOrgoAPI) GetComputer(_ context.Context, id string) (orgoComputer, e
 	return computer, nil
 }
 
-func (f *fakeOrgoAPI) DeleteComputer(_ context.Context, id string) error {
+func (f *fakeOrgoAPI) StartComputer(_ context.Context, id string) error {
+	f.startedComputers = append(f.startedComputers, id)
+	computer := f.computers[id]
+	computer.Status = "running"
+	f.computers[id] = computer
+	return nil
+}
+
+func (f *fakeOrgoAPI) DeleteComputer(ctx context.Context, id string) error {
+	_, f.deleteComputerDeadline = ctx.Deadline()
 	f.deletedComputers = append(f.deletedComputers, id)
 	delete(f.computers, id)
 	return f.deleteComputerErr
@@ -145,6 +158,23 @@ func TestProviderRegistersSecretSafeFlags(t *testing.T) {
 	}
 	if cfg.Orgo.APIBase != "https://orgo.test/api" || cfg.Orgo.WorkspaceID != "ws_test" || cfg.Orgo.RAMGB != 8 || cfg.Orgo.CPUs != 2 || cfg.Orgo.DiskGB != 32 || cfg.Orgo.Resolution != "1440x900x24" {
 		t.Fatalf("applied cfg=%#v", cfg.Orgo)
+	}
+}
+
+func TestProviderAliasesRejectUnsupportedMachineFlags(t *testing.T) {
+	for _, provider := range []string{providerName, "orgo-ai", " ORGO-AI "} {
+		t.Run(provider, func(t *testing.T) {
+			fs := flag.NewFlagSet(provider, flag.ContinueOnError)
+			cfg := Config{Provider: provider}
+			values := RegisterOrgoProviderFlags(fs, cfg)
+			fs.String("class", "", "")
+			if err := fs.Parse([]string{"--class", "large"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyOrgoProviderFlags(&cfg, fs, values); err == nil || !strings.Contains(err.Error(), "--class is not supported") {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	}
 }
 
@@ -189,6 +219,9 @@ func TestRunCreatesExecutesAndDeletesTemporaryWorkspace(t *testing.T) {
 	if got := strings.Join(fake.deletedWorkspaces, ","); got != "ws_created" {
 		t.Fatalf("deleted workspaces=%q", got)
 	}
+	if !fake.deleteComputerDeadline || !fake.deleteWorkspaceDeadline {
+		t.Fatalf("cleanup context missing deadline: computer=%t workspace=%t", fake.deleteComputerDeadline, fake.deleteWorkspaceDeadline)
+	}
 }
 
 func TestRunWaitsForNewComputerBeforeBash(t *testing.T) {
@@ -214,6 +247,41 @@ func TestRunWaitsForNewComputerBeforeBash(t *testing.T) {
 	}
 	if got := strings.Join(fake.bashStatuses, ","); got != "running" {
 		t.Fatalf("bash states=%q, want running", got)
+	}
+}
+
+func TestRunStartsReusedComputerBeforeBash(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		statuses []string
+	}{
+		{name: "suspended", statuses: []string{"suspended", "running"}},
+		{name: "finishes stopping", statuses: []string{"stopping", "stopped", "running"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newFakeOrgoAPI()
+			fake.computers["computer_test"] = orgoComputer{
+				ID: "computer_test", Name: "orgo-reused", WorkspaceID: "ws_existing", Status: tt.statuses[0],
+			}
+			fake.computerStatuses = append([]string(nil), tt.statuses...)
+			backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+			backend.client = fake
+
+			result, err := backend.Run(context.Background(), RunRequest{ID: "computer_test", NoSync: true, Command: []string{"true"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("exit=%d", result.ExitCode)
+			}
+			if got := strings.Join(fake.startedComputers, ","); got != "computer_test" {
+				t.Fatalf("started computers=%q", got)
+			}
+			if got := strings.Join(fake.bashStatuses, ","); got != "running" {
+				t.Fatalf("bash states=%q, want running", got)
+			}
+		})
 	}
 }
 

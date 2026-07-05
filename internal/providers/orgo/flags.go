@@ -1,6 +1,9 @@
 package orgo
 
-import "flag"
+import (
+	"flag"
+	"strings"
+)
 
 type orgoFlagValues struct {
 	APIBase     *string
@@ -25,7 +28,8 @@ func RegisterOrgoProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyOrgoProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if cfg.Provider == providerName {
+	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
+	case providerName, "orgo-ai":
 		if flagWasSet(fs, "class") {
 			return exit(2, "--class is not supported for provider=%s", providerName)
 		}

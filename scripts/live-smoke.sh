@@ -1133,7 +1133,8 @@ orgo_smoke() {
     .stdout // .output // .result // .text // .message // empty
   '
   if ! printf '%s\n' "$bash_json" | jq -e '
-    tostring | contains("crabbox-orgo-ok")
+    .success == true and
+    ((.stdout // .output // .result // .text // .message // "") | contains("crabbox-orgo-ok"))
   ' >/dev/null; then
     echo "orgo smoke command did not return crabbox-orgo-ok" >&2
     return 1

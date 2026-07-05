@@ -21,6 +21,7 @@ type orgoAPI interface {
 	GetWorkspace(ctx context.Context, id string) (orgoWorkspace, error)
 	CreateComputer(ctx context.Context, req orgoCreateComputerRequest) (orgoComputer, error)
 	GetComputer(ctx context.Context, id string) (orgoComputer, error)
+	StartComputer(ctx context.Context, id string) error
 	DeleteComputer(ctx context.Context, id string) error
 	RunBash(ctx context.Context, id, command string, stdout, stderr io.Writer) (int, error)
 }
@@ -69,6 +70,11 @@ type orgoBashResponse struct {
 	ExitCode      *int   `json:"exit_code"`
 	ExitCodeCamel *int   `json:"exitCode"`
 	Success       *bool  `json:"success"`
+}
+
+type orgoActionResponse struct {
+	Success bool   `json:"success"`
+	Status  string `json:"status"`
 }
 
 type orgoHTTPClient struct {
@@ -218,6 +224,17 @@ func (c *orgoHTTPClient) GetComputer(ctx context.Context, id string) (orgoComput
 	var computer orgoComputer
 	err := c.doJSON(ctx, http.MethodGet, "/computers/"+url.PathEscape(id), nil, &computer)
 	return computer, err
+}
+
+func (c *orgoHTTPClient) StartComputer(ctx context.Context, id string) error {
+	var res orgoActionResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/computers/"+url.PathEscape(id)+"/start", nil, &res); err != nil {
+		return err
+	}
+	if !res.Success {
+		return fmt.Errorf("orgo did not start computer %s (status=%s)", id, strings.TrimSpace(res.Status))
+	}
+	return nil
 }
 
 func (c *orgoHTTPClient) DeleteComputer(ctx context.Context, id string) error {

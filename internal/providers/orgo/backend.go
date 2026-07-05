@@ -15,6 +15,7 @@ const (
 	orgoWorkspaceLabel        = "orgo_workspace_id"
 	orgoReadyTimeout          = 5 * time.Minute
 	orgoReadyPollInterval     = 250 * time.Millisecond
+	orgoCleanupTimeout        = 30 * time.Second
 )
 
 var orgoEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -101,6 +102,10 @@ func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		if err != nil {
 			return RunResult{}, err
 		}
+		lease.Computer, err = b.ensureComputerRunning(ctx, client, lease.Computer)
+		if err != nil {
+			return RunResult{}, err
+		}
 	}
 
 	shouldStop := acquired && !req.Keep
@@ -108,7 +113,7 @@ func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		if !shouldStop {
 			return
 		}
-		if err := b.deleteLease(context.Background(), client, lease); err != nil {
+		if err := b.cleanupLease(client, lease); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: orgo cleanup failed for %s: %v\n", lease.Computer.ID, err)
 		}
 	}()
@@ -286,16 +291,16 @@ func (b *orgoBackend) createComputer(ctx context.Context, client orgoAPI, repo R
 	computer, err := client.CreateComputer(ctx, req)
 	if err != nil {
 		if createdWorkspace != "" {
-			_ = client.DeleteWorkspace(context.Background(), createdWorkspace)
+			_ = b.cleanupLease(client, orgoLease{CreatedWorkspace: createdWorkspace})
 		}
 		return orgoLease{}, err
 	}
 	if computer.WorkspaceID == "" {
 		computer.WorkspaceID = workspaceID
 	}
-	computer, err = b.waitForComputerRunning(ctx, client, computer)
+	computer, err = b.waitForComputerRunning(ctx, client, computer, false)
 	if err != nil {
-		_ = b.deleteLease(context.Background(), client, orgoLease{
+		_ = b.cleanupLease(client, orgoLease{
 			Computer:         computer,
 			CreatedWorkspace: createdWorkspace,
 		})
@@ -303,14 +308,19 @@ func (b *orgoBackend) createComputer(ctx context.Context, client orgoAPI, repo R
 	}
 	lease := orgoLease{LeaseID: leaseID, Slug: slug, Computer: computer, CreatedWorkspace: createdWorkspace}
 	if err := b.claimLease(repo, lease, reclaim); err != nil {
-		_ = b.deleteLease(context.Background(), client, lease)
+		_ = b.cleanupLease(client, lease)
 		return orgoLease{}, err
 	}
 	return lease, nil
 }
 
-func (b *orgoBackend) waitForComputerRunning(ctx context.Context, client orgoAPI, computer orgoComputer) (orgoComputer, error) {
+func (b *orgoBackend) ensureComputerRunning(ctx context.Context, client orgoAPI, computer orgoComputer) (orgoComputer, error) {
+	return b.waitForComputerRunning(ctx, client, computer, true)
+}
+
+func (b *orgoBackend) waitForComputerRunning(ctx context.Context, client orgoAPI, computer orgoComputer, startStopped bool) (orgoComputer, error) {
 	deadline := b.now().Add(orgoReadyTimeout)
+	startRequested := false
 	for {
 		state := normalizeOrgoStatus(computer.Status)
 		switch state {
@@ -318,6 +328,15 @@ func (b *orgoBackend) waitForComputerRunning(ctx context.Context, client orgoAPI
 			return computer, nil
 		case "error", "failed", "deleted":
 			return computer, exit(5, "orgo computer %s entered %s state while starting", computer.ID, state)
+		case "stopped", "suspended":
+			if startStopped && !startRequested {
+				if err := client.StartComputer(ctx, computer.ID); err != nil {
+					return computer, err
+				}
+				startRequested = true
+				computer.Status = "starting"
+				continue
+			}
 		}
 		if !b.now().Before(deadline) {
 			return computer, exit(5, "timed out waiting for orgo computer %s to become running (last state=%s)", computer.ID, state)
@@ -426,6 +445,12 @@ func (b *orgoBackend) deleteLease(ctx context.Context, client orgoAPI, lease org
 		removeLeaseClaim(lease.LeaseID)
 	}
 	return cleanupErr
+}
+
+func (b *orgoBackend) cleanupLease(client orgoAPI, lease orgoLease) error {
+	ctx, cancel := context.WithTimeout(context.Background(), orgoCleanupTimeout)
+	defer cancel()
+	return b.deleteLease(ctx, client, lease)
 }
 
 func (b *orgoBackend) listComputers(ctx context.Context, client orgoAPI) ([]orgoComputer, error) {

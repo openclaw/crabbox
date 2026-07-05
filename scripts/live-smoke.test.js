@@ -3635,7 +3635,7 @@ case "$method $url" in
     printf '{"id":"computer_test","status":"running"}\\n'
     ;;
   "POST https://orgo.test/computers/computer_test/bash")
-    printf '{"stdout":"crabbox-orgo-ok\\\\n","exit_code":0}\\n'
+    printf '{"success":%s,"stdout":"crabbox-orgo-ok\\\\n","exit_code":0}\\n' "\${CRABBOX_FAKE_ORGO_SUCCESS:-true}"
     ;;
   "DELETE https://orgo.test/computers/computer_test"|"DELETE https://orgo.test/workspaces/ws_test")
     printf '{}\\n'
@@ -3679,6 +3679,27 @@ esac
   assert.match(curlCalls, /^DELETE https:\/\/orgo\.test\/computers\/computer_test data=$/m);
   assert.match(curlCalls, /^DELETE https:\/\/orgo\.test\/workspaces\/ws_test data=$/m);
   assert.doesNotMatch(curlCalls, /dummy-orgo-key/);
+
+	const failedResult = spawnSync("bash", ["scripts/live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+			CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+			CRABBOX_FAKE_CURL_LOG: curlLog,
+			CRABBOX_FAKE_ORGO_SUCCESS: "false",
+			CRABBOX_LIVE: "1",
+			CRABBOX_LIVE_COORDINATOR: "0",
+			CRABBOX_LIVE_ORGO_SUFFIX: "test-failure",
+			CRABBOX_LIVE_PROVIDERS: "orgo",
+			CRABBOX_LIVE_REPO: repoRoot,
+			CRABBOX_ORGO_API_BASE: "https://orgo.test",
+			ORGO_API_KEY: "dummy-orgo-key",
+		},
+		encoding: "utf8",
+	});
+	assert.equal(failedResult.status, 1, failedResult.stdout + failedResult.stderr);
+	assert.match(failedResult.stderr, /did not return crabbox-orgo-ok/);
 });
 
 test("orgo live smoke reuses an explicit workspace", () => {
@@ -3731,7 +3752,7 @@ case "$method $url" in
     printf '{"id":"computer_test","status":"running"}\\n'
     ;;
   "POST https://orgo.test/computers/computer_test/bash")
-    printf '{"stdout":"crabbox-orgo-ok\\\\n","exit_code":0}\\n'
+    printf '{"success":true,"stdout":"crabbox-orgo-ok\\\\n","exit_code":0}\\n'
     ;;
   "DELETE https://orgo.test/computers/computer_test")
     printf '{}\\n'
