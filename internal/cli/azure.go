@@ -2077,6 +2077,10 @@ func (c *AzureClient) azureCleanupDeleteResources(ctx context.Context, vmName st
 	if vm.Properties == nil {
 		return resources, fmt.Errorf("live Azure VM %s has no properties", vmName)
 	}
+	vmLocation := strings.TrimSpace(stringValue(vm.Location))
+	if vmLocation == "" {
+		return resources, fmt.Errorf("live Azure VM %s has no location", vmName)
+	}
 	resources.vmID = strings.TrimSpace(expectedVMID)
 	if err := requireAzureCleanupIdentity("VM", vmName, stringValue(vm.Properties.VMID), resources.vmID); err != nil {
 		return resources, err
@@ -2222,10 +2226,14 @@ func (c *AzureClient) azureCleanupDeleteResources(ctx context.Context, vmName st
 			return resources, err
 		}
 		resources.quarantineNSG = nsgName
-	} else if !strings.EqualFold(nsgName, c.NSG) && !strings.EqualFold(nsgName, azureRegionalName(c.NSG, c.Location)) {
+	} else if !isAzureCleanupSharedNSG(nsgName, c.NSG, vmLocation) {
 		return resources, fmt.Errorf("Azure cleanup NIC %s references unexpected network security group %s", nicName, nsgName)
 	}
 	return resources, nil
+}
+
+func isAzureCleanupSharedNSG(name, baseName, vmLocation string) bool {
+	return strings.EqualFold(name, baseName) || strings.EqualFold(name, azureRegionalName(baseName, vmLocation))
 }
 
 func (c *AzureClient) deleteVMResources(ctx context.Context, name string) error {

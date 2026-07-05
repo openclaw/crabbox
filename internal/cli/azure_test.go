@@ -150,6 +150,15 @@ func TestRequireAzureCleanupIdentity(t *testing.T) {
 	}
 }
 
+func TestAzureCleanupSharedNSGUsesLiveVMLocation(t *testing.T) {
+	if !isAzureCleanupSharedNSG("crabbox-nsg-westus2", "crabbox-nsg", "westus2") {
+		t.Fatal("live fallback-region NSG rejected")
+	}
+	if isAzureCleanupSharedNSG("crabbox-nsg-eastus", "crabbox-nsg", "westus2") {
+		t.Fatal("primary-region NSG accepted for fallback-region VM")
+	}
+}
+
 func TestAzureImageForConfig(t *testing.T) {
 	t.Parallel()
 	linux := baseConfig()

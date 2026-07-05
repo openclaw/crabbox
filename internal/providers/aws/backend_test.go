@@ -521,6 +521,35 @@ func TestAWSCleanupDryRunRetainsExactClaim(t *testing.T) {
 	}
 }
 
+func TestAWSCleanupRejectsProviderKeyChangedFromExactClaim(t *testing.T) {
+	isolateAWSClaimState(t)
+	original := awsTestServer("i-stale", "cbx_666666666666", "stale", "us-east-1")
+	original.Labels["provider_key"] = "crabbox-cbx-666666666666"
+	original.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	candidate := original
+	candidate.Labels = maps.Clone(original.Labels)
+	candidate.Labels["provider_key"] = "crabbox-cbx-777777777777"
+	fake := &fakeAWSClient{servers: []Server{candidate}}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	cfg := Config{Provider: "aws", AWSRegion: "us-east-1"}
+	claimAWSCleanupServer(t, cfg, original)
+	var stderr strings.Builder
+	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*awsLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.getIDs) != 0 || len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatalf("cleanup crossed changed claim key: gets=%v instances=%v keys=%v", fake.getIDs, fake.deletedInstances, fake.deletedKeys)
+	}
+	if !strings.Contains(stderr.String(), "exact local claim missing or stale") {
+		t.Fatalf("stderr=%q, want stale exact-claim skip", stderr.String())
+	}
+	assertAWSClaimCloudID(t, original.Labels["lease"], original.CloudID)
+}
+
 func TestAWSCleanupRevalidatesLiveOwnershipBeforeDelete(t *testing.T) {
 	isolateAWSClaimState(t)
 	snapshot := awsTestServer("i-stale", "cbx_111111111111", "stale", "us-east-1")

@@ -450,6 +450,13 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 		strings.TrimSpace(claim.Labels["aws_region"]) != awsServerRegion(server) {
 		return core.LeaseClaim{}, exit(2, "refusing to operate on AWS instance %s from a missing or stale exact local claim", server.DisplayID())
 	}
+	expectedProviderKey := strings.TrimSpace(claim.Labels["provider_key"])
+	if expectedProviderKey == "" {
+		expectedProviderKey = core.ProviderKeyForLease(expectedLeaseID)
+	}
+	if strings.TrimSpace(core.ServerProviderKey(server)) != expectedProviderKey {
+		return core.LeaseClaim{}, exit(2, "refusing to operate on AWS instance %s whose provider key differs from its exact local claim", server.DisplayID())
+	}
 	return claim, nil
 }
 

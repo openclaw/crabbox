@@ -10,6 +10,34 @@ import (
 func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, expected Server, resources azureVMDeleteResources, now time.Time) error {
 	name := strings.TrimSpace(expected.CloudID)
 	for attempt := 0; ; attempt++ {
+		if resources.vm {
+			vmOnly := azureVMDeleteResources{vm: true}
+			errs, retry := c.deleteVMResourcesOnce(ctx, name, vmOnly)
+			if len(errs) != 0 {
+				if !retry || attempt >= azureDeleteRetryAttempts-1 {
+					return joinErrors(errs)
+				}
+				if err := waitForAzureCleanupRetry(ctx, errs); err != nil {
+					return err
+				}
+				var err error
+				resources, err = c.revalidateAzureCleanupDeleteResources(ctx, expected, resources, now)
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			resources.vm = false
+			var err error
+			resources, err = c.revalidateAzureCleanupDeleteResources(ctx, expected, resources, now)
+			if err != nil {
+				return err
+			}
+			if azureCleanupResourcesEmpty(resources) {
+				return nil
+			}
+		}
+
 		errs, retry := c.deleteVMResourcesOnce(ctx, name, resources)
 		if len(errs) == 0 {
 			return nil
@@ -17,21 +45,31 @@ func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, 
 		if !retry || attempt >= azureDeleteRetryAttempts-1 {
 			return joinErrors(errs)
 		}
-		select {
-		case <-ctx.Done():
-			errs = append(errs, ctx.Err())
-			return joinErrors(errs)
-		case <-time.After(azureDeleteRetryDelay):
+		if err := waitForAzureCleanupRetry(ctx, errs); err != nil {
+			return err
 		}
 		var err error
 		resources, err = c.revalidateAzureCleanupDeleteResources(ctx, expected, resources, now)
 		if err != nil {
 			return err
 		}
-		if !resources.vm && resources.nic == "" && resources.publicIP == "" && resources.disk == "" && resources.quarantineNSG == "" {
+		if azureCleanupResourcesEmpty(resources) {
 			return nil
 		}
 	}
+}
+
+func waitForAzureCleanupRetry(ctx context.Context, errs []error) error {
+	select {
+	case <-ctx.Done():
+		return joinErrors(append(errs, ctx.Err()))
+	case <-time.After(azureDeleteRetryDelay):
+		return nil
+	}
+}
+
+func azureCleanupResourcesEmpty(resources azureVMDeleteResources) bool {
+	return !resources.vm && resources.nic == "" && resources.publicIP == "" && resources.disk == "" && resources.quarantineNSG == ""
 }
 
 func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context, expected Server, resources azureVMDeleteResources, now time.Time) (azureVMDeleteResources, error) {
