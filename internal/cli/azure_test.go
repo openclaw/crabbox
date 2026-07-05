@@ -399,6 +399,88 @@ func TestAzureSnapshotQuarantineSecurityGroupDeniesAllInbound(t *testing.T) {
 	}
 }
 
+func TestAzureCleanupQuarantineNSGIdentity(t *testing.T) {
+	t.Parallel()
+	const (
+		name       = "crabbox-lease-q-nsg"
+		resourceID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/crabbox-lease-q-nsg"
+		identity   = "quarantine-resource-guid"
+	)
+	labels := map[string]string{
+		"crabbox":    "true",
+		"created_by": "crabbox",
+		"provider":   "azure",
+		"lease":      "cbx_123456789abc",
+		"slug":       "cleanup-test",
+	}
+	group := armnetwork.SecurityGroup{
+		ID:   to.Ptr(resourceID),
+		Tags: azureLabelsToTags(labels),
+		Properties: &armnetwork.SecurityGroupPropertiesFormat{
+			ResourceGUID: to.Ptr(identity),
+		},
+	}
+	client := AzureClient{SubscriptionID: "sub", ResourceGroup: "rg"}
+
+	got, err := client.azureCleanupQuarantineNSGIdentity(name, group, "", labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != identity {
+		t.Fatalf("identity=%q, want %q", got, identity)
+	}
+	if got, err := client.azureCleanupQuarantineNSGIdentity(name, group, resourceID, labels); err != nil || got != identity {
+		t.Fatalf("referenced identity=%q err=%v, want %q", got, err, identity)
+	}
+
+	tests := []struct {
+		name      string
+		mutate    func(*armnetwork.SecurityGroup)
+		reference string
+		wantErr   string
+	}{
+		{
+			name: "unexpected resource name",
+			mutate: func(group *armnetwork.SecurityGroup) {
+				group.ID = to.Ptr("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/replacement-q-nsg")
+			},
+			wantErr: "unexpected resource name",
+		},
+		{
+			name:      "stale reference",
+			reference: "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/other-q-nsg",
+			wantErr:   "does not match VM reference",
+		},
+		{
+			name: "ownership drift",
+			mutate: func(group *armnetwork.SecurityGroup) {
+				group.Tags = maps.Clone(group.Tags)
+				group.Tags["created_by"] = to.Ptr("external")
+			},
+			wantErr: "lacks canonical Crabbox ownership tags",
+		},
+		{
+			name: "missing immutable identity",
+			mutate: func(group *armnetwork.SecurityGroup) {
+				group.Properties = &armnetwork.SecurityGroupPropertiesFormat{}
+			},
+			wantErr: "has no immutable resource identity",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := group
+			if test.mutate != nil {
+				test.mutate(&candidate)
+			}
+			_, err := client.azureCleanupQuarantineNSGIdentity(name, candidate, test.reference, labels)
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("error=%v, want containing %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestAzureSnapshotNICReleaseRequestUsesWritableCreatePayload(t *testing.T) {
 	t.Parallel()
 	quarantineNSGID := "/subscriptions/test/resourceGroups/test/providers/Microsoft.Network/networkSecurityGroups/lease-q-nsg"
