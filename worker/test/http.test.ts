@@ -51,6 +51,14 @@ describe("coordinator auth", () => {
           method: "POST",
           headers: { cookie, origin: "https://lease.code.example.test" },
         }),
+        new Request("https://broker.example.test/portal/logout", {
+          method: "POST",
+          headers: { cookie },
+        }),
+        new Request("https://broker.example.test/portal/logout", {
+          method: "POST",
+          headers: { cookie, origin: "https://attacker.example" },
+        }),
         new Request(viewerURL, { headers: { cookie, upgrade: "websocket" } }),
         new Request(viewerURL, {
           headers: { cookie, origin: "https://attacker.example", upgrade: "websocket" },
@@ -72,6 +80,13 @@ describe("coordinator auth", () => {
         new Request(mutationURL, {
           method: "POST",
           headers: { cookie, origin: "https://broker.example.test" },
+        }),
+        new Request("https://broker.example.test/portal/logout", {
+          method: "POST",
+          headers: { cookie, origin: "https://broker.example.test" },
+        }),
+        new Request("https://broker.example.test/portal/logout", {
+          headers: { cookie, origin: "https://attacker.example" },
         }),
         new Request(viewerURL, {
           headers: {
@@ -95,6 +110,47 @@ describe("coordinator auth", () => {
     for (const prepared of accepted) {
       expect(prepared).toMatchObject({ authenticated: true });
     }
+  });
+
+  it("allows a verified same-origin portal logout without GitHub membership", async () => {
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_PUBLIC_URL: "https://broker.example.test",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const headers = {
+      cookie: `crabbox_session=${encodeURIComponent(token)}`,
+      origin: "https://broker.example.test",
+    };
+    const membershipUnavailable = {
+      githubMembership: async (): Promise<void> => {
+        throw new Error("GitHub unavailable");
+      },
+    };
+
+    const logout = await prepareCoordinatorRequest(
+      new Request("https://broker.example.test/portal/logout", { method: "POST", headers }),
+      env,
+      membershipUnavailable,
+    );
+    expect(logout).toMatchObject({ authenticated: true });
+
+    const normalMutation = await prepareCoordinatorRequest(
+      new Request("https://broker.example.test/portal/leases/blue-lobster/share", {
+        method: "POST",
+        headers,
+      }),
+      env,
+      membershipUnavailable,
+    );
+    expect(normalMutation).toMatchObject({ authenticated: false, response: { status: 401 } });
   });
 
   it("treats malformed portal cookies as absent across request types", async () => {

@@ -271,6 +271,30 @@ export async function verifiedUserTokenExpiresAtForRevocation(
   return payload ? new Date(payload.exp * 1000).toISOString() : undefined;
 }
 
+// Logout must remain available when GitHub membership revalidation is unavailable or revoked.
+export async function authenticateUserTokenForRevocation(
+  token: string,
+  env: Pick<
+    Env,
+    | "CRABBOX_SHARED_TOKEN"
+    | "CRABBOX_SESSION_SECRET"
+    | "CRABBOX_GITHUB_ADMIN_OWNERS"
+    | "CRABBOX_GITHUB_ADMIN_LOGINS"
+  >,
+): Promise<AuthContext | undefined> {
+  const payload = await verifyUserToken(token, env).catch(() => undefined);
+  if (!payload) return undefined;
+  return {
+    authorized: true,
+    admin: githubUserIsAdmin(payload, env),
+    auth: "github",
+    owner: payload.owner,
+    org: payload.org,
+    login: payload.login,
+    tokenExpiresAt: new Date(payload.exp * 1000).toISOString(),
+  };
+}
+
 async function verifyUserToken(
   token: string,
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,

@@ -53,7 +53,7 @@ Every non-health route normally requires a Bearer token; requests without one
 are rejected `401 unauthorized`. The Node runtime can instead accept an
 explicitly configured trusted reverse-proxy identity from allowlisted peer
 CIDRs. The generally unauthenticated routes are `GET /v1/health`, the GitHub
-login/OAuth and portal login/logout routes, and bridge agent upgrades that use
+login/OAuth and portal login routes, and bridge agent upgrades that use
 short-lived tickets. The workspace lifecycle and desktop-connection routes also
 accept the dedicated `CRABBOX_RUNTIME_ADAPTER_TOKEN` as a non-admin service
 identity. That credential cannot attach workspace terminals and is rejected from
@@ -268,6 +268,9 @@ require an exact same-origin browser `Origin` matching `CRABBOX_PUBLIC_URL` (or
 the request origin when no public URL is configured). Missing or sibling-origin
 intent is rejected before the portal cookie is converted into bearer authority;
 explicit bearer API clients remain independent of this browser-only boundary.
+Portal logout follows the same boundary: `GET /portal/logout` only renders a
+confirmation page, and only a same-origin `POST` clears the portal cookie and
+revokes isolated Code viewer sessions.
 
 Configured provider credentials are redacted from documented HTTP or streamed
 error diagnostics, including Azure Dynamic Sessions, Cloudflare runner, Daytona,

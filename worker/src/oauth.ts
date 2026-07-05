@@ -117,6 +117,20 @@ export function githubPortalLogout(): Response {
   );
 }
 
+export function githubPortalLogoutConfirmation(): Response {
+  return html(
+    "Log out of Crabbox?",
+    "This ends your portal session and any isolated Code viewer sessions.",
+    200,
+    {
+      "content-security-policy":
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "x-frame-options": "DENY",
+    },
+    `<form method="post" action="/portal/logout"><button type="submit">Log out</button></form><p><a href="/portal">Cancel</a></p>`,
+  );
+}
+
 async function githubAuthStart(
   request: Request,
   storage: CoordinatorStorage,
