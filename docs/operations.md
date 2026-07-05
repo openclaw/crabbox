@@ -684,6 +684,6 @@ Before tagging a release:
 - `git diff --check`
 - Live smoke at least one coordinator-backed `crabbox run`, then verify `crabbox attach`, `crabbox events`, `crabbox logs`, and lease cleanup.
 - Push, pull, and wait for CI green on the release commit.
-- Tag and push `vX.Y.Z`, then wait for the release workflow. The workflow publishes GitHub release assets, copies the matching `CHANGELOG.md` section into the GitHub release body, and pushes the generated `Formula/crabbox.rb` update to `openclaw/homebrew-tap` with `HOMEBREW_TAP_GITHUB_TOKEN`; missing tap access is a release failure.
+- Tag and push `vX.Y.Z`, then send the default-branch release event with that exact tag: `gh api --method POST repos/openclaw/crabbox/dispatches -f event_type=release -f 'client_payload[tag]=vX.Y.Z'`. Tag pushes and ref-selectable workflow dispatches do not publish. The workflow verifies that the tag is in default-branch history before loading release credentials, publishes GitHub release assets, copies the matching `CHANGELOG.md` section into the GitHub release body, and pushes the generated `Formula/crabbox.rb` update to `openclaw/homebrew-tap` with `HOMEBREW_TAP_GITHUB_TOKEN`; missing tap access is a release failure.
 - Verify the GitHub release assets and the Homebrew formula update.
 - `brew update`, install or upgrade `openclaw/tap/crabbox`, run `crabbox --version`, and run a short live smoke from the installed binary.

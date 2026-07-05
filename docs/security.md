@@ -343,13 +343,14 @@ it to commands, print it, or store it in repo config.
 
 ## Release Integrity
 
-Release publication uses the GoReleaser configuration from the reviewed branch
-that dispatched the workflow, never configuration from a manually selected
-release tag. Manual re-releases must be dispatched from the default branch,
-accept only an existing exact `vMAJOR.MINOR.PATCH` tag in that branch's history,
-and may fail for historical tags that are incompatible with the current
-reviewed release configuration rather than falling back to tag-controlled
-publishing behavior.
+Production release publication accepts only a `repository_dispatch` release
+event, which GitHub runs from the default branch; version-tag pushes and
+ref-selectable workflow dispatches do not start the credentialed workflow. The
+workflow accepts only an existing exact `vMAJOR.MINOR.PATCH` tag in
+default-branch history and uses the GoReleaser configuration from the reviewed
+default-branch commit, never from the selected release tag. Re-releases may fail
+for historical tags that are incompatible with the current reviewed
+configuration rather than falling back to tag-controlled publishing behavior.
 
 ## Managed Windows Artifact Integrity
 

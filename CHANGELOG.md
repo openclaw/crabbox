@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Restricted production releases to default-branch repository dispatches for existing version tags in reviewed history, so tag pushes and ref-selectable manual workflows cannot run credentialed release configuration. Thanks @coygeek.
 - Bound GitHub OAuth CLI token release to a one-use callback on the initiating device, so forwarding an authorization URL cannot hand the resulting user token to another terminal. Thanks @coygeek.
 - Honored an explicit broker URL and freshly issued credential during immediate post-login identity verification, even when ambient coordinator overrides point elsewhere.
 - Kept coordinator restarts, run history, lease detail pages, and Azure orphan sweeps memory-bounded with exact lease restores, paged record scans, and batched terminal-run pruning after a configurable 30-day retention period.
