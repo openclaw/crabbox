@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,157 @@ func TestIsloClientDeleteSandboxHandlesEmptyAndMissing(t *testing.T) {
 			t.Fatal("expected error for 500 delete, got nil")
 		}
 	})
+}
+
+func TestIsloClientDeleteSandboxConfinesRedirects(t *testing.T) {
+	crossOriginHit := false
+	crossOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		crossOriginHit = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer crossOrigin.Close()
+
+	var sameOriginRedirectHit bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/auth/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"session_token":"test-token"}`)
+		case r.URL.Path == "/sandboxes/same-origin":
+			http.Redirect(w, r, "/redirected-delete", http.StatusTemporaryRedirect)
+		case r.URL.Path == "/redirected-delete":
+			sameOriginRedirectHit = true
+			if r.Header.Get("Authorization") == "" {
+				t.Error("same-origin redirected request lost authorization")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/sandboxes/cross-origin":
+			http.Redirect(w, r, crossOrigin.URL+"/stolen", http.StatusTemporaryRedirect)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{}
+	cfg.Islo.APIKey = "test-key"
+	cfg.Islo.BaseURL = server.URL
+	client, err := newIsloClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeleteSandbox(context.Background(), "same-origin"); err != nil {
+		t.Fatalf("same-origin redirect should be allowed: %v", err)
+	}
+	if !sameOriginRedirectHit {
+		t.Fatal("same-origin redirect target was not reached")
+	}
+	err = client.DeleteSandbox(context.Background(), "cross-origin")
+	if err == nil || !strings.Contains(err.Error(), "refusing islo redirect") {
+		t.Fatalf("cross-origin redirect error=%v, want refusal", err)
+	}
+	if crossOriginHit {
+		t.Fatal("cross-origin redirect target received request")
+	}
+}
+
+func TestIsloRedirectErrorsHideRejectedLocation(t *testing.T) {
+	crossOriginHit := false
+	crossOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		crossOriginHit = true
+		t.Errorf("redirect target received %s %s auth=%q", r.Method, r.URL.RequestURI(), r.Header.Get("Authorization"))
+	}))
+	defer crossOrigin.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/auth/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"session_token":"test-token"}`)
+		case r.URL.Path == "/sandboxes/raw-location":
+			http.Redirect(w, r, crossOrigin.URL+"/stolen?token=redirect-secret#fragment-secret", http.StatusTemporaryRedirect)
+		case r.URL.Path == "/sandboxes/sdk-location":
+			http.Redirect(w, r, crossOrigin.URL+"/sdk-stolen?token=redirect-secret#fragment-secret", http.StatusTemporaryRedirect)
+		case r.URL.Path == "/sandboxes/redirect-limit":
+			http.Redirect(w, r, "/redirect-limit/1", http.StatusTemporaryRedirect)
+		case strings.HasPrefix(r.URL.Path, "/redirect-limit/"):
+			hop, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/redirect-limit/"))
+			if err != nil {
+				t.Errorf("parse redirect hop: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if hop < 9 {
+				http.Redirect(w, r, "/redirect-limit/"+strconv.Itoa(hop+1), http.StatusTemporaryRedirect)
+				return
+			}
+			http.Redirect(w, r, "/limit-secret?token=limit-secret#limit-fragment", http.StatusTemporaryRedirect)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{}
+	cfg.Islo.APIKey = "test-key"
+	cfg.Islo.BaseURL = server.URL
+	client, err := newIsloClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		call func() error
+		want string
+	}{
+		"raw delete": {
+			call: func() error { return client.DeleteSandbox(context.Background(), "raw-location") },
+			want: "refusing islo redirect",
+		},
+		"sdk get": {
+			call: func() error {
+				_, err := client.GetSandbox(context.Background(), "sdk-location")
+				return err
+			},
+			want: "refusing islo redirect",
+		},
+		"redirect limit": {
+			call: func() error { return client.DeleteSandbox(context.Background(), "redirect-limit") },
+			want: "islo redirect stopped after 10 redirects",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("redirect error=%v, want %q", err, tc.want)
+			}
+			for _, leaked := range []string{"redirect-secret", "fragment-secret", "/stolen", "/sdk-stolen", "limit-secret", "limit-fragment"} {
+				if strings.Contains(err.Error(), leaked) {
+					t.Fatalf("redirect error leaked %q: %v", leaked, err)
+				}
+			}
+		})
+	}
+	if crossOriginHit {
+		t.Fatal("cross-origin redirect target received request")
+	}
+}
+
+func TestIsloRedirectGuardUsesEffectiveOrigin(t *testing.T) {
+	guard := isloSameOriginRedirectGuard("https://api.islo.dev", nil)
+	samePort, err := http.NewRequest(http.MethodGet, "https://api.islo.dev:443/sandboxes", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := guard(samePort, nil); err != nil {
+		t.Fatalf("default HTTPS port should share origin: %v", err)
+	}
+	otherPort, err := http.NewRequest(http.MethodGet, "https://api.islo.dev:444/sandboxes", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := guard(otherPort, nil); err == nil {
+		t.Fatal("different effective port should be refused")
+	}
 }
 
 func TestIsloRawErrorsRedactSessionToken(t *testing.T) {
