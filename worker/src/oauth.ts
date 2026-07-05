@@ -5,6 +5,11 @@ import {
   userTokenSigningConfigurationError,
 } from "./auth";
 import type { CoordinatorRuntime, CoordinatorStorage } from "./coordinator-runtime";
+import {
+  githubUserIsRevoked,
+  GitHubAuthorizationError,
+  requireGitHubLoginMembership,
+} from "./github-membership";
 import { errorMessage, json, readJson } from "./http";
 import type { Env, Provider } from "./types";
 import { requestOrg } from "./usage";
@@ -13,7 +18,6 @@ const githubAuthorizeURL = "https://github.com/login/oauth/authorize";
 const githubTokenURL = "https://github.com/login/oauth/access_token";
 const githubAPIURL = "https://api.github.com";
 const maxPendingOAuthLogins = 100;
-const maxGitHubTeamPages = 10;
 const defaultUserTokenTTLSeconds = 180 * 24 * 60 * 60;
 const minUserTokenTTLSeconds = 60 * 60;
 const maxUserTokenTTLSeconds = 365 * 24 * 60 * 60;
@@ -48,18 +52,6 @@ interface GitHubEmail {
   email?: string;
   primary?: boolean;
   verified?: boolean;
-}
-
-interface GitHubTeam {
-  slug?: string;
-  organization?: {
-    login?: string;
-  };
-}
-
-interface AllowedGitHubTeam {
-  org: string;
-  slug: string;
 }
 
 export async function githubAuthRoute(
@@ -271,20 +263,24 @@ async function githubAuthCallback(
       }),
       env,
     );
-    const org = await requireAllowedOrgMembership(accessToken, identity.login, requestedOrg, env);
-    await requireAllowedTeamMembership(accessToken, identity.login, org, env);
+    if (githubUserIsRevoked(identity, env)) {
+      throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
+    }
+    const org = await requireGitHubLoginMembership(accessToken, identity.login, requestedOrg, env);
     const ttlSeconds = userTokenTTLSeconds(env);
     const tokenInput = {
       owner: identity.owner,
       ownerSource: identity.ownerSource,
       org,
       login: identity.login,
+      githubAccessToken: accessToken,
       ttlSeconds,
     } as {
       owner: string;
       ownerSource: "github-verified-email";
       org: string;
       login: string;
+      githubAccessToken: string;
       name?: string;
       ttlSeconds: number;
     };
@@ -613,136 +609,6 @@ async function githubIdentity(accessToken: string): Promise<{
   }
   return identity;
 }
-
-async function requireAllowedOrgMembership(
-  accessToken: string,
-  login: string,
-  requestedOrg: string,
-  env: Env,
-): Promise<string> {
-  const allowed = allowedGitHubOrgs(env);
-  const requested = requestedOrg.toLowerCase();
-  const org = allowed.includes(requested) ? requested : allowed[0];
-  if (!org) {
-    throw new GitHubAuthorizationError("GitHub login is not configured with an allowed org.");
-  }
-  const response = await fetch(`${githubAPIURL}/user/memberships/orgs/${encodeURIComponent(org)}`, {
-    headers: githubHeaders(accessToken),
-  });
-  if (!response.ok) {
-    throw new GitHubAuthorizationError(`GitHub user ${login} is not an active member of ${org}.`);
-  }
-  const membership = (await response.json()) as {
-    state?: string;
-    organization?: { login?: string };
-  };
-  if (
-    membership.state !== "active" ||
-    membership.organization?.login?.toLowerCase() !== org.toLowerCase()
-  ) {
-    throw new GitHubAuthorizationError(`GitHub user ${login} is not an active member of ${org}.`);
-  }
-  return membership.organization.login || org;
-}
-
-async function requireAllowedTeamMembership(
-  accessToken: string,
-  login: string,
-  org: string,
-  env: Env,
-): Promise<void> {
-  const allowed = allowedGitHubTeams(env, org);
-  if (allowed.length === 0) {
-    return;
-  }
-  const allowedKeys = new Set(allowed.map((team) => teamKey(team.org, team.slug)));
-  for (const team of await userGitHubTeams(accessToken)) {
-    const teamOrg = team.organization?.login?.toLowerCase() ?? "";
-    const teamSlug = team.slug?.toLowerCase() ?? "";
-    if (teamOrg && teamSlug && allowedKeys.has(teamKey(teamOrg, teamSlug))) {
-      return;
-    }
-  }
-  throw new GitHubAuthorizationError(
-    `GitHub user ${login} is not a member of an allowed team in ${org}.`,
-  );
-}
-
-function allowedGitHubOrgs(env: Env): string[] {
-  const raw = env.CRABBOX_GITHUB_ALLOWED_ORGS || env.CRABBOX_GITHUB_ALLOWED_ORG;
-  const configured = raw
-    ? raw
-        .split(",")
-        .map((value) => value.trim().toLowerCase())
-        .filter(Boolean)
-    : [];
-  if (configured.length > 0) {
-    return configured;
-  }
-  return [(env.CRABBOX_DEFAULT_ORG || "").trim().toLowerCase()].filter(Boolean);
-}
-
-function allowedGitHubTeams(env: Env, defaultOrg: string): AllowedGitHubTeam[] {
-  const raw = env.CRABBOX_GITHUB_ALLOWED_TEAMS || env.CRABBOX_GITHUB_ALLOWED_TEAM;
-  if (!raw) {
-    return [];
-  }
-  return raw
-    .split(",")
-    .map((value) => parseAllowedGitHubTeam(value, defaultOrg))
-    .filter((team): team is AllowedGitHubTeam => team !== undefined);
-}
-
-function parseAllowedGitHubTeam(value: string, defaultOrg: string): AllowedGitHubTeam | undefined {
-  const trimmed = value.trim().toLowerCase();
-  if (!trimmed) {
-    return undefined;
-  }
-  const [org, slug] = trimmed.includes("/") ? trimmed.split("/", 2) : [defaultOrg, trimmed];
-  if (!org || !slug) {
-    return undefined;
-  }
-  return { org, slug };
-}
-
-async function userGitHubTeams(accessToken: string): Promise<GitHubTeam[]> {
-  return userGitHubTeamsPage(accessToken, 1, []);
-}
-
-async function userGitHubTeamsPage(
-  accessToken: string,
-  page: number,
-  teams: GitHubTeam[],
-): Promise<GitHubTeam[]> {
-  const url = `${githubAPIURL}/user/teams?per_page=100&page=${page}`;
-  const response = await fetch(url, { headers: githubHeaders(accessToken) });
-  if (!response.ok) {
-    throw new GitHubAuthorizationError(
-      `Could not verify GitHub team membership: GitHub returned ${response.status}.`,
-    );
-  }
-  const pageTeams = (await response.json()) as GitHubTeam[];
-  const next = [...teams, ...pageTeams];
-  if (pageTeams.length < 100 || page >= maxGitHubTeamPages) {
-    return next;
-  }
-  return userGitHubTeamsPage(accessToken, page + 1, next);
-}
-
-function teamKey(org: string, slug: string): string {
-  return `${org.toLowerCase()}/${slug.toLowerCase()}`;
-}
-
-function githubHeaders(accessToken: string): Record<string, string> {
-  return {
-    accept: "application/vnd.github+json",
-    authorization: `Bearer ${accessToken}`,
-    "user-agent": "crabbox-coordinator",
-    "x-github-api-version": "2022-11-28",
-  };
-}
-
-class GitHubAuthorizationError extends Error {}
 
 async function deletePendingOAuth(
   storage: CoordinatorStorage,

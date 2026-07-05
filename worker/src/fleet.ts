@@ -4,12 +4,12 @@ const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
 import {
-  authenticateRequest,
   adminGrantVersion as configuredAdminGrantVersion,
   githubUserIsAdmin,
   isAdminRequest,
   requestWithAuthContext,
   sha256Hex,
+  verifiedUserTokenExpiresAtForRevocation,
   type AuthContext,
 } from "./auth";
 import {
@@ -8035,13 +8035,11 @@ export class FleetCoordinator {
     await this.cleanupExpiredCodeViewerAuth();
     const token = cookieValue(request.headers.get("cookie") ?? "", "crabbox_session");
     if (token) {
-      const headers = new Headers(request.headers);
-      headers.set("authorization", `Bearer ${token}`);
-      const auth = await authenticateRequest(new Request(request, { headers }), this.env);
-      if (auth?.auth === "github") {
+      const verifiedTokenExpiresAt = await verifiedUserTokenExpiresAtForRevocation(token, this.env);
+      if (verifiedTokenExpiresAt) {
         const portalSessionHash = await sha256Hex(token);
         const now = new Date();
-        const tokenExpiresAt = Date.parse(auth.tokenExpiresAt ?? "");
+        const tokenExpiresAt = Date.parse(verifiedTokenExpiresAt);
         const revocationExpiresAt = now.getTime() + codeViewerSessionTTLSeconds * 1000;
         const expiresAt = Number.isFinite(tokenExpiresAt)
           ? Math.min(revocationExpiresAt, tokenExpiresAt)

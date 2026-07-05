@@ -68,8 +68,9 @@ resolved in this order (`worker/src/auth.ts`):
 3. **Signed user token** — prefix `cbxu_`, an HMAC-SHA256 signature over a
    base64url payload, keyed only by `CRABBOX_SESSION_SECRET`. The session secret
    must be configured and distinct from `CRABBOX_SHARED_TOKEN`. Issued by GitHub
-   OAuth login; default 180-day expiry. Carries `owner`, `org`, and GitHub
-   `login`.
+   OAuth login; default 180-day expiry. Carries `owner`, `org`, GitHub `login`,
+   and an encrypted OAuth credential used to revalidate allowed org/team
+   membership on requests.
 4. **Trusted reverse-proxy identity** — opt-in through
    `CRABBOX_TRUSTED_USER_HEADER` on the Node runtime, accepted only from peers in
    `CRABBOX_TRUSTED_PROXY_CIDRS`; the authenticated ingress must also strip

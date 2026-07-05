@@ -31,8 +31,15 @@ of them. The account must also expose a verified email through GitHub's
 `user:email` scope; the broker never uses a public profile or unverified email
 as the owner. On success the broker issues a signed user token (prefix `cbxu_`,
 HMAC-SHA256, default 180-day expiry) and the CLI stores it in the user config.
-Tokens from the older unversioned schema are rejected, so users must log in
-again after upgrading the broker with this security fix.
+The token carries the GitHub OAuth credential encrypted under the independent
+session secret. The broker revalidates current org/team membership on requests,
+caching successful checks for five minutes and failing closed when GitHub can no
+longer confirm membership. Tokens from older schemas are rejected, so users
+must log in again after upgrading the broker with this security fix.
+
+Set `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` to tune the positive cache from 0
+to 3600 seconds. `CRABBOX_GITHUB_REVOKED_USERS` immediately denies listed GitHub
+logins or verified emails; use `login:` or `owner:` prefixes when needed.
 
 ```sh
 crabbox login --url https://broker.example.com

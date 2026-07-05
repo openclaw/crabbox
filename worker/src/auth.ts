@@ -1,3 +1,8 @@
+import {
+  requireCurrentGitHubMembership,
+  type GitHubMembershipEnv,
+  type GitHubMembershipIdentity,
+} from "./github-membership";
 import { bearerToken } from "./http";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";
@@ -11,7 +16,8 @@ const accessKidMaxChars = 256;
 const accessKeySetTTLMS = 5 * 60 * 1000;
 const accessKeySetFailureTTLMS = 30 * 1000;
 const accessKeySetCacheMaxEntries = 8;
-const userTokenVersion = 2;
+const githubAccessTokenMaxChars = 4096;
+const userTokenVersion = 3;
 const accessKeySetCache = new Map<string, AccessKeySetCacheEntry>();
 const accessKeySetLoads = new Map<string, Promise<AccessKeySetCacheEntry>>();
 
@@ -27,16 +33,21 @@ export interface AuthContext {
 
 export interface AuthRequestContext {
   trustedProxy?: boolean;
+  githubMembership?: (
+    identity: GitHubMembershipIdentity,
+    env: GitHubMembershipEnv,
+  ) => Promise<void>;
 }
 
 interface UserTokenPayload {
   typ: "crabbox-user";
   version: typeof userTokenVersion;
   ownerSource: "github-verified-email";
-  jti?: string;
+  jti: string;
   owner: string;
   org: string;
   login: string;
+  githubCredential: string;
   name?: string;
   exp: number;
   iat: number;
@@ -55,6 +66,12 @@ export async function authenticateRequest(
     | "CRABBOX_ACCESS_AUD"
     | "CRABBOX_GITHUB_ADMIN_OWNERS"
     | "CRABBOX_GITHUB_ADMIN_LOGINS"
+    | "CRABBOX_GITHUB_ALLOWED_ORG"
+    | "CRABBOX_GITHUB_ALLOWED_ORGS"
+    | "CRABBOX_GITHUB_ALLOWED_TEAM"
+    | "CRABBOX_GITHUB_ALLOWED_TEAMS"
+    | "CRABBOX_GITHUB_REVOKED_USERS"
+    | "CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS"
     | "CRABBOX_TRUSTED_USER_HEADER"
     | "CRABBOX_TRUSTED_USER_ORG"
     | "CRABBOX_TRUSTED_PROXY_SECRET"
@@ -94,6 +111,26 @@ export async function authenticateRequest(
   if (token) {
     const payload = await verifyUserToken(token, env).catch(() => undefined);
     if (payload) {
+      const accessToken = await openGitHubCredential(
+        payload.githubCredential,
+        sessionSecret(env),
+      ).catch(() => undefined);
+      if (!accessToken) return undefined;
+      const membership = context.githubMembership ?? requireCurrentGitHubMembership;
+      try {
+        await membership(
+          {
+            accessToken,
+            tokenID: payload.jti,
+            owner: payload.owner,
+            org: payload.org,
+            login: payload.login,
+          },
+          env,
+        );
+      } catch {
+        return undefined;
+      }
       return {
         authorized: true,
         admin: githubUserIsAdmin(payload, env),
@@ -188,11 +225,15 @@ export async function issueUserToken(
     ownerSource: "github-verified-email";
     org: string;
     login: string;
+    githubAccessToken: string;
     name?: string;
     ttlSeconds?: number;
   },
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
+  if (!input.githubAccessToken || input.githubAccessToken.length > githubAccessTokenMaxChars) {
+    throw new Error("GitHub access token is required for signed user tokens");
+  }
   const payload: UserTokenPayload = {
     typ: "crabbox-user",
     version: userTokenVersion,
@@ -201,6 +242,7 @@ export async function issueUserToken(
     owner: input.owner,
     org: input.org,
     login: input.login,
+    githubCredential: await sealGitHubCredential(input.githubAccessToken, sessionSecret(env)),
     iat: now,
     exp: now + (input.ttlSeconds ?? 30 * 24 * 60 * 60),
   };
@@ -218,6 +260,15 @@ export function userTokenExpiresAt(token: string): string | undefined {
     return undefined;
   }
   return new Date(payload.exp * 1000).toISOString();
+}
+
+// Logout must revoke local sessions even when GitHub membership revalidation is unavailable.
+export async function verifiedUserTokenExpiresAtForRevocation(
+  token: string,
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
+): Promise<string | undefined> {
+  const payload = await verifyUserToken(token, env).catch(() => undefined);
+  return payload ? new Date(payload.exp * 1000).toISOString() : undefined;
 }
 
 async function verifyUserToken(
@@ -241,7 +292,14 @@ async function verifyUserToken(
     typeof payload.owner !== "string" ||
     typeof payload.org !== "string" ||
     typeof payload.login !== "string" ||
+    typeof payload.jti !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.jti) ||
+    typeof payload.githubCredential !== "string" ||
+    typeof payload.iat !== "number" ||
+    payload.iat <= 0 ||
+    payload.iat > Math.floor(Date.now() / 1000) + 60 ||
     typeof payload.exp !== "number" ||
+    payload.exp <= payload.iat ||
     payload.exp <= Math.floor(Date.now() / 1000) ||
     "admin" in payload
   ) {
@@ -611,6 +669,39 @@ async function sign(value: string, secret: string): Promise<string> {
   );
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(value));
   return base64URL(new Uint8Array(signature));
+}
+
+async function sealGitHubCredential(accessToken: string, secret: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    await userTokenCredentialKey(secret),
+    encoder.encode(accessToken),
+  );
+  return `${base64URL(iv)}.${base64URL(new Uint8Array(ciphertext))}`;
+}
+
+async function openGitHubCredential(value: string, secret: string): Promise<string | undefined> {
+  const parts = value.split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return undefined;
+  const iv = base64URLDecode(parts[0]);
+  const ciphertext = base64URLDecode(parts[1]);
+  if (iv.length !== 12 || ciphertext.length <= 16) return undefined;
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
+    await userTokenCredentialKey(secret),
+    ciphertext,
+  );
+  const accessToken = decoder.decode(plaintext);
+  return accessToken && accessToken.length <= githubAccessTokenMaxChars ? accessToken : undefined;
+}
+
+async function userTokenCredentialKey(secret: string): Promise<CryptoKey> {
+  const material = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(`crabbox-user-github-credential-v1\0${secret}`),
+  );
+  return crypto.subtle.importKey("raw", material, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
 export async function sha256Hex(value: string): Promise<string> {

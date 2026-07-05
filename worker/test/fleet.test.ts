@@ -15776,6 +15776,8 @@ describe("fleet lease identity and idle", () => {
       CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
       CRABBOX_PUBLIC_URL: "https://crabbox.test",
       CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "0",
     } as Env;
     const fleet = testFleet(storage, {}, env);
     const leaseID = "cbx_000000000001";
@@ -15795,11 +15797,20 @@ describe("fleet lease identity and idle", () => {
       ownerSource: "github-verified-email",
       org: "example-org",
       login: "alice",
+      githubAccessToken: "github-access-token",
       ttlSeconds: 60 * 60,
     });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("GitHub unavailable during logout");
+      }),
+    );
     const portalCookie = `crabbox_session=${encodeURIComponent(token)}`;
     const throughCoordinator = async (input: Request): Promise<Response> =>
-      await routeCoordinatorRequest(input, env, async (prepared) => await fleet.fetch(prepared));
+      await routeCoordinatorRequest(input, env, async (prepared) => await fleet.fetch(prepared), {
+        githubMembership: async (): Promise<void> => {},
+      });
     const codeEntry = "https://crabbox.test/portal/leases/blue-lobster/code/";
 
     const handoff = await throughCoordinator(
