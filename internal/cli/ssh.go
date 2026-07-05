@@ -1335,6 +1335,9 @@ func remoteGitSeed(workdir, remoteURL, head string) string {
 }
 
 func normalizeGitRemoteURL(remoteURL string) string {
+	if gitRemoteURLHasCredentials(remoteURL) {
+		return ""
+	}
 	if strings.HasPrefix(remoteURL, "git@github.com:") {
 		return "https://github.com/" + strings.TrimSuffix(strings.TrimPrefix(remoteURL, "git@github.com:"), ".git") + ".git"
 	}

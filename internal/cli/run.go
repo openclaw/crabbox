@@ -1195,7 +1195,11 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s mode=archive", timings.sync.Round(time.Millisecond)))
 			goto afterSync
 		}
-		if syncGitSeedEnabled(cfg, repo) {
+		gitSeed, credentialBlocked := syncGitSeedDecision(cfg, repo)
+		if credentialBlocked {
+			warnCredentialBearingGitSeed(a.Stderr)
+		}
+		if gitSeed {
 			stepStart = time.Now()
 			if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)

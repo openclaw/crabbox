@@ -540,7 +540,11 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	if err := runSSHQuiet(ctx, target, remoteMkdir(workdir)); err != nil {
 		return exit(7, "create remote workdir: %v", err)
 	}
-	if syncGitSeedEnabled(cfg, repo) {
+	gitSeed, credentialBlocked := syncGitSeedDecision(cfg, repo)
+	if credentialBlocked {
+		warnCredentialBearingGitSeed(a.Stderr)
+	}
+	if gitSeed {
 		if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
 			fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 		}
