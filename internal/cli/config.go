@@ -1482,11 +1482,12 @@ func loadConfig() (Config, error) {
 func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	cfg := baseConfig()
 	for _, path := range configPaths() {
+		trust := classifyConfigPath(path)
 		freestyleAPIURL := cfg.Freestyle.APIURL
-		if err := applyConfigFile(&cfg, path); err != nil {
+		if err := applyConfigFile(&cfg, path, trust); err != nil {
 			return Config{}, err
 		}
-		if !trustedProviderEndpointConfigPath(path) {
+		if !trust.trusted {
 			cfg.Freestyle.APIURL = freestyleAPIURL
 		}
 	}
@@ -4491,13 +4492,6 @@ func configPaths() []string {
 	return paths
 }
 
-func trustedProviderEndpointConfigPath(path string) bool {
-	if explicit := os.Getenv("CRABBOX_CONFIG"); explicit != "" {
-		return path == explicit
-	}
-	return path == userConfigPath()
-}
-
 func userConfigPath() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -4631,30 +4625,66 @@ func writableConfigPath() string {
 	return userConfigPath()
 }
 
-func applyConfigFile(cfg *Config, path string) error {
+type configPathTrust struct {
+	trusted        bool
+	repositoryRoot string
+}
+
+func applyConfigFile(cfg *Config, path string, trust configPathTrust) error {
 	file, err := readFileConfig(path)
 	if err != nil {
 		return err
 	}
-	trusted := trustedConfigPath(path)
-	if !trusted {
-		if root, err := filepath.Abs(filepath.Dir(path)); err == nil {
-			cfg.credentialProvenance.repositoryRoot = root
-		}
+	if !trust.trusted && trust.repositoryRoot != "" {
+		cfg.credentialProvenance.repositoryRoot = trust.repositoryRoot
 	}
-	return applyFileConfigWithTrust(cfg, file, trusted)
+	return applyFileConfigWithTrust(cfg, file, trust.trusted)
 }
 
 func applyFileConfig(cfg *Config, file fileConfig) error {
 	return applyFileConfigWithTrust(cfg, file, true)
 }
 
-func trustedConfigPath(path string) bool {
-	if explicit := strings.TrimSpace(os.Getenv("CRABBOX_CONFIG")); explicit != "" {
-		return filepath.Clean(path) == filepath.Clean(explicit)
+func classifyConfigPath(path string) configPathTrust {
+	if sameConfigPath(path, userConfigPath()) {
+		return configPathTrust{trusted: true}
 	}
-	userPath := userConfigPath()
-	return userPath != "" && filepath.Clean(path) == filepath.Clean(userPath)
+	repo, _ := findRepo()
+	root, _ := filepath.Abs(repo.Root)
+	if explicit := strings.TrimSpace(os.Getenv("CRABBOX_CONFIG")); explicit != "" &&
+		sameConfigPath(path, explicit) && !configPathWithinRoot(path, root) {
+		return configPathTrust{trusted: true}
+	}
+	return configPathTrust{repositoryRoot: root}
+}
+
+func sameConfigPath(left, right string) bool {
+	return left != "" && right != "" && filepath.Clean(left) == filepath.Clean(right)
+}
+
+func configPathWithinRoot(path, root string) bool {
+	if path == "" || root == "" {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	if pathWithinRoot(pathAbs, rootAbs) {
+		return true
+	}
+	resolvedPath, pathErr := filepath.EvalSymlinks(pathAbs)
+	resolvedRoot, rootErr := filepath.EvalSymlinks(rootAbs)
+	return pathErr == nil && rootErr == nil && pathWithinRoot(resolvedPath, resolvedRoot)
+}
+
+func pathWithinRoot(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 func inlineSSHPublicKey(value string) bool {

@@ -60,6 +60,10 @@ read (in that order).
 
 If `CRABBOX_CONFIG` is set, it replaces the entire file search: only that file
 is loaded, and neither the user config nor the repo-local files are read. The
+override changes file selection, not its trust domain. A selected path inside
+the active repository remains repository configuration, including a path that
+enters the repository through a symlink; use the OS user config path or an
+explicit file outside the repository for trusted operator settings. The
 CLI writes new user config (for example via `crabbox login` or
 `crabbox config set-broker`) with `0600` permissions and warns if an existing
 file is group- or world-readable.
@@ -419,7 +423,7 @@ remains account-owned after Crabbox release. Repo-local config also cannot
 set the API token, API URL, item, payment method, template, data center, or
 purchase opt-in. Put those account and purchase selections in environment
 variables, CLI flags, private user config, or an explicit `CRABBOX_CONFIG`
-file. `paymentMethodId` may be omitted only when the account has exactly one
+file outside the active repository. `paymentMethodId` may be omitted only when the account has exactly one
 active default payment method; otherwise set it explicitly. Use
 `crabbox doctor --provider hostinger --json` to discover available ids without
 making a purchase.
@@ -482,7 +486,7 @@ XCP-ng password command-line flag. Prefer a pool-master `apiUrl`; if XAPI
 returns `HOST_IS_SLAVE`, Crabbox retries login once against the reported master.
 For credential safety, repository-local `crabbox.yaml` and `.crabbox.yaml`
 files cannot override `apiUrl` or `insecureTLS`; set those in user config, an
-explicit `CRABBOX_CONFIG` file, or environment variables.
+explicit `CRABBOX_CONFIG` file outside the active repository, or environment variables.
 
 `target: linux` describes the current Crabbox lease surface, not an XCP-ng
 hypervisor limitation. XCP-ng itself can host Linux, Windows, and BSD guests on

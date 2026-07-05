@@ -161,7 +161,7 @@ login once against the master address reported by XAPI.
 Repository-local `crabbox.yaml` and `.crabbox.yaml` files cannot override
 `apiUrl` or `insecureTLS`, so a checkout cannot redirect inherited credentials.
 Configure those connection-trust settings in user config, an explicit
-`CRABBOX_CONFIG` file, or environment variables.
+`CRABBOX_CONFIG` file outside the active repository, or environment variables.
 
 Keep the password in a private config file with `0600` permissions, in an
 environment variable, or in a secret manager. Do not pass it on argv. Crabbox

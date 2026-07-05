@@ -278,7 +278,7 @@ scripts/live-nomad-smoke.sh
 ```
 
 `scripts/live-nomad-smoke.sh` accepts Nomad credential destinations only from
-environment variables or an explicit trusted `CRABBOX_CONFIG` file. It does not
+environment variables or an explicit `CRABBOX_CONFIG` file outside the active repository. It does not
 read repo-local `crabbox.yaml` or `.crabbox.yaml` for `nomad.address` or
 `nomad.tokenEnv`, because the script re-emits those values as explicit CLI flags
 while running a live credentialed smoke.
@@ -302,7 +302,7 @@ It emits one classification:
 - `diagnostic_only`
 
 Missing `CRABBOX_LIVE=1`, missing `CRABBOX_LIVE_PROVIDERS=nomad`, and missing
-`NOMAD_ADDR` or trusted `nomad.address` from `CRABBOX_CONFIG` are classified as
+`NOMAD_ADDR` or trusted `nomad.address` from `CRABBOX_CONFIG` outside the active repository are classified as
 `environment_blocked` before any mutation. ACL-enabled endpoints that reject an
 unset or invalid token fail during read-only `doctor` before job creation. If
 the smoke is interrupted after a job is created, rerun:
@@ -315,7 +315,7 @@ crabbox cleanup --provider nomad --dry-run
 ## Troubleshooting
 
 - `nomad address is required`: set `NOMAD_ADDR`, set `nomad.address` in an
-  explicit trusted `CRABBOX_CONFIG` file, or pass `--nomad-address`.
+  explicit `CRABBOX_CONFIG` file outside the active repository, or pass `--nomad-address`.
 - `missing_token`: the cluster rejected anonymous access; export the environment
   variable named by `tokenEnv` (`NOMAD_TOKEN` by default). Do not place the
   token on argv.
