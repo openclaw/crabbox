@@ -17,7 +17,7 @@ export function leaseProviderLabels(
     keep: String(config.keep),
     lease: leaseID,
     slug: normalizeLeaseSlug(slug),
-    owner: sanitizeLabel(owner),
+    owner: providerLabelValue(owner),
     profile: config.profile,
     provider_key: config.providerKey,
     provider,
@@ -66,7 +66,7 @@ export function leaseProviderLabels(
   return sanitizeLabels({ ...labels, ...extra });
 }
 
-function sanitizeLabel(value: string): string {
+export function providerLabelValue(value: string): string {
   const cleaned = value
     .trim()
     .replaceAll(/[^a-zA-Z0-9_.-]/g, "_")
@@ -77,7 +77,7 @@ function sanitizeLabel(value: string): string {
 
 function sanitizeLabels(labels: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(labels).map(([key, value]) => [key, sanitizeLabel(value)]),
+    Object.entries(labels).map(([key, value]) => [key, providerLabelValue(value)]),
   );
 }
 

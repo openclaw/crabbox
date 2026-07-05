@@ -11,7 +11,7 @@ import {
   providerKeyOwnershipLabels,
   sshPublicKeyIdentity,
 } from "./provider-key";
-import { leaseProviderLabels } from "./provider-labels";
+import { leaseProviderLabels, providerLabelValue } from "./provider-labels";
 import { leaseProviderName } from "./slug";
 import type { Env, HetznerSSHKey, HetznerServer, ProviderMachine } from "./types";
 
@@ -89,15 +89,20 @@ export function hetznerProvisioningResourceID(error: unknown): number | undefine
     : undefined;
 }
 
-export function hetznerServerOwnedByLease(server: HetznerServer, leaseID: string): boolean {
+export function hetznerServerOwnedByLease(
+  server: HetznerServer,
+  leaseID: string,
+  slug: string,
+): boolean {
   const labels = server.labels ?? {};
   return (
     /^cbx_[a-f0-9]{12}$/.test(leaseID) &&
+    slug.trim().length > 0 &&
     labels["crabbox"] === "true" &&
     labels["created_by"] === "crabbox" &&
     labels["provider"] === "hetzner" &&
     labels["lease"] === leaseID &&
-    (labels["slug"] ?? "").trim().length > 0
+    labels["slug"] === providerLabelValue(slug)
   );
 }
 
