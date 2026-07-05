@@ -97,6 +97,35 @@ func TestAcquireKeepDoesNotOverrideDeleteOnReleasePolicy(t *testing.T) {
 	}
 }
 
+func TestAcquireRetainsClaimWhenRollbackDeleteFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.getSeq["cs-1"] = []codespace{fakeCodespace("cs-1", "Failed")}
+	fc.deleteErr = errors.New("delete temporarily unavailable")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: "cbx_123456789abc",
+		RequestedSlug:    "rollback-box",
+	})
+	if err == nil {
+		t.Fatal("acquire unexpectedly succeeded")
+	}
+	for _, want := range []string{"terminal state=Failed", "rollback github-codespaces", "delete temporarily unavailable", "cs-1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%q missing %q", err, want)
+		}
+	}
+	if _, ok, err := resolveLeaseClaimForProvider("cbx_123456789abc", providerName); err != nil || !ok {
+		t.Fatalf("recovery claim missing ok=%t err=%v", ok, err)
+	}
+	if !fc.deleteDeadline {
+		t.Fatal("rollback delete context had no deadline")
+	}
+}
+
 func TestResolveStartsStoppedCodespaceAndRefreshesTarget(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -471,12 +500,14 @@ func newTestBackend(t *testing.T, fc *fakeCodespacesClient, fg *fakeGH) *testBac
 }
 
 type fakeCodespacesClient struct {
-	items   map[string]codespace
-	getSeq  map[string][]codespace
-	creates []createCodespaceRequest
-	starts  []string
-	stops   []string
-	deletes []string
+	items          map[string]codespace
+	getSeq         map[string][]codespace
+	creates        []createCodespaceRequest
+	starts         []string
+	stops          []string
+	deletes        []string
+	deleteErr      error
+	deleteDeadline bool
 }
 
 func newFakeCodespacesClient() *fakeCodespacesClient {
@@ -535,8 +566,12 @@ func (f *fakeCodespacesClient) stopCodespace(_ context.Context, name string) err
 	return nil
 }
 
-func (f *fakeCodespacesClient) deleteCodespace(_ context.Context, name string) error {
+func (f *fakeCodespacesClient) deleteCodespace(ctx context.Context, name string) error {
+	_, f.deleteDeadline = ctx.Deadline()
 	f.deletes = append(f.deletes, name)
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	delete(f.items, name)
 	return nil
 }

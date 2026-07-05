@@ -2,6 +2,7 @@ package githubcodespaces
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -40,6 +41,8 @@ type backend struct {
 	pollInterval  time.Duration
 	readyTimeout  time.Duration
 }
+
+const githubCodespacesRollbackTimeout = 30 * time.Second
 
 const (
 	labelCodespaceName  = "codespace_name"
@@ -129,24 +132,20 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	repoRoot, err := repoRootForClaim(req.Repo)
 	if err != nil {
 		if !req.Keep {
-			_ = api.deleteCodespace(context.Background(), created.Name)
-			_ = removeStoredSSHConfig(leaseID)
+			err = errors.Join(err, b.rollbackCreatedCodespace(api, leaseID, created.Name, false))
 		}
 		return LeaseTarget{}, err
 	}
 	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, SSHTarget{}, repoRoot, cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
-			_ = api.deleteCodespace(context.Background(), created.Name)
-			_ = removeStoredSSHConfig(leaseID)
+			err = errors.Join(err, b.rollbackCreatedCodespace(api, leaseID, created.Name, false))
 		}
 		return LeaseTarget{}, err
 	}
 	available, err := b.waitForAvailable(ctx, api, created.Name)
 	if err != nil {
 		if !req.Keep {
-			_ = api.deleteCodespace(context.Background(), created.Name)
-			_ = removeStoredSSHConfig(leaseID)
-			removeLeaseClaim(leaseID)
+			err = errors.Join(err, b.rollbackCreatedCodespace(api, leaseID, created.Name, true))
 		}
 		return LeaseTarget{}, err
 	}
@@ -154,17 +153,13 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	target, err := b.sshTarget(ctx, gh, leaseID, available.Name, repo, true)
 	if err != nil {
 		if !req.Keep {
-			_ = api.deleteCodespace(context.Background(), available.Name)
-			_ = removeStoredSSHConfig(leaseID)
-			removeLeaseClaim(leaseID)
+			err = errors.Join(err, b.rollbackCreatedCodespace(api, leaseID, available.Name, true))
 		}
 		return LeaseTarget{}, b.sshPrerequisiteError(err)
 	}
 	if err := b.waitSSH(ctx, &target, "github-codespaces ssh", b.readyTimeout); err != nil {
 		if !req.Keep {
-			_ = api.deleteCodespace(context.Background(), available.Name)
-			_ = removeStoredSSHConfig(leaseID)
-			removeLeaseClaim(leaseID)
+			err = errors.Join(err, b.rollbackCreatedCodespace(api, leaseID, available.Name, true))
 		}
 		return LeaseTarget{}, b.sshPrerequisiteError(err)
 	}
@@ -172,23 +167,44 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if req.OnAcquired != nil {
 		if err := req.OnAcquired(lease); err != nil {
 			if !req.Keep {
-				_ = api.deleteCodespace(context.Background(), available.Name)
-				_ = removeStoredSSHConfig(leaseID)
-				removeLeaseClaim(leaseID)
+				err = errors.Join(err, b.rollbackCreatedCodespace(api, leaseID, available.Name, true))
 			}
 			return LeaseTarget{}, err
 		}
 	}
 	if err := updateLeaseClaimEndpoint(leaseID, server, target); err != nil {
 		if !req.Keep {
-			_ = api.deleteCodespace(context.Background(), available.Name)
-			_ = removeStoredSSHConfig(leaseID)
-			removeLeaseClaim(leaseID)
+			err = errors.Join(err, b.rollbackCreatedCodespace(api, leaseID, available.Name, true))
 		}
 		return LeaseTarget{}, err
 	}
 	fmt.Fprintf(b.stderr(), "provisioned provider=github-codespaces lease=%s slug=%s codespace=%s repo=%s state=%s\n", leaseID, slug, available.Name, repo, available.State)
 	return lease, nil
+}
+
+func (b *backend) rollbackCreatedCodespace(api codespacesAPI, leaseID, name string, claimed bool) error {
+	var expectedClaim LeaseClaim
+	if claimed {
+		claim, ok, err := readLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return err
+		}
+		if !ok || strings.TrimSpace(claim.CloudID) != name {
+			return exit(4, "refusing github-codespaces rollback for lease=%s codespace=%s without its exact claim", leaseID, name)
+		}
+		expectedClaim = claim
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), githubCodespacesRollbackTimeout)
+	defer cancel()
+	if err := api.deleteCodespace(ctx, name); err != nil && !isGitHubNotFound(err) {
+		return fmt.Errorf("rollback github-codespaces codespace=%s lease=%s: %w", name, leaseID, err)
+	}
+	if claimed {
+		return removeLeaseClaimIfUnchangedAfter(leaseID, expectedClaim, func() error {
+			return removeStoredSSHConfig(leaseID)
+		})
+	}
+	return removeStoredSSHConfig(leaseID)
 }
 
 func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
