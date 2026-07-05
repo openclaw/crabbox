@@ -10,6 +10,11 @@ import (
 
 func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, expected Server, resources azureVMDeleteResources, now time.Time) error {
 	name := strings.TrimSpace(expected.CloudID)
+	var err error
+	resources, err = c.revalidateAzureCleanupDeleteResourcesWithRetry(ctx, expected, resources, now)
+	if err != nil {
+		return err
+	}
 	for attempt := 0; ; attempt++ {
 		if resources.vm {
 			vmOnly := azureVMDeleteResources{vm: true}
@@ -102,28 +107,6 @@ func azureCleanupResourcesEmpty(resources azureVMDeleteResources) bool {
 func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context, expected Server, resources azureVMDeleteResources, now time.Time) (azureVMDeleteResources, error) {
 	name := strings.TrimSpace(expected.CloudID)
 	labels := expected.Labels
-	if resources.vm {
-		response, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil)
-		if err != nil {
-			if isAzureNotFoundError(err) {
-				resources.vm = false
-			} else {
-				return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup VM %s before retry: %w", name, err)}
-			}
-		} else {
-			live := azureVMToServer(response.VirtualMachine, "", "")
-			if err := validateAzureCleanupVM(expected, live, now); err != nil {
-				return resources, &azureCleanupSkipError{err: err}
-			}
-			if response.VirtualMachine.Properties == nil {
-				return resources, &azureCleanupSkipError{err: fmt.Errorf("live Azure VM %s has no properties", name)}
-			}
-			if err := requireAzureCleanupIdentity("VM", name, stringValue(response.VirtualMachine.Properties.VMID), resources.vmID); err != nil {
-				return resources, &azureCleanupSkipError{err: err}
-			}
-		}
-	}
-
 	if resources.nic != "" {
 		response, err := c.nicc.Get(ctx, c.ResourceGroup, resources.nic, nil)
 		if err != nil {
@@ -200,6 +183,30 @@ func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context,
 				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup quarantine NSG %s has no properties", resources.quarantineNSG)}
 			}
 			if err := requireAzureCleanupIdentity("quarantine NSG", resources.quarantineNSG, stringValue(response.Properties.ResourceGUID), resources.quarantineID); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+		}
+	}
+
+	// Read the VM last so lease renewal and immutable identity are checked
+	// after every companion read and immediately before the delete boundary.
+	if resources.vm {
+		response, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil)
+		if err != nil {
+			if isAzureNotFoundError(err) {
+				resources.vm = false
+			} else {
+				return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup VM %s before retry: %w", name, err)}
+			}
+		} else {
+			live := azureVMToServer(response.VirtualMachine, "", "")
+			if err := validateAzureCleanupVM(expected, live, now); err != nil {
+				return resources, &azureCleanupSkipError{err: err}
+			}
+			if response.VirtualMachine.Properties == nil {
+				return resources, &azureCleanupSkipError{err: fmt.Errorf("live Azure VM %s has no properties", name)}
+			}
+			if err := requireAzureCleanupIdentity("VM", name, stringValue(response.VirtualMachine.Properties.VMID), resources.vmID); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
 			}
 		}
