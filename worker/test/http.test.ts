@@ -1224,8 +1224,12 @@ describe("http responses", () => {
       "Authorization: Bearer bearer-secret",
       "Authorization: Bearer: colon-bearer-secret",
       "Authorization: Bearer\n folded-bearer-secret",
+      "Authorization: Bearer:\r\n folded-colon-bearer-secret",
+      "standalone Bearer   spaced-standalone-secret",
       "standalone Bearer: colon-standalone-secret",
       "standalone Bearer\n folded-standalone-secret",
+      "standalone Bearer:\r\n folded-colon-standalone-secret",
+      "standalone Bearer [redacted]",
       "Proxy-Authorization=Basic basic-secret",
       "X-API-Key=header-secret",
       "client_secret=plain-secret",
@@ -1243,8 +1247,11 @@ describe("http responses", () => {
       "bearer-secret",
       "colon-bearer-secret",
       "folded-bearer-secret",
+      "folded-colon-bearer-secret",
+      "spaced-standalone-secret",
       "colon-standalone-secret",
       "folded-standalone-secret",
+      "folded-colon-standalone-secret",
       "basic-secret",
       "header-secret",
       "plain-secret",
@@ -1262,6 +1269,7 @@ describe("http responses", () => {
       expect(redacted).not.toContain(secret);
     }
     expect(redacted).toContain("[redacted]");
+    expect(redacted).toContain("standalone Bearer [redacted]");
     expect(redacted).toContain("safe suffix");
   });
 });
