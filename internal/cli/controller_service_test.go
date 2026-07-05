@@ -1493,7 +1493,13 @@ func TestControllerPreAcquireAckFailureRetainsStoppingUntilStableAbsence(t *test
 	defer cancel()
 	service.opts.CreateTimeout = 2 * time.Second
 	base := time.Now().UTC()
-	service.now = func() time.Time { return base }
+	var clockMu sync.RWMutex
+	currentTime := base
+	service.now = func() time.Time {
+		clockMu.RLock()
+		defer clockMu.RUnlock()
+		return currentTime
+	}
 
 	created := controllerHTTP(service, http.MethodPost, "/v1/workspaces", "test-token", controllerWorkspaceRequest{ID: "pre-ack-absent-box"})
 	if created.Code != http.StatusAccepted {
@@ -1523,7 +1529,9 @@ func TestControllerPreAcquireAckFailureRetainsStoppingUntilStableAbsence(t *test
 		t.Fatalf("workspace escaped late-materialization recovery window: %#v", current)
 	}
 
-	service.now = func() time.Time { return base.Add(3 * time.Second) }
+	clockMu.Lock()
+	currentTime = base.Add(3 * time.Second)
+	clockMu.Unlock()
 	service.enqueue(stopping.Request.ID)
 	failed := waitControllerWorkspaceStatus(t, service, stopping.Request.ID, "failed")
 	if failed.Message != "workspace provisioning failed before provider identity acknowledgment" {
