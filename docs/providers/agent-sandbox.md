@@ -313,8 +313,8 @@ The guarded live smoke is opt-in and creates one short-lived Crabbox-owned
 `SandboxClaim` only when explicit live configuration is present. Because the
 smoke forces replacement sync and verifies that a remote-only stale file is
 removed on retained reuse, it accepts cluster access, workload selectors, and
-`workdir` only from environment variables or an explicit `CRABBOX_CONFIG` file,
-not repository-local config:
+`workdir` only from environment variables or an explicit `CRABBOX_CONFIG` file
+outside the active repository, not repository-local config:
 
 ```sh
 CRABBOX_LIVE=1 \

@@ -93,7 +93,7 @@ Repo-local config cannot set `apiToken`, `apiUrl`, `itemId`,
 `paymentMethodId`, `templateId`, `dataCenterId`, or enable `allowPurchase`.
 This prevents a repository from selecting the Hostinger account, redirecting
 credentials, or choosing billable inputs. Set those through flags, environment
-variables, private user config, or an explicit `CRABBOX_CONFIG` file.
+variables, private user config, or an explicit `CRABBOX_CONFIG` file outside the active repository.
 
 Provider flags:
 
@@ -172,7 +172,7 @@ crabbox warmup --provider hostinger --hostinger-allow-purchase
 ```
 
 ```yaml
-# Private user config, or a file explicitly selected with CRABBOX_CONFIG.
+# Private user config, or a file outside the active repository selected with CRABBOX_CONFIG.
 hostinger:
   allowPurchase: true
 ```

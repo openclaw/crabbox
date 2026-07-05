@@ -239,6 +239,12 @@ bodies. E2B API endpoints require HTTPS except for explicit localhost/loopback
 development URLs, and AWS region values are validated before constructing
 SigV4 service hosts.
 
+`CRABBOX_CONFIG` changes which file is loaded, not its trust domain. An explicit
+path inside the active repository remains repository-sourced for credential
+destination checks, including a symlink outside the checkout that resolves
+back into it. The canonical user config and explicit files outside the active
+repository remain operator-trusted sources.
+
 Repository-selected Static SSH, remote Parallels, and exe.dev control hosts
 cannot inherit a key, SSH agent, or local SSH configuration from a more trusted
 source. Put both a Static SSH or Parallels host and a relative, symlink-resolved

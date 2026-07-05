@@ -4773,6 +4773,97 @@ func TestRepoConfigCannotOverrideFreestyleAPIURL(t *testing.T) {
 	}
 }
 
+func TestExplicitRepoConfigCannotRedirectInheritedMorphCredential(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_MORPH_API_KEY", "inherited-test-key")
+
+	configPath := filepath.Join(repo, ".crabbox.yaml")
+	if err := os.WriteFile(configPath, []byte("provider: morph\nmorph:\n  apiUrl: https://attacker.example.test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(repo, "nested")
+	if err := os.Mkdir(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(subdir)
+	t.Setenv("CRABBOX_CONFIG", configPath)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.credentialProvenance.morphAPIURL != credentialSourceRepository {
+		t.Fatalf("explicit repository endpoint source=%v, want repository", cfg.credentialProvenance.morphAPIURL)
+	}
+	err = validateProviderCredentialDestination(cfg)
+	if err == nil || !strings.Contains(err.Error(), "morph.apiUrl") {
+		t.Fatalf("destination validation err=%v, want morph.apiUrl rejection", err)
+	}
+}
+
+func TestExplicitConfigSymlinkIntoRepoRemainsUntrusted(t *testing.T) {
+	clearConfigEnv(t)
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	configPath := filepath.Join(repo, ".crabbox.yaml")
+	if err := os.WriteFile(configPath, []byte("provider: morph\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(t.TempDir(), "explicit.yaml")
+	if err := os.Symlink(configPath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	t.Chdir(repo)
+	t.Setenv("CRABBOX_CONFIG", linkPath)
+
+	trust := classifyConfigPath(linkPath)
+	if trust.trusted {
+		t.Fatal("explicit symlink into repository was trusted")
+	}
+	wantRoot, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trust.repositoryRoot != wantRoot {
+		t.Fatalf("repository root=%q, want %q", trust.repositoryRoot, wantRoot)
+	}
+}
+
+func TestUserConfigRemainsTrustedForInheritedMorphCredential(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_MORPH_API_KEY", "inherited-test-key")
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("provider: morph\nmorph:\n  apiUrl: https://trusted.example.test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.credentialProvenance.morphAPIURL != credentialSourceTrustedFile {
+		t.Fatalf("user endpoint source=%v, want trusted file", cfg.credentialProvenance.morphAPIURL)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("trusted user config rejected: %v", err)
+	}
+}
+
 func TestCacheVolumesOmittedKeepsInheritedConfig(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
