@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added GitHub Codespaces direct Linux SSH leases with token-scope preflight, repository and machine selection, claim-bound ownership, generated OpenSSH configuration, and guarded lifecycle smoke coverage. Thanks @coygeek.
+- Added GitHub Codespaces direct Linux SSH leases with token-scope preflight, repository and machine selection, durable pre-create recovery, exact claim-bound ownership, generated OpenSSH configuration, and guarded lifecycle smoke coverage. Thanks @coygeek.
 
 ### Changed
 

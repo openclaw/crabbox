@@ -232,6 +232,16 @@ func TestRailwayProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
 	}
 }
 
+func TestGitHubCodespacesProviderClaimScope(t *testing.T) {
+	cfg := baseConfig()
+	cfg.GitHubCodespaces.APIURL = " https://api.github.example/api/v3/ "
+	cfg.GitHubCodespaces.Repo = " Example-Org/My-App "
+	want := "endpoint:https://api.github.example/api/v3|repo:example-org/my-app"
+	if got := providerClaimScope("github-codespaces", cfg); got != want {
+		t.Fatalf("providerClaimScope(github-codespaces)=%q, want %q", got, want)
+	}
+}
+
 func TestConditionalClaimMutationRejectsChangedState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := baseConfig()

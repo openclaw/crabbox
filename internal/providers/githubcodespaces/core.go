@@ -87,6 +87,14 @@ func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Serv
 	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
 }
 
+func claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
+func providerClaimScope(cfg Config) string {
+	return core.ProviderClaimScope(providerName, cfg)
+}
+
 func resolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
@@ -101,6 +109,10 @@ func listLeaseClaims() ([]LeaseClaim, error) {
 
 func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
 	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
+}
+
+func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
 }
 
 func updateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected LeaseClaim, server Server, target SSHTarget, action func() error) (LeaseClaim, error) {
