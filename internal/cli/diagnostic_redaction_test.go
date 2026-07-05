@@ -36,6 +36,13 @@ func TestRedactDiagnosticSecretsCoversCredentialEncodings(t *testing.T) {
 	}
 }
 
+func TestRedactDiagnosticSecretsPreservesSafeURLPlaceholders(t *testing.T) {
+	value := "http://<redacted>@broker.example.test https://[redacted]@api.example.test"
+	if got := RedactDiagnosticSecrets(value); got != value {
+		t.Fatalf("already-redacted URLs changed: %q", got)
+	}
+}
+
 func TestConfiguredDiagnosticSecretsFindsConfigAndSelectedEnvironment(t *testing.T) {
 	t.Setenv("AWS_SESSION_TOKEN", "environment-session-secret")
 	t.Setenv("CUSTOM_NOMAD_TOKEN", "nomad-environment-secret")

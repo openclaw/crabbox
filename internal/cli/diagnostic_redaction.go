@@ -29,9 +29,22 @@ func RedactDiagnosticSecrets(value string, secrets ...string) string {
 	redacted = diagnosticHeaderPattern.ReplaceAllStringFunc(redacted, redactDiagnosticAssignment)
 	redacted = diagnosticJSONPattern.ReplaceAllStringFunc(redacted, redactDiagnosticJSONField)
 	redacted = diagnosticQueryPattern.ReplaceAllString(redacted, `$1`+diagnosticRedaction)
-	redacted = diagnosticURLPattern.ReplaceAllString(redacted, `$1`+diagnosticRedaction+`@`)
+	redacted = diagnosticURLPattern.ReplaceAllStringFunc(redacted, redactDiagnosticURLUserinfo)
 	redacted = diagnosticBearerPattern.ReplaceAllString(redacted, "Bearer "+diagnosticRedaction)
 	return diagnosticPEMPattern.ReplaceAllString(redacted, diagnosticRedaction)
+}
+
+func redactDiagnosticURLUserinfo(match string) string {
+	separator := strings.Index(match, "://")
+	if separator < 0 {
+		return match
+	}
+	prefixEnd := separator + 3
+	userinfo := strings.TrimSuffix(match[prefixEnd:], "@")
+	if userinfo == "<redacted>" || userinfo == diagnosticRedaction {
+		return match
+	}
+	return match[:prefixEnd] + diagnosticRedaction + "@"
 }
 
 func normalizedDiagnosticSecrets(values []string) []string {
