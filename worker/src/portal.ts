@@ -183,7 +183,7 @@ export function portalHome(
     `<main class="portal-shell">
       ${portalHeader({
         meta: `${escapeHTML(new URL(request.url).host)}${admin ? ` <span class="pill admin-pill">admin</span>` : ""}`,
-        actions: `${admin ? `<a class="button secondary admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>` : ""}<a class="button secondary" href="/portal/logout">log out</a>`,
+        actions: `${admin ? `<a class="button secondary admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>` : ""}${portalLogoutButton()}`,
       })}
       ${admin ? portalAdminSummary({ owner, org, active: active.length, ended, runners: sortedRunners.length, system, providers: portalProviderSummary(sortedLeases, sortedRunners, macHosts) }) : ""}
       <section class="panel table-panel">
@@ -253,7 +253,7 @@ export function portalAdmin(
         actions: `
           <a class="button secondary" href="/portal">leases</a>
           <a class="button secondary admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       ${adminTabs(tab, providerFilter)}
@@ -549,7 +549,7 @@ export function portalLeaseDetail(
               : ""
           }
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section class="detail-grid">
@@ -649,7 +649,7 @@ export function portalShareLease(
               actions: `
                 <a class="button secondary" href="/portal/leases/${encodeURIComponent(lease.id)}">back to lease</a>
                 <a class="button secondary" href="/portal">leases</a>
-                <a class="button secondary" href="/portal/logout">log out</a>
+                ${portalLogoutButton()}
               `,
             })
       }
@@ -720,7 +720,7 @@ export function portalExternalRunnerDetail(
         meta: `${escapeHTML(runner.id)} · ${escapeHTML(runner.provider)} external runner`,
         actions: `
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section class="detail-grid">
@@ -831,7 +831,7 @@ export function portalMacHostDetail(
         meta: `${escapeHTML(host.id)} · ${escapeHTML(host.provider)} ${escapeHTML(host.target)} dedicated host`,
         actions: `
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section class="detail-grid">
@@ -916,7 +916,7 @@ export function portalRunDetail(
         actions: `
           <a class="button secondary" href="/portal/leases/${encodeURIComponent(run.leaseID)}">lease</a>
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section class="detail-grid">
@@ -1064,7 +1064,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
           <button id="vnc-fullscreen" class="icon-btn" type="button" title="fullscreen" aria-label="toggle fullscreen">${fullscreenIcon}</button>
           ${canManage ? `<button id="vnc-share" class="button secondary" type="button">share</button>` : ""}
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section id="screen" class="screen" aria-label="WebVNC display" tabindex="0"></section>
@@ -1855,7 +1855,7 @@ export function portalCode(lease: LeaseRecord): Response {
           <span id="code-status" class="status-pill">checking bridge</span>
           <button id="code-reload" class="icon-btn" type="button" title="reload" aria-label="reload">${reloadIcon}</button>
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section class="screen code-wait-screen" aria-label="Code bridge waiting state">
@@ -2534,6 +2534,10 @@ function portalHeader(options: PortalHeaderOptions): string {
     </div>
     ${actions}
   </header>`;
+}
+
+function portalLogoutButton(): string {
+  return `<form method="post" action="/portal/logout"><button class="button secondary" type="submit">log out</button></form>`;
 }
 
 function leaseOwnership(lease: LeaseRecord, owner: string, org: string): "mine" | "system" {

@@ -71,7 +71,12 @@ import {
   marketplaceStatus,
   type MarketplaceQuoteRequest,
 } from "./marketplace";
-import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
+import {
+  githubAuthRoute,
+  githubPortalLogin,
+  githubPortalLogout,
+  githubPortalLogoutConfirmation,
+} from "./oauth";
 import { defaultOSImage, normalizeOSImage } from "./os-image";
 import {
   portalCode,
@@ -885,6 +890,9 @@ export class FleetCoordinator {
         return await githubPortalLogin(request, this.state.storage, this.env);
       }
       if (method === "GET" && parts.join("/") === "portal/logout") {
+        return githubPortalLogoutConfirmation();
+      }
+      if (method === "POST" && parts.join("/") === "portal/logout") {
         return await this.portalLogout(request);
       }
       if (parts[0] === "portal") {

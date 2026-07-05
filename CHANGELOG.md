@@ -2,6 +2,10 @@
 
 ## 0.36.1 - Unreleased
 
+### Fixed
+
+- Changed portal logout to an authenticated, same-origin `POST` with a read-only `GET` confirmation page, preventing cross-site top-level navigation from clearing portal cookies or revoking isolated Code viewer sessions. Thanks @coygeek.
+
 ## 0.36.0 - 2026-07-05
 
 ### Changed

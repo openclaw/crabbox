@@ -8265,10 +8265,14 @@ describe("fleet lease identity and idle", () => {
     const portalHTML = await portal.text();
     expect(portalHTML).toContain("client managed");
     expect(portalHTML).toContain("remove registration");
+    expect(portalHTML).toContain('<form method="post" action="/portal/logout">');
+    expect(portalHTML).not.toContain('href="/portal/logout"');
 
     const portalIndex = await fleet.fetch(request("GET", "/portal", { headers: ownerHeaders }));
     expect(portalIndex.status).toBe(200);
     const portalIndexHTML = await portalIndex.text();
+    expect(portalIndexHTML).toContain('<form method="post" action="/portal/logout">');
+    expect(portalIndexHTML).not.toContain('href="/portal/logout"');
     expect(portalIndexHTML).toContain('data-release-kind="registered"');
     expect(portalIndexHTML).toContain('title="Remove test-box registration"');
     expect(portalIndexHTML).toContain(
@@ -16110,9 +16114,20 @@ describe("fleet lease identity and idle", () => {
       createdAt: new Date(Date.now() - 2_000).toISOString(),
       expiresAt: new Date(Date.now() - 1_000).toISOString(),
     });
+    const crossSiteNavigation = await throughCoordinator(
+      new Request("https://crabbox.test/portal/logout", {
+        headers: { cookie: portalCookie, origin: "https://attacker.example" },
+      }),
+    );
+    expect(crossSiteNavigation.status).toBe(200);
+    expect(crossSiteNavigation.headers.get("set-cookie")).toBeNull();
+    expect(await crossSiteNavigation.text()).toContain('method="post"');
+    expect(activeViewer.closeCode).toBeUndefined();
+
     const logout = await throughCoordinator(
       new Request("https://crabbox.test/portal/logout", {
-        headers: { cookie: portalCookie },
+        method: "POST",
+        headers: { cookie: portalCookie, origin: "https://crabbox.test" },
       }),
     );
     expect(logout.status).toBe(200);
@@ -21509,9 +21524,19 @@ describe("fleet identity", () => {
     expect(callback.headers.get("set-cookie")).toContain("crabbox_session=cbxu_");
   });
 
-  it("clears portal session on logout without restarting OAuth", async () => {
+  it("requires a POST before clearing the portal session", async () => {
     const fleet = testFleet();
-    const logout = await fleet.fetch(request("GET", "/portal/logout"));
+    const confirmation = await fleet.fetch(request("GET", "/portal/logout"));
+    expect(confirmation.status).toBe(200);
+    expect(confirmation.headers.get("set-cookie")).toBeNull();
+    expect(confirmation.headers.get("content-security-policy")).toContain("form-action 'self'");
+    expect(confirmation.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(confirmation.headers.get("x-frame-options")).toBe("DENY");
+    const confirmationBody = await confirmation.text();
+    expect(confirmationBody).toContain('method="post"');
+    expect(confirmationBody).toContain('action="/portal/logout"');
+
+    const logout = await fleet.fetch(request("POST", "/portal/logout"));
     expect(logout.status).toBe(200);
     expect(logout.headers.get("location")).toBeNull();
     expect(logout.headers.get("set-cookie")).toContain("crabbox_session=");

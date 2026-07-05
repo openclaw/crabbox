@@ -116,8 +116,9 @@ adapter's `Spec()`; the type definitions live in
 Node runtime:
 
 - `GET /v1/health` returns liveness; `GET /` redirects to `/portal`.
-- `/v1/auth/*`, `/portal/login`, `/portal/logout`, and WebSocket upgrades for
-  the live bridges go to `FleetCoordinator`.
+- `/v1/auth/*`, `/portal/login`, and WebSocket upgrades for the live bridges go
+  to `FleetCoordinator` without the normal portal-session authentication;
+  `/portal/logout` remains authenticated and same-origin gated.
 - `/v1/internal/*` is 404 externally; runtime schedulers invoke maintenance
   internally.
 - Everything else passes through `authenticateRequest` and is forwarded with

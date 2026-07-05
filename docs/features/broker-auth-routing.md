@@ -45,7 +45,7 @@ https://fallback.example.com                       # additional fallback
 complete a browser GitHub OAuth flow. The coordinator still requires Crabbox
 auth on every API route; the unauthenticated
 exceptions are `GET /v1/health`, the GitHub login/OAuth routes (`/v1/auth/*`,
-`/portal/login`, `/portal/logout`), and the per-lease websocket agent upgrades that
+`/portal/login`), and the per-lease websocket agent upgrades that
 authenticate via short-lived bridge tickets instead.
 
 `https://broker-access.example.com` is the **same** Worker fronted by a Cloudflare Access
