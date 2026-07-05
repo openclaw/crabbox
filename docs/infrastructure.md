@@ -216,13 +216,14 @@ Homepage URL: https://broker.example.com
 Callback URL: https://broker.example.com/v1/auth/github/callback
 ```
 
-The coordinator derives the callback from `CRABBOX_PUBLIC_URL` (falling back to
-the request origin). Inject the OAuth app values through the runtime's secret
-mechanism:
+The coordinator derives the callback from the required `CRABBOX_PUBLIC_URL` and
+rejects callbacks from other origins before code exchange. Inject the OAuth app
+values through the runtime's secret mechanism:
 
 ```text
 CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
+CRABBOX_PUBLIC_URL               # canonical HTTPS coordinator origin
 CRABBOX_SESSION_SECRET            # signs cbxu_ user tokens; required and distinct from CRABBOX_SHARED_TOKEN
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional: restrict to org teams (alias CRABBOX_GITHUB_ALLOWED_TEAM)
