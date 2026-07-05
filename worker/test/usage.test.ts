@@ -39,6 +39,25 @@ describe("usage accounting", () => {
     expect(usage.byOrg[0]?.key).toBe("openclaw");
   });
 
+  it("keeps user-visible usage inside the requested owner and org", () => {
+    const now = new Date("2026-05-01T02:00:00Z");
+    const matching = testLease({ owner: "alice@example.com", org: "org-a" });
+    const otherOrg = testLease({
+      id: "cbx_other_org",
+      owner: "alice@example.com",
+      org: "org-b",
+    });
+
+    const usage = usageSummary(
+      [matching, otherOrg],
+      { scope: "user", owner: "alice@example.com", org: "org-a", month: "2026-05" },
+      now,
+    );
+
+    expect(usage.leases).toBe(1);
+    expect(usage.byOrg.map((group) => group.key)).toEqual(["org-a"]);
+  });
+
   it("blocks new leases when owner monthly budget would be exceeded", () => {
     const now = new Date("2026-05-01T02:00:00Z");
     const existing = testLease({

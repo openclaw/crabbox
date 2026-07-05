@@ -232,7 +232,9 @@ function leaseMatchesUsageFilter(lease: LeaseRecord, filter: UsageFilter): boole
     return false;
   }
   if (filter.scope === "user") {
-    return !filter.owner || lease.owner === filter.owner;
+    return (
+      (!filter.owner || lease.owner === filter.owner) && (!filter.org || lease.org === filter.org)
+    );
   }
   if (filter.scope === "org") {
     return !filter.org || lease.org === filter.org;

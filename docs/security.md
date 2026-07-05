@@ -94,7 +94,7 @@ the browser receives a random confirmation through that loopback URL. Polling
 requires both the CLI-held secret and the browser confirmation, so forwarding an
 authorization URL cannot deliver the resulting user token to the sender.
 
-User tokens can only mutate leases, runs, and usage for their own `owner`/`org`
+User tokens can only mutate or read leases, runs, and usage for their own `owner`/`org`
 identity. Lease owners also have read-only audit access to run history, logs,
 events, telemetry, and live event subscriptions for work recorded against
 their leases, including runs that later replace the active backing lease. See

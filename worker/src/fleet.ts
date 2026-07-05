@@ -10143,10 +10143,15 @@ export class FleetCoordinator {
     const owner = admin
       ? (url.searchParams.get("owner") ?? requestOwner(request))
       : requestOwner(request);
+    const requestedOrg = url.searchParams.get("org") ?? undefined;
     const org = admin
-      ? (url.searchParams.get("org") ?? requestOrg(request, this.env))
+      ? (requestedOrg ?? (scope === "org" ? requestOrg(request, this.env) : undefined))
       : requestOrg(request, this.env);
-    const usage = usageSummary(await this.leaseRecords(), { scope, owner, org, month }, new Date());
+    const usage = usageSummary(
+      await this.leaseRecords(),
+      { scope, owner, month, ...(org ? { org } : {}) },
+      new Date(),
+    );
     return json({ usage, limits: costLimits(this.env) });
   }
 
