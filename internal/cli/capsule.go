@@ -23,6 +23,8 @@ const (
 	repoBuildReplayClass    = "repo-build-replay"
 	repoBuildReplayVersion  = "0.1.0"
 	capsuleManifestFileName = "capsule.yaml"
+	privateCapsuleDirMode   = 0o700
+	privateCapsuleFileMode  = 0o600
 
 	capsuleOutcomePass           = "pass"
 	capsuleOutcomeFailReproduced = "fail_reproduced"
@@ -244,7 +246,10 @@ func (a App) capsuleFromActions(ctx context.Context, args []string) error {
 	if dir == "" {
 		dir = filepath.Join("capsules", defaultCapsuleOutputName(runRef, job, step, *jobName != "" || capsuleRunHasMultipleFailures(view.Jobs)))
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o755); err != nil {
+	if err := ensurePrivateCapsuleDir(dir); err != nil {
+		return err
+	}
+	if err := ensurePrivateCapsuleDir(filepath.Join(dir, "logs")); err != nil {
 		return err
 	}
 	logRef, failureSignature := capsuleArtifactRef{}, ""
@@ -255,7 +260,7 @@ func (a App) capsuleFromActions(ctx context.Context, args []string) error {
 		} else if logText != "" {
 			logText = boundString(logText, *maxLogBytes)
 			logPath := filepath.Join(dir, "logs", "failed.log")
-			if err := os.WriteFile(logPath, []byte(logText), 0o644); err != nil {
+			if err := writePrivateCapsuleFile(logPath, []byte(logText)); err != nil {
 				return err
 			}
 			logDigest := sha256String(logText)
@@ -897,14 +902,41 @@ func boundString(value string, maxBytes int) string {
 }
 
 func writeCapsuleManifest(path string, manifest capsuleManifest) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	data, err := yaml.Marshal(manifest)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return writePrivateCapsuleFile(path, data)
+}
+
+func ensurePrivateCapsuleDir(path string) error {
+	if err := os.MkdirAll(path, privateCapsuleDirMode); err != nil {
+		return err
+	}
+	return os.Chmod(path, privateCapsuleDirMode)
+}
+
+func writePrivateCapsuleFile(path string, data []byte) error {
+	// Create missing capsule parents privately without changing permissions on
+	// an existing repository, shared directory, or the current working directory.
+	if err := os.MkdirAll(filepath.Dir(path), privateCapsuleDirMode); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, privateCapsuleFileMode)
+	if err != nil {
+		return err
+	}
+	// OpenFile preserves an existing file's mode. Tighten it before writing so
+	// reused capsule paths never expose newly captured logs through old modes.
+	if err := file.Chmod(privateCapsuleFileMode); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func readCapsuleManifest(path string) (capsuleManifest, error) {

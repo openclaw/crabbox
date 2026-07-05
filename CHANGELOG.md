@@ -18,6 +18,7 @@
 - Pinned mediated-egress connections to validated public DNS results and rejected private, loopback, link-local, and reserved destinations, preventing allowlisted hostnames from rebinding into the operator network. Thanks @coygeek.
 - Confined artifact manifest fetches, downloads, and brokered uploads to same-origin redirects, preventing signed URLs and upload grants from reaching another origin. Thanks @coygeek.
 - Scoped user-visible usage totals to both the authenticated owner and organization, excluding same-owner leases from other organizations. Thanks @coygeek.
+- Wrote captured capsule manifests and failed Actions logs with private Unix permissions, repairing broader modes when an output path is reused. Thanks @coygeek.
 - Bound GitHub OAuth CLI token release to a one-use callback on the initiating device, so forwarding an authorization URL cannot hand the resulting user token to another terminal. Thanks @coygeek.
 - Honored an explicit broker URL and freshly issued credential during immediate post-login identity verification, even when ambient coordinator overrides point elsewhere.
 - Kept coordinator restarts, run history, lease detail pages, and Azure orphan sweeps memory-bounded with exact lease restores, paged record scans, and batched terminal-run pruning after a configurable 30-day retention period.
