@@ -193,7 +193,7 @@ const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAWSOrphanSweepGraceSeconds = 15 * 60;
 const defaultAzureOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAzureOrphanSweepGraceSeconds = 15 * 60;
-const leaseRecordScanBatchSize = 128;
+const storageRecordScanBatchSize = 128;
 const providerAccessReservationTTLMS = 15 * 60 * 1000;
 const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
@@ -5857,17 +5857,15 @@ export class FleetCoordinator {
         404,
       );
     }
-    const runs = await this.runRecords();
-    const leases = new Map((await this.leaseRecords()).map((record) => [record.id, record]));
-    leases.set(lease.id, lease);
-    await Promise.all(runs.map((run) => this.ensureRunLeaseAttribution(run, leases)));
-    const visibleRuns = runs
-      .filter(
-        (run) =>
-          this.runReferencesLease(run, lease.id) && this.runReadableToRequest(run, request, lease),
-      )
-      .toSorted((a, b) => b.startedAt.localeCompare(a.startedAt))
-      .slice(0, 12);
+    const visibleRuns = await this.recentRuns(12, async (run) => {
+      if (run.leaseIDs !== undefined && !this.runReferencesLease(run, lease.id)) {
+        return false;
+      }
+      await this.ensureRunLeaseAttribution(run);
+      return (
+        this.runReferencesLease(run, lease.id) && this.runReadableToRequest(run, request, lease)
+      );
+    });
     return portalLeaseDetail(lease, visibleRuns, this.leaseBridgeStatus(lease), {
       canManage: this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
     });
@@ -9986,19 +9984,28 @@ export class FleetCoordinator {
     const state = url.searchParams.get("state") ?? "";
     const limit = clampLimit(url.searchParams.get("limit"), 50);
     const admin = isAdminRequest(request);
-    const runs = await this.runRecords();
-    const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
-    await Promise.all(runs.map((run) => this.ensureRunLeaseAttribution(run, leases)));
-    return json({
-      runs: runs
-        .filter((run) => !leaseID || this.runReferencesLease(run, leaseID))
-        .filter((run) => admin || this.runReadableToRequest(run, request, leases.get(run.leaseID)))
-        .filter((run) => !owner || run.owner === owner)
-        .filter((run) => !org || run.org === org)
-        .filter((run) => !state || run.state === state)
-        .toSorted((a, b) => b.startedAt.localeCompare(a.startedAt))
-        .slice(0, limit),
+    const runs = await this.recentRuns(limit, async (run) => {
+      if (
+        (owner && run.owner !== owner) ||
+        (org && run.org !== org) ||
+        (state && run.state !== state) ||
+        (leaseID && run.leaseIDs !== undefined && !this.runReferencesLease(run, leaseID))
+      ) {
+        return false;
+      }
+      if (admin && !leaseID) {
+        return true;
+      }
+      let currentLease = await this.ensureRunLeaseAttribution(run);
+      if (leaseID && !this.runReferencesLease(run, leaseID)) {
+        return false;
+      }
+      if (!admin && !run.leaseOwners?.length && !currentLease && validLeaseID(run.leaseID)) {
+        currentLease = await this.getLease(run.leaseID);
+      }
+      return admin || this.runReadableToRequest(run, request, currentLease);
     });
+    return json({ runs });
   }
 
   private async listExternalRunners(request: Request): Promise<Response> {
@@ -11239,26 +11246,34 @@ export class FleetCoordinator {
   }
 
   private async visitLeaseRecords(visitor: (lease: LeaseRecord) => void): Promise<void> {
+    await this.visitStorageRecords("lease:", visitor);
+  }
+
+  private async visitStorageRecords<T>(
+    prefix: string,
+    visitor: (record: T) => Promise<void> | void,
+  ): Promise<void> {
     let startAfter: string | undefined;
     for (;;) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- each bounded page starts after the previous page.
-      const page = await this.state.storage.list<LeaseRecord>({
-        prefix: "lease:",
-        limit: leaseRecordScanBatchSize,
+      const page = await this.state.storage.list<T>({
+        prefix,
+        limit: storageRecordScanBatchSize,
         ...(startAfter ? { startAfter } : {}),
       });
       if (page.size === 0) {
         break;
       }
-      for (const lease of page.values()) {
-        visitor(lease);
+      for (const record of page.values()) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- sequential visits bound legacy record hydration.
+        await visitor(record);
       }
       const nextStartAfter = [...page.keys()].at(-1);
       if (!nextStartAfter || nextStartAfter === startAfter) {
-        throw new Error("lease record scan did not advance");
+        throw new Error(`${prefix} record scan did not advance`);
       }
       startAfter = nextStartAfter;
-      if (page.size < leaseRecordScanBatchSize) {
+      if (page.size < storageRecordScanBatchSize) {
         break;
       }
     }
@@ -11387,9 +11402,17 @@ export class FleetCoordinator {
     }
   }
 
-  private async runRecords(): Promise<RunRecord[]> {
-    const runs = await this.state.storage.list<RunRecord>({ prefix: "run:" });
-    return [...runs.values()];
+  private async recentRuns(
+    limit: number,
+    accept: (run: RunRecord) => Promise<boolean>,
+  ): Promise<RunRecord[]> {
+    const recent: RunRecord[] = [];
+    await this.visitStorageRecords<RunRecord>("run:", async (run) => {
+      if (await accept(run)) {
+        retainRecentRun(recent, run, limit);
+      }
+    });
+    return recent;
   }
 
   private async externalRunnerRecords(): Promise<ExternalRunnerRecord[]> {
@@ -14079,6 +14102,23 @@ function leaseUsesCanonicalProviderKey(
 
 function validExternalRunnerID(value: string | undefined): value is string {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,128}$/.test(value);
+}
+
+function retainRecentRun(runs: RunRecord[], run: RunRecord, limit: number): void {
+  let low = 0;
+  let high = runs.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (runs[middle]!.startedAt.localeCompare(run.startedAt) < 0) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  runs.splice(low, 0, run);
+  if (runs.length > limit) {
+    runs.pop();
+  }
 }
 
 function clampLimit(value: string | null, fallback: number): number {

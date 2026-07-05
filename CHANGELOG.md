@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- Kept coordinator restarts and Azure orphan sweeps memory-bounded by restoring only socket-referenced leases and scanning historical lease records in provider-filtered pages.
+- Kept coordinator restarts, run history, lease detail pages, and Azure orphan sweeps memory-bounded with exact lease restores and paged record scans.
 - Redacted coordinator URL userinfo, queries, and fragments from adapter relay connection status. Thanks @coygeek.
 - Closed restored legacy Code viewer sessions that lack a complete organization-bound principal during restore and after lease share revocation. Thanks @coygeek.
 - Required a canonical public origin for GitHub OAuth and bound callbacks to the initiating origin before exchanging codes or issuing sessions. Thanks @coygeek.

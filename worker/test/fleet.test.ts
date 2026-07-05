@@ -133,6 +133,21 @@ class HookedMemoryStorage extends MemoryStorage {
   }
 }
 
+class ObservedMemoryStorage extends MemoryStorage {
+  readonly listOptions: Array<{ prefix?: string; limit?: number; startAfter?: string }> = [];
+
+  override async list<T>(
+    options: { prefix?: string; limit?: number; startAfter?: string } = {},
+  ): Promise<Map<string, T>> {
+    this.listOptions.push({ ...options });
+    return await super.list<T>(options);
+  }
+
+  resetListOptions(): void {
+    this.listOptions.length = 0;
+  }
+}
+
 const restrictedBrokerSelectorCases = [
   { provider: "aws" as const, field: "awsAMI", value: "ami-000000000001" },
   { provider: "aws" as const, field: "awsSGID", value: "sg-000000000001" },
@@ -19352,6 +19367,71 @@ describe("fleet lease identity and idle", () => {
 });
 
 describe("fleet run history", () => {
+  it("pages run history and lease detail scans while retaining only the newest matches", async () => {
+    const storage = new ObservedMemoryStorage();
+    const fleet = testFleet(storage);
+    const ownerHeaders = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const targetLeaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${targetLeaseID}`,
+      testLease({ id: targetLeaseID, owner: "alice@example.com", org: "example-org" }),
+    );
+    for (let index = 0; index < 300; index += 1) {
+      const id = `run_${index.toString().padStart(12, "0")}`;
+      const leaseID = index % 3 === 0 ? targetLeaseID : "cbx_000000000002";
+      storage.seed(
+        `run:${id}`,
+        testRun({
+          id,
+          leaseID,
+          leaseIDs: [leaseID],
+          leaseOwners: [{ owner: "alice@example.com", org: "example-org" }],
+          owner: "alice@example.com",
+          org: "example-org",
+          state: "succeeded",
+          startedAt: new Date(Date.UTC(2026, 4, 1, 0, 0, index)).toISOString(),
+        }),
+      );
+    }
+
+    storage.resetListOptions();
+    const history = await fleet.fetch(
+      request("GET", "/v1/runs?limit=5", { headers: ownerHeaders }),
+    );
+    const historyBody = (await history.json()) as { runs: RunRecord[] };
+    expect(historyBody.runs.map((run) => run.id)).toEqual([
+      "run_000000000299",
+      "run_000000000298",
+      "run_000000000297",
+      "run_000000000296",
+      "run_000000000295",
+    ]);
+    expect(storage.listOptions).toEqual([
+      { prefix: "run:", limit: 128 },
+      { prefix: "run:", limit: 128, startAfter: "run:run_000000000127" },
+      { prefix: "run:", limit: 128, startAfter: "run:run_000000000255" },
+    ]);
+
+    storage.resetListOptions();
+    const portal = await fleet.fetch(
+      request("GET", `/portal/leases/${targetLeaseID}`, { headers: ownerHeaders }),
+    );
+    expect(portal.status).toBe(200);
+    const portalHTML = await portal.text();
+    expect(portalHTML).toContain("run_000000000297");
+    expect(portalHTML).toContain("run_000000000264");
+    expect(portalHTML).not.toContain("run_000000000261");
+    expect(portalHTML).not.toContain("run_000000000299");
+    expect(storage.listOptions).toEqual([
+      { prefix: "run:", limit: 128 },
+      { prefix: "run:", limit: 128, startAfter: "run:run_000000000127" },
+      { prefix: "run:", limit: 128, startAfter: "run:run_000000000255" },
+    ]);
+  });
+
   it("creates early run sessions and appends durable events", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
