@@ -420,6 +420,19 @@ func TestRemoteGitSeedCandidateRequiresRemoteTrackingRef(t *testing.T) {
 	if !remoteGitSeedCandidate(repo) {
 		t.Fatal("head in a remote-tracking ref should be a seed candidate")
 	}
+
+	repo.RemoteURL = "https://token@github.com/openclaw/crabbox.git"
+	if remoteGitSeedCandidate(repo) {
+		t.Fatal("credential-bearing HTTPS remote should not be a seed candidate")
+	}
+	repo.RemoteURL = "https://user:token@github.com/openclaw/crabbox.git"
+	if remoteGitSeedCandidate(repo) {
+		t.Fatal("HTTPS remote with password userinfo should not be a seed candidate")
+	}
+	repo.RemoteURL = "ssh://git@github.com/openclaw/crabbox.git"
+	if !remoteGitSeedCandidate(repo) {
+		t.Fatal("SSH remotes with a username should remain seed candidates")
+	}
 }
 
 func TestCheckSyncPreflightFailsLargeCandidate(t *testing.T) {

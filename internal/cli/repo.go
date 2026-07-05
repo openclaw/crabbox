@@ -226,7 +226,22 @@ func remoteGitSeedCandidate(repo Repo) bool {
 	if repo.Root == "" || repo.RemoteURL == "" || repo.Head == "" {
 		return false
 	}
+	if !remoteGitSeedURLSafe(repo.RemoteURL) {
+		return false
+	}
 	return gitOutput(repo.Root, "for-each-ref", "--contains", repo.Head, "--format=%(refname)", "refs/remotes") != ""
+}
+
+func remoteGitSeedURLSafe(remoteURL string) bool {
+	remoteURL = strings.TrimSpace(remoteURL)
+	if !strings.Contains(remoteURL, "://") {
+		return true
+	}
+	u, err := url.Parse(remoteURL)
+	if err != nil || u.User == nil {
+		return true
+	}
+	return u.Scheme != "http" && u.Scheme != "https"
 }
 
 func defaultBaseRef(root string) string {
