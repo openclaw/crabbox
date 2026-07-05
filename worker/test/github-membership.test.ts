@@ -5,6 +5,10 @@ import { prepareCoordinatorRequest } from "../src/coordinator-entry";
 import type { Env } from "../src/types";
 
 const accessToken = "github-access-token-for-tests";
+const liveAccessToken = process.env.CRABBOX_GITHUB_LIVE_TOKEN;
+const liveOrg = process.env.CRABBOX_GITHUB_LIVE_ORG;
+const liveLogin = process.env.CRABBOX_GITHUB_LIVE_LOGIN;
+const liveMembershipConfigured = Boolean(liveAccessToken && liveOrg && liveLogin);
 
 function testEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -156,27 +160,26 @@ describe("GitHub user-token membership", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it.skipIf(!process.env.CRABBOX_GITHUB_LIVE_TOKEN)(
-    "live: accepts a current OpenClaw organization member through the encrypted user-token path",
+  it.skipIf(!liveMembershipConfigured)(
+    "live: accepts a current organization member through the encrypted user-token path",
     async () => {
-      const liveAccessToken = process.env.CRABBOX_GITHUB_LIVE_TOKEN!;
       const env = testEnv({
-        CRABBOX_DEFAULT_ORG: "openclaw",
-        CRABBOX_GITHUB_ALLOWED_ORG: "openclaw",
+        CRABBOX_DEFAULT_ORG: liveOrg,
+        CRABBOX_GITHUB_ALLOWED_ORG: liveOrg,
       });
       const token = await issueUserToken(env, {
-        owner: "steipete@gmail.com",
+        owner: "live-member@example.com",
         ownerSource: "github-verified-email",
-        org: "openclaw",
-        login: "steipete",
-        githubAccessToken: liveAccessToken,
+        org: liveOrg!,
+        login: liveLogin!,
+        githubAccessToken: liveAccessToken!,
       });
 
       await expect(authenticateRequest(tokenRequest(token), env)).resolves.toMatchObject({
         authorized: true,
-        owner: "steipete@gmail.com",
-        org: "openclaw",
-        login: "steipete",
+        owner: "live-member@example.com",
+        org: liveOrg,
+        login: liveLogin,
       });
     },
   );
