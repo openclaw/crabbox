@@ -4486,56 +4486,65 @@ describe("fleet lease identity and idle", () => {
   });
 
   it.each([
-    ["canonical name", "crabbox-cbx-000000000000", true],
-    ["unexpected name", "crabbox-other", false],
-  ])("handles a legacy Hetzner lease with its %s", async (_case, serverName, owned) => {
-    const requests: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(String(input));
-        requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
-        if ((init?.method ?? "GET") === "GET") {
-          return jsonResponse({
-            server: {
-              id: 123,
-              name: serverName,
-              status: "running",
-              server_type: { name: "cx23" },
-              public_net: { ipv4: { ip: "192.0.2.1" } },
-              labels: {
-                crabbox: "true",
-                created_by: "crabbox",
-                lease: "cbx_000000000000",
+    [
+      "canonical name",
+      "crabbox-cbx-000000000000",
+      "released",
+      ["GET /v1/servers/123", "DELETE /v1/servers/123", "DELETE /v1/ssh_keys/7"],
+    ],
+    [
+      "unexpected name",
+      "crabbox-other",
+      "refusing to delete Hetzner server 123: ownership does not match lease cbx_000000000000",
+      ["GET /v1/servers/123"],
+    ],
+  ])(
+    "handles a legacy Hetzner lease with its %s",
+    async (_case, serverName, expectedOutcome, expectedRequests) => {
+      const requests: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(String(input));
+          requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+          if ((init?.method ?? "GET") === "GET") {
+            return jsonResponse({
+              server: {
+                id: 123,
+                name: serverName,
+                status: "running",
+                server_type: { name: "cx23" },
+                public_net: { ipv4: { ip: "192.0.2.1" } },
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  lease: "cbx_000000000000",
+                },
               },
-            },
-          });
-        }
-        return new Response(null, { status: 204 });
-      }),
-    );
-    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
-    const release = provider.releaseLease(
-      testLease({
-        slug: undefined,
-        serverName,
-        providerKeyCleanupPending: true,
-        providerKeyCleanupID: "7",
-      }),
-    );
+            });
+          }
+          return new Response(null, { status: 204 });
+        }),
+      );
+      const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+      const outcome = await provider
+        .releaseLease(
+          testLease({
+            slug: undefined,
+            serverName,
+            providerKeyCleanupPending: true,
+            providerKeyCleanupID: "7",
+          }),
+        )
+        .then(
+          () => "released",
+          (error: unknown) => (error instanceof Error ? error.message : String(error)),
+        );
 
-    if (owned) {
-      await expect(release).resolves.toBeUndefined();
-      expect(requests).toEqual([
-        "GET /v1/servers/123",
-        "DELETE /v1/servers/123",
-        "DELETE /v1/ssh_keys/7",
-      ]);
-    } else {
-      await expect(release).rejects.toThrow("ownership does not match lease cbx_000000000000");
-      expect(requests).toEqual(["GET /v1/servers/123"]);
-    }
-  });
+      expect(outcome).toBe(expectedOutcome);
+      expect(requests).toEqual(expectedRequests);
+    },
+  );
 
   it("recovers an unknown Hetzner server before deleting its retained SSH key", async () => {
     const requests: string[] = [];
