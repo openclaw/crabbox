@@ -337,7 +337,9 @@ repo:
   Scope these to the artifact bucket/prefix and use them only to sign
   short-lived upload/read URLs. New grants encode the exact authenticated
   owner/org identity in an opaque versioned namespace; existing object URLs are
-  not rewritten or resolved through a legacy lookup path.
+  not rewritten or resolved through a legacy lookup path. Reads remain signed
+  unless `CRABBOX_ARTIFACTS_PUBLIC_READS=1` explicitly opts into non-expiring
+  public links; public grants add an unguessable per-grant namespace.
 
 Deployments that previously relied on `CRABBOX_SHARED_TOKEN` as the implicit
 user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
@@ -354,6 +356,7 @@ Coordinator config values (not secret material):
 - `CRABBOX_ACCESS_TEAM_DOMAIN`, `CRABBOX_ACCESS_AUD` — Access JWT verification.
 - `CRABBOX_ARTIFACTS_BACKEND`, `CRABBOX_ARTIFACTS_BUCKET`,
   `CRABBOX_ARTIFACTS_PREFIX`, `CRABBOX_ARTIFACTS_BASE_URL`,
+  `CRABBOX_ARTIFACTS_PUBLIC_READS`,
   `CRABBOX_ARTIFACTS_REGION`, `CRABBOX_ARTIFACTS_ENDPOINT_URL`,
   `CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS`,
   `CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS` — artifact storage settings.

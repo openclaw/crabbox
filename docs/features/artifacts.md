@@ -195,13 +195,17 @@ Coordinator artifact variables describe the backend:
 - `CRABBOX_ARTIFACTS_BUCKET`: destination bucket.
 - `CRABBOX_ARTIFACTS_PREFIX`: root object prefix for all brokered uploads
   (default `crabbox-artifacts`).
-- `CRABBOX_ARTIFACTS_BASE_URL`: public URL prefix for final Markdown links.
+- `CRABBOX_ARTIFACTS_BASE_URL`: display URL prefix used only when public reads
+  are explicitly enabled.
+- `CRABBOX_ARTIFACTS_PUBLIC_READS`: set to `1` only when intentionally serving
+  non-expiring public links. Public grants receive a random per-grant namespace.
 - `CRABBOX_ARTIFACTS_REGION` and `CRABBOX_ARTIFACTS_ENDPOINT_URL`: S3/R2 signing
   endpoint details (region defaults to `auto` for r2, `us-east-1` for s3;
   r2 requires the endpoint URL).
 - `CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS`: lifetime for write grants.
-- `CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS`: lifetime for signed read URLs when no
-  public base URL is configured.
+- `CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS`: lifetime for signed read URLs (the
+  default read policy, including when a base URL is configured without public
+  reads enabled).
 
 Coordinator artifact secrets authorize signing:
 

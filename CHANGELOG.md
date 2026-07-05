@@ -19,6 +19,7 @@
 - Kept explicit `CRABBOX_CONFIG` files inside the active repository in the repository trust domain, including symlink aliases, so they cannot redirect inherited provider credentials. Thanks @coygeek.
 - Pinned mediated-egress connections to validated public DNS results and rejected private, loopback, link-local, and reserved destinations, preventing allowlisted hostnames from rebinding into the operator network. Thanks @coygeek.
 - Confined artifact manifest fetches, downloads, and brokered uploads to same-origin redirects, preventing signed URLs and upload grants from reaching another origin. Thanks @coygeek.
+- Kept brokered artifact reads signed by default even when a display base URL is configured; explicit public reads now use a random per-grant namespace and report their access policy. Thanks @coygeek.
 - Scoped user-visible usage totals to both the authenticated owner and organization, excluding same-owner leases from other organizations. Thanks @coygeek.
 - Wrote captured capsule manifests and failed Actions logs with private Unix permissions, repairing broader modes when an output path is reused. Thanks @coygeek.
 - Revalidated signed GitHub user tokens against current allowed organization and team membership every five minutes, failed closed on GitHub errors, and added narrow owner/login revocations without rotating every session. Thanks @coygeek.
