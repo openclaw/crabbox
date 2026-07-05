@@ -16,6 +16,7 @@
 - Redacted broker URL userinfo, queries, and fragments from `login`, `whoami`, and `doctor` text and JSON output. Thanks @coygeek.
 - Redacted Parallels top-level, template, and fleet-host SSH private keys from `config show --json` while preserving non-secret routing metadata. Thanks @coygeek.
 - Redacted Proxmox token IDs, secrets, and authorization values from provider HTTP error bodies before returning diagnostics. Thanks @coygeek.
+- Prevented FastAPI Cloud bearer credentials from following cross-origin redirects, preserved caller redirect policies, and rejected unsafe credential-destination URL components. Thanks @coygeek.
 - Treated malformed percent-encoded portal cookies as absent instead of throwing before normal authentication handling. Thanks @coygeek.
 - Verified downloaded GitHub Actions runner archives against the exact upstream release-asset SHA-256 digest before replacing or extracting the installed runner. Thanks @coygeek.
 - Required W&B sandbox reuse, status, and stop to match an exact endpoint/entity/project/resource-bound local claim plus provider inventory ownership. Thanks @coygeek.

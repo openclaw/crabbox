@@ -3,6 +3,7 @@ package fastapicloud
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -131,19 +132,86 @@ func newFastAPICloudClient(cfg Config, rt Runtime) (fastAPICloudAPI, error) {
 	if token == "" {
 		return nil, exit(2, "provider=%s requires FASTAPI_CLOUD_TOKEN", providerName)
 	}
-	apiURL := strings.TrimRight(strings.TrimSpace(blank(cfg.FastAPICloud.APIURL, "https://api.fastapicloud.com/api/v1")), "/")
-	parsed, err := url.Parse(apiURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
-	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return nil, exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
+	apiURL, err := validateFastAPICloudAPIURL(blank(cfg.FastAPICloud.APIURL, "https://api.fastapicloud.com/api/v1"))
+	if err != nil {
+		return nil, err
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &fastAPICloudClient{token: token, apiURL: apiURL, httpClient: httpClient}, nil
+	return &fastAPICloudClient{token: token, apiURL: apiURL, httpClient: secureFastAPICloudHTTPClient(httpClient, apiURL)}, nil
+}
+
+func validateFastAPICloudAPIURL(raw string) (string, error) {
+	apiURL := strings.TrimRight(strings.TrimSpace(raw), "/")
+	parsed, err := url.Parse(apiURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
+		return "", exit(2, "provider=%s API URL must be an absolute HTTPS URL", providerName)
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", exit(2, "provider=%s API URL must not contain userinfo, query parameters, or a fragment", providerName)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
+		return "", exit(2, "provider=%s API URL must use HTTPS except for loopback development endpoints", providerName)
+	}
+	return apiURL, nil
+}
+
+func secureFastAPICloudHTTPClient(source *http.Client, apiURL string) *http.Client {
+	client := *source
+	trusted, _ := url.Parse(apiURL)
+	originalCheckRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameFastAPICloudOrigin(trusted, req.URL) {
+			return &fastAPICloudRedirectError{origin: fastAPICloudRedirectOrigin(req.URL)}
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameFastAPICloudOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveFastAPICloudPort(a) == effectiveFastAPICloudPort(b)
+}
+
+func effectiveFastAPICloudPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
+
+type fastAPICloudRedirectError struct {
+	origin string
+}
+
+func (e *fastAPICloudRedirectError) Error() string {
+	return fmt.Sprintf("%s refused cross-origin redirect to %s", providerName, e.origin)
+}
+
+func fastAPICloudRedirectOrigin(value *url.URL) string {
+	if value == nil || value.Scheme == "" || value.Host == "" {
+		return "<redacted>"
+	}
+	return value.Scheme + "://" + value.Host
 }
 
 func (c *fastAPICloudClient) GetApp(ctx context.Context, appID string) (fastAPICloudApp, error) {
@@ -244,6 +312,11 @@ func (c *fastAPICloudClient) get(ctx context.Context, apiPath string, params url
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// net/http wraps CheckRedirect failures with the untrusted Location URL.
+		var redirectErr *fastAPICloudRedirectError
+		if errors.As(err, &redirectErr) {
+			return redirectErr
+		}
 		return err
 	}
 	defer resp.Body.Close()
