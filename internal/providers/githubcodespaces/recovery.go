@@ -127,18 +127,19 @@ func validateCreatedCodespaceIdentity(expected LeaseClaim, item codespace) (code
 	if item.DisplayName != "" && item.DisplayName != displayName {
 		return codespace{}, exit(4, "github-codespaces create display name mismatch: got %q want %q; recovery claim retained", item.DisplayName, displayName)
 	}
-	if item.Repository.FullName != "" && !strings.EqualFold(item.Repository.FullName, repo) {
+	liveRepo := strings.TrimSpace(item.Repository.FullName)
+	if liveRepo != "" && !strings.EqualFold(liveRepo, repo) {
 		return codespace{}, exit(4, "github-codespaces create repository mismatch: got %q want %q; recovery claim retained", item.Repository.FullName, repo)
 	}
 	item.DisplayName = displayName
-	item.Repository.FullName = repo
+	item.Repository.FullName = firstNonEmpty(liveRepo, repo)
 	return item, nil
 }
 
 func (b *backend) bindValidatedCreatedClaim(expected LeaseClaim, item codespace) (LeaseClaim, error) {
 	name := strings.TrimSpace(item.Name)
 	displayName := strings.TrimSpace(expected.Labels[labelDisplayName])
-	repo := strings.TrimSpace(expected.Labels[labelRepository])
+	repo := firstNonEmpty(strings.TrimSpace(item.Repository.FullName), strings.TrimSpace(expected.Labels[labelRepository]))
 	labels := cloneLabels(expected.Labels)
 	delete(labels, labelRecovery)
 	labels[labelCodespaceName] = name

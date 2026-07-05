@@ -316,7 +316,7 @@ func TestReleaseRecoversPendingCreateThenDeletesExactResource(t *testing.T) {
 	}
 	item := fakeCodespace("cs-later", "Available")
 	item.DisplayName = claim.Labels[labelDisplayName]
-	item.Repository.FullName = claim.Labels[labelRepository]
+	item.Repository.FullName = "Example-Org/My-App"
 	fc.items[item.Name] = item
 
 	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}}); err != nil {
