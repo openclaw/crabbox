@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,13 @@ import (
 	"strings"
 	"time"
 )
+
+type githubAPIResponseError struct {
+	status  int
+	message string
+}
+
+func (e *githubAPIResponseError) Error() string { return e.message }
 
 type client struct {
 	httpClient *http.Client
@@ -306,15 +314,24 @@ func githubAPIError(status int, retryAfter, body string) error {
 	}
 	if retryAfter != "" {
 		if seconds, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil {
-			return fmt.Errorf("github-codespaces API status=%d retry_after=%s: %s; %s", status, (time.Duration(seconds) * time.Second).String(), message, action)
+			return &githubAPIResponseError{status: status, message: fmt.Sprintf("github-codespaces API status=%d retry_after=%s: %s; %s", status, (time.Duration(seconds) * time.Second).String(), message, action)}
 		}
-		return fmt.Errorf("github-codespaces API status=%d retry_after=%s: %s; %s", status, retryAfter, message, action)
+		return &githubAPIResponseError{status: status, message: fmt.Sprintf("github-codespaces API status=%d retry_after=%s: %s; %s", status, retryAfter, message, action)}
 	}
-	return fmt.Errorf("github-codespaces API status=%d: %s; %s", status, message, action)
+	return &githubAPIResponseError{status: status, message: fmt.Sprintf("github-codespaces API status=%d: %s; %s", status, message, action)}
 }
 
 func isGitHubNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "github-codespaces API status=404")
+	var apiErr *githubAPIResponseError
+	return errors.As(err, &apiErr) && apiErr.status == http.StatusNotFound
+}
+
+func githubAPIStatus(err error) (int, bool) {
+	var apiErr *githubAPIResponseError
+	if !errors.As(err, &apiErr) {
+		return 0, false
+	}
+	return apiErr.status, true
 }
 
 func nextLinkPath(linkHeader, baseURL string) (string, error) {

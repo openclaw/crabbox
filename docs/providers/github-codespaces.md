@@ -151,17 +151,24 @@ Do not put GitHub tokens in Crabbox config or on command lines. Use
 2. Resolve the repository from `githubCodespaces.repo`, flags, env, or the
    current GitHub remote.
 3. Check available Codespaces machines for the repo/ref.
-4. Create a Codespace with the configured machine, ref, devcontainer path,
+4. Persist a local recovery claim bound to the API endpoint, repository, GitHub
+   login, and exact Crabbox display name.
+5. Create a Codespace with the configured machine, ref, devcontainer path,
    working directory, geo, idle timeout, retention period, and Crabbox display
    name.
-5. Store a local Crabbox claim that binds the lease id, slug, Codespace name,
-   repository, machine, and GitHub login.
-6. Wait for the Codespace to become available.
-7. Ask `gh codespace ssh --config -c <codespace>` for OpenSSH config, store it
+6. Bind the provider-assigned Codespace name to the existing claim.
+7. Wait for the Codespace to become available.
+8. Ask `gh codespace ssh --config -c <codespace>` for OpenSSH config, store it
    under Crabbox state, select the matching target, and wait for SSH readiness.
-8. Use normal Crabbox SSH and rsync behavior for `run`, `sync`, and `ssh`.
-9. On `stop`, delete or stop the claim-owned Codespace according to the release
+9. Use normal Crabbox SSH and rsync behavior for `run`, `sync`, and `ssh`.
+10. On `stop`, delete or stop the claim-owned Codespace according to the release
    policy.
+
+If a create response is lost, Crabbox retains the recovery claim and reconciles
+only one Codespace with the exact expected display name and repository in the
+same GitHub account. Missing or duplicate matches fail closed. Retry `crabbox
+stop --provider github-codespaces <lease-or-slug>` after GitHub inventory
+converges.
 
 If a retained Codespace is stopped, resolving it later starts it and waits for
 availability before refreshing the generated SSH config.
@@ -170,7 +177,8 @@ availability before refreshing the generated SSH config.
 
 GitHub Codespaces does not expose custom user labels. Crabbox therefore uses a
 local claim as the ownership predicate. Release and cleanup require the claim to
-match the provider, Codespace name, and creating GitHub login.
+match the provider, API endpoint, repository, Codespace name, and creating
+GitHub login.
 
 Deletion is conservative:
 

@@ -6,6 +6,7 @@
 
 - Added a CubeSandbox delegated-run provider with E2B-compatible lifecycle and envd execution, archive sync, CubeProxy routing, exact API-endpoint/sandbox-bound ownership claims, conflict-safe explicit adoption, and guarded cleanup. Thanks @zozo123.
 - Added coordinator-managed Daytona Linux leases with a Worker-held API key, exact ownership cleanup, expiring SSH-token refresh, CLI secret redaction, and production Cloudflare configuration.
+- Added GitHub Codespaces direct Linux SSH leases with token-scope preflight, repository and machine selection, durable pre-create recovery, exact claim-bound ownership, generated OpenSSH configuration, and guarded lifecycle smoke coverage. Thanks @coygeek.
 
 ### Fixed
 
@@ -42,10 +43,6 @@
 ### Added
 
 - Added Sealos DevBox Linux SSH leases through the Kubernetes CRD with exact provider/resource-bound claims, conflict-safe explicit `--reclaim` adoption, claim-locked release and cleanup, controller-owned Secret SSH routing, and guarded zero-residue lifecycle proof. Thanks @coygeek.
-
-### Added
-
-- Added GitHub Codespaces direct Linux SSH leases with token-scope preflight, repository and machine selection, claim-bound ownership, generated OpenSSH configuration, and guarded lifecycle smoke coverage. Thanks @coygeek.
 
 ### Changed
 

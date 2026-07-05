@@ -810,6 +810,15 @@ func providerClaimScope(provider string, cfg Config) string {
 		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.CubeSandbox.APIURL); endpoint != "" {
 			return "endpoint:" + endpoint
 		}
+	case "github-codespaces":
+		parts := make([]string, 0, 2)
+		if endpoint := normalizedNamespaceClaimEndpoint(cfg.GitHubCodespaces.APIURL); endpoint != "" {
+			parts = append(parts, "endpoint:"+endpoint)
+		}
+		if repo := strings.ToLower(strings.TrimSpace(cfg.GitHubCodespaces.Repo)); repo != "" {
+			parts = append(parts, "repo:"+repo)
+		}
+		return strings.Join(parts, "|")
 	case "namespace-instance":
 		parts := make([]string, 0, 3)
 		if endpoint := normalizedNamespaceClaimEndpoint(cfg.NamespaceInstance.Endpoint); endpoint != "" {

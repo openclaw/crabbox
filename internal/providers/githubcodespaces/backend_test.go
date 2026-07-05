@@ -67,6 +67,269 @@ func TestAcquireCreatesClaimGeneratesSSHConfigAndWaitsReady(t *testing.T) {
 	}
 }
 
+func TestAcquirePersistsRecoveryClaimBeforeCreate(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.getSeq["cs-1"] = []codespace{fakeCodespace("cs-1", "Available")}
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789aa1"
+	fc.onCreate = func(req createCodespaceRequest) {
+		claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+		if err != nil || !ok {
+			t.Fatalf("pre-create claim ok=%t err=%v", ok, err)
+		}
+		if claim.CloudID != "" || claim.ProviderScope != "endpoint:https://api.github.com|repo:example-org/my-app" {
+			t.Fatalf("pre-create claim=%#v", claim)
+		}
+		if claim.Labels[labelRecovery] != recoveryPreCreate || claim.Labels[labelDisplayName] != req.DisplayName || claim.Labels[labelRepository] != req.Repo || claim.Labels[labelLogin] != "alice" {
+			t.Fatalf("pre-create labels=%#v request=%#v", claim.Labels, req)
+		}
+	}
+
+	lease, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "durable-box",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "cs-1" {
+		t.Fatalf("lease=%#v", lease)
+	}
+}
+
+func TestAcquireRecoversAmbiguousCreateByExactIdentity(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.createErr = errors.New("create response lost")
+	fc.onCreate = func(req createCodespaceRequest) {
+		item := fakeCodespace("cs-recovered", "Available")
+		item.DisplayName = req.DisplayName
+		item.Repository.FullName = req.Repo
+		fc.items[item.Name] = item
+	}
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+
+	lease, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: "cbx_123456789aa2",
+		RequestedSlug:    "recovered-box",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "cs-recovered" || len(fc.deletes) != 0 {
+		t.Fatalf("lease=%#v deletes=%#v", lease, fc.deletes)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(lease.LeaseID, providerName)
+	if err != nil || !ok || claim.CloudID != "cs-recovered" || claim.Labels[labelRecovery] != "" {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+}
+
+func TestAcquireRecoversIdentitylessSuccessByExactIdentity(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.useCreateResult = true
+	fc.onCreate = func(req createCodespaceRequest) {
+		item := fakeCodespace("cs-identityless", "Available")
+		item.DisplayName = req.DisplayName
+		item.Repository.FullName = req.Repo
+		fc.items[item.Name] = item
+	}
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+
+	lease, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: "cbx_123456789aa8",
+		RequestedSlug:    "identityless-box",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "cs-identityless" || len(fc.deletes) != 0 {
+		t.Fatalf("lease=%#v deletes=%#v", lease, fc.deletes)
+	}
+}
+
+func TestAcquireRetainsClaimWhenAmbiguousCreateHasNoMatch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.createErr = errors.New("create response lost")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789aa3"
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "pending-box",
+	})
+	if err == nil || !strings.Contains(err.Error(), "claim retained") {
+		t.Fatalf("err=%v", err)
+	}
+	claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName)
+	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("deleted uncertain resource=%#v", fc.deletes)
+	}
+}
+
+func TestAcquireRejectsDuplicateRecoveryMatches(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.createErr = errors.New("create response lost")
+	fc.onCreate = func(req createCodespaceRequest) {
+		for _, name := range []string{"cs-duplicate-one", "cs-duplicate-two"} {
+			item := fakeCodespace(name, "Available")
+			item.DisplayName = req.DisplayName
+			item.Repository.FullName = req.Repo
+			fc.items[name] = item
+		}
+	}
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: "cbx_123456789aa4",
+		RequestedSlug:    "duplicate-box",
+	})
+	if err == nil || !strings.Contains(err.Error(), "multiple github-codespaces resources match") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("deleted ambiguous resources=%#v", fc.deletes)
+	}
+}
+
+func TestAcquireDiscardsClaimAfterDefinitiveCreateRejection(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.createErr = githubAPIError(422, "", `{"message":"invalid machine"}`)
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789aa5"
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "rejected-box",
+	})
+	if err == nil || !strings.Contains(err.Error(), "status=422") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName); claimErr != nil || ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("delete after definitive rejection=%#v", fc.deletes)
+	}
+}
+
+func TestAcquireRollsBackExactCreateWhenClaimBindingFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	b.bindClaim = func(_ string, expected LeaseClaim, _ Server) (LeaseClaim, error) {
+		return expected, errors.New("claim write failed")
+	}
+	leaseID := "cbx_123456789aa9"
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "bind-failure-box",
+	})
+	if err == nil || !strings.Contains(err.Error(), "claim write failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if got := strings.Join(fc.deletes, ","); got != "cs-1" {
+		t.Fatalf("deletes=%q", got)
+	}
+	if !fc.deleteDeadline {
+		t.Fatal("rollback delete context had no deadline")
+	}
+	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName); claimErr != nil || ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
+	}
+}
+
+func TestAcquireDoesNotRollbackWhenPendingClaimRaces(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789aaa"
+	b.bindClaim = func(_ string, expected LeaseClaim, _ Server) (LeaseClaim, error) {
+		server := serverFromClaim(expected)
+		server.Labels["raced"] = "true"
+		if err := updateLeaseClaimEndpoint(expected.LeaseID, server, SSHTarget{}); err != nil {
+			t.Fatal(err)
+		}
+		return expected, errors.New("claim raced")
+	}
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "race-box",
+	})
+	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("deleted after claim race=%#v", fc.deletes)
+	}
+	claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName)
+	if claimErr != nil || !ok || claim.Labels[labelRecovery] != recoveryPreCreate || claim.Labels["raced"] != "true" {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
+	}
+}
+
+func TestReleaseRecoversPendingCreateThenDeletesExactResource(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.createErr = errors.New("create response lost")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789aa6"
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "later-box",
+	})
+	if err == nil {
+		t.Fatal("acquire unexpectedly succeeded")
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil || !ok {
+		t.Fatalf("pending claim ok=%t err=%v", ok, err)
+	}
+	item := fakeCodespace("cs-later", "Available")
+	item.DisplayName = claim.Labels[labelDisplayName]
+	item.Repository.FullName = claim.Labels[labelRepository]
+	fc.items[item.Name] = item
+
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(fc.deletes, ","); got != item.Name {
+		t.Fatalf("deletes=%q", got)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, err)
+	}
+}
+
 func TestAcquireKeepDoesNotOverrideDeleteOnReleasePolicy(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -249,6 +512,29 @@ func TestReleaseDeleteRequiresLocalClaim(t *testing.T) {
 	}
 	if len(fc.deletes) != 0 || len(fc.stops) != 0 {
 		t.Fatalf("provider action without claim deletes=%#v stops=%#v", fc.deletes, fc.stops)
+	}
+}
+
+func TestReleaseRefusesProviderScopeMismatch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-scope"] = fakeCodespace("cs-scope", "Available")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789aa7"
+	server := b.serverFromCodespace(fc.items["cs-scope"], b.labelsFor(leaseID, "scope-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-scope"], "ready"))
+	server.Labels[labelDisplayName] = "crabbox-scope-box"
+	if err := claimLeaseTargetForRepoConfig(leaseID, "scope-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.GitHubCodespaces.APIURL = "https://api.enterprise.example"
+
+	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "scope mismatch") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fc.deletes) != 0 || len(fc.stops) != 0 {
+		t.Fatalf("mutated on scope mismatch deletes=%#v stops=%#v", fc.deletes, fc.stops)
 	}
 }
 
@@ -473,6 +759,7 @@ func newTestBackend(t *testing.T, fc *fakeCodespacesClient, fg *fakeGH) *testBac
 		SSHPort:     "22",
 		IdleTimeout: time.Hour,
 		GitHubCodespaces: GitHubCodespacesConfig{
+			APIURL:           defaultAPIURL,
 			GHPath:           "gh",
 			Repo:             "example-org/my-app",
 			Ref:              "main",
@@ -500,14 +787,19 @@ func newTestBackend(t *testing.T, fc *fakeCodespacesClient, fg *fakeGH) *testBac
 }
 
 type fakeCodespacesClient struct {
-	items          map[string]codespace
-	getSeq         map[string][]codespace
-	creates        []createCodespaceRequest
-	starts         []string
-	stops          []string
-	deletes        []string
-	deleteErr      error
-	deleteDeadline bool
+	items           map[string]codespace
+	getSeq          map[string][]codespace
+	creates         []createCodespaceRequest
+	createErr       error
+	createResult    codespace
+	useCreateResult bool
+	onCreate        func(createCodespaceRequest)
+	listErr         error
+	starts          []string
+	stops           []string
+	deletes         []string
+	deleteErr       error
+	deleteDeadline  bool
 }
 
 func newFakeCodespacesClient() *fakeCodespacesClient {
@@ -519,16 +811,29 @@ func newFakeCodespacesClient() *fakeCodespacesClient {
 
 func (f *fakeCodespacesClient) createCodespace(_ context.Context, req createCodespaceRequest) (codespace, error) {
 	f.creates = append(f.creates, req)
-	name := fmt.Sprintf("cs-%d", len(f.creates))
-	item := fakeCodespace(name, "Provisioning")
+	if f.onCreate != nil {
+		f.onCreate(req)
+	}
+	if f.createErr != nil {
+		return codespace{}, f.createErr
+	}
+	item := f.createResult
+	if !f.useCreateResult {
+		item = fakeCodespace(fmt.Sprintf("cs-%d", len(f.creates)), "Provisioning")
+	}
 	item.DisplayName = req.DisplayName
 	item.Repository.FullName = req.Repo
 	item.Machine.Name = req.Machine
-	f.items[name] = item
+	if item.Name != "" {
+		f.items[item.Name] = item
+	}
 	return item, nil
 }
 
 func (f *fakeCodespacesClient) listCodespaces(context.Context) ([]codespace, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	out := make([]codespace, 0, len(f.items))
 	for _, item := range f.items {
 		out = append(out, item)
