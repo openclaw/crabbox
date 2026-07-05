@@ -19241,6 +19241,7 @@ describe("fleet lease identity and idle", () => {
         CRABBOX_ARTIFACTS_BUCKET: "qa-artifacts",
         CRABBOX_ARTIFACTS_PREFIX: "qa",
         CRABBOX_ARTIFACTS_BASE_URL: "https://artifacts.example.com",
+        CRABBOX_ARTIFACTS_PUBLIC_READS: "1",
         CRABBOX_ARTIFACTS_REGION: "auto",
         CRABBOX_ARTIFACTS_ENDPOINT_URL: "https://account.r2.cloudflarestorage.com",
         CRABBOX_ARTIFACTS_ACCESS_KEY_ID: "access-key",
@@ -19270,10 +19271,12 @@ describe("fleet lease identity and idle", () => {
       backend: string;
       bucket: string;
       prefix: string;
+      accessPolicy: string;
       files: Array<{
         name: string;
         key: string;
         url: string;
+        accessPolicy: string;
         upload: { url: string; headers: Record<string, string> };
       }>;
     };
@@ -19281,11 +19284,15 @@ describe("fleet lease identity and idle", () => {
     expect(body.bucket).toBe("qa-artifacts");
     const org = Buffer.from("default-org").toString("base64url");
     const owner = Buffer.from("alice@example.com").toString("base64url");
-    expect(body.prefix).toBe(`qa/v2/org/${org}/owner/${owner}/pr-42`);
-    expect(body.files[0].key).toBe(`qa/v2/org/${org}/owner/${owner}/pr-42/screenshots/after.png`);
-    expect(body.files[0].url).toBe(
-      `https://artifacts.example.com/qa/v2/org/${org}/owner/${owner}/pr-42/screenshots/after.png`,
+    expect(body.prefix).toMatch(
+      new RegExp(`^qa/v2/org/${org}/owner/${owner}/public/[A-Za-z0-9_-]{22}/pr-42$`),
     );
+    expect(body.accessPolicy).toBe("public");
+    expect(body.files[0].key).toBe(`${body.prefix}/screenshots/after.png`);
+    expect(body.files[0].url).toBe(
+      `https://artifacts.example.com/${body.prefix}/screenshots/after.png`,
+    );
+    expect(body.files[0].accessPolicy).toBe("public");
     expect(body.files[0].upload.headers["content-length"]).toBe("123");
     expect(body.files[0].upload.headers["content-type"]).toBe("image/png");
     expect(body.files[0].upload.url).toContain("X-Amz-Signature=");

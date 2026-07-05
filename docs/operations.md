@@ -404,7 +404,8 @@ CRABBOX_TAILSCALE_SHA256_ARM64    optional pinned arm64 archive checksum
 CRABBOX_ARTIFACTS_BACKEND         optional; enables brokered artifact publishing
 CRABBOX_ARTIFACTS_BUCKET          required when artifact backend is enabled
 CRABBOX_ARTIFACTS_PREFIX          optional
-CRABBOX_ARTIFACTS_BASE_URL        optional; public final artifact URL prefix
+CRABBOX_ARTIFACTS_BASE_URL        optional; public URL prefix used only with public reads
+CRABBOX_ARTIFACTS_PUBLIC_READS    optional; set 1 to intentionally return public non-expiring links
 CRABBOX_ARTIFACTS_REGION          optional
 CRABBOX_ARTIFACTS_ENDPOINT_URL    optional; required for R2/custom S3 endpoints
 CRABBOX_ARTIFACTS_ACCESS_KEY_ID   required when artifact backend is enabled
@@ -470,9 +471,14 @@ CRABBOX_ARTIFACTS_BACKEND=r2
 CRABBOX_ARTIFACTS_BUCKET=my-crabbox-artifacts
 CRABBOX_ARTIFACTS_PREFIX=crabbox-artifacts
 CRABBOX_ARTIFACTS_BASE_URL=https://artifacts.example.com
+CRABBOX_ARTIFACTS_PUBLIC_READS=1
 CRABBOX_ARTIFACTS_REGION=auto
 CRABBOX_ARTIFACTS_ENDPOINT_URL=<account>.r2.cloudflarestorage.com
 ```
+
+Omit `CRABBOX_ARTIFACTS_PUBLIC_READS` to return expiring signed read URLs even
+when a base URL is configured. Enable it only when the artifact origin is
+intentionally public; each public grant receives a random capability namespace.
 
 Deploy the matching access key id and secret access key as coordinator secrets,
 not local CLI defaults. End users run `crabbox artifacts publish` without
