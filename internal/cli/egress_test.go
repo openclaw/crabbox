@@ -3,9 +3,12 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -35,6 +38,123 @@ func TestEgressAllowlistRejectsBareWildcard(t *testing.T) {
 	}
 	if egressHostAllowed("example.com", []string{"*"}) {
 		t.Fatal("bare wildcard should not allow every host")
+	}
+}
+
+func TestPublicEgressAddressRejectsPrivateAndReservedRanges(t *testing.T) {
+	tests := map[string]bool{
+		"8.8.8.8":                true,
+		"2606:4700:4700::1111":   true,
+		"0.0.0.0":                false,
+		"10.0.0.1":               false,
+		"100.64.0.1":             false,
+		"127.0.0.1":              false,
+		"169.254.169.254":        false,
+		"192.0.2.1":              false,
+		"192.168.1.1":            false,
+		"198.18.0.1":             false,
+		"224.0.0.1":              false,
+		"::1":                    false,
+		"64:ff9b::808:808":       true,
+		"64:ff9b::a00:1":         false,
+		"64:ff9b::a9fe:a9fe":     false,
+		"64:ff9b:1::1":           false,
+		"2001:db8::1":            false,
+		"fc00::1":                false,
+		"fe80::1":                false,
+		"::ffff:127.0.0.1":       false,
+		"::ffff:169.254.169.254": false,
+	}
+	for raw, want := range tests {
+		t.Run(raw, func(t *testing.T) {
+			if got := publicEgressAddress(netip.MustParseAddr(raw)); got != want {
+				t.Fatalf("publicEgressAddress(%s)=%t, want %t", raw, got, want)
+			}
+		})
+	}
+}
+
+func TestDialPublicEgressHostPinsValidatedAddress(t *testing.T) {
+	var dialed string
+	lookup := func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{
+			netip.MustParseAddr("127.0.0.1"),
+			netip.MustParseAddr("8.8.8.8"),
+			netip.MustParseAddr("8.8.8.8"),
+		}, nil
+	}
+	dial := func(_ context.Context, network, address string) (net.Conn, error) {
+		if network != "tcp" {
+			t.Fatalf("network=%q, want tcp", network)
+		}
+		dialed = address
+		conn, peer := net.Pipe()
+		_ = peer.Close()
+		return conn, nil
+	}
+
+	conn, err := dialPublicEgressHostWith(context.Background(), "allowed.example", "443", lookup, dial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if dialed != "8.8.8.8:443" {
+		t.Fatalf("dialed=%q, want pinned public address", dialed)
+	}
+}
+
+func TestDialPublicEgressHostRejectsPrivateResolutionBeforeDial(t *testing.T) {
+	dialed := false
+	lookup := func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("169.254.169.254")}, nil
+	}
+	dial := func(context.Context, string, string) (net.Conn, error) {
+		dialed = true
+		return nil, nil
+	}
+
+	_, err := dialPublicEgressHostWith(context.Background(), "allowed.example", "80", lookup, dial)
+	if err == nil || !strings.Contains(err.Error(), "public address") {
+		t.Fatalf("err=%v, want public-address rejection", err)
+	}
+	if dialed {
+		t.Fatal("private resolved address reached dialer")
+	}
+}
+
+func TestDialPublicEgressHostRejectsPrivateIPLiteralWithoutDNS(t *testing.T) {
+	lookedUp := false
+	dialed := false
+	lookup := func(context.Context, string, string) ([]netip.Addr, error) {
+		lookedUp = true
+		return nil, nil
+	}
+	dial := func(context.Context, string, string) (net.Conn, error) {
+		dialed = true
+		return nil, nil
+	}
+
+	_, err := dialPublicEgressHostWith(context.Background(), "127.0.0.1", "8080", lookup, dial)
+	if err == nil || !strings.Contains(err.Error(), "public address") {
+		t.Fatalf("err=%v, want public-address rejection", err)
+	}
+	if lookedUp || dialed {
+		t.Fatalf("private IP literal lookedUp=%t dialed=%t", lookedUp, dialed)
+	}
+}
+
+func TestLivePublicEgressDial(t *testing.T) {
+	if os.Getenv("CRABBOX_LIVE") != "1" {
+		t.Skip("set CRABBOX_LIVE=1 to exercise public DNS and TCP egress")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := dialPublicEgressHost(ctx, "example.com", "443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

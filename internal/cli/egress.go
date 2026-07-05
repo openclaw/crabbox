@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -431,7 +432,7 @@ func (b *egressBridge) hostOpen(ctx context.Context, msg egressProxyMessage, all
 		_ = b.writeJSON(ctx, egressProxyMessage{Type: "error", ID: msg.ID, Error: "host not allowed"})
 		return
 	}
-	conn, err := (&net.Dialer{Timeout: egressDialTimeout}).DialContext(ctx, "tcp", net.JoinHostPort(msg.Host, msg.Port))
+	conn, err := dialPublicEgressHost(ctx, msg.Host, msg.Port)
 	if err != nil {
 		_ = b.writeJSON(ctx, egressProxyMessage{Type: "error", ID: msg.ID, Error: err.Error()})
 		return
@@ -444,6 +445,111 @@ func (b *egressBridge) hostOpen(ctx context.Context, msg egressProxyMessage, all
 		return
 	}
 	go b.copyConnToBridge(ctx, msg.ID, conn)
+}
+
+func dialPublicEgressHost(ctx context.Context, host, port string) (net.Conn, error) {
+	dialer := &net.Dialer{}
+	return dialPublicEgressHostWith(ctx, host, port, net.DefaultResolver.LookupNetIP, dialer.DialContext)
+}
+
+func dialPublicEgressHostWith(
+	ctx context.Context,
+	host, port string,
+	lookup func(context.Context, string, string) ([]netip.Addr, error),
+	dial func(context.Context, string, string) (net.Conn, error),
+) (net.Conn, error) {
+	portNumber, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return nil, errors.New("invalid destination port")
+	}
+
+	dialCtx, cancel := context.WithTimeout(ctx, egressDialTimeout)
+	defer cancel()
+	addresses, err := resolveEgressHost(dialCtx, host, lookup)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, address := range addresses {
+		if !publicEgressAddress(address) {
+			continue
+		}
+		conn, dialErr := dial(dialCtx, "tcp", net.JoinHostPort(address.String(), strconv.Itoa(portNumber)))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("dial allowed destination: %w", lastErr)
+	}
+	return nil, errors.New("destination did not resolve to a public address")
+}
+
+func resolveEgressHost(
+	ctx context.Context,
+	host string,
+	lookup func(context.Context, string, string) ([]netip.Addr, error),
+) ([]netip.Addr, error) {
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if host == "" {
+		return nil, errors.New("missing destination host")
+	}
+	if address, err := netip.ParseAddr(host); err == nil {
+		return []netip.Addr{address.Unmap()}, nil
+	}
+	addresses, err := lookup(ctx, "ip", host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve allowed destination: %w", err)
+	}
+	seen := make(map[netip.Addr]bool, len(addresses))
+	resolved := make([]netip.Addr, 0, len(addresses))
+	for _, address := range addresses {
+		address = address.Unmap()
+		if address.IsValid() && !seen[address] {
+			seen[address] = true
+			resolved = append(resolved, address)
+		}
+	}
+	if len(resolved) == 0 {
+		return nil, errors.New("destination did not resolve to an address")
+	}
+	return resolved, nil
+}
+
+var blockedEgressPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+}
+
+var wellKnownNAT64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+
+func publicEgressAddress(address netip.Addr) bool {
+	address = address.Unmap()
+	if wellKnownNAT64Prefix.Contains(address) {
+		bytes := address.As16()
+		return publicEgressAddress(netip.AddrFrom4([4]byte{bytes[12], bytes[13], bytes[14], bytes[15]}))
+	}
+	if !address.IsValid() || !address.IsGlobalUnicast() || address.IsPrivate() {
+		return false
+	}
+	for _, prefix := range blockedEgressPrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *egressBridge) serveClient(ctx context.Context, listen string) error {
