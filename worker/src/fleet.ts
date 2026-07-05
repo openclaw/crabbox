@@ -16488,7 +16488,7 @@ export class HetznerProvider implements CloudProvider {
       if (server) {
         if (
           server.id !== serverID ||
-          !hetznerServerOwnedByLease(server, lease.id, lease.slug ?? "")
+          !hetznerServerOwnedByLease(server, lease.id, lease.slug, lease.serverName)
         ) {
           throw new Error(
             `refusing to delete Hetzner server ${serverID}: ownership does not match lease ${lease.id}`,

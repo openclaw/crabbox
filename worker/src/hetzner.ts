@@ -92,17 +92,29 @@ export function hetznerProvisioningResourceID(error: unknown): number | undefine
 export function hetznerServerOwnedByLease(
   server: HetznerServer,
   leaseID: string,
-  slug: string,
+  slug: string | undefined,
+  serverName: string,
 ): boolean {
   const labels = server.labels ?? {};
+  if (
+    !/^cbx_[a-f0-9]{12}$/.test(leaseID) ||
+    labels["crabbox"] !== "true" ||
+    labels["created_by"] !== "crabbox" ||
+    labels["lease"] !== leaseID
+  ) {
+    return false;
+  }
+  if (slug?.trim()) {
+    return labels["provider"] === "hetzner" && labels["slug"] === providerLabelValue(slug);
+  }
+
+  // Pre-slug leases used the lease ID as the server name and had neither modern label.
+  const legacyServerName = `crabbox-${leaseID.replaceAll("_", "-")}`;
   return (
-    /^cbx_[a-f0-9]{12}$/.test(leaseID) &&
-    slug.trim().length > 0 &&
-    labels["crabbox"] === "true" &&
-    labels["created_by"] === "crabbox" &&
-    labels["provider"] === "hetzner" &&
-    labels["lease"] === leaseID &&
-    labels["slug"] === providerLabelValue(slug)
+    serverName === legacyServerName &&
+    server.name === serverName &&
+    labels["provider"] === undefined &&
+    labels["slug"] === undefined
   );
 }
 
