@@ -3,6 +3,7 @@ package vultr
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -113,6 +114,15 @@ func (f *fakeVultrAPI) DeleteInstance(_ context.Context, id string) error {
 
 func (f *fakeVultrAPI) FindSSHKey(_ context.Context, name, publicKey string) (vultrSSHKey, bool, error) {
 	return selectVultrSSHKey(f.sshKeys, name, publicKey)
+}
+
+func (f *fakeVultrAPI) FindSSHKeyByID(_ context.Context, id string) (vultrSSHKey, bool, error) {
+	for _, key := range f.sshKeys {
+		if key.ID == id {
+			return key, true, nil
+		}
+	}
+	return vultrSSHKey{}, false, nil
 }
 
 func (f *fakeVultrAPI) DeleteSSHKey(_ context.Context, id string) error {
@@ -269,6 +279,58 @@ func TestReleaseDeletesOwnedInstanceKeyAndClaim(t *testing.T) {
 	}
 	if _, ok, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || ok {
 		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReleaseDeletesOwnedInstanceWhenSSHKeyAlreadyGone(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "blue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sshKeys = nil
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != lease.Server.CloudID {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if len(api.deletedKeys) != 0 {
+		t.Fatalf("deletedKeys=%v", api.deletedKeys)
+	}
+	if _, ok, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReleaseDeletesOwnedRenamedSSHKeyByImmutableID(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "blue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sshKeys[0].Name = "renamed-outside-crabbox"
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deletedKeys) != 1 || api.deletedKeys[0] != "key-123" {
+		t.Fatalf("deletedKeys=%v", api.deletedKeys)
+	}
+}
+
+func TestRollbackVultrAcquireRetainsSSHKeyWhenInstanceDeleteFails(t *testing.T) {
+	api := &fakeVultrAPI{deleteErr: os.ErrPermission}
+	err := rollbackVultrAcquire(api, "instance-123", "key-123", true)
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != "instance-123" {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if len(api.deletedKeys) != 0 {
+		t.Fatalf("deletedKeys=%v", api.deletedKeys)
 	}
 }
 

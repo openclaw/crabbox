@@ -28,6 +28,7 @@ type vultrAPI interface {
 	GetInstance(context.Context, string) (vultrInstance, error)
 	CreateInstance(context.Context, core.Config, string, string, string, bool, time.Time) (vultrInstance, error)
 	DeleteInstance(context.Context, string) error
+	FindSSHKeyByID(context.Context, string) (vultrSSHKey, bool, error)
 	FindSSHKey(context.Context, string, string) (vultrSSHKey, bool, error)
 	DeleteSSHKey(context.Context, string) error
 	UpdateInstanceTags(context.Context, string, []string) error
@@ -522,6 +523,19 @@ func (c *vultrClient) FindSSHKey(ctx context.Context, name, publicKey string) (v
 		return vultrSSHKey{}, false, err
 	}
 	return selectVultrSSHKey(keys, name, publicKey)
+}
+
+func (c *vultrClient) FindSSHKeyByID(ctx context.Context, id string) (vultrSSHKey, bool, error) {
+	keys, err := c.ListSSHKeys(ctx)
+	if err != nil {
+		return vultrSSHKey{}, false, err
+	}
+	for _, key := range keys {
+		if key.ID == id {
+			return key, true, nil
+		}
+	}
+	return vultrSSHKey{}, false, nil
 }
 
 func selectVultrSSHKey(keys []vultrSSHKey, name, publicKey string) (vultrSSHKey, bool, error) {

@@ -139,7 +139,7 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		}
 		return core.LeaseTarget{}, err
 	}
-	waited, err := b.waitForInstanceReady(ctx, client, created.ID)
+	waited, err := b.waitForInstanceReady(ctx, client, created.ID, core.BootstrapWaitTimeout(cfg))
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -375,8 +375,10 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if keyOwned != "true" && keyOwned != "false" {
 		return core.Exit(4, "vultr SSH key ownership remains indeterminate for lease=%s; local claim and credentials retained", leaseID)
 	}
+	keyPresent := false
 	if keyOwned == "true" {
-		if err := authorizeVultrSSHKeyDelete(ctx, client, leaseID, keyID); err != nil {
+		keyPresent, err = authorizeVultrSSHKeyDelete(ctx, client, leaseID, keyID)
+		if err != nil {
 			return err
 		}
 	}
@@ -385,7 +387,7 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 			return err
 		}
 	}
-	if keyOwned == "true" {
+	if keyPresent {
 		if err := client.DeleteSSHKey(ctx, keyID); err != nil {
 			return err
 		}
@@ -568,8 +570,8 @@ func validateVultrClaimIdentity(claim core.LeaseClaim, leaseID, slug string) err
 	return nil
 }
 
-func (b *backend) waitForInstanceReady(ctx context.Context, client vultrAPI, id string) (vultrInstance, error) {
-	deadline := b.now().Add(5 * time.Minute)
+func (b *backend) waitForInstanceReady(ctx context.Context, client vultrAPI, id string, timeout time.Duration) (vultrInstance, error) {
+	deadline := b.now().Add(timeout)
 	for {
 		item, err := client.GetInstance(ctx, id)
 		if err != nil {
@@ -603,18 +605,19 @@ func instanceReady(item vultrInstance) bool {
 func rollbackVultrAcquire(client vultrAPI, instanceID, keyID string, keyCreated bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	var errs []error
 	if instanceID != "" {
 		if err := client.DeleteInstance(ctx, instanceID); err != nil {
-			errs = append(errs, err)
+			// Keep the SSH key while the instance still exists. A later recovery
+			// cleanup needs it to verify ownership and regain access if required.
+			return err
 		}
 	}
 	if keyCreated && keyID != "" {
 		if err := client.DeleteSSHKey(ctx, keyID); err != nil {
-			errs = append(errs, err)
+			return err
 		}
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 func validateLiveInstance(item vultrInstance, expected core.Server) error {
@@ -683,33 +686,42 @@ func preserveVultrIdentity(labels, stored map[string]string) {
 	}
 }
 
-func authorizeVultrSSHKeyDelete(ctx context.Context, client vultrAPI, leaseID, keyID string) error {
+func authorizeVultrSSHKeyDelete(ctx context.Context, client vultrAPI, leaseID, keyID string) (bool, error) {
 	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	publicKeyBytes, err := os.ReadFile(keyPath + ".pub")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return core.Exit(4, "vultr SSH key deletion for lease=%s requires retained local public key; local claim and credentials retained", leaseID)
+			return false, core.Exit(4, "vultr SSH key deletion for lease=%s requires retained local public key; local claim and credentials retained", leaseID)
 		}
-		return fmt.Errorf("read retained vultr SSH public key: %w", err)
+		return false, fmt.Errorf("read retained vultr SSH public key: %w", err)
 	}
 	publicKey := strings.TrimSpace(string(publicKeyBytes))
 	if publicKey == "" {
-		return core.Exit(2, "retained vultr SSH public key is empty for lease=%s", leaseID)
+		return false, core.Exit(2, "retained vultr SSH public key is empty for lease=%s", leaseID)
 	}
-	key, found, err := client.FindSSHKey(ctx, providerKeyForLease(leaseID), publicKey)
+	key, found, err := client.FindSSHKeyByID(ctx, keyID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !found {
-		return core.Exit(4, "vultr SSH key for lease=%s could not be verified; local claim and credentials retained", leaseID)
+		matched, matchFound, err := client.FindSSHKey(ctx, providerKeyForLease(leaseID), publicKey)
+		if err != nil {
+			return false, err
+		}
+		if matchFound {
+			return false, core.Exit(2, "refusing to delete Vultr SSH key %s for lease=%s; canonical key still exists with immutable id %s", keyID, leaseID, matched.ID)
+		}
+		// The provider already removed the exact key. Instance ownership remains
+		// independently bound by the claim, account, cloud ID, name, and tags.
+		return false, nil
 	}
-	if key.ID != keyID {
-		return core.Exit(2, "refusing to delete Vultr SSH key %s for lease=%s; verified key id is %s", keyID, leaseID, key.ID)
+	if key.ID != keyID || normalizedSSHKey(key) != publicKey {
+		return false, core.Exit(2, "refusing to delete Vultr SSH key %s for lease=%s; immutable id or public key does not match retained ownership", keyID, leaseID)
 	}
-	return nil
+	return true, nil
 }
 
 func validateVultrUserScheme(cfg core.Config) error {
