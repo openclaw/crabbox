@@ -128,6 +128,37 @@ func TestScalewayResolveReadOnlyIgnoresStaleClaim(t *testing.T) {
 	}
 }
 
+func TestScalewayNoMutationResolveDoesNotBindAmbiguousRecovery(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_131313131313"
+	slug := "no-mutation-recovery"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["recovery"] = "ambiguous-create"
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-no-mutation"
+	claimServer := core.Server{Provider: providerName, Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	liveLabels := maps.Clone(labels)
+	delete(liveLabels, "recovery")
+	fake.server = testServer("srv-no-mutation", core.LeaseProviderName(leaseID, slug), tagsFromLabels(liveLabels), "203.0.113.22")
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "srv-no-mutation" {
+		t.Fatalf("lease=%#v", lease)
+	}
+	claim, exists, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
+	if claimErr != nil || !exists || claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create" {
+		t.Fatalf("no-mutation resolve changed claim: claim=%#v exists=%t err=%v", claim, exists, claimErr)
+	}
+}
+
 func TestStatusTouchClaimRequiresMatchingProviderIdentity(t *testing.T) {
 	backend := &Backend{}
 	labels := map[string]string{
@@ -522,6 +553,98 @@ func TestScalewayReleaseRetainsIdentitylessRecoveryClaim(t *testing.T) {
 	}
 	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("cbx_444444444444", providerName); claimErr != nil || !ok {
 		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
+	}
+}
+
+func TestScalewayAmbiguousCreateBindsUniqueServerBeforeCleanup(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_454545454545"
+	slug := "recovered"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["recovery"] = "ambiguous-create"
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-recovered"
+	claimServer := core.Server{Provider: providerName, Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	liveLabels := maps.Clone(labels)
+	delete(liveLabels, "recovery")
+	fake.server = testServer("srv-recovered", core.LeaseProviderName(leaseID, slug), tagsFromLabels(liveLabels), "203.0.113.24")
+	fake.deleteKeyErr = errors.New("key cleanup failed")
+
+	err := backend.deleteServer(context.Background(), fake, backend.serverFromScaleway(fake.server))
+	if err == nil || !strings.Contains(err.Error(), "key cleanup failed") {
+		t.Fatalf("deleteServer err=%v", err)
+	}
+	if !fake.deletedServer {
+		t.Fatal("recovered server was not deleted")
+	}
+	claim, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
+	if claimErr != nil || !ok || claim.CloudID != "srv-recovered" || claim.Labels["scaleway_ssh_key_id"] != "key-recovered" {
+		t.Fatalf("bound recovery claim=%#v ok=%t err=%v", claim, ok, claimErr)
+	}
+}
+
+func TestScalewayAmbiguousCreateRefusesDuplicateServers(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_464646464646"
+	slug := "duplicates"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["recovery"] = "ambiguous-create"
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-duplicates"
+	claimServer := core.Server{Provider: providerName, Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	liveLabels := maps.Clone(labels)
+	delete(liveLabels, "recovery")
+	fake.servers = []*instance.Server{
+		testServer("srv-first", core.LeaseProviderName(leaseID, slug), tagsFromLabels(liveLabels), "203.0.113.25"),
+		testServer("srv-second", core.LeaseProviderName(leaseID, slug), tagsFromLabels(liveLabels), "203.0.113.26"),
+	}
+
+	err := backend.deleteServer(context.Background(), fake, backend.serverFromScaleway(fake.servers[0]))
+	if err == nil || !strings.Contains(err.Error(), "found 2 matching servers") {
+		t.Fatalf("deleteServer err=%v", err)
+	}
+	if fake.deletedServer || fake.deletedKey {
+		t.Fatalf("ambiguous cleanup mutated resources: server=%t key=%t", fake.deletedServer, fake.deletedKey)
+	}
+	claim, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
+	if claimErr != nil || !ok || claim.CloudID != "" {
+		t.Fatalf("ambiguous claim=%#v ok=%t err=%v", claim, ok, claimErr)
+	}
+}
+
+func TestScalewayCleanupRefusesChangedLiveSSHKeyIdentity(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_474747474747"
+	slug := "changed-key"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-claimed"
+	claimServer := core.Server{Provider: providerName, CloudID: "srv-changed-key", Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	liveLabels := maps.Clone(labels)
+	liveLabels["scaleway_ssh_key_id"] = "key-other"
+	fake.server = testServer("srv-changed-key", core.LeaseProviderName(leaseID, slug), tagsFromLabels(liveLabels), "203.0.113.27")
+
+	err := backend.deleteServer(context.Background(), fake, claimServer)
+	if err == nil || !strings.Contains(err.Error(), "SSH key identity does not match") {
+		t.Fatalf("deleteServer err=%v", err)
+	}
+	if fake.deletedServer || fake.deletedKey {
+		t.Fatalf("changed key cleanup mutated resources: server=%t key=%t", fake.deletedServer, fake.deletedKey)
 	}
 }
 
