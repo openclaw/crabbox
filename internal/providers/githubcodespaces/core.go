@@ -115,6 +115,10 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
 }
 
+func removeLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
+}
+
 func shouldCleanupServer(server Server, now time.Time) (bool, string) {
 	return core.ShouldCleanupServer(server, now)
 }
