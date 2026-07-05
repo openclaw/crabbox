@@ -16494,7 +16494,13 @@ export class HetznerProvider implements CloudProvider {
             `refusing to delete Hetzner server ${serverID}: ownership does not match lease ${lease.id}`,
           );
         }
-        await this.deleteServer(String(serverID));
+        try {
+          await this.deleteServer(String(serverID));
+        } catch (error) {
+          if (!providerResourceNotFound(error)) {
+            throw error;
+          }
+        }
       }
     }
     if (lease.providerKeyCleanupPending) {

@@ -4350,6 +4350,53 @@ describe("fleet lease identity and idle", () => {
     await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
   });
 
+  it("finishes retained key cleanup when a validated Hetzner server disappears", async () => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const method = init?.method ?? "GET";
+        requests.push(`${method} ${url.pathname}`);
+        if (method === "GET") {
+          return jsonResponse({
+            server: {
+              id: 123,
+              name: "crabbox-blue-lobster",
+              status: "running",
+              server_type: { name: "cx23" },
+              public_net: { ipv4: { ip: "192.0.2.1" } },
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                provider: "hetzner",
+                lease: "cbx_000000000000",
+                slug: "blue-lobster",
+              },
+            },
+          });
+        }
+        if (url.pathname === "/v1/servers/123") {
+          return jsonResponse({ error: { code: "not_found" } }, 404);
+        }
+        return new Response(null, { status: 204 });
+      }),
+    );
+    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+
+    await expect(
+      provider.releaseLease(
+        testLease({ providerKeyCleanupPending: true, providerKeyCleanupID: "7" }),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "DELETE /v1/ssh_keys/7",
+    ]);
+  });
+
   it("deletes a persisted Hetzner server before its retained SSH key", async () => {
     const requests: string[] = [];
     vi.stubGlobal(
