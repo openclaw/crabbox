@@ -29,10 +29,26 @@ jobs:
     # to gate production deploys without changing the workflow.
     environment: coordinator
     steps:
+      # Stay green (skip, don't fail) until the deploy secret is wired, so
+      # landing this workflow doesn't red-X main before activation.
+      - name: Check for deploy token
+        id: token
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            echo "::notice::CLOUDFLARE_API_TOKEN is not set; skipping deploy. Add it to the 'coordinator' environment to activate."
+            echo "ready=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "ready=true" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Check out
+        if: steps.token.outputs.ready == 'true'
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Set up Node
+        if: steps.token.outputs.ready == 'true'
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24
@@ -40,10 +56,12 @@ jobs:
           cache-dependency-path: worker/package-lock.json
 
       - name: Install
+        if: steps.token.outputs.ready == 'true'
         run: npm ci
         working-directory: worker
 
       - name: Deploy
+        if: steps.token.outputs.ready == 'true'
         # `npm run deploy` runs the predeploy bundle (vendor-novnc) then
         # `wrangler deploy`; a bundling failure fails the job before publishing.
         run: npm run deploy
