@@ -24,6 +24,7 @@
 - Treated malformed percent-encoded portal cookies as absent instead of throwing before normal authentication handling. Thanks @coygeek.
 - Verified downloaded GitHub Actions runner archives against the exact upstream release-asset SHA-256 digest before replacing or extracting the installed runner. Thanks @coygeek.
 - Required an unchanged region-bound local claim before direct AWS cleanup can terminate an instance discovered through provider tags. Thanks @coygeek.
+- Revalidated live AWS, Azure, and GCP instance identity, ownership, lease binding, and cleanup eligibility immediately before direct cleanup deletion. Thanks @coygeek.
 - Required W&B sandbox reuse, status, and stop to match an exact endpoint/entity/project/resource-bound local claim plus provider inventory ownership. Thanks @coygeek.
 - Required RunPod stop to use an exact pod ID/name-bound local claim, with conflict-safe explicit `--reclaim` adoption for unclaimed or legacy pods. Thanks @coygeek.
 - Made coordinatorless generic provider live smokes skip coordinator-only history and always clean up acquired leases after later lifecycle failures.
