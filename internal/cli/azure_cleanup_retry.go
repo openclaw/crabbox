@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -21,7 +22,7 @@ func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, 
 					return err
 				}
 				var err error
-				resources, err = c.revalidateAzureCleanupDeleteResources(ctx, expected, resources, now)
+				resources, err = c.revalidateAzureCleanupDeleteResourcesWithRetry(ctx, expected, resources, now)
 				if err != nil {
 					return err
 				}
@@ -29,7 +30,7 @@ func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, 
 			}
 			resources.vm = false
 			var err error
-			resources, err = c.revalidateAzureCleanupDeleteResources(ctx, expected, resources, now)
+			resources, err = c.revalidateAzureCleanupDeleteResourcesWithRetry(ctx, expected, resources, now)
 			if err != nil {
 				return err
 			}
@@ -49,12 +50,38 @@ func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, 
 			return err
 		}
 		var err error
-		resources, err = c.revalidateAzureCleanupDeleteResources(ctx, expected, resources, now)
+		resources, err = c.revalidateAzureCleanupDeleteResourcesWithRetry(ctx, expected, resources, now)
 		if err != nil {
 			return err
 		}
 		if azureCleanupResourcesEmpty(resources) {
 			return nil
+		}
+	}
+}
+
+func (c *AzureClient) revalidateAzureCleanupDeleteResourcesWithRetry(ctx context.Context, expected Server, resources azureVMDeleteResources, now time.Time) (azureVMDeleteResources, error) {
+	return retryAzureCleanupResourceReads(ctx, resources, func(current azureVMDeleteResources) (azureVMDeleteResources, error) {
+		return c.revalidateAzureCleanupDeleteResources(ctx, expected, current, now)
+	})
+}
+
+func retryAzureCleanupResourceReads(ctx context.Context, resources azureVMDeleteResources, revalidate func(azureVMDeleteResources) (azureVMDeleteResources, error)) (azureVMDeleteResources, error) {
+	return retryAzureCleanupResourceReadsWithWait(ctx, resources, revalidate, waitForAzureCleanupRetry)
+}
+
+func retryAzureCleanupResourceReadsWithWait(ctx context.Context, resources azureVMDeleteResources, revalidate func(azureVMDeleteResources) (azureVMDeleteResources, error), wait func(context.Context, []error) error) (azureVMDeleteResources, error) {
+	for attempt := 0; ; attempt++ {
+		next, err := revalidate(resources)
+		if err == nil {
+			return next, nil
+		}
+		var readErr *azureCleanupResourceReadError
+		if !errors.As(err, &readErr) || attempt >= azureDeleteRetryAttempts-1 {
+			return resources, err
+		}
+		if err := wait(ctx, []error{err}); err != nil {
+			return resources, err
 		}
 	}
 }
@@ -81,7 +108,7 @@ func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context,
 			if isAzureNotFoundError(err) {
 				resources.vm = false
 			} else {
-				return resources, fmt.Errorf("re-read Azure cleanup VM %s before retry: %w", name, err)
+				return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup VM %s before retry: %w", name, err)}
 			}
 		} else {
 			live := azureVMToServer(response.VirtualMachine, "", "")
@@ -103,7 +130,7 @@ func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context,
 			if isAzureNotFoundError(err) {
 				resources.nic = ""
 			} else {
-				return resources, fmt.Errorf("re-read Azure cleanup NIC %s before retry: %w", resources.nic, err)
+				return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup NIC %s before retry: %w", resources.nic, err)}
 			}
 		} else {
 			if err := validateAzureCleanupResourceTags("NIC", resources.nic, response.Tags, labels); err != nil {
@@ -124,7 +151,7 @@ func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context,
 			if isAzureNotFoundError(err) {
 				resources.publicIP = ""
 			} else {
-				return resources, fmt.Errorf("re-read Azure cleanup public IP %s before retry: %w", resources.publicIP, err)
+				return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup public IP %s before retry: %w", resources.publicIP, err)}
 			}
 		} else {
 			if err := validateAzureCleanupResourceTags("public IP", resources.publicIP, response.Tags, labels); err != nil {
@@ -145,7 +172,7 @@ func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context,
 			if isAzureNotFoundError(err) {
 				resources.disk = ""
 			} else {
-				return resources, fmt.Errorf("re-read Azure cleanup disk %s before retry: %w", resources.disk, err)
+				return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup disk %s before retry: %w", resources.disk, err)}
 			}
 		} else {
 			if response.Properties == nil {
@@ -163,7 +190,7 @@ func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context,
 			if isAzureNotFoundError(err) {
 				resources.quarantineNSG = ""
 			} else {
-				return resources, fmt.Errorf("re-read Azure cleanup quarantine NSG %s before retry: %w", resources.quarantineNSG, err)
+				return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup quarantine NSG %s before retry: %w", resources.quarantineNSG, err)}
 			}
 		} else {
 			if err := validateAzureCleanupResourceTags("quarantine NSG", resources.quarantineNSG, response.Tags, labels); err != nil {

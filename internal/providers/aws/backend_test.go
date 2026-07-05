@@ -702,11 +702,70 @@ func TestAWSCleanupContinuesWhenLiveCandidateAlreadyGone(t *testing.T) {
 	if len(fake.deletedInstances) != 1 || fake.deletedInstances[0] != remaining.CloudID {
 		t.Fatalf("deleted=%v, want only remaining candidate", fake.deletedInstances)
 	}
-	if !strings.Contains(stderr.String(), "reason=live instance no longer exists") {
-		t.Fatalf("stderr=%q, want already-gone skip", stderr.String())
+	if !strings.Contains(stderr.String(), "delete missing server recovery") {
+		t.Fatalf("stderr=%q, want already-gone recovery", stderr.String())
+	}
+	wantKeys := []string{
+		"key-id-for-" + core.ServerProviderKey(missing),
+		"key-id-for-" + core.ServerProviderKey(remaining),
+	}
+	if len(fake.deletedKeys) != len(wantKeys) || fake.deletedKeys[0] != wantKeys[0] || fake.deletedKeys[1] != wantKeys[1] {
+		t.Fatalf("deleted keys=%v, want %v", fake.deletedKeys, wantKeys)
 	}
 	assertAWSClaimMissing(t, missing.Labels["lease"])
 	assertAWSClaimMissing(t, remaining.Labels["lease"])
+}
+
+func TestAWSCleanupRetainsMissingInstanceClaimWhenKeyOwnershipDrifts(t *testing.T) {
+	isolateAWSClaimState(t)
+	server := awsTestServer("i-missing", "cbx_111111111111", "missing", "us-east-1")
+	server.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	fake := &fakeAWSClient{
+		servers:        []Server{server},
+		getErrs:        map[string]error{server.CloudID: core.Exit(4, "aws instance not found: %s", server.CloudID)},
+		validateKeyErr: core.NewAWSCleanupKeyOwnershipError("replacement key"),
+	}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	cfg := Config{Provider: "aws", AWSRegion: "us-east-1"}
+	claimAWSCleanupServer(t, cfg, server)
+	var stderr strings.Builder
+	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*awsLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedKeys) != 0 {
+		t.Fatalf("deleted replacement key: %v", fake.deletedKeys)
+	}
+	if !strings.Contains(stderr.String(), "replacement key") {
+		t.Fatalf("stderr=%q, want key ownership skip", stderr.String())
+	}
+	assertAWSClaimCloudID(t, server.Labels["lease"], server.CloudID)
+}
+
+func TestAWSCleanupRetainsMissingInstanceClaimWhenKeyDeleteFails(t *testing.T) {
+	isolateAWSClaimState(t)
+	server := awsTestServer("i-missing", "cbx_111111111111", "missing", "us-east-1")
+	server.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	deleteErr := errors.New("delete key failed")
+	fake := &fakeAWSClient{
+		servers:      []Server{server},
+		getErrs:      map[string]error{server.CloudID: core.Exit(4, "aws instance not found: %s", server.CloudID)},
+		deleteKeyErr: deleteErr,
+	}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+
+	cfg := Config{Provider: "aws", AWSRegion: "us-east-1"}
+	claimAWSCleanupServer(t, cfg, server)
+	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); !errors.Is(err, deleteErr) {
+		t.Fatalf("error=%v, want %v", err, deleteErr)
+	}
+	assertAWSClaimCloudID(t, server.Labels["lease"], server.CloudID)
 }
 
 func TestAWSCleanupTreatsInstanceMissingAtDeleteBoundaryAsRemoved(t *testing.T) {

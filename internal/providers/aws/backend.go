@@ -284,10 +284,18 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 		live, err := client.GetServer(ctx, server.CloudID)
 		if err != nil {
 			if isAWSResolveNotFound(err) {
-				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance no longer exists\n", server.DisplayID(), server.Name)
-				if err := removeExactAWSClaim(claim); err != nil {
+				cleanupKeyID, keyErr := resolveAWSCleanupKeyID(ctx, client, server)
+				if keyErr != nil {
+					if core.IsAWSCleanupKeyOwnershipError(keyErr) {
+						fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, keyErr)
+						continue
+					}
+					return fmt.Errorf("re-read AWS cleanup key for missing instance %s: %w", server.DisplayID(), keyErr)
+				}
+				if err := deleteMissingClaimedAWSResourcesWithClient(ctx, client, claim, cleanupKeyID); err != nil {
 					return err
 				}
+				fmt.Fprintf(b.RT.Stderr, "delete missing server recovery id=%s name=%s\n", server.DisplayID(), server.Name)
 				continue
 			}
 			return fmt.Errorf("re-read AWS cleanup candidate %s: %w", server.DisplayID(), err)
@@ -300,16 +308,13 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance %s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
-		var cleanupKeyID string
-		if keyName := core.ServerProviderKey(live); core.ValidCrabboxProviderKey(keyName) {
-			cleanupKeyID, err = client.ResolveCleanupSSHKeyID(ctx, keyName)
-			if err != nil {
-				if core.IsAWSCleanupKeyOwnershipError(err) {
-					fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, err)
-					continue
-				}
-				return fmt.Errorf("re-read AWS cleanup key %s: %w", keyName, err)
+		cleanupKeyID, err := resolveAWSCleanupKeyID(ctx, client, live)
+		if err != nil {
+			if core.IsAWSCleanupKeyOwnershipError(err) {
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, err)
+				continue
 			}
+			return fmt.Errorf("re-read AWS cleanup key %s: %w", core.ServerProviderKey(live), err)
 		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", live.DisplayID(), live.Name)
 		if err := deleteClaimedAWSServerWithClient(ctx, client, live, claim, cleanupKeyID); err != nil {
@@ -478,8 +483,18 @@ func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, ser
 	return cleanupErr
 }
 
-func removeExactAWSClaim(claim core.LeaseClaim) error {
-	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error { return nil })
+func resolveAWSCleanupKeyID(ctx context.Context, client awsClient, server Server) (string, error) {
+	keyName := core.ServerProviderKey(server)
+	if !core.ValidCrabboxProviderKey(keyName) {
+		return "", nil
+	}
+	return client.ResolveCleanupSSHKeyID(ctx, keyName)
+}
+
+func deleteMissingClaimedAWSResourcesWithClient(ctx context.Context, client awsClient, claim core.LeaseClaim, cleanupKeyID string) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		return client.DeleteCleanupSSHKeyID(ctx, cleanupKeyID)
+	})
 }
 
 func deleteAWSCleanupServerWithClient(ctx context.Context, client awsClient, server Server, cleanupKeyID string) error {

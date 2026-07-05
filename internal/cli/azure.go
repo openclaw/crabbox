@@ -2212,59 +2212,24 @@ func (c *AzureClient) azureCleanupDeleteResources(ctx context.Context, vmName st
 		if err != nil {
 			return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup quarantine NSG %s: %w", nsgName, err)}
 		}
-		resources.quarantineID, err = c.azureCleanupQuarantineNSGIdentity(nsgName, nsg.SecurityGroup, nsgID, labels)
-		if err != nil {
+		if err := requireAzureResourceID("quarantine NSG", nsgName, stringValue(nsg.ID), nsgID); err != nil {
+			return resources, err
+		}
+		if err := validateAzureCleanupResourceTags("quarantine NSG", nsgName, nsg.Tags, labels); err != nil {
+			return resources, err
+		}
+		if nsg.Properties == nil {
+			return resources, fmt.Errorf("Azure cleanup quarantine NSG %s has no properties", nsgName)
+		}
+		resources.quarantineID = stringValue(nsg.Properties.ResourceGUID)
+		if err := requireAzureCleanupIdentity("quarantine NSG", nsgName, resources.quarantineID, ""); err != nil {
 			return resources, err
 		}
 		resources.quarantineNSG = nsgName
 	} else if !isAzureCleanupSharedNSG(nsgName, c.NSG, vmLocation) {
 		return resources, fmt.Errorf("Azure cleanup NIC %s references unexpected network security group %s", nicName, nsgName)
-	} else {
-		// Snapshot provisioning switches the NIC to the shared NSG before it
-		// deletes the temporary quarantine NSG. Recover a tagged survivor from
-		// an interrupted switch so deleting the VM cannot strand it.
-		quarantineName := vmName + azureSnapshotQuarantineNSGSuffix
-		quarantine, err := c.sgc.Get(ctx, c.ResourceGroup, quarantineName, nil)
-		if err != nil {
-			if !isAzureNotFoundError(err) {
-				return resources, &azureCleanupResourceReadError{err: fmt.Errorf("probe detached Azure cleanup quarantine NSG %s: %w", quarantineName, err)}
-			}
-		} else {
-			resources.quarantineID, err = c.azureCleanupQuarantineNSGIdentity(quarantineName, quarantine.SecurityGroup, "", labels)
-			if err != nil {
-				return resources, err
-			}
-			resources.quarantineNSG = quarantineName
-		}
 	}
 	return resources, nil
-}
-
-func (c *AzureClient) azureCleanupQuarantineNSGIdentity(name string, nsg armnetwork.SecurityGroup, referencedID string, labels map[string]string) (string, error) {
-	resourceID := stringValue(nsg.ID)
-	resourceName, err := azureScopedResourceName(resourceID, c.SubscriptionID, c.ResourceGroup, "Microsoft.Network", "networkSecurityGroups")
-	if err != nil {
-		return "", err
-	}
-	if !strings.EqualFold(resourceName, name) {
-		return "", fmt.Errorf("Azure cleanup quarantine NSG %s has unexpected resource name %s", name, resourceName)
-	}
-	if referencedID != "" {
-		if err := requireAzureResourceID("quarantine NSG", name, resourceID, referencedID); err != nil {
-			return "", err
-		}
-	}
-	if err := validateAzureCleanupResourceTags("quarantine NSG", name, nsg.Tags, labels); err != nil {
-		return "", err
-	}
-	if nsg.Properties == nil {
-		return "", fmt.Errorf("Azure cleanup quarantine NSG %s has no properties", name)
-	}
-	identity := stringValue(nsg.Properties.ResourceGUID)
-	if err := requireAzureCleanupIdentity("quarantine NSG", name, identity, ""); err != nil {
-		return "", err
-	}
-	return identity, nil
 }
 
 func isAzureCleanupSharedNSG(name, baseName, vmLocation string) bool {
