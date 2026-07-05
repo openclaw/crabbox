@@ -3,8 +3,11 @@ package githubcodespaces
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+var githubTokenPattern = regexp.MustCompile(`(?i)(?:github_pat_|gh[opusr]_)[a-z0-9_]{12,}`)
 
 type ghRunner struct {
 	cfg GitHubCodespacesConfig
@@ -91,21 +94,9 @@ func redactGHArgs(args []string) []string {
 }
 
 func redactSecretText(text string) string {
-	fields := strings.Fields(text)
-	for i, field := range fields {
-		if looksLikeGitHubToken(field) {
-			fields[i] = "<redacted>"
-		}
-	}
-	return strings.Join(fields, " ")
+	return githubTokenPattern.ReplaceAllString(text, "<redacted>")
 }
 
 func looksLikeGitHubToken(value string) bool {
-	value = strings.Trim(value, `"'.,;:()[]{}<>`)
-	for _, prefix := range []string{"ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_"} {
-		if strings.HasPrefix(value, prefix) && len(value) >= len(prefix)+12 {
-			return true
-		}
-	}
-	return false
+	return githubTokenPattern.MatchString(value)
 }

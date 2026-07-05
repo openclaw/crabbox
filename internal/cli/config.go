@@ -4991,8 +4991,10 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.GitHubCodespaces.Geo != "" {
 			cfg.GitHubCodespaces.Geo = file.GitHubCodespaces.Geo
 		}
-		applyLeaseDuration(&cfg.GitHubCodespaces.IdleTimeout, file.GitHubCodespaces.IdleTimeout)
-		applyLeaseDuration(&cfg.GitHubCodespaces.RetentionPeriod, file.GitHubCodespaces.RetentionPeriod)
+		if trusted {
+			applyLeaseDuration(&cfg.GitHubCodespaces.IdleTimeout, file.GitHubCodespaces.IdleTimeout)
+			applyLeaseDuration(&cfg.GitHubCodespaces.RetentionPeriod, file.GitHubCodespaces.RetentionPeriod)
+		}
 		if trusted && file.GitHubCodespaces.DeleteOnRelease != nil {
 			cfg.GitHubCodespaces.DeleteOnRelease = *file.GitHubCodespaces.DeleteOnRelease
 			MarkDeleteOnReleaseExplicit(cfg, "github-codespaces")

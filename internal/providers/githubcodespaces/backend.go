@@ -43,7 +43,10 @@ type backend struct {
 	readyTimeout  time.Duration
 }
 
-const githubCodespacesRollbackTimeout = 30 * time.Second
+const (
+	githubCodespacesRollbackTimeout = 30 * time.Second
+	githubCodespacesDeleteTimeout   = 2 * time.Minute
+)
 
 const (
 	labelCodespaceName  = "codespace_name"
@@ -367,7 +370,14 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 				return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
 			}
 		}
-		return deleteClaimedCodespace(ctx, api, claim, name)
+		if err := b.deleteClaimedCodespace(ctx, api, claim, name); err != nil {
+			var unsafe *unsafeCodespaceDeleteError
+			if errors.As(err, &unsafe) {
+				return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
+			}
+			return err
+		}
+		return nil
 	}
 	return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
 }
@@ -390,13 +400,47 @@ func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI,
 	return err
 }
 
-func deleteClaimedCodespace(ctx context.Context, api codespacesAPI, claim LeaseClaim, name string) error {
+func (b *backend) deleteClaimedCodespace(ctx context.Context, api codespacesAPI, claim LeaseClaim, name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" || claim.CloudID != name || claim.Labels[labelCodespaceName] != name {
 		return exit(4, "refusing github-codespaces delete for lease=%s without its exact bound resource identity", claim.LeaseID)
 	}
 	return removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
-		if err := api.deleteCodespace(ctx, name); err != nil && !isGitHubNotFound(err) {
+		deleteCtx, cancel := context.WithTimeout(ctx, githubCodespacesDeleteTimeout)
+		defer cancel()
+
+		item, err := api.getCodespace(deleteCtx, name)
+		if isGitHubNotFound(err) {
+			return removeStoredSSHConfig(claim.LeaseID)
+		}
+		if err != nil {
+			return err
+		}
+		if err := validateCodespaceClaimResource(claim, item); err != nil {
+			return err
+		}
+		// Stop is idempotent. Always issue it so even an initially stopped
+		// codespace gets a fresh status and identity check immediately before delete.
+		if err := api.stopCodespace(deleteCtx, name); err != nil {
+			if isGitHubNotFound(err) {
+				return removeStoredSSHConfig(claim.LeaseID)
+			}
+			return err
+		}
+		item, err = b.waitForStopped(deleteCtx, api, name)
+		if isGitHubNotFound(err) {
+			return removeStoredSSHConfig(claim.LeaseID)
+		}
+		if err != nil {
+			return err
+		}
+		if err := validateCodespaceClaimResource(claim, item); err != nil {
+			return err
+		}
+		if err := validateDeleteSafe(item); err != nil {
+			return err
+		}
+		if err := api.deleteCodespace(deleteCtx, name); err != nil && !isGitHubNotFound(err) {
 			return err
 		}
 		return removeStoredSSHConfig(claim.LeaseID)
@@ -474,7 +518,14 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				return err
 			}
 		}
-		if err := deleteClaimedCodespace(ctx, api, claim, server.CloudID); err != nil {
+		if err := b.deleteClaimedCodespace(ctx, api, claim, server.CloudID); err != nil {
+			var unsafe *unsafeCodespaceDeleteError
+			if errors.As(err, &unsafe) {
+				retainErr := b.stopCodespaceAndRetain(ctx, api, claim.LeaseID, claim, server, server.CloudID)
+				if retainErr != nil {
+					return errors.Join(err, retainErr)
+				}
+			}
 			return err
 		}
 	}
@@ -560,6 +611,26 @@ func (b *backend) waitForAvailable(ctx context.Context, api codespacesAPI, name 
 		select {
 		case <-waitCtx.Done():
 			return codespace{}, waitCtx.Err()
+		case <-time.After(b.pollInterval):
+		}
+	}
+}
+
+func (b *backend) waitForStopped(ctx context.Context, api codespacesAPI, name string) (codespace, error) {
+	for {
+		item, err := api.getCodespace(ctx, name)
+		if err != nil {
+			return codespace{}, err
+		}
+		if codespaceStopped(item.State) {
+			return item, nil
+		}
+		if codespaceTerminal(item.State) {
+			return codespace{}, exit(5, "github-codespaces codespace %s entered terminal state=%s while stopping", name, item.State)
+		}
+		select {
+		case <-ctx.Done():
+			return codespace{}, ctx.Err()
 		case <-time.After(b.pollInterval):
 		}
 	}
@@ -834,10 +905,44 @@ func codespaceTerminal(state string) bool {
 	}
 }
 
+type unsafeCodespaceDeleteError struct {
+	err error
+}
+
+func (e *unsafeCodespaceDeleteError) Error() string {
+	return e.err.Error()
+}
+
+func (e *unsafeCodespaceDeleteError) Unwrap() error {
+	return e.err
+}
+
 func validateDeleteSafe(item codespace) error {
 	status := item.GitStatus
 	if status.HasUncommittedChanges || status.HasUnpushedChanges || status.Ahead > 0 {
-		return exit(3, "refusing to delete github-codespaces codespace=%s with uncommitted or unpushed changes", item.Name)
+		return &unsafeCodespaceDeleteError{err: exit(3, "refusing to delete github-codespaces codespace=%s with uncommitted or unpushed changes", item.Name)}
+	}
+	return nil
+}
+
+func validateCodespaceClaimResource(claim LeaseClaim, item codespace) error {
+	expectedName := strings.TrimSpace(claim.Labels[labelCodespaceName])
+	if expectedName == "" || strings.TrimSpace(claim.CloudID) != expectedName || strings.TrimSpace(item.Name) != expectedName {
+		return exit(4, "refusing github-codespaces delete for lease=%s after resource identity changed", claim.LeaseID)
+	}
+	for _, identity := range []struct {
+		label string
+		live  string
+		name  string
+	}{
+		{label: labelEnvironmentID, live: item.EnvironmentID, name: "environment id"},
+		{label: labelRepository, live: item.Repository.FullName, name: "repository"},
+		{label: labelDisplayName, live: item.DisplayName, name: "display name"},
+	} {
+		expected := strings.TrimSpace(claim.Labels[identity.label])
+		if expected != "" && strings.TrimSpace(identity.live) != expected {
+			return exit(4, "refusing github-codespaces delete for lease=%s after %s changed", claim.LeaseID, identity.name)
+		}
 	}
 	return nil
 }
