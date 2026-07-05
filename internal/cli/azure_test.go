@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"reflect"
 	"strings"
 	"testing"
@@ -67,6 +68,67 @@ func TestParseAzureImageRef(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateAzureCleanupVM(t *testing.T) {
+	now := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
+	expected := Server{
+		CloudID: "crabbox-live",
+		Labels: map[string]string{
+			"crabbox":    "true",
+			"created_by": "crabbox",
+			"provider":   "azure",
+			"lease":      "cbx_123456abcdef",
+			"slug":       "live",
+			"expires_at": leaseLabelTime(now.Add(-time.Hour)),
+		},
+	}
+	if err := validateAzureCleanupVM(expected, expected, now); err != nil {
+		t.Fatalf("valid cleanup VM rejected: %v", err)
+	}
+
+	changedSlug := expected
+	changedSlug.Labels = maps.Clone(expected.Labels)
+	changedSlug.Labels["slug"] = "other"
+	if err := validateAzureCleanupVM(expected, changedSlug, now); err == nil || !strings.Contains(err.Error(), "slug") {
+		t.Fatalf("changed slug error=%v", err)
+	}
+
+	renewed := expected
+	renewed.Labels = maps.Clone(expected.Labels)
+	renewed.Labels["expires_at"] = leaseLabelTime(now.Add(time.Hour))
+	if err := validateAzureCleanupVM(expected, renewed, now); err == nil || !strings.Contains(err.Error(), "no longer cleanup eligible") {
+		t.Fatalf("renewed VM error=%v", err)
+	}
+}
+
+func TestValidateAzureCleanupResourceTags(t *testing.T) {
+	labels := map[string]string{
+		"crabbox":    "true",
+		"created_by": "crabbox",
+		"provider":   "azure",
+		"lease":      "cbx_123456abcdef",
+		"slug":       "live",
+	}
+	if err := validateAzureCleanupResourceTags("NIC", "crabbox-live-nic", azureLabelsToTags(labels), labels); err != nil {
+		t.Fatalf("valid resource tags rejected: %v", err)
+	}
+	wrongLease := maps.Clone(labels)
+	wrongLease["lease"] = "cbx_fedcba654321"
+	if err := validateAzureCleanupResourceTags("NIC", "crabbox-live-nic", azureLabelsToTags(wrongLease), labels); err == nil || !strings.Contains(err.Error(), "lease") {
+		t.Fatalf("wrong lease error=%v", err)
+	}
+}
+
+func TestAzureScopedResourceName(t *testing.T) {
+	id := "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/crabbox-live-nic"
+	name, err := azureScopedResourceName(id, "sub", "rg", "Microsoft.Network", "networkInterfaces")
+	if err != nil || name != "crabbox-live-nic" {
+		t.Fatalf("name=%q err=%v", name, err)
+	}
+	if _, err := azureScopedResourceName(id, "other", "rg", "Microsoft.Network", "networkInterfaces"); err == nil {
+		t.Fatal("cross-subscription resource id accepted")
 	}
 }
 

@@ -15,18 +15,19 @@ import (
 )
 
 type fakeAzureClient struct {
-	deleted   []string
-	tagged    []string
-	servers   []Server
-	listErr   error
-	created   Server
-	createCfg Config
-	createErr error
-	waitErr   error
-	getErr    error
-	get       map[string]Server
-	getErrs   map[string]error
-	getIDs    []string
+	deleted         []string
+	cleanupExpected []Server
+	tagged          []string
+	servers         []Server
+	listErr         error
+	created         Server
+	createCfg       Config
+	createErr       error
+	waitErr         error
+	getErr          error
+	get             map[string]Server
+	getErrs         map[string]error
+	getIDs          []string
 }
 
 func (c *fakeAzureClient) ListCrabboxServers(context.Context) ([]Server, error) {
@@ -76,6 +77,12 @@ func (c *fakeAzureClient) GetServer(_ context.Context, id string) (Server, error
 
 func (c *fakeAzureClient) DeleteServer(_ context.Context, name string) error {
 	c.deleted = append(c.deleted, name)
+	return nil
+}
+
+func (c *fakeAzureClient) DeleteCleanupServer(_ context.Context, server Server, _ time.Time) error {
+	c.cleanupExpected = append(c.cleanupExpected, server)
+	c.deleted = append(c.deleted, server.CloudID)
 	return nil
 }
 
@@ -396,6 +403,26 @@ func TestAzureCleanupRevalidatesLiveEligibilityBeforeDelete(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "reason=live VM") {
 		t.Fatalf("stderr=%q, want renewed-live skip", stderr.String())
+	}
+}
+
+func TestAzureCleanupDeleteBoundaryUsesOriginalCandidate(t *testing.T) {
+	snapshot := azureTestServer("candidate", "cbx_111111111111", "original")
+	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	live := snapshot
+	live.Labels = maps.Clone(snapshot.Labels)
+	live.Labels["slug"] = "changed"
+	fake := &fakeAzureClient{servers: []Server{snapshot}, get: map[string]Server{snapshot.CloudID: live}}
+	oldClient := newAzureClient
+	newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+	t.Cleanup(func() { newAzureClient = oldClient })
+
+	backend := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.cleanupExpected) != 1 || fake.cleanupExpected[0].Labels["slug"] != "original" {
+		t.Fatalf("cleanup boundary candidates=%v, want original list candidate", fake.cleanupExpected)
 	}
 }
 

@@ -38,6 +38,7 @@ type azureClient interface {
 	WaitForServerIP(context.Context, string) (Server, error)
 	GetServer(context.Context, string) (Server, error)
 	DeleteServer(context.Context, string) error
+	DeleteCleanupServer(context.Context, Server, time.Time) error
 	SetTags(context.Context, string, map[string]string) error
 }
 
@@ -241,10 +242,18 @@ func (b *azureLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live VM %s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
-		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", live.DisplayID(), live.Name)
-		if err := deleteAzureServerWithClient(ctx, client, live); err != nil {
+		if err := client.DeleteCleanupServer(ctx, server, now); err != nil {
+			if core.IsAzureCleanupSkipError(err) {
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", live.DisplayID(), live.Name, err)
+				continue
+			}
+			if isAzureCleanupNotFound(err) {
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live VM no longer exists at delete boundary\n", live.DisplayID(), live.Name)
+				continue
+			}
 			return err
 		}
+		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", live.DisplayID(), live.Name)
 		leaseID := server.Labels["lease"]
 		removeLeaseClaim(leaseID)
 		core.RemoveStoredTestboxKey(leaseID)
