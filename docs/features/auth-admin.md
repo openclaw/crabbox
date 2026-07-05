@@ -36,7 +36,7 @@ again after upgrading the broker with this security fix.
 
 ```sh
 crabbox login --url https://broker.example.com
-crabbox login --url https://broker.example.com --no-browser   # print the URL instead of opening it
+crabbox login --url https://broker.example.com --no-browser   # print the URL; open it on this device
 crabbox login --url https://broker.example.com --provider aws # also set the default brokered provider
 ```
 

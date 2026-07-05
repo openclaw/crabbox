@@ -20942,6 +20942,7 @@ describe("fleet identity", () => {
         body: {
           pollSecretHash: await sha256HexForTest(pollSecret),
           provider: "aws",
+          loopbackRedirectURI: testLoopbackRedirectURI,
         },
       }),
     );
@@ -20966,6 +20967,40 @@ describe("fleet identity", () => {
     );
     expect(poll.status).toBe(200);
     await expect(poll.json()).resolves.toMatchObject({ status: "pending" });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["remote host", `http://example.test:54321/crabbox/oauth/${"a".repeat(64)}`],
+    ["https", `https://127.0.0.1:54321/crabbox/oauth/${"a".repeat(64)}`],
+    ["default port", `http://127.0.0.1:80/crabbox/oauth/${"a".repeat(64)}`],
+    ["short path secret", "http://127.0.0.1:54321/crabbox/oauth/abc"],
+    ["query", `${testLoopbackRedirectURI}?next=https://example.test`],
+    ["fragment", `${testLoopbackRedirectURI}#fragment`],
+  ])("rejects a %s GitHub CLI loopback redirect", async (_name, loopbackRedirectURI) => {
+    const fleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_PUBLIC_URL: "https://broker.example.test",
+        CRABBOX_GITHUB_CLIENT_ID: "github-client",
+        CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+        CRABBOX_SESSION_SECRET: "session-secret",
+      },
+    );
+    const response = await fleet.fetch(
+      request("POST", "/v1/auth/github/start", {
+        body: {
+          pollSecretHash: await sha256HexForTest("local-poll-secret"),
+          ...(loopbackRedirectURI ? { loopbackRedirectURI } : {}),
+        },
+      }),
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "loopback_redirect_required",
+    });
   });
 
   it("requires a canonical public origin before GitHub login starts", async () => {
@@ -21017,7 +21052,7 @@ describe("fleet identity", () => {
     const canonical = await fleet.fetch(
       request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
     );
-    expect(canonical.status).toBe(200);
+    expect(canonical.status).toBe(303);
     expect(fetchMock).toHaveBeenCalled();
   });
 
@@ -21180,6 +21215,7 @@ describe("fleet identity", () => {
         body: {
           pollSecretHash: await sha256HexForTest("new-secret"),
           provider: "aws",
+          loopbackRedirectURI: testLoopbackRedirectURI,
         },
       }),
     );
@@ -21212,20 +21248,42 @@ describe("fleet identity", () => {
     });
   });
 
-  it("mints GitHub login tokens for allowed org members", async () => {
+  it("binds allowed-member token release to the browser confirmation", async () => {
     const { fleet, loginID, state, pollSecret } = await startGitHubLogin();
     vi.stubGlobal("fetch", githubFetchMock({ member: true }));
 
     const callback = await fleet.fetch(
       request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
     );
-    expect(callback.status).toBe(200);
+    const browserConfirmation = browserConfirmationFromCallback(callback);
+
+    const unconfirmed = await fleet.fetch(
+      request("POST", "/v1/auth/github/poll", {
+        body: { loginID, pollSecret },
+      }),
+    );
+    expect(unconfirmed.status).toBe(200);
+    await expect(unconfirmed.json()).resolves.toMatchObject({
+      status: "confirmation_required",
+    });
+
+    const forged = await fleet.fetch(
+      request("POST", "/v1/auth/github/poll", {
+        body: {
+          loginID,
+          pollSecret,
+          browserConfirmation: `confirm_${"0".repeat(32)}`,
+        },
+      }),
+    );
+    expect(forged.status).toBe(403);
 
     const poll = await fleet.fetch(
       request("POST", "/v1/auth/github/poll", {
         body: {
           loginID,
           pollSecret,
+          browserConfirmation,
         },
       }),
     );
@@ -21313,13 +21371,14 @@ describe("fleet identity", () => {
     const callback = await fleet.fetch(
       request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
     );
-    expect(callback.status).toBe(200);
+    const browserConfirmation = browserConfirmationFromCallback(callback);
 
     const poll = await fleet.fetch(
       request("POST", "/v1/auth/github/poll", {
         body: {
           loginID,
           pollSecret,
+          browserConfirmation,
         },
       }),
     );
@@ -21345,13 +21404,14 @@ describe("fleet identity", () => {
     const callback = await fleet.fetch(
       request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
     );
-    expect(callback.status).toBe(200);
+    const browserConfirmation = browserConfirmationFromCallback(callback);
 
     const poll = await fleet.fetch(
       request("POST", "/v1/auth/github/poll", {
         body: {
           loginID,
           pollSecret,
+          browserConfirmation,
         },
       }),
     );
@@ -21410,13 +21470,14 @@ describe("fleet identity", () => {
     const callback = await fleet.fetch(
       request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
     );
-    expect(callback.status).toBe(200);
+    const browserConfirmation = browserConfirmationFromCallback(callback);
 
     const poll = await fleet.fetch(
       request("POST", "/v1/auth/github/poll", {
         body: {
           loginID,
           pollSecret,
+          browserConfirmation,
         },
       }),
     );
@@ -21598,6 +21659,7 @@ async function startGitHubLogin(env: Partial<Env> = {}): Promise<{
       body: {
         pollSecretHash: await sha256HexForTest(pollSecret),
         provider: "aws",
+        loopbackRedirectURI: testLoopbackRedirectURI,
       },
     }),
   );
@@ -21607,6 +21669,21 @@ async function startGitHubLogin(env: Partial<Env> = {}): Promise<{
   const state = url.searchParams.get("state");
   expect(state).toBeTruthy();
   return { fleet, loginID: body.loginID, pollSecret, state: state || "" };
+}
+
+const testLoopbackRedirectURI = `http://127.0.0.1:54321/crabbox/oauth/${"a".repeat(64)}`;
+
+function browserConfirmationFromCallback(callback: Response): string {
+  expect(callback.status).toBe(303);
+  expect(callback.headers.get("cache-control")).toBe("no-store");
+  expect(callback.headers.get("referrer-policy")).toBe("no-referrer");
+  const location = callback.headers.get("location");
+  expect(location).toBeTruthy();
+  const redirect = new URL(location ?? "");
+  expect(redirect.origin + redirect.pathname).toBe(testLoopbackRedirectURI);
+  const confirmation = redirect.searchParams.get("confirmation");
+  expect(confirmation).toMatch(/^confirm_[a-f0-9]{32}$/);
+  return confirmation ?? "";
 }
 
 function githubFetchMock({

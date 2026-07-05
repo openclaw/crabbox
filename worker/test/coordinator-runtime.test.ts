@@ -568,7 +568,10 @@ describe("coordinator runtimes", () => {
         new Request("https://coordinator.test/v1/auth/github/start", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ pollSecretHash: "0".repeat(64) }),
+          body: JSON.stringify({
+            pollSecretHash: "0".repeat(64),
+            loopbackRedirectURI: `http://127.0.0.1:54321/crabbox/oauth/${"a".repeat(64)}`,
+          }),
         }),
         "start",
         runtime,
@@ -626,7 +629,7 @@ describe("coordinator runtimes", () => {
     expect(duplicate.status).toBe(409);
 
     releaseTokenExchange();
-    await expect(callback).resolves.toMatchObject({ status: 200 });
+    await expect(callback).resolves.toMatchObject({ status: 303 });
   });
 
   it("runs the fleet coordinator without a Durable Object", async () => {

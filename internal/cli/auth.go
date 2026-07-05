@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"runtime"
@@ -83,6 +84,12 @@ func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, bro
 }
 
 func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, brokerMode BrokerMode, noBrowser, jsonOut bool) error {
+	loopback, err := startGitHubLoginLoopback()
+	if err != nil {
+		return exit(3, "start local GitHub login callback: %v", err)
+	}
+	defer loopback.Close()
+
 	pollSecret, err := randomHex(32)
 	if err != nil {
 		return err
@@ -92,7 +99,7 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 	if err != nil {
 		return err
 	}
-	start, err := client.StartGitHubLogin(ctx, pollSecretHash, provider)
+	start, err := client.StartGitHubLogin(ctx, pollSecretHash, provider, loopback.URL())
 	if err != nil {
 		return err
 	}
@@ -113,7 +120,7 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 		if err != nil {
 			return err
 		}
-		start, err = client.StartGitHubLogin(ctx, pollSecretHash, provider)
+		start, err = client.StartGitHubLogin(ctx, pollSecretHash, provider, loopback.URL())
 		if err != nil {
 			return err
 		}
@@ -130,9 +137,9 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 		}
 	}
 	if noBrowser {
-		fmt.Fprintf(a.Stderr, "open this GitHub login URL:\n%s\n", start.URL)
+		fmt.Fprintf(a.Stderr, "open this GitHub login URL in a browser on this device:\n%s\n", start.URL)
 	} else if err := openBrowser(start.URL); err != nil {
-		fmt.Fprintf(a.Stderr, "could not open browser: %v\nopen this GitHub login URL:\n%s\n", err, start.URL)
+		fmt.Fprintf(a.Stderr, "could not open browser: %v\nopen this GitHub login URL in a browser on this device:\n%s\n", err, start.URL)
 	} else {
 		fmt.Fprintln(a.Stderr, "opened GitHub login in your browser")
 	}
@@ -142,17 +149,25 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 			deadline = parsed
 		}
 	}
+	browserConfirmation := ""
 	for {
 		if time.Now().After(deadline) {
 			return exit(3, "GitHub login expired")
 		}
-		poll, err := client.PollGitHubLogin(ctx, start.LoginID, pollSecret)
+		select {
+		case browserConfirmation = <-loopback.confirmations:
+		default:
+		}
+		poll, err := client.PollGitHubLogin(ctx, start.LoginID, pollSecret, browserConfirmation)
 		if err != nil {
 			return err
 		}
 		switch poll.Status {
-		case "pending":
+		case "pending", "confirmation_required":
 		case "complete":
+			if browserConfirmation == "" {
+				return exit(3, "GitHub login completed before this device received the browser confirmation")
+			}
 			if poll.Token == "" {
 				return exit(3, "GitHub login completed without a broker token")
 			}
@@ -186,6 +201,77 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 		case <-timer.C:
 		}
 	}
+}
+
+type githubLoginLoopback struct {
+	listener      net.Listener
+	server        *http.Server
+	path          string
+	confirmations chan string
+}
+
+func startGitHubLoginLoopback() (*githubLoginLoopback, error) {
+	pathToken, err := randomHex(32)
+	if err != nil {
+		return nil, err
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	loopback := &githubLoginLoopback{
+		listener:      listener,
+		path:          "/crabbox/oauth/" + pathToken,
+		confirmations: make(chan string, 1),
+	}
+	loopback.server = &http.Server{
+		Handler:           http.HandlerFunc(loopback.handle),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       5 * time.Second,
+	}
+	go func() {
+		_ = loopback.server.Serve(listener)
+	}()
+	return loopback, nil
+}
+
+func (l *githubLoginLoopback) URL() string {
+	return "http://" + l.listener.Addr().String() + l.path
+}
+
+func (l *githubLoginLoopback) Close() {
+	_ = l.server.Close()
+}
+
+func (l *githubLoginLoopback) handle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || r.URL.Path != l.path {
+		http.NotFound(w, r)
+		return
+	}
+	confirmation := r.URL.Query().Get("confirmation")
+	if !validBrowserConfirmation(confirmation) {
+		http.Error(w, "invalid login confirmation", http.StatusBadRequest)
+		return
+	}
+	select {
+	case l.confirmations <- confirmation:
+	default:
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "<!doctype html><html><head><meta charset=\"utf-8\"><title>Crabbox login complete</title></head><body><h1>Crabbox login complete</h1><p>You can close this tab and return to the terminal.</p></body></html>")
+}
+
+func validBrowserConfirmation(value string) bool {
+	if !strings.HasPrefix(value, "confirm_") || len(value) != len("confirm_")+32 {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, "confirm_"))
+	return err == nil
 }
 
 func (a App) finishLogin(ctx context.Context, coord *CoordinatorClient, path string, cfg Config, jsonOut bool) error {
@@ -431,5 +517,17 @@ func writeBrokerLogin(brokerURL, token, provider string, brokerMode BrokerMode) 
 		return "", Config{}, err
 	}
 	cfg, err := loadConfig()
-	return written, cfg, err
+	if err != nil {
+		return written, Config{}, err
+	}
+	// Verify the login against the broker and credential just written. Ambient
+	// coordinator overrides still apply to later commands, but must not redirect
+	// this one-shot verification away from an explicit login destination.
+	cfg.Coordinator = brokerURL
+	cfg.CoordToken = token
+	cfg.CoordTokenCommand = nil
+	cfg.BrokerMode = brokerMode
+	cfg.Provider = brokerProvider
+	cfg.brokerProvider = brokerProvider
+	return written, cfg, nil
 }

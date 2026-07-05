@@ -1177,9 +1177,12 @@ func (c *CoordinatorClient) ProviderReadiness(ctx context.Context, cfg Config) (
 	return res, err
 }
 
-func (c *CoordinatorClient) StartGitHubLogin(ctx context.Context, pollSecretHash, provider string) (CoordinatorGitHubLoginStart, error) {
+func (c *CoordinatorClient) StartGitHubLogin(ctx context.Context, pollSecretHash, provider, loopbackRedirectURI string) (CoordinatorGitHubLoginStart, error) {
 	var res CoordinatorGitHubLoginStart
-	body := map[string]any{"pollSecretHash": pollSecretHash}
+	body := map[string]any{
+		"pollSecretHash":      pollSecretHash,
+		"loopbackRedirectURI": loopbackRedirectURI,
+	}
 	if provider != "" {
 		body["provider"] = provider
 	}
@@ -1187,12 +1190,16 @@ func (c *CoordinatorClient) StartGitHubLogin(ctx context.Context, pollSecretHash
 	return res, err
 }
 
-func (c *CoordinatorClient) PollGitHubLogin(ctx context.Context, loginID, pollSecret string) (CoordinatorGitHubLoginPoll, error) {
+func (c *CoordinatorClient) PollGitHubLogin(ctx context.Context, loginID, pollSecret, browserConfirmation string) (CoordinatorGitHubLoginPoll, error) {
 	var res CoordinatorGitHubLoginPoll
-	err := c.do(ctx, http.MethodPost, "/v1/auth/github/poll", map[string]any{
+	body := map[string]any{
 		"loginID":    loginID,
 		"pollSecret": pollSecret,
-	}, &res)
+	}
+	if browserConfirmation != "" {
+		body["browserConfirmation"] = browserConfirmation
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/auth/github/poll", body, &res)
 	return res, err
 }
 

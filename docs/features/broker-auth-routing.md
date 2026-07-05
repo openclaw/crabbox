@@ -144,6 +144,12 @@ needs its own OAuth app: the callback URL must exactly match the public origin, 
 to canonicalize portal redirects). GitHub OAuth refuses to start without this setting,
 and callbacks from another origin are rejected before code exchange or session issuance.
 
+For CLI login, the public callback redirects completion to a one-use
+`http://127.0.0.1:<random-port>/crabbox/oauth/<random-path>` listener created by
+the initiating CLI. The coordinator releases the token only when polling proves
+both the terminal-held polling secret and the browser-delivered confirmation.
+This makes copied authorization URLs non-transferable to another terminal.
+
 The CLI treats that callback origin as a credential destination. If a login response
 from one broker points at a different callback origin, `crabbox login` fails before
 opening the browser unless the alternate origin appears in trusted operator config:

@@ -22,9 +22,11 @@ interface OAuthPending {
   id: string;
   state: string;
   pollSecretHash?: string;
+  browserConfirmationHash?: string;
   mode?: "cli" | "portal";
   provider?: Provider;
   returnTo?: string;
+  loopbackRedirectURI?: string;
   redirectURI: string;
   createdAt: string;
   expiresAt: string;
@@ -146,9 +148,20 @@ async function githubAuthStart(
   const input = await readJson<{
     pollSecretHash?: string;
     provider?: Provider;
+    loopbackRedirectURI?: string;
   }>(request);
   if (!input.pollSecretHash || !/^[a-f0-9]{64}$/.test(input.pollSecretHash)) {
     return json({ error: "invalid_poll_secret_hash" }, { status: 400 });
+  }
+  const loopbackRedirectURI = validLoopbackRedirectURI(input.loopbackRedirectURI);
+  if (!loopbackRedirectURI) {
+    return json(
+      {
+        error: "loopback_redirect_required",
+        message: "Upgrade the Crabbox CLI to complete GitHub login on this device.",
+      },
+      { status: 400 },
+    );
   }
   const pendingCount = await cleanupExpiredPendingOAuth(storage);
   if (pendingCount >= maxPendingOAuthLogins) {
@@ -163,6 +176,7 @@ async function githubAuthStart(
   const pending = newPendingOAuth({
     mode: "cli",
     pollSecretHash: input.pollSecretHash,
+    loopbackRedirectURI,
     redirectURI: oauthConfig.redirectURI,
   });
   if (input.provider === "aws" || input.provider === "hetzner" || input.provider === "gcp") {
@@ -290,7 +304,11 @@ async function githubAuthCallback(
     if (tokenExpiresAt) {
       completion.tokenExpiresAt = tokenExpiresAt;
     }
-    const completed = await finishPendingOAuth(runtime, pending.id, claim, completion);
+    const browserConfirmation = randomID("confirm");
+    const completed = await finishPendingOAuth(runtime, pending.id, claim, {
+      ...completion,
+      browserConfirmationHash: await sha256Hex(browserConfirmation),
+    });
     if (!completed) {
       return expiredOAuthResponse();
     }
@@ -300,10 +318,20 @@ async function githubAuthCallback(
         "set-cookie": portalSessionCookie(token, ttlSeconds),
       });
     }
-    return html(
-      "Crabbox login complete",
-      "GitHub authorized Crabbox. You can close this tab and return to the terminal.",
-    );
+    if (!completed.loopbackRedirectURI) {
+      await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, completed));
+      return html(
+        "Crabbox login unavailable",
+        "This login was started by an outdated client. Upgrade Crabbox and try again.",
+        400,
+      );
+    }
+    const loopback = new URL(completed.loopbackRedirectURI);
+    loopback.searchParams.set("confirmation", browserConfirmation);
+    return redirect(loopback.toString(), 303, {
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+    });
   } catch (err) {
     await finishPendingOAuth(runtime, pending.id, claim, { error: errorMessage(err) });
     if (err instanceof GitHubAuthorizationError) {
@@ -349,7 +377,10 @@ async function finishPendingOAuth(
   id: string,
   claim: string,
   result: Partial<
-    Pick<OAuthPending, "token" | "tokenExpiresAt" | "owner" | "org" | "login" | "error">
+    Pick<
+      OAuthPending,
+      "token" | "tokenExpiresAt" | "owner" | "org" | "login" | "error" | "browserConfirmationHash"
+    >
   >,
 ): Promise<OAuthPending | undefined> {
   return runtime.runExclusive(async () => {
@@ -377,7 +408,11 @@ function expiredOAuthResponse(): Response {
 }
 
 async function githubAuthPoll(request: Request, storage: CoordinatorStorage): Promise<Response> {
-  const input = await readJson<{ loginID?: string; pollSecret?: string }>(request);
+  const input = await readJson<{
+    loginID?: string;
+    pollSecret?: string;
+    browserConfirmation?: string;
+  }>(request);
   if (!input.loginID || !input.pollSecret) {
     return json({ error: "invalid_poll" }, { status: 400 });
   }
@@ -400,6 +435,22 @@ async function githubAuthPoll(request: Request, storage: CoordinatorStorage): Pr
   }
   if (!pending.token) {
     return json({ status: "pending", expiresAt: pending.expiresAt });
+  }
+  if (!pending.loopbackRedirectURI || !pending.browserConfirmationHash) {
+    await deletePendingOAuth(storage, pending);
+    return json(
+      { status: "failed", error: "This login was started by an outdated client." },
+      { status: 400 },
+    );
+  }
+  if (!input.browserConfirmation) {
+    return json({ status: "confirmation_required", expiresAt: pending.expiresAt });
+  }
+  if (
+    !/^confirm_[a-f0-9]{32}$/.test(input.browserConfirmation) ||
+    (await sha256Hex(input.browserConfirmation)) !== pending.browserConfirmationHash
+  ) {
+    return json({ error: "forbidden" }, { status: 403 });
   }
   const response = {
     status: "complete",
@@ -424,6 +475,34 @@ function userTokenTTLSeconds(env: Pick<Env, "CRABBOX_USER_TOKEN_TTL_SECONDS">): 
     return defaultUserTokenTTLSeconds;
   }
   return Math.min(maxUserTokenTTLSeconds, Math.max(minUserTokenTTLSeconds, Math.trunc(value)));
+}
+
+function validLoopbackRedirectURI(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+  const port = Number(parsed.port);
+  if (
+    parsed.protocol !== "http:" ||
+    parsed.hostname !== "127.0.0.1" ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535 ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    !/^\/crabbox\/oauth\/[a-f0-9]{64}$/.test(parsed.pathname)
+  ) {
+    return undefined;
+  }
+  return parsed.toString();
 }
 
 function githubOAuthConfiguration(

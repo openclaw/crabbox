@@ -88,6 +88,12 @@ by coordinator config:
   `user:email` scope. Public profile and unverified emails are never trusted as
   the token owner.
 
+CLI login also binds token release to the initiating device. The CLI opens a
+one-use listener on a random `127.0.0.1` port and path; after GitHub authorization,
+the browser receives a random confirmation through that loopback URL. Polling
+requires both the CLI-held secret and the browser confirmation, so forwarding an
+authorization URL cannot deliver the resulting user token to the sender.
+
 User tokens can only mutate leases, runs, and usage for their own `owner`/`org`
 identity. Lease owners also have read-only audit access to run history, logs,
 events, telemetry, and live event subscriptions for work recorded against
