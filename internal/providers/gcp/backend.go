@@ -324,7 +324,7 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 			removeLeaseClaim(leaseID)
 		}
 	}
-	if err := b.pruneStaleClaims(liveLeaseIDs, req.DryRun); err != nil {
+	if err := b.pruneStaleClaims(ctx, liveLeaseIDs, req.DryRun); err != nil {
 		return err
 	}
 	return nil
@@ -348,7 +348,7 @@ func validateGCPCleanupLiveServer(expected, live Server) error {
 	return nil
 }
 
-func (b *gcpLeaseBackend) pruneStaleClaims(liveLeaseIDs map[string]struct{}, dryRun bool) error {
+func (b *gcpLeaseBackend) pruneStaleClaims(ctx context.Context, liveLeaseIDs map[string]struct{}, dryRun bool) error {
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return err
@@ -363,6 +363,22 @@ func (b *gcpLeaseBackend) pruneStaleClaims(liveLeaseIDs map[string]struct{}, dry
 		}
 		if _, ok := liveLeaseIDs[claim.LeaseID]; ok {
 			continue
+		}
+		if strings.TrimSpace(claim.CloudID) != "" {
+			cfg := b.Cfg
+			if zone := strings.TrimSpace(claim.Labels["zone"]); zone != "" {
+				cfg.GCPZone = zone
+			}
+			client, err := newGCPClient(ctx, cfg)
+			if err != nil {
+				return err
+			}
+			if _, err := client.GetServer(ctx, claim.CloudID); err == nil {
+				fmt.Fprintf(b.RT.Stderr, "retain stale claim lease=%s slug=%s provider=gcp reason=cloud resource still exists\n", claim.LeaseID, blank(claim.Slug, "-"))
+				continue
+			} else if !core.IsGCPNotFound(err) {
+				return fmt.Errorf("re-read GCP stale claim %s: %w", claim.LeaseID, err)
+			}
 		}
 		fmt.Fprintf(b.RT.Stderr, "remove stale claim lease=%s slug=%s provider=gcp\n", claim.LeaseID, blank(claim.Slug, "-"))
 		if !dryRun {
