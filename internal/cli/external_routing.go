@@ -28,7 +28,7 @@ type externalRoutingState struct {
 	CredentialBoundaryVersion int                        `json:"credentialBoundaryVersion,omitempty"`
 }
 
-const externalRoutingCredentialVersion = 1
+const externalRoutingCredentialVersion = 2
 
 func externalRoutingStateForConfig(cfg ExternalConfig, credentialVersion int) externalRoutingState {
 	return externalRoutingState{

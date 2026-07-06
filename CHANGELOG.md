@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Prevented repository-defined External lifecycle commands from placing inherited `external.config` values on process arguments without an exact, trusted non-secret argv contract. Thanks @coygeek.
 - Prevented repository-controlled External SSH endpoint templates and adapter output from silently using ambient or operator-managed SSH credentials, with source-bound opt-ins for environment-derived fields and provider-returned destinations. Thanks @coygeek.
 - Made Sealos DevBox preflight work with tenant-scoped RBAC, rendered the runtime class, storage request, scheduling constraints, and SSH port contract required by hosted Sealos clusters, updated the SSHGate default to port 2233, bootstrapped missing sync tools, and cleaned local claims safely when a DevBox is already absent. Thanks @coygeek.
 - Changed portal logout to an authenticated, same-origin `POST` with a read-only `GET` confirmation page, preventing cross-site top-level navigation from clearing portal cookies or revoking isolated Code viewer sessions. Thanks @coygeek.
