@@ -377,8 +377,13 @@ func writeRunReceipt(path, keyPath string, in runReceiptInput) (runArtifact, err
 		return runArtifact{}, err
 	}
 	encoded = append(encoded, '\n')
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := createPrivateRunOutputDir(dir); err != nil {
+			return runArtifact{}, exit(2, "create receipt directory: %v", err)
+		}
+	}
 	if err := writePrivateRunOutputFile(path, encoded); err != nil {
-		return runArtifact{}, err
+		return runArtifact{}, exit(2, "write receipt %s: %v", path, err)
 	}
 	return runArtifact{Kind: "receipt", Path: path, Bytes: len(encoded)}, nil
 }

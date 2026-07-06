@@ -349,6 +349,30 @@ func TestAttestDigestWriterHashesMixedStreamsInArrivalOrder(t *testing.T) {
 	}
 }
 
+func TestAttestReceiptCreatesMissingParentDirectories(t *testing.T) {
+	setAttestTestHome(t)
+	path := filepath.Join(t.TempDir(), "nested", "deeper", "receipt.json")
+	if _, err := writeRunReceipt(path, "", fullReceiptInput()); err != nil {
+		t.Fatalf("write receipt: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(filepath.Dir(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o700 {
+			t.Fatalf("expected receipt dir mode 0700, got %v", info.Mode().Perm())
+		}
+	}
+	out, err := runVerify(t, path)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !strings.HasPrefix(out, "PASS ") {
+		t.Fatalf("unexpected verify output: %q", out)
+	}
+}
+
 func TestAttestReceiptPathCollisions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "receipt.json")
 	if err := preflightRunOutputCollisions("attest receipt", path, path, "", nil); err == nil {
