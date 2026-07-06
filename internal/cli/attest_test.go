@@ -173,6 +173,41 @@ func TestVerifyRejectsTamperedReceipts(t *testing.T) {
 			wantCode: 2,
 		},
 		{
+			name: "unsupported schema version",
+			mutate: func(t *testing.T, path string, receipt map[string]any) []byte {
+				receipt["schema_version"] = 2
+				return marshalReceipt(t, receipt)
+			},
+			wantCode: 2,
+		},
+		{
+			name: "unknown field",
+			mutate: func(t *testing.T, path string, receipt map[string]any) []byte {
+				receipt["review_note"] = "not part of the receipt schema"
+				return marshalReceipt(t, receipt)
+			},
+			wantCode: 2,
+		},
+		{
+			name: "decimal exit code spelling",
+			mutate: func(t *testing.T, path string, receipt map[string]any) []byte {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return bytes.Replace(data, []byte(`"exit_code": 0`), []byte(`"exit_code": 0.0`), 1)
+			},
+			wantCode: 2,
+		},
+		{
+			name: "invalid log digest",
+			mutate: func(t *testing.T, path string, receipt map[string]any) []byte {
+				receipt["log_sha256"] = "sha256:not-hex"
+				return marshalReceipt(t, receipt)
+			},
+			wantCode: 2,
+		},
+		{
 			name: "duplicate exit code key keeps signed value last",
 			mutate: func(t *testing.T, path string, receipt map[string]any) []byte {
 				data, err := os.ReadFile(path)
@@ -242,6 +277,32 @@ func TestVerifyRejectsTamperedReceipts(t *testing.T) {
 			t.Fatalf("expected exit 2, got %v", err)
 		}
 	})
+}
+
+func TestVerifyRejectsSignedNonReceipt(t *testing.T) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := key.Public().(ed25519.PublicKey)
+	receipt := map[string]any{
+		"payload":    "not a crabbox receipt",
+		"public_key": base64.StdEncoding.EncodeToString(pub),
+	}
+	canonical, err := canonicalReceiptBytes(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(key, canonical))
+	path := filepath.Join(t.TempDir(), "receipt.json")
+	if err := os.WriteFile(path, marshalReceipt(t, receipt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runVerify(t, path)
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("expected exit 2 for signed non-receipt, got %v", err)
+	}
 }
 
 func TestAttestDigestWriterSerializesConcurrentStreams(t *testing.T) {

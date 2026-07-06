@@ -11,15 +11,21 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"hash"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 const attestReceiptSchemaVersion = 1
+
+var errDuplicateReceiptKey = errors.New("duplicate key")
 
 type runReceiptInput struct {
 	Provider   string
@@ -48,6 +54,8 @@ func ensureAttestKey() (ed25519.PrivateKey, error) {
 	}
 	if _, err := os.Stat(path); err == nil {
 		return loadAttestKey(path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
 	if err := createPrivateRunOutputDir(filepath.Dir(path)); err != nil {
 		return nil, err
@@ -72,9 +80,15 @@ func loadAttestKey(path string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	block, _ := pem.Decode(data)
+	block, rest := pem.Decode(data)
 	if block == nil {
 		return nil, fmt.Errorf("attest key %s is not PEM encoded", path)
+	}
+	if block.Type != "PRIVATE KEY" {
+		return nil, fmt.Errorf("attest key %s is not a PKCS8 private key", path)
+	}
+	if len(bytes.TrimSpace(rest)) != 0 {
+		return nil, fmt.Errorf("attest key %s has trailing data", path)
 	}
 	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
@@ -176,6 +190,155 @@ func canonicalReceiptBytes(receipt map[string]any) ([]byte, error) {
 	return json.Marshal(unsigned)
 }
 
+var attestReceiptFields = map[string]bool{
+	"schema_version": true,
+	"generated_at":   true,
+	"provider":       true,
+	"lease_id":       true,
+	"slug":           true,
+	"run_id":         true,
+	"command":        true,
+	"exit_code":      true,
+	"command_ms":     true,
+	"actions_url":    true,
+	"log_sha256":     true,
+	"public_key":     true,
+	"signature":      true,
+}
+
+var attestRequiredReceiptFields = []string{
+	"schema_version",
+	"generated_at",
+	"provider",
+	"lease_id",
+	"command",
+	"exit_code",
+	"command_ms",
+	"public_key",
+	"signature",
+}
+
+func decodeRunReceipt(data []byte) (map[string]any, error) {
+	duplicate, err := jsonHasDuplicateKeys(json.NewDecoder(bytes.NewReader(data)))
+	if err != nil {
+		return nil, err
+	}
+	if duplicate {
+		return nil, errDuplicateReceiptKey
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var receipt map[string]any
+	if err := dec.Decode(&receipt); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("multiple JSON values")
+		}
+		return nil, err
+	}
+	if err := validateRunReceipt(receipt); err != nil {
+		return nil, err
+	}
+	return receipt, nil
+}
+
+func validateRunReceipt(receipt map[string]any) error {
+	if len(receipt) == 0 {
+		return fmt.Errorf("empty receipt")
+	}
+	for key := range receipt {
+		if !attestReceiptFields[key] {
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	for _, key := range attestRequiredReceiptFields {
+		if _, ok := receipt[key]; !ok {
+			return fmt.Errorf("missing %s", key)
+		}
+	}
+	schemaVersion, err := receiptInt64(receipt, "schema_version")
+	if err != nil {
+		return err
+	}
+	if schemaVersion != attestReceiptSchemaVersion {
+		return fmt.Errorf("unsupported schema_version %d", schemaVersion)
+	}
+	generatedAt, err := receiptString(receipt, "generated_at")
+	if err != nil {
+		return err
+	}
+	if _, err := time.Parse(time.RFC3339, generatedAt); err != nil {
+		return fmt.Errorf("invalid generated_at")
+	}
+	for _, key := range []string{"provider", "lease_id", "command", "public_key", "signature"} {
+		if _, err := receiptString(receipt, key); err != nil {
+			return err
+		}
+	}
+	for _, key := range []string{"slug", "run_id", "actions_url"} {
+		if _, ok := receipt[key]; ok {
+			if _, err := receiptString(receipt, key); err != nil {
+				return err
+			}
+		}
+	}
+	exitCode, err := receiptInt64(receipt, "exit_code")
+	if err != nil {
+		return err
+	}
+	if exitCode < 0 {
+		return fmt.Errorf("invalid exit_code")
+	}
+	commandMs, err := receiptInt64(receipt, "command_ms")
+	if err != nil {
+		return err
+	}
+	if commandMs < 0 {
+		return fmt.Errorf("invalid command_ms")
+	}
+	if _, ok := receipt["log_sha256"]; ok {
+		logDigest, err := receiptString(receipt, "log_sha256")
+		if err != nil {
+			return err
+		}
+		if !validSHA256Digest(logDigest) {
+			return fmt.Errorf("invalid log_sha256")
+		}
+	}
+	return nil
+}
+
+func receiptString(receipt map[string]any, key string) (string, error) {
+	value, ok := receipt[key].(string)
+	if !ok || strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("invalid %s", key)
+	}
+	return value, nil
+}
+
+func receiptInt64(receipt map[string]any, key string) (int64, error) {
+	number, ok := receipt[key].(json.Number)
+	if !ok {
+		return 0, fmt.Errorf("invalid %s", key)
+	}
+	value, err := strconv.ParseInt(number.String(), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s", key)
+	}
+	return value, nil
+}
+
+func validSHA256Digest(value string) bool {
+	if !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+	return err == nil && len(decoded) == sha256.Size
+}
+
 func writeRunReceipt(path, keyPath string, in runReceiptInput) (runArtifact, error) {
 	key, err := resolveAttestKey(keyPath)
 	if err != nil {
@@ -233,16 +396,12 @@ func (a App) verify(ctx context.Context, args []string) error {
 	if err != nil {
 		return exit(2, "read receipt: %v", err)
 	}
-	var receipt map[string]any
-	if err := json.Unmarshal(data, &receipt); err != nil {
-		return exit(2, "parse receipt: %v", err)
-	}
-	duplicate, err := jsonHasDuplicateKeys(json.NewDecoder(bytes.NewReader(data)))
-	if err != nil {
-		return exit(2, "parse receipt: %v", err)
-	}
-	if duplicate {
+	receipt, err := decodeRunReceipt(data)
+	if errors.Is(err, errDuplicateReceiptKey) {
 		return exit(2, "malformed receipt: duplicate key")
+	}
+	if err != nil {
+		return exit(2, "malformed receipt: %v", err)
 	}
 	pubText, ok := receipt["public_key"].(string)
 	if !ok {
