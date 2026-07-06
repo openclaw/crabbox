@@ -99,6 +99,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.attach(ctx, helpArgs), true
 	case "results":
 		return a.results(ctx, helpArgs), true
+	case "verify":
+		return a.verify(ctx, helpArgs), true
 	case "status":
 		return a.status(ctx, helpArgs), true
 	case "list":
@@ -194,6 +196,7 @@ Commands:
   events      Print recorded run events
   attach      Follow recorded events for an active run
   results     Show recorded test result summaries
+  verify      Verify a signed run receipt
   cache       Inspect, purge, warm, or list remote cache volumes
   status      Show lease state; add --wait to block until ready
   list        List Crabbox machines

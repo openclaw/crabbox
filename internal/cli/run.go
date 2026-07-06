@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -232,6 +234,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	scenario := fs.String("scenario", "", "preset variable shorthand for --preset-var scenario=<value>")
 	emitProof := fs.String("emit-proof", "", "write a generated proof block after a successful run")
 	proofTemplate := fs.String("proof-template", "", "proof template name from the selected profile")
+	attestOut := fs.String("attest", "", "write a signed run receipt after a successful run")
+	attestKeyOverride := fs.String("attest-key", "", "path to an existing PKCS8 PEM ed25519 private key for --attest")
 	stopAfter := fs.String("stop-after", "", "stop policy for the lease: success, always, failure, or never")
 	leaseOutput := fs.String("lease-output", "", "write a small JSON lease handle for orchestrators")
 	readyPool := fs.String("pool", "", "borrow a broker ready-pool lease")
@@ -373,6 +377,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if strings.TrimSpace(*emitProof) != "" {
 			return exit(2, "--emit-proof cannot be combined with --sync-only")
 		}
+		if strings.TrimSpace(*attestOut) != "" {
+			return exit(2, "--attest cannot be combined with --sync-only")
+		}
 	}
 	if err := preflightRunLocalOutputs(*captureStdout, *captureStderr, downloads); err != nil {
 		return err
@@ -401,6 +408,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 		}
 		if err := preflightLocalOutputPath("emit proof", strings.TrimSpace(*emitProof), true, true); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(*attestOut) != "" {
+		if err := preflightLocalOutputPath("attest receipt", strings.TrimSpace(*attestOut), true, true); err != nil {
 			return err
 		}
 	}
@@ -619,6 +631,26 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 			result.Artifacts = append(result.Artifacts, proof)
 			fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
+		}
+		if runErr == nil && strings.TrimSpace(*attestOut) != "" {
+			command := strings.TrimSpace(result.CommandText)
+			if command == "" {
+				command = runCommandDisplay(runReq.Command, runReq.ShellMode)
+			}
+			receipt, err := writeRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), runReceiptInput{
+				Provider:   firstNonBlank(result.Provider, cfg.Provider),
+				LeaseID:    result.LeaseID,
+				Slug:       result.Slug,
+				Command:    command,
+				ExitCode:   result.ExitCode,
+				CommandMs:  result.Command.Milliseconds(),
+				ActionsURL: result.ActionsURL,
+			})
+			if err != nil {
+				return err
+			}
+			result.Artifacts = append(result.Artifacts, receipt)
+			fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", receipt.Path, receipt.Bytes)
 		}
 		if result.Session != nil {
 			coldRun := !result.Session.Reused
@@ -1488,6 +1520,11 @@ afterSync:
 	if stderrCaptured {
 		stderrEvents = nil
 	}
+	attestDigest := sha256.New()
+	if strings.TrimSpace(*attestOut) != "" {
+		stdout = io.MultiWriter(stdout, attestDigest)
+		stderr = io.MultiWriter(stderr, attestDigest)
+	}
 	resultsMarker := ""
 	if cfg.Results.Auto {
 		resultsMarker = remoteResultsMarker
@@ -1604,6 +1641,25 @@ afterSync:
 		runArtifacts = append(runArtifacts, proof)
 		report.Artifacts = runArtifacts
 		fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
+	}
+	if strings.TrimSpace(*attestOut) != "" && code == 0 {
+		receipt, err := writeRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), runReceiptInput{
+			Provider:   cfg.Provider,
+			LeaseID:    leaseID,
+			Slug:       serverSlug(server),
+			RunID:      recorder.runID,
+			Command:    commandDisplay,
+			ExitCode:   code,
+			CommandMs:  report.CommandMs,
+			ActionsURL: actionsURL,
+			LogSHA256:  "sha256:" + hex.EncodeToString(attestDigest.Sum(nil)),
+		})
+		if err != nil {
+			return recordFailure(err)
+		}
+		runArtifacts = append(runArtifacts, receipt)
+		report.Artifacts = runArtifacts
+		fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", receipt.Path, receipt.Bytes)
 	}
 	recorder.Finish(ctx, target, code, timings.sync, timings.command, logBuffer.String(), logBuffer.Truncated(), results, classification)
 	if a.runOutcome != nil {

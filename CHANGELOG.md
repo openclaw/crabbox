@@ -8,6 +8,7 @@
 - Added `sync-plan --json` with candidate and dirty-delta sizes, configured guardrail status, deleted-path counts, and ranked file and directory hotspots for automation. Thanks @zozo123.
 - Added a CubeSandbox delegated-run provider with E2B-compatible lifecycle and envd execution, archive sync, CubeProxy routing, exact API-endpoint/sandbox-bound ownership claims, conflict-safe explicit adoption, and guarded cleanup. Thanks @zozo123.
 - Added coordinator-managed Daytona Linux leases with a Worker-held API key, exact ownership cleanup, expiring SSH-token refresh, CLI secret redaction, and production Cloudflare configuration.
+- Added signed run receipts: `crabbox run --attest <path>` writes an Ed25519-signed receipt of a successful run, and the new `crabbox verify` command checks receipt integrity and reports the signer fingerprint. Thanks @yetval.
 
 ### Fixed
 
