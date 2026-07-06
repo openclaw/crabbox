@@ -76,6 +76,7 @@ func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 
 func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
+	core.RemoveStoredTestboxKey(leaseID)
 }
 
 func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {

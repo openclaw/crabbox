@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -49,6 +50,50 @@ func TestProviderContract(t *testing.T) {
 	if spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever ||
 		!spec.Features.Has(core.FeatureSSH) || !spec.Features.Has(core.FeatureCrabboxSync) || !spec.Features.Has(core.FeatureCleanup) {
 		t.Fatalf("spec=%#v", spec)
+	}
+}
+
+func TestLeasePinsProxyHostKeyPerLease(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	const leaseID = "cbx_abcdef123456"
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	lease, err := (&backend{}).lease(instance{ClusterID: "instance-id", Labels: map[string]string{"lease": leaseID}}, cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKnownHosts := filepath.Join(filepath.Dir(keyPath), "known_hosts")
+	if lease.SSH.DisableHostKeyChecking || lease.SSH.KnownHostsFile != wantKnownHosts {
+		t.Fatalf("namespace instance SSH target does not pin its lease host key: %#v", lease.SSH)
+	}
+	if !lease.SSH.SSHConfigProxy || lease.SSH.ProxyCommand == "" {
+		t.Fatalf("namespace instance SSH proxy routing was lost: %#v", lease.SSH)
+	}
+}
+
+func TestRebindResolvedLeaseTargetRebindsKnownHosts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	const leaseID = "cbx_abcdef123456"
+	target := core.LeaseTarget{SSH: core.SSHTarget{KnownHostsFile: "alias/known_hosts"}}
+
+	if err := (&backend{}).RebindResolvedLeaseTarget(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(filepath.Dir(keyPath), "known_hosts"); target.SSH.KnownHostsFile != want {
+		t.Fatalf("KnownHostsFile=%q want %q", target.SSH.KnownHostsFile, want)
 	}
 }
 

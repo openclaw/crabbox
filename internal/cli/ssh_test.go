@@ -1550,6 +1550,9 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 	if !strings.Contains(plain, "dd bs=1") {
 		t.Fatalf("non-WSL2 manifest writer should keep portable dd fallback: %q", plain)
 	}
+	if strings.Contains(plain, "status=none") {
+		t.Fatalf("non-WSL2 manifest writer should not require GNU dd extensions: %q", plain)
+	}
 }
 
 func TestSyncManifestInputForTargetFramesDeletedLengthForWSL2(t *testing.T) {

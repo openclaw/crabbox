@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Kept sync manifest writes compatible with minimal BusyBox guests instead of requiring a GNU-only `dd` option, and preserved complete Phala gateway hostnames so later status and SSH reconnects keep working.
+- Restored lease-scoped SSH host-key pinning for Namespace Instance, Phala, and Islo proxy connections instead of accepting unverified server identities. Thanks @coygeek.
 - Corrected the CLI command map, coordinator API methods, and provider architecture reference to match the implemented commands, routes, and backend capabilities. Thanks @zozo123.
 - Partitioned unauthenticated GitHub OAuth starts by caller with an atomic per-source limit and guarded global backstop, preventing one source from exhausting login for every user. Thanks @coygeek.
 - Disabled inherited SSH agent and X11 forwarding across CLI-managed SSH, rsync, SCP, VNC, and port-forward transports, preserving per-lease credential boundaries. Thanks @coygeek.

@@ -94,6 +94,9 @@ func machineTypeForClass(class string) string {
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
+	if err := core.UseLeaseKnownHosts(&target.SSH, leaseID); err != nil {
+		return err
+	}
 	core.UseStoredTestboxKey(&target.SSH, leaseID)
 	return nil
 }
@@ -191,7 +194,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		recoveryLabels["recovery"] = recovery
 		recoveryLabels["state"] = "provisioning"
 		item := instance{ClusterID: id, Labels: recoveryLabels}
-		lease := b.lease(item, cfg, leaseID)
+		lease, err := b.lease(item, cfg, leaseID)
+		if err != nil {
+			return err
+		}
 		if req.Repo.Root != "" {
 			return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim)
 		}
@@ -218,7 +224,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
-	lease := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID)
+	if err != nil {
+		return core.LeaseTarget{}, rollback(err)
+	}
 	if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
@@ -241,7 +250,10 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	lease := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if req.ReleaseOnly || req.StatusOnly && !req.ReadyProbe {
 		return lease, nil
 	}
@@ -707,28 +719,30 @@ func (b *backend) resolve(ctx context.Context, identifier string, cfg core.Confi
 	return instance{}, "", core.Exit(4, "Namespace instance lease not found: %s", identifier)
 }
 
-func (b *backend) lease(item instance, cfg core.Config, leaseID string) core.LeaseTarget {
+func (b *backend) lease(item instance, cfg core.Config, leaseID string) (core.LeaseTarget, error) {
 	target := core.SSHTarget{
-		User:                   "root",
-		Host:                   item.ClusterID,
-		Key:                    cfg.SSHKey,
-		Port:                   "22",
-		TargetOS:               core.TargetLinux,
-		ReadyCheck:             "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
-		NoControlMaster:        true,
-		DisableHostKeyChecking: true,
-		NetworkKind:            "public",
-		SSHConfigProxy:         true,
-		ProxyCommand:           proxyCommand(cfg, item.ClusterID),
+		User:            "root",
+		Host:            item.ClusterID,
+		Key:             cfg.SSHKey,
+		Port:            "22",
+		TargetOS:        core.TargetLinux,
+		ReadyCheck:      "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
+		NoControlMaster: true,
+		NetworkKind:     "public",
+		SSHConfigProxy:  true,
+		ProxyCommand:    proxyCommand(cfg, item.ClusterID),
 	}
 	if leaseID != "" {
+		if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
 		core.UseStoredTestboxKey(&target, leaseID)
 	}
 	server := b.server(item, cfg)
 	if claim, ok, _ := resolveNamespaceClaim(leaseID, cfg); ok {
 		mergeClaimLabels(&server, claim)
 	}
-	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
 func (b *backend) prepareSSH(ctx context.Context, cfg core.Config, target *core.SSHTarget) error {
