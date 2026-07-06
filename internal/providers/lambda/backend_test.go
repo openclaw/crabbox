@@ -633,7 +633,7 @@ func TestReleaseRefusesRefreshedClaimSnapshot(t *testing.T) {
 	}
 }
 
-func TestAmbiguousLaunchRecoveryRefusesDuplicateSSHKeyMatches(t *testing.T) {
+func TestAmbiguousLaunchRecoveryConflictIsScopedToRecoveryClaim(t *testing.T) {
 	api := &fakeLambdaAPI{launchErr: errors.New("transport closed")}
 	b := newTestBackend(t, api)
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "ambiguous-duplicate"})
@@ -650,7 +650,27 @@ func TestAmbiguousLaunchRecoveryRefusesDuplicateSSHKeyMatches(t *testing.T) {
 		Instance{ID: "i-duplicate-1", Name: "duplicate-1", Status: "active", IP: "203.0.113.54", Type: defaultType, SSHKeyNames: []string{keyName}},
 		Instance{ID: "i-duplicate-2", Name: "duplicate-2", Status: "active", IP: "203.0.113.55", Type: defaultType, SSHKeyNames: []string{keyName}},
 	)
-	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "ambiguous-duplicate", ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "matches 2 instances") {
+	unrelatedLeaseID := "cbx_abcdef123457"
+	old := time.Now().Add(-48 * time.Hour)
+	unrelatedLabels := leaseTags(b.cfg, unrelatedLeaseID, "unrelated", "ready", false, old)
+	unrelatedLabels["expires_at"] = core.LeaseLabelTime(old.Add(time.Minute))
+	unrelated := Instance{ID: "i-unrelated", Name: "unrelated", Status: "active", IP: "203.0.113.56", Type: defaultType, Tags: unrelatedLabels}
+	api.instances = append(api.instances, unrelated)
+	unrelatedServer := core.Server{Provider: providerName, CloudID: unrelated.ID, Name: unrelated.Name, Labels: unrelatedLabels}
+	if err := core.ClaimLeaseTargetForRepoConfig(unrelatedLeaseID, "unrelated", b.cfg, unrelatedServer, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	views, err := b.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].CloudID != unrelated.ID {
+		t.Fatalf("views=%#v", views)
+	}
+	if target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "unrelated", ReleaseOnly: true}); err != nil || target.Server.CloudID != unrelated.ID {
+		t.Fatalf("target=%#v err=%v", target, err)
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "i-duplicate-1", ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "matches 2 instances") {
 		t.Fatalf("resolve err=%v", err)
 	}
 	server := core.Server{Provider: providerName, CloudID: "i-duplicate-1", Name: claim.Slug, Labels: claim.Labels}
@@ -663,6 +683,15 @@ func TestAmbiguousLaunchRecoveryRefusesDuplicateSSHKeyMatches(t *testing.T) {
 	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider("ambiguous-duplicate", providerName); err != nil || !ok {
 		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.terminatedIDs) != 1 || len(api.terminatedIDs[0]) != 1 || api.terminatedIDs[0][0] != unrelated.ID {
+		t.Fatalf("terminated=%v", api.terminatedIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("ambiguous-duplicate", providerName); err != nil || !ok {
+		t.Fatalf("recovery claim ok=%v err=%v", ok, err)
 	}
 }
 

@@ -38,6 +38,14 @@ func (e *ambiguousLambdaCreateError) Error() string {
 
 func (e *ambiguousLambdaCreateError) Unwrap() error { return e.err }
 
+type ambiguousLambdaRecoveryConflictError struct {
+	err core.ExitError
+}
+
+func (e *ambiguousLambdaRecoveryConflictError) Error() string { return e.err.Error() }
+
+func (e *ambiguousLambdaRecoveryConflictError) Unwrap() error { return e.err }
+
 type lambdaSSHKeyIdentity struct {
 	ID      string
 	Name    string
@@ -618,6 +626,10 @@ func (b *backend) ownedServersFromInstances(instances []Instance) ([]core.Server
 	for _, item := range instances {
 		server, claimed, err := claimedServerFromInstance(item, instances, b.cfg)
 		if err != nil {
+			var conflict *ambiguousLambdaRecoveryConflictError
+			if errors.As(err, &conflict) {
+				continue
+			}
 			return nil, err
 		}
 		if claimed {
@@ -751,7 +763,8 @@ func validateUniqueAmbiguousLaunchInstance(instanceID string, instances []Instan
 		}
 	}
 	if matches != 1 {
-		return core.Exit(2, "refusing Lambda recovery for lease=%s: recovery SSH key matches %d instances", claim.LeaseID, matches)
+		err := core.Exit(2, "refusing Lambda recovery for lease=%s: recovery SSH key matches %d instances", claim.LeaseID, matches)
+		return &ambiguousLambdaRecoveryConflictError{err: err}
 	}
 	if matchedID != instanceID {
 		return core.Exit(2, "refusing to release Lambda instance %s without its recovery SSH key binding", instanceID)
