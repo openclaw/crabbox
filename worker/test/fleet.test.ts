@@ -9832,7 +9832,8 @@ describe("fleet lease identity and idle", () => {
   it("deletes only coordinator-owned Azure orphan sweep candidates", async () => {
     const storage = new MemoryStorage();
     const list = vi.spyOn(storage, "list");
-    const deleted: string[] = [];
+    const rawDeleted: string[] = [];
+    const ownedDeleted: LeaseRecord[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
     storage.seed(
       "lease:cbx_000000000776",
@@ -9841,6 +9842,7 @@ describe("fleet lease identity and idle", () => {
         provider: "azure",
         cloudID: "vm-orphan",
         region: "westus2",
+        providerScope: "/subscriptions/subscription/resourceGroups/crabbox-leases",
         state: "expired",
         keep: false,
       }),
@@ -9917,7 +9919,11 @@ describe("fleet lease identity and idle", () => {
                 name: "vm-orphan",
                 labels: {
                   crabbox: "true",
-                  lease: "cbx_missing",
+                  created_by: "crabbox",
+                  provider: "azure",
+                  lease: "cbx_000000000776",
+                  slug: "blue-lobster",
+                  owner: "peter@example.com",
                   created_at: oldSeconds,
                   expires_at: oldSeconds,
                 },
@@ -9991,9 +9997,12 @@ describe("fleet lease identity and idle", () => {
                 },
               }),
             ],
+            onDeleteOwnedServer(lease) {
+              ownedDeleted.push(structuredClone(lease));
+            },
           },
           async (id) => {
-            deleted.push(id);
+            rawDeleted.push(id);
           },
         ),
       },
@@ -10015,7 +10024,16 @@ describe("fleet lease identity and idle", () => {
       terminated: number;
       candidates: Array<Record<string, unknown>>;
     }>("azure-orphan-sweep:last");
-    expect(deleted).toEqual(["vm-orphan"]);
+    expect(rawDeleted).toEqual([]);
+    expect(ownedDeleted).toEqual([
+      expect.objectContaining({
+        id: "cbx_000000000776",
+        provider: "azure",
+        cloudID: "vm-orphan",
+        region: "westus2",
+        providerScope: "/subscriptions/subscription/resourceGroups/crabbox-leases",
+      }),
+    ]);
     expect(
       list.mock.calls.filter(([options]) => options?.prefix === "lease:" && options.limit === 128),
     ).toHaveLength(2);
@@ -10024,7 +10042,7 @@ describe("fleet lease identity and idle", () => {
       expect.objectContaining({
         cloudID: "vm-orphan",
         region: "westus2",
-        leaseID: "cbx_missing",
+        leaseID: "cbx_000000000776",
         reason: "expired-provider-tag",
         ownership: "coordinator-lease",
         ownershipLeaseID: "cbx_000000000776",
@@ -10037,6 +10055,93 @@ describe("fleet lease identity and idle", () => {
         action: "reported",
       }),
     ]);
+  });
+
+  it("keeps Azure orphan sweep candidates when exact owned deletion rejects them", async () => {
+    const storage = new MemoryStorage();
+    const rawDeleted: string[] = [];
+    const ownedDeleted: LeaseRecord[] = [];
+    const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    storage.seed(
+      "lease:cbx_000000000776",
+      testLease({
+        id: "cbx_000000000776",
+        provider: "azure",
+        cloudID: "vm-replaced",
+        region: "westus2",
+        providerScope: "/subscriptions/subscription/resourceGroups/crabbox-leases",
+        state: "expired",
+        keep: false,
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(
+          undefined,
+          {
+            provider: "azure",
+            servers: [
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-replaced",
+                region: "westus2",
+                name: "vm-replaced",
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  provider: "azure",
+                  lease: "cbx_replacement",
+                  slug: "replacement",
+                  owner: "other@example.com",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+            ],
+            onDeleteOwnedServer(lease) {
+              ownedDeleted.push(structuredClone(lease));
+              throw new Error(
+                `refusing to delete Azure VM vm-replaced: ownership does not match lease ${lease.id}`,
+              );
+            },
+          },
+          async (id) => {
+            rawDeleted.push(id);
+          },
+        ),
+      },
+      {
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_SUBSCRIPTION_ID: "subscription",
+        CRABBOX_AZURE_LOCATION: "westus2",
+        CRABBOX_AZURE_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS: "1",
+      },
+    );
+
+    await fleet.alarm();
+
+    expect(rawDeleted).toEqual([]);
+    expect(ownedDeleted).toEqual([
+      expect.objectContaining({ id: "cbx_000000000776", cloudID: "vm-replaced" }),
+    ]);
+    expect(storage.value("azure-orphan-sweep:last")).toMatchObject({
+      mode: "delete",
+      terminated: 0,
+      candidates: [
+        expect.objectContaining({
+          cloudID: "vm-replaced",
+          leaseID: "cbx_replacement",
+          ownership: "coordinator-lease",
+          ownershipLeaseID: "cbx_000000000776",
+          action: "terminate_failed",
+          error: expect.stringContaining("ownership does not match lease cbx_000000000776"),
+        }),
+      ],
+    });
   });
 
   it("releases stale pending EC2 Mac hosts during the AWS orphan sweep", async () => {
@@ -23433,6 +23538,7 @@ function fakeProvider(
         }
       | undefined;
     onReleaseLease?: (lease: LeaseRecord) => Promise<void> | void;
+    onDeleteOwnedServer?: (lease: LeaseRecord) => Promise<void> | void;
     onRecoverServer?: (
       lease: LeaseRecord,
     ) => Promise<ProviderMachine | undefined> | ProviderMachine | undefined;
@@ -23599,6 +23705,13 @@ function fakeProvider(
     async deleteServer(id: string) {
       await onDelete?.(id);
     },
+    ...(result.onDeleteOwnedServer
+      ? {
+          async deleteOwnedServer(lease: LeaseRecord) {
+            await result.onDeleteOwnedServer?.(lease);
+          },
+        }
+      : {}),
     async releaseLease(lease: LeaseRecord) {
       await result.onReleaseLease?.(lease);
       await onDelete?.(

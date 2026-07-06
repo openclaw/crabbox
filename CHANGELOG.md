@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Routed Azure orphan-sweep deletion through the exact lease-, provider-scope-, resource-, companion-, and immutable-disk-bound owned-delete path instead of deleting by retained VM name alone.
 - Kept sync manifest writes compatible with minimal BusyBox guests instead of requiring a GNU-only `dd` option, and preserved complete Phala gateway hostnames so later status and SSH reconnects keep working.
 - Restored lease-scoped SSH host-key pinning for Namespace Instance, Phala, and Islo proxy connections instead of accepting unverified server identities. Thanks @coygeek.
 - Corrected the CLI command map, coordinator API methods, and provider architecture reference to match the implemented commands, routes, and backend capabilities. Thanks @zozo123.

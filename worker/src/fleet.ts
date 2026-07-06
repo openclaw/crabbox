@@ -11398,8 +11398,14 @@ export class FleetCoordinator {
       recordCloudOrphanSweepOwnership(candidate, ownershipLease);
       if (config.deleteEnabled && ownershipLease) {
         try {
+          const provider = this.provider("azure", region);
+          if (!provider.deleteOwnedServer) {
+            throw new ProviderCleanupManualResolutionError(
+              `refusing to delete Azure lease ${ownershipLease.id}: exact owned-delete support is unavailable`,
+            );
+          }
           // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
-          await this.provider("azure", region).deleteServer(machine.cloudID || machine.name);
+          await provider.deleteOwnedServer(ownershipLease);
           candidate.action = "terminated";
         } catch (error) {
           candidate.action = "terminate_failed";
@@ -16798,6 +16804,7 @@ interface CloudProvider {
   ): Promise<ProviderLeaseCreateFinalization>;
   releaseLease(lease: LeaseRecord): Promise<void>;
   deleteServer(id: string): Promise<void>;
+  deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
   supportsNativeImages(): boolean;
   nativeImagesUnsupportedMessage(): string;
   defaultImageStrategy(lease: LeaseRecord): "image" | "disk-snapshot";
