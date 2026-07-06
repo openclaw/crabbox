@@ -598,15 +598,23 @@ func sshBaseArgs(target SSHTarget) []string {
 	return sshBaseArgsWithOptions(target, "10", "3")
 }
 
+func sshForwardingDenyArgs() []string {
+	return []string{
+		"-o", "ForwardAgent=no",
+		"-o", "ForwardX11=no",
+		"-o", "ForwardX11Trusted=no",
+	}
+}
+
 func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts string) []string {
-	args := []string{
+	args := append(sshForwardingDenyArgs(),
 		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=" + connectTimeout,
-		"-o", "ConnectionAttempts=" + connectionAttempts,
+		"-o", "ConnectTimeout="+connectTimeout,
+		"-o", "ConnectionAttempts="+connectionAttempts,
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
-	}
+	)
 	if target.DisableHostKeyChecking {
 		args = append(args,
 			"-o", "StrictHostKeyChecking=no",

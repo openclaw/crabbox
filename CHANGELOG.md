@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Disabled inherited SSH agent and X11 forwarding across CLI-managed SSH, rsync, SCP, VNC, and port-forward transports, preserving per-lease credential boundaries. Thanks @coygeek.
 - Collected runtime-only provider credentials through provider-owned diagnostic hooks and redacted opaque OpenSandbox and W&B upstream errors before they reach CLI output. Thanks @coygeek.
 - Redacted complete punctuation-bearing authorization, API-key, and bearer values from CLI and coordinator diagnostics while preserving whitespace-separated routing context. Thanks @coygeek.
 - Limited framing of proxied Browser Code responses to the same isolated Code origin, preventing sibling same-site pages from clickjacking an authenticated session without breaking code-server webviews. Thanks @coygeek.

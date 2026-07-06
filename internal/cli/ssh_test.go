@@ -477,6 +477,9 @@ func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 		"ConnectTimeout=10",
 		"ConnectionAttempts=3",
 		"IdentitiesOnly=yes",
+		"ForwardAgent=no",
+		"ForwardX11=no",
+		"ForwardX11Trusted=no",
 		"ServerAliveInterval=15",
 		"ServerAliveCountMax=2",
 		"ControlMaster=auto",
@@ -488,6 +491,34 @@ func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("sshArgs() missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestSSHArgsOverrideAmbientForwardingConfig(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("OpenSSH client is unavailable")
+	}
+	configPath := filepath.Join(t.TempDir(), "hostile_config")
+	if err := os.WriteFile(configPath, []byte("Host *\n  ForwardAgent yes\n  ForwardX11 yes\n  ForwardX11Trusted yes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := SSHTarget{User: "crabbox", Host: "203.0.113.10", Port: "2222"}
+	args := append(sshBaseArgs(target), "-F", configPath, "-G", target.User+"@"+target.Host)
+	out, err := exec.Command("ssh", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh -G: %v: %s", err, out)
+	}
+	resolved := make(map[string]string)
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			resolved[fields[0]] = fields[1]
+		}
+	}
+	for _, option := range []string{"forwardagent", "forwardx11", "forwardx11trusted"} {
+		if got := resolved[option]; got != "no" {
+			t.Fatalf("ssh -G resolved %s=%q, want no", option, got)
 		}
 	}
 }

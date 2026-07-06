@@ -461,6 +461,9 @@ never proxies SSH traffic. The posture:
   (`<user-config>/crabbox/testboxes/<lease-id>/id_ed25519`; RSA for AWS/Azure
   Windows). Matching cloud key pairs are removed when Crabbox deletes the box.
   See [SSH keys](features/ssh-keys.md).
+- CLI-managed SSH, rsync, SCP, VNC, and port-forward connections explicitly
+  disable agent and X11 forwarding, overriding broad settings inherited from
+  the operator's OpenSSH configuration.
 - SSH listens on the configured primary port (default `2222`) plus configured
   fallback ports (default `22`), because port 22 is not reliably reachable from
   every operator network.
