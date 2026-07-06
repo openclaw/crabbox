@@ -102,6 +102,13 @@ the browser receives a random confirmation through that loopback URL. Polling
 requires both the CLI-held secret and the browser confirmation, so forwarding an
 authorization URL cannot deliver the resulting user token to the sender.
 
+Unauthenticated CLI and portal login starts share a ten-pending-attempt limit per
+caller source and a 100-attempt global backstop. Admission and storage are serialized,
+expired attempts are removed first, and only a session-secret-keyed source hash is
+stored with each attempt. Cloudflare supplies the caller address; the portable Node
+server derives it from the socket or an explicitly trusted proxy instead of trusting
+a client-provided forwarding header.
+
 User tokens can only mutate or read leases, runs, and usage for their own `owner`/`org`
 identity. Lease owners also have read-only audit access to run history, logs,
 events, telemetry, and live event subscriptions for work recorded against

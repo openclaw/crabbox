@@ -533,7 +533,7 @@ describe("coordinator runtimes", () => {
       ).toBe("direct");
     }
     expect(coordinatorRequestQueue(new Request("https://coordinator.test/portal/login"))).toBe(
-      "lifecycle",
+      "direct",
     );
     expect(
       coordinatorRequestQueue(
@@ -544,7 +544,7 @@ describe("coordinator runtimes", () => {
       coordinatorRequestQueue(
         new Request("https://coordinator.test/v1/auth/github/start", { method: "POST" }),
       ),
-    ).toBe("lifecycle");
+    ).toBe("direct");
     expect(
       coordinatorRequestQueue(
         new Request("https://coordinator.test/v1/adapters/applied-alice/ticket", {
@@ -564,20 +564,18 @@ describe("coordinator runtimes", () => {
       CRABBOX_SHARED_TOKEN: "shared",
       CRABBOX_SESSION_SECRET: "session-secret",
     } as Env;
-    const start = await runtime.runExclusive(() =>
-      githubAuthRoute(
-        new Request("https://coordinator.test/v1/auth/github/start", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            pollSecretHash: "0".repeat(64),
-            loopbackRedirectURI: `http://127.0.0.1:54321/crabbox/oauth/${"a".repeat(64)}`,
-          }),
+    const start = await githubAuthRoute(
+      new Request("https://coordinator.test/v1/auth/github/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pollSecretHash: "0".repeat(64),
+          loopbackRedirectURI: `http://127.0.0.1:54321/crabbox/oauth/${"a".repeat(64)}`,
         }),
-        "start",
-        runtime,
-        env,
-      ),
+      }),
+      "start",
+      runtime,
+      env,
     );
     const startBody = (await start.json()) as { url: string };
     const state = new URL(startBody.url).searchParams.get("state");

@@ -372,6 +372,12 @@ Provider choices are `HETZNER_TOKEN`, an AWS credential set, an Azure service
 principal, a GCP service account, or `DAYTONA_CRABBOX_KEY`. Node additionally
 requires `DATABASE_URL`.
 
+GitHub OAuth start routes remain unauthenticated so a new user can bootstrap login.
+The coordinator limits active attempts to ten per caller source and 100 globally for
+both CLI and portal login, after removing expired attempts. Node deployments behind a
+reverse proxy must configure `CRABBOX_TRUSTED_PROXY_CIDRS`; otherwise caller limits use
+the direct peer address and ignore forwarded addresses.
+
 For any portal that exposes browser Code, configure
 `CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com` and route the
 matching wildcard hostname to the same coordinator with TLS and WebSocket

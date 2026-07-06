@@ -901,7 +901,7 @@ export class FleetCoordinator {
         return await githubAuthRoute(request, parts[3], this.state, this.env);
       }
       if (method === "GET" && parts.join("/") === "portal/login") {
-        return await githubPortalLogin(request, this.state.storage, this.env);
+        return await githubPortalLogin(request, this.state, this.env);
       }
       if (method === "GET" && parts.join("/") === "portal/logout") {
         return githubPortalLogoutConfirmation();

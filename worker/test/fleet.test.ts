@@ -22356,6 +22356,106 @@ describe("fleet identity", () => {
     await expect(poll.json()).resolves.toMatchObject({ status: "pending" });
   });
 
+  it("atomically limits pending GitHub logins per caller", async () => {
+    const storage = new MemoryStorage();
+    const fleet = githubLoginTestFleet(storage);
+    const sourceIP = "198.51.100.40";
+
+    const responses = await Promise.all(
+      Array.from({ length: 20 }, () => fleet.fetch(githubLoginStartRequest(sourceIP))),
+    );
+    expect(responses.map(({ status }) => status).toSorted()).toEqual([
+      ...Array.from({ length: 10 }, () => 200),
+      ...Array.from({ length: 10 }, () => 429),
+    ]);
+    expect((await storage.list({ prefix: "oauth:" })).size).toBe(10);
+
+    const stored = [
+      ...(await storage.list<Record<string, unknown>>({ prefix: "oauth:" })).values(),
+    ];
+    expect(stored.every(({ sourceHash }) => typeof sourceHash === "string")).toBe(true);
+    expect(JSON.stringify(stored)).not.toContain(sourceIP);
+  });
+
+  it("shares the caller limit across CLI and portal GitHub login", async () => {
+    const fleet = githubLoginTestFleet();
+    const sourceIP = "198.51.100.41";
+
+    const cliStarts = await Promise.all(
+      Array.from({ length: 9 }, () => fleet.fetch(githubLoginStartRequest(sourceIP))),
+    );
+    expect(cliStarts.every(({ status }) => status === 200)).toBe(true);
+    expect(
+      (
+        await fleet.fetch(
+          request("GET", "/portal/login", {
+            headers: { "cf-connecting-ip": sourceIP },
+          }),
+        )
+      ).status,
+    ).toBe(302);
+
+    const blockedCLI = await fleet.fetch(githubLoginStartRequest(sourceIP));
+    expect(blockedCLI.status).toBe(429);
+    await expect(blockedCLI.json()).resolves.toMatchObject({ error: "login_rate_limited" });
+    expect(
+      (
+        await fleet.fetch(
+          request("GET", "/portal/login", {
+            headers: { "cf-connecting-ip": sourceIP },
+          }),
+        )
+      ).status,
+    ).toBe(429);
+    expect((await fleet.fetch(githubLoginStartRequest("198.51.100.42"))).status).toBe(200);
+  });
+
+  it("reclaims expired attempts from the caller limit", async () => {
+    const storage = new MemoryStorage();
+    const fleet = githubLoginTestFleet(storage);
+    const sourceIP = "198.51.100.43";
+
+    const starts = await Promise.all(
+      Array.from({ length: 10 }, () => fleet.fetch(githubLoginStartRequest(sourceIP))),
+    );
+    expect(starts.every(({ status }) => status === 200)).toBe(true);
+    expect((await fleet.fetch(githubLoginStartRequest(sourceIP))).status).toBe(429);
+
+    const attempts = await storage.list<Record<string, unknown>>({ prefix: "oauth:" });
+    await Promise.all(
+      [...attempts].map(([key, pending]) =>
+        storage.put(key, { ...pending, expiresAt: "2026-05-01T00:00:00.000Z" }),
+      ),
+    );
+
+    expect((await fleet.fetch(githubLoginStartRequest(sourceIP))).status).toBe(200);
+    expect((await storage.list({ prefix: "oauth:" })).size).toBe(1);
+  });
+
+  it("keeps a global pending GitHub login backstop across callers", async () => {
+    const fleet = githubLoginTestFleet();
+
+    const responses = await Promise.all(
+      Array.from({ length: 10 }, (_, source) =>
+        Array.from({ length: 10 }, () =>
+          fleet.fetch(githubLoginStartRequest(`198.51.100.${source + 1}`)),
+        ),
+      ).flat(),
+    );
+    expect(responses.every(({ status }) => status === 200)).toBe(true);
+
+    expect((await fleet.fetch(githubLoginStartRequest("198.51.100.200"))).status).toBe(429);
+    expect(
+      (
+        await fleet.fetch(
+          request("GET", "/portal/login", {
+            headers: { "cf-connecting-ip": "198.51.100.201" },
+          }),
+        )
+      ).status,
+    ).toBe(429);
+  });
+
   it.each([
     ["missing", undefined],
     ["remote host", `http://example.test:54321/crabbox/oauth/${"a".repeat(64)}`],
@@ -23106,6 +23206,31 @@ async function startGitHubLogin(env: Partial<Env> = {}): Promise<{
   const state = url.searchParams.get("state");
   expect(state).toBeTruthy();
   return { fleet, loginID: body.loginID, pollSecret, state: state || "" };
+}
+
+function githubLoginTestFleet(storage = new MemoryStorage()): FleetDurableObject {
+  return testFleet(
+    storage,
+    {},
+    {
+      CRABBOX_DEFAULT_ORG: "openclaw",
+      CRABBOX_PUBLIC_URL: "https://crabbox.test",
+      CRABBOX_GITHUB_CLIENT_ID: "github-client",
+      CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SESSION_SECRET: "session-secret",
+    },
+  );
+}
+
+function githubLoginStartRequest(sourceIP: string): Request {
+  return request("POST", "/v1/auth/github/start", {
+    headers: { "cf-connecting-ip": sourceIP },
+    body: {
+      pollSecretHash: "0".repeat(64),
+      loopbackRedirectURI: testLoopbackRedirectURI,
+    },
+  });
 }
 
 const testLoopbackRedirectURI = `http://127.0.0.1:54321/crabbox/oauth/${"a".repeat(64)}`;
