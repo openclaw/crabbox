@@ -56,13 +56,13 @@ The CLI picks one of four modes per provider in `loadBackend`
   (`CRABBOX_COORDINATOR` or `config set-broker`). The provider's SSH backend is
   wrapped in a `coordinatorLeaseBackend`: lease lifecycle goes through the
   coordinator over HTTPS, but the CLI still drives SSH, rsync, and command execution
-  **directly** to the runner. The brokered set is exactly the four managed cloud
-  providers: `aws`, `azure`, `gcp`, `hetzner`.
+  **directly** to the runner. The brokered set is exactly the five managed cloud
+  providers: `aws`, `azure`, `daytona`, `gcp`, `hetzner`.
 - **Direct SSH mode** — the provider returns an SSH lease backend but no broker
   is configured. The CLI provisions and connects against the cloud or host API
-  itself; no coordinator is involved. The four brokerable providers fall back to this
+  itself; no coordinator is involved. The five brokerable providers fall back to this
   when no broker URL is set, and every other SSH-lease provider (`ssh`,
-  `parallels`, `proxmox`, `daytona`, `runpod`, and so on) always runs here.
+  `parallels`, `proxmox`, `runpod`, and so on) always runs here.
 - **Registered direct mode** — `broker.mode: registered` keeps the same direct
   SSH provider lifecycle but registers lease metadata and heartbeats with the
   coordinator. It can list and share portal bridges, but cannot directly call

@@ -47,7 +47,7 @@ crabbox login --url https://broker.example.com --no-browser   # print the URL; o
 crabbox login --url https://broker.example.com --provider aws # also set the default brokered provider
 ```
 
-`--provider` accepts `hetzner`, `aws`, `azure`, or `gcp`. With no `--url`,
+`--provider` accepts `hetzner`, `aws`, `azure`, `daytona`, or `gcp`. With no `--url`,
 `login` reuses the broker URL already in config. After storing the token, the
 CLI calls `whoami` to confirm the credential works.
 

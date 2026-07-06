@@ -1329,7 +1329,7 @@ func (testDaytonaProvider) Spec() ProviderSpec {
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
-		Coordinator: CoordinatorNever,
+		Coordinator: CoordinatorSupported,
 	}
 }
 

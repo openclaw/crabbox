@@ -524,6 +524,7 @@ describe("coordinator runtimes", () => {
       ["GET", "/v1/workspaces/fleet-is-101"],
       ["DELETE", "/v1/workspaces/fleet-is-101"],
       ["GET", "/v1/native-vnc/handoff"],
+      ["GET", "/v1/leases/cbx_abcdef123456"],
       ["GET", "/v1/adapters/applied-alice"],
       ["POST", "/v1/adapters/applied-alice/proxy/v1/workspaces"],
     ]) {

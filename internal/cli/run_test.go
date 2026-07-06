@@ -639,6 +639,12 @@ func TestTimingJSONIncludesLabelWhenAvailable(t *testing.T) {
 }
 
 func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+
 	tests := []struct {
 		name     string
 		provider string

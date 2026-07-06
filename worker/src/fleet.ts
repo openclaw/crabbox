@@ -50,6 +50,12 @@ import {
   coordinatorRequestQueue,
   type CoordinatorRuntime,
 } from "./coordinator-runtime";
+import {
+  DaytonaClient,
+  daytonaAccessNeedsRefresh,
+  isDaytonaNotFound,
+  type DaytonaSSHEndpoint,
+} from "./daytona";
 import { GCPClient, gcpProviderLabelValue } from "./gcp";
 import {
   HetznerClient,
@@ -267,6 +273,7 @@ function coordinatorDiagnosticSecrets(env: Env): Array<string | undefined> {
     env.AWS_SESSION_TOKEN,
     env.AZURE_CLIENT_SECRET,
     env.GCP_PRIVATE_KEY,
+    env.DAYTONA_CRABBOX_KEY,
     env.CRABBOX_RUNTIME_ADAPTER_TOKEN,
     env.CRABBOX_SHARED_TOKEN,
     env.CRABBOX_ADMIN_TOKEN,
@@ -2165,7 +2172,6 @@ export class FleetCoordinator {
     if (!config.providerKey) {
       config = { ...config, providerKey: canonicalProviderKey };
     }
-    config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
     const readiness = this.providerConfigurationReadiness(
       config.provider,
       providerProjectForConfig(config),
@@ -2181,6 +2187,7 @@ export class FleetCoordinator {
         { status: 424 },
       );
     }
+    config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
     const provider = this.provider(
       config.provider,
       providerRegionForConfig(config),
@@ -4527,7 +4534,10 @@ export class FleetCoordinator {
     if (method === "GET" && action === undefined) {
       const admin = isAdminRequest(request);
       const lease = await this.resolveLease(leaseID, request, false);
-      return lease ? json({ lease: this.leaseForRequest(lease, request, admin) }) : notFound();
+      const refreshed = lease ? await this.refreshLeaseAccessForResolution(lease) : undefined;
+      return refreshed
+        ? json({ lease: this.leaseForRequest(refreshed, request, admin) })
+        : notFound();
     }
     if (method === "POST" && action === "heartbeat") {
       return this.heartbeatLease(request, leaseID);
@@ -4918,6 +4928,40 @@ export class FleetCoordinator {
     const lease =
       managedProvider === "aws" ? await this.withAWSIngressOperationLock(refresh) : await refresh();
     return json({ lease });
+  }
+
+  private async refreshLeaseAccessForResolution(lease: LeaseRecord): Promise<LeaseRecord> {
+    if (
+      lease.state !== "active" ||
+      lease.cleanupStartedAt ||
+      Date.parse(lease.expiresAt) <= Date.now()
+    ) {
+      return lease;
+    }
+    const managedProvider = managedLeaseProvider(lease);
+    if (!managedProvider) {
+      return lease;
+    }
+    const provider = this.provider(managedProvider, lease.region, lease.providerProject);
+    const refreshed = await provider.refreshLeaseAccessForResolution?.(structuredClone(lease));
+    if (!refreshed) {
+      return lease;
+    }
+    return await this.state.runExclusive(async () => {
+      const latest = await this.getLease(lease.id);
+      if (
+        !latest ||
+        latest.state !== "active" ||
+        latest.cleanupStartedAt ||
+        latest.cloudID !== lease.cloudID
+      ) {
+        return latest ?? lease;
+      }
+      const merged = applyLeaseRecordChanges(latest, lease, refreshed);
+      await this.putLease(merged);
+      await this.scheduleAlarm();
+      return merged;
+    });
   }
 
   private async applyLeaseHeartbeatState(
@@ -9117,12 +9161,15 @@ export class FleetCoordinator {
             ? await this.provider("azure").listCrabboxServers()
             : provider === "gcp"
               ? await this.provider("gcp").listCrabboxServers()
-              : [
-                  ...(await this.provider("hetzner").listCrabboxServers()),
-                  ...(await this.listProviderMachinesSafe("aws")),
-                  ...(await this.listProviderMachinesSafe("azure")),
-                  ...(await this.listProviderMachinesSafe("gcp")),
-                ];
+              : provider === "daytona"
+                ? await this.provider("daytona").listCrabboxServers()
+                : [
+                    ...(await this.provider("hetzner").listCrabboxServers()),
+                    ...(await this.listProviderMachinesSafe("aws")),
+                    ...(await this.listProviderMachinesSafe("azure")),
+                    ...(await this.listProviderMachinesSafe("gcp")),
+                    ...(await this.listProviderMachinesSafe("daytona")),
+                  ];
     return json({ machines });
   }
 
@@ -9206,6 +9253,15 @@ export class FleetCoordinator {
           message: "registered leases cannot join coordinator-managed ready pools",
         },
         { status: 400 },
+      );
+    }
+    if (lease.provider === "daytona") {
+      return json(
+        {
+          error: "provider_not_supported",
+          message: "Daytona leases cannot join ready pools because their SSH token rotates",
+        },
+        { status: 409 },
       );
     }
     if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
@@ -9459,11 +9515,15 @@ export class FleetCoordinator {
     const leases = admin
       ? this.filterLeases(await this.leaseRecords(), request)
       : this.filterLeasesForRequest(await this.leaseRecords(), request);
-    return json({ leases: leases.map((lease) => this.leaseForRequest(lease, request, admin)) });
+    return json({ leases: leases.map((lease) => this.leaseForListRequest(lease, request, admin)) });
   }
 
   private async adminLeases(request: Request): Promise<Response> {
-    return json({ leases: this.filterLeases(await this.leaseRecords(), request) });
+    return json({
+      leases: this.filterLeases(await this.leaseRecords(), request).map((lease) =>
+        this.leaseForListRequest(lease, request, true),
+      ),
+    });
   }
 
   private async adminLeaseAudit(request: Request): Promise<Response> {
@@ -11774,6 +11834,14 @@ export class FleetCoordinator {
     return visible;
   }
 
+  private leaseForListRequest(lease: LeaseRecord, request: Request, admin: boolean): LeaseRecord {
+    const visible = this.leaseForRequest(lease, request, admin);
+    if (visible.provider === "daytona" && visible.sshUser) {
+      visible.sshUser = "<token>";
+    }
+    return visible;
+  }
+
   private leaseAccessRole(
     lease: LeaseRecord,
     request: Request,
@@ -12062,6 +12130,9 @@ export class FleetCoordinator {
     }
     if (provider === "gcp") {
       return new GCPProvider(this.env, this.state.storage, region, project);
+    }
+    if (provider === "daytona") {
+      return new DaytonaProvider(this.env);
     }
     return new HetznerProvider(this.env);
   }
@@ -14425,7 +14496,7 @@ function providerFromQuery(value: string | null): Provider | undefined {
 function providerRegionForConfig(config: LeaseConfig): string | undefined {
   if (config.provider === "gcp") return config.gcpZone;
   if (config.provider === "azure") return config.azureLocation;
-  return config.awsRegion;
+  return config.provider === "aws" ? config.awsRegion : undefined;
 }
 
 function providerProjectForConfig(config: LeaseConfig): string | undefined {
@@ -15487,7 +15558,8 @@ function boundedRunEvent(
     input.provider === "aws" ||
     input.provider === "hetzner" ||
     input.provider === "azure" ||
-    input.provider === "gcp"
+    input.provider === "gcp" ||
+    input.provider === "daytona"
   ) {
     event.provider = input.provider;
   }
@@ -16703,6 +16775,7 @@ interface CloudProvider {
     lease: LeaseRecord,
     context: ProviderAccessContext,
   ): Promise<LeaseRecord | void>;
+  refreshLeaseAccessForResolution?(lease: LeaseRecord): Promise<LeaseRecord | void>;
   reconcileLeaseAccess?(lease: LeaseRecord, context: ProviderAccessContext): Promise<void>;
   createServerWithFallback(
     config: ReturnType<typeof leaseConfig>,
@@ -17313,6 +17386,219 @@ export class GCPProvider implements CloudProvider {
 
   hourlyPriceUSD(): Promise<number | undefined> {
     return this.client.hourlyPriceUSD();
+  }
+}
+
+export class DaytonaProvider implements CloudProvider {
+  private clientValue?: DaytonaClient;
+  private readonly pendingAccess = new Map<string, DaytonaSSHEndpoint>();
+
+  constructor(private readonly env: Env) {}
+
+  private get client(): DaytonaClient {
+    this.clientValue ??= new DaytonaClient(this.env);
+    return this.clientValue;
+  }
+
+  listCrabboxServers(): Promise<ProviderMachine[]> {
+    return this.client.listCrabboxServers();
+  }
+
+  getServer(id: string): Promise<ProviderMachine> {
+    return this.client.getServer(id);
+  }
+
+  findServerByLease(leaseID: string): Promise<ProviderMachine | undefined> {
+    return this.client.findServerByLease(leaseID);
+  }
+
+  async recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    const server = await this.findServerByLease(lease.id);
+    return server && providerMachineOwnedByLease(server, lease, "daytona") ? server : undefined;
+  }
+
+  prepareLeaseConfig(
+    config: ReturnType<typeof leaseConfig>,
+  ): Promise<ReturnType<typeof leaseConfig>> {
+    return Promise.resolve({
+      ...config,
+      serverType: this.client.snapshot || "default",
+      sshUser: this.client.user,
+      sshPort: "22",
+      sshFallbackPorts: [],
+      workRoot: this.client.workRoot,
+    });
+  }
+
+  async createServerWithFallback(
+    config: ReturnType<typeof leaseConfig>,
+    leaseID: string,
+    slug: string,
+    owner: string,
+  ): Promise<{
+    server: ProviderMachine;
+    serverType: string;
+    market?: string;
+    attempts?: ProvisioningAttempt[];
+  }> {
+    let server: ProviderMachine;
+    try {
+      server = await this.client.createServer(config, leaseID, slug, owner);
+    } catch (error) {
+      const recovered = await this.client.findServerByLease(leaseID).catch(() => undefined);
+      if (
+        !recovered ||
+        !providerMachineOwnedByLease(
+          recovered,
+          {
+            id: leaseID,
+            slug,
+            provider: "daytona",
+            owner,
+            cloudID: recovered.cloudID,
+          },
+          "daytona",
+        )
+      ) {
+        throw error;
+      }
+      server = recovered;
+    }
+    try {
+      const ready = await this.client.waitForStarted(server.cloudID);
+      const access = await this.client.createSSHAccess(ready.cloudID, {
+        expiresAt: new Date(Date.now() + config.ttlSeconds * 1_000).toISOString(),
+      });
+      this.pendingAccess.set(ready.cloudID, access);
+      return {
+        server: { ...ready, host: access.host },
+        serverType: this.client.snapshot || ready.serverType || "default",
+      };
+    } catch (error) {
+      try {
+        const current = await this.client.getServer(server.cloudID);
+        const owned = providerMachineOwnedByLease(
+          current,
+          {
+            id: leaseID,
+            slug,
+            provider: "daytona",
+            owner,
+            cloudID: server.cloudID,
+          },
+          "daytona",
+        );
+        if (!owned) {
+          throw new Error(
+            `refusing to clean Daytona sandbox ${server.cloudID}: ownership does not match lease ${leaseID}`,
+            { cause: error },
+          );
+        }
+        await this.client.deleteServer(server.cloudID);
+      } catch (cleanupError) {
+        if (!isDaytonaNotFound(cleanupError)) {
+          throw new ProviderProvisioningCleanupError(
+            `${errorMessage(error)}; cleanup failed for Daytona sandbox ${server.cloudID}: ${errorMessage(cleanupError)}`,
+            { provider: "daytona", cloudID: server.cloudID, serverID: server.id },
+            cleanupError,
+          );
+        }
+      }
+      throw new Error(
+        `${errorMessage(error)}; deleted Daytona sandbox ${server.cloudID} after readiness failure`,
+        { cause: error },
+      );
+    }
+  }
+
+  async finalizeLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    server: ProviderMachine,
+  ): Promise<ProviderLeaseCreateFinalization> {
+    const access =
+      this.pendingAccess.get(server.cloudID) ??
+      (await this.client.createSSHAccess(server.cloudID, lease));
+    this.pendingAccess.delete(server.cloudID);
+    return {
+      config,
+      lease: {
+        ...lease,
+        host: access.host,
+        sshUser: access.user,
+        sshPort: access.port,
+        sshFallbackPorts: [],
+        providerAccessExpiresAt: access.expiresAt,
+        workRoot: this.client.workRoot,
+        ...(server.region ? { region: server.region } : {}),
+      },
+    };
+  }
+
+  async refreshLeaseAccessForResolution(lease: LeaseRecord): Promise<LeaseRecord | void> {
+    if (!daytonaAccessNeedsRefresh(lease)) return;
+    const access = await this.client.createSSHAccess(lease.cloudID, lease);
+    return {
+      ...lease,
+      host: access.host,
+      sshUser: access.user,
+      sshPort: access.port,
+      sshFallbackPorts: [],
+      providerAccessExpiresAt: access.expiresAt,
+    };
+  }
+
+  async releaseLease(lease: LeaseRecord): Promise<void> {
+    this.pendingAccess.delete(lease.cloudID);
+    let server: ProviderMachine;
+    try {
+      server = await this.client.getServer(lease.cloudID);
+    } catch (error) {
+      if (isDaytonaNotFound(error)) return;
+      throw error;
+    }
+    if (!providerMachineOwnedByLease(server, lease, "daytona")) {
+      throw new Error(
+        `refusing to delete Daytona sandbox ${lease.cloudID}: ownership does not match lease ${lease.id}`,
+      );
+    }
+    await this.client.deleteServer(lease.cloudID);
+  }
+
+  deleteServer(id: string): Promise<void> {
+    this.pendingAccess.delete(id);
+    return this.client.deleteServer(id);
+  }
+
+  supportsNativeImages(): boolean {
+    return false;
+  }
+
+  nativeImagesUnsupportedMessage(): string {
+    return "Daytona sandboxes are selected through the coordinator snapshot configuration";
+  }
+
+  defaultImageStrategy(): "image" | "disk-snapshot" {
+    return "disk-snapshot";
+  }
+
+  validateLeaseImageStrategy(): string | undefined {
+    return undefined;
+  }
+
+  createLeaseImage = unsupportedProviderImageLifecycle("daytona");
+  getImage = unsupportedProviderImageLifecycle("daytona");
+  deleteImage = unsupportedProviderImageLifecycle("daytona");
+  storedImageMetadata = noStoredImageMetadata;
+  decorateImage = passthroughProviderImage;
+  validateDeleteImage = allowProviderImageDelete;
+
+  deleteSSHKey(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  hourlyPriceUSD(): Promise<number | undefined> {
+    return Promise.resolve(undefined);
   }
 }
 

@@ -261,8 +261,8 @@
     "gpu": "unknown",
     "lifecycle": "Daytona",
     "cleanup": "sandbox delete",
-    "bestFit": "Managed development sandbox with delegated archive sync and execution",
-    "caveat": "SSH access is short-lived; run and sync use Daytona toolbox APIs",
+    "bestFit": "Managed development sandbox with direct toolbox execution or brokered SSH",
+    "caveat": "SSH access is short-lived; direct run uses Daytona toolbox APIs while brokered run uses SSH",
     "docs": "daytona.md"
   },
   "digitalocean": {

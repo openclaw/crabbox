@@ -20,7 +20,7 @@ macOS targets or cloud-specific capacity controls. For non-Linux targets or
 provider-native snapshots, use [AWS](aws.md), [GCP](gcp.md), [Azure](azure.md),
 or a container/sandbox provider instead.
 
-Hetzner is one of the four brokerable providers: it runs **direct from the CLI**
+Hetzner is one of the five brokerable providers: it runs **direct from the CLI**
 by default and goes **through the coordinator** only when a coordinator URL and
 token are configured. See [Provider backends](../provider-backends.md) for the
 brokered-vs-direct model.

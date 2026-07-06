@@ -2,6 +2,10 @@
 
 ## 0.36.1 - Unreleased
 
+### Added
+
+- Added coordinator-managed Daytona Linux leases with a Worker-held API key, exact ownership cleanup, expiring SSH-token refresh, CLI secret redaction, and production Cloudflare configuration.
+
 ### Fixed
 
 - Revalidated non-admin GitHub grants when WebVNC and Code agent tickets are consumed, matching the existing egress fail-closed boundary after logout, emergency revocation, membership loss, or membership-check failure. Thanks @coygeek.

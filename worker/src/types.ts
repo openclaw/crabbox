@@ -53,6 +53,15 @@ export interface Env {
   CRABBOX_GCP_SSH_CIDRS?: string;
   CRABBOX_GCP_ROOT_GB?: string;
   CRABBOX_GCP_SERVICE_ACCOUNT?: string;
+  DAYTONA_CRABBOX_KEY?: string;
+  CRABBOX_DAYTONA_API_URL?: string;
+  CRABBOX_DAYTONA_ORGANIZATION_ID?: string;
+  CRABBOX_DAYTONA_SNAPSHOT?: string;
+  CRABBOX_DAYTONA_TARGET?: string;
+  CRABBOX_DAYTONA_USER?: string;
+  CRABBOX_DAYTONA_WORK_ROOT?: string;
+  CRABBOX_DAYTONA_SSH_GATEWAY_HOST?: string;
+  CRABBOX_DAYTONA_SSH_ACCESS_MINUTES?: string;
   CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_SHARED_OWNER?: string;
@@ -258,6 +267,12 @@ export const coordinatorProviderRegistry = [
     requiredSecrets: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
     adminAudit: false,
   },
+  {
+    provider: "daytona",
+    label: "Daytona",
+    requiredSecrets: ["DAYTONA_CRABBOX_KEY"],
+    adminAudit: false,
+  },
 ] as const satisfies readonly {
   provider: string;
   label: string;
@@ -359,6 +374,7 @@ export interface LeaseRecord {
   sshUser: string;
   sshPort: string;
   sshFallbackPorts?: string[];
+  providerAccessExpiresAt?: string;
   workRoot: string;
   keep: boolean;
   ttlSeconds: number;

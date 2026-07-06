@@ -369,7 +369,8 @@ Configure `CRABBOX_PUBLIC_URL`, one auth model, and at least one brokered
 provider. Shared-token automation needs `CRABBOX_SHARED_TOKEN` and
 `CRABBOX_SHARED_OWNER`; browser login needs the GitHub OAuth settings below.
 Provider choices are `HETZNER_TOKEN`, an AWS credential set, an Azure service
-principal, or a GCP service account. Node additionally requires `DATABASE_URL`.
+principal, a GCP service account, or `DAYTONA_CRABBOX_KEY`. Node additionally
+requires `DATABASE_URL`.
 
 For any portal that exposes browser Code, configure
 `CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com` and route the
@@ -390,6 +391,8 @@ CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for /v1/workspaces terminal attachmen
 CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; hetzner, aws, azure, or gcp
 CRABBOX_WORKSPACE_CLASS           optional workspace machine class; default standard
 CRABBOX_WORKSPACE_PREWARM_COUNT   optional ready spares per active organization; default 0, maximum 4
+DAYTONA_CRABBOX_KEY               required for brokered Daytona leases
+CRABBOX_DAYTONA_*                 optional Daytona API, snapshot, target, user, work-root, and SSH-token settings
 CRABBOX_RUN_RETENTION_DAYS        terminal run history retention; default 30 days, minimum 1
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login

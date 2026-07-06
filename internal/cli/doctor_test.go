@@ -26,8 +26,8 @@ func TestCoordinatorProviderReadinessSupported(t *testing.T) {
 		{provider: "azure", want: true},
 		{provider: "gcp", want: true},
 		{provider: "hetzner", want: true},
+		{provider: "daytona", want: true},
 		{provider: "proxmox", want: false},
-		{provider: "daytona", want: false},
 		{provider: "morph", want: false},
 		{provider: "islo", want: false},
 		{provider: "e2b", want: false},
@@ -604,7 +604,7 @@ func TestDoctorBrokerAuthFailureReportsExpiredUserToken(t *testing.T) {
 	t.Fatalf("missing broker check: %#v", view.Checks)
 }
 
-func TestDoctorSkipsProviderReadinessForCoordinatorUnsupportedProvider(t *testing.T) {
+func TestDoctorChecksProviderReadinessForCoordinatorSupportedDaytona(t *testing.T) {
 	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync", "curl"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("missing local doctor tool %s: %v", tool, err)
@@ -623,10 +623,10 @@ func TestDoctorSkipsProviderReadinessForCoordinatorUnsupportedProvider(t *testin
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/v1/whoami":
 			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{Auth: "token", Owner: "alice@example.test", Org: "example-org"})
+		case "/v1/providers/daytona/readiness":
+			readinessCalled = true
+			_ = json.NewEncoder(w).Encode(CoordinatorProviderReadiness{Provider: "daytona", Configured: true})
 		default:
-			if strings.Contains(r.URL.Path, "/readiness") {
-				readinessCalled = true
-			}
 			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
 		}
 	}))
@@ -639,11 +639,11 @@ func TestDoctorSkipsProviderReadinessForCoordinatorUnsupportedProvider(t *testin
 	if err != nil {
 		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}
-	if readinessCalled {
-		t.Fatal("doctor called provider readiness for coordinator-unsupported provider")
+	if !readinessCalled {
+		t.Fatal("doctor did not call Daytona provider readiness")
 	}
-	if strings.Contains(stdout.String(), "failed  provider") {
-		t.Fatalf("unexpected provider failure: %q", stdout.String())
+	if !strings.Contains(stdout.String(), "ok      provider provider=daytona coordinator_secrets=ready") {
+		t.Fatalf("missing Daytona readiness: %q", stdout.String())
 	}
 }
 

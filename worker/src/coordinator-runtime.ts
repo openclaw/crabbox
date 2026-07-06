@@ -53,6 +53,15 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[0] === "v1" &&
     path[1] === "leases" &&
     path[2] &&
+    method === "GET" &&
+    path.length === 3
+  ) {
+    return "direct";
+  }
+  if (
+    path[0] === "v1" &&
+    path[1] === "leases" &&
+    path[2] &&
     method === "POST" &&
     (path[3] === "heartbeat" || path[3] === "release")
   ) {

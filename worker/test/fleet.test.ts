@@ -16369,6 +16369,126 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("redacts Daytona SSH access tokens from portal lease details", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      daytona: fakeProvider(undefined, { provider: "daytona" }),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        provider: "daytona",
+        owner: "alice@example.com",
+        org: "example-org",
+        host: "ssh.app.daytona.io",
+        sshUser: "daytona-live-ssh-token",
+        sshPort: "22",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const response = await fleet.fetch(
+      request("GET", "/portal/leases/cbx_000000000001", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toContain("&lt;token&gt;@ssh.app.daytona.io:22");
+    expect(body).not.toContain("daytona-live-ssh-token");
+  });
+
+  it("redacts Daytona SSH access tokens from user and admin lease lists", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "daytona",
+        owner: "alice@example.com",
+        org: "example-org",
+        sshUser: "daytona-live-ssh-token",
+      }),
+    );
+
+    const userResponse = await fleet.fetch(
+      request("GET", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(userResponse.status).toBe(200);
+    const userBody = await userResponse.text();
+    expect(userBody).toContain('"sshUser":"<token>"');
+    expect(userBody).not.toContain("daytona-live-ssh-token");
+
+    const adminResponse = await fleet.fetch(
+      request("GET", "/v1/admin/leases", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    expect(adminResponse.status).toBe(200);
+    const adminBody = await adminResponse.text();
+    expect(adminBody).toContain('"sshUser":"<token>"');
+    expect(adminBody).not.toContain("daytona-live-ssh-token");
+  });
+
+  it("returns a refreshed Daytona SSH token when resolving an expiring lease", async () => {
+    const storage = new MemoryStorage();
+    let refreshes = 0;
+    const fleet = testFleet(storage, {
+      daytona: fakeProvider(undefined, {
+        provider: "daytona",
+        onRefreshLeaseAccessForResolution: (lease) => {
+          refreshes += 1;
+          return {
+            ...lease,
+            sshUser: "daytona-refreshed-token",
+            providerAccessExpiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          };
+        },
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "daytona",
+        cloudID: "sandbox-one",
+        owner: "alice@example.com",
+        org: "example-org",
+        sshUser: "daytona-expiring-token",
+        providerAccessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/leases/cbx_000000000001", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      lease: { sshUser: "daytona-refreshed-token" },
+    });
+    expect(refreshes).toBe(1);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000001")?.sshUser).toBe(
+      "daytona-refreshed-token",
+    );
+  });
+
   it("fails closed without an isolated Code origin while retaining health and bridge tickets", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -21947,7 +22067,7 @@ describe("fleet identity", () => {
 
     expect(response.status).toBe(200);
     expect(body).toContain("provider health");
-    expect(body).toContain("4 supported");
+    expect(body).toContain("5 supported");
     expect(body).toContain("users");
     expect(body).toContain('href="/portal/admin/users"');
     expect(body).not.toContain("all leases");
@@ -22788,6 +22908,21 @@ describe("fleet identity", () => {
         "AZURE_SUBSCRIPTION_ID",
       ],
     });
+
+    const daytonaMissing = await fleet.fetch(request("GET", "/v1/providers/daytona/readiness"));
+    await expect(daytonaMissing.json()).resolves.toMatchObject({
+      provider: "daytona",
+      configured: false,
+      missing: ["DAYTONA_CRABBOX_KEY"],
+    });
+
+    const daytonaFleet = testFleet(undefined, {}, { DAYTONA_CRABBOX_KEY: "live-key" });
+    const daytona = await daytonaFleet.fetch(request("GET", "/v1/providers/daytona/readiness"));
+    await expect(daytona.json()).resolves.toMatchObject({
+      provider: "daytona",
+      configured: true,
+      missing: [],
+    });
   });
 
   it("reports AWS capacity quota readiness before a lease is requested", async () => {
@@ -22906,6 +23041,31 @@ describe("fleet identity", () => {
       error: "provider_not_configured",
       provider: "azure",
       missing: expect.arrayContaining(["AZURE_TENANT_ID"]),
+    });
+  });
+
+  it("fails brokered Daytona leases with provider_not_configured before constructing Daytona", async () => {
+    const fleet = testFleet();
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "daytona",
+          target: "linux",
+          class: "standard",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(response.status).toBe(424);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "provider_not_configured",
+      provider: "daytona",
+      missing: ["DAYTONA_CRABBOX_KEY"],
     });
   });
 });
@@ -23067,7 +23227,7 @@ function expiredRuntimeAdapterClaim(adapterID: string) {
 function fakeProvider(
   onCreate?: (config: LeaseConfig) => Promise<void> | void,
   result: {
-    provider?: "hetzner" | "aws" | "azure" | "gcp";
+    provider?: "hetzner" | "aws" | "azure" | "gcp" | "daytona";
     serverType?: string;
     hostID?: string;
     cloudID?: string;
@@ -23119,6 +23279,7 @@ function fakeProvider(
       lease: LeaseRecord,
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
     ) => LeaseRecord | undefined;
+    onRefreshLeaseAccessForResolution?: (lease: LeaseRecord) => LeaseRecord | undefined;
     onReconcileLeaseAccess?: (
       lease: LeaseRecord,
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
@@ -23260,6 +23421,9 @@ function fakeProvider(
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
     ) {
       return result.onRefreshLeaseAccess?.(lease, context);
+    },
+    async refreshLeaseAccessForResolution(lease: LeaseRecord) {
+      return result.onRefreshLeaseAccessForResolution?.(lease);
     },
     async reconcileLeaseAccess(
       lease: LeaseRecord,

@@ -135,12 +135,12 @@ func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 			t.Fatalf("leases state=%q", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"leases": []CoordinatorLease{
-			{ID: "cbx_123", Provider: "aws", State: "active"},
+			{ID: "cbx_123", Provider: "daytona", State: "active", SSHUser: "daytona-live-token"},
 		}})
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: "aws", TargetOS: targetLinux, Coordinator: server.URL, CoordToken: "user-token"}
+	cfg := Config{Provider: "daytona", TargetOS: targetLinux, Coordinator: server.URL, CoordToken: "user-token"}
 	coord, _, err := newCoordinatorClient(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -158,6 +158,9 @@ func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 	}
 	if len(leases) != 1 || leases[0].ID != "cbx_123" {
 		t.Fatalf("leases=%#v", leases)
+	}
+	if leases[0].SSHUser != "<token>" {
+		t.Fatalf("sshUser=%q, want redacted token", leases[0].SSHUser)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("unexpected warning: %q", stderr.String())
@@ -384,6 +387,27 @@ func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 	applyResolvedServerConfig(&cfg, server)
 	if cfg.WorkRoot != defaultMacOSWorkRoot {
 		t.Fatalf("workRoot=%q want %q", cfg.WorkRoot, defaultMacOSWorkRoot)
+	}
+}
+
+func TestLeaseToServerTargetMarksDaytonaSSHUserSecret(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "daytona"
+	cfg.SSHKey = "/tmp/must-not-be-used"
+
+	_, target, _ := leaseToServerTarget(CoordinatorLease{
+		ID:       "cbx_123",
+		Provider: "daytona",
+		SSHUser:  "daytona-secret-token",
+		SSHPort:  "22",
+		Host:     "ssh.app.daytona.io",
+	}, cfg)
+
+	if target.User != "daytona-secret-token" || target.Key != "" || !target.AuthSecret {
+		t.Fatalf("target=%#v", target)
+	}
+	if target.NetworkKind != NetworkPublic {
+		t.Fatalf("network kind=%q want public", target.NetworkKind)
 	}
 }
 
