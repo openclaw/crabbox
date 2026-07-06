@@ -572,6 +572,10 @@ bin/crabbox inspect --id blue-lobster --json
 bin/crabbox stop blue-lobster
 ```
 
+Azure release persists an immutable managed-disk cleanup claim before deleting
+the VM. Retries use that durable claim and recheck any live disk attachment;
+they never treat names or Crabbox-written ownership tags as sufficient proof.
+
 Trusted operators can use `crabbox admin release` or `crabbox admin delete --force` for stuck leases.
 
 After AWS credential or account rotation, scan old provider accounts directly for Crabbox-tagged EC2 instances that the current coordinator can no longer see:

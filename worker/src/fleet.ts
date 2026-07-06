@@ -10960,6 +10960,7 @@ export class FleetCoordinator {
             location: record.location,
             subscription: scope.subscription,
             resourceGroup: scope.resourceGroup,
+            ownedDeleteClaimStorage: this.state.storage,
           }).deleteOwnedServer(lease);
         } catch (error) {
           await this.state.runExclusive(async () => {
@@ -16759,6 +16760,7 @@ interface ProviderStateStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   list<T>(options?: { prefix?: string }): Promise<Map<string, T>>;
+  delete(key: string): Promise<unknown>;
 }
 
 interface ProviderAccessContext {
@@ -16943,6 +16945,7 @@ export class AzureProvider implements CloudProvider {
     this.clientValue ??= new AzureClient(this.env, {
       ...(this.location ? { location: this.location } : {}),
       ...(this.deferredCleanup ? { deferredCleanup: this.deferredCleanup } : {}),
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
     });
     return this.clientValue;
   }
@@ -17015,6 +17018,7 @@ export class AzureProvider implements CloudProvider {
       ...(this.deferredCleanup ? { deferredCleanup: this.deferredCleanup } : {}),
       subscription: scope.subscription,
       resourceGroup: scope.resourceGroup,
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
     }).deleteOwnedServer(lease);
   }
 

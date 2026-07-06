@@ -534,6 +534,11 @@ Provider tags discover candidates and explain why they look stale, but do not
 authorize a destructive action. Automatic AWS or Azure deletion requires an
 exact retained coordinator lease binding for the same provider resource and
 region; EC2 Mac host release likewise requires an exact retained host binding.
+Before coordinator Azure cleanup deletes a VM, it also persists the managed
+disk's immutable ID while the live `managedBy` association still matches that
+VM. Later disk deletion revalidates that identity and any current attachment;
+an interrupted cleanup may continue after the VM is gone without trusting
+self-written tags, while missing or mismatched claims fail closed.
 Tag-only and legacy candidates remain report-only. Sweeps skip `keep=true`
 resources and apply a grace window before reporting missing labels or stale
 lease mappings.
