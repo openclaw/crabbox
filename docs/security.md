@@ -324,8 +324,10 @@ claim or explicit `stop --reclaim` adoption of the currently inspected
 deployment; a successful stop removes that one-deployment claim.
 Direct Hetzner release and cleanup similarly require canonical provider labels
 plus an unchanged local claim whose lease and cloud ID match the exact server.
-Cleanup skips weakly labeled, unclaimed, and stale-claim servers instead of
-turning provider inventory into ownership proof.
+Direct GCP release and cleanup require an unchanged local claim bound to the
+project, zone, instance name and immutable numeric ID, lease, slug, and provider
+key. Cleanup skips weakly labeled, unclaimed, and stale-claim servers instead
+of turning provider inventory into ownership proof.
 
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects. Required

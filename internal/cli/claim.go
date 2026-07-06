@@ -16,10 +16,12 @@ import (
 )
 
 type leaseClaim struct {
-	LeaseID                             string            `json:"leaseID"`
-	Slug                                string            `json:"slug,omitempty"`
-	Provider                            string            `json:"provider,omitempty"`
-	CloudID                             string            `json:"cloudID,omitempty"`
+	LeaseID  string `json:"leaseID"`
+	Slug     string `json:"slug,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	CloudID  string `json:"cloudID,omitempty"`
+	// CloudNumericID binds providers whose CloudID is a reusable resource name.
+	CloudNumericID                      int64             `json:"cloudNumericID,omitempty"`
 	ProviderScope                       string            `json:"providerScope,omitempty"`
 	StaticHost                          string            `json:"staticHost,omitempty"`
 	StaticUser                          string            `json:"staticUser,omitempty"`
@@ -542,6 +544,9 @@ func endpointClaimGuard(leaseID string, next func(leaseClaim, bool) error) func(
 func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget) {
 	if server.CloudID != "" {
 		claim.CloudID = server.CloudID
+	}
+	if server.ID != 0 {
+		claim.CloudNumericID = server.ID
 	}
 	if len(server.Labels) > 0 {
 		claim.Labels = cloneStringMap(server.Labels)

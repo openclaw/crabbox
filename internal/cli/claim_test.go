@@ -146,6 +146,7 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	server := Server{
 		Provider: "aws",
 		CloudID:  "i-1750645",
+		ID:       42,
 		Labels: map[string]string{
 			"provider": "aws",
 			"slug":     "warm",
@@ -159,7 +160,7 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.RepoRoot != "" {
+	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.CloudNumericID != 42 || claim.RepoRoot != "" {
 		t.Fatalf("unexpected unattached provider claim: %#v", claim)
 	}
 
