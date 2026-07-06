@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -1542,7 +1540,7 @@ afterSync:
 	if stderrCaptured {
 		stderrEvents = nil
 	}
-	attestDigest := sha256.New()
+	attestDigest := newAttestDigestWriter()
 	if strings.TrimSpace(*attestOut) != "" {
 		stdout = io.MultiWriter(stdout, attestDigest)
 		stderr = io.MultiWriter(stderr, attestDigest)
@@ -1674,7 +1672,7 @@ afterSync:
 			ExitCode:   code,
 			CommandMs:  report.CommandMs,
 			ActionsURL: actionsURL,
-			LogSHA256:  "sha256:" + hex.EncodeToString(attestDigest.Sum(nil)),
+			LogSHA256:  attestDigest.sum(),
 		})
 		if err != nil {
 			return recordFailure(err)

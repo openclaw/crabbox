@@ -7,14 +7,18 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -238,6 +242,50 @@ func TestVerifyRejectsTamperedReceipts(t *testing.T) {
 			t.Fatalf("expected exit 2, got %v", err)
 		}
 	})
+}
+
+func TestAttestDigestWriterSerializesConcurrentStreams(t *testing.T) {
+	writer := newAttestDigestWriter()
+	stdout := io.MultiWriter(io.Discard, writer)
+	stderr := io.MultiWriter(io.Discard, writer)
+	chunk := bytes.Repeat([]byte("a"), 1024)
+	rounds := 64
+	var wg sync.WaitGroup
+	for _, stream := range []io.Writer{stdout, stderr} {
+		wg.Add(1)
+		go func(stream io.Writer) {
+			defer wg.Done()
+			for i := 0; i < rounds; i++ {
+				if _, err := stream.Write(chunk); err != nil {
+					t.Error(err)
+				}
+			}
+		}(stream)
+	}
+	wg.Wait()
+	expected := sha256.Sum256(bytes.Repeat([]byte("a"), 2*rounds*1024))
+	if got := writer.sum(); got != "sha256:"+hex.EncodeToString(expected[:]) {
+		t.Fatalf("unexpected digest %s", got)
+	}
+}
+
+func TestAttestDigestWriterHashesMixedStreamsInArrivalOrder(t *testing.T) {
+	writer := newAttestDigestWriter()
+	stdout := io.MultiWriter(io.Discard, writer)
+	stderr := io.MultiWriter(io.Discard, writer)
+	if _, err := stdout.Write([]byte("out line\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stderr.Write([]byte("err line\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdout.Write([]byte("done\n")); err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256.Sum256([]byte("out line\nerr line\ndone\n"))
+	if got := writer.sum(); got != "sha256:"+hex.EncodeToString(expected[:]) {
+		t.Fatalf("unexpected digest %s", got)
+	}
 }
 
 func TestAttestReceiptPathCollisions(t *testing.T) {

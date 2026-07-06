@@ -12,8 +12,10 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"hash"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -95,6 +97,27 @@ func resolveAttestKey(override string) (ed25519.PrivateKey, error) {
 func attestFingerprint(pub ed25519.PublicKey) string {
 	digest := sha256.Sum256(pub)
 	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+type attestDigestWriter struct {
+	mu     sync.Mutex
+	digest hash.Hash
+}
+
+func newAttestDigestWriter() *attestDigestWriter {
+	return &attestDigestWriter{digest: sha256.New()}
+}
+
+func (w *attestDigestWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.digest.Write(p)
+}
+
+func (w *attestDigestWriter) sum() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return "sha256:" + hex.EncodeToString(w.digest.Sum(nil))
 }
 
 func jsonHasDuplicateKeys(dec *json.Decoder) (bool, error) {
