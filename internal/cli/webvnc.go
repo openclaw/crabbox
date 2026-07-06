@@ -165,6 +165,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(fs.Output(), "  --local-port <port>")
 		fmt.Fprintln(fs.Output(), "  --open")
 		fmt.Fprintln(fs.Output(), "  --take-control")
+		fmt.Fprintln(fs.Output(), "  --preflight  verify macOS Screen Sharing RFB authentication and exit")
 		fmt.Fprintln(fs.Output(), "  --redact-credentials=false  reveal viewer credentials (unsafe)")
 		fmt.Fprintln(fs.Output(), "  --reclaim")
 	}
@@ -176,6 +177,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	openPortal := fs.Bool("open", false, "open the web portal VNC page")
 	takeControl := fs.Bool("take-control", false, "ask the portal viewer to take keyboard and mouse control after connecting")
+	preflightOnly := fs.Bool("preflight", false, "verify macOS Screen Sharing RFB authentication and exit without opening WebVNC")
 	redactCredentials := registerWebVNCCredentialOutputFlag(fs)
 	daemon := fs.Bool("daemon", false, "compatibility alias for daemon start")
 	background := fs.Bool("background", false, "compatibility alias for daemon start")
@@ -211,6 +213,9 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 			return exit(2, "--controller-owner-id requires controller-owned resolution with the complete expected provider identity")
 		}
 	}
+	if *preflightOnly && (*daemonStatus || *stopDaemon || *daemon || *background) {
+		return exit(2, "--preflight cannot be combined with webvnc daemon/status/stop")
+	}
 	if *daemonStatus {
 		return a.webVNCDaemonStatus(*id, *controllerOwnerID)
 	}
@@ -232,7 +237,10 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		// browser viewer from a host-side bridge over the guest's native Screen
 		// Sharing instead of the Linux directSSHWebVNC path.
 		if isMacOSDesktopProvider(cfg) {
-			return a.macOSWebVNCBridge(ctx, cfg, *id, *localPort, *openPortal, *reclaim, *noProviderSideEffects, expectedIdentity)
+			return a.macOSWebVNCBridge(ctx, cfg, *id, *localPort, *openPortal, *preflightOnly, *reclaim, *noProviderSideEffects, expectedIdentity)
+		}
+		if *preflightOnly {
+			return exit(2, "webvnc --preflight currently supports target=macos Screen Sharing leases")
 		}
 		return a.directSSHWebVNC(ctx, cfg, *id, *localPort, *openPortal, *takeControl, *reclaim, *noProviderSideEffects, expectedIdentity, *controllerOwnerID)
 	}
@@ -266,9 +274,6 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	if err := ensureOpenWebVNCPortalAccess(ctx, coord, leaseID, *openPortal, a.Stdout); err != nil {
-		return err
-	}
 	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=%s\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider), blank(target.TargetOS, cfg.TargetOS))
 	fmt.Fprintln(a.Stdout, "bridge: probing VNC on target loopback 127.0.0.1:5900 over SSH")
 	endpoint, err := resolveVNCEndpoint(ctx, cfg, &target)
@@ -276,6 +281,12 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		return err
 	}
 	username, password := webVNCCredentials(ctx, cfg, target, endpoint)
+	credentials := rfbCredentials{Username: username, Password: password}
+	if target.TargetOS == targetMacOS {
+		if err := requireMacOSScreenSharingCredentials(credentials); err != nil {
+			return err
+		}
+	}
 
 	connHost := endpoint.Host
 	connPort := endpoint.Port
@@ -304,8 +315,27 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 			*localPort = tunnelPort
 		}
 	}
+	if target.TargetOS == targetMacOS {
+		if err := preflightMacOSScreenSharing(ctx, connHost, connPort, credentials); err != nil {
+			return err
+		}
+		fmt.Fprintln(a.Stdout, "preflight: macOS Screen Sharing RFB authentication ok")
+		if *preflightOnly {
+			return nil
+		}
+	} else if *preflightOnly {
+		return exit(2, "webvnc --preflight currently supports target=macos Screen Sharing leases")
+	}
+	if err := ensureOpenWebVNCPortalAccess(ctx, coord, leaseID, *openPortal, a.Stdout); err != nil {
+		return err
+	}
 
-	portal := webVNCPortalURL(coord.BaseURL, leaseID, username, password, webVNCPortalOptions{TakeControl: *takeControl})
+	portalUsername, portalPassword := webVNCPortalCredentialsForTarget(target, username, password)
+	handoffTicket, err := webVNCPortalHandoffForTarget(ctx, coord, leaseID, target, username, password)
+	if err != nil {
+		return err
+	}
+	portal := webVNCPortalURL(coord.BaseURL, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl, Handoff: handoffTicket})
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
 	opened := false
 	bridgeCtx := ctx
@@ -328,6 +358,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		LeaseID:          leaseID,
 		Host:             connHost,
 		Port:             connPort,
+		Credentials:      credentials,
 		PoolSize:         webVNCBridgePoolSizeForTarget(target),
 		IdleTimeout:      cfg.IdleTimeout,
 		Telemetry:        leaseTelemetryCollectorForTarget(target),
@@ -338,10 +369,10 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		OnReady: func() error {
 			fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using WebVNC")
 			fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
-			if strings.TrimSpace(password) != "" {
-				fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
-				if strings.TrimSpace(username) != "" {
-					fmt.Fprintf(a.Stdout, "username: %s\n", strings.TrimSpace(username))
+			if strings.TrimSpace(portalPassword) != "" {
+				fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(portalPassword))
+				if strings.TrimSpace(portalUsername) != "" {
+					fmt.Fprintf(a.Stdout, "username: %s\n", strings.TrimSpace(portalUsername))
 				}
 			}
 			if *openPortal && !opened {
@@ -357,7 +388,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 }
 
 const defaultWebVNCBridgePoolSize = 4
-const macOSWebVNCBridgePoolSize = 2
+const macOSWebVNCBridgePoolSize = 1
 
 func webVNCBridgePoolSizeForTarget(target SSHTarget) int {
 	if target.TargetOS == targetMacOS {
@@ -366,11 +397,29 @@ func webVNCBridgePoolSizeForTarget(target SSHTarget) int {
 	return defaultWebVNCBridgePoolSize
 }
 
+func preflightMacOSScreenSharing(ctx context.Context, host, port string, credentials rfbCredentials) error {
+	if err := requireMacOSScreenSharingCredentials(credentials); err != nil {
+		return err
+	}
+	if err := preflightRFBAuthentication(ctx, net.JoinHostPort(host, port), credentials); err != nil {
+		return exit(5, "macOS Screen Sharing preflight failed: %v", err)
+	}
+	return nil
+}
+
+func requireMacOSScreenSharingCredentials(credentials rfbCredentials) error {
+	if strings.TrimSpace(credentials.Username) == "" || strings.TrimSpace(credentials.Password) == "" {
+		return exit(2, "macOS Screen Sharing credentials are required for WebVNC preflight")
+	}
+	return nil
+}
+
 type webVNCBridgePoolConfig struct {
 	Coord            *CoordinatorClient
 	LeaseID          string
 	Host             string
 	Port             string
+	Credentials      rfbCredentials
 	PoolSize         int
 	IdleTimeout      time.Duration
 	Telemetry        leaseTelemetryCollector
@@ -449,7 +498,7 @@ func serveWebVNCBridgeSlot(ctx context.Context, cfg webVNCBridgePoolConfig, slot
 	connectedOnce := false
 	attempt := 0
 	for {
-		bridge, err := connectWebVNCBridge(ctx, cfg.Coord, cfg.LeaseID, cfg.Host, cfg.Port, cfg.RescueCtx.Target, cfg.Log)
+		bridge, err := connectWebVNCBridge(ctx, cfg.Coord, cfg.LeaseID, cfg.Host, cfg.Port, cfg.RescueCtx.Target, cfg.Credentials, cfg.Log)
 		if err != nil {
 			attempt, kind := nextWebVNCBridgeFailure(connectedOnce, attempt)
 			events <- webVNCBridgePoolEvent{Kind: kind, Slot: slot, Attempt: attempt, Err: err}
@@ -703,8 +752,31 @@ func webVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, endpoi
 	return strings.TrimSpace(username), strings.TrimSpace(password)
 }
 
+func webVNCPortalCredentialsForTarget(target SSHTarget, username, password string) (string, string) {
+	if target.TargetOS == targetMacOS {
+		return "", ""
+	}
+	return username, password
+}
+
+func webVNCPortalHandoffForTarget(ctx context.Context, coord *CoordinatorClient, leaseID string, target SSHTarget, username, password string) (string, error) {
+	if target.TargetOS != targetMacOS || coord == nil || !coord.hasConfiguredAuth() {
+		return "", nil
+	}
+	username = strings.TrimSpace(username)
+	password = strings.TrimSpace(password)
+	if username == "" && password == "" {
+		return "", nil
+	}
+	handoff, err := coord.CreateWebVNCCredentialHandoff(ctx, leaseID, username, password)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(handoff.Ticket), nil
+}
+
 func webVNCOutputURLHasCredentials(value string) bool {
-	if strings.Contains(value, "password=") || strings.Contains(value, "username=") {
+	if strings.Contains(value, "password=") || strings.Contains(value, "username=") || strings.Contains(value, "handoff=") {
 		return true
 	}
 	parsed, err := url.Parse(value)
@@ -923,12 +995,17 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	for _, line := range recentWebVNCLogEvents(daemon.LogPath, 6) {
 		fmt.Fprintf(a.Stdout, "log event: %s\n", line)
 	}
-	portal := webVNCPortalURL(coord.BaseURL, leaseID, username, password)
+	portalUsername, portalPassword := webVNCPortalCredentialsForTarget(target, username, password)
+	handoffTicket, err := webVNCPortalHandoffForTarget(ctx, coord, leaseID, target, username, password)
+	if err != nil {
+		return err
+	}
+	portal := webVNCPortalURL(coord.BaseURL, leaseID, portalUsername, portalPassword, webVNCPortalOptions{Handoff: handoffTicket})
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
-	if strings.TrimSpace(password) != "" {
-		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
-		if strings.TrimSpace(username) != "" {
-			fmt.Fprintf(a.Stdout, "username: %s\n", strings.TrimSpace(username))
+	if strings.TrimSpace(portalPassword) != "" {
+		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(portalPassword))
+		if strings.TrimSpace(portalUsername) != "" {
+			fmt.Fprintf(a.Stdout, "username: %s\n", strings.TrimSpace(portalUsername))
 		}
 	}
 	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(cfg, target, leaseID))
@@ -1014,7 +1091,12 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		return endpointErr
 	}
 	username, password := webVNCCredentials(ctx, cfg, target, endpoint)
-	portal := webVNCPortalURL(coord.BaseURL, leaseID, username, password, webVNCPortalOptions{TakeControl: *takeControl})
+	portalUsername, portalPassword := webVNCPortalCredentialsForTarget(target, username, password)
+	handoffTicket, err := webVNCPortalHandoffForTarget(ctx, coord, leaseID, target, username, password)
+	if err != nil {
+		return err
+	}
+	portal := webVNCPortalURL(coord.BaseURL, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl, Handoff: handoffTicket})
 	daemonArgs := webVNCBridgeArgs(cfg, target, leaseID, *openPortal, *takeControl)
 	daemonName := *id
 	if strings.TrimSpace(daemonName) == "" {
@@ -1025,8 +1107,8 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "webvnc reset: lease=%s slug=%s\n", leaseID, blank(serverSlug(server), "-"))
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
-	if strings.TrimSpace(password) != "" {
-		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
+	if strings.TrimSpace(portalPassword) != "" {
+		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(portalPassword))
 	}
 	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(cfg, target, leaseID))
 	return nil
@@ -2335,6 +2417,7 @@ type webVNCBridge struct {
 	tcp                   net.Conn
 	ws                    *websocket.Conn
 	target                SSHTarget
+	credentials           rfbCredentials
 	log                   io.Writer
 	desktopThemeUpdates   chan string
 	applyDesktopThemeFunc func(context.Context, string) error
@@ -2342,7 +2425,7 @@ type webVNCBridge struct {
 
 const webVNCDesktopThemeSSHAttemptTimeout = 35 * time.Second
 
-func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string, target SSHTarget, log io.Writer) (*webVNCBridge, error) {
+func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string, target SSHTarget, credentials rfbCredentials, log io.Writer) (*webVNCBridge, error) {
 	agentBaseURL, err := webVNCAgentBaseURL(coord.BaseURL)
 	if err != nil {
 		return nil, err
@@ -2387,6 +2470,7 @@ func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 		tcp:                 tcp,
 		ws:                  ws,
 		target:              target,
+		credentials:         credentials,
 		log:                 log,
 		desktopThemeUpdates: make(chan string, 1),
 	}, nil
@@ -2523,6 +2607,9 @@ func (b *webVNCBridge) Serve(ctx context.Context) error {
 		cancelThemes()
 		<-themeDone
 	}()
+	if b.target.TargetOS == targetMacOS && strings.TrimSpace(b.credentials.Username) != "" && strings.TrimSpace(b.credentials.Password) != "" {
+		return relayWebSocketVNCWithARDAuthenticationWithTimeout(ctx, b.ws, b.tcp, b.credentials, 0)
+	}
 	errc := make(chan error, 2)
 	go func() { errc <- b.copyWebSocketToTCP(ctx) }()
 	go func() { errc <- copyTCPToWebSocket(ctx, b.ws, b.tcp) }()
@@ -2874,7 +2961,7 @@ func (a App) directSSHWindowsWebVNC(
 		webPort,
 		credentials,
 		openViewer,
-		true,
+		localWebVNCAuthVNC,
 		func(ctx context.Context) (net.Conn, error) {
 			return dialVNCForegroundTunnel(ctx, tunnel, vncPort)
 		},
@@ -4052,6 +4139,7 @@ func webVNCAgentURLWithCapabilities(base, leaseID, capabilities string) string {
 
 type webVNCPortalOptions struct {
 	TakeControl bool
+	Handoff     string
 }
 
 func webVNCPortalURL(base, leaseID, username, password string, opts ...webVNCPortalOptions) string {
@@ -4064,16 +4152,23 @@ func webVNCPortalURL(base, leaseID, username, password string, opts ...webVNCPor
 	u.Fragment = ""
 	u.RawFragment = ""
 	takeControl := false
+	handoff := ""
 	for _, opt := range opts {
 		takeControl = takeControl || opt.TakeControl
+		if strings.TrimSpace(opt.Handoff) != "" && handoff == "" {
+			handoff = strings.TrimSpace(opt.Handoff)
+		}
 	}
-	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" || takeControl {
+	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" || takeControl || handoff != "" {
 		values := url.Values{}
 		if strings.TrimSpace(username) != "" {
 			values.Set("username", strings.TrimSpace(username))
 		}
 		if strings.TrimSpace(password) != "" {
 			values.Set("password", strings.TrimSpace(password))
+		}
+		if handoff != "" {
+			values.Set("handoff", handoff)
 		}
 		if takeControl {
 			values.Set("control", "take")

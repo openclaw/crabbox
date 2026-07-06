@@ -18,6 +18,7 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 	id := fs.String("id", "", "lease id or slug")
 	output := fs.String("output", "", "local PNG output path")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -26,6 +27,9 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 	setIDFromFirstArg(fs, id)
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	if isBlacksmithProvider(cfg.Provider) {

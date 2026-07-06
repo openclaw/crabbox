@@ -12,6 +12,7 @@ crabbox webvnc --id swift-crab
 crabbox webvnc --id swift-crab --network tailscale
 crabbox webvnc --id swift-crab --open
 crabbox webvnc --id swift-crab --open --take-control
+crabbox webvnc --id swift-crab --target macos --preflight
 secret-command | crabbox webvnc local --vnc-host 127.0.0.1 --vnc-port 5900 --username admin --password-stdin --open
 crabbox webvnc daemon start --id swift-crab --open
 crabbox webvnc daemon status --id swift-crab
@@ -121,7 +122,9 @@ browser URLs, and the handoff file. The WebSocket relay requires the same token
 as a per-session subprotocol. The handoff is removed when the bridge exits.
 
 The bridge opens a small warm pool of backend sessions (4 slots for Linux and
-Windows targets, 2 for macOS). That pool is what the `slots=` field in
+Windows targets, 1 for macOS). macOS uses a single backend session so Screen
+Sharing credential failures surface through one bridge attempt instead of
+parallel VNC logins. That pool is what the `slots=` field in
 `webvnc status` reports, and it lets multiple portal viewers join the same
 lease: one viewer is the controller, later viewers join in observer mode, and
 any viewer can press **take over** to become the controller. The prior
@@ -171,6 +174,11 @@ The runner VNC service stays bound to loopback.
 `crabbox webvnc --id <lease-id-or-slug>` runs the bridge in the foreground.
 Leave it running while the browser tab is open. With `--open` it opens the
 portal page once the bridge reports connected.
+
+For macOS Screen Sharing leases, `--preflight` verifies the RFB/Apple Remote
+Desktop authentication path through the same SSH tunnel and exits before opening
+the portal bridge. The password still comes from the configured credential
+source and is not printed.
 
 ### daemon start / status / list / stop
 

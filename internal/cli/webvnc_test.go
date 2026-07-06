@@ -52,6 +52,13 @@ func TestWebVNCURLs(t *testing.T) {
 	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "", webVNCPortalOptions{TakeControl: true}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take" {
 		t.Fatalf("portal URL with control=%q", got)
 	}
+	macUsername, macPassword := webVNCPortalCredentialsForTarget(SSHTarget{TargetOS: targetMacOS}, "ec2-user", "secret value")
+	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", macUsername, macPassword, webVNCPortalOptions{TakeControl: true}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take" {
+		t.Fatalf("macOS portal URL without handoff must not contain credentials: %q", got)
+	}
+	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", macUsername, macPassword, webVNCPortalOptions{TakeControl: true, Handoff: "vnc_handoff_abcdef"}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take&handoff=vnc_handoff_abcdef" {
+		t.Fatalf("macOS portal URL must carry handoff ticket for browser auth: %q", got)
+	}
 	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "secret value", webVNCPortalOptions{TakeControl: true}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take&password=secret+value" {
 		t.Fatalf("portal URL with password and control=%q", got)
 	}
@@ -1013,7 +1020,7 @@ func TestConnectWebVNCBridgeRegistersAgentBeforeServe(t *testing.T) {
 		t.Fatal(err)
 	}
 	coord := &CoordinatorClient{BaseURL: server.URL, Token: "test-token", Client: server.Client()}
-	bridge, err := connectWebVNCBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", port, SSHTarget{TargetOS: targetLinux}, io.Discard)
+	bridge, err := connectWebVNCBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", port, SSHTarget{TargetOS: targetLinux}, rfbCredentials{}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1106,7 +1113,7 @@ func TestConnectWebVNCBridgeSplitOriginSendsOnlyBridgeTicket(t *testing.T) {
 		},
 		Client: apiServer.Client(),
 	}
-	bridge, err := connectWebVNCBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", port, SSHTarget{TargetOS: targetMacOS}, io.Discard)
+	bridge, err := connectWebVNCBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", port, SSHTarget{TargetOS: targetMacOS}, rfbCredentials{}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1488,11 +1495,18 @@ func TestWebVNCBridgeArgsCarriesNetworkOverride(t *testing.T) {
 }
 
 func TestWebVNCBridgePoolSizeForTarget(t *testing.T) {
-	if got := webVNCBridgePoolSizeForTarget(SSHTarget{TargetOS: targetMacOS}); got != 2 {
-		t.Fatalf("macOS pool size=%d, want 2", got)
+	if got := webVNCBridgePoolSizeForTarget(SSHTarget{TargetOS: targetMacOS}); got != 1 {
+		t.Fatalf("macOS pool size=%d, want 1", got)
 	}
 	if got := webVNCBridgePoolSizeForTarget(SSHTarget{TargetOS: targetLinux}); got != defaultWebVNCBridgePoolSize {
 		t.Fatalf("linux pool size=%d, want default", got)
+	}
+}
+
+func TestPreflightMacOSScreenSharingRequiresCredentials(t *testing.T) {
+	err := preflightMacOSScreenSharing(context.Background(), "127.0.0.1", "5900", rfbCredentials{})
+	if err == nil || !strings.Contains(err.Error(), "credentials are required") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

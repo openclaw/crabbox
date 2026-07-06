@@ -26,7 +26,7 @@ const maxMacOSWebVNCCredentialBodyBytes = 4 << 10
 // the embedded noVNC module, and runs a loopback WebSocket relay. noVNC performs
 // Apple (ARD) authentication with credentials fetched into browser memory only
 // after the viewer proves its ephemeral session token.
-func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort string, openViewer, reclaim, noProviderSideEffects bool, expected webVNCExpectedProviderIdentity) error {
+func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort string, openViewer, preflightOnly, reclaim, noProviderSideEffects bool, expected webVNCExpectedProviderIdentity) error {
 	// Claim the actual browser-facing TCP listener before provider or SSH work.
 	// Daemon children adopt the supervisor's inherited listener; foreground
 	// bridges turn their reservation into the listener directly.
@@ -70,6 +70,9 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	if !ok {
 		return exit(2, "provider=%s does not supply macOS desktop credentials", cfg.Provider)
 	}
+	if err := requireMacOSScreenSharingCredentials(credentials); err != nil {
+		return err
+	}
 
 	// SSH tunnel: 127.0.0.1:vncPort -> guest 127.0.0.1:5900 (Screen Sharing).
 	tunnel, vncPort, err := startVNCForegroundTunnelOnReservedPort(ctx, target, "", "127.0.0.1", managedVNCPort, webPort)
@@ -77,6 +80,13 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		return err
 	}
 	defer stopProcess(tunnel)
+	if err := preflightMacOSScreenSharing(ctx, "127.0.0.1", vncPort, credentials); err != nil {
+		return err
+	}
+	fmt.Fprintln(a.Stdout, "preflight: macOS Screen Sharing RFB authentication ok")
+	if preflightOnly {
+		return nil
+	}
 	bridgeCtx, cancelBridge := context.WithCancelCause(ctx)
 	defer cancelBridge(context.Canceled)
 
@@ -96,7 +106,7 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		webPort,
 		credentials,
 		openViewer,
-		false,
+		localWebVNCAuthARD,
 		func(ctx context.Context) (net.Conn, error) {
 			return dialVNCForegroundTunnel(ctx, tunnel, vncPort)
 		},

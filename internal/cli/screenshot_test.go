@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"io"
 	"strings"
 	"testing"
 )
@@ -11,6 +13,19 @@ func TestDefaultScreenshotPath(t *testing.T) {
 	}
 	if got := defaultScreenshotPath("cbx_123", ""); got != "crabbox-cbx-123-screenshot.png" {
 		t.Fatalf("fallback path=%q", got)
+	}
+}
+
+func TestScreenshotRegistersProviderSpecificFlags(t *testing.T) {
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).screenshot(context.Background(), []string{
+		"--provider", "direct-webvnc-test",
+		"--direct-webvnc-routing", "route-cbx_abcdef123456",
+	})
+	if err == nil {
+		t.Fatal("screenshot without an id should fail")
+	}
+	if strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("provider flag was not registered: %v", err)
 	}
 }
 

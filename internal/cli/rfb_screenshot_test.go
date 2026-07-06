@@ -73,6 +73,27 @@ func TestCaptureRFBFrameSupportsAppleRemoteDesktopAuth(t *testing.T) {
 	}
 }
 
+func TestPreflightRFBAuthenticationSupportsAppleRemoteDesktopAuth(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- serveTestARDHandshakeUntilSecurityResult(server, "ec2-user", "example-pass")
+	}()
+
+	if err := preflightRFBAuthenticationFromConn(context.Background(), client, rfbCredentials{
+		Username: "ec2-user",
+		Password: "example-pass",
+	}); err != nil {
+		t.Fatalf("preflight RFB authentication: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake RFB server: %v", err)
+	}
+}
+
 func TestCaptureRFBFrameReadsNoneAuthSecurityResult(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()

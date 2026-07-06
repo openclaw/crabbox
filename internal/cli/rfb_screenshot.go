@@ -112,6 +112,50 @@ func captureRFBFrame(ctx context.Context, address string, creds rfbCredentials) 
 	return captureRFBFrameFromConn(ctx, conn, creds)
 }
 
+func preflightRFBAuthentication(ctx context.Context, address string, creds rfbCredentials) error {
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return preflightRFBAuthenticationFromConn(ctx, conn, creds)
+}
+
+func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	}
+
+	version := make([]byte, 12)
+	if _, err := io.ReadFull(conn, version); err != nil {
+		return fmt.Errorf("read RFB version: %w", err)
+	}
+	if err := validateRFBServerVersion(version); err != nil {
+		return fmt.Errorf("unexpected RFB version %q", string(version))
+	}
+	if _, err := conn.Write([]byte("RFB 003.008\n")); err != nil {
+		return fmt.Errorf("write RFB version: %w", err)
+	}
+
+	securityType, err := negotiateRFBSecurityType(conn)
+	if err != nil {
+		return err
+	}
+	switch securityType {
+	case rfbSecurityNone:
+	case rfbSecurityARD:
+		if err := negotiateRFBARDAuth(conn, creds); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported RFB security type %d", securityType)
+	}
+	return readRFBSecurityResult(conn)
+}
+
 func captureRFBFrameFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials) (image.Image, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)

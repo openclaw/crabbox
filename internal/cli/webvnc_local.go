@@ -27,6 +27,7 @@ const (
 )
 
 const localWebVNCSecurityTypePassword byte = 2
+const localWebVNCSecurityTypeNone byte = 1
 
 const (
 	localWebVNCReadTimeout   = 10 * time.Second
@@ -42,6 +43,14 @@ type localWebVNCSourceIdentity struct {
 }
 
 type localWebVNCConnContextKey struct{}
+
+type localWebVNCAuthenticationMode int
+
+const (
+	localWebVNCAuthAuto localWebVNCAuthenticationMode = iota
+	localWebVNCAuthVNC
+	localWebVNCAuthARD
+)
 
 // webVNCLocal serves the embedded noVNC viewer for an already-tunneled VNC
 // socket. The source and browser listeners are both restricted to IPv4
@@ -130,10 +139,17 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 		webPort,
 		credentials,
 		*openViewer,
-		*securityType == localWebVNCSecurityVNC,
+		localWebVNCAuthenticationModeForSecurityType(*securityType),
 		dialVNC,
 		nil,
 	)
+}
+
+func localWebVNCAuthenticationModeForSecurityType(securityType string) localWebVNCAuthenticationMode {
+	if securityType == localWebVNCSecurityVNC {
+		return localWebVNCAuthVNC
+	}
+	return localWebVNCAuthAuto
 }
 
 func reserveLocalWebVNCBrowserPort(requested string, excluded ...string) (*webVNCDaemonPortReservation, error) {
@@ -296,7 +312,7 @@ func (a App) serveLocalWebVNCBridge(
 	webPort string,
 	credentials rfbCredentials,
 	openViewer bool,
-	forceVNCAuthentication bool,
+	authMode localWebVNCAuthenticationMode,
 	dialVNC localWebVNCDialer,
 	handoffOutput func(macOSWebVNCHandoff),
 ) error {
@@ -344,8 +360,12 @@ func (a App) serveLocalWebVNCBridge(
 			return
 		}
 		defer tcp.Close()
-		if forceVNCAuthentication {
+		switch authMode {
+		case localWebVNCAuthVNC:
 			_ = relayWebSocketVNCWithVNCAuthentication(relayCtx, ws, tcp)
+			return
+		case localWebVNCAuthARD:
+			_ = relayWebSocketVNCWithARDAuthentication(relayCtx, ws, tcp, credentials)
 			return
 		}
 		relayWebSocketVNC(relayCtx, ws, tcp)
@@ -391,6 +411,168 @@ func (a App) serveLocalWebVNCBridge(
 	case err := <-serverErrors:
 		return exit(5, "serve local WebVNC: %v", err)
 	}
+}
+
+func relayWebSocketVNCWithARDAuthentication(ctx context.Context, ws *websocket.Conn, tcp net.Conn, credentials rfbCredentials) error {
+	return relayWebSocketVNCWithARDAuthenticationWithTimeout(ctx, ws, tcp, credentials, localWebVNCReadTimeout)
+}
+
+func relayWebSocketVNCWithARDAuthenticationWithTimeout(ctx context.Context, ws *websocket.Conn, tcp net.Conn, credentials rfbCredentials, negotiationTimeout time.Duration) error {
+	browser := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
+	negotiationCtx, cancelNegotiation := context.WithCancel(ctx)
+	negotiation := make(chan error, 1)
+	go func() {
+		negotiation <- forceRFBARDAuthenticationWithTimeout(negotiationCtx, browser, tcp, credentials, negotiationTimeout)
+	}()
+	var timer *time.Timer
+	var timeout <-chan time.Time
+	if negotiationTimeout > 0 {
+		timer = time.NewTimer(negotiationTimeout)
+		timeout = timer.C
+		defer timer.Stop()
+	}
+	select {
+	case err := <-negotiation:
+		cancelNegotiation()
+		if cause := context.Cause(ctx); cause != nil {
+			_ = ws.Close(websocket.StatusGoingAway, "bridge stopped")
+			return cause
+		}
+		if err != nil {
+			_ = ws.Close(websocket.StatusPolicyViolation, "ARD authentication negotiation failed")
+			return err
+		}
+	case <-ctx.Done():
+		_ = ws.Close(websocket.StatusGoingAway, "bridge stopped")
+		cancelNegotiation()
+		<-negotiation
+		return context.Cause(ctx)
+	case <-timeout:
+		_ = ws.Close(websocket.StatusPolicyViolation, "ARD authentication negotiation timed out")
+		cancelNegotiation()
+		<-negotiation
+		return fmt.Errorf("ARD authentication negotiation timed out")
+	}
+	errors := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(tcp, browser)
+		errors <- err
+	}()
+	go func() {
+		_, err := io.Copy(browser, tcp)
+		errors <- err
+	}()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case err := <-errors:
+		return err
+	}
+}
+
+func forceRFBARDAuthentication(ctx context.Context, browser, server net.Conn, credentials rfbCredentials) error {
+	return forceRFBARDAuthenticationWithTimeout(ctx, browser, server, credentials, localWebVNCReadTimeout)
+}
+
+func forceRFBARDAuthenticationWithTimeout(ctx context.Context, browser, server net.Conn, credentials rfbCredentials, negotiationTimeout time.Duration) error {
+	if deadline, ok := rfbAuthenticationDeadline(ctx, negotiationTimeout); ok {
+		if err := browser.SetDeadline(deadline); err != nil {
+			return fmt.Errorf("set RFB browser authentication deadline: %w", err)
+		}
+		if err := server.SetDeadline(deadline); err != nil {
+			_ = browser.SetDeadline(time.Time{})
+			return fmt.Errorf("set RFB server authentication deadline: %w", err)
+		}
+	}
+	cancellationDone := make(chan struct{})
+	stopCancellation := context.AfterFunc(ctx, func() {
+		defer close(cancellationDone)
+		_ = browser.SetDeadline(time.Now())
+		_ = server.SetDeadline(time.Now())
+	})
+	defer func() {
+		if !stopCancellation() {
+			<-cancellationDone
+		}
+		_ = browser.SetDeadline(time.Time{})
+		_ = server.SetDeadline(time.Time{})
+	}()
+
+	serverVersion := make([]byte, 12)
+	if _, err := io.ReadFull(server, serverVersion); err != nil {
+		return fmt.Errorf("read RFB server version: %w", err)
+	}
+	if err := validateRFBServerVersion(serverVersion); err != nil {
+		return fmt.Errorf("invalid RFB server version: %w", err)
+	}
+	if _, err := browser.Write(serverVersion); err != nil {
+		return fmt.Errorf("write RFB server version: %w", err)
+	}
+
+	browserVersion := make([]byte, 12)
+	if _, err := io.ReadFull(browser, browserVersion); err != nil {
+		return fmt.Errorf("read RFB browser version: %w", err)
+	}
+	major, minor, err := parseRFBVersion(browserVersion)
+	if err != nil {
+		return fmt.Errorf("invalid RFB browser version: %w", err)
+	}
+	if _, err := server.Write(browserVersion); err != nil {
+		return fmt.Errorf("write RFB browser version: %w", err)
+	}
+
+	securityType, err := negotiateRFBSecurityType(server)
+	if err != nil {
+		return err
+	}
+	switch securityType {
+	case rfbSecurityARD:
+		if err := negotiateRFBARDAuth(server, credentials); err != nil {
+			return err
+		}
+	case rfbSecurityNone:
+	default:
+		return fmt.Errorf("unsupported RFB security type %d", securityType)
+	}
+	if err := readRFBSecurityResult(server); err != nil {
+		return err
+	}
+
+	if major == 3 && minor < 7 {
+		security := make([]byte, 4)
+		binary.BigEndian.PutUint32(security, uint32(localWebVNCSecurityTypeNone))
+		if _, err := browser.Write(security); err != nil {
+			return fmt.Errorf("write RFB 3.3 no-auth security type: %w", err)
+		}
+		return nil
+	}
+
+	if _, err := browser.Write([]byte{1, localWebVNCSecurityTypeNone}); err != nil {
+		return fmt.Errorf("write filtered RFB no-auth security type: %w", err)
+	}
+	selected := []byte{0}
+	if _, err := io.ReadFull(browser, selected); err != nil {
+		return fmt.Errorf("read RFB browser security selection: %w", err)
+	}
+	if selected[0] != localWebVNCSecurityTypeNone {
+		return fmt.Errorf("RFB browser did not select no authentication")
+	}
+	if _, err := browser.Write([]byte{0, 0, 0, 0}); err != nil {
+		return fmt.Errorf("write RFB no-auth security result: %w", err)
+	}
+	return nil
+}
+
+func rfbAuthenticationDeadline(ctx context.Context, timeout time.Duration) (time.Time, bool) {
+	deadline, ok := ctx.Deadline()
+	if timeout <= 0 {
+		return deadline, ok
+	}
+	timeoutDeadline := time.Now().Add(timeout)
+	if !ok || timeoutDeadline.Before(deadline) {
+		return timeoutDeadline, true
+	}
+	return deadline, true
 }
 
 func relayWebSocketVNCWithVNCAuthentication(ctx context.Context, ws *websocket.Conn, tcp net.Conn) error {
