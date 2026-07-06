@@ -335,11 +335,7 @@ func (b *backend) itemMatchesScope(item devboxItem) bool {
 }
 
 func (b *backend) itemHasActiveScope(item devboxItem) bool {
-	scopeID := strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider-scope"])
-	if scopeID != "" {
-		return scopeID == b.claimScopeID()
-	}
-	scopeID = strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider_scope_id"])
+	scopeID := devboxScopeID(item)
 	if scopeID != "" {
 		return scopeID == b.claimScopeID()
 	}
@@ -349,6 +345,13 @@ func (b *backend) itemHasActiveScope(item devboxItem) bool {
 	}
 	legacyRawScope := strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider_scope"])
 	return legacyRawScope != "" && legacyRawScope == b.claimScope()
+}
+
+func devboxScopeID(item devboxItem) string {
+	if scopeID := strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider-scope"]); scopeID != "" {
+		return scopeID
+	}
+	return strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider_scope_id"])
 }
 
 func (b *backend) serverFromDevbox(item devboxItem) core.Server {
@@ -422,7 +425,7 @@ func (b *backend) resolveDevbox(ctx context.Context, identifier string) (devboxI
 			return devboxItem{}, "", "", "", err
 		}
 		if !b.itemMatchesScope(item) {
-			return devboxItem{}, "", "", "", core.Exit(4, "Sealos DevBox %q is outside the active provider scope", name)
+			return devboxItem{}, "", "", "", core.Exit(4, "Sealos DevBox %q is outside the active provider scope (expected %s, found %s)", name, b.claimScopeID(), devboxScopeID(item))
 		}
 		actualName, leaseID, slug, err := identityFromDevbox(item, name)
 		if err != nil {

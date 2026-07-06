@@ -35,12 +35,13 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if req.Lease.Server.Labels != nil {
 		expectedSlug = req.Lease.Server.Labels["slug"]
 	}
-	item, name, leaseID, slug, err := b.validateDevboxIdentity(ctx, name, req.Lease.LeaseID, expectedSlug)
+	requestedName := name
+	item, name, leaseID, slug, err := b.validateDevboxIdentity(ctx, requestedName, req.Lease.LeaseID, expectedSlug)
 	if err != nil {
 		if b.deleteOnRelease(req.Lease) && kubernetesObjectNotFound(err) && req.Lease.LeaseID != "" {
 			if err := core.RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
-				if _, err := b.getDevbox(ctx, name); err == nil {
-					return core.Exit(4, "refusing to remove Sealos claim %s after DevBox %q reappeared", req.Lease.LeaseID, name)
+				if _, err := b.getDevbox(ctx, requestedName); err == nil {
+					return core.Exit(4, "refusing to remove Sealos claim %s after DevBox %q reappeared", req.Lease.LeaseID, requestedName)
 				} else if !kubernetesObjectNotFound(err) {
 					return err
 				}

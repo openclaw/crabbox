@@ -958,7 +958,7 @@ func TestSealosDevboxConfigDefaultsFileAndEnv(t *testing.T) {
 	if cfg.SealosDevbox.Kubectl != "kubectl" ||
 		cfg.SealosDevbox.Namespace != "default" ||
 		cfg.SealosDevbox.Network != "SSHGate" ||
-		cfg.SealosDevbox.SSHGatewayPort != "2222" ||
+		cfg.SealosDevbox.SSHGatewayPort != "2233" ||
 		cfg.SealosDevbox.SSHUser != "devbox" ||
 		cfg.SealosDevbox.WorkRoot != "/home/devbox/project" ||
 		cfg.SealosDevbox.DeleteOnRelease {

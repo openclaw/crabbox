@@ -529,7 +529,7 @@ sealos_smoke() {
   template_id="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_TEMPLATE_ID templateID)"
   network="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_NETWORK network SSHGate)"
   ssh_gateway_host="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST sshGatewayHost)"
-  ssh_gateway_port="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_PORT sshGatewayPort 2222)"
+  ssh_gateway_port="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_PORT sshGatewayPort 2233)"
   node_host="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_NODE_HOST nodeHost)"
 
   if ! command -v "$kubectl_path" >/dev/null 2>&1; then

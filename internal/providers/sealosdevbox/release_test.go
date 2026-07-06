@@ -234,6 +234,12 @@ func TestReleaseDeleteRemovesLocalStateWhenDevboxNotFound(t *testing.T) {
 	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("stored key still exists or stat failed unexpectedly: %v", err)
 	}
+	for _, request := range runner.requests {
+		args := strings.Join(request.Args, " ")
+		if strings.Contains(args, "get "+devboxResource+"/") && !strings.Contains(args, "get "+devboxResource+"/"+name+" ") {
+			t.Fatalf("missing-resource verification lost exact DevBox name: %s", args)
+		}
+	}
 }
 
 func TestResolveReleaseOnlyAllowsDeleteCleanupWhenDevboxMissing(t *testing.T) {

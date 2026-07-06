@@ -3,6 +3,7 @@ package sealosdevbox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -167,4 +168,46 @@ func (b *backend) waitForSSH(ctx context.Context, target *core.SSHTarget, phase 
 		waiter = core.WaitForSSHReady
 	}
 	return waiter(ctx, target, b.rt.Stderr, phase, bootstrapWaitTimeout(b.cfg))
+}
+
+func (b *backend) prepareSSH(ctx context.Context, target *core.SSHTarget, phase string) error {
+	transport := *target
+	transport.ReadyCheck = "true"
+	if err := b.waitForSSH(ctx, &transport, phase); err != nil {
+		return err
+	}
+	target.Port = transport.Port
+	if b.rt.Stderr != nil {
+		fmt.Fprintln(b.rt.Stderr, "bootstrapping Sealos DevBox tools")
+	}
+	run := b.sshRun
+	if run == nil {
+		run = core.RunSSHQuiet
+	}
+	if err := run(ctx, *target, sealosBootstrapToolsCommand()); err != nil {
+		return core.Exit(5, "Sealos DevBox tool bootstrap failed: %v", err)
+	}
+	return b.waitForSSH(ctx, target, phase)
+}
+
+func sealosBootstrapToolsCommand() string {
+	return strings.Join([]string{
+		"set -e",
+		"if command -v git >/dev/null 2>&1 && command -v rsync >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then exit 0; fi",
+		"SUDO=",
+		"if [ \"$(id -u)\" != 0 ]; then command -v sudo >/dev/null 2>&1 && sudo -n true || { echo 'sealos-devbox tool bootstrap requires root or passwordless sudo' >&2; exit 1; }; SUDO='sudo -n'; fi",
+		"if command -v apt-get >/dev/null 2>&1; then",
+		"  $SUDO apt-get update >/tmp/crabbox-sealos-apt-update.log 2>&1",
+		"  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git rsync tar >/tmp/crabbox-sealos-apt-install.log 2>&1",
+		"elif command -v dnf >/dev/null 2>&1; then",
+		"  $SUDO dnf install -y git rsync tar >/tmp/crabbox-sealos-dnf-install.log 2>&1",
+		"elif command -v yum >/dev/null 2>&1; then",
+		"  $SUDO yum install -y git rsync tar >/tmp/crabbox-sealos-yum-install.log 2>&1",
+		"elif command -v apk >/dev/null 2>&1; then",
+		"  $SUDO apk add --no-cache git rsync tar >/tmp/crabbox-sealos-apk-install.log 2>&1",
+		"else",
+		"  echo 'sealos-devbox tool bootstrap requires apt-get, dnf, yum, or apk' >&2; exit 1",
+		"fi",
+		sealosSSHReadyCheck,
+	}, "\n")
 }

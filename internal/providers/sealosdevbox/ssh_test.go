@@ -18,7 +18,7 @@ func TestSSHGateTargetUsesPublicKeyRouteDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target.Host != "ssh.sealos.example.test" || target.Port != "2222" || target.User != "devbox" || target.Key != "/tmp/cbx-key" {
+	if target.Host != "ssh.sealos.example.test" || target.Port != "2233" || target.User != "devbox" || target.Key != "/tmp/cbx-key" {
 		t.Fatalf("target=%#v", target)
 	}
 	if target.TargetOS != core.TargetLinux || target.NetworkKind != core.NetworkPublic {
@@ -29,6 +29,35 @@ func TestSSHGateTargetUsesPublicKeyRouteDefaults(t *testing.T) {
 	}
 	if strings.Contains(target.User, "@") {
 		t.Fatalf("username-encoded routing became default: %#v", target)
+	}
+}
+
+func TestPrepareSSHBootstrapsToolsBetweenReadinessChecks(t *testing.T) {
+	backend := lifecycleBackend(lifecycleConfig(), &lifecycleRunner{})
+	var checks []string
+	backend.sshReady = func(_ context.Context, target *core.SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+		checks = append(checks, target.ReadyCheck)
+		return nil
+	}
+	var command string
+	backend.sshRun = func(_ context.Context, target core.SSHTarget, remote string) error {
+		if target.Port != "2233" {
+			t.Fatalf("bootstrap target=%#v", target)
+		}
+		command = remote
+		return nil
+	}
+	target := core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2233", User: "devbox", Key: "/tmp/key", ReadyCheck: sealosSSHReadyCheck}
+	if err := backend.prepareSSH(context.Background(), &target, "Sealos DevBox SSH"); err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 2 || checks[0] != "true" || checks[1] != sealosSSHReadyCheck {
+		t.Fatalf("readiness checks=%q", checks)
+	}
+	for _, want := range []string{"command -v rsync", "sudo -n", "apt-get install", "dnf install", "yum install", "apk add", sealosSSHReadyCheck} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("bootstrap command missing %q:\n%s", want, command)
+		}
 	}
 }
 
@@ -169,7 +198,7 @@ func TestResolveWaitsForSSHBeforePersistingEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.SSHHost != "ssh.sealos.example.test" || claim.SSHPort != 2222 {
+	if claim.SSHHost != "ssh.sealos.example.test" || claim.SSHPort != 2233 {
 		t.Fatalf("claim endpoint=%#v", claim)
 	}
 }

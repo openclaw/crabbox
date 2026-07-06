@@ -244,11 +244,11 @@ func TestDoctorUsesReadOnlyKubectlCommands(t *testing.T) {
 		t.Fatalf("result=%#v", result)
 	}
 	crdCheck := findDoctorCheck(t, result.Checks, "crd.devboxes")
-	if crdCheck.Status != "ok" || !strings.Contains(crdCheck.Details["versions"], "v1alpha2") {
+	if crdCheck.Status != "ok" || crdCheck.Details["groupVersion"] != devboxGroupVersion || crdCheck.Details["resource"] != "devboxes" {
 		t.Fatalf("crd check=%#v", crdCheck)
 	}
-	if got := commandString(runner.requests[3]); !strings.Contains(got, ".spec.versions[?(@.served==true)].name") {
-		t.Fatalf("CRD check did not filter served versions: %s", got)
+	if got := commandString(runner.requests[3]); !strings.Contains(got, "get --raw /apis/"+devboxGroupVersion) {
+		t.Fatalf("CRD check did not use tenant-safe API discovery: %s", got)
 	}
 	if !strings.Contains(result.Message, "automation_surface=crd_first") || !strings.Contains(result.Message, "mutation=false") {
 		t.Fatalf("message=%q", result.Message)
@@ -270,7 +270,7 @@ func TestDoctorUsesReadOnlyKubectlCommands(t *testing.T) {
 			t.Fatalf("could not find kubectl verb in %v", args)
 		}
 		verb := args[commandStart]
-		if verb == "auth" && commandStart+1 < len(args) && args[commandStart+1] == "can-i" {
+		if isRulesReviewRequest(req) {
 			continue
 		}
 		switch verb {
@@ -313,7 +313,7 @@ func TestDoctorRedactsSensitiveCommandOutput(t *testing.T) {
 func TestDoctorRequiresExplicitRBACYes(t *testing.T) {
 	runner := &recordingRunner{
 		results: map[int]core.LocalCommandResult{
-			5: {Stdout: "no\n"},
+			5: {Stdout: `{"status":{"resourceRules":[]}}`},
 		},
 	}
 	doctor, err := (Provider{}).ConfigureDoctor(lifecycleConfig(), core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
@@ -330,10 +330,58 @@ func TestDoctorRequiresExplicitRBACYes(t *testing.T) {
 	}
 }
 
+func TestRulesAllowRequiresUnscopedMatchingRule(t *testing.T) {
+	tests := []struct {
+		name     string
+		rules    []resourceRule
+		verb     string
+		group    string
+		resource string
+		want     bool
+	}{
+		{
+			name:     "exact core rule",
+			rules:    []resourceRule{{Verbs: []string{"get"}, APIGroups: []string{""}, Resources: []string{"pods"}}},
+			verb:     "get",
+			resource: "pods",
+			want:     true,
+		},
+		{
+			name:     "wildcards",
+			rules:    []resourceRule{{Verbs: []string{"*"}, APIGroups: []string{"*"}, Resources: []string{"*"}}},
+			verb:     "delete",
+			group:    "devbox.sealos.io",
+			resource: "devboxes",
+			want:     true,
+		},
+		{
+			name:     "wrong group",
+			rules:    []resourceRule{{Verbs: []string{"get"}, APIGroups: []string{"apps"}, Resources: []string{"devboxes"}}},
+			verb:     "get",
+			group:    "devbox.sealos.io",
+			resource: "devboxes",
+		},
+		{
+			name:     "resource name restricted",
+			rules:    []resourceRule{{Verbs: []string{"get"}, APIGroups: []string{"devbox.sealos.io"}, Resources: []string{"devboxes"}, ResourceNames: []string{"one"}}},
+			verb:     "get",
+			group:    "devbox.sealos.io",
+			resource: "devboxes",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rulesAllow(tt.rules, tt.verb, tt.group, tt.resource); got != tt.want {
+				t.Fatalf("rulesAllow()=%v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDoctorRequiresDevboxCRDVersion(t *testing.T) {
 	runner := &recordingRunner{
 		results: map[int]core.LocalCommandResult{
-			4: {Stdout: "v1beta1\n"},
+			4: {Stdout: `{"groupVersion":"devbox.sealos.io/v1beta1","resources":[{"name":"devboxes"}]}`},
 		},
 	}
 	doctor, err := (Provider{}).ConfigureDoctor(lifecycleConfig(), core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
@@ -362,11 +410,11 @@ func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 	if result, ok := r.results[index]; ok {
 		return result, r.errors[index]
 	}
-	if isCanIRequest(req) {
-		return core.LocalCommandResult{Stdout: "yes"}, r.errors[index]
+	if isRulesReviewRequest(req) {
+		return core.LocalCommandResult{Stdout: `{"status":{"resourceRules":[{"verbs":["*"],"apiGroups":["*"],"resources":["*"]}]}}`}, r.errors[index]
 	}
-	if isCRDVersionsRequest(req) {
-		return core.LocalCommandResult{Stdout: "v1alpha2"}, r.errors[index]
+	if isDevboxDiscoveryRequest(req) {
+		return core.LocalCommandResult{Stdout: `{"groupVersion":"devbox.sealos.io/v1alpha2","resources":[{"name":"devboxes"}]}`}, r.errors[index]
 	}
 	return core.LocalCommandResult{Stdout: "ok"}, r.errors[index]
 }

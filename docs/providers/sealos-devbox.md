@@ -13,14 +13,16 @@ DevBox templates remain under Sealos and cluster control.
 
 - `kubectl` installed and on `PATH`, or configured with
   `sealosDevbox.kubectl`.
-- A Kubernetes context that can read the configured namespace and the
-  `devboxes.devbox.sealos.io` CRD.
+- A Kubernetes context that can read the configured namespace and discover the
+  `devbox.sealos.io/v1alpha2` API.
 - RBAC to get/list DevBoxes, Secrets, Pods, and Events.
 - RBAC to create, update, and delete DevBoxes when running `warmup`, `run`,
   `stop`, or non-dry-run `cleanup`.
 - `sealosDevbox.image`; `sealosDevbox.templateID` is optional metadata, not an
   image replacement.
-- A Sealos DevBox image with OpenSSH, `git`, `rsync`, and `tar`.
+- A Sealos DevBox image with OpenSSH plus root or passwordless `sudo` access to
+  `apt-get`, `dnf`, `yum`, or `apk`. Crabbox idempotently installs missing
+  `git`, `rsync`, and `tar` tools before sync.
 - For `network: SSHGate`, a reachable Sealos SSHGateway host and port.
 - For `network: NodePort`, `sealosDevbox.nodeHost` and a DevBox status shape
   that exposes an SSH NodePort.
@@ -32,9 +34,9 @@ crabbox doctor --provider sealos-devbox
 crabbox doctor --provider sealos-devbox --json
 ```
 
-Doctor checks local `kubectl`, context, namespace, CRD availability, read RBAC,
-mutating RBAC through `kubectl auth can-i`, and route configuration. It does
-not create, patch, stop, delete, or read Secret data.
+Doctor checks local `kubectl`, context, namespace, tenant-safe API discovery,
+read and mutating RBAC through one `SelfSubjectRulesReview`, and route
+configuration. It does not create, patch, stop, delete, or read Secret data.
 
 ## Config
 
@@ -53,7 +55,7 @@ sealosDevbox:
   storageLimit: 20Gi
   network: SSHGate
   sshGatewayHost: ssh.sealos.example.com
-  sshGatewayPort: "2222"
+  sshGatewayPort: "2233"
   sshUser: devbox
   workRoot: /home/devbox/project
   nodeHost: ""
@@ -93,7 +95,8 @@ Local path expansion applies to host-side path fields such as `kubectl` and
 `warmup` and one-shot `run` create a Crabbox-owned DevBox CR in the configured
 namespace. The generated manifest sets `spec.state: Running`, resource size,
 image, optional template ID, storage limit, network mode, SSH user, workdir, and
-an SSH port entry. Crabbox adds deterministic labels and annotations for the provider,
+an SSH port entry. It also selects Sealos' DevBox runtime and dedicated nodes,
+matching manifests exported by the DevBox dashboard. Crabbox adds deterministic labels and annotations for the provider,
 lease ID, slug, namespace, non-sensitive route scope fingerprint, TTL, idle
 timeout, timestamps, and release policy. The raw kubeconfig/context/route scope
 stays in the local lease claim and is not written to the remote DevBox object.

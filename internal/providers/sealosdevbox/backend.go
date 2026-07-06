@@ -2,6 +2,7 @@ package sealosdevbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ type backend struct {
 	cfg                  core.Config
 	rt                   core.Runtime
 	sshReady             func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+	sshRun               func(context.Context, core.SSHTarget, string) error
 	pollIntervalOverride time.Duration
 }
 
@@ -41,23 +43,38 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 		return doctorResult(checks), nil
 	}
 	add(doctorCheck("ok", "namespace", "found", map[string]string{"namespace": b.cfg.SealosDevbox.Namespace}))
-	versions, err := b.kubectl(ctx, nil, false, "get", "customresourcedefinition", devboxCRD, "-o", "jsonpath={.spec.versions[?(@.served==true)].name}")
+	discovery, err := b.kubectl(ctx, nil, false, "get", "--raw", "/apis/"+devboxGroupVersion)
 	if err != nil {
 		add(doctorCheck("failed", "crd.devboxes", err.Error(), map[string]string{"groupVersion": devboxGroupVersion}))
 		return doctorResult(checks), nil
 	}
-	if !crdServesVersion(versions, "v1alpha2") {
-		add(doctorCheck("failed", "crd.devboxes", "DevBox CRD does not serve v1alpha2", map[string]string{"groupVersion": devboxGroupVersion, "versions": strings.TrimSpace(versions)}))
+	var resources struct {
+		GroupVersion string `json:"groupVersion"`
+		Resources    []struct {
+			Name string `json:"name"`
+		} `json:"resources"`
+	}
+	if err := json.Unmarshal([]byte(discovery), &resources); err != nil {
+		add(doctorCheck("failed", "crd.devboxes", "DevBox API discovery returned invalid JSON", map[string]string{"groupVersion": devboxGroupVersion}))
 		return doctorResult(checks), nil
 	}
-	add(doctorCheck("ok", "crd.devboxes", "found", map[string]string{"groupVersion": devboxGroupVersion, "versions": strings.TrimSpace(versions)}))
+	if resources.GroupVersion != devboxGroupVersion || !apiResourceExists(resources.Resources, "devboxes") {
+		add(doctorCheck("failed", "crd.devboxes", "DevBox API discovery does not serve devboxes at "+devboxGroupVersion, map[string]string{"groupVersion": resources.GroupVersion}))
+		return doctorResult(checks), nil
+	}
+	add(doctorCheck("ok", "crd.devboxes", "found", map[string]string{"groupVersion": resources.GroupVersion, "resource": "devboxes"}))
+	rules, err := b.permissionRules(ctx)
+	if err != nil {
+		add(doctorCheck("failed", "rbac.rules", err.Error(), map[string]string{"namespace": b.cfg.SealosDevbox.Namespace}))
+		return doctorResult(checks), nil
+	}
 	for _, resource := range []string{devboxResource, "secrets", "pods", "events"} {
 		for _, verb := range []string{"get", "list"} {
-			add(b.canI(ctx, verb, resource))
+			add(canIWithRules(rules, verb, resource))
 		}
 	}
 	for _, verb := range []string{"create", "update", "patch", "delete"} {
-		add(b.canI(ctx, verb, devboxResource))
+		add(canIWithRules(rules, verb, devboxResource))
 	}
 	creationDetails := map[string]string{
 		"image_configured":       boolString(strings.TrimSpace(b.cfg.SealosDevbox.Image) != ""),
@@ -111,9 +128,11 @@ func doctorResult(checks []core.DoctorCheck) core.DoctorResult {
 	}
 }
 
-func crdServesVersion(versions, version string) bool {
-	for _, candidate := range strings.Fields(versions) {
-		if candidate == version {
+func apiResourceExists(resources []struct {
+	Name string `json:"name"`
+}, name string) bool {
+	for _, resource := range resources {
+		if resource.Name == name {
 			return true
 		}
 	}
@@ -257,7 +276,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 		return core.LeaseTarget{}, err
 	}
 	persistedClaim = updatedClaim
-	if err := b.waitForSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
+	if err := b.prepareSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
 		events, _ := b.listEvents(ctx, name)
 		return core.LeaseTarget{}, core.Exit(5, "%v; Sealos DevBox diagnostics: %s", err, devboxDiagnostics(item, events, nil))
 	}
@@ -358,7 +377,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (lease c
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if err := b.waitForSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
+	if err := b.prepareSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
 		events, _ := b.listEvents(ctx, item.Metadata.Name)
 		return core.LeaseTarget{}, core.Exit(5, "%v; Sealos DevBox diagnostics: %s", err, devboxDiagnostics(item, events, nil))
 	}
@@ -398,7 +417,7 @@ func (b *backend) resolveClaimedReleaseTarget(ctx context.Context, identifier st
 		return core.LeaseTarget{}, err
 	} else {
 		if !b.itemMatchesScope(item) {
-			return core.LeaseTarget{}, core.Exit(4, "Sealos DevBox %q is outside the active provider scope", name)
+			return core.LeaseTarget{}, core.Exit(4, "Sealos DevBox %q is outside the active provider scope (expected %s, found %s)", name, b.claimScopeID(), devboxScopeID(item))
 		}
 		if err := b.validateClaimBinding(claim, item); err != nil {
 			return core.LeaseTarget{}, err
@@ -444,6 +463,12 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	}
 	server := b.serverFromDevbox(item)
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.cfg, req.State, b.now())
+	// TouchDirectLeaseLabels sanitizes values for provider label limits. Keep the
+	// authoritative ownership annotations lossless so a touch cannot orphan the
+	// resource by truncating its SHA-256 scope fingerprint.
+	server.Labels["provider-scope"] = b.claimScopeID()
+	server.Labels["provider_scope_id"] = b.claimScopeID()
+	server.Labels["provider_scope"] = b.claimScope()
 	claim, err := b.revalidateClaimSnapshot(req.Lease.Server, leaseID)
 	if err != nil {
 		return core.Server{}, err

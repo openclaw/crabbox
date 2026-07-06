@@ -139,10 +139,10 @@ func (r *lifecycleRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 		return result, r.errors[index]
 	}
 	if result.Stdout == "" {
-		if isCanIRequest(req) {
-			result.Stdout = "yes"
-		} else if isCRDVersionsRequest(req) {
-			result.Stdout = "v1alpha2"
+		if isRulesReviewRequest(req) {
+			result.Stdout = `{"status":{"resourceRules":[{"verbs":["*"],"apiGroups":["*"],"resources":["*"]}]}}`
+		} else if isDevboxDiscoveryRequest(req) {
+			result.Stdout = `{"groupVersion":"devbox.sealos.io/v1alpha2","resources":[{"name":"devboxes"}]}`
 		} else {
 			result.Stdout = "ok"
 		}
@@ -174,6 +174,7 @@ func lifecycleBackend(cfg core.Config, runner *lifecycleRunner) *backend {
 			Clock:  fixedClock{t: time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)},
 		},
 		sshReady: noopSSHReady,
+		sshRun:   func(context.Context, core.SSHTarget, string) error { return nil },
 	}
 }
 
@@ -245,8 +246,25 @@ func TestRenderDevboxManifestStructured(t *testing.T) {
 		t.Fatalf("spec=%#v", spec)
 	}
 	resource := spec["resource"].(map[string]any)
-	if resource["cpu"] != "4" || resource["memory"] != "8Gi" {
+	if resource["cpu"] != "4" || resource["memory"] != "8Gi" || resource["ephemeral-storage"] != "40Gi" {
 		t.Fatalf("resource=%#v", resource)
+	}
+	if spec["runtimeClassName"] != devboxRuntimeClass || spec["mergeBaseImageTopLayer"] != true {
+		t.Fatalf("runtime spec=%#v", spec)
+	}
+	tolerations := spec["tolerations"].([]any)
+	toleration := tolerations[0].(map[string]any)
+	if toleration["key"] != devboxSchedulingNodeKey || toleration["operator"] != "Exists" || toleration["effect"] != "NoSchedule" {
+		t.Fatalf("tolerations=%#v", tolerations)
+	}
+	affinity := spec["affinity"].(map[string]any)
+	nodeAffinity := affinity["nodeAffinity"].(map[string]any)
+	required := nodeAffinity["requiredDuringSchedulingIgnoredDuringExecution"].(map[string]any)
+	terms := required["nodeSelectorTerms"].([]any)
+	expressions := terms[0].(map[string]any)["matchExpressions"].([]any)
+	expression := expressions[0].(map[string]any)
+	if expression["key"] != devboxSchedulingNodeKey || expression["operator"] != "Exists" {
+		t.Fatalf("affinity=%#v", affinity)
 	}
 	network := spec["network"].(map[string]any)
 	if network["type"] != networkSSHGate {
@@ -255,6 +273,11 @@ func TestRenderDevboxManifestStructured(t *testing.T) {
 	config := spec["config"].(map[string]any)
 	if config["user"] != "devbox" || config["workingDir"] != "/home/devbox/project" {
 		t.Fatalf("config=%#v", config)
+	}
+	ports := config["ports"].([]any)
+	port := ports[0].(map[string]any)
+	if port["name"] != devboxSSHPortName || port["containerPort"] != 22 || port["protocol"] != "TCP" {
+		t.Fatalf("ports=%#v", ports)
 	}
 }
 
@@ -411,7 +434,7 @@ func TestAcquireCreatesManifestPersistsClaimAndKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.LeaseID != leaseID || lease.Server.Name != name || lease.SSH.Host != "ssh.sealos.example.test" || lease.SSH.Port != "2222" || lease.SSH.Key == "" {
+	if lease.LeaseID != leaseID || lease.Server.Name != name || lease.SSH.Host != "ssh.sealos.example.test" || lease.SSH.Port != "2233" || lease.SSH.Key == "" {
 		t.Fatalf("lease=%#v", lease)
 	}
 	claim, err := core.ReadLeaseClaim(leaseID)
@@ -1151,6 +1174,16 @@ func TestTouchRefreshesRemoteLeaseAnnotationsWithResourceVersion(t *testing.T) {
 	if payload.Metadata.ResourceVersion != "rv-touch" || payload.Metadata.Annotations[annotationBase+"last_touched_at"] != wantTouched {
 		t.Fatalf("touch patch=%#v", payload)
 	}
+	wantScopeID := sealosClaimScopeID(cfg)
+	if len(wantScopeID) != 64 {
+		t.Fatalf("scope fingerprint length=%d", len(wantScopeID))
+	}
+	if payload.Metadata.Annotations[annotationBase+"provider-scope"] != wantScopeID || payload.Metadata.Annotations[annotationBase+"provider_scope_id"] != wantScopeID {
+		t.Fatalf("touch truncated ownership annotations: %#v", payload.Metadata.Annotations)
+	}
+	if server.Labels["provider-scope"] != wantScopeID || server.Labels["provider_scope_id"] != wantScopeID {
+		t.Fatalf("touch truncated ownership labels: %#v", server.Labels)
+	}
 	if payload.Spec != nil {
 		t.Fatalf("touch must not overwrite desired state: %#v", payload.Spec)
 	}
@@ -1275,18 +1308,14 @@ func flattenArgs(requests []core.LocalCommandRequest) []string {
 	return out
 }
 
-func isCanIRequest(req core.LocalCommandRequest) bool {
-	for i := 0; i+1 < len(req.Args); i++ {
-		if req.Args[i] == "auth" && req.Args[i+1] == "can-i" {
-			return true
-		}
-	}
-	return false
+func isRulesReviewRequest(req core.LocalCommandRequest) bool {
+	args := strings.Join(req.Args, " ")
+	return strings.Contains(args, "create --raw /apis/authorization.k8s.io/v1/selfsubjectrulesreviews -f -")
 }
 
-func isCRDVersionsRequest(req core.LocalCommandRequest) bool {
+func isDevboxDiscoveryRequest(req core.LocalCommandRequest) bool {
 	args := strings.Join(req.Args, " ")
-	return strings.Contains(args, "get customresourcedefinition "+devboxCRD) && strings.Contains(args, "jsonpath={.spec.versions[?(@.served==true)].name}")
+	return strings.Contains(args, "get --raw /apis/"+devboxGroupVersion)
 }
 
 func TestPersistDevboxKeyUsesCrabboxKeyPath(t *testing.T) {

@@ -2768,7 +2768,7 @@ func baseConfig() Config {
 			Memory:         "4Gi",
 			StorageLimit:   "20Gi",
 			Network:        "SSHGate",
-			SSHGatewayPort: "2222",
+			SSHGatewayPort: "2233",
 			SSHUser:        "devbox",
 			WorkRoot:       "/home/devbox/project",
 		},

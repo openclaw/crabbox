@@ -69,16 +69,81 @@ func (b *backend) kubeArgs(namespace bool) []string {
 	return args
 }
 
-func (b *backend) canI(ctx context.Context, verb, resource string) core.DoctorCheck {
-	out, err := b.kubectl(ctx, nil, true, "auth", "can-i", verb, resource)
-	check := "rbac." + verb + "." + strings.TrimSuffix(resource, ".devbox.sealos.io")
+type resourceRule struct {
+	Verbs         []string `json:"verbs"`
+	APIGroups     []string `json:"apiGroups"`
+	Resources     []string `json:"resources"`
+	ResourceNames []string `json:"resourceNames"`
+}
+
+func (b *backend) permissionRules(ctx context.Context) ([]resourceRule, error) {
+	request, err := json.Marshal(map[string]any{
+		"apiVersion": "authorization.k8s.io/v1",
+		"kind":       "SelfSubjectRulesReview",
+		"spec": map[string]string{
+			"namespace": b.cfg.SealosDevbox.Namespace,
+		},
+	})
 	if err != nil {
-		return doctorCheck("failed", check, err.Error(), nil)
+		return nil, err
 	}
-	if !strings.EqualFold(strings.TrimSpace(out), "yes") {
+	out, err := b.kubectlWithInput(ctx, nil, bytes.NewReader(request), false,
+		"create", "--raw", "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews", "-f", "-")
+	if err != nil {
+		return nil, err
+	}
+	var review struct {
+		Status struct {
+			ResourceRules   []resourceRule `json:"resourceRules"`
+			Incomplete      bool           `json:"incomplete"`
+			EvaluationError string         `json:"evaluationError"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(out), &review); err != nil {
+		return nil, core.Exit(5, "sealos-devbox permission review returned invalid JSON: %v", err)
+	}
+	if review.Status.Incomplete || strings.TrimSpace(review.Status.EvaluationError) != "" {
+		return nil, core.Exit(5, "sealos-devbox permission review incomplete")
+	}
+	return review.Status.ResourceRules, nil
+}
+
+func canIWithRules(rules []resourceRule, verb, resource string) core.DoctorCheck {
+	check := "rbac." + verb + "." + strings.TrimSuffix(resource, ".devbox.sealos.io")
+	resourceName, apiGroup := splitAPIResource(resource)
+	if !rulesAllow(rules, verb, apiGroup, resourceName) {
 		return doctorCheck("failed", check, "denied", map[string]string{"allowed": "false"})
 	}
 	return doctorCheck("ok", check, "allowed", map[string]string{"mutation": "false", "dry_permission_check": "true"})
+}
+
+func splitAPIResource(resource string) (string, string) {
+	name, group, found := strings.Cut(resource, ".")
+	if !found {
+		return resource, ""
+	}
+	return name, group
+}
+
+func rulesAllow(rules []resourceRule, verb, apiGroup, resource string) bool {
+	for _, rule := range rules {
+		if len(rule.ResourceNames) != 0 {
+			continue
+		}
+		if stringSetContains(rule.Verbs, verb) && stringSetContains(rule.APIGroups, apiGroup) && stringSetContains(rule.Resources, resource) {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSetContains(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == "*" || candidate == value {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *backend) createDevbox(ctx context.Context, manifest []byte) error {
