@@ -2,6 +2,7 @@ package external
 
 import (
 	"flag"
+	"os"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -22,7 +23,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Name:        providerName,
 		Family:      "external",
 		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
+		Targets:     []core.TargetSpec{{OS: core.TargetLinux}, {OS: core.TargetMacOS}, {OS: core.TargetWindows, WindowsMode: "normal"}, {OS: core.TargetWindows, WindowsMode: "wsl2"}},
 		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode},
 		Coordinator: core.CoordinatorNever,
 	}
@@ -38,6 +39,26 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (Provider) ValidateConfig(cfg core.Config) error {
 	return validateConfig(cfg)
+}
+
+func (Provider) DesktopCredentials(cfg core.Config, target core.SSHTarget) (core.DesktopCredentials, bool) {
+	desktop := cfg.External.Connection.Desktop
+	passwordEnv := strings.TrimSpace(desktop.PasswordEnv)
+	if passwordEnv == "" {
+		return core.DesktopCredentials{}, false
+	}
+	password, ok := os.LookupEnv(passwordEnv)
+	if !ok || password == "" {
+		return core.DesktopCredentials{}, false
+	}
+	username := strings.TrimSpace(desktop.Username)
+	if username == "" {
+		username = strings.TrimSpace(target.User)
+	}
+	if username == "" {
+		username = strings.TrimSpace(cfg.External.Connection.SSH.User)
+	}
+	return core.DesktopCredentials{Username: username, Password: password}, true
 }
 
 func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
@@ -87,8 +108,8 @@ func lifecycleControllerIdentityAttestationConfigured(cfg core.ExternalConfig) b
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
-		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
+	if cfg.TargetOS == "" {
+		cfg.TargetOS = core.TargetLinux
 	}
 	cfg.Provider = providerName
 	loadedRouting := core.ExternalRoutingLoaded(cfg.External)
@@ -113,7 +134,7 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
-	cfg.TargetOS = core.TargetLinux
+	cfg.Provider = providerName
 	cfg.SSHFallbackPorts = nil
 	cfg.WorkRoot = externalWorkRoot(cfg)
 	return &leaseBackend{spec: p.Spec(), cfg: cfg, rt: rt}, nil

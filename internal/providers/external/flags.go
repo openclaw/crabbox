@@ -11,12 +11,14 @@ import (
 )
 
 type flagValues struct {
-	Command           *string
-	Args              *stringListFlag
-	ConfigJSON        *string
-	WorkRoot          *string
-	RoutingFile       *string
-	IdempotentLeaseID *bool
+	Command            *string
+	Args               *stringListFlag
+	ConfigJSON         *string
+	WorkRoot           *string
+	RoutingFile        *string
+	DesktopUsername    *string
+	DesktopPasswordEnv *string
+	IdempotentLeaseID  *bool
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -32,7 +34,9 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 			defaults.External.RoutingFile,
 			"private external provider routing state file",
 		),
-		IdempotentLeaseID: fs.Bool("external-idempotent-lease-id", defaults.External.Capabilities.IdempotentLeaseID, "adapter guarantees idempotent acquisition for caller-supplied lease IDs"),
+		DesktopUsername:    fs.String("external-desktop-username", defaults.External.Connection.Desktop.Username, "external desktop username; defaults to resolved SSH user"),
+		DesktopPasswordEnv: fs.String("external-desktop-password-env", defaults.External.Connection.Desktop.PasswordEnv, "environment variable name containing the external desktop password"),
+		IdempotentLeaseID:  fs.Bool("external-idempotent-lease-id", defaults.External.Capabilities.IdempotentLeaseID, "adapter guarantees idempotent acquisition for caller-supplied lease IDs"),
 	}
 }
 
@@ -82,6 +86,12 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "external-command") || core.FlagWasSet(fs, "external-arg") || core.FlagWasSet(fs, "external-config-json") {
 		core.MarkExternalProviderOutputFlagExplicit(cfg)
+	}
+	if core.FlagWasSet(fs, "external-desktop-username") {
+		cfg.External.Connection.Desktop.Username = *v.DesktopUsername
+	}
+	if core.FlagWasSet(fs, "external-desktop-password-env") {
+		cfg.External.Connection.Desktop.PasswordEnv = *v.DesktopPasswordEnv
 	}
 	return validateConfig(*cfg)
 }
@@ -144,6 +154,9 @@ func validateConfig(cfg core.Config) error {
 		if cfg.External.Lifecycle.List.Output != lifecycleOutputJSONNameArray && cfg.External.Lifecycle.List.Output != lifecycleOutputJSONLeaseArray {
 			return core.Exit(2, "external.lifecycle.list.output must be %q or %q", lifecycleOutputJSONNameArray, lifecycleOutputJSONLeaseArray)
 		}
+	}
+	if desktopPasswordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); desktopPasswordEnv != "" && !lifecycleEnvNamePattern.MatchString(desktopPasswordEnv) {
+		return core.Exit(2, "external.connection.desktop.passwordEnv must be an environment variable name")
 	}
 	clean := path.Clean(externalWorkRoot(cfg))
 	if !strings.HasPrefix(clean, "/") {

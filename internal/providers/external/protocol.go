@@ -152,7 +152,7 @@ func (p protocolLease) target(cfg core.Config, keep bool) core.LeaseTarget {
 		Labels:   labels,
 	}
 	server.ServerType.Name = core.Blank(p.ServerType, "external")
-	target := core.SSHTarget{TargetOS: core.TargetLinux, NetworkKind: core.NetworkPublic}
+	target := core.SSHTarget{TargetOS: core.Blank(cfg.TargetOS, core.TargetLinux), WindowsMode: cfg.WindowsMode, NetworkKind: core.NetworkPublic}
 	if p.SSH != nil {
 		target.User = p.SSH.User
 		target.Host = p.SSH.Host

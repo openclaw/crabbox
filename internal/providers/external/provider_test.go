@@ -80,6 +80,64 @@ func TestProviderSpec(t *testing.T) {
 			t.Fatalf("missing feature %s", feature)
 		}
 	}
+	targets := map[string]bool{}
+	for _, target := range spec.Targets {
+		targets[target.OS+"/"+target.WindowsMode] = true
+	}
+	for _, want := range []string{core.TargetLinux + "/", core.TargetMacOS + "/", core.TargetWindows + "/normal", core.TargetWindows + "/wsl2"} {
+		if !targets[want] {
+			t.Fatalf("missing target %s in %#v", want, spec.Targets)
+		}
+	}
+}
+
+func TestConfigureAcceptsMacOSTarget(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetMacOS
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := backend.(*leaseBackend).cfg
+	if got.TargetOS != core.TargetMacOS {
+		t.Fatalf("target=%q", got.TargetOS)
+	}
+	lease := protocolLease{
+		LeaseID: "cbx_abcdef123456",
+		Slug:    "blue-crab",
+		Name:    "crabbox-blue-crab",
+		CloudID: "provider/node-1",
+		SSH:     &protocolSSH{User: "desktop", Host: "desktop.example.test", Port: "22"},
+	}.target(got, true)
+	if lease.SSH.TargetOS != core.TargetMacOS {
+		t.Fatalf("lease target=%q", lease.SSH.TargetOS)
+	}
+}
+
+func TestDesktopCredentialsUseEnvReference(t *testing.T) {
+	t.Setenv("CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD", "provider-secret")
+	cfg := testConfig()
+	cfg.External.Connection.Desktop.PasswordEnv = "CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD"
+	credentials, ok := (Provider{}).DesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	if !ok {
+		t.Fatal("expected desktop credentials")
+	}
+	if credentials.Username != "lease-user" || credentials.Password != "provider-secret" {
+		t.Fatalf("credentials=%#v", credentials)
+	}
+	cfg.External.Connection.Desktop.Username = "screen-user"
+	credentials, ok = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	if !ok || credentials.Username != "screen-user" {
+		t.Fatalf("explicit username credentials=%#v ok=%t", credentials, ok)
+	}
+}
+
+func TestValidateConfigRejectsInvalidDesktopPasswordEnv(t *testing.T) {
+	cfg := testConfig()
+	cfg.External.Connection.Desktop.PasswordEnv = "not an env name"
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "external.connection.desktop.passwordEnv") {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 func TestRouteConfigUsesProviderWorkRoot(t *testing.T) {
@@ -262,6 +320,27 @@ func TestFlagsOverrideArgsAndConfigJSON(t *testing.T) {
 	}
 	if cfg.External.Config["namespace"] != "prod" || cfg.External.Config["cpu"] != float64(64) {
 		t.Fatalf("config=%#v", cfg.External.Config)
+	}
+}
+
+func TestFlagsOverrideDesktopCredentials(t *testing.T) {
+	cfg := testConfig()
+	fs := flag.NewFlagSet("external", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{
+		"--external-desktop-username", "screen-user",
+		"--external-desktop-password-env", "CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Connection.Desktop.Username != "screen-user" {
+		t.Fatalf("desktop username=%q", cfg.External.Connection.Desktop.Username)
+	}
+	if cfg.External.Connection.Desktop.PasswordEnv != "CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD" {
+		t.Fatalf("desktop password env=%q", cfg.External.Connection.Desktop.PasswordEnv)
 	}
 }
 

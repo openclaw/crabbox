@@ -275,14 +275,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	password := ""
-	if endpoint.Managed {
-		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
-	}
-	username := ""
-	if endpoint.Managed && target.TargetOS == targetMacOS {
-		username = target.User
-	}
+	username, password := webVNCCredentials(ctx, cfg, target, endpoint)
 
 	connHost := endpoint.Host
 	connPort := endpoint.Port
@@ -695,6 +688,21 @@ func (w webVNCRedactingWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
+func webVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, endpoint vncEndpoint) (string, string) {
+	if !endpoint.Managed {
+		return "", ""
+	}
+	if credentials, ok := providerDesktopCredentials(cfg, target); ok {
+		return strings.TrimSpace(credentials.Username), strings.TrimSpace(credentials.Password)
+	}
+	password, _ := runSSHOutput(ctx, target, vncPasswordCommand(target))
+	username := ""
+	if target.TargetOS == targetMacOS {
+		username = target.User
+	}
+	return strings.TrimSpace(username), strings.TrimSpace(password)
+}
+
 func webVNCOutputURLHasCredentials(value string) bool {
 	if strings.Contains(value, "password=") || strings.Contains(value, "username=") {
 		return true
@@ -864,13 +872,10 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 		*localPort = availableLocalVNCPort()
 	}
 	endpoint, endpointErr := resolveVNCEndpoint(ctx, cfg, &target)
-	password := ""
 	username := ""
-	if endpointErr == nil && endpoint.Managed {
-		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
-		if target.TargetOS == targetMacOS {
-			username = target.User
-		}
+	password := ""
+	if endpointErr == nil {
+		username, password = webVNCCredentials(ctx, cfg, target, endpoint)
 	}
 	status, statusErr := coord.WebVNCStatus(ctx, leaseID)
 	daemon, daemonErr := localWebVNCDaemonStatus(leaseID)
@@ -1003,12 +1008,12 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx))
 		return exit(5, "reset target WebVNC/input stack: %v", err)
 	}
-	password := ""
-	username := ""
-	if target.TargetOS == targetMacOS {
-		username = target.User
+	endpoint, endpointErr := resolveVNCEndpoint(ctx, cfg, &target)
+	if endpointErr != nil {
+		printRescue(a.Stdout, rescueVNCTargetUnreachable, endpointErr.Error(), desktopDoctorCommand(rescueCtx))
+		return endpointErr
 	}
-	password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
+	username, password := webVNCCredentials(ctx, cfg, target, endpoint)
 	portal := webVNCPortalURL(coord.BaseURL, leaseID, username, password, webVNCPortalOptions{TakeControl: *takeControl})
 	daemonArgs := webVNCBridgeArgs(cfg, target, leaseID, *openPortal, *takeControl)
 	daemonName := *id
@@ -2581,17 +2586,19 @@ func guardMacOSDirectWebVNC(cfg Config) error {
 	return exit(2, "this webvnc subcommand is not available for macOS leases; run `crabbox webvnc --id <id>` for the host-side browser viewer, or use a native VNC client over an SSH tunnel:\n  ssh -o GatewayPorts=no -L 127.0.0.1:5900:127.0.0.1:5900 %s@<lease-ip>\n  open vnc://127.0.0.1:5900", blank(cfg.SSHUser, "<user>"))
 }
 
-// isMacOSDesktopProvider reports whether the lease belongs to a provider whose
-// ONLY target is macOS (e.g. tart) — those use the host-side Screen Sharing
-// bridge. It is keyed off the provider spec (not the resolved cfg.TargetOS,
-// which the webvnc subcommands don't always populate) so every entrypoint
-// classifies uniformly. Multi-target providers (e.g. parallels, which also
-// serves Linux/Windows) keep the existing WebVNC path even for their macOS
-// leases, so a single macOS target must not divert them into the tart bridge.
+// isMacOSDesktopProvider reports whether the lease should use the host-side
+// Screen Sharing bridge. Single-target macOS providers always qualify. Generic
+// multi-target adapters qualify only when they expose desktop credentials and the
+// selected target is macOS.
 func isMacOSDesktopProvider(cfg Config) bool {
 	p, err := ProviderFor(cfg.Provider)
 	if err != nil {
 		return false
+	}
+	if cfg.TargetOS == targetMacOS {
+		if _, ok := p.(DesktopCredentialProvider); ok {
+			return true
+		}
 	}
 	targets := p.Spec().Targets
 	if len(targets) == 0 {
