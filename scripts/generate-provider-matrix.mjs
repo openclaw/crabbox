@@ -8,9 +8,12 @@ import { fileURLToPath } from "node:url";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const metadataPath = path.join(root, "docs", "providers", "provider-metadata.json");
 const readmePath = path.join(root, "docs", "providers", "README.md");
+const lifecycleGuidePath = path.join(root, "docs", "features", "provider-live-smoke.md");
 const benchmarkCategoriesPath = path.join(root, "internal", "cli", "provider_categories_generated.go");
 const beginMarker = "<!-- BEGIN GENERATED PROVIDER MATRIX -->";
 const endMarker = "<!-- END GENERATED PROVIDER MATRIX -->";
+const lifecycleBeginMarker = "<!-- BEGIN GENERATED PROVIDER LIFECYCLE COVERAGE -->";
+const lifecycleEndMarker = "<!-- END GENERATED PROVIDER LIFECYCLE COVERAGE -->";
 const check = process.argv.includes("--check");
 const allowed = {
   status: new Set(["built-in", "specialized"]),
@@ -56,15 +59,28 @@ function main() {
   validate(providers, metadata);
   const generated = render(providers, metadata);
   const readme = fs.readFileSync(readmePath, "utf8");
-  const next = replaceGenerated(readme, generated);
+  const next = replaceGenerated(readme, generated, beginMarker, endMarker, readmePath);
+  const lifecycleGuide = fs.readFileSync(lifecycleGuidePath, "utf8");
+  const coverage = lifecycleCoverage(providers, metadata);
+  const nextLifecycleGuide = replaceGenerated(
+    lifecycleGuide,
+    renderLifecycleCoverage(coverage),
+    lifecycleBeginMarker,
+    lifecycleEndMarker,
+    lifecycleGuidePath
+  );
 
   if (check) {
     if (next !== readme) {
       fail("provider decision matrix is stale; run node scripts/generate-provider-matrix.mjs");
     }
+    if (nextLifecycleGuide !== lifecycleGuide) {
+      fail("provider lifecycle coverage is stale; run node scripts/generate-provider-matrix.mjs");
+    }
     console.log(`checked provider matrix: ${providers.length} providers`);
   } else {
     fs.writeFileSync(readmePath, next, "utf8");
+    fs.writeFileSync(lifecycleGuidePath, nextLifecycleGuide, "utf8");
     console.log(`generated provider matrix: ${providers.length} providers`);
   }
 }
@@ -174,13 +190,84 @@ function render(providers, metadata) {
   return lines.join("\n");
 }
 
-function replaceGenerated(input, generated) {
-  const start = input.indexOf(beginMarker);
+function replaceGenerated(input, generated, startMarker, endMarker, targetPath) {
+  const start = input.indexOf(startMarker);
   const end = input.indexOf(endMarker);
   if (start < 0 || end < 0 || end < start) {
-    fail(`missing provider matrix markers in ${path.relative(root, readmePath)}`);
+    fail(`missing generated markers in ${path.relative(root, targetPath)}`);
   }
   return `${input.slice(0, start)}${generated}${input.slice(end + endMarker.length)}`;
+}
+
+function lifecycleCoverage(providers, metadata) {
+  const liveMatrixSource = fs.readFileSync(path.join(root, "scripts", "live-smoke.sh"), "utf8");
+  const matrixProviders = new Set(
+    [...liveMatrixSource.matchAll(/\bhas_provider\s+([a-z0-9-]+)/g)].map((match) => match[1])
+  );
+  return providers.map((provider) => {
+    const name = provider.provider;
+    const packageName = name === "blacksmith-testbox" ? "blacksmith" : name.replaceAll("-", "");
+    const packageDir = path.join(root, "internal", "providers", packageName);
+    const files = fs.existsSync(packageDir) ? fs.readdirSync(packageDir) : [];
+    const hermeticLifecycle = files.some((file) => /lifecycle.*_test\.go$/.test(file) && !hasSmokeBuildTag(path.join(packageDir, file)));
+    const goSmoke = files.some((file) => /(?:_live|smoke)_test\.go$/.test(file) && hasSmokeBuildTag(path.join(packageDir, file)));
+    const dedicatedSmoke = dedicatedLiveSmoke(name);
+    const matrixSmoke = matrixProviders.has(name);
+    return {
+      name,
+      docs: metadata[name].docs,
+      packageName,
+      hermeticLifecycle,
+      goSmoke,
+      dedicatedSmoke,
+      matrixSmoke
+    };
+  });
+}
+
+function hasSmokeBuildTag(file) {
+  return fs.readFileSync(file, "utf8").split("\n", 8).some((line) => line.trim() === "//go:build smoke");
+}
+
+function dedicatedLiveSmoke(provider) {
+  const candidates = [path.join(root, "scripts", `live-${provider}-smoke.sh`)];
+  if (provider === "cloudflare") candidates.push(path.join(root, "scripts", "deploy-cloudflare-smoke.sh"));
+  if (provider === "cloudflare-dynamic-workers") candidates.push(path.join(root, "scripts", "deploy-cloudflare-dynamic-workers-smoke.sh"));
+  if (provider === "codesandbox") candidates.push(path.join(root, "scripts", "live-codesandbox-smoke.test.js"));
+  if (provider === "proxmox") candidates.push(path.join(root, "scripts", "proxmox-live-smoke.sh"));
+  if (provider === "xcp-ng") candidates.push(path.join(root, "scripts", "xcpng-live-smoke.sh"));
+  return candidates.some((file) => fs.existsSync(file));
+}
+
+function renderLifecycleCoverage(coverage) {
+  const hermeticCount = coverage.filter((provider) => provider.hermeticLifecycle).length;
+  const liveCount = coverage.filter((provider) => provider.dedicatedSmoke || provider.matrixSmoke).length;
+  const goSmokeCount = coverage.filter((provider) => provider.goSmoke).length;
+  const uncoveredCount = coverage.filter(
+    (provider) => !provider.hermeticLifecycle && !provider.dedicatedSmoke && !provider.matrixSmoke && !provider.goSmoke
+  ).length;
+  const lines = [
+    lifecycleBeginMarker,
+    "",
+    "## Source-derived coverage matrix",
+    "",
+    "This matrix is generated from the registered provider list, convention-named",
+    "hermetic lifecycle tests, `scripts/live-smoke.sh`, dedicated live runners, and",
+    "`//go:build smoke` tests. Regenerate it with",
+    "`node scripts/generate-provider-matrix.mjs`; docs CI rejects drift.",
+    "",
+    `Current coverage: ${coverage.length} providers; ${hermeticCount} with convention-named hermetic lifecycle tests, ${liveCount} with a live runner, ${goSmokeCount} with tagged Go smoke tests, and ${uncoveredCount} with none of those lifecycle surfaces.`,
+    "",
+    "| Provider | Hermetic lifecycle | Live runner | Tagged Go smoke |",
+    "| --- | --- | --- | --- |"
+  ];
+  for (const provider of coverage) {
+    const hermetic = provider.hermeticLifecycle ? `yes (\`${provider.packageName}\`)` : "—";
+    const live = provider.dedicatedSmoke && provider.matrixSmoke ? "dedicated + matrix" : provider.dedicatedSmoke ? "dedicated" : provider.matrixSmoke ? "matrix" : "—";
+    lines.push(`| [${provider.name}](../providers/${provider.docs}) | ${hermetic} | ${live} | ${provider.goSmoke ? "yes" : "—"} |`);
+  }
+  lines.push("", lifecycleEndMarker);
+  return lines.join("\n");
 }
 
 function renderBenchmarkCategories(metadata) {
