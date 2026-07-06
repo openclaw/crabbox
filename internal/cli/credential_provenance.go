@@ -77,6 +77,8 @@ type credentialDestinationProvenance struct {
 	sshKey                credentialValueSource
 	exeDevControlHost     credentialValueSource
 	externalConfig        credentialValueSource
+	externalLifecycle     credentialValueSource
+	externalConnection    credentialValueSource
 	externalResource      credentialValueSource
 	externalSSHConnection credentialValueSource
 	externalSSHHost       credentialValueSource
@@ -85,6 +87,7 @@ type credentialDestinationProvenance struct {
 	externalSSHOutput     credentialValueSource
 	externalRouting       credentialValueSource
 	externalApproved      externalCredentialApproval
+	externalArgvApproval  externalLifecycleCredentialApproval
 	repositoryRoot        string
 }
 
@@ -96,6 +99,11 @@ type externalCredentialApproval struct {
 	envSSH         ExternalSSHConnectionConfig
 	providerOutput bool
 	outputContract [32]byte
+}
+
+type externalLifecycleCredentialApproval struct {
+	configArgv bool
+	contract   [32]byte
 }
 
 type sourcedCredential struct {
@@ -391,6 +399,26 @@ func validateProviderCredentialDestination(cfg Config) error {
 		if !externalDeclarativeLifecycleConfigured(cfg.External) {
 			break
 		}
+		if externalConfigIsInherited(cfg.External, provenance.externalConfig) {
+			repositoryLifecycle := provenance.externalLifecycle == credentialSourceRepository
+			repositoryResource := provenance.externalResource == credentialSourceRepository
+			repositoryCloudID := provenance.externalConnection == credentialSourceRepository
+			for _, configArgv := range externalLifecycleConfigArgvSurfaces(
+				cfg.External,
+				repositoryLifecycle,
+				repositoryLifecycle || repositoryResource,
+				repositoryLifecycle || repositoryCloudID,
+			) {
+				field := "external.lifecycle." + configArgv.operation + "." + configArgv.surface
+				if !repositoryLifecycle {
+					field = "external.connection template feeding " + field
+				}
+				override := "external.lifecycle." + configArgv.operation + ".allowConfigArgv in the same lifecycle contract in trusted user config"
+				if !configArgv.allowed || !externalLifecycleConfigArgvApproved(cfg.External, provenance.externalArgvApproval) {
+					return repositoryCredentialDestinationError("external", field, override)
+				}
+			}
+		}
 		if cfg.External.Connection.SSH.AllowEnv && provenance.externalSSHAllowEnv == credentialSourceRepository {
 			return repositoryCredentialDestinationError("external", "external.connection.ssh.allowEnv", "the same opt-in in trusted user config")
 		}
@@ -473,6 +501,115 @@ func externalDeclarativeLifecycleConfigured(cfg ExternalConfig) bool {
 	return len(cfg.Lifecycle.Acquire.Argv) > 0 || len(cfg.Lifecycle.Acquire.Steps) > 0
 }
 
+func externalConfigIsInherited(cfg ExternalConfig, source credentialValueSource) bool {
+	if len(cfg.Config) == 0 {
+		return false
+	}
+	if source != credentialSourceUnknown && source != credentialSourceRepository {
+		return true
+	}
+	return cfg.routingLoaded && source == credentialSourceRepository
+}
+
+func externalLifecycleAllowsConfigArgv(cfg ExternalLifecycleConfig) bool {
+	for _, operation := range externalLifecycleOperations(cfg) {
+		if operation.operation.AllowConfigArgv {
+			return true
+		}
+	}
+	return false
+}
+
+func externalLifecycleContract(cfg ExternalConfig) ([32]byte, bool) {
+	contract := struct {
+		Lifecycle    ExternalLifecycleConfig `json:"lifecycle"`
+		ResourceName string                  `json:"resourceName"`
+		CloudID      string                  `json:"cloudId"`
+	}{
+		Lifecycle:    cfg.Lifecycle,
+		ResourceName: cfg.Connection.ResourceName,
+		CloudID:      cfg.Connection.CloudID,
+	}
+	data, err := json.Marshal(contract)
+	if err != nil {
+		return [32]byte{}, false
+	}
+	return sha256.Sum256(data), true
+}
+
+func externalLifecycleConfigArgvApproved(cfg ExternalConfig, approval externalLifecycleCredentialApproval) bool {
+	if !approval.configArgv {
+		return false
+	}
+	contract, ok := externalLifecycleContract(cfg)
+	return ok && contract == approval.contract
+}
+
+type namedExternalLifecycleOperation struct {
+	name      string
+	operation ExternalLifecycleOperation
+}
+
+func externalLifecycleOperations(cfg ExternalLifecycleConfig) []namedExternalLifecycleOperation {
+	return []namedExternalLifecycleOperation{
+		{name: "doctor", operation: cfg.Doctor},
+		{name: "acquire", operation: cfg.Acquire},
+		{name: "resolve", operation: cfg.Resolve},
+		{name: "list", operation: cfg.List},
+		{name: "release", operation: cfg.Release},
+		{name: "touch", operation: cfg.Touch},
+		{name: "cleanup", operation: cfg.Cleanup},
+	}
+}
+
+type externalLifecycleConfigArgvSurface struct {
+	operation string
+	surface   string
+	allowed   bool
+}
+
+func externalLifecycleConfigArgvSurfaces(
+	cfg ExternalConfig,
+	directConfig bool,
+	resourceNameConfig bool,
+	cloudIDConfig bool,
+) []externalLifecycleConfigArgvSurface {
+	resourceNameUsesConfig := resourceNameConfig && strings.Contains(cfg.Connection.ResourceName, "{{config.")
+	cloudIDUsesConfig := cloudIDConfig && strings.Contains(cfg.Connection.CloudID, "{{config.")
+	var surfaces []externalLifecycleConfigArgvSurface
+	for _, named := range externalLifecycleOperations(cfg.Lifecycle) {
+		if externalLifecycleArgsUseConfig(named.operation.Argv, directConfig, resourceNameUsesConfig, cloudIDUsesConfig) {
+			surfaces = append(surfaces, externalLifecycleConfigArgvSurface{
+				operation: named.name,
+				surface:   "argv",
+				allowed:   named.operation.AllowConfigArgv,
+			})
+		}
+		for _, step := range named.operation.Steps {
+			if externalLifecycleArgsUseConfig(step, directConfig, resourceNameUsesConfig, cloudIDUsesConfig) {
+				surfaces = append(surfaces, externalLifecycleConfigArgvSurface{
+					operation: named.name,
+					surface:   "steps",
+					allowed:   named.operation.AllowConfigArgv,
+				})
+				break
+			}
+		}
+	}
+	return surfaces
+}
+
+func externalLifecycleArgsUseConfig(argv []string, directConfig, resourceNameUsesConfig, cloudIDUsesConfig bool) bool {
+	for _, value := range argv {
+		if directConfig && strings.Contains(value, "{{config.") ||
+			resourceNameUsesConfig && strings.Contains(value, "{{resourceName}}") ||
+			cloudIDUsesConfig && strings.Contains(value, "{{cloudId}}") {
+			return true
+		}
+	}
+	return false
+}
+
 // MarkExternalRoutingCredentialSources applies the routing file's trust source
 // to connection values after the External provider loads that private state.
 // An unknown source is reserved for claim-bound automatic routing.
@@ -484,6 +621,8 @@ func MarkExternalRoutingCredentialSources(cfg *Config) {
 	connection := cfg.External.Connection
 	provenance := &cfg.credentialProvenance
 	provenance.externalConfig = source
+	provenance.externalLifecycle = source
+	provenance.externalConnection = source
 	provenance.externalResource = credentialDestinationSource(connection.ResourceName, provenance.externalApproved.resource, source)
 	provenance.externalSSHConnection = source
 	provenance.externalSSHHost = credentialDestinationSource(connection.SSH.Host, provenance.externalApproved.host, source)

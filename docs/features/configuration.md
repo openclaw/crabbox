@@ -788,7 +788,11 @@ not shell commands. Acquire steps can opt into release cleanup with
 `rollbackOnFailure: true`. Put credentials in an operation `env:` map, not in
 `argv` or `steps`; environment-derived argv values require the explicit
 `allowEnvArgv: true` compatibility opt-in, and environment-derived resource
-names require `connection.allowEnvResourceName: true`. See
+names require `connection.allowEnvResourceName: true`. Repository lifecycle
+commands cannot place inherited `external.config` values in argv without an
+exact lifecycle and config-derived connection-template contract carrying
+`allowConfigArgv: true` in trusted user config; repository-owned config values
+are unchanged. See
 [External Provider](../providers/external.md) for placeholders, output
 semantics, inventory formats, routing behavior, controller-safe raw
 `json-lease` identity attestation, and security guidance.
