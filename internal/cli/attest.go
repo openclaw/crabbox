@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -96,6 +97,51 @@ func attestFingerprint(pub ed25519.PublicKey) string {
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
+func jsonHasDuplicateKeys(dec *json.Decoder) (bool, error) {
+	token, err := dec.Token()
+	if err != nil {
+		return false, err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return false, nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]bool{}
+		for dec.More() {
+			keyToken, err := dec.Token()
+			if err != nil {
+				return false, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return false, fmt.Errorf("invalid object key")
+			}
+			if seen[key] {
+				return true, nil
+			}
+			seen[key] = true
+			duplicate, err := jsonHasDuplicateKeys(dec)
+			if duplicate || err != nil {
+				return duplicate, err
+			}
+		}
+		_, err = dec.Token()
+		return false, err
+	case '[':
+		for dec.More() {
+			duplicate, err := jsonHasDuplicateKeys(dec)
+			if duplicate || err != nil {
+				return duplicate, err
+			}
+		}
+		_, err = dec.Token()
+		return false, err
+	}
+	return false, nil
+}
+
 func canonicalReceiptBytes(receipt map[string]any) ([]byte, error) {
 	unsigned := make(map[string]any, len(receipt))
 	for key, value := range receipt {
@@ -167,6 +213,13 @@ func (a App) verify(ctx context.Context, args []string) error {
 	var receipt map[string]any
 	if err := json.Unmarshal(data, &receipt); err != nil {
 		return exit(2, "parse receipt: %v", err)
+	}
+	duplicate, err := jsonHasDuplicateKeys(json.NewDecoder(bytes.NewReader(data)))
+	if err != nil {
+		return exit(2, "parse receipt: %v", err)
+	}
+	if duplicate {
+		return exit(2, "malformed receipt: duplicate key")
 	}
 	pubText, ok := receipt["public_key"].(string)
 	if !ok {

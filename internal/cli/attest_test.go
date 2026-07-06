@@ -169,6 +169,30 @@ func TestVerifyRejectsTamperedReceipts(t *testing.T) {
 			wantCode: 2,
 		},
 		{
+			name: "duplicate exit code key keeps signed value last",
+			mutate: func(t *testing.T, path string, receipt map[string]any) []byte {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return bytes.Replace(data, []byte(`"exit_code": 0`), []byte(`"exit_code": 1,
+  "exit_code": 0`), 1)
+			},
+			wantCode: 2,
+		},
+		{
+			name: "duplicate command key keeps signed value last",
+			mutate: func(t *testing.T, path string, receipt map[string]any) []byte {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return bytes.Replace(data, []byte(`"command": "go test ./..."`), []byte(`"command": "rm -rf ./dist",
+  "command": "go test ./..."`), 1)
+			},
+			wantCode: 2,
+		},
+		{
 			name: "truncated json",
 			mutate: func(t *testing.T, path string, receipt map[string]any) []byte {
 				data, err := os.ReadFile(path)
@@ -214,6 +238,19 @@ func TestVerifyRejectsTamperedReceipts(t *testing.T) {
 			t.Fatalf("expected exit 2, got %v", err)
 		}
 	})
+}
+
+func TestAttestReceiptPathCollisions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "receipt.json")
+	if err := preflightRunOutputCollisions("attest receipt", path, path, "", nil); err == nil {
+		t.Fatal("expected capture stdout collision error")
+	}
+	if err := preflightRunOutputCollisions("attest receipt", path, "", path, nil); err == nil {
+		t.Fatal("expected capture stderr collision error")
+	}
+	if err := preflightRunOutputCollisions("attest receipt", path, "", "", []string{"remote.log=" + path}); err == nil {
+		t.Fatal("expected download collision error")
+	}
 }
 
 func marshalReceipt(t *testing.T, receipt map[string]any) []byte {

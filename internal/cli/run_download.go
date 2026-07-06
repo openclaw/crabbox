@@ -95,25 +95,29 @@ func rejectCaptureDownloadCollision(label, capturePath string, download runDownl
 }
 
 func preflightProofOutputPath(proofPath, captureStdout, captureStderr string, downloads []string) error {
-	if proofPath == "" {
+	return preflightRunOutputCollisions("emit proof", proofPath, captureStdout, captureStderr, downloads)
+}
+
+func preflightRunOutputCollisions(label, path, captureStdout, captureStderr string, downloads []string) error {
+	if path == "" {
 		return nil
 	}
 	if captureStdout != "" {
-		same, err := sameLocalOutputPath(proofPath, captureStdout)
+		same, err := sameLocalOutputPath(path, captureStdout)
 		if err != nil {
 			return err
 		}
 		if same {
-			return exit(2, "emit proof/capture stdout: paths must be different")
+			return exit(2, "%s/capture stdout: paths must be different", label)
 		}
 	}
 	if captureStderr != "" {
-		same, err := sameLocalOutputPath(proofPath, captureStderr)
+		same, err := sameLocalOutputPath(path, captureStderr)
 		if err != nil {
 			return err
 		}
 		if same {
-			return exit(2, "emit proof/capture stderr: paths must be different")
+			return exit(2, "%s/capture stderr: paths must be different", label)
 		}
 	}
 	for _, spec := range downloads {
@@ -121,12 +125,12 @@ func preflightProofOutputPath(proofPath, captureStdout, captureStderr string, do
 		if err != nil {
 			return err
 		}
-		same, err := sameLocalOutputPath(proofPath, download.Local)
+		same, err := sameLocalOutputPath(path, download.Local)
 		if err != nil {
 			return err
 		}
 		if same {
-			return exit(2, "emit proof/download %s: paths must be different", download.Remote)
+			return exit(2, "%s/download %s: paths must be different", label, download.Remote)
 		}
 	}
 	return nil

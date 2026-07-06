@@ -23,9 +23,11 @@ exits 1:
 FAIL receipt.json signer=sha256:6a5f...: signature mismatch
 ```
 
-A receipt that cannot be checked at all (unreadable file, invalid JSON, a
-missing or malformed `public_key` or `signature`) exits 2 with an error on
-stderr.
+A receipt that cannot be checked at all (unreadable file, invalid JSON,
+duplicate JSON keys, a missing or malformed `public_key` or `signature`) exits
+2 with an error on stderr. Duplicate keys are rejected outright because JSON
+parsers disagree on which duplicate wins, which would let an edited receipt
+show one value to a reader while the signature still verifies against another.
 
 ## Receipt format
 
