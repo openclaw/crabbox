@@ -143,22 +143,36 @@ func newTestBackend(t *testing.T, api *fakeLambdaAPI) *backend {
 	return b
 }
 
-func TestListShowsOnlyCompleteOwnedLambdaInstances(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.TargetOS = core.TargetLinux
-	cfg.ServerType = defaultType
-	owned := Instance{ID: "i-owned", Name: "owned", Status: "active", IP: "203.0.113.10", Type: defaultType, Tags: leaseTags(cfg, "cbx_abcdef123456", "owned", "ready", false, time.Now())}
-	api := &fakeLambdaAPI{instances: []Instance{
-		owned,
+func attachLambdaClaimSnapshot(t *testing.T, server core.Server, leaseID string) core.Server {
+	t.Helper()
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return server
+}
+
+func TestListShowsOnlyClaimedLambdaInstances(t *testing.T) {
+	api := &fakeLambdaAPI{}
+	b := newTestBackend(t, api)
+	claimedLabels := leaseTags(b.cfg, "cbx_abcdef123456", "claimed", "ready", false, time.Now())
+	providerOnlyLabels := leaseTags(b.cfg, "cbx_abcdef123457", "provider-only", "ready", false, time.Now())
+	api.instances = []Instance{
+		{ID: "i-claimed", Name: "claimed", Status: "active", IP: "203.0.113.10", Type: defaultType, Tags: claimedLabels},
+		{ID: "i-provider-only", Name: "provider-only", Status: "active", IP: "203.0.113.11", Type: defaultType, Tags: providerOnlyLabels},
 		{ID: "i-foreign", Name: "foreign", Tags: map[string]string{"crabbox": "true", "provider": "other"}},
 		{ID: "i-partial", Name: "partial", Tags: map[string]string{"crabbox": "true", "provider": providerName}},
-	}}
-	views, err := newTestBackend(t, api).List(context.Background(), core.ListRequest{})
+	}
+	server := core.Server{Provider: providerName, CloudID: "i-claimed", Name: "claimed", Labels: claimedLabels}
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_abcdef123456", "claimed", b.cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	views, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(views) != 1 || views[0].CloudID != "i-owned" || views[0].Status != "ready" {
+	if len(views) != 1 || views[0].CloudID != "i-claimed" || views[0].Status != "ready" {
 		t.Fatalf("views=%#v", views)
 	}
 }
@@ -276,6 +290,7 @@ func TestAcquireReusesMatchingSSHKeyAndReleaseDoesNotDeleteIt(t *testing.T) {
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
 		t.Fatal(err)
 	}
+	server = attachLambdaClaimSnapshot(t, server, leaseID)
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +516,12 @@ func TestCleanupDryRunDoesNotMutate(t *testing.T) {
 	labels["last_touched_at"] = core.LeaseLabelTime(old)
 	labels["expires_at"] = core.LeaseLabelTime(old.Add(time.Minute))
 	api := &fakeLambdaAPI{instances: []Instance{{ID: "i-old", Name: "old", Status: "active", IP: "203.0.113.50", Type: defaultType, Tags: labels}}}
-	if err := newTestBackend(t, api).Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+	b := newTestBackend(t, api)
+	server := core.Server{Provider: providerName, CloudID: "i-old", Name: "old", Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_abcdef123456", "old", b.cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.terminatedIDs) != 0 || len(api.deletedKeyIDs) != 0 {
@@ -509,7 +529,7 @@ func TestCleanupDryRunDoesNotMutate(t *testing.T) {
 	}
 }
 
-func TestCleanupDeletesProviderOnlyExpiredLambdaInstance(t *testing.T) {
+func TestCleanupSkipsProviderOnlyExpiredLambdaInstance(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
@@ -520,8 +540,228 @@ func TestCleanupDeletesProviderOnlyExpiredLambdaInstance(t *testing.T) {
 	if err := newTestBackend(t, api).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(api.terminatedIDs) != 1 || len(api.terminatedIDs[0]) != 1 || api.terminatedIDs[0][0] != "i-old" {
+	if len(api.terminatedIDs) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("provider-only resource mutated: terminated=%v keys=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+}
+
+func TestReleaseRefusesProviderOnlyLambdaInstance(t *testing.T) {
+	b := newTestBackend(t, &fakeLambdaAPI{})
+	labels := lambdaProviderLaunchTags(leaseTags(b.cfg, "cbx_abcdef123456", "provider-only", "ready", false, time.Now()), lambdaSSHKeyIdentity{ID: "key-provider-only", Name: "crabbox-cbx-provider-only", Created: true})
+	api := &fakeLambdaAPI{instances: []Instance{{ID: "i-provider-only", Name: "provider-only", Status: "active", IP: "203.0.113.50", Type: defaultType, Tags: labels}}}
+	b.clientFactory = func(core.Runtime) (lambdaAPI, error) { return api, nil }
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "i-provider-only", ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("resolve err=%v", err)
+	}
+	server := core.Server{Provider: providerName, CloudID: "i-provider-only", Name: "provider-only", Labels: labels}
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: labels["lease"], Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.terminatedIDs) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("provider-only resource mutated: terminated=%v keys=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+}
+
+func TestReleaseRefusesAmbiguousLaunchWithoutClaimedSSHKey(t *testing.T) {
+	api := &fakeLambdaAPI{launchErr: errors.New("transport closed")}
+	b := newTestBackend(t, api)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "ambiguous-unbound"})
+	if err == nil || !strings.Contains(err.Error(), "indeterminate") {
+		t.Fatalf("err=%v", err)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("ambiguous-unbound", providerName)
+	if claimErr != nil || !ok {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	api.launchErr = nil
+	api.instances = append(api.instances, Instance{ID: "i-unbound", Name: "unbound", Status: "active", IP: "203.0.113.52", Type: defaultType, SSHKeyNames: []string{"different-key"}})
+	server := core.Server{Provider: providerName, CloudID: "i-unbound", Name: claim.Slug, Labels: claim.Labels}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "matches 0 instances") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.terminatedIDs) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("unbound recovery mutated: terminated=%v keys=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("ambiguous-unbound", providerName); err != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReleaseRefusesRequestSSHKeyOverride(t *testing.T) {
+	api := &fakeLambdaAPI{}
+	b := newTestBackend(t, api)
+	leaseID := "cbx_abcdef123456"
+	labels := lambdaLabelsWithKey(leaseTags(b.cfg, leaseID, "claimed-key", "ready", false, time.Now()), lambdaSSHKeyIdentity{ID: "key-claimed", Name: providerKeyForLease(leaseID), Created: true})
+	api.instances = []Instance{{ID: "i-claimed-key", Name: "claimed-key", Status: "active", IP: "203.0.113.51", Type: defaultType, Tags: labels}}
+	server := core.Server{Provider: providerName, CloudID: "i-claimed-key", Name: "claimed-key", Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "claimed-key", b.cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	server = attachLambdaClaimSnapshot(t, server, leaseID)
+	requestLabels := cloneLambdaLabels(labels)
+	requestLabels[lambdaKeyIDLabel] = "key-unclaimed"
+	server.Labels = requestLabels
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "stale local claim") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.terminatedIDs) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("mutated from request override: terminated=%v keys=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("claimed-key", providerName); err != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReleaseRefusesRefreshedClaimSnapshot(t *testing.T) {
+	api := &fakeLambdaAPI{}
+	b := newTestBackend(t, api)
+	leaseID := "cbx_abcdef123456"
+	old := time.Now().Add(-48 * time.Hour)
+	labels := lambdaLabelsWithKey(leaseTags(b.cfg, leaseID, "refreshed", "ready", false, old), lambdaSSHKeyIdentity{ID: "key-refreshed", Name: providerKeyForLease(leaseID), Created: true})
+	labels["expires_at"] = core.LeaseLabelTime(old.Add(time.Minute))
+	api.instances = []Instance{{ID: "i-refreshed", Name: "refreshed", Status: "active", IP: "203.0.113.53", Type: defaultType, Tags: labels}}
+	server := core.Server{Provider: providerName, CloudID: "i-refreshed", Name: "refreshed", Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "refreshed", b.cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider("refreshed", providerName)
+	if err != nil || !ok {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	freshLabels := cloneLambdaLabels(labels)
+	freshLabels["last_touched_at"] = core.LeaseLabelTime(time.Now())
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, freshLabels); err != nil {
+		t.Fatal(err)
+	}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.terminatedIDs) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("refreshed claim mutated: terminated=%v keys=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+}
+
+func TestReleaseRefusesTransferredClaimSnapshot(t *testing.T) {
+	api := &fakeLambdaAPI{}
+	b := newTestBackend(t, api)
+	leaseID := "cbx_abcdef123456"
+	labels := lambdaLabelsWithKey(leaseTags(b.cfg, leaseID, "transferred", "ready", false, time.Now()), lambdaSSHKeyIdentity{ID: "key-transferred", Name: providerKeyForLease(leaseID), Created: true})
+	api.instances = []Instance{{ID: "i-transferred", Name: "transferred", Status: "active", IP: "203.0.113.57", Type: defaultType, Tags: labels}}
+	server := core.Server{Provider: providerName, CloudID: "i-transferred", Name: "transferred", Labels: labels}
+	repoA := t.TempDir()
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "transferred", b.cfg, server, core.SSHTarget{}, repoA, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	server = attachLambdaClaimSnapshot(t, server, leaseID)
+	repoB := t.TempDir()
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "transferred", b.cfg, server, core.SSHTarget{}, repoB, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider("transferred", providerName)
+	if err != nil || !ok || claim.RepoRoot != repoB {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.terminatedIDs) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("transferred claim mutated: terminated=%v keys=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+}
+
+func TestReleaseAllowsSameOwnerEndpointRefresh(t *testing.T) {
+	api := &fakeLambdaAPI{}
+	b := newTestBackend(t, api)
+	leaseID := "cbx_abcdef123456"
+	labels := lambdaLabelsWithKey(leaseTags(b.cfg, leaseID, "endpoint-refresh", "ready", false, time.Now()), lambdaSSHKeyIdentity{ID: "key-endpoint-refresh", Name: providerKeyForLease(leaseID), Created: true})
+	api.instances = []Instance{{ID: "i-endpoint-refresh", Name: "endpoint-refresh", Status: "active", IP: "203.0.113.59", Type: defaultType, Tags: labels}}
+	server := core.Server{Provider: providerName, CloudID: "i-endpoint-refresh", Name: "endpoint-refresh", Labels: labels}
+	repoRoot := t.TempDir()
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "endpoint-refresh", b.cfg, server, core.SSHTarget{}, repoRoot, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	server = attachLambdaClaimSnapshot(t, server, leaseID)
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{Host: "100.64.0.59", Port: "22"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "endpoint-refresh", b.cfg, server, core.SSHTarget{Host: "100.64.0.59", Port: "22"}, repoRoot, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.terminatedIDs) != 1 || api.terminatedIDs[0][0] != "i-endpoint-refresh" || len(api.deletedKeyIDs) != 1 || api.deletedKeyIDs[0] != "key-endpoint-refresh" {
+		t.Fatalf("terminated=%v deletedKeyIDs=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+}
+
+func TestAmbiguousLaunchRecoveryConflictIsScopedToRecoveryClaim(t *testing.T) {
+	api := &fakeLambdaAPI{launchErr: errors.New("transport closed")}
+	b := newTestBackend(t, api)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "ambiguous-duplicate"})
+	if err == nil || !strings.Contains(err.Error(), "indeterminate") {
+		t.Fatalf("err=%v", err)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("ambiguous-duplicate", providerName)
+	if claimErr != nil || !ok {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	api.launchErr = nil
+	keyName := claim.Labels[lambdaKeyNameLabel]
+	api.instances = append(api.instances,
+		Instance{ID: "i-duplicate-1", Name: "duplicate-1", Status: "active", IP: "203.0.113.54", Type: defaultType, SSHKeyNames: []string{keyName}},
+		Instance{ID: "i-duplicate-2", Name: "duplicate-2", Status: "active", IP: "203.0.113.55", Type: defaultType, SSHKeyNames: []string{keyName}},
+	)
+	unrelatedLeaseID := "cbx_abcdef123457"
+	old := time.Now().Add(-48 * time.Hour)
+	unrelatedLabels := leaseTags(b.cfg, unrelatedLeaseID, "unrelated", "ready", false, old)
+	unrelatedLabels["expires_at"] = core.LeaseLabelTime(old.Add(time.Minute))
+	unrelated := Instance{ID: "i-unrelated", Name: "unrelated", Status: "active", IP: "203.0.113.56", Type: defaultType, Tags: unrelatedLabels}
+	api.instances = append(api.instances, unrelated)
+	unrelatedServer := core.Server{Provider: providerName, CloudID: unrelated.ID, Name: unrelated.Name, Labels: unrelatedLabels}
+	if err := core.ClaimLeaseTargetForRepoConfig(unrelatedLeaseID, "unrelated", b.cfg, unrelatedServer, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	views, err := b.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].CloudID != unrelated.ID {
+		t.Fatalf("views=%#v", views)
+	}
+	if target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "unrelated", ReleaseOnly: true}); err != nil || target.Server.CloudID != unrelated.ID {
+		t.Fatalf("target=%#v err=%v", target, err)
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "i-duplicate-1", ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "matches 2 instances") {
+		t.Fatalf("resolve err=%v", err)
+	}
+	server := core.Server{Provider: providerName, CloudID: "i-duplicate-1", Name: claim.Slug, Labels: claim.Labels}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "matches 2 instances") {
+		t.Fatalf("release err=%v", err)
+	}
+	if len(api.terminatedIDs) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("duplicate recovery mutated: terminated=%v keys=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("ambiguous-duplicate", providerName); err != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.terminatedIDs) != 1 || len(api.terminatedIDs[0]) != 1 || api.terminatedIDs[0][0] != unrelated.ID {
 		t.Fatalf("terminated=%v", api.terminatedIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("ambiguous-duplicate", providerName); err != nil || !ok {
+		t.Fatalf("recovery claim ok=%v err=%v", ok, err)
 	}
 }
 
@@ -632,6 +872,62 @@ func TestAmbiguousLaunchRecoveryFindsInstanceBySSHKeyName(t *testing.T) {
 	}
 }
 
+func TestAmbiguousLaunchRecoveryPersistsBindingBeforePartialCleanup(t *testing.T) {
+	api := &fakeLambdaAPI{launchErr: errors.New("transport closed")}
+	b := newTestBackend(t, api)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "ambiguous-retry"})
+	if err == nil || !strings.Contains(err.Error(), "indeterminate") {
+		t.Fatalf("err=%v", err)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("ambiguous-retry", providerName)
+	if claimErr != nil || !ok || claim.CloudID != "" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	api.launchErr = nil
+	api.instances = append(api.instances, Instance{
+		ID:          "i-ambiguous-retry",
+		Name:        "ambiguous-retry",
+		Status:      "active",
+		IP:          "203.0.113.58",
+		Type:        defaultType,
+		SSHKeyNames: []string{claim.Labels[lambdaKeyNameLabel]},
+	})
+	target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "ambiguous-retry", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.deleteKeyErr = errors.New("key deletion unavailable")
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: target})
+	if err == nil || !strings.Contains(err.Error(), "key deletion unavailable") {
+		t.Fatalf("err=%v", err)
+	}
+	bound, ok, claimErr := core.ResolveLeaseClaimForProvider("ambiguous-retry", providerName)
+	if claimErr != nil || !ok || bound.CloudID != "i-ambiguous-retry" {
+		t.Fatalf("bound=%#v ok=%v err=%v", bound, ok, claimErr)
+	}
+	if len(api.terminatedIDs) != 1 || api.terminatedIDs[0][0] != "i-ambiguous-retry" {
+		t.Fatalf("terminated=%v", api.terminatedIDs)
+	}
+	api.instances = nil
+	api.deleteKeyErr = nil
+	retry, err := b.releaseTargetFromClaim("ambiguous-retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: retry}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.terminatedIDs) != 1 {
+		t.Fatalf("terminated on retry=%v", api.terminatedIDs)
+	}
+	if len(api.deletedKeyIDs) != 2 || api.deletedKeyIDs[1] != "key-700" {
+		t.Fatalf("deletedKeyIDs=%v", api.deletedKeyIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("ambiguous-retry", providerName); err != nil || ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+}
+
 func TestFailedRollbackRecoveryClaimKeepsInstanceIDForRetry(t *testing.T) {
 	api := &fakeLambdaAPI{terminateErr: errors.New("terminate unavailable")}
 	b := newTestBackend(t, api)
@@ -704,22 +1000,28 @@ func TestTouchAndTailscaleMetadataAreLocalOnly(t *testing.T) {
 	if touched.Labels["state"] != "running" || touched.Labels[lambdaTouchLocalLabel] != "true" {
 		t.Fatalf("touched labels=%v", touched.Labels)
 	}
-	updated, err := b.UpdateTailscaleMetadata(context.Background(), core.LeaseTarget{LeaseID: lease.LeaseID, Server: touched}, core.TailscaleMetadata{
+	meta := core.TailscaleMetadata{
 		Enabled:  true,
 		Hostname: "touch",
 		FQDN:     "touch.example.ts.net",
 		IPv4:     "100.64.1.10",
 		Tags:     []string{"tag:ci", "tag:crabbox"},
 		State:    "ready",
-	})
+		Version:  "1.80.3",
+		DeviceID: "node-lambda-touch",
+	}
+	pending := touched
+	pending.Labels = cloneLambdaLabels(touched.Labels)
+	applyTailscaleMetadata(pending.Labels, meta)
+	updated, err := b.UpdateTailscaleMetadata(context.Background(), core.LeaseTarget{LeaseID: lease.LeaseID, Server: pending}, meta)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Labels["tailscale_ipv4"] != "100.64.1.10" || updated.Labels["tailscale_tags"] != "tag:ci,tag:crabbox" || updated.Labels[lambdaTouchLocalLabel] != "true" {
+	if updated.Labels["tailscale_ipv4"] != "100.64.1.10" || updated.Labels["tailscale_tags"] != "tag:ci,tag:crabbox" || updated.Labels["tailscale_version"] != "1.80.3" || updated.Labels["tailscale_device_id"] != "node-lambda-touch" || updated.Labels[lambdaTouchLocalLabel] != "true" {
 		t.Fatalf("updated labels=%v", updated.Labels)
 	}
 	claim, ok, err := core.ResolveLeaseClaimForProvider("touch", providerName)
-	if err != nil || !ok || claim.Labels["tailscale_fqdn"] != "touch.example.ts.net" {
+	if err != nil || !ok || claim.Labels["tailscale_fqdn"] != "touch.example.ts.net" || claim.Labels["tailscale_version"] != "1.80.3" || claim.Labels["tailscale_device_id"] != "node-lambda-touch" {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 }

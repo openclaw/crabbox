@@ -24,10 +24,6 @@ func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time
 	return labels
 }
 
-func isOwnedInstance(item Instance) bool {
-	return validateLambdaLabels(item.Tags) == nil
-}
-
 func validateLambdaLabels(labels map[string]string) error {
 	if labels == nil ||
 		labels["crabbox"] != "true" ||
@@ -60,6 +56,8 @@ func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadat
 		delete(labels, "tailscale_ipv4")
 		delete(labels, "tailscale_fqdn")
 		delete(labels, "tailscale_error")
+		delete(labels, "tailscale_version")
+		delete(labels, "tailscale_device_id")
 		delete(labels, "tailscale_exit_node")
 		delete(labels, "tailscale_exit_node_allow_lan_access")
 		return
@@ -82,6 +80,12 @@ func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadat
 	}
 	if meta.Error != "" {
 		labels["tailscale_error"] = meta.Error
+	}
+	if meta.Version != "" {
+		labels["tailscale_version"] = meta.Version
+	}
+	if meta.DeviceID != "" {
+		labels["tailscale_device_id"] = meta.DeviceID
 	}
 	if meta.ExitNode != "" {
 		labels["tailscale_exit_node"] = meta.ExitNode
