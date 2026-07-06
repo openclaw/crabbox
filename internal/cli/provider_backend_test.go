@@ -1410,3 +1410,22 @@ func TestRedactedSSHUserOnlyForDaytona(t *testing.T) {
 		t.Fatalf("redactedSSHUser daytona=%q", got)
 	}
 }
+
+func TestServerLeaseClaimSnapshotIsExplicitAndCloned(t *testing.T) {
+	server := Server{}
+	if _, exists, set := ServerLeaseClaimSnapshot(server); exists || set {
+		t.Fatalf("empty snapshot exists=%v set=%v", exists, set)
+	}
+	claim := LeaseClaim{LeaseID: "cbx_abcdef123456", Labels: map[string]string{"state": "ready"}}
+	SetServerLeaseClaimSnapshot(&server, claim, true)
+	claim.Labels["state"] = "changed"
+	got, exists, set := ServerLeaseClaimSnapshot(server)
+	if !exists || !set || got.LeaseID != claim.LeaseID || got.Labels["state"] != "ready" {
+		t.Fatalf("snapshot=%#v exists=%v set=%v", got, exists, set)
+	}
+	got.Labels["state"] = "mutated"
+	again, _, _ := ServerLeaseClaimSnapshot(server)
+	if again.Labels["state"] != "ready" {
+		t.Fatalf("snapshot alias=%#v", again)
+	}
+}

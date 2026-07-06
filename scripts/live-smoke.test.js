@@ -538,6 +538,165 @@ esac
   }
 });
 
+test("Sealos DevBox live smoke classifies missing context before mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-sealos-missing-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const home = path.join(dir, "home");
+  const homeBin = path.join(home, "bin");
+  const fakeKubectl = path.join(homeBin, "kubectl");
+  const kubeDir = path.join(home, ".kube");
+  const log = path.join(dir, "calls.log");
+  fs.mkdirSync(kubeDir, { recursive: true });
+  fs.mkdirSync(homeBin, { recursive: true });
+  fs.writeFileSync(path.join(kubeDir, "config"), "apiVersion: v1\n", "utf8");
+  writeExecutable(fakeKubectl, "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$*" in
+  "config path")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "sealos-devbox",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_SEALOS_DEVBOX_CONTEXT: "",
+      CRABBOX_SEALOS_DEVBOX_IMAGE: "ubuntu:24.04",
+      CRABBOX_SEALOS_DEVBOX_KUBECTL: fakeKubectl,
+      CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST: "ssh.sealos.example.test",
+      HOME: home,
+      KUBECONFIG: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^classification=environment_blocked reason=missing_context provider=sealos-devbox/m);
+  assert.match(result.stderr, /admin active-lease check skipped/);
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^config path$/m);
+  assert.doesNotMatch(calls, /^doctor --provider sealos-devbox/m);
+  assert.doesNotMatch(calls, /^warmup /m);
+  assert.doesNotMatch(calls, /^run /m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
+test("Sealos DevBox live smoke runs the guarded SSH lease lifecycle", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-sealos-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const home = path.join(dir, "home");
+  const homeBin = path.join(home, "bin");
+  const fakeKubectl = path.join(homeBin, "kubectl");
+  const kubeDir = path.join(home, ".kube");
+  const log = path.join(dir, "calls.log");
+  fs.mkdirSync(homeBin, { recursive: true });
+  fs.mkdirSync(kubeDir, { recursive: true });
+  fs.writeFileSync(path.join(kubeDir, "config"), "apiVersion: v1\n", "utf8");
+  writeExecutable(fakeKubectl, "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$1" in
+  config)
+    exit 0
+    ;;
+  doctor)
+    printf '{"provider":"sealos-devbox","status":"ready","checks":[{"check":"rbac.create.devboxes","status":"ok"},{"check":"rbac.update.devboxes","status":"ok"},{"check":"rbac.delete.devboxes","status":"ok"}]}\\n'
+    ;;
+  cleanup)
+    printf 'sealos-devbox cleanup dry_run=true\\n'
+    ;;
+  list)
+    printf '[]\\n'
+    ;;
+  warmup)
+    printf 'provisioning provider=sealos-devbox lease=cbx_123456789abc slug=sealos-devbox-smoke-test devbox=crabbox-sealos-devbox-smoke-test namespace=team-a keep=true\\n'
+    printf 'provisioned lease=cbx_123456789abc slug=sealos-devbox-smoke-test state=ready\\n'
+    ;;
+  status)
+    printf '{"id":"cbx_123456789abc","slug":"sealos-devbox-smoke-test","provider":"sealos-devbox","state":"Running","serverType":"sealos-devbox","host":"ssh.sealos.example.test","ready":true,"lastTouchedAt":"2026-06-24T00:00:00Z","expiresAt":"2026-06-24T00:15:00Z"}\\n'
+    ;;
+  ssh)
+    exit 0
+    ;;
+  run)
+    printf 'crabbox-live-ok\\nrun_deadbeef1234\\n'
+    ;;
+  logs)
+    printf 'log ok\\n'
+    ;;
+  stop)
+    printf 'deleted %s\\n' "\${*: -1}"
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "sealos-devbox",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_LIVE_SEALOS_DEVBOX_SLUG: "sealos-devbox-smoke-test",
+      CRABBOX_SEALOS_DEVBOX_CONTEXT: "sealos-test",
+      CRABBOX_SEALOS_DEVBOX_IMAGE: "ubuntu:24.04",
+      CRABBOX_SEALOS_DEVBOX_KUBECONFIG: "~/.kube/config",
+      CRABBOX_SEALOS_DEVBOX_KUBECTL: "~/bin/kubectl",
+      CRABBOX_SEALOS_DEVBOX_NAMESPACE: "team-a",
+      CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST: "ssh.sealos.example.test",
+      HOME: home,
+      KUBECONFIG: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /crabbox-live-ok/);
+  assert.match(result.stderr, /admin active-lease check skipped/);
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^doctor --provider sealos-devbox /m);
+  assert.match(calls, /--sealos-devbox-delete-on-release=true/);
+  assert.match(calls, new RegExp(`--sealos-devbox-kubectl ${fakeKubectl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.match(calls, /--sealos-devbox-kubeconfig ~\/\.kube\/config/);
+  assert.doesNotMatch(calls, /--sealos-devbox-delete-on-release=false/);
+  assert.equal((calls.match(/^cleanup --provider sealos-devbox /gm) ?? []).length, 2);
+  assert.match(
+    calls,
+    /^warmup --provider sealos-devbox .* --keep --slug sealos-devbox-smoke-test --ttl 15m --idle-timeout 5m --timing-json$/m,
+  );
+  assert.match(calls, /^status --provider sealos-devbox .* --id sealos-devbox-smoke-test --wait --wait-timeout 5m --json$/m);
+  assert.match(calls, /^ssh --provider sealos-devbox .* --id sealos-devbox-smoke-test$/m);
+  assert.match(calls, /^run --provider sealos-devbox .* --id sealos-devbox-smoke-test --shell -- /m);
+  assert.match(calls, /^stop --provider sealos-devbox .* sealos-devbox-smoke-test$/m);
+  assert.match(calls, /^list --provider sealos-devbox .* --json$/m);
+});
+
 test("Namespace Devbox live smoke requires the devbox CLI before provider mutation", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-namespace-"));
   const bin = path.join(dir, "bin");

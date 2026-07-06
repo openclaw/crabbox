@@ -66,6 +66,8 @@ export interface Env {
   CRABBOX_GITHUB_ALLOWED_ORGS?: string;
   CRABBOX_GITHUB_ALLOWED_TEAM?: string;
   CRABBOX_GITHUB_ALLOWED_TEAMS?: string;
+  CRABBOX_GITHUB_REVOKED_USERS?: string;
+  CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS?: string;
   CRABBOX_GITHUB_ADMIN_OWNERS?: string;
   CRABBOX_GITHUB_ADMIN_LOGINS?: string;
   CRABBOX_PUBLIC_URL?: string;
@@ -114,6 +116,7 @@ export interface Env {
   CRABBOX_ARTIFACTS_BUCKET?: string;
   CRABBOX_ARTIFACTS_PREFIX?: string;
   CRABBOX_ARTIFACTS_BASE_URL?: string;
+  CRABBOX_ARTIFACTS_PUBLIC_READS?: string;
   CRABBOX_ARTIFACTS_REGION?: string;
   CRABBOX_ARTIFACTS_ENDPOINT_URL?: string;
   CRABBOX_ARTIFACTS_ACCESS_KEY_ID?: string;
@@ -329,6 +332,8 @@ export interface LeaseRecord {
   cloudID: string;
   region?: string;
   providerProject?: string;
+  providerScope?: string;
+  providerOwner?: string;
   network?: LeaseNetworkState;
   owner: string;
   org: string;

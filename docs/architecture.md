@@ -116,8 +116,9 @@ adapter's `Spec()`; the type definitions live in
 Node runtime:
 
 - `GET /v1/health` returns liveness; `GET /` redirects to `/portal`.
-- `/v1/auth/*`, `/portal/login`, `/portal/logout`, and WebSocket upgrades for
-  the live bridges go to `FleetCoordinator`.
+- `/v1/auth/*`, `/portal/login`, and WebSocket upgrades for the live bridges go
+  to `FleetCoordinator` without the normal portal-session authentication;
+  `/portal/logout` remains authenticated and same-origin gated.
 - `/v1/internal/*` is 404 externally; runtime schedulers invoke maintenance
   internally.
 - Everything else passes through `authenticateRequest` and is forwarded with
@@ -126,7 +127,9 @@ Node runtime:
 Auth (`worker/src/auth.ts`) requires a Bearer token, matched in order:
 `CRABBOX_ADMIN_TOKEN` (admin), `CRABBOX_SHARED_TOKEN` (non-admin shared), then a
 signed user token (prefix `cbxu_`, HMAC-SHA256, 180-day default expiry) minted
-after GitHub OAuth login verifies allowed org membership. An optional Cloudflare
+after GitHub OAuth login verifies allowed org membership. The signed token keeps
+the OAuth credential encrypted under the session secret so request authentication
+can periodically revalidate current org/team membership. An optional Cloudflare
 Access JWT (`cf-access-jwt-assertion`) can supply the owner identity. The
 coordinator injects `x-crabbox-auth`, `-admin`, `-owner`, `-org`, and `-github-login`
 headers. The portal converts a `crabbox_session` cookie into a Bearer token.

@@ -15,7 +15,9 @@ import {
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   AWSProvider,
+  AzureProvider,
   FleetDurableObject,
+  GCPProvider,
   HetznerProvider,
   bridgeTicketFromRequest,
   boundedSocketReason,
@@ -32,6 +34,10 @@ import {
 } from "../src/fleet";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { portalCode } from "../src/portal";
+import {
+  ProviderProvisioningCleanupError,
+  providerProvisioningCleanupClaim,
+} from "../src/provider-provisioning";
 import {
   runtimeAdapterDesktopRelayTimeoutMs,
   runtimeAdapterRelayFrameLimit,
@@ -352,6 +358,238 @@ describe("runtime adapter relay", () => {
     expect(viewer.closeReason).toBe("admin access revoked");
     expect(viewer.sentJSON()).toEqual([]);
     expect(internal.codeViewers.has("code-rotated-admin")).toBe(false);
+  });
+
+  it("fails closed active non-admin GitHub WebVNC and egress bridges after revocation", async () => {
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const payload = decodeUserTokenPayload(token);
+    const portalSessionHash = await sha256Hex(token);
+    const grant = {
+      auth: "github" as const,
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: false,
+      login: "alice",
+      portalSessionHash,
+      githubGrant: {
+        tokenID: payload.jti,
+        sealedCredential: payload.githubCredential,
+        expiresAt: new Date(payload.exp * 1000).toISOString(),
+      },
+    };
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    const leaseID = "cbx_000000000001";
+    const webAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_revoked_user",
+      capabilities: new Set<string>(),
+    });
+    const webViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID,
+      id: "viewer_revoked_user",
+      agentID: "agent_revoked_user",
+      ...grant,
+      label: "alice",
+    });
+    const egressHost = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID,
+      sessionID: "egress_revoked_user",
+      ...grant,
+    });
+    const egressClient = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID,
+      sessionID: "egress_revoked_user",
+      ...grant,
+    });
+    const internal = fleet as unknown as {
+      env: Env;
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      webVNCViewers: Map<
+        string,
+        Map<
+          string,
+          {
+            id: string;
+            agentID: string;
+            socket: WebSocket;
+            owner: string;
+            org: string;
+            admin: boolean;
+            auth: "github";
+            login: string;
+            portalSessionHash: string;
+            githubGrant: typeof grant.githubGrant;
+            label: string;
+            connectedAt: string;
+          }
+        >
+      >;
+      egressHosts: Map<string, WebSocket>;
+      egressClients: Map<string, WebSocket>;
+    };
+    internal.webVNCAgents.set(
+      leaseID,
+      new Map([["agent_revoked_user", webAgent as unknown as WebSocket]]),
+    );
+    internal.webVNCViewers.set(
+      leaseID,
+      new Map([
+        [
+          "viewer_revoked_user",
+          {
+            id: "viewer_revoked_user",
+            agentID: "agent_revoked_user",
+            socket: webViewer as unknown as WebSocket,
+            ...grant,
+            label: "alice",
+            connectedAt: new Date().toISOString(),
+          },
+        ],
+      ]),
+    );
+    internal.egressHosts.set(
+      `${leaseID}\u0000egress_revoked_user`,
+      egressHost as unknown as WebSocket,
+    );
+    internal.egressClients.set(
+      `${leaseID}\u0000egress_revoked_user`,
+      egressClient as unknown as WebSocket,
+    );
+    const githubFetch = vi.fn<() => Promise<Response>>(async () => {
+      throw new Error("revoked users must fail before GitHub API access");
+    });
+    vi.stubGlobal("fetch", githubFetch);
+
+    await fleet.webSocketMessage(webViewer as unknown as WebSocket, "vnc-frame");
+    await fleet.webSocketMessage(egressHost as unknown as WebSocket, "egress-frame");
+
+    expect(webViewer.closeCode).toBe(1008);
+    expect(webViewer.closeReason).toBe("user access revoked");
+    expect(webAgent.closeCode).toBe(1011);
+    expect(egressHost.closeCode).toBe(1008);
+    expect(egressHost.closeReason).toBe("user access revoked");
+    expect(egressClient.closeCode).toBe(1008);
+    expect(egressClient.closeReason).toBe("user access revoked");
+    expect(githubFetch).not.toHaveBeenCalled();
+
+    internal.env.CRABBOX_GITHUB_REVOKED_USERS = undefined;
+    const membershipFailureHost = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID,
+      sessionID: "egress_membership_failure",
+      ...grant,
+    });
+    const membershipFailureClient = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID,
+      sessionID: "egress_membership_failure",
+      ...grant,
+    });
+    internal.egressHosts.set(
+      `${leaseID}\u0000egress_membership_failure`,
+      membershipFailureHost as unknown as WebSocket,
+    );
+    internal.egressClients.set(
+      `${leaseID}\u0000egress_membership_failure`,
+      membershipFailureClient as unknown as WebSocket,
+    );
+
+    await fleet.webSocketMessage(membershipFailureHost as unknown as WebSocket, "egress-frame");
+
+    expect(membershipFailureHost.closeCode).toBe(1008);
+    expect(membershipFailureHost.closeReason).toBe("user access revoked");
+    expect(membershipFailureClient.closeCode).toBe(1008);
+    expect(membershipFailureClient.closeReason).toBe("user access revoked");
+    expect(githubFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a WebVNC upgrade revoked before its buffered desktop frames flush", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const payload = decodeUserTokenPayload(token);
+    const portalSessionHash = await sha256Hex(token);
+    const leaseID = "cbx_000000000001";
+    const agentID = "agent_logout_race";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        owner: "alice@example.com",
+        org: "example-org",
+        desktop: true,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    storage.seed(`code-viewer-session-revocation:${portalSessionHash}`, {
+      portalSessionHash,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const fleet = testFleet(storage, {}, env);
+    const agent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: agentID,
+      capabilities: new Set<string>(),
+    });
+    const internal = fleet as unknown as {
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      webVNCViewers: Map<string, Map<string, unknown>>;
+      pendingWebVNCToViewer: Map<string, { chunks: Array<string | ArrayBuffer>; bytes: number }>;
+    };
+    internal.webVNCAgents.set(leaseID, new Map([[agentID, agent as unknown as WebSocket]]));
+    internal.pendingWebVNCToViewer.set(`${leaseID}:${agentID}`, {
+      chunks: ["buffered-desktop-frame"],
+      bytes: 22,
+    });
+
+    const response = await fleet.fetch(
+      request("GET", `/portal/leases/${leaseID}/vnc/viewer`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          upgrade: "websocket",
+          "x-crabbox-auth": "github",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+          "x-crabbox-github-login": "alice",
+          "x-crabbox-github-token-id": payload.jti,
+          "x-crabbox-github-sealed-credential": payload.githubCredential,
+          "x-crabbox-token-expires-at": new Date(payload.exp * 1000).toISOString(),
+        },
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(agent.closeCode).toBeUndefined();
+    expect(internal.webVNCViewers.size).toBe(0);
+    expect(internal.pendingWebVNCToViewer.get(`${leaseID}:${agentID}`)?.chunks).toEqual([
+      "buffered-desktop-frame",
+    ]);
   });
 
   it("restores unambiguous hibernated bridge sockets after validating lease state", async () => {
@@ -701,7 +939,7 @@ describe("runtime adapter relay", () => {
     expect(viewer.closeCode).toBe(1008);
     expect(viewer.closeReason).toBe("portal session ended");
     expect(legacyViewer.closeCode).toBe(1008);
-    expect(legacyViewer.closeReason).toBe("portal session ended");
+    expect(legacyViewer.closeReason).toBe("lease access revoked");
     expect(agent.sentJSON()).toEqual([
       {
         type: "ws_close",
@@ -713,7 +951,7 @@ describe("runtime adapter relay", () => {
         type: "ws_close",
         id: "viewer-legacy",
         code: 1008,
-        reason: "portal session ended",
+        reason: "lease access revoked",
       },
     ]);
     const relay = fleet as unknown as { codeViewers: Map<string, WebSocket> };
@@ -831,12 +1069,13 @@ describe("runtime adapter relay", () => {
     expect(revokedCodeViewer.closeReason).toBe("lease access revoked");
     expect(ownerCodeViewer.closeCode).toBeUndefined();
     expect(legacyCodeViewer.closeCode).toBe(1008);
-    expect(legacyCodeViewer.closeReason).toBe("lease access revoked");
+    expect(legacyCodeViewer.closeReason).toBe("user access revoked");
     expect(revokedWebViewer.closeCode).toBe(1008);
     expect(revokedWebViewer.closeReason).toBe("lease access revoked");
     expect(revokedWebAgent.closeCode).toBe(1011);
-    expect(retainedWebViewer.closeCode).toBeUndefined();
-    expect(retainedWebAgent.closeCode).toBeUndefined();
+    expect(retainedWebViewer.closeCode).toBe(1008);
+    expect(retainedWebViewer.closeReason).toBe("bridge authentication expired");
+    expect(retainedWebAgent.closeCode).toBe(1011);
     expect(legacyOwnerWebViewer.closeCode).toBe(1008);
     expect(legacyOwnerWebViewer.closeReason).toBe("lease access revoked");
     expect(legacyOwnerWebAgent.closeCode).toBe(1011);
@@ -851,7 +1090,7 @@ describe("runtime adapter relay", () => {
         type: "ws_close",
         id: "code-legacy",
         code: 1008,
-        reason: "lease access revoked",
+        reason: "user access revoked",
       },
     ]);
   });
@@ -4350,6 +4589,53 @@ describe("fleet lease identity and idle", () => {
     await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
   });
 
+  it("finishes retained key cleanup when a validated Hetzner server disappears", async () => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const method = init?.method ?? "GET";
+        requests.push(`${method} ${url.pathname}`);
+        if (method === "GET") {
+          return jsonResponse({
+            server: {
+              id: 123,
+              name: "crabbox-blue-lobster",
+              status: "running",
+              server_type: { name: "cx23" },
+              public_net: { ipv4: { ip: "192.0.2.1" } },
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                provider: "hetzner",
+                lease: "cbx_000000000000",
+                slug: "blue-lobster",
+              },
+            },
+          });
+        }
+        if (url.pathname === "/v1/servers/123") {
+          return jsonResponse({ error: { code: "not_found" } }, 404);
+        }
+        return new Response(null, { status: 204 });
+      }),
+    );
+    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+
+    await expect(
+      provider.releaseLease(
+        testLease({ providerKeyCleanupPending: true, providerKeyCleanupID: "7" }),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "DELETE /v1/ssh_keys/7",
+    ]);
+  });
+
   it("deletes a persisted Hetzner server before its retained SSH key", async () => {
     const requests: string[] = [];
     vi.stubGlobal(
@@ -4357,6 +4643,24 @@ describe("fleet lease identity and idle", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input));
         requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        if ((init?.method ?? "GET") === "GET") {
+          return jsonResponse({
+            server: {
+              id: 123,
+              name: "crabbox-blue-lobster",
+              status: "running",
+              server_type: { name: "cx23" },
+              public_net: { ipv4: { ip: "192.0.2.1" } },
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                provider: "hetzner",
+                lease: "cbx_000000000000",
+                slug: "blue-lobster",
+              },
+            },
+          });
+        }
         return new Response(null, { status: 204 });
       }),
     );
@@ -4370,8 +4674,163 @@ describe("fleet lease identity and idle", () => {
 
     await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
 
-    expect(requests).toEqual(["DELETE /v1/servers/123", "DELETE /v1/ssh_keys/7"]);
+    expect(requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "DELETE /v1/ssh_keys/7",
+    ]);
   });
+
+  it.each([
+    ["another lease", { lease: "cbx_111111111111", slug: "blue-lobster" }],
+    ["another slug", { lease: "cbx_000000000000", slug: "other" }],
+  ])("refuses to delete a persisted Hetzner server owned by %s", async (_case, labels) => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        return jsonResponse({
+          server: {
+            id: 123,
+            name: "crabbox-other",
+            status: "running",
+            server_type: { name: "cx23" },
+            public_net: { ipv4: { ip: "192.0.2.1" } },
+            labels: {
+              crabbox: "true",
+              created_by: "crabbox",
+              provider: "hetzner",
+              ...labels,
+            },
+          },
+        });
+      }),
+    );
+    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+    const lease = testLease({
+      provider: "hetzner",
+      serverID: 123,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+
+    await expect(provider.releaseLease(lease)).rejects.toThrow(
+      "ownership does not match lease cbx_000000000000",
+    );
+
+    expect(requests).toEqual(["GET /v1/servers/123"]);
+  });
+
+  it("accepts the encoded provider label for a long Hetzner lease slug", async () => {
+    const slug = `blue-${"lobster".repeat(10)}`;
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        if ((init?.method ?? "GET") === "GET") {
+          return jsonResponse({
+            server: {
+              id: 123,
+              name: "crabbox-blue-lobster",
+              status: "running",
+              server_type: { name: "cx23" },
+              public_net: { ipv4: { ip: "192.0.2.1" } },
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                provider: "hetzner",
+                lease: "cbx_000000000000",
+                slug: slug.slice(0, 63),
+              },
+            },
+          });
+        }
+        return new Response(null, { status: 204 });
+      }),
+    );
+    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+
+    await expect(
+      provider.releaseLease(
+        testLease({
+          slug,
+          providerKeyCleanupPending: true,
+          providerKeyCleanupID: "7",
+        }),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "DELETE /v1/ssh_keys/7",
+    ]);
+  });
+
+  it.each([
+    [
+      "canonical name",
+      "crabbox-cbx-000000000000",
+      "released",
+      ["GET /v1/servers/123", "DELETE /v1/servers/123", "DELETE /v1/ssh_keys/7"],
+    ],
+    [
+      "unexpected name",
+      "crabbox-other",
+      "refusing to delete Hetzner server 123: ownership does not match lease cbx_000000000000",
+      ["GET /v1/servers/123"],
+    ],
+  ])(
+    "handles a legacy Hetzner lease with its %s",
+    async (_case, serverName, expectedOutcome, expectedRequests) => {
+      const requests: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(String(input));
+          requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+          if ((init?.method ?? "GET") === "GET") {
+            return jsonResponse({
+              server: {
+                id: 123,
+                name: serverName,
+                status: "running",
+                server_type: { name: "cx23" },
+                public_net: { ipv4: { ip: "192.0.2.1" } },
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  lease: "cbx_000000000000",
+                },
+              },
+            });
+          }
+          return new Response(null, { status: 204 });
+        }),
+      );
+      const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+      const outcome = await provider
+        .releaseLease(
+          testLease({
+            slug: undefined,
+            serverName,
+            providerKeyCleanupPending: true,
+            providerKeyCleanupID: "7",
+          }),
+        )
+        .then(
+          () => "released",
+          (error: unknown) => (error instanceof Error ? error.message : String(error)),
+        );
+
+      expect(outcome).toBe(expectedOutcome);
+      expect(requests).toEqual(expectedRequests);
+    },
+  );
 
   it("recovers an unknown Hetzner server before deleting its retained SSH key", async () => {
     const requests: string[] = [];
@@ -4391,7 +4850,13 @@ describe("fleet lease identity and idle", () => {
                 status: "running",
                 server_type: { name: "cx23" },
                 public_net: { ipv4: { ip: "192.0.2.1" } },
-                labels: { crabbox: "true", lease: "cbx_abcdef123456" },
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  provider: "hetzner",
+                  lease: "cbx_abcdef123456",
+                  slug: "rollback",
+                },
               },
             ],
           });
@@ -4402,6 +4867,7 @@ describe("fleet lease identity and idle", () => {
     const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
     const lease = testLease({
       id: "cbx_abcdef123456",
+      slug: "rollback",
       provider: "hetzner",
       serverID: 0,
       provisioningResourceMayExist: true,
@@ -4439,7 +4905,7 @@ describe("fleet lease identity and idle", () => {
 
     await expect(provider.releaseLease(lease)).rejects.toThrow("http 503");
 
-    expect(requests).toEqual(["DELETE /v1/servers/123"]);
+    expect(requests).toEqual(["GET /v1/servers/123"]);
   });
 
   it("records a shared Hetzner key's actual name so cleanup retains it", async () => {
@@ -4801,18 +5267,49 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("only deletes provider keys canonically bound to the released lease", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          server: {
+            id: 123,
+            name: "crabbox-blue-lobster",
+            status: "running",
+            server_type: { name: "cx23" },
+            public_net: { ipv4: { ip: "192.0.2.1" } },
+            labels: {
+              crabbox: "true",
+              created_by: "crabbox",
+              provider: "hetzner",
+              lease: "cbx_abcdef123456",
+              slug: "blue-lobster",
+            },
+          },
+        }),
+      ),
+    );
     const providers = [
-      new HetznerProvider({} as Env),
+      new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env),
       new AWSProvider({} as Env, "eu-west-1", new MemoryStorage()),
     ];
     await Promise.all(
       providers.map(async (provider) => {
         vi.spyOn(provider, "deleteServer").mockResolvedValue();
         const deleteSSHKey = vi.spyOn(provider, "deleteSSHKey").mockResolvedValue();
+        if (provider instanceof AWSProvider) {
+          vi.spyOn(provider, "findServer").mockResolvedValue(
+            ownedTestMachine("aws", "i-abcdef123456"),
+          );
+        }
+        const providerLease =
+          provider instanceof AWSProvider
+            ? { provider: "aws" as const, cloudID: "i-abcdef123456" }
+            : {};
         await provider.releaseLease(
           testLease({
             id: "cbx_abcdef123456",
             providerKey: "crabbox-cbx-000000000001",
+            ...providerLease,
           }),
         );
         expect(deleteSSHKey).not.toHaveBeenCalled();
@@ -4822,12 +5319,212 @@ describe("fleet lease identity and idle", () => {
             id: "cbx_abcdef123456",
             providerKey: "crabbox-cbx-abcdef123456",
             providerKeyCleanupOwned: true,
+            ...providerLease,
           }),
         );
         expect(deleteSSHKey).toHaveBeenCalledOnce();
         expect(deleteSSHKey).toHaveBeenCalledWith("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
       }),
     );
+  });
+
+  it("reads and verifies cloud ownership before AWS, Azure, or GCP release", async () => {
+    await Promise.all(
+      workerCloudReleaseCases()
+        .filter(({ providerName }) => providerName !== "azure")
+        .map(async ({ providerName, cloudID, provider }) => {
+          const findServer = vi
+            .spyOn(provider, "findServer")
+            .mockResolvedValue(ownedTestMachine(providerName, cloudID));
+          const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
+          const lease = testLease({
+            id: "cbx_abcdef123456",
+            provider: providerName,
+            cloudID,
+            providerKeyCleanupOwned: false,
+          });
+
+          await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
+          expect(findServer).toHaveBeenCalledWith(cloudID);
+          expect(deleteServer).toHaveBeenCalledWith(cloudID);
+        }),
+    );
+  });
+
+  it("routes Azure release through its companion-aware ownership cleanup", async () => {
+    const provider = new AzureProvider({} as Env);
+    const deleteOwnedServer = vi.spyOn(provider, "deleteOwnedServer").mockResolvedValue();
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      cloudID: "crabbox-blue-lobster",
+    });
+
+    await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
+    expect(deleteOwnedServer).toHaveBeenCalledWith(lease);
+  });
+
+  it("persists Azure provider scope before provisioning", async () => {
+    const provider = new AzureProvider({
+      FLEET: {} as DurableObjectNamespace,
+      AZURE_TENANT_ID: "tenant",
+      AZURE_CLIENT_ID: "client",
+      AZURE_CLIENT_SECRET: "secret",
+      AZURE_SUBSCRIPTION_ID: "stored-subscription",
+      CRABBOX_AZURE_RESOURCE_GROUP: "stored-resource-group",
+    } as Env);
+    const config = leaseConfig({ provider: "azure", sshPublicKey: "ssh-ed25519 test" });
+    const prepared = await provider.prepareLeaseCreate(
+      config,
+      testLease({ provider: "azure", cloudID: "" }),
+    );
+
+    expect(prepared.lease.providerScope).toBe(
+      "/subscriptions/stored-subscription/resourceGroups/stored-resource-group",
+    );
+  });
+
+  it("fails legacy Azure release closed when provider scope was never persisted", async () => {
+    const provider = new AzureProvider({} as Env);
+    await expect(
+      provider.releaseLease(
+        testLease({
+          id: "cbx_abcdef123456",
+          provider: "azure",
+          cloudID: "crabbox-blue-lobster",
+        }),
+      ),
+    ).rejects.toThrow("canonical provider scope was not persisted");
+  });
+
+  it("terminalizes legacy unscoped Azure cleanup for manual resolution", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      owner: "alice@example.com",
+      org: "example-org",
+      provider: "azure",
+      cloudID: "crabbox-blue-lobster",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(storage);
+
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers: {
+          "x-crabbox-owner": lease.owner,
+          "x-crabbox-org": lease.org,
+        },
+        body: { delete: true },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      state: "released",
+      cloudID: lease.cloudID,
+      keep: true,
+      releaseDeletesServer: false,
+      failureError: expect.stringContaining("canonical provider scope was not persisted"),
+    });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupRetryAt).toBeUndefined();
+    expect(storage.alarm()).toBeUndefined();
+  });
+
+  it("fails cloud release closed when ownership does not match the lease", async () => {
+    await Promise.all(
+      workerCloudReleaseCases()
+        .filter(({ providerName }) => providerName !== "azure")
+        .map(async ({ providerName, cloudID, provider }) => {
+          const machine = ownedTestMachine(providerName, cloudID);
+          vi.spyOn(provider, "findServer").mockResolvedValue({
+            ...machine,
+            labels: { ...machine.labels, lease: "cbx_000000000000" },
+          });
+          const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
+
+          await expect(
+            provider.releaseLease(
+              testLease({ id: "cbx_abcdef123456", provider: providerName, cloudID }),
+            ),
+          ).rejects.toThrow(`ownership does not match lease cbx_abcdef123456`);
+          expect(deleteServer).not.toHaveBeenCalled();
+        }),
+    );
+  });
+
+  it("completes AWS and GCP release only when the exact primary resource is absent", async () => {
+    await Promise.all(
+      workerCloudReleaseCases()
+        .filter(({ providerName }) => providerName !== "azure")
+        .map(async ({ providerName, cloudID, provider }) => {
+          vi.spyOn(provider, "findServer").mockResolvedValue(undefined);
+          const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
+
+          await expect(
+            provider.releaseLease(
+              testLease({ id: "cbx_abcdef123456", provider: providerName, cloudID }),
+            ),
+          ).resolves.toBeUndefined();
+          expect(deleteServer).not.toHaveBeenCalled();
+        }),
+    );
+  });
+
+  it("retains Azure cleanup when a missing VM leaves companion ownership unprovable", async () => {
+    const provider = new AzureProvider({} as Env);
+    vi.spyOn(provider, "deleteOwnedServer").mockRejectedValue(
+      new Error("companion resource ownership cannot be verified"),
+    );
+
+    await expect(
+      provider.releaseLease(
+        testLease({
+          id: "cbx_abcdef123456",
+          provider: "azure",
+          cloudID: "crabbox-blue-lobster",
+        }),
+      ),
+    ).rejects.toThrow("companion resource ownership cannot be verified");
+  });
+
+  it("fails cloud release closed on provider read errors", async () => {
+    await Promise.all(
+      workerCloudReleaseCases()
+        .filter(({ providerName }) => providerName !== "azure")
+        .map(async ({ providerName, cloudID, provider }) => {
+          vi.spyOn(provider, "findServer").mockRejectedValue(new Error("http 404: scope missing"));
+          const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
+
+          await expect(
+            provider.releaseLease(
+              testLease({ id: "cbx_abcdef123456", provider: providerName, cloudID }),
+            ),
+          ).rejects.toThrow("scope missing");
+          expect(deleteServer).not.toHaveBeenCalled();
+        }),
+    );
+  });
+
+  it("fails AWS release closed on a non-instance not-found DELETE", async () => {
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+    vi.spyOn(provider, "findServer").mockResolvedValue(ownedTestMachine("aws", "i-abcdef123456"));
+    vi.spyOn(provider, "deleteServer").mockRejectedValue(new Error("AWS resource group not found"));
+
+    await expect(
+      provider.releaseLease(
+        testLease({
+          id: "cbx_abcdef123456",
+          provider: "aws",
+          cloudID: "i-abcdef123456",
+          providerKeyCleanupOwned: false,
+        }),
+      ),
+    ).rejects.toThrow("resource group not found");
   });
 
   it("adapts workspaces onto owner-scoped lease lifecycle", async () => {
@@ -5279,6 +5976,7 @@ describe("fleet lease identity and idle", () => {
     expect(providerCreates).toBe(2);
     expect(storage.value<LeaseRecord>(`lease:${warmLeaseID}`)).toMatchObject({
       owner: "bob@example.com",
+      providerOwner: "crabbox-internal-prewarm",
       org: "example-org",
       workspaceID: "fleet-prewarm-bob",
     });
@@ -6954,6 +7652,233 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("persists and retries an exact funded-provider cleanup claim", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const cleanupLeases: LeaseRecord[] = [];
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(
+        async () => {
+          throw new ProviderProvisioningCleanupError(
+            "create failed; cleanup unavailable",
+            {
+              provider: "gcp",
+              cloudID: "crabbox-blue-lobster-c80c2195",
+              region: "us-central1-b",
+              providerProject: "stored-project",
+            },
+            new Error("cleanup unavailable"),
+          );
+        },
+        {
+          provider: "gcp",
+          onReleaseLease(lease) {
+            cleanupLeases.push(structuredClone(lease));
+          },
+        },
+      ),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "request-project",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 cleanup-claim",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(failed).toMatchObject({
+      state: "failed",
+      cloudID: "crabbox-blue-lobster-c80c2195",
+      region: "us-central1-b",
+      providerProject: "stored-project",
+      releaseDeletesServer: true,
+      provisioningResourceMayExist: true,
+    });
+    storage.seed(`lease:${leaseID}`, {
+      ...failed,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+
+    await fleet.alarm();
+
+    expect(cleanupLeases).toHaveLength(1);
+    expect(cleanupLeases[0]).toMatchObject({
+      cloudID: "crabbox-blue-lobster-c80c2195",
+      region: "us-central1-b",
+      providerProject: "stored-project",
+    });
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      provisioningResourceMayExist: false,
+      failureError: expect.stringContaining("cleanup unavailable"),
+    });
+  });
+
+  it("retains an exact cleanup claim after the lease state changes during provisioning", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    let providerStorage: MemoryStorage | undefined;
+    const cleanupLeases: LeaseRecord[] = [];
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onPrepareLeaseConfig(config, currentStorage) {
+          providerStorage = currentStorage;
+          return config;
+        },
+        async onCreateProvisioning() {
+          const current = providerStorage?.value<LeaseRecord>(`lease:${leaseID}`);
+          expect(current?.state).toBe("provisioning");
+          providerStorage?.seed(`lease:${leaseID}`, {
+            ...current!,
+            state: "released",
+            releaseDeletesServer: false,
+            keep: true,
+            endedAt: new Date().toISOString(),
+          });
+          throw new ProviderProvisioningCleanupError(
+            "create failed after concurrent release",
+            {
+              provider: "gcp",
+              cloudID: "crabbox-blue-lobster-c80c2195",
+              region: "us-central1-b",
+              providerProject: "stored-project",
+            },
+            new Error("cleanup unavailable"),
+          );
+        },
+        onReleaseLease(lease) {
+          cleanupLeases.push(structuredClone(lease));
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "request-project",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 concurrent-release",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "released",
+      cloudID: "crabbox-blue-lobster-c80c2195",
+      region: "us-central1-b",
+      providerProject: "stored-project",
+      releaseDeletesServer: false,
+      keep: true,
+    });
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupRetryAt).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningResourceMayExist).toBe(
+      undefined,
+    );
+    await fleet.alarm();
+    expect(cleanupLeases).toHaveLength(0);
+  });
+
+  it("rejects a cleanup claim for a different provider", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(async () => {
+        throw new ProviderProvisioningCleanupError(
+          "mismatched cleanup claim",
+          {
+            provider: "aws",
+            cloudID: "i-abcdef123456",
+            region: "eu-west-1",
+          },
+          new Error("cleanup unavailable"),
+        );
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "request-project",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 mismatched-claim",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: "",
+      provisioningResourceMayExist: false,
+      failureError: expect.stringContaining("mismatched cleanup claim"),
+    });
+  });
+
+  it("returns an exact AWS cleanup claim when readiness rollback fails", async () => {
+    vi.spyOn(EC2SpotClient.prototype, "createServerWithFallback").mockResolvedValue({
+      server: {
+        provider: "aws",
+        id: 42,
+        cloudID: "i-abcdef123456",
+        name: "crabbox-blue-lobster",
+        status: "pending",
+        labels: {},
+      },
+      serverType: "t3.small",
+    });
+    vi.spyOn(EC2SpotClient.prototype, "waitForServerIP").mockRejectedValue(
+      new Error("readiness timed out"),
+    );
+    vi.spyOn(EC2SpotClient.prototype, "deleteServer").mockRejectedValue(
+      new Error("temporary terminate failure"),
+    );
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+
+    const error = await provider
+      .createServerWithFallback(
+        leaseConfig({
+          provider: "aws",
+          serverType: "t3.small",
+          serverTypeExplicit: true,
+          awsRegion: "eu-west-1",
+          capacity: { market: "on-demand", fallback: "none" },
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        "cbx_abcdef123456",
+        "blue-lobster",
+        "alice@example.com",
+      )
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ProviderProvisioningCleanupError);
+    expect(providerProvisioningCleanupClaim(error)).toEqual({
+      provider: "aws",
+      cloudID: "i-abcdef123456",
+      region: "eu-west-1",
+      serverID: 42,
+    });
+  });
+
   it("backs off durable Hetzner server and SSH key cleanup after rollback failure", async () => {
     const storage = new MemoryStorage();
     const leaseID = "cbx_abcdef123456";
@@ -8017,10 +8942,14 @@ describe("fleet lease identity and idle", () => {
     const portalHTML = await portal.text();
     expect(portalHTML).toContain("client managed");
     expect(portalHTML).toContain("remove registration");
+    expect(portalHTML).toContain('<form method="post" action="/portal/logout">');
+    expect(portalHTML).not.toContain('href="/portal/logout"');
 
     const portalIndex = await fleet.fetch(request("GET", "/portal", { headers: ownerHeaders }));
     expect(portalIndex.status).toBe(200);
     const portalIndexHTML = await portalIndex.text();
+    expect(portalIndexHTML).toContain('<form method="post" action="/portal/logout">');
+    expect(portalIndexHTML).not.toContain('href="/portal/logout"');
     expect(portalIndexHTML).toContain('data-release-kind="registered"');
     expect(portalIndexHTML).toContain('title="Remove test-box registration"');
     expect(portalIndexHTML).toContain(
@@ -8621,19 +9550,54 @@ describe("fleet lease identity and idle", () => {
       {
         name: "crabbox-deferred",
         location: "eastus",
+        subscription: "sub",
         resourceGroup: "crabbox-leases",
+        leaseID: "cbx_abcdef123456",
+        slug: "deferred",
+        owner: "alice@example.com",
         createdAt: new Date().toISOString(),
       },
     );
     staleBlocked.resolve();
     await Promise.all([staleSchedule, deferredCleanup]);
 
-    expect(storage.value("azure-cleanup:eastus:crabbox-deferred")).toMatchObject({
+    const records = await storage.list({ prefix: "azure-cleanup:" });
+    expect([...records.values()][0]).toMatchObject({
       attempts: 0,
       location: "eastus",
       name: "crabbox-deferred",
+      subscription: "sub",
+      leaseID: "cbx_abcdef123456",
     });
     expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1500);
+  });
+
+  it("fails legacy Azure deferred cleanup closed without a persisted claim and scope", async () => {
+    const storage = new MemoryStorage();
+    const key = "azure-cleanup:legacy:eastus:crabbox-deferred";
+    storage.seed(key, {
+      name: "crabbox-deferred",
+      location: "eastus",
+      resourceGroup: "crabbox-leases",
+      createdAt: "2026-05-01T00:00:00.000Z",
+      attempts: 0,
+      updatedAt: "2026-05-01T00:00:00.000Z",
+      retryAt: "2026-05-01T00:00:00.000Z",
+    });
+    const fetcher = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetcher);
+
+    await testFleet(storage).alarm();
+
+    expect(
+      storage.value<{ attempts: number; lastError: string; terminalAt: string }>(key),
+    ).toMatchObject({
+      attempts: 1,
+      lastError: expect.stringContaining("canonical lease claim and provider scope"),
+      terminalAt: expect.any(String),
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(storage.alarm()).toBeUndefined();
   });
 
   it("bootstraps AWS orphan sweep maintenance from the Worker cron route", async () => {
@@ -15580,7 +16544,7 @@ describe("fleet lease identity and idle", () => {
     const tokenExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
     const headers = {
       authorization: "Bearer portal-session-token",
-      "x-crabbox-auth": "github",
+      "x-crabbox-auth": "bearer",
       "x-crabbox-owner": "alice@example.com",
       "x-crabbox-org": "example-org",
       "x-crabbox-github-login": "alice",
@@ -15705,7 +16669,7 @@ describe("fleet lease identity and idle", () => {
     const storage = new MemoryStorage();
     const env = {
       CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
-      CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+      CRABBOX_ADMIN_TOKEN: "current-admin-token",
     };
     const fleet = testFleet(storage, {}, env);
     const leaseID = "cbx_000000000001";
@@ -15723,11 +16687,11 @@ describe("fleet lease identity and idle", () => {
     const isolatedOrigin = await codeOriginForLease(env, leaseID);
     expect(isolatedOrigin).toBeDefined();
     const staleGrant = {
-      auth: "github",
+      auth: "bearer",
       admin: true,
       owner: "former-admin@example.com",
       org: "other-org",
-      login: "former-admin",
+      adminTokenHash: await sha256Hex("former-admin-token"),
       portalSessionHash: "a".repeat(64),
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
@@ -15776,6 +16740,8 @@ describe("fleet lease identity and idle", () => {
       CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
       CRABBOX_PUBLIC_URL: "https://crabbox.test",
       CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "0",
     } as Env;
     const fleet = testFleet(storage, {}, env);
     const leaseID = "cbx_000000000001";
@@ -15795,11 +16761,22 @@ describe("fleet lease identity and idle", () => {
       ownerSource: "github-verified-email",
       org: "example-org",
       login: "alice",
+      githubAccessToken: "github-access-token",
       ttlSeconds: 60 * 60,
     });
+    const githubFetch = vi.fn<() => Promise<Response>>(
+      async () =>
+        new Response(JSON.stringify({ state: "active", organization: { login: "example-org" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", githubFetch);
     const portalCookie = `crabbox_session=${encodeURIComponent(token)}`;
     const throughCoordinator = async (input: Request): Promise<Response> =>
-      await routeCoordinatorRequest(input, env, async (prepared) => await fleet.fetch(prepared));
+      await routeCoordinatorRequest(input, env, async (prepared) => await fleet.fetch(prepared), {
+        githubMembership: async (): Promise<void> => {},
+      });
     const codeEntry = "https://crabbox.test/portal/leases/blue-lobster/code/";
 
     const handoff = await throughCoordinator(
@@ -15827,6 +16804,7 @@ describe("fleet lease identity and idle", () => {
       new Request(isolatedPage, { headers: { cookie: codeCookie } }),
     );
     expect(page.status).toBe(200);
+    githubFetch.mockRejectedValue(new Error("GitHub unavailable during logout"));
 
     const activeViewerID = "active-code-viewer";
     const portalSessionHash = await sha256Hex(token);
@@ -15838,12 +16816,103 @@ describe("fleet lease identity and idle", () => {
       auth: "github",
       portalSessionHash,
     });
+    const activeWebAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_active",
+      capabilities: new Set<string>(),
+    });
+    const activeWebViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID,
+      id: "viewer_active",
+      agentID: "agent_active",
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: false,
+      auth: "github",
+      login: "alice",
+      portalSessionHash,
+      label: "alice",
+    });
+    const activeEgressHost = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID,
+      sessionID: "active-egress-session",
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: false,
+      auth: "github",
+      login: "alice",
+      portalSessionHash,
+    });
+    const activeEgressClient = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID,
+      sessionID: "active-egress-session",
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: false,
+      auth: "github",
+      login: "alice",
+      portalSessionHash,
+    });
     const codeBridgeState = fleet as unknown as {
       codeAgents: Map<string, WebSocket>;
       codeViewers: Map<string, WebSocket>;
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      webVNCViewers: Map<
+        string,
+        Map<
+          string,
+          {
+            id: string;
+            agentID: string;
+            socket: WebSocket;
+            owner: string;
+            org: string;
+            admin: boolean;
+            auth: "github";
+            login: string;
+            portalSessionHash: string;
+            label: string;
+            connectedAt: string;
+          }
+        >
+      >;
+      egressHosts: Map<string, WebSocket>;
+      egressClients: Map<string, WebSocket>;
     };
     codeBridgeState.codeAgents.set(leaseID, activeAgent as unknown as WebSocket);
     codeBridgeState.codeViewers.set(activeViewerID, activeViewer as unknown as WebSocket);
+    codeBridgeState.webVNCAgents.set(
+      leaseID,
+      new Map([["agent_active", activeWebAgent as unknown as WebSocket]]),
+    );
+    codeBridgeState.webVNCViewers.set(
+      leaseID,
+      new Map([
+        [
+          "viewer_active",
+          {
+            id: "viewer_active",
+            agentID: "agent_active",
+            socket: activeWebViewer as unknown as WebSocket,
+            owner: "alice@example.com",
+            org: "example-org",
+            admin: false,
+            auth: "github",
+            login: "alice",
+            portalSessionHash,
+            label: "alice",
+            connectedAt: new Date().toISOString(),
+          },
+        ],
+      ]),
+    );
+    const egressKey = `${leaseID}\u0000active-egress-session`;
+    codeBridgeState.egressHosts.set(egressKey, activeEgressHost as unknown as WebSocket);
+    codeBridgeState.egressClients.set(egressKey, activeEgressClient as unknown as WebSocket);
 
     const expiredRevocationKey = `code-viewer-session-revocation:${"f".repeat(64)}`;
     storage.seed(expiredRevocationKey, {
@@ -15851,9 +16920,23 @@ describe("fleet lease identity and idle", () => {
       createdAt: new Date(Date.now() - 2_000).toISOString(),
       expiresAt: new Date(Date.now() - 1_000).toISOString(),
     });
+    const crossSiteNavigation = await throughCoordinator(
+      new Request("https://crabbox.test/portal/logout", {
+        headers: { cookie: portalCookie, origin: "https://attacker.example" },
+      }),
+    );
+    expect(crossSiteNavigation.status).toBe(200);
+    expect(crossSiteNavigation.headers.get("set-cookie")).toBeNull();
+    expect(await crossSiteNavigation.text()).toContain('method="post"');
+    expect(activeViewer.closeCode).toBeUndefined();
+    expect(activeWebViewer.closeCode).toBeUndefined();
+    expect(activeEgressHost.closeCode).toBeUndefined();
+    expect(activeEgressClient.closeCode).toBeUndefined();
+
     const logout = await throughCoordinator(
       new Request("https://crabbox.test/portal/logout", {
-        headers: { cookie: portalCookie },
+        method: "POST",
+        headers: { cookie: portalCookie, origin: "https://crabbox.test" },
       }),
     );
     expect(logout.status).toBe(200);
@@ -15862,6 +16945,13 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value(expiredRevocationKey)).toBeUndefined();
     expect(activeViewer.closeCode).toBe(1008);
     expect(activeViewer.closeReason).toBe("portal session ended");
+    expect(activeWebViewer.closeCode).toBe(1008);
+    expect(activeWebViewer.closeReason).toBe("portal session ended");
+    expect(activeWebAgent.closeCode).toBe(1011);
+    expect(activeEgressHost.closeCode).toBe(1008);
+    expect(activeEgressHost.closeReason).toBe("portal session ended");
+    expect(activeEgressClient.closeCode).toBe(1008);
+    expect(activeEgressClient.closeReason).toBe("portal session ended");
     expect(activeAgent.sentJSON()).toEqual([
       {
         type: "ws_close",
@@ -19230,6 +20320,7 @@ describe("fleet lease identity and idle", () => {
         CRABBOX_ARTIFACTS_BUCKET: "qa-artifacts",
         CRABBOX_ARTIFACTS_PREFIX: "qa",
         CRABBOX_ARTIFACTS_BASE_URL: "https://artifacts.example.com",
+        CRABBOX_ARTIFACTS_PUBLIC_READS: "1",
         CRABBOX_ARTIFACTS_REGION: "auto",
         CRABBOX_ARTIFACTS_ENDPOINT_URL: "https://account.r2.cloudflarestorage.com",
         CRABBOX_ARTIFACTS_ACCESS_KEY_ID: "access-key",
@@ -19259,10 +20350,12 @@ describe("fleet lease identity and idle", () => {
       backend: string;
       bucket: string;
       prefix: string;
+      accessPolicy: string;
       files: Array<{
         name: string;
         key: string;
         url: string;
+        accessPolicy: string;
         upload: { url: string; headers: Record<string, string> };
       }>;
     };
@@ -19270,11 +20363,15 @@ describe("fleet lease identity and idle", () => {
     expect(body.bucket).toBe("qa-artifacts");
     const org = Buffer.from("default-org").toString("base64url");
     const owner = Buffer.from("alice@example.com").toString("base64url");
-    expect(body.prefix).toBe(`qa/v2/org/${org}/owner/${owner}/pr-42`);
-    expect(body.files[0].key).toBe(`qa/v2/org/${org}/owner/${owner}/pr-42/screenshots/after.png`);
-    expect(body.files[0].url).toBe(
-      `https://artifacts.example.com/qa/v2/org/${org}/owner/${owner}/pr-42/screenshots/after.png`,
+    expect(body.prefix).toMatch(
+      new RegExp(`^qa/v2/org/${org}/owner/${owner}/public/[A-Za-z0-9_-]{22}/pr-42$`),
     );
+    expect(body.accessPolicy).toBe("public");
+    expect(body.files[0].key).toBe(`${body.prefix}/screenshots/after.png`);
+    expect(body.files[0].url).toBe(
+      `https://artifacts.example.com/${body.prefix}/screenshots/after.png`,
+    );
+    expect(body.files[0].accessPolicy).toBe("public");
     expect(body.files[0].upload.headers["content-length"]).toBe("123");
     expect(body.files[0].upload.headers["content-type"]).toBe("image/png");
     expect(body.files[0].upload.url).toContain("X-Amz-Signature=");
@@ -21243,9 +22340,19 @@ describe("fleet identity", () => {
     expect(callback.headers.get("set-cookie")).toContain("crabbox_session=cbxu_");
   });
 
-  it("clears portal session on logout without restarting OAuth", async () => {
+  it("requires a POST before clearing the portal session", async () => {
     const fleet = testFleet();
-    const logout = await fleet.fetch(request("GET", "/portal/logout"));
+    const confirmation = await fleet.fetch(request("GET", "/portal/logout"));
+    expect(confirmation.status).toBe(200);
+    expect(confirmation.headers.get("set-cookie")).toBeNull();
+    expect(confirmation.headers.get("content-security-policy")).toContain("form-action 'self'");
+    expect(confirmation.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(confirmation.headers.get("x-frame-options")).toBe("DENY");
+    const confirmationBody = await confirmation.text();
+    expect(confirmationBody).toContain('method="post"');
+    expect(confirmationBody).toContain('action="/portal/logout"');
+
+    const logout = await fleet.fetch(request("POST", "/portal/logout"));
     expect(logout.status).toBe(200);
     expect(logout.headers.get("location")).toBeNull();
     expect(logout.headers.get("set-cookie")).toContain("crabbox_session=");
@@ -22620,9 +23727,45 @@ function testMachine(overrides: Partial<ProviderMachine>): ProviderMachine {
   };
 }
 
+function ownedTestMachine(provider: "aws" | "azure" | "gcp", cloudID: string): ProviderMachine {
+  return testMachine({
+    provider,
+    cloudID,
+    labels: {
+      crabbox: "true",
+      created_by: "crabbox",
+      lease: "cbx_abcdef123456",
+      owner: provider === "gcp" ? "peter_example_com" : "peter_example.com",
+      provider,
+      slug: "blue-lobster",
+    },
+  });
+}
+
+function workerCloudReleaseCases() {
+  return [
+    {
+      providerName: "aws" as const,
+      cloudID: "i-abcdef123456",
+      provider: new AWSProvider({} as Env, "eu-west-1", new MemoryStorage()),
+    },
+    {
+      providerName: "azure" as const,
+      cloudID: "crabbox-blue-lobster",
+      provider: new AzureProvider({} as Env),
+    },
+    {
+      providerName: "gcp" as const,
+      cloudID: "crabbox-blue-lobster",
+      provider: new GCPProvider({} as Env),
+    },
+  ];
+}
+
 function testLease(overrides: Partial<LeaseRecord>): LeaseRecord {
   return {
     id: "cbx_000000000000",
+    slug: "blue-lobster",
     provider: "hetzner",
     cloudID: "123",
     owner: "peter@example.com",
@@ -22825,9 +23968,19 @@ async function sha256HexForTest(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function decodeUserTokenPayload(token: string): { exp: number; iat: number } {
+function decodeUserTokenPayload(token: string): {
+  exp: number;
+  iat: number;
+  jti: string;
+  githubCredential: string;
+} {
   expect(token).toMatch(/^cbxu_/);
   const [payload] = token.slice("cbxu_".length).split(".");
   const decoded = Buffer.from(payload, "base64url").toString("utf8");
-  return JSON.parse(decoded) as { exp: number; iat: number };
+  return JSON.parse(decoded) as {
+    exp: number;
+    iat: number;
+    jti: string;
+    githubCredential: string;
+  };
 }

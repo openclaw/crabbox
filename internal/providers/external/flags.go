@@ -42,12 +42,14 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		return nil
 	}
 	if core.FlagWasSet(fs, "external-routing-file") {
+		core.MarkExternalRoutingFileExplicit(cfg)
 		cfg.External.RoutingFile = *v.RoutingFile
 		routing, err := core.LoadExternalRouting(cfg.External.RoutingFile)
 		if err != nil {
 			return core.Exit(2, "%v", err)
 		}
 		cfg.External = routing
+		core.MarkExternalRoutingCredentialSources(cfg)
 		cfg.WorkRoot = externalWorkRoot(*cfg)
 	} else if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !core.ExternalRoutingLoaded(cfg.External) {
 		routing, err := core.LoadExternalRouting(path)
@@ -55,6 +57,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return core.Exit(2, "%v", err)
 		}
 		cfg.External = routing
+		core.MarkExternalRoutingCredentialSources(cfg)
 		cfg.WorkRoot = externalWorkRoot(*cfg)
 	}
 	if core.FlagWasSet(fs, "external-command") {
@@ -76,6 +79,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "external-idempotent-lease-id") {
 		cfg.External.Capabilities.IdempotentLeaseID = *v.IdempotentLeaseID
+	}
+	if core.FlagWasSet(fs, "external-command") || core.FlagWasSet(fs, "external-arg") || core.FlagWasSet(fs, "external-config-json") {
+		core.MarkExternalProviderOutputFlagExplicit(cfg)
 	}
 	return validateConfig(*cfg)
 }

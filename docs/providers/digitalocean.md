@@ -126,9 +126,9 @@ explicit VPC. Do not broaden scopes inside scripts.
 5. Add ready-state Crabbox tags and claim the lease locally.
 6. Run normal Crabbox sync/run/ssh workflows over SSH.
 7. Delete the Droplet and managed SSH key on `stop`; `cleanup` deletes only
-   resources with a complete Crabbox DigitalOcean ownership tag set. Failed
-   post-delete or key-only rollback cleanup retains an account-scoped local
-   claim so `stop` can retry it.
+   resources with complete Crabbox DigitalOcean ownership tags and an exact
+   account- and Droplet-bound local claim. Failed post-delete or key-only
+   rollback cleanup retains that claim so `stop` can retry it.
 
 If Droplet creation returns an indeterminate transport or server failure,
 Crabbox retains the SSH credentials and records a pending local recovery claim.
@@ -152,9 +152,12 @@ crabbox:target:linux
 crabbox:expires_at:<unix-seconds>
 ```
 
-Release and cleanup require a complete ownership predicate: Crabbox marker,
-provider marker, lease id, slug, and Linux target. Droplets with partial,
-foreign, or malformed Crabbox-like tags are skipped/refused.
+Read-only inventory requires a complete ownership predicate: Crabbox marker,
+provider marker, canonical lease id, slug, and Linux target. Reuse and deletion
+also require an exact local claim for the same DigitalOcean account, lease, and
+Droplet id. Droplets with partial, foreign, malformed, claimless, or mismatched
+ownership are skipped or refused; a claimless Droplet must first be adopted
+through explicit supported `--reclaim` reuse.
 
 Tag updates apply only the set difference. Crabbox detaches obsolete tags from
 the Droplet but does not delete account-level tag objects: DigitalOcean tag

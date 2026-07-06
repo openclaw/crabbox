@@ -45,7 +45,7 @@ https://fallback.example.com                       # additional fallback
 complete a browser GitHub OAuth flow. The coordinator still requires Crabbox
 auth on every API route; the unauthenticated
 exceptions are `GET /v1/health`, the GitHub login/OAuth routes (`/v1/auth/*`,
-`/portal/login`, `/portal/logout`), and the per-lease websocket agent upgrades that
+`/portal/login`), and the per-lease websocket agent upgrades that
 authenticate via short-lived bridge tickets instead.
 
 `https://broker-access.example.com` is the **same** Worker fronted by a Cloudflare Access
@@ -85,8 +85,11 @@ matches the token in this precedence (`worker/src/auth.ts`):
    base64url payload, verified only with `CRABBOX_SESSION_SECRET`. The session
    secret must be configured and distinct from `CRABBOX_SHARED_TOKEN`. Minted by
    `crabbox login` only after GitHub returns a verified owner email, with a
-   default 180-day expiry. The payload records the verified-email provenance;
-   older unversioned user tokens are rejected and require a fresh login.
+   default 180-day expiry. The payload records the verified-email provenance
+   and an encrypted GitHub OAuth credential. Current allowed-org/team membership
+   is revalidated on requests, with positive checks cached for five minutes and
+   GitHub errors failing closed after cache expiry. Older token schemas are
+   rejected and require a fresh login.
    User tokens are non-admin unless their verified GitHub email or login matches
    `CRABBOX_GITHUB_ADMIN_OWNERS` or `CRABBOX_GITHUB_ADMIN_LOGINS`.
 
@@ -184,6 +187,8 @@ CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separat
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional; comma-separated team slugs
 CRABBOX_GITHUB_ADMIN_OWNERS      # optional; comma-separated GitHub verified emails with admin
 CRABBOX_GITHUB_ADMIN_LOGINS      # optional; comma-separated GitHub logins with admin
+CRABBOX_GITHUB_REVOKED_USERS     # optional; comma-separated logins/emails denied immediately
+CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS # optional; default 300, range 0-3600
 CRABBOX_SESSION_SECRET           # required for user tokens; must differ from CRABBOX_SHARED_TOKEN
 CRABBOX_USER_TOKEN_TTL_SECONDS   # optional; default 15552000 (180 days), clamped to 1h-365d
 ```

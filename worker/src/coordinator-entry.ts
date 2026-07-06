@@ -1,4 +1,5 @@
 import {
+  authenticateUserTokenForRevocation,
   authenticateRequest,
   requestWithAdminGrantVersion,
   requestWithAuthContext,
@@ -54,7 +55,7 @@ export async function prepareCoordinatorRequest(
   if (url.pathname.startsWith("/v1/auth/")) {
     return { request: requestWithoutTrustedHeaders(request), authenticated: false };
   }
-  if (url.pathname === "/portal/login" || url.pathname === "/portal/logout") {
+  if (url.pathname === "/portal/login") {
     return { request: requestWithoutTrustedHeaders(request), authenticated: false };
   }
   if (
@@ -104,7 +105,16 @@ export async function prepareCoordinatorRequest(
     };
   }
   const authRequest = portal ? requestWithPortalCookie(request) : request;
-  const auth = await authenticateRequest(authRequest, env, authContext);
+  const portalLogoutToken =
+    portal &&
+    request.method === "POST" &&
+    url.pathname === "/portal/logout" &&
+    !request.headers.has("authorization")
+      ? cookieValue(request.headers.get("cookie") ?? "", "crabbox_session")
+      : undefined;
+  const auth = portalLogoutToken
+    ? await authenticateUserTokenForRevocation(portalLogoutToken, env)
+    : await authenticateRequest(authRequest, env, authContext);
   if (!auth?.authorized) {
     if (portal && request.method === "GET" && request.headers.get("upgrade") !== "websocket") {
       const login = new URL("/portal/login", url.origin);

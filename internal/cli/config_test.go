@@ -228,6 +228,22 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_BLAXEL_WORKDIR",
 		"CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS",
 		"CRABBOX_BLAXEL_FORGET_MISSING",
+		"CRABBOX_SEALOS_DEVBOX_KUBECTL",
+		"CRABBOX_SEALOS_DEVBOX_KUBECONFIG",
+		"CRABBOX_SEALOS_DEVBOX_CONTEXT",
+		"CRABBOX_SEALOS_DEVBOX_NAMESPACE",
+		"CRABBOX_SEALOS_DEVBOX_IMAGE",
+		"CRABBOX_SEALOS_DEVBOX_TEMPLATE_ID",
+		"CRABBOX_SEALOS_DEVBOX_CPU",
+		"CRABBOX_SEALOS_DEVBOX_MEMORY",
+		"CRABBOX_SEALOS_DEVBOX_STORAGE_LIMIT",
+		"CRABBOX_SEALOS_DEVBOX_NETWORK",
+		"CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST",
+		"CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_PORT",
+		"CRABBOX_SEALOS_DEVBOX_SSH_USER",
+		"CRABBOX_SEALOS_DEVBOX_WORK_ROOT",
+		"CRABBOX_SEALOS_DEVBOX_NODE_HOST",
+		"CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE",
 		"CRABBOX_AGENT_SANDBOX_KUBECONFIG",
 		"CRABBOX_AGENT_SANDBOX_KUBECTL",
 		"CRABBOX_AGENT_SANDBOX_CONTEXT",
@@ -892,6 +908,7 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	if err := applyFileConfig(&cfg, fileConfig{
 		Incus:        &fileIncusConfig{DeleteOnRelease: &value},
 		KubeVirt:     &fileKubeVirtConfig{DeleteOnRelease: &value},
+		SealosDevbox: &fileSealosDevboxConfig{DeleteOnRelease: &value},
 		AgentSandbox: &fileAgentSandboxConfig{DeleteOnRelease: &value},
 		Namespace:    &fileNamespaceConfig{DeleteOnRelease: &value},
 		Morph:        &fileMorphConfig{DeleteOnRelease: &value},
@@ -901,7 +918,7 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"incus", "kubevirt", "agent-sandbox", "namespace-devbox", "morph", "nvidia-brev"} {
+	for _, provider := range []string{"incus", "kubevirt", "sealos-devbox", "agent-sandbox", "namespace-devbox", "morph", "nvidia-brev"} {
 		if !DeleteOnReleaseExplicit(cfg, provider) {
 			t.Fatalf("file release policy not explicit for %s", provider)
 		}
@@ -915,6 +932,7 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	for _, key := range []string{
 		"CRABBOX_INCUS_DELETE_ON_RELEASE",
 		"CRABBOX_KUBEVIRT_DELETE_ON_RELEASE",
+		"CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE",
 		"CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE",
 		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
 		"CRABBOX_MORPH_DELETE_ON_RELEASE",
@@ -925,10 +943,115 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	if err := applyEnv(&envCfg); err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"incus", "kubevirt", "agent-sandbox", "namespace-devbox", "morph", "nvidia-brev"} {
+	for _, provider := range []string{"incus", "kubevirt", "sealos-devbox", "agent-sandbox", "namespace-devbox", "morph", "nvidia-brev"} {
 		if !DeleteOnReleaseExplicit(envCfg, provider) {
 			t.Fatalf("environment release policy not explicit for %s", provider)
 		}
+	}
+}
+
+func TestSealosDevboxConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := baseConfig()
+	if cfg.SealosDevbox.Kubectl != "kubectl" ||
+		cfg.SealosDevbox.Namespace != "default" ||
+		cfg.SealosDevbox.Network != "SSHGate" ||
+		cfg.SealosDevbox.SSHGatewayPort != "2233" ||
+		cfg.SealosDevbox.SSHUser != "devbox" ||
+		cfg.SealosDevbox.WorkRoot != "/home/devbox/project" ||
+		cfg.SealosDevbox.DeleteOnRelease {
+		t.Fatalf("defaults=%#v", cfg.SealosDevbox)
+	}
+	deleteOnRelease := true
+	if err := applyFileConfig(&cfg, fileConfig{SealosDevbox: &fileSealosDevboxConfig{
+		Kubectl:         "~/bin/kubectl",
+		Kubeconfig:      "~/.kube/sealos.yaml",
+		Context:         "sealos-file",
+		Namespace:       "team-a",
+		Image:           "ubuntu:24.04",
+		TemplateID:      "tpl-file",
+		CPU:             "4",
+		Memory:          "8Gi",
+		StorageLimit:    "40Gi",
+		Network:         "NodePort",
+		SSHGatewayHost:  "ssh.file.example",
+		SSHGatewayPort:  "2200",
+		SSHUser:         "devbox-file",
+		WorkRoot:        "/workspace/file",
+		NodeHost:        "node.file.example",
+		DeleteOnRelease: &deleteOnRelease,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SealosDevbox.Kubectl != filepath.Join(home, "bin/kubectl") ||
+		cfg.SealosDevbox.Kubeconfig != filepath.Join(home, ".kube/sealos.yaml") ||
+		cfg.SealosDevbox.Context != "sealos-file" ||
+		cfg.SealosDevbox.Namespace != "team-a" ||
+		cfg.SealosDevbox.Image != "ubuntu:24.04" ||
+		cfg.SealosDevbox.TemplateID != "tpl-file" ||
+		cfg.SealosDevbox.CPU != "4" ||
+		cfg.SealosDevbox.Memory != "8Gi" ||
+		cfg.SealosDevbox.StorageLimit != "40Gi" ||
+		cfg.SealosDevbox.Network != "NodePort" ||
+		cfg.SealosDevbox.SSHGatewayHost != "ssh.file.example" ||
+		cfg.SealosDevbox.SSHGatewayPort != "2200" ||
+		cfg.SealosDevbox.SSHUser != "devbox-file" ||
+		cfg.SealosDevbox.WorkRoot != "/workspace/file" ||
+		cfg.SealosDevbox.NodeHost != "node.file.example" ||
+		!cfg.SealosDevbox.DeleteOnRelease {
+		t.Fatalf("file sealos config not applied: %#v", cfg.SealosDevbox)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
+		t.Fatal("file deleteOnRelease was not marked explicit")
+	}
+	if !IsSealosDevboxWorkRootExplicit(&cfg) {
+		t.Fatal("file workRoot was not marked explicit")
+	}
+
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_KUBECTL", "~/env/kubectl")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_KUBECONFIG", "~/.kube/env.yaml")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_CONTEXT", "sealos-env")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_NAMESPACE", "team-env")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_IMAGE", "python:3.12")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_TEMPLATE_ID", "tpl-env")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_CPU", "6")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_MEMORY", "12Gi")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_STORAGE_LIMIT", "60Gi")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_NETWORK", "SSHGate")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST", "ssh.env.example")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_PORT", "2223")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_SSH_USER", "devbox-env")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_WORK_ROOT", "/workspace/env")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_NODE_HOST", "node.env.example")
+	t.Setenv("CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SealosDevbox.Kubectl != filepath.Join(home, "env/kubectl") ||
+		cfg.SealosDevbox.Kubeconfig != filepath.Join(home, ".kube/env.yaml") ||
+		cfg.SealosDevbox.Context != "sealos-env" ||
+		cfg.SealosDevbox.Namespace != "team-env" ||
+		cfg.SealosDevbox.Image != "python:3.12" ||
+		cfg.SealosDevbox.TemplateID != "tpl-env" ||
+		cfg.SealosDevbox.CPU != "6" ||
+		cfg.SealosDevbox.Memory != "12Gi" ||
+		cfg.SealosDevbox.StorageLimit != "60Gi" ||
+		cfg.SealosDevbox.Network != "SSHGate" ||
+		cfg.SealosDevbox.SSHGatewayHost != "ssh.env.example" ||
+		cfg.SealosDevbox.SSHGatewayPort != "2223" ||
+		cfg.SealosDevbox.SSHUser != "devbox-env" ||
+		cfg.SealosDevbox.WorkRoot != "/workspace/env" ||
+		cfg.SealosDevbox.NodeHost != "node.env.example" ||
+		cfg.SealosDevbox.DeleteOnRelease {
+		t.Fatalf("env sealos config not applied: %#v", cfg.SealosDevbox)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
+		t.Fatal("env deleteOnRelease was not marked explicit")
+	}
+	if !IsSealosDevboxWorkRootExplicit(&cfg) {
+		t.Fatal("env workRoot was not marked explicit")
 	}
 }
 
@@ -1014,6 +1137,68 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 		!cfg.AgentSandbox.DeleteOnRelease ||
 		cfg.AgentSandbox.ForgetMissing {
 		t.Fatalf("env agentSandbox config not applied: %#v", cfg.AgentSandbox)
+	}
+}
+
+func TestSealosDevboxUntrustedConfigCannotRedirectClusterWorkload(t *testing.T) {
+	cfg := baseConfig()
+	cfg.SealosDevbox.Kubectl = "/trusted/kubectl"
+	cfg.SealosDevbox.Kubeconfig = "/trusted/kubeconfig"
+	cfg.SealosDevbox.Context = "trusted-context"
+	cfg.SealosDevbox.Namespace = "trusted-namespace"
+	cfg.SealosDevbox.Image = "trusted-image"
+	cfg.SealosDevbox.TemplateID = "trusted-template"
+	cfg.SealosDevbox.CPU = "2"
+	cfg.SealosDevbox.Memory = "4Gi"
+	cfg.SealosDevbox.StorageLimit = "20Gi"
+	cfg.SealosDevbox.Network = "SSHGate"
+	cfg.SealosDevbox.SSHGatewayHost = "trusted-ssh.example.test"
+	cfg.SealosDevbox.SSHGatewayPort = "2222"
+	cfg.SealosDevbox.SSHUser = "trusted-user"
+	cfg.SealosDevbox.WorkRoot = "/trusted/work"
+	cfg.SealosDevbox.NodeHost = "trusted-node.example.test"
+	deleteOnRelease := true
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{
+		SealosDevbox: &fileSealosDevboxConfig{
+			Kubectl:         "./payload",
+			Kubeconfig:      "./exec-plugin-kubeconfig",
+			Context:         "attacker-context",
+			Namespace:       "attacker-namespace",
+			Image:           "attacker-image",
+			TemplateID:      "attacker-template",
+			CPU:             "64",
+			Memory:          "1Ti",
+			StorageLimit:    "10Ti",
+			Network:         "NodePort",
+			SSHGatewayHost:  "attacker-ssh.example.test",
+			SSHGatewayPort:  "2022",
+			SSHUser:         "attacker-user",
+			WorkRoot:        "/attacker/work",
+			NodeHost:        "attacker-node.example.test",
+			DeleteOnRelease: &deleteOnRelease,
+		},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SealosDevbox.Kubectl != "/trusted/kubectl" ||
+		cfg.SealosDevbox.Kubeconfig != "/trusted/kubeconfig" ||
+		cfg.SealosDevbox.Context != "trusted-context" ||
+		cfg.SealosDevbox.Namespace != "trusted-namespace" ||
+		cfg.SealosDevbox.Image != "trusted-image" ||
+		cfg.SealosDevbox.TemplateID != "trusted-template" ||
+		cfg.SealosDevbox.CPU != "2" ||
+		cfg.SealosDevbox.Memory != "4Gi" ||
+		cfg.SealosDevbox.StorageLimit != "20Gi" ||
+		cfg.SealosDevbox.Network != "SSHGate" ||
+		cfg.SealosDevbox.SSHGatewayHost != "trusted-ssh.example.test" ||
+		cfg.SealosDevbox.SSHGatewayPort != "2222" ||
+		cfg.SealosDevbox.SSHUser != "trusted-user" ||
+		cfg.SealosDevbox.WorkRoot != "/trusted/work" ||
+		cfg.SealosDevbox.NodeHost != "trusted-node.example.test" {
+		t.Fatalf("untrusted sealos cluster workload override applied: %#v", cfg.SealosDevbox)
+	}
+	if !cfg.SealosDevbox.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
+		t.Fatalf("untrusted deleteOnRelease should still apply explicitly: %#v", cfg.SealosDevbox)
 	}
 }
 

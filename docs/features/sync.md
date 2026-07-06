@@ -100,6 +100,10 @@ the remote fingerprint and forces a clean transfer.
 Git seeding (`sync.gitSeed`, default on) clones or fetches the base tree on the
 runner before rsync, so only your diff travels over the wire. It activates only
 when the local `HEAD` commit is reachable from a remote ref.
+Crabbox disables Git seeding when the origin is an HTTP(S) URL with embedded
+userinfo, warns without printing the URL, and uses the normal file sync instead.
+This prevents credentials stored in local Git remotes from reaching lease
+command arguments or the seeded worktree's Git configuration.
 
 ## Large-sync guardrails
 

@@ -46,6 +46,7 @@ func TestValidateDropletLabelsRejectsPartialOwnership(t *testing.T) {
 	}{
 		{name: "nil", labels: nil},
 		{name: "generic crabbox only", labels: map[string]string{"crabbox": "true"}},
+		{name: "non-canonical lease", labels: map[string]string{"crabbox": "true", "created_by": "crabbox", "provider": providerName, "lease": "legacy-lease-1", "slug": "x", "target": core.TargetLinux}},
 		{name: "wrong provider", labels: map[string]string{"crabbox": "true", "created_by": "crabbox", "provider": "hetzner", "lease": "cbx_1", "slug": "x", "target": core.TargetLinux}},
 		{name: "missing lease", labels: map[string]string{"crabbox": "true", "created_by": "crabbox", "provider": providerName, "slug": "x", "target": core.TargetLinux}},
 		{name: "wrong target", labels: map[string]string{"crabbox": "true", "created_by": "crabbox", "provider": providerName, "lease": "cbx_1", "slug": "x", "target": "windows"}},

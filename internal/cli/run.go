@@ -1195,7 +1195,11 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s mode=archive", timings.sync.Round(time.Millisecond)))
 			goto afterSync
 		}
-		if syncGitSeedEnabled(cfg, repo) {
+		gitSeed, credentialBlocked := syncGitSeedDecision(cfg, repo)
+		if credentialBlocked {
+			warnCredentialBearingGitSeed(a.Stderr)
+		}
+		if gitSeed {
 			stepStart = time.Now()
 			if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
@@ -1978,6 +1982,39 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		}
 		if DeleteOnReleaseExplicit(cfg, "kubevirt") {
 			args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
+		}
+	case "sealos-devbox":
+		workRoot := EffectiveSealosDevboxWorkRoot(cfg)
+		if strings.TrimSpace(cfg.SealosDevbox.Kubectl) != "" {
+			args = append(args, "--sealos-devbox-kubectl", cfg.SealosDevbox.Kubectl)
+		}
+		if strings.TrimSpace(cfg.SealosDevbox.Kubeconfig) != "" {
+			args = append(args, "--sealos-devbox-kubeconfig", cfg.SealosDevbox.Kubeconfig)
+		}
+		for _, routing := range []struct {
+			flagName string
+			value    string
+		}{
+			{flagName: "--sealos-devbox-context", value: cfg.SealosDevbox.Context},
+			{flagName: "--sealos-devbox-namespace", value: cfg.SealosDevbox.Namespace},
+			{flagName: "--sealos-devbox-network", value: cfg.SealosDevbox.Network},
+			{flagName: "--sealos-devbox-ssh-gateway-host", value: cfg.SealosDevbox.SSHGatewayHost},
+			{flagName: "--sealos-devbox-ssh-gateway-port", value: cfg.SealosDevbox.SSHGatewayPort},
+			{flagName: "--sealos-devbox-node-host", value: cfg.SealosDevbox.NodeHost},
+			{flagName: "--sealos-devbox-ssh-user", value: cfg.SealosDevbox.SSHUser},
+			{flagName: "--sealos-devbox-work-root", value: workRoot},
+		} {
+			if strings.TrimSpace(routing.value) != "" {
+				args = append(args, routing.flagName, routing.value)
+			}
+		}
+		if DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
+			args = append(args, fmt.Sprintf("--sealos-devbox-delete-on-release=%t", cfg.SealosDevbox.DeleteOnRelease))
+		}
+		if strings.TrimSpace(cfg.SealosDevbox.Kubeconfig) == "" {
+			if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
+				args = append([]string{"KUBECONFIG=" + value}, args...)
+			}
 		}
 	case "incus":
 		if DeleteOnReleaseExplicit(cfg, "incus") {
@@ -2893,7 +2930,8 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 				return server, server.Labels["lease"], nil
 			}
 		}
-		// Canonical lease IDs are exact identities, never aliases.
+		// Canonical IDs are exact identities, never aliases. Falling through to
+		// slug or provider-name matching could retarget a destructive operation.
 		return Server{}, "", nil
 	}
 	matches := make([]Server, 0, 2)

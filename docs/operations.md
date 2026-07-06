@@ -110,6 +110,14 @@ Per-provider smoke prerequisites:
   template is selected, then proves doctor, dry-run cleanup, stop-by-default
   warmup/run/stop/status, delete-on-release warmup/run/stop, list, and final
   dry-run cleanup.
+- **Sealos DevBox** — `kubectl`, an inherited kubeconfig or readable configured
+  kubeconfig, an explicit `sealosDevbox.context`, namespace RBAC for the
+  DevBox CRD, `sealosDevbox.image`, and a
+  configured SSHGate or NodePort route. `scripts/live-smoke.sh` refuses to
+  mutate Sealos resources until those prerequisites and `doctor --json` pass,
+  then proves dry-run cleanup, one retained DevBox warmup, status, SSH command
+  rendering, a synced command, stop, post-stop status, and final dry-run
+  cleanup.
 - **Semaphore** — `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`,
   and `CRABBOX_SEMAPHORE_TOKEN`, or the equivalent user config.
   `scripts/live-smoke.sh` refuses to call Semaphore until those values are
@@ -388,6 +396,8 @@ CRABBOX_SESSION_SECRET            required for browser login; must differ from C
 CRABBOX_CODE_ORIGIN_TEMPLATE      required for browser Code; per-lease HTTPS origin template
 CRABBOX_GITHUB_ALLOWED_ORG or CRABBOX_GITHUB_ALLOWED_ORGS
 CRABBOX_GITHUB_ALLOWED_TEAMS      optional
+CRABBOX_GITHUB_REVOKED_USERS      optional narrow login/email revocation list
+CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS optional; default 300, range 0-3600
 CRABBOX_ACCESS_TEAM_DOMAIN        required for Access JWT verification
 CRABBOX_ACCESS_AUD                required for Access JWT verification
 CRABBOX_TAILSCALE_CLIENT_ID       required for brokered --tailscale
@@ -402,7 +412,8 @@ CRABBOX_TAILSCALE_SHA256_ARM64    optional pinned arm64 archive checksum
 CRABBOX_ARTIFACTS_BACKEND         optional; enables brokered artifact publishing
 CRABBOX_ARTIFACTS_BUCKET          required when artifact backend is enabled
 CRABBOX_ARTIFACTS_PREFIX          optional
-CRABBOX_ARTIFACTS_BASE_URL        optional; public final artifact URL prefix
+CRABBOX_ARTIFACTS_BASE_URL        optional; public URL prefix used only with public reads
+CRABBOX_ARTIFACTS_PUBLIC_READS    optional; set 1 to intentionally return public non-expiring links
 CRABBOX_ARTIFACTS_REGION          optional
 CRABBOX_ARTIFACTS_ENDPOINT_URL    optional; required for R2/custom S3 endpoints
 CRABBOX_ARTIFACTS_ACCESS_KEY_ID   required when artifact backend is enabled
@@ -468,9 +479,14 @@ CRABBOX_ARTIFACTS_BACKEND=r2
 CRABBOX_ARTIFACTS_BUCKET=my-crabbox-artifacts
 CRABBOX_ARTIFACTS_PREFIX=crabbox-artifacts
 CRABBOX_ARTIFACTS_BASE_URL=https://artifacts.example.com
+CRABBOX_ARTIFACTS_PUBLIC_READS=1
 CRABBOX_ARTIFACTS_REGION=auto
 CRABBOX_ARTIFACTS_ENDPOINT_URL=<account>.r2.cloudflarestorage.com
 ```
+
+Omit `CRABBOX_ARTIFACTS_PUBLIC_READS` to return expiring signed read URLs even
+when a base URL is configured. Enable it only when the artifact origin is
+intentionally public; each public grant receives a random capability namespace.
 
 Deploy the matching access key id and secret access key as coordinator secrets,
 not local CLI defaults. End users run `crabbox artifacts publish` without

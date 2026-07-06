@@ -113,6 +113,11 @@ The action `stop` takes depends on how the lease was created:
   `stopped lease=<id> instance=<name> retained=true` for retained Incus
   instances). Hostinger is stop-only and prints `billing=still-owned`; it does
   not delete or cancel the subscription.
+- **DigitalOcean, Linode, Vultr, and Scaleway** — require canonical live
+  ownership tags plus an exact local claim for the same provider account or
+  project and resource before reuse or deletion. Claimless resources remain
+  visible in read-only inventory and require explicit supported `--reclaim`
+  reuse before `stop` may delete them.
 - **Delegated runners** — call the provider's own teardown for the resolved
   sandbox.
 

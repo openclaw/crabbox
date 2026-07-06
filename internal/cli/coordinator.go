@@ -554,11 +554,12 @@ type CoordinatorArtifactUploadInput struct {
 }
 
 type CoordinatorArtifactUploadResponse struct {
-	Backend   string                           `json:"backend"`
-	Bucket    string                           `json:"bucket"`
-	Prefix    string                           `json:"prefix"`
-	ExpiresAt string                           `json:"expiresAt"`
-	Files     []CoordinatorArtifactUploadGrant `json:"files"`
+	Backend      string                           `json:"backend"`
+	Bucket       string                           `json:"bucket"`
+	Prefix       string                           `json:"prefix"`
+	ExpiresAt    string                           `json:"expiresAt"`
+	AccessPolicy string                           `json:"accessPolicy,omitempty"`
+	Files        []CoordinatorArtifactUploadGrant `json:"files"`
 }
 
 type CoordinatorArtifactUploadGrant struct {
@@ -570,7 +571,8 @@ type CoordinatorArtifactUploadGrant struct {
 		Headers   map[string]string `json:"headers"`
 		ExpiresAt string            `json:"expiresAt"`
 	} `json:"upload"`
-	URL string `json:"url"`
+	URL          string `json:"url"`
+	AccessPolicy string `json:"accessPolicy,omitempty"`
 }
 
 type TestResultSummary struct {

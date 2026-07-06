@@ -13,7 +13,10 @@ func syncWindowsNative(ctx context.Context, target SSHTarget, repo Repo, cfg Con
 	if err := runSSHQuiet(ctx, target, windowsPrepareWorkdir(workdir, cfg.Sync.Delete)); err != nil {
 		return exit(7, "prepare remote workdir: %v", err)
 	}
-	gitSeed := syncGitSeedEnabled(cfg, repo)
+	gitSeed, credentialBlocked := syncGitSeedDecision(cfg, repo)
+	if credentialBlocked {
+		warnCredentialBearingGitSeed(stderr)
+	}
 	if gitSeed {
 		if err := runSSHQuiet(ctx, target, windowsGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
 			fmt.Fprintf(stderr, "warning: remote git seed failed: %v\n", err)

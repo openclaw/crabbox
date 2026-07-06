@@ -53,7 +53,7 @@ Every non-health route normally requires a Bearer token; requests without one
 are rejected `401 unauthorized`. The Node runtime can instead accept an
 explicitly configured trusted reverse-proxy identity from allowlisted peer
 CIDRs. The generally unauthenticated routes are `GET /v1/health`, the GitHub
-login/OAuth and portal login/logout routes, and bridge agent upgrades that use
+login/OAuth and portal login routes, and bridge agent upgrades that use
 short-lived tickets. The workspace lifecycle and desktop-connection routes also
 accept the dedicated `CRABBOX_RUNTIME_ADAPTER_TOKEN` as a non-admin service
 identity. That credential cannot attach workspace terminals and is rejected from
@@ -69,10 +69,13 @@ every other coordinator route. Normal authentication is resolved in
    base64url payload signed with `CRABBOX_SESSION_SECRET`, which must be set and
    must differ from `CRABBOX_SHARED_TOKEN`. The versioned payload carries a
    verified-email `owner`, its `github-verified-email` provenance, `org`, and
-   GitHub `login`, has a default 180-day expiry, and is rejected if it carries
-   an `admin` claim — browser login can never mint admin tokens. Tokens from
-   older schemas are rejected; users must log in again after this security
-   upgrade.
+   GitHub `login`, has a default 180-day expiry, and contains the OAuth
+   credential encrypted under a key derived from the session secret. Every
+   request revalidates current allowed-org/team membership through GitHub, with
+   successful checks cached for five minutes. GitHub errors fail closed after
+   the cache expires. The token is rejected if it carries an `admin` claim —
+   browser login can never mint admin tokens. Tokens from older schemas are
+   rejected; users must log in again after this security upgrade.
 
 ### GitHub browser login
 
@@ -84,6 +87,11 @@ by coordinator config:
   members of the listed GitHub org(s).
 - `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) further
   narrows access to selected team slugs after org membership passes.
+- `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` controls successful request-time
+  membership caching (default 300, maximum 3600; set 0 to check every request).
+- `CRABBOX_GITHUB_REVOKED_USERS` immediately rejects comma-separated GitHub
+  logins or verified emails. Optional `login:` / `owner:` prefixes disambiguate
+  values. Use this for narrow emergency revocation without rotating every token.
 - The GitHub account must expose at least one verified email through the OAuth
   `user:email` scope. Public profile and unverified emails are never trusted as
   the token owner.
@@ -171,6 +179,13 @@ flows. Legacy admin attachments without a verifiable source and version fail
 closed after upgrade. Restored Code viewer sessions without a complete
 organization-bound principal also fail closed during restore and whenever lease
 sharing access shrinks.
+Non-admin GitHub WebVNC, Code, and egress sessions bind to the exact portal
+session and preserve only the encrypted GitHub credential from its signed user
+token. Active traffic rechecks portal logout and emergency user revocation, and
+revalidates GitHub membership under the configured membership-cache window.
+Membership errors fail closed. Restored legacy GitHub bridge attachments without
+a complete encrypted grant and portal-session binding close before carrying
+traffic; plaintext GitHub credentials are never stored in bridge state.
 Shared-operator requests do **not** trust caller-supplied `X-Crabbox-Owner` /
 `X-Crabbox-Org` headers — pin that automation's identity with
 `CRABBOX_SHARED_OWNER` (and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed
@@ -245,14 +260,25 @@ destination checks, including a symlink outside the checkout that resolves
 back into it. The canonical user config and explicit files outside the active
 repository remain operator-trusted sources.
 
-Repository-selected Static SSH, remote Parallels, and exe.dev control hosts
-cannot inherit a key, SSH agent, or local SSH configuration from a more trusted
-source. Put both a Static SSH or Parallels host and a relative, symlink-resolved
-key file contained by the repository in the same repository config, or
-explicitly approve the destination with the matching host flag or environment
-variable. Absolute, missing, and repository-escaping key paths do not count as
-same-source credentials. Because exe.dev control authentication is always
-ambient, a repository-defined custom control host requires an explicit
+Repository-selected Static SSH, remote Parallels, External SSH, and exe.dev
+control hosts cannot inherit a key, SSH agent, or local SSH configuration from
+a more trusted source. Static SSH and Parallels may pair the destination with
+a relative, symlink-resolved key file contained by the same repository;
+absolute, missing, and repository-escaping key paths do not count as
+same-source credentials. They can instead use the matching host flag or
+environment variable for approval. External SSH always requires the exact SSH
+endpoint (user, host, key, port, fallback ports, and proxy settings) plus any
+referenced `resourceName` to be repeated in trusted user config because
+operator SSH config and nested proxies can add
+authentication independently of an outer key. Repository-controlled template
+inputs keep the resulting destination in the repository trust domain, and the
+SSH environment-expansion opt-in is honored only from trusted user config.
+Protocol or declarative JSON output may supply SSH coordinates only when the
+exact output-producing adapter contract and `ssh.trustProviderOutput` are
+approved together in trusted user config; repository changes invalidate that
+approval.
+Because exe.dev control authentication is always ambient, a repository-defined
+custom control host requires an explicit
 `--exe-dev-control-host` or `CRABBOX_EXE_DEV_CONTROL_HOST` override.
 
 Cookie-authenticated portal mutations and portal viewer WebSocket upgrades
@@ -260,6 +286,10 @@ require an exact same-origin browser `Origin` matching `CRABBOX_PUBLIC_URL` (or
 the request origin when no public URL is configured). Missing or sibling-origin
 intent is rejected before the portal cookie is converted into bearer authority;
 explicit bearer API clients remain independent of this browser-only boundary.
+Portal logout follows the same boundary: `GET /portal/logout` only renders a
+confirmation page, and only a same-origin `POST` clears the portal cookie and
+revokes all WebVNC, Code, and mediated-egress bridges bound to that portal
+session.
 
 Configured provider credentials are redacted from documented HTTP or streamed
 error diagnostics, including Azure Dynamic Sessions, Cloudflare runner, Daytona,
@@ -314,7 +344,8 @@ repo:
   lifecycle and desktop-connection APIs only; it cannot attach terminals.
 - `CRABBOX_SHARED_TOKEN` — trusted operator automation only.
 - `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
-  `CRABBOX_SESSION_SECRET` — GitHub browser login and user-token signing. The
+  `CRABBOX_SESSION_SECRET` — GitHub browser login, user-token signing, and
+  encryption of the OAuth credential used for membership revalidation. The
   session secret is required, must be independent from the shared token, and
   should be rotated separately.
 - `CRABBOX_GITHUB_ADMIN_OWNERS`, `CRABBOX_GITHUB_ADMIN_LOGINS` — optional
@@ -328,7 +359,9 @@ repo:
   Scope these to the artifact bucket/prefix and use them only to sign
   short-lived upload/read URLs. New grants encode the exact authenticated
   owner/org identity in an opaque versioned namespace; existing object URLs are
-  not rewritten or resolved through a legacy lookup path.
+  not rewritten or resolved through a legacy lookup path. Reads remain signed
+  unless `CRABBOX_ARTIFACTS_PUBLIC_READS=1` explicitly opts into non-expiring
+  public links; public grants add an unguessable per-grant namespace.
 
 Deployments that previously relied on `CRABBOX_SHARED_TOKEN` as the implicit
 user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
@@ -337,13 +370,15 @@ user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
 
 Coordinator config values (not secret material):
 
-- `CRABBOX_GITHUB_ALLOWED_ORG(S)`, `CRABBOX_GITHUB_ALLOWED_TEAMS` —
-  browser-login authorization.
+- `CRABBOX_GITHUB_ALLOWED_ORG(S)`, `CRABBOX_GITHUB_ALLOWED_TEAMS`,
+  `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS`, `CRABBOX_GITHUB_REVOKED_USERS` —
+  browser-login and continuing user-token authorization.
 - `CRABBOX_TAILSCALE_TAGS` — allowlist/default for requested Tailscale ACL tags.
   Do not allow arbitrary user-supplied tags.
 - `CRABBOX_ACCESS_TEAM_DOMAIN`, `CRABBOX_ACCESS_AUD` — Access JWT verification.
 - `CRABBOX_ARTIFACTS_BACKEND`, `CRABBOX_ARTIFACTS_BUCKET`,
   `CRABBOX_ARTIFACTS_PREFIX`, `CRABBOX_ARTIFACTS_BASE_URL`,
+  `CRABBOX_ARTIFACTS_PUBLIC_READS`,
   `CRABBOX_ARTIFACTS_REGION`, `CRABBOX_ARTIFACTS_ENDPOINT_URL`,
   `CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS`,
   `CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS` — artifact storage settings.

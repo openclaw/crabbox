@@ -11,11 +11,11 @@ import (
 const diagnosticRedaction = "[redacted]"
 
 var (
-	diagnosticHeaderPattern = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization|x-api-key|api-key|api_key|access-token|access_token|client-secret|client_secret|session-token|session_token|token|password)[ \t]*[:=][ \t]*(?:(?:bearer|basic)[ \t]+)?[^\s"',;\\}&#?]+`)
+	diagnosticHeaderPattern = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization|x-api-key|api-key|api_key|access-token|access_token|client-secret|client_secret|session-token|session_token|token|password)[ \t]*[:=][ \t]*(?:(?:bearer|basic)(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+))?[^\s"',;\\}&#?]+`)
 	diagnosticJSONPattern   = regexp.MustCompile(`(?i)"(authorization|proxy-authorization|x-api-key|apiKey|api-key|api_key|accessToken|access-token|access_token|clientSecret|client-secret|client_secret|credential|credentials|privateKey|private-key|private_key|secret|sessionToken|session-token|session_token|token|password)"\s*:\s*"(?:\\[\s\S]|[^"\\])*(?:"|$)`)
 	diagnosticQueryPattern  = regexp.MustCompile(`(?i)([?&](?:api[_-]?key|access[_-]?token|client[_-]?secret|password|token|signature|sig|x-amz-credential|x-amz-signature|x-amz-security-token|x-goog-credential|x-goog-signature|x-goog-security-token)=)[^&#\s]+`)
 	diagnosticURLPattern    = regexp.MustCompile(`(?i)\b(https?://)[^/@\s]+@`)
-	diagnosticBearerPattern = regexp.MustCompile(`(?i)\bbearer[ \t]+[^\s"',;\\}]+`)
+	diagnosticBearerPattern = regexp.MustCompile(`(?i)\bbearer(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+)[^\s"',;\\}]+`)
 	diagnosticPEMPattern    = regexp.MustCompile(`(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)`)
 )
 

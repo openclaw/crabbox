@@ -4,13 +4,15 @@ const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
 import {
-  authenticateRequest,
   adminGrantVersion as configuredAdminGrantVersion,
+  githubUserGrantIsCurrent,
   githubUserIsAdmin,
   isAdminRequest,
   requestWithAuthContext,
   sha256Hex,
+  verifiedUserTokenExpiresAtForRevocation,
   type AuthContext,
+  type GitHubUserGrant,
 } from "./auth";
 import {
   EC2SpotClient,
@@ -20,6 +22,7 @@ import {
   awsProvisioningErrorCategory,
   awsRegionCandidates,
   isAWSInstanceCleanedAfterReadinessFailure,
+  isAWSInstanceNotFoundError,
   isRetryableAWSProvisioningError,
   isAWSSecurityGroupRuleLimitError,
   type AWSMacHost,
@@ -47,13 +50,14 @@ import {
   coordinatorRequestQueue,
   type CoordinatorRuntime,
 } from "./coordinator-runtime";
-import { GCPClient } from "./gcp";
+import { GCPClient, gcpProviderLabelValue } from "./gcp";
 import {
   HetznerClient,
   HetznerProvisioningError,
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
   hetznerProvisioningResourceID,
+  hetznerServerOwnedByLease,
 } from "./hetzner";
 import {
   bearerToken,
@@ -70,7 +74,12 @@ import {
   marketplaceStatus,
   type MarketplaceQuoteRequest,
 } from "./marketplace";
-import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
+import {
+  githubAuthRoute,
+  githubPortalLogin,
+  githubPortalLogout,
+  githubPortalLogoutConfirmation,
+} from "./oauth";
 import { defaultOSImage, normalizeOSImage } from "./os-image";
 import {
   portalCode,
@@ -93,6 +102,13 @@ import {
   webVNCBridgeCommand,
 } from "./portal";
 import { leaseIDForProviderKey, providerKeyForLease, sshPublicKeyIdentity } from "./provider-key";
+import { providerMachineOwnedByLease, workspacePrewarmProviderOwner } from "./provider-labels";
+import {
+  ProviderProvisioningCleanupError,
+  providerProvisioningCleanupClaim,
+  type ProviderProvisioningCleanupClaim,
+  validatedProviderProvisioningCleanupClaim,
+} from "./provider-provisioning";
 import {
   readRuntimeAdapterRelayBody,
   runtimeAdapterProxyPath,
@@ -126,6 +142,7 @@ import type {
   ExternalRunnerInput,
   ExternalRunnerRecord,
   ExternalRunnerSyncRequest,
+  HetznerServer,
   LeaseRecord,
   LeaseRegistrationRequest,
   LeaseRequest,
@@ -218,7 +235,7 @@ const workspaceMinimumTTLSeconds =
   (workspaceProvisionClaimMs + workspaceProvisionRecoveryGraceMs) / 1000;
 const workspaceMaxRecordsPerOwner = 100;
 const workspaceTerminalRetentionMs = 24 * 60 * 60_000;
-const workspacePrewarmOwner = "crabbox-internal-prewarm";
+const workspacePrewarmOwner = workspacePrewarmProviderOwner;
 const workspacePrewarmReplacementLeadMs = 5 * 60_000;
 const workspacePrewarmRetryDelayMs = 5 * 60_000;
 const workspaceTerminalMaxBufferedBytes = 1024 * 1024;
@@ -232,6 +249,7 @@ const workspaceTerminalSSHReadyTimeoutMs = 2 * 60_000;
 const workspaceSSHHostPrivateKeyHeader = "x-crabbox-workspace-ssh-host-private-key";
 const workspaceSSHHostPublicKeyHeader = "x-crabbox-workspace-ssh-host-public-key";
 const adminGrantRevalidationIntervalMs = 1_000;
+const userGrantRevalidationIntervalMs = 1_000;
 
 function coordinatorErrorMessage(env: Env, error: unknown): string {
   return errorMessage(error, coordinatorDiagnosticSecrets(env));
@@ -270,6 +288,13 @@ interface CachedAdminGrant {
   adminGrantVersion?: string;
 }
 
+interface CachedBridgeGrant extends CachedAdminGrant {
+  auth?: AuthContext["auth"];
+  login?: string;
+  portalSessionHash?: string;
+  githubGrant?: GitHubUserGrant;
+}
+
 interface WebVNCTicketRecord extends CachedAdminGrant {
   ticket: string;
   leaseID: string;
@@ -300,7 +325,7 @@ interface CodeTicketRecord extends CachedAdminGrant {
   expiresAt: string;
 }
 
-interface CodeViewerTicketRecord extends CachedAdminGrant {
+interface CodeViewerTicketRecord extends CachedBridgeGrant {
   ticket: string;
   leaseID: string;
   auth: AuthContext["auth"];
@@ -315,7 +340,7 @@ interface CodeViewerTicketRecord extends CachedAdminGrant {
   expiresAt: string;
 }
 
-interface CodeViewerSessionRecord extends CachedAdminGrant {
+interface CodeViewerSessionRecord extends CachedBridgeGrant {
   session: string;
   leaseID: string;
   auth: AuthContext["auth"];
@@ -421,7 +446,7 @@ interface RuntimeAdapterLegacyDeleteCompletion {
 
 type EgressRole = "host" | "client";
 
-interface EgressTicketRecord extends CachedAdminGrant {
+interface EgressTicketRecord extends CachedBridgeGrant {
   ticket: string;
   leaseID: string;
   owner: string;
@@ -613,6 +638,14 @@ interface AzureDeferredCleanupRecord extends AzureDeferredCleanupRequest {
   updatedAt: string;
   retryAt: string;
   lastError?: string;
+  terminalAt?: string;
+}
+
+class ProviderCleanupManualResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderCleanupManualResolutionError";
+  }
 }
 
 interface AWSIngressReconcileTarget {
@@ -709,7 +742,7 @@ interface AzureOrphanSweepRecord {
 
 type BridgeAttachment =
   | { kind: "webvnc-agent"; leaseID: string; id: string; capabilities: Set<string> }
-  | {
+  | (CachedBridgeGrant & {
       kind: "webvnc-viewer";
       leaseID: string;
       id: string;
@@ -717,14 +750,10 @@ type BridgeAttachment =
       owner: string;
       org?: string;
       admin?: boolean;
-      auth?: AuthContext["auth"];
-      login?: string;
-      adminTokenHash?: string;
-      adminGrantVersion?: string;
       label: string;
-    }
+    })
   | { kind: "code-agent"; leaseID: string }
-  | {
+  | (CachedBridgeGrant & {
       kind: "code-viewer";
       leaseID: string;
       id: string;
@@ -732,35 +761,23 @@ type BridgeAttachment =
       owner?: string;
       org?: string;
       admin?: boolean;
-      login?: string;
-      adminTokenHash?: string;
-      adminGrantVersion?: string;
-      portalSessionHash?: string;
-    }
-  | {
+    })
+  | (CachedBridgeGrant & {
       kind: "egress-host";
       leaseID: string;
       sessionID: string;
       owner?: string;
       org?: string;
       admin?: boolean;
-      auth?: AuthContext["auth"];
-      login?: string;
-      adminTokenHash?: string;
-      adminGrantVersion?: string;
-    }
-  | {
+    })
+  | (CachedBridgeGrant & {
       kind: "egress-client";
       leaseID: string;
       sessionID: string;
       owner?: string;
       org?: string;
       admin?: boolean;
-      auth?: AuthContext["auth"];
-      login?: string;
-      adminTokenHash?: string;
-      adminGrantVersion?: string;
-    }
+    })
   | {
       kind: "runtime-adapter-agent";
       adapterID: string;
@@ -798,17 +815,13 @@ interface WebVNCEvent {
   reason?: string;
 }
 
-interface WebVNCViewerSession {
+interface WebVNCViewerSession extends CachedBridgeGrant {
   id: string;
   agentID: string;
   socket: WebSocket;
   owner: string;
   org?: string;
   admin?: boolean;
-  auth?: AuthContext["auth"];
-  login?: string;
-  adminTokenHash?: string;
-  adminGrantVersion?: string;
   label: string;
   connectedAt: string;
 }
@@ -834,6 +847,7 @@ export class FleetCoordinator {
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
   private readonly restoredBridgeSockets = new Set<WebSocket>();
   private readonly adminGrantValidationTimes = new WeakMap<WebSocket, number>();
+  private readonly userGrantValidationTimes = new WeakMap<WebSocket, number>();
   private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
@@ -883,6 +897,9 @@ export class FleetCoordinator {
         return await githubPortalLogin(request, this.state.storage, this.env);
       }
       if (method === "GET" && parts.join("/") === "portal/logout") {
+        return githubPortalLogoutConfirmation();
+      }
+      if (method === "POST" && parts.join("/") === "portal/logout") {
         return await this.portalLogout(request);
       }
       if (parts[0] === "portal") {
@@ -1191,8 +1208,17 @@ export class FleetCoordinator {
     const revokedAdmins = new Set<WebSocket>();
     const revokedAdminEgressSessions = new Map<string, { leaseID: string; sessionID: string }>();
     const revokedViewers = new Map<WebSocket, string>();
-    const revokedEgressSessions = new Map<string, { leaseID: string; sessionID: string }>();
-    const codeViewersToCheck: Array<{ socket: WebSocket; portalSessionHash?: string }> = [];
+    const revokedEgressSessions = new Map<
+      string,
+      { leaseID: string; sessionID: string; reason: string }
+    >();
+    const githubBridgesToCheck: Array<{
+      socket: WebSocket;
+      attachment: Extract<
+        BridgeAttachment,
+        { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+      >;
+    }> = [];
     for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
       if (!attachment) {
@@ -1226,29 +1252,52 @@ export class FleetCoordinator {
         revokedEgressSessions.set(egressSocketKey(lease.id, attachment.sessionID), {
           leaseID: lease.id,
           sessionID: attachment.sessionID,
+          reason: "lease access revoked",
         });
         continue;
       }
-      if (attachment.kind === "code-viewer" && attachment.auth === "github") {
-        codeViewersToCheck.push({
-          socket,
-          ...(attachment.portalSessionHash
-            ? { portalSessionHash: attachment.portalSessionHash }
-            : {}),
-        });
+      if (revocableUserBridge(attachment)) {
+        const portalRevocationCanOverrideLeaseAccess =
+          attachment.kind === "code-viewer" &&
+          attachment.auth === "github" &&
+          validPortalSessionHash(attachment.portalSessionHash);
+        if (revokedViewers.has(socket) && !portalRevocationCanOverrideLeaseAccess) {
+          continue;
+        }
+        if (attachment.auth === undefined) {
+          if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
+            revokedEgressSessions.set(egressSocketKey(lease.id, attachment.sessionID), {
+              leaseID: lease.id,
+              sessionID: attachment.sessionID,
+              reason: "bridge authentication expired",
+            });
+          } else {
+            revokedViewers.set(socket, "bridge authentication expired");
+          }
+          continue;
+        }
+        if (attachment.auth === "github" && attachment.admin !== true) {
+          githubBridgesToCheck.push({ socket, attachment });
+        }
       }
     }
-    const codeViewerRevocations = await Promise.all(
-      codeViewersToCheck.map(async ({ socket, portalSessionHash }) => ({
+    const githubBridgeRevocations = await Promise.all(
+      githubBridgesToCheck.map(async ({ socket, attachment }) => ({
         socket,
-        revoked:
-          !validPortalSessionHash(portalSessionHash) ||
-          (await this.codeViewerPortalSessionRevoked(portalSessionHash)),
+        attachment,
+        reason: await this.githubBridgeGrantFailureReason(attachment),
       })),
     );
-    for (const { socket, revoked: portalSessionRevoked } of codeViewerRevocations) {
-      if (portalSessionRevoked) {
-        revokedViewers.set(socket, "portal session ended");
+    for (const { socket, attachment, reason } of githubBridgeRevocations) {
+      if (!reason) continue;
+      if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
+        revokedEgressSessions.set(egressSocketKey(attachment.leaseID, attachment.sessionID), {
+          leaseID: attachment.leaseID,
+          sessionID: attachment.sessionID,
+          reason,
+        });
+      } else {
+        revokedViewers.set(socket, reason);
       }
     }
     for (const socket of revokedAdmins) {
@@ -1269,8 +1318,8 @@ export class FleetCoordinator {
     for (const [leaseID, reason] of revoked) {
       this.closeLeaseBridges(leaseID, 1008, reason);
     }
-    for (const { leaseID, sessionID } of revokedEgressSessions.values()) {
-      this.clearEgressSession(leaseID, sessionID, 1008, "lease access revoked");
+    for (const { leaseID, sessionID, reason } of revokedEgressSessions.values()) {
+      this.clearEgressSession(leaseID, sessionID, 1008, reason);
     }
     for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
@@ -1445,6 +1494,10 @@ export class FleetCoordinator {
           ...(attachment.adminGrantVersion
             ? { adminGrantVersion: attachment.adminGrantVersion }
             : {}),
+          ...(attachment.portalSessionHash
+            ? { portalSessionHash: attachment.portalSessionHash }
+            : {}),
+          ...(attachment.githubGrant ? { githubGrant: attachment.githubGrant } : {}),
           label: attachment.label,
           connectedAt: new Date().toISOString(),
         });
@@ -1712,7 +1765,7 @@ export class FleetCoordinator {
     if (socket.readyState !== WebSocket.OPEN || !this.bridgeSocketIsCurrent(socket, attachment)) {
       return;
     }
-    if (!(await this.activeBridgeAdminGrantIsCurrent(socket, attachment))) {
+    if (!(await this.activeBridgeGrantIsCurrent(socket, attachment))) {
       return;
     }
     switch (attachment.kind) {
@@ -1789,17 +1842,34 @@ export class FleetCoordinator {
     if (
       !attachment ||
       !this.bridgeSocketIsCurrent(socket, attachment) ||
-      !(await this.activeBridgeAdminGrantIsCurrent(socket, attachment))
+      !(await this.activeBridgeGrantIsCurrent(socket, attachment))
     ) {
       return undefined;
     }
     return socket;
   }
 
-  private async activeBridgeAdminGrantIsCurrent(
+  private async activeBridgeGrantIsCurrent(
     socket: WebSocket,
     attachment: BridgeAttachment,
   ): Promise<boolean> {
+    if (
+      revocableUserBridge(attachment) &&
+      attachment.auth === "github" &&
+      attachment.admin !== true
+    ) {
+      const now = Date.now();
+      const lastValidatedAt = this.userGrantValidationTimes.get(socket) ?? 0;
+      if (now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
+        const failureReason = await this.githubBridgeGrantFailureReason(attachment);
+        if (failureReason) {
+          this.userGrantValidationTimes.delete(socket);
+          this.closeRevokedUserBridge(socket, attachment, failureReason);
+          return false;
+        }
+        this.userGrantValidationTimes.set(socket, now);
+      }
+    }
     if (!("admin" in attachment) || attachment.admin !== true) {
       return true;
     }
@@ -1825,6 +1895,54 @@ export class FleetCoordinator {
     this.handleBridgeClose(socket, 1008, "admin access revoked");
     closeSocket(socket, 1008, "admin access revoked");
     return false;
+  }
+
+  private async githubBridgeGrantFailureReason(
+    attachment: CachedBridgeGrant & { owner?: string; org?: string; admin?: boolean },
+  ): Promise<string | undefined> {
+    if (
+      validPortalSessionHash(attachment.portalSessionHash) &&
+      (await this.portalSessionIsRevoked(attachment.portalSessionHash))
+    ) {
+      return "portal session ended";
+    }
+    if (
+      typeof attachment.owner !== "string" ||
+      typeof attachment.org !== "string" ||
+      typeof attachment.admin !== "boolean" ||
+      typeof attachment.login !== "string" ||
+      !validPortalSessionHash(attachment.portalSessionHash) ||
+      !attachment.githubGrant
+    ) {
+      return "user access revoked";
+    }
+    return (await githubUserGrantIsCurrent(
+      attachment.githubGrant,
+      {
+        owner: attachment.owner,
+        org: attachment.org,
+        login: attachment.login,
+      },
+      this.env,
+    ))
+      ? undefined
+      : "user access revoked";
+  }
+
+  private closeRevokedUserBridge(
+    socket: WebSocket,
+    attachment: Extract<
+      BridgeAttachment,
+      { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+    >,
+    reason: string,
+  ): void {
+    if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
+      this.clearEgressSession(attachment.leaseID, attachment.sessionID, 1008, reason);
+      return;
+    }
+    this.handleBridgeClose(socket, 1008, reason);
+    closeSocket(socket, 1008, reason);
   }
 
   private handleBridgeClose(socket: WebSocket, code: number, reason: string): void {
@@ -2249,6 +2367,7 @@ export class FleetCoordinator {
         code: config.code,
         cloudID: "",
         owner,
+        providerOwner: owner,
         org,
         profile: config.profile,
         class: config.class,
@@ -2499,12 +2618,28 @@ export class FleetCoordinator {
           : this.withAWSIngressOperationLock(provision);
     const { server, serverType, market, attempts } = await provisioned.catch(
       async (error: unknown) => {
+        const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
         await this.state.runExclusive(async () => {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
             await this.deleteProviderAccess(record.id);
           }
           const current = await this.getLease(record.id);
           if (!current || current.state !== "provisioning") {
+            if (cleanupClaim) {
+              const failedAt = new Date().toISOString();
+              record = structuredClone(current ?? record);
+              if (record.state !== "released" && record.state !== "expired") {
+                record.state = "failed";
+                record.endedAt = failedAt;
+              }
+              retainProvisioningCleanupClaim(
+                record,
+                cleanupClaim,
+                coordinatorErrorMessage(this.env, error),
+                failedAt,
+              );
+              await this.putLease(record);
+            }
             await this.markAWSIngressReconcilePending(record);
             await this.scheduleAlarm();
             return;
@@ -2516,10 +2651,15 @@ export class FleetCoordinator {
           record.endedAt = failedAt;
           record.cleanupFailedAt = failedAt;
           record.cleanupError = coordinatorErrorMessage(this.env, error);
-          record.provisioningResourceMayExist =
-            config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
-          record.provisioningFailureRetryable =
-            config.provider === "hetzner" && hetznerProvisioningFailureRetryable(error);
+          record.provisioningResourceMayExist = cleanupClaim
+            ? true
+            : config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
+          record.provisioningFailureRetryable = cleanupClaim
+            ? false
+            : config.provider === "hetzner" && hetznerProvisioningFailureRetryable(error);
+          if (cleanupClaim) {
+            retainProvisioningCleanupClaim(record, cleanupClaim, record.cleanupError, failedAt);
+          }
           const failedHetznerServerID =
             config.provider === "hetzner" ? hetznerProvisioningResourceID(error) : undefined;
           if (failedHetznerServerID !== undefined) {
@@ -2534,7 +2674,11 @@ export class FleetCoordinator {
             record.providerKeyCleanupPending = true;
             record.providerKeyCleanupID = String(error.providerKeyCleanupID);
           }
-          if (failedHetznerServerID !== undefined || record.providerKeyCleanupPending) {
+          if (
+            cleanupClaim ||
+            failedHetznerServerID !== undefined ||
+            record.providerKeyCleanupPending
+          ) {
             record.cleanupRetryAt = new Date(
               Date.parse(failedAt) + leaseCleanupRetryDelayMs,
             ).toISOString();
@@ -2871,6 +3015,7 @@ export class FleetCoordinator {
     const createdAt = Date.parse(lease.createdAt);
     const adoptedTTLSeconds = Math.max(1, Math.ceil((expiresAt.getTime() - createdAt) / 1000));
     lease.workspaceID = input.id;
+    lease.providerOwner ??= lease.owner;
     lease.owner = input.owner;
     lease.org = input.org;
     lease.profile = input.profile;
@@ -6532,6 +6677,13 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    const bridgeGrant = await bridgeGrantForRequest(request, admin);
+    if (!bridgeGrant) {
+      return json(
+        { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
+        { status: 401 },
+      );
+    }
     await this.cleanupExpiredEgressTickets();
     const now = new Date();
     const requestedSessionID = input.sessionID ?? input.sessionId;
@@ -6544,7 +6696,7 @@ export class FleetCoordinator {
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       admin,
-      ...(await adminGrantForRequest(request, admin)),
+      ...bridgeGrant,
       role,
       sessionID,
       allow: boundedEgressAllowlist(input.allow),
@@ -7731,6 +7883,12 @@ export class FleetCoordinator {
         owner: session.owner,
         org: session.org,
         ...(session.login ? { login: session.login } : {}),
+        ...(session.githubGrant
+          ? {
+              githubGrant: session.githubGrant,
+              tokenExpiresAt: session.githubGrant.expiresAt,
+            }
+          : {}),
       });
     }
     const lease = await this.resolvePortalLease(identifier, authorizedRequest);
@@ -7764,38 +7922,16 @@ export class FleetCoordinator {
       return portalCode(lease);
     }
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      const auth = viewerSession?.auth ?? requestAuthType(authorizedRequest);
-      const adminGrant: CachedAdminGrant = viewerSession
-        ? {
-            auth: viewerSession.auth,
-            ...(viewerSession.login ? { login: viewerSession.login } : {}),
-            ...(viewerSession.adminTokenHash
-              ? { adminTokenHash: viewerSession.adminTokenHash }
-              : {}),
-            ...(viewerSession.adminGrantVersion
-              ? { adminGrantVersion: viewerSession.adminGrantVersion }
-              : {}),
-          }
-        : await adminGrantForRequest(authorizedRequest, isAdminRequest(authorizedRequest));
-      let portalSessionHash = viewerSession?.portalSessionHash;
-      if (auth === "github" && !portalSessionHash) {
-        const token = bearerToken(authorizedRequest);
-        if (!token) {
-          return json(
-            { error: "code_viewer_session_revoked", message: "Code viewer session has ended" },
-            { status: 401, headers: { "cache-control": "no-store" } },
-          );
-        }
-        portalSessionHash = await sha256Hex(token);
+      const bridgeGrant = viewerSession
+        ? copyBridgeGrant(viewerSession)
+        : await bridgeGrantForRequest(authorizedRequest, isAdminRequest(authorizedRequest));
+      if (!bridgeGrant) {
+        return json(
+          { error: "code_viewer_session_revoked", message: "Code viewer session has ended" },
+          { status: 401, headers: { "cache-control": "no-store" } },
+        );
       }
-      return await this.codeViewerWebSocket(
-        authorizedRequest,
-        lease,
-        agent,
-        auth,
-        adminGrant,
-        portalSessionHash,
-      );
+      return await this.codeViewerWebSocket(authorizedRequest, lease, agent, bridgeGrant);
     }
     return await this.codeProxyHTTP(authorizedRequest, lease, agent);
   }
@@ -7809,37 +7945,31 @@ export class FleetCoordinator {
     const now = new Date();
     const auth = requestAuthType(request);
     const admin = isAdminRequest(request);
-    let portalSessionHash: string | undefined;
-    if (auth === "github") {
-      const token = bearerToken(request);
-      if (!token) {
-        return portalError("Code session ended", "Log in again to open Code.", 401);
-      }
-      portalSessionHash = await sha256Hex(token);
-      if (await this.codeViewerPortalSessionRevoked(portalSessionHash)) {
-        return portalError("Code session ended", "Log in again to open Code.", 401);
-      }
+    const bridgeGrant = await bridgeGrantForRequest(request, admin);
+    if (!bridgeGrant) {
+      return portalError("Code session ended", "Log in again to open Code.", 401);
+    }
+    if (
+      bridgeGrant.portalSessionHash &&
+      (await this.portalSessionIsRevoked(bridgeGrant.portalSessionHash))
+    ) {
+      return portalError("Code session ended", "Log in again to open Code.", 401);
     }
     const ticket: CodeViewerTicketRecord = {
       ticket: newCodeViewerTicket(),
       leaseID: lease.id,
       auth,
       admin,
-      ...(await adminGrantForRequest(request, admin)),
+      ...bridgeGrant,
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       returnTo: canonicalCodeReturnTo(request, lease.id),
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + codeViewerTicketTTLSeconds * 1000).toISOString(),
     };
-    if (portalSessionHash) {
-      ticket.portalSessionHash = portalSessionHash;
-    }
-    const login = request.headers.get("x-crabbox-github-login")?.trim();
-    if (login) {
-      ticket.login = login;
-    }
-    const tokenExpiresAt = request.headers.get("x-crabbox-token-expires-at")?.trim();
+    const tokenExpiresAt =
+      bridgeGrant.githubGrant?.expiresAt ??
+      request.headers.get("x-crabbox-token-expires-at")?.trim();
     if (tokenExpiresAt && Number.isFinite(Date.parse(tokenExpiresAt))) {
       ticket.viewerExpiresAt = new Date(tokenExpiresAt).toISOString();
     }
@@ -7875,8 +8005,7 @@ export class FleetCoordinator {
     }
     if (
       (ticket.auth === "github" && !validPortalSessionHash(ticket.portalSessionHash)) ||
-      (ticket.portalSessionHash &&
-        (await this.codeViewerPortalSessionRevoked(ticket.portalSessionHash)))
+      (ticket.portalSessionHash && (await this.portalSessionIsRevoked(ticket.portalSessionHash)))
     ) {
       return json(
         { error: "code_viewer_session_revoked", message: "Code viewer session has ended" },
@@ -7896,21 +8025,10 @@ export class FleetCoordinator {
       admin: ticket.admin,
       owner: ticket.owner,
       org: ticket.org,
+      ...copyBridgeGrant(ticket),
       createdAt: now.toISOString(),
       expiresAt: new Date(expiresAt).toISOString(),
     };
-    if (ticket.login) {
-      session.login = ticket.login;
-    }
-    if (ticket.adminTokenHash) {
-      session.adminTokenHash = ticket.adminTokenHash;
-    }
-    if (ticket.adminGrantVersion) {
-      session.adminGrantVersion = ticket.adminGrantVersion;
-    }
-    if (ticket.portalSessionHash) {
-      session.portalSessionHash = ticket.portalSessionHash;
-    }
     await this.state.storage.put(codeViewerSessionKey(session.session), session);
     return new Response(null, {
       status: 303,
@@ -7944,7 +8062,8 @@ export class FleetCoordinator {
       Date.parse(session.expiresAt) <= Date.now() ||
       (session.auth === "github" && !validPortalSessionHash(session.portalSessionHash)) ||
       (session.portalSessionHash &&
-        (await this.codeViewerPortalSessionRevoked(session.portalSessionHash)))
+        (await this.portalSessionIsRevoked(session.portalSessionHash))) ||
+      (session.auth === "github" && (await this.githubBridgeGrantFailureReason(session)))
     ) {
       if (session) {
         await this.state.storage.delete(codeViewerSessionKey(value));
@@ -8035,13 +8154,11 @@ export class FleetCoordinator {
     await this.cleanupExpiredCodeViewerAuth();
     const token = cookieValue(request.headers.get("cookie") ?? "", "crabbox_session");
     if (token) {
-      const headers = new Headers(request.headers);
-      headers.set("authorization", `Bearer ${token}`);
-      const auth = await authenticateRequest(new Request(request, { headers }), this.env);
-      if (auth?.auth === "github") {
+      const verifiedTokenExpiresAt = await verifiedUserTokenExpiresAtForRevocation(token, this.env);
+      if (verifiedTokenExpiresAt) {
         const portalSessionHash = await sha256Hex(token);
         const now = new Date();
-        const tokenExpiresAt = Date.parse(auth.tokenExpiresAt ?? "");
+        const tokenExpiresAt = Date.parse(verifiedTokenExpiresAt);
         const revocationExpiresAt = now.getTime() + codeViewerSessionTTLSeconds * 1000;
         const expiresAt = Number.isFinite(tokenExpiresAt)
           ? Math.min(revocationExpiresAt, tokenExpiresAt)
@@ -8055,14 +8172,14 @@ export class FleetCoordinator {
               expiresAt: new Date(expiresAt).toISOString(),
             },
           );
-          this.closeCodeViewersForPortalSession(portalSessionHash);
+          this.closeBridgesForPortalSession(portalSessionHash);
         });
       }
     }
     return githubPortalLogout();
   }
 
-  private async codeViewerPortalSessionRevoked(portalSessionHash: string): Promise<boolean> {
+  private async portalSessionIsRevoked(portalSessionHash: string): Promise<boolean> {
     const key = codeViewerSessionRevocationKey(portalSessionHash);
     const revocation = await this.state.storage.get<CodeViewerSessionRevocationRecord>(key);
     if (!revocation || revocation.portalSessionHash !== portalSessionHash) {
@@ -8138,9 +8255,7 @@ export class FleetCoordinator {
     request: Request,
     lease: LeaseRecord,
     agent: WebSocket,
-    auth: AuthContext["auth"],
-    adminGrant: CachedAdminGrant,
-    portalSessionHash?: string,
+    bridgeGrant: CachedBridgeGrant,
   ): Promise<Response> {
     return await this.withBridgeTicketLock(async () => {
       const currentLease = await this.resolvePortalLease(lease.id, request);
@@ -8148,8 +8263,10 @@ export class FleetCoordinator {
         return notFound();
       }
       if (
-        (auth === "github" && !validPortalSessionHash(portalSessionHash)) ||
-        (portalSessionHash && (await this.codeViewerPortalSessionRevoked(portalSessionHash)))
+        (bridgeGrant.auth === "github" &&
+          (!validPortalSessionHash(bridgeGrant.portalSessionHash) || !bridgeGrant.githubGrant)) ||
+        (bridgeGrant.portalSessionHash &&
+          (await this.portalSessionIsRevoked(bridgeGrant.portalSessionHash)))
       ) {
         return json(
           { error: "code_viewer_session_revoked", message: "Code viewer session has ended" },
@@ -8164,12 +8281,11 @@ export class FleetCoordinator {
         kind: "code-viewer",
         leaseID: lease.id,
         id,
-        auth,
+        auth: bridgeGrant.auth ?? requestAuthType(request),
         owner: requestOwner(request),
         org: requestOrg(request, this.env),
         admin: isAdminRequest(request),
-        ...adminGrant,
-        ...(portalSessionHash ? { portalSessionHash } : {}),
+        ...bridgeGrant,
       });
       const url = new URL(request.url);
       const open: CodeWebSocketOpen = {
@@ -8351,7 +8467,20 @@ export class FleetCoordinator {
     }
   }
 
-  private closeCodeViewersForPortalSession(portalSessionHash: string): void {
+  private closeBridgesForPortalSession(portalSessionHash: string): void {
+    for (const [leaseID, viewers] of this.webVNCViewers) {
+      for (const [id, viewer] of viewers) {
+        const attachment = this.bridgeAttachment(viewer.socket);
+        if (
+          attachment?.kind !== "webvnc-viewer" ||
+          attachment.portalSessionHash !== portalSessionHash
+        ) {
+          continue;
+        }
+        this.clearWebVNCViewer(leaseID, id, viewer.socket);
+        closeSocket(viewer.socket, 1008, "portal session ended");
+      }
+    }
     for (const [id, viewer] of this.codeViewers) {
       const attachment = this.bridgeAttachment(viewer);
       if (
@@ -8362,6 +8491,23 @@ export class FleetCoordinator {
       }
       this.clearCodeViewer(attachment.leaseID, id, viewer, 1008, "portal session ended");
       closeSocket(viewer, 1008, "portal session ended");
+    }
+    const egressSessions = new Map<string, { leaseID: string; sessionID: string }>();
+    for (const socket of [...this.egressHosts.values(), ...this.egressClients.values()]) {
+      const attachment = this.bridgeAttachment(socket);
+      if (
+        (attachment?.kind !== "egress-host" && attachment?.kind !== "egress-client") ||
+        attachment.portalSessionHash !== portalSessionHash
+      ) {
+        continue;
+      }
+      egressSessions.set(egressSocketKey(attachment.leaseID, attachment.sessionID), {
+        leaseID: attachment.leaseID,
+        sessionID: attachment.sessionID,
+      });
+    }
+    for (const { leaseID, sessionID } of egressSessions.values()) {
+      this.clearEgressSession(leaseID, sessionID, 1008, "portal session ended");
     }
   }
 
@@ -8474,6 +8620,25 @@ export class FleetCoordinator {
       if (error) {
         return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
       }
+      const admin = isAdminRequest(request);
+      const bridgeGrant = await bridgeGrantForRequest(request, admin);
+      if (!bridgeGrant) {
+        return json(
+          { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
+          { status: 401 },
+        );
+      }
+      const owner = requestOwner(request);
+      const org = requestOrg(request, this.env);
+      if (
+        bridgeGrant.auth === "github" &&
+        (await this.githubBridgeGrantFailureReason({ ...bridgeGrant, owner, org, admin }))
+      ) {
+        return json(
+          { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
+          { status: 401 },
+        );
+      }
       const agent = this.claimIdleWebVNCAgent(lease.id);
       if (!agent) {
         const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
@@ -8497,10 +8662,6 @@ export class FleetCoordinator {
 
       const upgrade = this.state.createWebSocketUpgrade();
       const viewer = upgrade.socket;
-      const owner = requestOwner(request);
-      const org = requestOrg(request, this.env);
-      const admin = isAdminRequest(request);
-      const adminGrant = await adminGrantForRequest(request, admin);
       const label = webVNCViewerLabel(owner);
 
       this.trackWebVNCViewer(lease.id, {
@@ -8510,7 +8671,7 @@ export class FleetCoordinator {
         owner,
         org,
         admin,
-        ...adminGrant,
+        ...bridgeGrant,
         label,
         connectedAt: new Date().toISOString(),
       });
@@ -8527,7 +8688,7 @@ export class FleetCoordinator {
         owner,
         org,
         admin,
-        ...adminGrant,
+        ...bridgeGrant,
         label,
       });
       flushPendingWebVNC(this.pendingWebVNCToViewer, webVNCBufferKey(lease.id, agent.id), viewer);
@@ -8901,6 +9062,13 @@ export class FleetCoordinator {
         ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
         : ticket;
     if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
+      await this.state.storage.delete(key);
+      return { status: "invalid" };
+    }
+    if (
+      currentTicket.auth === "github" &&
+      (await this.githubBridgeGrantFailureReason(currentTicket))
+    ) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
@@ -10414,10 +10582,12 @@ export class FleetCoordinator {
       claims.map(async ({ claim, lease }) => {
         const cleanup = async () => {
           let failure: string | undefined;
+          let manualResolution = false;
           try {
             await this.deleteLeaseServer(lease);
           } catch (error) {
             failure = coordinatorErrorMessage(this.env, error);
+            manualResolution = error instanceof ProviderCleanupManualResolutionError;
           }
           await this.state.runExclusive(async () => {
             const current = await this.getLease(lease.id);
@@ -10426,6 +10596,11 @@ export class FleetCoordinator {
             }
             const nowDate = new Date();
             const nowISO = nowDate.toISOString();
+            if (failure && manualResolution) {
+              terminalizeManualProviderCleanup(current, failure, nowISO);
+              await this.putLease(current);
+              return;
+            }
             if (failure) {
               current.cleanupAttempts = (current.cleanupAttempts ?? 0) + 1;
               delete current.cleanupStartedAt;
@@ -10445,6 +10620,13 @@ export class FleetCoordinator {
             current.state = leaseIsLive(current) ? "expired" : current.state;
             current.updatedAt = nowISO;
             current.endedAt = nowISO;
+            if (current.state === "failed" && current.provisioningResourceMayExist) {
+              if (!current.failureError && current.cleanupError) {
+                current.failureError = current.cleanupError;
+              }
+              current.provisioningResourceMayExist = false;
+              current.provisioningFailureRetryable = false;
+            }
             delete current.releaseDeletesServer;
             clearLeaseCleanupMetadata(current);
             delete current.providerKeyCleanupPending;
@@ -10746,6 +10928,7 @@ export class FleetCoordinator {
       prefix: azureDeferredCleanupPrefix,
     });
     const times = [...records.values()]
+      .filter((record) => !record.terminalAt)
       .map((record) => Date.parse(record.retryAt))
       .filter((time) => Number.isFinite(time));
     if (times.length === 0) {
@@ -10763,25 +10946,40 @@ export class FleetCoordinator {
     const now = Date.now();
     await Promise.all(
       [...records.entries()].map(async ([key, record]) => {
+        if (record.terminalAt) {
+          return;
+        }
         const retryAt = Date.parse(record.retryAt);
         if (Number.isFinite(retryAt) && retryAt > now) {
           return;
         }
         try {
-          await new AzureClient(this.env, { location: record.location }).deleteServer(record.name);
+          const lease = azureDeferredCleanupLease(record);
+          const scope = azureProviderScope(lease.providerScope)!;
+          await new AzureClient(this.env, {
+            location: record.location,
+            subscription: scope.subscription,
+            resourceGroup: scope.resourceGroup,
+          }).deleteOwnedServer(lease);
         } catch (error) {
           await this.state.runExclusive(async () => {
             const current = await this.state.storage.get<AzureDeferredCleanupRecord>(key);
             if (!current || current.updatedAt !== record.updatedAt) {
               return;
             }
+            const terminal = error instanceof ProviderCleanupManualResolutionError;
             const nextRecord: AzureDeferredCleanupRecord = {
               ...current,
               attempts: current.attempts + 1,
               updatedAt: new Date().toISOString(),
-              retryAt: new Date(now + leaseCleanupRetryDelayMs).toISOString(),
+              retryAt: terminal
+                ? current.retryAt
+                : new Date(now + leaseCleanupRetryDelayMs).toISOString(),
               lastError: coordinatorErrorMessage(this.env, error),
             };
+            if (terminal) {
+              nextRecord.terminalAt = nextRecord.updatedAt;
+            }
             await this.state.storage.put(key, nextRecord);
             console.warn(
               `azure deferred cleanup failed name=${record.name} location=${record.location}: ${nextRecord.lastError}`,
@@ -11802,7 +12000,7 @@ export class FleetCoordinator {
         continue;
       }
       // oxlint-disable-next-line eslint/no-await-in-loop -- validate each control before its event can be sent.
-      if (!(await this.activeBridgeAdminGrantIsCurrent(socket, attachment))) {
+      if (!(await this.activeBridgeGrantIsCurrent(socket, attachment))) {
         continue;
       }
       const after = attachment.subscriptions?.[run.id];
@@ -12109,6 +12307,16 @@ export class FleetCoordinator {
       await this.state.runExclusive(async () => {
         const current = await this.getLease(preparation.lease.id);
         if (!current || current.cleanupStartedAt !== preparation.claim) {
+          return;
+        }
+        if (error instanceof ProviderCleanupManualResolutionError) {
+          terminalizeManualProviderCleanup(
+            current,
+            coordinatorErrorMessage(this.env, error),
+            new Date().toISOString(),
+          );
+          await this.putLease(current);
+          await this.scheduleAlarm();
           return;
         }
         const failedAt = new Date();
@@ -13901,6 +14109,57 @@ async function adminGrantForRequest(request: Request, admin: boolean): Promise<C
   return { auth, ...(adminGrantVersion ? { adminGrantVersion } : {}) };
 }
 
+async function bridgeGrantForRequest(
+  request: Request,
+  admin: boolean,
+): Promise<CachedBridgeGrant | undefined> {
+  const auth = requestAuthType(request);
+  const adminGrant = await adminGrantForRequest(request, admin);
+  if (!request.headers.has("x-crabbox-auth")) {
+    return adminGrant;
+  }
+  if (auth !== "github") {
+    return { auth, ...adminGrant };
+  }
+  const token = bearerToken(request);
+  const login = request.headers.get("x-crabbox-github-login")?.trim();
+  const tokenID = request.headers.get("x-crabbox-github-token-id")?.trim();
+  const sealedCredential = request.headers.get("x-crabbox-github-sealed-credential")?.trim();
+  const expiresAt = request.headers.get("x-crabbox-token-expires-at")?.trim();
+  if (
+    !token ||
+    !login ||
+    !tokenID ||
+    !sealedCredential ||
+    !expiresAt ||
+    !Number.isFinite(Date.parse(expiresAt))
+  ) {
+    return undefined;
+  }
+  return {
+    auth,
+    login,
+    ...adminGrant,
+    portalSessionHash: await sha256Hex(token),
+    githubGrant: {
+      tokenID,
+      sealedCredential,
+      expiresAt: new Date(expiresAt).toISOString(),
+    },
+  };
+}
+
+function copyBridgeGrant(principal: CachedBridgeGrant): CachedBridgeGrant {
+  return {
+    ...(principal.auth ? { auth: principal.auth } : {}),
+    ...(principal.login ? { login: principal.login } : {}),
+    ...(principal.adminTokenHash ? { adminTokenHash: principal.adminTokenHash } : {}),
+    ...(principal.adminGrantVersion ? { adminGrantVersion: principal.adminGrantVersion } : {}),
+    ...(principal.portalSessionHash ? { portalSessionHash: principal.portalSessionHash } : {}),
+    ...(principal.githubGrant ? { githubGrant: principal.githubGrant } : {}),
+  };
+}
+
 type AdminGrantEnv = Pick<
   Env,
   "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS" | "CRABBOX_GITHUB_ADMIN_LOGINS"
@@ -14063,6 +14322,60 @@ function providerResourceNotFound(error: unknown): boolean {
   return message.includes("http 404") || isCloudNotFoundError(message);
 }
 
+function azureProviderScope(
+  value: string | undefined,
+): { subscription: string; resourceGroup: string } | undefined {
+  const match = /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)$/i.exec(value?.trim() ?? "");
+  if (!match?.[1] || !match[2]) return undefined;
+  return { subscription: match[1], resourceGroup: match[2] };
+}
+
+function azureDeferredCleanupLease(
+  record: AzureDeferredCleanupRecord,
+): Pick<LeaseRecord, "id" | "slug" | "provider" | "cloudID" | "owner" | "providerScope"> {
+  const subscription = record.subscription?.trim();
+  const resourceGroup = record.resourceGroup?.trim();
+  const providerScope = `/subscriptions/${subscription}/resourceGroups/${resourceGroup}`;
+  if (
+    !subscription ||
+    !resourceGroup ||
+    !validLeaseID(record.leaseID) ||
+    !normalizeLeaseSlug(record.slug) ||
+    !record.owner?.trim() ||
+    !azureProviderScope(providerScope)
+  ) {
+    throw new ProviderCleanupManualResolutionError(
+      `refusing Azure deferred cleanup for ${record.name}: canonical lease claim and provider scope were not persisted`,
+    );
+  }
+  return {
+    id: record.leaseID,
+    slug: record.slug,
+    provider: "azure",
+    cloudID: record.name,
+    owner: record.owner,
+    providerScope,
+  };
+}
+
+async function ownedProviderMachineForRelease(
+  provider: Extract<Provider, "aws" | "azure" | "gcp">,
+  lease: LeaseRecord,
+  findServer: (id: string) => Promise<ProviderMachine | undefined>,
+  options: {
+    labelValue?: (value: string) => string;
+  } = {},
+): Promise<ProviderMachine | undefined> {
+  const machine = await findServer(lease.cloudID);
+  if (!machine) return undefined;
+  if (!providerMachineOwnedByLease(machine, lease, provider, options.labelValue)) {
+    throw new Error(
+      `refusing to delete ${provider} resource ${lease.cloudID}: ownership does not match lease ${lease.id}`,
+    );
+  }
+  return machine;
+}
+
 function checkpointStrategy(value: string | undefined): "image" | "disk-snapshot" | undefined {
   switch ((value ?? "").trim().toLowerCase()) {
     case "image":
@@ -14141,8 +14454,8 @@ function allowProviderImageDelete(): Promise<undefined> {
   return Promise.resolve(undefined);
 }
 
-function azureDeferredCleanupKey(location: string, name: string): string {
-  return `${azureDeferredCleanupPrefix}${location}:${name}`;
+function azureDeferredCleanupKey(request: AzureDeferredCleanupRequest): string {
+  return `${azureDeferredCleanupPrefix}${encodeURIComponent(request.subscription)}:${encodeURIComponent(request.resourceGroup)}:${encodeURIComponent(request.location)}:${encodeURIComponent(request.name)}`;
 }
 
 export function recordAzureDeferredCleanup(
@@ -14151,7 +14464,7 @@ export function recordAzureDeferredCleanup(
   request: AzureDeferredCleanupRequest,
 ): Promise<void> {
   return state.runExclusive(async () => {
-    const key = azureDeferredCleanupKey(request.location, request.name);
+    const key = azureDeferredCleanupKey(request);
     const current = await state.storage.get<AzureDeferredCleanupRecord>(key);
     const now = new Date().toISOString();
     const record: AzureDeferredCleanupRecord = {
@@ -14707,6 +15020,20 @@ function completeBridgePrincipal(value: {
   );
 }
 
+function revocableUserBridge(
+  attachment: BridgeAttachment,
+): attachment is Extract<
+  BridgeAttachment,
+  { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+> {
+  return (
+    attachment.kind === "webvnc-viewer" ||
+    attachment.kind === "code-viewer" ||
+    attachment.kind === "egress-host" ||
+    attachment.kind === "egress-client"
+  );
+}
+
 function validOptionalEgressBridgePrincipal(value: {
   owner?: unknown;
   org?: unknown;
@@ -14717,8 +15044,8 @@ function validOptionalEgressBridgePrincipal(value: {
 }
 
 function leaseBridgeTicketPrincipal(
-  ticket: CachedAdminGrant & { owner: string; org: string; admin?: boolean },
-): CachedAdminGrant & {
+  ticket: CachedBridgeGrant & { owner: string; org: string; admin?: boolean },
+): CachedBridgeGrant & {
   owner: string;
   org: string;
   admin: boolean;
@@ -14731,6 +15058,8 @@ function leaseBridgeTicketPrincipal(
     ...(ticket.login ? { login: ticket.login } : {}),
     ...(ticket.adminTokenHash ? { adminTokenHash: ticket.adminTokenHash } : {}),
     ...(ticket.adminGrantVersion ? { adminGrantVersion: ticket.adminGrantVersion } : {}),
+    ...(ticket.portalSessionHash ? { portalSessionHash: ticket.portalSessionHash } : {}),
+    ...(ticket.githubGrant ? { githubGrant: ticket.githubGrant } : {}),
   };
 }
 
@@ -15641,6 +15970,35 @@ function provisionedLeaseRecord(
   };
 }
 
+function retainProvisioningCleanupClaim(
+  lease: LeaseRecord,
+  claim: ProviderProvisioningCleanupClaim,
+  error: string,
+  failedAt: string,
+): void {
+  const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
+  lease.cloudID = claim.cloudID;
+  lease.serverName = claim.cloudID;
+  lease.serverID = claim.serverID ?? 0;
+  lease.updatedAt = failedAt;
+  if (claim.region) lease.region = claim.region;
+  if (claim.providerProject) lease.providerProject = claim.providerProject;
+  if (claim.providerScope) lease.providerScope = claim.providerScope;
+  if (retainResource) {
+    lease.keep = true;
+    clearLeaseCleanupMetadata(lease);
+    delete lease.provisioningResourceMayExist;
+    delete lease.provisioningFailureRetryable;
+    return;
+  }
+  lease.releaseDeletesServer = true;
+  lease.provisioningResourceMayExist = true;
+  lease.provisioningFailureRetryable = false;
+  lease.cleanupError = error;
+  lease.cleanupFailedAt = failedAt;
+  lease.cleanupRetryAt = new Date(Date.parse(failedAt) + leaseCleanupRetryDelayMs).toISOString();
+}
+
 function nextLeaseAlarmTime(lease: LeaseRecord): number {
   const now = Date.now();
   const expiresAt = Date.parse(lease.expiresAt);
@@ -15694,6 +16052,26 @@ function clearLeaseCleanupMetadata(lease: LeaseRecord): void {
   delete lease.cleanupError;
   delete lease.cleanupFailedAt;
   delete lease.cleanupRetryAt;
+}
+
+function terminalizeManualProviderCleanup(
+  lease: LeaseRecord,
+  error: string,
+  terminalAt: string,
+): void {
+  if (leaseIsLive(lease)) {
+    lease.state = "expired";
+  }
+  lease.keep = true;
+  lease.releaseDeletesServer = false;
+  lease.failureError = error;
+  lease.updatedAt = terminalAt;
+  lease.endedAt = terminalAt;
+  clearLeaseCleanupMetadata(lease);
+  delete lease.cleanupStartedAt;
+  delete lease.cleanupClaimExpiresAt;
+  delete lease.provisioningResourceMayExist;
+  delete lease.provisioningFailureRetryable;
 }
 
 function clearRuntimeAdapterDeleteMetadata(lease: LeaseRecord): void {
@@ -16468,20 +16846,38 @@ export class HetznerProvider implements CloudProvider {
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
     let serverID = Number(lease.serverID);
+    let server: HetznerServer | undefined;
     if (
       (!Number.isSafeInteger(serverID) || serverID <= 0) &&
       lease.providerKeyCleanupPending &&
       lease.provisioningResourceMayExist
     ) {
-      const recovered = await this.client.findServerByLease(lease.id);
-      serverID = recovered?.id ?? Number.NaN;
+      server = await this.client.findServerByLease(lease.id);
+      serverID = server?.id ?? Number.NaN;
     }
     if (Number.isSafeInteger(serverID) && serverID > 0) {
       try {
-        await this.deleteServer(String(serverID));
+        server ??= await this.client.getServer(serverID);
       } catch (error) {
         if (!providerResourceNotFound(error)) {
           throw error;
+        }
+      }
+      if (server) {
+        if (
+          server.id !== serverID ||
+          !hetznerServerOwnedByLease(server, lease.id, lease.slug, lease.serverName)
+        ) {
+          throw new Error(
+            `refusing to delete Hetzner server ${serverID}: ownership does not match lease ${lease.id}`,
+          );
+        }
+        try {
+          await this.deleteServer(String(serverID));
+        } catch (error) {
+          if (!providerResourceNotFound(error)) {
+            throw error;
+          }
         }
       }
     }
@@ -16533,7 +16929,7 @@ export class HetznerProvider implements CloudProvider {
   }
 }
 
-class AzureProvider implements CloudProvider {
+export class AzureProvider implements CloudProvider {
   private clientValue?: AzureClient;
 
   constructor(
@@ -16561,12 +16957,30 @@ class AzureProvider implements CloudProvider {
     return this.client.listCrabboxServers();
   }
 
+  getServer(id: string): Promise<ProviderMachine> {
+    return this.client.getServer(id);
+  }
+
+  findServer(id: string): Promise<ProviderMachine | undefined> {
+    return this.client.findServer(id);
+  }
+
   async prepareLeaseConfig(
     config: ReturnType<typeof leaseConfig>,
   ): Promise<ReturnType<typeof leaseConfig>> {
     return config.azureLocation
       ? config
       : { ...config, azureLocation: azureLocationFor(this.env, "") };
+  }
+
+  prepareLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+  ): Promise<ProviderLeaseCreatePreparation> {
+    return Promise.resolve({
+      config,
+      lease: { ...lease, providerScope: this.client.providerScope() },
+    });
   }
 
   createServerWithFallback(
@@ -16587,6 +17001,23 @@ class AzureProvider implements CloudProvider {
     return this.client.deleteServer(id);
   }
 
+  deleteOwnedServer(lease: LeaseRecord): Promise<void> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope) {
+      return Promise.reject(
+        new ProviderCleanupManualResolutionError(
+          `refusing to delete Azure lease ${lease.id}: canonical provider scope was not persisted`,
+        ),
+      );
+    }
+    return new AzureClient(this.env, {
+      ...(this.location ? { location: this.location } : {}),
+      ...(this.deferredCleanup ? { deferredCleanup: this.deferredCleanup } : {}),
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+    }).deleteOwnedServer(lease);
+  }
+
   async finalizeLeaseCreate(
     config: ReturnType<typeof leaseConfig>,
     lease: LeaseRecord,
@@ -16595,7 +17026,11 @@ class AzureProvider implements CloudProvider {
   ): Promise<ProviderLeaseCreateFinalization> {
     const region = server.region || config.azureLocation;
     const nextConfig = region ? { ...config, azureLocation: region } : config;
-    const nextLease: LeaseRecord = { ...lease, region };
+    const nextLease: LeaseRecord = {
+      ...lease,
+      region,
+      providerScope: this.client.providerScope(),
+    };
     const hints = capacityHints(this.env, nextConfig, nextLease, attempts);
     if (hints.length > 0) {
       nextLease.capacityHints = hints;
@@ -16604,7 +17039,7 @@ class AzureProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    await this.deleteServer(lease.cloudID);
+    await this.deleteOwnedServer(lease);
   }
 
   supportsNativeImages(): boolean {
@@ -16678,7 +17113,7 @@ class AzureProvider implements CloudProvider {
   }
 }
 
-class GCPProvider implements CloudProvider {
+export class GCPProvider implements CloudProvider {
   private clientValue?: GCPClient;
 
   constructor(
@@ -16710,6 +17145,10 @@ class GCPProvider implements CloudProvider {
 
   getServer(id: string): Promise<ProviderMachine> {
     return this.client.getServer(id);
+  }
+
+  findServer(id: string): Promise<ProviderMachine | undefined> {
+    return this.client.findServer(id);
   }
 
   recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
@@ -16770,6 +17209,13 @@ class GCPProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
+    if (
+      !(await ownedProviderMachineForRelease("gcp", lease, (id) => this.findServer(id), {
+        labelValue: gcpProviderLabelValue,
+      }))
+    ) {
+      return;
+    }
     await this.deleteServer(lease.cloudID);
   }
 
@@ -16881,6 +17327,10 @@ export class AWSProvider implements CloudProvider {
 
   getServer(id: string): Promise<ProviderMachine> {
     return this.client.getServer(id);
+  }
+
+  findServer(id: string): Promise<ProviderMachine | undefined> {
+    return this.client.findServer(id);
   }
 
   async prepareLeaseConfig(
@@ -17116,9 +17566,15 @@ export class AWSProvider implements CloudProvider {
             const deleteMessage =
               deleteError instanceof Error ? deleteError.message : String(deleteError);
             if (!isAWSInstanceCleanedAfterReadinessFailure(waitMessage, deleteMessage)) {
-              throw new Error(
+              throw new ProviderProvisioningCleanupError(
                 `${waitMessage}; cleanup failed for AWS instance ${server.cloudID}: ${deleteMessage}`,
-                { cause: deleteError },
+                {
+                  provider: "aws",
+                  cloudID: server.cloudID,
+                  region,
+                  serverID: server.id,
+                },
+                deleteError,
               );
             }
           }
@@ -17142,6 +17598,7 @@ export class AWSProvider implements CloudProvider {
         }
         return result;
       } catch (error) {
+        if (providerProvisioningCleanupClaim(error)) throw error;
         const message = error instanceof Error ? error.message : String(error);
         regionAttempts.push({
           region,
@@ -17183,11 +17640,14 @@ export class AWSProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
+    const server = await ownedProviderMachineForRelease("aws", lease, (id) => this.findServer(id));
     try {
-      await this.deleteServer(lease.cloudID);
+      if (server) {
+        await this.deleteServer(lease.cloudID);
+      }
     } catch (error) {
       const message = coordinatorErrorMessage(this.env, error);
-      if (!isCloudNotFoundError(message)) {
+      if (!isAWSInstanceNotFoundError(message)) {
         throw error;
       }
       console.warn(

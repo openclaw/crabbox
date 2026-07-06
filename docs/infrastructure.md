@@ -227,6 +227,8 @@ CRABBOX_PUBLIC_URL               # canonical HTTPS coordinator origin
 CRABBOX_SESSION_SECRET            # signs cbxu_ user tokens; required and distinct from CRABBOX_SHARED_TOKEN
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional: restrict to org teams (alias CRABBOX_GITHUB_ALLOWED_TEAM)
+CRABBOX_GITHUB_REVOKED_USERS     # optional: immediately deny listed logins or verified emails
+CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS # optional: positive-cache TTL, default 300, max 3600
 ```
 
 ### Cloudflare Access (optional)
@@ -629,6 +631,7 @@ CRABBOX_SHARED_TOKEN, CRABBOX_SHARED_OWNER
 CRABBOX_ADMIN_TOKEN                       # admin routes + image promotion
 CRABBOX_GITHUB_CLIENT_ID, CRABBOX_GITHUB_CLIENT_SECRET
 CRABBOX_GITHUB_ALLOWED_ORG[S], CRABBOX_GITHUB_ALLOWED_TEAMS (optional)
+CRABBOX_GITHUB_REVOKED_USERS, CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS (optional)
 CRABBOX_GITHUB_ADMIN_OWNERS, CRABBOX_GITHUB_ADMIN_LOGINS (optional)
 CRABBOX_SESSION_SECRET
 CRABBOX_DEFAULT_ORG

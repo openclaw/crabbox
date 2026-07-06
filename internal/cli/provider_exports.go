@@ -138,6 +138,12 @@ func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, 
 	return claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
 
+// ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged binds an
+// exact resource while atomically replacing any previously published route.
+func ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
 func ResolveLeaseClaim(identifier string) (LeaseClaim, bool, error) {
 	return resolveLeaseClaim(identifier)
 }
@@ -178,6 +184,12 @@ func VerifyLeaseClaimUnchanged(leaseID string, expected LeaseClaim) error {
 // removes the claim only when it still matches expected.
 func RemoveLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
 	return removeLeaseClaimIfUnchangedAfter(leaseID, expected, action)
+}
+
+// CleanupLeaseClaimIfUnchangedAfter holds the claim lock across action and
+// cleans up only when claim presence and content still match the expectation.
+func CleanupLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, expectedExists bool, action func() error) error {
+	return cleanupLeaseClaimIfUnchangedAfter(leaseID, expected, expectedExists, action)
 }
 func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {
 	return restoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
@@ -255,6 +267,29 @@ func ReadLeaseClaim(leaseID string) (LeaseClaim, error) {
 
 func ReadLeaseClaimWithPresence(leaseID string) (LeaseClaim, bool, error) {
 	return readLeaseClaimWithPresence(leaseID)
+}
+
+// SetServerLeaseClaimSnapshot carries the exact claim state that authorized a
+// provider result into a later lifecycle operation.
+func SetServerLeaseClaimSnapshot(server *Server, claim LeaseClaim, exists bool) {
+	if server == nil {
+		return
+	}
+	server.claimSnapshotSet = true
+	server.claimSnapshotExists = exists
+	server.claimSnapshot = leaseClaim{}
+	if exists {
+		server.claimSnapshot = cloneLeaseClaim(claim)
+	}
+}
+
+// ServerLeaseClaimSnapshot returns the carried claim, whether it existed, and
+// whether a snapshot was explicitly attached.
+func ServerLeaseClaimSnapshot(server Server) (LeaseClaim, bool, bool) {
+	if !server.claimSnapshotSet {
+		return LeaseClaim{}, false, false
+	}
+	return cloneLeaseClaim(server.claimSnapshot), server.claimSnapshotExists, true
 }
 
 func OSImageWasExplicit(cfg Config) bool {

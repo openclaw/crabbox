@@ -188,6 +188,43 @@ func TestNomadRegistersWithoutAliases(t *testing.T) {
 	}
 }
 
+func TestSealosDevboxRegistersWithRequestedAliases(t *testing.T) {
+	provider, err := core.ProviderFor("sealos-devbox")
+	if err != nil {
+		t.Fatalf("ProviderFor(sealos-devbox): %v", err)
+	}
+	if provider.Name() != "sealos-devbox" {
+		t.Fatalf("ProviderFor(sealos-devbox).Name=%q", provider.Name())
+	}
+	if _, ok := provider.(core.DoctorProvider); !ok {
+		t.Fatal("sealos-devbox provider does not expose doctor")
+	}
+	spec := provider.Spec()
+	if spec.Family != "sealos" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("sealos-devbox spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("sealos-devbox targets=%#v", spec.Targets)
+	}
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("sealos-devbox features=%v missing %s", spec.Features, feature)
+		}
+	}
+	for _, alias := range []string{"sealos", "sealos-dev"} {
+		got, err := core.ProviderFor(alias)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", alias, err)
+		}
+		if got.Name() != "sealos-devbox" {
+			t.Fatalf("ProviderFor(%q).Name=%q want sealos-devbox", alias, got.Name())
+		}
+	}
+	if got, err := core.ProviderFor("devbox"); err == nil && got.Name() == "sealos-devbox" {
+		t.Fatal(`"devbox" alias unexpectedly resolves to sealos-devbox`)
+	}
+}
+
 func TestAgentSandboxRegistersWithoutAliases(t *testing.T) {
 	provider, err := core.ProviderFor("agent-sandbox")
 	if err != nil {
@@ -1184,6 +1221,10 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 		cfg.Semaphore.Host = "semaphore.example.test"
 		cfg.Semaphore.Token = "test-token"
 		return cfg, true
+	case "sealos-devbox":
+		cfg.SealosDevbox.Context = "sealos-context"
+		cfg.SealosDevbox.SSHGatewayHost = "ssh.sealos.example.test"
+		return cfg, true
 	case "sprites":
 		cfg.Sprites.Token = "test-token"
 		return cfg, true
@@ -1255,6 +1296,7 @@ func allBuiltInProviderNames() []string {
 		"scaleway",
 		"anthropic-sandbox-runtime",
 		"semaphore",
+		"sealos-devbox",
 		"smolvm",
 		"sprites",
 		"ssh",
