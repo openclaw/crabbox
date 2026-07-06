@@ -299,7 +299,9 @@ Sprites, and Upstash Box. The same final redaction covers `doctor` text and JSON
 messages/details. It removes exact configured secrets, authorization and API-key
 headers, credential-bearing URL query/userinfo components, common secret JSON
 fields, bearer values, and PEM private keys while retaining non-secret routing
-context. Generated stop and failure-routing commands retain provider
+context. Header and bearer fallbacks treat whitespace or an unescaped JSON quote
+as the credential boundary, so punctuation inside an otherwise unknown credential
+cannot expose a suffix. Generated stop and failure-routing commands retain provider
 endpoint routing but remove URL userinfo before they are printed or stored.
 GitHub Actions registration metadata and its short-lived runner token travel
 over SSH stdin rather than the remote command line. These guarantees apply to
