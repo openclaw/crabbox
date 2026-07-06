@@ -5,7 +5,15 @@ import {
   validatedCIDRs,
   type LeaseConfig,
 } from "./config";
-import { leaseProviderLabels } from "./provider-labels";
+import {
+  leaseProviderLabels,
+  providerLabelValue,
+  providerMachineOwnedByLease,
+} from "./provider-labels";
+import {
+  ProviderProvisioningCleanupError,
+  providerProvisioningCleanupClaim,
+} from "./provider-provisioning";
 import { leaseProviderName } from "./slug";
 import type { Env, ProviderImage, ProviderMachine, ProvisioningAttempt } from "./types";
 
@@ -18,6 +26,17 @@ const firewallVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
 interface TokenCache {
   token: string;
   expiresAt: number;
+}
+
+class GCPHTTPError extends Error {
+  constructor(
+    readonly method: string,
+    readonly path: string,
+    readonly status: number,
+    readonly body: string,
+  ) {
+    super(`gcp ${method} ${path}: http ${status}: ${body}`);
+  }
 }
 
 interface GCPInstance {
@@ -195,6 +214,7 @@ export class GCPClient {
           if (attempts.length > 0) result.attempts = attempts;
           return result;
         } catch (error) {
+          if (providerProvisioningCleanupClaim(error)) throw error;
           const message = errorMessage(error);
           failures.push(`${zone}/${machineType}: ${message}`);
           attempts.push({
@@ -240,6 +260,7 @@ export class GCPClient {
               attempts,
             };
           } catch (error) {
+            if (providerProvisioningCleanupClaim(error)) throw error;
             const message = errorMessage(error);
             failures.push(`on-demand ${zone}/${machineType}: ${message}`);
             if (!isFallbackProvisioningError(message)) {
@@ -335,9 +356,43 @@ export class GCPClient {
       await this.waitZoneOperation(op);
       return await this.getServer(name);
     } catch (error) {
-      await this.deleteServer(name).catch(() => undefined);
+      try {
+        await this.deleteServerOwnedByClaim(name, leaseID, slug, owner);
+      } catch (cleanupError) {
+        throw new ProviderProvisioningCleanupError(
+          `${errorMessage(error)}; GCP provisioning cleanup failed closed: ${errorMessage(cleanupError)}`,
+          {
+            provider: "gcp",
+            cloudID: name,
+            region: this.zone,
+            providerProject: project,
+          },
+          cleanupError,
+        );
+      }
       throw error;
     }
+  }
+
+  private async deleteServerOwnedByClaim(
+    name: string,
+    leaseID: string,
+    slug: string,
+    owner: string,
+  ): Promise<void> {
+    const machine = await this.findServer(name);
+    if (!machine) return;
+    if (
+      !providerMachineOwnedByLease(
+        machine,
+        { id: leaseID, slug, owner, provider: "gcp", cloudID: name },
+        "gcp",
+        gcpProviderLabelValue,
+      )
+    ) {
+      throw new Error(`GCP instance ${name} ownership does not match lease ${leaseID}`);
+    }
+    await this.deleteServer(name);
   }
 
   async getServer(name: string): Promise<ProviderMachine> {
@@ -345,6 +400,15 @@ export class GCPClient {
       await this.gcp<GCPInstance>("GET", `/zones/${this.zone}/instances/${name}`),
       this.zone,
     );
+  }
+
+  async findServer(name: string): Promise<ProviderMachine | undefined> {
+    try {
+      return await this.getServer(name);
+    } catch (error) {
+      if (gcpInstanceNotFound(error, this.project, this.zone, name)) return undefined;
+      throw error;
+    }
   }
 
   async waitForServerIP(name: string): Promise<ProviderMachine> {
@@ -364,7 +428,7 @@ export class GCPClient {
       "DELETE",
       `/zones/${this.zone}/instances/${name}`,
     ).catch((error) => {
-      if (isNotFound(error)) return undefined;
+      if (gcpInstanceNotFound(error, this.project, this.zone, name)) return undefined;
       throw error;
     });
     if (op) await this.waitZoneOperation(op);
@@ -579,7 +643,7 @@ export class GCPClient {
     const response = await this.fetcher(`${computeBaseURL}/projects/${this.project}${path}`, init);
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`gcp ${method} ${path}: http ${response.status}: ${text}`);
+      throw new GCPHTTPError(method, path, response.status, text);
     }
     return (text ? JSON.parse(text) : {}) as T;
   }
@@ -726,7 +790,7 @@ function gcpLabelKey(value: string): string {
   return /^[a-z]/.test(out) ? out : `x${out}`.slice(0, 63);
 }
 
-function gcpLabelValue(value: string): string {
+export function gcpLabelValue(value: string): string {
   let out = value
     .trim()
     .toLowerCase()
@@ -735,6 +799,10 @@ function gcpLabelValue(value: string): string {
     .replaceAll(/^[_-]+|[_-]+$/g, "");
   if (!out) out = "unknown";
   return out;
+}
+
+export function gcpProviderLabelValue(value: string): string {
+  return gcpLabelValue(providerLabelValue(value));
 }
 
 export function isFallbackProvisioningError(message: string): boolean {
@@ -779,6 +847,12 @@ export function operationDone(op: GCPOperation): boolean {
 
 function isNotFound(error: unknown): boolean {
   return errorMessage(error).includes("http 404");
+}
+
+function gcpInstanceNotFound(error: unknown, project: string, zone: string, name: string): boolean {
+  if (!(error instanceof GCPHTTPError) || error.status !== 404) return false;
+  const resource = `projects/${project}/zones/${zone}/instances/${name}`.toLowerCase();
+  return error.body.toLowerCase().includes(resource);
 }
 
 function errorMessage(error: unknown): string {

@@ -332,6 +332,8 @@ export interface LeaseRecord {
   cloudID: string;
   region?: string;
   providerProject?: string;
+  providerScope?: string;
+  providerOwner?: string;
   network?: LeaseNetworkState;
   owner: string;
   org: string;
