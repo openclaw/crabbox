@@ -3569,6 +3569,22 @@ func TestExternalFixedLeaseIDCapabilityConfigAndEnv(t *testing.T) {
 	}
 }
 
+func TestExternalDesktopCredentialsEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", "screen-user")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Connection.Desktop.Username != "screen-user" {
+		t.Fatalf("desktop username=%q", cfg.External.Connection.Desktop.Username)
+	}
+	if cfg.External.Connection.Desktop.PasswordEnv != "CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD" {
+		t.Fatalf("desktop password env=%q", cfg.External.Connection.Desktop.PasswordEnv)
+	}
+}
+
 func TestTartConfigYAMLMissingFieldsNotOverwritten(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

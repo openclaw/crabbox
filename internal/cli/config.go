@@ -499,6 +499,7 @@ type ExternalConnectionConfig struct {
 	ServerType           string                      `yaml:"serverType,omitempty" json:"serverType,omitempty"`
 	Labels               map[string]string           `yaml:"labels,omitempty" json:"labels,omitempty"`
 	SSH                  ExternalSSHConnectionConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
+	Desktop              ExternalDesktopConfig       `yaml:"desktop,omitempty" json:"desktop,omitempty"`
 }
 
 type ExternalSSHConnectionConfig struct {
@@ -514,6 +515,11 @@ type ExternalSSHConnectionConfig struct {
 	ProxyCommand        string   `yaml:"proxyCommand,omitempty" json:"proxyCommand,omitempty"`
 	AllowEnv            bool     `yaml:"allowEnv,omitempty" json:"allowEnv,omitempty"`
 	TrustProviderOutput bool     `yaml:"trustProviderOutput,omitempty" json:"trustProviderOutput,omitempty"`
+}
+
+type ExternalDesktopConfig struct {
+	Username    string `yaml:"username,omitempty" json:"username,omitempty"`
+	PasswordEnv string `yaml:"passwordEnv,omitempty" json:"passwordEnv,omitempty"`
 }
 
 type NamespaceConfig struct {
@@ -8169,6 +8175,8 @@ func applyEnv(cfg *Config) error {
 		cfg.External.RoutingFile = value
 		cfg.credentialProvenance.externalRouting = credentialSourceEnvironment
 	}
+	cfg.External.Connection.Desktop.Username = getenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", cfg.External.Connection.Desktop.Username)
+	cfg.External.Connection.Desktop.PasswordEnv = getenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", cfg.External.Connection.Desktop.PasswordEnv)
 	if value, ok := getenvBool("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID"); ok {
 		cfg.External.Capabilities.IdempotentLeaseID = value
 	}

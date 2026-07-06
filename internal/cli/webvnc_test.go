@@ -233,6 +233,27 @@ func TestWebVNCCredentialOutputDefaultsToRedacted(t *testing.T) {
 	}
 }
 
+func TestWebVNCCredentialsPreferProviderHook(t *testing.T) {
+	username, password := webVNCCredentials(
+		context.Background(),
+		Config{Provider: "direct-webvnc-test"},
+		SSHTarget{User: "ssh-user"},
+		vncEndpoint{Managed: true},
+	)
+	if username != "provider-user" || password != "provider-secret" {
+		t.Fatalf("credentials=(%q,%q)", username, password)
+	}
+	username, password = webVNCCredentials(
+		context.Background(),
+		Config{Provider: "direct-webvnc-test"},
+		SSHTarget{User: "ssh-user"},
+		vncEndpoint{},
+	)
+	if username != "" || password != "" {
+		t.Fatalf("unmanaged credentials=(%q,%q)", username, password)
+	}
+}
+
 func TestPrepareWebVNCDaemonArgsGatesProviderSideEffectsByOwner(t *testing.T) {
 	args := prepareWebVNCDaemonArgs([]string{"--id", "cbx_abcdef123456", "--reclaim"}, false)
 	joined := strings.Join(args, " ")
@@ -442,6 +463,9 @@ func (directWebVNCTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (directWebVNCTestProvider) Configure(Config, Runtime) (Backend, error) { return nil, nil }
+func (directWebVNCTestProvider) DesktopCredentials(Config, SSHTarget) (DesktopCredentials, bool) {
+	return DesktopCredentials{Username: "provider-user", Password: "provider-secret"}, true
+}
 func (directWebVNCTestProvider) CommandRoutingArgs(_ Config, leaseID string) []string {
 	return []string{"--direct-webvnc-routing", "route-" + leaseID}
 }

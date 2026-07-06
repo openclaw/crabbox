@@ -2030,6 +2030,12 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 			if strings.TrimSpace(cfg.External.WorkRoot) != "" {
 				args = append(args, "--external-work-root", cfg.External.WorkRoot)
 			}
+			if strings.TrimSpace(cfg.External.Connection.Desktop.Username) != "" {
+				args = append(args, "--external-desktop-username", cfg.External.Connection.Desktop.Username)
+			}
+			if strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv) != "" {
+				args = append(args, "--external-desktop-password-env", cfg.External.Connection.Desktop.PasswordEnv)
+			}
 		}
 	}
 	return args

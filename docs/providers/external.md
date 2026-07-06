@@ -41,6 +41,30 @@ the exact command, arguments, `external.config`, and connection inputs.
 Repository config cannot self-enable this contract, and changing the
 output-producing adapter contract invalidates an inherited approval.
 
+External SSH leases can target `linux`, `macos`, or `windows`. Keep `target:
+linux` for ordinary devboxes. Use `target: macos` when the external adapter
+returns an SSH-reachable Mac and you want Crabbox to drive native Screen Sharing
+or the WebVNC portal bridge.
+
+For macOS desktop access, keep the Screen Sharing password outside the config and
+store only an environment variable reference:
+
+```yaml
+provider: external
+target: macos
+external:
+  command: mac-provider-adapter
+  connection:
+    desktop:
+      passwordEnv: CRABBOX_EXTERNAL_DESKTOP_PASSWORD
+  workRoot: /Users/developer/crabbox
+```
+
+`connection.desktop.username` is optional; Crabbox falls back to the resolved SSH
+user. `passwordEnv` must be an environment variable name. Inject the secret into
+the Crabbox process from your normal secret store; do not put the password in
+YAML, argv, routing files, issue trackers, or logs.
+
 `external.config` is arbitrary YAML passed as JSON to the executable. Keep
 secrets in the executable's normal credential store or environment rather than
 the Crabbox config file. Generated SSH, retry, and stop commands store resolved
@@ -307,6 +331,8 @@ Flags:
 --external-idempotent-lease-id
 --external-work-root
 --external-routing-file
+--external-desktop-username
+--external-desktop-password-env
 ```
 
 Environment:
@@ -317,6 +343,8 @@ CRABBOX_EXTERNAL_ARG
 CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID
 CRABBOX_EXTERNAL_WORK_ROOT
 CRABBOX_EXTERNAL_ROUTING_FILE
+CRABBOX_EXTERNAL_DESKTOP_USERNAME
+CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV
 ```
 
 The repository live harness can exercise a configured external provider:
@@ -438,7 +466,8 @@ proxy-backed SSH even if `sshConfigProxy` is omitted.
 
 When `readyCheck` is omitted, Crabbox uses a generic Linux tool check for
 `bash`, `python3`, `git`, `rsync`, and `tar`. Return an explicit `readyCheck`
-when the external provider needs a stronger guest bootstrap signal.
+when the external provider needs a stronger guest bootstrap signal or targets a
+non-Linux host.
 
 `list` returns `{"protocolVersion":1,"leases":[...]}`. Protocol-command adapters
 that enable `idempotentLeaseId` must return a real array, including `[]` for an
