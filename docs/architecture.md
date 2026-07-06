@@ -223,10 +223,11 @@ GET  /v1/providers/{provider}/readiness
 GET  /v1/runners
 POST /v1/runners/sync
 POST /v1/images
-POST /v1/images/{id}/promote | fast-snapshot-restore
+POST /v1/images/{id}/promote
+GET  /v1/images/{id}/fast-snapshot-restore
 POST /v1/artifacts/uploads
 GET  /v1/admin/leases
-POST /v1/admin/lease-audit
+GET  /v1/admin/lease-audit
 POST /v1/admin/leases/{id-or-slug}/release | delete
 GET  /v1/admin/hosts
 POST /v1/admin/aws-orphan-sweep
