@@ -1391,7 +1391,10 @@ IFS= read -r manifest_len
 case "$manifest_len" in
   ''|*[!0-9]*) echo "invalid sync manifest length" >&2; exit 1 ;;
 esac
-dd bs=1 count="$manifest_len" of="$meta_dir/sync-manifest.new" status=none
+# Keep this to POSIX dd operands: minimal guests commonly provide BusyBox dd,
+# which rejects GNU's progress-suppression extension. Suppress only the summary;
+# dd's exit status still makes the fail-closed script abort on a short write.
+dd bs=1 count="$manifest_len" of="$meta_dir/sync-manifest.new" 2>/dev/null
 cat > "$meta_dir/sync-deleted.new"
 `
 	return "bash -lc " + shellQuote(script)

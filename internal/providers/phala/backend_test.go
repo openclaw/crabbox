@@ -635,6 +635,8 @@ func TestTouchPersistsUpdatedLabelsToClaim(t *testing.T) {
 			time.Now().Add(-time.Minute),
 		),
 	}
+	const gatewayHost = "cvm-1-22.dstack-pha-production.phala.network"
+	server.Labels["gateway_host"] = gatewayHost
 	target := core.SSHTarget{Host: "cvm-1", User: "root", Port: "22"}
 	if err := core.ClaimLeaseTargetForConfig(leaseID, "blue-box", cfg, server, target, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
@@ -655,8 +657,57 @@ func TestTouchPersistsUpdatedLabelsToClaim(t *testing.T) {
 	}
 	if len(claims) != 1 ||
 		claims[0].Labels["last_touched_at"] != touched.Labels["last_touched_at"] ||
-		claims[0].Labels["expires_at"] != touched.Labels["expires_at"] {
+		claims[0].Labels["expires_at"] != touched.Labels["expires_at"] ||
+		claims[0].Labels["gateway_host"] != gatewayHost {
 		t.Fatalf("claims=%#v touched=%#v", claims, touched.Labels)
+	}
+}
+
+func TestResolveRepairsTruncatedGatewayHostClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	const (
+		leaseID  = "cbx_abcdef123456"
+		cloudID  = "0123456789abcdef0123456789abcdef01234567"
+		fullHost = cloudID + "-22.dstack-pha-prod5.phala.network"
+	)
+	truncatedHost := fullHost[:63]
+	labels := core.DirectLeaseLabels(cfg, leaseID, "blue-box", providerName, "", false, time.Now())
+	labels["phala_cvm"] = cloudID
+	labels["gateway_host"] = truncatedHost
+	server := core.Server{CloudID: cloudID, Provider: providerName, Name: "blue-box", Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "blue-box", cfg, server, core.SSHTarget{Host: cloudID, Port: "22"}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{results: []core.LocalCommandResult{
+		{Stdout: `{"success":true,"total":1,"items":[{"appId":"` + cloudID + `","cvmName":"crabbox-cbx-abcdef123456","status":"running"}]}`},
+		{Stdout: `{"success":true,"app_id":"` + cloudID + `","gateway":{"base_domain":"dstack-pha-prod5.phala.network"}}`},
+	}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lease.Server.Labels["gateway_host"]; got != fullHost {
+		t.Fatalf("gateway_host=%q want %q", got, fullHost)
+	}
+	if !strings.Contains(lease.SSH.ProxyCommand, "--gateway-host "+fullHost) {
+		t.Fatalf("ProxyCommand=%q missing repaired gateway host", lease.SSH.ProxyCommand)
+	}
+	if _, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "ready", IdleTimeout: cfg.IdleTimeout}); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Labels["gateway_host"] != fullHost {
+		t.Fatalf("repaired gateway host not persisted: %#v", claims)
 	}
 }
 
