@@ -95,11 +95,20 @@ top-level `workRoot` propagates to the VM when `exeDev.workRoot` is unset.
    `--no-email`, `--image`, `--cpu`, `--memory`, `--disk`, and `--command` as
    configured.
 2. Crabbox waits for SSH readiness on the returned `ssh_dest`, then uses its
-   standard rsync + remote command execution.
-3. `list --provider exe-dev` calls `ls --l --json` and shows the Crabbox-tagged
-   VMs.
-4. `stop --provider exe-dev <id>` calls `rm <vm-name> --json` and removes the
-   local claim.
+   standard rsync + remote command execution and persists the exact VM name,
+   SSH endpoint, ownership tags, and exe.dev control route in the local claim.
+3. `list --provider exe-dev` calls `ls --l --json` and shows only VMs with the
+   complete `crabbox`, canonical lease, and slug tag set. Pass `--all` to inspect
+   unowned or incomplete inventory; names that merely start with `crabbox-` do
+   not establish ownership.
+4. Reusing a completely tagged VM without a local claim requires explicit
+   `--reclaim`. Crabbox refuses untagged adoption and never retargets a claim
+   already bound to another VM or control route.
+5. `stop --provider exe-dev <id>` deletes only when the unchanged local claim,
+   exact VM name, deterministic lease name, complete remote tags, and current
+   control route all agree. It rechecks inventory while holding the claim lock,
+   calls `rm <vm-name> --json`, and removes the claim only after deletion
+   succeeds. Failed or ambiguous deletion keeps the claim for an exact retry.
 
 ## Limits
 
@@ -116,9 +125,17 @@ top-level `workRoot` propagates to the VM when `exeDev.workRoot` is unset.
 
 ```sh
 ssh -o BatchMode=yes exe.dev whoami --json
-ssh -o BatchMode=yes exe.dev ls --json
+ssh -o BatchMode=yes exe.dev ls --l --json
 crabbox run --provider exe-dev --slug exe-smoke --no-sync -- uname -a
 crabbox stop --provider exe-dev exe-smoke
+```
+
+To adopt an existing fully tagged VM after inspecting it, run a normal reuse
+with explicit ownership intent before stopping it:
+
+```sh
+crabbox run --provider exe-dev --id <vm-or-lease> --reclaim --no-sync -- true
+crabbox stop --provider exe-dev <vm-or-lease>
 ```
 
 If VM creation returns an active-plan error, resolve billing at

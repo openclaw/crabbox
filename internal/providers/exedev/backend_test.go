@@ -2,6 +2,7 @@ package exedev
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
@@ -27,11 +28,10 @@ func (r *exeDevRecordingRunner) Run(_ context.Context, req LocalCommandRequest) 
 func TestExeDevListFiltersCrabboxVMsByDefault(t *testing.T) {
 	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		base := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "exe.dev", "ls --l --json"}
-		all := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "exe.dev", "ls --l --json --a"}
-		if !reflect.DeepEqual(req.Args, base) && !reflect.DeepEqual(req.Args, all) {
+		if !reflect.DeepEqual(req.Args, base) {
 			t.Fatalf("args=%v", req.Args)
 		}
-		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running"},{"vm_name":"manual-box","ssh_dest":"manual-box.exe.xyz","status":"running"}]}`}, nil
+		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]},{"vm_name":"crabbox-manual-12345678","ssh_dest":"crabbox-manual-12345678.exe.xyz","status":"running"}]}`}, nil
 	}}
 	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	views, err := backend.List(context.Background(), ListRequest{})
@@ -59,7 +59,7 @@ func TestExeDevDoctorListsInventory(t *testing.T) {
 		if strings.Contains(got, " new ") || strings.Contains(got, " rm ") {
 			t.Fatalf("doctor used mutating command: %v", req.Args)
 		}
-		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running"}]}`}, nil
+		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]}]}`}, nil
 	}}
 	doctor, err := Provider{}.ConfigureDoctor(Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
@@ -135,11 +135,11 @@ func TestExeDevAcquireReportsRollbackFailureAfterClaimFailure(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { waitForSSHReady = oldWait })
-	oldClaim := claimLeaseForRepoProvider
-	claimLeaseForRepoProvider = func(string, string, string, string, time.Duration, bool) error {
-		return primaryErr
+	oldClaim := claimLeaseTargetForRepoConfigIfUnchanged
+	claimLeaseTargetForRepoConfigIfUnchanged = func(string, string, Config, Server, SSHTarget, string, time.Duration, bool, LeaseClaim, bool) (LeaseClaim, error) {
+		return LeaseClaim{}, primaryErr
 	}
-	t.Cleanup(func() { claimLeaseForRepoProvider = oldClaim })
+	t.Cleanup(func() { claimLeaseTargetForRepoConfigIfUnchanged = oldClaim })
 	runner := newExeDevAcquireRollbackRunner()
 	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}})
@@ -150,7 +150,7 @@ func newExeDevAcquireRollbackRunner() *exeDevRecordingRunner {
 	return &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		cmd := strings.Join(req.Args, " ")
 		switch {
-		case strings.Contains(cmd, "ls --l --json --a"):
+		case strings.Contains(cmd, "ls --l --json"):
 			return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
 		case strings.Contains(cmd, " new "):
 			return LocalCommandResult{Stdout: `{"vm_name":"created-vm","ssh_dest":"created-vm.exe.xyz","status":"running"}`}, nil
@@ -314,7 +314,10 @@ func TestExeDevResolveVMNameRecoversExistingClaim(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	slug := "blue-lobster"
 	name := leaseProviderName(leaseID, slug)
-	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, t.TempDir(), 0, false); err != nil {
+	cfg := Config{Provider: providerName}
+	applyExeDevDefaults(&cfg)
+	vm := exeDevVM{VMName: name, SSHDest: name + ".exe.xyz", Status: "running"}
+	if _, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, exeDevServer(vm, leaseID, slug, cfg, true), exeDevSSHTarget(cfg, vm), t.TempDir(), 0, false, LeaseClaim{}, false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &exeDevRecordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
@@ -328,6 +331,265 @@ func TestExeDevResolveVMNameRecoversExistingClaim(t *testing.T) {
 	if gotLeaseID != leaseID || gotSlug != slug {
 		t.Fatalf("leaseID=%q slug=%q", gotLeaseID, gotSlug)
 	}
+}
+
+func TestExeDevReleaseRejectsUnclaimedRawIdentifiers(t *testing.T) {
+	vm := exeDevVM{VMName: "manual-box", SSHDest: "manual-box.exe.xyz", Status: "running"}
+	for _, identifier := range []string{vm.Name(), "manual box", vm.SSHHost()} {
+		t.Run(identifier, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			runner := exeDevInventoryRunner(t, vm)
+			backend := newExeDevTestBackend(Config{}, runner)
+			_, err := backend.Resolve(context.Background(), ResolveRequest{ID: identifier, ReleaseOnly: true})
+			if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+				t.Fatalf("err=%v, want exact local claim refusal", err)
+			}
+			assertNoExeDevRM(t, runner)
+		})
+	}
+}
+
+func TestExeDevReleaseRejectsTaggedVMWithoutLocalClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	vm := ownedExeDevVM(leaseID, "blue")
+	runner := exeDevInventoryRunner(t, vm)
+	backend := newExeDevTestBackend(Config{}, runner)
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("err=%v, want exact local claim refusal", err)
+	}
+	assertNoExeDevRM(t, runner)
+}
+
+func TestExeDevReleaseRejectsClaimBoundToDifferentVM(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	vm := ownedExeDevVM(leaseID, "blue")
+	cfg := Config{Provider: providerName}
+	applyExeDevDefaults(&cfg)
+	other := vm
+	other.VMName = "crabbox-other-12345678"
+	persistExeDevClaim(t, cfg, other, leaseID, "blue", t.TempDir())
+	runner := exeDevInventoryRunner(t, vm)
+	backend := newExeDevTestBackend(cfg, runner)
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "not bound to an exact provider/resource claim") {
+		t.Fatalf("err=%v, want exact resource binding refusal", err)
+	}
+	assertNoExeDevRM(t, runner)
+}
+
+func TestExeDevReleaseRequiresUnchangedClaimAndRemoteTags(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, backend *exeDevLeaseBackend, runner *exeDevRecordingRunner, lease LeaseTarget, claim LeaseClaim, vm exeDevVM)
+		want   string
+	}{
+		{
+			name: "claim changed",
+			mutate: func(t *testing.T, backend *exeDevLeaseBackend, _ *exeDevRecordingRunner, lease LeaseTarget, claim LeaseClaim, vm exeDevVM) {
+				cfg := backend.configForRun()
+				if _, err := claimLeaseTargetForRepoConfigIfUnchanged(lease.LeaseID, claim.Slug, cfg, lease.Server, exeDevSSHTarget(cfg, vm), t.TempDir(), cfg.IdleTimeout, true, claim, true); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "claim changed",
+		},
+		{
+			name: "control route changed",
+			mutate: func(_ *testing.T, backend *exeDevLeaseBackend, _ *exeDevRecordingRunner, _ LeaseTarget, _ LeaseClaim, _ exeDevVM) {
+				backend.cfg.ExeDev.ControlHost = "other.exe.dev"
+			},
+			want: "different exe.dev control route",
+		},
+		{
+			name: "remote tags removed",
+			mutate: func(t *testing.T, _ *exeDevLeaseBackend, runner *exeDevRecordingRunner, _ LeaseTarget, _ LeaseClaim, vm exeDevVM) {
+				vm.Tags = nil
+				runner.fn = exeDevInventoryResponse(t, vm)
+			},
+			want: "no complete Crabbox ownership tags",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			leaseID := "cbx_abcdef123456"
+			vm := ownedExeDevVM(leaseID, "blue")
+			runner := exeDevInventoryRunner(t, vm)
+			backend := newExeDevTestBackend(Config{}, runner)
+			claim := persistExeDevClaim(t, backend.configForRun(), vm, leaseID, "blue", t.TempDir())
+			lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, backend, runner, lease, claim, vm)
+			err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("err=%v, want %q", err, test.want)
+			}
+			assertNoExeDevRM(t, runner)
+			if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+				t.Fatalf("claim exists=%v err=%v, want retained", exists, readErr)
+			}
+		})
+	}
+}
+
+func TestExeDevReleaseDeletesExactlyClaimedVMAndRemovesClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	vm := ownedExeDevVM(leaseID, "blue")
+	runner := exeDevInventoryRunner(t, vm)
+	backend := newExeDevTestBackend(Config{}, runner)
+	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, "blue", t.TempDir())
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.SSHHost(), ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if !hasExeDevRM(runner) {
+		t.Fatalf("rm not called: %#v", runner.calls)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
+	}
+}
+
+func TestExeDevReleaseRetainsClaimWhenDeleteFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	vm := ownedExeDevVM(leaseID, "blue")
+	runner := exeDevInventoryRunner(t, vm)
+	backend := newExeDevTestBackend(Config{}, runner)
+	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, "blue", t.TempDir())
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.fn = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if strings.Contains(strings.Join(req.Args, " "), " rm ") {
+			return LocalCommandResult{ExitCode: 1}, errors.New("delete failed")
+		}
+		return exeDevInventoryResponse(t, vm)(req)
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err=%v, want delete failure", err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+		t.Fatalf("claim exists=%v err=%v, want retained", exists, err)
+	}
+}
+
+func TestExeDevReuseRequiresExplicitAdoptionAndPersistsExactBinding(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	vm := ownedExeDevVM(leaseID, "blue")
+	for _, reclaim := range []bool{false, true} {
+		t.Run(map[bool]string{false: "implicit refused", true: "explicit adopted"}[reclaim], func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			runner := exeDevInventoryRunner(t, vm)
+			backend := newExeDevTestBackend(Config{}, runner)
+			lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), Repo: Repo{Root: t.TempDir()}, Reclaim: reclaim})
+			if !reclaim {
+				if err == nil || !strings.Contains(err.Error(), "reuse with --reclaim") {
+					t.Fatalf("err=%v, want explicit reclaim refusal", err)
+				}
+				if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+					t.Fatalf("claim exists=%v err=%v, want absent", exists, readErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, exists, readErr := readLeaseClaimWithPresence(leaseID)
+			if readErr != nil || !exists {
+				t.Fatalf("claim exists=%v err=%v", exists, readErr)
+			}
+			if claim.CloudID != vm.Name() || claim.Provider != providerName || claim.Labels[exeDevControlScopeLabel] == "" {
+				t.Fatalf("claim=%#v", claim)
+			}
+			if _, exists, snapshotSet := serverLeaseClaimSnapshot(lease.Server); !snapshotSet || !exists {
+				t.Fatalf("claim snapshot set=%v exists=%v", snapshotSet, exists)
+			}
+		})
+	}
+}
+
+func TestExeDevOwnershipRejectsConflictingTags(t *testing.T) {
+	vm := ownedExeDevVM("cbx_abcdef123456", "blue")
+	vm.Tags = append(vm.Tags, "crabbox-lease-cbx_other123456")
+	if _, _, _, err := exeDevOwnershipIdentity(vm); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("err=%v, want conflicting tag refusal", err)
+	}
+}
+
+func TestExeDevOwnershipRejectsNoncanonicalLeaseTag(t *testing.T) {
+	vm := ownedExeDevVM("exe_abcdef123456", "blue")
+	if _, _, _, err := exeDevOwnershipIdentity(vm); err == nil || !strings.Contains(err.Error(), "invalid Crabbox lease tag") {
+		t.Fatalf("err=%v, want invalid lease tag refusal", err)
+	}
+}
+
+func ownedExeDevVM(leaseID, slug string) exeDevVM {
+	name := leaseProviderName(leaseID, slug)
+	return exeDevVM{
+		VMName:  name,
+		SSHDest: name + ".exe.xyz",
+		Status:  "running",
+		Tags:    []string{"crabbox", "crabbox-lease-" + leaseID, "crabbox-slug-" + slug},
+	}
+}
+
+func exeDevInventoryRunner(t *testing.T, vm exeDevVM) *exeDevRecordingRunner {
+	t.Helper()
+	return &exeDevRecordingRunner{fn: exeDevInventoryResponse(t, vm)}
+}
+
+func exeDevInventoryResponse(t *testing.T, vm exeDevVM) func(LocalCommandRequest) (LocalCommandResult, error) {
+	t.Helper()
+	payload, err := json.Marshal(exeDevListResponse{VMs: []exeDevVM{vm}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if strings.Contains(strings.Join(req.Args, " "), " rm ") {
+			return LocalCommandResult{Stdout: `{}`}, nil
+		}
+		return LocalCommandResult{Stdout: string(payload)}, nil
+	}
+}
+
+func newExeDevTestBackend(cfg Config, runner *exeDevRecordingRunner) *exeDevLeaseBackend {
+	applyExeDevDefaults(&cfg)
+	return &exeDevLeaseBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+}
+
+func persistExeDevClaim(t *testing.T, cfg Config, vm exeDevVM, leaseID, slug, repoRoot string) LeaseClaim {
+	t.Helper()
+	claim, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, exeDevServer(vm, leaseID, slug, cfg, true), exeDevSSHTarget(cfg, vm), repoRoot, cfg.IdleTimeout, false, LeaseClaim{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return claim
+}
+
+func assertNoExeDevRM(t *testing.T, runner *exeDevRecordingRunner) {
+	t.Helper()
+	if hasExeDevRM(runner) {
+		t.Fatalf("unexpected rm call: %#v", runner.calls)
+	}
+}
+
+func hasExeDevRM(runner *exeDevRecordingRunner) bool {
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call.Args, " "), " rm ") {
+			return true
+		}
+	}
+	return false
 }
 
 func TestExeDevFlagsRejectGenericClassAndType(t *testing.T) {

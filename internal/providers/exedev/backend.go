@@ -51,12 +51,14 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 		}
 		return LeaseTarget{}, err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	claim, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false)
+	if err != nil {
 		if !req.Keep {
 			err = b.rollbackCreatedVM(name, err)
 		}
 		return LeaseTarget{}, err
 	}
+	setServerLeaseClaimSnapshot(&lease.Server, claim, true)
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s name=%s state=ready\n", leaseID, name)
 	return lease, nil
 }
@@ -68,16 +70,35 @@ func (b *exeDevLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (L
 		return LeaseTarget{}, err
 	}
 	if req.ReleaseOnly {
-		return LeaseTarget{Server: exeDevServer(vm, leaseID, slug, cfg, true), LeaseID: leaseID}, nil
+		server := exeDevServer(vm, leaseID, slug, cfg, true)
+		claim, err := b.claimForVMRelease(vm, leaseID, slug)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		setServerLeaseClaimSnapshot(&server, claim, true)
+		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	lease, err := b.prepareLease(ctx, cfg, vm, leaseID, slug, true, false)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if err := claimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		claim, err := b.claimResolvedVM(lease, vm, leaseID, slug, req)
+		if err != nil {
 			return LeaseTarget{}, err
 		}
+		setServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	} else if claim, exists, err := readLeaseClaimWithPresence(leaseID); err != nil {
+		return LeaseTarget{}, err
+	} else {
+		if exists {
+			if err := b.validateVMClaimBinding(vm, claim, leaseID, slug); err != nil {
+				return LeaseTarget{}, err
+			}
+		} else if !req.IsReadOnlyStatus() {
+			return LeaseTarget{}, exit(2, "provider=%s lease %s has no exact local claim; use a repository-scoped reuse with --reclaim before operating on it", providerName, leaseID)
+		}
+		setServerLeaseClaimSnapshot(&lease.Server, claim, exists)
 	}
 	return lease, nil
 }
@@ -95,22 +116,23 @@ func (b *exeDevLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (Docto
 }
 
 func (b *exeDevLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
-	name := strings.TrimSpace(req.Lease.Server.Name)
-	if name == "" {
-		vm, _, _, err := b.resolveVM(ctx, req.Lease.LeaseID)
+	claim, exists, snapshotSet := serverLeaseClaimSnapshot(req.Lease.Server)
+	if !snapshotSet || !exists {
+		return exit(2, "provider=%s release requires an exact local claim snapshot", providerName)
+	}
+	if err := b.validateReleaseTarget(req.Lease, claim); err != nil {
+		return err
+	}
+	return removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		vm, err := b.findVMByExactName(ctx, claim.CloudID)
 		if err != nil {
 			return err
 		}
-		name = vm.Name()
-	}
-	if name == "" {
-		return exit(2, "provider=%s release requires a VM name", providerName)
-	}
-	if err := b.deleteVM(ctx, name); err != nil {
-		return err
-	}
-	removeLeaseClaim(req.Lease.LeaseID)
-	return nil
+		if err := b.validateVMClaimBinding(vm, claim, claim.LeaseID, claim.Slug); err != nil {
+			return err
+		}
+		return b.deleteVM(ctx, claim.CloudID)
+	})
 }
 
 func (b *exeDevLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
@@ -205,6 +227,129 @@ func (b *exeDevLeaseBackend) deleteVM(ctx context.Context, name string) error {
 	return nil
 }
 
+func (b *exeDevLeaseBackend) claimResolvedVM(lease LeaseTarget, vm exeDevVM, leaseID, slug string, req ResolveRequest) (LeaseClaim, error) {
+	if err := b.validateResolvedLeaseTarget(lease, vm, leaseID, slug); err != nil {
+		return LeaseClaim{}, err
+	}
+	previous, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return LeaseClaim{}, err
+	}
+	if !exists && !req.Reclaim {
+		return LeaseClaim{}, exit(2, "exe.dev VM %s is not locally claimed; inspect it, then reuse with --reclaim before operating on it", vm.Name())
+	}
+	if exists {
+		if previous.Provider != "" && previous.Provider != providerName {
+			return LeaseClaim{}, exit(2, "lease %s is already claimed by provider=%s", leaseID, previous.Provider)
+		}
+		if previous.Provider == "" && !req.Reclaim {
+			return LeaseClaim{}, exit(2, "lease %s has a legacy providerless claim; reuse with --reclaim to bind provider=%s", leaseID, providerName)
+		}
+		if previous.CloudID != "" && previous.CloudID != vm.Name() {
+			return LeaseClaim{}, exit(2, "lease %s is already bound to exe.dev VM %s, refusing retarget to %s", leaseID, previous.CloudID, vm.Name())
+		}
+		if err := b.validateExistingClaimRoute(previous); err != nil {
+			return LeaseClaim{}, err
+		}
+	}
+	cfg := b.configForRun()
+	claim, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previous, exists)
+	if err != nil {
+		return LeaseClaim{}, err
+	}
+	return claim, nil
+}
+
+func (b *exeDevLeaseBackend) validateResolvedLeaseTarget(lease LeaseTarget, vm exeDevVM, leaseID, slug string) error {
+	if err := validateExeDevVMOwnership(vm, leaseID, slug, "reuse"); err != nil {
+		return err
+	}
+	wantScope, err := exeDevControlScope(b.configForRun())
+	if err != nil {
+		return err
+	}
+	wantHost := vm.SSHAddress().Host
+	if lease.LeaseID != leaseID || lease.Server.Provider != providerName || lease.Server.CloudID != vm.Name() || lease.Server.Name != vm.Name() || lease.SSH.Host != wantHost {
+		return exit(2, "exe.dev VM %s resolved to inconsistent provider metadata", vm.Name())
+	}
+	if lease.Server.Labels["provider"] != providerName || lease.Server.Labels["lease"] != leaseID || normalizeLeaseSlug(lease.Server.Labels["slug"]) != normalizeLeaseSlug(slug) || lease.Server.Labels["name"] != vm.Name() || lease.Server.Labels[exeDevControlScopeLabel] != wantScope {
+		return exit(2, "exe.dev VM %s resolved to incomplete claim metadata", vm.Name())
+	}
+	return nil
+}
+
+func (b *exeDevLeaseBackend) claimForVMRelease(vm exeDevVM, leaseID, slug string) (LeaseClaim, error) {
+	claim, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return LeaseClaim{}, err
+	}
+	if !exists {
+		return LeaseClaim{}, exit(2, "exe.dev VM %s has no exact local claim; refusing deletion", vm.Name())
+	}
+	if err := b.validateVMClaimBinding(vm, claim, leaseID, slug); err != nil {
+		return LeaseClaim{}, err
+	}
+	return claim, nil
+}
+
+func (b *exeDevLeaseBackend) validateExistingClaimRoute(claim LeaseClaim) error {
+	want, err := exeDevControlScope(b.configForRun())
+	if err != nil {
+		return err
+	}
+	if got := strings.TrimSpace(claim.Labels[exeDevControlScopeLabel]); got != "" && got != want {
+		return exit(2, "lease %s is bound to a different exe.dev control route", claim.LeaseID)
+	}
+	return nil
+}
+
+func (b *exeDevLeaseBackend) validateVMClaimBinding(vm exeDevVM, claim LeaseClaim, leaseID, slug string) error {
+	if err := validateExeDevVMOwnership(vm, leaseID, slug, "deletion"); err != nil {
+		return err
+	}
+	slug = normalizeLeaseSlug(slug)
+	if claim.LeaseID != leaseID || claim.Provider != providerName || normalizeLeaseSlug(claim.Slug) != slug || claim.CloudID != vm.Name() {
+		return exit(2, "exe.dev VM %s is not bound to an exact provider/resource claim", vm.Name())
+	}
+	wantScope, err := exeDevControlScope(b.configForRun())
+	if err != nil {
+		return err
+	}
+	if claim.Labels["provider"] != providerName || claim.Labels["lease"] != leaseID || normalizeLeaseSlug(claim.Labels["slug"]) != slug || claim.Labels["name"] != vm.Name() || claim.Labels[exeDevControlScopeLabel] != wantScope {
+		return exit(2, "exe.dev VM %s claim metadata does not attest the current provider binding", vm.Name())
+	}
+	return nil
+}
+
+func validateExeDevVMOwnership(vm exeDevVM, leaseID, slug, operation string) error {
+	remoteLeaseID, remoteSlug, owned, err := exeDevOwnershipIdentity(vm)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return exit(2, "exe.dev VM %s has no complete Crabbox ownership tags; refusing %s", vm.Name(), operation)
+	}
+	slug = normalizeLeaseSlug(slug)
+	if remoteLeaseID != leaseID || remoteSlug != slug {
+		return exit(2, "exe.dev VM %s ownership tags do not match lease=%s slug=%s", vm.Name(), leaseID, slug)
+	}
+	wantName := leaseProviderName(leaseID, slug)
+	if vm.Name() != wantName {
+		return exit(2, "exe.dev VM %s does not match the claimed provider name %s", vm.Name(), wantName)
+	}
+	return nil
+}
+
+func (b *exeDevLeaseBackend) validateReleaseTarget(lease LeaseTarget, claim LeaseClaim) error {
+	if lease.LeaseID != claim.LeaseID || lease.Server.Provider != providerName || lease.Server.CloudID != claim.CloudID || lease.Server.Name != claim.CloudID {
+		return exit(2, "provider=%s release target does not match its claim snapshot", providerName)
+	}
+	if lease.Server.Labels["lease"] != claim.LeaseID || normalizeLeaseSlug(lease.Server.Labels["slug"]) != normalizeLeaseSlug(claim.Slug) {
+		return exit(2, "provider=%s release labels do not match their claim snapshot", providerName)
+	}
+	return b.validateExistingClaimRoute(claim)
+}
+
 func (b *exeDevLeaseBackend) prepareLease(ctx context.Context, cfg Config, vm exeDevVM, leaseID, slug string, keep, wait bool) (LeaseTarget, error) {
 	server := exeDevServer(vm, leaseID, slug, cfg, keep)
 	target := exeDevSSHTarget(cfg, vm)
@@ -272,13 +417,30 @@ func (b *exeDevLeaseBackend) findVM(ctx context.Context, identifier string) (exe
 	return exeDevVM{}, exit(4, "exe.dev VM not found: %s", identifier)
 }
 
+func (b *exeDevLeaseBackend) findVMByExactName(ctx context.Context, name string) (exeDevVM, error) {
+	vms, err := b.listVMs(ctx, true)
+	if err != nil {
+		return exeDevVM{}, err
+	}
+	for _, vm := range vms {
+		if vm.Name() == name {
+			return vm, nil
+		}
+	}
+	return exeDevVM{}, exit(4, "exe.dev VM not found: %s", name)
+}
+
 func (b *exeDevLeaseBackend) findVMByLeaseID(ctx context.Context, leaseID string) (exeDevVM, bool, error) {
 	vms, err := b.listVMs(ctx, true)
 	if err != nil {
 		return exeDevVM{}, false, err
 	}
 	for _, vm := range vms {
-		if taggedLeaseID, _ := exeDevTaggedIdentity(vm); taggedLeaseID == leaseID {
+		taggedLeaseID, _, owned, err := exeDevOwnershipIdentity(vm)
+		if err != nil {
+			return exeDevVM{}, false, err
+		}
+		if owned && taggedLeaseID == leaseID {
 			return vm, true, nil
 		}
 	}
@@ -293,8 +455,14 @@ func (b *exeDevLeaseBackend) listServers(ctx context.Context, all bool) ([]Lease
 	cfg := b.configForRun()
 	servers := make([]Server, 0, len(vms))
 	for _, vm := range vms {
-		if !all && !strings.HasPrefix(vm.Name(), "crabbox-") {
-			continue
+		if !all {
+			_, _, owned, err := exeDevOwnershipIdentity(vm)
+			if err != nil {
+				return nil, err
+			}
+			if !owned {
+				continue
+			}
 		}
 		leaseID, slug, err := b.leaseIdentityForVM(vm)
 		if err != nil {
@@ -305,11 +473,8 @@ func (b *exeDevLeaseBackend) listServers(ctx context.Context, all bool) ([]Lease
 	return servers, nil
 }
 
-func (b *exeDevLeaseBackend) listVMs(ctx context.Context, all bool) ([]exeDevVM, error) {
+func (b *exeDevLeaseBackend) listVMs(ctx context.Context, _ bool) ([]exeDevVM, error) {
 	args := []string{"ls", "--l", "--json"}
-	if all {
-		args = append(args, "--a")
-	}
 	out, err := b.controlOutput(ctx, args)
 	if err != nil {
 		return nil, err
@@ -461,11 +626,24 @@ func commandExitCode(result LocalCommandResult) int {
 	return 1
 }
 
+const exeDevControlScopeLabel = "exe_dev_control_scope"
+
+func exeDevControlScope(cfg Config) (string, error) {
+	destination, port, err := exeDevControlDestination(cfg.ExeDev.ControlHost)
+	if err != nil {
+		return "", err
+	}
+	return "ssh:" + destination + "|port:" + blank(port, "default"), nil
+}
+
 func exeDevServer(vm exeDevVM, leaseID, slug string, cfg Config, keep bool) Server {
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	labels["name"] = vm.Name()
 	labels["state"] = blank(vm.Status, "unknown")
 	labels["work_root"] = cfg.WorkRoot
+	if scope, err := exeDevControlScope(cfg); err == nil {
+		labels[exeDevControlScopeLabel] = scope
+	}
 	if vm.Region != "" {
 		labels["region"] = vm.Region
 	}
@@ -530,8 +708,10 @@ func shellQuote(value string) string {
 }
 
 func (b *exeDevLeaseBackend) leaseIdentityForVM(vm exeDevVM) (string, string, error) {
-	if leaseID, slug := exeDevTaggedIdentity(vm); leaseID != "" {
-		return leaseID, blank(slug, newLeaseSlug(leaseID)), nil
+	if leaseID, slug, owned, err := exeDevOwnershipIdentity(vm); err != nil {
+		return "", "", err
+	} else if owned {
+		return leaseID, slug, nil
 	}
 	if slug := inferExeDevSlugFromName(vm.Name()); slug != "" {
 		if claim, ok, err := resolveLeaseClaimForProvider(slug, providerName); err != nil {
@@ -551,19 +731,46 @@ func (b *exeDevLeaseBackend) leaseIdentityForVM(vm exeDevVM) (string, string, er
 	return leaseID, slug, nil
 }
 
-func exeDevTaggedIdentity(vm exeDevVM) (string, string) {
-	leaseID := ""
-	slug := ""
+func exeDevOwnershipIdentity(vm exeDevVM) (string, string, bool, error) {
+	leaseIDs := map[string]struct{}{}
+	slugs := map[string]struct{}{}
+	baseTag := false
 	for _, tag := range vm.Tags {
 		tag = strings.TrimSpace(tag)
+		if tag == "crabbox" {
+			baseTag = true
+		}
 		if strings.HasPrefix(tag, "crabbox-lease-") {
-			leaseID = strings.TrimPrefix(tag, "crabbox-lease-")
+			leaseID := strings.TrimSpace(strings.TrimPrefix(tag, "crabbox-lease-"))
+			if leaseID != "" {
+				leaseIDs[leaseID] = struct{}{}
+			}
 		}
 		if strings.HasPrefix(tag, "crabbox-slug-") {
-			slug = normalizeLeaseSlug(strings.TrimPrefix(tag, "crabbox-slug-"))
+			slug := normalizeLeaseSlug(strings.TrimPrefix(tag, "crabbox-slug-"))
+			if slug != "" {
+				slugs[slug] = struct{}{}
+			}
 		}
 	}
-	return leaseID, slug
+	if len(leaseIDs) > 1 || len(slugs) > 1 {
+		return "", "", false, exit(2, "exe.dev VM %s has conflicting Crabbox ownership tags", vm.Name())
+	}
+	if !baseTag || len(leaseIDs) != 1 || len(slugs) != 1 {
+		return "", "", false, nil
+	}
+	leaseID := ""
+	for value := range leaseIDs {
+		leaseID = value
+	}
+	if !isCanonicalLeaseID(leaseID) {
+		return "", "", false, exit(2, "exe.dev VM %s has an invalid Crabbox lease tag", vm.Name())
+	}
+	slug := ""
+	for value := range slugs {
+		slug = value
+	}
+	return leaseID, slug, true, nil
 }
 
 func inferExeDevSlugFromName(name string) string {

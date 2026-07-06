@@ -31,6 +31,7 @@ type Repo = core.Repo
 type ExitError = core.ExitError
 type LocalCommandRequest = core.LocalCommandRequest
 type LocalCommandResult = core.LocalCommandResult
+type LeaseClaim = core.LeaseClaim
 
 const (
 	providerName  = "exe-dev"
@@ -62,6 +63,10 @@ func normalizeLeaseSlug(value string) string {
 	return core.NormalizeLeaseSlug(value)
 }
 
+func isCanonicalLeaseID(value string) bool {
+	return core.IsCanonicalLeaseID(value)
+}
+
 func leaseProviderName(leaseID, slug string) string {
 	return core.LeaseProviderName(leaseID, slug)
 }
@@ -70,16 +75,28 @@ func allocateDirectLeaseSlug(leaseID, requested string, servers []Server) (strin
 	return core.AllocateDirectLeaseSlug(leaseID, requested, servers)
 }
 
-var claimLeaseForRepoProvider = func(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
+var claimLeaseTargetForRepoConfigIfUnchanged = func(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected core.LeaseClaim, expectedExists bool) (core.LeaseClaim, error) {
+	return core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
 
 func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
+func readLeaseClaimWithPresence(leaseID string) (core.LeaseClaim, bool, error) {
+	return core.ReadLeaseClaimWithPresence(leaseID)
+}
+
+func removeLeaseClaimIfUnchangedAfter(leaseID string, expected core.LeaseClaim, action func() error) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
+}
+
+func setServerLeaseClaimSnapshot(server *Server, claim core.LeaseClaim, exists bool) {
+	core.SetServerLeaseClaimSnapshot(server, claim, exists)
+}
+
+func serverLeaseClaimSnapshot(server Server) (core.LeaseClaim, bool, bool) {
+	return core.ServerLeaseClaimSnapshot(server)
 }
 
 func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {
