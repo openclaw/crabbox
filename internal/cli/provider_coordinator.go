@@ -315,7 +315,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		Network:          resolved.Network,
 		Tailscale:        lease.Tailscale,
 		SSHHost:          target.Host,
-		SSHUser:          target.User,
+		SSHUser:          redactedSSHUser(b.cfg, server, target),
 		SSHPort:          target.Port,
 		SSHFallbackPorts: target.FallbackPorts,
 		SSHKey:           target.Key,

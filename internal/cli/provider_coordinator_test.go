@@ -167,6 +167,43 @@ func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 	}
 }
 
+func TestCoordinatorStatusRedactsDaytonaSSHAccessToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_123" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID:       "cbx_123",
+			Provider: "daytona",
+			TargetOS: targetLinux,
+			SSHUser:  "daytona-live-token",
+			SSHPort:  "22",
+			State:    "active",
+		}})
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Provider:    "daytona",
+		TargetOS:    targetLinux,
+		Coordinator: server.URL,
+		CoordToken:  "user-token",
+	}
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord}
+
+	status, err := backend.Status(context.Background(), StatusRequest{ID: "cbx_123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.SSHUser != "<token>" {
+		t.Fatalf("sshUser=%q, want redacted token", status.SSHUser)
+	}
+}
+
 func TestCoordinatorAcquireSendsTailscaleHostnameTemplate(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
