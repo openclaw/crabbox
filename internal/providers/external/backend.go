@@ -34,6 +34,9 @@ func (b *leaseBackend) SupportsRequestedLeaseID() bool {
 }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (_ core.LeaseTarget, resultErr error) {
+	if err := b.validateAcquireProviderSSHOutput(); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	leaseID := strings.TrimSpace(req.RequestedLeaseID)
 	fixedLeaseID := leaseID != ""
 	if leaseID == "" {
@@ -111,7 +114,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (_ 
 		}
 		return core.LeaseTarget{}, err
 	}
-	if _, err := core.PersistExternalRouting(lease.LeaseID, b.cfg.External); err != nil {
+	if _, err := core.PersistValidatedExternalRouting(lease.LeaseID, b.cfg.External); err != nil {
 		var acquireErr error = core.Exit(2, "%v", err)
 		if !req.Keep {
 			acquireErr = appendAcquireCleanupError(acquireErr, b.rollbackAcquireRelease(ctx, leaseForProtocol(lease)))
@@ -181,6 +184,13 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (_ 
 		return core.LeaseTarget{}, err
 	}
 	return lease, nil
+}
+
+func (b *leaseBackend) validateAcquireProviderSSHOutput() error {
+	if !lifecycleConfigured(b.cfg.External) || b.cfg.External.Lifecycle.Acquire.Output == lifecycleOutputJSONLease {
+		return core.ValidateExternalProviderSSHOutput(b.cfg)
+	}
+	return nil
 }
 
 func (b *leaseBackend) rollbackAcquireRelease(ctx context.Context, lease *protocolLease) error {
@@ -323,7 +333,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 		return lease, nil
 	}
 	if !req.NoLocalStateMutations {
-		if _, err := core.PersistExternalRouting(lease.LeaseID, b.cfg.External); err != nil {
+		if _, err := core.PersistValidatedExternalRouting(lease.LeaseID, b.cfg.External); err != nil {
 			return core.LeaseTarget{}, core.Exit(2, "%v", err)
 		}
 	}
@@ -528,7 +538,9 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 	if req.DryRun {
 		return nil
 	}
-	response, err := b.invoke(ctx, protocolRequest{Operation: "list", All: true, Refresh: true})
+	response, err := b.invoke(ctx, protocolRequest{
+		Operation: "list", All: true, Refresh: true, SkipSSHOutputValidation: true,
+	})
 	if err != nil {
 		return err
 	}
@@ -596,6 +608,9 @@ func (b *leaseBackend) invokeProtocol(ctx context.Context, request protocolReque
 	}
 	if response.ProtocolVersion != protocolVersion {
 		return protocolResponse{}, core.Exit(5, "external provider protocol version %d is unsupported", response.ProtocolVersion)
+	}
+	if err := b.validateProviderSSHOutput(request, response); err != nil {
+		return protocolResponse{}, err
 	}
 	if request.Operation == "list" && b.cfg.External.Capabilities.IdempotentLeaseID {
 		if response.Leases == nil {

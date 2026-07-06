@@ -456,15 +456,16 @@ type AgentSandboxConfig struct {
 }
 
 type ExternalConfig struct {
-	Command       string
-	Args          []string
-	Config        map[string]any
-	Capabilities  ExternalCapabilitiesConfig
-	Lifecycle     ExternalLifecycleConfig
-	Connection    ExternalConnectionConfig
-	WorkRoot      string
-	RoutingFile   string
-	routingLoaded bool
+	Command                  string
+	Args                     []string
+	Config                   map[string]any
+	Capabilities             ExternalCapabilitiesConfig
+	Lifecycle                ExternalLifecycleConfig
+	Connection               ExternalConnectionConfig
+	WorkRoot                 string
+	RoutingFile              string
+	routingLoaded            bool
+	routingCredentialVersion int
 }
 
 type ExternalCapabilitiesConfig struct {
@@ -501,16 +502,18 @@ type ExternalConnectionConfig struct {
 }
 
 type ExternalSSHConnectionConfig struct {
-	User            string   `yaml:"user,omitempty" json:"user,omitempty"`
-	Host            string   `yaml:"host,omitempty" json:"host,omitempty"`
-	Key             string   `yaml:"key,omitempty" json:"key,omitempty"`
-	Port            string   `yaml:"port,omitempty" json:"port,omitempty"`
-	FallbackPorts   []string `yaml:"fallbackPorts,omitempty" json:"fallbackPorts,omitempty"`
-	ReadyCheck      string   `yaml:"readyCheck,omitempty" json:"readyCheck,omitempty"`
-	AuthSecret      bool     `yaml:"authSecret,omitempty" json:"authSecret,omitempty"`
-	NoControlMaster bool     `yaml:"noControlMaster,omitempty" json:"noControlMaster,omitempty"`
-	SSHConfigProxy  bool     `yaml:"sshConfigProxy,omitempty" json:"sshConfigProxy,omitempty"`
-	ProxyCommand    string   `yaml:"proxyCommand,omitempty" json:"proxyCommand,omitempty"`
+	User                string   `yaml:"user,omitempty" json:"user,omitempty"`
+	Host                string   `yaml:"host,omitempty" json:"host,omitempty"`
+	Key                 string   `yaml:"key,omitempty" json:"key,omitempty"`
+	Port                string   `yaml:"port,omitempty" json:"port,omitempty"`
+	FallbackPorts       []string `yaml:"fallbackPorts,omitempty" json:"fallbackPorts,omitempty"`
+	ReadyCheck          string   `yaml:"readyCheck,omitempty" json:"readyCheck,omitempty"`
+	AuthSecret          bool     `yaml:"authSecret,omitempty" json:"authSecret,omitempty"`
+	NoControlMaster     bool     `yaml:"noControlMaster,omitempty" json:"noControlMaster,omitempty"`
+	SSHConfigProxy      bool     `yaml:"sshConfigProxy,omitempty" json:"sshConfigProxy,omitempty"`
+	ProxyCommand        string   `yaml:"proxyCommand,omitempty" json:"proxyCommand,omitempty"`
+	AllowEnv            bool     `yaml:"allowEnv,omitempty" json:"allowEnv,omitempty"`
+	TrustProviderOutput bool     `yaml:"trustProviderOutput,omitempty" json:"trustProviderOutput,omitempty"`
 }
 
 type NamespaceConfig struct {
@@ -5844,6 +5847,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.External.Config != nil {
 			cfg.External.Config = file.External.Config
+			cfg.credentialProvenance.externalConfig = credentialSource
 		}
 		if file.External.Capabilities != nil {
 			cfg.External.Capabilities = *file.External.Capabilities
@@ -5853,12 +5857,62 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.External.Connection != nil {
 			cfg.External.Connection = *file.External.Connection
+			ssh := cfg.External.Connection.SSH
+			cfg.credentialProvenance.externalSSHConnection = credentialSource
+			if trusted {
+				outputContract, outputContractOK := externalProviderOutputContract(cfg.External)
+				if ssh.TrustProviderOutput && !outputContractOK {
+					return exit(2, "external provider-output contract must be JSON encodable")
+				}
+				cfg.credentialProvenance.externalApproved = externalCredentialApproval{
+					resource:       cfg.External.Connection.ResourceName,
+					host:           ssh.Host,
+					proxy:          ssh.ProxyCommand,
+					allowEnv:       ssh.AllowEnv,
+					envSSH:         ssh,
+					providerOutput: ssh.TrustProviderOutput,
+					outputContract: outputContract,
+				}
+				cfg.credentialProvenance.externalApproved.envSSH.FallbackPorts = append([]string(nil), ssh.FallbackPorts...)
+			}
+			cfg.credentialProvenance.externalResource = credentialDestinationSource(
+				cfg.External.Connection.ResourceName, cfg.credentialProvenance.externalApproved.resource, credentialSource,
+			)
+			cfg.credentialProvenance.externalSSHHost = credentialDestinationSource(
+				ssh.Host, cfg.credentialProvenance.externalApproved.host, credentialSource,
+			)
+			cfg.credentialProvenance.externalSSHProxy = credentialDestinationSource(
+				ssh.ProxyCommand, cfg.credentialProvenance.externalApproved.proxy, credentialSource,
+			)
+			cfg.credentialProvenance.externalSSHAllowEnv = credentialSourceForBool(ssh.AllowEnv, credentialSource)
+			if !trusted && ssh.AllowEnv && cfg.credentialProvenance.externalApproved.allowEnv &&
+				externalSSHEnvApprovalMatches(cfg.External.Connection, cfg.credentialProvenance.externalApproved) {
+				cfg.credentialProvenance.externalSSHAllowEnv = credentialSourceTrustedFile
+			}
 		}
 		if file.External.WorkRoot != "" {
 			cfg.External.WorkRoot = file.External.WorkRoot
 		}
 		if file.External.RoutingFile != "" {
 			cfg.External.RoutingFile = file.External.RoutingFile
+			cfg.credentialProvenance.externalRouting = credentialSource
+		}
+		if cfg.External.Connection.SSH.TrustProviderOutput {
+			outputContract, outputContractOK := externalProviderOutputContract(cfg.External)
+			if trusted {
+				if !outputContractOK {
+					return exit(2, "external provider-output contract must be JSON encodable")
+				}
+				cfg.credentialProvenance.externalApproved.providerOutput = true
+				cfg.credentialProvenance.externalApproved.outputContract = outputContract
+				cfg.credentialProvenance.externalSSHOutput = credentialSourceTrustedFile
+			} else {
+				cfg.credentialProvenance.externalSSHOutput = credentialSourceRepository
+				if cfg.credentialProvenance.externalApproved.providerOutput &&
+					outputContractOK && outputContract == cfg.credentialProvenance.externalApproved.outputContract {
+					cfg.credentialProvenance.externalSSHOutput = credentialSourceTrustedFile
+				}
+			}
 		}
 	}
 	if file.Namespace != nil {
@@ -8098,12 +8152,23 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_AGENT_SANDBOX_FORGET_MISSING"); ok {
 		cfg.AgentSandbox.ForgetMissing = value
 	}
-	cfg.External.Command = getenv("CRABBOX_EXTERNAL_COMMAND", cfg.External.Command)
+	externalProviderOutputExplicit := false
+	if value := os.Getenv("CRABBOX_EXTERNAL_COMMAND"); value != "" {
+		cfg.External.Command = value
+		externalProviderOutputExplicit = true
+	}
 	if arg := os.Getenv("CRABBOX_EXTERNAL_ARG"); arg != "" {
 		cfg.External.Args = []string{arg}
+		externalProviderOutputExplicit = true
+	}
+	if externalProviderOutputExplicit {
+		markExternalProviderOutputExplicit(cfg, credentialSourceEnvironment)
 	}
 	cfg.External.WorkRoot = getenv("CRABBOX_EXTERNAL_WORK_ROOT", cfg.External.WorkRoot)
-	cfg.External.RoutingFile = getenv("CRABBOX_EXTERNAL_ROUTING_FILE", cfg.External.RoutingFile)
+	if value := os.Getenv("CRABBOX_EXTERNAL_ROUTING_FILE"); value != "" {
+		cfg.External.RoutingFile = value
+		cfg.credentialProvenance.externalRouting = credentialSourceEnvironment
+	}
 	if value, ok := getenvBool("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID"); ok {
 		cfg.External.Capabilities.IdempotentLeaseID = value
 	}

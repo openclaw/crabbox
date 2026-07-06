@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Prevented repository-controlled External SSH endpoint templates and adapter output from silently using ambient or operator-managed SSH credentials, with source-bound opt-ins for environment-derived fields and provider-returned destinations. Thanks @coygeek.
 - Made Sealos DevBox preflight work with tenant-scoped RBAC, rendered the runtime class, storage request, scheduling constraints, and SSH port contract required by hosted Sealos clusters, updated the SSHGate default to port 2233, bootstrapped missing sync tools, and cleaned local claims safely when a DevBox is already absent. Thanks @coygeek.
 - Changed portal logout to an authenticated, same-origin `POST` with a read-only `GET` confirmation page, preventing cross-site top-level navigation from clearing portal cookies or revoking isolated Code viewer sessions. Thanks @coygeek.
 - Bound non-admin GitHub WebVNC, Code, and egress bridges to their encrypted user grant and portal session, closing active or restored bridges after logout, emergency revocation, membership loss, or membership-check failure without persisting plaintext GitHub credentials. Thanks @coygeek.

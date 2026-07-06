@@ -361,7 +361,7 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 	}
 	if providerSelected && strings.TrimSpace(cfg.External.RoutingFile) != "" {
 		if !cfg.External.routingLoaded {
-			if err := loadExternalRoutingConfig(cfg, cfg.External.RoutingFile); err != nil {
+			if err := loadExternalRoutingConfig(cfg, cfg.External.RoutingFile, false); err != nil {
 				return err
 			}
 		}
@@ -387,18 +387,25 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 	if !cfg.providerExplicit {
 		cfg.Provider = "external"
 	}
-	if err := loadExternalRoutingConfig(cfg, path); err != nil {
+	if err := loadExternalRoutingConfig(cfg, path, true); err != nil {
 		return err
 	}
 	return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
 }
 
-func loadExternalRoutingConfig(cfg *Config, path string) error {
+func loadExternalRoutingConfig(cfg *Config, path string, claimBound bool) error {
 	routing, err := LoadExternalRouting(path)
 	if err != nil {
 		return err
 	}
+	if claimBound {
+		cfg.credentialProvenance.externalRouting = credentialSourceRepository
+		if routing.routingCredentialVersion >= externalRoutingCredentialVersion {
+			cfg.credentialProvenance.externalRouting = credentialSourceTrustedFile
+		}
+	}
 	cfg.External = routing
+	MarkExternalRoutingCredentialSources(cfg)
 	if strings.TrimSpace(routing.WorkRoot) != "" {
 		cfg.WorkRoot = routing.WorkRoot
 	}

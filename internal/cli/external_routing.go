@@ -18,24 +18,28 @@ import (
 var externalRoutingMutationMutexes sync.Map
 
 type externalRoutingState struct {
-	Command      string                     `json:"command,omitempty"`
-	Args         []string                   `json:"args,omitempty"`
-	Config       map[string]any             `json:"config,omitempty"`
-	Capabilities ExternalCapabilitiesConfig `json:"capabilities,omitempty"`
-	Lifecycle    ExternalLifecycleConfig    `json:"lifecycle,omitempty"`
-	Connection   ExternalConnectionConfig   `json:"connection,omitempty"`
-	WorkRoot     string                     `json:"workRoot,omitempty"`
+	Command                   string                     `json:"command,omitempty"`
+	Args                      []string                   `json:"args,omitempty"`
+	Config                    map[string]any             `json:"config,omitempty"`
+	Capabilities              ExternalCapabilitiesConfig `json:"capabilities,omitempty"`
+	Lifecycle                 ExternalLifecycleConfig    `json:"lifecycle,omitempty"`
+	Connection                ExternalConnectionConfig   `json:"connection,omitempty"`
+	WorkRoot                  string                     `json:"workRoot,omitempty"`
+	CredentialBoundaryVersion int                        `json:"credentialBoundaryVersion,omitempty"`
 }
 
-func externalRoutingStateForConfig(cfg ExternalConfig) externalRoutingState {
+const externalRoutingCredentialVersion = 1
+
+func externalRoutingStateForConfig(cfg ExternalConfig, credentialVersion int) externalRoutingState {
 	return externalRoutingState{
-		Command:      cfg.Command,
-		Args:         append([]string(nil), cfg.Args...),
-		Config:       cfg.Config,
-		Capabilities: cfg.Capabilities,
-		Lifecycle:    cfg.Lifecycle,
-		Connection:   cfg.Connection,
-		WorkRoot:     cfg.WorkRoot,
+		Command:                   cfg.Command,
+		Args:                      append([]string(nil), cfg.Args...),
+		Config:                    cfg.Config,
+		Capabilities:              cfg.Capabilities,
+		Lifecycle:                 cfg.Lifecycle,
+		Connection:                cfg.Connection,
+		WorkRoot:                  cfg.WorkRoot,
+		CredentialBoundaryVersion: credentialVersion,
 	}
 }
 
@@ -71,11 +75,21 @@ func externalRoutingConfigDir() (string, error) {
 }
 
 func PersistExternalRouting(leaseID string, cfg ExternalConfig) (string, error) {
+	return persistExternalRouting(leaseID, cfg, 0)
+}
+
+// PersistValidatedExternalRouting records that the credential destination was
+// validated before the routing state became authoritative for a lease.
+func PersistValidatedExternalRouting(leaseID string, cfg ExternalConfig) (string, error) {
+	return persistExternalRouting(leaseID, cfg, externalRoutingCredentialVersion)
+}
+
+func persistExternalRouting(leaseID string, cfg ExternalConfig, credentialVersion int) (string, error) {
 	path, err := ExternalRoutingPath(leaseID)
 	if err != nil {
 		return "", err
 	}
-	data, err := json.MarshalIndent(externalRoutingStateForConfig(cfg), "", "  ")
+	data, err := json.MarshalIndent(externalRoutingStateForConfig(cfg, credentialVersion), "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encode external routing: %w", err)
 	}
@@ -163,15 +177,16 @@ func LoadExternalRouting(path string) (ExternalConfig, error) {
 		return ExternalConfig{}, fmt.Errorf("parse external routing file: %w", err)
 	}
 	return ExternalConfig{
-		Command:       state.Command,
-		Args:          append([]string(nil), state.Args...),
-		Config:        state.Config,
-		Capabilities:  state.Capabilities,
-		Lifecycle:     state.Lifecycle,
-		Connection:    state.Connection,
-		WorkRoot:      state.WorkRoot,
-		RoutingFile:   path,
-		routingLoaded: true,
+		Command:                  state.Command,
+		Args:                     append([]string(nil), state.Args...),
+		Config:                   state.Config,
+		Capabilities:             state.Capabilities,
+		Lifecycle:                state.Lifecycle,
+		Connection:               state.Connection,
+		WorkRoot:                 state.WorkRoot,
+		RoutingFile:              path,
+		routingLoaded:            true,
+		routingCredentialVersion: state.CredentialBoundaryVersion,
 	}, nil
 }
 
@@ -220,11 +235,11 @@ func removeExternalRoutingIfUnchangedWithSync(leaseID string, expected ExternalC
 		if err != nil {
 			return err
 		}
-		actualData, err := json.Marshal(externalRoutingStateForConfig(actual))
+		actualData, err := json.Marshal(externalRoutingStateForConfig(actual, 0))
 		if err != nil {
 			return fmt.Errorf("encode current external routing state: %w", err)
 		}
-		expectedData, err := json.Marshal(externalRoutingStateForConfig(expected))
+		expectedData, err := json.Marshal(externalRoutingStateForConfig(expected, 0))
 		if err != nil {
 			return fmt.Errorf("encode expected external routing state: %w", err)
 		}

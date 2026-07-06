@@ -260,14 +260,25 @@ destination checks, including a symlink outside the checkout that resolves
 back into it. The canonical user config and explicit files outside the active
 repository remain operator-trusted sources.
 
-Repository-selected Static SSH, remote Parallels, and exe.dev control hosts
-cannot inherit a key, SSH agent, or local SSH configuration from a more trusted
-source. Put both a Static SSH or Parallels host and a relative, symlink-resolved
-key file contained by the repository in the same repository config, or
-explicitly approve the destination with the matching host flag or environment
-variable. Absolute, missing, and repository-escaping key paths do not count as
-same-source credentials. Because exe.dev control authentication is always
-ambient, a repository-defined custom control host requires an explicit
+Repository-selected Static SSH, remote Parallels, External SSH, and exe.dev
+control hosts cannot inherit a key, SSH agent, or local SSH configuration from
+a more trusted source. Static SSH and Parallels may pair the destination with
+a relative, symlink-resolved key file contained by the same repository;
+absolute, missing, and repository-escaping key paths do not count as
+same-source credentials. They can instead use the matching host flag or
+environment variable for approval. External SSH always requires the exact SSH
+endpoint (user, host, key, port, fallback ports, and proxy settings) plus any
+referenced `resourceName` to be repeated in trusted user config because
+operator SSH config and nested proxies can add
+authentication independently of an outer key. Repository-controlled template
+inputs keep the resulting destination in the repository trust domain, and the
+SSH environment-expansion opt-in is honored only from trusted user config.
+Protocol or declarative JSON output may supply SSH coordinates only when the
+exact output-producing adapter contract and `ssh.trustProviderOutput` are
+approved together in trusted user config; repository changes invalidate that
+approval.
+Because exe.dev control authentication is always ambient, a repository-defined
+custom control host requires an explicit
 `--exe-dev-control-host` or `CRABBOX_EXE_DEV_CONTROL_HOST` override.
 
 Cookie-authenticated portal mutations and portal viewer WebSocket upgrades

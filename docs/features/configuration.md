@@ -726,9 +726,17 @@ external:
   config:
     backend: vm
     namespace: team-devboxes
+  connection:
+    ssh:
+      trustProviderOutput: true
   workRoot: /workspaces/crabbox
   routingFile: ""
 ```
+
+If the protocol response contains SSH coordinates, keep
+`trustProviderOutput: true` together with the exact command, arguments, and
+`external.config` plus its connection inputs in trusted user config. Repository
+config cannot inherit the approval after changing that adapter contract.
 
 The executable receives one versioned JSON request on stdin per lifecycle
 operation and returns one JSON response on stdout. This keeps internal control
@@ -762,11 +770,18 @@ external:
     ssh:
       user: "{{env.DEVBOX_USER}}"
       host: "{{resourceName}}"
+      allowEnv: true
+      trustProviderOutput: true
       sshConfigProxy: true
   config:
     size: cpu16
   workRoot: /home/developer/crabbox
 ```
+
+Put this destination-bearing example in trusted user config. Repository config
+may define the lifecycle, but its exact `resourceName`, SSH destination, and
+environment opt-in must be repeated in trusted user config before Crabbox uses
+operator-managed SSH credentials.
 
 Declarative lifecycle entries use one `argv` array or an ordered `steps` list,
 not shell commands. Acquire steps can opt into release cleanup with

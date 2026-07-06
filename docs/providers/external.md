@@ -28,9 +28,18 @@ external:
     backend: vm
     namespace: team-devboxes
     size: cpu32
+  connection:
+    ssh:
+      trustProviderOutput: true
   workRoot: /workspaces/crabbox
   routingFile: ""
 ```
+
+When a protocol command returns SSH coordinates, put
+`connection.ssh.trustProviderOutput: true` in the same trusted user config as
+the exact command, arguments, `external.config`, and connection inputs.
+Repository config cannot self-enable this contract, and changing the
+output-producing adapter contract invalidates an inherited approval.
 
 `external.config` is arbitrary YAML passed as JSON to the executable. Keep
 secrets in the executable's normal credential store or environment rather than
@@ -119,12 +128,19 @@ external:
       user: "{{env.DEVBOX_USER}}"
       host: "{{resourceName}}"
       port: "22"
+      allowEnv: true
+      trustProviderOutput: true
       sshConfigProxy: true
       readyCheck: command -v git && command -v rsync && command -v tar
   config:
     size: cpu16
   workRoot: /home/developer/crabbox
 ```
+
+Place this destination-bearing example in trusted user config. If repository
+config owns the lifecycle, repeat the exact `resourceName`, SSH destination,
+and environment opt-in in trusted user config before using operator-managed
+SSH credentials.
 
 `acquire`, `list`, `release`, and `connection.ssh.user` are required.
 Lifecycle operations configure exactly one of `argv` or `steps`. Steps run in
@@ -176,6 +192,27 @@ later release still requires `allowEnvArgv` before placing `{{resourceName}}`
 back in argv. Do not use either opt-in for tokens, passwords, API keys, or
 other credential contents.
 
+Environment-derived expansion in `connection.ssh` fields is rejected by
+default, including indirect use through an environment-backed `resourceName`,
+because values such as the SSH user, host, key path, ready check, or proxy
+command can expose process environment data to a network destination or local
+process. For non-secret environment-backed SSH routing values, set
+`connection.ssh.allowEnv: true` in trusted user config. Repository config
+cannot grant itself this opt-in. The opt-in does not approve inherited SSH
+authentication for a repository-selected destination.
+
+A repository-selected External SSH `host`, default-host `resourceName`, or
+`proxyCommand` is rejected even when the repository supplies a key. OpenSSH
+can still add identities from operator user config, and a nested SSH proxy can
+authenticate independently of the outer key. To approve the destination,
+repeat the exact SSH endpoint templates (user, host, key, port, fallback ports,
+and proxy settings) plus any `resourceName` they reference in trusted user
+config (see
+[Configuration](../features/configuration.md#precedence)).
+Templates that reference `repo.*` inputs remain repository-selected. Templates
+that reference `config.*` are approved only when the effective
+`external.config` map also comes from trusted config.
+
 `leaseIdSlug` is the lease ID normalized as a lowercase slug, suitable for
 providers that require DNS-style names. `resourceName` is the expanded
 `connection.resourceName`.
@@ -216,7 +253,14 @@ external:
     resourceName: "{{leaseIdSlug}}"
     ssh:
       user: developer
+      trustProviderOutput: true
 ```
+
+Because `json-lease` and `json-lease-array` may supply SSH coordinates directly,
+their `trustProviderOutput` contract and the complete lifecycle/configuration
+that produces the output must be approved together in trusted user config.
+Without that explicit source-bound approval, Crabbox rejects returned SSH
+coordinates before connecting or persisting validated routing state.
 
 A declarative adapter qualifies for controller fixed-ID provisioning only when
 `idempotentLeaseId` is true, both acquire and resolve use `json-lease`, list
@@ -241,6 +285,8 @@ reserved `lease`, `slug`, `name`, `externalResourceName`, or
 For `json-name-array`, optional `list.namePrefix` discards inventory names
 outside the expanded prefix before Crabbox constructs leases. Use it when a
 provider CLI lists resources that are not all owned by this configuration.
+Both list formats select SSH destinations and therefore require the same
+source-bound `connection.ssh.trustProviderOutput` contract.
 
 Declarative configuration and resolved connection templates are included in
 the private per-lease routing file. This lets generated retry, daemon, SSH, and
