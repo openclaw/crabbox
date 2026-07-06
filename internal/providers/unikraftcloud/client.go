@@ -56,14 +56,14 @@ type ukcImage struct {
 }
 
 type ukcInstance struct {
-	UUID              string                 `json:"uuid"`
-	Name              string                 `json:"name"`
-	State             string                 `json:"state"`
-	CreatedAt         string                 `json:"created_at"`
-	PrivateFQDN       string                 `json:"private_fqdn"`
-	MemoryMB          int                    `json:"memory_mb"`
-	ServiceGroup      *ukcServiceGroup       `json:"service_group,omitempty"`
-	NetworkInterfaces []ukcNetworkInterface  `json:"network_interfaces,omitempty"`
+	UUID              string                `json:"uuid"`
+	Name              string                `json:"name"`
+	State             string                `json:"state"`
+	CreatedAt         string                `json:"created_at"`
+	PrivateFQDN       string                `json:"private_fqdn"`
+	MemoryMB          int                   `json:"memory_mb"`
+	ServiceGroup      *ukcServiceGroup      `json:"service_group,omitempty"`
+	NetworkInterfaces []ukcNetworkInterface `json:"network_interfaces,omitempty"`
 	ItemStatus        string                `json:"status,omitempty"`
 	ItemMessage       string                `json:"message,omitempty"`
 	ItemError         int                   `json:"error,omitempty"`
