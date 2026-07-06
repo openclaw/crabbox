@@ -215,6 +215,15 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		return core.LeaseTarget{}, err
 	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return core.LeaseTarget{}, fmt.Errorf("read acquired lambda claim: %w", err)
+	}
+	if !exists {
+		return core.LeaseTarget{}, core.Exit(2, "lambda lease=%s claim is missing after acquire", leaseID)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	target.Server = server
 	committed = true
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s lambda=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)
 	return target, nil
@@ -333,22 +342,26 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, claimErr
 	} else if ok && claim.CloudID != "" {
 		if item, found := byID[claim.CloudID]; found {
-			return b.targetFromClaimedInstance(item, claim.Labels, req)
+			server, err := serverFromLambdaClaim(item, b.cfg, claim)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+			return b.targetFromClaimedServer(server, req)
 		}
 	}
 	server, leaseID, err := core.FindServerByAlias(servers, req.ID)
 	if err == nil && leaseID != "" {
-		item, found := byID[server.CloudID]
+		_, found := byID[server.CloudID]
 		if !found {
 			return core.LeaseTarget{}, core.Exit(4, "lease/lambda instance not found: %s", req.ID)
 		}
-		return b.targetFromClaimedInstance(item, server.Labels, req)
+		return b.targetFromClaimedServer(server, req)
 	}
 	if item, ok := byID[req.ID]; ok {
 		if server, claimed, claimErr := claimedServerFromInstance(item, instances, b.cfg); claimErr != nil {
 			return core.LeaseTarget{}, claimErr
 		} else if claimed {
-			return b.targetFromClaimedInstance(item, server.Labels, req)
+			return b.targetFromClaimedServer(server, req)
 		}
 	}
 	if req.ReleaseOnly {
@@ -380,14 +393,14 @@ func (b *backend) releaseTargetFromClaim(id string) (core.LeaseTarget, error) {
 	server := core.Server{Provider: providerName, CloudID: claim.CloudID, Name: claim.Slug, Labels: claim.Labels}
 	server.PublicNet.IPv4.IP = claim.SSHHost
 	server.ServerType.Name = claim.Labels["server_type"]
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
 }
-func (b *backend) targetFromClaimedInstance(item Instance, labels map[string]string, req core.ResolveRequest) (core.LeaseTarget, error) {
-	if err := validateLambdaLabels(labels); err != nil {
+
+func (b *backend) targetFromClaimedServer(server core.Server, req core.ResolveRequest) (core.LeaseTarget, error) {
+	if err := validateLambdaLabels(server.Labels); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	server := serverFromInstance(item, b.cfg)
-	server.Labels = cloneLambdaLabels(labels)
 	leaseID := server.Labels["lease"]
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
@@ -398,6 +411,14 @@ func (b *backend) targetFromClaimedInstance(item Instance, labels map[string]str
 		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, server.Labels["slug"], b.cfg, server, ssh, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
 		}
+		claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if !exists {
+			return core.LeaseTarget{}, core.Exit(2, "lambda lease=%s claim disappeared during resolve", leaseID)
+		}
+		core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	}
 	return core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}, nil
 }
@@ -437,7 +458,8 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	_ = ctx
 	b.initDirect()
 	server := req.Lease.Server
-	if err := validateLambdaLabels(server.Labels); err != nil {
+	claim, err := revalidateLambdaClaimSnapshot(server)
+	if err != nil {
 		return core.Server{}, err
 	}
 	cfg := b.cfg
@@ -447,11 +469,11 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	labels := core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, b.now())
 	labels[lambdaTouchLocalLabel] = "true"
 	server.Labels = labels
-	if claim, ok, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID); err == nil && ok {
-		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels); err != nil {
-			return core.Server{}, err
-		}
+	updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels)
+	if err != nil {
+		return core.Server{}, err
 	}
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
@@ -459,50 +481,32 @@ func (b *backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 	_ = ctx
 	b.initDirect()
 	server := lease.Server
-	if err := validateLambdaLabels(server.Labels); err != nil {
+	expected, exists, set := core.ServerLeaseClaimSnapshot(server)
+	if !set || !exists {
+		return core.Server{}, core.Exit(2, "lambda lease=%s has no exact local claim snapshot; refusing metadata update", lease.LeaseID)
+	}
+	baseline := server
+	baseline.Labels = cloneLambdaLabels(expected.Labels)
+	claim, err := revalidateLambdaClaimSnapshot(baseline)
+	if err != nil {
 		return core.Server{}, err
 	}
-	labels := make(map[string]string, len(server.Labels)+8)
-	for key, value := range server.Labels {
-		labels[key] = value
-	}
+	labels := cloneLambdaLabels(claim.Labels)
 	applyTailscaleMetadata(labels, meta)
 	labels[lambdaTouchLocalLabel] = "true"
 	server.Labels = labels
-	if claim, ok, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err == nil && ok {
-		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels); err != nil {
-			return core.Server{}, err
-		}
+	updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels)
+	if err != nil {
+		return core.Server{}, err
 	}
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
 func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
-	if err := validateLambdaLabels(server.Labels); err != nil {
-		return err
-	}
-	claim, claimExists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"])
+	claim, err := revalidateLambdaClaimSnapshot(server)
 	if err != nil {
-		return fmt.Errorf("read lambda cleanup claim: %w", err)
-	}
-	if !claimExists {
-		return core.Exit(2, "lambda lease=%s has no exact local claim; refusing destructive operation", server.Labels["lease"])
-	}
-	if claim.Provider != providerName {
-		return core.Exit(2, "lease=%s is claimed by provider=%s; refusing lambda cleanup", claim.LeaseID, claim.Provider)
-	}
-	if err := validateLambdaLabels(claim.Labels); err != nil {
-		return core.Exit(2, "lambda lease=%s has an invalid local claim; refusing destructive operation", claim.LeaseID)
-	}
-	if claim.LeaseID != server.Labels["lease"] ||
-		claim.Slug != server.Labels["slug"] ||
-		claim.Labels["lease"] != claim.LeaseID ||
-		claim.Labels["slug"] != claim.Slug ||
-		!maps.Equal(claim.Labels, server.Labels) {
-		return core.Exit(2, "refusing to release Lambda instance %s from a stale local claim", server.DisplayID())
-	}
-	if claim.CloudID != "" && server.CloudID != "" && claim.CloudID != server.CloudID {
-		return core.Exit(2, "refusing to release Lambda instance %s from a stale local claim", server.CloudID)
+		return err
 	}
 	instanceID := firstNonBlank(server.CloudID, claim.CloudID)
 	if claim.CloudID == "" {
@@ -525,6 +529,22 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	}
 	server.CloudID = instanceID
 	server.Labels = cloneLambdaLabels(claim.Labels)
+	if claim.CloudID == "" && claim.Labels[lambdaRecoveryKeyLabel] == "ambiguous-create" {
+		updated, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(claim.LeaseID, claim, server, core.SSHTarget{}, func() error {
+			instances, err := client.ListInstances(ctx)
+			if err != nil {
+				return err
+			}
+			return validateUniqueAmbiguousLaunchInstance(instanceID, instances, claim)
+		})
+		if err != nil {
+			return fmt.Errorf("bind ambiguous lambda recovery: %w", err)
+		}
+		claim = updated
+		instanceID = claim.CloudID
+		server.CloudID = instanceID
+		core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	}
 	keyID := claim.Labels[lambdaKeyIDLabel]
 	keyName := claim.Labels[lambdaKeyNameLabel]
 	keyOwned := claim.Labels[lambdaKeyOwnedLabel] == "true"
@@ -534,23 +554,12 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 			live, getErr := client.GetInstance(ctx, instanceID)
 			if getErr == nil {
 				liveFound = true
-				if claim.CloudID == "" {
-					instances, err := client.ListInstances(ctx)
-					if err != nil {
-						return err
-					}
-					if err := validateUniqueAmbiguousLaunchInstance(instanceID, instances, claim); err != nil {
-						return err
-					}
-				} else if err := validateLiveInstance(live, server); err != nil {
+				if err := validateLiveInstance(live, server); err != nil {
 					return err
 				}
 			} else if !isLambdaNotFound(getErr) {
 				return getErr
 			}
-		}
-		if claim.CloudID == "" && claim.Labels[lambdaRecoveryKeyLabel] == "ambiguous-create" && !liveFound {
-			return core.Exit(2, "lambda recovery is still pending for lease=%s; credentials and recovery claim retained", claim.LeaseID)
 		}
 		if liveFound {
 			if err := client.TerminateInstances(ctx, []string{instanceID}); err != nil {
@@ -577,6 +586,54 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	}
 	core.RemoveStoredTestboxKey(claim.LeaseID)
 	return nil
+}
+
+func revalidateLambdaClaimSnapshot(server core.Server) (core.LeaseClaim, error) {
+	if err := validateLambdaLabels(server.Labels); err != nil {
+		return core.LeaseClaim{}, err
+	}
+	expected, expectedExists, snapshotSet := core.ServerLeaseClaimSnapshot(server)
+	if !snapshotSet || !expectedExists {
+		return core.LeaseClaim{}, core.Exit(2, "lambda lease=%s has no exact local claim snapshot; refusing operation", server.Labels["lease"])
+	}
+	if expected.Provider != providerName ||
+		expected.LeaseID != server.Labels["lease"] ||
+		expected.Slug != server.Labels["slug"] ||
+		expected.Labels["lease"] != expected.LeaseID ||
+		expected.Labels["slug"] != expected.Slug ||
+		!maps.Equal(expected.Labels, server.Labels) ||
+		(expected.CloudID != "" && server.CloudID != "" && expected.CloudID != server.CloudID) {
+		return core.LeaseClaim{}, core.Exit(2, "refusing Lambda operation on %s from a stale local claim", server.DisplayID())
+	}
+	current, exists, err := core.ReadLeaseClaimWithPresence(expected.LeaseID)
+	if err != nil {
+		return core.LeaseClaim{}, fmt.Errorf("read lambda claim: %w", err)
+	}
+	if !exists ||
+		!lambdaClaimOwnershipMatches(expected, current) ||
+		!maps.Equal(current.Labels, server.Labels) {
+		return core.LeaseClaim{}, core.Exit(2, "lambda lease=%s claim changed; retry", expected.LeaseID)
+	}
+	if err := validateLambdaLabels(current.Labels); err != nil {
+		return core.LeaseClaim{}, core.Exit(2, "lambda lease=%s has an invalid local claim; refusing operation", current.LeaseID)
+	}
+	return current, nil
+}
+
+func lambdaClaimOwnershipMatches(expected, current core.LeaseClaim) bool {
+	return expected.LeaseID == current.LeaseID &&
+		expected.Slug == current.Slug &&
+		expected.Provider == current.Provider &&
+		expected.CloudID == current.CloudID &&
+		expected.ProviderScope == current.ProviderScope &&
+		expected.StaticHost == current.StaticHost &&
+		expected.StaticUser == current.StaticUser &&
+		expected.StaticPort == current.StaticPort &&
+		expected.StaticWorkRoot == current.StaticWorkRoot &&
+		expected.TargetOS == current.TargetOS &&
+		expected.WindowsMode == current.WindowsMode &&
+		expected.Pond == current.Pond &&
+		expected.RepoRoot == current.RepoRoot
 }
 
 func (b *backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, key lambdaSSHKeyIdentity, cloudID, recovery string, keep bool, now time.Time) error {
@@ -659,12 +716,21 @@ func claimedServerFromInstance(item Instance, instances []Instance, cfg core.Con
 	if claim.CloudID != "" && claim.CloudID != item.ID {
 		return core.Server{}, false, nil
 	}
-	if err := validateLambdaLabels(claim.Labels); err != nil {
+	server, err := serverFromLambdaClaim(item, cfg, claim)
+	if err != nil {
 		return core.Server{}, false, err
+	}
+	return server, true, nil
+}
+
+func serverFromLambdaClaim(item Instance, cfg core.Config, claim core.LeaseClaim) (core.Server, error) {
+	if err := validateLambdaLabels(claim.Labels); err != nil {
+		return core.Server{}, err
 	}
 	server := serverFromInstance(item, cfg)
 	server.Labels = cloneLambdaLabels(claim.Labels)
-	return server, true, nil
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return server, nil
 }
 
 func ambiguousLaunchClaimForInstance(item Instance, instances []Instance) (core.LeaseClaim, bool, error) {

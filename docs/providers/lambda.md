@@ -156,7 +156,8 @@ Lambda has no safe tag-update path in this phase, and the launch path does not
 depend on provider-side tag persistence. Local Crabbox claims carry fresh touch
 and idle-timeout state. Explicit failed-create recovery remains claim-bound:
 ambiguous launches must match the unique per-lease Lambda SSH key before Crabbox
-can terminate them.
+persists the recovered instance binding before termination, so partial cleanup
+can safely resume after the instance disappears.
 
 Direct mode has no coordinator alarm. Use:
 

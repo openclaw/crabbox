@@ -257,6 +257,29 @@ func ReadLeaseClaimWithPresence(leaseID string) (LeaseClaim, bool, error) {
 	return readLeaseClaimWithPresence(leaseID)
 }
 
+// SetServerLeaseClaimSnapshot carries the exact claim state that authorized a
+// provider result into a later lifecycle operation.
+func SetServerLeaseClaimSnapshot(server *Server, claim LeaseClaim, exists bool) {
+	if server == nil {
+		return
+	}
+	server.claimSnapshotSet = true
+	server.claimSnapshotExists = exists
+	server.claimSnapshot = leaseClaim{}
+	if exists {
+		server.claimSnapshot = cloneLeaseClaim(claim)
+	}
+}
+
+// ServerLeaseClaimSnapshot returns the carried claim, whether it existed, and
+// whether a snapshot was explicitly attached.
+func ServerLeaseClaimSnapshot(server Server) (LeaseClaim, bool, bool) {
+	if !server.claimSnapshotSet {
+		return LeaseClaim{}, false, false
+	}
+	return cloneLeaseClaim(server.claimSnapshot), server.claimSnapshotExists, true
+}
+
 func OSImageWasExplicit(cfg Config) bool {
 	return cfg.osImageExplicit
 }

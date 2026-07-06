@@ -10,7 +10,7 @@
 - Confined Islo API redirects to the configured scheme, hostname, and effective port before replaying authorization or request bodies, while keeping rejected Location secrets out of diagnostics. Thanks @TurboTheTurtle.
 - Redacted colon-delimited and line-folded bearer credentials from CLI and coordinator diagnostics. Thanks @TurboTheTurtle.
 - Required coordinator AWS, Azure, and GCP release and provisioning-failure cleanup to re-read the stored cloud resource and verify exact provider, resource, lease, owner, and slug ownership before deletion; Azure now persists the exact subscription/resource-group scope for deferred retries and fails legacy unscoped cleanup closed for manual resolution. Thanks @coygeek.
-- Required Lambda inventory, stop, and cleanup to use an unchanged instance-bound local claim, with claim-bound SSH-key deletion and explicit per-lease-key recovery for ambiguous creates. Thanks @coygeek.
+- Required Lambda inventory, stop, and cleanup to use an unchanged instance-bound local claim, with claim-bound SSH-key deletion and durable unique-instance recovery for ambiguous creates. Thanks @coygeek.
 
 ## 0.36.0 - 2026-07-05
 
