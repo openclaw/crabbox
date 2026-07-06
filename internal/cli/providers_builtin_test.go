@@ -1328,7 +1328,7 @@ func (testDaytonaProvider) Spec() ProviderSpec {
 		Name:        "daytona",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Features:    FeatureSet{FeatureSSH, FeatureArchiveSync},
 		Coordinator: CoordinatorNever,
 	}
 }

@@ -130,6 +130,15 @@ function validate(providers, metadata) {
     if (!profile.docs.endsWith(".md") || !fs.existsSync(docsPath)) {
       fail(`${provider.provider}.docs does not exist: ${profile.docs}`);
     }
+    for (const feature of ["crabbox-sync", "archive-sync"]) {
+      const declared = Boolean(provider.features?.includes(feature));
+      if (profile.sync === feature && !declared) {
+        fail(`${provider.provider}.sync is ${JSON.stringify(feature)} but the provider spec does not declare the ${feature} feature`);
+      }
+      if (profile.sync !== feature && declared) {
+        fail(`${provider.provider} declares the ${feature} feature but metadata sync is ${JSON.stringify(profile.sync)}`);
+      }
+    }
   }
 }
 
