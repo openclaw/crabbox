@@ -17,13 +17,7 @@ func TestReleaseRetainsLeaseByPausingAndClearingEndpoint(t *testing.T) {
 	leaseID := "cbx_123456abcdef"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
-	server := releaseServer(cfg, leaseID, slug, name)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}); err != nil {
-		t.Fatal(err)
-	}
+	server := claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"})
 	before, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
@@ -62,10 +56,7 @@ func TestReleaseRetainsLegacyRawScopeDevboxMigratesScopeAnnotation(t *testing.T)
 	leaseID := "cbx_legacyraw"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
-	server := releaseServer(cfg, leaseID, slug, name)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	server := claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"})
 	legacyItem := `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `"}},"status":{"state":"Running","phase":"Running"}}`
 	runner := &lifecycleRunner{outputs: []string{
 		legacyItem,
@@ -85,10 +76,7 @@ func TestReleaseDeleteRemovesDevboxClaimAndKeyAfterValidation(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	slug := "red"
 	name := core.LeaseProviderName(leaseID, slug)
-	server := releaseServer(cfg, leaseID, slug, name)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	server := claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"})
 	keys := devboxSecretKeys{PublicKey: "ssh-ed25519 AAA test", PrivateKey: "private\n"}
 	keyPath, err := persistDevboxKey(leaseID, keys)
 	if err != nil {
@@ -157,10 +145,7 @@ func TestReleaseDeleteKeepsLocalStateWhenKubectlMissing(t *testing.T) {
 	leaseID := "cbx_missingkubectl"
 	slug := "red"
 	name := core.LeaseProviderName(leaseID, slug)
-	server := releaseServer(cfg, leaseID, slug, name)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	server := claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"})
 	keyPath, err := persistDevboxKey(leaseID, devboxSecretKeys{PublicKey: "ssh-ed25519 AAA test", PrivateKey: "private\n"})
 	if err != nil {
 		t.Fatal(err)
@@ -193,10 +178,7 @@ func TestReleaseDeleteRemovesLocalStateWhenDevboxDisappearsAfterShutdown(t *test
 	leaseID := "cbx_shutdownrace"
 	slug := "red"
 	name := core.LeaseProviderName(leaseID, slug)
-	server := releaseServer(cfg, leaseID, slug, name)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	server := claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"})
 	keyPath, err := persistDevboxKey(leaseID, devboxSecretKeys{PublicKey: "ssh-ed25519 AAA test", PrivateKey: "private\n"})
 	if err != nil {
 		t.Fatal(err)
@@ -229,18 +211,18 @@ func TestReleaseDeleteRemovesLocalStateWhenDevboxNotFound(t *testing.T) {
 	leaseID := "cbx_missingdevbox"
 	slug := "red"
 	name := core.LeaseProviderName(leaseID, slug)
-	server := releaseServer(cfg, leaseID, slug, name)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	server := claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"})
 	keyPath, err := persistDevboxKey(leaseID, devboxSecretKeys{PublicKey: "ssh-ed25519 AAA test", PrivateKey: "private\n"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	runner := &lifecycleRunner{
-		stderrs:  []string{`Error from server (NotFound): devboxes.devbox.sealos.io "` + name + `" not found`},
-		exitCode: []int{1},
-		errors:   []error{errors.New("exit status 1")},
+		stderrs: []string{
+			`Error from server (NotFound): devboxes.devbox.sealos.io "` + name + `" not found`,
+			`Error from server (NotFound): devboxes.devbox.sealos.io "` + name + `" not found`,
+		},
+		exitCode: []int{1, 1},
+		errors:   []error{errors.New("exit status 1"), errors.New("exit status 1")},
 	}
 	backend := lifecycleBackend(cfg, runner)
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
@@ -261,22 +243,17 @@ func TestResolveReleaseOnlyAllowsDeleteCleanupWhenDevboxMissing(t *testing.T) {
 	leaseID := "cbx_missingresolve"
 	slug := "red"
 	name := core.LeaseProviderName(leaseID, slug)
-	server := releaseServer(cfg, leaseID, slug, name)
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"})
 	runner := &lifecycleRunner{
 		stderrs: []string{
 			`Error from server (NotFound): devboxes.devbox.sealos.io "` + name + `" not found`,
 			`Error from server (NotFound): devboxes.devbox.sealos.io "` + name + `" not found`,
+			`Error from server (NotFound): devboxes.devbox.sealos.io "` + name + `" not found`,
 		},
-		exitCode: []int{1, 1},
-		errors:   []error{errors.New("exit status 1"), errors.New("exit status 1")},
+		exitCode: []int{1, 1, 1},
+		errors:   []error{errors.New("exit status 1"), errors.New("exit status 1"), errors.New("exit status 1")},
 	}
 	backend := lifecycleBackend(cfg, runner)
-	if err := backend.claimLeaseForRepo(leaseID, slug, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}); err != nil {
-		t.Fatal(err)
-	}
 	keyPath, err := persistDevboxKey(leaseID, devboxSecretKeys{PublicKey: "ssh-ed25519 AAA test", PrivateKey: "private\n"})
 	if err != nil {
 		t.Fatal(err)
@@ -300,22 +277,98 @@ func TestResolveReleaseOnlyAllowsDeleteCleanupWhenDevboxMissing(t *testing.T) {
 }
 
 func TestReleaseRejectsIdentityMismatchBeforeMutation(t *testing.T) {
+	isolateSealosState(t)
 	cfg := lifecycleConfig()
 	leaseID := "cbx_123456abcdef"
 	name := core.LeaseProviderName(leaseID, "blue")
+	server := claimExactSealosTarget(t, cfg, leaseID, "blue", name, t.TempDir(), core.SSHTarget{})
 	runner := &lifecycleRunner{outputs: []string{
 		releaseDevboxJSON(cfg, "cbx_other000000", "blue", name),
 	}}
 	backend := lifecycleBackend(cfg, runner)
 	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
 		LeaseID: leaseID,
-		Server:  releaseServer(cfg, leaseID, "blue", name),
+		Server:  server,
 	}})
 	if err == nil || !strings.Contains(err.Error(), "lease identity changed") {
 		t.Fatalf("err=%v", err)
 	}
 	if len(runner.requests) != 1 {
 		t.Fatalf("identity mismatch mutated resource: %s", strings.Join(flattenArgs(runner.requests), " "))
+	}
+}
+
+func TestReleaseRejectsTransferredClaimSnapshotBeforeMutation(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_transferredstop"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	server := claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"})
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "new-owner.example.test", Port: "22"}, t.TempDir(), cfg.IdleTimeout, true); err != nil {
+		t.Fatal(err)
+	}
+	runner := &lifecycleRunner{outputs: []string{releaseDevboxJSON(cfg, leaseID, slug, name)}}
+	backend := lifecycleBackend(cfg, runner)
+
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("ReleaseLease error=%v", err)
+	}
+	if got := strings.Join(flattenArgs(runner.requests), " "); strings.Contains(got, " patch ") || strings.Contains(got, " delete ") {
+		t.Fatalf("transferred claim mutated provider: %s", got)
+	}
+}
+
+func TestReleaseAllowsSameOwnerClaimRefresh(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_refreshedstop"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	server := claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "old.example.test", Port: "22"})
+	expected, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshed := server
+	refreshed.Labels = make(map[string]string, len(server.Labels))
+	for key, value := range server.Labels {
+		refreshed.Labels[key] = value
+	}
+	refreshed.Labels["last_touched_at"] = "1777777777"
+	if _, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, refreshed, core.SSHTarget{Host: "new.example.test", Port: "2222"}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &lifecycleRunner{outputs: []string{releaseDevboxJSON(cfg, leaseID, slug, name), "patched"}}
+	backend := lifecycleBackend(cfg, runner)
+
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(flattenArgs(runner.requests), " "); !strings.Contains(got, "patch "+devboxResource+"/"+name) {
+		t.Fatalf("same-owner refreshed claim was not released: %s", got)
+	}
+}
+
+func TestReleaseRejectsUnclaimedTargetBeforeProviderRead(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_unclaimedstop"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	runner := &lifecycleRunner{}
+	backend := lifecycleBackend(cfg, runner)
+
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: leaseID,
+		Server:  releaseServer(cfg, leaseID, slug, name),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "no exact resource-bound local claim") {
+		t.Fatalf("ReleaseLease error=%v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("unclaimed release read or mutated provider state: %#v", runner.requests)
 	}
 }
 

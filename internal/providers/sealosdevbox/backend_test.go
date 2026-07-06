@@ -95,6 +95,18 @@ type lifecycleRunner struct {
 	errors   []error
 }
 
+type hookLifecycleRunner struct {
+	inner  *lifecycleRunner
+	before func(core.LocalCommandRequest)
+}
+
+func (r *hookLifecycleRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if r.before != nil {
+		r.before(req)
+	}
+	return r.inner.Run(ctx, req)
+}
+
 type stderrStreamingRunner struct {
 	message string
 }
@@ -171,6 +183,25 @@ func isolateSealosState(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("XDG_STATE_HOME", dir)
 	t.Setenv("HOME", dir)
+}
+
+func claimExactSealosTarget(t *testing.T, cfg core.Config, leaseID, slug, name, repoRoot string, target core.SSHTarget) core.Server {
+	t.Helper()
+	backend := lifecycleBackend(cfg, &lifecycleRunner{})
+	server := releaseServer(cfg, leaseID, slug, name)
+	previous, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.claimExactTarget(leaseID, slug, repoRoot, server, target, cfg.IdleTimeout, false, previous, exists); err != nil {
+		t.Fatal(err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return server
 }
 
 func TestRenderDevboxManifestStructured(t *testing.T) {
@@ -363,6 +394,19 @@ func TestAcquireCreatesManifestPersistsClaimAndKey(t *testing.T) {
 		secretJSON,
 	}}
 	backend := lifecycleBackend(cfg, runner)
+	backend.sshReady = func(_ context.Context, _ *core.SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+		claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !exists || claim.CloudID != devboxCloudID("team-a", name) {
+			t.Fatalf("acquire did not persist exact resource binding before readiness: %#v", claim)
+		}
+		if claim.SSHHost != "" || claim.SSHPort != 0 {
+			t.Fatalf("acquire published endpoint before readiness: %#v", claim)
+		}
+		return nil
+	}
 	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedLeaseID: leaseID, RequestedSlug: slug, Repo: core.Repo{Root: t.TempDir()}})
 	if err != nil {
 		t.Fatal(err)
@@ -409,6 +453,25 @@ func TestAcquireRefusesExistingDevboxCollisionWithoutMutation(t *testing.T) {
 	got := strings.Join(flattenArgs(runner.requests), " ")
 	if !strings.Contains(got, "create -f -") || strings.Contains(got, " delete ") || strings.Contains(got, " patch ") {
 		t.Fatalf("collision commands=%s", got)
+	}
+}
+
+func TestAcquireRejectsExistingClaimBeforeProviderMutation(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_existingclaim"
+	slug := "occupied"
+	name := core.LeaseProviderName(leaseID, slug)
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{})
+	runner := &lifecycleRunner{}
+	backend := lifecycleBackend(cfg, runner)
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedLeaseID: leaseID, RequestedSlug: slug, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "already has a local claim") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("existing claim reached provider: %#v", runner.requests)
 	}
 }
 
@@ -521,6 +584,37 @@ func TestAcquireOnAcquiredErrorRollsBackKeptDevbox(t *testing.T) {
 		t.Fatalf("Acquire error=%v", err)
 	}
 	assertPreconditionedDevboxDelete(t, cfg, runner, name)
+}
+
+func TestAcquireRollbackPreservesConcurrentlyAdoptedDevbox(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_concurrentadopt"
+	slug := "adopted"
+	name := core.LeaseProviderName(leaseID, slug)
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `"}},"status":{"state":"Running","phase":"Running"}}`
+	runner := &lifecycleRunner{outputs: []string{`{"items":[]}`, "created", devboxJSON}}
+	backend := lifecycleBackend(cfg, runner)
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    slug,
+		Repo:             core.Repo{Root: t.TempDir()},
+		OnAcquired: func(acquired core.LeaseTarget) error {
+			claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), acquired.SSH)
+			return errors.New("fail after concurrent adoption")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "fail after concurrent adoption") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	if got := strings.Join(flattenArgs(runner.requests), " "); strings.Contains(got, " delete ") {
+		t.Fatalf("rollback deleted concurrently adopted DevBox: %s", got)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || claim.CloudID != devboxCloudID("team-a", name) {
+		t.Fatalf("concurrent claim exists=%v err=%v claim=%#v", exists, err, claim)
+	}
 }
 
 func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
@@ -644,13 +738,15 @@ func TestStatusWaitRequiresSSHReadiness(t *testing.T) {
 }
 
 func TestResolveReleaseOnlySkipsMissingNodePortRoute(t *testing.T) {
+	isolateSealosState(t)
 	cfg := lifecycleConfig()
 	cfg.SealosDevbox.Network = networkNodePort
 	cfg.SealosDevbox.NodeHost = "node-1.example.test"
 	leaseID := "cbx_nodeportgone"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
-	item := `{"items":[{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}]}`
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{})
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
 	backend := lifecycleBackend(cfg, &lifecycleRunner{outputs: []string{item}})
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
@@ -661,6 +757,25 @@ func TestResolveReleaseOnlySkipsMissingNodePortRoute(t *testing.T) {
 	}
 	if lease.SSH.Host != "" || lease.SSH.Port != "" || lease.SSH.Key != "" {
 		t.Fatalf("release-only resolve should not require SSH route: %#v", lease.SSH)
+	}
+}
+
+func TestResolveReleaseOnlyAcceptsClaimedDevboxName(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_namedrelease"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{})
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	backend := lifecycleBackend(cfg, &lifecycleRunner{outputs: []string{item}})
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: name, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.Name != name {
+		t.Fatalf("lease=%#v", lease)
 	}
 }
 
@@ -690,6 +805,62 @@ func TestResolveReadOnlyDoesNotPersistSecretKey(t *testing.T) {
 	}
 }
 
+func TestResolveReleaseOnlyRejectsUnclaimedBeforeProviderRead(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	runner := &lifecycleRunner{}
+	backend := lifecycleBackend(cfg, runner)
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_unclaimed000", ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "no exact resource-bound local claim") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("unclaimed release read or mutated provider state: %#v", runner.requests)
+	}
+}
+
+func TestResolveMutableReuseRequiresExplicitReclaim(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_unclaimedreuse"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	item := `{"items":[{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `"}},"status":{"state":"Paused","phase":"Paused"}}]}`
+	runner := &lifecycleRunner{outputs: []string{item}}
+	backend := lifecycleBackend(cfg, runner)
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "retry a mutable reuse command with --reclaim") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	commands := strings.Join(flattenArgs(runner.requests), " ")
+	if strings.Contains(commands, " patch ") || strings.Contains(commands, "secret/") {
+		t.Fatalf("unclaimed reuse mutated resource or read Secret: %s", commands)
+	}
+}
+
+func TestResolveReclaimRejectsResourceBoundToAnotherLease(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	name := "shared-devbox"
+	claimExactSealosTarget(t, cfg, "cbx_existing000", "existing", name, t.TempDir(), core.SSHTarget{})
+	leaseID := "cbx_candidate000"
+	slug := "candidate"
+	item := `{"items":[{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `"}},"status":{"state":"Paused","phase":"Paused"}}]}`
+	runner := &lifecycleRunner{outputs: []string{item}}
+	backend := lifecycleBackend(cfg, runner)
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
+	if err == nil || !strings.Contains(err.Error(), "already bound to lease cbx_existing000") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	commands := strings.Join(flattenArgs(runner.requests), " ")
+	if strings.Contains(commands, " patch ") || strings.Contains(commands, "secret/") {
+		t.Fatalf("conflicting reclaim mutated resource or read Secret: %s", commands)
+	}
+}
+
 func TestResolveChecksRepoClaimBeforeResumeOrSecretRead(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()
@@ -697,9 +868,7 @@ func TestResolveChecksRepoClaimBeforeResumeOrSecretRead(t *testing.T) {
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
 	claimedRepo := t.TempDir()
-	if err := core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, sealosClaimScope(cfg), claimedRepo, cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, claimedRepo, core.SSHTarget{})
 	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused"}}`
 	runner := &lifecycleRunner{outputs: []string{pausedItem}}
 	backend := lifecycleBackend(cfg, runner)
@@ -732,7 +901,7 @@ func TestResolveRestoresClaimAfterPostClaimFailure(t *testing.T) {
 	}}
 	backend := lifecycleBackend(cfg, runner)
 
-	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
 	if err == nil || !strings.Contains(err.Error(), "exact DevBox controller owner") {
 		t.Fatalf("Resolve error=%v", err)
 	}
@@ -747,12 +916,14 @@ func TestResolveResumesPausedDevboxBeforeSSHReuse(t *testing.T) {
 	leaseID := "cbx_resume12345"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
+	repoRoot := t.TempDir()
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, repoRoot, core.SSHTarget{})
 	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused"}}`
 	runningItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
 	runningItem = withDevboxUID(runningItem)
 	secretJSON := ownedDevboxSecretJSON(name, "team-a", "uid-test", "ssh-ed25519 AAA test", "private", false)
 	runner := &lifecycleRunner{outputs: []string{
-		`{"items":[` + pausedItem + `]}`,
+		pausedItem,
 		"patched",
 		runningItem,
 		secretJSON,
@@ -766,7 +937,7 @@ func TestResolveResumesPausedDevboxBeforeSSHReuse(t *testing.T) {
 		}
 		return nil
 	}
-	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repoRoot}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,12 +970,14 @@ func TestResolveResumesPausedNodePortDevboxBeforeRouteLookup(t *testing.T) {
 	leaseID := "cbx_nodeportres"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
+	repoRoot := t.TempDir()
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, repoRoot, core.SSHTarget{})
 	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused"}}`
 	runningItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","network":{"type":"NodePort","nodePort":32022}}}`
 	runningItem = withDevboxUID(runningItem)
 	secretJSON := ownedDevboxSecretJSON(name, "team-a", "uid-test", "ssh-ed25519 AAA test", "private", false)
 	runner := &lifecycleRunner{outputs: []string{
-		`{"items":[` + pausedItem + `]}`,
+		pausedItem,
 		"patched",
 		runningItem,
 		secretJSON,
@@ -816,7 +989,7 @@ func TestResolveResumesPausedNodePortDevboxBeforeRouteLookup(t *testing.T) {
 		}
 		return nil
 	}
-	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repoRoot}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -858,14 +1031,16 @@ func TestResolveRejectsSecretOwnedByAnotherDevbox(t *testing.T) {
 	leaseID := "cbx_wrongowner"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
+	repoRoot := t.TempDir()
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, repoRoot, core.SSHTarget{})
 	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
 	item = withDevboxUID(item)
 	runner := &lifecycleRunner{outputs: []string{
-		`{"items":[` + item + `]}`,
+		item,
 		ownedDevboxSecretJSON(name, "team-a", "uid-other", "ssh-ed25519 AAA test", "private", false),
 	}}
 	backend := lifecycleBackend(cfg, runner)
-	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repoRoot}})
 	if err == nil || !strings.Contains(err.Error(), "exact DevBox controller owner") {
 		t.Fatalf("Resolve error=%v", err)
 	}
@@ -876,19 +1051,65 @@ func TestResolveRejectsSecretOwnedByAnotherDevbox(t *testing.T) {
 	}
 }
 
+func TestResolveDoesNotReplaceKeyAfterClaimTransfer(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_resolvekeyrace"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	repoRoot := t.TempDir()
+	server := claimExactSealosTarget(t, cfg, leaseID, slug, name, repoRoot, core.SSHTarget{Host: "winner.example.test", Port: "22"})
+	keyPath, err := persistDevboxKey(leaseID, devboxSecretKeys{PublicKey: "ssh-ed25519 AAA winner", PrivateKey: "winner-private\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	inner := &lifecycleRunner{outputs: []string{
+		item,
+		ownedDevboxSecretJSON(name, "team-a", "uid-test", "ssh-ed25519 AAA loser", "loser-private\n", false),
+	}}
+	transferred := false
+	backend := lifecycleBackend(cfg, inner)
+	backend.rt.Exec = &hookLifecycleRunner{inner: inner, before: func(req core.LocalCommandRequest) {
+		if transferred || !strings.Contains(commandString(req), "get secret/") {
+			return
+		}
+		transferred = true
+		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "winner.example.test", Port: "22"}, t.TempDir(), cfg.IdleTimeout, true); err != nil {
+			t.Fatal(err)
+		}
+	}}
+
+	_, err = backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repoRoot}})
+	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if !transferred {
+		t.Fatal("test did not transfer claim during Secret read")
+	}
+	privateKey, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(privateKey) != "winner-private\n" {
+		t.Fatalf("stale resolve replaced winning key: %q", privateKey)
+	}
+}
+
 func TestTouchRefreshesRemoteLeaseAnnotationsWithResourceVersion(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()
 	leaseID := "cbx_touch123456"
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
+	claimedServer := claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "ssh.sealos.example.test", User: "devbox", Port: "2222", Key: "/tmp/key"})
 	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-touch","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a","crabbox.dev/last_touched_at":"2026-06-01T00:00:00Z"}},"status":{"state":"Running","phase":"Running"}}`
-	runner := &lifecycleRunner{outputs: []string{`{"items":[` + item + `]}`, "patched"}}
+	runner := &lifecycleRunner{outputs: []string{item, "patched"}}
 	backend := lifecycleBackend(cfg, runner)
 	server, err := backend.Touch(context.Background(), core.TouchRequest{
 		Lease: core.LeaseTarget{
 			LeaseID: leaseID,
-			Server:  core.Server{Labels: map[string]string{"slug": slug}},
+			Server:  claimedServer,
 			SSH:     core.SSHTarget{Host: "ssh.sealos.example.test", User: "devbox", Port: "2222", Key: "/tmp/key"},
 		},
 		State: "running",
@@ -899,6 +1120,9 @@ func TestTouchRefreshesRemoteLeaseAnnotationsWithResourceVersion(t *testing.T) {
 	wantTouched := strconv.FormatInt(backend.now().Unix(), 10)
 	if server.Labels["last_touched_at"] != wantTouched {
 		t.Fatalf("last_touched_at=%q", server.Labels["last_touched_at"])
+	}
+	if claim, exists, set := core.ServerLeaseClaimSnapshot(server); !set || !exists || claim.Labels["last_touched_at"] != wantTouched {
+		t.Fatalf("touch claim snapshot set=%v exists=%v claim=%#v", set, exists, claim)
 	}
 	if len(runner.requests) != 2 || !strings.Contains(commandString(runner.requests[1]), "patch "+devboxResource+"/"+name) {
 		t.Fatalf("requests=%#v", runner.requests)
@@ -932,6 +1156,29 @@ func TestTouchRefreshesRemoteLeaseAnnotationsWithResourceVersion(t *testing.T) {
 	}
 }
 
+func TestTouchRejectsTransferredClaimSnapshotBeforeMutation(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_transferredtouch"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	server := claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "old.example.test", Port: "22"})
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "new.example.test", Port: "22"}, t.TempDir(), cfg.IdleTimeout, true); err != nil {
+		t.Fatal(err)
+	}
+	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","uid":"uid-test","resourceVersion":"rv-touch","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
+	runner := &lifecycleRunner{outputs: []string{item}}
+	backend := lifecycleBackend(cfg, runner)
+
+	_, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, State: "running"})
+	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("Touch error=%v", err)
+	}
+	if got := strings.Join(flattenArgs(runner.requests), " "); strings.Contains(got, " patch ") {
+		t.Fatalf("transferred touch mutated provider: %s", got)
+	}
+}
+
 func TestResolveClaimRejectsDevboxOutsideActiveScope(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()
@@ -939,9 +1186,7 @@ func TestResolveClaimRejectsDevboxOutsideActiveScope(t *testing.T) {
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
 	backend := lifecycleBackend(cfg, &lifecycleRunner{})
-	if err := backend.claimLeaseForRepo(leaseID, slug, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{})
 	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"other-scope","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
 	backend.rt.Exec = &lifecycleRunner{outputs: []string{item}}
 	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
@@ -957,9 +1202,7 @@ func TestResolveClaimRejectsDevboxMissingProviderScope(t *testing.T) {
 	slug := "blue"
 	name := core.LeaseProviderName(leaseID, slug)
 	backend := lifecycleBackend(cfg, &lifecycleRunner{})
-	if err := backend.claimLeaseForRepo(leaseID, slug, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{})
 	item := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running"}}`
 	backend.rt.Exec = &lifecycleRunner{outputs: []string{item}}
 	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})

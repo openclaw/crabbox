@@ -12,11 +12,14 @@ import (
 )
 
 func TestCleanupDryRunSkipsWrongScopeAndDoesNotMutate(t *testing.T) {
+	isolateSealosState(t)
 	cfg := lifecycleConfig()
+	claimExactSealosTarget(t, cfg, "cbx_owned000000", "owned", "devbox-owned", t.TempDir(), core.SSHTarget{})
 	owned := cleanupDevboxJSON(cfg, "cbx_owned000000", "owned", "devbox-owned", sealosClaimScopeID(cfg), "2026-06-24T00:00:00Z")
+	unclaimed := cleanupDevboxJSON(cfg, "cbx_unclaimed00", "unclaimed", "devbox-unclaimed", sealosClaimScopeID(cfg), "2026-06-24T00:00:00Z")
 	wrongScope := cleanupDevboxJSON(cfg, "cbx_wrong000000", "wrong", "devbox-wrong", "other-scope", "2026-06-24T00:00:00Z")
 	notOwned := `{"metadata":{"name":"devbox-user","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"dashboard"},"annotations":{}},"status":{"state":"Shutdown"}}`
-	runner := &lifecycleRunner{outputs: []string{`{"items":[` + owned + `,` + wrongScope + `,` + notOwned + `]}`}}
+	runner := &lifecycleRunner{outputs: []string{`{"items":[` + owned + `,` + unclaimed + `,` + wrongScope + `,` + notOwned + `]}`}}
 	var stdout, stderr bytes.Buffer
 	backend := lifecycleBackend(cfg, runner)
 	backend.rt.Stdout = &stdout
@@ -27,10 +30,10 @@ func TestCleanupDryRunSkipsWrongScopeAndDoesNotMutate(t *testing.T) {
 	if !strings.Contains(stdout.String(), "dry_run=true") || !strings.Contains(stdout.String(), "devbox-owned") {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
-	if strings.Contains(stdout.String(), "devbox-wrong") || strings.Contains(stdout.String(), "devbox-user") {
+	if strings.Contains(stdout.String(), "devbox-unclaimed") || strings.Contains(stdout.String(), "devbox-wrong") || strings.Contains(stdout.String(), "devbox-user") {
 		t.Fatalf("dry-run included wrong resource: %q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "outside active provider scope") {
+	if !strings.Contains(stderr.String(), "missing exact local claim") || !strings.Contains(stderr.String(), "outside active provider scope") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 	for _, req := range runner.requests {
@@ -46,10 +49,7 @@ func TestCleanupDeletesExpiredOwnedDevboxAndRemovesClaimAndKey(t *testing.T) {
 	leaseID := "cbx_owned000000"
 	slug := "owned"
 	name := "devbox-owned"
-	server := releaseServer(cfg, leaseID, slug, name)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"})
 	keyPath, err := persistDevboxKey(leaseID, devboxSecretKeys{PublicKey: "ssh-ed25519 AAA test", PrivateKey: "private\n"})
 	if err != nil {
 		t.Fatal(err)
@@ -80,10 +80,12 @@ func TestCleanupDeletesExpiredOwnedDevboxAndRemovesClaimAndKey(t *testing.T) {
 }
 
 func TestCleanupRefusesResourceWhoseScopeChangesBeforeDelete(t *testing.T) {
+	isolateSealosState(t)
 	cfg := lifecycleConfig()
 	leaseID := "cbx_scopechange00"
 	slug := "scope-change"
 	name := "devbox-scope-change"
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{})
 	owned := cleanupDevboxJSON(cfg, leaseID, slug, name, sealosClaimScopeID(cfg), "2026-06-24T00:00:00Z")
 	changed := cleanupDevboxJSON(cfg, leaseID, slug, name, "other-scope", "2026-06-24T00:00:00Z")
 	runner := &lifecycleRunner{outputs: []string{`{"items":[` + owned + `]}`, changed}}
@@ -110,10 +112,13 @@ func TestCleanupRemovesOnlySameScopeStaleClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &lifecycleRunner{
-		outputs:  []string{`{"items":[]}`, ""},
-		stderrs:  []string{"", `Error from server (NotFound): devboxes.devbox.sealos.io "devbox-stale" not found`},
-		exitCode: []int{0, 1},
-		errors:   []error{nil, errors.New("exit status 1")},
+		outputs: []string{`{"items":[]}`, "", ""},
+		stderrs: []string{"",
+			`Error from server (NotFound): devboxes.devbox.sealos.io "devbox-stale" not found`,
+			`Error from server (NotFound): devboxes.devbox.sealos.io "devbox-stale" not found`,
+		},
+		exitCode: []int{0, 1, 1},
+		errors:   []error{nil, errors.New("exit status 1"), errors.New("exit status 1")},
 	}
 	var stdout bytes.Buffer
 	backend := lifecycleBackend(cfg, runner)
@@ -138,10 +143,7 @@ func TestCleanupPreservesClaimWhenRemoteIdentityDrifts(t *testing.T) {
 	leaseID := "cbx_drift000000"
 	slug := "drift"
 	name := "devbox-drift"
-	server := releaseServer(cfg, leaseID, slug, name)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
-		t.Fatal(err)
-	}
+	claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{})
 	drifted := cleanupDevboxJSON(cfg, leaseID, slug, name, "other-scope", "2026-06-24T00:00:00Z")
 	runner := &lifecycleRunner{outputs: []string{`{"items":[` + drifted + `]}`}}
 	var stdout bytes.Buffer

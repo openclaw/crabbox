@@ -17,9 +17,19 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
 		return err
 	}
+	claim, err := b.revalidateClaimSnapshot(req.Lease.Server, req.Lease.LeaseID)
+	if err != nil {
+		return err
+	}
 	name := releaseDevboxName(req.Lease, b.cfg)
 	if name == "" {
 		return core.Exit(2, "sealos-devbox release requires a DevBox name")
+	}
+	if err := b.validateStoredClaimResource(claim, name); err != nil {
+		return err
+	}
+	if got := strings.TrimSpace(req.Lease.Server.DisplayID()); got != "" && got != strings.TrimSpace(claim.CloudID) {
+		return core.Exit(4, "Sealos DevBox %q release resource does not match bound claim %s", name, claim.CloudID)
 	}
 	expectedSlug := ""
 	if req.Lease.Server.Labels != nil {
@@ -28,8 +38,17 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	item, name, leaseID, slug, err := b.validateDevboxIdentity(ctx, name, req.Lease.LeaseID, expectedSlug)
 	if err != nil {
 		if b.deleteOnRelease(req.Lease) && kubernetesObjectNotFound(err) && req.Lease.LeaseID != "" {
-			core.RemoveLeaseClaim(req.Lease.LeaseID)
-			core.RemoveStoredTestboxKey(req.Lease.LeaseID)
+			if err := core.RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
+				if _, err := b.getDevbox(ctx, name); err == nil {
+					return core.Exit(4, "refusing to remove Sealos claim %s after DevBox %q reappeared", req.Lease.LeaseID, name)
+				} else if !kubernetesObjectNotFound(err) {
+					return err
+				}
+				core.RemoveStoredTestboxKey(req.Lease.LeaseID)
+				return nil
+			}); err != nil {
+				return err
+			}
 			return nil
 		}
 		return err
@@ -37,51 +56,51 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if !b.itemMatchesScope(item) {
 		return core.Exit(4, "Sealos DevBox %q is outside the active provider scope", name)
 	}
+	if err := b.validateClaimBinding(claim, item); err != nil {
+		return err
+	}
 	server := b.serverFromDevbox(item)
 	server.Labels["lease"] = leaseID
 	server.Labels["slug"] = slug
 	if b.deleteOnRelease(req.Lease) {
-		if err := b.patchDevboxState(ctx, name, item.Metadata.ResourceVersion, devboxStateShutdown, nil); err != nil {
-			return err
-		}
-		item, _, _, _, err = b.validateDevboxIdentity(ctx, name, leaseID, slug)
-		if err != nil {
-			if kubernetesObjectNotFound(err) {
-				core.RemoveLeaseClaim(leaseID)
-				core.RemoveStoredTestboxKey(leaseID)
-				return nil
+		action := func() error {
+			if err := b.patchDevboxState(ctx, name, item.Metadata.ResourceVersion, devboxStateShutdown, nil); err != nil {
+				return err
 			}
+			validated, _, _, _, err := b.validateDevboxIdentity(ctx, name, leaseID, slug)
+			if err != nil {
+				if kubernetesObjectNotFound(err) {
+					core.RemoveStoredTestboxKey(leaseID)
+					return nil
+				}
+				return err
+			}
+			if !b.itemMatchesScope(validated) {
+				return core.Exit(4, "refusing to delete Sealos DevBox %q after its provider scope changed", name)
+			}
+			if err := b.validateClaimBinding(claim, validated); err != nil {
+				return err
+			}
+			if err := b.deleteDevbox(ctx, validated); err != nil {
+				return err
+			}
+			core.RemoveStoredTestboxKey(leaseID)
+			return nil
+		}
+		if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, action); err != nil {
 			return err
 		}
-		if !b.itemMatchesScope(item) {
-			return core.Exit(4, "refusing to delete Sealos DevBox %q after its provider scope changed", name)
-		}
-		if err := b.deleteDevbox(ctx, item); err != nil {
-			return err
-		}
-		core.RemoveLeaseClaim(leaseID)
-		core.RemoveStoredTestboxKey(leaseID)
 		return nil
 	}
 	server.Status = "paused"
 	server.Labels["state"] = "paused"
 	server.Labels["release"] = "pause"
 	annotations := annotationsFromLeaseLabels(server.Labels)
-	claim, claimOK, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
-	if err != nil {
-		return err
-	}
 	action := func() error {
 		return b.patchDevboxState(ctx, name, item.Metadata.ResourceVersion, devboxStatePaused, annotations)
 	}
-	if claimOK {
-		_, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, core.SSHTarget{}, action)
-		return err
-	}
-	if err := action(); err != nil {
-		return err
-	}
-	return core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{})
+	_, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, core.SSHTarget{}, action)
+	return err
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {

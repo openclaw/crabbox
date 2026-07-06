@@ -105,6 +105,16 @@ func persistDevboxKey(leaseID string, keys devboxSecretKeys) (string, error) {
 	return path, nil
 }
 
+func persistDevboxKeyIfClaimUnchanged(leaseID string, expected core.LeaseClaim, server core.Server, keys devboxSecretKeys) (core.LeaseClaim, string, error) {
+	var keyPath string
+	updated, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, server, core.SSHTarget{}, func() error {
+		var persistErr error
+		keyPath, persistErr = persistDevboxKey(leaseID, keys)
+		return persistErr
+	})
+	return updated, keyPath, err
+}
+
 func readExistingDevboxKey(path string) ([]byte, os.FileMode, bool, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {

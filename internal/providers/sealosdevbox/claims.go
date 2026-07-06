@@ -130,6 +130,131 @@ func (b *backend) claimMatchesScope(claim core.LeaseClaim) bool {
 	return claim.Provider == providerName && strings.TrimSpace(claim.ProviderScope) == b.claimScope()
 }
 
+func (b *backend) validateClaimBinding(claim core.LeaseClaim, item devboxItem) error {
+	name, leaseID, slug, err := identityFromDevbox(item, strings.TrimSpace(item.Metadata.Name))
+	if err != nil {
+		return err
+	}
+	if err := b.validateStoredClaimResource(claim, name); err != nil {
+		return err
+	}
+	if claim.LeaseID != leaseID {
+		return core.Exit(4, "Sealos DevBox %q claim lease mismatch: expected %s, found %s", name, leaseID, core.Blank(claim.LeaseID, "<empty>"))
+	}
+	if core.NormalizeLeaseSlug(claim.Slug) != slug {
+		return core.Exit(4, "Sealos DevBox %q claim slug mismatch: expected %s, found %s", name, slug, core.Blank(claim.Slug, "<empty>"))
+	}
+	return nil
+}
+
+func (b *backend) validateStoredClaimResource(claim core.LeaseClaim, name string) error {
+	name = strings.TrimSpace(name)
+	if !b.claimMatchesScope(claim) {
+		return core.Exit(4, "Sealos DevBox %q claim is outside the active provider scope", name)
+	}
+	if strings.TrimSpace(claim.LeaseID) == "" || core.NormalizeLeaseSlug(claim.Slug) == "" {
+		return unclaimedDevboxError(name)
+	}
+	wantCloudID := devboxCloudID(strings.TrimSpace(b.cfg.SealosDevbox.Namespace), name)
+	if strings.TrimSpace(claim.CloudID) != wantCloudID {
+		return unclaimedDevboxError(name)
+	}
+	return nil
+}
+
+func (b *backend) exactClaimForItem(item devboxItem) (core.LeaseClaim, error) {
+	leaseID := strings.TrimSpace(item.Metadata.Labels[leaseIDLabel])
+	if leaseID == "" {
+		return core.LeaseClaim{}, core.Exit(4, "Sealos DevBox %q is missing its lease identity", item.Metadata.Name)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if !exists {
+		return core.LeaseClaim{}, unclaimedDevboxError(item.Metadata.Name)
+	}
+	if err := b.validateClaimBinding(claim, item); err != nil {
+		return core.LeaseClaim{}, err
+	}
+	return claim, nil
+}
+
+func (b *backend) revalidateClaimSnapshot(server core.Server, leaseID string) (core.LeaseClaim, error) {
+	expected, expectedExists, snapshotSet := core.ServerLeaseClaimSnapshot(server)
+	if !snapshotSet || !expectedExists || expected.LeaseID != leaseID {
+		return core.LeaseClaim{}, unclaimedDevboxError(leaseID)
+	}
+	current, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if !exists || !sameSealosClaimOwnership(expected, current) {
+		return core.LeaseClaim{}, core.Exit(2, "Sealos lease %s claim changed; retry", leaseID)
+	}
+	return current, nil
+}
+
+func sameSealosClaimOwnership(left, right core.LeaseClaim) bool {
+	return left.LeaseID == right.LeaseID &&
+		left.Slug == right.Slug &&
+		left.Provider == right.Provider &&
+		left.CloudID == right.CloudID &&
+		left.ProviderScope == right.ProviderScope &&
+		left.RepoRoot == right.RepoRoot
+}
+
+func (b *backend) validateClaimAdoption(claim core.LeaseClaim, exists bool, item devboxItem) error {
+	name, leaseID, slug, err := identityFromDevbox(item, strings.TrimSpace(item.Metadata.Name))
+	if err != nil {
+		return err
+	}
+	namespace := core.Blank(strings.TrimSpace(item.Metadata.Namespace), strings.TrimSpace(b.cfg.SealosDevbox.Namespace))
+	wantCloudID := devboxCloudID(namespace, name)
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return err
+	}
+	for _, candidate := range claims {
+		if candidate.LeaseID == leaseID || !b.claimMatchesScope(candidate) {
+			continue
+		}
+		if strings.TrimSpace(candidate.CloudID) == wantCloudID {
+			return core.Exit(4, "refusing to bind Sealos resource %s to lease %s; it is already bound to lease %s", wantCloudID, leaseID, candidate.LeaseID)
+		}
+	}
+	if !exists {
+		return nil
+	}
+	if provider := strings.TrimSpace(claim.Provider); provider != "" && provider != providerName {
+		return core.Exit(4, "refusing to retarget lease %s from provider %s to %s", leaseID, provider, providerName)
+	}
+	if scope := strings.TrimSpace(claim.ProviderScope); scope != "" && scope != b.claimScope() {
+		return core.Exit(4, "refusing to retarget lease %s from another Sealos provider scope", leaseID)
+	}
+	if claim.LeaseID != "" && claim.LeaseID != leaseID {
+		return core.Exit(4, "refusing to retarget Sealos claim %s to lease %s", claim.LeaseID, leaseID)
+	}
+	if claimSlug := core.NormalizeLeaseSlug(claim.Slug); claimSlug != "" && claimSlug != slug {
+		return core.Exit(4, "refusing to retarget Sealos lease %s from slug %s to %s", leaseID, claimSlug, slug)
+	}
+	if cloudID := strings.TrimSpace(claim.CloudID); cloudID != "" && cloudID != wantCloudID {
+		return core.Exit(4, "refusing to retarget Sealos lease %s from resource %s to %s", leaseID, cloudID, wantCloudID)
+	}
+	return nil
+}
+
+func (b *backend) claimExactTarget(leaseID, slug, repoRoot string, server core.Server, target core.SSHTarget, idleTimeout time.Duration, reclaim bool, expected core.LeaseClaim, expectedExists bool) (core.LeaseClaim, error) {
+	if strings.TrimSpace(repoRoot) == "" {
+		return core.ClaimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug, b.cfg, b.claimScope(), server, target, idleTimeout, expected, expectedExists)
+	}
+	return core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug, b.cfg, b.claimScope(), server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
+func unclaimedDevboxError(identifier string) error {
+	return core.Exit(2, "Sealos DevBox %q has no exact resource-bound local claim; retry a mutable reuse command with --reclaim to adopt it", identifier)
+}
+
 func (b *backend) claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, b.claimScope(), repoRoot, idleTimeout, reclaim)
 }
@@ -189,7 +314,10 @@ func (b *backend) resolveClaim(identifier string) (core.LeaseClaim, bool, error)
 		if !b.claimMatchesScope(claim) {
 			continue
 		}
-		if claim.LeaseID == identifier || (slug != "" && core.NormalizeLeaseSlug(claim.Slug) == slug) || claim.CloudID == identifier {
+		if claim.LeaseID == identifier ||
+			(slug != "" && core.NormalizeLeaseSlug(claim.Slug) == slug) ||
+			claim.CloudID == identifier ||
+			devboxNameFromClaim(claim, b.cfg) == identifier {
 			return claim, true, nil
 		}
 	}

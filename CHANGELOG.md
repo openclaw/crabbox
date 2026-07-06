@@ -16,7 +16,7 @@
 
 ### Added
 
-- Added Sealos DevBox Linux SSH leases through the Kubernetes CRD with exact scope-bound claims, Secret-backed SSH routing, conflict-safe creation, and guarded lifecycle cleanup. Thanks @coygeek.
+- Added Sealos DevBox Linux SSH leases through the Kubernetes CRD with exact provider/resource-bound claims, conflict-safe explicit `--reclaim` adoption, claim-locked release and cleanup, controller-owned Secret SSH routing, and guarded zero-residue lifecycle proof. Thanks @coygeek.
 
 ### Changed
 

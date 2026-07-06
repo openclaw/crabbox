@@ -147,12 +147,15 @@ func TestResolveWaitsForSSHBeforePersistingEndpoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if exists && (claim.SSHHost != "" || claim.SSHPort != 0) {
+		if !exists || claim.CloudID != devboxCloudID("team-a", name) || claim.ProviderScope != sealosClaimScope(cfg) {
+			t.Fatalf("reclaim did not bind exact resource before SSH wait: %#v", claim)
+		}
+		if claim.SSHHost != "" || claim.SSHPort != 0 {
 			t.Fatalf("endpoint persisted before SSH wait: %#v", claim)
 		}
 		return nil
 	}
-	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
 	if err != nil {
 		t.Fatal(err)
 	}

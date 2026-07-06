@@ -120,6 +120,13 @@ Commands that need SSH, such as `run` and `ssh`, resolve the live DevBox,
 refresh the route and key, wait for SSH, and then enter the normal Crabbox SSH
 runner.
 
+Read-only discovery may report a correctly scoped DevBox without local state.
+Mutable reuse requires a local claim bound to the exact provider scope,
+namespace/name resource, lease ID, and slug. Adopt an unclaimed or legacy
+DevBox explicitly by rerunning `run` or `ssh` with `--reclaim`; adoption fails
+if another claim already binds that resource. `stop` and `cleanup` never adopt
+resources implicitly.
+
 ## SSH
 
 `SSHGate` is the default and recommended network mode when the Sealos
@@ -174,8 +181,10 @@ Cleanup is scope-safe:
 - dry-run cleanup prints only Crabbox-owned candidates in the active
   kubeconfig/context/namespace/route scope;
 - resources outside the active provider scope are skipped with a reason;
+- resources without an exact resource-bound local claim are reported but never
+  mutated;
 - non-dry-run cleanup revalidates identity and uses UID/resource-version delete
-  preconditions;
+  preconditions while holding the unchanged claim lock;
 - stale local claims are removed only after a refreshed inventory proves the
   DevBox name and lease ID are absent; a present resource with drifted ownership
   metadata retains its recovery claim.

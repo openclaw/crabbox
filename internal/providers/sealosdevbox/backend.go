@@ -135,6 +135,11 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	if leaseID == "" {
 		leaseID = core.NewLeaseID()
 	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	} else if exists {
+		return core.LeaseTarget{}, core.Exit(2, "Sealos lease %s already has a local claim; reuse the existing lease or choose another lease ID", leaseID)
+	}
 	slug, err := b.allocateLeaseSlug(ctx, leaseID, req.RequestedSlug)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -167,6 +172,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	}
 	keyPersisted := false
 	claimPersisted := false
+	var persistedClaim core.LeaseClaim
 	forceRollback := false
 	defer func() {
 		if err == nil || (req.Keep && !forceRollback) || !applied {
@@ -174,24 +180,30 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		rollbackItem, _, rollbackLeaseID, rollbackSlug, rollbackErr := b.validateDevboxIdentity(cleanupCtx, name, leaseID, slug)
-		if rollbackErr != nil || !b.itemMatchesScope(rollbackItem) || rollbackLeaseID != leaseID || rollbackSlug != slug {
-			if b.rt.Stderr != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: refusing to delete unverified Sealos DevBox %s after acquire failure for lease %s: %v\n", name, leaseID, rollbackErr)
+		cleanupAction := func() error {
+			rollbackItem, _, rollbackLeaseID, rollbackSlug, rollbackErr := b.validateDevboxIdentity(cleanupCtx, name, leaseID, slug)
+			if rollbackErr != nil || !b.itemMatchesScope(rollbackItem) || rollbackLeaseID != leaseID || rollbackSlug != slug {
+				return errors.Join(core.Exit(4, "refusing to delete unverified Sealos DevBox %s after acquire failure for lease %s", name, leaseID), rollbackErr)
 			}
-			return
-		}
-		if cleanupErr := b.deleteDevbox(cleanupCtx, rollbackItem); cleanupErr != nil {
-			if b.rt.Stderr != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: failed to delete Sealos DevBox %s after acquire failure for lease %s: %v\n", name, leaseID, cleanupErr)
+			if err := b.deleteDevbox(cleanupCtx, rollbackItem); err != nil {
+				return err
 			}
-			return
+			if keyPersisted {
+				core.RemoveStoredTestboxKey(leaseID)
+			}
+			return nil
 		}
+		var cleanupErr error
 		if claimPersisted {
-			core.RemoveLeaseClaim(leaseID)
+			cleanupErr = core.RemoveLeaseClaimIfUnchangedAfter(leaseID, persistedClaim, cleanupAction)
+		} else {
+			cleanupErr = core.CleanupLeaseClaimIfUnchangedAfter(leaseID, core.LeaseClaim{}, false, cleanupAction)
 		}
-		if keyPersisted {
-			core.RemoveStoredTestboxKey(leaseID)
+		if cleanupErr != nil {
+			if b.rt.Stderr != nil {
+				fmt.Fprintf(b.rt.Stderr, "warning: failed to roll back Sealos DevBox %s after acquire failure for lease %s: %v\n", name, leaseID, cleanupErr)
+			}
+			return
 		}
 	}()
 	item, err := b.waitForDevboxPrepared(ctx, name, bootstrapWaitTimeout(b.cfg))
@@ -213,6 +225,23 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 			return core.LeaseTarget{}, err
 		}
 	}
+	previousClaim, previousClaimExists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if err := b.validateClaimAdoption(previousClaim, previousClaimExists, item); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if previousClaimExists && !req.Reclaim {
+		if err := b.validateClaimBinding(previousClaim, item); err != nil {
+			return core.LeaseTarget{}, unclaimedDevboxError(name)
+		}
+	}
+	persistedClaim, err = b.claimExactTarget(leaseID, slug, req.Repo.Root, server, core.SSHTarget{}, b.cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	claimPersisted = true
 	secret, err := b.waitForDevboxSecret(ctx, item, bootstrapWaitTimeout(b.cfg))
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -221,30 +250,29 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	keyPath, err = persistDevboxKey(leaseID, keys)
+	var updatedClaim core.LeaseClaim
+	updatedClaim, keyPath, err = persistDevboxKeyIfClaimUnchanged(leaseID, persistedClaim, server, keys)
+	keyPersisted = keyPath != ""
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	keyPersisted = true
-	if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
-		return core.LeaseTarget{}, err
-	}
-	claimPersisted = true
+	persistedClaim = updatedClaim
 	if err := b.waitForSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
 		events, _ := b.listEvents(ctx, name)
 		return core.LeaseTarget{}, core.Exit(5, "%v; Sealos DevBox diagnostics: %s", err, devboxDiagnostics(item, events, nil))
 	}
-	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
+	updatedClaim, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, persistedClaim, server, target)
+	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	persistedClaim = updatedClaim
+	core.SetServerLeaseClaimSnapshot(&server, persistedClaim, true)
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (lease core.LeaseTarget, err error) {
 	if req.ReleaseOnly {
-		if lease, ok, err := b.resolveMissingClaimForRelease(ctx, req.ID); err != nil || ok {
-			return lease, err
-		}
+		return b.resolveClaimedReleaseTarget(ctx, req.ID)
 	}
 	item, _, leaseID, slug, err := b.resolveDevbox(ctx, req.ID)
 	if err != nil {
@@ -271,6 +299,23 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (lease c
 	}
 	var previousClaim, preflightClaim core.LeaseClaim
 	var previousClaimExists, rollbackClaim bool
+	previousClaim, previousClaimExists, err = core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if err := b.validateClaimAdoption(previousClaim, previousClaimExists, item); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if previousClaimExists {
+		if bindErr := b.validateClaimBinding(previousClaim, item); bindErr != nil && !req.Reclaim {
+			return core.LeaseTarget{}, bindErr
+		}
+	} else if !req.Reclaim {
+		return core.LeaseTarget{}, unclaimedDevboxError(item.Metadata.Name)
+	}
+	if req.Reclaim && strings.TrimSpace(req.Repo.Root) == "" {
+		return core.LeaseTarget{}, core.Exit(2, "Sealos DevBox %q cannot be reclaimed without a repository root", item.Metadata.Name)
+	}
 	defer func() {
 		if err == nil || !rollbackClaim {
 			return
@@ -280,15 +325,13 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (lease c
 		}
 	}()
 	if req.Repo.Root != "" {
-		previousClaim, previousClaimExists, err = core.ReadLeaseClaimWithPresence(leaseID)
-		if err != nil {
-			return core.LeaseTarget{}, err
-		}
-		preflightClaim, err = core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, providerName, b.claimScope(), "", req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+		preflightClaim, err = b.claimExactTarget(leaseID, slug, req.Repo.Root, server, core.SSHTarget{}, b.cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
 		rollbackClaim = true
+	} else {
+		preflightClaim = previousClaim
 	}
 	item, server, err = b.resumeDevboxIfPaused(ctx, item, server)
 	if err != nil {
@@ -305,10 +348,12 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (lease c
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	keyPath, err := persistDevboxKey(leaseID, keys)
+	var updatedClaim core.LeaseClaim
+	updatedClaim, keyPath, err := persistDevboxKeyIfClaimUnchanged(leaseID, preflightClaim, server, keys)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	preflightClaim = updatedClaim
 	target, err = b.sshTarget(item, keyPath, true)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -318,43 +363,49 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (lease c
 		return core.LeaseTarget{}, core.Exit(5, "%v; Sealos DevBox diagnostics: %s", err, devboxDiagnostics(item, events, nil))
 	}
 	if req.Repo.Root != "" {
-		if _, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, server, target); err != nil {
+		updatedClaim, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, server, target)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		preflightClaim = updatedClaim
 		rollbackClaim = false
 	}
+	core.SetServerLeaseClaimSnapshot(&server, preflightClaim, true)
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *backend) resolveMissingClaimForRelease(ctx context.Context, identifier string) (core.LeaseTarget, bool, error) {
+func (b *backend) resolveClaimedReleaseTarget(ctx context.Context, identifier string) (core.LeaseTarget, error) {
 	claim, ok, err := b.resolveClaim(identifier)
-	if err != nil || !ok {
-		return core.LeaseTarget{}, false, err
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if !ok {
+		return core.LeaseTarget{}, unclaimedDevboxError(identifier)
 	}
 	name := devboxNameFromClaim(claim, b.cfg)
 	if name == "" {
-		return core.LeaseTarget{}, false, nil
+		return core.LeaseTarget{}, unclaimedDevboxError(identifier)
+	}
+	if err := b.validateStoredClaimResource(claim, name); err != nil {
+		return core.LeaseTarget{}, err
 	}
 	if item, err := b.getDevbox(ctx, name); err != nil {
 		if kubernetesObjectNotFound(err) {
-			return core.LeaseTarget{Server: serverFromClaim(claim, b.cfg), LeaseID: claim.LeaseID}, true, nil
+			server := serverFromClaim(claim, b.cfg)
+			core.SetServerLeaseClaimSnapshot(&server, claim, true)
+			return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
 		}
-		return core.LeaseTarget{}, true, err
+		return core.LeaseTarget{}, err
 	} else {
-		actualName, leaseID, slug, err := identityFromDevbox(item, name)
-		if err != nil {
-			return core.LeaseTarget{}, true, err
-		}
-		if leaseID != claim.LeaseID {
-			return core.LeaseTarget{}, true, core.Exit(4, "Sealos DevBox %q lease identity changed: expected %s, found %s", actualName, claim.LeaseID, leaseID)
-		}
-		if core.NormalizeLeaseSlug(claim.Slug) != "" && slug != core.NormalizeLeaseSlug(claim.Slug) {
-			return core.LeaseTarget{}, true, core.Exit(4, "Sealos DevBox %q slug identity changed: expected %s, found %s", actualName, claim.Slug, slug)
-		}
 		if !b.itemMatchesScope(item) {
-			return core.LeaseTarget{}, true, core.Exit(4, "Sealos DevBox %q is outside the active provider scope", name)
+			return core.LeaseTarget{}, core.Exit(4, "Sealos DevBox %q is outside the active provider scope", name)
 		}
-		return core.LeaseTarget{Server: b.serverFromDevbox(item), LeaseID: claim.LeaseID}, true, nil
+		if err := b.validateClaimBinding(claim, item); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		server := b.serverFromDevbox(item)
+		core.SetServerLeaseClaimSnapshot(&server, claim, true)
+		return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
 	}
 }
 
@@ -393,26 +444,21 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	}
 	server := b.serverFromDevbox(item)
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.cfg, req.State, b.now())
-	action := func() error {
-		return b.patchDevboxAnnotations(ctx, name, item.Metadata.ResourceVersion, annotationsFromLeaseLabels(server.Labels))
-	}
-	claim, claimOK, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	claim, err := b.revalidateClaimSnapshot(req.Lease.Server, leaseID)
 	if err != nil {
 		return core.Server{}, err
 	}
-	if claimOK {
-		_, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, req.Lease.SSH, action)
-		if err != nil {
-			return core.Server{}, err
-		}
-		return server, nil
-	}
-	if err := action(); err != nil {
+	if err := b.validateClaimBinding(claim, item); err != nil {
 		return core.Server{}, err
 	}
-	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, req.Lease.SSH); err != nil {
+	action := func() error {
+		return b.patchDevboxAnnotations(ctx, name, item.Metadata.ResourceVersion, annotationsFromLeaseLabels(server.Labels))
+	}
+	updated, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, req.Lease.SSH, action)
+	if err != nil {
 		return core.Server{}, err
 	}
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 

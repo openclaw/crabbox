@@ -183,6 +183,7 @@ type claimMetadata struct {
 	setCacheVolumes       bool
 	cacheVolumes          []string
 	setEndpoint           bool
+	replaceEndpoint       bool
 	server                Server
 	target                SSHTarget
 	guard                 func(leaseClaim, bool) error
@@ -255,7 +256,19 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 			existing.CacheVolumes = append([]string(nil), metadata.cacheVolumes...)
 		}
 		if metadata.setEndpoint {
+			if metadata.replaceEndpoint {
+				clearLeaseClaimTailscaleFields(existing)
+				existing.BridgeURL = ""
+			}
 			applyLeaseClaimEndpoint(existing, metadata.server, metadata.target)
+			if metadata.replaceEndpoint {
+				existing.SSHHost = metadata.target.Host
+				if port, err := strconv.Atoi(strings.TrimSpace(metadata.target.Port)); err == nil && port > 0 {
+					existing.SSHPort = port
+				} else {
+					existing.SSHPort = 0
+				}
+			}
 		}
 		if metadata.result != nil {
 			*metadata.result = cloneLeaseClaim(*existing)
@@ -298,12 +311,26 @@ func claimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug string, cfg Config,
 }
 
 func claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	provider, _ := claimProviderDetailsForConfig(cfg)
+	return claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerClaimScope(provider, cfg), server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
+func claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, false)
+}
+
+func claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, true)
+}
+
+func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists, replaceEndpoint bool) (leaseClaim, error) {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
-	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 		setEndpoint:     true,
+		replaceEndpoint: replaceEndpoint,
 		server:          server,
 		target:          target,
 		guard:           unchangedLeaseClaimGuard(leaseID, expected, expectedExists),

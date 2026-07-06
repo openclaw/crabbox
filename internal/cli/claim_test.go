@@ -1014,6 +1014,33 @@ func TestClaimLeaseForRepoConfigIfUnchangedPreservesEndpoint(t *testing.T) {
 	}
 }
 
+func TestClaimLeaseTargetForRepoConfigScopeReplacingEndpointClearsPublishedRoute(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	leaseID := "cbx_replaceendpoint"
+	server := Server{
+		CloudID:  "team-a/devbox-one",
+		Provider: "external",
+		Labels:   map[string]string{"provider": "external", "slug": "blue", "state": "ready"},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "blue", cfg, server, SSHTarget{Host: "stale.example.test", Port: "2222"}, "/repo-a", time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+	expected, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("claim=%#v exists=%v err=%v", expected, exists, err)
+	}
+
+	updated, err := claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, "blue", cfg, "cluster-a", server, SSHTarget{}, "/repo-b", time.Hour, true, expected, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.RepoRoot != "/repo-b" || updated.ProviderScope != "cluster-a" || updated.SSHHost != "" || updated.SSHPort != 0 {
+		t.Fatalf("updated claim=%#v", updated)
+	}
+}
+
 func TestClaimLeaseForRepoProviderScopePondEndpointStoresInitialClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")
