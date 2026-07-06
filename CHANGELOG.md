@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Required direct Azure release and cleanup to hold an unchanged subscription-, resource-group-, VM-name-, immutable-VM-, lease-, slug-, and provider-key-bound local claim across deletion, with durable companion-resource identities for interruption-safe cleanup. Thanks @coygeek.
 - Required direct GCP release and cleanup to hold an unchanged project-, zone-, name-, numeric-instance-, lease-, slug-, and provider-key-bound local claim across deletion. Thanks @coygeek.
 - Prevented repository-defined External lifecycle commands from placing inherited `external.config` values on process arguments without an exact, trusted non-secret argv contract. Thanks @coygeek.
 - Prevented repository-controlled External SSH endpoint templates and adapter output from silently using ambient or operator-managed SSH credentials, with source-bound opt-ins for environment-derived fields and provider-returned destinations. Thanks @coygeek.
