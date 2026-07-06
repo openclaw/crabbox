@@ -162,24 +162,6 @@ func (b *backend) validateStoredClaimResource(claim core.LeaseClaim, name string
 	return nil
 }
 
-func (b *backend) exactClaimForItem(item devboxItem) (core.LeaseClaim, error) {
-	leaseID := strings.TrimSpace(item.Metadata.Labels[leaseIDLabel])
-	if leaseID == "" {
-		return core.LeaseClaim{}, core.Exit(4, "Sealos DevBox %q is missing its lease identity", item.Metadata.Name)
-	}
-	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
-	if err != nil {
-		return core.LeaseClaim{}, err
-	}
-	if !exists {
-		return core.LeaseClaim{}, unclaimedDevboxError(item.Metadata.Name)
-	}
-	if err := b.validateClaimBinding(claim, item); err != nil {
-		return core.LeaseClaim{}, err
-	}
-	return claim, nil
-}
-
 func (b *backend) revalidateClaimSnapshot(server core.Server, leaseID string) (core.LeaseClaim, error) {
 	expected, expectedExists, snapshotSet := core.ServerLeaseClaimSnapshot(server)
 	if !snapshotSet || !expectedExists || expected.LeaseID != leaseID {
@@ -253,10 +235,6 @@ func (b *backend) claimExactTarget(leaseID, slug, repoRoot string, server core.S
 
 func unclaimedDevboxError(identifier string) error {
 	return core.Exit(2, "Sealos DevBox %q has no exact resource-bound local claim; retry a mutable reuse command with --reclaim to adopt it", identifier)
-}
-
-func (b *backend) claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, b.claimScope(), repoRoot, idleTimeout, reclaim)
 }
 
 func devboxNameFromClaim(claim core.LeaseClaim, cfg core.Config) string {
