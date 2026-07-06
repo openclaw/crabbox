@@ -222,8 +222,9 @@ CRABBOX_LIVE_ISLO_PAUSE_RESUME=1 ISLO_API_KEY=... \
 ```
 
 The lifecycle test honors `ISLO_BASE_URL` (default `https://api.islo.dev`) and
-`CRABBOX_LIVE_ISLO_IMAGE` (default `docker.io/library/ubuntu:26.04`), and
-deletes its sandbox on exit even when an assertion fails. If the process is
+`CRABBOX_LIVE_ISLO_IMAGE` (default `docker.io/library/ubuntu:26.04`). After it
+captures the lease ID, it attempts to delete the sandbox on exit even when a
+later assertion fails. If setup fails before lease capture or the process is
 interrupted, remove the leftover `crabbox-pause-resume-live-*` sandbox through
 the `--reclaim` adoption flow above followed by `crabbox stop`, or delete it on
 the Islo side.
