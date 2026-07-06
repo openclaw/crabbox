@@ -17358,6 +17358,7 @@ describe("fleet lease identity and idle", () => {
     expect(csp).toContain("script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:");
     expect(csp).toContain("https://static.cloudflareinsights.com");
     expect(csp).toContain("worker-src 'self' data: blob:");
+    expect(csp).toContain("frame-ancestors 'self'");
     expect(headers.get("content-length")).toBeNull();
     expect(headers.get("content-type")).toBe("text/html");
     expect(headers.get("cache-control")).toBe("no-store, no-transform");

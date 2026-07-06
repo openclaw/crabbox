@@ -14867,6 +14867,7 @@ const codePortalContentSecurityPolicy = [
   "child-src 'self' blob:",
   "connect-src 'self' ws: wss: https:",
   "font-src 'self' data: blob:",
+  "frame-ancestors 'self'",
   "frame-src 'self' https://*.vscode-cdn.net data:",
   "img-src 'self' https: data: blob:",
   "manifest-src 'self'",

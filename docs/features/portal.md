@@ -68,6 +68,9 @@ use the Code session on other portal routes or lease origins. The ingress must
 provide wildcard TLS and WebSocket routing for the template.
 Proxied responses may set only code-server's `vscode-tkn` cookie; Crabbox removes
 domain scope and confines it to that lease's Code path.
+Crabbox also replaces upstream Content Security Policy headers and limits
+framing to the same isolated Code origin, so a sibling same-site origin cannot
+embed an authenticated Code session while code-server's own webviews still work.
 Portal logout revokes WebVNC, isolated Code, and mediated-egress bridge sessions
 server-side, so their sockets or separate host-scoped cookies cannot retain
 access after the portal cookie is cleared. Logout uses a same-origin `POST`; a
