@@ -149,6 +149,43 @@ describe("daytona coordinator client", () => {
     expect(String(error)).toContain("[redacted]");
   });
 
+  it.each(["started", "running", "ready", "active", " Active "])(
+    "accepts Daytona ready state %j",
+    async (state) => {
+      const client = new DaytonaClient(baseEnv);
+      client.fetcher = async () =>
+        Response.json({
+          id: "sandbox-one",
+          name: "crabbox-one",
+          state,
+          labels: { crabbox: "true" },
+        });
+
+      await expect(client.waitForStarted("sandbox-one")).resolves.toMatchObject({
+        cloudID: "sandbox-one",
+        status: state,
+      });
+    },
+  );
+
+  it.each(["error", "errored", "failed", "build_failed", "destroyed", "destroying", "deleted"])(
+    "rejects Daytona terminal state %j",
+    async (state) => {
+      const client = new DaytonaClient(baseEnv);
+      client.fetcher = async () =>
+        Response.json({
+          id: "sandbox-one",
+          name: "crabbox-one",
+          state,
+          labels: { crabbox: "true" },
+        });
+
+      await expect(client.waitForStarted("sandbox-one")).rejects.toThrow(
+        `entered terminal state=${state}`,
+      );
+    },
+  );
+
   it("parses SSH commands and refreshes expiring access", () => {
     expect(
       daytonaSSHEndpoint({

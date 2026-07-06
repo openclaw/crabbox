@@ -149,7 +149,7 @@ export class DaytonaClient {
       // oxlint-disable-next-line eslint/no-await-in-loop -- readiness polling is intentionally sequential.
       const server = await this.getServer(id);
       lastState = server.status;
-      if (lastState === "started") return server;
+      if (daytonaReadyState(lastState)) return server;
       if (daytonaTerminalState(lastState)) {
         throw new Error(`daytona sandbox ${id} entered terminal state=${lastState}`);
       }
@@ -276,7 +276,23 @@ function stableMachineID(value: string): number {
 }
 
 function daytonaTerminalState(state: string): boolean {
-  return ["destroyed", "destroying", "error", "build_failed"].includes(state);
+  return [
+    "error",
+    "errored",
+    "failed",
+    "build_failed",
+    "destroyed",
+    "destroying",
+    "deleted",
+  ].includes(normalizeDaytonaState(state));
+}
+
+function daytonaReadyState(state: string): boolean {
+  return ["started", "running", "ready", "active"].includes(normalizeDaytonaState(state));
+}
+
+function normalizeDaytonaState(state: string): string {
+  return state.trim().toLowerCase();
 }
 
 function daytonaSSHAccessMinutesForLease(
