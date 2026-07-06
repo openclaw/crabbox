@@ -326,8 +326,13 @@ Direct Hetzner release and cleanup similarly require canonical provider labels
 plus an unchanged local claim whose lease and cloud ID match the exact server.
 Direct GCP release and cleanup require an unchanged local claim bound to the
 project, zone, instance name and immutable numeric ID, lease, slug, and provider
-key. Cleanup skips weakly labeled, unclaimed, and stale-claim servers instead
-of turning provider inventory into ownership proof.
+key. Direct Azure release and cleanup likewise require an unchanged local claim
+bound to the subscription, resource group, VM name and immutable VM ID, lease,
+slug, and provider key. Before deleting a VM, Crabbox also persists immutable
+NIC, public IP, disk, and quarantine-NSG identities so an interrupted cleanup
+can resume without trusting reused names. Cleanup skips weakly labeled,
+unclaimed, and stale-claim servers instead of turning provider inventory into
+ownership proof.
 
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects. Required
