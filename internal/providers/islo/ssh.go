@@ -34,6 +34,9 @@ func (b *isloBackend) Resolve(ctx context.Context, req core.ResolveRequest) (cor
 	server := isloSandboxToServer(sandbox)
 	applyIsloSSHLabels(&server, leaseID, b.cfg)
 	target := b.sshTargetForSandbox(name)
+	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
@@ -113,14 +116,13 @@ func (b *isloBackend) sshTargetForSandbox(name string) core.SSHTarget {
 		key = b.cfg.SSHKey
 	}
 	return core.SSHTarget{
-		User:                   user,
-		Host:                   isloSSHHost(name),
-		Key:                    key,
-		Port:                   port,
-		FallbackPorts:          []string{},
-		TargetOS:               targetLinux,
-		SSHConfigProxy:         true,
-		DisableHostKeyChecking: true,
+		User:           user,
+		Host:           isloSSHHost(name),
+		Key:            key,
+		Port:           port,
+		FallbackPorts:  []string{},
+		TargetOS:       targetLinux,
+		SSHConfigProxy: true,
 	}
 }
 

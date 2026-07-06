@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,5 +33,64 @@ func TestTestboxKeyPathAllowsSafeCustomIDs(t *testing.T) {
 	want := filepath.Join(configDir, "crabbox", "testboxes", "morphvm_123", "id_ed25519")
 	if path != want {
 		t.Fatalf("testboxKeyPath()=%q want %q", path, want)
+	}
+}
+
+func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	const leaseID = "cbx_abcdef123456"
+	target := SSHTarget{User: "root", Host: "provider-resource", Port: "22"}
+	if err := useLeaseKnownHosts(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := testboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(filepath.Dir(keyPath), "known_hosts")
+	if target.KnownHostsFile != want {
+		t.Fatalf("KnownHostsFile=%q want %q", target.KnownHostsFile, want)
+	}
+	if info, err := os.Stat(filepath.Dir(want)); err != nil {
+		t.Fatalf("stat lease SSH directory: %v", err)
+	} else if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("lease SSH directory mode=%#o want private", info.Mode().Perm())
+	}
+
+	args := strings.Join(sshBaseArgs(target), " ")
+	for _, wantArg := range []string{"StrictHostKeyChecking=accept-new", "UserKnownHostsFile=" + sshConfigFileValue(want)} {
+		if !strings.Contains(args, wantArg) {
+			t.Fatalf("ssh args missing %q: %s", wantArg, args)
+		}
+	}
+	for _, forbidden := range []string{"StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null"} {
+		if strings.Contains(args, forbidden) {
+			t.Fatalf("ssh args contain insecure option %q: %s", forbidden, args)
+		}
+	}
+}
+
+func TestUseLeaseKnownHostsFailsClosedWhenDirectoryCannotBePrepared(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testboxesPath := filepath.Join(configDir, "crabbox", "testboxes")
+	if err := os.MkdirAll(filepath.Dir(testboxesPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(testboxesPath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := SSHTarget{KnownHostsFile: "unchanged"}
+	if err := useLeaseKnownHosts(&target, "cbx_abcdef123456"); err == nil {
+		t.Fatal("useLeaseKnownHosts succeeded with an unusable lease directory")
+	}
+	if target.KnownHostsFile != "unchanged" {
+		t.Fatalf("KnownHostsFile changed after preparation failure: %q", target.KnownHostsFile)
 	}
 }

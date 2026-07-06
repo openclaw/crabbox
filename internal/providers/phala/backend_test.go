@@ -1532,11 +1532,17 @@ func TestDefaultWorkRootIsWritableOnDevOsGuest(t *testing.T) {
 // SSH readiness probe must not block on git, which the dev-os guest cannot
 // provide.
 func TestPhalaLeaseReadyCheckDropsGit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	b := &backend{rt: core.Runtime{}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
-	lease := b.lease(instance{ID: "appid123", Labels: map[string]string{"lease": "cbx_test"}}, cfg, "cbx_test")
+	lease, err := b.lease(instance{ID: "appid123", Labels: map[string]string{"lease": "cbx_test"}}, cfg, "cbx_test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(lease.SSH.ReadyCheck, "git") {
 		t.Fatalf("lease ReadyCheck must not require git:\n%s", lease.SSH.ReadyCheck)
 	}
@@ -1544,6 +1550,50 @@ func TestPhalaLeaseReadyCheckDropsGit(t *testing.T) {
 		if !strings.Contains(lease.SSH.ReadyCheck, "command -v "+tool) {
 			t.Fatalf("lease ReadyCheck missing %s:\n%s", tool, lease.SSH.ReadyCheck)
 		}
+	}
+}
+
+func TestPhalaLeasePinsProxyHostKeyPerLease(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	const leaseID = "cbx_abcdef123456"
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	lease, err := (&backend{}).lease(instance{ID: "cvm-id", Labels: map[string]string{"lease": leaseID}}, cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKnownHosts := filepath.Join(filepath.Dir(keyPath), "known_hosts")
+	if lease.SSH.DisableHostKeyChecking || lease.SSH.KnownHostsFile != wantKnownHosts {
+		t.Fatalf("phala SSH target does not pin its lease host key: %#v", lease.SSH)
+	}
+	if !lease.SSH.SSHConfigProxy || lease.SSH.ProxyCommand == "" {
+		t.Fatalf("phala SSH proxy routing was lost: %#v", lease.SSH)
+	}
+}
+
+func TestRebindResolvedLeaseTargetRebindsKnownHosts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	const leaseID = "cbx_abcdef123456"
+	target := core.LeaseTarget{SSH: core.SSHTarget{KnownHostsFile: "alias/known_hosts"}}
+
+	if err := (&backend{}).RebindResolvedLeaseTarget(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(filepath.Dir(keyPath), "known_hosts"); target.SSH.KnownHostsFile != want {
+		t.Fatalf("KnownHostsFile=%q want %q", target.SSH.KnownHostsFile, want)
 	}
 }
 
@@ -1962,6 +2012,9 @@ func TestResolveGatewayHostToleratesMissingAndIncomplete(t *testing.T) {
 // connection skips the per-connection cvms-get call.
 func TestGatewayHostRoundTripsThroughClaimToProxyCommand(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.IdleTimeout = 5 * time.Minute
@@ -1983,7 +2036,10 @@ func TestGatewayHostRoundTripsThroughClaimToProxyCommand(t *testing.T) {
 		t.Fatalf("gateway_host not surfaced from claim: labels=%v", item.Labels)
 	}
 	b := &backend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	lease := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(lease.SSH.ProxyCommand, "--gateway-host "+host) {
 		t.Fatalf("ProxyCommand=%q missing cached --gateway-host %q", lease.SSH.ProxyCommand, host)
 	}
