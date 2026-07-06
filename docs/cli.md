@@ -69,7 +69,8 @@ See [warmup](commands/warmup.md), [prewarm](commands/prewarm.md),
 
 ```text
 crabbox sync-plan [--limit <n>]              preview local sync manifest size hotspots
-crabbox shard --count <n> -- <command...>    fork a checkpoint into parallel test shards
+crabbox shard --from <checkpoint-id> --count <n> -- <command...>
+                                                fork a checkpoint into parallel test shards
 crabbox cp --id <id> <src> SANDBOX:<dst>     copy files between host and a delegated sandbox
 crabbox job list                              list repo-local configured jobs
 crabbox job run <name>                        run a configured job
