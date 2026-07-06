@@ -181,11 +181,12 @@ organization-bound principal also fail closed during restore and whenever lease
 sharing access shrinks.
 Non-admin GitHub WebVNC, Code, and egress sessions bind to the exact portal
 session and preserve only the encrypted GitHub credential from its signed user
-token. Active traffic rechecks portal logout and emergency user revocation, and
-revalidates GitHub membership under the configured membership-cache window.
-Membership errors fail closed. Restored legacy GitHub bridge attachments without
-a complete encrypted grant and portal-session binding close before carrying
-traffic; plaintext GitHub credentials are never stored in bridge state.
+token. Agent-ticket consumption and active traffic recheck portal logout and
+emergency user revocation, and revalidate GitHub membership under the configured
+membership-cache window. Membership errors fail closed. New or restored legacy
+GitHub bridge tickets and attachments without a complete encrypted grant and
+portal-session binding fail before carrying traffic; plaintext GitHub
+credentials are never stored in bridge state.
 Shared-operator requests do **not** trust caller-supplied `X-Crabbox-Owner` /
 `X-Crabbox-Org` headers — pin that automation's identity with
 `CRABBOX_SHARED_OWNER` (and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed

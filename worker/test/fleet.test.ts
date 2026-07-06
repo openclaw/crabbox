@@ -17470,6 +17470,108 @@ describe("fleet lease identity and idle", () => {
     ).toEqual([]);
   });
 
+  it("revalidates non-admin GitHub grants when agent bridge tickets are consumed", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const payload = decodeUserTokenPayload(token);
+    const portalSessionHash = await sha256Hex(token);
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        desktop: true,
+        code: true,
+        state: "active",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    const fleet = testFleet(storage, {}, env);
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "x-crabbox-auth": "github",
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+      "x-crabbox-github-login": "alice",
+      "x-crabbox-github-token-id": payload.jti,
+      "x-crabbox-github-sealed-credential": payload.githubCredential,
+      "x-crabbox-token-expires-at": new Date(payload.exp * 1000).toISOString(),
+    };
+    const cases = [
+      {
+        createPath: `/v1/leases/${leaseID}/webvnc/ticket`,
+        consumePath: `/v1/leases/${leaseID}/webvnc/agent`,
+        storagePrefix: "webvnc-ticket",
+        body: {},
+      },
+      {
+        createPath: `/v1/leases/${leaseID}/code/ticket`,
+        consumePath: `/v1/leases/${leaseID}/code/agent`,
+        storagePrefix: "code-ticket",
+        body: {},
+      },
+      {
+        createPath: `/v1/leases/${leaseID}/egress/ticket`,
+        consumePath: `/v1/leases/${leaseID}/egress/host`,
+        storagePrefix: "egress-ticket",
+        body: { role: "host" },
+      },
+    ];
+    const tickets = await Promise.all(
+      cases.map(async (item): Promise<(typeof cases)[number] & { ticket: string }> => {
+        const response = await fleet.fetch(
+          request("POST", item.createPath, { headers, body: item.body }),
+        );
+        expect(response.status).toBe(200);
+        const result = (await response.json()) as { ticket?: string };
+        expect(result.ticket).toBeTypeOf("string");
+        const ticket = result.ticket ?? "";
+        expect(storage.value(`${item.storagePrefix}:${ticket}`)).toMatchObject({
+          auth: "github",
+          login: "alice",
+          portalSessionHash,
+          githubGrant: {
+            tokenID: payload.jti,
+            sealedCredential: payload.githubCredential,
+          },
+        });
+        return { ...item, ticket };
+      }),
+    );
+
+    (fleet as unknown as { env: Env }).env.CRABBOX_GITHUB_REVOKED_USERS = "login:alice";
+    const githubFetch = vi.fn<() => Promise<Response>>(async () => {
+      throw new Error("emergency revocation must fail before GitHub API access");
+    });
+    vi.stubGlobal("fetch", githubFetch);
+
+    await Promise.all(
+      tickets.map(async (item) => {
+        const response = await fleet.fetch(
+          request("GET", item.consumePath, {
+            headers: { authorization: `Bearer ${item.ticket}`, upgrade: "websocket" },
+          }),
+        );
+        expect(response.status).toBe(401);
+        expect(storage.value(`${item.storagePrefix}:${item.ticket}`)).toBeUndefined();
+      }),
+    );
+    expect(githubFetch).not.toHaveBeenCalled();
+  });
+
   it("rejects bridge tickets whose cached admin grant was revoked", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {}, { CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin" });

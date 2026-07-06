@@ -295,7 +295,7 @@ interface CachedBridgeGrant extends CachedAdminGrant {
   githubGrant?: GitHubUserGrant;
 }
 
-interface WebVNCTicketRecord extends CachedAdminGrant {
+interface WebVNCTicketRecord extends CachedBridgeGrant {
   ticket: string;
   leaseID: string;
   owner: string;
@@ -315,7 +315,7 @@ interface NativeVNCTicketRecord {
   expiresAt: string;
 }
 
-interface CodeTicketRecord extends CachedAdminGrant {
+interface CodeTicketRecord extends CachedBridgeGrant {
   ticket: string;
   leaseID: string;
   owner: string;
@@ -7511,6 +7511,13 @@ export class FleetCoordinator {
     if (error) {
       return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
     }
+    const bridgeGrant = await bridgeGrantForRequest(request, admin);
+    if (!bridgeGrant) {
+      return json(
+        { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
+        { status: 401 },
+      );
+    }
     await this.cleanupExpiredWebVNCTickets();
     const now = new Date();
     const ticket: WebVNCTicketRecord = {
@@ -7519,7 +7526,7 @@ export class FleetCoordinator {
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       admin,
-      ...(await adminGrantForRequest(request, admin)),
+      ...bridgeGrant,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + webVNCTicketTTLSeconds * 1000).toISOString(),
     };
@@ -7799,6 +7806,13 @@ export class FleetCoordinator {
     if (error) {
       return json({ error: "code_unavailable", message: error }, { status: 409 });
     }
+    const bridgeGrant = await bridgeGrantForRequest(request, admin);
+    if (!bridgeGrant) {
+      return json(
+        { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
+        { status: 401 },
+      );
+    }
     await this.cleanupExpiredCodeTickets();
     const now = new Date();
     const ticket: CodeTicketRecord = {
@@ -7807,7 +7821,7 @@ export class FleetCoordinator {
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       admin,
-      ...(await adminGrantForRequest(request, admin)),
+      ...bridgeGrant,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + codeTicketTTLSeconds * 1000).toISOString(),
     };
@@ -8925,6 +8939,25 @@ export class FleetCoordinator {
     return this.withBridgeTicketLock(() => this.consumeWebVNCTicketUnderLock(request, identifier));
   }
 
+  private async currentLeaseBridgeTicket<
+    T extends CachedBridgeGrant & { owner: string; org: string; admin?: boolean },
+  >(ticket: T, lease: LeaseRecord): Promise<T | undefined> {
+    const currentTicket =
+      ticket.admin === true
+        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
+        : ticket;
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
+      return undefined;
+    }
+    if (
+      currentTicket.auth === "github" &&
+      (await this.githubBridgeGrantFailureReason(currentTicket))
+    ) {
+      return undefined;
+    }
+    return currentTicket;
+  }
+
   private async consumeWebVNCTicketUnderLock(
     request: Request,
     identifier: string,
@@ -8946,11 +8979,8 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    const currentTicket =
-      ticket.admin === true
-        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
-        : ticket;
-    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
+    const currentTicket = await this.currentLeaseBridgeTicket(ticket, lease);
+    if (!currentTicket) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
@@ -8998,11 +9028,8 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    const currentTicket =
-      ticket.admin === true
-        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
-        : ticket;
-    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
+    const currentTicket = await this.currentLeaseBridgeTicket(ticket, lease);
+    if (!currentTicket) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
@@ -9057,18 +9084,8 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    const currentTicket =
-      ticket.admin === true
-        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
-        : ticket;
-    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
-      await this.state.storage.delete(key);
-      return { status: "invalid" };
-    }
-    if (
-      currentTicket.auth === "github" &&
-      (await this.githubBridgeGrantFailureReason(currentTicket))
-    ) {
+    const currentTicket = await this.currentLeaseBridgeTicket(ticket, lease);
+    if (!currentTicket) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
