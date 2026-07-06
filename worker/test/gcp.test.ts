@@ -9,6 +9,7 @@ import {
   isFallbackProvisioningError,
   operationDone,
 } from "../src/gcp";
+import { providerProvisioningCleanupClaim } from "../src/provider-provisioning";
 import { leaseProviderName } from "../src/slug";
 import type { Env, ProviderMachine } from "../src/types";
 
@@ -43,6 +44,94 @@ describe("gcp provider", () => {
     expect(() => new GCPClient({ ...env, CRABBOX_GCP_SSH_CIDRS: "::::/128" })).toThrow(
       "CRABBOX_GCP_SSH_CIDRS entries must be valid",
     );
+  });
+
+  it("treats only the exact zonal instance as absent", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    let message =
+      "The resource 'projects/default-project/zones/us-central1-a/instances/crabbox-blue-lobster' was not found";
+    client.fetcher = async () =>
+      new Response(JSON.stringify({ error: { code: 404, message } }), { status: 404 });
+
+    await expect(client.findServer("crabbox-blue-lobster")).resolves.toBeUndefined();
+    message = "The resource 'projects/default-project' was not found";
+    await expect(client.findServer("crabbox-blue-lobster")).rejects.toThrow(
+      "projects/default-project",
+    );
+  });
+
+  it("treats only an exact missing instance DELETE as complete", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    let message =
+      "The resource 'projects/default-project/zones/us-central1-a/instances/crabbox-blue-lobster' was not found";
+    client.fetcher = async () =>
+      new Response(JSON.stringify({ error: { code: 404, message } }), { status: 404 });
+
+    await expect(client.deleteServer("crabbox-blue-lobster")).resolves.toBeUndefined();
+    message = "The resource 'projects/default-project' was not found";
+    await expect(client.deleteServer("crabbox-blue-lobster")).rejects.toThrow(
+      "projects/default-project",
+    );
+  });
+
+  it("does not delete a foreign same-name instance after a failed create", async () => {
+    const client = new GCPClient(env);
+    const calls: string[] = [];
+    const internal = client as unknown as {
+      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
+    };
+    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+    vi.spyOn(internal, "gcp").mockImplementation(async (method, path) => {
+      calls.push(`${method} ${path}`);
+      if (method === "POST") throw new Error("already exists");
+      return {
+        id: "1",
+        name: leaseProviderName("cbx_abcdef123456", "blue-lobster"),
+        zone: "projects/default-project/zones/us-central1-a",
+        machineType: "zones/us-central1-a/machineTypes/e2-micro",
+        labels: {
+          crabbox: "true",
+          created_by: "crabbox",
+          provider: "gcp",
+          lease: "cbx_000000000000",
+          owner: "foreign_example_com",
+          slug: "blue-lobster",
+        },
+      } as T;
+    });
+
+    const error = await client
+      .createServer(
+        leaseConfig({
+          provider: "gcp",
+          serverType: "e2-micro",
+          gcpProject: "default-project",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        "cbx_abcdef123456",
+        "blue-lobster",
+        "alice@example.com",
+      )
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("provisioning cleanup failed closed");
+    expect(providerProvisioningCleanupClaim(error)).toEqual({
+      provider: "gcp",
+      cloudID: leaseProviderName("cbx_abcdef123456", "blue-lobster"),
+      region: "us-central1-a",
+      providerProject: "default-project",
+    });
+    expect(calls.some((call) => call.startsWith("DELETE "))).toBe(false);
   });
 
   it("recovers when another create wins the shared firewall race", async () => {

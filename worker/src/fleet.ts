@@ -22,6 +22,7 @@ import {
   awsProvisioningErrorCategory,
   awsRegionCandidates,
   isAWSInstanceCleanedAfterReadinessFailure,
+  isAWSInstanceNotFoundError,
   isRetryableAWSProvisioningError,
   isAWSSecurityGroupRuleLimitError,
   type AWSMacHost,
@@ -49,7 +50,7 @@ import {
   coordinatorRequestQueue,
   type CoordinatorRuntime,
 } from "./coordinator-runtime";
-import { GCPClient } from "./gcp";
+import { GCPClient, gcpProviderLabelValue } from "./gcp";
 import {
   HetznerClient,
   HetznerProvisioningError,
@@ -101,6 +102,13 @@ import {
   webVNCBridgeCommand,
 } from "./portal";
 import { leaseIDForProviderKey, providerKeyForLease, sshPublicKeyIdentity } from "./provider-key";
+import { providerMachineOwnedByLease, workspacePrewarmProviderOwner } from "./provider-labels";
+import {
+  ProviderProvisioningCleanupError,
+  providerProvisioningCleanupClaim,
+  type ProviderProvisioningCleanupClaim,
+  validatedProviderProvisioningCleanupClaim,
+} from "./provider-provisioning";
 import {
   readRuntimeAdapterRelayBody,
   runtimeAdapterProxyPath,
@@ -227,7 +235,7 @@ const workspaceMinimumTTLSeconds =
   (workspaceProvisionClaimMs + workspaceProvisionRecoveryGraceMs) / 1000;
 const workspaceMaxRecordsPerOwner = 100;
 const workspaceTerminalRetentionMs = 24 * 60 * 60_000;
-const workspacePrewarmOwner = "crabbox-internal-prewarm";
+const workspacePrewarmOwner = workspacePrewarmProviderOwner;
 const workspacePrewarmReplacementLeadMs = 5 * 60_000;
 const workspacePrewarmRetryDelayMs = 5 * 60_000;
 const workspaceTerminalMaxBufferedBytes = 1024 * 1024;
@@ -630,6 +638,14 @@ interface AzureDeferredCleanupRecord extends AzureDeferredCleanupRequest {
   updatedAt: string;
   retryAt: string;
   lastError?: string;
+  terminalAt?: string;
+}
+
+class ProviderCleanupManualResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderCleanupManualResolutionError";
+  }
 }
 
 interface AWSIngressReconcileTarget {
@@ -2351,6 +2367,7 @@ export class FleetCoordinator {
         code: config.code,
         cloudID: "",
         owner,
+        providerOwner: owner,
         org,
         profile: config.profile,
         class: config.class,
@@ -2601,12 +2618,28 @@ export class FleetCoordinator {
           : this.withAWSIngressOperationLock(provision);
     const { server, serverType, market, attempts } = await provisioned.catch(
       async (error: unknown) => {
+        const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
         await this.state.runExclusive(async () => {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
             await this.deleteProviderAccess(record.id);
           }
           const current = await this.getLease(record.id);
           if (!current || current.state !== "provisioning") {
+            if (cleanupClaim) {
+              const failedAt = new Date().toISOString();
+              record = structuredClone(current ?? record);
+              if (record.state !== "released" && record.state !== "expired") {
+                record.state = "failed";
+                record.endedAt = failedAt;
+              }
+              retainProvisioningCleanupClaim(
+                record,
+                cleanupClaim,
+                coordinatorErrorMessage(this.env, error),
+                failedAt,
+              );
+              await this.putLease(record);
+            }
             await this.markAWSIngressReconcilePending(record);
             await this.scheduleAlarm();
             return;
@@ -2618,10 +2651,15 @@ export class FleetCoordinator {
           record.endedAt = failedAt;
           record.cleanupFailedAt = failedAt;
           record.cleanupError = coordinatorErrorMessage(this.env, error);
-          record.provisioningResourceMayExist =
-            config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
-          record.provisioningFailureRetryable =
-            config.provider === "hetzner" && hetznerProvisioningFailureRetryable(error);
+          record.provisioningResourceMayExist = cleanupClaim
+            ? true
+            : config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
+          record.provisioningFailureRetryable = cleanupClaim
+            ? false
+            : config.provider === "hetzner" && hetznerProvisioningFailureRetryable(error);
+          if (cleanupClaim) {
+            retainProvisioningCleanupClaim(record, cleanupClaim, record.cleanupError, failedAt);
+          }
           const failedHetznerServerID =
             config.provider === "hetzner" ? hetznerProvisioningResourceID(error) : undefined;
           if (failedHetznerServerID !== undefined) {
@@ -2636,7 +2674,11 @@ export class FleetCoordinator {
             record.providerKeyCleanupPending = true;
             record.providerKeyCleanupID = String(error.providerKeyCleanupID);
           }
-          if (failedHetznerServerID !== undefined || record.providerKeyCleanupPending) {
+          if (
+            cleanupClaim ||
+            failedHetznerServerID !== undefined ||
+            record.providerKeyCleanupPending
+          ) {
             record.cleanupRetryAt = new Date(
               Date.parse(failedAt) + leaseCleanupRetryDelayMs,
             ).toISOString();
@@ -2973,6 +3015,7 @@ export class FleetCoordinator {
     const createdAt = Date.parse(lease.createdAt);
     const adoptedTTLSeconds = Math.max(1, Math.ceil((expiresAt.getTime() - createdAt) / 1000));
     lease.workspaceID = input.id;
+    lease.providerOwner ??= lease.owner;
     lease.owner = input.owner;
     lease.org = input.org;
     lease.profile = input.profile;
@@ -10539,10 +10582,12 @@ export class FleetCoordinator {
       claims.map(async ({ claim, lease }) => {
         const cleanup = async () => {
           let failure: string | undefined;
+          let manualResolution = false;
           try {
             await this.deleteLeaseServer(lease);
           } catch (error) {
             failure = coordinatorErrorMessage(this.env, error);
+            manualResolution = error instanceof ProviderCleanupManualResolutionError;
           }
           await this.state.runExclusive(async () => {
             const current = await this.getLease(lease.id);
@@ -10551,6 +10596,11 @@ export class FleetCoordinator {
             }
             const nowDate = new Date();
             const nowISO = nowDate.toISOString();
+            if (failure && manualResolution) {
+              terminalizeManualProviderCleanup(current, failure, nowISO);
+              await this.putLease(current);
+              return;
+            }
             if (failure) {
               current.cleanupAttempts = (current.cleanupAttempts ?? 0) + 1;
               delete current.cleanupStartedAt;
@@ -10570,6 +10620,13 @@ export class FleetCoordinator {
             current.state = leaseIsLive(current) ? "expired" : current.state;
             current.updatedAt = nowISO;
             current.endedAt = nowISO;
+            if (current.state === "failed" && current.provisioningResourceMayExist) {
+              if (!current.failureError && current.cleanupError) {
+                current.failureError = current.cleanupError;
+              }
+              current.provisioningResourceMayExist = false;
+              current.provisioningFailureRetryable = false;
+            }
             delete current.releaseDeletesServer;
             clearLeaseCleanupMetadata(current);
             delete current.providerKeyCleanupPending;
@@ -10871,6 +10928,7 @@ export class FleetCoordinator {
       prefix: azureDeferredCleanupPrefix,
     });
     const times = [...records.values()]
+      .filter((record) => !record.terminalAt)
       .map((record) => Date.parse(record.retryAt))
       .filter((time) => Number.isFinite(time));
     if (times.length === 0) {
@@ -10888,25 +10946,40 @@ export class FleetCoordinator {
     const now = Date.now();
     await Promise.all(
       [...records.entries()].map(async ([key, record]) => {
+        if (record.terminalAt) {
+          return;
+        }
         const retryAt = Date.parse(record.retryAt);
         if (Number.isFinite(retryAt) && retryAt > now) {
           return;
         }
         try {
-          await new AzureClient(this.env, { location: record.location }).deleteServer(record.name);
+          const lease = azureDeferredCleanupLease(record);
+          const scope = azureProviderScope(lease.providerScope)!;
+          await new AzureClient(this.env, {
+            location: record.location,
+            subscription: scope.subscription,
+            resourceGroup: scope.resourceGroup,
+          }).deleteOwnedServer(lease);
         } catch (error) {
           await this.state.runExclusive(async () => {
             const current = await this.state.storage.get<AzureDeferredCleanupRecord>(key);
             if (!current || current.updatedAt !== record.updatedAt) {
               return;
             }
+            const terminal = error instanceof ProviderCleanupManualResolutionError;
             const nextRecord: AzureDeferredCleanupRecord = {
               ...current,
               attempts: current.attempts + 1,
               updatedAt: new Date().toISOString(),
-              retryAt: new Date(now + leaseCleanupRetryDelayMs).toISOString(),
+              retryAt: terminal
+                ? current.retryAt
+                : new Date(now + leaseCleanupRetryDelayMs).toISOString(),
               lastError: coordinatorErrorMessage(this.env, error),
             };
+            if (terminal) {
+              nextRecord.terminalAt = nextRecord.updatedAt;
+            }
             await this.state.storage.put(key, nextRecord);
             console.warn(
               `azure deferred cleanup failed name=${record.name} location=${record.location}: ${nextRecord.lastError}`,
@@ -12234,6 +12307,16 @@ export class FleetCoordinator {
       await this.state.runExclusive(async () => {
         const current = await this.getLease(preparation.lease.id);
         if (!current || current.cleanupStartedAt !== preparation.claim) {
+          return;
+        }
+        if (error instanceof ProviderCleanupManualResolutionError) {
+          terminalizeManualProviderCleanup(
+            current,
+            coordinatorErrorMessage(this.env, error),
+            new Date().toISOString(),
+          );
+          await this.putLease(current);
+          await this.scheduleAlarm();
           return;
         }
         const failedAt = new Date();
@@ -14239,6 +14322,60 @@ function providerResourceNotFound(error: unknown): boolean {
   return message.includes("http 404") || isCloudNotFoundError(message);
 }
 
+function azureProviderScope(
+  value: string | undefined,
+): { subscription: string; resourceGroup: string } | undefined {
+  const match = /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)$/i.exec(value?.trim() ?? "");
+  if (!match?.[1] || !match[2]) return undefined;
+  return { subscription: match[1], resourceGroup: match[2] };
+}
+
+function azureDeferredCleanupLease(
+  record: AzureDeferredCleanupRecord,
+): Pick<LeaseRecord, "id" | "slug" | "provider" | "cloudID" | "owner" | "providerScope"> {
+  const subscription = record.subscription?.trim();
+  const resourceGroup = record.resourceGroup?.trim();
+  const providerScope = `/subscriptions/${subscription}/resourceGroups/${resourceGroup}`;
+  if (
+    !subscription ||
+    !resourceGroup ||
+    !validLeaseID(record.leaseID) ||
+    !normalizeLeaseSlug(record.slug) ||
+    !record.owner?.trim() ||
+    !azureProviderScope(providerScope)
+  ) {
+    throw new ProviderCleanupManualResolutionError(
+      `refusing Azure deferred cleanup for ${record.name}: canonical lease claim and provider scope were not persisted`,
+    );
+  }
+  return {
+    id: record.leaseID,
+    slug: record.slug,
+    provider: "azure",
+    cloudID: record.name,
+    owner: record.owner,
+    providerScope,
+  };
+}
+
+async function ownedProviderMachineForRelease(
+  provider: Extract<Provider, "aws" | "azure" | "gcp">,
+  lease: LeaseRecord,
+  findServer: (id: string) => Promise<ProviderMachine | undefined>,
+  options: {
+    labelValue?: (value: string) => string;
+  } = {},
+): Promise<ProviderMachine | undefined> {
+  const machine = await findServer(lease.cloudID);
+  if (!machine) return undefined;
+  if (!providerMachineOwnedByLease(machine, lease, provider, options.labelValue)) {
+    throw new Error(
+      `refusing to delete ${provider} resource ${lease.cloudID}: ownership does not match lease ${lease.id}`,
+    );
+  }
+  return machine;
+}
+
 function checkpointStrategy(value: string | undefined): "image" | "disk-snapshot" | undefined {
   switch ((value ?? "").trim().toLowerCase()) {
     case "image":
@@ -14317,8 +14454,8 @@ function allowProviderImageDelete(): Promise<undefined> {
   return Promise.resolve(undefined);
 }
 
-function azureDeferredCleanupKey(location: string, name: string): string {
-  return `${azureDeferredCleanupPrefix}${location}:${name}`;
+function azureDeferredCleanupKey(request: AzureDeferredCleanupRequest): string {
+  return `${azureDeferredCleanupPrefix}${encodeURIComponent(request.subscription)}:${encodeURIComponent(request.resourceGroup)}:${encodeURIComponent(request.location)}:${encodeURIComponent(request.name)}`;
 }
 
 export function recordAzureDeferredCleanup(
@@ -14327,7 +14464,7 @@ export function recordAzureDeferredCleanup(
   request: AzureDeferredCleanupRequest,
 ): Promise<void> {
   return state.runExclusive(async () => {
-    const key = azureDeferredCleanupKey(request.location, request.name);
+    const key = azureDeferredCleanupKey(request);
     const current = await state.storage.get<AzureDeferredCleanupRecord>(key);
     const now = new Date().toISOString();
     const record: AzureDeferredCleanupRecord = {
@@ -15833,6 +15970,35 @@ function provisionedLeaseRecord(
   };
 }
 
+function retainProvisioningCleanupClaim(
+  lease: LeaseRecord,
+  claim: ProviderProvisioningCleanupClaim,
+  error: string,
+  failedAt: string,
+): void {
+  const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
+  lease.cloudID = claim.cloudID;
+  lease.serverName = claim.cloudID;
+  lease.serverID = claim.serverID ?? 0;
+  lease.updatedAt = failedAt;
+  if (claim.region) lease.region = claim.region;
+  if (claim.providerProject) lease.providerProject = claim.providerProject;
+  if (claim.providerScope) lease.providerScope = claim.providerScope;
+  if (retainResource) {
+    lease.keep = true;
+    clearLeaseCleanupMetadata(lease);
+    delete lease.provisioningResourceMayExist;
+    delete lease.provisioningFailureRetryable;
+    return;
+  }
+  lease.releaseDeletesServer = true;
+  lease.provisioningResourceMayExist = true;
+  lease.provisioningFailureRetryable = false;
+  lease.cleanupError = error;
+  lease.cleanupFailedAt = failedAt;
+  lease.cleanupRetryAt = new Date(Date.parse(failedAt) + leaseCleanupRetryDelayMs).toISOString();
+}
+
 function nextLeaseAlarmTime(lease: LeaseRecord): number {
   const now = Date.now();
   const expiresAt = Date.parse(lease.expiresAt);
@@ -15886,6 +16052,26 @@ function clearLeaseCleanupMetadata(lease: LeaseRecord): void {
   delete lease.cleanupError;
   delete lease.cleanupFailedAt;
   delete lease.cleanupRetryAt;
+}
+
+function terminalizeManualProviderCleanup(
+  lease: LeaseRecord,
+  error: string,
+  terminalAt: string,
+): void {
+  if (leaseIsLive(lease)) {
+    lease.state = "expired";
+  }
+  lease.keep = true;
+  lease.releaseDeletesServer = false;
+  lease.failureError = error;
+  lease.updatedAt = terminalAt;
+  lease.endedAt = terminalAt;
+  clearLeaseCleanupMetadata(lease);
+  delete lease.cleanupStartedAt;
+  delete lease.cleanupClaimExpiresAt;
+  delete lease.provisioningResourceMayExist;
+  delete lease.provisioningFailureRetryable;
 }
 
 function clearRuntimeAdapterDeleteMetadata(lease: LeaseRecord): void {
@@ -16743,7 +16929,7 @@ export class HetznerProvider implements CloudProvider {
   }
 }
 
-class AzureProvider implements CloudProvider {
+export class AzureProvider implements CloudProvider {
   private clientValue?: AzureClient;
 
   constructor(
@@ -16771,12 +16957,30 @@ class AzureProvider implements CloudProvider {
     return this.client.listCrabboxServers();
   }
 
+  getServer(id: string): Promise<ProviderMachine> {
+    return this.client.getServer(id);
+  }
+
+  findServer(id: string): Promise<ProviderMachine | undefined> {
+    return this.client.findServer(id);
+  }
+
   async prepareLeaseConfig(
     config: ReturnType<typeof leaseConfig>,
   ): Promise<ReturnType<typeof leaseConfig>> {
     return config.azureLocation
       ? config
       : { ...config, azureLocation: azureLocationFor(this.env, "") };
+  }
+
+  prepareLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+  ): Promise<ProviderLeaseCreatePreparation> {
+    return Promise.resolve({
+      config,
+      lease: { ...lease, providerScope: this.client.providerScope() },
+    });
   }
 
   createServerWithFallback(
@@ -16797,6 +17001,23 @@ class AzureProvider implements CloudProvider {
     return this.client.deleteServer(id);
   }
 
+  deleteOwnedServer(lease: LeaseRecord): Promise<void> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope) {
+      return Promise.reject(
+        new ProviderCleanupManualResolutionError(
+          `refusing to delete Azure lease ${lease.id}: canonical provider scope was not persisted`,
+        ),
+      );
+    }
+    return new AzureClient(this.env, {
+      ...(this.location ? { location: this.location } : {}),
+      ...(this.deferredCleanup ? { deferredCleanup: this.deferredCleanup } : {}),
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+    }).deleteOwnedServer(lease);
+  }
+
   async finalizeLeaseCreate(
     config: ReturnType<typeof leaseConfig>,
     lease: LeaseRecord,
@@ -16805,7 +17026,11 @@ class AzureProvider implements CloudProvider {
   ): Promise<ProviderLeaseCreateFinalization> {
     const region = server.region || config.azureLocation;
     const nextConfig = region ? { ...config, azureLocation: region } : config;
-    const nextLease: LeaseRecord = { ...lease, region };
+    const nextLease: LeaseRecord = {
+      ...lease,
+      region,
+      providerScope: this.client.providerScope(),
+    };
     const hints = capacityHints(this.env, nextConfig, nextLease, attempts);
     if (hints.length > 0) {
       nextLease.capacityHints = hints;
@@ -16814,7 +17039,7 @@ class AzureProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    await this.deleteServer(lease.cloudID);
+    await this.deleteOwnedServer(lease);
   }
 
   supportsNativeImages(): boolean {
@@ -16888,7 +17113,7 @@ class AzureProvider implements CloudProvider {
   }
 }
 
-class GCPProvider implements CloudProvider {
+export class GCPProvider implements CloudProvider {
   private clientValue?: GCPClient;
 
   constructor(
@@ -16920,6 +17145,10 @@ class GCPProvider implements CloudProvider {
 
   getServer(id: string): Promise<ProviderMachine> {
     return this.client.getServer(id);
+  }
+
+  findServer(id: string): Promise<ProviderMachine | undefined> {
+    return this.client.findServer(id);
   }
 
   recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
@@ -16980,6 +17209,13 @@ class GCPProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
+    if (
+      !(await ownedProviderMachineForRelease("gcp", lease, (id) => this.findServer(id), {
+        labelValue: gcpProviderLabelValue,
+      }))
+    ) {
+      return;
+    }
     await this.deleteServer(lease.cloudID);
   }
 
@@ -17091,6 +17327,10 @@ export class AWSProvider implements CloudProvider {
 
   getServer(id: string): Promise<ProviderMachine> {
     return this.client.getServer(id);
+  }
+
+  findServer(id: string): Promise<ProviderMachine | undefined> {
+    return this.client.findServer(id);
   }
 
   async prepareLeaseConfig(
@@ -17326,9 +17566,15 @@ export class AWSProvider implements CloudProvider {
             const deleteMessage =
               deleteError instanceof Error ? deleteError.message : String(deleteError);
             if (!isAWSInstanceCleanedAfterReadinessFailure(waitMessage, deleteMessage)) {
-              throw new Error(
+              throw new ProviderProvisioningCleanupError(
                 `${waitMessage}; cleanup failed for AWS instance ${server.cloudID}: ${deleteMessage}`,
-                { cause: deleteError },
+                {
+                  provider: "aws",
+                  cloudID: server.cloudID,
+                  region,
+                  serverID: server.id,
+                },
+                deleteError,
               );
             }
           }
@@ -17352,6 +17598,7 @@ export class AWSProvider implements CloudProvider {
         }
         return result;
       } catch (error) {
+        if (providerProvisioningCleanupClaim(error)) throw error;
         const message = error instanceof Error ? error.message : String(error);
         regionAttempts.push({
           region,
@@ -17393,11 +17640,14 @@ export class AWSProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
+    const server = await ownedProviderMachineForRelease("aws", lease, (id) => this.findServer(id));
     try {
-      await this.deleteServer(lease.cloudID);
+      if (server) {
+        await this.deleteServer(lease.cloudID);
+      }
     } catch (error) {
       const message = coordinatorErrorMessage(this.env, error);
-      if (!isCloudNotFoundError(message)) {
+      if (!isAWSInstanceNotFoundError(message)) {
         throw error;
       }
       console.warn(

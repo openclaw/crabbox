@@ -495,6 +495,28 @@ describe("aws provider", () => {
     );
   });
 
+  it("treats only EC2's exact missing-instance error as an absent server", async () => {
+    let code = "InvalidInstanceID.NotFound";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            `<Response><Errors><Error><Code>${code}</Code><Message>missing</Message></Error></Errors></Response>`,
+            { status: 400 },
+          ),
+      ),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.findServer("i-abcdef123456")).resolves.toBeUndefined();
+    code = "AuthFailure";
+    await expect(client.findServer("i-abcdef123456")).rejects.toThrow("AuthFailure");
+  });
+
   it("rejects invalid configured AWS SSH CIDRs before changing ingress", async () => {
     const calls: string[] = [];
     vi.stubGlobal(

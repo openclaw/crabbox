@@ -1,5 +1,13 @@
 import type { LeaseConfig } from "./config";
 import { normalizeLeaseSlug } from "./slug";
+import type { LeaseRecord, Provider, ProviderMachine } from "./types";
+
+type ProviderOwnershipLease = Pick<
+  LeaseRecord,
+  "id" | "slug" | "provider" | "owner" | "providerOwner" | "workspaceID"
+>;
+
+export const workspacePrewarmProviderOwner = "crabbox-internal-prewarm";
 
 export function leaseProviderLabels(
   config: LeaseConfig,
@@ -73,6 +81,48 @@ export function providerLabelValue(value: string): string {
     .slice(0, 63)
     .replaceAll(/^[_.-]+|[_.-]+$/g, "");
   return cleaned || "unknown";
+}
+
+export function providerMachineOwnedByLease(
+  machine: Pick<ProviderMachine, "provider" | "cloudID" | "labels">,
+  lease: ProviderOwnershipLease & Pick<LeaseRecord, "cloudID">,
+  provider: Provider,
+  labelValue: (value: string) => string = providerLabelValue,
+): boolean {
+  return (
+    /^cbx_[a-f0-9]{12}$/.test(lease.id) &&
+    lease.provider === provider &&
+    machine.provider === provider &&
+    lease.cloudID.length > 0 &&
+    machine.cloudID === lease.cloudID &&
+    providerLabelsOwnedByLease(machine.labels ?? {}, lease, provider, labelValue)
+  );
+}
+
+export function providerLabelsOwnedByLease(
+  labels: Record<string, string>,
+  lease: ProviderOwnershipLease,
+  provider: Provider,
+  labelValue: (value: string) => string = providerLabelValue,
+): boolean {
+  const slug = normalizeLeaseSlug(lease.slug);
+  const providerOwners = lease.providerOwner?.trim()
+    ? [lease.providerOwner.trim()]
+    : [lease.owner.trim(), ...(lease.workspaceID ? [workspacePrewarmProviderOwner] : [])].filter(
+        Boolean,
+      );
+  return (
+    /^cbx_[a-f0-9]{12}$/.test(lease.id) &&
+    slug.length > 0 &&
+    providerOwners.length > 0 &&
+    lease.provider === provider &&
+    labels["crabbox"] === "true" &&
+    labels["created_by"] === "crabbox" &&
+    labels["lease"] === lease.id &&
+    providerOwners.some((owner) => labels["owner"] === labelValue(owner)) &&
+    labels["provider"] === provider &&
+    labels["slug"] === labelValue(slug)
+  );
 }
 
 function sanitizeLabels(labels: Record<string, string>): Record<string, string> {

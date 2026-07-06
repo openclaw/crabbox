@@ -203,6 +203,13 @@ Verify configuration:
 crabbox doctor --provider gcp
 ```
 
+Maintainers can exercise the coordinator's exact ownership boundary against a
+disposable `e2-micro`: set the three required secrets above plus
+`LIVE_SSH_PUBLIC_KEY`, then run
+`CRABBOX_GCP_RELEASE_LIVE=1 npm test --prefix worker -- --run test/gcp-release.live.test.ts`.
+The smoke proves a foreign owner claim is denied, the exact owner claim is
+deleted, and neither the instance nor its boot disk remains.
+
 The readiness check reports missing secret names without exposing values. Lease
 creation fails with `provider_not_configured` until the Worker has the
 service-account credentials.
