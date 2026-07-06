@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Revalidated non-admin GitHub grants when WebVNC and Code agent tickets are consumed, matching the existing egress fail-closed boundary after logout, emergency revocation, membership loss, or membership-check failure. Thanks @coygeek.
 - Bound coordinator Azure managed-disk cleanup to a durable immutable disk claim captured from the live VM association, preventing stale adopted ownership tags from authorizing deletion. Thanks @coygeek.
 - Required direct Azure release and cleanup to hold an unchanged subscription-, resource-group-, VM-name-, immutable-VM-, lease-, slug-, and provider-key-bound local claim across deletion, with durable companion-resource identities for interruption-safe cleanup. Thanks @coygeek.
 - Required direct GCP release and cleanup to hold an unchanged project-, zone-, name-, numeric-instance-, lease-, slug-, and provider-key-bound local claim across deletion. Thanks @coygeek.

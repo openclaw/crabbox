@@ -339,7 +339,7 @@ describe("coordinator runtimes", () => {
     const runtime = new MemoryRuntime();
     const env = {
       CRABBOX_DEFAULT_ORG: "example-org",
-      CRABBOX_GITHUB_ADMIN_LOGINS: "admin",
+      CRABBOX_ADMIN_TOKEN: "admin-token",
     } as Env;
     const coordinator = new FleetCoordinator(runtime, env);
     const currentGrantVersion = await adminGrantVersion(env);
@@ -387,9 +387,9 @@ describe("coordinator runtimes", () => {
       "x-crabbox-owner": "admin@example.com",
       "x-crabbox-org": "example-org",
       "x-crabbox-admin": "true",
-      "x-crabbox-auth": "github",
-      "x-crabbox-github-login": "admin",
+      "x-crabbox-auth": "bearer",
       "x-crabbox-admin-grant-version": currentGrantVersion,
+      authorization: "Bearer admin-token",
     };
     const createTicket = async (
       kind: "webvnc" | "code",
