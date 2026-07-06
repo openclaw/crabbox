@@ -114,11 +114,28 @@ func configuredDiagnosticSecrets(cfg Config) []string {
 			seen[value] = true
 		}
 	}
+	sources := make([]ProviderDiagnosticSecretSource, 0)
+	for _, provider := range registeredProviders() {
+		if source, ok := provider.(ProviderDiagnosticSecretSource); ok {
+			sources = append(sources, source)
+		}
+	}
+	collectProviderDiagnosticSecrets(cfg, sources, seen)
 	secrets := make([]string, 0, len(seen))
 	for secret := range seen {
 		secrets = append(secrets, secret)
 	}
 	return secrets
+}
+
+func collectProviderDiagnosticSecrets(cfg Config, sources []ProviderDiagnosticSecretSource, seen map[string]bool) {
+	for _, source := range sources {
+		for _, value := range source.DiagnosticSecrets(cfg) {
+			if value = strings.TrimSpace(value); len(value) >= 4 {
+				seen[value] = true
+			}
+		}
+	}
 }
 
 func collectConfiguredDiagnosticSecrets(value reflect.Value, name string, seen map[string]bool) {

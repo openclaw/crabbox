@@ -5,6 +5,10 @@ import (
 	"testing"
 )
 
+type staticDiagnosticSecretSource []string
+
+func (s staticDiagnosticSecretSource) DiagnosticSecrets(Config) []string { return s }
+
 func TestRedactDiagnosticSecretsCoversCredentialEncodings(t *testing.T) {
 	exact := "configured-provider-secret"
 	value := strings.Join([]string{
@@ -94,4 +98,28 @@ func TestConfiguredDiagnosticSecretsFindsConfigAndSelectedEnvironment(t *testing
 	if strings.Contains(redacted, "secret") || strings.Count(redacted, diagnosticRedaction) != 5 {
 		t.Fatalf("configured secrets were not collected: %s", redacted)
 	}
+}
+
+func TestCollectProviderDiagnosticSecretsFindsRuntimeOnlyValues(t *testing.T) {
+	const runtimeSecret = "runtime-only-provider-secret"
+	seen := map[string]bool{}
+	collectProviderDiagnosticSecrets(Config{}, []ProviderDiagnosticSecretSource{
+		staticDiagnosticSecretSource{" ", "abc", " " + runtimeSecret + " ", runtimeSecret},
+	}, seen)
+
+	got := RedactDiagnosticSecrets("opaque diagnostic value "+runtimeSecret+" region=eu", secretsFromSet(seen)...)
+	if strings.Contains(got, runtimeSecret) || !strings.Contains(got, "region=eu") {
+		t.Fatalf("provider diagnostic secret collection failed: %q", got)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("seen=%v want one normalized secret", seen)
+	}
+}
+
+func secretsFromSet(values map[string]bool) []string {
+	secrets := make([]string, 0, len(values))
+	for value := range values {
+		secrets = append(secrets, value)
+	}
+	return secrets
 }

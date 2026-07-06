@@ -430,6 +430,31 @@ func TestDoctorRedactsCoordinatorAndProviderDiagnostics(t *testing.T) {
 	}
 }
 
+func TestDoctorRedactsRuntimeOnlyProviderSecret(t *testing.T) {
+	for _, tool := range []string{"git", "tar"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	const secret = "opaque-runtime-only-wandb-secret"
+	t.Setenv("WANDB_API_KEY", secret)
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "wandb", "--json"})
+	if err != nil {
+		t.Fatalf("doctor error=%v stderr=%q", err, stderr.String())
+	}
+	output := stdout.String()
+	if strings.Contains(output, secret) || !strings.Contains(output, "[redacted]") || !strings.Contains(output, "region=eu") {
+		t.Fatalf("doctor returned unsafe diagnostic: %s", output)
+	}
+}
+
 func TestDoctorJSONCoordinatorOutputIncludesCapacityWarnings(t *testing.T) {
 	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
 		if _, err := exec.LookPath(tool); err != nil {

@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Collected runtime-only provider credentials through provider-owned diagnostic hooks and redacted opaque OpenSandbox and W&B upstream errors before they reach CLI output. Thanks @coygeek.
 - Redacted complete punctuation-bearing authorization, API-key, and bearer values from CLI and coordinator diagnostics while preserving whitespace-separated routing context. Thanks @coygeek.
 - Limited framing of proxied Browser Code responses to the same isolated Code origin, preventing sibling same-site pages from clickjacking an authenticated session without breaking code-server webviews. Thanks @coygeek.
 - Revalidated non-admin GitHub grants when WebVNC and Code agent tickets are consumed, matching the existing egress fail-closed boundary after logout, emergency revocation, membership loss, or membership-check failure. Thanks @coygeek.

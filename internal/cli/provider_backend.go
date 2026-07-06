@@ -32,6 +32,13 @@ type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
 
+// ProviderDiagnosticSecretSource contributes runtime-only credentials to the
+// final diagnostic redaction pass. Providers should include every credential
+// source that is intentionally absent from Config, including local CLI stores.
+type ProviderDiagnosticSecretSource interface {
+	DiagnosticSecrets(cfg Config) []string
+}
+
 // ControllerProviderContract binds controller lifecycle retries to one opaque
 // provider configuration scope and an explicitly idempotent fixed-ID adapter.
 type ControllerProviderContract interface {

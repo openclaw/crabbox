@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"strings"
 )
 
@@ -322,8 +323,29 @@ func (testWandbProvider) RegisterFlags(*flag.FlagSet, Config) any { return noPro
 func (testWandbProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
+func (testWandbProvider) DiagnosticSecrets(Config) []string {
+	return []string{os.Getenv("WANDB_API_KEY")}
+}
 func (p testWandbProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
+}
+func (p testWandbProvider) ConfigureDoctor(Config, Runtime) (DoctorBackend, error) {
+	return testWandbDoctorBackend{testDelegatedBackend: testDelegatedBackend{spec: p.Spec()}}, nil
+}
+
+type testWandbDoctorBackend struct {
+	testDelegatedBackend
+}
+
+func (b testWandbDoctorBackend) Doctor(context.Context, DoctorRequest) (DoctorResult, error) {
+	return DoctorResult{
+		Provider: b.spec.Name,
+		Checks: []DoctorCheck{{
+			Status:  "warning",
+			Check:   "diagnostic",
+			Message: "provider rejected opaque=" + os.Getenv("WANDB_API_KEY") + " region=eu",
+		}},
+	}, nil
 }
 
 type testWindowsSandboxProvider struct{}
