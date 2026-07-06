@@ -121,8 +121,8 @@ classed doctor output rather than hidden behind generic errors.
 5. Claim the lease locally with Lambda instance and SSH-key metadata.
 6. Run normal Crabbox sync/run/ssh workflows over SSH.
 7. Terminate the Lambda instance and owned Lambda SSH key on `stop`; `cleanup`
-   deletes resources backed by a complete local Crabbox Lambda claim, and can
-   also reclaim complete Crabbox-tagged Lambda instances.
+   deletes only resources backed by an unchanged, exact local Crabbox Lambda
+   claim.
 
 If SSH-key creation, instance launch, or post-launch readiness becomes
 indeterminate, Crabbox records a local recovery claim with enough metadata to
@@ -147,15 +147,17 @@ expires_at=<unix-seconds>
 ttl_secs=<seconds>
 ```
 
-Release and cleanup require a complete ownership predicate: Crabbox marker,
-provider marker, lease id, slug, and Linux target. Lambda instances backed only
-by partial, foreign, or malformed Crabbox-like metadata are skipped or refused.
+Release and cleanup require an unchanged local claim that binds the exact Lambda
+instance, lease id, slug, provider, and SSH-key identity and ownership. Provider
+tags, names, and instance ids are discovery hints, not destructive authority;
+unclaimed Lambda inventory is skipped or refused.
 
 Lambda has no safe tag-update path in this phase, and the launch path does not
 depend on provider-side tag persistence. Local Crabbox claims carry fresh touch
-and idle-timeout state. Complete Crabbox-tagged Lambda instances are still
-understood by `list`, `stop`, and `cleanup` for compatibility with manually
-seeded or future provider metadata.
+and idle-timeout state. Explicit failed-create recovery remains claim-bound:
+ambiguous launches must match the unique per-lease Lambda SSH key before Crabbox
+can terminate them.
+
 Direct mode has no coordinator alarm. Use:
 
 ```sh

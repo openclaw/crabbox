@@ -24,10 +24,6 @@ func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time
 	return labels
 }
 
-func isOwnedInstance(item Instance) bool {
-	return validateLambdaLabels(item.Tags) == nil
-}
-
 func validateLambdaLabels(labels map[string]string) error {
 	if labels == nil ||
 		labels["crabbox"] != "true" ||
