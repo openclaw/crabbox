@@ -2076,6 +2076,7 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 	target := sshTargetForLease(cfg, lease.Host, lease.SSHUser, lease.SSHPort)
 	if server.Provider == "daytona" {
 		target.Key = ""
+		target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
 		target.AuthSecret = true
 		target.NetworkKind = NetworkPublic
 	} else {

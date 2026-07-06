@@ -406,6 +406,9 @@ func TestLeaseToServerTargetMarksDaytonaSSHUserSecret(t *testing.T) {
 	if target.User != "daytona-secret-token" || target.Key != "" || !target.AuthSecret {
 		t.Fatalf("target=%#v", target)
 	}
+	if target.ReadyCheck != "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null" {
+		t.Fatalf("ready check=%q", target.ReadyCheck)
+	}
 	if target.NetworkKind != NetworkPublic {
 		t.Fatalf("network kind=%q want public", target.NetworkKind)
 	}
