@@ -259,6 +259,27 @@ func TestDesktopTypeUsesPasteForSymbolHeavyText(t *testing.T) {
 	}
 }
 
+func TestDesktopPasteFailureSafeToRetry(t *testing.T) {
+	for _, detail := range []string{
+		"missing clipboard tool; warm a new lease",
+		"clipboard helper exited before paste (status=42)",
+		"clipboard helper failed to provide requested contents (xsel)",
+	} {
+		if !desktopPasteFailureSafeToRetry(detail) {
+			t.Errorf("expected pre-input failure to be retryable: %q", detail)
+		}
+	}
+	for _, detail := range []string{
+		"clipboard helper failed while serving paste (status=42)",
+		"xdotool type failed after entering part of the text",
+		"wtype returned status 1",
+	} {
+		if desktopPasteFailureSafeToRetry(detail) {
+			t.Errorf("expected potentially partial input failure not to be retryable: %q", detail)
+		}
+	}
+}
+
 func TestDesktopPasteRemoteCommandPrefersClipboardTools(t *testing.T) {
 	got := desktopPasteRemoteCommand()
 	for _, want := range []string{
@@ -410,10 +431,13 @@ func TestDesktopLinuxTerminalSupportsWaylandAndX11(t *testing.T) {
 
 func TestDesktopClickRemoteCommandSupportsManagedTargets(t *testing.T) {
 	linux := desktopClickRemoteCommand(SSHTarget{TargetOS: targetLinux}, 12, 34)
-	for _, want := range []string{"CRABBOX_DESKTOP_ENV:-xfce", "not supported on Wayland desktop envs", "DISPLAY=\"${DISPLAY:-:99}\"", "xdotool mousemove 12 34 click 1"} {
+	for _, want := range []string{"CRABBOX_DESKTOP_ENV:-xfce", "not supported on Wayland desktop envs", "DISPLAY=\"${DISPLAY:-:99}\"", "xdotool getactivewindow", "xdotool mousemove 12 34 click 1"} {
 		if !strings.Contains(linux, want) {
 			t.Fatalf("linux click command missing %q:\n%s", want, linux)
 		}
+	}
+	if strings.Index(linux, "xdotool getactivewindow") > strings.Index(linux, "not supported on Wayland desktop envs") {
+		t.Fatalf("linux click must try an active XWayland window before rejecting the desktop env:\n%s", linux)
 	}
 	mac := desktopClickRemoteCommand(SSHTarget{TargetOS: targetMacOS}, 12, 34)
 	for _, want := range []string{"cliclick c:12,34", "import CoreGraphics", "CGEvent"} {
@@ -441,6 +465,9 @@ func TestDesktopWaylandInputBranches(t *testing.T) {
 			t.Fatalf("key command missing %q:\n%s", want, key)
 		}
 	}
+	if strings.Index(key, "xdotool getactivewindow") > strings.Index(key, "command -v wtype") {
+		t.Fatalf("key command must prefer an active XWayland window before native Wayland fallback:\n%s", key)
+	}
 	unsupported := desktopKeyRemoteCommand("ctrl+l alt+Tab")
 	if !strings.Contains(unsupported, "supports a single key or modifier+key sequence") {
 		t.Fatalf("complex wayland key sequence should be rejected:\n%s", unsupported)
@@ -450,6 +477,9 @@ func TestDesktopWaylandInputBranches(t *testing.T) {
 		if !strings.Contains(typed, want) {
 			t.Fatalf("type command missing %q:\n%s", want, typed)
 		}
+	}
+	if strings.Index(typed, "xdotool getactivewindow") > strings.Index(typed, "wtype -d 1") {
+		t.Fatalf("type command must prefer an active XWayland window before native Wayland fallback:\n%s", typed)
 	}
 }
 

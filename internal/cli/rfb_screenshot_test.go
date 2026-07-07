@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/aes"
+	"crypto/des"
 	"crypto/md5"
 	"encoding/binary"
 	"flag"
 	"image/color"
 	"io"
 	"math/big"
+	"math/bits"
 	"net"
 	"testing"
 	"time"
@@ -93,6 +95,207 @@ func TestCaptureRFBFrameReadsNoneAuthSecurityResult(t *testing.T) {
 	if got := color.RGBAModel.Convert(img.At(0, 0)); got != (color.RGBA{B: 255, A: 255}) {
 		t.Fatalf("pixel=%v", got)
 	}
+}
+
+func TestClickRFBPointerSendsPressAndRelease(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- serveTestPointerRFB(server, 12, 34)
+	}()
+
+	if err := clickRFBPointerFromConn(context.Background(), client, rfbCredentials{}, 12, 34); err != nil {
+		t.Fatalf("click RFB pointer: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake RFB server: %v", err)
+	}
+}
+
+func TestPasteRFBClipboardSendsCutTextAndCommandV(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- serveTestClipboardRFB(server, "Issue or Pull request")
+	}()
+
+	if err := pasteRFBClipboardFromConn(context.Background(), client, rfbCredentials{}, "Issue or Pull request"); err != nil {
+		t.Fatalf("paste RFB clipboard: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake RFB server: %v", err)
+	}
+}
+
+func TestWriteRFBClientCutTextRejectsOversizedText(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	if err := writeRFBClientCutText(client, string(make([]byte, (1<<20)+1))); err == nil {
+		t.Fatal("oversized clipboard text should be rejected")
+	}
+}
+
+func TestRFBPasswordOnlyCredentialsPreferVNCAuth(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if _, err := server.Write([]byte{2, rfbSecurityARD, rfbSecurityVNC}); err != nil {
+			serverErr <- err
+			return
+		}
+		selected := []byte{0}
+		if _, err := io.ReadFull(server, selected); err != nil {
+			serverErr <- err
+			return
+		}
+		if selected[0] != rfbSecurityVNC {
+			serverErr <- errUnexpectedTestBytes("security type", selected)
+			return
+		}
+		challenge := []byte("0123456789abcdef")
+		if _, err := server.Write(challenge); err != nil {
+			serverErr <- err
+			return
+		}
+		response := make([]byte, len(challenge))
+		if _, err := io.ReadFull(server, response); err != nil {
+			serverErr <- err
+			return
+		}
+		key := []byte("password")
+		for i := range key {
+			key[i] = bits.Reverse8(key[i])
+		}
+		cipher, err := des.NewCipher(key)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		plaintext := make([]byte, len(response))
+		for offset := 0; offset < len(response); offset += cipher.BlockSize() {
+			cipher.Decrypt(plaintext[offset:offset+cipher.BlockSize()], response[offset:offset+cipher.BlockSize()])
+		}
+		if !bytes.Equal(plaintext, challenge) {
+			serverErr <- errUnexpectedTestBytes("VNC auth response", plaintext)
+			return
+		}
+		serverErr <- nil
+	}()
+
+	credentials := rfbCredentials{Password: "password"}
+	securityType, err := negotiateRFBSecurityType(client, credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if securityType != rfbSecurityVNC {
+		t.Fatalf("security type = %d", securityType)
+	}
+	if err := negotiateRFBVNCAuth(client, credentials); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serveTestPointerRFB(conn net.Conn, wantX, wantY int) error {
+	if err := serveTestInputRFBInit(conn); err != nil {
+		return err
+	}
+
+	wantMasks := []byte{0, 1, 0}
+	for _, wantMask := range wantMasks {
+		event := make([]byte, 6)
+		if _, err := io.ReadFull(conn, event); err != nil {
+			return err
+		}
+		if event[0] != 5 || event[1] != wantMask || int(binary.BigEndian.Uint16(event[2:4])) != wantX || int(binary.BigEndian.Uint16(event[4:6])) != wantY {
+			return errUnexpectedTestBytes("pointer event", event)
+		}
+	}
+	return nil
+}
+
+func serveTestClipboardRFB(conn net.Conn, wantText string) error {
+	if err := serveTestInputRFBInit(conn); err != nil {
+		return err
+	}
+	message := make([]byte, 8+len(wantText))
+	if _, err := io.ReadFull(conn, message); err != nil {
+		return err
+	}
+	if message[0] != 6 || !bytes.Equal(message[1:4], []byte{0, 0, 0}) || binary.BigEndian.Uint32(message[4:8]) != uint32(len(wantText)) || string(message[8:]) != wantText {
+		return errUnexpectedTestBytes("clipboard message", message)
+	}
+	wantKeys := []struct {
+		down bool
+		key  uint32
+	}{{true, 0xffeb}, {true, 0x76}, {false, 0x76}, {false, 0xffeb}}
+	for _, want := range wantKeys {
+		event := make([]byte, 8)
+		if _, err := io.ReadFull(conn, event); err != nil {
+			return err
+		}
+		wantDown := byte(0)
+		if want.down {
+			wantDown = 1
+		}
+		if event[0] != 4 || event[1] != wantDown || !bytes.Equal(event[2:4], []byte{0, 0}) || binary.BigEndian.Uint32(event[4:8]) != want.key {
+			return errUnexpectedTestBytes("key event", event)
+		}
+	}
+	return nil
+}
+
+func serveTestInputRFBInit(conn net.Conn) error {
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Write([]byte("RFB 003.008\n")); err != nil {
+		return err
+	}
+	clientVersion := make([]byte, 12)
+	if _, err := io.ReadFull(conn, clientVersion); err != nil {
+		return err
+	}
+	if !bytes.Equal(clientVersion, []byte("RFB 003.008\n")) {
+		return errUnexpectedTestBytes("client version", clientVersion)
+	}
+	if _, err := conn.Write([]byte{1, rfbSecurityNone}); err != nil {
+		return err
+	}
+	security := []byte{0}
+	if _, err := io.ReadFull(conn, security); err != nil {
+		return err
+	}
+	if security[0] != rfbSecurityNone {
+		return errUnexpectedTestBytes("security type", security)
+	}
+	if _, err := conn.Write([]byte{0, 0, 0, 0}); err != nil {
+		return err
+	}
+	clientInit := []byte{0}
+	if _, err := io.ReadFull(conn, clientInit); err != nil {
+		return err
+	}
+	serverInit := make([]byte, 24)
+	binary.BigEndian.PutUint16(serverInit[0:2], 100)
+	binary.BigEndian.PutUint16(serverInit[2:4], 80)
+	serverInit[4] = 32
+	serverInit[5] = 24
+	serverInit[7] = 1
+	if _, err := conn.Write(serverInit); err != nil {
+		return err
+	}
+	return nil
 }
 
 func serveTestARDRFB(conn net.Conn, username, password string) error {

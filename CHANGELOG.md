@@ -10,6 +10,7 @@
 ### Fixed
 
 - Bound non-admin shared-token WebVNC, Code, and egress bridges to the credential active at ticket creation, closing active and restored sessions after token rotation or removal. Thanks @coygeek.
+- Made Parallels macOS WebVNC use managed VNC credentials, authenticated screenshots, pointer and clipboard input, explicit host-side macOS routing, collision-safe local tunnels, XWayland-aware desktop input, and safe clipboard fallback.
 - Started delegated-provider sync timeouts at archive creation, matching SSH sync semantics and avoiding pre-transfer expiry during local Git manifest planning.
 - Kept macOS listener ownership checks responsive when mounted filesystems make full `lsof` metadata scans slow.
 - Routed Azure orphan-sweep deletion through the exact lease-, provider-scope-, resource-, companion-, and immutable-disk-bound owned-delete path instead of deleting by retained VM name alone.
