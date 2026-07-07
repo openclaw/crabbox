@@ -83,6 +83,7 @@ type credentialDestinationProvenance struct {
 	externalSSHProxy      credentialValueSource
 	externalSSHAllowEnv   credentialValueSource
 	externalSSHOutput     credentialValueSource
+	externalDesktopEnv    credentialValueSource
 	externalRouting       credentialValueSource
 	externalApproved      externalCredentialApproval
 	repositoryRoot        string
@@ -95,6 +96,7 @@ type externalCredentialApproval struct {
 	allowEnv       bool
 	envSSH         ExternalSSHConnectionConfig
 	providerOutput bool
+	desktopEnv     string
 	outputContract [32]byte
 }
 
@@ -388,6 +390,10 @@ func validateProviderCredentialDestination(cfg Config) error {
 		if cfg.External.Connection.SSH.TrustProviderOutput && provenance.externalSSHOutput == credentialSourceRepository {
 			return repositoryCredentialDestinationError("external", "external.connection.ssh.trustProviderOutput", "the same provider-output contract in trusted user config")
 		}
+		if strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv) != "" &&
+			provenance.externalDesktopEnv == credentialSourceRepository {
+			return repositoryCredentialDestinationError("external", "external.connection.desktop.passwordEnv", "the same desktop password environment variable in trusted user config or an explicit flag/environment override")
+		}
 		if !externalDeclarativeLifecycleConfigured(cfg.External) {
 			break
 		}
@@ -489,6 +495,9 @@ func MarkExternalRoutingCredentialSources(cfg *Config) {
 	provenance.externalSSHHost = credentialDestinationSource(connection.SSH.Host, provenance.externalApproved.host, source)
 	provenance.externalSSHProxy = credentialDestinationSource(connection.SSH.ProxyCommand, provenance.externalApproved.proxy, source)
 	provenance.externalSSHAllowEnv = credentialSourceForBool(connection.SSH.AllowEnv, source)
+	provenance.externalDesktopEnv = credentialDestinationSource(
+		connection.Desktop.PasswordEnv, provenance.externalApproved.desktopEnv, source,
+	)
 	if source == credentialSourceRepository && connection.SSH.AllowEnv && provenance.externalApproved.allowEnv &&
 		externalSSHEnvApprovalMatches(connection, provenance.externalApproved) {
 		provenance.externalSSHAllowEnv = credentialSourceTrustedFile
@@ -511,6 +520,12 @@ func MarkExternalRoutingFileExplicit(cfg *Config) {
 // adapter contract through a trusted flag.
 func MarkExternalProviderOutputFlagExplicit(cfg *Config) {
 	markExternalProviderOutputExplicit(cfg, credentialSourceFlag)
+}
+
+// MarkExternalDesktopPasswordEnvExplicit records an operator-selected desktop
+// secret reference so repository config cannot redirect inherited credentials.
+func MarkExternalDesktopPasswordEnvExplicit(cfg *Config) {
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceFlag
 }
 
 func markExternalProviderOutputExplicit(cfg *Config, source credentialValueSource) {

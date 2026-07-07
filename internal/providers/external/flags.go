@@ -92,6 +92,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "external-desktop-password-env") {
 		cfg.External.Connection.Desktop.PasswordEnv = *v.DesktopPasswordEnv
+		core.MarkExternalDesktopPasswordEnvExplicit(cfg)
 	}
 	return validateConfig(*cfg)
 }

@@ -5877,6 +5877,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 					allowEnv:       ssh.AllowEnv,
 					envSSH:         ssh,
 					providerOutput: ssh.TrustProviderOutput,
+					desktopEnv:     cfg.External.Connection.Desktop.PasswordEnv,
 					outputContract: outputContract,
 				}
 				cfg.credentialProvenance.externalApproved.envSSH.FallbackPorts = append([]string(nil), ssh.FallbackPorts...)
@@ -5891,6 +5892,11 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 				ssh.ProxyCommand, cfg.credentialProvenance.externalApproved.proxy, credentialSource,
 			)
 			cfg.credentialProvenance.externalSSHAllowEnv = credentialSourceForBool(ssh.AllowEnv, credentialSource)
+			cfg.credentialProvenance.externalDesktopEnv = credentialDestinationSource(
+				cfg.External.Connection.Desktop.PasswordEnv,
+				cfg.credentialProvenance.externalApproved.desktopEnv,
+				credentialSource,
+			)
 			if !trusted && ssh.AllowEnv && cfg.credentialProvenance.externalApproved.allowEnv &&
 				externalSSHEnvApprovalMatches(cfg.External.Connection, cfg.credentialProvenance.externalApproved) {
 				cfg.credentialProvenance.externalSSHAllowEnv = credentialSourceTrustedFile
@@ -8176,7 +8182,10 @@ func applyEnv(cfg *Config) error {
 		cfg.credentialProvenance.externalRouting = credentialSourceEnvironment
 	}
 	cfg.External.Connection.Desktop.Username = getenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", cfg.External.Connection.Desktop.Username)
-	cfg.External.Connection.Desktop.PasswordEnv = getenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", cfg.External.Connection.Desktop.PasswordEnv)
+	if value := os.Getenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV"); value != "" {
+		cfg.External.Connection.Desktop.PasswordEnv = value
+		cfg.credentialProvenance.externalDesktopEnv = credentialSourceEnvironment
+	}
 	if value, ok := getenvBool("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID"); ok {
 		cfg.External.Capabilities.IdempotentLeaseID = value
 	}

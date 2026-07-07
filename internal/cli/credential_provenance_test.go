@@ -959,6 +959,19 @@ func TestRepositorySSHDestinationsRejectInheritedOrAmbientAuthentication(t *test
 			},
 			want: "external.connection.ssh.allowEnv",
 		},
+		{
+			name: "external repository desktop password environment",
+			cfg: Config{
+				Provider: "external",
+				External: ExternalConfig{Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+					PasswordEnv: "INHERITED_SECRET",
+				}}},
+				credentialProvenance: credentialDestinationProvenance{
+					externalDesktopEnv: credentialSourceRepository,
+				},
+			},
+			want: "external.connection.desktop.passwordEnv",
+		},
 	}
 
 	for _, test := range tests {
@@ -1608,6 +1621,40 @@ func TestConfigMergeTracksSSHDestinationSources(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestExternalDesktopPasswordEnvRequiresTrustedApproval(t *testing.T) {
+	clearConfigEnv(t)
+	connection := ExternalConnectionConfig{Desktop: ExternalDesktopConfig{PasswordEnv: "APPROVED_DESKTOP_PASSWORD"}}
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &connection}}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &connection}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("exact trusted desktop password reference rejected: %v", err)
+	}
+
+	repositoryConnection := connection
+	repositoryConnection.Desktop.PasswordEnv = "OTHER_INHERITED_SECRET"
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &repositoryConnection}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external.connection.desktop.passwordEnv") {
+		t.Fatalf("repository desktop secret reference error=%v", err)
+	}
+
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "EXPLICIT_DESKTOP_PASSWORD")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("explicit desktop password environment override rejected: %v", err)
+	}
 }
 
 func TestRepositorySSHDestinationsAllowExplicitFlagOverride(t *testing.T) {
