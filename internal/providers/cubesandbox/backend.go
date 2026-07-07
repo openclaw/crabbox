@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 	"time"
 )
@@ -222,10 +223,14 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 	}
 	commandStarted := b.now()
 	fmt.Fprintf(b.rt.Stderr, "running on cubesandbox %s\n", strings.Join(req.Command, " "))
+	commandEnv, strippedAuthEnv := cubeSandboxCommandEnv(req.Env)
+	if len(strippedAuthEnv) > 0 {
+		fmt.Fprintf(b.rt.Stderr, "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(strippedAuthEnv, ","))
+	}
 	exitCode, commandErr := client.StartProcess(ctx, session, cubesandboxProcessRequest{
 		Command: command,
 		CWD:     workspace,
-		Env:     req.Env,
+		Env:     commandEnv,
 		User:    processUser,
 		Timeout: cubesandboxTimeoutDuration(b.cfg.TTL),
 		Stdout:  b.rt.Stdout,
@@ -267,6 +272,24 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		return finishResult(), ExitError{Code: result.ExitCode, Message: fmt.Sprintf("cubesandbox run exited %d", result.ExitCode)}
 	}
 	return finishResult(), nil
+}
+
+func cubeSandboxCommandEnv(env map[string]string) (map[string]string, []string) {
+	if len(env) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(env))
+	var stripped []string
+	for name, value := range env {
+		switch name {
+		case "CRABBOX_CUBESANDBOX_API_KEY", "CUBE_API_KEY", "E2B_API_KEY":
+			stripped = append(stripped, name)
+		default:
+			out[name] = value
+		}
+	}
+	slices.Sort(stripped)
+	return out, stripped
 }
 
 func (b *cubesandboxBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {

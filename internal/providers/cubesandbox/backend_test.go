@@ -816,6 +816,49 @@ func TestCubeSandboxRunBoundsAutomaticCleanup(t *testing.T) {
 	}
 }
 
+func TestCubeSandboxRunStripsProviderAuthenticationEnv(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{}
+	restore := swapNewCubeSandboxClient(client)
+	defer restore()
+	var stderr bytes.Buffer
+	backend := &cubesandboxBackend{
+		cfg: Config{CubeSandbox: CubeSandboxConfig{Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: &stderr},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir()},
+		Command: []string{"true"},
+		NoSync:  true,
+		Env: map[string]string{
+			"CRABBOX_CUBESANDBOX_API_KEY": "crabbox-secret",
+			"CUBE_API_KEY":                "cube-secret",
+			"E2B_API_KEY":                 "fallback-secret",
+			"SAFE_VALUE":                  "forwarded",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.processEnvs) < 2 {
+		t.Fatalf("process envs=%#v, want workspace and command calls", client.processEnvs)
+	}
+	commandEnv := client.processEnvs[len(client.processEnvs)-1]
+	if len(commandEnv) != 1 || commandEnv["SAFE_VALUE"] != "forwarded" {
+		t.Fatalf("command env=%#v, want only safe value", commandEnv)
+	}
+	for _, name := range []string{"CRABBOX_CUBESANDBOX_API_KEY", "CUBE_API_KEY", "E2B_API_KEY"} {
+		if !strings.Contains(stderr.String(), name) {
+			t.Fatalf("stderr=%q, want stripped variable %s", stderr.String(), name)
+		}
+	}
+	for _, secret := range []string{"crabbox-secret", "cube-secret", "fallback-secret"} {
+		if strings.Contains(stderr.String(), secret) {
+			t.Fatalf("stderr leaked secret %q: %q", secret, stderr.String())
+		}
+	}
+}
+
 func TestCubeSandboxRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeCubeSandboxSyncClient{}
@@ -1252,6 +1295,7 @@ type fakeCubeSandboxSyncClient struct {
 	uploadPath        string
 	uploaded          bytes.Buffer
 	processCodes      []int
+	processEnvs       []map[string]string
 }
 
 func swapNewCubeSandboxClient(fake cubesandboxAPI) func() {
@@ -1304,6 +1348,7 @@ func (f *fakeCubeSandboxSyncClient) UploadFile(_ context.Context, _ cubesandboxS
 func (f *fakeCubeSandboxSyncClient) StartProcess(_ context.Context, _ cubesandboxSession, req cubesandboxProcessRequest) (int, error) {
 	f.commands = append(f.commands, req.Command)
 	f.users = append(f.users, req.User)
+	f.processEnvs = append(f.processEnvs, req.Env)
 	if len(f.processCodes) > 0 {
 		code := f.processCodes[0]
 		f.processCodes = f.processCodes[1:]
