@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -161,6 +162,54 @@ func TestStopCleansMediatedEgressBeforeRelease(t *testing.T) {
 	}
 }
 
+func TestStopDefersUnsafeLocalConnectionCleanupUntilRelease(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	leaseID := "cbx_env_profile_test"
+	requestedID := "friendly-slug"
+	pidPaths := map[string]string{}
+	for _, id := range []string{requestedID, leaseID} {
+		_, pidPath, err := egressDaemonPaths(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(pidPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(pidPath, []byte("99999999\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pidPaths[id] = pidPath
+	}
+	runEnvProfileTestConnectionCleanupSafe = false
+	t.Cleanup(func() { runEnvProfileTestConnectionCleanupSafe = true })
+	runEnvProfileTestReleaseHook = func() error {
+		for id, pidPath := range pidPaths {
+			if _, err := os.Stat(pidPath); err != nil {
+				return fmt.Errorf("local connection cleanup for %s ran before guarded release", id)
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).stop(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--id", requestedID,
+	})
+	if err != nil {
+		t.Fatalf("stop error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	for id, pidPath := range pidPaths {
+		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+			t.Fatalf("egress pid path for %s still exists after release: %v", id, err)
+		}
+	}
+}
+
 func installRecordingSSH(t *testing.T, dir string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "ssh.log")
@@ -287,6 +336,7 @@ type runEnvProfileTestBackend struct {
 
 var runEnvProfileTestReleaseErr error
 var runEnvProfileTestReleaseHook func() error
+var runEnvProfileTestConnectionCleanupSafe = true
 
 func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runEnvProfileTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
@@ -318,6 +368,9 @@ func (b runEnvProfileTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequ
 }
 func (b runEnvProfileTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
 	return Server{Provider: b.spec.Name}, nil
+}
+func (b runEnvProfileTestBackend) ReleaseLeaseConnectionCleanupSafe() bool {
+	return runEnvProfileTestConnectionCleanupSafe
 }
 
 type runPrepareTestProvider struct{}

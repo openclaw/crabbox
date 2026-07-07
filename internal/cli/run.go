@@ -2762,9 +2762,8 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 }
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
-	connectionCleanupSafe := true
+	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(backend)
 	if refresher, ok := backend.(ReleaseLeaseTargetRefresher); ok {
-		connectionCleanupSafe = refresher.ReleaseLeaseConnectionCleanupSafe()
 		refreshed, err := refresher.RefreshReleaseLeaseTarget(ctx, lease)
 		if err != nil {
 			if errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
@@ -2793,9 +2792,22 @@ func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLease
 	return nil
 }
 
-func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseID string) {
-	if _, err := a.stopEgressHostDaemon(leaseID); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: egress host daemon cleanup failed for %s: %v\n", leaseID, err)
+func releaseLeaseConnectionCleanupSafe(backend SSHLeaseBackend) bool {
+	policy, ok := backend.(ReleaseLeaseConnectionCleanupPolicy)
+	return !ok || policy.ReleaseLeaseConnectionCleanupSafe()
+}
+
+func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseIDs ...string) {
+	seen := map[string]bool{}
+	for _, leaseID := range leaseIDs {
+		leaseID = strings.TrimSpace(leaseID)
+		if leaseID == "" || seen[leaseID] {
+			continue
+		}
+		seen[leaseID] = true
+		if _, err := a.stopEgressHostDaemon(leaseID); err != nil {
+			fmt.Fprintf(a.Stderr, "warning: egress host daemon cleanup failed for %s: %v\n", leaseID, err)
+		}
 	}
 }
 
@@ -3185,17 +3197,23 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err := ValidateLeaseTargetProviderIdentity(lease, expectedIdentity); err != nil {
 		return err
 	}
-	if lease.SSH.Host != "" {
-		a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
+	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(sshBackend)
+	if connectionCleanupSafe {
+		if lease.SSH.Host != "" {
+			a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
+		}
+		a.cleanupMediatedEgressBestEffort(ctx, *id, lease)
+		a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	}
-	a.cleanupMediatedEgressBestEffort(ctx, *id, lease)
-	a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	if err := sshBackend.ReleaseLease(ctx, ReleaseLeaseRequest{
 		Lease:                    lease,
 		Force:                    true,
 		ExpectedProviderIdentity: expectedIdentity,
 	}); err != nil {
 		return err
+	}
+	if !connectionCleanupSafe {
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(*id, lease.LeaseID)
 	}
 	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, cfg, lease.LeaseID)
 	if backendCoordinator(backend) != nil {

@@ -194,13 +194,19 @@ type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
 }
 
+// ReleaseLeaseConnectionCleanupPolicy lets a provider defer generic connection
+// cleanup until after its guarded release succeeds.
+type ReleaseLeaseConnectionCleanupPolicy interface {
+	// ReleaseLeaseConnectionCleanupSafe reports whether generic remote cleanup
+	// may run before the provider's guarded release.
+	ReleaseLeaseConnectionCleanupSafe() bool
+}
+
 // ReleaseLeaseTargetRefresher opts a provider into refreshing authorization
 // and connection metadata immediately before automatic lease cleanup.
 type ReleaseLeaseTargetRefresher interface {
+	ReleaseLeaseConnectionCleanupPolicy
 	RefreshReleaseLeaseTarget(context.Context, LeaseTarget) (LeaseTarget, error)
-	// ReleaseLeaseConnectionCleanupSafe reports whether generic remote cleanup
-	// may run between the refresh and the provider's guarded release.
-	ReleaseLeaseConnectionCleanupSafe() bool
 }
 
 var ErrReleaseLeaseOwnershipChanged = errors.New("release lease ownership changed")
