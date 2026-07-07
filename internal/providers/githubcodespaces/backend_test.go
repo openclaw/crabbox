@@ -425,6 +425,30 @@ func TestResolveStartsStoppedCodespaceAndRefreshesTarget(t *testing.T) {
 	}
 }
 
+func TestResolveStatusOnlyReadyProbeDoesNotStartStoppedCodespace(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-stopped-status"] = fakeCodespace("cs-stopped-status", "Shutdown")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ac5"
+	server := b.serverFromCodespace(fc.items["cs-stopped-status"], b.labelsFor(leaseID, "stopped-status-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopped-status"], "stopped"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "stopped-status-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "stopped-status-box", StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.starts) != 0 || lease.SSH.Host != "" || len(b.waits) != 0 {
+		t.Fatalf("starts=%#v lease=%#v waits=%#v", fc.starts, lease, b.waits)
+	}
+	if lease.Server.Status != "Shutdown" || lease.Server.Labels[labelState] != "stopped" {
+		t.Fatalf("lease=%#v", lease)
+	}
+}
+
 func TestResolveNoLocalStateMutationsDoesNotStoreSSHConfig(t *testing.T) {
 	stateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)
@@ -688,6 +712,36 @@ func TestReleaseRetainedStopsAndClearsEndpoint(t *testing.T) {
 	}
 }
 
+func TestReleaseRetainedRemovesClaimWhenCodespaceIsAlreadyAbsent(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	fc := newFakeCodespacesClient()
+	fc.stopErr = githubAPIError(404, "", `{"message":"Not Found"}`)
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	b.cfg.GitHubCodespaces.DeleteOnRelease = false
+	leaseID := "cbx_123456789ab9"
+	item := fakeCodespace("cs-retained-absent", "Shutdown")
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "retained-absent-box", "example-org/my-app", "alice", true, releaseStop, item, "stopped"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "retained-absent-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeSSHConfig(leaseID, "Host retained-absent-box\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
+		t.Fatalf("claim ok=%t err=%v", ok, err)
+	}
+	configPath := filepath.Join(stateHome, "crabbox", "github-codespaces", leaseID+".ssh_config")
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("stored config err=%v path=%s", err, configPath)
+	}
+}
+
 func TestCleanupDryRunKeepsProviderNonMutating(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -919,6 +973,7 @@ type fakeCodespacesClient struct {
 	listErr         error
 	starts          []string
 	stops           []string
+	stopErr         error
 	deletes         []string
 	deleteErr       error
 	deleteDeadline  bool
@@ -990,6 +1045,9 @@ func (f *fakeCodespacesClient) startCodespace(_ context.Context, name string) (c
 
 func (f *fakeCodespacesClient) stopCodespace(_ context.Context, name string) error {
 	f.stops = append(f.stops, name)
+	if f.stopErr != nil {
+		return f.stopErr
+	}
 	item := f.items[name]
 	item.State = "Shutdown"
 	f.items[name] = item

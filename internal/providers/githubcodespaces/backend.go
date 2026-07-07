@@ -256,6 +256,10 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	server = b.mergeLiveServer(server, item)
+	if req.StatusOnly && codespaceStopped(item.State) {
+		server.Labels[labelState] = "stopped"
+		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+	}
 	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
@@ -394,10 +398,21 @@ func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI,
 	server.Labels[labelState] = "stopped"
 	server.Labels[labelRelease] = releaseStop
 	server.Labels[labelCodespaceName] = name
-	_, err := updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, func() error {
-		return api.stopCodespace(ctx, name)
+	absent := false
+	updated, err := updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, func() error {
+		err := api.stopCodespace(ctx, name)
+		if isGitHubNotFound(err) {
+			absent = true
+			return nil
+		}
+		return err
 	})
-	return err
+	if err != nil || !absent {
+		return err
+	}
+	return removeLeaseClaimIfUnchangedAfter(leaseID, updated, func() error {
+		return removeStoredSSHConfig(leaseID)
+	})
 }
 
 func (b *backend) deleteClaimedCodespace(ctx context.Context, api codespacesAPI, claim LeaseClaim, name string) error {

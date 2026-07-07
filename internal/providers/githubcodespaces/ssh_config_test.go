@@ -11,7 +11,7 @@ func TestSSHConfigParsesProxyTarget(t *testing.T) {
 	target, err := selectSSHTarget(Config{GitHubCodespaces: GitHubCodespacesConfig{WorkRoot: "/workspaces/my-app"}}, `Host sturdy-space
   User vscode
   IdentityFile "/tmp/codespaces/key"
-  UserKnownHostsFile /dev/null
+  UserKnownHostsFile=/dev/null
   ProxyCommand gh codespace ssh -c sturdy-space --stdio
 `, "sturdy-space")
 	if err != nil {

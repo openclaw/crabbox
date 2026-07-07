@@ -292,8 +292,13 @@ func splitSSHConfigDirective(line string) (string, string) {
 		return "", ""
 	}
 	for i, r := range line {
+		if r == '=' {
+			return strings.TrimSpace(line[:i]), strings.TrimSpace(line[i+1:])
+		}
 		if r == ' ' || r == '\t' {
-			return strings.TrimSpace(line[:i]), strings.TrimSpace(line[i:])
+			value := strings.TrimSpace(line[i:])
+			value = strings.TrimSpace(strings.TrimPrefix(value, "="))
+			return strings.TrimSpace(line[:i]), value
 		}
 	}
 	return line, ""
