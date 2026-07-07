@@ -28,13 +28,17 @@ func (r *exeDevRecordingRunner) Run(_ context.Context, req LocalCommandRequest) 
 }
 
 func TestExeDevListFiltersCrabboxVMsByDefault(t *testing.T) {
-	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &exeDevRecordingRunner{}
+	runner.fn = func(req LocalCommandRequest) (LocalCommandResult, error) {
 		base := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "exe.dev", "ls --l --json"}
+		if len(runner.calls) == 2 {
+			base[len(base)-1] += " -a"
+		}
 		if !reflect.DeepEqual(req.Args, base) {
 			t.Fatalf("args=%v", req.Args)
 		}
 		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]},{"vm_name":"crabbox-manual-12345678","ssh_dest":"crabbox-manual-12345678.exe.xyz","status":"running"}]}`}, nil
-	}}
+	}
 	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	views, err := backend.List(context.Background(), ListRequest{})
 	if err != nil {
@@ -417,6 +421,21 @@ func TestExeDevReleaseRejectsClaimBoundToDifferentVM(t *testing.T) {
 		t.Fatalf("err=%v, want exact resource binding refusal", err)
 	}
 	assertNoExeDevRM(t, runner)
+}
+
+func TestExeDevReleaseRejectsChangedSSHEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	vm := ownedExeDevVM(leaseID, "blue")
+	backend := newExeDevTestBackend(Config{}, exeDevInventoryRunner(t, vm))
+	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, "blue", t.TempDir())
+	vm.SSHDest = "replacement.exe.xyz:2222"
+	backend.rt.Exec = exeDevInventoryRunner(t, vm)
+
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "SSH endpoint does not match") {
+		t.Fatalf("err=%v, want exact SSH endpoint refusal", err)
+	}
 }
 
 func TestExeDevReleaseRequiresUnchangedClaimAndRemoteTags(t *testing.T) {
@@ -877,6 +896,28 @@ func TestExeDevBulkInventoryTreatsMalformedTagsAsUnowned(t *testing.T) {
 	}
 }
 
+func TestExeDevLeaseLookupSkipsOnlyUnrelatedMalformedTags(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	valid := ownedExeDevVM(leaseID, "blue")
+	malformed := ownedExeDevVM("cbx_other123456", "other")
+	malformed.Tags = append(malformed.Tags, "crabbox-lease-cbx_second123456")
+
+	backend := newExeDevTestBackend(Config{}, &exeDevRecordingRunner{fn: exeDevInventoryResponseMany(t, malformed, valid)})
+	vm, found, err := backend.findVMByLeaseID(context.Background(), leaseID)
+	if err != nil || !found || vm.Name() != valid.Name() {
+		t.Fatalf("vm=%#v found=%v err=%v", vm, found, err)
+	}
+	if command := strings.Join(backend.rt.Exec.(*exeDevRecordingRunner).calls[0].Args, " "); strings.Contains(command, " -a") {
+		t.Fatalf("lease lookup crossed into team-wide inventory: %s", command)
+	}
+
+	malformed.Tags = append(malformed.Tags, "crabbox-lease-"+leaseID)
+	backend = newExeDevTestBackend(Config{}, &exeDevRecordingRunner{fn: exeDevInventoryResponseMany(t, malformed, valid)})
+	if _, _, err := backend.findVMByLeaseID(context.Background(), leaseID); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("err=%v, want malformed requested-lease refusal", err)
+	}
+}
+
 func TestExeDevOwnershipRejectsNoncanonicalLeaseTag(t *testing.T) {
 	vm := ownedExeDevVM("exe_abcdef123456", "blue")
 	if _, _, _, err := exeDevOwnershipIdentity(vm); err == nil || !strings.Contains(err.Error(), "invalid Crabbox lease tag") {
@@ -933,8 +974,12 @@ func exeDevInventoryRunner(t *testing.T, vm exeDevVM) *exeDevRecordingRunner {
 }
 
 func exeDevInventoryResponse(t *testing.T, vm exeDevVM) func(LocalCommandRequest) (LocalCommandResult, error) {
+	return exeDevInventoryResponseMany(t, vm)
+}
+
+func exeDevInventoryResponseMany(t *testing.T, vms ...exeDevVM) func(LocalCommandRequest) (LocalCommandResult, error) {
 	t.Helper()
-	payload, err := json.Marshal(exeDevListResponse{VMs: []exeDevVM{vm}})
+	payload, err := json.Marshal(exeDevListResponse{VMs: vms})
 	if err != nil {
 		t.Fatal(err)
 	}
