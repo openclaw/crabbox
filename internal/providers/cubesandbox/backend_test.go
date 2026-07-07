@@ -611,12 +611,23 @@ func TestCubeSandboxPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 		cfg: cfg,
 		rt:  Runtime{Stderr: io.Discard},
 	}
-	err := backend.prepareWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, "/")
+	err := backend.prepareWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, "/", true)
 	if err == nil || !strings.Contains(err.Error(), "too broad") {
 		t.Fatalf("err=%v, want unsafe workspace error", err)
 	}
 	if len(client.commands) != 0 {
 		t.Fatalf("commands=%#v, want none", client.commands)
+	}
+}
+
+func TestCubeSandboxPrepareWorkspacePreservesExistingWithoutSync(t *testing.T) {
+	client := &fakeCubeSandboxSyncClient{}
+	backend := &cubesandboxBackend{rt: Runtime{Stderr: io.Discard}}
+	if err := backend.prepareWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, "/root/repo", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.commands) != 1 || client.commands[0] != "mkdir -p '/root/repo'" {
+		t.Fatalf("commands=%#v, want non-destructive mkdir", client.commands)
 	}
 }
 

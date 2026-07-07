@@ -6168,12 +6168,15 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.CubeSandbox.ProxyNodeIP != "" {
 			cfg.CubeSandbox.ProxyNodeIP = file.CubeSandbox.ProxyNodeIP
+			cfg.credentialProvenance.cubeSandboxProxyNode = credentialSource
 		}
 		if file.CubeSandbox.ProxyPortHTTP > 0 {
 			cfg.CubeSandbox.ProxyPortHTTP = file.CubeSandbox.ProxyPortHTTP
+			cfg.credentialProvenance.cubeSandboxProxyPort = credentialSource
 		}
 		if file.CubeSandbox.ProxyScheme != "" {
 			cfg.CubeSandbox.ProxyScheme = file.CubeSandbox.ProxyScheme
+			cfg.credentialProvenance.cubeSandboxProxyProto = credentialSource
 		}
 	}
 	if file.ExeDev != nil {
@@ -8367,7 +8370,6 @@ func applyEnv(cfg *Config) error {
 	cfg.E2B.User = getenv("CRABBOX_E2B_USER", cfg.E2B.User)
 	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_API_KEY", "CUBE_API_KEY", "E2B_API_KEY"); ok {
 		cfg.CubeSandbox.APIKey = value
-		cfg.credentialProvenance.cubeSandboxAPIKey = credentialSourceEnvironment
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_API_URL", "CUBE_API_URL", "E2B_API_URL"); ok {
 		cfg.CubeSandbox.APIURL = value
@@ -8380,9 +8382,22 @@ func applyEnv(cfg *Config) error {
 	cfg.CubeSandbox.Template = getenv("CRABBOX_CUBESANDBOX_TEMPLATE", getenv("CUBE_TEMPLATE_ID", cfg.CubeSandbox.Template))
 	cfg.CubeSandbox.Workdir = getenv("CRABBOX_CUBESANDBOX_WORKDIR", cfg.CubeSandbox.Workdir)
 	cfg.CubeSandbox.User = getenv("CRABBOX_CUBESANDBOX_USER", cfg.CubeSandbox.User)
-	cfg.CubeSandbox.ProxyNodeIP = getenv("CRABBOX_CUBESANDBOX_PROXY_NODE_IP", getenv("CUBE_PROXY_NODE_IP", cfg.CubeSandbox.ProxyNodeIP))
-	cfg.CubeSandbox.ProxyPortHTTP = getenvInt("CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP", getenvInt("CUBE_PROXY_PORT_HTTP", cfg.CubeSandbox.ProxyPortHTTP))
-	cfg.CubeSandbox.ProxyScheme = getenv("CRABBOX_CUBESANDBOX_PROXY_SCHEME", getenv("CUBE_PROXY_SCHEME", cfg.CubeSandbox.ProxyScheme))
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_NODE_IP", "CUBE_PROXY_NODE_IP"); ok {
+		cfg.CubeSandbox.ProxyNodeIP = value
+		cfg.credentialProvenance.cubeSandboxProxyNode = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP", "CUBE_PROXY_PORT_HTTP"); ok {
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			return exit(2, "invalid cubesandbox proxy HTTP port %q", value)
+		}
+		cfg.CubeSandbox.ProxyPortHTTP = port
+		cfg.credentialProvenance.cubeSandboxProxyPort = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_SCHEME", "CUBE_PROXY_SCHEME"); ok {
+		cfg.CubeSandbox.ProxyScheme = value
+		cfg.credentialProvenance.cubeSandboxProxyProto = credentialSourceEnvironment
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_CONTROL_HOST", "EXE_DEV_CONTROL_HOST"); ok {
 		cfg.ExeDev.ControlHost = value
 		cfg.credentialProvenance.exeDevControlHost = credentialSourceEnvironment

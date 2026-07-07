@@ -32,7 +32,7 @@ func (b *cubesandboxBackend) syncWorkspace(ctx context.Context, client cubesandb
 	}
 	preflightDuration := b.now().Sub(preflightStarted)
 	prepareStarted := b.now()
-	if err := b.prepareWorkspace(ctx, client, session, workspace); err != nil {
+	if err := b.prepareWorkspace(ctx, client, session, workspace, b.cfg.Sync.Delete); err != nil {
 		return nil, 0, err
 	}
 	prepareDuration := b.now().Sub(prepareStarted)
@@ -72,13 +72,13 @@ func (b *cubesandboxBackend) syncWorkspace(ctx context.Context, client cubesandb
 	}, total, nil
 }
 
-func (b *cubesandboxBackend) prepareWorkspace(ctx context.Context, client cubesandboxAPI, session cubesandboxSession, workspace string) error {
+func (b *cubesandboxBackend) prepareWorkspace(ctx context.Context, client cubesandboxAPI, session cubesandboxSession, workspace string, deleteExisting bool) error {
 	workspace, err := cleanCubeSandboxWorkspacePath(workspace)
 	if err != nil {
 		return err
 	}
 	command := "mkdir -p " + shellQuote(workspace)
-	if b.cfg.Sync.Delete {
+	if deleteExisting {
 		command = "rm -rf " + shellQuote(workspace) + " && " + command
 	}
 	return b.execShell(ctx, client, session, command, io.Discard)

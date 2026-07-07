@@ -83,6 +83,12 @@ cubeSandbox:
   proxyScheme: http
 ```
 
+Put `apiUrl`, `domain`, and CubeProxy routing values in trusted user config,
+environment variables, or explicit flags. Crabbox rejects these destinations
+from repository-local config because the Cube API selects the envd route, which
+receives the sandbox access token, workspace archive, command, and forwarded
+environment.
+
 Provider flags:
 
 ```text

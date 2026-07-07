@@ -1028,6 +1028,100 @@ func TestExternalCommandModeIgnoresUnusedConnectionProvenance(t *testing.T) {
 	}
 }
 
+func TestCubeSandboxRejectsRepositoryDataPlaneDestinationsWithoutAPIKey(t *testing.T) {
+	tests := []struct {
+		name string
+		file fileCubeSandboxConfig
+		want string
+	}{
+		{name: "API URL", file: fileCubeSandboxConfig{APIURL: "https://attacker.example.test"}, want: "cubeSandbox.apiUrl"},
+		{name: "domain", file: fileCubeSandboxConfig{Domain: "attacker.example.test"}, want: "cubeSandbox.domain"},
+		{name: "proxy node", file: fileCubeSandboxConfig{ProxyNodeIP: "attacker.example.test"}, want: "cubeSandbox.proxyNodeIp"},
+		{name: "proxy port", file: fileCubeSandboxConfig{ProxyPortHTTP: 8080}, want: "cubeSandbox.proxyPortHttp"},
+		{name: "proxy scheme", file: fileCubeSandboxConfig{ProxyScheme: "https"}, want: "cubeSandbox.proxyScheme"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "cubesandbox"
+			cfg.CubeSandbox.APIKey = ""
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{CubeSandbox: &tt.file}, false); err != nil {
+				t.Fatal(err)
+			}
+			err := validateProviderCredentialDestination(cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "ephemeral credentials and workspace data") {
+				t.Fatalf("err=%v, want repository destination rejection for %s", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestCubeSandboxEnvironmentApprovesRepositoryDataPlaneRoute(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "cubesandbox"
+	file := fileCubeSandboxConfig{
+		APIURL:        "https://repo-api.example.test",
+		Domain:        "repo.example.test",
+		ProxyNodeIP:   "repo-proxy.example.test",
+		ProxyPortHTTP: 8080,
+		ProxyScheme:   "http",
+	}
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{CubeSandbox: &file}, false); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CUBESANDBOX_DOMAIN", "approved.example.test")
+	t.Setenv("CRABBOX_CUBESANDBOX_API_URL", "https://approved-api.example.test")
+	t.Setenv("CRABBOX_CUBESANDBOX_PROXY_NODE_IP", "approved-proxy.example.test")
+	t.Setenv("CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP", "8443")
+	t.Setenv("CRABBOX_CUBESANDBOX_PROXY_SCHEME", "https")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("environment-approved data-plane route rejected: %v", err)
+	}
+}
+
+func TestCubeSandboxFlagsApproveRepositoryDataPlaneRoute(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "cubesandbox"
+	file := fileCubeSandboxConfig{
+		APIURL:        "https://repo-api.example.test",
+		Domain:        "repo.example.test",
+		ProxyNodeIP:   "repo-proxy.example.test",
+		ProxyPortHTTP: 8080,
+		ProxyScheme:   "http",
+	}
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{CubeSandbox: &file}, false); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFlagSet("test", io.Discard)
+	apiURL := fs.String("cubesandbox-api-url", cfg.CubeSandbox.APIURL, "")
+	domain := fs.String("cubesandbox-domain", cfg.CubeSandbox.Domain, "")
+	proxyNode := fs.String("cubesandbox-proxy-node-ip", cfg.CubeSandbox.ProxyNodeIP, "")
+	proxyPort := fs.Int("cubesandbox-proxy-port-http", cfg.CubeSandbox.ProxyPortHTTP, "")
+	proxyScheme := fs.String("cubesandbox-proxy-scheme", cfg.CubeSandbox.ProxyScheme, "")
+	args := []string{
+		"--cubesandbox-api-url", "https://approved-api.example.test",
+		"--cubesandbox-domain", "approved.example.test",
+		"--cubesandbox-proxy-node-ip", "approved-proxy.example.test",
+		"--cubesandbox-proxy-port-http", "8443",
+		"--cubesandbox-proxy-scheme", "https",
+	}
+	if err := parseFlags(fs, args); err != nil {
+		t.Fatal(err)
+	}
+	cfg.CubeSandbox.APIURL = *apiURL
+	cfg.CubeSandbox.Domain = *domain
+	cfg.CubeSandbox.ProxyNodeIP = *proxyNode
+	cfg.CubeSandbox.ProxyPortHTTP = *proxyPort
+	cfg.CubeSandbox.ProxyScheme = *proxyScheme
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("flag-approved data-plane route rejected: %v", err)
+	}
+}
+
 func externalLifecycleConfigForTest() ExternalLifecycleConfig {
 	return ExternalLifecycleConfig{Acquire: ExternalLifecycleOperation{Argv: []string{"provider-adapter"}}}
 }

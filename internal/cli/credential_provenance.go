@@ -45,7 +45,9 @@ type credentialDestinationProvenance struct {
 	e2bAPIKey             credentialValueSource
 	cubeSandboxAPIURL     credentialValueSource
 	cubeSandboxDomain     credentialValueSource
-	cubeSandboxAPIKey     credentialValueSource
+	cubeSandboxProxyNode  credentialValueSource
+	cubeSandboxProxyPort  credentialValueSource
+	cubeSandboxProxyProto credentialValueSource
 	railwayAPIURL         credentialValueSource
 	railwayAPIToken       credentialValueSource
 	fastAPICloudAPIURL    credentialValueSource
@@ -178,6 +180,15 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "cubesandbox-domain") {
 		provenance.cubeSandboxDomain = credentialSourceFlag
+	}
+	if flagWasSet(fs, "cubesandbox-proxy-node-ip") {
+		provenance.cubeSandboxProxyNode = credentialSourceFlag
+	}
+	if flagWasSet(fs, "cubesandbox-proxy-port-http") {
+		provenance.cubeSandboxProxyPort = credentialSourceFlag
+	}
+	if flagWasSet(fs, "cubesandbox-proxy-scheme") {
+		provenance.cubeSandboxProxyProto = credentialSourceFlag
 	}
 	if flagWasSet(fs, "railway-url") {
 		provenance.railwayAPIURL = credentialSourceFlag
@@ -320,12 +331,20 @@ func validateProviderCredentialDestination(cfg Config) error {
 			return repositoryCredentialDestinationError("e2b", "e2b.domain", "CRABBOX_E2B_DOMAIN or --e2b-domain")
 		}
 	case "cubesandbox":
-		credentials := []sourcedCredential{{cfg.CubeSandbox.APIKey, provenance.cubeSandboxAPIKey}}
-		if provenance.cubeSandboxAPIURL == credentialSourceRepository && inheritedCredential(credentials...) {
-			return repositoryCredentialDestinationError("cubesandbox", "cubeSandbox.apiUrl", "CRABBOX_CUBESANDBOX_API_URL or --cubesandbox-api-url")
+		if provenance.cubeSandboxAPIURL == credentialSourceRepository {
+			return repositoryCubeSandboxDestinationError("cubeSandbox.apiUrl", "CRABBOX_CUBESANDBOX_API_URL or --cubesandbox-api-url")
 		}
-		if provenance.cubeSandboxDomain == credentialSourceRepository && inheritedCredential(credentials...) {
-			return repositoryCredentialDestinationError("cubesandbox", "cubeSandbox.domain", "CRABBOX_CUBESANDBOX_DOMAIN or --cubesandbox-domain")
+		if provenance.cubeSandboxDomain == credentialSourceRepository {
+			return repositoryCubeSandboxDestinationError("cubeSandbox.domain", "CRABBOX_CUBESANDBOX_DOMAIN or --cubesandbox-domain")
+		}
+		if provenance.cubeSandboxProxyNode == credentialSourceRepository {
+			return repositoryCubeSandboxDestinationError("cubeSandbox.proxyNodeIp", "CRABBOX_CUBESANDBOX_PROXY_NODE_IP")
+		}
+		if provenance.cubeSandboxProxyPort == credentialSourceRepository {
+			return repositoryCubeSandboxDestinationError("cubeSandbox.proxyPortHttp", "CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP")
+		}
+		if provenance.cubeSandboxProxyProto == credentialSourceRepository {
+			return repositoryCubeSandboxDestinationError("cubeSandbox.proxyScheme", "CRABBOX_CUBESANDBOX_PROXY_SCHEME")
 		}
 	case "railway":
 		if provenance.railwayAPIURL == credentialSourceRepository &&
@@ -872,4 +891,8 @@ func nomadSelectedTokenEnvHasValue(cfg Config) bool {
 
 func repositoryCredentialDestinationError(provider, field, override string) error {
 	return exit(2, "provider=%s refuses repository-configured %s with inherited credentials; set %s to explicitly approve the credential destination", provider, field, override)
+}
+
+func repositoryCubeSandboxDestinationError(field, override string) error {
+	return exit(2, "provider=cubesandbox refuses repository-configured %s because CubeSandbox routes receive ephemeral credentials and workspace data; set %s to explicitly approve the destination", field, override)
 }
