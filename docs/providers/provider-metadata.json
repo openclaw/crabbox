@@ -251,6 +251,20 @@
     "caveat": "No SSH, env forwarding, artifacts, proof, downloads, or custom Dockerfile templates yet",
     "docs": "crownest.md"
   },
+  "cubesandbox": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "CubeSandbox KVM MicroVM",
+    "location": "self-hosted",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "unknown",
+    "lifecycle": "Crabbox and Cube API",
+    "cleanup": "claimed sandbox delete",
+    "bestFit": "Self-hosted E2B-compatible MicroVM command execution",
+    "caveat": "Requires a CubeSandbox deployment, ready template ID, and reachable CubeProxy data plane",
+    "docs": "cubesandbox.md"
+  },
   "daytona": {
     "status": "built-in",
     "category": "direct-cloud",

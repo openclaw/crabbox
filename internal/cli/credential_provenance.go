@@ -43,6 +43,9 @@ type credentialDestinationProvenance struct {
 	e2bAPIURL             credentialValueSource
 	e2bDomain             credentialValueSource
 	e2bAPIKey             credentialValueSource
+	cubeSandboxAPIURL     credentialValueSource
+	cubeSandboxDomain     credentialValueSource
+	cubeSandboxAPIKey     credentialValueSource
 	railwayAPIURL         credentialValueSource
 	railwayAPIToken       credentialValueSource
 	fastAPICloudAPIURL    credentialValueSource
@@ -161,6 +164,12 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "e2b-domain") {
 		provenance.e2bDomain = credentialSourceFlag
+	}
+	if flagWasSet(fs, "cubesandbox-api-url") {
+		provenance.cubeSandboxAPIURL = credentialSourceFlag
+	}
+	if flagWasSet(fs, "cubesandbox-domain") {
+		provenance.cubeSandboxDomain = credentialSourceFlag
 	}
 	if flagWasSet(fs, "railway-url") {
 		provenance.railwayAPIURL = credentialSourceFlag
@@ -301,6 +310,14 @@ func validateProviderCredentialDestination(cfg Config) error {
 		}
 		if provenance.e2bDomain == credentialSourceRepository && inheritedCredential(credentials...) {
 			return repositoryCredentialDestinationError("e2b", "e2b.domain", "CRABBOX_E2B_DOMAIN or --e2b-domain")
+		}
+	case "cubesandbox":
+		credentials := []sourcedCredential{{cfg.CubeSandbox.APIKey, provenance.cubeSandboxAPIKey}}
+		if provenance.cubeSandboxAPIURL == credentialSourceRepository && inheritedCredential(credentials...) {
+			return repositoryCredentialDestinationError("cubesandbox", "cubeSandbox.apiUrl", "CRABBOX_CUBESANDBOX_API_URL or --cubesandbox-api-url")
+		}
+		if provenance.cubeSandboxDomain == credentialSourceRepository && inheritedCredential(credentials...) {
+			return repositoryCredentialDestinationError("cubesandbox", "cubeSandbox.domain", "CRABBOX_CUBESANDBOX_DOMAIN or --cubesandbox-domain")
 		}
 	case "railway":
 		if provenance.railwayAPIURL == credentialSourceRepository &&
