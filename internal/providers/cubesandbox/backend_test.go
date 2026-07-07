@@ -606,8 +606,10 @@ func TestCubeSandboxSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 	client := &fakeCubeSandboxSyncClient{}
+	cfg := Config{CubeSandbox: CubeSandboxConfig{User: "ubuntu", Workdir: "repo"}}
+	cfg.Sync.Delete = true
 	backend := &cubesandboxBackend{
-		cfg: Config{CubeSandbox: CubeSandboxConfig{User: "ubuntu", Workdir: "repo"}},
+		cfg: cfg,
 		rt:  Runtime{Stderr: io.Discard},
 	}
 	workspace := cubesandboxWorkspacePath(backend.cfg)
@@ -623,8 +625,23 @@ func TestCubeSandboxSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if !tarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
 		t.Fatal("uploaded archive missing go.mod")
 	}
-	if !client.commandContains("mkdir -p '/home/ubuntu/repo'") || !client.commandContains("tar -xzf") {
+	if !client.commandContains("mkdir -p '/home/ubuntu/.repo.crabbox-sync-") || !client.commandContains("tar -xzf") {
 		t.Fatalf("commands=%#v", client.commands)
+	}
+	extractIndex, replaceIndex := -1, -1
+	for i, command := range client.commands {
+		if strings.Contains(command, "tar -xzf") {
+			extractIndex = i
+		}
+		if strings.Contains(command, "mv '/home/ubuntu/repo'") {
+			replaceIndex = i
+		}
+		if strings.Contains(command, "rm -rf '/home/ubuntu/repo'") {
+			t.Fatalf("workspace deleted before replacement: %q", command)
+		}
+	}
+	if extractIndex < 0 || replaceIndex <= extractIndex {
+		t.Fatalf("commands=%#v, want staged extract before replacement", client.commands)
 	}
 	if !client.userContains("ubuntu") {
 		t.Fatalf("users=%#v", client.users)
@@ -648,8 +665,10 @@ func TestCubeSandboxSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 	client := &fakeCubeSandboxSyncClient{processCodes: []int{0, 7, 0}}
+	cfg := Config{CubeSandbox: CubeSandboxConfig{User: "ubuntu", Workdir: "repo"}}
+	cfg.Sync.Delete = true
 	backend := &cubesandboxBackend{
-		cfg: Config{CubeSandbox: CubeSandboxConfig{User: "ubuntu", Workdir: "repo"}},
+		cfg: cfg,
 		rt:  Runtime{Stderr: io.Discard},
 	}
 	workspace := cubesandboxWorkspacePath(backend.cfg)
@@ -666,6 +685,11 @@ func TestCubeSandboxSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.
 	if !strings.Contains(cleanup, "rm -f '/tmp/crabbox-") {
 		t.Fatalf("cleanup command missing remote archive removal: %q", cleanup)
 	}
+	for _, command := range client.commands {
+		if strings.Contains(command, "rm -rf '/home/ubuntu/repo'") || strings.Contains(command, "mv '/home/ubuntu/repo'") {
+			t.Fatalf("failed staged extraction modified existing workspace: %q", command)
+		}
+	}
 }
 
 func TestCubeSandboxPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
@@ -676,7 +700,7 @@ func TestCubeSandboxPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 		cfg: cfg,
 		rt:  Runtime{Stderr: io.Discard},
 	}
-	err := backend.prepareWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, "/", true)
+	err := backend.prepareWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, "/")
 	if err == nil || !strings.Contains(err.Error(), "too broad") {
 		t.Fatalf("err=%v, want unsafe workspace error", err)
 	}
@@ -688,7 +712,7 @@ func TestCubeSandboxPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 func TestCubeSandboxPrepareWorkspacePreservesExistingWithoutSync(t *testing.T) {
 	client := &fakeCubeSandboxSyncClient{}
 	backend := &cubesandboxBackend{rt: Runtime{Stderr: io.Discard}}
-	if err := backend.prepareWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, "/root/repo", false); err != nil {
+	if err := backend.prepareWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, "/root/repo"); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.commands) != 1 || client.commands[0] != "mkdir -p '/root/repo'" {

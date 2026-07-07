@@ -194,7 +194,7 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			return finishResult(), err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, session, workspace, false); err != nil {
+	} else if err := b.prepareWorkspace(ctx, client, session, workspace); err != nil {
 		return finishResult(), err
 	}
 	if req.SyncOnly {
