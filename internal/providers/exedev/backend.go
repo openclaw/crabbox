@@ -37,7 +37,7 @@ func (b *exeDevLeaseBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	leaseID := newLeaseID()
-	servers, err := b.listServers(ctx, true)
+	servers, err := b.listServers(ctx, false)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -217,7 +217,7 @@ func (b *exeDevLeaseBackend) resolveReleaseTarget(ctx context.Context, cfg Confi
 	if err := b.validateAbsentCleanupClaim(ctx, claim); err != nil {
 		return LeaseTarget{}, err
 	}
-	vms, err := b.listVMs(ctx, true)
+	vms, err := b.listVMs(ctx, false)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -281,7 +281,7 @@ func (b *exeDevLeaseBackend) confirmClaimedVMAbsent(ctx context.Context, claim L
 	if err := b.validateAbsentCleanupClaim(ctx, claim); err != nil {
 		return err
 	}
-	vms, err := b.listVMs(ctx, true)
+	vms, err := b.listVMs(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -557,6 +557,14 @@ func (b *exeDevLeaseBackend) validateVMClaimBinding(ctx context.Context, vm exeD
 	if claim.LeaseID != leaseID || claim.Provider != providerName || normalizeLeaseSlug(claim.Slug) != slug || claim.CloudID != vm.Name() {
 		return exit(2, "exe.dev VM %s is not bound to an exact provider/resource claim", vm.Name())
 	}
+	target := exeDevSSHTarget(b.configForRun(), vm)
+	port, err := strconv.Atoi(strings.TrimSpace(target.Port))
+	if err != nil || port <= 0 || strings.TrimSpace(target.Host) == "" {
+		return exit(2, "exe.dev VM %s has an invalid SSH endpoint", vm.Name())
+	}
+	if strings.TrimSpace(claim.SSHHost) != strings.TrimSpace(target.Host) || claim.SSHPort != port {
+		return exit(2, "exe.dev VM %s SSH endpoint does not match the exact local claim", vm.Name())
+	}
 	if err := b.validateExistingClaimRoute(ctx, claim); err != nil {
 		return err
 	}
@@ -708,7 +716,7 @@ func (b *exeDevLeaseBackend) resolveVM(ctx context.Context, identifier string) (
 }
 
 func (b *exeDevLeaseBackend) findVM(ctx context.Context, identifier string) (exeDevVM, error) {
-	vms, err := b.listVMs(ctx, true)
+	vms, err := b.listVMs(ctx, false)
 	if err != nil {
 		return exeDevVM{}, err
 	}
@@ -722,7 +730,7 @@ func (b *exeDevLeaseBackend) findVM(ctx context.Context, identifier string) (exe
 }
 
 func (b *exeDevLeaseBackend) findVMByExactName(ctx context.Context, name string) (exeDevVM, error) {
-	vms, err := b.listVMs(ctx, true)
+	vms, err := b.listVMs(ctx, false)
 	if err != nil {
 		return exeDevVM{}, err
 	}
@@ -735,14 +743,17 @@ func (b *exeDevLeaseBackend) findVMByExactName(ctx context.Context, name string)
 }
 
 func (b *exeDevLeaseBackend) findVMByLeaseID(ctx context.Context, leaseID string) (exeDevVM, bool, error) {
-	vms, err := b.listVMs(ctx, true)
+	vms, err := b.listVMs(ctx, false)
 	if err != nil {
 		return exeDevVM{}, false, err
 	}
 	for _, vm := range vms {
 		taggedLeaseID, _, owned, err := exeDevOwnershipIdentity(vm)
 		if err != nil {
-			return exeDevVM{}, false, err
+			if exeDevVMReferencesLease(vm, leaseID) {
+				return exeDevVM{}, false, err
+			}
+			continue
 		}
 		if owned && taggedLeaseID == leaseID {
 			return vm, true, nil
@@ -797,8 +808,11 @@ func fallbackExeDevIdentity(vm exeDevVM) (string, string) {
 	return leaseID, slug
 }
 
-func (b *exeDevLeaseBackend) listVMs(ctx context.Context, _ bool) ([]exeDevVM, error) {
+func (b *exeDevLeaseBackend) listVMs(ctx context.Context, all bool) ([]exeDevVM, error) {
 	args := []string{"ls", "--l", "--json"}
+	if all {
+		args = append(args, "-a")
+	}
 	out, err := b.controlOutput(ctx, args)
 	if err != nil {
 		return nil, err
