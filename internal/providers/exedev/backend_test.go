@@ -646,13 +646,38 @@ func TestExeDevAbsentReleaseRechecksInventoryBeforeRemovingClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.fn = exeDevInventoryResponse(t, vm)
+	renamed := vm
+	renamed.VMName = "renamed-owned-vm"
+	renamed.SSHDest = "renamed-owned-vm.exe.xyz"
+	runner.fn = exeDevInventoryResponse(t, renamed)
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "is present") {
 		t.Fatalf("err=%v, want present-VM refusal", err)
 	}
 	assertNoExeDevRM(t, runner)
 	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v, want retained", exists, err)
+	}
+}
+
+func TestExeDevAbsentReleaseRejectsRenamedOwnedVM(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	slug := "blue"
+	vm := ownedExeDevVM(leaseID, slug)
+	renamed := vm
+	renamed.VMName = "renamed-owned-vm"
+	renamed.SSHDest = "renamed-owned-vm.exe.xyz"
+	runner := exeDevInventoryRunner(t, renamed)
+	backend := newExeDevTestBackend(Config{}, runner)
+	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
+
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "unexpected VM") {
+		t.Fatalf("err=%v, want renamed owned-VM refusal", err)
+	}
+	assertNoExeDevRM(t, runner)
+	if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+		t.Fatalf("claim exists=%v err=%v, want retained", exists, readErr)
 	}
 }
 

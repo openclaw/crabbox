@@ -176,6 +176,9 @@ func (b *exeDevLeaseBackend) resolveReleaseTarget(ctx context.Context, cfg Confi
 	}
 	for _, vm := range vms {
 		if vm.Name() != claim.CloudID {
+			if exeDevVMReferencesLease(vm, claim.LeaseID) {
+				return LeaseTarget{}, exit(2, "exe.dev lease %s is present on unexpected VM %s; refusing absent-claim cleanup", claim.LeaseID, vm.Name())
+			}
 			continue
 		}
 		if err := b.validateVMClaimBinding(ctx, vm, claim, claim.LeaseID, claim.Slug); err != nil {
@@ -233,11 +236,21 @@ func (b *exeDevLeaseBackend) confirmClaimedVMAbsent(ctx context.Context, claim L
 		return err
 	}
 	for _, vm := range vms {
-		if vm.Name() == claim.CloudID {
-			return exit(2, "exe.dev VM %s is present; refusing absent-claim cleanup", claim.CloudID)
+		if vm.Name() == claim.CloudID || exeDevVMReferencesLease(vm, claim.LeaseID) {
+			return exit(2, "exe.dev lease %s is present on VM %s; refusing absent-claim cleanup", claim.LeaseID, vm.Name())
 		}
 	}
 	return nil
+}
+
+func exeDevVMReferencesLease(vm exeDevVM, leaseID string) bool {
+	want := "crabbox-lease-" + leaseID
+	for _, tag := range vm.Tags {
+		if tag == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *exeDevLeaseBackend) RefreshReleaseLeaseTarget(ctx context.Context, lease LeaseTarget) (LeaseTarget, error) {
