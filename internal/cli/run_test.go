@@ -166,7 +166,9 @@ func TestStopDefersUnsafeLocalConnectionCleanupUntilRelease(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
+	logPath := installRecordingSSH(t, dir)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
 	leaseID := "cbx_env_profile_test"
 	requestedID := "friendly-slug"
 	pidPaths := map[string]string{}
@@ -186,6 +188,7 @@ func TestStopDefersUnsafeLocalConnectionCleanupUntilRelease(t *testing.T) {
 	runEnvProfileTestConnectionCleanupSafe = false
 	t.Cleanup(func() { runEnvProfileTestConnectionCleanupSafe = true })
 	runEnvProfileTestReleaseHook = func() error {
+		assertSSHLogContains(t, logPath, remoteStopEgressClientCommand())
 		for id, pidPath := range pidPaths {
 			if _, err := os.Stat(pidPath); err != nil {
 				return fmt.Errorf("local connection cleanup for %s ran before guarded release", id)
@@ -358,7 +361,10 @@ func (b runEnvProfileTestBackend) Resolve(context.Context, ResolveRequest) (Leas
 func (b runEnvProfileTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
 }
-func (b runEnvProfileTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+func (b runEnvProfileTestBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	if req.GuardedRemoteCleanup != nil {
+		req.GuardedRemoteCleanup(ctx, req.Lease)
+	}
 	if runEnvProfileTestReleaseHook != nil {
 		if err := runEnvProfileTestReleaseHook(); err != nil {
 			return err

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -493,6 +494,52 @@ func TestExeDevReleaseDeletesExactlyClaimedVMAndRemovesClaim(t *testing.T) {
 	}
 	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
+	}
+}
+
+func TestExeDevReleaseRunsGuardedRemoteCleanupBeforeDelete(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	vm := ownedExeDevVM(leaseID, "blue")
+	runner := exeDevInventoryRunner(t, vm)
+	backend := newExeDevTestBackend(Config{}, runner)
+	claim := persistExeDevClaim(t, backend.configForRun(), vm, leaseID, "blue", t.TempDir())
+	labels := maps.Clone(claim.Labels)
+	labels["tailscale"] = "true"
+	claim, err := updateLeaseClaimLabelsIfUnchangedAfter(leaseID, claim, labels, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleaned := false
+	lease.SSH.Host = "stale-endpoint.example"
+	baseRun := runner.fn
+	runner.fn = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if strings.Contains(strings.Join(req.Args, " "), " rm ") && !cleaned {
+			return LocalCommandResult{}, errors.New("delete ran before guarded remote cleanup")
+		}
+		return baseRun(req)
+	}
+	err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{
+		Lease: lease,
+		GuardedRemoteCleanup: func(_ context.Context, target LeaseTarget) {
+			if target.SSH.Host != vm.SSHHost() {
+				t.Fatalf("cleanup SSH host=%q want %q", target.SSH.Host, vm.SSHHost())
+			}
+			if target.Server.Labels["tailscale"] != "true" {
+				t.Fatalf("cleanup labels=%v, want claimed Tailscale metadata", target.Server.Labels)
+			}
+			cleaned = true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cleaned || !hasExeDevRM(runner) {
+		t.Fatalf("cleaned=%v rm=%v", cleaned, hasExeDevRM(runner))
 	}
 }
 

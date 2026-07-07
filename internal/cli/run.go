@@ -2812,14 +2812,23 @@ func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseIDs ...string) {
 }
 
 func (a App) cleanupBackendLeaseConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
+	a.cleanupBackendLeaseLocalConnectionsBestEffort(lease.LeaseID)
+	a.cleanupBackendLeaseRemoteConnectionsBestEffort(ctx, lease)
+}
+
+func (a App) cleanupBackendLeaseRemoteConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
 	a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
-	a.cleanupMediatedEgressBestEffort(ctx, lease.LeaseID, lease)
+	a.cleanupMediatedEgressRemoteBestEffort(ctx, lease)
 	a.logoutRemoteTailscaleBestEffort(ctx, lease)
 }
 
 func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
-	if err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+	request := ReleaseLeaseRequest{Lease: lease, Force: true}
+	if !releaseLeaseConnectionCleanupSafe(backend) {
+		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
+	}
+	if err := backend.ReleaseLease(ctx, request); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: release failed for %s: %v\n", lease.LeaseID, err)
 		return err
 	}
@@ -3205,11 +3214,15 @@ func (a App) stop(ctx context.Context, args []string) error {
 		a.cleanupMediatedEgressBestEffort(ctx, *id, lease)
 		a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	}
-	if err := sshBackend.ReleaseLease(ctx, ReleaseLeaseRequest{
+	request := ReleaseLeaseRequest{
 		Lease:                    lease,
 		Force:                    true,
 		ExpectedProviderIdentity: expectedIdentity,
-	}); err != nil {
+	}
+	if !connectionCleanupSafe {
+		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
+	}
+	if err := sshBackend.ReleaseLease(ctx, request); err != nil {
 		return err
 	}
 	if !connectionCleanupSafe {

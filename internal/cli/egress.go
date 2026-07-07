@@ -1094,11 +1094,15 @@ func (a App) cleanupMediatedEgressBestEffort(ctx context.Context, requestedID st
 			fmt.Fprintf(a.Stderr, "warning: egress host daemon cleanup failed for %s: %v\n", id, err)
 		}
 	}
+	a.cleanupMediatedEgressRemoteBestEffort(ctx, lease)
+}
+
+func (a App) cleanupMediatedEgressRemoteBestEffort(ctx context.Context, lease LeaseTarget) {
 	if !supportsRemoteEgressClientCleanup(lease.SSH) {
 		return
 	}
 	if err := runSSHQuiet(ctx, lease.SSH, remoteStopEgressClientCommand()); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: egress remote client cleanup failed for %s: %v\n", blank(lease.LeaseID, requestedID), err)
+		fmt.Fprintf(a.Stderr, "warning: egress remote client cleanup failed for %s: %v\n", lease.LeaseID, err)
 	}
 }
 

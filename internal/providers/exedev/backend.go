@@ -147,11 +147,53 @@ func (b *exeDevLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseR
 		if err := b.validateVMClaimBinding(ctx, vm, claim, claim.LeaseID, claim.Slug); err != nil {
 			return err
 		}
+		if req.GuardedRemoteCleanup != nil {
+			cleanupLease := req.Lease
+			cleanupLease.SSH = exeDevSSHTarget(b.configForRun(), vm)
+			cleanupLease.Server = exeDevCleanupServer(b.configForRun(), vm, claim)
+			req.GuardedRemoteCleanup(ctx, cleanupLease)
+			vm, err = b.findVMByExactName(ctx, claim.CloudID)
+			if err != nil {
+				return err
+			}
+			if err := b.validateVMClaimBinding(ctx, vm, claim, claim.LeaseID, claim.Slug); err != nil {
+				return err
+			}
+		}
 		// exe.dev exposes only name-based deletion. The account-bound random
 		// generation tag is the strongest provider-visible resource identity;
 		// actors able to replace it also already hold unconditional `rm` access.
 		return b.deleteVM(ctx, claim.CloudID)
 	})
+}
+
+func exeDevCleanupServer(cfg Config, vm exeDevVM, claim LeaseClaim) Server {
+	server := exeDevServer(vm, claim.LeaseID, claim.Slug, cfg, true)
+	for key, value := range claim.Labels {
+		server.Labels[key] = value
+	}
+	if claim.TailscaleIPv4 != "" || claim.TailscaleFQDN != "" || claim.TailscaleHostname != "" {
+		server.Labels["tailscale"] = "true"
+	}
+	if claim.TailscaleIPv4 != "" {
+		server.Labels["tailscale_ipv4"] = claim.TailscaleIPv4
+	}
+	if claim.TailscaleFQDN != "" {
+		server.Labels["tailscale_fqdn"] = claim.TailscaleFQDN
+	}
+	if claim.TailscaleHostname != "" {
+		server.Labels["tailscale_hostname"] = claim.TailscaleHostname
+	}
+	if len(claim.TailscaleTags) > 0 {
+		server.Labels["tailscale_tags"] = strings.Join(claim.TailscaleTags, ",")
+	}
+	if claim.TailscaleExitNode != "" {
+		server.Labels["tailscale_exit_node"] = claim.TailscaleExitNode
+	}
+	if claim.TailscaleExitLAN {
+		server.Labels["tailscale_exit_node_allow_lan_access"] = "true"
+	}
+	return server
 }
 
 func (b *exeDevLeaseBackend) resolveReleaseTarget(ctx context.Context, cfg Config, identifier string) (LeaseTarget, error) {
@@ -170,7 +212,7 @@ func (b *exeDevLeaseBackend) resolveReleaseTarget(ctx context.Context, cfg Confi
 		}
 		server := exeDevServer(vm, leaseID, slug, cfg, true)
 		setServerLeaseClaimSnapshot(&server, claim, true)
-		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return LeaseTarget{Server: server, SSH: exeDevSSHTarget(cfg, vm), LeaseID: leaseID}, nil
 	}
 	if err := b.validateAbsentCleanupClaim(ctx, claim); err != nil {
 		return LeaseTarget{}, err
@@ -191,7 +233,7 @@ func (b *exeDevLeaseBackend) resolveReleaseTarget(ctx context.Context, cfg Confi
 		}
 		server := exeDevServer(vm, claim.LeaseID, claim.Slug, cfg, true)
 		setServerLeaseClaimSnapshot(&server, claim, true)
-		return LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
+		return LeaseTarget{Server: server, SSH: exeDevSSHTarget(cfg, vm), LeaseID: claim.LeaseID}, nil
 	}
 	server := Server{
 		CloudID:  claim.CloudID,
