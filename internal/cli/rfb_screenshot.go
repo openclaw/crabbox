@@ -24,10 +24,11 @@ import (
 )
 
 const (
-	rfbSecurityNone = 1
-	rfbSecurityVNC  = 2
-	rfbSecurityARD  = 30
-	rfbEncodingRaw  = 0
+	rfbSecurityNone  = 1
+	rfbSecurityVNC   = 2
+	rfbSecurityARD   = 30
+	rfbEncodingRaw   = 0
+	rfbKeyEventDelay = 5 * time.Millisecond
 )
 
 type rfbCredentials struct {
@@ -189,9 +190,11 @@ func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredential
 		if err := writeRFBKeyEvent(conn, true, key); err != nil {
 			return err
 		}
+		time.Sleep(rfbKeyEventDelay)
 		if err := writeRFBKeyEvent(conn, false, key); err != nil {
 			return err
 		}
+		time.Sleep(rfbKeyEventDelay)
 	}
 	time.Sleep(50 * time.Millisecond)
 	return nil

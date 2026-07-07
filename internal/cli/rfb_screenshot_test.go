@@ -151,6 +151,12 @@ func TestRFBKeysymForRuneRejectsUnsupportedControl(t *testing.T) {
 	}
 }
 
+func TestRFBTextKeyEventsArePaced(t *testing.T) {
+	if rfbKeyEventDelay < time.Millisecond {
+		t.Fatalf("RFB key event delay %s is too short for macOS Screen Sharing", rfbKeyEventDelay)
+	}
+}
+
 func TestRFBPasswordOnlyCredentialsPreferVNCAuth(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
