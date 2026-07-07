@@ -1001,7 +1001,7 @@ func validateBrokerProvider(provider string) (string, error) {
 	}
 	spec := resolved.Spec()
 	if spec.Coordinator != CoordinatorSupported {
-		return "", exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, gcp, and hetzner", provider)
+		return "", exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, daytona, gcp, and hetzner", provider)
 	}
 	return resolved.Name(), nil
 }

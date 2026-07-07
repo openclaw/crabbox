@@ -936,7 +936,7 @@ func egressClientBinaryForTarget(ctx context.Context, target SSHTarget) (string,
 }
 
 func scpBaseArgs(target SSHTarget) []string {
-	args := make([]string, 0, 16)
+	args := sshForwardingDenyArgs()
 	if target.TargetOS == targetWindows && target.WindowsMode != windowsModeWSL2 {
 		args = append(args, "-O")
 	}

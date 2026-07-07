@@ -1533,10 +1533,7 @@ func TestControllerPreAcquireAckFailureRetainsStoppingUntilStableAbsence(t *test
 	currentTime = base.Add(3 * time.Second)
 	clockMu.Unlock()
 	service.enqueue(stopping.Request.ID)
-	failed := waitControllerWorkspaceStatus(t, service, stopping.Request.ID, "failed")
-	if failed.Message != "workspace provisioning failed before provider identity acknowledgment" {
-		t.Fatalf("failure message=%q", failed.Message)
-	}
+	waitControllerWorkspaceStatusMessage(t, service, stopping.Request.ID, "failed", "workspace provisioning failed before provider identity acknowledgment")
 	runner.mu.Lock()
 	warmups := runner.warmupCalls
 	stops := runner.stopCalls
@@ -3500,6 +3497,20 @@ func waitControllerWorkspaceStatus(t *testing.T, service *controllerService, id,
 		return record
 	}
 	t.Fatalf("workspace %s status=%q want=%q message=%q", id, record.Status, want, record.Message)
+	return controllerWorkspaceRecord{}
+}
+
+func waitControllerWorkspaceStatusMessage(t *testing.T, service *controllerService, id, status, message string) controllerWorkspaceRecord {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if record, ok := service.workspace(id); ok && record.Status == status && record.Message == message {
+			return record
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	record, _ := service.workspace(id)
+	t.Fatalf("workspace %s status=%q message=%q want status=%q message=%q", id, record.Status, record.Message, status, message)
 	return controllerWorkspaceRecord{}
 }
 

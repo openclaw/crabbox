@@ -1983,6 +1983,39 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if DeleteOnReleaseExplicit(cfg, "kubevirt") {
 			args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
 		}
+	case "sealos-devbox":
+		workRoot := EffectiveSealosDevboxWorkRoot(cfg)
+		if strings.TrimSpace(cfg.SealosDevbox.Kubectl) != "" {
+			args = append(args, "--sealos-devbox-kubectl", cfg.SealosDevbox.Kubectl)
+		}
+		if strings.TrimSpace(cfg.SealosDevbox.Kubeconfig) != "" {
+			args = append(args, "--sealos-devbox-kubeconfig", cfg.SealosDevbox.Kubeconfig)
+		}
+		for _, routing := range []struct {
+			flagName string
+			value    string
+		}{
+			{flagName: "--sealos-devbox-context", value: cfg.SealosDevbox.Context},
+			{flagName: "--sealos-devbox-namespace", value: cfg.SealosDevbox.Namespace},
+			{flagName: "--sealos-devbox-network", value: cfg.SealosDevbox.Network},
+			{flagName: "--sealos-devbox-ssh-gateway-host", value: cfg.SealosDevbox.SSHGatewayHost},
+			{flagName: "--sealos-devbox-ssh-gateway-port", value: cfg.SealosDevbox.SSHGatewayPort},
+			{flagName: "--sealos-devbox-node-host", value: cfg.SealosDevbox.NodeHost},
+			{flagName: "--sealos-devbox-ssh-user", value: cfg.SealosDevbox.SSHUser},
+			{flagName: "--sealos-devbox-work-root", value: workRoot},
+		} {
+			if strings.TrimSpace(routing.value) != "" {
+				args = append(args, routing.flagName, routing.value)
+			}
+		}
+		if DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
+			args = append(args, fmt.Sprintf("--sealos-devbox-delete-on-release=%t", cfg.SealosDevbox.DeleteOnRelease))
+		}
+		if strings.TrimSpace(cfg.SealosDevbox.Kubeconfig) == "" {
+			if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
+				args = append([]string{"KUBECONFIG=" + value}, args...)
+			}
+		}
 	case "incus":
 		if DeleteOnReleaseExplicit(cfg, "incus") {
 			args = append(args, fmt.Sprintf("--incus-delete-on-release=%t", cfg.Incus.DeleteOnRelease))

@@ -49,6 +49,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 ```sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=aws               CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=hetzner           CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=azure CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_AZURE_TYPE=Standard_D2s_v5 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=blacksmith-testbox CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=e2b               CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=modal             CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
@@ -110,6 +111,14 @@ Per-provider smoke prerequisites:
   template is selected, then proves doctor, dry-run cleanup, stop-by-default
   warmup/run/stop/status, delete-on-release warmup/run/stop, list, and final
   dry-run cleanup.
+- **Sealos DevBox** — `kubectl`, an inherited kubeconfig or readable configured
+  kubeconfig, an explicit `sealosDevbox.context`, namespace RBAC for the
+  DevBox CRD, `sealosDevbox.image`, and a
+  configured SSHGate or NodePort route. `scripts/live-smoke.sh` refuses to
+  mutate Sealos resources until those prerequisites and `doctor --json` pass,
+  then proves dry-run cleanup, one retained DevBox warmup, status, SSH command
+  rendering, a synced command, stop, post-stop status, and final dry-run
+  cleanup.
 - **Semaphore** — `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`,
   and `CRABBOX_SEMAPHORE_TOKEN`, or the equivalent user config.
   `scripts/live-smoke.sh` refuses to call Semaphore until those values are
@@ -360,7 +369,14 @@ Configure `CRABBOX_PUBLIC_URL`, one auth model, and at least one brokered
 provider. Shared-token automation needs `CRABBOX_SHARED_TOKEN` and
 `CRABBOX_SHARED_OWNER`; browser login needs the GitHub OAuth settings below.
 Provider choices are `HETZNER_TOKEN`, an AWS credential set, an Azure service
-principal, or a GCP service account. Node additionally requires `DATABASE_URL`.
+principal, a GCP service account, or `DAYTONA_CRABBOX_KEY`. Node additionally
+requires `DATABASE_URL`.
+
+GitHub OAuth start routes remain unauthenticated so a new user can bootstrap login.
+The coordinator limits active attempts to ten per caller source and 100 globally for
+both CLI and portal login, after removing expired attempts. Node deployments behind a
+reverse proxy must configure `CRABBOX_TRUSTED_PROXY_CIDRS`; otherwise caller limits use
+the direct peer address and ignore forwarded addresses.
 
 For any portal that exposes browser Code, configure
 `CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com` and route the
@@ -381,6 +397,8 @@ CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for /v1/workspaces terminal attachmen
 CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; hetzner, aws, azure, or gcp
 CRABBOX_WORKSPACE_CLASS           optional workspace machine class; default standard
 CRABBOX_WORKSPACE_PREWARM_COUNT   optional ready spares per active organization; default 0, maximum 4
+DAYTONA_CRABBOX_KEY               required for brokered Daytona leases
+CRABBOX_DAYTONA_*                 optional Daytona API, snapshot, target, user, work-root, and SSH-token settings
 CRABBOX_RUN_RETENTION_DAYS        terminal run history retention; default 30 days, minimum 1
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login
@@ -562,6 +580,10 @@ bin/crabbox admin leases --state active
 bin/crabbox inspect --id blue-lobster --json
 bin/crabbox stop blue-lobster
 ```
+
+Azure release persists an immutable managed-disk cleanup claim before deleting
+the VM. Retries use that durable claim and recheck any live disk attachment;
+they never treat names or Crabbox-written ownership tags as sufficient proof.
 
 Trusted operators can use `crabbox admin release` or `crabbox admin delete --force` for stuck leases.
 

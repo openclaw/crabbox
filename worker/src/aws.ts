@@ -511,6 +511,16 @@ export class EC2SpotClient {
     throw new Error(`aws instance not found: ${instanceID}`);
   }
 
+  async findServer(instanceID: string): Promise<ProviderMachine | undefined> {
+    try {
+      return await this.getServer(instanceID);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isAWSInstanceNotFoundError(message)) return undefined;
+      throw error;
+    }
+  }
+
   async waitForServerIP(instanceID: string): Promise<ProviderMachine> {
     const deadline = Date.now() + 600_000;
     while (Date.now() < deadline) {

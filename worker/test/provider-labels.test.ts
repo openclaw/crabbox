@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import type { LeaseConfig } from "../src/config";
-import { leaseProviderLabels } from "../src/provider-labels";
+import { gcpLabelValue, gcpProviderLabelValue } from "../src/gcp";
+import { leaseProviderLabels, providerMachineOwnedByLease } from "../src/provider-labels";
+import type { LeaseRecord, ProviderMachine } from "../src/types";
 
 describe("provider labels", () => {
   it("caps expires_at at the shorter of ttl and idle timeout", () => {
@@ -223,5 +225,133 @@ describe("provider labels", () => {
       new Date("2026-05-01T12:00:00Z"),
     );
     expect(labels.pond).toBeUndefined();
+  });
+
+  it("binds release ownership to the exact provider, resource, lease, owner, and slug", () => {
+    const lease = {
+      id: "cbx_abcdef123456",
+      slug: "blue-lobster",
+      provider: "aws",
+      cloudID: "i-abcdef123456",
+      owner: "alice@example.com",
+    } satisfies Pick<LeaseRecord, "id" | "slug" | "provider" | "cloudID" | "owner">;
+    const machine = {
+      provider: "aws",
+      cloudID: lease.cloudID,
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        lease: lease.id,
+        owner: "alice_example.com",
+        provider: "aws",
+        slug: lease.slug,
+      },
+    } satisfies Pick<ProviderMachine, "provider" | "cloudID" | "labels">;
+
+    expect(providerMachineOwnedByLease(machine, lease, "aws")).toBe(true);
+    for (const candidate of [
+      { ...machine, provider: "gcp" as const },
+      { ...machine, cloudID: "i-foreign" },
+      { ...machine, labels: { ...machine.labels, crabbox: "false" } },
+      { ...machine, labels: { ...machine.labels, created_by: "external" } },
+      { ...machine, labels: { ...machine.labels, lease: "cbx_000000000000" } },
+      { ...machine, labels: { ...machine.labels, owner: "bob_example.com" } },
+      { ...machine, labels: { ...machine.labels, provider: "azure" } },
+      { ...machine, labels: { ...machine.labels, slug: "red-lobster" } },
+    ]) {
+      expect(providerMachineOwnedByLease(candidate, lease, "aws")).toBe(false);
+    }
+    expect(providerMachineOwnedByLease(machine, { ...lease, id: "legacy-id" }, "aws")).toBe(false);
+    expect(providerMachineOwnedByLease(machine, { ...lease, slug: undefined }, "aws")).toBe(false);
+    expect(providerMachineOwnedByLease(machine, { ...lease, owner: "" }, "aws")).toBe(false);
+  });
+
+  it("compares GCP ownership using the labels stored by Compute Engine", () => {
+    const lease = {
+      id: "cbx_abcdef123456",
+      slug: "Blue.Lobster",
+      provider: "gcp",
+      cloudID: "crabbox-blue-lobster",
+      owner: "Alice@example.com",
+    } satisfies Pick<LeaseRecord, "id" | "slug" | "provider" | "cloudID" | "owner">;
+    const machine = {
+      provider: "gcp",
+      cloudID: lease.cloudID,
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        lease: lease.id,
+        owner: "alice_example_com",
+        provider: "gcp",
+        slug: "blue-lobster",
+      },
+    } satisfies Pick<ProviderMachine, "provider" | "cloudID" | "labels">;
+
+    expect(providerMachineOwnedByLease(machine, lease, "gcp", gcpLabelValue)).toBe(true);
+    expect(providerMachineOwnedByLease(machine, lease, "gcp")).toBe(false);
+  });
+
+  it("matches the two-stage GCP label transform used during creation", () => {
+    const lease = {
+      id: "cbx_abcdef123456",
+      slug: "Blue.Lobster",
+      provider: "gcp",
+      cloudID: "crabbox-blue-lobster",
+      owner: "İ@example.com",
+    } satisfies Pick<LeaseRecord, "id" | "slug" | "provider" | "cloudID" | "owner">;
+    const machine = {
+      provider: "gcp",
+      cloudID: lease.cloudID,
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        lease: lease.id,
+        owner: "example_com",
+        provider: "gcp",
+        slug: "blue-lobster",
+      },
+    } satisfies Pick<ProviderMachine, "provider" | "cloudID" | "labels">;
+
+    expect(providerMachineOwnedByLease(machine, lease, "gcp", gcpProviderLabelValue)).toBe(true);
+    expect(providerMachineOwnedByLease(machine, lease, "gcp", gcpLabelValue)).toBe(false);
+  });
+
+  it("uses the immutable provider owner after a workspace prewarm handoff", () => {
+    const lease = {
+      id: "cbx_abcdef123456",
+      slug: "blue-lobster",
+      provider: "aws",
+      cloudID: "i-abcdef123456",
+      workspaceID: "fleet-blue-lobster",
+      owner: "alice@example.com",
+      providerOwner: "crabbox-internal-prewarm",
+    } satisfies Pick<
+      LeaseRecord,
+      "id" | "slug" | "provider" | "cloudID" | "workspaceID" | "owner" | "providerOwner"
+    >;
+    const machine = {
+      provider: "aws",
+      cloudID: lease.cloudID,
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        lease: lease.id,
+        owner: "crabbox-internal-prewarm",
+        provider: "aws",
+        slug: lease.slug,
+      },
+    } satisfies Pick<ProviderMachine, "provider" | "cloudID" | "labels">;
+
+    expect(providerMachineOwnedByLease(machine, lease, "aws")).toBe(true);
+    expect(
+      providerMachineOwnedByLease(machine, { ...lease, providerOwner: undefined }, "aws"),
+    ).toBe(true);
+    expect(
+      providerMachineOwnedByLease(
+        machine,
+        { ...lease, providerOwner: undefined, workspaceID: undefined },
+        "aws",
+      ),
+    ).toBe(false);
   });
 });

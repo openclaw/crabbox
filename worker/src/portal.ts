@@ -26,6 +26,7 @@ const providerIcons: Record<string, string> = {
   "blacksmith-testbox": `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v5H4z"/><path d="M4 13h16v5H4z"/><path d="M8 8.5h.01M8 15.5h.01M12 8.5h5M12 15.5h5"/></svg>`,
   aws: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15.5c3.8 2.2 9.1 2.5 14.8.9"/><path d="M17.5 13.2 20 16l-3.7.7"/><path d="M7 8.5h10l1.8 4H5.2z"/></svg>`,
   azure: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 17.5h9.2a4 4 0 0 0 .5-8 5.5 5.5 0 0 0-10.5-1.6A4.8 4.8 0 0 0 7.5 17.5Z"/><path d="M9 13h6"/></svg>`,
+  daytona: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M8 10h8M8 14h5"/></svg>`,
   gcp: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17 3.5 12.5 9.5 2h5L20.5 12.5 18 17z"/><path d="M8.5 17h9.5M9.5 2l3 5.5M14.5 2l-3 5.5"/></svg>`,
   hetzner: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M8 8v8M16 8v8M8 12h8"/></svg>`,
 };
@@ -564,7 +565,7 @@ export function portalLeaseDetail(
             ${metaHTMLRow("target", targetBadge(target, lease.windowsMode))}
             ${metaRow("class", lease.class)}
             ${metaRow("host", lease.host || "pending")}
-            ${metaRow("ssh", lease.sshPort ? `${lease.sshUser || "crabbox"}@${lease.host || "host"}:${lease.sshPort}` : "pending")}
+            ${metaRow("ssh", portalSSHAddress(lease))}
             ${metaRow("work root", lease.workRoot || "pending")}
             ${leaseTelemetryRows(lease.telemetry)}
             ${metaRow("expires", shortTime(lease.expiresAt))}
@@ -861,7 +862,7 @@ export function portalMacHostDetail(
               ? `<dl class="meta-grid">
                   ${metaRow("lease", activeLease.slug ? `${activeLease.slug} / ${activeLease.id}` : activeLease.id)}
                   ${metaRow("host", activeLease.host || "pending")}
-                  ${metaRow("ssh", activeLease.sshPort ? `${activeLease.sshUser || "crabbox"}@${activeLease.host || "host"}:${activeLease.sshPort}` : "pending")}
+                  ${metaRow("ssh", portalSSHAddress(activeLease))}
                   ${metaRow("desktop", activeLeaseVNC ? "enabled" : "disabled")}
                   ${metaRow("expires", shortTime(activeLease.expiresAt))}
                 </dl>`
@@ -3968,6 +3969,12 @@ function compactAge(value: string | undefined): string {
 
 function leaseSortTime(lease: LeaseRecord): string {
   return lease.endedAt || lease.releasedAt || lease.updatedAt || lease.expiresAt || lease.createdAt;
+}
+
+function portalSSHAddress(lease: LeaseRecord): string {
+  if (!lease.sshPort) return "pending";
+  const user = lease.provider === "daytona" ? "<token>" : lease.sshUser || "crabbox";
+  return `${user}@${lease.host || "host"}:${lease.sshPort}`;
 }
 
 function formatDuration(value: number | undefined): string {

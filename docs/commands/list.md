@@ -19,7 +19,7 @@ crabbox list --json
 
 The shape of the output depends on the selected `--provider`:
 
-- **Coordinator-backed providers** (`hetzner`, `aws`, `azure`, `gcp` with a broker
+- **Coordinator-backed providers** (`hetzner`, `aws`, `azure`, `daytona`, `gcp` with a broker
   configured) list the leases the broker tracks for you. Add `--all` to request
   admin-wide provider inventory when an admin token is configured.
 - **Direct cloud / hypervisor / static providers** list the machines the provider

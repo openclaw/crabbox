@@ -59,6 +59,9 @@ printf 'err\n' >&2
 	wantArgs := []string{
 		"-i", "/tmp/crabbox key",
 		"-o", "IdentitiesOnly=yes",
+		"-o", "ForwardAgent=no",
+		"-o", "ForwardX11=no",
+		"-o", "ForwardX11Trusted=no",
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=10",
 		"-o", "ConnectionAttempts=3",

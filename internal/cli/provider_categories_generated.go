@@ -58,6 +58,7 @@ var benchmarkProviderCategories = map[string]string{
 	"railway":                    "service-control",
 	"runpod":                     "gpu-cloud",
 	"scaleway":                   "direct-cloud",
+	"sealos-devbox":              "direct-cloud",
 	"semaphore":                  "ci-proof-runner",
 	"smolvm":                     "delegated-sandbox",
 	"sprites":                    "direct-cloud",

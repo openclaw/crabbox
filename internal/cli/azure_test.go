@@ -77,12 +77,13 @@ func TestValidateAzureCleanupVM(t *testing.T) {
 		CloudID:     "crabbox-live",
 		ImmutableID: "vmid-live",
 		Labels: map[string]string{
-			"crabbox":    "true",
-			"created_by": "crabbox",
-			"provider":   "azure",
-			"lease":      "cbx_123456abcdef",
-			"slug":       "live",
-			"expires_at": leaseLabelTime(now.Add(-time.Hour)),
+			"crabbox":      "true",
+			"created_by":   "crabbox",
+			"provider":     "azure",
+			"lease":        "cbx_123456abcdef",
+			"slug":         "live",
+			"provider_key": providerKeyForLease("cbx_123456abcdef"),
+			"expires_at":   leaseLabelTime(now.Add(-time.Hour)),
 		},
 	}
 	if err := validateAzureCleanupVM(expected, expected, now); err != nil {
@@ -106,6 +107,77 @@ func TestValidateAzureCleanupVM(t *testing.T) {
 	renewed.Labels["expires_at"] = leaseLabelTime(now.Add(time.Hour))
 	if err := validateAzureCleanupVM(expected, renewed, now); err == nil || !strings.Contains(err.Error(), "no longer cleanup eligible") {
 		t.Fatalf("renewed VM error=%v", err)
+	}
+}
+
+func TestValidateAzureOwnedVMDoesNotRequireExpiry(t *testing.T) {
+	expected := Server{
+		CloudID:     "crabbox-release",
+		ImmutableID: "vmid-release",
+		Labels: map[string]string{
+			"crabbox":      "true",
+			"created_by":   "crabbox",
+			"provider":     "azure",
+			"lease":        "cbx_123456abcdef",
+			"slug":         "release",
+			"provider_key": providerKeyForLease("cbx_123456abcdef"),
+		},
+	}
+	if err := validateAzureOwnedVM(expected, expected); err != nil {
+		t.Fatalf("valid release VM rejected: %v", err)
+	}
+	replacement := expected
+	replacement.ImmutableID = "vmid-replacement"
+	if err := validateAzureOwnedVM(expected, replacement); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("replacement VM error=%v", err)
+	}
+	changedKey := expected
+	changedKey.Labels = maps.Clone(expected.Labels)
+	changedKey.Labels["provider_key"] = "replacement"
+	if err := validateAzureOwnedVM(expected, changedKey); err == nil || !strings.Contains(err.Error(), "provider key") {
+		t.Fatalf("changed provider key error=%v", err)
+	}
+}
+
+func TestAzureDeleteResourcesRoundTripDurableClaimLabels(t *testing.T) {
+	expected := Server{
+		CloudID:     "crabbox-owned",
+		ImmutableID: "vmid-owned",
+		Labels:      map[string]string{"lease": "cbx_123456abcdef", "slug": "owned"},
+	}
+	resources := azureVMDeleteResources{
+		vm:            true,
+		vmID:          "vmid-owned",
+		nic:           "crabbox-owned-nic",
+		nicID:         "nic-guid",
+		publicIP:      "crabbox-owned-pip",
+		publicIPID:    "pip-guid",
+		disk:          "crabbox-owned-osdisk",
+		diskID:        "disk-guid",
+		quarantineNSG: "crabbox-owned-q-nsg",
+		quarantineID:  "nsg-guid",
+	}
+	expected.Labels = azureDeleteResourcesToLabels(expected.Labels, resources)
+	if !HasAzureCleanupBinding(expected.Labels) {
+		t.Fatal("durable cleanup binding marker missing")
+	}
+	got, err := azureDeleteResourcesFromLabels(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := requireMatchingAzureDeleteResources(got, resources); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAzureDeleteResourcesRejectIncompleteDurableClaim(t *testing.T) {
+	expected := Server{
+		CloudID:     "crabbox-owned",
+		ImmutableID: "vmid-owned",
+		Labels:      map[string]string{AzureCleanupBindingLabel: azureCleanupBindingVersion},
+	}
+	if _, err := azureDeleteResourcesFromLabels(expected); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("err=%v, want incomplete binding rejection", err)
 	}
 }
 

@@ -36,7 +36,10 @@ A per-lease `known_hosts` file lives next to the key
 - `StrictHostKeyChecking=accept-new` — trust a host's key on first contact, then
   pin it;
 - `UserKnownHostsFile` pointed at the per-lease `known_hosts`;
-- `IdentitiesOnly=yes` with `-i <key>` so only the lease key is offered.
+- `IdentitiesOnly=yes` with `-i <key>` so only the lease key is offered;
+- `ForwardAgent=no`, `ForwardX11=no`, and `ForwardX11Trusted=no` so broad local
+  OpenSSH configuration cannot delegate ambient agent or X11 authority to a
+  lease.
 
 Because host keys are scoped to the lease's own file, a reused provider IP from
 a previous lease never poisons the user's global `~/.ssh/known_hosts`, and two

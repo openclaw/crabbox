@@ -144,8 +144,10 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	server := Server{
-		Provider: "aws",
-		CloudID:  "i-1750645",
+		Provider:    "aws",
+		CloudID:     "i-1750645",
+		ID:          42,
+		ImmutableID: "vmid-1750645",
 		Labels: map[string]string{
 			"provider": "aws",
 			"slug":     "warm",
@@ -159,7 +161,7 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.RepoRoot != "" {
+	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.CloudNumericID != 42 || claim.CloudImmutableID != "vmid-1750645" || claim.RepoRoot != "" {
 		t.Fatalf("unexpected unattached provider claim: %#v", claim)
 	}
 
@@ -173,6 +175,19 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	}
 	if claim.RepoRoot != repoRoot {
 		t.Fatalf("provider claim was not attached to repo: %#v", claim)
+	}
+}
+
+func TestAzureProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
+	cfg := baseConfig()
+	cfg.AzureSubscription = " TEST-SUB "
+	cfg.AzureResourceGroup = " Production-RG "
+	if got, want := providerClaimScope("azure", cfg), "subscription:test-sub|resource-group:production-rg"; got != want {
+		t.Fatalf("providerClaimScope(azure)=%q, want %q", got, want)
+	}
+	cfg.AzureResourceGroup = ""
+	if got := providerClaimScope("azure", cfg); got != "" {
+		t.Fatalf("incomplete azure scope=%q, want empty", got)
 	}
 }
 
@@ -1011,6 +1026,33 @@ func TestClaimLeaseForRepoConfigIfUnchangedPreservesEndpoint(t *testing.T) {
 	}
 	if claimed.RepoRoot != "/repo-b" || claimed.SSHHost != target.Host || claimed.SSHPort != 22 {
 		t.Fatalf("claim=%#v", claimed)
+	}
+}
+
+func TestClaimLeaseTargetForRepoConfigScopeReplacingEndpointClearsPublishedRoute(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	leaseID := "cbx_replaceendpoint"
+	server := Server{
+		CloudID:  "team-a/devbox-one",
+		Provider: "external",
+		Labels:   map[string]string{"provider": "external", "slug": "blue", "state": "ready"},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "blue", cfg, server, SSHTarget{Host: "stale.example.test", Port: "2222"}, "/repo-a", time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+	expected, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("claim=%#v exists=%v err=%v", expected, exists, err)
+	}
+
+	updated, err := claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, "blue", cfg, "cluster-a", server, SSHTarget{}, "/repo-b", time.Hour, true, expected, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.RepoRoot != "/repo-b" || updated.ProviderScope != "cluster-a" || updated.SSHHost != "" || updated.SSHPort != 0 {
+		t.Fatalf("updated claim=%#v", updated)
 	}
 }
 

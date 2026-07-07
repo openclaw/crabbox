@@ -60,10 +60,10 @@ export function redactDiagnosticSecrets(
     redacted = redacted.replaceAll(secret, "[redacted]");
   }
   redacted = redacted.replaceAll(
-    /\b(authorization|proxy-authorization|x-api-key|api-key|api_key|access-token|access_token|client-secret|client_secret|session-token|session_token|token|password)[ \t]*[:=][ \t]*(?:(?:bearer|basic)(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+))?[^\s"',;\\}]+/gi,
-    (match) => {
-      const colon = match.indexOf(":");
-      const equals = match.indexOf("=");
+    /(^|[^?&A-Za-z0-9_-])(authorization|proxy-authorization|x-api-key|api-key|api_key|access-token|access_token|client-secret|client_secret|session-token|session_token|token|password)[ \t]*[:=][ \t]*(?:(?:bearer|basic)(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+))?(?:\\.|[^\s"])+/gi,
+    (match, prefix: string) => {
+      const colon = match.indexOf(":", prefix.length);
+      const equals = match.indexOf("=", prefix.length);
       const separator = colon < 0 ? equals : equals < 0 ? colon : Math.min(colon, equals);
       return separator >= 0 ? `${match.slice(0, separator + 1)} [redacted]` : match;
     },
@@ -76,12 +76,12 @@ export function redactDiagnosticSecrets(
     },
   );
   redacted = redacted.replaceAll(
-    /([?&](?:api[_-]?key|access[_-]?token|client[_-]?secret|password|token|signature|sig|x-amz-credential|x-amz-signature|x-amz-security-token)=)[^&#\s]+/gi,
+    /([?&](?:authorization|proxy-authorization|x-api-key|api[_-]?key|access[_-]?token|client[_-]?secret|session[_-]?token|password|token|signature|sig|x-amz-credential|x-amz-signature|x-amz-security-token)=)[^&#\s]+/gi,
     "$1[redacted]",
   );
   redacted = redacted.replaceAll(/\b(https?:\/\/)[^/\s:@]+:[^@\s/]+@/gi, "$1[redacted]@");
   redacted = redacted.replaceAll(
-    /\bbearer(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+)[^\s"',;\\}]+/gi,
+    /\bbearer(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+)(?:\\.|[^\s"])+/gi,
     "Bearer [redacted]",
   );
   return redacted.replaceAll(

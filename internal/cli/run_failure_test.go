@@ -456,6 +456,45 @@ func TestFailureDigestPreservesInheritedKubeconfigForKubeVirt(t *testing.T) {
 	}
 }
 
+func TestFailureDigestPreservesSealosRouting(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/tmp/base.yaml:/tmp/cluster.yaml")
+	cfg := Config{
+		Provider: "sealos-devbox",
+		TargetOS: targetLinux,
+		SealosDevbox: SealosDevboxConfig{
+			Kubectl:        "/opt/bin/kubectl",
+			Context:        "dev=west",
+			Namespace:      "team-devboxes",
+			Network:        "SSHGate",
+			SSHGatewayHost: "ssh.example.test",
+			SSHGatewayPort: "2222",
+			SSHUser:        "devbox",
+			WorkRoot:       "/home/devbox/project",
+		},
+	}
+	commands := failureDigestNextCommands(runFailureDigestInput{
+		Provider:       "sealos-devbox",
+		TargetOS:       targetLinux,
+		LeaseID:        "cbx_123",
+		CommandDisplay: "go test ./...",
+		RoutingArgs:    runFailureDigestRoutingArgs(cfg, "cbx_123"),
+		SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, "cbx_123"),
+		Classification: FailureClassification{RetryLikely: "unknown"},
+	}, "unknown")
+	joined := strings.Join(commands, "\n")
+	for _, want := range []string{
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox ssh --provider sealos-devbox",
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox run --provider sealos-devbox",
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox stop --provider sealos-devbox",
+		"--sealos-devbox-context dev=west",
+		"--sealos-devbox-ssh-gateway-host ssh.example.test",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestRunFailureDigestIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
 	args := runFailureDigestRoutingArgs(Config{
 		Provider: "xcp-ng",

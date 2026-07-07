@@ -17,6 +17,7 @@ import (
 	"time"
 
 	sdk "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type openSandboxClient interface {
@@ -38,6 +39,14 @@ type ambiguousOpenSandboxCreateError struct {
 
 func (e *ambiguousOpenSandboxCreateError) Error() string { return e.cause.Error() }
 func (e *ambiguousOpenSandboxCreateError) Unwrap() error { return e.cause }
+
+type redactedOpenSandboxError struct {
+	cause   error
+	message string
+}
+
+func (e *redactedOpenSandboxError) Error() string { return e.message }
+func (e *redactedOpenSandboxError) Unwrap() error { return e.cause }
 
 type createSandboxOptions struct {
 	Image          string
@@ -260,6 +269,24 @@ func (c *sdkOpenSandboxClient) lifecycle() *sdk.LifecycleClient {
 	return sdk.NewLifecycleClient(c.base+"/v1", c.key, sdk.WithHTTPClient(&httpClient))
 }
 
+func (c *sdkOpenSandboxClient) redactProviderText(value string, extraSecrets ...string) string {
+	secrets := make([]string, 1, len(extraSecrets)+1)
+	secrets[0] = c.key
+	secrets = append(secrets, extraSecrets...)
+	return shared.RedactErrorSecrets(value, secrets...)
+}
+
+func (c *sdkOpenSandboxClient) redactProviderError(err error, extraSecrets ...string) error {
+	if err == nil {
+		return nil
+	}
+	message := c.redactProviderText(err.Error(), extraSecrets...)
+	if message == err.Error() {
+		return err
+	}
+	return &redactedOpenSandboxError{cause: err, message: message}
+}
+
 func (c *sdkOpenSandboxClient) config() sdk.ConnectionConfig {
 	protocol := ""
 	if parsed, err := url.Parse(c.base); err == nil {
@@ -314,7 +341,7 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 	}
 	info, err := c.lifecycle().CreateSandbox(ctx, req)
 	if err != nil {
-		createErr := fmt.Errorf("opensandbox create sandbox: %w", err)
+		createErr := fmt.Errorf("opensandbox create sandbox: %w", c.redactProviderError(err))
 		if isOpenSandboxAmbiguousCreateError(err) {
 			return sandboxInfo{}, &ambiguousOpenSandboxCreateError{cause: createErr}
 		}
@@ -337,7 +364,7 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 	if info.ExpiresAt == nil || info.ExpiresAt.IsZero() {
 		info, err = c.lifecycle().GetSandbox(readyCtx, sandboxID)
 		if err != nil {
-			return sandboxInfo{}, c.cleanupCreateFailure(ctx, sandboxID, fmt.Errorf("opensandbox refresh sandbox expiration: %w", err))
+			return sandboxInfo{}, c.cleanupCreateFailure(ctx, sandboxID, fmt.Errorf("opensandbox refresh sandbox expiration: %w", c.redactProviderError(err)))
 		}
 		if info.Status.State != sdk.StateRunning {
 			refreshedCtx, refreshedCancel := c.readinessContext(readyCtx, info.ExpiresAt)
@@ -363,14 +390,14 @@ func (c *sdkOpenSandboxClient) cleanupCreateFailure(ctx context.Context, sandbox
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openSandboxCleanupTimeout)
 	defer cancel()
 	if err := c.lifecycle().DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isOpenSandboxNotFound(err) {
-		return fmt.Errorf("%w; cleanup opensandbox sandbox %s failed: %v", cause, sandboxID, err)
+		return fmt.Errorf("%w; cleanup opensandbox sandbox %s failed: %v", cause, sandboxID, c.redactProviderError(err))
 	}
 	return cause
 }
 
 func (c *sdkOpenSandboxClient) ResumeSandbox(ctx context.Context, sandboxID string) error {
 	if err := c.lifecycle().ResumeSandbox(ctx, sandboxID); err != nil {
-		return fmt.Errorf("opensandbox resume sandbox: %w", err)
+		return fmt.Errorf("opensandbox resume sandbox: %w", c.redactProviderError(err))
 	}
 	readyCtx, cancel := c.readinessContext(ctx, nil)
 	defer cancel()
@@ -387,11 +414,11 @@ func (c *sdkOpenSandboxClient) ResumeSandbox(ctx context.Context, sandboxID stri
 }
 
 func (c *sdkOpenSandboxClient) PingSandbox(ctx context.Context, sandboxID string) error {
-	execd, err := c.execd(ctx, sandboxID)
+	conn, err := c.resolveExecd(ctx, sandboxID)
 	if err != nil {
 		return err
 	}
-	return execd.Ping(ctx)
+	return c.redactProviderError(c.execdForConnection(conn).Ping(ctx), openSandboxExecdSecrets(conn)...)
 }
 
 func (c *sdkOpenSandboxClient) readyTimeout() time.Duration {
@@ -446,7 +473,7 @@ func (c *sdkOpenSandboxClient) waitForRunning(ctx context.Context, sandboxID str
 			if expiresAt != nil && requestContextErr != nil && ctx.Err() == nil {
 				return nil, fmt.Errorf("sandbox %s expired before reaching Running state", sandboxID)
 			}
-			return nil, fmt.Errorf("get sandbox status: %w", err)
+			return nil, fmt.Errorf("get sandbox status: %w", c.redactProviderError(err))
 		}
 		if info.ExpiresAt != nil && !info.ExpiresAt.IsZero() {
 			expiresAt = info.ExpiresAt
@@ -478,13 +505,17 @@ func (c *sdkOpenSandboxClient) waitUntilReady(ctx context.Context, sandboxID str
 	start := time.Now()
 	var lastErr error
 	for {
-		execd, err := c.execd(ctx, sandboxID)
+		conn, err := c.resolveExecd(ctx, sandboxID)
 		if err == nil {
-			err = execd.Ping(ctx)
+			err = c.execdForConnection(conn).Ping(ctx)
+			if err != nil {
+				err = c.redactProviderError(err, openSandboxExecdSecrets(conn)...)
+			}
 		}
 		if err == nil {
 			return nil
 		}
+		err = c.redactProviderError(err)
 		if !isOpenSandboxReadinessPending(err) {
 			return fmt.Errorf("sandbox %s readiness failed: %w", sandboxID, err)
 		}
@@ -505,7 +536,7 @@ func (c *sdkOpenSandboxClient) waitUntilReady(ctx context.Context, sandboxID str
 func (c *sdkOpenSandboxClient) ListSandboxes(ctx context.Context, metadata map[string]string) ([]sandboxInfo, error) {
 	resp, err := c.lifecycle().ListSandboxes(ctx, sdk.ListOptions{Metadata: metadata, PageSize: 100})
 	if err != nil {
-		return nil, fmt.Errorf("opensandbox list sandboxes: %w", err)
+		return nil, fmt.Errorf("opensandbox list sandboxes: %w", c.redactProviderError(err))
 	}
 	out := make([]sandboxInfo, 0, len(resp.Items))
 	for i := range resp.Items {
@@ -517,25 +548,25 @@ func (c *sdkOpenSandboxClient) ListSandboxes(ctx context.Context, metadata map[s
 func (c *sdkOpenSandboxClient) GetSandbox(ctx context.Context, sandboxID string) (sandboxInfo, error) {
 	info, err := c.lifecycle().GetSandbox(ctx, sandboxID)
 	if err != nil {
-		return sandboxInfo{}, fmt.Errorf("opensandbox get sandbox: %w", err)
+		return sandboxInfo{}, fmt.Errorf("opensandbox get sandbox: %w", c.redactProviderError(err))
 	}
 	return sdkSandboxInfo(info), nil
 }
 
 func (c *sdkOpenSandboxClient) DeleteSandbox(ctx context.Context, sandboxID string) error {
 	if err := c.lifecycle().DeleteSandbox(ctx, sandboxID); err != nil {
-		return fmt.Errorf("opensandbox delete sandbox: %w", err)
+		return fmt.Errorf("opensandbox delete sandbox: %w", c.redactProviderError(err))
 	}
 	return nil
 }
 
 func (c *sdkOpenSandboxClient) UploadFile(ctx context.Context, sandboxID, remotePath string, body io.Reader) error {
-	execd, err := c.execd(ctx, sandboxID)
+	conn, err := c.resolveExecd(ctx, sandboxID)
 	if err != nil {
 		return err
 	}
-	if err := execd.UploadFile(ctx, body, sdk.UploadFileOptions{Metadata: sdk.FileMetadata{Path: remotePath}}); err != nil {
-		return fmt.Errorf("opensandbox upload %s: %w", remotePath, err)
+	if err := c.execdForConnection(conn).UploadFile(ctx, body, sdk.UploadFileOptions{Metadata: sdk.FileMetadata{Path: remotePath}}); err != nil {
+		return fmt.Errorf("opensandbox upload %s: %w", remotePath, c.redactProviderError(err, openSandboxExecdSecrets(conn)...))
 	}
 	return nil
 }
@@ -604,12 +635,13 @@ func (c *sdkOpenSandboxClient) runCommandStream(ctx context.Context, conn execdC
 	}
 	response, err := c.execdHTTPClient(conn).Do(request)
 	if err != nil {
-		return fmt.Errorf("opensandbox send command request: %w", err)
+		return fmt.Errorf("opensandbox send command request: %w", c.redactProviderError(err, openSandboxExecdSecrets(conn)...))
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= http.StatusBadRequest {
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
-		return fmt.Errorf("opensandbox command request failed status=%d body=%s", response.StatusCode, strings.TrimSpace(string(message)))
+		body := c.redactProviderText(strings.TrimSpace(string(message)), openSandboxExecdSecrets(conn)...)
+		return fmt.Errorf("opensandbox command request failed status=%d body=%s", response.StatusCode, body)
 	}
 	return streamOpenSandboxCommand(ctx, response.Body, handler)
 }
@@ -847,17 +879,9 @@ func commandOutput(text, data string) string {
 
 func (c *sdkOpenSandboxClient) Probe(ctx context.Context) error {
 	if _, err := c.lifecycle().ListSandboxes(ctx, sdk.ListOptions{PageSize: 1}); err != nil {
-		return fmt.Errorf("opensandbox probe: %w", err)
+		return fmt.Errorf("opensandbox probe: %w", c.redactProviderError(err))
 	}
 	return nil
-}
-
-func (c *sdkOpenSandboxClient) execd(ctx context.Context, sandboxID string) (*sdk.ExecdClient, error) {
-	conn, err := c.resolveExecd(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	return c.execdForConnection(conn), nil
 }
 
 func (c *sdkOpenSandboxClient) execdForConnection(conn execdConnection) *sdk.ExecdClient {
@@ -871,7 +895,7 @@ func (c *sdkOpenSandboxClient) interruptOpenSandboxCommand(ctx context.Context, 
 	interruptCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openSandboxInterruptTimeout)
 	defer cancel()
 	if err := c.execdForConnection(conn).InterruptCommand(interruptCtx, executionID); err != nil {
-		return fmt.Errorf("%w; interrupt opensandbox command %s failed: %v", cause, executionID, err)
+		return fmt.Errorf("%w; interrupt opensandbox command %s failed: %v", cause, executionID, c.redactProviderError(err, openSandboxExecdSecrets(conn)...))
 	}
 	return cause
 }
@@ -880,7 +904,7 @@ func (c *sdkOpenSandboxClient) resolveExecd(ctx context.Context, sandboxID strin
 	useProxy := c.cfg.OpenSandbox.UseServerProxy
 	endpoint, err := c.lifecycle().GetEndpoint(ctx, sandboxID, sdk.DefaultExecdPort, &useProxy)
 	if err != nil {
-		return execdConnection{}, fmt.Errorf("opensandbox resolve execd endpoint: %w", err)
+		return execdConnection{}, fmt.Errorf("opensandbox resolve execd endpoint: %w", c.redactProviderError(err))
 	}
 	conn := c.config()
 	endpointURL := conn.RewriteEndpointURL(endpoint.Endpoint)
@@ -900,6 +924,28 @@ func (c *sdkOpenSandboxClient) resolveExecd(ctx context.Context, sandboxID strin
 		headers[execdAuthHeader] = c.key
 	}
 	return execdConnection{baseURL: endpointURL, rawQuery: rawQuery, headers: headers}, nil
+}
+
+func openSandboxExecdSecrets(conn execdConnection) []string {
+	secrets := make([]string, 0, len(conn.headers)+4)
+	for _, value := range conn.headers {
+		if value = strings.TrimSpace(value); len(value) >= 4 {
+			secrets = append(secrets, value)
+		}
+	}
+	for _, field := range strings.Split(conn.rawQuery, "&") {
+		_, value, found := strings.Cut(field, "=")
+		if !found {
+			value = field
+		}
+		if value = strings.TrimSpace(value); len(value) >= 4 {
+			secrets = append(secrets, value)
+		}
+		if decoded, err := url.QueryUnescape(value); err == nil && decoded != value && len(strings.TrimSpace(decoded)) >= 4 {
+			secrets = append(secrets, decoded)
+		}
+	}
+	return secrets
 }
 
 func normalizeOpenSandboxEndpointHeaders(values map[string]string) (map[string]string, error) {

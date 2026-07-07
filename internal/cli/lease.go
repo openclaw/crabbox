@@ -108,6 +108,25 @@ func UseStoredTestboxKey(target *SSHTarget, leaseID string) {
 	useStoredTestboxKey(target, leaseID)
 }
 
+func useLeaseKnownHosts(target *SSHTarget, leaseID string) error {
+	keyPath, err := testboxKeyPath(leaseID)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(keyPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return exit(2, "prepare lease SSH host-key directory for %s: %v", leaseID, err)
+	}
+	// Keep the verified host identity beside Crabbox's lease credentials so
+	// cleanup removes both and identical provider hostnames cannot share trust.
+	target.KnownHostsFile = filepath.Join(dir, "known_hosts")
+	return nil
+}
+
+func UseLeaseKnownHosts(target *SSHTarget, leaseID string) error {
+	return useLeaseKnownHosts(target, leaseID)
+}
+
 func moveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
 	if oldLeaseID == "" || newLeaseID == "" || oldLeaseID == newLeaseID {
 		return nil

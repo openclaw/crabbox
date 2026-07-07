@@ -122,7 +122,11 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 		if err := validateRawExternalLeaseIdentity(request.Operation, lease); err != nil {
 			return protocolResponse{}, err
 		}
-		return protocolResponse{ProtocolVersion: protocolVersion, Lease: &lease, RawLifecycleIdentity: true}, nil
+		response := protocolResponse{ProtocolVersion: protocolVersion, Lease: &lease, RawLifecycleIdentity: true}
+		if err := b.validateProviderSSHOutput(request, response); err != nil {
+			return protocolResponse{}, err
+		}
+		return response, nil
 	case lifecycleOutputJSONNameArray:
 		namePrefix := ""
 		if operation.NamePrefix != "" {
@@ -153,7 +157,11 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 			}
 			leases = append(leases, lease)
 		}
-		return protocolResponse{ProtocolVersion: protocolVersion, Leases: leases}, nil
+		response := protocolResponse{ProtocolVersion: protocolVersion, Leases: leases}
+		if err := b.validateProviderSSHOutput(request, response); err != nil {
+			return protocolResponse{}, err
+		}
+		return response, nil
 	case lifecycleOutputJSONLeaseArray:
 		var leases []protocolLease
 		if err := json.Unmarshal([]byte(result.Stdout), &leases); err != nil {
@@ -169,10 +177,36 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 				}
 			}
 		}
-		return protocolResponse{ProtocolVersion: protocolVersion, Leases: leases}, nil
+		response := protocolResponse{ProtocolVersion: protocolVersion, Leases: leases}
+		if err := b.validateProviderSSHOutput(request, response); err != nil {
+			return protocolResponse{}, err
+		}
+		return response, nil
 	default:
 		return protocolResponse{}, core.Exit(2, "external lifecycle %s has unsupported output %q", request.Operation, operation.Output)
 	}
+}
+
+func (b *leaseBackend) validateProviderSSHOutput(request protocolRequest, response protocolResponse) error {
+	if request.SkipSSHOutputValidation ||
+		(request.Operation != "acquire" && request.Operation != "list" &&
+			(request.Operation != "resolve" || request.ReleaseOnly)) {
+		return nil
+	}
+	if response.Lease != nil && response.Lease.SSH != nil {
+		if err := core.ValidateExternalProviderSSHOutput(b.cfg); err != nil {
+			return err
+		}
+	}
+	for index := range response.Leases {
+		if response.Leases[index].SSH == nil {
+			continue
+		}
+		if err := core.ValidateExternalProviderSSHOutput(b.cfg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateRawExternalLeaseIdentity(operation string, lease protocolLease) error {
@@ -447,11 +481,16 @@ func (b *leaseBackend) lifecycleLeaseForRequest(request protocolRequest, resourc
 
 func lifecycleSSH(cfg core.ExternalSSHConnectionConfig, templateCtx lifecycleTemplateContext) (protocolSSH, error) {
 	expand := func(label, value string) (string, error) {
-		expanded, err := expandLifecycleValue(value, templateCtx)
+		expansion, err := expandLifecycleValueTracked(value, templateCtx)
 		if err != nil {
 			return "", core.Exit(2, "external connection ssh.%s: %v", label, err)
 		}
-		return expanded, nil
+		// Resource-name provenance survives claims, so indirect placeholders are
+		// subject to the same narrow opt-in as direct environment expansion.
+		if expansion.sensitive && !cfg.AllowEnv {
+			return "", core.Exit(2, "external connection ssh.%s uses an environment-derived value; set external.connection.ssh.allowEnv in trusted user config only for non-secret values", label)
+		}
+		return expansion.value, nil
 	}
 	user, err := expand("user", cfg.User)
 	if err != nil {

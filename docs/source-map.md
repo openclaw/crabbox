@@ -96,8 +96,8 @@ SSH-lease providers:
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
 - Cirrus Labs tart local macOS VM: `internal/providers/tart`
 - Microsoft Hyper-V local Windows VM: `internal/providers/hyperv`
-- Daytona, Morph, exe.dev, KubeVirt, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, Lambda, Vast:
-  `internal/providers/daytona`, `internal/providers/morph`, `internal/providers/exedev`, `internal/providers/kubevirt`, `internal/providers/external`, `internal/providers/tenki`, `internal/providers/namespace`,
+- Daytona, Morph, exe.dev, KubeVirt, Sealos DevBox, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, Lambda, Vast:
+  `internal/providers/daytona`, `internal/providers/morph`, `internal/providers/exedev`, `internal/providers/kubevirt`, `internal/providers/sealosdevbox`, `internal/providers/external`, `internal/providers/tenki`, `internal/providers/namespace`,
   `internal/providers/runpod`, `internal/providers/semaphore`, `internal/providers/sprites`, `internal/providers/lambda`,
   `internal/providers/vast`, live smoke `scripts/live-vast-smoke.sh`
 
@@ -159,7 +159,7 @@ Actions hydration or repo scripts.
 Provider docs:
 
 - Per-provider feature notes: `docs/features/aws.md`, `docs/features/azure.md`, `docs/features/hetzner.md`, `docs/features/blacksmith-testbox.md`, `docs/features/namespace-devbox.md`, `docs/features/namespace-devbox-setup.md`, `docs/features/semaphore.md`, `docs/features/sprites.md`, `docs/features/daytona.md`, `docs/features/islo.md`, `docs/features/e2b.md`
-- Per-provider reference: `docs/providers/README.md` plus one file per provider under `docs/providers/`, including `docs/providers/aws-lambda-microvm.md` for Lambda MicroVM delegated execution and its runner image, `docs/providers/lambda.md` for the direct Lambda GPU SSH lease provider, `docs/providers/vast.md` for the direct Vast.ai GPU SSH lease provider, `docs/providers/blaxel.md` for delegated Blaxel sandbox execution, `docs/providers/apple-vm.md` for the local Apple Silicon `Virtualization.framework` path, `docs/providers/digitalocean.md` for the direct Droplet provider, `docs/providers/vultr.md` for the direct Vultr provider, `docs/providers/ovh.md` for the direct OVHcloud provider, `docs/providers/incus.md` for the separate local live validation contract, `docs/providers/superserve.md` for delegated Superserve execution and live proof, and `docs/providers/cloudflare-sandbox.md` for Cloudflare Sandbox bridge-backed delegated Linux execution
+- Per-provider reference: `docs/providers/README.md` plus one file per provider under `docs/providers/`, including `docs/providers/aws-lambda-microvm.md` for Lambda MicroVM delegated execution and its runner image, `docs/providers/lambda.md` for the direct Lambda GPU SSH lease provider, `docs/providers/vast.md` for the direct Vast.ai GPU SSH lease provider, `docs/providers/blaxel.md` for delegated Blaxel sandbox execution, `docs/providers/apple-vm.md` for the local Apple Silicon `Virtualization.framework` path, `docs/providers/digitalocean.md` for the direct Droplet provider, `docs/providers/vultr.md` for the direct Vultr provider, `docs/providers/ovh.md` for the direct OVHcloud provider, `docs/providers/incus.md` for the separate local live validation contract, `docs/providers/sealos-devbox.md` for the Kubernetes-backed Sealos DevBox SSH lease, `docs/providers/superserve.md` for delegated Superserve execution and live proof, and `docs/providers/cloudflare-sandbox.md` for Cloudflare Sandbox bridge-backed delegated Linux execution
 - Provider selection, landscape, live-smoke, and backend authoring guide: `docs/features/provider-selection.md`, `docs/features/provider-landscape.md`, `docs/features/provider-live-smoke.md`, `docs/provider-backends.md`, `docs/features/provider-authoring.md`
 - Delegated runner contract for non-SSH hosted APIs: `docs/features/delegated-runner-contract.md`
 - Tailscale contract: `docs/features/tailscale.md`

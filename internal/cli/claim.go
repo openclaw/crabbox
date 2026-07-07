@@ -16,10 +16,14 @@ import (
 )
 
 type leaseClaim struct {
-	LeaseID                             string            `json:"leaseID"`
-	Slug                                string            `json:"slug,omitempty"`
-	Provider                            string            `json:"provider,omitempty"`
-	CloudID                             string            `json:"cloudID,omitempty"`
+	LeaseID  string `json:"leaseID"`
+	Slug     string `json:"slug,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	CloudID  string `json:"cloudID,omitempty"`
+	// CloudNumericID binds providers whose CloudID is a reusable resource name.
+	CloudNumericID int64 `json:"cloudNumericID,omitempty"`
+	// CloudImmutableID binds providers whose immutable identity is a string.
+	CloudImmutableID                    string            `json:"cloudImmutableID,omitempty"`
 	ProviderScope                       string            `json:"providerScope,omitempty"`
 	StaticHost                          string            `json:"staticHost,omitempty"`
 	StaticUser                          string            `json:"staticUser,omitempty"`
@@ -183,6 +187,7 @@ type claimMetadata struct {
 	setCacheVolumes       bool
 	cacheVolumes          []string
 	setEndpoint           bool
+	replaceEndpoint       bool
 	server                Server
 	target                SSHTarget
 	guard                 func(leaseClaim, bool) error
@@ -255,7 +260,19 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 			existing.CacheVolumes = append([]string(nil), metadata.cacheVolumes...)
 		}
 		if metadata.setEndpoint {
+			if metadata.replaceEndpoint {
+				clearLeaseClaimTailscaleFields(existing)
+				existing.BridgeURL = ""
+			}
 			applyLeaseClaimEndpoint(existing, metadata.server, metadata.target)
+			if metadata.replaceEndpoint {
+				existing.SSHHost = metadata.target.Host
+				if port, err := strconv.Atoi(strings.TrimSpace(metadata.target.Port)); err == nil && port > 0 {
+					existing.SSHPort = port
+				} else {
+					existing.SSHPort = 0
+				}
+			}
 		}
 		if metadata.result != nil {
 			*metadata.result = cloneLeaseClaim(*existing)
@@ -298,12 +315,26 @@ func claimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug string, cfg Config,
 }
 
 func claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	provider, _ := claimProviderDetailsForConfig(cfg)
+	return claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerClaimScope(provider, cfg), server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
+func claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, false)
+}
+
+func claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, true)
+}
+
+func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists, replaceEndpoint bool) (leaseClaim, error) {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
-	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 		setEndpoint:     true,
+		replaceEndpoint: replaceEndpoint,
 		server:          server,
 		target:          target,
 		guard:           unchangedLeaseClaimGuard(leaseID, expected, expectedExists),
@@ -515,6 +546,12 @@ func endpointClaimGuard(leaseID string, next func(leaseClaim, bool) error) func(
 func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget) {
 	if server.CloudID != "" {
 		claim.CloudID = server.CloudID
+	}
+	if server.ID != 0 {
+		claim.CloudNumericID = server.ID
+	}
+	if server.ImmutableID != "" {
+		claim.CloudImmutableID = server.ImmutableID
 	}
 	if len(server.Labels) > 0 {
 		claim.Labels = cloneStringMap(server.Labels)
@@ -762,6 +799,8 @@ func canonicalClaimProvider(provider string) string {
 
 func providerClaimScope(provider string, cfg Config) string {
 	switch provider {
+	case "azure":
+		return azureLeaseClaimScope(cfg.AzureSubscription, cfg.AzureResourceGroup)
 	case "gcp":
 		if cfg.GCPProject != "" {
 			return "project:" + cfg.GCPProject
@@ -797,6 +836,15 @@ func providerClaimScope(provider string, cfg Config) string {
 		}
 	}
 	return ""
+}
+
+func azureLeaseClaimScope(subscriptionID, resourceGroup string) string {
+	subscriptionID = strings.ToLower(strings.TrimSpace(subscriptionID))
+	resourceGroup = strings.ToLower(strings.TrimSpace(resourceGroup))
+	if subscriptionID == "" || resourceGroup == "" {
+		return ""
+	}
+	return "subscription:" + subscriptionID + "|resource-group:" + resourceGroup
 }
 
 func normalizedNamespaceClaimEndpoint(raw string) string {
