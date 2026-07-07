@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Bound non-admin shared-token WebVNC, Code, and egress bridges to the credential active at ticket creation, closing active and restored sessions after token rotation or removal. Thanks @coygeek.
 - Started delegated-provider sync timeouts at archive creation, matching SSH sync semantics and avoiding pre-transfer expiry during local Git manifest planning.
 - Kept macOS listener ownership checks responsive when mounted filesystems make full `lsof` metadata scans slow.
 - Routed Azure orphan-sweep deletion through the exact lease-, provider-scope-, resource-, companion-, and immutable-disk-bound owned-delete path instead of deleting by retained VM name alone.

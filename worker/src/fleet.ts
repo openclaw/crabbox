@@ -298,6 +298,7 @@ interface CachedAdminGrant {
 interface CachedBridgeGrant extends CachedAdminGrant {
   auth?: AuthContext["auth"];
   login?: string;
+  sharedTokenHash?: string;
   portalSessionHash?: string;
   githubGrant?: GitHubUserGrant;
 }
@@ -1226,6 +1227,13 @@ export class FleetCoordinator {
         { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
       >;
     }> = [];
+    const sharedBridgesToCheck: Array<{
+      socket: WebSocket;
+      attachment: Extract<
+        BridgeAttachment,
+        { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+      >;
+    }> = [];
     for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
       if (!attachment) {
@@ -1285,17 +1293,33 @@ export class FleetCoordinator {
         }
         if (attachment.auth === "github" && attachment.admin !== true) {
           githubBridgesToCheck.push({ socket, attachment });
+        } else if (attachment.auth === "bearer" && attachment.admin !== true) {
+          sharedBridgesToCheck.push({ socket, attachment });
         }
       }
     }
-    const githubBridgeRevocations = await Promise.all(
-      githubBridgesToCheck.map(async ({ socket, attachment }) => ({
-        socket,
-        attachment,
-        reason: await this.githubBridgeGrantFailureReason(attachment),
-      })),
-    );
-    for (const { socket, attachment, reason } of githubBridgeRevocations) {
+    const [githubBridgeRevocations, sharedBridgeRevocations] = await Promise.all([
+      Promise.all(
+        githubBridgesToCheck.map(async ({ socket, attachment }) => ({
+          socket,
+          attachment,
+          reason: await this.githubBridgeGrantFailureReason(attachment),
+        })),
+      ),
+      Promise.all(
+        sharedBridgesToCheck.map(async ({ socket, attachment }) => ({
+          socket,
+          attachment,
+          reason: (await this.sharedBridgeGrantIsCurrent(attachment))
+            ? undefined
+            : "shared access revoked",
+        })),
+      ),
+    ]);
+    for (const { socket, attachment, reason } of [
+      ...githubBridgeRevocations,
+      ...sharedBridgeRevocations,
+    ]) {
       if (!reason) continue;
       if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
         revokedEgressSessions.set(egressSocketKey(attachment.leaseID, attachment.sessionID), {
@@ -1497,6 +1521,7 @@ export class FleetCoordinator {
           ...(attachment.admin !== undefined ? { admin: attachment.admin } : {}),
           ...(attachment.auth ? { auth: attachment.auth } : {}),
           ...(attachment.login ? { login: attachment.login } : {}),
+          ...(attachment.sharedTokenHash ? { sharedTokenHash: attachment.sharedTokenHash } : {}),
           ...(attachment.adminTokenHash ? { adminTokenHash: attachment.adminTokenHash } : {}),
           ...(attachment.adminGrantVersion
             ? { adminGrantVersion: attachment.adminGrantVersion }
@@ -1862,6 +1887,22 @@ export class FleetCoordinator {
   ): Promise<boolean> {
     if (
       revocableUserBridge(attachment) &&
+      attachment.auth === "bearer" &&
+      attachment.admin !== true
+    ) {
+      const now = Date.now();
+      const lastValidatedAt = this.userGrantValidationTimes.get(socket) ?? 0;
+      if (now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
+        if (!(await this.sharedBridgeGrantIsCurrent(attachment))) {
+          this.userGrantValidationTimes.delete(socket);
+          this.closeRevokedUserBridge(socket, attachment, "shared access revoked");
+          return false;
+        }
+        this.userGrantValidationTimes.set(socket, now);
+      }
+    }
+    if (
+      revocableUserBridge(attachment) &&
       attachment.auth === "github" &&
       attachment.admin !== true
     ) {
@@ -1902,6 +1943,16 @@ export class FleetCoordinator {
     this.handleBridgeClose(socket, 1008, "admin access revoked");
     closeSocket(socket, 1008, "admin access revoked");
     return false;
+  }
+
+  private async sharedBridgeGrantIsCurrent(attachment: CachedBridgeGrant): Promise<boolean> {
+    const sharedToken = this.env.CRABBOX_SHARED_TOKEN;
+    return (
+      typeof sharedToken === "string" &&
+      sharedToken.length > 0 &&
+      /^[a-f0-9]{64}$/.test(attachment.sharedTokenHash ?? "") &&
+      attachment.sharedTokenHash === (await sha256Hex(sharedToken))
+    );
   }
 
   private async githubBridgeGrantFailureReason(
@@ -6721,7 +6772,7 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    const bridgeGrant = await bridgeGrantForRequest(request, admin);
+    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
     if (!bridgeGrant) {
       return json(
         { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
@@ -7555,7 +7606,7 @@ export class FleetCoordinator {
     if (error) {
       return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
     }
-    const bridgeGrant = await bridgeGrantForRequest(request, admin);
+    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
     if (!bridgeGrant) {
       return json(
         { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
@@ -7850,7 +7901,7 @@ export class FleetCoordinator {
     if (error) {
       return json({ error: "code_unavailable", message: error }, { status: 409 });
     }
-    const bridgeGrant = await bridgeGrantForRequest(request, admin);
+    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
     if (!bridgeGrant) {
       return json(
         { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
@@ -7982,7 +8033,11 @@ export class FleetCoordinator {
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       const bridgeGrant = viewerSession
         ? copyBridgeGrant(viewerSession)
-        : await bridgeGrantForRequest(authorizedRequest, isAdminRequest(authorizedRequest));
+        : await bridgeGrantForRequest(
+            authorizedRequest,
+            isAdminRequest(authorizedRequest),
+            this.env.CRABBOX_SHARED_TOKEN,
+          );
       if (!bridgeGrant) {
         return json(
           { error: "code_viewer_session_revoked", message: "Code viewer session has ended" },
@@ -8003,7 +8058,7 @@ export class FleetCoordinator {
     const now = new Date();
     const auth = requestAuthType(request);
     const admin = isAdminRequest(request);
-    const bridgeGrant = await bridgeGrantForRequest(request, admin);
+    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
     if (!bridgeGrant) {
       return portalError("Code session ended", "Log in again to open Code.", 401);
     }
@@ -8121,7 +8176,10 @@ export class FleetCoordinator {
       (session.auth === "github" && !validPortalSessionHash(session.portalSessionHash)) ||
       (session.portalSessionHash &&
         (await this.portalSessionIsRevoked(session.portalSessionHash))) ||
-      (session.auth === "github" && (await this.githubBridgeGrantFailureReason(session)))
+      (session.auth === "github" && (await this.githubBridgeGrantFailureReason(session))) ||
+      (session.auth === "bearer" &&
+        session.admin !== true &&
+        !(await this.sharedBridgeGrantIsCurrent(session)))
     ) {
       if (session) {
         await this.state.storage.delete(codeViewerSessionKey(value));
@@ -8679,7 +8737,11 @@ export class FleetCoordinator {
         return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
       }
       const admin = isAdminRequest(request);
-      const bridgeGrant = await bridgeGrantForRequest(request, admin);
+      const bridgeGrant = await bridgeGrantForRequest(
+        request,
+        admin,
+        this.env.CRABBOX_SHARED_TOKEN,
+      );
       if (!bridgeGrant) {
         return json(
           { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
@@ -8996,6 +9058,13 @@ export class FleetCoordinator {
     if (
       currentTicket.auth === "github" &&
       (await this.githubBridgeGrantFailureReason(currentTicket))
+    ) {
+      return undefined;
+    }
+    if (
+      currentTicket.auth === "bearer" &&
+      currentTicket.admin !== true &&
+      !(await this.sharedBridgeGrantIsCurrent(currentTicket))
     ) {
       return undefined;
     }
@@ -14207,6 +14276,7 @@ async function adminGrantForRequest(request: Request, admin: boolean): Promise<C
 async function bridgeGrantForRequest(
   request: Request,
   admin: boolean,
+  sharedToken?: string,
 ): Promise<CachedBridgeGrant | undefined> {
   const auth = requestAuthType(request);
   const adminGrant = await adminGrantForRequest(request, admin);
@@ -14214,6 +14284,13 @@ async function bridgeGrantForRequest(
     return adminGrant;
   }
   if (auth !== "github") {
+    if (auth === "bearer" && !admin && sharedToken) {
+      const token = bearerToken(request);
+      if (!token) {
+        return undefined;
+      }
+      return { auth, sharedTokenHash: await sha256Hex(token), ...adminGrant };
+    }
     return { auth, ...adminGrant };
   }
   const token = bearerToken(request);
@@ -14248,6 +14325,7 @@ function copyBridgeGrant(principal: CachedBridgeGrant): CachedBridgeGrant {
   return {
     ...(principal.auth ? { auth: principal.auth } : {}),
     ...(principal.login ? { login: principal.login } : {}),
+    ...(principal.sharedTokenHash ? { sharedTokenHash: principal.sharedTokenHash } : {}),
     ...(principal.adminTokenHash ? { adminTokenHash: principal.adminTokenHash } : {}),
     ...(principal.adminGrantVersion ? { adminGrantVersion: principal.adminGrantVersion } : {}),
     ...(principal.portalSessionHash ? { portalSessionHash: principal.portalSessionHash } : {}),
@@ -15152,6 +15230,7 @@ function leaseBridgeTicketPrincipal(
     admin: ticket.admin === true,
     ...(ticket.auth ? { auth: ticket.auth } : {}),
     ...(ticket.login ? { login: ticket.login } : {}),
+    ...(ticket.sharedTokenHash ? { sharedTokenHash: ticket.sharedTokenHash } : {}),
     ...(ticket.adminTokenHash ? { adminTokenHash: ticket.adminTokenHash } : {}),
     ...(ticket.adminGrantVersion ? { adminGrantVersion: ticket.adminGrantVersion } : {}),
     ...(ticket.portalSessionHash ? { portalSessionHash: ticket.portalSessionHash } : {}),

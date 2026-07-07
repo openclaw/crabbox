@@ -360,6 +360,105 @@ describe("runtime adapter relay", () => {
     expect(internal.codeViewers.has("code-rotated-admin")).toBe(false);
   });
 
+  it("revokes active shared-token WebVNC, Code, and egress bridges after rotation", async () => {
+    const oldSharedToken = "old-shared-token";
+    const grant = {
+      auth: "bearer" as const,
+      owner: "shared@example.com",
+      org: "example-org",
+      admin: false,
+      sharedTokenHash: await sha256Hex(oldSharedToken),
+    };
+    const fleet = testFleet(new MemoryStorage(), {}, { CRABBOX_SHARED_TOKEN: oldSharedToken });
+    const leaseID = "cbx_000000000001";
+    const webAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_shared_token",
+      capabilities: new Set<string>(),
+    });
+    const webViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID,
+      id: "viewer_shared_token",
+      agentID: "agent_shared_token",
+      ...grant,
+      label: "shared",
+    });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const codeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code_shared_token",
+      ...grant,
+    });
+    const egressHost = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID,
+      sessionID: "egress_shared_token",
+      ...grant,
+    });
+    const egressClient = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID,
+      sessionID: "egress_shared_token",
+      ...grant,
+    });
+    const internal = fleet as unknown as {
+      env: Env;
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      webVNCViewers: Map<string, Map<string, unknown>>;
+      codeAgents: Map<string, WebSocket>;
+      codeViewers: Map<string, WebSocket>;
+      egressHosts: Map<string, WebSocket>;
+      egressClients: Map<string, WebSocket>;
+    };
+    internal.webVNCAgents.set(
+      leaseID,
+      new Map([["agent_shared_token", webAgent as unknown as WebSocket]]),
+    );
+    internal.webVNCViewers.set(
+      leaseID,
+      new Map([
+        [
+          "viewer_shared_token",
+          {
+            id: "viewer_shared_token",
+            agentID: "agent_shared_token",
+            socket: webViewer as unknown as WebSocket,
+            ...grant,
+            label: "shared",
+            connectedAt: new Date().toISOString(),
+          },
+        ],
+      ]),
+    );
+    internal.codeAgents.set(leaseID, codeAgent as unknown as WebSocket);
+    internal.codeViewers.set("code_shared_token", codeViewer as unknown as WebSocket);
+    internal.egressHosts.set(
+      `${leaseID}\u0000egress_shared_token`,
+      egressHost as unknown as WebSocket,
+    );
+    internal.egressClients.set(
+      `${leaseID}\u0000egress_shared_token`,
+      egressClient as unknown as WebSocket,
+    );
+    internal.env.CRABBOX_SHARED_TOKEN = "new-shared-token";
+
+    await fleet.webSocketMessage(webViewer as unknown as WebSocket, "vnc-frame");
+    await fleet.webSocketMessage(codeViewer as unknown as WebSocket, "code-frame");
+    await fleet.webSocketMessage(egressHost as unknown as WebSocket, "egress-frame");
+
+    for (const socket of [webViewer, codeViewer, egressHost, egressClient]) {
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.closeReason).toBe("shared access revoked");
+    }
+    expect(internal.webVNCViewers.get(leaseID)?.has("viewer_shared_token") ?? false).toBe(false);
+    expect(internal.codeViewers.has("code_shared_token")).toBe(false);
+    expect(internal.egressHosts.has(`${leaseID}\u0000egress_shared_token`)).toBe(false);
+    expect(internal.egressClients.has(`${leaseID}\u0000egress_shared_token`)).toBe(false);
+  });
+
   it("fails closed active non-admin GitHub WebVNC and egress bridges after revocation", async () => {
     const env = {
       CRABBOX_SESSION_SECRET: "session-secret",
@@ -961,6 +1060,84 @@ describe("runtime adapter relay", () => {
     expect(agent.sentJSON()).toHaveLength(2);
   });
 
+  it("rejects restored shared-token bridges after credential rotation", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_000000000002",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      owner: "shared@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const grant = {
+      auth: "bearer" as const,
+      owner: "shared@example.com",
+      org: "example-org",
+      admin: false,
+      sharedTokenHash: await sha256Hex("old-shared-token"),
+    };
+    const webAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID: lease.id,
+      id: "agent_restored_shared",
+      capabilities: new Set<string>(),
+    });
+    const webViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID: lease.id,
+      id: "viewer_restored_shared",
+      agentID: "agent_restored_shared",
+      ...grant,
+      label: "shared",
+    });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id });
+    const codeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID: lease.id,
+      id: "code_restored_shared",
+      ...grant,
+    });
+    const egressHost = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID: lease.id,
+      sessionID: "egress_restored_shared",
+      ...grant,
+    });
+    const egressClient = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID: lease.id,
+      sessionID: "egress_restored_shared",
+      ...grant,
+    });
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () =>
+          [
+            webAgent,
+            webViewer,
+            codeAgent,
+            codeViewer,
+            egressHost,
+            egressClient,
+          ] as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      {
+        CRABBOX_DEFAULT_ORG: "example-org",
+        CRABBOX_SHARED_TOKEN: "new-shared-token",
+      } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    for (const socket of [webViewer, codeViewer, egressHost, egressClient]) {
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.closeReason).toBe("shared access revoked");
+    }
+  });
+
   it("reconciles hibernated viewer principals against the current lease share", async () => {
     const storage = new MemoryStorage();
     const lease = testLease({
@@ -979,7 +1156,7 @@ describe("runtime adapter relay", () => {
       kind: "code-viewer",
       leaseID: lease.id,
       id: "code-revoked",
-      auth: "bearer",
+      auth: "proxy",
       owner: "revoked@example.com",
       org: "other-org",
       admin: false,
@@ -988,7 +1165,7 @@ describe("runtime adapter relay", () => {
       kind: "code-viewer",
       leaseID: lease.id,
       id: "code-owner",
-      auth: "bearer",
+      auth: "proxy",
       owner: "owner@example.com",
       org: "example-org",
       admin: false,
@@ -11086,7 +11263,7 @@ describe("fleet lease identity and idle", () => {
       kind: "code-viewer",
       leaseID,
       id: "code-revoked",
-      auth: "bearer",
+      auth: "proxy",
       owner: "revoked@example.com",
       org: "other-org",
       admin: false,
@@ -11095,7 +11272,7 @@ describe("fleet lease identity and idle", () => {
       kind: "code-viewer",
       leaseID,
       id: "code-retained",
-      auth: "bearer",
+      auth: "proxy",
       owner: "retained@example.com",
       org: "other-org",
       admin: false,
@@ -11104,7 +11281,7 @@ describe("fleet lease identity and idle", () => {
       kind: "code-viewer",
       leaseID,
       id: "code-owner",
-      auth: "bearer",
+      auth: "proxy",
       owner: "owner@example.com",
       org: "example-org",
       admin: false,
@@ -16730,17 +16907,17 @@ describe("fleet lease identity and idle", () => {
     expect(isolatedOrigin).toBeDefined();
     const viewers = [
       {
-        "x-crabbox-auth": "bearer",
+        "x-crabbox-auth": "proxy",
         "x-crabbox-owner": "owner@example.com",
         "x-crabbox-org": "example-org",
       },
       {
-        "x-crabbox-auth": "bearer",
+        "x-crabbox-auth": "proxy",
         "x-crabbox-owner": "manager@example.com",
         "x-crabbox-org": "other-org",
       },
       {
-        "x-crabbox-auth": "bearer",
+        "x-crabbox-auth": "proxy",
         "x-crabbox-owner": "admin@example.com",
         "x-crabbox-org": "other-org",
         "x-crabbox-admin": "true",
@@ -16763,6 +16940,7 @@ describe("fleet lease identity and idle", () => {
     const env = {
       CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
       CRABBOX_PUBLIC_URL: "https://crabbox.test",
+      CRABBOX_SHARED_TOKEN: "portal-session-token",
     };
     const fleet = testFleet(storage, {}, env);
     const leaseID = "cbx_000000000001";
@@ -16873,6 +17051,14 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(sameOriginPost.status).not.toBe(403);
+
+    (fleet as unknown as { env: Env }).env.CRABBOX_SHARED_TOKEN = "rotated-portal-token";
+    const rotatedSession = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}${bootstrap.headers.get("location")}`, {
+        headers: { cookie: sessionCookie },
+      }),
+    );
+    expect(rotatedSession.status).toBe(302);
 
     const missingSession = await fleet.fetch(
       new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/health`),
@@ -17658,7 +17844,7 @@ describe("fleet lease identity and idle", () => {
     storage.seed(`code-viewer-session:${session}`, {
       session,
       leaseID,
-      auth: "bearer",
+      auth: "proxy",
       admin: false,
       owner: "alice@example.com",
       org: "example-org",
@@ -17796,6 +17982,86 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(githubFetch).not.toHaveBeenCalled();
+  });
+
+  it("binds shared-token bridge tickets to the credential active at creation", async () => {
+    const storage = new MemoryStorage();
+    const oldSharedToken = "old-shared-token";
+    const env = {
+      CRABBOX_SHARED_TOKEN: oldSharedToken,
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "shared@example.com",
+        org: "example-org",
+        desktop: true,
+        code: true,
+        state: "active",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    const fleet = testFleet(storage, {}, env);
+    const headers = {
+      authorization: `Bearer ${oldSharedToken}`,
+      "x-crabbox-auth": "bearer",
+      "x-crabbox-owner": "shared@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const cases = [
+      {
+        createPath: `/v1/leases/${leaseID}/webvnc/ticket`,
+        consumePath: `/v1/leases/${leaseID}/webvnc/agent`,
+        storagePrefix: "webvnc-ticket",
+        body: {},
+      },
+      {
+        createPath: `/v1/leases/${leaseID}/code/ticket`,
+        consumePath: `/v1/leases/${leaseID}/code/agent`,
+        storagePrefix: "code-ticket",
+        body: {},
+      },
+      {
+        createPath: `/v1/leases/${leaseID}/egress/ticket`,
+        consumePath: `/v1/leases/${leaseID}/egress/host`,
+        storagePrefix: "egress-ticket",
+        body: { role: "host" },
+      },
+    ];
+    const sharedTokenHash = await sha256Hex(oldSharedToken);
+    const tickets = await Promise.all(
+      cases.map(async (item): Promise<(typeof cases)[number] & { ticket: string }> => {
+        const response = await fleet.fetch(
+          request("POST", item.createPath, { headers, body: item.body }),
+        );
+        expect(response.status).toBe(200);
+        const result = (await response.json()) as { ticket?: string };
+        const ticket = result.ticket ?? "";
+        expect(ticket).not.toBe("");
+        expect(storage.value(`${item.storagePrefix}:${ticket}`)).toMatchObject({
+          auth: "bearer",
+          sharedTokenHash,
+        });
+        return { ...item, ticket };
+      }),
+    );
+
+    (fleet as unknown as { env: Env }).env.CRABBOX_SHARED_TOKEN = "new-shared-token";
+    await Promise.all(
+      tickets.map(async (item) => {
+        const response = await fleet.fetch(
+          request("GET", item.consumePath, {
+            headers: { authorization: `Bearer ${item.ticket}`, upgrade: "websocket" },
+          }),
+        );
+        expect(response.status).toBe(401);
+        expect(storage.value(`${item.storagePrefix}:${item.ticket}`)).toBeUndefined();
+      }),
+    );
   });
 
   it("rejects bridge tickets whose cached admin grant was revoked", async () => {
