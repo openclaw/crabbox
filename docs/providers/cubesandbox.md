@@ -27,7 +27,7 @@ host-managed SSH access.
 
 - A reachable Cube API endpoint, usually `http://<cubeapi-host>:3000`.
 - A ready CubeSandbox template ID, for example from `CUBE_TEMPLATE_ID`.
-- CubeProxy data-plane routing. If DNS for `49999-<sandbox>.<domain>` is not
+- CubeProxy data-plane routing. If DNS for `49983-<sandbox>.<domain>` is not
   available from the Crabbox host, configure `CUBE_PROXY_NODE_IP`.
 
 ## Commands
@@ -116,8 +116,8 @@ from the proxy port (`http` unless port is `443`). A template is required for
 new sandboxes.
 
 When `proxyNodeIp` is set, Crabbox connects to
-`<proxyScheme>://<proxyNodeIp>:<proxyPortHttp>` and preserves the virtual
-sandbox host header (`49999-<sandbox>.<domain>`). Leave `proxyNodeIp` empty when
+`<proxyScheme>://<proxyNodeIp>:<proxyPortHttp>` and preserves the envd virtual
+sandbox host header (`49983-<sandbox>.<domain>`). Leave `proxyNodeIp` empty when
 that virtual host already resolves from the Crabbox host.
 
 ## Capabilities
@@ -141,8 +141,12 @@ that virtual host already resolves from the Crabbox host.
 - The provider requires a template ID for create/warmup/run-without-id.
 - HTTP Cube API URLs are supported for self-hosted deployments. Do not send real
   API keys over untrusted HTTP networks.
-- Local claims are scoped by Crabbox metadata and provider name. `stop` refuses
-  to delete sandboxes that are not marked as Crabbox-owned CubeSandbox sandboxes.
+- Reuse, status, and stop require a local claim bound to the exact Cube API
+  endpoint, sandbox ID, provider, and canonical remote lease metadata. Labels
+  alone never authorize a mutable or destructive operation.
+- To adopt a labelled legacy or externally restored sandbox, use its exact
+  CubeSandbox sandbox ID with `run --id <sandbox-id> --reclaim` or
+  `stop --id <sandbox-id> --reclaim`. Conflicting claims fail closed.
 
 Related docs:
 

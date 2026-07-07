@@ -41,6 +41,8 @@ type cubesandboxClient struct {
 	httpClient  *http.Client
 }
 
+const cubesandboxEnvdPort = 49983
+
 type cubesandboxCreateSandboxRequest struct {
 	TemplateID          string
 	TimeoutSeconds      int
@@ -464,7 +466,7 @@ func (c *cubesandboxClient) envdEndpoint(session cubesandboxSession, path string
 		domain = c.domain
 	}
 	scheme := normalizeCubeSandboxProxyScheme(c.proxyScheme, c.proxyPort)
-	virtualHost := "49999-" + session.SandboxID + "." + domain
+	virtualHost := fmt.Sprintf("%d-%s.%s", cubesandboxEnvdPort, session.SandboxID, domain)
 	if c.proxyHost == "" {
 		return scheme + "://" + virtualHost + path, ""
 	}
@@ -481,7 +483,7 @@ func (c *cubesandboxClient) setEnvdHeaders(req *http.Request, session cubesandbo
 	}
 	req.Header.Set("X-Access-Token", session.EnvdAccessToken)
 	req.Header.Set("E2b-Sandbox-Id", session.SandboxID)
-	req.Header.Set("E2b-Sandbox-Port", "49999")
+	req.Header.Set("E2b-Sandbox-Port", strconv.Itoa(cubesandboxEnvdPort))
 }
 
 type cubesandboxStartResponse struct {

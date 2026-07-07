@@ -156,8 +156,16 @@ func ResolveLeaseClaimForProviderWithExact(identifier, provider string) (LeaseCl
 	return resolveLeaseClaimForProviderWithExact(identifier, provider)
 }
 
+func ResolveLeaseClaimForProviderScopeWithExact(identifier, provider, providerScope string) (LeaseClaim, bool, bool, error) {
+	return resolveLeaseClaimForProviderScopeWithExact(identifier, provider, providerScope)
+}
+
 func ResolveLeaseClaimForProviderCloudID(cloudID, provider string) (LeaseClaim, bool, error) {
 	return resolveLeaseClaimForProviderCloudID(cloudID, provider)
+}
+
+func ResolveLeaseClaimForProviderCloudIDScope(cloudID, provider, providerScope string) (LeaseClaim, bool, error) {
+	return resolveLeaseClaimForProviderCloudIDScope(cloudID, provider, providerScope)
 }
 
 func LeaseClaimMatchesIdentifier(claim LeaseClaim, identifier string) bool {

@@ -434,6 +434,31 @@ func TestCubeSandboxEnvdClientRefusesCrossOriginRedirectBeforeReplay(t *testing.
 	}
 }
 
+func TestCubeSandboxClientRoutesEnvdToPort49983(t *testing.T) {
+	client := &cubesandboxClient{
+		domain:      "cube.test",
+		proxyHost:   "127.0.0.1",
+		proxyPort:   8080,
+		proxyScheme: "http",
+	}
+	session := cubesandboxSession{SandboxID: "sbx_1", Domain: "cube.test"}
+	endpoint, host := client.envdEndpoint(session, "/process.Process/Start")
+	if got, want := endpoint, "http://127.0.0.1:8080/process.Process/Start"; got != want {
+		t.Fatalf("endpoint=%q, want %q", got, want)
+	}
+	if got, want := host, "49983-sbx_1.cube.test"; got != want {
+		t.Fatalf("host=%q, want %q", got, want)
+	}
+	req, err := http.NewRequest(http.MethodPost, endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.setEnvdHeaders(req, session)
+	if got, want := req.Header.Get("E2b-Sandbox-Port"), "49983"; got != want {
+		t.Fatalf("E2b-Sandbox-Port=%q, want %q", got, want)
+	}
+}
+
 func TestCubeSandboxClientFollowsSameOriginRedirect(t *testing.T) {
 	var redirectedAuth string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -656,11 +681,11 @@ func TestCubeSandboxCreateSandboxCapsDefaultTTL(t *testing.T) {
 }
 
 func TestCubeSandboxCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testing.T) {
-	origClaim := claimLeaseForRepoProviderPond
-	claimLeaseForRepoProviderPond = func(_, _, _, _, _ string, _ time.Duration, _ bool) error {
+	origClaim := claimLeaseTargetForRepoConfig
+	claimLeaseTargetForRepoConfig = func(_, _ string, _ Config, _ Server, _ SSHTarget, _ string, _ time.Duration, _ bool) error {
 		return errors.New("claim write failed")
 	}
-	t.Cleanup(func() { claimLeaseForRepoProviderPond = origClaim })
+	t.Cleanup(func() { claimLeaseTargetForRepoConfig = origClaim })
 
 	client := &fakeCubeSandboxSyncClient{deleteErr: errors.New("delete failed")}
 	var stderr bytes.Buffer
@@ -676,7 +701,7 @@ func TestCubeSandboxCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testi
 		"claim write failed",
 		"cleanup cubesandbox sandbox sbx_1",
 		"delete failed",
-		"crabbox stop --provider cubesandbox --id sbx_1",
+		"crabbox stop --provider cubesandbox --id sbx_1 --reclaim",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err=%v, want %q", err, want)
@@ -690,6 +715,28 @@ func TestCubeSandboxCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testi
 	}
 	if !strings.Contains(stderr.String(), "warning: cleanup cubesandbox sandbox sbx_1") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestCubeSandboxRunBoundsAutomaticCleanup(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{}
+	restore := swapNewCubeSandboxClient(client)
+	defer restore()
+	backend := &cubesandboxBackend{
+		cfg: Config{CubeSandbox: CubeSandboxConfig{Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir()},
+		Command: []string{"true"},
+		NoSync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !client.deleteDeadlineSet {
+		t.Fatal("automatic cleanup did not use a bounded context")
 	}
 }
 
@@ -799,6 +846,7 @@ func TestCubeSandboxSandboxToServerUsesMetadata(t *testing.T) {
 }
 
 func TestCubeSandboxResolveSyntheticIDRequiresCrabboxMetadata(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	backend := &cubesandboxBackend{}
 	client := &fakeCubeSandboxSyncClient{
 		sandbox: cubesandboxSandbox{
@@ -814,15 +862,303 @@ func TestCubeSandboxResolveSyntheticIDRequiresCrabboxMetadata(t *testing.T) {
 	client.sandbox.Metadata = map[string]string{
 		"provider": "cubesandbox",
 		"crabbox":  "true",
-		"lease":    "cbx_123",
+		"lease":    "cbx_123456789abc",
 		"slug":     "blue-lobster",
 	}
-	leaseID, sandboxID, slug, err := backend.resolveSandboxID(context.Background(), client, "cubesandbox_sbx_1", "", false)
+	_, _, _, err = backend.resolveSandboxID(context.Background(), client, "cubesandbox_sbx_1", t.TempDir(), false)
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("err=%v, want exact-claim rejection", err)
+	}
+
+	repoRoot := t.TempDir()
+	leaseID, sandboxID, slug, err := backend.resolveSandboxID(context.Background(), client, "cubesandbox_sbx_1", repoRoot, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leaseID != "cbx_123" || sandboxID != "sbx_1" || slug != "blue-lobster" {
+	if leaseID != "cbx_123456789abc" || sandboxID != "sbx_1" || slug != "blue-lobster" {
 		t.Fatalf("lease=%q sandbox=%q slug=%q", leaseID, sandboxID, slug)
+	}
+	claim, ok, exact, err := resolveLeaseClaimForProviderScopeWithExact(leaseID, "endpoint:http://127.0.0.1:3000")
+	if err != nil || !ok || !exact || claim.CloudID != "sbx_1" || claim.ProviderScope != "endpoint:http://127.0.0.1:3000" {
+		t.Fatalf("claim=%#v ok=%t exact=%t err=%v", claim, ok, exact, err)
+	}
+	if _, _, _, err := backend.resolveSandboxID(context.Background(), client, leaseID, repoRoot, false); err != nil {
+		t.Fatalf("resolve exact claim: %v", err)
+	}
+}
+
+func TestCubeSandboxCreateBindsExactSandboxAndEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{}
+	backend := &cubesandboxBackend{
+		cfg: Config{
+			IdleTimeout: 30 * time.Minute,
+			CubeSandbox: CubeSandboxConfig{
+				APIURL:   "https://cube.example.test/root/",
+				Template: "base",
+			},
+		},
+		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	leaseID, sandbox, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir()}, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, exact, err := resolveLeaseClaimForProviderScopeWithExact(leaseID, "endpoint:https://cube.example.test/root")
+	if err != nil || !ok || !exact {
+		t.Fatalf("claim=%#v ok=%t exact=%t err=%v", claim, ok, exact, err)
+	}
+	if claim.CloudID != sandbox.SandboxID || claim.ProviderScope != "endpoint:https://cube.example.test/root" {
+		t.Fatalf("claim=%#v sandbox=%#v", claim, sandbox)
+	}
+}
+
+func TestCubeSandboxStopRejectsLabelledButUnclaimedSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{sandbox: cubesandboxSandbox{
+		SandboxID: "sbx_unclaimed",
+		Metadata: map[string]string{
+			"provider": providerName,
+			"crabbox":  "true",
+			"lease":    "cbx_123456789abc",
+		},
+	}}
+	restore := swapNewCubeSandboxClient(client)
+	defer restore()
+	backend := &cubesandboxBackend{cfg: cubesandboxClaimConfig(Config{}), rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	err := backend.Stop(context.Background(), StopRequest{ID: "sbx_unclaimed"})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("Stop err=%v, want exact-claim rejection", err)
+	}
+	if len(client.deleteIDs) != 0 {
+		t.Fatalf("unclaimed Stop deleted %#v", client.deleteIDs)
+	}
+}
+
+func TestCubeSandboxStopChecksLiveOwnershipAndRemovesClaimAtomically(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{}
+	restore := swapNewCubeSandboxClient(client)
+	defer restore()
+	backend := &cubesandboxBackend{
+		cfg: Config{CubeSandbox: CubeSandboxConfig{APIURL: "https://cube.example.test", Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	leaseID, sandbox, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir()}, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.sandbox.Metadata["lease"] = "cbx_ffffffffffff"
+	err = backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "no longer has canonical ownership metadata") {
+		t.Fatalf("mismatched Stop err=%v", err)
+	}
+	if len(client.deleteIDs) != 0 {
+		t.Fatalf("mismatched Stop deleted %#v", client.deleteIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+		t.Fatalf("mismatched Stop lost recovery claim: exists=%t err=%v", exists, err)
+	}
+
+	client.sandbox.Metadata["lease"] = leaseID
+	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+		t.Fatalf("Stop exact claim: %v", err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != sandbox.SandboxID {
+		t.Fatalf("deleteIDs=%#v", client.deleteIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("successful Stop claim exists=%t err=%v", exists, err)
+	}
+}
+
+func TestCubeSandboxExactSandboxIDResolvesExistingClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{}
+	backend := &cubesandboxBackend{
+		cfg: Config{CubeSandbox: CubeSandboxConfig{APIURL: "https://cube.example.test", Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	leaseID, sandbox, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir()}, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{sandbox.SandboxID, "cubesandbox_" + sandbox.SandboxID} {
+		gotLease, gotSandbox, gotSlug, err := backend.resolveSandboxID(context.Background(), client, id, "", false)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", id, err)
+		}
+		if gotLease != leaseID || gotSandbox != sandbox.SandboxID || gotSlug != slug {
+			t.Fatalf("resolve %q = %q %q %q, want %q %q %q", id, gotLease, gotSandbox, gotSlug, leaseID, sandbox.SandboxID, slug)
+		}
+	}
+}
+
+func TestCubeSandboxStopRejectsDifferentAPIEndpointBeforeRemoteRead(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{}
+	creator := &cubesandboxBackend{
+		cfg: Config{CubeSandbox: CubeSandboxConfig{APIURL: "https://cube-a.example.test", Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	leaseID, _, _, err := creator.createSandbox(context.Background(), client, Repo{Root: t.TempDir()}, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.getIDs = nil
+	restore := swapNewCubeSandboxClient(client)
+	defer restore()
+	other := &cubesandboxBackend{
+		cfg: Config{CubeSandbox: CubeSandboxConfig{APIURL: "https://cube-b.example.test"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	err = other.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "different API endpoint") {
+		t.Fatalf("Stop err=%v, want endpoint rejection", err)
+	}
+	if len(client.getIDs) != 0 || len(client.deleteIDs) != 0 {
+		t.Fatalf("endpoint mismatch touched provider: gets=%#v deletes=%#v", client.getIDs, client.deleteIDs)
+	}
+}
+
+func TestCubeSandboxReclaimAndStopAdoptsExactSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{sandbox: cubesandboxSandbox{
+		SandboxID: "sbx_reclaim",
+		Metadata: map[string]string{
+			"provider": providerName,
+			"crabbox":  "true",
+			"lease":    "cbx_123456789abc",
+			"slug":     "reclaim-me",
+		},
+	}}
+	restore := swapNewCubeSandboxClient(client)
+	defer restore()
+	backend := &cubesandboxBackend{cfg: cubesandboxClaimConfig(Config{}), rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	if err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "sbx_reclaim"}); err != nil {
+		t.Fatalf("ReclaimAndStop: %v", err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "sbx_reclaim" {
+		t.Fatalf("deleteIDs=%#v", client.deleteIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence("cbx_123456789abc"); err != nil || exists {
+		t.Fatalf("successful reclaim claim exists=%t err=%v", exists, err)
+	}
+}
+
+func TestCubeSandboxReclaimAndStopPreservesRepoBoundClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_123456789abc"
+	firstCfg := Config{Provider: providerName, CubeSandbox: CubeSandboxConfig{APIURL: "https://cube-a.example.test"}}
+	sandbox := cubesandboxSandbox{
+		SandboxID: "sbx_reclaim",
+		Metadata: map[string]string{
+			"provider": providerName,
+			"crabbox":  "true",
+			"lease":    leaseID,
+			"slug":     "reclaim-me",
+		},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "reclaim-me", firstCfg, cubesandboxSandboxToServer(sandbox), SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeCubeSandboxSyncClient{sandbox: sandbox}
+	restore := swapNewCubeSandboxClient(client)
+	defer restore()
+	backend := &cubesandboxBackend{
+		cfg: Config{Provider: providerName, CubeSandbox: CubeSandboxConfig{APIURL: "https://cube-b.example.test"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	if err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: sandbox.SandboxID}); err != nil {
+		t.Fatalf("ReclaimAndStop: %v", err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != sandbox.SandboxID {
+		t.Fatalf("deleteIDs=%#v", client.deleteIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("successful reclaim claim exists=%t err=%v", exists, err)
+	}
+}
+
+func TestCubeSandboxReclaimRejectsCrossProviderLeaseCollision(t *testing.T) {
+	for _, mode := range []string{"run", "stop"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const leaseID = "cbx_123456789abc"
+			otherCfg := Config{Provider: "e2b"}
+			otherServer := Server{Provider: "e2b", CloudID: "e2b-owned"}
+			if _, err := claimLeaseTargetForConfigIfUnchanged(leaseID, "other", otherCfg, otherServer, SSHTarget{}, 0, LeaseClaim{}, false); err != nil {
+				t.Fatal(err)
+			}
+
+			client := &fakeCubeSandboxSyncClient{sandbox: cubesandboxSandbox{
+				SandboxID: "sbx_reclaim",
+				Metadata: map[string]string{
+					"provider": providerName,
+					"crabbox":  "true",
+					"lease":    leaseID,
+				},
+			}}
+			restore := swapNewCubeSandboxClient(client)
+			defer restore()
+			backend := &cubesandboxBackend{cfg: cubesandboxClaimConfig(Config{}), rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			var err error
+			if mode == "stop" {
+				err = backend.ReclaimAndStop(context.Background(), StopRequest{ID: "sbx_reclaim"})
+			} else {
+				_, _, _, err = backend.resolveSandboxID(context.Background(), client, "sbx_reclaim", t.TempDir(), true)
+			}
+			if err == nil || !strings.Contains(err.Error(), "already claimed by provider \"e2b\"") {
+				t.Fatalf("err=%v, want cross-provider collision", err)
+			}
+			if len(client.deleteIDs) != 0 {
+				t.Fatalf("deleteIDs=%#v, want none", client.deleteIDs)
+			}
+			claim, exists, readErr := readLeaseClaimWithPresence(leaseID)
+			if readErr != nil || !exists || claim.Provider != "e2b" || claim.CloudID != "e2b-owned" {
+				t.Fatalf("claim=%#v exists=%t err=%v", claim, exists, readErr)
+			}
+		})
+	}
+}
+
+func TestCubeSandboxReclaimScopesCloudIDCollisionToEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	firstCfg := Config{Provider: providerName, CubeSandbox: CubeSandboxConfig{APIURL: "https://cube-a.example.test"}}
+	firstServer := Server{Provider: providerName, CloudID: "same-sandbox-id"}
+	if _, err := claimLeaseTargetForConfigIfUnchanged("cbx_111111111111", "first", firstCfg, firstServer, SSHTarget{}, 0, LeaseClaim{}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeCubeSandboxSyncClient{sandbox: cubesandboxSandbox{
+		SandboxID: "same-sandbox-id",
+		Metadata: map[string]string{
+			"provider": providerName,
+			"crabbox":  "true",
+			"lease":    "cbx_222222222222",
+			"slug":     "second",
+		},
+	}}
+	secondCfg := Config{Provider: providerName, CubeSandbox: CubeSandboxConfig{APIURL: "https://cube-b.example.test"}}
+	backend := &cubesandboxBackend{cfg: secondCfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	leaseID, sandboxID, _, err := backend.resolveSandboxID(context.Background(), client, "same-sandbox-id", t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseID != "cbx_222222222222" || sandboxID != "same-sandbox-id" {
+		t.Fatalf("resolved lease=%q sandbox=%q", leaseID, sandboxID)
+	}
+	for _, tc := range []struct {
+		cfg     Config
+		leaseID string
+	}{
+		{cfg: firstCfg, leaseID: "cbx_111111111111"},
+		{cfg: secondCfg, leaseID: "cbx_222222222222"},
+	} {
+		claim, ok, err := resolveLeaseClaimForProviderCloudIDScope("same-sandbox-id", providerClaimScope(tc.cfg))
+		if err != nil || !ok || claim.LeaseID != tc.leaseID {
+			t.Fatalf("scope=%q claim=%#v ok=%t err=%v", providerClaimScope(tc.cfg), claim, ok, err)
+		}
 	}
 }
 
@@ -832,6 +1168,7 @@ type fakeCubeSandboxSyncClient struct {
 	sandbox           cubesandboxSandbox
 	createReq         cubesandboxCreateSandboxRequest
 	createCalls       int
+	getIDs            []string
 	getErr            error
 	deleteIDs         []string
 	deleteErr         error
@@ -853,14 +1190,16 @@ func (f *fakeCubeSandboxSyncClient) CreateSandbox(_ context.Context, req cubesan
 	if f.sandbox.SandboxID != "" {
 		return f.sandbox, nil
 	}
-	return cubesandboxSandbox{SandboxID: "sbx_1", Metadata: req.Metadata}, nil
+	f.sandbox = cubesandboxSandbox{SandboxID: "sbx_1", Metadata: req.Metadata, State: "running"}
+	return f.sandbox, nil
 }
 
 func (f *fakeCubeSandboxSyncClient) ConnectSandbox(context.Context, string, int) (cubesandboxSession, error) {
 	return cubesandboxSession{}, nil
 }
 
-func (f *fakeCubeSandboxSyncClient) GetSandbox(context.Context, string) (cubesandboxSandbox, error) {
+func (f *fakeCubeSandboxSyncClient) GetSandbox(_ context.Context, sandboxID string) (cubesandboxSandbox, error) {
+	f.getIDs = append(f.getIDs, sandboxID)
 	if f.getErr != nil {
 		return cubesandboxSandbox{}, f.getErr
 	}
