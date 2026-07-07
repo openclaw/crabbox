@@ -148,16 +148,50 @@ func TestExeDevAcquireReportsRollbackFailureAfterClaimFailure(t *testing.T) {
 	assertExeDevRollbackFailure(t, err, primaryErr, runner)
 }
 
+func TestExeDevProvisioningRollbackRejectsReplacementGeneration(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	slug := "blue"
+	vm := ownedExeDevVM(leaseID, slug)
+	runner := exeDevInventoryRunner(t, vm)
+	backend := newExeDevTestBackend(Config{}, runner)
+	primaryErr := errors.New("ssh not ready")
+
+	err := backend.rollbackCreatedVM(vm.Name(), leaseID, slug, "cbx_222222222222", primaryErr)
+	if err == nil || !strings.Contains(err.Error(), primaryErr.Error()) || !strings.Contains(err.Error(), "refused replacement VM") {
+		t.Fatalf("err=%v, want guarded rollback refusal", err)
+	}
+	assertNoExeDevRM(t, runner)
+}
+
 func newExeDevAcquireRollbackRunner() *exeDevRecordingRunner {
+	var created *exeDevVM
 	return &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		cmd := strings.Join(req.Args, " ")
 		switch {
 		case strings.Contains(cmd, "whoami --json"):
 			return LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
 		case strings.Contains(cmd, "ls --l --json"):
-			return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
+			vms := []exeDevVM{}
+			if created != nil {
+				vms = append(vms, *created)
+			}
+			payload, err := json.Marshal(exeDevListResponse{VMs: vms})
+			return LocalCommandResult{Stdout: string(payload)}, err
 		case strings.Contains(cmd, " new "):
-			return LocalCommandResult{Stdout: `{"vm_name":"created-vm","ssh_dest":"created-vm.exe.xyz","status":"running"}`}, nil
+			fields := strings.Fields(req.Args[len(req.Args)-1])
+			vm := exeDevVM{Status: "running"}
+			for i := 0; i < len(fields)-1; i++ {
+				switch fields[i] {
+				case "--name":
+					vm.VMName = fields[i+1]
+					vm.SSHDest = fields[i+1] + ".exe.xyz"
+				case "--tag":
+					vm.Tags = append(vm.Tags, fields[i+1])
+				}
+			}
+			created = &vm
+			payload, err := json.Marshal(vm)
+			return LocalCommandResult{Stdout: string(payload)}, err
 		case strings.Contains(cmd, " rm "):
 			return LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
 		default:

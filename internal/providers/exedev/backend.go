@@ -56,14 +56,14 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	lease, err := b.prepareLease(ctx, cfg, vm, leaseID, slug, req.Keep, true)
 	if err != nil {
 		if !req.Keep {
-			err = b.rollbackCreatedVM(name, err)
+			err = b.rollbackCreatedVM(name, leaseID, slug, generation, err)
 		}
 		return LeaseTarget{}, err
 	}
 	providerScope, err := b.controlScope(ctx)
 	if err != nil {
 		if !req.Keep {
-			err = b.rollbackCreatedVM(name, err)
+			err = b.rollbackCreatedVM(name, leaseID, slug, generation, err)
 		}
 		return LeaseTarget{}, err
 	}
@@ -71,7 +71,7 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false)
 	if err != nil {
 		if !req.Keep {
-			err = b.rollbackCreatedVM(name, err)
+			err = b.rollbackCreatedVM(name, leaseID, slug, generation, err)
 		}
 		return LeaseTarget{}, err
 	}
@@ -795,9 +795,19 @@ func (b *exeDevLeaseBackend) control(ctx context.Context, args []string, stdout,
 	return b.rt.Exec.Run(ctx, LocalCommandRequest{Name: "ssh", Args: sshArgs, Stdout: stdout, Stderr: stderr})
 }
 
-func (b *exeDevLeaseBackend) rollbackCreatedVM(name string, cause error) error {
+func (b *exeDevLeaseBackend) rollbackCreatedVM(name, leaseID, slug, generation string, cause error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	vm, err := b.findVMByExactName(cleanupCtx, name)
+	if err != nil {
+		return exit(exitCodeForError(cause), "%v; exe.dev cleanup could not verify VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+	}
+	if err := validateExeDevVMOwnership(vm, leaseID, slug, "provisioning rollback"); err != nil {
+		return exit(exitCodeForError(cause), "%v; exe.dev cleanup refused unverified VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+	}
+	if err := validateExeDevClaimGeneration(vm, generation); err != nil {
+		return exit(exitCodeForError(cause), "%v; exe.dev cleanup refused replacement VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+	}
 	if err := b.deleteVM(cleanupCtx, name); err != nil {
 		return exit(exitCodeForError(cause), "%v; exe.dev cleanup failed for VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
