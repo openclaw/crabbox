@@ -19,7 +19,11 @@ still matches the offline contract.
    `lifecycle_test.go` or `*_lifecycle_test.go`; the source-derived Connector
    Lifecycles job discovers their packages and runs them with the race detector.
    Cover acquire, resolve/readiness, use, touch, list, release, cleanup failure,
-   and claim retention where the backend supports those stages.
+   and claim retention where the backend supports those stages. The
+   `.github/workflows/connector-e2e-smokes.yml` gate additionally drives
+   secret-free connector lifecycles end to end on hosted runners: local
+   containers, a localhost byo-SSH target, the Docker Sandbox trust-boundary
+   proof, and read-only readiness contracts.
 2. **Guarded live smoke** — opt-in developer or maintainer proof against the real
    provider. Use `CRABBOX_LIVE=1`, select the exact provider, cap spend and TTL,
    arm cleanup before the first mutation, and prove create/use/destroy with zero
