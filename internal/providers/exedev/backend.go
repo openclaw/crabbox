@@ -51,7 +51,14 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 		}
 		return LeaseTarget{}, err
 	}
-	claim, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false)
+	providerScope, err := exeDevControlScope(cfg)
+	if err != nil {
+		if !req.Keep {
+			err = b.rollbackCreatedVM(name, err)
+		}
+		return LeaseTarget{}, err
+	}
+	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false)
 	if err != nil {
 		if !req.Keep {
 			err = b.rollbackCreatedVM(name, err)
@@ -248,12 +255,24 @@ func (b *exeDevLeaseBackend) claimResolvedVM(lease LeaseTarget, vm exeDevVM, lea
 		if previous.CloudID != "" && previous.CloudID != vm.Name() {
 			return LeaseClaim{}, exit(2, "lease %s is already bound to exe.dev VM %s, refusing retarget to %s", leaseID, previous.CloudID, vm.Name())
 		}
-		if err := b.validateExistingClaimRoute(previous); err != nil {
-			return LeaseClaim{}, err
+		// Released versions did not bind exe.dev claims to a control route.
+		// Explicit reclaim is the migration boundary after remote ownership and
+		// exact resource identity have both been revalidated above.
+		if previous.ProviderScope == "" && !req.Reclaim {
+			return LeaseClaim{}, exit(2, "lease %s has a legacy unscoped claim; reuse with --reclaim to bind the exe.dev control route", leaseID)
+		}
+		if previous.ProviderScope != "" {
+			if err := b.validateExistingClaimRoute(previous); err != nil {
+				return LeaseClaim{}, err
+			}
 		}
 	}
 	cfg := b.configForRun()
-	claim, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previous, exists)
+	providerScope, err := exeDevControlScope(cfg)
+	if err != nil {
+		return LeaseClaim{}, err
+	}
+	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previous, exists)
 	if err != nil {
 		return LeaseClaim{}, err
 	}
@@ -264,15 +283,11 @@ func (b *exeDevLeaseBackend) validateResolvedLeaseTarget(lease LeaseTarget, vm e
 	if err := validateExeDevVMOwnership(vm, leaseID, slug, "reuse"); err != nil {
 		return err
 	}
-	wantScope, err := exeDevControlScope(b.configForRun())
-	if err != nil {
-		return err
-	}
 	wantHost := vm.SSHAddress().Host
 	if lease.LeaseID != leaseID || lease.Server.Provider != providerName || lease.Server.CloudID != vm.Name() || lease.Server.Name != vm.Name() || lease.SSH.Host != wantHost {
 		return exit(2, "exe.dev VM %s resolved to inconsistent provider metadata", vm.Name())
 	}
-	if lease.Server.Labels["provider"] != providerName || lease.Server.Labels["lease"] != leaseID || normalizeLeaseSlug(lease.Server.Labels["slug"]) != normalizeLeaseSlug(slug) || lease.Server.Labels["name"] != vm.Name() || lease.Server.Labels[exeDevControlScopeLabel] != wantScope {
+	if lease.Server.Labels["provider"] != providerName || lease.Server.Labels["lease"] != leaseID || normalizeLeaseSlug(lease.Server.Labels["slug"]) != normalizeLeaseSlug(slug) || lease.Server.Labels["name"] != vm.Name() {
 		return exit(2, "exe.dev VM %s resolved to incomplete claim metadata", vm.Name())
 	}
 	return nil
@@ -297,7 +312,7 @@ func (b *exeDevLeaseBackend) validateExistingClaimRoute(claim LeaseClaim) error 
 	if err != nil {
 		return err
 	}
-	if got := strings.TrimSpace(claim.Labels[exeDevControlScopeLabel]); got != "" && got != want {
+	if got := strings.TrimSpace(claim.ProviderScope); got == "" || got != want {
 		return exit(2, "lease %s is bound to a different exe.dev control route", claim.LeaseID)
 	}
 	return nil
@@ -311,11 +326,10 @@ func (b *exeDevLeaseBackend) validateVMClaimBinding(vm exeDevVM, claim LeaseClai
 	if claim.LeaseID != leaseID || claim.Provider != providerName || normalizeLeaseSlug(claim.Slug) != slug || claim.CloudID != vm.Name() {
 		return exit(2, "exe.dev VM %s is not bound to an exact provider/resource claim", vm.Name())
 	}
-	wantScope, err := exeDevControlScope(b.configForRun())
-	if err != nil {
+	if err := b.validateExistingClaimRoute(claim); err != nil {
 		return err
 	}
-	if claim.Labels["provider"] != providerName || claim.Labels["lease"] != leaseID || normalizeLeaseSlug(claim.Labels["slug"]) != slug || claim.Labels["name"] != vm.Name() || claim.Labels[exeDevControlScopeLabel] != wantScope {
+	if claim.Labels["provider"] != providerName || claim.Labels["lease"] != leaseID || normalizeLeaseSlug(claim.Labels["slug"]) != slug || claim.Labels["name"] != vm.Name() {
 		return exit(2, "exe.dev VM %s claim metadata does not attest the current provider binding", vm.Name())
 	}
 	return nil
@@ -626,8 +640,6 @@ func commandExitCode(result LocalCommandResult) int {
 	return 1
 }
 
-const exeDevControlScopeLabel = "exe_dev_control_scope"
-
 func exeDevControlScope(cfg Config) (string, error) {
 	destination, port, err := exeDevControlDestination(cfg.ExeDev.ControlHost)
 	if err != nil {
@@ -641,9 +653,6 @@ func exeDevServer(vm exeDevVM, leaseID, slug string, cfg Config, keep bool) Serv
 	labels["name"] = vm.Name()
 	labels["state"] = blank(vm.Status, "unknown")
 	labels["work_root"] = cfg.WorkRoot
-	if scope, err := exeDevControlScope(cfg); err == nil {
-		labels[exeDevControlScopeLabel] = scope
-	}
 	if vm.Region != "" {
 		labels["region"] = vm.Region
 	}

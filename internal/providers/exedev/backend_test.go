@@ -135,11 +135,11 @@ func TestExeDevAcquireReportsRollbackFailureAfterClaimFailure(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { waitForSSHReady = oldWait })
-	oldClaim := claimLeaseTargetForRepoConfigIfUnchanged
-	claimLeaseTargetForRepoConfigIfUnchanged = func(string, string, Config, Server, SSHTarget, string, time.Duration, bool, LeaseClaim, bool) (LeaseClaim, error) {
+	oldClaim := claimLeaseTargetForRepoConfigScopeIfUnchanged
+	claimLeaseTargetForRepoConfigScopeIfUnchanged = func(string, string, Config, string, Server, SSHTarget, string, time.Duration, bool, LeaseClaim, bool) (LeaseClaim, error) {
 		return LeaseClaim{}, primaryErr
 	}
-	t.Cleanup(func() { claimLeaseTargetForRepoConfigIfUnchanged = oldClaim })
+	t.Cleanup(func() { claimLeaseTargetForRepoConfigScopeIfUnchanged = oldClaim })
 	runner := newExeDevAcquireRollbackRunner()
 	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}})
@@ -317,7 +317,7 @@ func TestExeDevResolveVMNameRecoversExistingClaim(t *testing.T) {
 	cfg := Config{Provider: providerName}
 	applyExeDevDefaults(&cfg)
 	vm := exeDevVM{VMName: name, SSHDest: name + ".exe.xyz", Status: "running"}
-	if _, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, exeDevServer(vm, leaseID, slug, cfg, true), exeDevSSHTarget(cfg, vm), t.TempDir(), 0, false, LeaseClaim{}, false); err != nil {
+	if _, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, mustExeDevControlScope(t, cfg), exeDevServer(vm, leaseID, slug, cfg, true), exeDevSSHTarget(cfg, vm), t.TempDir(), 0, false, LeaseClaim{}, false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &exeDevRecordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
@@ -390,7 +390,7 @@ func TestExeDevReleaseRequiresUnchangedClaimAndRemoteTags(t *testing.T) {
 			name: "claim changed",
 			mutate: func(t *testing.T, backend *exeDevLeaseBackend, _ *exeDevRecordingRunner, lease LeaseTarget, claim LeaseClaim, vm exeDevVM) {
 				cfg := backend.configForRun()
-				if _, err := claimLeaseTargetForRepoConfigIfUnchanged(lease.LeaseID, claim.Slug, cfg, lease.Server, exeDevSSHTarget(cfg, vm), t.TempDir(), cfg.IdleTimeout, true, claim, true); err != nil {
+				if _, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(lease.LeaseID, claim.Slug, cfg, claim.ProviderScope, lease.Server, exeDevSSHTarget(cfg, vm), t.TempDir(), cfg.IdleTimeout, true, claim, true); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -458,6 +458,43 @@ func TestExeDevReleaseDeletesExactlyClaimedVMAndRemovesClaim(t *testing.T) {
 	}
 }
 
+func TestExeDevReleaseSurvivesTouchedClaimRoundTrip(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	slug := "blue"
+	vm := ownedExeDevVM(leaseID, slug)
+	runner := exeDevInventoryRunner(t, vm)
+	backend := newExeDevTestBackend(Config{}, runner)
+	cfg := backend.configForRun()
+	repoRoot := t.TempDir()
+	claim := persistExeDevClaim(t, cfg, vm, leaseID, slug, repoRoot)
+	lease := LeaseTarget{
+		LeaseID: leaseID,
+		Server:  exeDevServer(vm, leaseID, slug, cfg, true),
+	}
+	touched, err := backend.Touch(context.Background(), TouchRequest{Lease: lease, State: "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err = claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, claim.ProviderScope, touched, exeDevSSHTarget(cfg, vm), repoRoot, cfg.IdleTimeout, true, claim, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.ProviderScope != mustExeDevControlScope(t, cfg) {
+		t.Fatalf("provider scope=%q", claim.ProviderScope)
+	}
+	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: resolved}); err != nil {
+		t.Fatal(err)
+	}
+	if !hasExeDevRM(runner) {
+		t.Fatalf("rm not called: %#v", runner.calls)
+	}
+}
+
 func TestExeDevReleaseRetainsClaimWhenDeleteFails(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_abcdef123456"
@@ -508,7 +545,7 @@ func TestExeDevReuseRequiresExplicitAdoptionAndPersistsExactBinding(t *testing.T
 			if readErr != nil || !exists {
 				t.Fatalf("claim exists=%v err=%v", exists, readErr)
 			}
-			if claim.CloudID != vm.Name() || claim.Provider != providerName || claim.Labels[exeDevControlScopeLabel] == "" {
+			if claim.CloudID != vm.Name() || claim.Provider != providerName || claim.ProviderScope == "" {
 				t.Fatalf("claim=%#v", claim)
 			}
 			if _, exists, snapshotSet := serverLeaseClaimSnapshot(lease.Server); !snapshotSet || !exists {
@@ -569,11 +606,20 @@ func newExeDevTestBackend(cfg Config, runner *exeDevRecordingRunner) *exeDevLeas
 
 func persistExeDevClaim(t *testing.T, cfg Config, vm exeDevVM, leaseID, slug, repoRoot string) LeaseClaim {
 	t.Helper()
-	claim, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, exeDevServer(vm, leaseID, slug, cfg, true), exeDevSSHTarget(cfg, vm), repoRoot, cfg.IdleTimeout, false, LeaseClaim{}, false)
+	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, mustExeDevControlScope(t, cfg), exeDevServer(vm, leaseID, slug, cfg, true), exeDevSSHTarget(cfg, vm), repoRoot, cfg.IdleTimeout, false, LeaseClaim{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return claim
+}
+
+func mustExeDevControlScope(t *testing.T, cfg Config) string {
+	t.Helper()
+	scope, err := exeDevControlScope(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope
 }
 
 func assertNoExeDevRM(t *testing.T, runner *exeDevRecordingRunner) {

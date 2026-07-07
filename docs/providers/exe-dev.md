@@ -101,9 +101,10 @@ top-level `workRoot` propagates to the VM when `exeDev.workRoot` is unset.
    complete `crabbox`, canonical lease, and slug tag set. Pass `--all` to inspect
    unowned or incomplete inventory; names that merely start with `crabbox-` do
    not establish ownership.
-4. Reusing a completely tagged VM without a local claim requires explicit
-   `--reclaim`. Crabbox refuses untagged adoption and never retargets a claim
-   already bound to another VM or control route.
+4. Reusing a completely tagged VM without a local claim, or upgrading a legacy
+   claim that lacks a control-route scope, requires explicit `--reclaim`.
+   Crabbox refuses untagged adoption and never retargets a claim already bound
+   to another VM or control route.
 5. `stop --provider exe-dev <id>` deletes only when the unchanged local claim,
    exact VM name, deterministic lease name, complete remote tags, and current
    control route all agree. It rechecks inventory while holding the claim lock,

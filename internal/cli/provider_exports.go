@@ -138,6 +138,12 @@ func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, 
 	return claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
 
+// ClaimLeaseTargetForRepoConfigScopeIfUnchanged lets a provider bind a
+// repository-scoped claim to routing identity outside the shared Config model.
+func ClaimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
 // ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged binds an
 // exact resource while atomically replacing any previously published route.
 func ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
