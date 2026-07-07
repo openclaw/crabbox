@@ -2755,6 +2755,20 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 }
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
+	if refresher, ok := backend.(ReleaseLeaseTargetRefresher); ok {
+		refreshed, err := refresher.RefreshReleaseLeaseTarget(ctx, lease)
+		if err != nil {
+			fmt.Fprintf(a.Stderr, "warning: could not refresh lease %s before cleanup: %v; attempting release with acquired target\n", lease.LeaseID, err)
+		} else {
+			if refreshed.SSH.Host == "" {
+				refreshed.SSH = lease.SSH
+			}
+			if refreshed.Coordinator == nil {
+				refreshed.Coordinator = lease.Coordinator
+			}
+			lease = refreshed
+		}
+	}
 	a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
 	return a.releaseBackendLease(ctx, backend, cfg, lease)
 }

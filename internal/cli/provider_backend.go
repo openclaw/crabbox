@@ -194,6 +194,12 @@ type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
 }
 
+// ReleaseLeaseTargetRefresher opts a provider into refreshing authorization
+// and connection metadata immediately before automatic lease cleanup.
+type ReleaseLeaseTargetRefresher interface {
+	RefreshReleaseLeaseTarget(context.Context, LeaseTarget) (LeaseTarget, error)
+}
+
 type CheckpointForkWorkdirValidator interface {
 	ValidateCheckpointForkWorkdir(ctx context.Context, lease LeaseTarget, workdir string) error
 }

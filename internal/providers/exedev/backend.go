@@ -142,6 +142,10 @@ func (b *exeDevLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseR
 	})
 }
 
+func (b *exeDevLeaseBackend) RefreshReleaseLeaseTarget(ctx context.Context, lease LeaseTarget) (LeaseTarget, error) {
+	return b.Resolve(ctx, ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+}
+
 func (b *exeDevLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	server := req.Lease.Server
 	if server.Labels == nil {
@@ -532,9 +536,21 @@ func (b *exeDevLeaseBackend) rollbackCreatedVM(name string, cause error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := b.deleteVM(cleanupCtx, name); err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup failed for VM %s; manual cleanup: crabbox stop --provider exe-dev --id %s: %v", cause, name, name, err)
+		return exit(exitCodeForError(cause), "%v; exe.dev cleanup failed for VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	return cause
+}
+
+func (b *exeDevLeaseBackend) manualDeleteCommand(name string) string {
+	dest, port, err := exeDevControlDestination(b.configForRun().ExeDev.ControlHost)
+	if err != nil {
+		return "ssh <configured-exe-dev-control-host> rm " + shellQuote(name)
+	}
+	args := []string{"ssh"}
+	if port != "" {
+		args = append(args, "-p", port)
+	}
+	return shellQuoteArgs(append(args, dest, "rm", name))
 }
 
 func exitCodeForError(err error) int {

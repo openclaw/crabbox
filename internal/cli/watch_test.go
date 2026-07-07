@@ -31,6 +31,7 @@ type watchTestBackend struct {
 	acquireErr   error
 	resolveErr   error
 	labels       map[string]string
+	resolveSSH   string
 	features     FeatureSet
 }
 
@@ -68,7 +69,11 @@ func (b *watchTestBackend) Resolve(ctx context.Context, req ResolveRequest) (Lea
 	}
 	server := Server{Provider: "watch-test", Labels: labels}
 	server.ServerType.Name = "test"
-	return LeaseTarget{LeaseID: req.ID, Server: server}, nil
+	return LeaseTarget{LeaseID: req.ID, Server: server, SSH: SSHTarget{Host: b.resolveSSH}}, nil
+}
+
+func (b *watchTestBackend) RefreshReleaseLeaseTarget(ctx context.Context, lease LeaseTarget) (LeaseTarget, error) {
+	return b.Resolve(ctx, ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
 }
 
 func (b *watchTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
@@ -699,6 +704,7 @@ func TestWatchRefreshesReleaseAuthorizationAfterIterations(t *testing.T) {
 	root := newWatchGitRepo(t)
 	backend := newWatchTestBackend()
 	backend.labels = map[string]string{"claim_revision": "after-run"}
+	backend.resolveSSH = "refreshed.example"
 	executor := newWatchTestExecutor()
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
 	opts := watchOptions{Debounce: 25 * time.Millisecond, IdleExit: 250 * time.Millisecond, IdleExitSet: true, Command: []string{"echo", "ok"}}
@@ -710,14 +716,14 @@ func TestWatchRefreshesReleaseAuthorizationAfterIterations(t *testing.T) {
 
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
-	if !backend.resolveReq.ReleaseOnly || backend.resolveReq.ID != watchTestLeaseID || backend.resolveReq.Repo.Root != root {
-		t.Fatalf("resolve request=%+v, want repository-scoped release-only refresh", backend.resolveReq)
+	if !backend.resolveReq.ReleaseOnly || backend.resolveReq.ID != watchTestLeaseID {
+		t.Fatalf("resolve request=%+v, want release-only refresh", backend.resolveReq)
 	}
 	if got := backend.releaseLease.Server.Labels["claim_revision"]; got != "after-run" {
 		t.Fatalf("released claim revision=%q, want refreshed snapshot", got)
 	}
-	if got := backend.releaseLease.SSH.Host; got != "acquired.example" {
-		t.Fatalf("released SSH host=%q, want acquired connection metadata", got)
+	if got := backend.releaseLease.SSH.Host; got != "refreshed.example" {
+		t.Fatalf("released SSH host=%q, want refreshed connection metadata", got)
 	}
 }
 

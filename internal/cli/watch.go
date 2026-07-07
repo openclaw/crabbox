@@ -192,7 +192,7 @@ func (a App) watchWithBackend(ctx context.Context, opts watchOptions, repo Repo,
 	}
 	if !opts.Keep {
 		defer func() {
-			if releaseErr := a.releaseWatchLeaseBestEffort(context.Background(), backend, repo, options, cfg, lease); releaseErr != nil {
+			if releaseErr := a.releaseBackendLeaseBestEffort(context.Background(), backend, cfg, lease); releaseErr != nil {
 				fmt.Fprintf(a.Stderr, "warning: watch lease release failed for %s: %v\n", lease.LeaseID, releaseErr)
 			}
 		}()
@@ -203,27 +203,6 @@ func (a App) watchWithBackend(ctx context.Context, opts watchOptions, repo Repo,
 	}
 	fmt.Fprintf(a.Stdout, "leased %s slug=%s provider=%s idle_timeout=%s idle_exit=%s\n", lease.LeaseID, blank(serverSlug(lease.Server), "-"), cfg.Provider, cfg.IdleTimeout, idleExit)
 	return a.watchLoop(ctx, opts, repo, cfg, lease.LeaseID, idleExit, execute)
-}
-
-func (a App) releaseWatchLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, repo Repo, options LeaseOptions, cfg Config, acquired LeaseTarget) error {
-	lease, err := backend.Resolve(ctx, ResolveRequest{
-		Repo:        repo,
-		Options:     options,
-		ID:          acquired.LeaseID,
-		ReleaseOnly: true,
-	})
-	if err != nil {
-		fmt.Fprintf(a.Stderr, "warning: could not refresh watch lease %s before cleanup: %v; attempting release with acquired target\n", acquired.LeaseID, err)
-		lease = acquired
-	} else {
-		if lease.SSH.Host == "" {
-			lease.SSH = acquired.SSH
-		}
-		if lease.Coordinator == nil {
-			lease.Coordinator = acquired.Coordinator
-		}
-	}
-	return a.releaseBackendLeaseBestEffort(ctx, backend, cfg, lease)
 }
 
 func watchEffectiveIdleExit(opts watchOptions, idleTimeout time.Duration) (time.Duration, error) {

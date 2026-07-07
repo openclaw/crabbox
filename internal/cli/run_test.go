@@ -27,6 +27,7 @@ func init() {
 
 type warmupFailureReleaseBackend struct {
 	releases int
+	resolves int
 }
 
 func (b *warmupFailureReleaseBackend) Spec() ProviderSpec {
@@ -36,6 +37,7 @@ func (b *warmupFailureReleaseBackend) Acquire(context.Context, AcquireRequest) (
 	return LeaseTarget{}, nil
 }
 func (b *warmupFailureReleaseBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+	b.resolves++
 	return LeaseTarget{}, nil
 }
 func (b *warmupFailureReleaseBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
@@ -60,6 +62,9 @@ func TestWarmupFailureLeavesAcknowledgedLeaseForControllerReleaseGate(t *testing
 	app.releaseWarmupLeaseAfterFailure(context.Background(), backend, defaultConfig(), lease, false)
 	if backend.releases != 1 {
 		t.Fatalf("standalone warmup cleanup releases=%d", backend.releases)
+	}
+	if backend.resolves != 0 {
+		t.Fatalf("standalone warmup cleanup resolves=%d, want no implicit preparation", backend.resolves)
 	}
 }
 

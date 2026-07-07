@@ -171,7 +171,7 @@ func assertExeDevRollbackFailure(t *testing.T, err error, primary error, runner 
 	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
 		t.Fatalf("err=%#v, want rendered ExitError code 1", err)
 	}
-	for _, want := range []string{"exe.dev cleanup failed for VM", "manual cleanup: crabbox stop --provider exe-dev --id", "exit status 1", primary.Error()} {
+	for _, want := range []string{"exe.dev cleanup failed for VM", "manual cleanup: ssh exe.dev rm crabbox-", "exit status 1", primary.Error()} {
 		if !strings.Contains(exitErr.Message, want) {
 			t.Fatalf("exit message=%q missing %q", exitErr.Message, want)
 		}
