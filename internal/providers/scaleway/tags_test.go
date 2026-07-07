@@ -16,22 +16,36 @@ func TestLeaseTagsRoundTripOwnershipLabels(t *testing.T) {
 		ServerType: "DEV1-S",
 		Profile:    "daily",
 	}
-	tags := leaseTags(cfg, "cbx_123", "blue-box", "ready", true, time.Unix(1700000000, 0).UTC())
-	for _, want := range []string{tagCrabbox, "crabbox:provider:scaleway", "crabbox:target:linux", "crabbox:lease:cbx_123", "crabbox:slug:blue-box", "crabbox:state:ready"} {
+	tags := leaseTags(cfg, "cbx_999999999999", "blue-box", "ready", true, time.Unix(1700000000, 0).UTC())
+	for _, want := range []string{tagCrabbox, "crabbox:provider:scaleway", "crabbox:target:linux", "crabbox:lease:cbx_999999999999", "crabbox:slug:blue-box", "crabbox:state:ready"} {
 		if !containsTag(tags, want) {
 			t.Fatalf("tags=%v missing %q", tags, want)
 		}
 	}
 	labels := labelsFromTags(tags)
-	if labels["provider"] != providerName || labels["lease"] != "cbx_123" || labels["slug"] != "blue-box" || labels["state"] != "ready" || labels["target"] != core.TargetLinux {
+	if labels["provider"] != providerName || labels["lease"] != "cbx_999999999999" || labels["slug"] != "blue-box" || labels["state"] != "ready" || labels["target"] != core.TargetLinux {
 		t.Fatalf("labels=%v", labels)
+	}
+}
+
+func TestValidateScalewayLabelsRejectsNonCanonicalLease(t *testing.T) {
+	labels := map[string]string{
+		"crabbox":    "true",
+		"created_by": "crabbox",
+		"provider":   providerName,
+		"lease":      "legacy-lease-1",
+		"slug":       "legacy",
+		"target":     core.TargetLinux,
+	}
+	if err := validateScalewayLabels(labels); err == nil {
+		t.Fatal("non-canonical lease must not be treated as owned")
 	}
 }
 
 func TestExactTagsPreserveTailscaleValues(t *testing.T) {
 	labels := map[string]string{
 		"provider":           providerName,
-		"lease":              "cbx_123",
+		"lease":              "cbx_999999999999",
 		"slug":               "blue-box",
 		"target":             core.TargetLinux,
 		"tailscale_hostname": "cbx-blue.example.ts.net",

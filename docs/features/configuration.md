@@ -726,9 +726,17 @@ external:
   config:
     backend: vm
     namespace: team-devboxes
+  connection:
+    ssh:
+      trustProviderOutput: true
   workRoot: /workspaces/crabbox
   routingFile: ""
 ```
+
+If the protocol response contains SSH coordinates, keep
+`trustProviderOutput: true` together with the exact command, arguments, and
+`external.config` plus its connection inputs in trusted user config. Repository
+config cannot inherit the approval after changing that adapter contract.
 
 The executable receives one versioned JSON request on stdin per lifecycle
 operation and returns one JSON response on stdout. This keeps internal control
@@ -762,18 +770,29 @@ external:
     ssh:
       user: "{{env.DEVBOX_USER}}"
       host: "{{resourceName}}"
+      allowEnv: true
+      trustProviderOutput: true
       sshConfigProxy: true
   config:
     size: cpu16
   workRoot: /home/developer/crabbox
 ```
 
+Put this destination-bearing example in trusted user config. Repository config
+may define the lifecycle, but its exact `resourceName`, SSH destination, and
+environment opt-in must be repeated in trusted user config before Crabbox uses
+operator-managed SSH credentials.
+
 Declarative lifecycle entries use one `argv` array or an ordered `steps` list,
 not shell commands. Acquire steps can opt into release cleanup with
 `rollbackOnFailure: true`. Put credentials in an operation `env:` map, not in
 `argv` or `steps`; environment-derived argv values require the explicit
 `allowEnvArgv: true` compatibility opt-in, and environment-derived resource
-names require `connection.allowEnvResourceName: true`. See
+names require `connection.allowEnvResourceName: true`. Repository lifecycle
+commands cannot place inherited `external.config` values in argv without an
+exact lifecycle and config-derived connection-template contract carrying
+`allowConfigArgv: true` in trusted user config; repository-owned config values
+are unchanged. See
 [External Provider](../providers/external.md) for placeholders, output
 semantics, inventory formats, routing behavior, controller-safe raw
 `json-lease` identity attestation, and security guidance.

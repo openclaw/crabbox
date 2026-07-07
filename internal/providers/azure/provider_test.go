@@ -2,10 +2,103 @@ package azure
 
 import (
 	"flag"
+	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestPrepareLeaseClaimEndpointPreservesExactAzureIdentity(t *testing.T) {
+	provider := Provider{}
+	existing := core.LeaseClaim{
+		LeaseID:          "cbx_123456abcdef",
+		Slug:             "owned",
+		CloudID:          "crabbox-owned",
+		CloudImmutableID: "vmid-owned",
+		Labels: map[string]string{
+			"provider_key": core.ProviderKeyForLease("cbx_123456abcdef"),
+		},
+	}
+	server := core.Server{
+		CloudID:     "crabbox-owned",
+		ImmutableID: "vmid-owned",
+		Labels: map[string]string{
+			"lease":        existing.LeaseID,
+			"slug":         existing.Slug,
+			"provider_key": existing.Labels["provider_key"],
+		},
+	}
+	got, err := provider.PrepareLeaseClaimEndpoint(existing, "azure", existing.Slug, server, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CloudID != existing.CloudID || got.ImmutableID != existing.CloudImmutableID {
+		t.Fatalf("server=%+v, want exact existing Azure identity", got)
+	}
+}
+
+func TestPrepareLeaseClaimEndpointRejectsIdentityRetargeting(t *testing.T) {
+	provider := Provider{}
+	existing := core.LeaseClaim{
+		LeaseID:          "cbx_123456abcdef",
+		Slug:             "owned",
+		CloudID:          "crabbox-owned",
+		CloudImmutableID: "vmid-owned",
+		Labels: map[string]string{
+			"provider_key": core.ProviderKeyForLease("cbx_123456abcdef"),
+		},
+	}
+	base := core.Server{
+		CloudID:     existing.CloudID,
+		ImmutableID: existing.CloudImmutableID,
+		Labels: map[string]string{
+			"lease":        existing.LeaseID,
+			"slug":         existing.Slug,
+			"provider_key": existing.Labels["provider_key"],
+		},
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*core.Server)
+	}{
+		{name: "name", mutate: func(server *core.Server) { server.CloudID = "replacement" }},
+		{name: "immutable id", mutate: func(server *core.Server) { server.ImmutableID = "vmid-replacement" }},
+		{name: "provider key", mutate: func(server *core.Server) { server.Labels["provider_key"] = "wrong" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := base
+			server.Labels = map[string]string{}
+			for key, value := range base.Labels {
+				server.Labels[key] = value
+			}
+			test.mutate(&server)
+			_, err := provider.PrepareLeaseClaimEndpoint(existing, "azure", existing.Slug, server, true)
+			if err == nil || !strings.Contains(err.Error(), "refusing to rewrite Azure") {
+				t.Fatalf("err=%v, want identity retarget rejection", err)
+			}
+		})
+	}
+}
+
+func TestPrepareLeaseClaimEndpointDoesNotPromoteLegacyClaim(t *testing.T) {
+	existing := core.LeaseClaim{LeaseID: "cbx_123456abcdef", Slug: "legacy", CloudID: "crabbox-legacy"}
+	server := core.Server{
+		CloudID:     existing.CloudID,
+		ImmutableID: "vmid-later",
+		Labels: map[string]string{
+			"lease":        existing.LeaseID,
+			"slug":         existing.Slug,
+			"provider_key": core.ProviderKeyForLease(existing.LeaseID),
+		},
+	}
+	got, err := (Provider{}).PrepareLeaseClaimEndpoint(existing, "azure", existing.Slug, server, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ImmutableID != "" || got.Labels["provider_key"] != "" {
+		t.Fatalf("server=%+v, want legacy claim metadata left unpromoted", got)
+	}
+}
 
 func TestIsCrabboxAzureLeaseRequiresCanonicalTags(t *testing.T) {
 	t.Parallel()

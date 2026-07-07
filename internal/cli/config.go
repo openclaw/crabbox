@@ -158,6 +158,8 @@ type Config struct {
 	Actions                       ActionsConfig
 	Blacksmith                    BlacksmithConfig
 	KubeVirt                      KubeVirtConfig
+	SealosDevbox                  SealosDevboxConfig
+	sealosDevboxWorkRootExplicit  bool
 	AgentSandbox                  AgentSandboxConfig
 	deleteOnReleaseExplicit       map[string]bool
 	External                      ExternalConfig
@@ -169,6 +171,7 @@ type Config struct {
 	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
+	CubeSandbox                   CubeSandboxConfig
 	ExeDev                        ExeDevConfig
 	Railway                       RailwayConfig
 	FastAPICloud                  FastAPICloudConfig
@@ -438,6 +441,25 @@ type KubeVirtConfig struct {
 	DeleteOnRelease bool
 }
 
+type SealosDevboxConfig struct {
+	Kubectl         string
+	Kubeconfig      string
+	Context         string
+	Namespace       string
+	Image           string
+	TemplateID      string
+	CPU             string
+	Memory          string
+	StorageLimit    string
+	Network         string
+	SSHGatewayHost  string
+	SSHGatewayPort  string
+	SSHUser         string
+	WorkRoot        string
+	NodeHost        string
+	DeleteOnRelease bool
+}
+
 type AgentSandboxConfig struct {
 	Kubectl             string
 	Kubeconfig          string
@@ -454,15 +476,16 @@ type AgentSandboxConfig struct {
 }
 
 type ExternalConfig struct {
-	Command       string
-	Args          []string
-	Config        map[string]any
-	Capabilities  ExternalCapabilitiesConfig
-	Lifecycle     ExternalLifecycleConfig
-	Connection    ExternalConnectionConfig
-	WorkRoot      string
-	RoutingFile   string
-	routingLoaded bool
+	Command                  string
+	Args                     []string
+	Config                   map[string]any
+	Capabilities             ExternalCapabilitiesConfig
+	Lifecycle                ExternalLifecycleConfig
+	Connection               ExternalConnectionConfig
+	WorkRoot                 string
+	RoutingFile              string
+	routingLoaded            bool
+	routingCredentialVersion int
 }
 
 type ExternalCapabilitiesConfig struct {
@@ -484,6 +507,7 @@ type ExternalLifecycleOperation struct {
 	Steps             [][]string        `yaml:"steps,omitempty" json:"steps,omitempty"`
 	Env               map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	AllowEnvArgv      bool              `yaml:"allowEnvArgv,omitempty" json:"allowEnvArgv,omitempty"`
+	AllowConfigArgv   bool              `yaml:"allowConfigArgv,omitempty" json:"allowConfigArgv,omitempty"`
 	Output            string            `yaml:"output,omitempty" json:"output,omitempty"`
 	NamePrefix        string            `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
 	RollbackOnFailure bool              `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
@@ -499,16 +523,18 @@ type ExternalConnectionConfig struct {
 }
 
 type ExternalSSHConnectionConfig struct {
-	User            string   `yaml:"user,omitempty" json:"user,omitempty"`
-	Host            string   `yaml:"host,omitempty" json:"host,omitempty"`
-	Key             string   `yaml:"key,omitempty" json:"key,omitempty"`
-	Port            string   `yaml:"port,omitempty" json:"port,omitempty"`
-	FallbackPorts   []string `yaml:"fallbackPorts,omitempty" json:"fallbackPorts,omitempty"`
-	ReadyCheck      string   `yaml:"readyCheck,omitempty" json:"readyCheck,omitempty"`
-	AuthSecret      bool     `yaml:"authSecret,omitempty" json:"authSecret,omitempty"`
-	NoControlMaster bool     `yaml:"noControlMaster,omitempty" json:"noControlMaster,omitempty"`
-	SSHConfigProxy  bool     `yaml:"sshConfigProxy,omitempty" json:"sshConfigProxy,omitempty"`
-	ProxyCommand    string   `yaml:"proxyCommand,omitempty" json:"proxyCommand,omitempty"`
+	User                string   `yaml:"user,omitempty" json:"user,omitempty"`
+	Host                string   `yaml:"host,omitempty" json:"host,omitempty"`
+	Key                 string   `yaml:"key,omitempty" json:"key,omitempty"`
+	Port                string   `yaml:"port,omitempty" json:"port,omitempty"`
+	FallbackPorts       []string `yaml:"fallbackPorts,omitempty" json:"fallbackPorts,omitempty"`
+	ReadyCheck          string   `yaml:"readyCheck,omitempty" json:"readyCheck,omitempty"`
+	AuthSecret          bool     `yaml:"authSecret,omitempty" json:"authSecret,omitempty"`
+	NoControlMaster     bool     `yaml:"noControlMaster,omitempty" json:"noControlMaster,omitempty"`
+	SSHConfigProxy      bool     `yaml:"sshConfigProxy,omitempty" json:"sshConfigProxy,omitempty"`
+	ProxyCommand        string   `yaml:"proxyCommand,omitempty" json:"proxyCommand,omitempty"`
+	AllowEnv            bool     `yaml:"allowEnv,omitempty" json:"allowEnv,omitempty"`
+	TrustProviderOutput bool     `yaml:"trustProviderOutput,omitempty" json:"trustProviderOutput,omitempty"`
 }
 
 type NamespaceConfig struct {
@@ -594,6 +620,18 @@ type E2BConfig struct {
 	Template string
 	Workdir  string
 	User     string
+}
+
+type CubeSandboxConfig struct {
+	APIKey        string
+	APIURL        string
+	Domain        string
+	Template      string
+	Workdir       string
+	User          string
+	ProxyNodeIP   string
+	ProxyPortHTTP int
+	ProxyScheme   string
 }
 
 type AzureDynamicSessionsConfig struct {
@@ -2561,6 +2599,24 @@ func MarkWorkRootExplicit(cfg *Config) {
 	cfg.explicitWorkRoot = cfg.WorkRoot
 }
 
+func IsSealosDevboxWorkRootExplicit(cfg *Config) bool {
+	return cfg != nil && cfg.sealosDevboxWorkRootExplicit
+}
+
+func MarkSealosDevboxWorkRootExplicit(cfg *Config) {
+	cfg.sealosDevboxWorkRootExplicit = true
+}
+
+func EffectiveSealosDevboxWorkRoot(cfg Config) string {
+	if IsSealosDevboxWorkRootExplicit(&cfg) {
+		return Blank(strings.TrimSpace(cfg.SealosDevbox.WorkRoot), baseConfig().SealosDevbox.WorkRoot)
+	}
+	if IsWorkRootExplicit(&cfg) {
+		return strings.TrimSpace(cfg.WorkRoot)
+	}
+	return Blank(strings.TrimSpace(cfg.SealosDevbox.WorkRoot), baseConfig().SealosDevbox.WorkRoot)
+}
+
 func IsHostingerWorkRootExplicit(cfg *Config) bool {
 	return cfg.hostingerWorkRootExplicit
 }
@@ -2786,6 +2842,17 @@ func baseConfig() Config {
 			WorkRoot:        "/home/crabbox/crabbox",
 			DeleteOnRelease: true,
 		},
+		SealosDevbox: SealosDevboxConfig{
+			Kubectl:        "kubectl",
+			Namespace:      "default",
+			CPU:            "2",
+			Memory:         "4Gi",
+			StorageLimit:   "20Gi",
+			Network:        "SSHGate",
+			SSHGatewayPort: "2233",
+			SSHUser:        "devbox",
+			WorkRoot:       "/home/devbox/project",
+		},
 		AgentSandbox: AgentSandboxConfig{
 			Kubectl:             "kubectl",
 			Namespace:           "default",
@@ -2839,6 +2906,13 @@ func baseConfig() Config {
 			Domain:   "e2b.app",
 			Template: "base",
 			Workdir:  "crabbox",
+		},
+		CubeSandbox: CubeSandboxConfig{
+			APIURL:        "http://127.0.0.1:3000",
+			Domain:        "cube.app",
+			Template:      "",
+			Workdir:       "crabbox",
+			ProxyPortHTTP: 80,
 		},
 		ExeDev: ExeDevConfig{
 			ControlHost: "exe.dev",
@@ -3190,6 +3264,7 @@ type fileConfig struct {
 	Actions                  *fileActionsConfig                  `yaml:"actions,omitempty"`
 	Blacksmith               *fileBlacksmithConfig               `yaml:"blacksmith,omitempty"`
 	KubeVirt                 *fileKubeVirtConfig                 `yaml:"kubevirt,omitempty"`
+	SealosDevbox             *fileSealosDevboxConfig             `yaml:"sealosDevbox,omitempty"`
 	AgentSandbox             *fileAgentSandboxConfig             `yaml:"agentSandbox,omitempty"`
 	External                 *fileExternalConfig                 `yaml:"external,omitempty"`
 	Namespace                *fileNamespaceConfig                `yaml:"namespace,omitempty"`
@@ -3199,6 +3274,7 @@ type fileConfig struct {
 	Morph                    *fileMorphConfig                    `yaml:"morph,omitempty"`
 	Daytona                  *fileDaytonaConfig                  `yaml:"daytona,omitempty"`
 	E2B                      *fileE2BConfig                      `yaml:"e2b,omitempty"`
+	CubeSandbox              *fileCubeSandboxConfig              `yaml:"cubeSandbox,omitempty"`
 	ExeDev                   *fileExeDevConfig                   `yaml:"exeDev,omitempty"`
 	Railway                  *fileRailwayConfig                  `yaml:"railway,omitempty"`
 	FastAPICloud             *fileFastAPICloudConfig             `yaml:"fastapiCloud,omitempty"`
@@ -3627,6 +3703,25 @@ type fileKubeVirtConfig struct {
 	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
+type fileSealosDevboxConfig struct {
+	Kubectl         string `yaml:"kubectl,omitempty"`
+	Kubeconfig      string `yaml:"kubeconfig,omitempty"`
+	Context         string `yaml:"context,omitempty"`
+	Namespace       string `yaml:"namespace,omitempty"`
+	Image           string `yaml:"image,omitempty"`
+	TemplateID      string `yaml:"templateID,omitempty"`
+	CPU             string `yaml:"cpu,omitempty"`
+	Memory          string `yaml:"memory,omitempty"`
+	StorageLimit    string `yaml:"storageLimit,omitempty"`
+	Network         string `yaml:"network,omitempty"`
+	SSHGatewayHost  string `yaml:"sshGatewayHost,omitempty"`
+	SSHGatewayPort  string `yaml:"sshGatewayPort,omitempty"`
+	SSHUser         string `yaml:"sshUser,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	NodeHost        string `yaml:"nodeHost,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
+}
+
 type fileAgentSandboxConfig struct {
 	Kubectl             string `yaml:"kubectl,omitempty"`
 	Kubeconfig          string `yaml:"kubeconfig,omitempty"`
@@ -3752,6 +3847,17 @@ type fileE2BConfig struct {
 	Template string `yaml:"template,omitempty"`
 	Workdir  string `yaml:"workdir,omitempty"`
 	User     string `yaml:"user,omitempty"`
+}
+
+type fileCubeSandboxConfig struct {
+	APIURL        string `yaml:"apiUrl,omitempty"`
+	Domain        string `yaml:"domain,omitempty"`
+	Template      string `yaml:"template,omitempty"`
+	Workdir       string `yaml:"workdir,omitempty"`
+	User          string `yaml:"user,omitempty"`
+	ProxyNodeIP   string `yaml:"proxyNodeIp,omitempty"`
+	ProxyPortHTTP int    `yaml:"proxyPortHttp,omitempty"`
+	ProxyScheme   string `yaml:"proxyScheme,omitempty"`
 }
 
 type fileAzureDynamicSessionsConfig struct {
@@ -5786,6 +5892,58 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
 		}
 	}
+	if file.SealosDevbox != nil {
+		if trusted && file.SealosDevbox.Kubectl != "" {
+			cfg.SealosDevbox.Kubectl = expandUserPath(file.SealosDevbox.Kubectl)
+		}
+		if trusted && file.SealosDevbox.Kubeconfig != "" {
+			cfg.SealosDevbox.Kubeconfig = expandUserPath(file.SealosDevbox.Kubeconfig)
+		}
+		if trusted && file.SealosDevbox.Context != "" {
+			cfg.SealosDevbox.Context = file.SealosDevbox.Context
+		}
+		if trusted && file.SealosDevbox.Namespace != "" {
+			cfg.SealosDevbox.Namespace = file.SealosDevbox.Namespace
+		}
+		if trusted && file.SealosDevbox.Image != "" {
+			cfg.SealosDevbox.Image = file.SealosDevbox.Image
+		}
+		if trusted && file.SealosDevbox.TemplateID != "" {
+			cfg.SealosDevbox.TemplateID = file.SealosDevbox.TemplateID
+		}
+		if trusted && file.SealosDevbox.CPU != "" {
+			cfg.SealosDevbox.CPU = file.SealosDevbox.CPU
+		}
+		if trusted && file.SealosDevbox.Memory != "" {
+			cfg.SealosDevbox.Memory = file.SealosDevbox.Memory
+		}
+		if trusted && file.SealosDevbox.StorageLimit != "" {
+			cfg.SealosDevbox.StorageLimit = file.SealosDevbox.StorageLimit
+		}
+		if trusted && file.SealosDevbox.Network != "" {
+			cfg.SealosDevbox.Network = file.SealosDevbox.Network
+		}
+		if trusted && file.SealosDevbox.SSHGatewayHost != "" {
+			cfg.SealosDevbox.SSHGatewayHost = file.SealosDevbox.SSHGatewayHost
+		}
+		if trusted && file.SealosDevbox.SSHGatewayPort != "" {
+			cfg.SealosDevbox.SSHGatewayPort = file.SealosDevbox.SSHGatewayPort
+		}
+		if trusted && file.SealosDevbox.SSHUser != "" {
+			cfg.SealosDevbox.SSHUser = file.SealosDevbox.SSHUser
+		}
+		if trusted && file.SealosDevbox.WorkRoot != "" {
+			cfg.SealosDevbox.WorkRoot = file.SealosDevbox.WorkRoot
+			MarkSealosDevboxWorkRootExplicit(cfg)
+		}
+		if trusted && file.SealosDevbox.NodeHost != "" {
+			cfg.SealosDevbox.NodeHost = file.SealosDevbox.NodeHost
+		}
+		if file.SealosDevbox.DeleteOnRelease != nil {
+			cfg.SealosDevbox.DeleteOnRelease = *file.SealosDevbox.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "sealos-devbox")
+		}
+	}
 	if file.AgentSandbox != nil {
 		if trusted && file.AgentSandbox.Kubectl != "" {
 			cfg.AgentSandbox.Kubectl = file.AgentSandbox.Kubectl
@@ -5837,21 +5995,87 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.External.Config != nil {
 			cfg.External.Config = file.External.Config
+			cfg.credentialProvenance.externalConfig = credentialSource
 		}
 		if file.External.Capabilities != nil {
 			cfg.External.Capabilities = *file.External.Capabilities
 		}
 		if file.External.Lifecycle != nil {
 			cfg.External.Lifecycle = *file.External.Lifecycle
+			cfg.credentialProvenance.externalLifecycle = credentialSource
 		}
 		if file.External.Connection != nil {
 			cfg.External.Connection = *file.External.Connection
+			ssh := cfg.External.Connection.SSH
+			cfg.credentialProvenance.externalConnection = credentialSource
+			cfg.credentialProvenance.externalSSHConnection = credentialSource
+			if trusted {
+				outputContract, outputContractOK := externalProviderOutputContract(cfg.External)
+				if ssh.TrustProviderOutput && !outputContractOK {
+					return exit(2, "external provider-output contract must be JSON encodable")
+				}
+				cfg.credentialProvenance.externalApproved = externalCredentialApproval{
+					resource:       cfg.External.Connection.ResourceName,
+					host:           ssh.Host,
+					proxy:          ssh.ProxyCommand,
+					allowEnv:       ssh.AllowEnv,
+					envSSH:         ssh,
+					providerOutput: ssh.TrustProviderOutput,
+					outputContract: outputContract,
+				}
+				cfg.credentialProvenance.externalApproved.envSSH.FallbackPorts = append([]string(nil), ssh.FallbackPorts...)
+			}
+			cfg.credentialProvenance.externalResource = credentialDestinationSource(
+				cfg.External.Connection.ResourceName, cfg.credentialProvenance.externalApproved.resource, credentialSource,
+			)
+			cfg.credentialProvenance.externalSSHHost = credentialDestinationSource(
+				ssh.Host, cfg.credentialProvenance.externalApproved.host, credentialSource,
+			)
+			cfg.credentialProvenance.externalSSHProxy = credentialDestinationSource(
+				ssh.ProxyCommand, cfg.credentialProvenance.externalApproved.proxy, credentialSource,
+			)
+			cfg.credentialProvenance.externalSSHAllowEnv = credentialSourceForBool(ssh.AllowEnv, credentialSource)
+			if !trusted && ssh.AllowEnv && cfg.credentialProvenance.externalApproved.allowEnv &&
+				externalSSHEnvApprovalMatches(cfg.External.Connection, cfg.credentialProvenance.externalApproved) {
+				cfg.credentialProvenance.externalSSHAllowEnv = credentialSourceTrustedFile
+			}
 		}
 		if file.External.WorkRoot != "" {
 			cfg.External.WorkRoot = file.External.WorkRoot
 		}
 		if file.External.RoutingFile != "" {
 			cfg.External.RoutingFile = file.External.RoutingFile
+			cfg.credentialProvenance.externalRouting = credentialSource
+		}
+		if cfg.External.Connection.SSH.TrustProviderOutput {
+			outputContract, outputContractOK := externalProviderOutputContract(cfg.External)
+			if trusted {
+				if !outputContractOK {
+					return exit(2, "external provider-output contract must be JSON encodable")
+				}
+				cfg.credentialProvenance.externalApproved.providerOutput = true
+				cfg.credentialProvenance.externalApproved.outputContract = outputContract
+				cfg.credentialProvenance.externalSSHOutput = credentialSourceTrustedFile
+			} else {
+				cfg.credentialProvenance.externalSSHOutput = credentialSourceRepository
+				if cfg.credentialProvenance.externalApproved.providerOutput &&
+					outputContractOK && outputContract == cfg.credentialProvenance.externalApproved.outputContract {
+					cfg.credentialProvenance.externalSSHOutput = credentialSourceTrustedFile
+				}
+			}
+		}
+		if trusted && (file.External.Lifecycle != nil || file.External.Connection != nil) {
+			cfg.credentialProvenance.externalArgvApproval = externalLifecycleCredentialApproval{}
+			if externalLifecycleAllowsConfigArgv(cfg.External.Lifecycle) {
+				contract, ok := externalLifecycleContract(cfg.External)
+				if !ok {
+					return exit(2, "external lifecycle config-argv contract must be JSON encodable")
+				}
+				cfg.credentialProvenance.externalArgvApproval = externalLifecycleCredentialApproval{
+					configArgv: true,
+					contract:   contract,
+				}
+			}
 		}
 	}
 	if file.Namespace != nil {
@@ -6037,6 +6261,37 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.E2B.User != "" {
 			cfg.E2B.User = file.E2B.User
+		}
+	}
+	if file.CubeSandbox != nil {
+		if file.CubeSandbox.APIURL != "" {
+			cfg.CubeSandbox.APIURL = file.CubeSandbox.APIURL
+			cfg.credentialProvenance.cubeSandboxAPIURL = credentialSource
+		}
+		if file.CubeSandbox.Domain != "" {
+			cfg.CubeSandbox.Domain = file.CubeSandbox.Domain
+			cfg.credentialProvenance.cubeSandboxDomain = credentialSource
+		}
+		if file.CubeSandbox.Template != "" {
+			cfg.CubeSandbox.Template = file.CubeSandbox.Template
+		}
+		if file.CubeSandbox.Workdir != "" {
+			cfg.CubeSandbox.Workdir = file.CubeSandbox.Workdir
+		}
+		if file.CubeSandbox.User != "" {
+			cfg.CubeSandbox.User = file.CubeSandbox.User
+		}
+		if file.CubeSandbox.ProxyNodeIP != "" {
+			cfg.CubeSandbox.ProxyNodeIP = file.CubeSandbox.ProxyNodeIP
+			cfg.credentialProvenance.cubeSandboxProxyNode = credentialSource
+		}
+		if file.CubeSandbox.ProxyPortHTTP > 0 {
+			cfg.CubeSandbox.ProxyPortHTTP = file.CubeSandbox.ProxyPortHTTP
+			cfg.credentialProvenance.cubeSandboxProxyPort = credentialSource
+		}
+		if file.CubeSandbox.ProxyScheme != "" {
+			cfg.CubeSandbox.ProxyScheme = file.CubeSandbox.ProxyScheme
+			cfg.credentialProvenance.cubeSandboxProxyProto = credentialSource
 		}
 	}
 	if file.ExeDev != nil {
@@ -8063,6 +8318,28 @@ func applyEnv(cfg *Config) error {
 		cfg.KubeVirt.DeleteOnRelease = value
 		MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
 	}
+	cfg.SealosDevbox.Kubectl = expandUserPath(getenv("CRABBOX_SEALOS_DEVBOX_KUBECTL", cfg.SealosDevbox.Kubectl))
+	cfg.SealosDevbox.Kubeconfig = expandUserPath(getenv("CRABBOX_SEALOS_DEVBOX_KUBECONFIG", cfg.SealosDevbox.Kubeconfig))
+	cfg.SealosDevbox.Context = getenv("CRABBOX_SEALOS_DEVBOX_CONTEXT", cfg.SealosDevbox.Context)
+	cfg.SealosDevbox.Namespace = getenv("CRABBOX_SEALOS_DEVBOX_NAMESPACE", cfg.SealosDevbox.Namespace)
+	cfg.SealosDevbox.Image = getenv("CRABBOX_SEALOS_DEVBOX_IMAGE", cfg.SealosDevbox.Image)
+	cfg.SealosDevbox.TemplateID = getenv("CRABBOX_SEALOS_DEVBOX_TEMPLATE_ID", cfg.SealosDevbox.TemplateID)
+	cfg.SealosDevbox.CPU = getenv("CRABBOX_SEALOS_DEVBOX_CPU", cfg.SealosDevbox.CPU)
+	cfg.SealosDevbox.Memory = getenv("CRABBOX_SEALOS_DEVBOX_MEMORY", cfg.SealosDevbox.Memory)
+	cfg.SealosDevbox.StorageLimit = getenv("CRABBOX_SEALOS_DEVBOX_STORAGE_LIMIT", cfg.SealosDevbox.StorageLimit)
+	cfg.SealosDevbox.Network = getenv("CRABBOX_SEALOS_DEVBOX_NETWORK", cfg.SealosDevbox.Network)
+	cfg.SealosDevbox.SSHGatewayHost = getenv("CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST", cfg.SealosDevbox.SSHGatewayHost)
+	cfg.SealosDevbox.SSHGatewayPort = getenv("CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_PORT", cfg.SealosDevbox.SSHGatewayPort)
+	cfg.SealosDevbox.SSHUser = getenv("CRABBOX_SEALOS_DEVBOX_SSH_USER", cfg.SealosDevbox.SSHUser)
+	if value := os.Getenv("CRABBOX_SEALOS_DEVBOX_WORK_ROOT"); value != "" {
+		cfg.SealosDevbox.WorkRoot = value
+		MarkSealosDevboxWorkRootExplicit(cfg)
+	}
+	cfg.SealosDevbox.NodeHost = getenv("CRABBOX_SEALOS_DEVBOX_NODE_HOST", cfg.SealosDevbox.NodeHost)
+	if value, ok := getenvBool("CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE"); ok {
+		cfg.SealosDevbox.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "sealos-devbox")
+	}
 	cfg.AgentSandbox.Kubectl = getenv("CRABBOX_AGENT_SANDBOX_KUBECTL", cfg.AgentSandbox.Kubectl)
 	cfg.AgentSandbox.Kubeconfig = expandUserPath(getenv("CRABBOX_AGENT_SANDBOX_KUBECONFIG", cfg.AgentSandbox.Kubeconfig))
 	cfg.AgentSandbox.Context = getenv("CRABBOX_AGENT_SANDBOX_CONTEXT", cfg.AgentSandbox.Context)
@@ -8088,12 +8365,23 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_AGENT_SANDBOX_FORGET_MISSING"); ok {
 		cfg.AgentSandbox.ForgetMissing = value
 	}
-	cfg.External.Command = getenv("CRABBOX_EXTERNAL_COMMAND", cfg.External.Command)
+	externalProviderOutputExplicit := false
+	if value := os.Getenv("CRABBOX_EXTERNAL_COMMAND"); value != "" {
+		cfg.External.Command = value
+		externalProviderOutputExplicit = true
+	}
 	if arg := os.Getenv("CRABBOX_EXTERNAL_ARG"); arg != "" {
 		cfg.External.Args = []string{arg}
+		externalProviderOutputExplicit = true
+	}
+	if externalProviderOutputExplicit {
+		markExternalProviderOutputExplicit(cfg, credentialSourceEnvironment)
 	}
 	cfg.External.WorkRoot = getenv("CRABBOX_EXTERNAL_WORK_ROOT", cfg.External.WorkRoot)
-	cfg.External.RoutingFile = getenv("CRABBOX_EXTERNAL_ROUTING_FILE", cfg.External.RoutingFile)
+	if value := os.Getenv("CRABBOX_EXTERNAL_ROUTING_FILE"); value != "" {
+		cfg.External.RoutingFile = value
+		cfg.credentialProvenance.externalRouting = credentialSourceEnvironment
+	}
 	if value, ok := getenvBool("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID"); ok {
 		cfg.External.Capabilities.IdempotentLeaseID = value
 	}
@@ -8214,6 +8502,36 @@ func applyEnv(cfg *Config) error {
 	cfg.E2B.Template = getenv("CRABBOX_E2B_TEMPLATE", cfg.E2B.Template)
 	cfg.E2B.Workdir = getenv("CRABBOX_E2B_WORKDIR", cfg.E2B.Workdir)
 	cfg.E2B.User = getenv("CRABBOX_E2B_USER", cfg.E2B.User)
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_API_KEY", "CUBE_API_KEY", "E2B_API_KEY"); ok {
+		cfg.CubeSandbox.APIKey = value
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_API_URL", "CUBE_API_URL", "E2B_API_URL"); ok {
+		cfg.CubeSandbox.APIURL = value
+		cfg.credentialProvenance.cubeSandboxAPIURL = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_DOMAIN", "CUBE_SANDBOX_DOMAIN"); ok {
+		cfg.CubeSandbox.Domain = value
+		cfg.credentialProvenance.cubeSandboxDomain = credentialSourceEnvironment
+	}
+	cfg.CubeSandbox.Template = getenv("CRABBOX_CUBESANDBOX_TEMPLATE", getenv("CUBE_TEMPLATE_ID", cfg.CubeSandbox.Template))
+	cfg.CubeSandbox.Workdir = getenv("CRABBOX_CUBESANDBOX_WORKDIR", cfg.CubeSandbox.Workdir)
+	cfg.CubeSandbox.User = getenv("CRABBOX_CUBESANDBOX_USER", cfg.CubeSandbox.User)
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_NODE_IP", "CUBE_PROXY_NODE_IP"); ok {
+		cfg.CubeSandbox.ProxyNodeIP = value
+		cfg.credentialProvenance.cubeSandboxProxyNode = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP", "CUBE_PROXY_PORT_HTTP"); ok {
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			return exit(2, "invalid cubesandbox proxy HTTP port %q", value)
+		}
+		cfg.CubeSandbox.ProxyPortHTTP = port
+		cfg.credentialProvenance.cubeSandboxProxyPort = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_SCHEME", "CUBE_PROXY_SCHEME"); ok {
+		cfg.CubeSandbox.ProxyScheme = value
+		cfg.credentialProvenance.cubeSandboxProxyProto = credentialSourceEnvironment
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_CONTROL_HOST", "EXE_DEV_CONTROL_HOST"); ok {
 		cfg.ExeDev.ControlHost = value
 		cfg.credentialProvenance.exeDevControlHost = credentialSourceEnvironment

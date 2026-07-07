@@ -5,6 +5,7 @@ import {
   adminGrantVersion,
   authenticateRequest,
   base64URL,
+  githubUserGrantIsCurrent,
   issueUserToken,
   requestWithAuthContext,
 } from "../src/auth";
@@ -22,6 +23,10 @@ function proxyIdentityRequest(secret?: string): Request {
   });
 }
 
+const allowGitHubMembership = {
+  githubMembership: async (): Promise<void> => {},
+};
+
 describe("coordinator auth", () => {
   it("requires same-origin intent for portal-cookie mutations and viewer sockets", async () => {
     const env = {
@@ -34,6 +39,7 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email",
       org: "example-org",
       login: "alice",
+      githubAccessToken: "github-access-token",
     });
     const cookie = `crabbox_session=${encodeURIComponent(token)}`;
     const mutationURL = "https://broker.example.test/portal/leases/blue-lobster/share";
@@ -46,11 +52,19 @@ describe("coordinator auth", () => {
           method: "POST",
           headers: { cookie, origin: "https://lease.code.example.test" },
         }),
+        new Request("https://broker.example.test/portal/logout", {
+          method: "POST",
+          headers: { cookie },
+        }),
+        new Request("https://broker.example.test/portal/logout", {
+          method: "POST",
+          headers: { cookie, origin: "https://attacker.example" },
+        }),
         new Request(viewerURL, { headers: { cookie, upgrade: "websocket" } }),
         new Request(viewerURL, {
           headers: { cookie, origin: "https://attacker.example", upgrade: "websocket" },
         }),
-      ].map((request) => prepareCoordinatorRequest(request, env)),
+      ].map((request) => prepareCoordinatorRequest(request, env, allowGitHubMembership)),
     );
     await Promise.all(
       denied.map(async (prepared) => {
@@ -67,6 +81,13 @@ describe("coordinator auth", () => {
         new Request(mutationURL, {
           method: "POST",
           headers: { cookie, origin: "https://broker.example.test" },
+        }),
+        new Request("https://broker.example.test/portal/logout", {
+          method: "POST",
+          headers: { cookie, origin: "https://broker.example.test" },
+        }),
+        new Request("https://broker.example.test/portal/logout", {
+          headers: { cookie, origin: "https://attacker.example" },
         }),
         new Request(viewerURL, {
           headers: {
@@ -85,11 +106,83 @@ describe("coordinator auth", () => {
             origin: "https://automation.example.test",
           },
         }),
-      ].map((request) => prepareCoordinatorRequest(request, env)),
+      ].map((request) => prepareCoordinatorRequest(request, env, allowGitHubMembership)),
     );
     for (const prepared of accepted) {
       expect(prepared).toMatchObject({ authenticated: true });
     }
+  });
+
+  it("allows a verified same-origin portal logout without GitHub membership", async () => {
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_PUBLIC_URL: "https://broker.example.test",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const headers = {
+      cookie: `crabbox_session=${encodeURIComponent(token)}`,
+      origin: "https://broker.example.test",
+    };
+    const membershipUnavailable = {
+      githubMembership: async (): Promise<void> => {
+        throw new Error("GitHub unavailable");
+      },
+    };
+
+    const logout = await prepareCoordinatorRequest(
+      new Request("https://broker.example.test/portal/logout", { method: "POST", headers }),
+      env,
+      membershipUnavailable,
+    );
+    expect(logout).toMatchObject({ authenticated: true });
+
+    const normalMutation = await prepareCoordinatorRequest(
+      new Request("https://broker.example.test/portal/leases/blue-lobster/share", {
+        method: "POST",
+        headers,
+      }),
+      env,
+      membershipUnavailable,
+    );
+    expect(normalMutation).toMatchObject({ authenticated: false, response: { status: 401 } });
+  });
+
+  it("fails closed when a live GitHub grant can no longer be decrypted", async () => {
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const auth = await authenticateRequest(
+      new Request("https://broker.example.test/v1/whoami", {
+        headers: { authorization: `Bearer ${token}` },
+      }),
+      env,
+      allowGitHubMembership,
+    );
+    expect(auth?.githubGrant).toBeDefined();
+
+    await expect(
+      githubUserGrantIsCurrent(
+        auth!.githubGrant!,
+        { owner: auth!.owner, org: auth!.org, login: auth!.login! },
+        { CRABBOX_SESSION_SECRET: "rotated-session-secret" },
+        allowGitHubMembership,
+      ),
+    ).resolves.toBe(false);
   });
 
   it("treats malformed portal cookies as absent across request types", async () => {
@@ -273,6 +366,8 @@ describe("coordinator auth", () => {
     requests.forEach((request) => {
       request.headers.set("x-crabbox-internal", "scheduled");
       request.headers.set("x-crabbox-admin-grant-version", "a".repeat(64));
+      request.headers.set("x-crabbox-github-token-id", "forged-token-id");
+      request.headers.set("x-crabbox-github-sealed-credential", "forged-credential");
     });
 
     const routedRequests = await Promise.all(
@@ -299,6 +394,12 @@ describe("coordinator auth", () => {
     ]);
     expect(
       routedRequests.map((request) => request.headers.get("x-crabbox-admin-grant-version")),
+    ).toEqual([null, null, null, null]);
+    expect(
+      routedRequests.map((request) => request.headers.get("x-crabbox-github-token-id")),
+    ).toEqual([null, null, null, null]);
+    expect(
+      routedRequests.map((request) => request.headers.get("x-crabbox-github-sealed-credential")),
     ).toEqual([null, null, null, null]);
   });
 
@@ -740,11 +841,12 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email",
       org: "openclaw",
       login: "friend",
+      githubAccessToken: "github-access-token",
     });
     const request = new Request("https://example.test/v1/whoami", {
       headers: { authorization: `Bearer ${token}`, "x-crabbox-owner": "spoof@example.com" },
     });
-    const auth = await authenticateRequest(request, env);
+    const auth = await authenticateRequest(request, env, allowGitHubMembership);
     expect(auth).toMatchObject({
       authorized: true,
       admin: false,
@@ -767,6 +869,7 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email",
       org: "example-org",
       login: "friend",
+      githubAccessToken: "github-access-token",
     });
 
     const authResults = await Promise.all(
@@ -789,6 +892,7 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email" as const,
       org: "openclaw",
       login: "friend",
+      githubAccessToken: "github-access-token",
     };
 
     const first = await issueUserToken(env, input);
@@ -822,6 +926,7 @@ describe("coordinator auth", () => {
         headers: { authorization: `Bearer ${token}` },
       }),
       env,
+      allowGitHubMembership,
     );
 
     expect(auth).toBeUndefined();
@@ -840,12 +945,14 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email",
       org: "openclaw",
       login: "vincentkoc",
+      githubAccessToken: "github-access-token",
     });
     const loginToken = await issueUserToken(env, {
       owner: "peter@example.com",
       ownerSource: "github-verified-email",
       org: "openclaw",
       login: "steipete",
+      githubAccessToken: "github-access-token",
     });
 
     const ownerAuth = await authenticateRequest(
@@ -853,12 +960,14 @@ describe("coordinator auth", () => {
         headers: { authorization: `Bearer ${ownerToken}` },
       }),
       env,
+      allowGitHubMembership,
     );
     const loginAuth = await authenticateRequest(
       new Request("https://example.test/v1/whoami", {
         headers: { authorization: `Bearer ${loginToken}` },
       }),
       env,
+      allowGitHubMembership,
     );
 
     expect(ownerAuth).toMatchObject({ admin: true, owner: "vincentkoc@ieee.org" });
@@ -968,6 +1077,7 @@ describe("coordinator auth", () => {
       ownerSource: "github-verified-email" as const,
       org: "openclaw",
       login: "friend",
+      githubAccessToken: "github-access-token",
     };
 
     await expect(issueUserToken({ CRABBOX_SHARED_TOKEN: "shared" }, input)).rejects.toThrow(
@@ -1112,11 +1222,21 @@ describe("http responses", () => {
       "longer-configured-provider-secret",
       "configured-provider-secret",
       "Authorization: Bearer bearer-secret",
+      "Authorization: Bearer: colon-bearer-secret",
+      "Authorization: Bearer\n folded-bearer-secret",
+      "Authorization: Bearer:\r\n folded-colon-bearer-secret",
+      "Authorization: Bearer :\r\n spaced-folded-colon-bearer-secret",
+      "standalone Bearer   spaced-standalone-secret",
+      "standalone Bearer: colon-standalone-secret",
+      "standalone Bearer\n folded-standalone-secret",
+      "standalone Bearer:\r\n folded-colon-standalone-secret",
+      "standalone Bearer :\r\n spaced-folded-colon-standalone-secret",
+      "standalone Bearer [redacted]",
       "Proxy-Authorization=Basic basic-secret",
       "X-API-Key=header-secret",
       "client_secret=plain-secret",
       '{"token":"json-secret\\\"escaped-tail-leak","clientSecret":"client-secret","x-api-key":"json-api-secret"}',
-      "https://alice:password@example.test/path?api_key=query-secret&X-Amz-Signature=signed-secret",
+      "https://alice:password@example.test/path?api_key=query-secret&x-api-key=query-api-key&authorization=query-authorization&proxy-authorization=query-proxy-authorization&session_token=query-session-token&X-Amz-Signature=signed-secret&region=eu",
       "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
       "safe suffix",
     ].join("\n");
@@ -1127,6 +1247,15 @@ describe("http responses", () => {
       "configured-provider-secret",
       "longer-configured-provider-secret",
       "bearer-secret",
+      "colon-bearer-secret",
+      "folded-bearer-secret",
+      "folded-colon-bearer-secret",
+      "spaced-folded-colon-bearer-secret",
+      "spaced-standalone-secret",
+      "colon-standalone-secret",
+      "folded-standalone-secret",
+      "folded-colon-standalone-secret",
+      "spaced-folded-colon-standalone-secret",
       "basic-secret",
       "header-secret",
       "plain-secret",
@@ -1137,6 +1266,10 @@ describe("http responses", () => {
       "alice",
       "password",
       "query-secret",
+      "query-api-key",
+      "query-authorization",
+      "query-proxy-authorization",
+      "query-session-token",
       "signed-secret",
       "PRIVATE KEY",
       "private-key-body",
@@ -1144,7 +1277,24 @@ describe("http responses", () => {
       expect(redacted).not.toContain(secret);
     }
     expect(redacted).toContain("[redacted]");
+    expect(redacted).toContain("standalone Bearer [redacted]");
+    expect(redacted).toContain("region=eu");
     expect(redacted).toContain("safe suffix");
+  });
+
+  it("redacts punctuation-bearing credential suffixes while preserving context", () => {
+    for (const separator of [",", ";", "'", "}", "&", "#", "?", '\\"']) {
+      const credential = `prefix${separator}secret-suffix`;
+      expect(redactDiagnosticSecrets(`Authorization: Bearer ${credential} route=iad`)).toBe(
+        "Authorization: [redacted] route=iad",
+      );
+      expect(redactDiagnosticSecrets(`upstream Bearer ${credential} request=retry`)).toBe(
+        "upstream Bearer [redacted] request=retry",
+      );
+    }
+    expect(redactDiagnosticSecrets("provider:Authorization: Bearer prefix}secret route=iad")).toBe(
+      "provider:Authorization: [redacted] route=iad",
+    );
   });
 });
 

@@ -64,13 +64,18 @@ func (a App) status(ctx context.Context, args []string) error {
 			state, err = delegated.Status(statusCtx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, Wait: *wait, WaitTimeout: *waitTimeout})
 		} else if isSSH {
 			var lease LeaseTarget
-			lease, err = sshBackend.Resolve(statusCtx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true, ReadyProbe: *wait})
+			lease, err = sshBackend.Resolve(statusCtx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true, ReadyProbe: *wait, NoLocalStateMutations: true})
 			if err == nil {
 				state, err = statusViewFromLeaseTarget(statusCtx, cfg, lease)
 				if err == nil && *wait {
-					_, touchErr := sshBackend.Touch(statusCtx, TouchRequest{Lease: lease, State: state.State, IdleTimeout: cfg.IdleTimeout})
-					if touchErr != nil {
-						fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, touchErr)
+					claimed, claimErr := statusLeaseHasExactClaim(backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
+					if claimErr != nil {
+						fmt.Fprintf(a.Stderr, "warning: touch skipped for %s: %v\n", lease.LeaseID, claimErr)
+					} else if claimed {
+						_, touchErr := sshBackend.Touch(statusCtx, TouchRequest{Lease: lease, State: state.State, IdleTimeout: cfg.IdleTimeout})
+						if touchErr != nil {
+							fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, touchErr)
+						}
 					}
 				}
 			}
@@ -129,6 +134,28 @@ func (a App) status(ctx context.Context, args []string) error {
 
 func statusWaitDone(state statusView) bool {
 	return state.Ready || statusTerminalState(state.State)
+}
+
+func statusLeaseHasExactClaim(backend Backend, lease LeaseTarget, fallbackProvider, providerScope string) (bool, error) {
+	provider := canonicalClaimProvider(blank(lease.Server.Provider, fallbackProvider))
+	if lease.LeaseID == "" || provider == "" {
+		return false, nil
+	}
+	claim, claimed, exact, err := resolveLeaseClaimForProviderWithExact(lease.LeaseID, provider)
+	if err != nil {
+		return false, fmt.Errorf("read exact %s lease claim: %w", provider, err)
+	}
+	resourceID := strings.TrimSpace(lease.Server.CloudID)
+	matched := claimed && exact &&
+		claim.ProviderScope == providerScope &&
+		resourceID != "" && claim.CloudID == resourceID
+	if !matched {
+		return false, nil
+	}
+	if validator, ok := backend.(StatusTouchClaimValidator); ok && !validator.StatusTouchClaimMatches(lease, claim) {
+		return false, nil
+	}
+	return true, nil
 }
 
 func statusWaitTerminalError(id string, state statusView) error {
@@ -252,7 +279,7 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 	if !ok {
 		return statusView{}, exit(2, "provider=%s does not support status", backend.Spec().Name)
 	}
-	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: id, StatusOnly: true})
+	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: id, StatusOnly: true, NoLocalStateMutations: true})
 	if err != nil {
 		return statusView{}, err
 	}

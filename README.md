@@ -76,7 +76,7 @@ failure bundles are not automatically scrubbed; review them before sharing. See
 ```text
 your laptop                 coordinator runtime              cloud provider
 -------------               -------------------              --------------
-crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azure / GCP
+crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azure / GCP / Daytona
    |                      or Node.js + PostgreSQL              |
    |                                                           |
    +------------- SSH + rsync to leased runner <---------------+
@@ -102,10 +102,10 @@ crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azu
 The data plane — SSH, rsync, command execution — always runs directly from the
 CLI to the runner. The coordinator only manages leases, cost, and observability.
 
-Only `aws`, `azure`, `gcp`, and `hetzner` can transfer provider lifecycle to the
+Only `aws`, `azure`, `daytona`, `gcp`, and `hetzner` can transfer provider lifecycle to the
 coordinator, and even those run direct from the CLI when no coordinator URL is
 configured. Every other provider runs direct or delegated. A direct-provider mode
-(`--provider hetzner|aws|azure|gcp|digitalocean|linode|proxmox` with local
+(`--provider hetzner|aws|azure|daytona|gcp|digitalocean|linode|proxmox` with local
 credentials) exists for debugging the coordinator itself or using private
 infrastructure.
 
@@ -291,8 +291,8 @@ and authoring guide.
   `ssh -L` forwards to members' `--expose` ports (`pond connect`), and bulk
   `pond release`. See [Pond](docs/features/pond.md).
 - **Brokered cloud with cost guardrails.** Maintainers and agents share infra
-  without sharing provider tokens. Hetzner, AWS, Azure, and Google Cloud are
-  the managed providers; per-lease and monthly spend caps reject over-budget
+  without sharing provider tokens. Hetzner, AWS, Azure, Google Cloud, and
+  Daytona are the managed providers; per-lease and monthly spend caps reject over-budget
   leases. Providers fall back across compatible instance families when capacity
   or quota rejects a request. `crabbox usage` summarizes spend by user, org,
   provider, and type. See [Coordinator](docs/features/coordinator.md),

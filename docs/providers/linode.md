@@ -114,8 +114,9 @@ and adjust token scopes before retrying. Do not broaden scopes inside scripts.
 3. Wait for a public IPv4 address and Crabbox SSH bootstrap readiness.
 4. Add ready-state Crabbox tags and claim the lease locally.
 5. Run normal Crabbox sync/run/ssh workflows over SSH.
-6. Delete the Linode instance on `stop`; `cleanup` deletes only resources with a
-   complete Crabbox Linode ownership tag set.
+6. Delete the Linode instance on `stop`; `cleanup` deletes only resources with
+   complete Crabbox Linode ownership tags and an exact account- and
+   instance-bound local claim.
 
 If instance creation returns an indeterminate transport or server failure,
 Crabbox retains the SSH credentials and records a pending local recovery claim.
@@ -138,9 +139,12 @@ crabbox:target:linux
 crabbox:expires_at:<unix-seconds>
 ```
 
-Release and cleanup require a complete ownership predicate: Crabbox marker,
-provider marker, lease id, slug, and Linux target. Linodes with partial,
-foreign, or malformed Crabbox-like tags are skipped/refused.
+Read-only inventory requires a complete ownership predicate: Crabbox marker,
+provider marker, canonical lease id, slug, and Linux target. Reuse and deletion
+also require an exact local claim for the same Linode account, lease, and
+instance id. Linodes with partial, foreign, malformed, claimless, or mismatched
+ownership are skipped or refused; a claimless Linode must first be adopted
+through explicit supported `--reclaim` reuse.
 
 Tag updates replace only Crabbox's namespaced tags and preserve unrelated
 operator tags already attached to the instance. Direct mode has no coordinator

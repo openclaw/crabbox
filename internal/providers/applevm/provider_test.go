@@ -428,7 +428,7 @@ func TestDoctorPassesSignedImageViaStdinAndRedactsDisplay(t *testing.T) {
 		if req.Name != "helper" || len(req.Args) == 0 || req.Args[0] != "doctor" {
 			return core.LocalCommandResult{}, nil, false
 		}
-		if args := strings.Join(req.Args, " "); strings.Contains(args, "secret") || strings.Contains(args, "private") {
+		if args := strings.Join(req.Args, " "); strings.Contains(args, signedImage) || strings.Contains(args, "bearer-secret") {
 			t.Fatalf("helper argv exposes signed image: %s", args)
 		}
 		for _, entry := range req.Env {
@@ -512,7 +512,7 @@ func TestAcquireRedactsSignedImageFromLogsAndLeaseMetadata(t *testing.T) {
 			if !ok || claim.ProviderScope != name {
 				t.Fatalf("claim before helper start: ok=%v claim=%+v", ok, claim)
 			}
-			if args := strings.Join(req.Args, " "); strings.Contains(args, "secret") || strings.Contains(args, "private") {
+			if args := strings.Join(req.Args, " "); strings.Contains(args, signedImage) || strings.Contains(args, "bearer-secret") {
 				t.Fatalf("helper argv exposes signed image: %s", args)
 			}
 			data, err := io.ReadAll(req.Stdin)

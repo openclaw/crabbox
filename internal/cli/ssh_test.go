@@ -272,6 +272,29 @@ exit 0
 	if got, want := strings.Count(string(logData), "ssh\n"), 4; got != want {
 		t.Fatalf("ssh calls=%d want %d; log:\n%s", got, want, logData)
 	}
+
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "do-not-forward"
+	repo.RemoteURL = "https://runner:" + secret + "@example.test/repo.git"
+	var stderr bytes.Buffer
+	if err := syncWindowsNative(context.Background(), target, repo, cfg, `C:\crabbox\cbx\repo`, manifest, io.Discard, &stderr, rsyncOptions{FullResync: true}); err != nil {
+		t.Fatal(err)
+	}
+	logData, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Count(string(logData), "ssh\n"), 2; got != want {
+		t.Fatalf("credential-blocked ssh calls=%d want %d; log:\n%s", got, want, logData)
+	}
+	if !strings.Contains(stderr.String(), "origin URL contains embedded HTTP credentials") {
+		t.Fatalf("missing safe warning: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), secret) || strings.Contains(stderr.String(), "example.test") {
+		t.Fatalf("warning leaked credential-bearing remote: %q", stderr.String())
+	}
 }
 
 func decodePowerShellCommand(t *testing.T, command string) string {
@@ -454,6 +477,9 @@ func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 		"ConnectTimeout=10",
 		"ConnectionAttempts=3",
 		"IdentitiesOnly=yes",
+		"ForwardAgent=no",
+		"ForwardX11=no",
+		"ForwardX11Trusted=no",
 		"ServerAliveInterval=15",
 		"ServerAliveCountMax=2",
 		"ControlMaster=auto",
@@ -465,6 +491,34 @@ func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("sshArgs() missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestSSHArgsOverrideAmbientForwardingConfig(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("OpenSSH client is unavailable")
+	}
+	configPath := filepath.Join(t.TempDir(), "hostile_config")
+	if err := os.WriteFile(configPath, []byte("Host *\n  ForwardAgent yes\n  ForwardX11 yes\n  ForwardX11Trusted yes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := SSHTarget{User: "crabbox", Host: "203.0.113.10", Port: "2222"}
+	args := append(sshBaseArgs(target), "-F", configPath, "-G", target.User+"@"+target.Host)
+	out, err := exec.Command("ssh", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh -G: %v: %s", err, out)
+	}
+	resolved := make(map[string]string)
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			resolved[fields[0]] = fields[1]
+		}
+	}
+	for _, option := range []string{"forwardagent", "forwardx11", "forwardx11trusted"} {
+		if got := resolved[option]; got != "no" {
+			t.Fatalf("ssh -G resolved %s=%q, want no", option, got)
 		}
 	}
 }
@@ -1359,6 +1413,69 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 	}
 }
 
+func TestGitSeedCommandsRejectCredentialBearingHTTPRemote(t *testing.T) {
+	const secret = "do-not-forward"
+	remote := "https://runner:" + secret + "@example.test/repo.git"
+	for name, command := range map[string]string{
+		"linux":   remoteGitSeed("/work/repo", remote, "abc123"),
+		"windows": windowsGitSeed(`C:\crabbox\repo`, remote, "abc123"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if strings.Contains(command, secret) || strings.Contains(command, "example.test") {
+				t.Fatalf("credential-bearing remote reached %s seed command: %q", name, command)
+			}
+			if strings.Contains(command, "git clone") {
+				t.Fatalf("%s seed command should be disabled: %q", name, command)
+			}
+		})
+	}
+}
+
+func TestRemoteGitSeedLocalCanary(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "init")
+	runGit(t, source, "config", "user.email", "test@example.com")
+	runGit(t, source, "config", "user.name", "Test")
+	mustWriteTestFile(t, filepath.Join(source, "proof.txt"), "safe seed\n")
+	runGit(t, source, "add", ".")
+	runGit(t, source, "commit", "-m", "seed")
+	head := gitOutput(source, "rev-parse", "HEAD")
+	origin := filepath.Join(root, "origin.git")
+	clone := exec.Command("git", "clone", "--bare", source, origin)
+	if out, err := clone.CombinedOutput(); err != nil {
+		t.Fatalf("create bare origin: %v\n%s", err, out)
+	}
+
+	workdir := filepath.Join(root, "safe-workdir")
+	seed := exec.Command("bash", "-lc", remoteGitSeed(workdir, origin, head))
+	if out, err := seed.CombinedOutput(); err != nil {
+		t.Fatalf("run safe seed: %v\n%s", err, out)
+	}
+	if got := gitOutput(workdir, "remote", "get-url", "origin"); got != origin {
+		t.Fatalf("seeded origin=%q want %q", got, origin)
+	}
+	proof, err := os.ReadFile(filepath.Join(workdir, "proof.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(proof)); got != "safe seed" {
+		t.Fatalf("seeded proof=%q", got)
+	}
+
+	blockedWorkdir := filepath.Join(root, "blocked-workdir")
+	blocked := exec.Command("bash", "-lc", remoteGitSeed(blockedWorkdir, "https://runner:do-not-forward@example.test/repo.git", head))
+	if out, err := blocked.CombinedOutput(); err != nil {
+		t.Fatalf("run blocked seed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(blockedWorkdir); !os.IsNotExist(err) {
+		t.Fatalf("credential-blocked seed created workdir: %v", err)
+	}
+}
+
 func TestRemoteGitHydrateStatusUsesMarkerAndRemoteBase(t *testing.T) {
 	got := remoteGitHydrateStatus("/work/repo", "main", "abc123")
 	for _, want := range []string{
@@ -1432,6 +1549,9 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 	plain := remoteWriteSyncManifestsNewForTarget(SSHTarget{TargetOS: targetLinux}, "/work/repo")
 	if !strings.Contains(plain, "dd bs=1") {
 		t.Fatalf("non-WSL2 manifest writer should keep portable dd fallback: %q", plain)
+	}
+	if strings.Contains(plain, "status=none") {
+		t.Fatalf("non-WSL2 manifest writer should not require GNU dd extensions: %q", plain)
 	}
 }
 

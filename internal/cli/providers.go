@@ -1549,7 +1549,7 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 
 func isRemoteDevProvider(provider string) bool {
 	switch provider {
-	case "codesandbox", "daytona", "morph", "namespace-devbox", "opencomputer":
+	case "codesandbox", "daytona", "morph", "namespace-devbox", "opencomputer", "sealos-devbox":
 		return true
 	default:
 		return false

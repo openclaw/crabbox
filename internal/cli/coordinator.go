@@ -554,11 +554,12 @@ type CoordinatorArtifactUploadInput struct {
 }
 
 type CoordinatorArtifactUploadResponse struct {
-	Backend   string                           `json:"backend"`
-	Bucket    string                           `json:"bucket"`
-	Prefix    string                           `json:"prefix"`
-	ExpiresAt string                           `json:"expiresAt"`
-	Files     []CoordinatorArtifactUploadGrant `json:"files"`
+	Backend      string                           `json:"backend"`
+	Bucket       string                           `json:"bucket"`
+	Prefix       string                           `json:"prefix"`
+	ExpiresAt    string                           `json:"expiresAt"`
+	AccessPolicy string                           `json:"accessPolicy,omitempty"`
+	Files        []CoordinatorArtifactUploadGrant `json:"files"`
 }
 
 type CoordinatorArtifactUploadGrant struct {
@@ -570,7 +571,8 @@ type CoordinatorArtifactUploadGrant struct {
 		Headers   map[string]string `json:"headers"`
 		ExpiresAt string            `json:"expiresAt"`
 	} `json:"upload"`
-	URL string `json:"url"`
+	URL          string `json:"url"`
+	AccessPolicy string `json:"accessPolicy,omitempty"`
 }
 
 type TestResultSummary struct {
@@ -802,7 +804,6 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"profile":                         cfg.Profile,
 		"provider":                        cfg.Provider,
 		"target":                          cfg.TargetOS,
-		"architecture":                    effectiveArchitectureForConfig(cfg),
 		"windowsMode":                     cfg.WindowsMode,
 		"desktop":                         cfg.Desktop,
 		"desktopEnv":                      normalizedDesktopEnv(cfg.DesktopEnv),
@@ -844,6 +845,9 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"sshPublicKey":                    publicKey,
 		"pond":                            cfg.Pond,
 		"exposedPorts":                    cfg.ExposedPorts,
+	}
+	if cfg.Provider != "daytona" || cfg.architectureExplicit {
+		req["architecture"] = effectiveArchitectureForConfig(cfg)
 	}
 	if len(capacity) > 0 {
 		req["capacity"] = capacity
@@ -2070,7 +2074,14 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 		cfg.WindowsMode = lease.WindowsMode
 	}
 	target := sshTargetForLease(cfg, lease.Host, lease.SSHUser, lease.SSHPort)
-	useStoredTestboxKey(&target, lease.ID)
+	if server.Provider == "daytona" {
+		target.Key = ""
+		target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
+		target.AuthSecret = true
+		target.NetworkKind = NetworkPublic
+	} else {
+		useStoredTestboxKey(&target, lease.ID)
+	}
 	return server, target, lease.ID
 }
 

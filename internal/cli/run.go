@@ -41,6 +41,10 @@ func applyServerTypeFlagOverrides(cfg *Config, fs *flag.FlagSet, serverType stri
 }
 
 func (a App) warmup(ctx context.Context, args []string) error {
+	return a.warmupWithLeaseObserver(ctx, args, nil)
+}
+
+func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe func(LeaseTarget)) error {
 	started := time.Now()
 	defaults := defaultConfig()
 	fs := newFlagSet("warmup", a.Stderr)
@@ -119,6 +123,9 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, controllerOwnsCleanup.Load())
 		return err
+	}
+	if observe != nil {
+		observe(LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 	}
 	if serverTailscaleMetadata(server).Enabled {
 		target = bootstrapNetworkTarget(cfg, server, target)
@@ -1195,7 +1202,11 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s mode=archive", timings.sync.Round(time.Millisecond)))
 			goto afterSync
 		}
-		if syncGitSeedEnabled(cfg, repo) {
+		gitSeed, credentialBlocked := syncGitSeedDecision(cfg, repo)
+		if credentialBlocked {
+			warnCredentialBearingGitSeed(a.Stderr)
+		}
+		if gitSeed {
 			stepStart = time.Now()
 			if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
@@ -1979,6 +1990,39 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if DeleteOnReleaseExplicit(cfg, "kubevirt") {
 			args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
 		}
+	case "sealos-devbox":
+		workRoot := EffectiveSealosDevboxWorkRoot(cfg)
+		if strings.TrimSpace(cfg.SealosDevbox.Kubectl) != "" {
+			args = append(args, "--sealos-devbox-kubectl", cfg.SealosDevbox.Kubectl)
+		}
+		if strings.TrimSpace(cfg.SealosDevbox.Kubeconfig) != "" {
+			args = append(args, "--sealos-devbox-kubeconfig", cfg.SealosDevbox.Kubeconfig)
+		}
+		for _, routing := range []struct {
+			flagName string
+			value    string
+		}{
+			{flagName: "--sealos-devbox-context", value: cfg.SealosDevbox.Context},
+			{flagName: "--sealos-devbox-namespace", value: cfg.SealosDevbox.Namespace},
+			{flagName: "--sealos-devbox-network", value: cfg.SealosDevbox.Network},
+			{flagName: "--sealos-devbox-ssh-gateway-host", value: cfg.SealosDevbox.SSHGatewayHost},
+			{flagName: "--sealos-devbox-ssh-gateway-port", value: cfg.SealosDevbox.SSHGatewayPort},
+			{flagName: "--sealos-devbox-node-host", value: cfg.SealosDevbox.NodeHost},
+			{flagName: "--sealos-devbox-ssh-user", value: cfg.SealosDevbox.SSHUser},
+			{flagName: "--sealos-devbox-work-root", value: workRoot},
+		} {
+			if strings.TrimSpace(routing.value) != "" {
+				args = append(args, routing.flagName, routing.value)
+			}
+		}
+		if DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
+			args = append(args, fmt.Sprintf("--sealos-devbox-delete-on-release=%t", cfg.SealosDevbox.DeleteOnRelease))
+		}
+		if strings.TrimSpace(cfg.SealosDevbox.Kubeconfig) == "" {
+			if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
+				args = append([]string{"KUBECONFIG=" + value}, args...)
+			}
+		}
 	case "incus":
 		if DeleteOnReleaseExplicit(cfg, "incus") {
 			args = append(args, fmt.Sprintf("--incus-delete-on-release=%t", cfg.Incus.DeleteOnRelease))
@@ -2718,19 +2762,73 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 }
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
-	a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
-	return a.releaseBackendLease(ctx, backend, cfg, lease)
+	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(backend)
+	if refresher, ok := backend.(ReleaseLeaseTargetRefresher); ok {
+		refreshed, err := refresher.RefreshReleaseLeaseTarget(ctx, lease)
+		if err != nil {
+			if errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
+				return err
+			}
+			fmt.Fprintf(a.Stderr, "warning: could not refresh lease %s before cleanup: %v; attempting release with acquired target\n", lease.LeaseID, err)
+		} else {
+			if refreshed.SSH.Host == "" {
+				refreshed.SSH = lease.SSH
+			}
+			if refreshed.Coordinator == nil {
+				refreshed.Coordinator = lease.Coordinator
+			}
+			lease = refreshed
+		}
+	}
+	if connectionCleanupSafe {
+		a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
+	}
+	if err := a.releaseBackendLease(ctx, backend, cfg, lease); err != nil {
+		return err
+	}
+	if !connectionCleanupSafe {
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(lease.LeaseID)
+	}
+	return nil
+}
+
+func releaseLeaseConnectionCleanupSafe(backend SSHLeaseBackend) bool {
+	policy, ok := backend.(ReleaseLeaseConnectionCleanupPolicy)
+	return !ok || policy.ReleaseLeaseConnectionCleanupSafe()
+}
+
+func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseIDs ...string) {
+	seen := map[string]bool{}
+	for _, leaseID := range leaseIDs {
+		leaseID = strings.TrimSpace(leaseID)
+		if leaseID == "" || seen[leaseID] {
+			continue
+		}
+		seen[leaseID] = true
+		if _, err := a.stopEgressHostDaemon(leaseID); err != nil {
+			fmt.Fprintf(a.Stderr, "warning: egress host daemon cleanup failed for %s: %v\n", leaseID, err)
+		}
+	}
 }
 
 func (a App) cleanupBackendLeaseConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
+	a.cleanupBackendLeaseLocalConnectionsBestEffort(lease.LeaseID)
+	a.cleanupBackendLeaseRemoteConnectionsBestEffort(ctx, lease)
+}
+
+func (a App) cleanupBackendLeaseRemoteConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
 	a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
-	a.cleanupMediatedEgressBestEffort(ctx, lease.LeaseID, lease)
+	a.cleanupMediatedEgressRemoteBestEffort(ctx, lease)
 	a.logoutRemoteTailscaleBestEffort(ctx, lease)
 }
 
 func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
-	if err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+	request := ReleaseLeaseRequest{Lease: lease, Force: true}
+	if !releaseLeaseConnectionCleanupSafe(backend) {
+		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
+	}
+	if err := backend.ReleaseLease(ctx, request); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: release failed for %s: %v\n", lease.LeaseID, err)
 		return err
 	}
@@ -2893,7 +2991,8 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 				return server, server.Labels["lease"], nil
 			}
 		}
-		// Canonical lease IDs are exact identities, never aliases.
+		// Canonical IDs are exact identities, never aliases. Falling through to
+		// slug or provider-name matching could retarget a destructive operation.
 		return Server{}, "", nil
 	}
 	matches := make([]Server, 0, 2)
@@ -3107,17 +3206,27 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err := ValidateLeaseTargetProviderIdentity(lease, expectedIdentity); err != nil {
 		return err
 	}
-	if lease.SSH.Host != "" {
-		a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
+	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(sshBackend)
+	if connectionCleanupSafe {
+		if lease.SSH.Host != "" {
+			a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
+		}
+		a.cleanupMediatedEgressBestEffort(ctx, *id, lease)
+		a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	}
-	a.cleanupMediatedEgressBestEffort(ctx, *id, lease)
-	a.logoutRemoteTailscaleBestEffort(ctx, lease)
-	if err := sshBackend.ReleaseLease(ctx, ReleaseLeaseRequest{
+	request := ReleaseLeaseRequest{
 		Lease:                    lease,
 		Force:                    true,
 		ExpectedProviderIdentity: expectedIdentity,
-	}); err != nil {
+	}
+	if !connectionCleanupSafe {
+		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
+	}
+	if err := sshBackend.ReleaseLease(ctx, request); err != nil {
 		return err
+	}
+	if !connectionCleanupSafe {
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(*id, lease.LeaseID)
 	}
 	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, cfg, lease.LeaseID)
 	if backendCoordinator(backend) != nil {

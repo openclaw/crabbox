@@ -53,6 +53,15 @@ export interface Env {
   CRABBOX_GCP_SSH_CIDRS?: string;
   CRABBOX_GCP_ROOT_GB?: string;
   CRABBOX_GCP_SERVICE_ACCOUNT?: string;
+  DAYTONA_CRABBOX_KEY?: string;
+  CRABBOX_DAYTONA_API_URL?: string;
+  CRABBOX_DAYTONA_ORGANIZATION_ID?: string;
+  CRABBOX_DAYTONA_SNAPSHOT?: string;
+  CRABBOX_DAYTONA_TARGET?: string;
+  CRABBOX_DAYTONA_USER?: string;
+  CRABBOX_DAYTONA_WORK_ROOT?: string;
+  CRABBOX_DAYTONA_SSH_GATEWAY_HOST?: string;
+  CRABBOX_DAYTONA_SSH_ACCESS_MINUTES?: string;
   CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_SHARED_OWNER?: string;
@@ -66,6 +75,8 @@ export interface Env {
   CRABBOX_GITHUB_ALLOWED_ORGS?: string;
   CRABBOX_GITHUB_ALLOWED_TEAM?: string;
   CRABBOX_GITHUB_ALLOWED_TEAMS?: string;
+  CRABBOX_GITHUB_REVOKED_USERS?: string;
+  CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS?: string;
   CRABBOX_GITHUB_ADMIN_OWNERS?: string;
   CRABBOX_GITHUB_ADMIN_LOGINS?: string;
   CRABBOX_PUBLIC_URL?: string;
@@ -114,6 +125,7 @@ export interface Env {
   CRABBOX_ARTIFACTS_BUCKET?: string;
   CRABBOX_ARTIFACTS_PREFIX?: string;
   CRABBOX_ARTIFACTS_BASE_URL?: string;
+  CRABBOX_ARTIFACTS_PUBLIC_READS?: string;
   CRABBOX_ARTIFACTS_REGION?: string;
   CRABBOX_ARTIFACTS_ENDPOINT_URL?: string;
   CRABBOX_ARTIFACTS_ACCESS_KEY_ID?: string;
@@ -255,6 +267,12 @@ export const coordinatorProviderRegistry = [
     requiredSecrets: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
     adminAudit: false,
   },
+  {
+    provider: "daytona",
+    label: "Daytona",
+    requiredSecrets: ["DAYTONA_CRABBOX_KEY"],
+    adminAudit: false,
+  },
 ] as const satisfies readonly {
   provider: string;
   label: string;
@@ -329,6 +347,8 @@ export interface LeaseRecord {
   cloudID: string;
   region?: string;
   providerProject?: string;
+  providerScope?: string;
+  providerOwner?: string;
   network?: LeaseNetworkState;
   owner: string;
   org: string;
@@ -354,6 +374,7 @@ export interface LeaseRecord {
   sshUser: string;
   sshPort: string;
   sshFallbackPorts?: string[];
+  providerAccessExpiresAt?: string;
   workRoot: string;
   keep: boolean;
   ttlSeconds: number;

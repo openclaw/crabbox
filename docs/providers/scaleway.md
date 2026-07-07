@@ -187,11 +187,13 @@ The provider implements a direct Linux SSH lease over Scaleway Instances:
 6. Run normal Crabbox sync/run/ssh workflows over SSH.
 7. Update timeout tags on touch.
 8. Delete owned Scaleway Instances and managed IAM SSH keys on `stop`; `cleanup`
-   deletes only resources with a complete Crabbox Scaleway ownership tag set.
+   deletes only resources with complete Crabbox Scaleway ownership tags and an
+   exact project-, zone-, and server-bound local claim.
 
-`list` uses all-pages Scaleway inventory. `resolve` accepts local claims and
-live tag-owned resources. Recovery claims retain enough Scaleway identity to
-finish release or cleanup after interrupted acquire paths.
+`list` uses all-pages Scaleway inventory. `resolve` may inspect complete,
+canonical live ownership tags without a claim, but reuse requires explicit
+supported `--reclaim` adoption. Recovery claims retain enough Scaleway identity
+to finish release or cleanup after interrupted acquire paths.
 
 ## Ownership And Cleanup
 
@@ -206,13 +208,15 @@ crabbox:target:linux
 crabbox:expires_at:<unix-seconds>
 ```
 
-Release and cleanup require a complete ownership predicate: Crabbox marker,
-provider marker, lease id, slug, and Linux target. Resources with partial,
-foreign, or malformed Crabbox-like tags are skipped or refused. A stale local
-claim is not enough for destructive release: Crabbox re-fetches the live
-Scaleway Instance by ID and validates current tags before deletion. If Scaleway
-confirms the Instance is already absent, release removes the managed SSH key and
-local claim idempotently.
+Read-only inventory requires a complete ownership predicate: Crabbox marker,
+provider marker, canonical lease id, slug, and Linux target. Reuse and deletion
+also require an exact local claim for the same Scaleway project, zone, lease,
+and server id. Resources with partial, foreign, malformed, claimless, or
+mismatched ownership are skipped or refused. A local claim alone is not enough
+for destructive release: Crabbox re-fetches the live Scaleway Instance by ID
+and validates current tags before deletion. If Scaleway confirms the Instance
+is already absent, release removes the managed SSH key and local claim
+idempotently.
 
 `crabbox cleanup --provider scaleway --dry-run` reports expired owned resources
 without deleting them. Use the Scaleway console or `scw` only for manual account

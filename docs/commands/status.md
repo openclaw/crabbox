@@ -61,7 +61,9 @@ seconds until the box is ready or reaches a terminal state
 `terminated`), and exits non-zero (code 5) if it times out (`--wait-timeout`,
 default `5m`) or the lease becomes terminal before it is ready. For direct
 SSH-lease providers, each poll while waiting also touches the lease to keep it
-from idling out.
+from idling out only when an exact local claim matches the configured provider
+scope and live resource identity. Claimless or mismatched resources remain
+strictly read-only while status waits.
 
 ## Flags
 

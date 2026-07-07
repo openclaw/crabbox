@@ -2,6 +2,7 @@ package crownest
 
 import (
 	"flag"
+	"os"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -14,6 +15,13 @@ type Provider struct{}
 
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return nil }
+
+func (Provider) DiagnosticSecrets(core.Config) []string {
+	return []string{
+		os.Getenv("CRABBOX_CROWNEST_API_KEY"),
+		os.Getenv("CROWNEST_API_KEY"),
+	}
+}
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{

@@ -2,6 +2,7 @@ package opensandbox
 
 import (
 	"flag"
+	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -15,6 +16,13 @@ type Provider struct{}
 
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return nil }
+
+func (Provider) DiagnosticSecrets(core.Config) []string {
+	return []string{
+		os.Getenv("CRABBOX_OPENSANDBOX_API_KEY"),
+		os.Getenv("OPEN_SANDBOX_API_KEY"),
+	}
+}
 
 func (Provider) ServerTypeForConfig(core.Config) string { return "" }
 func (Provider) ServerTypeForClass(string) string       { return "" }

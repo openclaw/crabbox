@@ -144,8 +144,10 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	server := Server{
-		Provider: "aws",
-		CloudID:  "i-1750645",
+		Provider:    "aws",
+		CloudID:     "i-1750645",
+		ID:          42,
+		ImmutableID: "vmid-1750645",
 		Labels: map[string]string{
 			"provider": "aws",
 			"slug":     "warm",
@@ -159,7 +161,7 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.RepoRoot != "" {
+	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.CloudNumericID != 42 || claim.CloudImmutableID != "vmid-1750645" || claim.RepoRoot != "" {
 		t.Fatalf("unexpected unattached provider claim: %#v", claim)
 	}
 
@@ -173,6 +175,19 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	}
 	if claim.RepoRoot != repoRoot {
 		t.Fatalf("provider claim was not attached to repo: %#v", claim)
+	}
+}
+
+func TestAzureProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
+	cfg := baseConfig()
+	cfg.AzureSubscription = " TEST-SUB "
+	cfg.AzureResourceGroup = " Production-RG "
+	if got, want := providerClaimScope("azure", cfg), "subscription:test-sub|resource-group:production-rg"; got != want {
+		t.Fatalf("providerClaimScope(azure)=%q, want %q", got, want)
+	}
+	cfg.AzureResourceGroup = ""
+	if got := providerClaimScope("azure", cfg); got != "" {
+		t.Fatalf("incomplete azure scope=%q, want empty", got)
 	}
 }
 
@@ -229,6 +244,17 @@ func TestRailwayProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
 	cfg.Railway.EnvironmentID = ""
 	if got := providerClaimScope("railway", cfg); got != "" {
 		t.Fatalf("incomplete railway scope=%q, want empty", got)
+	}
+}
+
+func TestCubeSandboxProviderClaimScopeBindsAPIEndpoint(t *testing.T) {
+	cfg := Config{CubeSandbox: CubeSandboxConfig{APIURL: "HTTPS://CUBE.EXAMPLE.TEST:443/root/"}}
+	if got, want := providerClaimScope("cubesandbox", cfg), "endpoint:https://cube.example.test/root"; got != want {
+		t.Fatalf("providerClaimScope(cubesandbox)=%q, want %q", got, want)
+	}
+	cfg.CubeSandbox.APIURL = ""
+	if got := providerClaimScope("cubesandbox", cfg); got != "" {
+		t.Fatalf("providerClaimScope(cubesandbox)=%q, want empty", got)
 	}
 }
 
@@ -819,6 +845,36 @@ func TestResolveLeaseClaimForProviderCloudIDRejectsDuplicates(t *testing.T) {
 	}
 }
 
+func TestResolveLeaseClaimForProviderCloudIDScopeDistinguishesEndpoints(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, tc := range []struct {
+		leaseID string
+		apiURL  string
+	}{
+		{leaseID: "cbx_111111111111", apiURL: "https://cube-a.example.test"},
+		{leaseID: "cbx_222222222222", apiURL: "https://cube-b.example.test"},
+	} {
+		cfg := baseConfig()
+		cfg.Provider = "cubesandbox"
+		cfg.CubeSandbox.APIURL = tc.apiURL
+		server := Server{Provider: "cubesandbox", CloudID: "same-sandbox-id"}
+		if err := claimLeaseTargetForRepoConfig(tc.leaseID, "shared-slug", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		claim, ok, err := resolveLeaseClaimForProviderCloudIDScope("same-sandbox-id", "cubesandbox", providerClaimScope("cubesandbox", cfg))
+		if err != nil || !ok || claim.LeaseID != tc.leaseID {
+			t.Fatalf("apiURL=%s claim=%#v ok=%t err=%v", tc.apiURL, claim, ok, err)
+		}
+		claim, ok, exact, err := resolveLeaseClaimForProviderScopeWithExact("shared-slug", "cubesandbox", providerClaimScope("cubesandbox", cfg))
+		if err != nil || !ok || exact || claim.LeaseID != tc.leaseID {
+			t.Fatalf("apiURL=%s slug claim=%#v ok=%t exact=%t err=%v", tc.apiURL, claim, ok, exact, err)
+		}
+	}
+	if _, ok, err := resolveLeaseClaimForProviderCloudID("same-sandbox-id", "cubesandbox"); err == nil || ok {
+		t.Fatalf("unscoped duplicate lookup ok=%t err=%v", ok, err)
+	}
+}
+
 func TestUpdateLeaseClaimTailscaleRecordsEndpointAndLabels(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")
@@ -1011,6 +1067,33 @@ func TestClaimLeaseForRepoConfigIfUnchangedPreservesEndpoint(t *testing.T) {
 	}
 	if claimed.RepoRoot != "/repo-b" || claimed.SSHHost != target.Host || claimed.SSHPort != 22 {
 		t.Fatalf("claim=%#v", claimed)
+	}
+}
+
+func TestClaimLeaseTargetForRepoConfigScopeReplacingEndpointClearsPublishedRoute(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	leaseID := "cbx_replaceendpoint"
+	server := Server{
+		CloudID:  "team-a/devbox-one",
+		Provider: "external",
+		Labels:   map[string]string{"provider": "external", "slug": "blue", "state": "ready"},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "blue", cfg, server, SSHTarget{Host: "stale.example.test", Port: "2222"}, "/repo-a", time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+	expected, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("claim=%#v exists=%v err=%v", expected, exists, err)
+	}
+
+	updated, err := claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, "blue", cfg, "cluster-a", server, SSHTarget{}, "/repo-b", time.Hour, true, expected, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.RepoRoot != "/repo-b" || updated.ProviderScope != "cluster-a" || updated.SSHHost != "" || updated.SSHPort != 0 {
+		t.Fatalf("updated claim=%#v", updated)
 	}
 }
 

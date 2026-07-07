@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"strings"
 	"testing"
@@ -100,6 +101,104 @@ func TestScalewayAcquireListResolveTouchReleaseLifecycle(t *testing.T) {
 	}
 }
 
+func TestScalewayResolveReadOnlyIgnoresStaleClaim(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_121212121212"
+	slug := "stale-read-only"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	fake.server = testServer("srv-live", core.LeaseProviderName(leaseID, slug), tagsFromLabels(labels), "203.0.113.21")
+	claimServer := core.Server{Provider: providerName, CloudID: "srv-stale", Name: fake.server.Name, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.CloudID != fake.server.ID {
+		t.Fatalf("lease=%#v", lease)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || claim.CloudID != "srv-stale" {
+		t.Fatalf("read-only resolve changed stale claim: claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+}
+
+func TestScalewayNoMutationResolveDoesNotBindAmbiguousRecovery(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_131313131313"
+	slug := "no-mutation-recovery"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["recovery"] = "ambiguous-create"
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-no-mutation"
+	claimServer := core.Server{Provider: providerName, Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	liveLabels := maps.Clone(labels)
+	delete(liveLabels, "recovery")
+	fake.server = testServer("srv-no-mutation", core.LeaseProviderName(leaseID, slug), tagsFromLabels(liveLabels), "203.0.113.22")
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "srv-no-mutation" {
+		t.Fatalf("lease=%#v", lease)
+	}
+	claim, exists, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
+	if claimErr != nil || !exists || claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create" {
+		t.Fatalf("no-mutation resolve changed claim: claim=%#v exists=%t err=%v", claim, exists, claimErr)
+	}
+}
+
+func TestStatusTouchClaimRequiresMatchingProviderIdentity(t *testing.T) {
+	backend := &Backend{}
+	labels := map[string]string{
+		"scaleway_project":      "project-a",
+		"scaleway_organization": "organization-a",
+		"scaleway_zone":         "fr-par-1",
+	}
+	claim := core.LeaseClaim{Labels: maps.Clone(labels)}
+	lease := core.LeaseTarget{Server: core.Server{Labels: maps.Clone(labels)}}
+	if !backend.StatusTouchClaimMatches(lease, claim) {
+		t.Fatal("matching provider identity was rejected")
+	}
+	for _, key := range []string{"scaleway_project", "scaleway_zone"} {
+		mismatched := lease
+		mismatched.Server.Labels = maps.Clone(lease.Server.Labels)
+		mismatched.Server.Labels[key] = "other"
+		if backend.StatusTouchClaimMatches(mismatched, claim) {
+			t.Fatalf("mismatched %s was accepted", key)
+		}
+		missing := claim
+		missing.Labels = maps.Clone(claim.Labels)
+		delete(missing.Labels, key)
+		if backend.StatusTouchClaimMatches(lease, missing) {
+			t.Fatalf("missing claim %s was accepted", key)
+		}
+	}
+	withoutOrganization := claim
+	withoutOrganization.Labels = maps.Clone(claim.Labels)
+	delete(withoutOrganization.Labels, "scaleway_organization")
+	if !backend.StatusTouchClaimMatches(lease, withoutOrganization) {
+		t.Fatal("optional organization was required")
+	}
+	mismatchedOrganization := lease
+	mismatchedOrganization.Server.Labels = maps.Clone(lease.Server.Labels)
+	mismatchedOrganization.Server.Labels["scaleway_organization"] = "other"
+	if backend.StatusTouchClaimMatches(mismatchedOrganization, claim) {
+		t.Fatal("present organization mismatch was accepted")
+	}
+}
+
 func TestScalewayAcquireOnAcquiredErrorRollsBack(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
@@ -178,13 +277,28 @@ func TestScalewayAcquireRejectsUnsupportedPortableOSBeforeDefaultingImage(t *tes
 func TestScalewayCleanupSkipsForeignAndDeletesExpiredOwned(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	now := backend.clockNow()
-	ownedLabels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_owned", "owned", providerName, "", false, now.Add(-3*time.Hour))
+	ownedLabels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_111111111111", "owned", providerName, "", false, now.Add(-3*time.Hour))
 	ownedLabels["scaleway_project"] = "project-1"
 	ownedLabels["scaleway_zone"] = "fr-par-1"
 	ownedLabels["scaleway_ssh_key_id"] = "key-owned"
+	claimlessLabels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_000000000000", "claimless", providerName, "", false, now.Add(-3*time.Hour))
+	claimlessLabels["scaleway_project"] = "project-1"
+	claimlessLabels["scaleway_zone"] = "fr-par-1"
 	fake.servers = []*instance.Server{
+		testServer("srv-claimless", "crabbox-cbx-claimless", tagsFromLabels(claimlessLabels), "203.0.113.10"),
 		testServer("srv-owned", "crabbox-cbx-owned", tagsFromLabels(ownedLabels), "203.0.113.11"),
 		testServer("srv-foreign", "foreign", []string{"crabbox", "crabbox:provider:other"}, "203.0.113.12"),
+	}
+	claimServer := backend.serverFromScaleway(fake.servers[1])
+	if err := core.ClaimLeaseTargetForConfig(
+		"cbx_111111111111",
+		"owned",
+		backend.cfgForRun(),
+		claimServer,
+		core.SSHTarget{},
+		backend.cfgForRun().IdleTimeout,
+	); err != nil {
+		t.Fatal(err)
 	}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("Cleanup: %v", err)
@@ -199,7 +313,7 @@ func TestScalewayCleanupSkipsForeignAndDeletesExpiredOwned(t *testing.T) {
 
 func TestScalewayCleanupRefusesMismatchedProject(t *testing.T) {
 	backend, fake := newTestBackend(t)
-	labels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_bad", "bad", providerName, "", false, backend.clockNow().Add(-3*time.Hour))
+	labels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_abcdefabcdef", "bad", providerName, "", false, backend.clockNow().Add(-3*time.Hour))
 	labels["scaleway_project"] = "other-project"
 	labels["scaleway_zone"] = "fr-par-1"
 	fake.servers = []*instance.Server{testServer("srv-bad", "crabbox-cbx-bad", tagsFromLabels(labels), "203.0.113.13")}
@@ -264,10 +378,10 @@ func TestScalewayAmbiguousSSHKeyCreateReconcilesCleanableKey(t *testing.T) {
 func TestScalewayReleaseOnlyPreservesAmbiguousSlugError(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	cfg := backend.cfgForRun()
-	labelsA := core.DirectLeaseLabels(cfg, "cbx_a", "duplicate", providerName, "", false, backend.clockNow())
+	labelsA := core.DirectLeaseLabels(cfg, "cbx_222222222222", "duplicate", providerName, "", false, backend.clockNow())
 	labelsA["scaleway_project"] = "project-1"
 	labelsA["scaleway_zone"] = "fr-par-1"
-	labelsB := core.DirectLeaseLabels(cfg, "cbx_b", "duplicate", providerName, "", false, backend.clockNow())
+	labelsB := core.DirectLeaseLabels(cfg, "cbx_333333333333", "duplicate", providerName, "", false, backend.clockNow())
 	labelsB["scaleway_project"] = "project-1"
 	labelsB["scaleway_zone"] = "fr-par-1"
 	fake.servers = []*instance.Server{
@@ -275,7 +389,7 @@ func TestScalewayReleaseOnlyPreservesAmbiguousSlugError(t *testing.T) {
 		testServer("srv-b", "duplicate-b", tagsFromLabels(labelsB), "203.0.113.22"),
 	}
 	claimServer := backend.serverFromScaleway(fake.servers[0])
-	if err := core.ClaimLeaseTargetForConfig("cbx_a", "duplicate", cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+	if err := core.ClaimLeaseTargetForConfig("cbx_222222222222", "duplicate", cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "duplicate", ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "matches multiple active leases") {
@@ -284,6 +398,64 @@ func TestScalewayReleaseOnlyPreservesAmbiguousSlugError(t *testing.T) {
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "srv-a", ReleaseOnly: true})
 	if err != nil || lease.Server.CloudID != "srv-a" {
 		t.Fatalf("Resolve exact cloud id lease=%#v err=%v", lease, err)
+	}
+}
+
+func TestScalewayReleaseOnlyDoesNotRetargetForeignExactClaimToSlug(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	const (
+		requestedID = "cbx_222222222222"
+		lookalikeID = "cbx_333333333333"
+	)
+
+	foreignCfg := cfg
+	foreignCfg.Provider = "aws"
+	foreignLabels := core.DirectLeaseLabels(foreignCfg, requestedID, "foreign", "aws", "", false, backend.clockNow())
+	if err := core.ClaimLeaseTargetForConfig(requestedID, "foreign", foreignCfg, core.Server{Provider: "aws", CloudID: "i-foreign", Labels: foreignLabels}, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+
+	labels := core.DirectLeaseLabels(cfg, lookalikeID, requestedID, providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	fake.server = testServer("srv-lookalike", "lookalike", tagsFromLabels(labels), "203.0.113.23")
+	server := backend.serverFromScaleway(fake.server)
+	if err := core.ClaimLeaseTargetForConfig(lookalikeID, requestedID, cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: requestedID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "exact lease identifier") {
+		t.Fatalf("Resolve release-only err=%v", err)
+	}
+	if fake.deletedServer || fake.deletedKey {
+		t.Fatalf("retargeted cleanup deleted server=%t key=%t", fake.deletedServer, fake.deletedKey)
+	}
+}
+
+func TestScalewayReleaseOnlyDoesNotFallBackToCanonicalClaimSlug(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	const (
+		requestedID = "cbx_aaaaaaaaaaaa"
+		lookalikeID = "cbx_bbbbbbbbbbbb"
+	)
+	labels := core.DirectLeaseLabels(cfg, lookalikeID, requestedID, providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	fake.server = testServer("srv-lookalike", "lookalike", tagsFromLabels(labels), "203.0.113.24")
+	server := backend.serverFromScaleway(fake.server)
+	if err := core.ClaimLeaseTargetForConfig(lookalikeID, requestedID, cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: requestedID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "exact lease identifier") {
+		t.Fatalf("Resolve release-only err=%v", err)
+	}
+	if fake.deletedServer || fake.deletedKey {
+		t.Fatalf("retargeted cleanup deleted server=%t key=%t", fake.deletedServer, fake.deletedKey)
 	}
 }
 
@@ -367,43 +539,165 @@ func TestScalewayMissingCreateIdentityPersistsRecoveryClaim(t *testing.T) {
 func TestScalewayReleaseRetainsIdentitylessRecoveryClaim(t *testing.T) {
 	backend, _ := newTestBackend(t)
 	cfg := backend.cfgForRun()
-	labels := core.DirectLeaseLabels(cfg, "cbx_recover", "recover", providerName, "", false, backend.clockNow())
+	labels := core.DirectLeaseLabels(cfg, "cbx_444444444444", "recover", providerName, "", false, backend.clockNow())
 	labels["recovery"] = "ambiguous-create"
 	labels["scaleway_project"] = "project-1"
 	labels["scaleway_zone"] = "fr-par-1"
 	server := core.Server{Provider: providerName, Name: "recover", Labels: labels}
-	if err := core.ClaimLeaseTargetForConfig("cbx_recover", "recover", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+	if err := core.ClaimLeaseTargetForConfig("cbx_444444444444", "recover", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
-	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_recover", Server: server}})
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_444444444444", Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "claim retained") {
 		t.Fatalf("ReleaseLease err=%v", err)
 	}
-	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("cbx_recover", providerName); claimErr != nil || !ok {
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("cbx_444444444444", providerName); claimErr != nil || !ok {
 		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
+	}
+}
+
+func TestScalewayAmbiguousCreateBindsUniqueServerBeforeCleanup(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_454545454545"
+	slug := "recovered"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["recovery"] = "ambiguous-create"
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-recovered"
+	claimServer := core.Server{Provider: providerName, Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	liveLabels := maps.Clone(labels)
+	delete(liveLabels, "recovery")
+	fake.server = testServer("srv-recovered", core.LeaseProviderName(leaseID, slug), tagsFromLabels(liveLabels), "203.0.113.24")
+	fake.deleteKeyErr = errors.New("key cleanup failed")
+
+	err := backend.deleteServer(context.Background(), fake, backend.serverFromScaleway(fake.server))
+	if err == nil || !strings.Contains(err.Error(), "key cleanup failed") {
+		t.Fatalf("deleteServer err=%v", err)
+	}
+	if !fake.deletedServer {
+		t.Fatal("recovered server was not deleted")
+	}
+	claim, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
+	if claimErr != nil || !ok || claim.CloudID != "srv-recovered" || claim.Labels["scaleway_ssh_key_id"] != "key-recovered" {
+		t.Fatalf("bound recovery claim=%#v ok=%t err=%v", claim, ok, claimErr)
+	}
+}
+
+func TestScalewayAmbiguousCreateRefusesDuplicateServers(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_464646464646"
+	slug := "duplicates"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["recovery"] = "ambiguous-create"
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-duplicates"
+	claimServer := core.Server{Provider: providerName, Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	liveLabels := maps.Clone(labels)
+	delete(liveLabels, "recovery")
+	fake.servers = []*instance.Server{
+		testServer("srv-first", core.LeaseProviderName(leaseID, slug), tagsFromLabels(liveLabels), "203.0.113.25"),
+		testServer("srv-second", core.LeaseProviderName(leaseID, slug), tagsFromLabels(liveLabels), "203.0.113.26"),
+	}
+
+	err := backend.deleteServer(context.Background(), fake, backend.serverFromScaleway(fake.servers[0]))
+	if err == nil || !strings.Contains(err.Error(), "found 2 matching servers") {
+		t.Fatalf("deleteServer err=%v", err)
+	}
+	if fake.deletedServer || fake.deletedKey {
+		t.Fatalf("ambiguous cleanup mutated resources: server=%t key=%t", fake.deletedServer, fake.deletedKey)
+	}
+	claim, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
+	if claimErr != nil || !ok || claim.CloudID != "" {
+		t.Fatalf("ambiguous claim=%#v ok=%t err=%v", claim, ok, claimErr)
+	}
+}
+
+func TestScalewayCleanupRefusesChangedLiveSSHKeyIdentity(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	leaseID := "cbx_474747474747"
+	slug := "changed-key"
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-claimed"
+	claimServer := core.Server{Provider: providerName, CloudID: "srv-changed-key", Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	liveLabels := maps.Clone(labels)
+	liveLabels["scaleway_ssh_key_id"] = "key-other"
+	fake.server = testServer("srv-changed-key", core.LeaseProviderName(leaseID, slug), tagsFromLabels(liveLabels), "203.0.113.27")
+
+	err := backend.deleteServer(context.Background(), fake, claimServer)
+	if err == nil || !strings.Contains(err.Error(), "SSH key identity does not match") {
+		t.Fatalf("deleteServer err=%v", err)
+	}
+	if fake.deletedServer || fake.deletedKey {
+		t.Fatalf("changed key cleanup mutated resources: server=%t key=%t", fake.deletedServer, fake.deletedKey)
 	}
 }
 
 func TestScalewayReleaseCleansIdentitylessRollbackKeyClaim(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	cfg := backend.cfgForRun()
-	labels := core.DirectLeaseLabels(cfg, "cbx_key_recover", "key-recover", providerName, "", false, backend.clockNow())
+	labels := core.DirectLeaseLabels(cfg, "cbx_555555555555", "key-recover", providerName, "", false, backend.clockNow())
 	labels["recovery"] = "rollback-key-cleanup"
 	labels["scaleway_project"] = "project-1"
 	labels["scaleway_zone"] = "fr-par-1"
 	labels["scaleway_ssh_key_id"] = "key-recover"
 	server := core.Server{Provider: providerName, Name: "key-recover", Labels: labels}
-	if err := core.ClaimLeaseTargetForConfig("cbx_key_recover", "key-recover", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+	if err := core.ClaimLeaseTargetForConfig("cbx_555555555555", "key-recover", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_key_recover", Server: server}}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_555555555555", Server: server}}); err != nil {
 		t.Fatalf("ReleaseLease: %v", err)
 	}
 	if !fake.deletedKey {
 		t.Fatal("release did not delete the identityless recovery key")
 	}
-	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("cbx_key_recover", providerName); claimErr != nil || ok {
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("cbx_555555555555", providerName); claimErr != nil || ok {
 		t.Fatalf("claim after recovery-key cleanup ok=%t err=%v", ok, claimErr)
+	}
+}
+
+func TestScalewayRejectsKeyOnlyRecoveryClaimForLiveServer(t *testing.T) {
+	for _, recovery := range []string{"ambiguous-key-create", "rollback-key-cleanup", "rollback-cleanup"} {
+		t.Run(recovery, func(t *testing.T) {
+			backend, fake := newTestBackend(t)
+			cfg := backend.cfgForRun()
+			leaseID := "cbx_565656565656"
+			slug := "key-only-live"
+			labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, backend.clockNow())
+			labels["recovery"] = recovery
+			labels["scaleway_project"] = "project-1"
+			labels["scaleway_organization"] = "organization-1"
+			labels["scaleway_zone"] = "fr-par-1"
+			labels["scaleway_ssh_key_id"] = "key-recover"
+			claimServer := core.Server{Provider: providerName, Name: slug, Labels: labels}
+			if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+				t.Fatal(err)
+			}
+			fake.server = testServer("server-live", core.LeaseProviderName(leaseID, slug), tagsFromLabels(labels), "203.0.113.23")
+			server := backend.serverFromScaleway(fake.server)
+			err := backend.deleteServer(context.Background(), fake, server)
+			if err == nil || !strings.Contains(err.Error(), "no server identity or valid recovery state") {
+				t.Fatalf("deleteServer err=%v", err)
+			}
+			if fake.deletedServer || fake.deletedKey {
+				t.Fatalf("key-only recovery mutated live resources: deletedServer=%t deletedKey=%t", fake.deletedServer, fake.deletedKey)
+			}
+		})
 	}
 }
 
@@ -411,21 +705,21 @@ func TestScalewayReleaseCleansClaimAndKeyWhenServerAlreadyDeleted(t *testing.T) 
 	backend, fake := newTestBackend(t)
 	fake.getErr = &scw.ResourceNotFoundError{}
 	cfg := backend.cfgForRun()
-	labels := core.DirectLeaseLabels(cfg, "cbx_gone", "gone", providerName, "", false, backend.clockNow())
+	labels := core.DirectLeaseLabels(cfg, "cbx_666666666666", "gone", providerName, "", false, backend.clockNow())
 	labels["scaleway_project"] = "project-1"
 	labels["scaleway_zone"] = "fr-par-1"
 	labels["scaleway_ssh_key_id"] = "key-gone"
 	server := core.Server{Provider: providerName, CloudID: "srv-gone", Name: "gone", Labels: labels}
-	if err := core.ClaimLeaseTargetForConfig("cbx_gone", "gone", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+	if err := core.ClaimLeaseTargetForConfig("cbx_666666666666", "gone", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_gone", Server: server}}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_666666666666", Server: server}}); err != nil {
 		t.Fatalf("ReleaseLease: %v", err)
 	}
 	if !fake.deletedKey {
 		t.Fatal("release did not delete managed SSH key after server not found")
 	}
-	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("cbx_gone", providerName); claimErr != nil || ok {
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("cbx_666666666666", providerName); claimErr != nil || ok {
 		t.Fatalf("claim after stale release ok=%t err=%v", ok, claimErr)
 	}
 }
@@ -433,16 +727,16 @@ func TestScalewayReleaseCleansClaimAndKeyWhenServerAlreadyDeleted(t *testing.T) 
 func TestScalewayReleaseOnlyRefusesLiveServerWithChangedTags(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	cfg := backend.cfgForRun()
-	labels := core.DirectLeaseLabels(cfg, "cbx_stale", "stale", providerName, "", false, backend.clockNow())
+	labels := core.DirectLeaseLabels(cfg, "cbx_777777777777", "stale", providerName, "", false, backend.clockNow())
 	labels["scaleway_project"] = "project-1"
 	labels["scaleway_zone"] = "fr-par-1"
 	labels["scaleway_ssh_key_id"] = "key-stale"
 	claimServer := core.Server{Provider: providerName, CloudID: "srv-stale", Name: "stale", Labels: labels}
-	if err := core.ClaimLeaseTargetForConfig("cbx_stale", "stale", cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+	if err := core.ClaimLeaseTargetForConfig("cbx_777777777777", "stale", cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
 	fake.server = testServer("srv-stale", "changed", []string{"foreign"}, "203.0.113.20")
-	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_stale", ReleaseOnly: true})
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_777777777777", ReleaseOnly: true})
 	if err == nil || !strings.Contains(err.Error(), "non-Crabbox Scaleway") {
 		t.Fatalf("Resolve release-only err=%v", err)
 	}
@@ -466,7 +760,7 @@ func TestScalewayReleaseLeaseRefusesLiveServerWithChangedTags(t *testing.T) {
 
 func TestScalewayDoctorReportsInventoryAndMissingAuth(t *testing.T) {
 	backend, fake := newTestBackend(t)
-	labels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_doc", "doc", providerName, "", false, backend.clockNow())
+	labels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_888888888888", "doc", providerName, "", false, backend.clockNow())
 	labels["scaleway_project"] = "project-1"
 	labels["scaleway_zone"] = "fr-par-1"
 	fake.servers = []*instance.Server{testServer("srv-doc", "crabbox-cbx-doc", tagsFromLabels(labels), "203.0.113.14")}

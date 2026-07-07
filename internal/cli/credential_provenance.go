@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -18,62 +21,94 @@ const (
 )
 
 type credentialDestinationProvenance struct {
-	coordinator         credentialValueSource
-	coordToken          credentialValueSource
-	coordTokenCommand   credentialValueSource
-	coordAdminToken     credentialValueSource
-	accessClientID      credentialValueSource
-	accessClientSecret  credentialValueSource
-	accessToken         credentialValueSource
-	azSessionsEndpoint  credentialValueSource
-	proxmoxAPIURL       credentialValueSource
-	proxmoxTokenID      credentialValueSource
-	proxmoxTokenSecret  credentialValueSource
-	proxmoxInsecureTLS  credentialValueSource
-	morphAPIURL         credentialValueSource
-	morphAPIKey         credentialValueSource
-	morphSSHGatewayHost credentialValueSource
-	daytonaAPIURL       credentialValueSource
-	daytonaAPIKey       credentialValueSource
-	daytonaJWTToken     credentialValueSource
-	daytonaSSHGateway   credentialValueSource
-	e2bAPIURL           credentialValueSource
-	e2bDomain           credentialValueSource
-	e2bAPIKey           credentialValueSource
-	railwayAPIURL       credentialValueSource
-	railwayAPIToken     credentialValueSource
-	fastAPICloudAPIURL  credentialValueSource
-	fastAPICloudToken   credentialValueSource
-	runpodAPIURL        credentialValueSource
-	runpodAPIKey        credentialValueSource
-	vastAPIURL          credentialValueSource
-	vastAPIKey          credentialValueSource
-	isloBaseURL         credentialValueSource
-	isloAPIKey          credentialValueSource
-	tenkiEndpoint       credentialValueSource
-	tenkiGateway        credentialValueSource
-	tensorlakeAPIURL    credentialValueSource
-	tensorlakeAPIKey    credentialValueSource
-	upstashBoxBaseURL   credentialValueSource
-	upstashBoxAPIKey    credentialValueSource
-	smolvmBaseURL       credentialValueSource
-	smolvmAPIKey        credentialValueSource
-	asciiBoxBaseURL     credentialValueSource
-	asciiBoxAPIKey      credentialValueSource
-	cloudflareAPIURL    credentialValueSource
-	cloudflareToken     credentialValueSource
-	nomadAddress        credentialValueSource
-	nomadTokenEnv       credentialValueSource
-	semaphoreHost       credentialValueSource
-	semaphoreToken      credentialValueSource
-	spritesAPIURL       credentialValueSource
-	spritesToken        credentialValueSource
-	parallelsHost       credentialValueSource
-	parallelsHostKey    credentialValueSource
-	staticHost          credentialValueSource
-	sshKey              credentialValueSource
-	exeDevControlHost   credentialValueSource
-	repositoryRoot      string
+	coordinator           credentialValueSource
+	coordToken            credentialValueSource
+	coordTokenCommand     credentialValueSource
+	coordAdminToken       credentialValueSource
+	accessClientID        credentialValueSource
+	accessClientSecret    credentialValueSource
+	accessToken           credentialValueSource
+	azSessionsEndpoint    credentialValueSource
+	proxmoxAPIURL         credentialValueSource
+	proxmoxTokenID        credentialValueSource
+	proxmoxTokenSecret    credentialValueSource
+	proxmoxInsecureTLS    credentialValueSource
+	morphAPIURL           credentialValueSource
+	morphAPIKey           credentialValueSource
+	morphSSHGatewayHost   credentialValueSource
+	daytonaAPIURL         credentialValueSource
+	daytonaAPIKey         credentialValueSource
+	daytonaJWTToken       credentialValueSource
+	daytonaSSHGateway     credentialValueSource
+	e2bAPIURL             credentialValueSource
+	e2bDomain             credentialValueSource
+	e2bAPIKey             credentialValueSource
+	cubeSandboxAPIURL     credentialValueSource
+	cubeSandboxDomain     credentialValueSource
+	cubeSandboxProxyNode  credentialValueSource
+	cubeSandboxProxyPort  credentialValueSource
+	cubeSandboxProxyProto credentialValueSource
+	railwayAPIURL         credentialValueSource
+	railwayAPIToken       credentialValueSource
+	fastAPICloudAPIURL    credentialValueSource
+	fastAPICloudToken     credentialValueSource
+	runpodAPIURL          credentialValueSource
+	runpodAPIKey          credentialValueSource
+	vastAPIURL            credentialValueSource
+	vastAPIKey            credentialValueSource
+	isloBaseURL           credentialValueSource
+	isloAPIKey            credentialValueSource
+	tenkiEndpoint         credentialValueSource
+	tenkiGateway          credentialValueSource
+	tensorlakeAPIURL      credentialValueSource
+	tensorlakeAPIKey      credentialValueSource
+	upstashBoxBaseURL     credentialValueSource
+	upstashBoxAPIKey      credentialValueSource
+	smolvmBaseURL         credentialValueSource
+	smolvmAPIKey          credentialValueSource
+	asciiBoxBaseURL       credentialValueSource
+	asciiBoxAPIKey        credentialValueSource
+	cloudflareAPIURL      credentialValueSource
+	cloudflareToken       credentialValueSource
+	nomadAddress          credentialValueSource
+	nomadTokenEnv         credentialValueSource
+	semaphoreHost         credentialValueSource
+	semaphoreToken        credentialValueSource
+	spritesAPIURL         credentialValueSource
+	spritesToken          credentialValueSource
+	parallelsHost         credentialValueSource
+	parallelsHostKey      credentialValueSource
+	staticHost            credentialValueSource
+	sshKey                credentialValueSource
+	exeDevControlHost     credentialValueSource
+	externalConfig        credentialValueSource
+	externalLifecycle     credentialValueSource
+	externalConnection    credentialValueSource
+	externalResource      credentialValueSource
+	externalSSHConnection credentialValueSource
+	externalSSHHost       credentialValueSource
+	externalSSHProxy      credentialValueSource
+	externalSSHAllowEnv   credentialValueSource
+	externalSSHOutput     credentialValueSource
+	externalRouting       credentialValueSource
+	externalApproved      externalCredentialApproval
+	externalArgvApproval  externalLifecycleCredentialApproval
+	repositoryRoot        string
+}
+
+type externalCredentialApproval struct {
+	resource       string
+	host           string
+	proxy          string
+	allowEnv       bool
+	envSSH         ExternalSSHConnectionConfig
+	providerOutput bool
+	outputContract [32]byte
+}
+
+type externalLifecycleCredentialApproval struct {
+	configArgv bool
+	contract   [32]byte
 }
 
 type sourcedCredential struct {
@@ -86,6 +121,16 @@ func credentialSourceForFile(trusted bool) credentialValueSource {
 		return credentialSourceTrustedFile
 	}
 	return credentialSourceRepository
+}
+
+func credentialDestinationSource(value, approved string, source credentialValueSource) credentialValueSource {
+	if strings.TrimSpace(value) == "" {
+		return credentialSourceUnknown
+	}
+	if source == credentialSourceRepository && approved != "" && value == approved {
+		return credentialSourceTrustedFile
+	}
+	return source
 }
 
 func firstNonEmptyEnv(names ...string) (string, bool) {
@@ -129,6 +174,21 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "e2b-domain") {
 		provenance.e2bDomain = credentialSourceFlag
+	}
+	if flagWasSet(fs, "cubesandbox-api-url") {
+		provenance.cubeSandboxAPIURL = credentialSourceFlag
+	}
+	if flagWasSet(fs, "cubesandbox-domain") {
+		provenance.cubeSandboxDomain = credentialSourceFlag
+	}
+	if flagWasSet(fs, "cubesandbox-proxy-node-ip") {
+		provenance.cubeSandboxProxyNode = credentialSourceFlag
+	}
+	if flagWasSet(fs, "cubesandbox-proxy-port-http") {
+		provenance.cubeSandboxProxyPort = credentialSourceFlag
+	}
+	if flagWasSet(fs, "cubesandbox-proxy-scheme") {
+		provenance.cubeSandboxProxyProto = credentialSourceFlag
 	}
 	if flagWasSet(fs, "railway-url") {
 		provenance.railwayAPIURL = credentialSourceFlag
@@ -192,6 +252,12 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "exe-dev-control-host") {
 		provenance.exeDevControlHost = credentialSourceFlag
+	}
+	if flagWasSet(fs, "external-routing-file") {
+		provenance.externalRouting = credentialSourceFlag
+	}
+	if flagWasSet(fs, "external-config-json") {
+		provenance.externalConfig = credentialSourceFlag
 	}
 }
 
@@ -263,6 +329,22 @@ func validateProviderCredentialDestination(cfg Config) error {
 		}
 		if provenance.e2bDomain == credentialSourceRepository && inheritedCredential(credentials...) {
 			return repositoryCredentialDestinationError("e2b", "e2b.domain", "CRABBOX_E2B_DOMAIN or --e2b-domain")
+		}
+	case "cubesandbox":
+		if provenance.cubeSandboxAPIURL == credentialSourceRepository {
+			return repositoryCubeSandboxDestinationError("cubeSandbox.apiUrl", "CRABBOX_CUBESANDBOX_API_URL or --cubesandbox-api-url")
+		}
+		if provenance.cubeSandboxDomain == credentialSourceRepository {
+			return repositoryCubeSandboxDestinationError("cubeSandbox.domain", "CRABBOX_CUBESANDBOX_DOMAIN or --cubesandbox-domain")
+		}
+		if provenance.cubeSandboxProxyNode == credentialSourceRepository {
+			return repositoryCubeSandboxDestinationError("cubeSandbox.proxyNodeIp", "CRABBOX_CUBESANDBOX_PROXY_NODE_IP")
+		}
+		if provenance.cubeSandboxProxyPort == credentialSourceRepository {
+			return repositoryCubeSandboxDestinationError("cubeSandbox.proxyPortHttp", "CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP")
+		}
+		if provenance.cubeSandboxProxyProto == credentialSourceRepository {
+			return repositoryCubeSandboxDestinationError("cubeSandbox.proxyScheme", "CRABBOX_CUBESANDBOX_PROXY_SCHEME")
 		}
 	case "railway":
 		if provenance.railwayAPIURL == credentialSourceRepository &&
@@ -346,8 +428,392 @@ func validateProviderCredentialDestination(cfg Config) error {
 		if provenance.exeDevControlHost == credentialSourceRepository {
 			return repositoryCredentialDestinationError("exe-dev", "exeDev.controlHost", "CRABBOX_EXE_DEV_CONTROL_HOST or --exe-dev-control-host")
 		}
+	case "external":
+		if cfg.External.Connection.SSH.TrustProviderOutput && provenance.externalSSHOutput == credentialSourceRepository {
+			return repositoryCredentialDestinationError("external", "external.connection.ssh.trustProviderOutput", "the same provider-output contract in trusted user config")
+		}
+		if !externalDeclarativeLifecycleConfigured(cfg.External) {
+			break
+		}
+		if externalConfigIsInherited(cfg.External, provenance.externalConfig) {
+			repositoryLifecycle := provenance.externalLifecycle == credentialSourceRepository
+			repositoryResource := provenance.externalResource == credentialSourceRepository
+			repositoryCloudID := provenance.externalConnection == credentialSourceRepository
+			for _, configArgv := range externalLifecycleConfigArgvSurfaces(
+				cfg.External,
+				repositoryLifecycle,
+				repositoryLifecycle || repositoryResource,
+				repositoryLifecycle || repositoryCloudID,
+			) {
+				field := "external.lifecycle." + configArgv.operation + "." + configArgv.surface
+				if !repositoryLifecycle {
+					field = "external.connection template feeding " + field
+				}
+				override := "external.lifecycle." + configArgv.operation + ".allowConfigArgv in the same lifecycle contract in trusted user config"
+				if !configArgv.allowed || !externalLifecycleConfigArgvApproved(cfg.External, provenance.externalArgvApproval) {
+					return repositoryCredentialDestinationError("external", field, override)
+				}
+			}
+		}
+		if cfg.External.Connection.SSH.AllowEnv && provenance.externalSSHAllowEnv == credentialSourceRepository {
+			return repositoryCredentialDestinationError("external", "external.connection.ssh.allowEnv", "the same opt-in in trusted user config")
+		}
+		resourceSource := externalTemplateCredentialSource(
+			cfg.External.Connection.ResourceName,
+			provenance.externalResource,
+			credentialSourceUnknown,
+			provenance.externalConfig,
+		)
+		hostSource := provenance.externalSSHHost
+		if strings.TrimSpace(cfg.External.Connection.SSH.Host) == "" {
+			hostSource = resourceSource
+		} else {
+			hostSource = externalTemplateCredentialSource(
+				cfg.External.Connection.SSH.Host, hostSource, resourceSource, provenance.externalConfig,
+			)
+		}
+		proxySource := externalTemplateCredentialSource(
+			cfg.External.Connection.SSH.ProxyCommand,
+			provenance.externalSSHProxy,
+			resourceSource,
+			provenance.externalConfig,
+		)
+		if proxySource == credentialSourceRepository {
+			return repositoryCredentialDestinationError("external", "external.connection.ssh.proxyCommand", "the same proxy command in trusted user config")
+		}
+		if hostSource == credentialSourceRepository {
+			return repositoryCredentialDestinationError("external", "external.connection.ssh.host", "the same destination in trusted user config")
+		}
+		if externalSSHEndpointUsesRepositoryInput(
+			cfg.External.Connection,
+			provenance.externalApproved,
+			provenance.externalSSHConnection,
+			resourceSource,
+			provenance.externalConfig,
+		) {
+			return repositoryCredentialDestinationError("external", "external.connection.ssh endpoint", "trusted endpoint templates and trusted template inputs")
+		}
+		if provenance.externalSSHConnection == credentialSourceRepository &&
+			!externalSSHEndpointApprovalMatches(cfg.External.Connection, provenance.externalApproved) {
+			return repositoryCredentialDestinationError("external", "external.connection.ssh endpoint", "the same user, host, key, port, fallback ports, and proxy settings in trusted user config")
+		}
 	}
 	return nil
+}
+
+// ValidateProviderCredentialDestination enforces source-bound credential
+// routing for provider entry points that can load configuration after the
+// normal CLI validation phase.
+func ValidateProviderCredentialDestination(cfg Config) error {
+	return validateProviderCredentialDestination(cfg)
+}
+
+// ValidateExternalProviderSSHOutput requires a trusted, source-bound contract
+// before adapter output may supply SSH coordinates directly.
+func ValidateExternalProviderSSHOutput(cfg Config) error {
+	if !cfg.External.Connection.SSH.TrustProviderOutput {
+		return exit(2, "external provider SSH output requires external.connection.ssh.trustProviderOutput in trusted user config")
+	}
+	if cfg.credentialProvenance.externalSSHOutput == credentialSourceRepository {
+		return repositoryCredentialDestinationError("external", "external.connection.ssh.trustProviderOutput", "the same provider-output contract in trusted user config")
+	}
+	return nil
+}
+
+func externalTemplateCredentialSource(value string, source, resourceSource, configSource credentialValueSource) credentialValueSource {
+	if strings.Contains(value, "{{repo.") {
+		return credentialSourceRepository
+	}
+	if configSource == credentialSourceRepository && strings.Contains(value, "{{config.") {
+		return credentialSourceRepository
+	}
+	if resourceSource == credentialSourceRepository && strings.Contains(value, "{{resourceName}}") {
+		return credentialSourceRepository
+	}
+	return source
+}
+
+func externalDeclarativeLifecycleConfigured(cfg ExternalConfig) bool {
+	return len(cfg.Lifecycle.Acquire.Argv) > 0 || len(cfg.Lifecycle.Acquire.Steps) > 0
+}
+
+func externalConfigIsInherited(cfg ExternalConfig, source credentialValueSource) bool {
+	if len(cfg.Config) == 0 {
+		return false
+	}
+	if source != credentialSourceUnknown && source != credentialSourceRepository {
+		return true
+	}
+	return cfg.routingLoaded && source == credentialSourceRepository
+}
+
+func externalLifecycleAllowsConfigArgv(cfg ExternalLifecycleConfig) bool {
+	for _, operation := range externalLifecycleOperations(cfg) {
+		if operation.operation.AllowConfigArgv {
+			return true
+		}
+	}
+	return false
+}
+
+func externalLifecycleContract(cfg ExternalConfig) ([32]byte, bool) {
+	contract := struct {
+		Lifecycle    ExternalLifecycleConfig `json:"lifecycle"`
+		ResourceName string                  `json:"resourceName"`
+		CloudID      string                  `json:"cloudId"`
+	}{
+		Lifecycle:    cfg.Lifecycle,
+		ResourceName: cfg.Connection.ResourceName,
+		CloudID:      cfg.Connection.CloudID,
+	}
+	data, err := json.Marshal(contract)
+	if err != nil {
+		return [32]byte{}, false
+	}
+	return sha256.Sum256(data), true
+}
+
+func externalLifecycleConfigArgvApproved(cfg ExternalConfig, approval externalLifecycleCredentialApproval) bool {
+	if !approval.configArgv {
+		return false
+	}
+	contract, ok := externalLifecycleContract(cfg)
+	return ok && contract == approval.contract
+}
+
+type namedExternalLifecycleOperation struct {
+	name      string
+	operation ExternalLifecycleOperation
+}
+
+func externalLifecycleOperations(cfg ExternalLifecycleConfig) []namedExternalLifecycleOperation {
+	return []namedExternalLifecycleOperation{
+		{name: "doctor", operation: cfg.Doctor},
+		{name: "acquire", operation: cfg.Acquire},
+		{name: "resolve", operation: cfg.Resolve},
+		{name: "list", operation: cfg.List},
+		{name: "release", operation: cfg.Release},
+		{name: "touch", operation: cfg.Touch},
+		{name: "cleanup", operation: cfg.Cleanup},
+	}
+}
+
+type externalLifecycleConfigArgvSurface struct {
+	operation string
+	surface   string
+	allowed   bool
+}
+
+func externalLifecycleConfigArgvSurfaces(
+	cfg ExternalConfig,
+	directConfig bool,
+	resourceNameConfig bool,
+	cloudIDConfig bool,
+) []externalLifecycleConfigArgvSurface {
+	resourceNameUsesConfig := resourceNameConfig && strings.Contains(cfg.Connection.ResourceName, "{{config.")
+	cloudIDUsesConfig := cloudIDConfig && strings.Contains(cfg.Connection.CloudID, "{{config.")
+	var surfaces []externalLifecycleConfigArgvSurface
+	for _, named := range externalLifecycleOperations(cfg.Lifecycle) {
+		if externalLifecycleArgsUseConfig(named.operation.Argv, directConfig, resourceNameUsesConfig, cloudIDUsesConfig) {
+			surfaces = append(surfaces, externalLifecycleConfigArgvSurface{
+				operation: named.name,
+				surface:   "argv",
+				allowed:   named.operation.AllowConfigArgv,
+			})
+		}
+		for _, step := range named.operation.Steps {
+			if externalLifecycleArgsUseConfig(step, directConfig, resourceNameUsesConfig, cloudIDUsesConfig) {
+				surfaces = append(surfaces, externalLifecycleConfigArgvSurface{
+					operation: named.name,
+					surface:   "steps",
+					allowed:   named.operation.AllowConfigArgv,
+				})
+				break
+			}
+		}
+	}
+	return surfaces
+}
+
+func externalLifecycleArgsUseConfig(argv []string, directConfig, resourceNameUsesConfig, cloudIDUsesConfig bool) bool {
+	for _, value := range argv {
+		if directConfig && strings.Contains(value, "{{config.") ||
+			resourceNameUsesConfig && strings.Contains(value, "{{resourceName}}") ||
+			cloudIDUsesConfig && strings.Contains(value, "{{cloudId}}") {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkExternalRoutingCredentialSources applies the routing file's trust source
+// to connection values after the External provider loads that private state.
+// An unknown source is reserved for claim-bound automatic routing.
+func MarkExternalRoutingCredentialSources(cfg *Config) {
+	source := cfg.credentialProvenance.externalRouting
+	if source == credentialSourceUnknown {
+		source = credentialSourceTrustedFile
+	}
+	connection := cfg.External.Connection
+	provenance := &cfg.credentialProvenance
+	provenance.externalConfig = source
+	provenance.externalLifecycle = source
+	provenance.externalConnection = source
+	provenance.externalResource = credentialDestinationSource(connection.ResourceName, provenance.externalApproved.resource, source)
+	provenance.externalSSHConnection = source
+	provenance.externalSSHHost = credentialDestinationSource(connection.SSH.Host, provenance.externalApproved.host, source)
+	provenance.externalSSHProxy = credentialDestinationSource(connection.SSH.ProxyCommand, provenance.externalApproved.proxy, source)
+	provenance.externalSSHAllowEnv = credentialSourceForBool(connection.SSH.AllowEnv, source)
+	if source == credentialSourceRepository && connection.SSH.AllowEnv && provenance.externalApproved.allowEnv &&
+		externalSSHEnvApprovalMatches(connection, provenance.externalApproved) {
+		provenance.externalSSHAllowEnv = credentialSourceTrustedFile
+	}
+	provenance.externalSSHOutput = credentialSourceForBool(connection.SSH.TrustProviderOutput, source)
+	outputContract, outputContractOK := externalProviderOutputContract(cfg.External)
+	if source == credentialSourceRepository && connection.SSH.TrustProviderOutput && provenance.externalApproved.providerOutput &&
+		outputContractOK && outputContract == provenance.externalApproved.outputContract {
+		provenance.externalSSHOutput = credentialSourceTrustedFile
+	}
+}
+
+// MarkExternalRoutingFileExplicit records an operator-selected routing path
+// before the External provider loads it during flag application.
+func MarkExternalRoutingFileExplicit(cfg *Config) {
+	cfg.credentialProvenance.externalRouting = credentialSourceFlag
+}
+
+// MarkExternalProviderOutputFlagExplicit records that an operator changed the
+// adapter contract through a trusted flag.
+func MarkExternalProviderOutputFlagExplicit(cfg *Config) {
+	markExternalProviderOutputExplicit(cfg, credentialSourceFlag)
+}
+
+func markExternalProviderOutputExplicit(cfg *Config, source credentialValueSource) {
+	if cfg.External.Connection.SSH.TrustProviderOutput && cfg.credentialProvenance.externalSSHOutput != credentialSourceRepository {
+		cfg.credentialProvenance.externalSSHOutput = source
+	}
+}
+
+func credentialSourceForBool(value bool, source credentialValueSource) credentialValueSource {
+	if !value {
+		return credentialSourceUnknown
+	}
+	return source
+}
+
+func externalSSHEnvTemplatesMatch(left, right ExternalSSHConnectionConfig) bool {
+	return left.User == right.User &&
+		left.Host == right.Host &&
+		left.Key == right.Key &&
+		left.Port == right.Port &&
+		slices.Equal(left.FallbackPorts, right.FallbackPorts) &&
+		left.ReadyCheck == right.ReadyCheck &&
+		left.ProxyCommand == right.ProxyCommand
+}
+
+func externalSSHEnvApprovalMatches(connection ExternalConnectionConfig, approval externalCredentialApproval) bool {
+	if !externalSSHEnvTemplatesMatch(connection.SSH, approval.envSSH) {
+		return false
+	}
+	if externalSSHReferencesResourceName(connection.SSH) && connection.ResourceName != approval.resource {
+		return false
+	}
+	return true
+}
+
+func externalSSHEndpointApprovalMatches(connection ExternalConnectionConfig, approval externalCredentialApproval) bool {
+	ssh := connection.SSH
+	approved := approval.envSSH
+	if ssh.User != approved.User ||
+		ssh.Host != approved.Host ||
+		ssh.Key != approved.Key ||
+		ssh.Port != approved.Port ||
+		!slices.Equal(ssh.FallbackPorts, approved.FallbackPorts) ||
+		ssh.AuthSecret != approved.AuthSecret ||
+		ssh.NoControlMaster != approved.NoControlMaster ||
+		ssh.SSHConfigProxy != approved.SSHConfigProxy ||
+		ssh.ProxyCommand != approved.ProxyCommand {
+		return false
+	}
+	if externalSSHEndpointReferencesResourceName(ssh) && connection.ResourceName != approval.resource {
+		return false
+	}
+	return true
+}
+
+func externalSSHEndpointUsesRepositoryInput(
+	connection ExternalConnectionConfig,
+	approval externalCredentialApproval,
+	connectionSource, resourceSource, configSource credentialValueSource,
+) bool {
+	ssh := connection.SSH
+	approved := approval.envSSH
+	for _, field := range []struct {
+		value    string
+		approved string
+	}{
+		{ssh.User, approved.User},
+		{ssh.Key, approved.Key},
+		{ssh.Port, approved.Port},
+	} {
+		source := credentialDestinationSource(field.value, field.approved, connectionSource)
+		if externalTemplateCredentialSource(field.value, source, resourceSource, configSource) == credentialSourceRepository {
+			return true
+		}
+	}
+	fallbackSource := connectionSource
+	if fallbackSource == credentialSourceRepository && slices.Equal(ssh.FallbackPorts, approved.FallbackPorts) {
+		fallbackSource = credentialSourceTrustedFile
+	}
+	for _, value := range ssh.FallbackPorts {
+		if externalTemplateCredentialSource(value, fallbackSource, resourceSource, configSource) == credentialSourceRepository {
+			return true
+		}
+	}
+	return false
+}
+
+func externalSSHEndpointReferencesResourceName(ssh ExternalSSHConnectionConfig) bool {
+	values := []string{ssh.User, ssh.Host, ssh.Key, ssh.Port, ssh.ProxyCommand}
+	values = append(values, ssh.FallbackPorts...)
+	for _, value := range values {
+		if strings.Contains(value, "{{resourceName}}") {
+			return true
+		}
+	}
+	return false
+}
+
+func externalSSHReferencesResourceName(ssh ExternalSSHConnectionConfig) bool {
+	values := []string{ssh.User, ssh.Host, ssh.Key, ssh.Port, ssh.ReadyCheck, ssh.ProxyCommand}
+	values = append(values, ssh.FallbackPorts...)
+	for _, value := range values {
+		if strings.Contains(value, "{{resourceName}}") {
+			return true
+		}
+	}
+	return false
+}
+
+func externalProviderOutputContract(cfg ExternalConfig) ([32]byte, bool) {
+	contract := struct {
+		Command    string                   `json:"command,omitempty"`
+		Args       []string                 `json:"args,omitempty"`
+		Config     map[string]any           `json:"config,omitempty"`
+		Lifecycle  ExternalLifecycleConfig  `json:"lifecycle,omitempty"`
+		Connection ExternalConnectionConfig `json:"connection,omitempty"`
+	}{
+		Command:    cfg.Command,
+		Args:       cfg.Args,
+		Config:     cfg.Config,
+		Lifecycle:  cfg.Lifecycle,
+		Connection: cfg.Connection,
+	}
+	data, err := json.Marshal(contract)
+	if err != nil {
+		return [32]byte{}, false
+	}
+	return sha256.Sum256(data), true
 }
 
 // ValidateNativeCredentialDestination is called only when a provider is about
@@ -425,4 +891,8 @@ func nomadSelectedTokenEnvHasValue(cfg Config) bool {
 
 func repositoryCredentialDestinationError(provider, field, override string) error {
 	return exit(2, "provider=%s refuses repository-configured %s with inherited credentials; set %s to explicitly approve the credential destination", provider, field, override)
+}
+
+func repositoryCubeSandboxDestinationError(field, override string) error {
+	return exit(2, "provider=cubesandbox refuses repository-configured %s because CubeSandbox routes receive ephemeral credentials and workspace data; set %s to explicitly approve the destination", field, override)
 }

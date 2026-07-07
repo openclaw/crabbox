@@ -73,7 +73,7 @@ func TestPrewarmPostWarmupFailuresReleaseSSHLease(t *testing.T) {
 			var stderr bytes.Buffer
 			app := App{Stdout: io.Discard, Stderr: &stderr}
 
-			err := app.runPrewarmPostWarmupStep(ctx, backend, Config{Provider: "prewarm-cleanup-test"}, "cbx_abcdef123456", stage, func() error {
+			err := app.runPrewarmPostWarmupStep(ctx, backend, Config{Provider: "prewarm-cleanup-test"}, LeaseTarget{LeaseID: "cbx_abcdef123456"}, stage, func() error {
 				return cause
 			})
 
@@ -104,10 +104,29 @@ func TestPrewarmPostWarmupFailuresReleaseSSHLease(t *testing.T) {
 func TestPrewarmSuccessfulStepDoesNotReleaseLease(t *testing.T) {
 	backend := &prewarmCleanupTestBackend{}
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).runPrewarmPostWarmupStep(
-		context.Background(), backend, Config{Provider: "prewarm-cleanup-test"}, "cbx_abcdef123456", "probe", func() error { return nil },
+		context.Background(), backend, Config{Provider: "prewarm-cleanup-test"}, LeaseTarget{LeaseID: "cbx_abcdef123456"}, "probe", func() error { return nil },
 	)
 	if err != nil || backend.resolveCalls != 0 || backend.releaseCalls != 0 {
 		t.Fatalf("successful step err=%v resolve=%d release=%d", err, backend.resolveCalls, backend.releaseCalls)
+	}
+}
+
+func TestPrewarmGuardedCleanupUsesAcquiredLeaseFence(t *testing.T) {
+	base := &warmupFailureReleaseBackend{}
+	backend := &ownershipChangedReleaseBackend{warmupFailureReleaseBackend: base}
+	cause := errors.New("probe failed")
+	var stderr bytes.Buffer
+	err := (App{Stdout: io.Discard, Stderr: &stderr}).runPrewarmPostWarmupStep(
+		context.Background(), backend, Config{Provider: "exe-dev"}, LeaseTarget{LeaseID: "cbx_abcdef123456"}, "probe", func() error { return cause },
+	)
+	if !errors.Is(err, cause) {
+		t.Fatalf("step error=%v, want %v", err, cause)
+	}
+	if base.resolves != 0 || base.releases != 0 {
+		t.Fatalf("guarded cleanup resolves=%d releases=%d, want ownership-fenced stop", base.resolves, base.releases)
+	}
+	if !strings.Contains(stderr.String(), "release lease ownership changed") {
+		t.Fatalf("stderr missing ownership fence:\n%s", stderr.String())
 	}
 }
 
@@ -124,7 +143,7 @@ func TestPrewarmCleanupFailurePrintsStopCommand(t *testing.T) {
 			var stderr bytes.Buffer
 			cause := errors.New("hydrate failed")
 			err := (App{Stdout: io.Discard, Stderr: &stderr}).runPrewarmPostWarmupStep(
-				context.Background(), tc.backend, Config{Provider: "prewarm-cleanup-test"}, "cbx_abcdef123456", "actions hydration", func() error { return cause },
+				context.Background(), tc.backend, Config{Provider: "prewarm-cleanup-test"}, LeaseTarget{LeaseID: "cbx_abcdef123456"}, "actions hydration", func() error { return cause },
 			)
 			if !errors.Is(err, cause) {
 				t.Fatalf("step error=%v, want %v", err, cause)
@@ -142,7 +161,7 @@ func TestPrewarmFailureDoesNotReleaseDelegatedProvider(t *testing.T) {
 	cause := errors.New("delegated step failed")
 	var stderr bytes.Buffer
 	err := (App{Stdout: io.Discard, Stderr: &stderr}).runPrewarmPostWarmupStep(
-		context.Background(), prewarmDelegatedTestBackend{}, Config{Provider: "prewarm-delegated-test"}, "run_abcdef123456", "probe", func() error { return cause },
+		context.Background(), prewarmDelegatedTestBackend{}, Config{Provider: "prewarm-delegated-test"}, LeaseTarget{LeaseID: "run_abcdef123456"}, "probe", func() error { return cause },
 	)
 	if !errors.Is(err, cause) {
 		t.Fatalf("step error=%v, want %v", err, cause)
@@ -181,7 +200,7 @@ func TestPrewarmCoordinatorCleanupReleasesByIDWhenResolveFails(t *testing.T) {
 	var stderr bytes.Buffer
 	cause := errors.New("probe failed")
 	err = (App{Stdout: io.Discard, Stderr: &stderr}).runPrewarmPostWarmupStep(
-		context.Background(), backend, cfg, "cbx_abcdef123456", "probe", func() error { return cause },
+		context.Background(), backend, cfg, LeaseTarget{LeaseID: "cbx_abcdef123456"}, "probe", func() error { return cause },
 	)
 	if !errors.Is(err, cause) {
 		t.Fatalf("step error=%v, want %v", err, cause)
@@ -307,6 +326,17 @@ func TestPrewarmDryRunKeepsLocalContainerVolumeOnWarmupOnly(t *testing.T) {
 	}
 	if strings.Contains(lines[1], "--local-container-volume") || !strings.Contains(lines[1], "--id '<lease>'") {
 		t.Fatalf("probe plan should reuse the mounted lease without forwarding the creation-only flag:\n%s", stdout.String())
+	}
+}
+
+func TestPrewarmFollowupDoesNotForwardReclaim(t *testing.T) {
+	args := prewarmProviderPassthroughArgs([]string{"--provider", "exe-dev", "--reclaim", "--exe-dev-control-host", "user@exe.dev"}, defaultConfig())
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--reclaim") {
+		t.Fatalf("follow-up args forwarded ownership transfer: %v", args)
+	}
+	if !strings.Contains(joined, "--exe-dev-control-host user@exe.dev") {
+		t.Fatalf("follow-up args lost provider routing: %v", args)
 	}
 }
 

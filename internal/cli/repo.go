@@ -142,7 +142,22 @@ func syncIncludes(cfg Config) []string {
 }
 
 func syncGitSeedEnabled(cfg Config, repo Repo) bool {
-	return cfg.Sync.GitSeed && len(syncIncludes(cfg)) == 0 && remoteGitSeedCandidate(repo)
+	enabled, _ := syncGitSeedDecision(cfg, repo)
+	return enabled
+}
+
+func syncGitSeedDecision(cfg Config, repo Repo) (enabled, credentialBlocked bool) {
+	if !cfg.Sync.GitSeed || len(syncIncludes(cfg)) != 0 || !remoteGitSeedSourceCandidate(repo) {
+		return false, false
+	}
+	if gitRemoteURLHasCredentials(repo.RemoteURL) {
+		return false, true
+	}
+	return true, false
+}
+
+func warnCredentialBearingGitSeed(w io.Writer) {
+	fmt.Fprintln(w, "warning: git seed disabled because origin URL contains embedded HTTP credentials; continuing with file sync without forwarding the remote URL")
 }
 
 func SyncExcludes(root string, cfg Config) ([]string, error) {
@@ -223,10 +238,36 @@ func gitOutput(root string, args ...string) string {
 }
 
 func remoteGitSeedCandidate(repo Repo) bool {
+	return remoteGitSeedSourceCandidate(repo) && !gitRemoteURLHasCredentials(repo.RemoteURL)
+}
+
+func remoteGitSeedSourceCandidate(repo Repo) bool {
 	if repo.Root == "" || repo.RemoteURL == "" || repo.Head == "" {
 		return false
 	}
 	return gitOutput(repo.Root, "for-each-ref", "--contains", repo.Head, "--format=%(refname)", "refs/remotes") != ""
+}
+
+func gitRemoteURLHasCredentials(remoteURL string) bool {
+	raw := strings.TrimSpace(remoteURL)
+	lower := strings.ToLower(raw)
+	schemeEnd := 0
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		schemeEnd = len("https://")
+	case strings.HasPrefix(lower, "http://"):
+		schemeEnd = len("http://")
+	default:
+		return false
+	}
+	if parsed, err := url.Parse(raw); err == nil && parsed.User != nil {
+		return true
+	}
+	authority := raw[schemeEnd:]
+	if end := strings.IndexAny(authority, "/?#"); end >= 0 {
+		authority = authority[:end]
+	}
+	return strings.Contains(authority, "@")
 }
 
 func defaultBaseRef(root string) string {

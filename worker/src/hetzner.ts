@@ -11,7 +11,7 @@ import {
   providerKeyOwnershipLabels,
   sshPublicKeyIdentity,
 } from "./provider-key";
-import { leaseProviderLabels } from "./provider-labels";
+import { leaseProviderLabels, providerLabelValue } from "./provider-labels";
 import { leaseProviderName } from "./slug";
 import type { Env, HetznerSSHKey, HetznerServer, ProviderMachine } from "./types";
 
@@ -87,6 +87,35 @@ export function hetznerProvisioningResourceID(error: unknown): number | undefine
   return Number.isSafeInteger(error.serverID) && (error.serverID ?? 0) > 0
     ? error.serverID
     : undefined;
+}
+
+export function hetznerServerOwnedByLease(
+  server: HetznerServer,
+  leaseID: string,
+  slug: string | undefined,
+  serverName: string,
+): boolean {
+  const labels = server.labels ?? {};
+  if (
+    !/^cbx_[a-f0-9]{12}$/.test(leaseID) ||
+    labels["crabbox"] !== "true" ||
+    labels["created_by"] !== "crabbox" ||
+    labels["lease"] !== leaseID
+  ) {
+    return false;
+  }
+  if (slug?.trim()) {
+    return labels["provider"] === "hetzner" && labels["slug"] === providerLabelValue(slug);
+  }
+
+  // Pre-slug leases used the lease ID as the server name and had neither modern label.
+  const legacyServerName = `crabbox-${leaseID.replaceAll("_", "-")}`;
+  return (
+    serverName === legacyServerName &&
+    server.name === serverName &&
+    labels["provider"] === undefined &&
+    labels["slug"] === undefined
+  );
 }
 
 export class HetznerClient {

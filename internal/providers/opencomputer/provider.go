@@ -2,6 +2,7 @@ package opencomputer
 
 import (
 	"flag"
+	"os"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -14,6 +15,15 @@ type Provider struct{}
 
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return []string{"oc", "open-computer"} }
+
+func (Provider) DiagnosticSecrets(core.Config) []string {
+	fileConfig := readOCFileConfig()
+	return []string{
+		os.Getenv("CRABBOX_OPENCOMPUTER_API_KEY"),
+		os.Getenv("OPENCOMPUTER_API_KEY"),
+		fileConfig.APIKey,
+	}
+}
 
 func (Provider) ServerTypeForConfig(core.Config) string { return "" }
 func (Provider) ServerTypeForClass(string) string       { return "" }

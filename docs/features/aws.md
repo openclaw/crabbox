@@ -9,7 +9,7 @@ Read when:
 
 AWS is Crabbox's broadest managed provider. It leases full SSH-reachable EC2
 boxes and supports four targets: Linux, native Windows, Windows WSL2, and EC2
-Mac. AWS is one of the four brokerable providers, so it can run two ways:
+Mac. AWS is one of the five brokerable providers, so it can run two ways:
 
 - **Brokered** — the coordinator holds the AWS credentials and provisions
   on your behalf. The CLI still talks SSH/rsync directly to the runner.

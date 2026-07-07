@@ -1,6 +1,47 @@
 # Changelog
 
-## 0.35.1 - Unreleased
+## 0.36.1 - Unreleased
+
+### Added
+
+- Added a CubeSandbox delegated-run provider with E2B-compatible lifecycle and envd execution, archive sync, CubeProxy routing, exact API-endpoint/sandbox-bound ownership claims, conflict-safe explicit adoption, and guarded cleanup. Thanks @zozo123.
+- Added coordinator-managed Daytona Linux leases with a Worker-held API key, exact ownership cleanup, expiring SSH-token refresh, CLI secret redaction, and production Cloudflare configuration.
+
+### Fixed
+
+- Started delegated-provider sync timeouts at archive creation, matching SSH sync semantics and avoiding pre-transfer expiry during local Git manifest planning.
+- Kept macOS listener ownership checks responsive when mounted filesystems make full `lsof` metadata scans slow.
+- Routed Azure orphan-sweep deletion through the exact lease-, provider-scope-, resource-, companion-, and immutable-disk-bound owned-delete path instead of deleting by retained VM name alone.
+- Kept sync manifest writes compatible with minimal BusyBox guests instead of requiring a GNU-only `dd` option, and preserved complete Phala gateway hostnames so later status and SSH reconnects keep working.
+- Restored lease-scoped SSH host-key pinning for Namespace Instance, Phala, and Islo proxy connections instead of accepting unverified server identities. Thanks @coygeek.
+- Corrected the CLI command map, coordinator API methods, and provider architecture reference to match the implemented commands, routes, and backend capabilities. Thanks @zozo123.
+- Advertised Daytona's direct toolbox archive sync so `--sync-only` and `--force-sync-large` work while preserving brokered Crabbox rsync. Thanks @zozo123.
+- Partitioned unauthenticated GitHub OAuth starts by caller with an atomic per-source limit and guarded global backstop, preventing one source from exhausting login for every user. Thanks @coygeek.
+- Disabled inherited SSH agent and X11 forwarding across CLI-managed SSH, rsync, SCP, VNC, and port-forward transports, preserving per-lease credential boundaries. Thanks @coygeek.
+- Collected runtime-only provider credentials through provider-owned diagnostic hooks and redacted opaque OpenSandbox and W&B upstream errors before they reach CLI output. Thanks @coygeek.
+- Redacted complete punctuation-bearing authorization, API-key, and bearer values from CLI and coordinator diagnostics while preserving whitespace-separated routing context. Thanks @coygeek.
+- Limited framing of proxied Browser Code responses to the same isolated Code origin, preventing sibling same-site pages from clickjacking an authenticated session without breaking code-server webviews. Thanks @coygeek.
+- Revalidated non-admin GitHub grants when WebVNC and Code agent tickets are consumed, matching the existing egress fail-closed boundary after logout, emergency revocation, membership loss, or membership-check failure. Thanks @coygeek.
+- Bound coordinator Azure managed-disk cleanup to a durable immutable disk claim captured from the live VM association, preventing stale adopted ownership tags from authorizing deletion. Thanks @coygeek.
+- Required direct Azure release and cleanup to hold an unchanged subscription-, resource-group-, VM-name-, immutable-VM-, lease-, slug-, and provider-key-bound local claim across deletion, with durable companion-resource identities for interruption-safe cleanup. Thanks @coygeek.
+- Required direct GCP release and cleanup to hold an unchanged project-, zone-, name-, numeric-instance-, lease-, slug-, and provider-key-bound local claim across deletion. Thanks @coygeek.
+- Prevented repository-defined External lifecycle commands from placing inherited `external.config` values on process arguments without an exact, trusted non-secret argv contract. Thanks @coygeek.
+- Prevented repository-controlled External SSH endpoint templates and adapter output from silently using ambient or operator-managed SSH credentials, with source-bound opt-ins for environment-derived fields and provider-returned destinations. Thanks @coygeek.
+- Made Sealos DevBox preflight work with tenant-scoped RBAC, rendered the runtime class, storage request, scheduling constraints, and SSH port contract required by hosted Sealos clusters, updated the SSHGate default to port 2233, bootstrapped missing sync tools, and cleaned local claims safely when a DevBox is already absent. Thanks @coygeek.
+- Changed portal logout to an authenticated, same-origin `POST` with a read-only `GET` confirmation page, preventing cross-site top-level navigation from clearing portal cookies or revoking isolated Code viewer sessions. Thanks @coygeek.
+- Bound non-admin GitHub WebVNC, Code, and egress bridges to their encrypted user grant and portal session, closing active or restored bridges after logout, emergency revocation, membership loss, or membership-check failure without persisting plaintext GitHub credentials. Thanks @coygeek.
+- Prevented Git seed from forwarding HTTP(S) origin credentials to Linux or Windows lease runners; Crabbox now warns without printing the remote and falls back to file sync. Thanks @coygeek.
+- Confined Islo API redirects to the configured scheme, hostname, and effective port before replaying authorization or request bodies, while keeping rejected Location secrets out of diagnostics. Thanks @TurboTheTurtle.
+- Redacted colon-delimited and line-folded bearer credentials from CLI and coordinator diagnostics. Thanks @TurboTheTurtle.
+- Required coordinator AWS, Azure, and GCP release and provisioning-failure cleanup to re-read the stored cloud resource and verify exact provider, resource, lease, owner, and slug ownership before deletion; Azure now persists the exact subscription/resource-group scope for deferred retries and fails legacy unscoped cleanup closed for manual resolution. Thanks @coygeek.
+- Required Lambda inventory, stop, and cleanup to use an unchanged instance-bound local claim, with claim-bound SSH-key deletion and durable unique-instance recovery for ambiguous creates. Thanks @coygeek.
+- Required exe.dev reuse and deletion to match canonical ownership tags, random resource generation, deterministic VM name, unchanged SSH endpoint and exact local claim, authenticated account fingerprint, and current control route; lifecycle lookups now remain account-local and failed deletion retains the claim. Thanks @coygeek.
+
+## 0.36.0 - 2026-07-05
+
+### Added
+
+- Added Sealos DevBox Linux SSH leases through the Kubernetes CRD with exact provider/resource-bound claims, conflict-safe explicit `--reclaim` adoption, claim-locked release and cleanup, controller-owned Secret SSH routing, and guarded zero-residue lifecycle proof. Thanks @coygeek.
 
 ### Added
 
@@ -21,8 +62,10 @@
 - Kept explicit `CRABBOX_CONFIG` files inside the active repository in the repository trust domain, including symlink aliases, so they cannot redirect inherited provider credentials. Thanks @coygeek.
 - Pinned mediated-egress connections to validated public DNS results and rejected private, loopback, link-local, and reserved destinations, preventing allowlisted hostnames from rebinding into the operator network. Thanks @coygeek.
 - Confined artifact manifest fetches, downloads, and brokered uploads to same-origin redirects, preventing signed URLs and upload grants from reaching another origin. Thanks @coygeek.
+- Kept brokered artifact reads signed by default even when a display base URL is configured; explicit public reads now use a random per-grant namespace and report their access policy. Thanks @coygeek.
 - Scoped user-visible usage totals to both the authenticated owner and organization, excluding same-owner leases from other organizations. Thanks @coygeek.
 - Wrote captured capsule manifests and failed Actions logs with private Unix permissions, repairing broader modes when an output path is reused. Thanks @coygeek.
+- Revalidated signed GitHub user tokens against current allowed organization and team membership every five minutes, failed closed on GitHub errors, and added narrow owner/login revocations without rotating every session. Thanks @coygeek.
 - Bound GitHub OAuth CLI token release to a one-use callback on the initiating device, so forwarding an authorization URL cannot hand the resulting user token to another terminal. Thanks @coygeek.
 - Honored an explicit broker URL and freshly issued credential during immediate post-login identity verification, even when ambient coordinator overrides point elsewhere.
 - Kept coordinator restarts, run history, lease detail pages, and Azure orphan sweeps memory-bounded with exact lease restores, paged record scans, and batched terminal-run pruning after a configurable 30-day retention period.
@@ -38,8 +81,10 @@
 - Verified downloaded GitHub Actions runner archives against the exact upstream release-asset SHA-256 digest before replacing or extracting the installed runner. Thanks @coygeek.
 - Required an unchanged region-bound local claim before direct AWS cleanup can terminate an instance discovered through provider tags. Thanks @coygeek.
 - Revalidated live AWS, Azure, and GCP instance identity, ownership, lease binding, cleanup eligibility, and any destructive companion-resource identity immediately before direct cleanup deletion. Thanks @coygeek.
+- Required coordinator Hetzner cleanup to re-read the stored server and verify exact canonical lease ownership labels before deletion. Thanks @coygeek.
 - Required W&B sandbox reuse, status, and stop to match an exact endpoint/entity/project/resource-bound local claim plus provider inventory ownership. Thanks @coygeek.
 - Required RunPod stop to use an exact pod ID/name-bound local claim, with conflict-safe explicit `--reclaim` adoption for unclaimed or legacy pods. Thanks @coygeek.
+- Required DigitalOcean, Linode, Scaleway, and Vultr inventory and destructive actions to use canonical lease identities and exact provider/resource-bound local claims, with explicit `--reclaim` adoption for claimless resources and recovery-safe Vultr instance/key rollback ordering. Thanks @coygeek and @vincentkoc.
 - Made coordinatorless generic provider live smokes skip coordinator-only history and always clean up acquired leases after later lifecycle failures.
 - Replaced privileged managed Linux Code Server and Tailscale installer scripts with checksum-verified archives or Tailscale's signed package repository with a pinned keyring in both CLI and coordinator bootstrap paths. Thanks @TurboTheTurtle.
 
