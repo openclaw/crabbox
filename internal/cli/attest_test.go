@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func setAttestTestHome(t *testing.T) string {
@@ -346,6 +347,48 @@ func TestAttestDigestWriterHashesMixedStreamsInArrivalOrder(t *testing.T) {
 	expected := sha256.Sum256([]byte("out line\nerr line\ndone\n"))
 	if got := writer.sum(); got != "sha256:"+hex.EncodeToString(expected[:]) {
 		t.Fatalf("unexpected digest %s", got)
+	}
+}
+
+func TestDelegatedRunReceiptOmitsMissingLeaseID(t *testing.T) {
+	setAttestTestHome(t)
+	path := filepath.Join(t.TempDir(), "receipt.json")
+	result := RunResult{
+		Provider:    "e2b",
+		CommandText: "pnpm test",
+		ExitCode:    0,
+		Command:     1500 * time.Millisecond,
+	}
+	req := RunRequest{Command: []string{"pnpm", "test"}}
+	artifact, err := writeDelegatedRunReceipt(path, "", Config{Provider: "e2b"}, result, req)
+	if err != nil {
+		t.Fatalf("write delegated receipt: %v", err)
+	}
+	if artifact.Kind != "receipt" {
+		t.Fatalf("unexpected artifact kind %q", artifact.Kind)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"lease_id", "slug", "run_id", "actions_url", "log_sha256"} {
+		if _, ok := receipt[key]; ok {
+			t.Fatalf("delegated receipt should omit empty %s", key)
+		}
+	}
+	if receipt["command"] != "pnpm test" {
+		t.Fatalf("unexpected command %v", receipt["command"])
+	}
+	out, err := runVerify(t, path)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !strings.HasPrefix(out, "PASS ") {
+		t.Fatalf("unexpected verify output: %q", out)
 	}
 }
 

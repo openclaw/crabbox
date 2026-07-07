@@ -32,8 +32,8 @@ show one value to a reader while the signature still verifies against another.
 ## Receipt format
 
 The receipt is a flat JSON object. `schema_version`, `generated_at`,
-`provider`, `lease_id`, `command`, `exit_code`, `command_ms`, and `public_key`
-are always present; `slug`, `run_id`, `actions_url`, and `log_sha256` appear
+`provider`, `command`, `exit_code`, `command_ms`, and `public_key` are always
+present; `lease_id`, `slug`, `run_id`, `actions_url`, and `log_sha256` appear
 when the run produced them. `log_sha256` is the SHA-256 of the combined
 stdout and stderr stream as observed by the client during brokered SSH runs.
 

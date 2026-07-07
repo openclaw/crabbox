@@ -653,19 +653,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
 		}
 		if runErr == nil && strings.TrimSpace(*attestOut) != "" {
-			command := strings.TrimSpace(result.CommandText)
-			if command == "" {
-				command = runCommandDisplay(runReq.Command, runReq.ShellMode)
-			}
-			receipt, err := writeRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), runReceiptInput{
-				Provider:   firstNonBlank(result.Provider, cfg.Provider),
-				LeaseID:    result.LeaseID,
-				Slug:       result.Slug,
-				Command:    command,
-				ExitCode:   result.ExitCode,
-				CommandMs:  result.Command.Milliseconds(),
-				ActionsURL: result.ActionsURL,
-			})
+			receipt, err := writeDelegatedRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), cfg, result, runReq)
 			if err != nil {
 				return err
 			}
@@ -1860,6 +1848,22 @@ func writeDelegatedRunProof(path, templateName string, cfg Config, result RunRes
 		CommandMs:   result.Command.Milliseconds(),
 		ExitCode:    result.ExitCode,
 		GeneratedAt: time.Now(),
+	})
+}
+
+func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult, req RunRequest) (runArtifact, error) {
+	command := strings.TrimSpace(result.CommandText)
+	if command == "" {
+		command = runCommandDisplay(req.Command, req.ShellMode)
+	}
+	return writeRunReceipt(path, keyPath, runReceiptInput{
+		Provider:   firstNonBlank(result.Provider, cfg.Provider),
+		LeaseID:    result.LeaseID,
+		Slug:       result.Slug,
+		Command:    command,
+		ExitCode:   result.ExitCode,
+		CommandMs:  result.Command.Milliseconds(),
+		ActionsURL: result.ActionsURL,
 	})
 }
 

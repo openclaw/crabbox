@@ -210,7 +210,6 @@ var attestRequiredReceiptFields = []string{
 	"schema_version",
 	"generated_at",
 	"provider",
-	"lease_id",
 	"command",
 	"exit_code",
 	"command_ms",
@@ -273,12 +272,12 @@ func validateRunReceipt(receipt map[string]any) error {
 	if _, err := time.Parse(time.RFC3339, generatedAt); err != nil {
 		return fmt.Errorf("invalid generated_at")
 	}
-	for _, key := range []string{"provider", "lease_id", "command", "public_key", "signature"} {
+	for _, key := range []string{"provider", "command", "public_key", "signature"} {
 		if _, err := receiptString(receipt, key); err != nil {
 			return err
 		}
 	}
-	for _, key := range []string{"slug", "run_id", "actions_url"} {
+	for _, key := range []string{"lease_id", "slug", "run_id", "actions_url"} {
 		if _, ok := receipt[key]; ok {
 			if _, err := receiptString(receipt, key); err != nil {
 				return err
@@ -349,11 +348,13 @@ func writeRunReceipt(path, keyPath string, in runReceiptInput) (runArtifact, err
 		"schema_version": attestReceiptSchemaVersion,
 		"generated_at":   time.Now().UTC().Format(time.RFC3339),
 		"provider":       in.Provider,
-		"lease_id":       in.LeaseID,
 		"command":        in.Command,
 		"exit_code":      in.ExitCode,
 		"command_ms":     in.CommandMs,
 		"public_key":     base64.StdEncoding.EncodeToString(pub),
+	}
+	if in.LeaseID != "" {
+		receipt["lease_id"] = in.LeaseID
 	}
 	if in.Slug != "" {
 		receipt["slug"] = in.Slug
