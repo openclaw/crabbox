@@ -26,6 +26,8 @@ type watchTestBackend struct {
 	resolveCalls int
 	releaseCalls int
 	releaseCtx   context.Context
+	releaseLease LeaseTarget
+	resolveReq   ResolveRequest
 	acquireErr   error
 	resolveErr   error
 	labels       map[string]string
@@ -49,13 +51,14 @@ func (b *watchTestBackend) Acquire(ctx context.Context, req AcquireRequest) (Lea
 	}
 	server := Server{Provider: "watch-test", Labels: map[string]string{"lease": watchTestLeaseID}}
 	server.ServerType.Name = "test"
-	return LeaseTarget{LeaseID: watchTestLeaseID, Server: server}, nil
+	return LeaseTarget{LeaseID: watchTestLeaseID, Server: server, SSH: SSHTarget{Host: "acquired.example"}}, nil
 }
 
 func (b *watchTestBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.resolveCalls++
+	b.resolveReq = req
 	if b.resolveErr != nil {
 		return LeaseTarget{}, b.resolveErr
 	}
@@ -72,11 +75,12 @@ func (b *watchTestBackend) List(context.Context, ListRequest) ([]LeaseView, erro
 	return nil, nil
 }
 
-func (b *watchTestBackend) ReleaseLease(ctx context.Context, _ ReleaseLeaseRequest) error {
+func (b *watchTestBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.releaseCalls++
 	b.releaseCtx = ctx
+	b.releaseLease = req.Lease
 	return nil
 }
 
@@ -678,14 +682,64 @@ func TestWatchAcquiresLeaseWhenNoID(t *testing.T) {
 		t.Fatalf("watchWithBackend: %v", err)
 	}
 	acquires, resolves, releases := backend.counts()
-	if acquires != 1 || resolves != 0 || releases != 1 {
-		t.Fatalf("acquire=%d resolve=%d release=%d, want 1/0/1", acquires, resolves, releases)
+	if acquires != 1 || resolves != 1 || releases != 1 {
+		t.Fatalf("acquire=%d resolve=%d release=%d, want 1/1/1", acquires, resolves, releases)
 	}
 	if !strings.Contains(stdout.String(), "leased "+watchTestLeaseID) {
 		t.Fatalf("stdout missing leased line:\n%s", stdout.String())
 	}
 	if got := executor.call(0); !strings.Contains(strings.Join(got, " "), "--id "+watchTestLeaseID) {
 		t.Fatalf("iteration args=%v, want injected --id", got)
+	}
+}
+
+func TestWatchRefreshesReleaseAuthorizationAfterIterations(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	root := newWatchGitRepo(t)
+	backend := newWatchTestBackend()
+	backend.labels = map[string]string{"claim_revision": "after-run"}
+	executor := newWatchTestExecutor()
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	opts := watchOptions{Debounce: 25 * time.Millisecond, IdleExit: 250 * time.Millisecond, IdleExitSet: true, Command: []string{"echo", "ok"}}
+	cfg := Config{Provider: "watch-test", IdleTimeout: time.Minute, TTL: time.Hour}
+
+	if err := app.watchWithBackend(context.Background(), opts, Repo{Root: root, Name: "my-app"}, cfg, backend, executor.run); err != nil {
+		t.Fatalf("watchWithBackend: %v", err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if !backend.resolveReq.ReleaseOnly || backend.resolveReq.ID != watchTestLeaseID || backend.resolveReq.Repo.Root != root {
+		t.Fatalf("resolve request=%+v, want repository-scoped release-only refresh", backend.resolveReq)
+	}
+	if got := backend.releaseLease.Server.Labels["claim_revision"]; got != "after-run" {
+		t.Fatalf("released claim revision=%q, want refreshed snapshot", got)
+	}
+	if got := backend.releaseLease.SSH.Host; got != "acquired.example" {
+		t.Fatalf("released SSH host=%q, want acquired connection metadata", got)
+	}
+}
+
+func TestWatchAttemptsReleaseWithAcquiredTargetWhenRefreshFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	root := newWatchGitRepo(t)
+	backend := newWatchTestBackend()
+	backend.resolveErr = errors.New("temporary inventory failure")
+	executor := newWatchTestExecutor()
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	opts := watchOptions{Debounce: 25 * time.Millisecond, IdleExit: 250 * time.Millisecond, IdleExitSet: true, Command: []string{"echo", "ok"}}
+	cfg := Config{Provider: "watch-test", IdleTimeout: time.Minute, TTL: time.Hour}
+
+	if err := app.watchWithBackend(context.Background(), opts, Repo{Root: root, Name: "my-app"}, cfg, backend, executor.run); err != nil {
+		t.Fatalf("watchWithBackend: %v", err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.releaseCalls != 1 || backend.releaseLease.LeaseID != watchTestLeaseID || backend.releaseLease.SSH.Host != "acquired.example" {
+		t.Fatalf("release calls=%d lease=%+v, want acquired target release attempt", backend.releaseCalls, backend.releaseLease)
 	}
 }
 
