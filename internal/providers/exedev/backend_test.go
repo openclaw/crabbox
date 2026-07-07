@@ -843,6 +843,7 @@ func TestExeDevReuseRequiresExplicitAdoptionAndPersistsExactBinding(t *testing.T
 			if !hasExeDevTagCommand(runner) {
 				t.Fatalf("explicit reclaim did not bind a remote claim generation: %#v", runner.calls)
 			}
+			assertExeDevTagOptionsPrecedeVM(t, runner)
 			if _, exists, snapshotSet := serverLeaseClaimSnapshot(lease.Server); !snapshotSet || !exists {
 				t.Fatalf("claim snapshot set=%v exists=%v", snapshotSet, exists)
 			}
@@ -907,15 +908,12 @@ func exeDevInventoryRunner(t *testing.T, vm exeDevVM) *exeDevRecordingRunner {
 		}
 		if strings.Contains(command, " tag ") {
 			fields := strings.Fields(req.Args[len(req.Args)-1])
-			deleteTags := len(fields) > 1 && fields[1] == "-d"
-			start := 2
+			deleteTags := len(fields) > 2 && fields[2] == "-d"
+			start := 3
 			if deleteTags {
-				start = 3
+				start = 4
 			}
 			for _, tag := range fields[start:] {
-				if tag == "--json" {
-					continue
-				}
 				if deleteTags {
 					current.Tags = slices.DeleteFunc(current.Tags, func(existing string) bool { return existing == tag })
 				} else if !slices.Contains(current.Tags, tag) {
@@ -998,6 +996,16 @@ func hasExeDevTagCommand(runner *exeDevRecordingRunner) bool {
 		}
 	}
 	return false
+}
+
+func assertExeDevTagOptionsPrecedeVM(t *testing.T, runner *exeDevRecordingRunner) {
+	t.Helper()
+	for _, call := range runner.calls {
+		fields := strings.Fields(call.Args[len(call.Args)-1])
+		if len(fields) > 0 && fields[0] == "tag" && (len(fields) < 2 || fields[1] != "--json") {
+			t.Fatalf("exe.dev tag options must precede VM name: %q", fields)
+		}
+	}
 }
 
 func TestExeDevFlagsRejectGenericClassAndType(t *testing.T) {

@@ -597,7 +597,7 @@ func (b *exeDevLeaseBackend) replaceVMClaimGeneration(ctx context.Context, vm ex
 		}
 	}
 	if !hasWant {
-		if _, err := b.controlOutput(ctx, []string{"tag", vm.Name(), want, "--json"}); err != nil {
+		if _, err := b.controlOutput(ctx, []string{"tag", "--json", vm.Name(), want}); err != nil {
 			return err
 		}
 	}
@@ -608,8 +608,9 @@ func (b *exeDevLeaseBackend) replaceVMClaimGeneration(ctx context.Context, vm ex
 		}
 	}
 	if len(remove) > 0 {
-		args := append([]string{"tag", "-d", vm.Name()}, remove...)
-		args = append(args, "--json")
+		// exe.dev's tag command accepts multiple positional tags, so options
+		// must precede the VM name or they are parsed as tag names.
+		args := append([]string{"tag", "--json", "-d", vm.Name()}, remove...)
 		if _, err := b.controlOutput(ctx, args); err != nil {
 			return err
 		}
