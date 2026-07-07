@@ -35,10 +35,9 @@ type cubesandboxClient struct {
 	apiURL      string
 	domain      string
 	user        string
-	proxyHost   string
-	proxyPort   int
 	proxyScheme string
 	httpClient  *http.Client
+	envdClient  *http.Client
 }
 
 const cubesandboxEnvdPort = 49983
@@ -114,16 +113,51 @@ var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) 
 	if proxyPort <= 0 {
 		proxyPort = 80
 	}
+	envdClient, err := cubeSandboxDataPlaneHTTPClient(httpClient, strings.TrimSpace(cfg.CubeSandbox.ProxyNodeIP), proxyPort)
+	if err != nil {
+		return nil, err
+	}
 	return &cubesandboxClient{
 		apiKey:      apiKey,
 		apiURL:      apiURL,
 		domain:      domain,
 		user:        cfg.CubeSandbox.User,
-		proxyHost:   strings.TrimSpace(cfg.CubeSandbox.ProxyNodeIP),
-		proxyPort:   proxyPort,
 		proxyScheme: proxyScheme,
 		httpClient:  httpClient,
+		envdClient:  envdClient,
 	}, nil
+}
+
+func cubeSandboxDataPlaneHTTPClient(source *http.Client, proxyHost string, proxyPort int) (*http.Client, error) {
+	proxyHost = strings.TrimSpace(proxyHost)
+	if proxyHost == "" {
+		return source, nil
+	}
+	transport := source.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	base, ok := transport.(*http.Transport)
+	if !ok {
+		return nil, exit(2, "provider=cubesandbox CubeProxy direct routing requires an HTTP transport that supports a dial override")
+	}
+	clone := base.Clone()
+	dialContext := clone.DialContext
+	if dialContext == nil {
+		dialContext = (&net.Dialer{}).DialContext
+	}
+	if strings.HasPrefix(proxyHost, "[") && strings.HasSuffix(proxyHost, "]") {
+		proxyHost = strings.TrimSuffix(strings.TrimPrefix(proxyHost, "["), "]")
+	}
+	dialTarget := net.JoinHostPort(proxyHost, strconv.Itoa(proxyPort))
+	clone.Proxy = nil
+	clone.DialTLSContext = nil
+	clone.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return dialContext(ctx, network, dialTarget)
+	}
+	client := *source
+	client.Transport = clone
+	return &client, nil
 }
 
 func validateCubeSandboxAPIURL(raw string) (string, error) {
@@ -327,7 +361,7 @@ func (c *cubesandboxClient) UploadFile(ctx context.Context, session cubesandboxS
 		}
 		_ = pw.Close()
 	}()
-	resp, err := secureCubeSandboxHTTPClient(c.httpClient, req.URL).Do(req)
+	resp, err := secureCubeSandboxHTTPClient(c.dataPlaneHTTPClient(), req.URL).Do(req)
 	if err != nil {
 		_ = pr.CloseWithError(err)
 		_ = pw.CloseWithError(err)
@@ -381,7 +415,7 @@ func (c *cubesandboxClient) StartProcess(ctx context.Context, session cubesandbo
 	if timeoutMs := durationMillisCeil(req.Timeout); timeoutMs > 0 {
 		httpReq.Header.Set("Connect-Timeout-Ms", fmt.Sprint(timeoutMs))
 	}
-	resp, err := secureCubeSandboxHTTPClient(c.httpClient, httpReq.URL).Do(httpReq)
+	resp, err := secureCubeSandboxHTTPClient(c.dataPlaneHTTPClient(), httpReq.URL).Do(httpReq)
 	if err != nil {
 		return 1, err
 	}
@@ -456,34 +490,29 @@ func (c *cubesandboxClient) sessionFromSandbox(sandbox cubesandboxSandbox) cubes
 }
 
 func (c *cubesandboxClient) envdURL(session cubesandboxSession, path string) string {
-	endpoint, _ := c.envdEndpoint(session, path)
-	return endpoint
-}
-
-func (c *cubesandboxClient) envdEndpoint(session cubesandboxSession, path string) (string, string) {
 	domain := strings.TrimSpace(session.Domain)
 	if domain == "" {
 		domain = c.domain
 	}
-	scheme := normalizeCubeSandboxProxyScheme(c.proxyScheme, c.proxyPort)
 	virtualHost := fmt.Sprintf("%d-%s.%s", cubesandboxEnvdPort, session.SandboxID, domain)
-	if c.proxyHost == "" {
-		return scheme + "://" + virtualHost + path, ""
-	}
-	host := c.proxyHost
-	if c.proxyPort > 0 {
-		host = net.JoinHostPort(c.proxyHost, strconv.Itoa(c.proxyPort))
-	}
-	return scheme + "://" + host + path, virtualHost
+	scheme := normalizeCubeSandboxProxyScheme(c.proxyScheme, 0)
+	return scheme + "://" + virtualHost + path
 }
 
 func (c *cubesandboxClient) setEnvdHeaders(req *http.Request, session cubesandboxSession) {
-	if _, host := c.envdEndpoint(session, req.URL.Path); host != "" {
-		req.Host = host
-	}
 	req.Header.Set("X-Access-Token", session.EnvdAccessToken)
 	req.Header.Set("E2b-Sandbox-Id", session.SandboxID)
 	req.Header.Set("E2b-Sandbox-Port", strconv.Itoa(cubesandboxEnvdPort))
+}
+
+func (c *cubesandboxClient) dataPlaneHTTPClient() *http.Client {
+	if c.envdClient != nil {
+		return c.envdClient
+	}
+	if c.httpClient != nil {
+		return c.httpClient
+	}
+	return http.DefaultClient
 }
 
 type cubesandboxStartResponse struct {

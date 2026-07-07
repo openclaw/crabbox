@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -437,17 +439,12 @@ func TestCubeSandboxEnvdClientRefusesCrossOriginRedirectBeforeReplay(t *testing.
 func TestCubeSandboxClientRoutesEnvdToPort49983(t *testing.T) {
 	client := &cubesandboxClient{
 		domain:      "cube.test",
-		proxyHost:   "127.0.0.1",
-		proxyPort:   8080,
 		proxyScheme: "http",
 	}
 	session := cubesandboxSession{SandboxID: "sbx_1", Domain: "cube.test"}
-	endpoint, host := client.envdEndpoint(session, "/process.Process/Start")
-	if got, want := endpoint, "http://127.0.0.1:8080/process.Process/Start"; got != want {
+	endpoint := client.envdURL(session, "/process.Process/Start")
+	if got, want := endpoint, "http://49983-sbx_1.cube.test/process.Process/Start"; got != want {
 		t.Fatalf("endpoint=%q, want %q", got, want)
-	}
-	if got, want := host, "49983-sbx_1.cube.test"; got != want {
-		t.Fatalf("host=%q, want %q", got, want)
 	}
 	req, err := http.NewRequest(http.MethodPost, endpoint, nil)
 	if err != nil {
@@ -456,6 +453,50 @@ func TestCubeSandboxClientRoutesEnvdToPort49983(t *testing.T) {
 	client.setEnvdHeaders(req, session)
 	if got, want := req.Header.Get("E2b-Sandbox-Port"), "49983"; got != want {
 		t.Fatalf("E2b-Sandbox-Port=%q, want %q", got, want)
+	}
+}
+
+func TestCubeSandboxHTTPSProxyPreservesVirtualHostForSNI(t *testing.T) {
+	var gotHost, gotServerName string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(serverURL.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := server.Client()
+	transport := source.Transport.(*http.Transport).Clone()
+	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	transport.TLSClientConfig.InsecureSkipVerify = true // test verifies SNI explicitly below
+	transport.TLSClientConfig.VerifyConnection = func(state tls.ConnectionState) error {
+		gotServerName = state.ServerName
+		return nil
+	}
+	source.Transport = transport
+	envdClient, err := cubeSandboxDataPlaneHTTPClient(source, serverURL.Hostname(), port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &cubesandboxClient{
+		domain:      "cube.test",
+		proxyScheme: "https",
+		httpClient:  source,
+		envdClient:  envdClient,
+	}
+	session := cubesandboxSession{SandboxID: "sbx_1", Domain: "cube.test", EnvdAccessToken: "test-token"}
+	if err := client.UploadFile(t.Context(), session, "/tmp/proof", strings.NewReader("proof")); err != nil {
+		t.Fatal(err)
+	}
+	want := "49983-sbx_1.cube.test"
+	if gotServerName != want || gotHost != want {
+		t.Fatalf("SNI=%q Host=%q, want virtual host %q", gotServerName, gotHost, want)
 	}
 }
 
@@ -657,9 +698,9 @@ func TestCubeSandboxStatusReady(t *testing.T) {
 	}
 }
 
-func TestCubeSandboxTimeoutCapsAtOneHour(t *testing.T) {
-	if got := cubesandboxTimeoutSeconds(90 * time.Minute); got != 3600 {
-		t.Fatalf("timeout=%d want 3600", got)
+func TestCubeSandboxTimeoutPreservesRequestedTTL(t *testing.T) {
+	if got := cubesandboxTimeoutSeconds(90 * time.Minute); got != 5400 {
+		t.Fatalf("timeout=%d want 5400", got)
 	}
 	if got := cubesandboxTimeoutSeconds(0); got != 300 {
 		t.Fatalf("default timeout=%d want 300", got)
@@ -669,7 +710,7 @@ func TestCubeSandboxTimeoutCapsAtOneHour(t *testing.T) {
 	}
 }
 
-func TestCubeSandboxCreateSandboxCapsDefaultTTL(t *testing.T) {
+func TestCubeSandboxCreateSandboxPreservesDefaultTTL(t *testing.T) {
 	client := &fakeCubeSandboxSyncClient{}
 	backend := &cubesandboxBackend{
 		cfg: Config{
@@ -683,11 +724,11 @@ func TestCubeSandboxCreateSandboxCapsDefaultTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.createReq.TimeoutSeconds != 3600 {
-		t.Fatalf("timeout=%d want 3600", client.createReq.TimeoutSeconds)
+	if client.createReq.TimeoutSeconds != 5400 {
+		t.Fatalf("timeout=%d want 5400", client.createReq.TimeoutSeconds)
 	}
-	if client.createReq.Metadata["ttl_secs"] != "3600" {
-		t.Fatalf("metadata=%#v want capped ttl", client.createReq.Metadata)
+	if client.createReq.Metadata["ttl_secs"] != "5400" {
+		t.Fatalf("metadata=%#v want requested ttl", client.createReq.Metadata)
 	}
 }
 

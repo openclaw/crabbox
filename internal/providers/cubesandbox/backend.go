@@ -87,8 +87,6 @@ type cubesandboxBackend struct {
 	rt   Runtime
 }
 
-const cubesandboxMaxSandboxTimeout = time.Hour
-
 func (b *cubesandboxBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *cubesandboxBackend) Warmup(ctx context.Context, req WarmupRequest) error {
@@ -738,9 +736,6 @@ func isCrabboxCubeSandboxSandbox(sandbox cubesandboxSandbox) bool {
 func cubesandboxTimeoutDuration(ttl time.Duration) time.Duration {
 	if ttl <= 0 {
 		return 5 * time.Minute
-	}
-	if ttl > cubesandboxMaxSandboxTimeout {
-		return cubesandboxMaxSandboxTimeout
 	}
 	return ttl
 }
