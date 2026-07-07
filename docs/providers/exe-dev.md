@@ -110,7 +110,9 @@ top-level `workRoot` propagates to the VM when `exeDev.workRoot` is unset.
    exact VM name, deterministic lease name, complete remote tags, current
    control route, and authenticated account fingerprint all agree. It rechecks inventory while holding the claim lock,
    calls `rm <vm-name> --json`, and removes the claim only after deletion
-   succeeds. Failed or ambiguous deletion keeps the claim for an exact retry.
+   succeeds. Failed or ambiguous deletion keeps the claim for an exact retry;
+   if a complete account-bound inventory later confirms the exact VM is absent,
+   the retry removes only the still-unchanged local claim.
 
 ## Limits
 

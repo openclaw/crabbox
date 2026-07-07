@@ -21,7 +21,10 @@ type exeDevLeaseBackend struct {
 	rt   Runtime
 }
 
-const exeDevClaimGenerationLabel = "claim_generation"
+const (
+	exeDevClaimGenerationLabel = "claim_generation"
+	exeDevConfirmedAbsentLabel = "exe_dev_confirmed_absent"
+)
 
 func NewExeDevLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
@@ -77,18 +80,12 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 
 func (b *exeDevLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
 	cfg := b.configForRun()
+	if req.ReleaseOnly {
+		return b.resolveReleaseTarget(ctx, cfg, req.ID)
+	}
 	vm, leaseID, slug, err := b.resolveVM(ctx, req.ID)
 	if err != nil {
 		return LeaseTarget{}, err
-	}
-	if req.ReleaseOnly {
-		server := exeDevServer(vm, leaseID, slug, cfg, true)
-		claim, err := b.claimForVMRelease(ctx, vm, leaseID, slug)
-		if err != nil {
-			return LeaseTarget{}, err
-		}
-		setServerLeaseClaimSnapshot(&server, claim, true)
-		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	lease, err := b.prepareLease(ctx, cfg, vm, leaseID, slug, true, false)
 	if err != nil {
@@ -135,6 +132,11 @@ func (b *exeDevLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseR
 	if err := b.validateReleaseTarget(req.Lease, claim); err != nil {
 		return err
 	}
+	if req.Lease.Server.Labels[exeDevConfirmedAbsentLabel] == "true" {
+		return removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+			return b.confirmClaimedVMAbsent(ctx, claim)
+		})
+	}
 	return removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
 		vm, err := b.findVMByExactName(ctx, claim.CloudID)
 		if err != nil {
@@ -145,6 +147,97 @@ func (b *exeDevLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseR
 		}
 		return b.deleteVM(ctx, claim.CloudID)
 	})
+}
+
+func (b *exeDevLeaseBackend) resolveReleaseTarget(ctx context.Context, cfg Config, identifier string) (LeaseTarget, error) {
+	claim, claimed, err := resolveExeDevReleaseClaim(identifier)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if !claimed {
+		vm, leaseID, slug, err := b.resolveVM(ctx, identifier)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		claim, err := b.claimForVMRelease(ctx, vm, leaseID, slug)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		server := exeDevServer(vm, leaseID, slug, cfg, true)
+		setServerLeaseClaimSnapshot(&server, claim, true)
+		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+	}
+	if err := b.validateAbsentCleanupClaim(ctx, claim); err != nil {
+		return LeaseTarget{}, err
+	}
+	vms, err := b.listVMs(ctx, true)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	for _, vm := range vms {
+		if vm.Name() != claim.CloudID {
+			continue
+		}
+		if err := b.validateVMClaimBinding(ctx, vm, claim, claim.LeaseID, claim.Slug); err != nil {
+			return LeaseTarget{}, err
+		}
+		server := exeDevServer(vm, claim.LeaseID, claim.Slug, cfg, true)
+		setServerLeaseClaimSnapshot(&server, claim, true)
+		return LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
+	}
+	server := Server{
+		CloudID:  claim.CloudID,
+		Provider: providerName,
+		Name:     claim.CloudID,
+		Labels: map[string]string{
+			"provider":                 providerName,
+			"lease":                    claim.LeaseID,
+			"slug":                     claim.Slug,
+			"name":                     claim.CloudID,
+			exeDevConfirmedAbsentLabel: "true",
+		},
+	}
+	setServerLeaseClaimSnapshot(&server, claim, true)
+	return LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
+}
+
+func resolveExeDevReleaseClaim(identifier string) (LeaseClaim, bool, error) {
+	claim, claimed, err := resolveLeaseClaimForProvider(identifier, providerName)
+	if err != nil || claimed {
+		return claim, claimed, err
+	}
+	cloudID := strings.TrimSpace(identifier)
+	if strings.HasSuffix(cloudID, ".exe.xyz") {
+		cloudID = strings.TrimSuffix(cloudID, ".exe.xyz")
+	}
+	return resolveLeaseClaimForProviderCloudID(cloudID, providerName)
+}
+
+func (b *exeDevLeaseBackend) validateAbsentCleanupClaim(ctx context.Context, claim LeaseClaim) error {
+	slug := normalizeLeaseSlug(claim.Slug)
+	if !isCanonicalLeaseID(claim.LeaseID) || claim.Provider != providerName || slug == "" || claim.CloudID != leaseProviderName(claim.LeaseID, slug) {
+		return exit(2, "lease %s has no exact exe.dev resource binding for absent cleanup", claim.LeaseID)
+	}
+	if claim.Labels["provider"] != providerName || claim.Labels["lease"] != claim.LeaseID || normalizeLeaseSlug(claim.Labels["slug"]) != slug || claim.Labels["name"] != claim.CloudID {
+		return exit(2, "lease %s claim metadata does not attest absent exe.dev cleanup", claim.LeaseID)
+	}
+	return b.validateExistingClaimRoute(ctx, claim)
+}
+
+func (b *exeDevLeaseBackend) confirmClaimedVMAbsent(ctx context.Context, claim LeaseClaim) error {
+	if err := b.validateAbsentCleanupClaim(ctx, claim); err != nil {
+		return err
+	}
+	vms, err := b.listVMs(ctx, true)
+	if err != nil {
+		return err
+	}
+	for _, vm := range vms {
+		if vm.Name() == claim.CloudID {
+			return exit(2, "exe.dev VM %s is present; refusing absent-claim cleanup", claim.CloudID)
+		}
+	}
+	return nil
 }
 
 func (b *exeDevLeaseBackend) RefreshReleaseLeaseTarget(ctx context.Context, lease LeaseTarget) (LeaseTarget, error) {

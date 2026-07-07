@@ -85,6 +85,10 @@ func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim,
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
 
+func resolveLeaseClaimForProviderCloudID(cloudID, provider string) (core.LeaseClaim, bool, error) {
+	return core.ResolveLeaseClaimForProviderCloudID(cloudID, provider)
+}
+
 func readLeaseClaimWithPresence(leaseID string) (core.LeaseClaim, bool, error) {
 	return core.ReadLeaseClaimWithPresence(leaseID)
 }

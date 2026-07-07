@@ -594,6 +594,92 @@ func TestExeDevReleaseRetainsClaimWhenDeleteFails(t *testing.T) {
 	}
 }
 
+func TestExeDevReleaseRemovesUnchangedClaimWhenVMIsAlreadyAbsent(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	slug := "blue"
+	vm := ownedExeDevVM(leaseID, slug)
+	for _, identifier := range []string{leaseID, vm.Name(), vm.SSHHost()} {
+		t.Run(identifier, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+				if strings.Contains(strings.Join(req.Args, " "), "whoami --json") {
+					return LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
+				}
+				return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
+			}}
+			backend := newExeDevTestBackend(Config{}, runner)
+			persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
+
+			lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: identifier, ReleaseOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.Server.Labels[exeDevConfirmedAbsentLabel] != "true" {
+				t.Fatalf("labels=%v, want confirmed-absence marker", lease.Server.Labels)
+			}
+			if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+			assertNoExeDevRM(t, runner)
+			if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+				t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
+			}
+		})
+	}
+}
+
+func TestExeDevAbsentReleaseRechecksInventoryBeforeRemovingClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	slug := "blue"
+	vm := ownedExeDevVM(leaseID, slug)
+	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if strings.Contains(strings.Join(req.Args, " "), "whoami --json") {
+			return LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
+		}
+		return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
+	}}
+	backend := newExeDevTestBackend(Config{}, runner)
+	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
+
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.fn = exeDevInventoryResponse(t, vm)
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "is present") {
+		t.Fatalf("err=%v, want present-VM refusal", err)
+	}
+	assertNoExeDevRM(t, runner)
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+		t.Fatalf("claim exists=%v err=%v, want retained", exists, err)
+	}
+}
+
+func TestExeDevAbsentReleaseRejectsDifferentAuthenticatedAccount(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	slug := "blue"
+	vm := ownedExeDevVM(leaseID, slug)
+	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if strings.Contains(strings.Join(req.Args, " "), "whoami --json") {
+			return LocalCommandResult{Stdout: `{"email":"other@example.com"}`}, nil
+		}
+		return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
+	}}
+	backend := newExeDevTestBackend(Config{}, runner)
+	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
+
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "different exe.dev control route") {
+		t.Fatalf("err=%v, want account-bound route refusal", err)
+	}
+	assertNoExeDevRM(t, runner)
+	if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+		t.Fatalf("claim exists=%v err=%v, want retained", exists, readErr)
+	}
+}
+
 func TestExeDevReuseRequiresExplicitAdoptionAndPersistsExactBinding(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	vm := ownedExeDevVM(leaseID, "blue")
