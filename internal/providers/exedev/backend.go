@@ -217,7 +217,7 @@ func (b *exeDevLeaseBackend) resolveReleaseTarget(ctx context.Context, cfg Confi
 	if err := b.validateAbsentCleanupClaim(ctx, claim); err != nil {
 		return LeaseTarget{}, err
 	}
-	vms, err := b.listVMs(ctx, false)
+	vms, err := b.listVMs(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -281,7 +281,7 @@ func (b *exeDevLeaseBackend) confirmClaimedVMAbsent(ctx context.Context, claim L
 	if err := b.validateAbsentCleanupClaim(ctx, claim); err != nil {
 		return err
 	}
-	vms, err := b.listVMs(ctx, false)
+	vms, err := b.listVMs(ctx)
 	if err != nil {
 		return err
 	}
@@ -716,7 +716,7 @@ func (b *exeDevLeaseBackend) resolveVM(ctx context.Context, identifier string) (
 }
 
 func (b *exeDevLeaseBackend) findVM(ctx context.Context, identifier string) (exeDevVM, error) {
-	vms, err := b.listVMs(ctx, false)
+	vms, err := b.listVMs(ctx)
 	if err != nil {
 		return exeDevVM{}, err
 	}
@@ -730,7 +730,7 @@ func (b *exeDevLeaseBackend) findVM(ctx context.Context, identifier string) (exe
 }
 
 func (b *exeDevLeaseBackend) findVMByExactName(ctx context.Context, name string) (exeDevVM, error) {
-	vms, err := b.listVMs(ctx, false)
+	vms, err := b.listVMs(ctx)
 	if err != nil {
 		return exeDevVM{}, err
 	}
@@ -743,7 +743,7 @@ func (b *exeDevLeaseBackend) findVMByExactName(ctx context.Context, name string)
 }
 
 func (b *exeDevLeaseBackend) findVMByLeaseID(ctx context.Context, leaseID string) (exeDevVM, bool, error) {
-	vms, err := b.listVMs(ctx, false)
+	vms, err := b.listVMs(ctx)
 	if err != nil {
 		return exeDevVM{}, false, err
 	}
@@ -763,7 +763,9 @@ func (b *exeDevLeaseBackend) findVMByLeaseID(ctx context.Context, leaseID string
 }
 
 func (b *exeDevLeaseBackend) listServers(ctx context.Context, all bool) ([]LeaseView, error) {
-	vms, err := b.listVMs(ctx, all)
+	// all widens only Crabbox's ownership filter. exe.dev scopes inventory to
+	// the authenticated account and its current CLI has no cross-account flag.
+	vms, err := b.listVMs(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -808,12 +810,8 @@ func fallbackExeDevIdentity(vm exeDevVM) (string, string) {
 	return leaseID, slug
 }
 
-func (b *exeDevLeaseBackend) listVMs(ctx context.Context, all bool) ([]exeDevVM, error) {
-	args := []string{"ls", "--l", "--json"}
-	if all {
-		args = append(args, "-a")
-	}
-	out, err := b.controlOutput(ctx, args)
+func (b *exeDevLeaseBackend) listVMs(ctx context.Context) ([]exeDevVM, error) {
+	out, err := b.controlOutput(ctx, []string{"ls", "--l", "--json"})
 	if err != nil {
 		return nil, err
 	}

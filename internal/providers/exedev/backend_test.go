@@ -31,9 +31,6 @@ func TestExeDevListFiltersCrabboxVMsByDefault(t *testing.T) {
 	runner := &exeDevRecordingRunner{}
 	runner.fn = func(req LocalCommandRequest) (LocalCommandResult, error) {
 		base := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "exe.dev", "ls --l --json"}
-		if len(runner.calls) == 2 {
-			base[len(base)-1] += " -a"
-		}
 		if !reflect.DeepEqual(req.Args, base) {
 			t.Fatalf("args=%v", req.Args)
 		}
