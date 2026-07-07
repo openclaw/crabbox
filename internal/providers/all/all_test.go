@@ -1266,6 +1266,7 @@ func allBuiltInProviderNames() []string {
 		"codesandbox",
 		"coder",
 		"crownest",
+		"cubesandbox",
 		"daytona",
 		"digitalocean",
 		"docker-sandbox",

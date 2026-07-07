@@ -170,6 +170,7 @@ type Config struct {
 	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
+	CubeSandbox                   CubeSandboxConfig
 	ExeDev                        ExeDevConfig
 	Railway                       RailwayConfig
 	FastAPICloud                  FastAPICloudConfig
@@ -600,6 +601,18 @@ type E2BConfig struct {
 	Template string
 	Workdir  string
 	User     string
+}
+
+type CubeSandboxConfig struct {
+	APIKey        string
+	APIURL        string
+	Domain        string
+	Template      string
+	Workdir       string
+	User          string
+	ProxyNodeIP   string
+	ProxyPortHTTP int
+	ProxyScheme   string
 }
 
 type AzureDynamicSessionsConfig struct {
@@ -2830,6 +2843,13 @@ func baseConfig() Config {
 			Template: "base",
 			Workdir:  "crabbox",
 		},
+		CubeSandbox: CubeSandboxConfig{
+			APIURL:        "http://127.0.0.1:3000",
+			Domain:        "cube.app",
+			Template:      "",
+			Workdir:       "crabbox",
+			ProxyPortHTTP: 80,
+		},
 		ExeDev: ExeDevConfig{
 			ControlHost: "exe.dev",
 			CPUs:        2,
@@ -3189,6 +3209,7 @@ type fileConfig struct {
 	Morph                    *fileMorphConfig                    `yaml:"morph,omitempty"`
 	Daytona                  *fileDaytonaConfig                  `yaml:"daytona,omitempty"`
 	E2B                      *fileE2BConfig                      `yaml:"e2b,omitempty"`
+	CubeSandbox              *fileCubeSandboxConfig              `yaml:"cubeSandbox,omitempty"`
 	ExeDev                   *fileExeDevConfig                   `yaml:"exeDev,omitempty"`
 	Railway                  *fileRailwayConfig                  `yaml:"railway,omitempty"`
 	FastAPICloud             *fileFastAPICloudConfig             `yaml:"fastapiCloud,omitempty"`
@@ -3746,6 +3767,17 @@ type fileE2BConfig struct {
 	Template string `yaml:"template,omitempty"`
 	Workdir  string `yaml:"workdir,omitempty"`
 	User     string `yaml:"user,omitempty"`
+}
+
+type fileCubeSandboxConfig struct {
+	APIURL        string `yaml:"apiUrl,omitempty"`
+	Domain        string `yaml:"domain,omitempty"`
+	Template      string `yaml:"template,omitempty"`
+	Workdir       string `yaml:"workdir,omitempty"`
+	User          string `yaml:"user,omitempty"`
+	ProxyNodeIP   string `yaml:"proxyNodeIp,omitempty"`
+	ProxyPortHTTP int    `yaml:"proxyPortHttp,omitempty"`
+	ProxyScheme   string `yaml:"proxyScheme,omitempty"`
 }
 
 type fileAzureDynamicSessionsConfig struct {
@@ -6116,6 +6148,37 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.E2B.User = file.E2B.User
 		}
 	}
+	if file.CubeSandbox != nil {
+		if file.CubeSandbox.APIURL != "" {
+			cfg.CubeSandbox.APIURL = file.CubeSandbox.APIURL
+			cfg.credentialProvenance.cubeSandboxAPIURL = credentialSource
+		}
+		if file.CubeSandbox.Domain != "" {
+			cfg.CubeSandbox.Domain = file.CubeSandbox.Domain
+			cfg.credentialProvenance.cubeSandboxDomain = credentialSource
+		}
+		if file.CubeSandbox.Template != "" {
+			cfg.CubeSandbox.Template = file.CubeSandbox.Template
+		}
+		if file.CubeSandbox.Workdir != "" {
+			cfg.CubeSandbox.Workdir = file.CubeSandbox.Workdir
+		}
+		if file.CubeSandbox.User != "" {
+			cfg.CubeSandbox.User = file.CubeSandbox.User
+		}
+		if file.CubeSandbox.ProxyNodeIP != "" {
+			cfg.CubeSandbox.ProxyNodeIP = file.CubeSandbox.ProxyNodeIP
+			cfg.credentialProvenance.cubeSandboxProxyNode = credentialSource
+		}
+		if file.CubeSandbox.ProxyPortHTTP > 0 {
+			cfg.CubeSandbox.ProxyPortHTTP = file.CubeSandbox.ProxyPortHTTP
+			cfg.credentialProvenance.cubeSandboxProxyPort = credentialSource
+		}
+		if file.CubeSandbox.ProxyScheme != "" {
+			cfg.CubeSandbox.ProxyScheme = file.CubeSandbox.ProxyScheme
+			cfg.credentialProvenance.cubeSandboxProxyProto = credentialSource
+		}
+	}
 	if file.ExeDev != nil {
 		if file.ExeDev.ControlHost != "" {
 			cfg.ExeDev.ControlHost = file.ExeDev.ControlHost
@@ -8305,6 +8368,36 @@ func applyEnv(cfg *Config) error {
 	cfg.E2B.Template = getenv("CRABBOX_E2B_TEMPLATE", cfg.E2B.Template)
 	cfg.E2B.Workdir = getenv("CRABBOX_E2B_WORKDIR", cfg.E2B.Workdir)
 	cfg.E2B.User = getenv("CRABBOX_E2B_USER", cfg.E2B.User)
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_API_KEY", "CUBE_API_KEY", "E2B_API_KEY"); ok {
+		cfg.CubeSandbox.APIKey = value
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_API_URL", "CUBE_API_URL", "E2B_API_URL"); ok {
+		cfg.CubeSandbox.APIURL = value
+		cfg.credentialProvenance.cubeSandboxAPIURL = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_DOMAIN", "CUBE_SANDBOX_DOMAIN"); ok {
+		cfg.CubeSandbox.Domain = value
+		cfg.credentialProvenance.cubeSandboxDomain = credentialSourceEnvironment
+	}
+	cfg.CubeSandbox.Template = getenv("CRABBOX_CUBESANDBOX_TEMPLATE", getenv("CUBE_TEMPLATE_ID", cfg.CubeSandbox.Template))
+	cfg.CubeSandbox.Workdir = getenv("CRABBOX_CUBESANDBOX_WORKDIR", cfg.CubeSandbox.Workdir)
+	cfg.CubeSandbox.User = getenv("CRABBOX_CUBESANDBOX_USER", cfg.CubeSandbox.User)
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_NODE_IP", "CUBE_PROXY_NODE_IP"); ok {
+		cfg.CubeSandbox.ProxyNodeIP = value
+		cfg.credentialProvenance.cubeSandboxProxyNode = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP", "CUBE_PROXY_PORT_HTTP"); ok {
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			return exit(2, "invalid cubesandbox proxy HTTP port %q", value)
+		}
+		cfg.CubeSandbox.ProxyPortHTTP = port
+		cfg.credentialProvenance.cubeSandboxProxyPort = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_SCHEME", "CUBE_PROXY_SCHEME"); ok {
+		cfg.CubeSandbox.ProxyScheme = value
+		cfg.credentialProvenance.cubeSandboxProxyProto = credentialSourceEnvironment
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_CONTROL_HOST", "EXE_DEV_CONTROL_HOST"); ok {
 		cfg.ExeDev.ControlHost = value
 		cfg.credentialProvenance.exeDevControlHost = credentialSourceEnvironment
