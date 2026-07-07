@@ -615,8 +615,20 @@ func parseCubeSandboxProcessStream(r io.Reader, stdout, stderr io.Writer, secret
 		if event.Event.End != nil {
 			exitCode = event.Event.End.ExitCode
 			seenEnd = true
-			if !event.Event.End.Exited && event.Event.End.Error != "" {
-				fmt.Fprintln(stderr, shared.RedactErrorSecrets(event.Event.End.Error, secrets...))
+			if !event.Event.End.Exited {
+				detail := strings.TrimSpace(event.Event.End.Error)
+				if detail == "" {
+					detail = strings.TrimSpace(event.Event.End.Status)
+				}
+				if detail == "" {
+					detail = "process did not exit normally"
+				}
+				detail = shared.RedactErrorSecrets(detail, secrets...)
+				fmt.Fprintln(stderr, detail)
+				if exitCode == 0 {
+					exitCode = 1
+				}
+				return exitCode, fmt.Errorf("cubesandbox process did not exit normally: %s", detail)
 			}
 		}
 	}

@@ -265,7 +265,11 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 	}
 	if commandErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(), ExitError{Code: 1, Message: fmt.Sprintf("cubesandbox run failed: %v", commandErr)}
+		failureCode := result.ExitCode
+		if failureCode == 0 {
+			failureCode = 1
+		}
+		return finishResult(), ExitError{Code: failureCode, Message: fmt.Sprintf("cubesandbox run failed: %v", commandErr)}
 	}
 	if result.ExitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
@@ -357,6 +361,14 @@ func (b *cubesandboxBackend) Stop(ctx context.Context, req StopRequest) error {
 	}
 	leaseID, sandboxID, _, err := b.resolveSandboxID(ctx, client, req.ID, "", false)
 	if err != nil {
+		var missing *cubesandboxClaimedSandboxMissingError
+		if errors.As(err, &missing) {
+			if removeErr := removeLeaseClaimIfUnchangedAfter(missing.claim.LeaseID, missing.claim, nil); removeErr != nil {
+				return removeErr
+			}
+			fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s (already absent)\n", missing.claim.LeaseID, missing.claim.CloudID)
+			return nil
+		}
 		return err
 	}
 	if err := b.deleteClaimedSandbox(ctx, client, leaseID, sandboxID); err != nil {
@@ -608,6 +620,9 @@ func (b *cubesandboxBackend) resolveClaimedSandbox(ctx context.Context, client c
 	}
 	sandbox, err := client.GetSandbox(ctx, claim.CloudID)
 	if err != nil {
+		if isNotFoundError(err) {
+			return "", "", "", &cubesandboxClaimedSandboxMissingError{claim: claim}
+		}
 		return "", "", "", cubesandboxError("get sandbox", err)
 	}
 	if err := validateCubeSandboxClaim(cfg, claim, sandbox); err != nil {
@@ -648,16 +663,30 @@ func (b *cubesandboxBackend) deleteClaimedSandbox(ctx context.Context, client cu
 	return removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
 		sandbox, err := client.GetSandbox(ctx, sandboxID)
 		if err != nil {
+			if isNotFoundError(err) {
+				return nil
+			}
 			return cubesandboxError("get sandbox before delete", err)
 		}
 		if err := validateCubeSandboxClaim(cfg, claim, sandbox); err != nil {
 			return err
 		}
 		if err := client.DeleteSandbox(ctx, sandboxID); err != nil {
+			if isNotFoundError(err) {
+				return nil
+			}
 			return cubesandboxError("delete sandbox", err)
 		}
 		return nil
 	})
+}
+
+type cubesandboxClaimedSandboxMissingError struct {
+	claim LeaseClaim
+}
+
+func (e *cubesandboxClaimedSandboxMissingError) Error() string {
+	return fmt.Sprintf("cubesandbox sandbox %q for lease %q no longer exists", e.claim.CloudID, e.claim.LeaseID)
 }
 
 func validateCubeSandboxClaim(cfg Config, claim LeaseClaim, sandbox cubesandboxSandbox) error {

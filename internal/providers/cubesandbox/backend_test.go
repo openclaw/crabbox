@@ -77,11 +77,20 @@ func TestCubeSandboxProcessStreamRedactsReflectedCredential(t *testing.T) {
 	t.Run("process end diagnostic", func(t *testing.T) {
 		body := cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 1, "exited": false, "error": "Bearer " + secret + " quota exceeded"}}})
 		var stderr bytes.Buffer
-		if _, err := parseCubeSandboxProcessStream(bytes.NewReader(body), io.Discard, &stderr, secret); err != nil {
-			t.Fatal(err)
+		code, err := parseCubeSandboxProcessStream(bytes.NewReader(body), io.Discard, &stderr, secret)
+		if code != 1 {
+			t.Fatalf("code=%d, want 1", code)
 		}
+		assertCubeSandboxRedactedError(t, err, secret)
 		if strings.Contains(stderr.String(), secret) || !strings.Contains(stderr.String(), "[redacted]") || !strings.Contains(stderr.String(), "quota exceeded") {
 			t.Fatalf("stderr=%q, want redacted useful process diagnostic", stderr.String())
+		}
+	})
+	t.Run("process end without diagnostic", func(t *testing.T) {
+		body := cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": false}}})
+		code, err := parseCubeSandboxProcessStream(bytes.NewReader(body), io.Discard, io.Discard)
+		if code != 1 || err == nil || !strings.Contains(err.Error(), "did not exit normally") {
+			t.Fatalf("code=%d err=%v, want abnormal termination failure", code, err)
 		}
 	})
 }
@@ -968,6 +977,29 @@ func TestCubeSandboxRunReturnsSessionHandleWhenKeepOnFailureRetainsSandbox(t *te
 	}
 }
 
+func TestCubeSandboxRunPreservesAbnormalProcessExitCode(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{
+		processCodes: []int{0, 137},
+		processErrs:  []error{nil, errors.New("process did not exit normally")},
+	}
+	restore := swapNewCubeSandboxClient(client)
+	defer restore()
+	backend := &cubesandboxBackend{
+		cfg: Config{TTL: time.Minute, CubeSandbox: CubeSandboxConfig{APIKey: "test", Template: "base", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"false"},
+		NoSync:  true,
+	})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 137 {
+		t.Fatalf("err=%v, want ExitError code 137", err)
+	}
+}
+
 func TestCubeSandboxSandboxToServerUsesMetadata(t *testing.T) {
 	server := cubesandboxSandboxToServer(cubesandboxSandbox{
 		SandboxID:  "sbx_1",
@@ -1112,6 +1144,59 @@ func TestCubeSandboxStopChecksLiveOwnershipAndRemovesClaimAtomically(t *testing.
 	}
 	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("successful Stop claim exists=%t err=%v", exists, err)
+	}
+}
+
+func TestCubeSandboxStopRemovesStaleClaimWhenSandboxIsAlreadyGone(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{}
+	restore := swapNewCubeSandboxClient(client)
+	defer restore()
+	backend := &cubesandboxBackend{
+		cfg: Config{CubeSandbox: CubeSandboxConfig{APIURL: "https://cube.example.test", Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	leaseID, sandbox, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir()}, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.getErr = &cubesandboxAPIError{StatusCode: http.StatusNotFound, Status: "404 Not Found"}
+	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+		t.Fatalf("Stop stale claim: %v", err)
+	}
+	if len(client.deleteIDs) != 0 {
+		t.Fatalf("already absent sandbox deleted: %#v", client.deleteIDs)
+	}
+	if client.getIDs[len(client.getIDs)-1] != sandbox.SandboxID {
+		t.Fatalf("getIDs=%#v, want %q", client.getIDs, sandbox.SandboxID)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("stale claim exists=%t err=%v", exists, err)
+	}
+}
+
+func TestCubeSandboxStopRemovesClaimWhenDeleteRacesWithExpiry(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeCubeSandboxSyncClient{}
+	restore := swapNewCubeSandboxClient(client)
+	defer restore()
+	backend := &cubesandboxBackend{
+		cfg: Config{CubeSandbox: CubeSandboxConfig{APIURL: "https://cube.example.test", Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	leaseID, sandbox, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir()}, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.deleteErr = &cubesandboxAPIError{StatusCode: http.StatusNotFound, Status: "404 Not Found"}
+	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+		t.Fatalf("Stop raced expiry: %v", err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != sandbox.SandboxID {
+		t.Fatalf("deleteIDs=%#v", client.deleteIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("raced expiry claim exists=%t err=%v", exists, err)
 	}
 }
 
@@ -1319,6 +1404,7 @@ type fakeCubeSandboxSyncClient struct {
 	uploadPath        string
 	uploaded          bytes.Buffer
 	processCodes      []int
+	processErrs       []error
 	processEnvs       []map[string]string
 }
 
@@ -1373,12 +1459,17 @@ func (f *fakeCubeSandboxSyncClient) StartProcess(_ context.Context, _ cubesandbo
 	f.commands = append(f.commands, req.Command)
 	f.users = append(f.users, req.User)
 	f.processEnvs = append(f.processEnvs, req.Env)
+	code := 0
 	if len(f.processCodes) > 0 {
-		code := f.processCodes[0]
+		code = f.processCodes[0]
 		f.processCodes = f.processCodes[1:]
-		return code, nil
 	}
-	return 0, nil
+	var err error
+	if len(f.processErrs) > 0 {
+		err = f.processErrs[0]
+		f.processErrs = f.processErrs[1:]
+	}
+	return code, err
 }
 
 func (f *fakeCubeSandboxSyncClient) commandContains(value string) bool {
