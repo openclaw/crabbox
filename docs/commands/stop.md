@@ -41,8 +41,12 @@ Crabbox lease ID and local slug:
 - `morph` — pauses the instance by default and retains its local claim and SSH
   key for reuse. Set `morph.deleteOnRelease` (or pass
   `--morph-delete-on-release`) to delete the instance and key instead.
-- `exe-dev` — accepts a Crabbox lease ID, local slug, or exe.dev VM name and
-  deletes the VM through `ssh exe.dev rm`.
+- `exe-dev` — accepts a Crabbox lease ID, local slug, or exe.dev VM name only
+  when an unchanged local claim binds the exact deterministic VM name,
+  complete remote ownership tags, and current control route. Claimless or
+  legacy unscoped tagged VMs require explicit `--reclaim` through a normal
+  reuse command before stop; untagged VMs remain read-only inventory. Failed
+  deletion keeps the claim.
 - `semaphore` — stops the Semaphore CI job and removes the local claim.
 - `sprites` — deletes the Sprites sprite and removes the local claim.
 - `daytona` — deletes the Daytona sandbox.

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -27,7 +28,18 @@ func init() {
 
 type warmupFailureReleaseBackend struct {
 	releases int
+	resolves int
 }
+
+type ownershipChangedReleaseBackend struct {
+	*warmupFailureReleaseBackend
+}
+
+func (b *ownershipChangedReleaseBackend) RefreshReleaseLeaseTarget(context.Context, LeaseTarget) (LeaseTarget, error) {
+	return LeaseTarget{}, ErrReleaseLeaseOwnershipChanged
+}
+
+func (b *ownershipChangedReleaseBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
 
 func (b *warmupFailureReleaseBackend) Spec() ProviderSpec {
 	return ProviderSpec{Name: "warmup-release-test"}
@@ -36,6 +48,7 @@ func (b *warmupFailureReleaseBackend) Acquire(context.Context, AcquireRequest) (
 	return LeaseTarget{}, nil
 }
 func (b *warmupFailureReleaseBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+	b.resolves++
 	return LeaseTarget{}, nil
 }
 func (b *warmupFailureReleaseBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
@@ -60,6 +73,22 @@ func TestWarmupFailureLeavesAcknowledgedLeaseForControllerReleaseGate(t *testing
 	app.releaseWarmupLeaseAfterFailure(context.Background(), backend, defaultConfig(), lease, false)
 	if backend.releases != 1 {
 		t.Fatalf("standalone warmup cleanup releases=%d", backend.releases)
+	}
+	if backend.resolves != 0 {
+		t.Fatalf("standalone warmup cleanup resolves=%d, want no implicit preparation", backend.resolves)
+	}
+}
+
+func TestReleaseBackendLeaseStopsBeforeCleanupAfterOwnershipChange(t *testing.T) {
+	base := &warmupFailureReleaseBackend{}
+	backend := &ownershipChangedReleaseBackend{warmupFailureReleaseBackend: base}
+	lease := LeaseTarget{LeaseID: "cbx_abcdef123456", SSH: SSHTarget{Host: "192.0.2.70"}}
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).releaseBackendLeaseBestEffort(context.Background(), backend, defaultConfig(), lease)
+	if !errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
+		t.Fatalf("err=%v, want ownership-change sentinel", err)
+	}
+	if base.releases != 0 {
+		t.Fatalf("releases=%d, want no cleanup or release after ownership change", base.releases)
 	}
 }
 
@@ -129,6 +158,57 @@ func TestStopCleansMediatedEgressBeforeRelease(t *testing.T) {
 		}
 		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 			t.Fatalf("egress pid path for %s still exists: %v", id, err)
+		}
+	}
+}
+
+func TestStopDefersUnsafeLocalConnectionCleanupUntilRelease(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	logPath := installRecordingSSH(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	leaseID := "cbx_env_profile_test"
+	requestedID := "friendly-slug"
+	pidPaths := map[string]string{}
+	for _, id := range []string{requestedID, leaseID} {
+		_, pidPath, err := egressDaemonPaths(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(pidPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(pidPath, []byte("99999999\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pidPaths[id] = pidPath
+	}
+	runEnvProfileTestConnectionCleanupSafe = false
+	t.Cleanup(func() { runEnvProfileTestConnectionCleanupSafe = true })
+	runEnvProfileTestReleaseHook = func() error {
+		assertSSHLogContains(t, logPath, remoteStopEgressClientCommand())
+		for id, pidPath := range pidPaths {
+			if _, err := os.Stat(pidPath); err != nil {
+				return fmt.Errorf("local connection cleanup for %s ran before guarded release", id)
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).stop(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--id", requestedID,
+	})
+	if err != nil {
+		t.Fatalf("stop error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	for id, pidPath := range pidPaths {
+		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+			t.Fatalf("egress pid path for %s still exists after release: %v", id, err)
 		}
 	}
 }
@@ -259,6 +339,7 @@ type runEnvProfileTestBackend struct {
 
 var runEnvProfileTestReleaseErr error
 var runEnvProfileTestReleaseHook func() error
+var runEnvProfileTestConnectionCleanupSafe = true
 
 func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runEnvProfileTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
@@ -280,7 +361,10 @@ func (b runEnvProfileTestBackend) Resolve(context.Context, ResolveRequest) (Leas
 func (b runEnvProfileTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
 }
-func (b runEnvProfileTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+func (b runEnvProfileTestBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	if req.GuardedRemoteCleanup != nil {
+		req.GuardedRemoteCleanup(ctx, req.Lease)
+	}
 	if runEnvProfileTestReleaseHook != nil {
 		if err := runEnvProfileTestReleaseHook(); err != nil {
 			return err
@@ -290,6 +374,9 @@ func (b runEnvProfileTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequ
 }
 func (b runEnvProfileTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
 	return Server{Provider: b.spec.Name}, nil
+}
+func (b runEnvProfileTestBackend) ReleaseLeaseConnectionCleanupSafe() bool {
+	return runEnvProfileTestConnectionCleanupSafe
 }
 
 type runPrepareTestProvider struct{}

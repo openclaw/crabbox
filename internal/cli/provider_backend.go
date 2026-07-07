@@ -194,6 +194,23 @@ type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
 }
 
+// ReleaseLeaseConnectionCleanupPolicy lets a provider defer generic connection
+// cleanup until after its guarded release succeeds.
+type ReleaseLeaseConnectionCleanupPolicy interface {
+	// ReleaseLeaseConnectionCleanupSafe reports whether generic remote cleanup
+	// may run before the provider's guarded release.
+	ReleaseLeaseConnectionCleanupSafe() bool
+}
+
+// ReleaseLeaseTargetRefresher opts a provider into refreshing authorization
+// and connection metadata immediately before automatic lease cleanup.
+type ReleaseLeaseTargetRefresher interface {
+	ReleaseLeaseConnectionCleanupPolicy
+	RefreshReleaseLeaseTarget(context.Context, LeaseTarget) (LeaseTarget, error)
+}
+
+var ErrReleaseLeaseOwnershipChanged = errors.New("release lease ownership changed")
+
 type CheckpointForkWorkdirValidator interface {
 	ValidateCheckpointForkWorkdir(ctx context.Context, lease LeaseTarget, workdir string) error
 }
@@ -652,6 +669,9 @@ type ReleaseLeaseRequest struct {
 	Lease                    LeaseTarget
 	Force                    bool
 	ExpectedProviderIdentity ProviderIdentityExpectation
+	// GuardedRemoteCleanup lets providers that fence release authorization run
+	// generic remote teardown only after ownership is verified under that fence.
+	GuardedRemoteCleanup func(context.Context, LeaseTarget)
 }
 
 // ConfirmedAbsentLocalCleanupRequest carries the immutable provider identity

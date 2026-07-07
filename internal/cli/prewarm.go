@@ -90,14 +90,18 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 		return nil
 	}
 	var out bytes.Buffer
+	var acquiredLease LeaseTarget
 	warmupStarted := time.Now()
 	warmupApp := App{Stdout: io.MultiWriter(a.Stdout, &out), Stderr: a.Stderr}
-	if err := warmupApp.warmup(ctx, leaseArgs); err != nil {
+	if err := warmupApp.warmupWithLeaseObserver(ctx, leaseArgs, func(lease LeaseTarget) { acquiredLease = lease }); err != nil {
 		return err
 	}
 	leaseID := parseWarmupLeaseID(out.String())
 	if leaseID == "" {
 		return exit(2, "prewarm could not parse warmup lease id")
+	}
+	if backend.Spec().Kind != ProviderKindDelegatedRun && acquiredLease.LeaseID != leaseID {
+		return exit(2, "prewarm warmup lease identity was not preserved")
 	}
 	warmupMs := time.Since(warmupStarted).Milliseconds()
 	hydration := "skipped"
@@ -109,7 +113,7 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 		hydration = "actions"
 		hydrateStarted := time.Now()
 		hydrateArgs = prewarmHydrateArgs(cfg, leaseID, *githubRunner, *waitTimeout, *keepAliveMinutes, followupArgs)
-		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, leaseID, "actions hydration", func() error {
+		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, acquiredLease, "actions hydration", func() error {
 			return a.actionsHydrate(ctx, hydrateArgs)
 		}); err != nil {
 			return err
@@ -121,7 +125,7 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 	probeMs := int64(0)
 	if strings.TrimSpace(*probeCommand) != "" {
 		probeStarted := time.Now()
-		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, leaseID, "probe", func() error {
+		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, acquiredLease, "probe", func() error {
 			return a.runCommand(ctx, prewarmProbeArgs(cfg, leaseID, *probeCommand, followupArgs))
 		}); err != nil {
 			return err
@@ -129,7 +133,7 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 		probeMs = time.Since(probeStarted).Milliseconds()
 	}
 	if readyPoolKey != "" {
-		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, leaseID, "pool registration", func() error {
+		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, acquiredLease, "pool registration", func() error {
 			return a.registerPrewarmedLeaseInReadyPool(ctx, cfg, leaseID, readyPoolKey, *githubRunner)
 		}); err != nil {
 			return err
@@ -244,18 +248,30 @@ func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, 
 	return nil
 }
 
-func (a App) runPrewarmPostWarmupStep(ctx context.Context, backend Backend, cfg Config, leaseID, stage string, step func() error) error {
+func (a App) runPrewarmPostWarmupStep(ctx context.Context, backend Backend, cfg Config, lease LeaseTarget, stage string, step func() error) error {
 	err := step()
 	if err == nil {
 		return nil
 	}
-	a.releasePrewarmLeaseAfterFailure(ctx, backend, cfg, leaseID, stage)
+	a.releasePrewarmLeaseAfterFailure(ctx, backend, cfg, lease, stage)
 	return err
 }
 
-func (a App) releasePrewarmLeaseAfterFailure(ctx context.Context, backend Backend, cfg Config, leaseID, stage string) {
+func (a App) releasePrewarmLeaseAfterFailure(ctx context.Context, backend Backend, cfg Config, acquired LeaseTarget, stage string) {
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
+		return
+	}
+	leaseID := acquired.LeaseID
+	if _, guarded := backend.(ReleaseLeaseTargetRefresher); guarded {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), prewarmFailureCleanupTimeout)
+		defer cancel()
+		fmt.Fprintf(a.Stderr, "prewarm cleanup: releasing id=%s after %s failure\n", leaseID, stage)
+		if err := a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, cfg, acquired); err != nil {
+			fmt.Fprintf(a.Stderr, "warning: prewarm %s failed; automatic release of %s failed: %v; next: crabbox stop --provider %s --id %s\n", stage, leaseID, err, cfg.Provider, leaseID)
+			return
+		}
+		fmt.Fprintf(a.Stderr, "prewarm cleanup: released id=%s after %s failure\n", leaseID, stage)
 		return
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), prewarmFailureCleanupTimeout)
@@ -376,7 +392,6 @@ func prewarmProviderPassthroughFlags(defaults Config) map[string]bool {
 	fs := flag.NewFlagSet("prewarm-followup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	_ = registerProviderFlags(fs, defaults)
-	fs.Bool("reclaim", false, "claim this lease for the current repo")
 	flags := map[string]bool{}
 	fs.VisitAll(func(f *flag.Flag) {
 		takesValue := true
