@@ -602,8 +602,15 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 				t.Fatalf("%s advertises %s but kind=%s features=%v", name, feature, spec.Kind, spec.Features)
 			}
 		}
+		// Archive sync is a delegated-run feature, except for SSH-lease
+		// hybrids whose run and sync planes are delegated to provider APIs
+		// (for example daytona's toolbox archive sync).
+		if spec.Features.Has(core.FeatureArchiveSync) &&
+			spec.Kind != core.ProviderKindDelegatedRun &&
+			!(spec.Kind == core.ProviderKindSSHLease && spec.Features.Has(core.FeatureSSH)) {
+			t.Fatalf("%s advertises %s but kind=%s features=%v", name, core.FeatureArchiveSync, spec.Kind, spec.Features)
+		}
 		for _, feature := range []core.Feature{
-			core.FeatureArchiveSync,
 			core.FeatureModuleRun,
 			core.FeatureRunProof,
 			core.FeatureRunSession,
@@ -624,7 +631,10 @@ func TestArchiveSyncFeatureGatesDelegatedSyncOptions(t *testing.T) {
 	for _, name := range allBuiltInProviderNames() {
 		provider := mustProvider(t, name)
 		spec := provider.Spec()
-		if spec.Kind != core.ProviderKindDelegatedRun {
+		// SSH-lease hybrids that delegate run and sync (archive-sync) go
+		// through the same option gate as delegated-run providers.
+		if spec.Kind != core.ProviderKindDelegatedRun &&
+			!(spec.Kind == core.ProviderKindSSHLease && spec.Features.Has(core.FeatureArchiveSync)) {
 			continue
 		}
 		err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{SyncOnly: true})

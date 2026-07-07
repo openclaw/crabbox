@@ -114,6 +114,39 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 	return nil
 }
 
+func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, allowProviderMetadata bool) (core.Server, error) {
+	_ = allowProviderMetadata
+	if provider != "azure" {
+		return core.Server{}, core.Exit(2, "refusing to rewrite Azure lease=%s as provider=%s", existing.LeaseID, provider)
+	}
+	if slug != existing.Slug || server.Labels["lease"] != existing.LeaseID || server.Labels["slug"] != existing.Slug {
+		return core.Server{}, core.Exit(2, "refusing to rewrite Azure lease=%s with mismatched label identity", existing.LeaseID)
+	}
+	if existing.CloudID != "" && server.CloudID != "" && existing.CloudID != server.CloudID {
+		return core.Server{}, core.Exit(2, "refusing to rewrite Azure lease=%s with stale VM name", existing.LeaseID)
+	}
+	if existing.CloudImmutableID != "" && server.ImmutableID != "" && existing.CloudImmutableID != server.ImmutableID {
+		return core.Server{}, core.Exit(2, "refusing to rewrite Azure lease=%s with stale immutable VM identity", existing.LeaseID)
+	}
+	if existing.CloudImmutableID == "" {
+		server.ImmutableID = ""
+	}
+	labels := make(map[string]string, len(server.Labels))
+	for key, value := range server.Labels {
+		labels[key] = value
+	}
+	if existingValue := existing.Labels["provider_key"]; existingValue != "" {
+		if cloudValue := labels["provider_key"]; cloudValue != "" && cloudValue != existingValue {
+			return core.Server{}, core.Exit(2, "refusing to rewrite Azure lease=%s with mismatched provider_key", existing.LeaseID)
+		}
+		labels["provider_key"] = existingValue
+	} else {
+		delete(labels, "provider_key")
+	}
+	server.Labels = labels
+	return server, nil
+}
+
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return core.AzureVMSizeCandidatesForConfig(cfg)[0]
 }

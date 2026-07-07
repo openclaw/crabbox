@@ -9,9 +9,15 @@ import (
 )
 
 func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, expected Server, resources azureVMDeleteResources, now time.Time) error {
+	return c.deleteAzureValidatedResourcesWithRetry(ctx, expected, resources, func(expected, live Server) error {
+		return validateAzureCleanupVM(expected, live, now)
+	})
+}
+
+func (c *AzureClient) deleteAzureValidatedResourcesWithRetry(ctx context.Context, expected Server, resources azureVMDeleteResources, validateVM func(Server, Server) error) error {
 	name := strings.TrimSpace(expected.CloudID)
 	var err error
-	resources, err = c.revalidateAzureCleanupDeleteResourcesWithRetry(ctx, expected, resources, now)
+	resources, err = c.revalidateAzureDeleteResourcesWithRetry(ctx, expected, resources, validateVM)
 	if err != nil {
 		return err
 	}
@@ -27,7 +33,7 @@ func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, 
 					return err
 				}
 				var err error
-				resources, err = c.revalidateAzureCleanupDeleteResourcesWithRetry(ctx, expected, resources, now)
+				resources, err = c.revalidateAzureDeleteResourcesWithRetry(ctx, expected, resources, validateVM)
 				if err != nil {
 					return err
 				}
@@ -35,7 +41,7 @@ func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, 
 			}
 			resources.vm = false
 			var err error
-			resources, err = c.revalidateAzureCleanupDeleteResourcesWithRetry(ctx, expected, resources, now)
+			resources, err = c.revalidateAzureDeleteResourcesWithRetry(ctx, expected, resources, validateVM)
 			if err != nil {
 				return err
 			}
@@ -55,7 +61,7 @@ func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, 
 			return err
 		}
 		var err error
-		resources, err = c.revalidateAzureCleanupDeleteResourcesWithRetry(ctx, expected, resources, now)
+		resources, err = c.revalidateAzureDeleteResourcesWithRetry(ctx, expected, resources, validateVM)
 		if err != nil {
 			return err
 		}
@@ -65,9 +71,9 @@ func (c *AzureClient) deleteAzureCleanupResourcesWithRetry(ctx context.Context, 
 	}
 }
 
-func (c *AzureClient) revalidateAzureCleanupDeleteResourcesWithRetry(ctx context.Context, expected Server, resources azureVMDeleteResources, now time.Time) (azureVMDeleteResources, error) {
+func (c *AzureClient) revalidateAzureDeleteResourcesWithRetry(ctx context.Context, expected Server, resources azureVMDeleteResources, validateVM func(Server, Server) error) (azureVMDeleteResources, error) {
 	return retryAzureCleanupResourceReads(ctx, resources, func(current azureVMDeleteResources) (azureVMDeleteResources, error) {
-		return c.revalidateAzureCleanupDeleteResources(ctx, expected, current, now)
+		return c.revalidateAzureDeleteResources(ctx, expected, current, validateVM)
 	})
 }
 
@@ -104,7 +110,7 @@ func azureCleanupResourcesEmpty(resources azureVMDeleteResources) bool {
 	return !resources.vm && resources.nic == "" && resources.publicIP == "" && resources.disk == "" && resources.quarantineNSG == ""
 }
 
-func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context, expected Server, resources azureVMDeleteResources, now time.Time) (azureVMDeleteResources, error) {
+func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expected Server, resources azureVMDeleteResources, validateVM func(Server, Server) error) (azureVMDeleteResources, error) {
 	name := strings.TrimSpace(expected.CloudID)
 	labels := expected.Labels
 	if resources.nic != "" {
@@ -200,7 +206,7 @@ func (c *AzureClient) revalidateAzureCleanupDeleteResources(ctx context.Context,
 			}
 		} else {
 			live := azureVMToServer(response.VirtualMachine, "", "")
-			if err := validateAzureCleanupVM(expected, live, now); err != nil {
+			if err := validateVM(expected, live); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
 			}
 			if response.VirtualMachine.Properties == nil {

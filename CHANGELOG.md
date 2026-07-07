@@ -2,8 +2,27 @@
 
 ## 0.36.1 - Unreleased
 
+### Added
+
+- Added coordinator-managed Daytona Linux leases with a Worker-held API key, exact ownership cleanup, expiring SSH-token refresh, CLI secret redaction, and production Cloudflare configuration.
+
 ### Fixed
 
+- Routed Azure orphan-sweep deletion through the exact lease-, provider-scope-, resource-, companion-, and immutable-disk-bound owned-delete path instead of deleting by retained VM name alone.
+- Kept sync manifest writes compatible with minimal BusyBox guests instead of requiring a GNU-only `dd` option, and preserved complete Phala gateway hostnames so later status and SSH reconnects keep working.
+- Restored lease-scoped SSH host-key pinning for Namespace Instance, Phala, and Islo proxy connections instead of accepting unverified server identities. Thanks @coygeek.
+- Corrected the CLI command map, coordinator API methods, and provider architecture reference to match the implemented commands, routes, and backend capabilities. Thanks @zozo123.
+- Advertised Daytona's direct toolbox archive sync so `--sync-only` and `--force-sync-large` work while preserving brokered Crabbox rsync. Thanks @zozo123.
+- Partitioned unauthenticated GitHub OAuth starts by caller with an atomic per-source limit and guarded global backstop, preventing one source from exhausting login for every user. Thanks @coygeek.
+- Disabled inherited SSH agent and X11 forwarding across CLI-managed SSH, rsync, SCP, VNC, and port-forward transports, preserving per-lease credential boundaries. Thanks @coygeek.
+- Collected runtime-only provider credentials through provider-owned diagnostic hooks and redacted opaque OpenSandbox and W&B upstream errors before they reach CLI output. Thanks @coygeek.
+- Redacted complete punctuation-bearing authorization, API-key, and bearer values from CLI and coordinator diagnostics while preserving whitespace-separated routing context. Thanks @coygeek.
+- Limited framing of proxied Browser Code responses to the same isolated Code origin, preventing sibling same-site pages from clickjacking an authenticated session without breaking code-server webviews. Thanks @coygeek.
+- Revalidated non-admin GitHub grants when WebVNC and Code agent tickets are consumed, matching the existing egress fail-closed boundary after logout, emergency revocation, membership loss, or membership-check failure. Thanks @coygeek.
+- Bound coordinator Azure managed-disk cleanup to a durable immutable disk claim captured from the live VM association, preventing stale adopted ownership tags from authorizing deletion. Thanks @coygeek.
+- Required direct Azure release and cleanup to hold an unchanged subscription-, resource-group-, VM-name-, immutable-VM-, lease-, slug-, and provider-key-bound local claim across deletion, with durable companion-resource identities for interruption-safe cleanup. Thanks @coygeek.
+- Required direct GCP release and cleanup to hold an unchanged project-, zone-, name-, numeric-instance-, lease-, slug-, and provider-key-bound local claim across deletion. Thanks @coygeek.
+- Prevented repository-defined External lifecycle commands from placing inherited `external.config` values on process arguments without an exact, trusted non-secret argv contract. Thanks @coygeek.
 - Prevented repository-controlled External SSH endpoint templates and adapter output from silently using ambient or operator-managed SSH credentials, with source-bound opt-ins for environment-derived fields and provider-returned destinations. Thanks @coygeek.
 - Made Sealos DevBox preflight work with tenant-scoped RBAC, rendered the runtime class, storage request, scheduling constraints, and SSH port contract required by hosted Sealos clusters, updated the SSHGate default to port 2233, bootstrapped missing sync tools, and cleaned local claims safely when a DevBox is already absent. Thanks @coygeek.
 - Changed portal logout to an authenticated, same-origin `POST` with a read-only `GET` confirmation page, preventing cross-site top-level navigation from clearing portal cookies or revoking isolated Code viewer sessions. Thanks @coygeek.

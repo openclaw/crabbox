@@ -488,6 +488,7 @@ type ExternalLifecycleOperation struct {
 	Steps             [][]string        `yaml:"steps,omitempty" json:"steps,omitempty"`
 	Env               map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	AllowEnvArgv      bool              `yaml:"allowEnvArgv,omitempty" json:"allowEnvArgv,omitempty"`
+	AllowConfigArgv   bool              `yaml:"allowConfigArgv,omitempty" json:"allowConfigArgv,omitempty"`
 	Output            string            `yaml:"output,omitempty" json:"output,omitempty"`
 	NamePrefix        string            `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
 	RollbackOnFailure bool              `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
@@ -5886,10 +5887,12 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.External.Lifecycle != nil {
 			cfg.External.Lifecycle = *file.External.Lifecycle
+			cfg.credentialProvenance.externalLifecycle = credentialSource
 		}
 		if file.External.Connection != nil {
 			cfg.External.Connection = *file.External.Connection
 			ssh := cfg.External.Connection.SSH
+			cfg.credentialProvenance.externalConnection = credentialSource
 			cfg.credentialProvenance.externalSSHConnection = credentialSource
 			if trusted {
 				outputContract, outputContractOK := externalProviderOutputContract(cfg.External)
@@ -5943,6 +5946,19 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 				if cfg.credentialProvenance.externalApproved.providerOutput &&
 					outputContractOK && outputContract == cfg.credentialProvenance.externalApproved.outputContract {
 					cfg.credentialProvenance.externalSSHOutput = credentialSourceTrustedFile
+				}
+			}
+		}
+		if trusted && (file.External.Lifecycle != nil || file.External.Connection != nil) {
+			cfg.credentialProvenance.externalArgvApproval = externalLifecycleCredentialApproval{}
+			if externalLifecycleAllowsConfigArgv(cfg.External.Lifecycle) {
+				contract, ok := externalLifecycleContract(cfg.External)
+				if !ok {
+					return exit(2, "external lifecycle config-argv contract must be JSON encodable")
+				}
+				cfg.credentialProvenance.externalArgvApproval = externalLifecycleCredentialApproval{
+					configArgv: true,
+					contract:   contract,
 				}
 			}
 		}

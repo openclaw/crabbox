@@ -1099,6 +1099,48 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCreateLeaseOmitsImplicitDaytonaArchitecture(t *testing.T) {
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"daytona","state":"active","host":"ssh.app.daytona.io"}}`))
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	cfg := Config{
+		Provider:         "daytona",
+		Architecture:     ArchitectureAMD64,
+		TargetOS:         targetLinux,
+		SSHFallbackPorts: []string{"22"},
+		TTL:              time.Hour,
+		IdleTimeout:      30 * time.Minute,
+	}
+	if _, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_123", "blue-crab"); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	if _, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_456", "red-crab"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := bodies[0]["architecture"]; ok {
+		t.Fatalf("implicit Daytona architecture forwarded: %#v", bodies[0])
+	}
+	if got := bodies[1]["architecture"]; got != ArchitectureARM64 {
+		t.Fatalf("explicit Daytona architecture=%v, want %q", got, ArchitectureARM64)
+	}
+}
+
 func TestCoordinatorRegisterLease(t *testing.T) {
 	var got CoordinatorLeaseRegistration
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

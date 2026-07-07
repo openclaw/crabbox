@@ -6,12 +6,12 @@ Read when:
 - configuring Daytona authentication, snapshots, or SSH access;
 - understanding how the Daytona backend differs from a plain SSH-lease provider.
 
-`provider: daytona` provisions [Daytona](https://www.daytona.io/) sandboxes from
-a snapshot. It is registered as an SSH-lease provider, but the data plane is
-hybrid: `warmup`, `run`, `list`, `status`, and `stop` drive Daytona's SDK and
-toolbox APIs, while `ssh` mints a short-lived Daytona SSH token only when
-interactive shell access is requested. Daytona is direct-from-CLI only — it
-never runs through the coordinator — and supports Linux targets exclusively.
+`provider: daytona` provisions [Daytona](https://www.daytona.io/) sandboxes and
+supports Linux targets exclusively. Direct mode is hybrid: `warmup`, `run`,
+`list`, `status`, and `stop` drive Daytona's SDK and toolbox APIs, while `ssh`
+mints a short-lived SSH token. Brokered mode keeps the API key in the
+coordinator, returns an expiring SSH identity to the authorized client, and
+uses Crabbox's normal SSH/rsync run path.
 
 ## Authentication
 
@@ -58,6 +58,17 @@ variable):
 | `CRABBOX_DAYTONA_API_URL`         | `DAYTONA_API_URL`          | `daytona.apiUrl`          |
 
 The API URL defaults to `https://app.daytona.io/api`.
+
+For brokered mode, configure the coordinator instead of client auth:
+
+```text
+DAYTONA_CRABBOX_KEY               # required secret
+CRABBOX_DAYTONA_SNAPSHOT          # optional shared snapshot
+CRABBOX_DAYTONA_TARGET            # optional compute target
+CRABBOX_DAYTONA_SSH_ACCESS_MINUTES # minimum token TTL; default 120
+```
+
+The coordinator accepts no Daytona API credential from lease requests.
 
 ## Config
 
@@ -132,6 +143,11 @@ Daytona is a hybrid backend: core rendering, lease labels, sync manifests, and
 repo claim checks stay Crabbox-owned, while the `run` transport is the Daytona
 SDK/toolbox. Actions runner hydration is not supported, because it requires a
 long-lived, directly SSH-reachable runner host.
+
+In brokered mode the Worker creates and deletes the sandbox, verifies exact
+lease labels before destructive cleanup, refreshes the SSH token before expiry,
+and redacts that token from the portal. Workspaces and ready pools are disabled
+because they persist an SSH endpoint beyond the rotating credential.
 
 See [providers.md](../commands/providers.md) for the full provider matrix and
 [capabilities.md](capabilities.md) for opt-in lease features.

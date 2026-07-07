@@ -9832,7 +9832,8 @@ describe("fleet lease identity and idle", () => {
   it("deletes only coordinator-owned Azure orphan sweep candidates", async () => {
     const storage = new MemoryStorage();
     const list = vi.spyOn(storage, "list");
-    const deleted: string[] = [];
+    const rawDeleted: string[] = [];
+    const ownedDeleted: LeaseRecord[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
     storage.seed(
       "lease:cbx_000000000776",
@@ -9841,6 +9842,7 @@ describe("fleet lease identity and idle", () => {
         provider: "azure",
         cloudID: "vm-orphan",
         region: "westus2",
+        providerScope: "/subscriptions/subscription/resourceGroups/crabbox-leases",
         state: "expired",
         keep: false,
       }),
@@ -9917,7 +9919,11 @@ describe("fleet lease identity and idle", () => {
                 name: "vm-orphan",
                 labels: {
                   crabbox: "true",
-                  lease: "cbx_missing",
+                  created_by: "crabbox",
+                  provider: "azure",
+                  lease: "cbx_000000000776",
+                  slug: "blue-lobster",
+                  owner: "peter@example.com",
                   created_at: oldSeconds,
                   expires_at: oldSeconds,
                 },
@@ -9991,9 +9997,12 @@ describe("fleet lease identity and idle", () => {
                 },
               }),
             ],
+            onDeleteOwnedServer(lease) {
+              ownedDeleted.push(structuredClone(lease));
+            },
           },
           async (id) => {
-            deleted.push(id);
+            rawDeleted.push(id);
           },
         ),
       },
@@ -10015,7 +10024,16 @@ describe("fleet lease identity and idle", () => {
       terminated: number;
       candidates: Array<Record<string, unknown>>;
     }>("azure-orphan-sweep:last");
-    expect(deleted).toEqual(["vm-orphan"]);
+    expect(rawDeleted).toEqual([]);
+    expect(ownedDeleted).toEqual([
+      expect.objectContaining({
+        id: "cbx_000000000776",
+        provider: "azure",
+        cloudID: "vm-orphan",
+        region: "westus2",
+        providerScope: "/subscriptions/subscription/resourceGroups/crabbox-leases",
+      }),
+    ]);
     expect(
       list.mock.calls.filter(([options]) => options?.prefix === "lease:" && options.limit === 128),
     ).toHaveLength(2);
@@ -10024,7 +10042,7 @@ describe("fleet lease identity and idle", () => {
       expect.objectContaining({
         cloudID: "vm-orphan",
         region: "westus2",
-        leaseID: "cbx_missing",
+        leaseID: "cbx_000000000776",
         reason: "expired-provider-tag",
         ownership: "coordinator-lease",
         ownershipLeaseID: "cbx_000000000776",
@@ -10037,6 +10055,93 @@ describe("fleet lease identity and idle", () => {
         action: "reported",
       }),
     ]);
+  });
+
+  it("keeps Azure orphan sweep candidates when exact owned deletion rejects them", async () => {
+    const storage = new MemoryStorage();
+    const rawDeleted: string[] = [];
+    const ownedDeleted: LeaseRecord[] = [];
+    const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    storage.seed(
+      "lease:cbx_000000000776",
+      testLease({
+        id: "cbx_000000000776",
+        provider: "azure",
+        cloudID: "vm-replaced",
+        region: "westus2",
+        providerScope: "/subscriptions/subscription/resourceGroups/crabbox-leases",
+        state: "expired",
+        keep: false,
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(
+          undefined,
+          {
+            provider: "azure",
+            servers: [
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-replaced",
+                region: "westus2",
+                name: "vm-replaced",
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  provider: "azure",
+                  lease: "cbx_replacement",
+                  slug: "replacement",
+                  owner: "other@example.com",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+            ],
+            onDeleteOwnedServer(lease) {
+              ownedDeleted.push(structuredClone(lease));
+              throw new Error(
+                `refusing to delete Azure VM vm-replaced: ownership does not match lease ${lease.id}`,
+              );
+            },
+          },
+          async (id) => {
+            rawDeleted.push(id);
+          },
+        ),
+      },
+      {
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_SUBSCRIPTION_ID: "subscription",
+        CRABBOX_AZURE_LOCATION: "westus2",
+        CRABBOX_AZURE_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS: "1",
+      },
+    );
+
+    await fleet.alarm();
+
+    expect(rawDeleted).toEqual([]);
+    expect(ownedDeleted).toEqual([
+      expect.objectContaining({ id: "cbx_000000000776", cloudID: "vm-replaced" }),
+    ]);
+    expect(storage.value("azure-orphan-sweep:last")).toMatchObject({
+      mode: "delete",
+      terminated: 0,
+      candidates: [
+        expect.objectContaining({
+          cloudID: "vm-replaced",
+          leaseID: "cbx_replacement",
+          ownership: "coordinator-lease",
+          ownershipLeaseID: "cbx_000000000776",
+          action: "terminate_failed",
+          error: expect.stringContaining("ownership does not match lease cbx_000000000776"),
+        }),
+      ],
+    });
   });
 
   it("releases stale pending EC2 Mac hosts during the AWS orphan sweep", async () => {
@@ -16369,6 +16474,126 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("redacts Daytona SSH access tokens from portal lease details", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      daytona: fakeProvider(undefined, { provider: "daytona" }),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        provider: "daytona",
+        owner: "alice@example.com",
+        org: "example-org",
+        host: "ssh.app.daytona.io",
+        sshUser: "daytona-live-ssh-token",
+        sshPort: "22",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const response = await fleet.fetch(
+      request("GET", "/portal/leases/cbx_000000000001", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toContain("&lt;token&gt;@ssh.app.daytona.io:22");
+    expect(body).not.toContain("daytona-live-ssh-token");
+  });
+
+  it("redacts Daytona SSH access tokens from user and admin lease lists", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "daytona",
+        owner: "alice@example.com",
+        org: "example-org",
+        sshUser: "daytona-live-ssh-token",
+      }),
+    );
+
+    const userResponse = await fleet.fetch(
+      request("GET", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(userResponse.status).toBe(200);
+    const userBody = await userResponse.text();
+    expect(userBody).toContain('"sshUser":"<token>"');
+    expect(userBody).not.toContain("daytona-live-ssh-token");
+
+    const adminResponse = await fleet.fetch(
+      request("GET", "/v1/admin/leases", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    expect(adminResponse.status).toBe(200);
+    const adminBody = await adminResponse.text();
+    expect(adminBody).toContain('"sshUser":"<token>"');
+    expect(adminBody).not.toContain("daytona-live-ssh-token");
+  });
+
+  it("returns a refreshed Daytona SSH token when resolving an expiring lease", async () => {
+    const storage = new MemoryStorage();
+    let refreshes = 0;
+    const fleet = testFleet(storage, {
+      daytona: fakeProvider(undefined, {
+        provider: "daytona",
+        onRefreshLeaseAccessForResolution: (lease) => {
+          refreshes += 1;
+          return {
+            ...lease,
+            sshUser: "daytona-refreshed-token",
+            providerAccessExpiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          };
+        },
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "daytona",
+        cloudID: "sandbox-one",
+        owner: "alice@example.com",
+        org: "example-org",
+        sshUser: "daytona-expiring-token",
+        providerAccessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/leases/cbx_000000000001", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      lease: { sshUser: "daytona-refreshed-token" },
+    });
+    expect(refreshes).toBe(1);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000001")?.sshUser).toBe(
+      "daytona-refreshed-token",
+    );
+  });
+
   it("fails closed without an isolated Code origin while retaining health and bridge tickets", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -17358,6 +17583,7 @@ describe("fleet lease identity and idle", () => {
     expect(csp).toContain("script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:");
     expect(csp).toContain("https://static.cloudflareinsights.com");
     expect(csp).toContain("worker-src 'self' data: blob:");
+    expect(csp).toContain("frame-ancestors 'self'");
     expect(headers.get("content-length")).toBeNull();
     expect(headers.get("content-type")).toBe("text/html");
     expect(headers.get("cache-control")).toBe("no-store, no-transform");
@@ -17468,6 +17694,108 @@ describe("fleet lease identity and idle", () => {
     expect(
       Object.keys(forwarded?.headers ?? {}).filter((key) => key.startsWith("x-crabbox-")),
     ).toEqual([]);
+  });
+
+  it("revalidates non-admin GitHub grants when agent bridge tickets are consumed", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const payload = decodeUserTokenPayload(token);
+    const portalSessionHash = await sha256Hex(token);
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        desktop: true,
+        code: true,
+        state: "active",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    const fleet = testFleet(storage, {}, env);
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "x-crabbox-auth": "github",
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+      "x-crabbox-github-login": "alice",
+      "x-crabbox-github-token-id": payload.jti,
+      "x-crabbox-github-sealed-credential": payload.githubCredential,
+      "x-crabbox-token-expires-at": new Date(payload.exp * 1000).toISOString(),
+    };
+    const cases = [
+      {
+        createPath: `/v1/leases/${leaseID}/webvnc/ticket`,
+        consumePath: `/v1/leases/${leaseID}/webvnc/agent`,
+        storagePrefix: "webvnc-ticket",
+        body: {},
+      },
+      {
+        createPath: `/v1/leases/${leaseID}/code/ticket`,
+        consumePath: `/v1/leases/${leaseID}/code/agent`,
+        storagePrefix: "code-ticket",
+        body: {},
+      },
+      {
+        createPath: `/v1/leases/${leaseID}/egress/ticket`,
+        consumePath: `/v1/leases/${leaseID}/egress/host`,
+        storagePrefix: "egress-ticket",
+        body: { role: "host" },
+      },
+    ];
+    const tickets = await Promise.all(
+      cases.map(async (item): Promise<(typeof cases)[number] & { ticket: string }> => {
+        const response = await fleet.fetch(
+          request("POST", item.createPath, { headers, body: item.body }),
+        );
+        expect(response.status).toBe(200);
+        const result = (await response.json()) as { ticket?: string };
+        expect(result.ticket).toBeTypeOf("string");
+        const ticket = result.ticket ?? "";
+        expect(storage.value(`${item.storagePrefix}:${ticket}`)).toMatchObject({
+          auth: "github",
+          login: "alice",
+          portalSessionHash,
+          githubGrant: {
+            tokenID: payload.jti,
+            sealedCredential: payload.githubCredential,
+          },
+        });
+        return { ...item, ticket };
+      }),
+    );
+
+    (fleet as unknown as { env: Env }).env.CRABBOX_GITHUB_REVOKED_USERS = "login:alice";
+    const githubFetch = vi.fn<() => Promise<Response>>(async () => {
+      throw new Error("emergency revocation must fail before GitHub API access");
+    });
+    vi.stubGlobal("fetch", githubFetch);
+
+    await Promise.all(
+      tickets.map(async (item) => {
+        const response = await fleet.fetch(
+          request("GET", item.consumePath, {
+            headers: { authorization: `Bearer ${item.ticket}`, upgrade: "websocket" },
+          }),
+        );
+        expect(response.status).toBe(401);
+        expect(storage.value(`${item.storagePrefix}:${item.ticket}`)).toBeUndefined();
+      }),
+    );
+    expect(githubFetch).not.toHaveBeenCalled();
   });
 
   it("rejects bridge tickets whose cached admin grant was revoked", async () => {
@@ -21845,7 +22173,7 @@ describe("fleet identity", () => {
 
     expect(response.status).toBe(200);
     expect(body).toContain("provider health");
-    expect(body).toContain("4 supported");
+    expect(body).toContain("5 supported");
     expect(body).toContain("users");
     expect(body).toContain('href="/portal/admin/users"');
     expect(body).not.toContain("all leases");
@@ -22131,6 +22459,106 @@ describe("fleet identity", () => {
     );
     expect(poll.status).toBe(200);
     await expect(poll.json()).resolves.toMatchObject({ status: "pending" });
+  });
+
+  it("atomically limits pending GitHub logins per caller", async () => {
+    const storage = new MemoryStorage();
+    const fleet = githubLoginTestFleet(storage);
+    const sourceIP = "198.51.100.40";
+
+    const responses = await Promise.all(
+      Array.from({ length: 20 }, () => fleet.fetch(githubLoginStartRequest(sourceIP))),
+    );
+    expect(responses.map(({ status }) => status).toSorted()).toEqual([
+      ...Array.from({ length: 10 }, () => 200),
+      ...Array.from({ length: 10 }, () => 429),
+    ]);
+    expect((await storage.list({ prefix: "oauth:" })).size).toBe(10);
+
+    const stored = [
+      ...(await storage.list<Record<string, unknown>>({ prefix: "oauth:" })).values(),
+    ];
+    expect(stored.every(({ sourceHash }) => typeof sourceHash === "string")).toBe(true);
+    expect(JSON.stringify(stored)).not.toContain(sourceIP);
+  });
+
+  it("shares the caller limit across CLI and portal GitHub login", async () => {
+    const fleet = githubLoginTestFleet();
+    const sourceIP = "198.51.100.41";
+
+    const cliStarts = await Promise.all(
+      Array.from({ length: 9 }, () => fleet.fetch(githubLoginStartRequest(sourceIP))),
+    );
+    expect(cliStarts.every(({ status }) => status === 200)).toBe(true);
+    expect(
+      (
+        await fleet.fetch(
+          request("GET", "/portal/login", {
+            headers: { "cf-connecting-ip": sourceIP },
+          }),
+        )
+      ).status,
+    ).toBe(302);
+
+    const blockedCLI = await fleet.fetch(githubLoginStartRequest(sourceIP));
+    expect(blockedCLI.status).toBe(429);
+    await expect(blockedCLI.json()).resolves.toMatchObject({ error: "login_rate_limited" });
+    expect(
+      (
+        await fleet.fetch(
+          request("GET", "/portal/login", {
+            headers: { "cf-connecting-ip": sourceIP },
+          }),
+        )
+      ).status,
+    ).toBe(429);
+    expect((await fleet.fetch(githubLoginStartRequest("198.51.100.42"))).status).toBe(200);
+  });
+
+  it("reclaims expired attempts from the caller limit", async () => {
+    const storage = new MemoryStorage();
+    const fleet = githubLoginTestFleet(storage);
+    const sourceIP = "198.51.100.43";
+
+    const starts = await Promise.all(
+      Array.from({ length: 10 }, () => fleet.fetch(githubLoginStartRequest(sourceIP))),
+    );
+    expect(starts.every(({ status }) => status === 200)).toBe(true);
+    expect((await fleet.fetch(githubLoginStartRequest(sourceIP))).status).toBe(429);
+
+    const attempts = await storage.list<Record<string, unknown>>({ prefix: "oauth:" });
+    await Promise.all(
+      [...attempts].map(([key, pending]) =>
+        storage.put(key, { ...pending, expiresAt: "2026-05-01T00:00:00.000Z" }),
+      ),
+    );
+
+    expect((await fleet.fetch(githubLoginStartRequest(sourceIP))).status).toBe(200);
+    expect((await storage.list({ prefix: "oauth:" })).size).toBe(1);
+  });
+
+  it("keeps a global pending GitHub login backstop across callers", async () => {
+    const fleet = githubLoginTestFleet();
+
+    const responses = await Promise.all(
+      Array.from({ length: 10 }, (_, source) =>
+        Array.from({ length: 10 }, () =>
+          fleet.fetch(githubLoginStartRequest(`198.51.100.${source + 1}`)),
+        ),
+      ).flat(),
+    );
+    expect(responses.every(({ status }) => status === 200)).toBe(true);
+
+    expect((await fleet.fetch(githubLoginStartRequest("198.51.100.200"))).status).toBe(429);
+    expect(
+      (
+        await fleet.fetch(
+          request("GET", "/portal/login", {
+            headers: { "cf-connecting-ip": "198.51.100.201" },
+          }),
+        )
+      ).status,
+    ).toBe(429);
   });
 
   it.each([
@@ -22686,6 +23114,21 @@ describe("fleet identity", () => {
         "AZURE_SUBSCRIPTION_ID",
       ],
     });
+
+    const daytonaMissing = await fleet.fetch(request("GET", "/v1/providers/daytona/readiness"));
+    await expect(daytonaMissing.json()).resolves.toMatchObject({
+      provider: "daytona",
+      configured: false,
+      missing: ["DAYTONA_CRABBOX_KEY"],
+    });
+
+    const daytonaFleet = testFleet(undefined, {}, { DAYTONA_CRABBOX_KEY: "live-key" });
+    const daytona = await daytonaFleet.fetch(request("GET", "/v1/providers/daytona/readiness"));
+    await expect(daytona.json()).resolves.toMatchObject({
+      provider: "daytona",
+      configured: true,
+      missing: [],
+    });
   });
 
   it("reports AWS capacity quota readiness before a lease is requested", async () => {
@@ -22806,6 +23249,31 @@ describe("fleet identity", () => {
       missing: expect.arrayContaining(["AZURE_TENANT_ID"]),
     });
   });
+
+  it("fails brokered Daytona leases with provider_not_configured before constructing Daytona", async () => {
+    const fleet = testFleet();
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "daytona",
+          target: "linux",
+          class: "standard",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(response.status).toBe(424);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "provider_not_configured",
+      provider: "daytona",
+      missing: ["DAYTONA_CRABBOX_KEY"],
+    });
+  });
 });
 
 async function startGitHubLogin(env: Partial<Env> = {}): Promise<{
@@ -22843,6 +23311,31 @@ async function startGitHubLogin(env: Partial<Env> = {}): Promise<{
   const state = url.searchParams.get("state");
   expect(state).toBeTruthy();
   return { fleet, loginID: body.loginID, pollSecret, state: state || "" };
+}
+
+function githubLoginTestFleet(storage = new MemoryStorage()): FleetDurableObject {
+  return testFleet(
+    storage,
+    {},
+    {
+      CRABBOX_DEFAULT_ORG: "openclaw",
+      CRABBOX_PUBLIC_URL: "https://crabbox.test",
+      CRABBOX_GITHUB_CLIENT_ID: "github-client",
+      CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SESSION_SECRET: "session-secret",
+    },
+  );
+}
+
+function githubLoginStartRequest(sourceIP: string): Request {
+  return request("POST", "/v1/auth/github/start", {
+    headers: { "cf-connecting-ip": sourceIP },
+    body: {
+      pollSecretHash: "0".repeat(64),
+      loopbackRedirectURI: testLoopbackRedirectURI,
+    },
+  });
 }
 
 const testLoopbackRedirectURI = `http://127.0.0.1:54321/crabbox/oauth/${"a".repeat(64)}`;
@@ -22965,7 +23458,7 @@ function expiredRuntimeAdapterClaim(adapterID: string) {
 function fakeProvider(
   onCreate?: (config: LeaseConfig) => Promise<void> | void,
   result: {
-    provider?: "hetzner" | "aws" | "azure" | "gcp";
+    provider?: "hetzner" | "aws" | "azure" | "gcp" | "daytona";
     serverType?: string;
     hostID?: string;
     cloudID?: string;
@@ -23017,6 +23510,7 @@ function fakeProvider(
       lease: LeaseRecord,
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
     ) => LeaseRecord | undefined;
+    onRefreshLeaseAccessForResolution?: (lease: LeaseRecord) => LeaseRecord | undefined;
     onReconcileLeaseAccess?: (
       lease: LeaseRecord,
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
@@ -23044,6 +23538,7 @@ function fakeProvider(
         }
       | undefined;
     onReleaseLease?: (lease: LeaseRecord) => Promise<void> | void;
+    onDeleteOwnedServer?: (lease: LeaseRecord) => Promise<void> | void;
     onRecoverServer?: (
       lease: LeaseRecord,
     ) => Promise<ProviderMachine | undefined> | ProviderMachine | undefined;
@@ -23159,6 +23654,9 @@ function fakeProvider(
     ) {
       return result.onRefreshLeaseAccess?.(lease, context);
     },
+    async refreshLeaseAccessForResolution(lease: LeaseRecord) {
+      return result.onRefreshLeaseAccessForResolution?.(lease);
+    },
     async reconcileLeaseAccess(
       lease: LeaseRecord,
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
@@ -23207,6 +23705,13 @@ function fakeProvider(
     async deleteServer(id: string) {
       await onDelete?.(id);
     },
+    ...(result.onDeleteOwnedServer
+      ? {
+          async deleteOwnedServer(lease: LeaseRecord) {
+            await result.onDeleteOwnedServer?.(lease);
+          },
+        }
+      : {}),
     async releaseLease(lease: LeaseRecord) {
       await result.onReleaseLease?.(lease);
       await onDelete?.(

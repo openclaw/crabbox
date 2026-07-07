@@ -144,8 +144,10 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	server := Server{
-		Provider: "aws",
-		CloudID:  "i-1750645",
+		Provider:    "aws",
+		CloudID:     "i-1750645",
+		ID:          42,
+		ImmutableID: "vmid-1750645",
 		Labels: map[string]string{
 			"provider": "aws",
 			"slug":     "warm",
@@ -159,7 +161,7 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.RepoRoot != "" {
+	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.CloudNumericID != 42 || claim.CloudImmutableID != "vmid-1750645" || claim.RepoRoot != "" {
 		t.Fatalf("unexpected unattached provider claim: %#v", claim)
 	}
 
@@ -173,6 +175,19 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	}
 	if claim.RepoRoot != repoRoot {
 		t.Fatalf("provider claim was not attached to repo: %#v", claim)
+	}
+}
+
+func TestAzureProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
+	cfg := baseConfig()
+	cfg.AzureSubscription = " TEST-SUB "
+	cfg.AzureResourceGroup = " Production-RG "
+	if got, want := providerClaimScope("azure", cfg), "subscription:test-sub|resource-group:production-rg"; got != want {
+		t.Fatalf("providerClaimScope(azure)=%q, want %q", got, want)
+	}
+	cfg.AzureResourceGroup = ""
+	if got := providerClaimScope("azure", cfg); got != "" {
+		t.Fatalf("incomplete azure scope=%q, want empty", got)
 	}
 }
 

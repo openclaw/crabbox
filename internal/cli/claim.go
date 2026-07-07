@@ -16,10 +16,14 @@ import (
 )
 
 type leaseClaim struct {
-	LeaseID                             string            `json:"leaseID"`
-	Slug                                string            `json:"slug,omitempty"`
-	Provider                            string            `json:"provider,omitempty"`
-	CloudID                             string            `json:"cloudID,omitempty"`
+	LeaseID  string `json:"leaseID"`
+	Slug     string `json:"slug,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	CloudID  string `json:"cloudID,omitempty"`
+	// CloudNumericID binds providers whose CloudID is a reusable resource name.
+	CloudNumericID int64 `json:"cloudNumericID,omitempty"`
+	// CloudImmutableID binds providers whose immutable identity is a string.
+	CloudImmutableID                    string            `json:"cloudImmutableID,omitempty"`
 	ProviderScope                       string            `json:"providerScope,omitempty"`
 	StaticHost                          string            `json:"staticHost,omitempty"`
 	StaticUser                          string            `json:"staticUser,omitempty"`
@@ -543,6 +547,12 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget)
 	if server.CloudID != "" {
 		claim.CloudID = server.CloudID
 	}
+	if server.ID != 0 {
+		claim.CloudNumericID = server.ID
+	}
+	if server.ImmutableID != "" {
+		claim.CloudImmutableID = server.ImmutableID
+	}
 	if len(server.Labels) > 0 {
 		claim.Labels = cloneStringMap(server.Labels)
 	}
@@ -789,6 +799,8 @@ func canonicalClaimProvider(provider string) string {
 
 func providerClaimScope(provider string, cfg Config) string {
 	switch provider {
+	case "azure":
+		return azureLeaseClaimScope(cfg.AzureSubscription, cfg.AzureResourceGroup)
 	case "gcp":
 		if cfg.GCPProject != "" {
 			return "project:" + cfg.GCPProject
@@ -824,6 +836,15 @@ func providerClaimScope(provider string, cfg Config) string {
 		}
 	}
 	return ""
+}
+
+func azureLeaseClaimScope(subscriptionID, resourceGroup string) string {
+	subscriptionID = strings.ToLower(strings.TrimSpace(subscriptionID))
+	resourceGroup = strings.ToLower(strings.TrimSpace(resourceGroup))
+	if subscriptionID == "" || resourceGroup == "" {
+		return ""
+	}
+	return "subscription:" + subscriptionID + "|resource-group:" + resourceGroup
 }
 
 func normalizedNamespaceClaimEndpoint(raw string) string {

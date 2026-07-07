@@ -19,7 +19,11 @@ still matches the offline contract.
    `lifecycle_test.go` or `*_lifecycle_test.go`; the source-derived Connector
    Lifecycles job discovers their packages and runs them with the race detector.
    Cover acquire, resolve/readiness, use, touch, list, release, cleanup failure,
-   and claim retention where the backend supports those stages.
+   and claim retention where the backend supports those stages. The
+   `.github/workflows/connector-e2e-smokes.yml` gate additionally drives
+   secret-free connector lifecycles end to end on hosted runners: local
+   containers, a localhost byo-SSH target, the Docker Sandbox trust-boundary
+   proof, and read-only readiness contracts.
 2. **Guarded live smoke** — opt-in developer or maintainer proof against the real
    provider. Use `CRABBOX_LIVE=1`, select the exact provider, cap spend and TTL,
    arm cleanup before the first mutation, and prove create/use/destroy with zero
@@ -151,7 +155,7 @@ hermetic lifecycle tests, `scripts/live-smoke.sh`, dedicated live runners, and
 `//go:build smoke` tests. Regenerate it with
 `node scripts/generate-provider-matrix.mjs`; docs CI rejects drift.
 
-Current coverage: 73 providers; 4 with convention-named hermetic lifecycle tests, 52 with a live runner, 3 with tagged Go smoke tests, and 20 with none of those lifecycle surfaces.
+Current coverage: 73 providers; 4 with convention-named hermetic lifecycle tests, 53 with a live runner, 3 with tagged Go smoke tests, and 19 with none of those lifecycle surfaces.
 
 | Provider | Hermetic lifecycle | Live runner | Tagged Go smoke |
 | --- | --- | --- | --- |
@@ -163,7 +167,7 @@ Current coverage: 73 providers; 4 with convention-named hermetic lifecycle tests
 | [ascii-box](../providers/ascii-box.md) | — | — | — |
 | [aws](../providers/aws.md) | — | matrix | — |
 | [aws-lambda-microvm](../providers/aws-lambda-microvm.md) | — | dedicated + matrix | — |
-| [azure](../providers/azure.md) | — | — | — |
+| [azure](../providers/azure.md) | — | matrix | — |
 | [azure-dynamic-sessions](../providers/azure-dynamic-sessions.md) | — | — | — |
 | [blacksmith-testbox](../providers/blacksmith-testbox.md) | — | matrix | — |
 | [blaxel](../providers/blaxel.md) | — | dedicated | — |

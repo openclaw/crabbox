@@ -191,15 +191,16 @@ func (b *gcpLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (cor
 }
 
 func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	claim, err := requireExactGCPClaim(req.Lease.Server, req.Lease.LeaseID, b.Cfg)
+	if err != nil {
+		return err
+	}
 	client, err := newGCPClient(ctx, b.Cfg)
 	if err != nil {
 		return err
 	}
 	cloudID := strings.TrimSpace(req.Lease.Server.CloudID)
-	if cloudID == "" {
-		return exit(4, "refusing to delete gcp lease=%s: missing cloud id", req.Lease.LeaseID)
-	}
-	if zone := req.Lease.Server.Labels["zone"]; zone != "" {
+	if zone := strings.TrimSpace(claim.Labels["zone"]); zone != "" {
 		cfg := b.Cfg
 		cfg.GCPZone = zone
 		client, err = newGCPClient(ctx, cfg)
@@ -210,8 +211,7 @@ func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	live, err := client.GetServer(ctx, cloudID)
 	if err != nil {
 		if core.IsGCPNotFound(err) {
-			removeLeaseClaim(req.Lease.LeaseID)
-			return nil
+			return core.RemoveLeaseClaimIfUnchanged(req.Lease.LeaseID, claim)
 		}
 		return err
 	}
@@ -224,11 +224,10 @@ func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	if liveLeaseID := strings.TrimSpace(live.Labels["lease"]); liveLeaseID != req.Lease.LeaseID {
 		return exit(4, "refusing to delete gcp instance %q for lease=%s: live instance belongs to lease=%s", cloudID, req.Lease.LeaseID, blank(liveLeaseID, "-"))
 	}
-	if err := client.DeleteServer(ctx, cloudID); err != nil {
+	if err := validateExactGCPClaim(claim, live, req.Lease.LeaseID, b.Cfg); err != nil {
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
-	return nil
+	return deleteClaimedGCPServer(ctx, client, live, claim)
 }
 
 func (b *gcpLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
@@ -285,12 +284,13 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
-		if req.DryRun {
-			fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
+		claim, claimErr := requireExactGCPClaim(server, server.Labels["lease"], b.Cfg)
+		if claimErr != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=exact local claim missing or stale\n", server.DisplayID(), server.Name)
 			continue
 		}
 		cfg := b.Cfg
-		if zone := server.Labels["zone"]; zone != "" {
+		if zone := strings.TrimSpace(claim.Labels["zone"]); zone != "" {
 			cfg.GCPZone = zone
 		}
 		client, err := newGCPClient(ctx, cfg)
@@ -301,8 +301,8 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 		if err != nil {
 			if core.IsGCPNotFound(err) {
 				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance no longer exists\n", server.DisplayID(), server.Name)
-				if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
-					removeLeaseClaim(leaseID)
+				if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+					return err
 				}
 				continue
 			}
@@ -312,22 +312,75 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, err)
 			continue
 		}
+		if err := validateExactGCPClaim(claim, live, server.Labels["lease"], b.Cfg); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=exact local claim missing or stale\n", server.DisplayID(), server.Name)
+			continue
+		}
 		if shouldDelete, reason := core.ShouldCleanupServer(live, now); !shouldDelete {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance %s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", live.DisplayID(), live.Name)
-		if err := client.DeleteServer(ctx, live.CloudID); err != nil {
-			return err
+		if req.DryRun {
+			continue
 		}
-		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
-			removeLeaseClaim(leaseID)
+		if err := deleteClaimedGCPServer(ctx, client, live, claim); err != nil {
+			return err
 		}
 	}
 	if err := b.pruneStaleClaims(ctx, liveLeaseIDs, req.DryRun); err != nil {
 		return err
 	}
 	return nil
+}
+
+func requireExactGCPClaim(server Server, expectedLeaseID string, cfg Config) (core.LeaseClaim, error) {
+	claim, exists, err := core.ReadLeaseClaimWithPresence(expectedLeaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if !exists {
+		return core.LeaseClaim{}, exit(2, "gcp lease=%s has no exact local claim; refusing destructive operation", expectedLeaseID)
+	}
+	if err := validateExactGCPClaim(claim, server, expectedLeaseID, cfg); err != nil {
+		return core.LeaseClaim{}, err
+	}
+	return claim, nil
+}
+
+func validateExactGCPClaim(claim core.LeaseClaim, server Server, expectedLeaseID string, cfg Config) error {
+	providerScope := gcpClaimScope(cfg)
+	serverSlug := strings.TrimSpace(server.Labels["slug"])
+	serverZone := strings.TrimSpace(server.Labels["zone"])
+	serverProviderKey := strings.TrimSpace(server.Labels["provider_key"])
+	if providerScope == "" ||
+		!isCrabboxGCPLease(server) ||
+		claim.LeaseID != expectedLeaseID ||
+		claim.Provider != "gcp" ||
+		claim.ProviderScope != providerScope ||
+		claim.CloudID == "" ||
+		claim.CloudID != strings.TrimSpace(server.CloudID) ||
+		claim.CloudNumericID == 0 ||
+		claim.CloudNumericID != server.ID ||
+		claim.Slug == "" ||
+		claim.Slug != serverSlug ||
+		server.Labels["lease"] != expectedLeaseID ||
+		serverZone == "" ||
+		strings.TrimSpace(claim.Labels["zone"]) != serverZone ||
+		strings.TrimSpace(claim.Labels["lease"]) != expectedLeaseID ||
+		strings.TrimSpace(claim.Labels["slug"]) != serverSlug ||
+		strings.TrimSpace(claim.Labels["provider"]) != "gcp" ||
+		serverProviderKey == "" ||
+		strings.TrimSpace(claim.Labels["provider_key"]) != serverProviderKey {
+		return exit(2, "refusing to operate on GCP instance %s from a missing or stale exact local claim", server.DisplayID())
+	}
+	return nil
+}
+
+func deleteClaimedGCPServer(ctx context.Context, client gcpClient, server Server, claim core.LeaseClaim) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		return client.DeleteServer(ctx, server.CloudID)
+	})
 }
 
 func validateGCPCleanupLiveServer(expected, live Server) error {

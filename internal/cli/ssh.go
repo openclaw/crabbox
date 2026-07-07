@@ -598,15 +598,23 @@ func sshBaseArgs(target SSHTarget) []string {
 	return sshBaseArgsWithOptions(target, "10", "3")
 }
 
+func sshForwardingDenyArgs() []string {
+	return []string{
+		"-o", "ForwardAgent=no",
+		"-o", "ForwardX11=no",
+		"-o", "ForwardX11Trusted=no",
+	}
+}
+
 func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts string) []string {
-	args := []string{
+	args := append(sshForwardingDenyArgs(),
 		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=" + connectTimeout,
-		"-o", "ConnectionAttempts=" + connectionAttempts,
+		"-o", "ConnectTimeout="+connectTimeout,
+		"-o", "ConnectionAttempts="+connectionAttempts,
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
-	}
+	)
 	if target.DisableHostKeyChecking {
 		args = append(args,
 			"-o", "StrictHostKeyChecking=no",
@@ -1383,7 +1391,10 @@ IFS= read -r manifest_len
 case "$manifest_len" in
   ''|*[!0-9]*) echo "invalid sync manifest length" >&2; exit 1 ;;
 esac
-dd bs=1 count="$manifest_len" of="$meta_dir/sync-manifest.new" status=none
+# Keep this to POSIX dd operands: minimal guests commonly provide BusyBox dd,
+# which rejects GNU's progress-suppression extension. Suppress only the summary;
+# dd's exit status still makes the fail-closed script abort on a short write.
+dd bs=1 count="$manifest_len" of="$meta_dir/sync-manifest.new" 2>/dev/null
 cat > "$meta_dir/sync-deleted.new"
 `
 	return "bash -lc " + shellQuote(script)
