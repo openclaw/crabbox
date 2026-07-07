@@ -165,14 +165,6 @@ func normalizeCubeSandboxProxyScheme(scheme string, port int) string {
 	}
 }
 
-func isCubeSandboxLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
 func secureCubeSandboxHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
 	client := *source
 	originalCheckRedirect := source.CheckRedirect
