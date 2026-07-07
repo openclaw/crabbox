@@ -115,30 +115,39 @@ func TestClickRFBPointerSendsPressAndRelease(t *testing.T) {
 	}
 }
 
-func TestPasteRFBClipboardSendsCutTextAndCommandV(t *testing.T) {
+func TestWriteRFBPointerEventRejectsProtocolOverflow(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	for _, point := range [][2]int{{-1, 0}, {0, -1}, {1 << 16, 0}, {0, 1 << 16}} {
+		if err := writeRFBPointerEvent(client, 0, point[0], point[1]); err == nil {
+			t.Errorf("pointer coordinates %d,%d should be rejected", point[0], point[1])
+		}
+	}
+}
+
+func TestTypeRFBTextSendsExactKeyEvents(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
 
+	const text = "Aa !\n\té🦀"
 	serverErr := make(chan error, 1)
 	go func() {
-		serverErr <- serveTestClipboardRFB(server, "Issue or Pull request")
+		serverErr <- serveTestTypeRFB(server, []uint32{0x41, 0x61, 0x20, 0x21, 0xff0d, 0xff09, 0xe9, 0x0101f980})
 	}()
 
-	if err := pasteRFBClipboardFromConn(context.Background(), client, rfbCredentials{}, "Issue or Pull request"); err != nil {
-		t.Fatalf("paste RFB clipboard: %v", err)
+	if err := typeRFBTextFromConn(context.Background(), client, rfbCredentials{}, text); err != nil {
+		t.Fatalf("type RFB text: %v", err)
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatalf("fake RFB server: %v", err)
 	}
 }
 
-func TestWriteRFBClientCutTextRejectsOversizedText(t *testing.T) {
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-	if err := writeRFBClientCutText(client, string(make([]byte, (1<<20)+1))); err == nil {
-		t.Fatal("oversized clipboard text should be rejected")
+func TestRFBKeysymForRuneRejectsUnsupportedControl(t *testing.T) {
+	if _, err := rfbKeysymForRune(0x1b); err == nil {
+		t.Fatal("Escape control character should be rejected")
 	}
 }
 
@@ -226,32 +235,19 @@ func serveTestPointerRFB(conn net.Conn, wantX, wantY int) error {
 	return nil
 }
 
-func serveTestClipboardRFB(conn net.Conn, wantText string) error {
+func serveTestTypeRFB(conn net.Conn, wantKeys []uint32) error {
 	if err := serveTestInputRFBInit(conn); err != nil {
 		return err
 	}
-	message := make([]byte, 8+len(wantText))
-	if _, err := io.ReadFull(conn, message); err != nil {
-		return err
-	}
-	if message[0] != 6 || !bytes.Equal(message[1:4], []byte{0, 0, 0}) || binary.BigEndian.Uint32(message[4:8]) != uint32(len(wantText)) || string(message[8:]) != wantText {
-		return errUnexpectedTestBytes("clipboard message", message)
-	}
-	wantKeys := []struct {
-		down bool
-		key  uint32
-	}{{true, 0xffeb}, {true, 0x76}, {false, 0x76}, {false, 0xffeb}}
-	for _, want := range wantKeys {
-		event := make([]byte, 8)
-		if _, err := io.ReadFull(conn, event); err != nil {
-			return err
-		}
-		wantDown := byte(0)
-		if want.down {
-			wantDown = 1
-		}
-		if event[0] != 4 || event[1] != wantDown || !bytes.Equal(event[2:4], []byte{0, 0}) || binary.BigEndian.Uint32(event[4:8]) != want.key {
-			return errUnexpectedTestBytes("key event", event)
+	for _, wantKey := range wantKeys {
+		for _, wantDown := range []byte{1, 0} {
+			event := make([]byte, 8)
+			if _, err := io.ReadFull(conn, event); err != nil {
+				return err
+			}
+			if event[0] != 4 || event[1] != wantDown || !bytes.Equal(event[2:4], []byte{0, 0}) || binary.BigEndian.Uint32(event[4:8]) != wantKey {
+				return errUnexpectedTestBytes("key event", event)
+			}
 		}
 	}
 	return nil

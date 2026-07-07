@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -94,7 +95,7 @@ func clickRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, x, y i
 	return nil
 }
 
-func pasteRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, text string) error {
+func typeRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, text string) error {
 	tunnel, localPort, err := startVNCForegroundTunnelOnReservedPort(ctx, target, "", "127.0.0.1", managedVNCPort)
 	if err != nil {
 		return err
@@ -105,8 +106,8 @@ func pasteRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, text s
 	if err != nil {
 		return err
 	}
-	if err := pasteRFBClipboard(ctx, "127.0.0.1:"+localPort, creds, text); err != nil {
-		return fmt.Errorf("paste macOS VNC clipboard: %w", err)
+	if err := typeRFBText(ctx, "127.0.0.1:"+localPort, creds, text); err != nil {
+		return fmt.Errorf("type macOS VNC text: %w", err)
 	}
 	return nil
 }
@@ -158,17 +159,20 @@ func clickRFBPointer(ctx context.Context, address string, creds rfbCredentials, 
 	return clickRFBPointerFromConn(ctx, conn, creds, x, y)
 }
 
-func pasteRFBClipboard(ctx context.Context, address string, creds rfbCredentials, text string) error {
+func typeRFBText(ctx context.Context, address string, creds rfbCredentials, text string) error {
 	dialer := net.Dialer{Timeout: 10 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	return pasteRFBClipboardFromConn(ctx, conn, creds, text)
+	return typeRFBTextFromConn(ctx, conn, creds, text)
 }
 
-func pasteRFBClipboardFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, text string) error {
+func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, text string) error {
+	if !utf8.ValidString(text) {
+		return fmt.Errorf("RFB text is not valid UTF-8")
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
@@ -177,24 +181,38 @@ func pasteRFBClipboardFromConn(ctx context.Context, conn net.Conn, creds rfbCred
 	if _, _, err := initializeRFBConnection(conn, creds); err != nil {
 		return err
 	}
-	if err := writeRFBClientCutText(conn, text); err != nil {
-		return err
-	}
-	time.Sleep(100 * time.Millisecond)
-	const (
-		xkSuperL = 0xffeb
-		xkV      = 0x76
-	)
-	for _, event := range []struct {
-		down bool
-		key  uint32
-	}{{true, xkSuperL}, {true, xkV}, {false, xkV}, {false, xkSuperL}} {
-		if err := writeRFBKeyEvent(conn, event.down, event.key); err != nil {
+	for _, r := range text {
+		key, err := rfbKeysymForRune(r)
+		if err != nil {
+			return err
+		}
+		if err := writeRFBKeyEvent(conn, true, key); err != nil {
+			return err
+		}
+		if err := writeRFBKeyEvent(conn, false, key); err != nil {
 			return err
 		}
 	}
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	return nil
+}
+
+func rfbKeysymForRune(r rune) (uint32, error) {
+	switch r {
+	case '\n', '\r':
+		return 0xff0d, nil // XK_Return
+	case '\t':
+		return 0xff09, nil // XK_Tab
+	case '\b':
+		return 0xff08, nil // XK_BackSpace
+	}
+	if r < 0x20 || r == 0x7f {
+		return 0, fmt.Errorf("RFB typing does not support control character U+%04X", r)
+	}
+	if r <= 0xff {
+		return uint32(r), nil
+	}
+	return 0x01000000 | uint32(r), nil
 }
 
 func clickRFBPointerFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, x, y int) error {
@@ -295,25 +313,14 @@ func initializeRFBConnection(conn net.Conn, creds rfbCredentials) (uint16, uint1
 }
 
 func writeRFBPointerEvent(conn net.Conn, buttonMask byte, x, y int) error {
+	if x < 0 || y < 0 || x > 0xffff || y > 0xffff {
+		return fmt.Errorf("RFB pointer coordinates %d,%d are outside the uint16 protocol range", x, y)
+	}
 	message := []byte{5, buttonMask, 0, 0, 0, 0}
 	binary.BigEndian.PutUint16(message[2:4], uint16(x))
 	binary.BigEndian.PutUint16(message[4:6], uint16(y))
 	if _, err := conn.Write(message); err != nil {
 		return fmt.Errorf("write RFB pointer event: %w", err)
-	}
-	return nil
-}
-
-func writeRFBClientCutText(conn net.Conn, text string) error {
-	if len(text) > 1<<20 {
-		return fmt.Errorf("RFB clipboard text is too large")
-	}
-	message := make([]byte, 8+len(text))
-	message[0] = 6
-	binary.BigEndian.PutUint32(message[4:8], uint32(len(text)))
-	copy(message[8:], text)
-	if _, err := conn.Write(message); err != nil {
-		return fmt.Errorf("write RFB clipboard text: %w", err)
 	}
 	return nil
 }
@@ -387,7 +394,9 @@ func negotiateRFBVNCAuth(conn net.Conn, creds rfbCredentials) error {
 	}
 	response := make([]byte, len(challenge))
 	for offset := 0; offset < len(challenge); offset += cipher.BlockSize() {
-		cipher.Encrypt(response[offset:offset+cipher.BlockSize()], challenge[offset:offset+cipher.BlockSize()])
+		// RFB VNC Authentication mandates DES for protocol compatibility; it is
+		// not used here to protect application data or stored credentials.
+		cipher.Encrypt(response[offset:offset+cipher.BlockSize()], challenge[offset:offset+cipher.BlockSize()]) // lgtm[go/weak-cryptographic-algorithm]
 	}
 	if _, err := conn.Write(response); err != nil {
 		return fmt.Errorf("write VNC auth response: %w", err)

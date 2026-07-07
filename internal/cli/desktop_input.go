@@ -81,7 +81,7 @@ func (a App) desktopPaste(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if target.TargetOS != targetLinux && target.TargetOS != targetMacOS {
+	if !desktopTextSupportsTarget(target) {
 		return exit(2, "desktop paste supports target=linux or target=macos")
 	}
 	text, err := desktopTextArgOrStdin(a.Stderr, args, "desktop paste")
@@ -89,10 +89,10 @@ func (a App) desktopPaste(ctx context.Context, args []string) error {
 		return err
 	}
 	if target.TargetOS == targetMacOS {
-		if err := pasteRemoteMacVNC(ctx, cfg, target, text); err != nil {
+		if err := typeRemoteMacVNC(ctx, cfg, target, text); err != nil {
 			return exit(5, "desktop paste failed for %s: %v", leaseID, err)
 		}
-		fmt.Fprintf(a.Stdout, "pasted: lease=%s bytes=%d method=vnc\n", leaseID, len(text))
+		fmt.Fprintf(a.Stdout, "pasted: lease=%s bytes=%d method=vnc-key\n", leaseID, len(text))
 		return nil
 	}
 	var stdout, stderr strings.Builder
@@ -105,13 +105,23 @@ func (a App) desktopPaste(ctx context.Context, args []string) error {
 }
 
 func (a App) desktopType(ctx context.Context, args []string) error {
-	target, cfg, leaseID, err := a.desktopCommandTarget(ctx, "desktop type", args, true)
+	target, cfg, leaseID, err := a.desktopCommandTarget(ctx, "desktop type", args, false)
 	if err != nil {
 		return err
+	}
+	if !desktopTextSupportsTarget(target) {
+		return exit(2, "desktop type supports target=linux or target=macos")
 	}
 	text, err := desktopTextArgOrStdin(a.Stderr, args, "desktop type")
 	if err != nil {
 		return err
+	}
+	if target.TargetOS == targetMacOS {
+		if err := typeRemoteMacVNC(ctx, cfg, target, text); err != nil {
+			return exit(5, "desktop type failed for %s: %v", leaseID, err)
+		}
+		fmt.Fprintf(a.Stdout, "typed: lease=%s bytes=%d method=vnc-key\n", leaseID, len(text))
+		return nil
 	}
 	if desktopShouldPasteForType(text) {
 		var stdout, stderr strings.Builder
@@ -139,6 +149,10 @@ func (a App) desktopType(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "typed: lease=%s method=xdotool bytes=%d\n", leaseID, len(text))
 	return nil
+}
+
+func desktopTextSupportsTarget(target SSHTarget) bool {
+	return target.TargetOS == targetLinux || target.TargetOS == targetMacOS
 }
 
 // desktopPasteFailureSafeToRetry only permits a key-by-key retry when the

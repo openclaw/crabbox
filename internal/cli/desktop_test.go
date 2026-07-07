@@ -259,6 +259,19 @@ func TestDesktopTypeUsesPasteForSymbolHeavyText(t *testing.T) {
 	}
 }
 
+func TestDesktopTextInputSupportsLinuxAndMacOS(t *testing.T) {
+	for _, target := range []SSHTarget{{TargetOS: targetLinux}, {TargetOS: targetMacOS}} {
+		if !desktopTextSupportsTarget(target) {
+			t.Errorf("target %q should support desktop text input", target.TargetOS)
+		}
+	}
+	for _, target := range []SSHTarget{{TargetOS: targetWindows}, {TargetOS: "freebsd"}} {
+		if desktopTextSupportsTarget(target) {
+			t.Errorf("target %q should not support desktop text input", target.TargetOS)
+		}
+	}
+}
+
 func TestDesktopPasteFailureSafeToRetry(t *testing.T) {
 	for _, detail := range []string{
 		"missing clipboard tool; warm a new lease",
