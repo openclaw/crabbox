@@ -22,7 +22,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "daytona",
 		Kind:        core.ProviderKindSSHLease,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync},
+		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureArchiveSync},
 		Coordinator: core.CoordinatorSupported,
 	}
 }

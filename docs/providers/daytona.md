@@ -132,7 +132,8 @@ The non-auth settings can also be set through environment variables:
 
 - Provider kind: SSH-lease (Linux only).
 - SSH: yes, via a short-lived Daytona SSH access token.
-- Crabbox sync: yes, archive sync through the Daytona toolbox.
+- Sync: direct mode uses Daytona toolbox archive sync; brokered mode uses normal
+  Crabbox rsync over SSH.
 - Desktop / browser / code: no — Daytona has no Crabbox VNC or `code` surface.
 - Actions hydration: no.
 - Coordinator (broker): yes for Linux SSH/sync/run. The coordinator owns the
@@ -146,10 +147,13 @@ The non-auth settings can also be set through environment variables:
 - `--id <sandbox-id-or-slug>` is required to address an existing sandbox.
 - Daytona `run` is delegated to the toolbox APIs; it is not core-over-SSH
   execution. Because of that, the following `run` options are rejected:
-  `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`,
+  `--checksum`, `--full-resync`,
   `--fresh-pr`, `--script` / `--script-stdin`, `--env-helper`,
   `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`,
   `--artifact-glob`, `--require-artifact`, `--emit-proof`, and `--stop-after`.
+- Use `--sync-only` to pre-upload the archive into a kept sandbox before a later
+  command. Large-sync guardrails still apply; `--force-sync-large` is honored
+  for intentional large archive syncs.
 - `--actions-runner` is rejected because it needs a normal SSH lease host.
 - `--keep-on-failure` keeps a newly created failed sandbox until Daytona
   auto-stop or an explicit `crabbox stop`.
