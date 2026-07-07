@@ -96,7 +96,8 @@ top-level `workRoot` propagates to the VM when `exeDev.workRoot` is unset.
    configured.
 2. Crabbox waits for SSH readiness on the returned `ssh_dest`, then uses its
    standard rsync + remote command execution and persists the exact VM name,
-   SSH endpoint, ownership tags, and exe.dev control route in the local claim.
+   SSH endpoint, ownership tags, exe.dev control route, and a non-secret hash
+   of the authenticated exe.dev account in the local claim.
 3. `list --provider exe-dev` calls `ls --l --json` and shows only VMs with the
    complete `crabbox`, canonical lease, and slug tag set. Pass `--all` to inspect
    unowned or incomplete inventory; names that merely start with `crabbox-` do
@@ -106,8 +107,8 @@ top-level `workRoot` propagates to the VM when `exeDev.workRoot` is unset.
    Crabbox refuses untagged adoption and never retargets a claim already bound
    to another VM or control route.
 5. `stop --provider exe-dev <id>` deletes only when the unchanged local claim,
-   exact VM name, deterministic lease name, complete remote tags, and current
-   control route all agree. It rechecks inventory while holding the claim lock,
+   exact VM name, deterministic lease name, complete remote tags, current
+   control route, and authenticated account fingerprint all agree. It rechecks inventory while holding the claim lock,
    calls `rm <vm-name> --json`, and removes the claim only after deletion
    succeeds. Failed or ambiguous deletion keeps the claim for an exact retry.
 

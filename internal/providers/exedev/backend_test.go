@@ -150,6 +150,8 @@ func newExeDevAcquireRollbackRunner() *exeDevRecordingRunner {
 	return &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		cmd := strings.Join(req.Args, " ")
 		switch {
+		case strings.Contains(cmd, "whoami --json"):
+			return LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
 		case strings.Contains(cmd, "ls --l --json"):
 			return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
 		case strings.Contains(cmd, " new "):
@@ -458,6 +460,28 @@ func TestExeDevReleaseDeletesExactlyClaimedVMAndRemovesClaim(t *testing.T) {
 	}
 }
 
+func TestExeDevReleaseRejectsDifferentAuthenticatedAccount(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	slug := "blue"
+	vm := ownedExeDevVM(leaseID, slug)
+	baseResponse := exeDevInventoryResponse(t, vm)
+	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if strings.Contains(strings.Join(req.Args, " "), "whoami --json") {
+			return LocalCommandResult{Stdout: `{"email":"other@example.com"}`}, nil
+		}
+		return baseResponse(req)
+	}}
+	backend := newExeDevTestBackend(Config{}, runner)
+	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
+
+	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "different exe.dev control route") {
+		t.Fatalf("err=%v, want account-bound route refusal", err)
+	}
+	assertNoExeDevRM(t, runner)
+}
+
 func TestExeDevReleaseSurvivesTouchedClaimRoundTrip(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_abcdef123456"
@@ -613,6 +637,25 @@ func TestExeDevOwnershipRejectsConflictingTags(t *testing.T) {
 	}
 }
 
+func TestExeDevBulkInventoryTreatsMalformedTagsAsUnowned(t *testing.T) {
+	vm := ownedExeDevVM("cbx_abcdef123456", "blue")
+	vm.Tags = append(vm.Tags, "crabbox-lease-cbx_other123456")
+	runner := exeDevInventoryRunner(t, vm)
+	backend := newExeDevTestBackend(Config{}, runner)
+
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil || len(views) != 0 {
+		t.Fatalf("owned inventory views=%#v err=%v, want malformed VM omitted", views, err)
+	}
+	views, err = backend.List(context.Background(), ListRequest{All: true})
+	if err != nil || len(views) != 1 || views[0].Name != vm.Name() {
+		t.Fatalf("all inventory views=%#v err=%v, want malformed VM visible", views, err)
+	}
+	if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("exact resolve err=%v, want hard malformed-tag refusal", err)
+	}
+}
+
 func TestExeDevOwnershipRejectsNoncanonicalLeaseTag(t *testing.T) {
 	vm := ownedExeDevVM("exe_abcdef123456", "blue")
 	if _, _, _, err := exeDevOwnershipIdentity(vm); err == nil || !strings.Contains(err.Error(), "invalid Crabbox lease tag") {
@@ -642,7 +685,11 @@ func exeDevInventoryResponse(t *testing.T, vm exeDevVM) func(LocalCommandRequest
 		t.Fatal(err)
 	}
 	return func(req LocalCommandRequest) (LocalCommandResult, error) {
-		if strings.Contains(strings.Join(req.Args, " "), " rm ") {
+		command := strings.Join(req.Args, " ")
+		if strings.Contains(command, "whoami --json") {
+			return LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
+		}
+		if strings.Contains(command, " rm ") {
 			return LocalCommandResult{Stdout: `{}`}, nil
 		}
 		return LocalCommandResult{Stdout: string(payload)}, nil
@@ -667,7 +714,7 @@ func persistExeDevClaim(t *testing.T, cfg Config, vm exeDevVM, leaseID, slug, re
 
 func mustExeDevControlScope(t *testing.T, cfg Config) string {
 	t.Helper()
-	scope, err := exeDevControlScope(cfg)
+	scope, err := exeDevControlScope(cfg, exeDevAccountFingerprint("test@example.com"))
 	if err != nil {
 		t.Fatal(err)
 	}
