@@ -76,6 +76,8 @@ func (b *watchTestBackend) RefreshReleaseLeaseTarget(ctx context.Context, lease 
 	return b.Resolve(ctx, ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
 }
 
+func (b *watchTestBackend) ReleaseLeaseConnectionCleanupSafe() bool { return true }
+
 func (b *watchTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
 }

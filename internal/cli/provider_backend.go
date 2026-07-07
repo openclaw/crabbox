@@ -198,7 +198,12 @@ type ReleaseLeaseReporter interface {
 // and connection metadata immediately before automatic lease cleanup.
 type ReleaseLeaseTargetRefresher interface {
 	RefreshReleaseLeaseTarget(context.Context, LeaseTarget) (LeaseTarget, error)
+	// ReleaseLeaseConnectionCleanupSafe reports whether generic remote cleanup
+	// may run between the refresh and the provider's guarded release.
+	ReleaseLeaseConnectionCleanupSafe() bool
 }
+
+var ErrReleaseLeaseOwnershipChanged = errors.New("release lease ownership changed")
 
 type CheckpointForkWorkdirValidator interface {
 	ValidateCheckpointForkWorkdir(ctx context.Context, lease LeaseTarget, workdir string) error

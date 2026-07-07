@@ -30,6 +30,16 @@ type warmupFailureReleaseBackend struct {
 	resolves int
 }
 
+type ownershipChangedReleaseBackend struct {
+	*warmupFailureReleaseBackend
+}
+
+func (b *ownershipChangedReleaseBackend) RefreshReleaseLeaseTarget(context.Context, LeaseTarget) (LeaseTarget, error) {
+	return LeaseTarget{}, ErrReleaseLeaseOwnershipChanged
+}
+
+func (b *ownershipChangedReleaseBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+
 func (b *warmupFailureReleaseBackend) Spec() ProviderSpec {
 	return ProviderSpec{Name: "warmup-release-test"}
 }
@@ -65,6 +75,19 @@ func TestWarmupFailureLeavesAcknowledgedLeaseForControllerReleaseGate(t *testing
 	}
 	if backend.resolves != 0 {
 		t.Fatalf("standalone warmup cleanup resolves=%d, want no implicit preparation", backend.resolves)
+	}
+}
+
+func TestReleaseBackendLeaseStopsBeforeCleanupAfterOwnershipChange(t *testing.T) {
+	base := &warmupFailureReleaseBackend{}
+	backend := &ownershipChangedReleaseBackend{warmupFailureReleaseBackend: base}
+	lease := LeaseTarget{LeaseID: "cbx_abcdef123456", SSH: SSHTarget{Host: "192.0.2.70"}}
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).releaseBackendLeaseBestEffort(context.Background(), backend, defaultConfig(), lease)
+	if !errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
+		t.Fatalf("err=%v, want ownership-change sentinel", err)
+	}
+	if base.releases != 0 {
+		t.Fatalf("releases=%d, want no cleanup or release after ownership change", base.releases)
 	}
 }
 

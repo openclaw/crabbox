@@ -33,6 +33,8 @@ type LocalCommandRequest = core.LocalCommandRequest
 type LocalCommandResult = core.LocalCommandResult
 type LeaseClaim = core.LeaseClaim
 
+var errReleaseLeaseOwnershipChanged = core.ErrReleaseLeaseOwnershipChanged
+
 const (
 	providerName  = "exe-dev"
 	targetLinux   = core.TargetLinux

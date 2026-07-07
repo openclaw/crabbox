@@ -174,6 +174,47 @@ func TestResolveSSHLeaseTargetRejectsUnattestedClaimChange(t *testing.T) {
 	}
 }
 
+func TestClaimAcquiredLeaseRejectsChangeAfterProviderSnapshot(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	leaseID := "cbx_acquiresnapshot1"
+	server := Server{
+		CloudID:  "i-acquired",
+		Provider: "aws",
+		Labels:   map[string]string{"provider": "aws", "lease": leaseID, "slug": "acquired", "state": "ready"},
+	}
+	target := SSHTarget{Host: "192.0.2.60", Port: "22"}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "acquired", cfg, server, target, "/repo", time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	acquired, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.claimSnapshot = acquired
+	server.claimSnapshotExists = true
+	server.claimSnapshotSet = true
+	changedLabels := cloneStringMap(acquired.Labels)
+	changedLabels["state"] = "reclaimed"
+	if _, err := updateLeaseClaimLabelsIfUnchanged(leaseID, acquired, changedLabels); err != nil {
+		t.Fatal(err)
+	}
+
+	err = (App{}).claimLeaseTargetForRepoAndRegister(context.Background(), leaseID, "acquired", cfg, server, target, "/repo", true)
+	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("err=%v, want acquisition-snapshot conflict", err)
+	}
+	current, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Labels["state"] != "reclaimed" {
+		t.Fatalf("claim state=%q, want concurrent change preserved", current.Labels["state"])
+	}
+}
+
 func TestResolveSSHLeaseTargetAcceptsMinimalProviderClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_minimalclaim123"

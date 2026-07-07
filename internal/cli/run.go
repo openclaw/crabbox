@@ -41,6 +41,10 @@ func applyServerTypeFlagOverrides(cfg *Config, fs *flag.FlagSet, serverType stri
 }
 
 func (a App) warmup(ctx context.Context, args []string) error {
+	return a.warmupWithLeaseObserver(ctx, args, nil)
+}
+
+func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe func(LeaseTarget)) error {
 	started := time.Now()
 	defaults := defaultConfig()
 	fs := newFlagSet("warmup", a.Stderr)
@@ -119,6 +123,9 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, controllerOwnsCleanup.Load())
 		return err
+	}
+	if observe != nil {
+		observe(LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 	}
 	if serverTailscaleMetadata(server).Enabled {
 		target = bootstrapNetworkTarget(cfg, server, target)
@@ -2755,9 +2762,14 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 }
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
+	connectionCleanupSafe := true
 	if refresher, ok := backend.(ReleaseLeaseTargetRefresher); ok {
+		connectionCleanupSafe = refresher.ReleaseLeaseConnectionCleanupSafe()
 		refreshed, err := refresher.RefreshReleaseLeaseTarget(ctx, lease)
 		if err != nil {
+			if errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
+				return err
+			}
 			fmt.Fprintf(a.Stderr, "warning: could not refresh lease %s before cleanup: %v; attempting release with acquired target\n", lease.LeaseID, err)
 		} else {
 			if refreshed.SSH.Host == "" {
@@ -2769,8 +2781,22 @@ func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLease
 			lease = refreshed
 		}
 	}
-	a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
-	return a.releaseBackendLease(ctx, backend, cfg, lease)
+	if connectionCleanupSafe {
+		a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
+	}
+	if err := a.releaseBackendLease(ctx, backend, cfg, lease); err != nil {
+		return err
+	}
+	if !connectionCleanupSafe {
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(lease.LeaseID)
+	}
+	return nil
+}
+
+func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseID string) {
+	if _, err := a.stopEgressHostDaemon(leaseID); err != nil {
+		fmt.Fprintf(a.Stderr, "warning: egress host daemon cleanup failed for %s: %v\n", leaseID, err)
+	}
 }
 
 func (a App) cleanupBackendLeaseConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {

@@ -52,6 +52,8 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	var err error
 	if resolved {
 		expected, expectedExists, err = resolvedLeaseClaimSnapshot(leaseID, server)
+	} else if server.claimSnapshotSet {
+		expected, expectedExists, err = resolvedLeaseClaimSnapshot(leaseID, server)
 	} else {
 		expected, expectedExists, err = readLeaseClaimWithPresence(leaseID)
 	}

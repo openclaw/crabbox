@@ -472,6 +472,8 @@ func TestExeDevReleaseSurvivesTouchedClaimRoundTrip(t *testing.T) {
 		LeaseID: leaseID,
 		Server:  exeDevServer(vm, leaseID, slug, cfg, true),
 	}
+	lease.Server.Labels[exeDevClaimGenerationLabel] = claim.Labels[exeDevClaimGenerationLabel]
+	setServerLeaseClaimSnapshot(&lease.Server, claim, true)
 	touched, err := backend.Touch(context.Background(), TouchRequest{Lease: lease, State: "ready"})
 	if err != nil {
 		t.Fatal(err)
@@ -483,7 +485,7 @@ func TestExeDevReleaseSurvivesTouchedClaimRoundTrip(t *testing.T) {
 	if claim.ProviderScope != mustExeDevControlScope(t, cfg) {
 		t.Fatalf("provider scope=%q", claim.ProviderScope)
 	}
-	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	resolved, err := backend.RefreshReleaseLeaseTarget(context.Background(), lease)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,6 +495,54 @@ func TestExeDevReleaseSurvivesTouchedClaimRoundTrip(t *testing.T) {
 	if !hasExeDevRM(runner) {
 		t.Fatalf("rm not called: %#v", runner.calls)
 	}
+}
+
+func TestExeDevReleaseRefreshRejectsConcurrentReclaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	slug := "blue"
+	vm := ownedExeDevVM(leaseID, slug)
+	runner := exeDevInventoryRunner(t, vm)
+	backend := newExeDevTestBackend(Config{}, runner)
+	cfg := backend.configForRun()
+	repoRoot := t.TempDir()
+	claim := persistExeDevClaim(t, cfg, vm, leaseID, slug, repoRoot)
+	lease := LeaseTarget{LeaseID: leaseID, Server: exeDevServer(vm, leaseID, slug, cfg, true)}
+	setServerLeaseClaimSnapshot(&lease.Server, claim, true)
+
+	reclaimed, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), Repo: Repo{Root: repoRoot}, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reclaimedClaim, reclaimedExists, reclaimedSet := serverLeaseClaimSnapshot(reclaimed.Server)
+	if !reclaimedSet || !reclaimedExists || reclaimedClaim.Labels[exeDevClaimGenerationLabel] == claim.Labels[exeDevClaimGenerationLabel] {
+		t.Fatalf("reclaimed generation=%q, want rotation from %q", reclaimedClaim.Labels[exeDevClaimGenerationLabel], claim.Labels[exeDevClaimGenerationLabel])
+	}
+	if _, err := backend.RefreshReleaseLeaseTarget(context.Background(), lease); err == nil || !strings.Contains(err.Error(), "claim ownership changed") {
+		t.Fatalf("err=%v, want changed-ownership refusal", err)
+	}
+	assertNoExeDevRM(t, runner)
+}
+
+func TestExeDevReleaseRefreshTreatsMissingClaimAsOwnershipChange(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123456"
+	slug := "blue"
+	vm := ownedExeDevVM(leaseID, slug)
+	runner := exeDevInventoryRunner(t, vm)
+	backend := newExeDevTestBackend(Config{}, runner)
+	claim := persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
+	lease := LeaseTarget{LeaseID: leaseID, Server: exeDevServer(vm, leaseID, slug, backend.configForRun(), true)}
+	setServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := backend.RefreshReleaseLeaseTarget(context.Background(), lease)
+	if !errors.Is(err, errReleaseLeaseOwnershipChanged) {
+		t.Fatalf("err=%v, want ownership-change sentinel", err)
+	}
+	assertNoExeDevRM(t, runner)
 }
 
 func TestExeDevReleaseRetainsClaimWhenDeleteFails(t *testing.T) {
@@ -606,7 +656,9 @@ func newExeDevTestBackend(cfg Config, runner *exeDevRecordingRunner) *exeDevLeas
 
 func persistExeDevClaim(t *testing.T, cfg Config, vm exeDevVM, leaseID, slug, repoRoot string) LeaseClaim {
 	t.Helper()
-	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, mustExeDevControlScope(t, cfg), exeDevServer(vm, leaseID, slug, cfg, true), exeDevSSHTarget(cfg, vm), repoRoot, cfg.IdleTimeout, false, LeaseClaim{}, false)
+	server := exeDevServer(vm, leaseID, slug, cfg, true)
+	server.Labels[exeDevClaimGenerationLabel] = "cbx_testgeneration"
+	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, mustExeDevControlScope(t, cfg), server, exeDevSSHTarget(cfg, vm), repoRoot, cfg.IdleTimeout, false, LeaseClaim{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

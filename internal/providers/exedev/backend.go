@@ -19,6 +19,8 @@ type exeDevLeaseBackend struct {
 	rt   Runtime
 }
 
+const exeDevClaimGenerationLabel = "claim_generation"
+
 func NewExeDevLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
 	applyExeDevDefaults(&cfg)
@@ -58,6 +60,7 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 		}
 		return LeaseTarget{}, err
 	}
+	lease.Server.Labels[exeDevClaimGenerationLabel] = newLeaseID()
 	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false)
 	if err != nil {
 		if !req.Keep {
@@ -143,7 +146,54 @@ func (b *exeDevLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseR
 }
 
 func (b *exeDevLeaseBackend) RefreshReleaseLeaseTarget(ctx context.Context, lease LeaseTarget) (LeaseTarget, error) {
-	return b.Resolve(ctx, ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+	acquired, acquiredExists, snapshotSet := serverLeaseClaimSnapshot(lease.Server)
+	if !snapshotSet || !acquiredExists {
+		return LeaseTarget{}, exit(2, "provider=%s release refresh requires the acquisition claim snapshot", providerName)
+	}
+	if changed, err := exeDevClaimOwnershipChanged(acquired); err != nil {
+		return LeaseTarget{}, err
+	} else if changed {
+		return LeaseTarget{}, exeDevOwnershipChangedError(lease.LeaseID)
+	}
+	refreshed, err := b.Resolve(ctx, ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+	if err != nil {
+		if changed, claimErr := exeDevClaimOwnershipChanged(acquired); claimErr == nil && changed {
+			return LeaseTarget{}, exeDevOwnershipChangedError(lease.LeaseID)
+		}
+		return LeaseTarget{}, err
+	}
+	current, currentExists, currentSnapshotSet := serverLeaseClaimSnapshot(refreshed.Server)
+	if !currentSnapshotSet || !currentExists || !sameExeDevClaimLineage(acquired, current) {
+		return LeaseTarget{}, exeDevOwnershipChangedError(lease.LeaseID)
+	}
+	return refreshed, nil
+}
+
+func (b *exeDevLeaseBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+
+func exeDevClaimOwnershipChanged(acquired LeaseClaim) (bool, error) {
+	current, exists, err := readLeaseClaimWithPresence(acquired.LeaseID)
+	if err != nil {
+		return false, err
+	}
+	return !exists || !sameExeDevClaimLineage(acquired, current), nil
+}
+
+func exeDevOwnershipChangedError(leaseID string) error {
+	return errors.Join(errReleaseLeaseOwnershipChanged, exit(2, "lease %s claim ownership changed after acquisition; refusing automatic release", leaseID))
+}
+
+func sameExeDevClaimLineage(acquired, current LeaseClaim) bool {
+	return acquired.LeaseID == current.LeaseID &&
+		acquired.Provider == current.Provider &&
+		acquired.ProviderScope == current.ProviderScope &&
+		acquired.CloudID == current.CloudID &&
+		acquired.CloudNumericID == current.CloudNumericID &&
+		acquired.CloudImmutableID == current.CloudImmutableID &&
+		normalizeLeaseSlug(acquired.Slug) == normalizeLeaseSlug(current.Slug) &&
+		acquired.RepoRoot == current.RepoRoot &&
+		strings.TrimSpace(acquired.Labels[exeDevClaimGenerationLabel]) != "" &&
+		acquired.Labels[exeDevClaimGenerationLabel] == current.Labels[exeDevClaimGenerationLabel]
 }
 
 func (b *exeDevLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
@@ -276,6 +326,17 @@ func (b *exeDevLeaseBackend) claimResolvedVM(lease LeaseTarget, vm exeDevVM, lea
 	if err != nil {
 		return LeaseClaim{}, err
 	}
+	generation := ""
+	if exists && !req.Reclaim {
+		generation = strings.TrimSpace(previous.Labels[exeDevClaimGenerationLabel])
+		if generation == "" {
+			return LeaseClaim{}, exit(2, "lease %s has a legacy generationless claim; reuse with --reclaim before operating on it", leaseID)
+		}
+	}
+	if generation == "" {
+		generation = newLeaseID()
+	}
+	lease.Server.Labels[exeDevClaimGenerationLabel] = generation
 	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previous, exists)
 	if err != nil {
 		return LeaseClaim{}, err
