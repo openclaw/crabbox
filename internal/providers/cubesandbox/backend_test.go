@@ -140,6 +140,30 @@ func TestValidateCubeSandboxAPIURL(t *testing.T) {
 	}
 }
 
+func TestCubeSandboxClientRejectsInvalidProxyScheme(t *testing.T) {
+	_, err := newCubeSandboxClient(Config{CubeSandbox: CubeSandboxConfig{
+		APIURL:      "http://127.0.0.1:3000",
+		ProxyScheme: "htps",
+	}}, Runtime{})
+	if err == nil || !strings.Contains(err.Error(), "must be http or https") {
+		t.Fatalf("err=%v, want invalid proxy scheme", err)
+	}
+}
+
+func TestCubeSandboxClientNormalizesUploadUser(t *testing.T) {
+	api, err := newCubeSandboxClient(Config{CubeSandbox: CubeSandboxConfig{
+		APIURL: "http://127.0.0.1:3000",
+		User:   " ubuntu ",
+	}}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*cubesandboxClient)
+	if client.user != "ubuntu" {
+		t.Fatalf("user=%q, want normalized upload user", client.user)
+	}
+}
+
 func TestParseCubeSandboxProcessStreamRequiresEndEvent(t *testing.T) {
 	body := bytes.Join([][]byte{
 		cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": base64.StdEncoding.EncodeToString([]byte("partial"))}}}),

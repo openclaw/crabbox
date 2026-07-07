@@ -108,7 +108,14 @@ var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) 
 		return nil, err
 	}
 	domain := strings.TrimSpace(blank(cfg.CubeSandbox.Domain, "cube.app"))
-	proxyScheme := normalizeCubeSandboxProxyScheme(cfg.CubeSandbox.ProxyScheme, cfg.CubeSandbox.ProxyPortHTTP)
+	proxyScheme, err := cubeSandboxProxyScheme(cfg.CubeSandbox.ProxyScheme, cfg.CubeSandbox.ProxyPortHTTP)
+	if err != nil {
+		return nil, err
+	}
+	user, err := cubesandboxProcessUser(cfg.CubeSandbox.User)
+	if err != nil {
+		return nil, err
+	}
 	proxyPort := cfg.CubeSandbox.ProxyPortHTTP
 	if proxyPort <= 0 {
 		proxyPort = 80
@@ -121,7 +128,7 @@ var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) 
 		apiKey:      apiKey,
 		apiURL:      apiURL,
 		domain:      domain,
-		user:        cfg.CubeSandbox.User,
+		user:        user,
 		proxyScheme: proxyScheme,
 		httpClient:  httpClient,
 		envdClient:  envdClient,
@@ -189,15 +196,17 @@ func validateCubeSandboxAPIURL(raw string) (string, error) {
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
-func normalizeCubeSandboxProxyScheme(scheme string, port int) string {
-	switch strings.ToLower(strings.TrimSpace(scheme)) {
+func cubeSandboxProxyScheme(scheme string, port int) (string, error) {
+	switch normalized := strings.ToLower(strings.TrimSpace(scheme)); normalized {
 	case "http", "https":
-		return strings.ToLower(strings.TrimSpace(scheme))
-	default:
+		return normalized, nil
+	case "":
 		if port == 443 {
-			return "https"
+			return "https", nil
 		}
-		return "http"
+		return "http", nil
+	default:
+		return "", exit(2, "provider=cubesandbox proxy scheme %q must be http or https", scheme)
 	}
 }
 
@@ -495,7 +504,10 @@ func (c *cubesandboxClient) envdURL(session cubesandboxSession, path string) str
 		domain = c.domain
 	}
 	virtualHost := fmt.Sprintf("%d-%s.%s", cubesandboxEnvdPort, session.SandboxID, domain)
-	scheme := normalizeCubeSandboxProxyScheme(c.proxyScheme, 0)
+	scheme := c.proxyScheme
+	if scheme == "" {
+		scheme = "http"
+	}
 	return scheme + "://" + virtualHost + path
 }
 
