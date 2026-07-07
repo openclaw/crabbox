@@ -22,8 +22,9 @@ type exeDevLeaseBackend struct {
 }
 
 const (
-	exeDevClaimGenerationLabel = "claim_generation"
-	exeDevConfirmedAbsentLabel = "exe_dev_confirmed_absent"
+	exeDevClaimGenerationLabel     = "claim_generation"
+	exeDevClaimGenerationTagPrefix = "crabbox-claim-"
+	exeDevConfirmedAbsentLabel     = "exe_dev_confirmed_absent"
 )
 
 func NewExeDevLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -46,8 +47,9 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	}
 	cfg := b.configForRun()
 	name := leaseProviderName(leaseID, slug)
+	generation := newLeaseID()
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s image=%s cpus=%d memory=%s disk=%s keep=%v\n", providerName, leaseID, slug, name, exeDevImage(cfg), cfg.ExeDev.CPUs, cfg.ExeDev.Memory, cfg.ExeDev.Disk, req.Keep)
-	vm, err := b.createVM(ctx, cfg, name, leaseID, slug)
+	vm, err := b.createVM(ctx, cfg, name, leaseID, slug, generation)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -65,7 +67,7 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 		}
 		return LeaseTarget{}, err
 	}
-	lease.Server.Labels[exeDevClaimGenerationLabel] = newLeaseID()
+	lease.Server.Labels[exeDevClaimGenerationLabel] = generation
 	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false)
 	if err != nil {
 		if !req.Keep {
@@ -145,6 +147,9 @@ func (b *exeDevLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseR
 		if err := b.validateVMClaimBinding(ctx, vm, claim, claim.LeaseID, claim.Slug); err != nil {
 			return err
 		}
+		// exe.dev exposes only name-based deletion. The account-bound random
+		// generation tag is the strongest provider-visible resource identity;
+		// actors able to replace it also already hold unconditional `rm` access.
 		return b.deleteVM(ctx, claim.CloudID)
 	})
 }
@@ -223,6 +228,9 @@ func (b *exeDevLeaseBackend) validateAbsentCleanupClaim(ctx context.Context, cla
 	}
 	if claim.Labels["provider"] != providerName || claim.Labels["lease"] != claim.LeaseID || normalizeLeaseSlug(claim.Labels["slug"]) != slug || claim.Labels["name"] != claim.CloudID {
 		return exit(2, "lease %s claim metadata does not attest absent exe.dev cleanup", claim.LeaseID)
+	}
+	if !isCanonicalLeaseID(strings.TrimSpace(claim.Labels[exeDevClaimGenerationLabel])) {
+		return exit(2, "lease %s has no canonical exe.dev claim generation for absent cleanup", claim.LeaseID)
 	}
 	return b.validateExistingClaimRoute(ctx, claim)
 }
@@ -356,8 +364,8 @@ func applyExeDevDefaults(cfg *Config) {
 	cfg.ServerType = exeDevImage(*cfg)
 }
 
-func (b *exeDevLeaseBackend) createVM(ctx context.Context, cfg Config, name, leaseID, slug string) (exeDevVM, error) {
-	args := []string{"new", "--name", name, "--json", "--tag", "crabbox", "--tag", "crabbox-lease-" + leaseID, "--tag", "crabbox-slug-" + slug}
+func (b *exeDevLeaseBackend) createVM(ctx context.Context, cfg Config, name, leaseID, slug, generation string) (exeDevVM, error) {
+	args := []string{"new", "--name", name, "--json", "--tag", "crabbox", "--tag", "crabbox-lease-" + leaseID, "--tag", "crabbox-slug-" + slug, "--tag", exeDevClaimGenerationTagPrefix + generation}
 	if cfg.ExeDev.NoEmail {
 		args = append(args, "--no-email")
 	}
@@ -449,6 +457,14 @@ func (b *exeDevLeaseBackend) claimResolvedVM(ctx context.Context, lease LeaseTar
 	if err != nil {
 		return LeaseClaim{}, err
 	}
+	if req.Reclaim {
+		return updateLeaseClaimLabelsIfUnchangedAfter(leaseID, claim, claim.Labels, func() error {
+			return b.replaceVMClaimGeneration(ctx, vm, generation)
+		})
+	}
+	if err := validateExeDevClaimGeneration(vm, generation); err != nil {
+		return LeaseClaim{}, err
+	}
 	return claim, nil
 }
 
@@ -505,7 +521,62 @@ func (b *exeDevLeaseBackend) validateVMClaimBinding(ctx context.Context, vm exeD
 	if claim.Labels["provider"] != providerName || claim.Labels["lease"] != leaseID || normalizeLeaseSlug(claim.Labels["slug"]) != slug || claim.Labels["name"] != vm.Name() {
 		return exit(2, "exe.dev VM %s claim metadata does not attest the current provider binding", vm.Name())
 	}
+	return validateExeDevClaimGeneration(vm, claim.Labels[exeDevClaimGenerationLabel])
+}
+
+func validateExeDevClaimGeneration(vm exeDevVM, expected string) error {
+	expected = strings.TrimSpace(expected)
+	if !isCanonicalLeaseID(expected) {
+		return exit(2, "exe.dev VM %s has no canonical claim generation; reuse with --reclaim before operating on it", vm.Name())
+	}
+	actual, exists, err := exeDevVMClaimGeneration(vm)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return exit(2, "exe.dev VM %s has no remote claim generation; reuse with --reclaim before operating on it", vm.Name())
+	}
+	if actual != expected {
+		return exit(2, "exe.dev VM %s claim generation does not match the exact local claim", vm.Name())
+	}
 	return nil
+}
+
+func (b *exeDevLeaseBackend) replaceVMClaimGeneration(ctx context.Context, vm exeDevVM, generation string) error {
+	if !isCanonicalLeaseID(generation) {
+		return exit(2, "invalid exe.dev claim generation")
+	}
+	want := exeDevClaimGenerationTagPrefix + generation
+	existing := exeDevClaimGenerationTags(vm)
+	hasWant := false
+	for _, tag := range existing {
+		if tag == want {
+			hasWant = true
+		}
+	}
+	if !hasWant {
+		if _, err := b.controlOutput(ctx, []string{"tag", vm.Name(), want, "--json"}); err != nil {
+			return err
+		}
+	}
+	remove := make([]string, 0, len(existing))
+	for _, tag := range existing {
+		if tag != want {
+			remove = append(remove, tag)
+		}
+	}
+	if len(remove) > 0 {
+		args := append([]string{"tag", "-d", vm.Name()}, remove...)
+		args = append(args, "--json")
+		if _, err := b.controlOutput(ctx, args); err != nil {
+			return err
+		}
+	}
+	current, err := b.findVMByExactName(ctx, vm.Name())
+	if err != nil {
+		return err
+	}
+	return validateExeDevClaimGeneration(current, generation)
 }
 
 func validateExeDevVMOwnership(vm exeDevVM, leaseID, slug, operation string) error {
@@ -648,6 +719,9 @@ func (b *exeDevLeaseBackend) listServers(ctx context.Context, all bool) ([]Lease
 		if !all {
 			_, _, owned, err := exeDevOwnershipIdentity(vm)
 			if err != nil || !owned {
+				continue
+			}
+			if _, _, err := exeDevVMClaimGeneration(vm); err != nil {
 				continue
 			}
 		}
@@ -1008,6 +1082,32 @@ func exeDevOwnershipIdentity(vm exeDevVM) (string, string, bool, error) {
 		slug = value
 	}
 	return leaseID, slug, true, nil
+}
+
+func exeDevVMClaimGeneration(vm exeDevVM) (string, bool, error) {
+	tags := exeDevClaimGenerationTags(vm)
+	if len(tags) > 1 {
+		return "", false, exit(2, "exe.dev VM %s has conflicting claim-generation tags", vm.Name())
+	}
+	if len(tags) == 0 {
+		return "", false, nil
+	}
+	generation := strings.TrimSpace(strings.TrimPrefix(tags[0], exeDevClaimGenerationTagPrefix))
+	if !isCanonicalLeaseID(generation) {
+		return "", false, exit(2, "exe.dev VM %s has an invalid claim-generation tag", vm.Name())
+	}
+	return generation, true, nil
+}
+
+func exeDevClaimGenerationTags(vm exeDevVM) []string {
+	var tags []string
+	for _, tag := range vm.Tags {
+		tag = strings.TrimSpace(tag)
+		if strings.HasPrefix(tag, exeDevClaimGenerationTagPrefix) {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
 }
 
 func inferExeDevSlugFromName(name string) string {

@@ -97,6 +97,10 @@ func removeLeaseClaimIfUnchangedAfter(leaseID string, expected core.LeaseClaim, 
 	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
 }
 
+func updateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected core.LeaseClaim, labels map[string]string, action func() error) (core.LeaseClaim, error) {
+	return core.UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID, expected, labels, action)
+}
+
 func setServerLeaseClaimSnapshot(server *Server, claim core.LeaseClaim, exists bool) {
 	core.SetServerLeaseClaimSnapshot(server, claim, exists)
 }

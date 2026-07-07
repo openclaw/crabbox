@@ -31,7 +31,7 @@
 - Redacted colon-delimited and line-folded bearer credentials from CLI and coordinator diagnostics. Thanks @TurboTheTurtle.
 - Required coordinator AWS, Azure, and GCP release and provisioning-failure cleanup to re-read the stored cloud resource and verify exact provider, resource, lease, owner, and slug ownership before deletion; Azure now persists the exact subscription/resource-group scope for deferred retries and fails legacy unscoped cleanup closed for manual resolution. Thanks @coygeek.
 - Required Lambda inventory, stop, and cleanup to use an unchanged instance-bound local claim, with claim-bound SSH-key deletion and durable unique-instance recovery for ambiguous creates. Thanks @coygeek.
-- Required exe.dev reuse and deletion to match a canonical remote ownership tag set, deterministic VM name, unchanged exact local claim, authenticated account fingerprint, and current control route, retaining the claim after failed deletion. Thanks @coygeek.
+- Required exe.dev reuse and deletion to match a canonical remote ownership tag set, random resource generation, deterministic VM name, unchanged exact local claim, authenticated account fingerprint, and current control route, retaining the claim after failed deletion. Thanks @coygeek.
 
 ## 0.36.0 - 2026-07-05
 

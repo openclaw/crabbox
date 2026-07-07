@@ -91,7 +91,8 @@ top-level `workRoot` propagates to the VM when `exeDev.workRoot` is unset.
 
 1. `warmup` lists existing exe.dev VMs, allocates a Crabbox slug, then creates a
    VM with the control-host call `new --name <crabbox-name> --json`, adding the
-   tags `crabbox`, `crabbox-lease-<id>`, and `crabbox-slug-<slug>`, plus
+   tags `crabbox`, `crabbox-lease-<id>`, and `crabbox-slug-<slug>`, a random
+   `crabbox-claim-<generation>` resource-binding tag, plus
    `--no-email`, `--image`, `--cpu`, `--memory`, `--disk`, and `--command` as
    configured.
 2. Crabbox waits for SSH readiness on the returned `ssh_dest`, then uses its
@@ -103,12 +104,15 @@ top-level `workRoot` propagates to the VM when `exeDev.workRoot` is unset.
    unowned or incomplete inventory; names that merely start with `crabbox-` do
    not establish ownership.
 4. Reusing a completely tagged VM without a local claim, or upgrading a legacy
-   claim that lacks a control-route scope, requires explicit `--reclaim`.
+   claim that lacks a control-route scope or matching remote claim generation,
+   requires explicit `--reclaim`. Reclaim rotates the remote generation while
+   holding the unchanged local claim lock.
    Crabbox refuses untagged adoption and never retargets a claim already bound
    to another VM or control route.
 5. `stop --provider exe-dev <id>` deletes only when the unchanged local claim,
-   exact VM name, deterministic lease name, complete remote tags, current
-   control route, and authenticated account fingerprint all agree. It rechecks inventory while holding the claim lock,
+   exact VM name, deterministic lease name, complete remote tags, remote claim
+   generation, current control route, and authenticated account fingerprint all
+   agree. It rechecks inventory while holding the claim lock,
    calls `rm <vm-name> --json`, and removes the claim only after deletion
    succeeds. Failed or ambiguous deletion keeps the claim for an exact retry;
    if a complete account-bound inventory later confirms the exact VM is absent,
