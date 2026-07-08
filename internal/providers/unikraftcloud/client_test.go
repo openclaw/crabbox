@@ -98,7 +98,7 @@ func TestUnikraftCloudClientLifecycleEndpoints(t *testing.T) {
 		switch r.Method + " " + r.URL.Path {
 		case "POST /v1/instances":
 			var req createInstanceRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Image.URL != "unikraft.org/nginx:latest" || !req.Autostart || req.MemoryMB != 256 {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Image != "unikraft.org/nginx:latest" || !req.Autostart || req.MemoryMB != 256 {
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "message": "bad create body"})
 				return
@@ -156,7 +156,7 @@ func TestUnikraftCloudClientLifecycleEndpoints(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := api.CreateInstance(ctx, createInstanceRequest{
-		Image:     ukcImage{URL: "unikraft.org/nginx:latest"},
+		Image:     "unikraft.org/nginx:latest",
 		MemoryMB:  256,
 		Autostart: true,
 	})

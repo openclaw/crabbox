@@ -71,7 +71,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 		return err
 	}
 	instance, err := api.CreateInstance(ctx, createInstanceRequest{
-		Image:     ukcImage{URL: image},
+		Image:     image,
 		MemoryMB:  b.cfg.UnikraftCloud.MemoryMB,
 		Autostart: true,
 	})

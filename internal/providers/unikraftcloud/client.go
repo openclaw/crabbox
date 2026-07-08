@@ -44,15 +44,11 @@ type unikraftCloudClient struct {
 
 type createInstanceRequest struct {
 	Name      string            `json:"name,omitempty"`
-	Image     ukcImage          `json:"image"`
+	Image     string            `json:"image"`
 	MemoryMB  int               `json:"memory_mb,omitempty"`
 	Args      []string          `json:"args,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
 	Autostart bool              `json:"autostart"`
-}
-
-type ukcImage struct {
-	URL string `json:"url"`
 }
 
 type ukcInstance struct {

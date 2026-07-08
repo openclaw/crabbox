@@ -122,7 +122,7 @@ func TestWarmupCreatesInstanceAndClaimsLease(t *testing.T) {
 	if len(api.created) != 1 {
 		t.Fatalf("created = %#v", api.created)
 	}
-	if api.created[0].Image.URL != "unikraft.org/nginx:latest" || !api.created[0].Autostart || api.created[0].MemoryMB != 256 {
+	if api.created[0].Image != "unikraft.org/nginx:latest" || !api.created[0].Autostart || api.created[0].MemoryMB != 256 {
 		t.Fatalf("create request = %#v", api.created[0])
 	}
 	leaseID := leasePrefix + testInstanceUUID
