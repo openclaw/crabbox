@@ -350,6 +350,44 @@ func TestCrabboxIgnoreCanReincludeDefaultExcludedSourcePath(t *testing.T) {
 	}
 }
 
+func TestCrabboxRuntimeExcludesCannotBeReincluded(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, ".crabboxignore"), "!.crabbox/env\n!.crabbox/scripts\n!.crabbox/runs\n")
+	writeFile(t, filepath.Join(dir, ".crabbox", "env", "live.env"), "export API_TOKEN=secret\n")
+	writeFile(t, filepath.Join(dir, ".crabbox", "scripts", "smoke.sh"), "echo hi\n")
+	writeFile(t, filepath.Join(dir, ".crabbox", "runs", "run_123", "artifact.tgz"), "artifact")
+	writeFile(t, filepath.Join(dir, ".crabbox", "srt-settings.json"), "{}\n")
+	writeFile(t, filepath.Join(dir, "src", "main.go"), "package main\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+
+	excludes, err := syncExcludes(dir, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := syncManifest(dir, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(manifest.Files, ",")
+	for _, want := range []string{".crabbox/srt-settings.json", "src/main.go"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("manifest %q missing %q", got, want)
+		}
+	}
+	for _, notWant := range []string{".crabbox/env/live.env", ".crabbox/scripts/smoke.sh", ".crabbox/runs/run_123/artifact.tgz"} {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("manifest %q should not include protected runtime path %q", got, notWant)
+		}
+	}
+	if !pathExcluded(".crabbox/env/live.env", excludes) || !pathExcluded(".crabbox/scripts/smoke.sh", excludes) || !pathExcluded(".crabbox/runs/run_123/artifact.tgz", excludes) {
+		t.Fatalf("protected runtime excludes were overridden: %v", excludes)
+	}
+}
+
 func TestPathExcludedUsesOrderedNegation(t *testing.T) {
 	tests := []struct {
 		name     string

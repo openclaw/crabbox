@@ -96,6 +96,8 @@ func defaultExcludes() []string {
 		".cache",
 		".tmp",
 		".local",
+		".crabbox/env",
+		".crabbox/scripts",
 		".crabbox/logs",
 		".crabbox/captures",
 		".crabbox/runs",
@@ -125,7 +127,18 @@ func syncExcludes(root string, cfg Config) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return appendOrderedStrings(excludes, ignore...), nil
+	excludes = appendOrderedStrings(excludes, ignore...)
+	return appendOrderedStrings(excludes, protectedSyncExcludes()...), nil
+}
+
+func protectedSyncExcludes() []string {
+	return []string{
+		".crabbox/env",
+		".crabbox/scripts",
+		".crabbox/logs",
+		".crabbox/captures",
+		".crabbox/runs",
+	}
 }
 
 // syncIncludes returns the configured sync include (whitelist) patterns. When
