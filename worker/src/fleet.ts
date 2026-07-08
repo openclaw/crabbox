@@ -890,7 +890,7 @@ export class FleetCoordinator {
 
   async fetch(request: Request): Promise<Response> {
     try {
-      this.reconcileAdminGrantVersion(request);
+      await this.reconcileAdminGrantVersion(request);
       if (!(await this.restoredBridgesReady())) {
         return json(
           {
@@ -1472,12 +1472,24 @@ export class FleetCoordinator {
     return ready;
   }
 
-  private reconcileAdminGrantVersion(request: Request): void {
+  private async reconcileAdminGrantVersion(request: Request): Promise<void> {
     const version = trustedAdminGrantVersion(request);
-    if (!version || version === this.currentAdminGrantVersion) {
+    if (!version) {
       return;
     }
+    if (version === this.currentAdminGrantVersion) return;
+    await this.applyAdminGrantVersion(version);
+  }
+
+  private async applyAdminGrantVersion(version: string): Promise<void> {
     this.currentAdminGrantVersion = version;
+    const validation = await adminGrantValidation(this.env, version);
+    if (this.currentAdminGrantVersion === version) {
+      this.reconcileAdminBridgeSockets(validation);
+    }
+  }
+
+  private adminBridgeSockets(): Set<WebSocket> {
     const sockets = new Set<WebSocket>([
       ...this.controlSockets.values(),
       ...this.codeAgents.values(),
@@ -1495,14 +1507,18 @@ export class FleetCoordinator {
         sockets.add(viewer.socket);
       }
     }
+    return sockets;
+  }
+
+  private reconcileAdminBridgeSockets(validation: AdminGrantValidation): void {
     const revokedEgressSessions = new Set<string>();
-    for (const socket of sockets) {
+    for (const socket of this.adminBridgeSockets()) {
       const attachment = this.bridgeAttachment(socket);
       if (
         !attachment ||
         !("admin" in attachment) ||
         attachment.admin !== true ||
-        attachment.adminGrantVersion === version
+        cachedAdminGrantIsCurrent(attachment, validation)
       ) {
         continue;
       }
@@ -1523,6 +1539,22 @@ export class FleetCoordinator {
       this.handleBridgeClose(socket, 1008, "admin access revoked");
       closeSocket(socket, 1008, "admin access revoked");
     }
+  }
+
+  private async reconcileScheduledAdminGrants(
+    forwardedVersion?: string,
+    preserveForwardedVersion = false,
+  ): Promise<void> {
+    let version =
+      forwardedVersion ?? (preserveForwardedVersion ? this.currentAdminGrantVersion : undefined);
+    if (!version) {
+      const derivedVersion = await configuredAdminGrantVersion(this.env);
+      version =
+        preserveForwardedVersion && this.currentAdminGrantVersion
+          ? this.currentAdminGrantVersion
+          : derivedVersion;
+    }
+    await this.applyAdminGrantVersion(version);
   }
 
   private async currentAdminGrantValidation(): Promise<AdminGrantValidation> {
@@ -2133,9 +2165,21 @@ export class FleetCoordinator {
   }
 
   async alarm(): Promise<void> {
+    await this.runScheduledMaintenance();
+  }
+
+  protected async durableObjectAlarm(): Promise<void> {
+    await this.runScheduledMaintenance(undefined, true);
+  }
+
+  private async runScheduledMaintenance(
+    forwardedAdminGrantVersion?: string,
+    preserveForwardedVersion = false,
+  ): Promise<void> {
     if (!(await this.restoredBridgesReady())) {
       throw new Error("restored bridge lease state is temporarily unavailable");
     }
+    await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
     await this.expireLeases();
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.reconcileRuntimeAdapterDeletes();
@@ -2155,7 +2199,7 @@ export class FleetCoordinator {
     if (request.headers.get("x-crabbox-internal") !== "scheduled") {
       return json({ error: "unauthorized" }, { status: 401 });
     }
-    await this.alarm();
+    await this.runScheduledMaintenance(trustedAdminGrantVersion(request));
     return json({ ok: true });
   }
 
@@ -12687,7 +12731,7 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
   }
 
   override alarm(): Promise<void> {
-    return super.alarm();
+    return super.durableObjectAlarm();
   }
 
   override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {

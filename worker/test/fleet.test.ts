@@ -13,9 +13,11 @@ import {
   type LeaseConfig,
 } from "../src/config";
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
+import { CloudflareCoordinatorRuntime } from "../src/coordinator-runtime";
 import {
   AWSProvider,
   AzureProvider,
+  FleetCoordinator,
   FleetDurableObject,
   GCPProvider,
   HetznerProvider,
@@ -283,6 +285,209 @@ describe("runtime adapter relay", () => {
     expect(socket.closeCode).toBe(1008);
     expect(socket.closeReason).toBe("admin access revoked");
     expect(internal.controlSockets.has("control-old-deployment-admin")).toBe(false);
+  });
+
+  it("reconciles idle admin sockets during direct scheduled alarms", async () => {
+    const oldAdminToken = "old-admin-token";
+    const oldVersion = await adminGrantVersion({ CRABBOX_ADMIN_TOKEN: oldAdminToken });
+    const fleet = testCoordinator(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_ADMIN_TOKEN: oldAdminToken,
+      },
+    );
+    const leaseID = "cbx_000000000001";
+    const grant = {
+      auth: "bearer" as const,
+      owner: "admin@example.com",
+      org: "example-org",
+      admin: true,
+      adminTokenHash: await sha256Hex(oldAdminToken),
+      adminGrantVersion: oldVersion,
+    };
+    const control = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-scheduled-admin",
+      ...grant,
+      subscriptions: {},
+    });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const codeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code-scheduled-admin",
+      ...grant,
+    });
+    const webAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_scheduled_admin",
+      capabilities: new Set<string>(),
+    });
+    const webViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID,
+      id: "viewer_scheduled_admin",
+      agentID: "agent_scheduled_admin",
+      ...grant,
+      label: "admin",
+    });
+    const egressHost = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID,
+      sessionID: "egress_scheduled_admin",
+      ...grant,
+    });
+    const egressClient = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID,
+      sessionID: "egress_scheduled_admin",
+      ...grant,
+    });
+    const internal = fleet as unknown as {
+      env: Env;
+      controlSockets: Map<string, WebSocket>;
+      codeAgents: Map<string, WebSocket>;
+      codeViewers: Map<string, WebSocket>;
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      webVNCViewers: Map<string, Map<string, unknown>>;
+      egressHosts: Map<string, WebSocket>;
+      egressClients: Map<string, WebSocket>;
+    };
+    internal.controlSockets.set("control-scheduled-admin", control as unknown as WebSocket);
+    internal.codeAgents.set(leaseID, codeAgent as unknown as WebSocket);
+    internal.codeViewers.set("code-scheduled-admin", codeViewer as unknown as WebSocket);
+    internal.webVNCAgents.set(
+      leaseID,
+      new Map([["agent_scheduled_admin", webAgent as unknown as WebSocket]]),
+    );
+    internal.webVNCViewers.set(
+      leaseID,
+      new Map([
+        [
+          "viewer_scheduled_admin",
+          {
+            id: "viewer_scheduled_admin",
+            agentID: "agent_scheduled_admin",
+            socket: webViewer as unknown as WebSocket,
+            ...grant,
+            label: "admin",
+            connectedAt: new Date().toISOString(),
+          },
+        ],
+      ]),
+    );
+    const egressKey = `${leaseID}\u0000egress_scheduled_admin`;
+    internal.egressHosts.set(egressKey, egressHost as unknown as WebSocket);
+    internal.egressClients.set(egressKey, egressClient as unknown as WebSocket);
+    const primed = await fleet.fetch(
+      request("GET", "/v1/health", {
+        headers: { "x-crabbox-admin-grant-version": oldVersion },
+      }),
+    );
+    expect(primed.status).toBe(200);
+    internal.env.CRABBOX_ADMIN_TOKEN = "new-admin-token";
+
+    await fleet.alarm();
+
+    for (const socket of [control, codeViewer, webViewer, egressHost, egressClient]) {
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.closeReason).toBe("admin access revoked");
+    }
+    expect(codeAgent.sentJSON()).toEqual([
+      {
+        type: "ws_close",
+        id: "code-scheduled-admin",
+        code: 1008,
+        reason: "admin access revoked",
+      },
+    ]);
+    expect(webAgent.closeCode).toBe(1011);
+    expect(internal.controlSockets.has("control-scheduled-admin")).toBe(false);
+    expect(internal.codeViewers.has("code-scheduled-admin")).toBe(false);
+    expect(internal.webVNCViewers.get(leaseID)?.has("viewer_scheduled_admin") ?? false).toBe(false);
+    expect(internal.egressHosts.has(egressKey)).toBe(false);
+    expect(internal.egressClients.has(egressKey)).toBe(false);
+  });
+
+  it("preserves the forwarded admin grant version during Worker scheduled maintenance", async () => {
+    const oldAdminToken = "old-admin-token";
+    const newAdminToken = "new-admin-token";
+    const newVersion = await adminGrantVersion({ CRABBOX_ADMIN_TOKEN: newAdminToken });
+    const fleet = testFleet(new MemoryStorage(), {}, { CRABBOX_ADMIN_TOKEN: oldAdminToken });
+    const socket = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-current-deployment-admin",
+      owner: "admin@example.com",
+      org: "example-org",
+      admin: true,
+      auth: "bearer",
+      adminTokenHash: await sha256Hex(newAdminToken),
+      adminGrantVersion: newVersion,
+      subscriptions: {},
+    });
+    const internal = fleet as unknown as {
+      currentAdminGrantVersion?: string;
+      controlSockets: Map<string, WebSocket>;
+    };
+    internal.controlSockets.set("control-current-deployment-admin", socket as unknown as WebSocket);
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/internal/scheduled", {
+        headers: {
+          "x-crabbox-internal": "scheduled",
+          "x-crabbox-admin-grant-version": newVersion,
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(socket.closeCode).toBeUndefined();
+    expect(internal.controlSockets.has("control-current-deployment-admin")).toBe(true);
+    expect(internal.currentAdminGrantVersion).toBe(newVersion);
+
+    await fleet.alarm();
+
+    expect(socket.closeCode).toBeUndefined();
+    expect(internal.controlSockets.has("control-current-deployment-admin")).toBe(true);
+    expect(internal.currentAdminGrantVersion).toBe(newVersion);
+  });
+
+  it("does not let an alarm race roll back a newly forwarded admin grant version", async () => {
+    const oldAdminToken = "old-admin-token";
+    const newAdminToken = "new-admin-token";
+    const newVersion = await adminGrantVersion({ CRABBOX_ADMIN_TOKEN: newAdminToken });
+    const fleet = testFleet(new MemoryStorage(), {}, { CRABBOX_ADMIN_TOKEN: oldAdminToken });
+    const socket = new FakeWebSocket({
+      kind: "control",
+      clientID: "control-racing-deployment-admin",
+      owner: "admin@example.com",
+      org: "example-org",
+      admin: true,
+      auth: "bearer",
+      adminTokenHash: await sha256Hex(newAdminToken),
+      adminGrantVersion: newVersion,
+      subscriptions: {},
+    });
+    const internal = fleet as unknown as {
+      currentAdminGrantVersion?: string;
+      controlSockets: Map<string, WebSocket>;
+    };
+    internal.controlSockets.set("control-racing-deployment-admin", socket as unknown as WebSocket);
+
+    const alarm = fleet.alarm();
+    const response = await fleet.fetch(
+      request("GET", "/v1/health", {
+        headers: { "x-crabbox-admin-grant-version": newVersion },
+      }),
+    );
+    await alarm;
+
+    expect(response.status).toBe(200);
+    expect(socket.closeCode).toBeUndefined();
+    expect(internal.controlSockets.has("control-racing-deployment-admin")).toBe(true);
+    expect(internal.currentAdminGrantVersion).toBe(newVersion);
   });
 
   it("revalidates idle admin controls before broadcasting subscribed run events", async () => {
@@ -24091,6 +24296,25 @@ function testFleet(
   }
   return new FleetDurableObject(
     { storage } as unknown as DurableObjectState,
+    { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
+    providers,
+  );
+}
+
+function testCoordinator(
+  storage = new MemoryStorage(),
+  providers = {},
+  env: Partial<Env> = {},
+): FleetCoordinator {
+  for (const provider of Object.values(providers)) {
+    (
+      provider as {
+        attachStorage?: (storage: MemoryStorage) => void;
+      }
+    ).attachStorage?.(storage);
+  }
+  return new FleetCoordinator(
+    new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState),
     { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
     providers,
   );
