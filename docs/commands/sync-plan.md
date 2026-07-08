@@ -24,8 +24,8 @@ matches what an actual sync would ship:
 - `sync.exclude` patterns from config;
 - Crabbox's built-in cache/build excludes.
 
-Files matching any exclude are removed from the candidate set before the
-size accounting runs.
+Ordered exclude rules are applied before size accounting; a later `!pattern`
+can re-include a path matched by an earlier rule.
 
 ## Output
 

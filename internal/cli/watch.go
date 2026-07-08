@@ -396,8 +396,41 @@ func (s *watchSession) observeEvent(watcher *fsnotify.Watcher, event fsnotify.Ev
 		return false
 	}
 	rel = filepath.ToSlash(rel)
-	if rel == "." || !safeRepoRel(rel) || pathExcluded(rel, s.excludes) {
+	if rel == "." || !safeRepoRel(rel) {
 		return false
+	}
+	excluded := pathExcluded(rel, s.excludes)
+	if excluded {
+		if !excludedDirMayContainReinclude(rel, s.excludes) {
+			return false
+		}
+		if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+			changed := false
+			for path := range s.paths {
+				if strings.HasPrefix(path, rel+"/") && !pathExcluded(path, s.excludes) {
+					delete(s.paths, path)
+					batch[path] = struct{}{}
+					changed = true
+				}
+			}
+			return changed
+		}
+		if event.Op&fsnotify.Create == 0 {
+			return false
+		}
+		info, err := os.Lstat(event.Name)
+		if err != nil || !info.IsDir() {
+			return false
+		}
+		files, err := addWatchTree(watcher, s.root, event.Name, s.excludes)
+		if err != nil {
+			return false
+		}
+		for _, file := range files {
+			s.rememberPath(file, filepath.Join(s.root, filepath.FromSlash(file)))
+			batch[file] = struct{}{}
+		}
+		return len(files) > 0
 	}
 	if event.Op == fsnotify.Chmod && !s.rememberPath(rel, event.Name) {
 		return false
@@ -456,8 +489,12 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 	excludesChanged := !slices.Equal(excludes, s.excludes)
 	s.excludes = excludes
 	if excludesChanged && s.watcher != nil {
-		if _, err := addWatchTree(s.watcher, s.root, s.root, s.excludes); err != nil {
+		files, err := addWatchTree(s.watcher, s.root, s.root, s.excludes)
+		if err != nil {
 			return nil, exit(1, "watch: rewatch %s after filter change: %v", s.root, err)
+		}
+		for _, file := range files {
+			s.rememberPath(file, filepath.Join(s.root, filepath.FromSlash(file)))
 		}
 	}
 	includes := syncIncludes(s.cfg)
@@ -596,7 +633,9 @@ func addWatchTree(watcher *fsnotify.Watcher, root, dir string, excludes []string
 		}
 		rel = filepath.ToSlash(rel)
 		if entry.IsDir() {
-			if rel != "." && (!safeRepoRel(rel) || pathExcluded(rel, excludes)) {
+			if rel != "." &&
+				(!safeRepoRel(rel) ||
+					(pathExcluded(rel, excludes) && !excludedDirMayContainReinclude(rel, excludes))) {
 				return fs.SkipDir
 			}
 			if err := watcher.Add(path); err != nil {

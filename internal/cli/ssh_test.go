@@ -1103,6 +1103,41 @@ func TestNormalizeRsyncOptionsNoTimesForcesChecksum(t *testing.T) {
 	}
 }
 
+func TestRsyncFilesFromUsesAuthoritativeManifestWithoutExcludes(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "rsync.log")
+	rsyncPath := filepath.Join(dir, "rsync")
+	if err := os.WriteFile(rsyncPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CRABBOX_FAKE_RSYNC_LOG\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_RSYNC_LOG", logPath)
+	target := SSHTarget{Host: "example.test", User: "runner"}
+	err := rsync(
+		context.Background(),
+		target,
+		dir,
+		"/work",
+		[]string{"target", "!target/keep.txt"},
+		io.Discard,
+		io.Discard,
+		rsyncOptions{UseFilesFrom: true, FilesFrom: []byte("target/keep.txt\x00")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--files-from=-\n") {
+		t.Fatalf("rsync args missing authoritative manifest:\n%s", args)
+	}
+	if strings.Contains(string(args), "--exclude\n") {
+		t.Fatalf("rsync args must not reapply excludes to manifest paths:\n%s", args)
+	}
+}
+
 func TestWindowsToWSLPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

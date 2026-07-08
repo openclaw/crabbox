@@ -116,7 +116,7 @@ func defaultExcludes() []string {
 }
 
 func configuredExcludes(cfg Config) []string {
-	return appendUniqueStrings(defaultExcludes(), cfg.Sync.Excludes...)
+	return appendOrderedStrings(defaultExcludes(), cfg.Sync.Excludes...)
 }
 
 func syncExcludes(root string, cfg Config) ([]string, error) {
@@ -125,7 +125,7 @@ func syncExcludes(root string, cfg Config) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return appendUniqueStrings(excludes, ignore...), nil
+	return appendOrderedStrings(excludes, ignore...), nil
 }
 
 // syncIncludes returns the configured sync include (whitelist) patterns. When
@@ -618,17 +618,54 @@ func pathExcluded(rel string, excludes []string) bool {
 	rel = filepath.ToSlash(rel)
 	excluded := false
 	for _, exclude := range excludes {
-		negated := false
-		exclude = strings.TrimSpace(exclude)
-		if strings.HasPrefix(exclude, "!") {
-			negated = true
-			exclude = strings.TrimSpace(strings.TrimPrefix(exclude, "!"))
-		}
+		exclude, negated := excludeRule(exclude)
 		if excludeMatches(rel, exclude) {
 			excluded = !negated
 		}
 	}
 	return excluded
+}
+
+func excludeRule(rule string) (pattern string, negated bool) {
+	rule = strings.TrimSpace(rule)
+	if strings.HasPrefix(rule, `\!`) {
+		return strings.TrimPrefix(rule, `\`), false
+	}
+	if strings.HasPrefix(rule, "!") {
+		return strings.TrimSpace(strings.TrimPrefix(rule, "!")), true
+	}
+	return rule, false
+}
+
+// excludedDirMayContainReinclude keeps watch traversal open when a later file
+// can be re-included below an otherwise excluded directory.
+func excludedDirMayContainReinclude(rel string, excludes []string) bool {
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	for _, rule := range excludes {
+		pattern, negated := excludeRule(rule)
+		if !negated {
+			continue
+		}
+		pattern = strings.Trim(filepath.ToSlash(pattern), "/")
+		if pattern == "" {
+			continue
+		}
+		if !strings.Contains(pattern, "/") {
+			return true
+		}
+		meta := strings.IndexAny(pattern, "*?[")
+		if meta < 0 {
+			if pattern == rel || strings.HasPrefix(pattern, rel+"/") || strings.HasPrefix(rel, pattern+"/") {
+				return true
+			}
+			continue
+		}
+		prefix := strings.TrimSuffix(pattern[:meta], "/")
+		if prefix == "" || prefix == rel || strings.HasPrefix(prefix, rel+"/") || strings.HasPrefix(rel, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func excludeMatches(rel string, exclude string) bool {

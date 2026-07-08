@@ -734,8 +734,10 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	if isWindowsWSL2Target(target) {
 		args = append(args, "--rsync-path", "wsl.exe rsync")
 	}
-	for _, exclude := range excludes {
-		args = append(args, "--exclude", exclude)
+	if !opts.UseFilesFrom {
+		for _, exclude := range excludes {
+			args = append(args, "--exclude", exclude)
+		}
 	}
 	if opts.Debug {
 		args = append(args, "--stats", "--itemize-changes", "--progress")

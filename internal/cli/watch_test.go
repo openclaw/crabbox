@@ -647,6 +647,84 @@ func TestWatchKeepsExecutableModeChanges(t *testing.T) {
 	}
 }
 
+func TestWatchTraversesExcludedParentForReincludedDescendant(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, "target/keep.txt", "source")
+	watchTestWrite(t, root, "target/drop.bin", "generated")
+	excludes := appendOrderedStrings(defaultExcludes(), "!target/keep.txt")
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+
+	files, err := addWatchTree(watcher, root, root, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(files, ",")
+	if !strings.Contains(got, "target/keep.txt") {
+		t.Fatalf("watched files=%q should include re-included descendant", got)
+	}
+	if strings.Contains(got, "target/drop.bin") || strings.Contains(got, ".git/") {
+		t.Fatalf("watched files=%q should omit excluded paths", got)
+	}
+}
+
+func TestWatchQueuesReincludedDescendantWhenExcludedParentIsRemoved(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, ".crabboxignore", "")
+	watchTestWrite(t, root, "target/keep.txt", "source")
+	watchTestGit(t, root, "add", ".crabboxignore", "target/keep.txt")
+	watchTestGit(t, root, "commit", "-q", "-m", "add excluded source target")
+	excludes, err := syncExcludes(root, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	files, err := addWatchTree(watcher, root, root, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &watchSession{
+		root:     root,
+		cfg:      baseConfig(),
+		excludes: excludes,
+		paths:    map[string]watchPathState{},
+		watcher:  watcher,
+	}
+	for _, file := range files {
+		session.rememberPath(file, filepath.Join(root, filepath.FromSlash(file)))
+	}
+	watchTestWrite(t, root, ".crabboxignore", "!target/keep.txt\n")
+	if _, err := session.qualifyBatch([]string{".crabboxignore"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := session.paths["target/keep.txt"]; !ok {
+		t.Fatal("filter rewatch did not remember newly re-included descendant")
+	}
+	if err := os.RemoveAll(filepath.Join(root, "target")); err != nil {
+		t.Fatal(err)
+	}
+	batch := map[string]struct{}{}
+	if !session.observeEvent(nil, fsnotify.Event{
+		Name: filepath.Join(root, "target"),
+		Op:   fsnotify.Remove,
+	}, batch) {
+		t.Fatal("excluded parent removal did not qualify re-included descendant")
+	}
+	if _, ok := batch["target/keep.txt"]; !ok {
+		t.Fatalf("batch=%v, want removed re-included descendant", batch)
+	}
+	if _, ok := session.paths["target/keep.txt"]; ok {
+		t.Fatal("removed descendant remained in watch state")
+	}
+}
+
 func TestWatchIncludeWhitelistFiltersReruns(t *testing.T) {
 	root := newWatchGitRepo(t)
 	watchTestWrite(t, root, "src/app.go", "package app\n")

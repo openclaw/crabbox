@@ -5628,8 +5628,8 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		applyLeaseDuration(&cfg.IdleTimeout, file.Lease.IdleTimeout)
 	}
 	if file.Sync != nil {
-		cfg.Sync.Excludes = appendUniqueStrings(cfg.Sync.Excludes, file.Sync.Exclude...)
-		cfg.Sync.Excludes = appendUniqueStrings(cfg.Sync.Excludes, file.Sync.Excludes...)
+		cfg.Sync.Excludes = appendOrderedStrings(cfg.Sync.Excludes, file.Sync.Exclude...)
+		cfg.Sync.Excludes = appendOrderedStrings(cfg.Sync.Excludes, file.Sync.Excludes...)
 		cfg.Sync.Includes = appendUniqueStrings(cfg.Sync.Includes, file.Sync.Include...)
 		cfg.Sync.Includes = appendUniqueStrings(cfg.Sync.Includes, file.Sync.Includes...)
 		if file.Sync.Delete != nil {
@@ -9806,6 +9806,16 @@ func appendUniqueStrings(values []string, extra ...string) []string {
 		}
 		seen[value] = true
 		out = append(out, value)
+	}
+	return out
+}
+
+func appendOrderedStrings(values []string, extra ...string) []string {
+	out := append([]string(nil), values...)
+	for _, value := range extra {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
 	}
 	return out
 }

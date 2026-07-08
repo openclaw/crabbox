@@ -5223,6 +5223,8 @@ sync:
   exclude:
     - .artifacts
     - tmp
+    - '!tmp'
+    - tmp
 env:
   allow:
     - CI
@@ -5535,7 +5537,7 @@ ssh:
 	if cfg.Sync.Timeout.String() != "30m0s" || cfg.Sync.WarnFiles != 100 || cfg.Sync.WarnBytes != 200 || cfg.Sync.FailFiles != 300 || cfg.Sync.FailBytes != 400 || !cfg.Sync.AllowLarge {
 		t.Fatalf("sync guardrails not loaded: %#v", cfg.Sync)
 	}
-	if len(cfg.Sync.Excludes) != 2 || cfg.Sync.Excludes[0] != ".artifacts" || cfg.Sync.Excludes[1] != "tmp" {
+	if got, want := cfg.Sync.Excludes, []string{".artifacts", "tmp", "!tmp", "tmp"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("sync excludes not loaded: %#v", cfg.Sync.Excludes)
 	}
 	if len(cfg.EnvAllow) != 3 || cfg.EnvAllow[2] != "CUSTOM_*" {

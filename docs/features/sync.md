@@ -44,6 +44,15 @@ project-specific generated directories in `.crabboxignore` or `sync.exclude`.
 Patterns match against POSIX-style relative paths. A pattern with no `/` matches
 any path segment by name or by glob (for example, `node_modules` or `*.log`);
 patterns with a `/` match a path prefix or a glob over the full relative path.
+Rules are evaluated in order and the last matching rule wins. Prefix a pattern
+with `!` to re-include a path excluded by an earlier rule, including a built-in
+default; prefix a literal leading `!` with a backslash (`\!cache`). For example:
+
+```gitignore
+# Keep generated target directories excluded, except this source package.
+target
+!apps/backend/app/connectors/target
+```
 
 Use `.crabboxignore` when you only need repo-local sync exclusions. The file is
 read from the repository root. Blank lines and lines starting with `#` are

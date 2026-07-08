@@ -350,6 +350,44 @@ func TestCrabboxIgnoreCanReincludeDefaultExcludedSourcePath(t *testing.T) {
 	}
 }
 
+func TestPathExcludedUsesOrderedNegation(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		patterns []string
+		want     bool
+	}{
+		{name: "exact reinclude", path: "apps/backend/target/schema.py", patterns: []string{"target", "!apps/backend/target"}, want: false},
+		{name: "unrelated default remains excluded", path: "build/target/debug.o", patterns: []string{"target", "!apps/backend/target"}, want: true},
+		{name: "last matching rule wins", path: "target/debug.o", patterns: []string{"target", "!target", "target"}, want: true},
+		{name: "escaped bang is literal", path: "!cache/item.bin", patterns: []string{`\!cache`}, want: true},
+		{name: "unescaped bang negates", path: "cache/item.bin", patterns: []string{"cache", "!cache"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := pathExcluded(test.path, test.patterns); got != test.want {
+				t.Fatalf("pathExcluded(%q, %q) = %v, want %v", test.path, test.patterns, got, test.want)
+			}
+		})
+	}
+}
+
+func TestSyncExcludesPreservesRepeatedRuleOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".crabboxignore"), "!target\ntarget\n!apps/backend/target\n")
+
+	excludes, err := syncExcludes(dir, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pathExcluded("apps/backend/target/schema.py", excludes) {
+		t.Fatal("final precise negation should reinclude source target path")
+	}
+	if !pathExcluded("build/target/debug.o", excludes) {
+		t.Fatal("repeated target rule should re-exclude unrelated target path")
+	}
+}
+
 func TestCrabboxIgnorePrunesDeletedPaths(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")
