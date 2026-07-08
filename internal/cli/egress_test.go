@@ -261,6 +261,14 @@ func TestSCPBaseArgsUseLegacyProtocolForNativeWindows(t *testing.T) {
 	if slices.Contains(linux, "-O") {
 		t.Fatalf("Linux scp args should not force legacy protocol: %v", linux)
 	}
+	for name, args := range map[string][]string{"native Windows": native, "WSL2": wsl2, "Linux": linux} {
+		got := strings.Join(args, " ")
+		for _, want := range []string{"ForwardAgent=no", "ForwardX11=no", "ForwardX11Trusted=no"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%s scp args missing %s: %v", name, want, args)
+			}
+		}
+	}
 }
 
 func TestManualEgressTicketCreationReusesActiveSession(t *testing.T) {

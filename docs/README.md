@@ -34,7 +34,7 @@ Object or on Node.js with PostgreSQL.
 ```text
 your laptop                 coordinator runtime              cloud provider
 -------------               -------------------              --------------
-crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azure / GCP
+crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azure / GCP / Daytona
    |                      or Node.js + PostgreSQL              |
    |                                                           |
    +------------- SSH + rsync to leased runner <---------------+

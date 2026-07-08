@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	sandboxv1 "github.com/openclaw/crabbox/internal/providers/wandb/gen/coreweave/sandbox/v1beta2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -121,8 +122,9 @@ type Auth struct {
 // inside that operation, and the backend closes the connection before returning
 // to avoid leaking sockets in long-lived Crabbox processes.
 type wandbClient struct {
-	conn *grpc.ClientConn
-	gw   sandboxv1.GatewayServiceClient
+	conn   *grpc.ClientConn
+	gw     sandboxv1.GatewayServiceClient
+	apiKey string
 }
 
 func newWandbClient(cfg Config, _ Runtime) (wandbAPI, error) {
@@ -156,7 +158,7 @@ func newWandbClient(cfg Config, _ Runtime) (wandbAPI, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial cwsandbox gateway %s: %w", endpoint, err)
 	}
-	return &wandbClient{conn: conn, gw: sandboxv1.NewGatewayServiceClient(conn)}, nil
+	return &wandbClient{conn: conn, gw: sandboxv1.NewGatewayServiceClient(conn), apiKey: auth.APIKey}, nil
 }
 
 // wandbProviderScope binds a local claim to the exact remote namespace without
@@ -313,7 +315,7 @@ func isLoopbackHost(host string) bool {
 // version the client is wired against.
 func (c *wandbClient) Version(ctx context.Context) (string, error) {
 	if _, err := c.gw.List(ctx, &sandboxv1.ListSandboxesRequest{PageSize: 1}); err != nil {
-		return "", mapRPCError(err, "version probe")
+		return "", mapRPCError(err, "version probe", c.apiKey)
 	}
 	return "coreweave.sandbox.v1beta2", nil
 }
@@ -335,7 +337,7 @@ func (c *wandbClient) Acquire(ctx context.Context, req wandbAcquireRequest) (wan
 		MaxLifetimeSeconds:   int32(req.MaxLifetimeSecs),
 	})
 	if err != nil {
-		return wandbSandbox{}, mapRPCError(err, "Start")
+		return wandbSandbox{}, mapRPCError(err, "Start", c.apiKey)
 	}
 	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout(req.MaxLifetimeSecs))
 	defer cancel()
@@ -360,7 +362,7 @@ func (c *wandbClient) pollUntilRunning(ctx context.Context, id string) (wandbSan
 		}
 		resp, err := c.gw.Get(ctx, &sandboxv1.GetSandboxRequest{SandboxId: id})
 		if err != nil {
-			return wandbSandbox{}, mapRPCError(err, "Get(poll)")
+			return wandbSandbox{}, mapRPCError(err, "Get(poll)", c.apiKey)
 		}
 		switch resp.SandboxStatus {
 		case sandboxv1.SandboxStatus_SANDBOX_STATUS_RUNNING:
@@ -422,7 +424,7 @@ func (c *wandbClient) Exec(ctx context.Context, req wandbExecRequest) (int, erro
 	}
 	resp, err := c.gw.Exec(ctx, grpcReq)
 	if err != nil {
-		return 0, mapRPCError(err, "Exec")
+		return 0, mapRPCError(err, "Exec", c.apiKey)
 	}
 	if resp.Result == nil {
 		return 0, fmt.Errorf("wandb exec: empty response")
@@ -452,7 +454,7 @@ func (c *wandbClient) Stop(ctx context.Context, id string, gracefulSeconds int, 
 		if missingOK && status.Code(err) == codes.NotFound {
 			return nil
 		}
-		return mapRPCError(err, "Stop")
+		return mapRPCError(err, "Stop", c.apiKey)
 	}
 	if resp == nil {
 		return fmt.Errorf("wandb stop %s: empty response", id)
@@ -462,7 +464,7 @@ func (c *wandbClient) Stop(ctx context.Context, id string, gracefulSeconds int, 
 		if msg == "" {
 			msg = "stop failed"
 		}
-		return fmt.Errorf("wandb stop %s: %s", id, msg)
+		return fmt.Errorf("wandb stop %s: %s", id, shared.RedactErrorSecrets(msg, c.apiKey))
 	}
 	return nil
 }
@@ -480,7 +482,7 @@ func (c *wandbClient) List(ctx context.Context, tags []string, statusFilter stri
 	for {
 		resp, err := c.gw.List(ctx, grpcReq)
 		if err != nil {
-			return nil, mapRPCError(err, "List")
+			return nil, mapRPCError(err, "List", c.apiKey)
 		}
 		for _, sb := range resp.Sandboxes {
 			out = append(out, wandbSandbox{
@@ -500,7 +502,7 @@ func (c *wandbClient) List(ctx context.Context, tags []string, statusFilter stri
 func (c *wandbClient) Status(ctx context.Context, id string) (wandbSandbox, error) {
 	resp, err := c.gw.Get(ctx, &sandboxv1.GetSandboxRequest{SandboxId: id})
 	if err != nil {
-		return wandbSandbox{}, mapRPCError(err, "Get")
+		return wandbSandbox{}, mapRPCError(err, "Get", c.apiKey)
 	}
 	return wandbSandbox{
 		ID:        id,
@@ -522,13 +524,14 @@ func formatTimestamp(ts *timestamppb.Timestamp) string {
 // mapRPCError converts a gRPC status into the wandbAPIError surface that
 // callers (and tests) already expect. ExitCode mapping follows sysexits.h:
 // 77 EX_NOPERM, 69 EX_UNAVAILABLE, 124 GNU timeout.
-func mapRPCError(err error, op string) error {
+func mapRPCError(err error, op string, secrets ...string) error {
 	if err == nil {
 		return nil
 	}
 	s, ok := status.FromError(err)
 	if !ok {
-		return &wandbAPIError{ExitCode: 1, Stderr: fmt.Sprintf("%s: %v", op, err)}
+		message := shared.RedactErrorSecrets(err.Error(), secrets...)
+		return &wandbAPIError{ExitCode: 1, Stderr: fmt.Sprintf("%s: %s", op, message)}
 	}
 	exit := 1
 	switch s.Code() {
@@ -545,7 +548,7 @@ func mapRPCError(err error, op string) error {
 	}
 	return &wandbAPIError{
 		ExitCode: exit,
-		Stderr:   fmt.Sprintf("%s: %s", op, s.Message()),
+		Stderr:   fmt.Sprintf("%s: %s", op, shared.RedactErrorSecrets(s.Message(), secrets...)),
 		Code:     s.Code(),
 	}
 }

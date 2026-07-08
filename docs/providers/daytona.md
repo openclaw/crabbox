@@ -6,11 +6,11 @@ Read this when you are:
 - configuring Daytona API auth, snapshots, or SSH access;
 - changing `internal/providers/daytona`.
 
-Daytona is an SSH-lease provider with a delegated execution path. `run` and
-`warmup` create the sandbox from a Daytona snapshot and drive sync and command
-execution through the Daytona SDK/toolbox APIs (archive upload, extraction, and
-process execution) — they do not run over SSH. `crabbox ssh` mints a short-lived
-Daytona SSH access token, then connects through the normal Crabbox SSH client.
+Daytona is an SSH-lease provider with two data planes. Direct `run` and `warmup`
+create the sandbox from a Daytona snapshot and drive sync and command execution
+through the Daytona SDK/toolbox APIs. With a coordinator configured, the Worker
+creates the sandbox and mints an expiring SSH access token; the CLI then uses
+normal SSH and rsync without receiving the Daytona API key.
 
 ## When to use
 
@@ -18,6 +18,11 @@ Use Daytona when the box image should come from a Daytona snapshot and command
 execution should stay inside Daytona's toolbox APIs. Reach for AWS, Hetzner, or
 the static `ssh` provider instead when you need a normal long-lived SSH lease for
 Actions hydration, desktop/VNC, or `code` workflows.
+
+Use brokered Daytona when clients should share centrally managed Daytona
+capacity without receiving the API key. Brokered Daytona supports normal
+SSH/sync/run, but not workspaces, ready pools, Actions hydration,
+desktop/browser/code, or Tailscale.
 
 ## Commands
 
@@ -43,6 +48,10 @@ The smoke requires a snapshot through `CRABBOX_DAYTONA_SNAPSHOT`,
 credentialless machines can verify the guard without mutating provider state.
 With a snapshot configured, the harness runs one delegated Daytona command and
 then lists normalized Daytona inventory.
+
+For a coordinator deployment, store `DAYTONA_CRABBOX_KEY` as a Worker secret.
+The optional `CRABBOX_DAYTONA_SNAPSHOT` Worker variable selects a shared
+snapshot; when it is empty, the Daytona account default is used.
 
 ## Auth
 
@@ -123,23 +132,28 @@ The non-auth settings can also be set through environment variables:
 
 - Provider kind: SSH-lease (Linux only).
 - SSH: yes, via a short-lived Daytona SSH access token.
-- Crabbox sync: yes, archive sync through the Daytona toolbox.
+- Sync: direct mode uses Daytona toolbox archive sync; brokered mode uses normal
+  Crabbox rsync over SSH.
 - Desktop / browser / code: no — Daytona has no Crabbox VNC or `code` surface.
 - Actions hydration: no.
-- Coordinator (broker): no — Daytona always runs direct from the CLI.
+- Coordinator (broker): yes for Linux SSH/sync/run. The coordinator owns the
+  API key and rotates the lease's SSH token.
 
 ## Gotchas
 
-- `daytona.snapshot` (or `--daytona-snapshot`) is required to create a sandbox.
-  The snapshot owns CPU, memory, disk, and installed tooling.
+- Direct mode requires `daytona.snapshot` (or `--daytona-snapshot`). Brokered
+  mode uses the coordinator's optional `CRABBOX_DAYTONA_SNAPSHOT`.
 - `--class` and `--type` are rejected; size the sandbox through the snapshot.
 - `--id <sandbox-id-or-slug>` is required to address an existing sandbox.
 - Daytona `run` is delegated to the toolbox APIs; it is not core-over-SSH
   execution. Because of that, the following `run` options are rejected:
-  `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`,
+  `--checksum`, `--full-resync`,
   `--fresh-pr`, `--script` / `--script-stdin`, `--env-helper`,
   `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`,
   `--artifact-glob`, `--require-artifact`, `--emit-proof`, and `--stop-after`.
+- Use `--sync-only` to pre-upload the archive into a kept sandbox before a later
+  command. Large-sync guardrails still apply; `--force-sync-large` is honored
+  for intentional large archive syncs.
 - `--actions-runner` is rejected because it needs a normal SSH lease host.
 - `--keep-on-failure` keeps a newly created failed sandbox until Daytona
   auto-stop or an explicit `crabbox stop`.

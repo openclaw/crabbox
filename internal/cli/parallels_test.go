@@ -319,6 +319,38 @@ func TestParallelsEnsureGuestReadyEnablesMacOSRemoteLogin(t *testing.T) {
 	}
 }
 
+func TestParallelsEnsureGuestReadyEnablesMacOSScreenSharing(t *testing.T) {
+	runner := &parallelsFakeRunner{}
+	client := NewParallelsClient(Config{}, runner)
+	err := client.EnsureGuestReady(context.Background(), "vm1", Config{SSHUser: "runner", WorkRoot: "/Users/runner/crabbox", TargetOS: targetMacOS, Desktop: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(runner.lastReq.Args, "\n")
+	for _, want := range []string{
+		"desktop=true",
+		"mkdir -p /var/db/crabbox",
+		"/var/db/crabbox/vnc.password",
+		"openssl rand -hex 4",
+		"NOPASSWD: /bin/cat /var/db/crabbox/vnc.password",
+		"-setvnclegacy -vnclegacy yes",
+		"-setvncpw -vncpw \"$vnc_password\"",
+		"-access -on -users \"$user\" -privs -all",
+		"VNCAlwaysStartOnConsole -bool true",
+		"com.apple.screensharing",
+		"nc -z 127.0.0.1 5900",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("macOS desktop guest prep missing %q:\n%s", want, got)
+		}
+	}
+	for _, banned := range []string{"dscl . -passwd", "-passwd /Users", "-access -off", "-privs -none"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("macOS desktop guest prep changes the account password with %q:\n%s", banned, got)
+		}
+	}
+}
+
 func TestParallelsEnsureGuestReadySkipsWindows(t *testing.T) {
 	runner := &parallelsFakeRunner{}
 	client := NewParallelsClient(Config{}, runner)

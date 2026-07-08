@@ -66,9 +66,9 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {
 		return err
 	}
-	credentials, ok := providerDesktopCredentials(cfg, target)
-	if !ok {
-		return exit(2, "provider=%s does not supply macOS desktop credentials", cfg.Provider)
+	credentials, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	if err != nil {
+		return err
 	}
 
 	// SSH tunnel: 127.0.0.1:vncPort -> guest 127.0.0.1:5900 (Screen Sharing).
@@ -104,6 +104,25 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 			fmt.Fprintf(a.Stdout, "remote: forward port %s over SSH, copy %s to your machine, then open the copied file\n", webPort, handoff.Path)
 		},
 	)
+}
+
+type macOSVNCPasswordReader func(context.Context, SSHTarget, string) (string, error)
+
+func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, readPassword macOSVNCPasswordReader) (rfbCredentials, error) {
+	if credentials, ok := providerDesktopCredentials(cfg, target); ok {
+		return credentials, nil
+	}
+	password, err := readPassword(ctx, target, vncPasswordCommand(target))
+	if err != nil {
+		return rfbCredentials{}, exit(5, "read managed macOS desktop credentials: %v", err)
+	}
+	password = strings.TrimSpace(password)
+	if password == "" {
+		return rfbCredentials{}, exit(5, "managed macOS desktop password is empty")
+	}
+	return rfbCredentials{
+		Password: password,
+	}, nil
 }
 
 func dialVNCForegroundTunnel(ctx context.Context, tunnel *vncForegroundTunnel, port string) (net.Conn, error) {

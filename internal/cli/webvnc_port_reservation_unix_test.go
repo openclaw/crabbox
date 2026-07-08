@@ -335,7 +335,9 @@ func TestDialVNCForegroundTunnelRequiresTrackedOwner(t *testing.T) {
 		done:   make(chan struct{}),
 		output: &strings.Builder{},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// macOS verifies ownership with lsof before and after dialing. Leave enough
+	// budget for both fail-closed probes under race-detector load.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	conn, err := dialVNCForegroundTunnel(ctx, tunnel, port)
 	if err != nil {

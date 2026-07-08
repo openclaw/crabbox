@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,10 +17,14 @@ import (
 )
 
 type leaseClaim struct {
-	LeaseID                             string            `json:"leaseID"`
-	Slug                                string            `json:"slug,omitempty"`
-	Provider                            string            `json:"provider,omitempty"`
-	CloudID                             string            `json:"cloudID,omitempty"`
+	LeaseID  string `json:"leaseID"`
+	Slug     string `json:"slug,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	CloudID  string `json:"cloudID,omitempty"`
+	// CloudNumericID binds providers whose CloudID is a reusable resource name.
+	CloudNumericID int64 `json:"cloudNumericID,omitempty"`
+	// CloudImmutableID binds providers whose immutable identity is a string.
+	CloudImmutableID                    string            `json:"cloudImmutableID,omitempty"`
 	ProviderScope                       string            `json:"providerScope,omitempty"`
 	StaticHost                          string            `json:"staticHost,omitempty"`
 	StaticUser                          string            `json:"staticUser,omitempty"`
@@ -543,6 +548,12 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget)
 	if server.CloudID != "" {
 		claim.CloudID = server.CloudID
 	}
+	if server.ID != 0 {
+		claim.CloudNumericID = server.ID
+	}
+	if server.ImmutableID != "" {
+		claim.CloudImmutableID = server.ImmutableID
+	}
 	if len(server.Labels) > 0 {
 		claim.Labels = cloneStringMap(server.Labels)
 	}
@@ -789,9 +800,15 @@ func canonicalClaimProvider(provider string) string {
 
 func providerClaimScope(provider string, cfg Config) string {
 	switch provider {
+	case "azure":
+		return azureLeaseClaimScope(cfg.AzureSubscription, cfg.AzureResourceGroup)
 	case "gcp":
 		if cfg.GCPProject != "" {
 			return "project:" + cfg.GCPProject
+		}
+	case "cubesandbox":
+		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.CubeSandbox.APIURL); endpoint != "" {
+			return "endpoint:" + endpoint
 		}
 	case "namespace-instance":
 		parts := make([]string, 0, 3)
@@ -824,6 +841,43 @@ func providerClaimScope(provider string, cfg Config) string {
 		}
 	}
 	return ""
+}
+
+func normalizedCubeSandboxClaimEndpoint(raw string) string {
+	endpoint := strings.TrimSpace(routingSafeURL(raw))
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimRight(endpoint, "/")
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		parsed.Host = "[" + host + "]"
+	} else {
+		parsed.Host = host
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = ""
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func azureLeaseClaimScope(subscriptionID, resourceGroup string) string {
+	subscriptionID = strings.ToLower(strings.TrimSpace(subscriptionID))
+	resourceGroup = strings.ToLower(strings.TrimSpace(resourceGroup))
+	if subscriptionID == "" || resourceGroup == "" {
+		return ""
+	}
+	return "subscription:" + subscriptionID + "|resource-group:" + resourceGroup
 }
 
 func normalizedNamespaceClaimEndpoint(raw string) string {
@@ -946,7 +1000,31 @@ func resolveLeaseClaimForProviderWithExact(identifier, provider string) (leaseCl
 	return claim, ok, false, err
 }
 
+func resolveLeaseClaimForProviderScopeWithExact(identifier, provider, providerScope string) (leaseClaim, bool, bool, error) {
+	if identifier == "" {
+		return leaseClaim{}, false, false, nil
+	}
+	exact, exists, err := readLeaseClaimWithPresence(identifier)
+	if err != nil {
+		return leaseClaim{}, false, exists, err
+	}
+	if exists {
+		if exact.LeaseID == "" || canonicalClaimProvider(exact.Provider) != provider || exact.ProviderScope != providerScope {
+			return exact, false, true, nil
+		}
+		return exact, true, true, nil
+	}
+	claim, ok, err := findUniqueLeaseClaim(identifier, func(candidate leaseClaim) bool {
+		return canonicalClaimProvider(candidate.Provider) == provider && candidate.ProviderScope == providerScope
+	})
+	return claim, ok, false, err
+}
+
 func resolveLeaseClaimForProviderCloudID(cloudID, provider string) (leaseClaim, bool, error) {
+	return resolveLeaseClaimForProviderCloudIDScope(cloudID, provider, "")
+}
+
+func resolveLeaseClaimForProviderCloudIDScope(cloudID, provider, providerScope string) (leaseClaim, bool, error) {
 	if cloudID == "" || provider == "" {
 		return leaseClaim{}, false, nil
 	}
@@ -973,8 +1051,11 @@ func resolveLeaseClaimForProviderCloudID(cloudID, provider string) (leaseClaim, 
 		if canonicalClaimProvider(claim.Provider) != provider || claim.CloudID != cloudID {
 			continue
 		}
+		if providerScope != "" && claim.ProviderScope != providerScope {
+			continue
+		}
 		if match.LeaseID != "" {
-			return leaseClaim{}, false, exit(2, "multiple provider=%s claims match cloud id %s", provider, cloudID)
+			return leaseClaim{}, false, exit(2, "multiple provider=%s scope=%s claims match cloud id %s", provider, providerScope, cloudID)
 		}
 		match = claim
 	}
@@ -1022,6 +1103,42 @@ func findLeaseClaim(identifier string, match func(leaseClaim) bool) (leaseClaim,
 		}
 	}
 	return leaseClaim{}, false, nil
+}
+
+func findUniqueLeaseClaim(identifier string, match func(leaseClaim) bool) (leaseClaim, bool, error) {
+	if identifier == "" {
+		return leaseClaim{}, false, nil
+	}
+	dir, err := crabboxStateDir()
+	if err != nil {
+		return leaseClaim{}, false, err
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "claims"))
+	if errors.Is(err, os.ErrNotExist) {
+		return leaseClaim{}, false, nil
+	}
+	if err != nil {
+		return leaseClaim{}, false, exit(2, "read claims directory: %v", err)
+	}
+	slug := normalizeLeaseSlug(identifier)
+	var found leaseClaim
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		claim, err := readLeaseClaim(strings.TrimSuffix(entry.Name(), ".json"))
+		if err != nil {
+			return leaseClaim{}, false, err
+		}
+		if (claim.LeaseID != identifier && (slug == "" || normalizeLeaseSlug(claim.Slug) != slug)) || !match(claim) {
+			continue
+		}
+		if found.LeaseID != "" {
+			return leaseClaim{}, false, exit(2, "multiple claims match identifier %s", identifier)
+		}
+		found = claim
+	}
+	return found, found.LeaseID != "", nil
 }
 
 func removeLeaseClaim(leaseID string) {

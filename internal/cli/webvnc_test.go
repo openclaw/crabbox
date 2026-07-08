@@ -393,18 +393,21 @@ func TestRegisteredLeaseUsesCoordinatorWebVNC(t *testing.T) {
 	}
 }
 
-func TestIsMacOSDesktopProviderOnlyDedicatedMacOS(t *testing.T) {
+func TestIsMacOSDesktopProviderUsesExplicitTargetOrDedicatedProvider(t *testing.T) {
 	// tart's only target is macOS -> uses the host-side Screen Sharing bridge.
 	if !isMacOSDesktopProvider(Config{Provider: "tart"}) {
 		t.Error("tart (dedicated macOS provider) should route to the macOS bridge")
 	}
-	// parallels is multi-target (macOS + Linux + Windows); it must NOT be diverted
-	// into the tart bridge, even for a macOS lease — regression guard.
+	// Parallels needs an explicit resolved target because it also serves Linux
+	// and Windows leases.
 	if isMacOSDesktopProvider(Config{Provider: "parallels"}) {
-		t.Error("parallels (multi-target) must not route to the macOS bridge")
+		t.Error("unresolved parallels target must not route to the macOS bridge")
 	}
-	if isMacOSDesktopProvider(Config{Provider: "parallels", TargetOS: targetMacOS}) {
-		t.Error("a macOS parallels lease must still use the existing WebVNC path")
+	if !isMacOSDesktopProvider(Config{Provider: "parallels", TargetOS: targetMacOS}) {
+		t.Error("a macOS parallels lease should route to the native Screen Sharing bridge")
+	}
+	if isMacOSDesktopProvider(Config{Provider: "parallels", TargetOS: targetLinux}) {
+		t.Error("a Linux parallels lease must keep the guest WebVNC path")
 	}
 }
 

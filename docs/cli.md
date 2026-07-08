@@ -39,6 +39,7 @@ Commands are grouped here for orientation. Each links to its detailed page under
 
 ```text
 crabbox warmup [lease flags]                 lease a box and wait until ready
+crabbox prewarm [lease flags]                lease and hydrate a reusable test-ready box
 crabbox run -- <command...>                  sync, run a remote command, stream output
 crabbox run --pool <key> -- <command...>     borrow a hydrated ready-pool lease
 crabbox run --timing-record=default -- <cmd> append timing to the local benchmark ledger
@@ -50,26 +51,33 @@ crabbox list                                  list machines (alias: crabbox pool
 crabbox share --id <id> [--user|--org]        grant access to a lease
 crabbox unshare --id <id> [--user|--org|--all]
 crabbox stop <id-or-slug>                     end a lease (alias: crabbox release)
-crabbox cleanup [--dry-run]                   sweep expired direct-provider machines
+crabbox pause <id-or-slug>                    pause a lease, keeping its state (provider-dependent)
+crabbox resume <id-or-slug>                   resume a previously paused lease
+crabbox cleanup [--dry-run]                   sweep expired direct-provider machines (alias: crabbox machine cleanup)
 crabbox pool ready [key]                      list hydrated broker ready-pool leases
 ```
 
-See [warmup](commands/warmup.md), [run](commands/run.md),
-[watch](commands/watch.md),
+See [warmup](commands/warmup.md), [prewarm](commands/prewarm.md),
+[run](commands/run.md), [watch](commands/watch.md),
 [status](commands/status.md), [inspect](commands/inspect.md),
 [list](commands/list.md), [share](commands/share.md),
 [unshare](commands/unshare.md), [stop](commands/stop.md),
+[pause](commands/pause.md), [resume](commands/resume.md),
 [cleanup](commands/cleanup.md), [pool](commands/pool.md).
 
 ### Run helpers and jobs
 
 ```text
 crabbox sync-plan [--limit <n>]              preview local sync manifest size hotspots
+crabbox shard --from <checkpoint-id> --count <n> -- <command...>
+                                                fork a checkpoint into parallel test shards
+crabbox cp --id <id> <src> SANDBOX:<dst>     copy files between host and a delegated sandbox
 crabbox job list                              list repo-local configured jobs
 crabbox job run <name>                        run a configured job
 ```
 
-See [sync-plan](commands/sync-plan.md), [job](commands/job.md).
+See [sync-plan](commands/sync-plan.md), [shard](commands/shard.md),
+[cp](commands/cp.md), [job](commands/job.md).
 
 ### Observability
 
@@ -95,14 +103,15 @@ crabbox vnc --id <id> [--open]                 print/open SSH-tunneled VNC detai
 crabbox webvnc --id <id> [--open]              bridge a desktop lease into the web portal
 crabbox code --id <id> [--open]                bridge a code lease into the web portal
 crabbox egress start --id <id>                 bridge lease traffic through this machine
+crabbox ports --id <id> [--publish <port>]     list, publish, or unpublish provider-native ports
 crabbox screenshot --id <id> [--output <png>]  capture a PNG from a desktop lease
 crabbox desktop launch|terminal|record|proof|doctor|click|paste|type|key
 ```
 
 See [connect](commands/connect.md), [ssh](commands/ssh.md), [vnc](commands/vnc.md),
 [webvnc](commands/webvnc.md), [code](commands/code.md),
-[egress](commands/egress.md), [screenshot](commands/screenshot.md),
-[desktop](commands/desktop.md).
+[egress](commands/egress.md), [ports](commands/ports.md),
+[screenshot](commands/screenshot.md), [desktop](commands/desktop.md).
 
 ### Media and artifacts
 
@@ -152,12 +161,13 @@ See [pond](commands/pond.md) and the [pond feature](features/pond.md).
 ```text
 crabbox providers                             show provider capabilities
 crabbox usage [--scope user|org|all]          cost and usage estimates
+crabbox marketplace status|quote              preview the credits gateway and smart-routing quotes
 crabbox admin leases|lease-audit|providers|hosts|release|delete
 crabbox admin aws-identity|aws-policy|mac-hosts
 ```
 
 See [providers](commands/providers.md), [usage](commands/usage.md),
-[admin](commands/admin.md).
+[marketplace](commands/marketplace.md), [admin](commands/admin.md).
 
 ### Config and auth
 

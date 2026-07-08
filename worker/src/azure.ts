@@ -48,6 +48,12 @@ const LEGACY_AZURE_NOBLE_GEN2_IMAGE =
 const DEFAULT_AZURE_WINDOWS_IMAGE =
   "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest";
 
+function azureOwnedDeleteClaimKey(providerScope: string, cloudID: string, leaseID: string): string {
+  return ["provider:azure:delete-claim", providerScope, cloudID, leaseID]
+    .map((part) => encodeURIComponent(part))
+    .join(":");
+}
+
 interface TokenCache {
   token: string;
   expiresAt: number;
@@ -107,6 +113,7 @@ interface AzureDisk {
   name?: string;
   managedBy?: string;
   tags?: Record<string, string>;
+  properties?: { uniqueId?: string };
 }
 
 interface AzureOwnedDeleteResources {
@@ -114,6 +121,30 @@ interface AzureOwnedDeleteResources {
   nic: boolean;
   pip: boolean;
   disk: boolean;
+}
+
+interface AzureOwnedDeleteInspection extends AzureOwnedDeleteResources {
+  diskResource?: AzureDisk;
+}
+
+interface AzureOwnedDeleteClaim {
+  version: 1;
+  provider: "azure";
+  leaseID: string;
+  slug: string;
+  owner: string;
+  cloudID: string;
+  providerScope: string;
+  disk?: {
+    resourceID: string;
+    uniqueID: string;
+  };
+}
+
+export interface AzureOwnedDeleteClaimStorage {
+  get<T>(key: string): Promise<T | undefined>;
+  put<T>(key: string, value: T): Promise<void>;
+  delete(key: string): Promise<unknown>;
 }
 
 interface AzureSecurityRule {
@@ -177,6 +208,7 @@ export class AzureClient {
   private readonly deferredCleanup:
     | ((request: AzureDeferredCleanupRequest) => Promise<void>)
     | undefined;
+  private readonly ownedDeleteClaimStorage: AzureOwnedDeleteClaimStorage | undefined;
   fetcher: typeof fetch = (input, init) => fetch(input, init);
 
   constructor(
@@ -188,6 +220,7 @@ export class AzureClient {
       subscription?: string;
       resourceGroup?: string;
       deferredCleanup?: (request: AzureDeferredCleanupRequest) => Promise<void>;
+      ownedDeleteClaimStorage?: AzureOwnedDeleteClaimStorage;
     } = {},
   ) {
     this.env = env;
@@ -213,6 +246,7 @@ export class AzureClient {
     if (this.sshCIDRs.length === 0) this.sshCIDRs.push("0.0.0.0/0");
     this.defaultLocation = options.location || env.CRABBOX_AZURE_LOCATION?.trim() || "eastus";
     this.deferredCleanup = options.deferredCleanup;
+    this.ownedDeleteClaimStorage = options.ownedDeleteClaimStorage;
   }
 
   async listCrabboxServers(): Promise<ProviderMachine[]> {
@@ -308,6 +342,7 @@ export class AzureClient {
       vnet: string;
       nsg: string;
       deferredCleanup?: (request: AzureDeferredCleanupRequest) => Promise<void>;
+      ownedDeleteClaimStorage?: AzureOwnedDeleteClaimStorage;
     } = {
       location,
       vnet: multiRegion ? azureRegionalName(this.vnet, location) : this.vnet,
@@ -315,6 +350,9 @@ export class AzureClient {
     };
     if (this.deferredCleanup) {
       options.deferredCleanup = this.deferredCleanup;
+    }
+    if (this.ownedDeleteClaimStorage) {
+      options.ownedDeleteClaimStorage = this.ownedDeleteClaimStorage;
     }
     return new AzureClient(this.env, options);
   }
@@ -447,14 +485,27 @@ export class AzureClient {
         `refusing to delete Azure lease ${lease.id}: stored provider scope does not match the cleanup client`,
       );
     }
+    const claimKey = azureOwnedDeleteClaimKey(this.providerScope(), lease.cloudID, lease.id);
+    let claim = await this.ownedDeleteClaimStorage?.get<AzureOwnedDeleteClaim>(claimKey);
+    if (!claim) {
+      const inspection = await this.ownedDeleteResources(lease, { prepareClaim: true });
+      claim = this.ownedDeleteClaim(lease, inspection.diskResource);
+      await this.ownedDeleteClaimStorage?.put(claimKey, claim);
+    }
+    this.requireOwnedDeleteClaim(lease, claim);
+
     const order: (keyof AzureOwnedDeleteResources)[] = ["vm", "nic", "pip", "disk"];
     for (const kind of order) {
       for (let attempt = 0; ; attempt += 1) {
         // Re-read every surviving resource before each destructive operation so
         // a same-name replacement cannot inherit authorization from an older read.
         // oxlint-disable-next-line eslint/no-await-in-loop -- every delete requires fresh ownership proof.
-        const resources = await this.ownedDeleteResources(lease);
-        if (!resources.vm && !resources.nic && !resources.pip && !resources.disk) return;
+        const resources = await this.ownedDeleteResources(lease, { claim });
+        if (!resources.vm && !resources.nic && !resources.pip && !resources.disk) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- clear only after the fresh inventory proves cleanup complete.
+          await this.ownedDeleteClaimStorage?.delete(claimKey);
+          return;
+        }
         if (!resources[kind]) break;
         const selected: AzureOwnedDeleteResources = {
           vm: false,
@@ -476,17 +527,19 @@ export class AzureClient {
         await sleep(DELETE_RETRY_DELAY_MS);
       }
     }
+    await this.ownedDeleteClaimStorage?.delete(claimKey);
   }
 
   private async ownedDeleteResources(
     lease: Pick<LeaseRecord, "id" | "slug" | "provider" | "cloudID" | "owner">,
-  ): Promise<AzureOwnedDeleteResources> {
+    options: { claim?: AzureOwnedDeleteClaim; prepareClaim?: boolean } = {},
+  ): Promise<AzureOwnedDeleteInspection> {
     const name = lease.cloudID;
     const vmResourcePath = vmPath(this.resourceGroup, name);
     const nicResourcePath = networkPath(this.resourceGroup, "networkInterfaces", `${name}-nic`);
     const pipResourcePath = networkPath(this.resourceGroup, "publicIPAddresses", `${name}-pip`);
     const diskResourcePath = `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks/${name}-osdisk`;
-    const [vm, nic, pip, disk] = await Promise.all([
+    const [vm, nic, pip, initialDisk] = await Promise.all([
       this.ownedResource<AzureVM>(vmResourcePath, API_VERSIONS.compute, "virtualMachines", name),
       this.ownedResource<AzureNIC>(
         nicResourcePath,
@@ -515,6 +568,7 @@ export class AzureClient {
     const expectedNICID = this.resourceID(nicResourcePath);
     const expectedPIPID = this.resourceID(pipResourcePath);
     const expectedDiskID = this.resourceID(diskResourcePath);
+    const vmDiskID = vm?.properties?.storageProfile?.osDisk?.managedDisk?.id;
     if (
       vm &&
       !vm.properties?.networkProfile?.networkInterfaces?.some((item) =>
@@ -536,9 +590,21 @@ export class AzureClient {
         `refusing to delete Azure resources for ${name}: NIC does not own ${name}-pip`,
       );
     }
+    if (options.prepareClaim && vmDiskID) {
+      if (!azureResourceIDEqual(vmDiskID, expectedDiskID)) {
+        throw new Error(
+          `refusing to delete Azure resources for ${name}: VM does not own ${name}-osdisk`,
+        );
+      }
+      if (!initialDisk) {
+        throw new Error(
+          `refusing to delete Azure resources for ${name}: managed OS disk identity is not yet available`,
+        );
+      }
+    }
 
+    let disk = initialDisk;
     if (disk) {
-      const vmDiskID = vm?.properties?.storageProfile?.osDisk?.managedDisk?.id;
       this.requireResourceIdentity("disk", disk, diskResourcePath, lease.id);
       if (vm && !azureResourceIDEqual(vmDiskID, expectedDiskID)) {
         throw new Error(
@@ -553,6 +619,7 @@ export class AzureClient {
           );
         }
         if (
+          !options.prepareClaim ||
           !vm ||
           !azureResourceIDEqual(vmDiskID, expectedDiskID) ||
           !azureResourceIDEqual(disk.managedBy, this.resourceID(vmResourcePath))
@@ -561,20 +628,128 @@ export class AzureClient {
             `refusing to delete Azure disk ${name}-osdisk: ownership does not match lease ${lease.id}`,
           );
         }
+        const uniqueID = this.requireDiskUniqueID(disk, lease.id);
         const ownershipTags = azureOwnershipTags(vm.tags ?? {}, lease);
         // Azure-created OS disks do not inherit VM tags. Bind the disk while
-        // the verified VM association is live so a later retry remains safe.
+        // the verified VM association is live. The immutable identity check
+        // prevents a concurrent same-name replacement from receiving the claim.
         await this.arm("PATCH", diskResourcePath, API_VERSIONS.disks, {
           tags: { ...disk.tags, ...ownershipTags },
         });
         const taggedDisk = await this.arm<AzureDisk>("GET", diskResourcePath, API_VERSIONS.disks);
         this.requireOwnedResource("disk", taggedDisk, diskResourcePath, lease);
+        if (
+          this.requireDiskUniqueID(taggedDisk, lease.id) !== uniqueID ||
+          !azureResourceIDEqual(taggedDisk.managedBy, this.resourceID(vmResourcePath))
+        ) {
+          throw new Error(
+            `refusing to delete Azure disk ${name}-osdisk: live association changed while binding lease ${lease.id}`,
+          );
+        }
+        disk = taggedDisk;
       } else {
         this.requireOwnedResource("disk", disk, diskResourcePath, lease);
       }
+
+      const uniqueID = this.requireDiskUniqueID(disk, lease.id);
+      if (options.prepareClaim) {
+        if (
+          !vm ||
+          !azureResourceIDEqual(vmDiskID, expectedDiskID) ||
+          !azureResourceIDEqual(disk.managedBy, this.resourceID(vmResourcePath))
+        ) {
+          throw new Error(
+            `refusing to delete Azure disk ${name}-osdisk: live association does not match lease ${lease.id}`,
+          );
+        }
+      } else {
+        const claimedDisk = options.claim?.disk;
+        if (
+          !claimedDisk ||
+          !azureResourceIDEqual(claimedDisk.resourceID, expectedDiskID) ||
+          claimedDisk.uniqueID !== uniqueID
+        ) {
+          throw new Error(
+            `refusing to delete Azure disk ${name}-osdisk: immutable identity does not match lease ${lease.id}`,
+          );
+        }
+        if (
+          (vm && !azureResourceIDEqual(disk.managedBy, this.resourceID(vmResourcePath))) ||
+          (!vm &&
+            disk.managedBy &&
+            !azureResourceIDEqual(disk.managedBy, this.resourceID(vmResourcePath)))
+        ) {
+          throw new Error(
+            `refusing to delete Azure disk ${name}-osdisk: live association does not match lease ${lease.id}`,
+          );
+        }
+      }
     }
 
-    return { vm: Boolean(vm), nic: Boolean(nic), pip: Boolean(pip), disk: Boolean(disk) };
+    return {
+      vm: Boolean(vm),
+      nic: Boolean(nic),
+      pip: Boolean(pip),
+      disk: Boolean(disk),
+      ...(disk ? { diskResource: disk } : {}),
+    };
+  }
+
+  private ownedDeleteClaim(
+    lease: Pick<LeaseRecord, "id" | "slug" | "provider" | "cloudID" | "owner">,
+    disk: AzureDisk | undefined,
+  ): AzureOwnedDeleteClaim {
+    const diskResourcePath = `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks/${lease.cloudID}-osdisk`;
+    return {
+      version: 1,
+      provider: "azure",
+      leaseID: lease.id,
+      slug: lease.slug ?? "",
+      owner: lease.owner,
+      cloudID: lease.cloudID,
+      providerScope: this.providerScope(),
+      ...(disk
+        ? {
+            disk: {
+              resourceID: this.resourceID(diskResourcePath),
+              uniqueID: this.requireDiskUniqueID(disk, lease.id),
+            },
+          }
+        : {}),
+    };
+  }
+
+  private requireOwnedDeleteClaim(
+    lease: Pick<LeaseRecord, "id" | "slug" | "provider" | "cloudID" | "owner">,
+    claim: AzureOwnedDeleteClaim,
+  ): void {
+    const expectedDiskID = this.resourceID(
+      `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks/${lease.cloudID}-osdisk`,
+    );
+    if (
+      claim.version !== 1 ||
+      claim.provider !== "azure" ||
+      claim.leaseID !== lease.id ||
+      claim.slug !== (lease.slug ?? "") ||
+      claim.owner !== lease.owner ||
+      claim.cloudID !== lease.cloudID ||
+      claim.providerScope !== this.providerScope() ||
+      (claim.disk &&
+        (!azureResourceIDEqual(claim.disk.resourceID, expectedDiskID) ||
+          !claim.disk.uniqueID.trim()))
+    ) {
+      throw new Error(`refusing to delete Azure lease ${lease.id}: durable cleanup claim mismatch`);
+    }
+  }
+
+  private requireDiskUniqueID(disk: AzureDisk, leaseID: string): string {
+    const uniqueID = disk.properties?.uniqueId?.trim();
+    if (!uniqueID) {
+      throw new Error(
+        `refusing to delete Azure disk ${disk.name ?? "unknown"}: immutable identity is missing for lease ${leaseID}`,
+      );
+    }
+    return uniqueID;
   }
 
   private async ownedResource<T>(

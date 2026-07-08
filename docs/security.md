@@ -102,6 +102,13 @@ the browser receives a random confirmation through that loopback URL. Polling
 requires both the CLI-held secret and the browser confirmation, so forwarding an
 authorization URL cannot deliver the resulting user token to the sender.
 
+Unauthenticated CLI and portal login starts share a ten-pending-attempt limit per
+caller source and a 100-attempt global backstop. Admission and storage are serialized,
+expired attempts are removed first, and only a session-secret-keyed source hash is
+stored with each attempt. Cloudflare supplies the caller address; the portable Node
+server derives it from the socket or an explicitly trusted proxy instead of trusting
+a client-provided forwarding header.
+
 User tokens can only mutate or read leases, runs, and usage for their own `owner`/`org`
 identity. Lease owners also have read-only audit access to run history, logs,
 events, telemetry, and live event subscriptions for work recorded against
@@ -181,11 +188,12 @@ organization-bound principal also fail closed during restore and whenever lease
 sharing access shrinks.
 Non-admin GitHub WebVNC, Code, and egress sessions bind to the exact portal
 session and preserve only the encrypted GitHub credential from its signed user
-token. Active traffic rechecks portal logout and emergency user revocation, and
-revalidates GitHub membership under the configured membership-cache window.
-Membership errors fail closed. Restored legacy GitHub bridge attachments without
-a complete encrypted grant and portal-session binding close before carrying
-traffic; plaintext GitHub credentials are never stored in bridge state.
+token. Agent-ticket consumption and active traffic recheck portal logout and
+emergency user revocation, and revalidate GitHub membership under the configured
+membership-cache window. Membership errors fail closed. New or restored legacy
+GitHub bridge tickets and attachments without a complete encrypted grant and
+portal-session binding fail before carrying traffic; plaintext GitHub
+credentials are never stored in bridge state.
 Shared-operator requests do **not** trust caller-supplied `X-Crabbox-Owner` /
 `X-Crabbox-Org` headers — pin that automation's identity with
 `CRABBOX_SHARED_OWNER` (and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed
@@ -298,8 +306,13 @@ Sprites, and Upstash Box. The same final redaction covers `doctor` text and JSON
 messages/details. It removes exact configured secrets, authorization and API-key
 headers, credential-bearing URL query/userinfo components, common secret JSON
 fields, bearer values, and PEM private keys while retaining non-secret routing
-context. Generated stop and failure-routing commands retain provider
-endpoint routing but remove URL userinfo before they are printed or stored.
+context. Providers contribute runtime-only environment and local CLI-store
+credentials to that exact-value pass, keeping credential discovery beside the
+provider that owns it. Header and bearer fallbacks treat whitespace or an
+unescaped JSON quote as the credential boundary, so punctuation inside an
+otherwise unknown credential cannot expose a suffix. Generated stop and
+failure-routing commands retain provider endpoint routing but remove URL userinfo
+before they are printed or stored.
 GitHub Actions registration metadata and its short-lived runner token travel
 over SSH stdin rather than the remote command line. These guarantees apply to
 Crabbox-generated diagnostics and process arguments, not to arbitrary command
@@ -324,8 +337,15 @@ claim or explicit `stop --reclaim` adoption of the currently inspected
 deployment; a successful stop removes that one-deployment claim.
 Direct Hetzner release and cleanup similarly require canonical provider labels
 plus an unchanged local claim whose lease and cloud ID match the exact server.
-Cleanup skips weakly labeled, unclaimed, and stale-claim servers instead of
-turning provider inventory into ownership proof.
+Direct GCP release and cleanup require an unchanged local claim bound to the
+project, zone, instance name and immutable numeric ID, lease, slug, and provider
+key. Direct Azure release and cleanup likewise require an unchanged local claim
+bound to the subscription, resource group, VM name and immutable VM ID, lease,
+slug, and provider key. Before deleting a VM, Crabbox also persists immutable
+NIC, public IP, disk, and quarantine-NSG identities so an interrupted cleanup
+can resume without trusting reused names. Cleanup skips weakly labeled,
+unclaimed, and stale-claim servers instead of turning provider inventory into
+ownership proof.
 
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects. Required
@@ -448,6 +468,9 @@ never proxies SSH traffic. The posture:
   (`<user-config>/crabbox/testboxes/<lease-id>/id_ed25519`; RSA for AWS/Azure
   Windows). Matching cloud key pairs are removed when Crabbox deletes the box.
   See [SSH keys](features/ssh-keys.md).
+- CLI-managed SSH, rsync, SCP, VNC, and port-forward connections explicitly
+  disable agent and X11 forwarding, overriding broad settings inherited from
+  the operator's OpenSSH configuration.
 - SSH listens on the configured primary port (default `2222`) plus configured
   fallback ports (default `22`), because port 22 is not reliably reachable from
   every operator network.
@@ -527,6 +550,11 @@ Provider tags discover candidates and explain why they look stale, but do not
 authorize a destructive action. Automatic AWS or Azure deletion requires an
 exact retained coordinator lease binding for the same provider resource and
 region; EC2 Mac host release likewise requires an exact retained host binding.
+Before coordinator Azure cleanup deletes a VM, it also persists the managed
+disk's immutable ID while the live `managedBy` association still matches that
+VM. Later disk deletion revalidates that identity and any current attachment;
+an interrupted cleanup may continue after the VM is gone without trusting
+self-written tags, while missing or mismatched claims fail closed.
 Tag-only and legacy candidates remain report-only. Sweeps skip `keep=true`
 resources and apply a grace window before reporting missing labels or stale
 lease mappings.
