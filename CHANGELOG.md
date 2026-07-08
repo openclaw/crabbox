@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Completed coordinator diagnostic redaction for non-Bearer authorization schemes, GCP signed URLs, and every configured provider credential field. Thanks @coygeek.
 - Reconciled idle admin WebVNC, Code, egress, and control sockets during direct and Node scheduled maintenance after admin-token or GitHub-admin rotation. Thanks @coygeek.
 - Bound accepted WebVNC and Code backend agents to the manager grant that created them, closing attributable agents after share or credential revocation while preserving pre-upgrade hibernated sockets. Thanks @coygeek.
 - Bound non-admin shared-token WebVNC, Code, and egress bridges to the credential active at ticket creation, closing active and restored sessions after token rotation or removal. Thanks @coygeek.

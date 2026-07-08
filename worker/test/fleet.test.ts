@@ -12896,7 +12896,16 @@ describe("fleet lease identity and idle", () => {
 
   it("redacts provider credentials before persisting and returning provisioning failures", async () => {
     const storage = new MemoryStorage();
-    const configuredSecret = "configured-azure-client-secret";
+    const configuredCredentials = {
+      AZURE_TENANT_ID: "11111111-2222-3333-4444-555555555555",
+      AZURE_CLIENT_ID: "66666666-7777-8888-9999-000000000000",
+      AZURE_CLIENT_SECRET: "configured-azure-client-secret",
+      AZURE_SUBSCRIPTION_ID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+      GCP_PRIVATE_KEY: "configured-gcp-private-key",
+    };
+    const configuredSecrets = Object.values(configuredCredentials);
+    const signedQuerySecrets = ["gcp-credential", "gcp-signature", "gcp-security-token"];
     const reflectedSecret = "reflected-provider-secret";
     const fleet = testFleet(
       storage,
@@ -12904,13 +12913,13 @@ describe("fleet lease identity and idle", () => {
         azure: fakeProvider(
           () => {
             throw new Error(
-              `azure create failed ${configuredSecret} Authorization: Bearer ${reflectedSecret}`,
+              `azure create failed ${configuredSecrets.join(" ")} https://storage.example.test/object?X-Goog-Credential=${signedQuerySecrets[0]}&X-Goog-Signature=${signedQuerySecrets[1]}&X-Goog-Security-Token=${signedQuerySecrets[2]} Authorization: Token ${reflectedSecret}`,
             );
           },
           { provider: "azure", region: "eastus" },
         ),
       },
-      { AZURE_CLIENT_SECRET: configuredSecret },
+      configuredCredentials,
     );
 
     const create = await fleet.fetch(
@@ -12932,11 +12941,15 @@ describe("fleet lease identity and idle", () => {
     const stored = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
     expect(stored?.cleanupError).toContain("[redacted]");
     expect(stored?.failureError).toContain("[redacted]");
-    expect(JSON.stringify(stored)).not.toContain(configuredSecret);
+    for (const secret of [...configuredSecrets, ...signedQuerySecrets]) {
+      expect(JSON.stringify(stored)).not.toContain(secret);
+    }
     expect(JSON.stringify(stored)).not.toContain(reflectedSecret);
     const responseText = await create.text();
     expect(responseText).toContain("[redacted]");
-    expect(responseText).not.toContain(configuredSecret);
+    for (const secret of [...configuredSecrets, ...signedQuerySecrets]) {
+      expect(responseText).not.toContain(secret);
+    }
     expect(responseText).not.toContain(reflectedSecret);
   });
 

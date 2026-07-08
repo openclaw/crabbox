@@ -178,7 +178,12 @@ import type {
   TailscaleMetadata,
   WindowsMode,
 } from "./types";
-import { coordinatorProviders, coordinatorProviderSpec, isCoordinatorProvider } from "./types";
+import {
+  coordinatorProviderRegistry,
+  coordinatorProviders,
+  coordinatorProviderSpec,
+  isCoordinatorProvider,
+} from "./types";
 import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } from "./usage";
 import { WebVNCCredentialHandoffs } from "./webvnc-handoff";
 
@@ -267,13 +272,10 @@ function coordinatorDiagnosticText(env: Env, value: string): string {
 
 function coordinatorDiagnosticSecrets(env: Env): Array<string | undefined> {
   return [
-    env.HETZNER_TOKEN,
-    env.AWS_ACCESS_KEY_ID,
-    env.AWS_SECRET_ACCESS_KEY,
+    ...coordinatorProviderRegistry.flatMap((provider) =>
+      provider.requiredSecrets.map((name) => env[name]),
+    ),
     env.AWS_SESSION_TOKEN,
-    env.AZURE_CLIENT_SECRET,
-    env.GCP_PRIVATE_KEY,
-    env.DAYTONA_CRABBOX_KEY,
     env.CRABBOX_RUNTIME_ADAPTER_TOKEN,
     env.CRABBOX_SHARED_TOKEN,
     env.CRABBOX_ADMIN_TOKEN,
