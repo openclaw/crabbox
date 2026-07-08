@@ -8,6 +8,7 @@ the manifest after editing `.crabboxignore`.
 ```sh
 crabbox sync-plan
 crabbox sync-plan --limit 10
+crabbox sync-plan --json
 ```
 
 The command reads only your local Git checkout. It does not require a
@@ -52,14 +53,45 @@ Directories are grouped at one level deep for top-level paths and two
 levels deep for nested paths (for example `internal/cli`), so deeply
 nested hotspots still roll up to a meaningful prefix.
 
+With `--json`, the command emits the same information in a stable
+machine-readable shape for CI checks and agent preflights:
+
+```json
+{
+  "candidate": { "files": 1843, "bytes": 327680000, "humanBytes": "312.5 MiB" },
+  "dirtyDelta": { "files": 12, "bytes": 524288, "humanBytes": "512.0 KiB" },
+  "deletedTrackedPaths": 2,
+  "guardrail": {
+    "scope": "dirty_delta",
+    "files": 12,
+    "bytes": 524288,
+    "humanBytes": "512.0 KiB",
+    "limits": { "warnFiles": 0, "warnBytes": 0, "failFiles": 0, "failBytes": 0 },
+    "allowLarge": false,
+    "status": "ok"
+  },
+  "topFiles": [{ "path": "assets/demo.mp4", "bytes": 88604672, "humanBytes": "84.5 MiB" }],
+  "topDirs": [{ "path": "assets", "bytes": 147010355, "humanBytes": "140.2 MiB" }]
+}
+```
+
+`candidate` is the full manifest that would be present on the remote after
+sync. `dirtyDelta` is the locally changed/untracked/deleted path set that
+`crabbox run` uses for large-sync guardrails when it is non-empty.
+`guardrail.scope` is therefore either `dirty_delta` or `candidate`, matching
+the sync preflight path. `guardrail.status` is `ok`, `warning`, or `failed`;
+warnings and failures are listed in `guardrail.reasons` when configured
+`sync.warn*` or `sync.fail*` thresholds are reached.
+
 ## Flags
 
 ```text
 --limit <n>   number of top files and directories to print (default 20)
+--json        print machine-readable JSON
 ```
 
 `--limit` must be positive; `--limit 0` (or any non-positive value) is
-rejected with an error. There is no `--json` output for this command.
+rejected with an error.
 
 ## Use cases
 
@@ -67,6 +99,7 @@ rejected with an error. There is no `--json` output for this command.
 - find directories that quietly grew (`.cache/`, `dist/`, generated
   assets);
 - audit `.crabboxignore` and `sync.exclude` after adding new patterns.
+- gate CI or an agent workflow on sync size before provisioning a remote box.
 
 The numbers `sync-plan` prints are upper bounds. The actual rsync transfer
 depends on what already exists on the remote runner: a repeat sync after a
