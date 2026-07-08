@@ -419,14 +419,41 @@ describe("coordinator runtimes", () => {
     expect(runtime.acceptedAttachment).toMatchObject({
       kind: "webvnc-agent",
       leaseID: lease.id,
+      owner: "manager@example.com",
+      org: "example-org",
+      admin: false,
     });
 
     const acceptedCodeTicket = await createTicket("code");
     expect((await connect("code", acceptedCodeTicket)).status).toBe(200);
-    expect(runtime.acceptedAttachment).toEqual({ kind: "code-agent", leaseID: lease.id });
+    expect(runtime.acceptedAttachment).toEqual({
+      kind: "code-agent",
+      leaseID: lease.id,
+      owner: "manager@example.com",
+      org: "example-org",
+      admin: false,
+    });
 
     expect((await connect("webvnc", await createTicket("webvnc", adminHeaders))).status).toBe(200);
+    expect(runtime.acceptedAttachment).toMatchObject({
+      kind: "webvnc-agent",
+      leaseID: lease.id,
+      owner: "admin@example.com",
+      org: "example-org",
+      admin: true,
+      auth: "bearer",
+      adminGrantVersion: currentGrantVersion,
+    });
     expect((await connect("code", await createTicket("code", adminHeaders))).status).toBe(200);
+    expect(runtime.acceptedAttachment).toMatchObject({
+      kind: "code-agent",
+      leaseID: lease.id,
+      owner: "admin@example.com",
+      org: "example-org",
+      admin: true,
+      auth: "bearer",
+      adminGrantVersion: currentGrantVersion,
+    });
 
     const revokedWebVNCTicket = await createTicket("webvnc");
     const revokedCodeTicket = await createTicket("code");
