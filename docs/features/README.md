@@ -90,9 +90,9 @@ Provider deep-dives that live here in `features/`:
 - [Station profiles](station-profiles.md): planned supervised workload records, agent profile, and model-access security gates.
 - [Agent runtime bridge](agent-runtime-bridge.md): contract for future
   harness-in-the-box HTTP/SSE bridge support under Station.
-- [Hermetic agent evidence](hermetic-agent-evidence.md): public demo showing
+- [Hermetic agent evidence](hermetic-agent-evidence.md): repo-local pattern for
   separate code/test writer contexts, QA arbitration, required artifacts, and
-  Crabbox/Islo remote proof collection.
+  Crabbox remote proof collection.
 - [Deterministic perf evidence](deterministic-perf-evidence.md): contract for
   future reproducible metric budgets and perf gate evidence.
 - [Actions hydration](actions-hydration.md): let GitHub Actions prepare a runner, then sync local work into that workspace.

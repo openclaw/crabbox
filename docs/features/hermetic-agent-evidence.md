@@ -4,7 +4,7 @@ Read this when:
 
 - running AI-generated code and tests from the same specification;
 - keeping the code writer, test writer, and QA reviewer in separate contexts;
-- using Crabbox to collect a durable proof file from the remote run.
+- using Crabbox to require and download durable proof files from the remote run.
 
 Crabbox is a useful execution layer for hermetic-agent workflows because the
 repository owns the agent protocol while Crabbox owns the remote run and
@@ -17,24 +17,21 @@ The best Crabbox fit is a **run-evidence pattern**, not a new agent framework:
 - `crabbox run` executes the repo-owned hermetic harness.
 - `--require-artifact` turns the proof JSON into a post-run gate.
 - `--download` pulls the bounded proof files back for review or agent handoff.
-- Provider choice stays ordinary Crabbox policy: Islo for delegated sandbox
-  execution, or an SSH-backed Linux provider when the operator wants
-  Crabbox-managed SSH and rsync.
+- Provider choice stays ordinary Crabbox policy: SSH-backed Linux providers when
+  the operator wants Crabbox-managed SSH and rsync, or delegated providers when
+  their adapter advertises bounded artifact/download support.
 
 Crabbox should not judge model output, store reasoning traces, decide whether a
 test is correct, or deliver model credentials for this pattern. Those decisions
 belong to the repo-owned harness and, later, to separately reviewed Station and
 agent-runtime bridge work.
 
-This page documents the public demo tracked by
-[openclaw/crabbox#1020](https://github.com/openclaw/crabbox/issues/1020):
+This page records the repo-local pattern tracked by
+[openclaw/crabbox#1020](https://github.com/openclaw/crabbox/issues/1020).
 
-- Demo repo: <https://github.com/zozo123/hermetic-agents-demo>
-- Live page: <https://zozo123.github.io/hermetic-agents-demo/>
+## Pattern Shape
 
-## Demo Shape
-
-The demo models three roles:
+A hermetic-agent harness usually models three roles:
 
 | Role | Allowed context | Forbidden context |
 | --- | --- | --- |
@@ -50,7 +47,7 @@ which side violated the spec.
 
 ## Local Proof
 
-The demo can run without Crabbox:
+A repository should keep a local proof command that works without Crabbox:
 
 ```sh
 ./scripts/run_hermetic_agents_demo.sh
@@ -70,43 +67,48 @@ verdict, and the exact disagreement assigned to the test writer.
 
 ## Crabbox Run
 
-The demo repo includes a `.crabbox.yaml` job:
+A repository can expose the same proof as a `.crabbox.yaml` job. With a normal
+SSH-backed Linux provider, the job shape is:
 
 ```sh
-export CRABBOX_ISLO_API_KEY=ak_...
 crabbox job run hermetic-agents
 ```
 
-That job uses `provider: islo`, runs the local proof script, requires the JSON
-proof file after command success, and downloads the JSON/Markdown evidence into
-`.crabbox/proofs/`.
+The job runs the local proof script, requires the JSON proof file after command
+success, and downloads JSON/Markdown evidence into `.crabbox/proofs/`.
 
 The same flow without the job wrapper is:
 
 ```sh
-crabbox run --provider islo \
+crabbox run \
   --require-artifact docs/metrics/hermetic-agents-e2e.json \
   --download docs/metrics/hermetic-agents-e2e.json=.crabbox/proofs/hermetic-agents-e2e.json \
   --download docs/metrics/hermetic-agents-e2e.md=.crabbox/proofs/hermetic-agents-e2e.md \
   --shell './scripts/run_hermetic_agents_demo.sh'
 ```
 
-Use any SSH-backed Linux provider instead of Islo when you want Crabbox-managed
-SSH and rsync rather than a delegated sandbox. The same `--require-artifact` and
-`--download` gates apply on supported Linux targets.
+Pick the provider the same way you would for any other Crabbox run:
+
+- Use brokered or direct SSH-backed Linux providers (`aws`, `azure`, `gcp`,
+  `hetzner`, `ssh`, and similar) when you want Crabbox-managed SSH, rsync,
+  broker history, telemetry, or warm-box reuse.
+- Use a delegated provider only when its adapter supports the required evidence
+  features. Islo, for example, supports bounded single-file `--require-artifact`
+  and `--download`.
 
 ## Concept Map
 
-| Crabbox concept | Fit in this demo |
+| Crabbox concept | Fit in this pattern |
 | --- | --- |
 | Run | One remote execution of the repo-owned hermetic harness. |
 | Workspace | The synced checkout containing specs, guides, harness code, and output paths. |
-| Provider | The remote execution substrate; the demo defaults to `islo` but does not require it. |
-| Delegated mode | With Islo, the provider owns archive upload and command transport; Crabbox owns CLI semantics, claims, required artifacts, downloads, and status. |
+| Provider | The remote execution substrate; use normal provider selection instead of coupling the pattern to one backend. |
+| SSH-backed mode | Crabbox owns SSH, rsync, command execution, artifacts, history, and telemetry when a brokered provider is used. |
+| Delegated mode | The provider owns workspace upload and command transport; Crabbox owns CLI semantics, claims, required artifacts, downloads, and status when the adapter supports them. |
 | Artifacts | The proof JSON/Markdown are bounded run evidence, not raw transcripts or secrets. |
 | Jobs | `.crabbox.yaml` names the repeatable remote proof as `hermetic-agents`. |
 | History/logs | Brokered SSH providers can add central run history; direct/delegated runs still provide live output and local proof downloads. |
-| Station | Future fit for long-running agent harnesses. This demo is intentionally a one-shot run. |
+| Station | Future fit for long-running agent harnesses. This pattern is intentionally a one-shot run. |
 
 ## Trust Boundary
 
@@ -132,7 +134,7 @@ Keep these boundaries explicit:
 Long-running hermetic-agent systems may eventually fit Station better than
 one-shot `run`: a station could supervise coder/tester/QA processes, record
 attempt lifecycle, bridge a repo-owned harness API, and revoke model access on
-stop. That is not what this demo uses.
+stop. That is not what this pattern uses.
 
 Today, keep the path simple:
 
@@ -169,7 +171,7 @@ Keep the Crabbox YAML focused on execution policy:
 ```yaml
 jobs:
   hermetic-agents:
-    provider: islo
+    provider: aws
     target: linux
     shell: true
     command: ./scripts/run_hermetic_agents_demo.sh
@@ -191,6 +193,10 @@ guides/qa-arbiter.md
 scripts/hermetic_agents_demo.py
 ```
 
+Switch `provider` to `islo` or another delegated backend only after confirming
+that backend supports the required artifact/download capabilities used by the
+job.
+
 ## Review Checklist
 
 Before sharing a hermetic-agent run, verify:
@@ -202,4 +208,6 @@ Before sharing a hermetic-agent run, verify:
 - Downloaded proof files contain no secrets or raw customer data.
 
 For artifact semantics and storage limits, see [Artifacts](artifacts.md). For
-delegated Islo behavior, see [Islo Provider](../providers/islo.md).
+provider capability details, see [Providers](providers.md),
+[Provider backends](../provider-backends.md), and any selected per-provider
+page.
