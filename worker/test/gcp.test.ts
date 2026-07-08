@@ -40,6 +40,61 @@ describe("gcp provider", () => {
     expect(new GCPClient(env, undefined, "request-project").project).toBe("request-project");
   });
 
+  it("uses the metadata server when service account key credentials are omitted", async () => {
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_ZONE: "us-central1-a",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    client.fetcher = async (input, init) => {
+      const url = String(input);
+      calls.push({ url, headers: new Headers(init?.headers) });
+      if (url.includes("metadata.google.internal")) {
+        return Response.json({ access_token: "metadata-token", expires_in: 1200 });
+      }
+      if (url.includes("/aggregated/instances")) {
+        return Response.json({ items: {} });
+      }
+      throw new Error(`unexpected GCP request ${url}`);
+    };
+
+    await expect(client.listCrabboxServers()).resolves.toEqual([]);
+    expect(calls[0]?.url).toContain("metadata.google.internal");
+    expect(calls[0]?.headers.get("Metadata-Flavor")).toBe("Google");
+    expect(calls[1]?.headers.get("Authorization")).toBe("Bearer metadata-token");
+  });
+
+  it("rejects partial service account key credentials", () => {
+    expect(() => new GCPClient({ ...env, GCP_PRIVATE_KEY: "" })).toThrow(
+      "GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY must be configured together",
+    );
+    expect(() => new GCPClient({ ...env, GCP_CLIENT_EMAIL: "" })).toThrow(
+      "GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY must be configured together",
+    );
+  });
+
+  it("requires explicit metadata credential source when service account key credentials are omitted", () => {
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_ZONE: "us-central1-a",
+    };
+    expect(() => new GCPClient(metadataEnv)).toThrow(
+      "GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY are required unless CRABBOX_GCP_CREDENTIAL_SOURCE=metadata",
+    );
+  });
+
+  it("rejects invalid configured GCP credential sources", () => {
+    expect(
+      () => new GCPClient({ ...env, CRABBOX_GCP_CREDENTIAL_SOURCE: "workload-identity" }),
+    ).toThrow("CRABBOX_GCP_CREDENTIAL_SOURCE must be metadata or service-account-key");
+  });
+
   it("rejects invalid configured GCP SSH CIDRs", () => {
     expect(() => new GCPClient({ ...env, CRABBOX_GCP_SSH_CIDRS: "::::/128" })).toThrow(
       "CRABBOX_GCP_SSH_CIDRS entries must be valid",

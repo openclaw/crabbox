@@ -12763,7 +12763,7 @@ interface ProviderReadinessCheck {
 function providerReadiness(provider: Provider, env: Env, gcpProject?: string): ProviderReadiness {
   const spec = coordinatorProviderSpec(provider);
   if (provider === "gcp") {
-    const missing = providerRequiredSecrets(provider).filter((name) => !nonSecretString(env[name]));
+    const missing: string[] = [];
     if (
       !nonSecretString(gcpProject) &&
       !nonSecretString(env.GCP_PROJECT_ID) &&
@@ -12771,14 +12771,28 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
     ) {
       missing.unshift("GCP_PROJECT_ID");
     }
+    const hasClientEmail = nonSecretString(env.GCP_CLIENT_EMAIL);
+    const hasPrivateKey = nonSecretString(env.GCP_PRIVATE_KEY);
+    const credentialSource = env.CRABBOX_GCP_CREDENTIAL_SOURCE?.trim() ?? "";
+    const validCredentialSource =
+      credentialSource === "" ||
+      credentialSource === "metadata" ||
+      credentialSource === "service-account-key";
+    if (!validCredentialSource) missing.push("CRABBOX_GCP_CREDENTIAL_SOURCE");
+    if (hasClientEmail !== hasPrivateKey) {
+      if (!hasClientEmail) missing.push("GCP_CLIENT_EMAIL");
+      if (!hasPrivateKey) missing.push("GCP_PRIVATE_KEY");
+    } else if (validCredentialSource && !hasClientEmail && credentialSource !== "metadata") {
+      missing.push("GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY", "CRABBOX_GCP_CREDENTIAL_SOURCE");
+    }
     return {
       provider,
       configured: missing.length === 0,
       missing,
       message:
         missing.length === 0
-          ? `${spec.provider} coordinator secrets are configured`
-          : `${spec.provider} coordinator secrets missing: ${missing.join(", ")}`,
+          ? `${spec.provider} coordinator credentials are configured`
+          : `${spec.provider} coordinator configuration missing: ${missing.join(", ")}`,
     };
   }
   const missing = providerRequiredSecrets(provider).filter((name) => !nonSecretString(env[name]));

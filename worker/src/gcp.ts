@@ -19,6 +19,8 @@ import type { Env, ProviderImage, ProviderMachine, ProvisioningAttempt } from ".
 
 const computeBaseURL = "https://compute.googleapis.com/compute/v1";
 const tokenURL = "https://oauth2.googleapis.com/token";
+const metadataTokenURL =
+  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const defaultImage = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64";
 const firewallName = "crabbox-ssh";
 const firewallVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
@@ -112,8 +114,15 @@ export class GCPClient {
     this.rootGB = numberFromEnv(env.CRABBOX_GCP_ROOT_GB, 400);
     this.serviceAccount = env.CRABBOX_GCP_SERVICE_ACCOUNT?.trim() || "";
     if (!this.project) throw new Error("GCP_PROJECT_ID or CRABBOX_GCP_PROJECT secret is required");
-    if (!env.GCP_CLIENT_EMAIL) throw new Error("GCP_CLIENT_EMAIL secret is required");
-    if (!env.GCP_PRIVATE_KEY) throw new Error("GCP_PRIVATE_KEY secret is required");
+    if (hasPartialServiceAccountCredential(env)) {
+      throw new Error("GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY must be configured together");
+    }
+    const credentialSource = gcpCredentialSource(env);
+    if (credentialSource === "service-account-key" && !hasServiceAccountCredential(env)) {
+      throw new Error(
+        "GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY are required unless CRABBOX_GCP_CREDENTIAL_SOURCE=metadata",
+      );
+    }
   }
 
   async listCrabboxServers(): Promise<ProviderMachine[]> {
@@ -651,6 +660,21 @@ export class GCPClient {
   private async accessToken(): Promise<string> {
     const now = Math.trunc(Date.now() / 1000);
     if (this.cache && this.cache.expiresAt - 60 > now) return this.cache.token;
+    if (gcpCredentialSource(this.env) === "metadata") {
+      const response = await this.fetcher(metadataTokenURL, {
+        headers: { "Metadata-Flavor": "Google" },
+      });
+      const data = (await response.json()) as {
+        access_token?: string;
+        expires_in?: number;
+        error?: string;
+      };
+      if (!response.ok || !data.access_token) {
+        throw new Error(`gcp metadata token: ${data.error ?? response.statusText}`);
+      }
+      this.cache = { token: data.access_token, expiresAt: now + (data.expires_in ?? 3600) };
+      return data.access_token;
+    }
     const assertion = await serviceAccountAssertion(this.env, now);
     const response = await this.fetcher(tokenURL, {
       method: "POST",
@@ -746,6 +770,21 @@ function pemToArrayBuffer(pem: string): ArrayBuffer {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes.buffer;
+}
+
+function hasServiceAccountCredential(env: Env): boolean {
+  return Boolean(env.GCP_CLIENT_EMAIL?.trim()) && Boolean(env.GCP_PRIVATE_KEY?.trim());
+}
+
+function hasPartialServiceAccountCredential(env: Env): boolean {
+  return Boolean(env.GCP_CLIENT_EMAIL?.trim()) !== Boolean(env.GCP_PRIVATE_KEY?.trim());
+}
+
+function gcpCredentialSource(env: Env): "metadata" | "service-account-key" {
+  const source = env.CRABBOX_GCP_CREDENTIAL_SOURCE?.trim() ?? "";
+  if (!source) return "service-account-key";
+  if (source === "metadata" || source === "service-account-key") return source;
+  throw new Error("CRABBOX_GCP_CREDENTIAL_SOURCE must be metadata or service-account-key");
 }
 
 function toMachine(instance: GCPInstance, zone: string): ProviderMachine {
