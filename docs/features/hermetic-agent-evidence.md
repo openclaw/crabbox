@@ -33,11 +33,11 @@ This page records the repo-local pattern tracked by
 
 A hermetic-agent harness usually models three roles:
 
-| Role | Allowed context | Forbidden context |
+| Role | Allowed context | Boundary |
 | --- | --- | --- |
-| Code writer | `spec/problem.md`, `guides/code-writer.md` | Generated tests |
-| Test writer | `spec/problem.md`, `guides/test-writer.md` | Implementation output |
-| QA arbiter | Spec, both outputs, hidden oracle | May send blame, not forbidden artifacts |
+| Code writer | `spec/problem.md`, `guides/code-writer.md` | Must not read generated tests |
+| Test writer | `spec/problem.md`, `guides/test-writer.md` | Must not read implementation output |
+| QA arbiter | Spec, both outputs, hidden oracle | May send blame backward, but not forbidden artifacts |
 
 The seeded failure is intentionally a bad generated test expectation. The
 implementation follows the spec, the test expects the wrong case-folding result,
@@ -47,8 +47,8 @@ which side violated the spec.
 
 ## Local Proof
 
-A repository should keep a local proof command that works without Crabbox. For
-example:
+An application repo should keep a local proof command that works without
+Crabbox. For example:
 
 ```sh
 ./scripts/run_hermetic_agents_demo.sh
@@ -94,8 +94,7 @@ Pick the provider the same way you would for any other Crabbox run:
   `hetzner`, `ssh`, and similar) when you want Crabbox-managed SSH, rsync,
   broker history, telemetry, or warm-box reuse.
 - Use a delegated provider only when its adapter supports the required evidence
-  features. Islo, for example, supports bounded single-file `--require-artifact`
-  and `--download`.
+  features, such as bounded single-file `--require-artifact` and `--download`.
 
 ## Concept Map
 
@@ -172,8 +171,8 @@ Keep the Crabbox YAML focused on execution policy:
 ```yaml
 jobs:
   hermetic-agents:
-    # Choose any provider that fits the repo: aws, hetzner, gcp, azure, ssh, etc.
-    provider: aws
+    # Omit provider to inherit user/team defaults, or set aws/hetzner/gcp/azure/ssh/etc.
+    # provider: aws
     target: linux
     shell: true
     command: ./scripts/run_hermetic_agents_demo.sh
