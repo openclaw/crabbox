@@ -47,7 +47,8 @@ which side violated the spec.
 
 ## Local Proof
 
-A repository should keep a local proof command that works without Crabbox:
+A repository should keep a local proof command that works without Crabbox. For
+example:
 
 ```sh
 ./scripts/run_hermetic_agents_demo.sh
@@ -67,8 +68,8 @@ verdict, and the exact disagreement assigned to the test writer.
 
 ## Crabbox Run
 
-A repository can expose the same proof as a `.crabbox.yaml` job. With a normal
-SSH-backed Linux provider, the job shape is:
+A repository can expose the same proof as a `.crabbox.yaml` job. With an
+SSH-backed Linux provider, the user-facing command stays ordinary Crabbox:
 
 ```sh
 crabbox job run hermetic-agents
@@ -171,6 +172,7 @@ Keep the Crabbox YAML focused on execution policy:
 ```yaml
 jobs:
   hermetic-agents:
+    # Choose any provider that fits the repo: aws, hetzner, gcp, azure, ssh, etc.
     provider: aws
     target: linux
     shell: true
