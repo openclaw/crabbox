@@ -322,6 +322,34 @@ func TestCrabboxIgnoreExtendsSyncExcludes(t *testing.T) {
 	}
 }
 
+func TestCrabboxIgnoreCanReincludeDefaultExcludedSourcePath(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, ".crabboxignore"), "!apps/backend/app/connectors/target\n")
+	writeFile(t, filepath.Join(dir, "apps", "backend", "app", "connectors", "target", "schemas.py"), "class Schema: ...\n")
+	writeFile(t, filepath.Join(dir, "build", "target", "debug.o"), "cache")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+
+	excludes, err := syncExcludes(dir, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := syncManifest(dir, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(manifest.Files, ",")
+	if !strings.Contains(got, "apps/backend/app/connectors/target/schemas.py") {
+		t.Fatalf("manifest should reinclude source target path: %q", got)
+	}
+	if strings.Contains(got, "build/target/debug.o") {
+		t.Fatalf("manifest should still exclude unrelated target output: %q", got)
+	}
+}
+
 func TestCrabboxIgnorePrunesDeletedPaths(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")

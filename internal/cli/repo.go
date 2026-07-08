@@ -616,36 +616,50 @@ func splitNul(data []byte) []string {
 
 func pathExcluded(rel string, excludes []string) bool {
 	rel = filepath.ToSlash(rel)
-	parts := strings.Split(rel, "/")
+	excluded := false
 	for _, exclude := range excludes {
-		exclude = strings.Trim(filepath.ToSlash(strings.TrimSpace(exclude)), "/")
-		if exclude == "" {
-			continue
+		negated := false
+		exclude = strings.TrimSpace(exclude)
+		if strings.HasPrefix(exclude, "!") {
+			negated = true
+			exclude = strings.TrimSpace(strings.TrimPrefix(exclude, "!"))
 		}
-		if rel == exclude || strings.HasPrefix(rel, exclude+"/") {
-			return true
+		if excludeMatches(rel, exclude) {
+			excluded = !negated
 		}
-		if !strings.Contains(exclude, "/") {
-			for _, part := range parts {
-				if part == exclude {
-					return true
-				}
-				if ok, _ := filepath.Match(exclude, part); ok {
-					return true
-				}
-			}
-		}
-		if ok, _ := filepath.Match(exclude, filepath.Base(rel)); ok {
-			return true
-		}
-		if ok, _ := filepath.Match(exclude, rel); ok {
-			return true
-		}
-		for i := 1; i < len(parts); i++ {
-			prefix := strings.Join(parts[:i], "/")
-			if ok, _ := filepath.Match(exclude, prefix); ok {
+	}
+	return excluded
+}
+
+func excludeMatches(rel string, exclude string) bool {
+	parts := strings.Split(rel, "/")
+	exclude = strings.Trim(filepath.ToSlash(strings.TrimSpace(exclude)), "/")
+	if exclude == "" {
+		return false
+	}
+	if rel == exclude || strings.HasPrefix(rel, exclude+"/") {
+		return true
+	}
+	if !strings.Contains(exclude, "/") {
+		for _, part := range parts {
+			if part == exclude {
 				return true
 			}
+			if ok, _ := filepath.Match(exclude, part); ok {
+				return true
+			}
+		}
+	}
+	if ok, _ := filepath.Match(exclude, filepath.Base(rel)); ok {
+		return true
+	}
+	if ok, _ := filepath.Match(exclude, rel); ok {
+		return true
+	}
+	for i := 1; i < len(parts); i++ {
+		prefix := strings.Join(parts[:i], "/")
+		if ok, _ := filepath.Match(exclude, prefix); ok {
+			return true
 		}
 	}
 	return false
