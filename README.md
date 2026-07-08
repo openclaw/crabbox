@@ -313,7 +313,8 @@ and authoring guide.
 - **Agent workspace evidence.** History, logs, events, telemetry, JUnit
   summaries, screenshots, recordings, artifacts, and PR publishing make
   autonomous work reviewable instead of only ephemeral terminal output. See
-  [Artifacts](docs/features/artifacts.md) and
+  [Hermetic agent evidence](docs/features/hermetic-agent-evidence.md),
+  [Artifacts](docs/features/artifacts.md), and
   [Telemetry](docs/features/telemetry.md).
 - **Stable timing records.** `--timing-json` on `run`, `warmup`, `prewarm`, and
   `actions hydrate` gives scripts one machine-readable sync/command/total

@@ -25,6 +25,10 @@ need Crabbox-managed SSH access to the box.
 Islo is Linux-only. Desktop, browser, code, Actions hydration, and SSH-based run
 options are not available.
 
+For a small end-to-end example that uses Islo to run a hermetic-agent proof and
+download the required JSON evidence, see
+[Hermetic agent evidence](../features/hermetic-agent-evidence.md).
+
 ## Commands
 
 ```sh
