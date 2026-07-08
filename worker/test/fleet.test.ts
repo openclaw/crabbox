@@ -376,6 +376,14 @@ describe("runtime adapter relay", () => {
       leaseID,
       id: "agent_shared_token",
       capabilities: new Set<string>(),
+      ...grant,
+    });
+    const idleWebAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_idle_shared_token",
+      capabilities: new Set<string>(),
+      ...grant,
     });
     const webViewer = new FakeWebSocket({
       kind: "webvnc-viewer",
@@ -385,7 +393,7 @@ describe("runtime adapter relay", () => {
       ...grant,
       label: "shared",
     });
-    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID, ...grant });
     const codeViewer = new FakeWebSocket({
       kind: "code-viewer",
       leaseID,
@@ -415,7 +423,10 @@ describe("runtime adapter relay", () => {
     };
     internal.webVNCAgents.set(
       leaseID,
-      new Map([["agent_shared_token", webAgent as unknown as WebSocket]]),
+      new Map([
+        ["agent_shared_token", webAgent as unknown as WebSocket],
+        ["agent_idle_shared_token", idleWebAgent as unknown as WebSocket],
+      ]),
     );
     internal.webVNCViewers.set(
       leaseID,
@@ -446,17 +457,161 @@ describe("runtime adapter relay", () => {
     internal.env.CRABBOX_SHARED_TOKEN = "new-shared-token";
 
     await fleet.webSocketMessage(webViewer as unknown as WebSocket, "vnc-frame");
-    await fleet.webSocketMessage(codeViewer as unknown as WebSocket, "code-frame");
+    await fleet.webSocketMessage(idleWebAgent as unknown as WebSocket, "idle-vnc-frame");
+    await fleet.webSocketMessage(codeViewer as unknown as WebSocket, "code-viewer-frame");
+    await fleet.webSocketMessage(codeAgent as unknown as WebSocket, "code-frame");
     await fleet.webSocketMessage(egressHost as unknown as WebSocket, "egress-frame");
 
-    for (const socket of [webViewer, codeViewer, egressHost, egressClient]) {
+    for (const socket of [
+      idleWebAgent,
+      webViewer,
+      codeAgent,
+      codeViewer,
+      egressHost,
+      egressClient,
+    ]) {
       expect(socket.closeCode).toBe(1008);
       expect(socket.closeReason).toBe("shared access revoked");
     }
+    expect(webAgent.closeCode).toBe(1011);
+    expect(internal.webVNCAgents.get(leaseID)?.size ?? 0).toBe(0);
     expect(internal.webVNCViewers.get(leaseID)?.has("viewer_shared_token") ?? false).toBe(false);
+    expect(internal.codeAgents.has(leaseID)).toBe(false);
     expect(internal.codeViewers.has("code_shared_token")).toBe(false);
     expect(internal.egressHosts.has(`${leaseID}\u0000egress_shared_token`)).toBe(false);
     expect(internal.egressClients.has(`${leaseID}\u0000egress_shared_token`)).toBe(false);
+  });
+
+  it("revalidates backend agents before forwarding viewer traffic", async () => {
+    const oldSharedToken = "old-shared-token";
+    const newSharedToken = "new-shared-token";
+    const agentGrant = {
+      auth: "bearer" as const,
+      owner: "shared@example.com",
+      org: "example-org",
+      admin: false,
+      sharedTokenHash: await sha256Hex(oldSharedToken),
+    };
+    const viewerGrant = {
+      ...agentGrant,
+      sharedTokenHash: await sha256Hex(newSharedToken),
+    };
+    const fleet = testFleet(new MemoryStorage(), {}, { CRABBOX_SHARED_TOKEN: newSharedToken });
+    const leaseID = "cbx_000000000001";
+    const webAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_revoked_recipient",
+      capabilities: new Set<string>(),
+      ...agentGrant,
+    });
+    const webViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID,
+      id: "viewer_current_sender",
+      agentID: "agent_revoked_recipient",
+      ...viewerGrant,
+      label: "shared",
+    });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID, ...agentGrant });
+    const codeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code_current_sender",
+      ...viewerGrant,
+    });
+    const internal = fleet as unknown as {
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      webVNCViewers: Map<string, Map<string, unknown>>;
+      codeAgents: Map<string, WebSocket>;
+      codeViewers: Map<string, WebSocket>;
+    };
+    internal.webVNCAgents.set(
+      leaseID,
+      new Map([["agent_revoked_recipient", webAgent as unknown as WebSocket]]),
+    );
+    internal.webVNCViewers.set(
+      leaseID,
+      new Map([
+        [
+          "viewer_current_sender",
+          {
+            id: "viewer_current_sender",
+            agentID: "agent_revoked_recipient",
+            socket: webViewer as unknown as WebSocket,
+            ...viewerGrant,
+            label: "shared",
+            connectedAt: new Date().toISOString(),
+          },
+        ],
+      ]),
+    );
+    internal.codeAgents.set(leaseID, codeAgent as unknown as WebSocket);
+    internal.codeViewers.set("code_current_sender", codeViewer as unknown as WebSocket);
+
+    await fleet.webSocketMessage(webViewer as unknown as WebSocket, "vnc-frame");
+    await fleet.webSocketMessage(codeViewer as unknown as WebSocket, "code-frame");
+
+    for (const socket of [webAgent, codeAgent]) {
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.closeReason).toBe("shared access revoked");
+      expect(socket.sentJSON()).toEqual([]);
+    }
+    expect(webViewer.closeCode).toBe(1011);
+    expect(codeViewer.closeCode).toBe(1011);
+    expect(internal.webVNCAgents.has(leaseID)).toBe(false);
+    expect(internal.codeAgents.has(leaseID)).toBe(false);
+  });
+
+  it("revalidates active GitHub-admin backend agents against the user grant", async () => {
+    const env = {
+      CRABBOX_GITHUB_ADMIN_LOGINS: "alice",
+      CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
+    } as Env;
+    const currentGrantVersion = await adminGrantVersion(env);
+    const grant = {
+      auth: "github" as const,
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: true,
+      login: "alice",
+      adminGrantVersion: currentGrantVersion,
+      portalSessionHash: "a".repeat(64),
+      githubGrant: {
+        tokenID: "github-admin-token",
+        sealedCredential: "sealed-credential",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    };
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    const leaseID = "cbx_000000000001";
+    const webAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_revoked_github_admin",
+      capabilities: new Set<string>(),
+      ...grant,
+    });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID, ...grant });
+    const internal = fleet as unknown as {
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      codeAgents: Map<string, WebSocket>;
+    };
+    internal.webVNCAgents.set(
+      leaseID,
+      new Map([["agent_revoked_github_admin", webAgent as unknown as WebSocket]]),
+    );
+    internal.codeAgents.set(leaseID, codeAgent as unknown as WebSocket);
+
+    await fleet.webSocketMessage(webAgent as unknown as WebSocket, "vnc-frame");
+    await fleet.webSocketMessage(codeAgent as unknown as WebSocket, "code-frame");
+
+    for (const socket of [webAgent, codeAgent]) {
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.closeReason).toBe("user access revoked");
+    }
+    expect(internal.webVNCAgents.has(leaseID)).toBe(false);
+    expect(internal.codeAgents.has(leaseID)).toBe(false);
   });
 
   it("fails closed active non-admin GitHub WebVNC and egress bridges after revocation", async () => {
@@ -1084,6 +1239,7 @@ describe("runtime adapter relay", () => {
       leaseID: lease.id,
       id: "agent_restored_shared",
       capabilities: new Set<string>(),
+      ...grant,
     });
     const webViewer = new FakeWebSocket({
       kind: "webvnc-viewer",
@@ -1093,7 +1249,7 @@ describe("runtime adapter relay", () => {
       ...grant,
       label: "shared",
     });
-    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id, ...grant });
     const codeViewer = new FakeWebSocket({
       kind: "code-viewer",
       leaseID: lease.id,
@@ -1132,9 +1288,66 @@ describe("runtime adapter relay", () => {
     );
 
     expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
-    for (const socket of [webViewer, codeViewer, egressHost, egressClient]) {
+    expect(webAgent.closeCode).toBe(1011);
+    expect(webAgent.closeReason).toBe("WebVNC viewer disconnected");
+    for (const socket of [webViewer, codeAgent, codeViewer, egressHost, egressClient]) {
       expect(socket.closeCode).toBe(1008);
       expect(socket.closeReason).toBe("shared access revoked");
+    }
+  });
+
+  it("rejects restored GitHub-admin backend agents after user-grant revocation", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_000000000003",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const env = {
+      CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_GITHUB_ADMIN_LOGINS: "alice",
+      CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
+    } as Env;
+    const currentGrantVersion = await adminGrantVersion(env);
+    const grant = {
+      auth: "github" as const,
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: true,
+      login: "alice",
+      adminGrantVersion: currentGrantVersion,
+      portalSessionHash: "b".repeat(64),
+      githubGrant: {
+        tokenID: "github-admin-token",
+        sealedCredential: "sealed-credential",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    };
+    const webAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID: lease.id,
+      id: "agent_restored_github_admin",
+      capabilities: new Set<string>(),
+      ...grant,
+    });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id, ...grant });
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => [webAgent, codeAgent] as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    for (const socket of [webAgent, codeAgent]) {
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.closeReason).toBe("user access revoked");
     }
   });
 
@@ -11226,9 +11439,24 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    const revokedWebAgent = new FakeWebSocket();
-    const retainedWebAgent = new FakeWebSocket();
-    const ownerWebAgent = new FakeWebSocket();
+    const revokedWebAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_revoked",
+      capabilities: new Set<string>(),
+    });
+    const retainedWebAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_retained",
+      capabilities: new Set<string>(),
+    });
+    const ownerWebAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_owner",
+      capabilities: new Set<string>(),
+    });
     const revokedWebViewer = new FakeWebSocket({
       kind: "webvnc-viewer",
       leaseID,
@@ -11439,6 +11667,78 @@ describe("fleet lease identity and idle", () => {
       JSON.stringify({ retained: true }),
     );
     expect(retainedWebAgent.sentJSON()).toEqual([{ retained: true }]);
+  });
+
+  it("revokes idle backend agents when their manager loses manage access", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000001";
+    const ownerHeaders = {
+      "x-crabbox-owner": "owner@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "shared-backend-agents",
+        owner: "owner@example.com",
+        org: "example-org",
+        desktop: true,
+        code: true,
+        share: {
+          users: {
+            "manager@example.com": "manage",
+            "other-manager@example.com": "manage",
+          },
+        },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const grant = {
+      auth: "proxy" as const,
+      owner: "manager@example.com",
+      org: "other-org",
+      admin: false,
+    };
+    const webAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_manager",
+      capabilities: new Set<string>(),
+      ...grant,
+    });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID, ...grant });
+    const relay = fleet as unknown as {
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      codeAgents: Map<string, WebSocket>;
+    };
+    relay.webVNCAgents.set(leaseID, new Map([["agent_manager", webAgent as unknown as WebSocket]]));
+    relay.codeAgents.set(leaseID, codeAgent as unknown as WebSocket);
+
+    const unrelatedRemoval = await fleet.fetch(
+      request("DELETE", "/v1/leases/shared-backend-agents/share", {
+        headers: ownerHeaders,
+        body: { user: "other-manager@example.com" },
+      }),
+    );
+    expect(unrelatedRemoval.status).toBe(200);
+    expect(webAgent.closeCode).toBeUndefined();
+    expect(codeAgent.closeCode).toBeUndefined();
+
+    const downgraded = await fleet.fetch(
+      request("PUT", "/v1/leases/shared-backend-agents/share", {
+        headers: ownerHeaders,
+        body: { users: { "manager@example.com": "use" } },
+      }),
+    );
+    expect(downgraded.status).toBe(200);
+    for (const socket of [webAgent, codeAgent]) {
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.closeReason).toBe("lease access revoked");
+    }
+    expect(relay.webVNCAgents.has(leaseID)).toBe(false);
+    expect(relay.codeAgents.has(leaseID)).toBe(false);
   });
 
   it("revokes a live egress session when manage access is downgraded", async () => {
@@ -17219,7 +17519,15 @@ describe("fleet lease identity and idle", () => {
 
     const activeViewerID = "active-code-viewer";
     const portalSessionHash = await sha256Hex(token);
-    const activeAgent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const agentGrant = {
+      auth: "github" as const,
+      owner: "alice@example.com",
+      org: "example-org",
+      admin: false,
+      login: "alice",
+      portalSessionHash,
+    };
+    const activeAgent = new FakeWebSocket({ kind: "code-agent", leaseID, ...agentGrant });
     const activeViewer = new FakeWebSocket({
       kind: "code-viewer",
       leaseID,
@@ -17232,6 +17540,14 @@ describe("fleet lease identity and idle", () => {
       leaseID,
       id: "agent_active",
       capabilities: new Set<string>(),
+      ...agentGrant,
+    });
+    const idleWebAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID,
+      id: "agent_idle_logout",
+      capabilities: new Set<string>(),
+      ...agentGrant,
     });
     const activeWebViewer = new FakeWebSocket({
       kind: "webvnc-viewer",
@@ -17298,7 +17614,10 @@ describe("fleet lease identity and idle", () => {
     codeBridgeState.codeViewers.set(activeViewerID, activeViewer as unknown as WebSocket);
     codeBridgeState.webVNCAgents.set(
       leaseID,
-      new Map([["agent_active", activeWebAgent as unknown as WebSocket]]),
+      new Map([
+        ["agent_active", activeWebAgent as unknown as WebSocket],
+        ["agent_idle_logout", idleWebAgent as unknown as WebSocket],
+      ]),
     );
     codeBridgeState.webVNCViewers.set(
       leaseID,
@@ -17341,6 +17660,8 @@ describe("fleet lease identity and idle", () => {
     expect(await crossSiteNavigation.text()).toContain('method="post"');
     expect(activeViewer.closeCode).toBeUndefined();
     expect(activeWebViewer.closeCode).toBeUndefined();
+    expect(idleWebAgent.closeCode).toBeUndefined();
+    expect(activeAgent.closeCode).toBeUndefined();
     expect(activeEgressHost.closeCode).toBeUndefined();
     expect(activeEgressClient.closeCode).toBeUndefined();
 
@@ -17359,6 +17680,10 @@ describe("fleet lease identity and idle", () => {
     expect(activeWebViewer.closeCode).toBe(1008);
     expect(activeWebViewer.closeReason).toBe("portal session ended");
     expect(activeWebAgent.closeCode).toBe(1011);
+    expect(idleWebAgent.closeCode).toBe(1008);
+    expect(idleWebAgent.closeReason).toBe("portal session ended");
+    expect(activeAgent.closeCode).toBe(1008);
+    expect(activeAgent.closeReason).toBe("portal session ended");
     expect(activeEgressHost.closeCode).toBe(1008);
     expect(activeEgressHost.closeReason).toBe("portal session ended");
     expect(activeEgressClient.closeCode).toBe(1008);
@@ -17880,6 +18205,65 @@ describe("fleet lease identity and idle", () => {
     expect(
       Object.keys(forwarded?.headers ?? {}).filter((key) => key.startsWith("x-crabbox-")),
     ).toEqual([]);
+  });
+
+  it("rejects a revoked backend agent before Code HTTP forwarding", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
+      CRABBOX_SHARED_TOKEN: "new-shared-token",
+    };
+    const fleet = testFleet(storage, {}, env);
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        code: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const agent = new FakeWebSocket({
+      kind: "code-agent",
+      leaseID,
+      auth: "bearer",
+      owner: "shared@example.com",
+      org: "example-org",
+      admin: false,
+      sharedTokenHash: await sha256Hex("old-shared-token"),
+    });
+    const relay = fleet as unknown as { codeAgents: Map<string, WebSocket> };
+    relay.codeAgents.set(leaseID, agent as unknown as WebSocket);
+    const session = `code_session_${"b".repeat(32)}`;
+    storage.seed(`code-viewer-session:${session}`, {
+      session,
+      leaseID,
+      auth: "proxy",
+      admin: false,
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+    const isolatedOrigin = await codeOriginForLease(env, leaseID);
+
+    const response = await fleet.fetch(
+      new Request(`${isolatedOrigin}/portal/leases/${leaseID}/code/api/status`, {
+        headers: {
+          cookie: `crabbox_code_session=${session}`,
+          origin: isolatedOrigin || "",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(agent.sentJSON()).toEqual([]);
+    expect(agent.closeCode).toBe(1008);
+    expect(agent.closeReason).toBe("shared access revoked");
+    expect(relay.codeAgents.has(leaseID)).toBe(false);
   });
 
   it("revalidates non-admin GitHub grants when agent bridge tickets are consumed", async () => {
@@ -18707,13 +19091,13 @@ describe("fleet lease identity and idle", () => {
     });
 
     const agentFrames: string[] = [];
-    const agentSocket = {
-      readyState: WebSocket.OPEN,
-      send(data: string) {
-        agentFrames.push(data);
-      },
-      close() {},
-    } as WebSocket;
+    const agentSocket = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID: "cbx_000000000001",
+      id: "agent_theme1",
+      capabilities: new Set<string>(),
+    });
+    agentSocket.onSend = (data) => agentFrames.push(data);
     const viewerSocket = { readyState: WebSocket.OPEN, close() {} } as WebSocket;
     const observerSocket = { readyState: WebSocket.OPEN, close() {} } as WebSocket;
     const webVNCState = fleet as unknown as {
@@ -18735,7 +19119,10 @@ describe("fleet lease identity and idle", () => {
         >
       >;
     };
-    webVNCState.webVNCAgents.set("cbx_000000000001", new Map([["agent_theme1", agentSocket]]));
+    webVNCState.webVNCAgents.set(
+      "cbx_000000000001",
+      new Map([["agent_theme1", agentSocket as unknown as WebSocket]]),
+    );
     webVNCState.webVNCViewers.set(
       "cbx_000000000001",
       new Map([

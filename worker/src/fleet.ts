@@ -749,7 +749,15 @@ interface AzureOrphanSweepRecord {
 }
 
 type BridgeAttachment =
-  | { kind: "webvnc-agent"; leaseID: string; id: string; capabilities: Set<string> }
+  | (CachedBridgeGrant & {
+      kind: "webvnc-agent";
+      leaseID: string;
+      id: string;
+      capabilities: Set<string>;
+      owner?: string;
+      org?: string;
+      admin?: boolean;
+    })
   | (CachedBridgeGrant & {
       kind: "webvnc-viewer";
       leaseID: string;
@@ -760,7 +768,13 @@ type BridgeAttachment =
       admin?: boolean;
       label: string;
     })
-  | { kind: "code-agent"; leaseID: string }
+  | (CachedBridgeGrant & {
+      kind: "code-agent";
+      leaseID: string;
+      owner?: string;
+      org?: string;
+      admin?: boolean;
+    })
   | (CachedBridgeGrant & {
       kind: "code-viewer";
       leaseID: string;
@@ -1224,15 +1238,36 @@ export class FleetCoordinator {
       socket: WebSocket;
       attachment: Extract<
         BridgeAttachment,
-        { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+        {
+          kind:
+            | "webvnc-agent"
+            | "webvnc-viewer"
+            | "code-agent"
+            | "code-viewer"
+            | "egress-host"
+            | "egress-client";
+        }
       >;
     }> = [];
     const sharedBridgesToCheck: Array<{
       socket: WebSocket;
       attachment: Extract<
         BridgeAttachment,
-        { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+        {
+          kind:
+            | "webvnc-agent"
+            | "webvnc-viewer"
+            | "code-agent"
+            | "code-viewer"
+            | "egress-host"
+            | "egress-client";
+        }
       >;
+    }> = [];
+    const adminPortalAgentsToCheck: Array<{
+      socket: WebSocket;
+      attachment: Extract<BridgeAttachment, { kind: "webvnc-agent" | "code-agent" }>;
+      portalSessionHash: string;
     }> = [];
     for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
@@ -1255,10 +1290,29 @@ export class FleetCoordinator {
         continue;
       }
       if (
+        (attachment.kind === "webvnc-agent" || attachment.kind === "code-agent") &&
+        attachment.admin === true &&
+        validPortalSessionHash(attachment.portalSessionHash)
+      ) {
+        adminPortalAgentsToCheck.push({
+          socket,
+          attachment,
+          portalSessionHash: attachment.portalSessionHash,
+        });
+      }
+      if (
         (attachment.kind === "webvnc-viewer" || attachment.kind === "code-viewer") &&
         !this.leaseViewerAuthorized(lease, attachment)
       ) {
         revokedViewers.set(socket, "lease access revoked");
+      }
+      if (
+        (attachment.kind === "webvnc-agent" || attachment.kind === "code-agent") &&
+        completeBridgePrincipal(attachment) &&
+        !this.leaseManagerAuthorized(lease, attachment)
+      ) {
+        revokedViewers.set(socket, "lease access revoked");
+        continue;
       }
       if (
         (attachment.kind === "egress-host" || attachment.kind === "egress-client") &&
@@ -1291,34 +1345,50 @@ export class FleetCoordinator {
           }
           continue;
         }
-        if (attachment.auth === "github" && attachment.admin !== true) {
+        if (
+          attachment.auth === "github" &&
+          (attachment.admin !== true ||
+            attachment.kind === "webvnc-agent" ||
+            attachment.kind === "code-agent")
+        ) {
           githubBridgesToCheck.push({ socket, attachment });
         } else if (attachment.auth === "bearer" && attachment.admin !== true) {
           sharedBridgesToCheck.push({ socket, attachment });
         }
       }
     }
-    const [githubBridgeRevocations, sharedBridgeRevocations] = await Promise.all([
-      Promise.all(
-        githubBridgesToCheck.map(async ({ socket, attachment }) => ({
-          socket,
-          attachment,
-          reason: await this.githubBridgeGrantFailureReason(attachment),
-        })),
-      ),
-      Promise.all(
-        sharedBridgesToCheck.map(async ({ socket, attachment }) => ({
-          socket,
-          attachment,
-          reason: (await this.sharedBridgeGrantIsCurrent(attachment))
-            ? undefined
-            : "shared access revoked",
-        })),
-      ),
-    ]);
+    const [githubBridgeRevocations, sharedBridgeRevocations, adminPortalAgentRevocations] =
+      await Promise.all([
+        Promise.all(
+          githubBridgesToCheck.map(async ({ socket, attachment }) => ({
+            socket,
+            attachment,
+            reason: await this.githubBridgeGrantFailureReason(attachment),
+          })),
+        ),
+        Promise.all(
+          sharedBridgesToCheck.map(async ({ socket, attachment }) => ({
+            socket,
+            attachment,
+            reason: (await this.sharedBridgeGrantIsCurrent(attachment))
+              ? undefined
+              : "shared access revoked",
+          })),
+        ),
+        Promise.all(
+          adminPortalAgentsToCheck.map(async ({ socket, attachment, portalSessionHash }) => ({
+            socket,
+            attachment,
+            reason: (await this.portalSessionIsRevoked(portalSessionHash))
+              ? "portal session ended"
+              : undefined,
+          })),
+        ),
+      ]);
     for (const { socket, attachment, reason } of [
       ...githubBridgeRevocations,
       ...sharedBridgeRevocations,
+      ...adminPortalAgentRevocations,
     ]) {
       if (!reason) continue;
       if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
@@ -1360,14 +1430,19 @@ export class FleetCoordinator {
         closeSocket(socket, 1008, reason);
       }
     }
-    for (const [socket, reason] of revokedViewers) {
+    const revokedUserBridges = [...revokedViewers].toSorted(([left], [right]) => {
+      const leftAttachment = this.bridgeAttachment(left);
+      const rightAttachment = this.bridgeAttachment(right);
+      const leftIsAgent =
+        leftAttachment?.kind === "webvnc-agent" || leftAttachment?.kind === "code-agent";
+      const rightIsAgent =
+        rightAttachment?.kind === "webvnc-agent" || rightAttachment?.kind === "code-agent";
+      return Number(leftIsAgent) - Number(rightIsAgent);
+    });
+    for (const [socket, reason] of revokedUserBridges) {
       const attachment = this.bridgeAttachment(socket);
-      if (attachment?.kind === "webvnc-viewer") {
-        this.clearWebVNCViewer(attachment.leaseID, attachment.id, socket);
-        closeSocket(socket, 1008, reason);
-      } else if (attachment?.kind === "code-viewer") {
-        this.clearCodeViewer(attachment.leaseID, attachment.id, socket, 1008, reason);
-        closeSocket(socket, 1008, reason);
+      if (attachment && revocableUserBridge(attachment)) {
+        this.closeRevokedUserBridge(socket, attachment, reason);
       }
     }
     this.restoredBridgeSockets.clear();
@@ -1405,10 +1480,16 @@ export class FleetCoordinator {
     this.currentAdminGrantVersion = version;
     const sockets = new Set<WebSocket>([
       ...this.controlSockets.values(),
+      ...this.codeAgents.values(),
       ...this.codeViewers.values(),
       ...this.egressHosts.values(),
       ...this.egressClients.values(),
     ]);
+    for (const agents of this.webVNCAgents.values()) {
+      for (const socket of agents.values()) {
+        sockets.add(socket);
+      }
+    }
     for (const viewers of this.webVNCViewers.values()) {
       for (const viewer of viewers.values()) {
         sockets.add(viewer.socket);
@@ -1817,15 +1898,17 @@ export class FleetCoordinator {
         }
         await forwardWebVNC(
           message,
-          this.webVNCAgents.get(attachment.leaseID)?.get(attachment.agentID),
+          await this.currentBridgeRecipient(
+            this.webVNCAgents.get(attachment.leaseID)?.get(attachment.agentID),
+          ),
         );
         break;
       case "code-agent":
         await this.handleCodeAgentMessage(attachment.leaseID, message);
         break;
       case "code-viewer": {
-        const agent = this.codeAgents.get(attachment.leaseID);
-        if (agent?.readyState !== WebSocket.OPEN) {
+        const agent = await this.currentBridgeRecipient(this.codeAgents.get(attachment.leaseID));
+        if (!agent) {
           return;
         }
         const data = await normalizeWebVNCData(message);
@@ -1904,7 +1987,9 @@ export class FleetCoordinator {
     if (
       revocableUserBridge(attachment) &&
       attachment.auth === "github" &&
-      attachment.admin !== true
+      (attachment.admin !== true ||
+        attachment.kind === "webvnc-agent" ||
+        attachment.kind === "code-agent")
     ) {
       const now = Date.now();
       const lastValidatedAt = this.userGrantValidationTimes.get(socket) ?? 0;
@@ -1991,7 +2076,15 @@ export class FleetCoordinator {
     socket: WebSocket,
     attachment: Extract<
       BridgeAttachment,
-      { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+      {
+        kind:
+          | "webvnc-agent"
+          | "webvnc-viewer"
+          | "code-agent"
+          | "code-viewer"
+          | "egress-host"
+          | "egress-client";
+      }
     >,
     reason: string,
   ): void {
@@ -5403,6 +5496,29 @@ export class FleetCoordinator {
     const code = 1008;
     const reason = "lease access revoked";
     const adminGrants = await this.currentAdminGrantValidation();
+    for (const agent of this.webVNCAgents.get(lease.id)?.values() ?? []) {
+      const attachment = this.bridgeAttachment(agent);
+      if (
+        attachment?.kind !== "webvnc-agent" ||
+        !completeBridgePrincipal(attachment) ||
+        this.leaseManagerAuthorized(lease, withCurrentAdminGrant(attachment, adminGrants))
+      ) {
+        continue;
+      }
+      this.clearWebVNCAgent(lease.id, attachment.id, agent);
+      closeSocket(agent, code, reason);
+    }
+    const codeAgent = this.codeAgents.get(lease.id);
+    const codeAgentAttachment = codeAgent ? this.bridgeAttachment(codeAgent) : undefined;
+    if (
+      codeAgent &&
+      codeAgentAttachment?.kind === "code-agent" &&
+      completeBridgePrincipal(codeAgentAttachment) &&
+      !this.leaseManagerAuthorized(lease, withCurrentAdminGrant(codeAgentAttachment, adminGrants))
+    ) {
+      this.clearCodeAgent(lease.id, codeAgent);
+      closeSocket(codeAgent, code, reason);
+    }
     for (const viewer of this.openWebVNCViewers(lease.id)) {
       if (this.leaseViewerAuthorized(lease, withCurrentAdminGrant(viewer, adminGrants))) {
         continue;
@@ -6721,7 +6837,7 @@ export class FleetCoordinator {
       if (consumed.status === "not_found") {
         return notFound();
       }
-      const { lease } = consumed;
+      const { lease, ticket } = consumed;
       const error = webVNCLeaseError(lease);
       if (error) {
         return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
@@ -6734,6 +6850,7 @@ export class FleetCoordinator {
       this.trackWebVNCAgent(lease.id, agentID, agent, capabilities);
       this.recordWebVNCEvent(lease.id, "bridge_connected");
       this.acceptBridgeWebSocket(agent, {
+        ...leaseBridgeTicketPrincipal(ticket),
         kind: "webvnc-agent",
         leaseID: lease.id,
         id: agentID,
@@ -7863,8 +7980,10 @@ export class FleetCoordinator {
         { status: 403 },
       );
     }
-    const agentSocket = this.webVNCAgents.get(lease.id)?.get(viewer.agentID);
-    if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
+    const agentSocket = await this.currentBridgeRecipient(
+      this.webVNCAgents.get(lease.id)?.get(viewer.agentID),
+    );
+    if (!agentSocket) {
       return json(
         { error: "webvnc_bridge_missing", message: "No WebVNC backend is available yet." },
         { status: 409 },
@@ -7946,7 +8065,7 @@ export class FleetCoordinator {
       if (consumed.status === "not_found") {
         return notFound();
       }
-      const { lease } = consumed;
+      const { lease, ticket } = consumed;
       const error = codeLeaseError(lease);
       if (error) {
         return json({ error: "code_unavailable", message: error }, { status: 409 });
@@ -7957,7 +8076,11 @@ export class FleetCoordinator {
       closeSocket(this.codeAgents.get(lease.id), 1012, "replaced by a newer code bridge");
       this.clearCodeLease(lease.id);
       this.codeAgents.set(lease.id, agent);
-      this.acceptBridgeWebSocket(agent, { kind: "code-agent", leaseID: lease.id });
+      this.acceptBridgeWebSocket(agent, {
+        ...leaseBridgeTicketPrincipal(ticket),
+        kind: "code-agent",
+        leaseID: lease.id,
+      });
       return upgrade.response;
     });
   }
@@ -8012,7 +8135,7 @@ export class FleetCoordinator {
     if (error) {
       return portalError("Code unavailable", error, 409);
     }
-    const agent = this.codeAgents.get(lease.id);
+    const agent = await this.currentBridgeRecipient(this.codeAgents.get(lease.id));
     if (request.method.toUpperCase() === "GET" && _rest.length === 1 && _rest[0] === "health") {
       return this.codePortalHealth(lease, agent);
     }
@@ -8608,6 +8731,27 @@ export class FleetCoordinator {
       this.clearCodeViewer(attachment.leaseID, id, viewer, 1008, "portal session ended");
       closeSocket(viewer, 1008, "portal session ended");
     }
+    for (const [leaseID, agents] of this.webVNCAgents) {
+      for (const [id, agent] of agents) {
+        const attachment = this.bridgeAttachment(agent);
+        if (
+          attachment?.kind !== "webvnc-agent" ||
+          attachment.portalSessionHash !== portalSessionHash
+        ) {
+          continue;
+        }
+        this.clearWebVNCAgent(leaseID, id, agent);
+        closeSocket(agent, 1008, "portal session ended");
+      }
+    }
+    for (const [leaseID, agent] of this.codeAgents) {
+      const attachment = this.bridgeAttachment(agent);
+      if (attachment?.kind !== "code-agent" || attachment.portalSessionHash !== portalSessionHash) {
+        continue;
+      }
+      this.clearCodeAgent(leaseID, agent);
+      closeSocket(agent, 1008, "portal session ended");
+    }
     const egressSessions = new Map<string, { leaseID: string; sessionID: string }>();
     for (const socket of [...this.egressHosts.values(), ...this.egressClients.values()]) {
       const attachment = this.bridgeAttachment(socket);
@@ -8759,7 +8903,7 @@ export class FleetCoordinator {
           { status: 401 },
         );
       }
-      const agent = this.claimIdleWebVNCAgent(lease.id);
+      const agent = await this.claimIdleWebVNCAgent(lease.id);
       if (!agent) {
         const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
         const command = canManage ? webVNCBridgeCommand(lease) : "";
@@ -8892,14 +9036,19 @@ export class FleetCoordinator {
     return this.openWebVNCViewers(leaseID).find((viewer) => viewer.agentID === agentID);
   }
 
-  private claimIdleWebVNCAgent(leaseID: string): { id: string; socket: WebSocket } | undefined {
+  private async claimIdleWebVNCAgent(
+    leaseID: string,
+  ): Promise<{ id: string; socket: WebSocket } | undefined> {
     const viewers = this.openWebVNCViewers(leaseID);
-    for (const [id, socket] of this.openWebVNCAgents(leaseID)) {
-      if (!viewers.some((viewer) => viewer.agentID === id)) {
-        return { id, socket };
-      }
-    }
-    return undefined;
+    const candidates = this.openWebVNCAgents(leaseID).filter(
+      ([id]) => !viewers.some((viewer) => viewer.agentID === id),
+    );
+    const current = await Promise.all(
+      candidates.map(async ([id, socket]) =>
+        (await this.currentBridgeRecipient(socket)) ? { id, socket } : undefined,
+      ),
+    );
+    return current.find((agent) => agent !== undefined);
   }
 
   private activeWebVNCControllerID(leaseID: string): string {
@@ -15105,7 +15254,9 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
         ? attachment
         : undefined;
     case "webvnc-agent":
-      return typeof attachment.leaseID === "string" && validWebVNCSessionID(attachment.id)
+      return typeof attachment.leaseID === "string" &&
+        validWebVNCSessionID(attachment.id) &&
+        validOptionalBridgePrincipal(attachment)
         ? {
             ...attachment,
             capabilities:
@@ -15113,7 +15264,9 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
           }
         : undefined;
     case "code-agent":
-      return typeof attachment.leaseID === "string" ? attachment : undefined;
+      return typeof attachment.leaseID === "string" && validOptionalBridgePrincipal(attachment)
+        ? attachment
+        : undefined;
     case "code-viewer":
       const serializedCodeViewer = attachment as Omit<typeof attachment, "auth"> & {
         auth?: AuthContext["auth"];
@@ -15194,13 +15347,21 @@ function completeBridgePrincipal(value: {
   );
 }
 
-function revocableUserBridge(
-  attachment: BridgeAttachment,
-): attachment is Extract<
+function revocableUserBridge(attachment: BridgeAttachment): attachment is Extract<
   BridgeAttachment,
-  { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+  {
+    kind:
+      | "webvnc-agent"
+      | "webvnc-viewer"
+      | "code-agent"
+      | "code-viewer"
+      | "egress-host"
+      | "egress-client";
+  }
 > {
   return (
+    ((attachment.kind === "webvnc-agent" || attachment.kind === "code-agent") &&
+      completeBridgePrincipal(attachment)) ||
     attachment.kind === "webvnc-viewer" ||
     attachment.kind === "code-viewer" ||
     attachment.kind === "egress-host" ||
