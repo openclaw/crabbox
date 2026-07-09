@@ -89,10 +89,15 @@ func (testExternalProvider) Name() string      { return "external" }
 func (testExternalProvider) Aliases() []string { return nil }
 func (testExternalProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        "external",
-		Family:      "external",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
+		Name:   "external",
+		Family: "external",
+		Kind:   ProviderKindSSHLease,
+		Targets: []TargetSpec{
+			{OS: targetLinux},
+			{OS: targetMacOS},
+			{OS: targetWindows, WindowsMode: windowsModeNormal},
+			{OS: targetWindows, WindowsMode: windowsModeWSL2},
+		},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode},
 		Coordinator: CoordinatorNever,
 	}

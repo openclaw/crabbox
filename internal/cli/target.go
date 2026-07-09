@@ -148,13 +148,14 @@ func validateProviderTarget(cfg Config) error {
 		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
 	}
 	if machineTarget && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
-		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vm" && provider.Name() != "aws-lambda-microvm" {
-			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-vm, or provider=aws-lambda-microvm")
+		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vm" && provider.Name() != "aws-lambda-microvm" && provider.Name() != "external" {
+			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-vm, provider=aws-lambda-microvm, or provider=external")
 		}
 		if cfg.TargetOS != targetLinux &&
 			!(provider.Name() == "azure" && cfg.TargetOS == targetWindows) &&
-			!(provider.Name() == "tart" && cfg.TargetOS == targetMacOS) {
-			return exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, or provider=tart target=macos only")
+			!(provider.Name() == "tart" && cfg.TargetOS == targetMacOS) &&
+			!(provider.Name() == "external" && (cfg.TargetOS == targetMacOS || cfg.TargetOS == targetWindows)) {
+			return exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, provider=tart target=macos, or provider=external target=macos/windows only")
 		}
 		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
 			return exit(2, "provider=azure target=windows architecture=arm64 supports windows.mode=normal only; windows.mode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support")

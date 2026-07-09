@@ -123,9 +123,7 @@ browser URLs, and the handoff file. The WebSocket relay requires the same token
 as a per-session subprotocol. The handoff is removed when the bridge exits.
 
 The bridge opens a small warm pool of backend sessions (4 slots for Linux and
-Windows targets, 1 for macOS). macOS uses a single backend session so Screen
-Sharing credential failures surface through one bridge attempt instead of
-parallel VNC logins. That pool is what the `slots=` field in
+Windows targets, 2 for macOS). That pool is what the `slots=` field in
 `webvnc status` reports, and it lets multiple portal viewers join the same
 lease: one viewer is the controller, later viewers join in observer mode, and
 any viewer can press **take over** to become the controller. The prior

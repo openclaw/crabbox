@@ -393,7 +393,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 }
 
 const defaultWebVNCBridgePoolSize = 4
-const macOSWebVNCBridgePoolSize = 1
+const macOSWebVNCBridgePoolSize = 2
 
 func webVNCBridgePoolSizeForTarget(target SSHTarget) int {
 	if target.TargetOS == targetMacOS {

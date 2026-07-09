@@ -160,6 +160,28 @@ func TestValidateProviderTargetAllowsTartMacOSARM64(t *testing.T) {
 	}
 }
 
+func TestValidateProviderTargetAllowsExternalARM64Targets(t *testing.T) {
+	for _, target := range []struct {
+		os   string
+		mode string
+	}{
+		{os: targetLinux, mode: windowsModeNormal},
+		{os: targetMacOS, mode: windowsModeNormal},
+		{os: targetWindows, mode: windowsModeNormal},
+		{os: targetWindows, mode: windowsModeWSL2},
+	} {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		cfg.TargetOS = target.os
+		cfg.WindowsMode = target.mode
+		cfg.Architecture = ArchitectureARM64
+		cfg.architectureExplicit = true
+		if err := validateProviderTarget(cfg); err != nil {
+			t.Errorf("target=%s mode=%s err=%v", target.os, target.mode, err)
+		}
+	}
+}
+
 func TestValidateProviderTargetRejectsTartExplicitAMD64(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "tart"
