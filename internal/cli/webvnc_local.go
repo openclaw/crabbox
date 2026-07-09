@@ -584,6 +584,9 @@ func forceRFBARDAuthenticationWithTimeout(ctx context.Context, browser, server n
 	if selected[0] != localWebVNCSecurityTypeNone {
 		return fmt.Errorf("RFB browser did not select no authentication")
 	}
+	if major == 3 && minor == 7 {
+		return nil
+	}
 	if _, err := browser.Write([]byte{0, 0, 0, 0}); err != nil {
 		return fmt.Errorf("write RFB no-auth security result: %w", err)
 	}

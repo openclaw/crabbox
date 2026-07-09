@@ -406,6 +406,85 @@ func TestForceRFBARDAuthenticationAdaptsRFB33VNCToNoAuthBrowser(t *testing.T) {
 	}
 }
 
+func TestForceRFBARDAuthenticationOmitsNoneResultForRFB37Browser(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	browser, bridgeBrowser := net.Pipe()
+	server, bridgeServer := net.Pipe()
+	defer browser.Close()
+	defer bridgeBrowser.Close()
+	defer server.Close()
+	defer bridgeServer.Close()
+
+	negotiation := make(chan error, 1)
+	go func() {
+		negotiation <- forceRFBARDAuthentication(ctx, bridgeBrowser, bridgeServer, rfbCredentials{Password: "example-pass"})
+	}()
+	serverErr := make(chan error, 1)
+	go func() {
+		if _, err := server.Write([]byte("RFB 003.007\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		version := make([]byte, 12)
+		if _, err := io.ReadFull(server, version); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := server.Write([]byte{1, rfbSecurityVNC}); err != nil {
+			serverErr <- err
+			return
+		}
+		selected := []byte{0}
+		if _, err := io.ReadFull(server, selected); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := server.Write([]byte("0123456789abcdef")); err != nil {
+			serverErr <- err
+			return
+		}
+		response := make([]byte, 16)
+		if _, err := io.ReadFull(server, response); err != nil {
+			serverErr <- err
+			return
+		}
+		_, err := server.Write([]byte{0, 0, 0, 0})
+		serverErr <- err
+	}()
+
+	version := make([]byte, 12)
+	if _, err := io.ReadFull(browser, version); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := browser.Write([]byte("RFB 003.007\n")); err != nil {
+		t.Fatal(err)
+	}
+	filtered := make([]byte, 2)
+	if _, err := io.ReadFull(browser, filtered); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(filtered, []byte{1, localWebVNCSecurityTypeNone}) {
+		t.Fatalf("filtered security types=%v", filtered)
+	}
+	if _, err := browser.Write([]byte{localWebVNCSecurityTypeNone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-negotiation; err != nil {
+		t.Fatal(err)
+	}
+	if err := browser.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	unexpected := []byte{0}
+	if _, err := browser.Read(unexpected); err == nil {
+		t.Fatalf("unexpected RFB 3.8 SecurityResult byte=%v", unexpected)
+	}
+}
+
 func TestRelayWebSocketVNCWithARDAuthenticationTimeoutIsConfigurable(t *testing.T) {
 	t.Run("short timeout", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

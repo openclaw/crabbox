@@ -182,15 +182,15 @@ func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, cred
 	if _, err := io.ReadFull(conn, version); err != nil {
 		return fmt.Errorf("read RFB version: %w", err)
 	}
-	major, minor, err := parseRFBVersion(version)
-	if err != nil {
+	if err := validateRFBServerVersion(version); err != nil {
 		return fmt.Errorf("unexpected RFB version %q", string(version))
 	}
+	major, minor, parseErr := parseRFBVersion(version)
 	clientVersion := []byte("RFB 003.008\n")
-	legacyVersion := major == 3 && minor < 7
+	legacyVersion := parseErr == nil && major == 3 && minor < 7
 	if legacyVersion {
 		clientVersion = []byte("RFB 003.003\n")
-	} else if major == 3 && minor == 7 {
+	} else if parseErr == nil && major == 3 && minor == 7 {
 		clientVersion = []byte("RFB 003.007\n")
 	}
 	if _, err := conn.Write(clientVersion); err != nil {
@@ -216,11 +216,16 @@ func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, cred
 		}
 		securityType = byte(selected)
 	} else {
-		securityType, err = negotiateRFBSecurityType(conn, creds)
+		securityType, err := negotiateRFBSecurityType(conn, creds)
 		if err != nil {
 			return err
 		}
+		return preflightRFBAuthenticationForSecurityType(conn, creds, securityType)
 	}
+	return preflightRFBAuthenticationForSecurityType(conn, creds, securityType)
+}
+
+func preflightRFBAuthenticationForSecurityType(conn net.Conn, creds rfbCredentials, securityType byte) error {
 	switch securityType {
 	case rfbSecurityNone:
 		return fmt.Errorf("RFB server did not require credential authentication")

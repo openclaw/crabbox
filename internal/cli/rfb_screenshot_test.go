@@ -196,6 +196,63 @@ func TestPreflightRFBAuthenticationSupportsRFB33VNC(t *testing.T) {
 	}
 }
 
+func TestPreflightRFBAuthenticationSupportsAliasBanner(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	const password = "example-pass"
+	serverErr := make(chan error, 1)
+	go func() {
+		if _, err := server.Write([]byte("RFB 004.000\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		version := make([]byte, 12)
+		if _, err := io.ReadFull(server, version); err != nil {
+			serverErr <- err
+			return
+		}
+		if string(version) != "RFB 003.008\n" {
+			serverErr <- fmt.Errorf("client version=%q", version)
+			return
+		}
+		if _, err := server.Write([]byte{1, rfbSecurityVNC}); err != nil {
+			serverErr <- err
+			return
+		}
+		selected := []byte{0}
+		if _, err := io.ReadFull(server, selected); err != nil {
+			serverErr <- err
+			return
+		}
+		challenge := []byte("0123456789abcdef")
+		if _, err := server.Write(challenge); err != nil {
+			serverErr <- err
+			return
+		}
+		response := make([]byte, len(challenge))
+		if _, err := io.ReadFull(server, response); err != nil {
+			serverErr <- err
+			return
+		}
+		expected, err := directSSHWebVNCChallengeResponse(password, challenge)
+		if err != nil || !bytes.Equal(response, expected) {
+			serverErr <- fmt.Errorf("unexpected VNC challenge response: %v", err)
+			return
+		}
+		_, err = server.Write([]byte{0, 0, 0, 0})
+		serverErr <- err
+	}()
+
+	if err := preflightRFBAuthenticationFromConn(context.Background(), client, rfbCredentials{Password: password}); err != nil {
+		t.Fatalf("preflight alias-banner authentication: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCaptureRFBFrameReadsNoneAuthSecurityResult(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
