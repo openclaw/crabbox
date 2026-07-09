@@ -3573,15 +3573,59 @@ func TestExternalDesktopCredentialsEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
 	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", "screen-user")
-	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "EXTERNAL_TEST_DESKTOP_PASSWORD")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.External.Connection.Desktop.Username != "screen-user" {
 		t.Fatalf("desktop username=%q", cfg.External.Connection.Desktop.Username)
 	}
-	if cfg.External.Connection.Desktop.PasswordEnv != "CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD" {
+	if cfg.External.Connection.Desktop.PasswordEnv != "EXTERNAL_TEST_DESKTOP_PASSWORD" {
 		t.Fatalf("desktop password env=%q", cfg.External.Connection.Desktop.PasswordEnv)
+	}
+}
+
+func TestExternalDesktopReservedEnvironmentCannotSelfRedirect(t *testing.T) {
+	const secret = "unique-operator-screen-sharing-secret"
+	for _, reserved := range []string{
+		"CRABBOX_EXTERNAL_DESKTOP_USERNAME",
+		"CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV",
+		"GH_TOKEN",
+		"GITHUB_TOKEN",
+		"LD_PRELOAD",
+		"LD_AUDIT",
+		"DYLD_INSERT_LIBRARIES",
+		"dyld_library_path",
+		"MallocDebugReport",
+		"malloc_check_",
+		"MALLOC_STACK_LOGGING",
+		"GODEBUG",
+		"GOGC",
+		"GOMEMLIMIT",
+		"GOMAXPROCS",
+		"GOTRACEBACK",
+	} {
+		t.Run(reserved, func(t *testing.T) {
+			cfg := Config{Provider: "external", TargetOS: targetMacOS}
+			cfg.External.Connection.Desktop.PasswordEnv = reserved
+			t.Setenv(reserved, secret)
+			ApplyExternalDesktopEnvironmentOverrides(&cfg)
+			if cfg.External.Connection.Desktop.Username == secret || cfg.External.Connection.Desktop.PasswordEnv == secret {
+				t.Fatalf("reserved environment copied secret into config: %#v", cfg.External.Connection.Desktop)
+			}
+			err := ValidateExternalDesktopPasswordEnvironmentName(cfg.External.Connection.Desktop.PasswordEnv)
+			if err == nil || !strings.Contains(err.Error(), "reserved") || strings.Contains(err.Error(), secret) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestLegacyExternalDesktopPasswordEnvironmentRemainsSupported(t *testing.T) {
+	for _, name := range []string{legacyExternalDesktopPasswordEnvironment, strings.ToLower(legacyExternalDesktopPasswordEnvironment)} {
+		if err := ValidateExternalDesktopPasswordEnvironmentName(name); err != nil {
+			t.Fatalf("legacy environment %q rejected: %v", name, err)
+		}
 	}
 }
 

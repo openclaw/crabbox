@@ -80,10 +80,10 @@ func captureDesktopScreenshot(ctx context.Context, cfg Config, target SSHTarget,
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return exit(2, "create screenshot directory: %v", err)
 	}
-	if isLocalMacTarget(target) {
-		return captureLocalMacScreenshot(ctx, outputPath)
-	}
-	if target.TargetOS == targetMacOS {
+	switch desktopScreenshotCapturePathFor(cfg, target, isLocalMacTarget(target)) {
+	case desktopScreenshotCaptureLocalMac:
+		return captureLocalMacScreenshot(ctx, target, outputPath)
+	case desktopScreenshotCaptureRemoteMacVNC:
 		return captureRemoteMacVNCScreenshot(ctx, cfg, target, outputPath)
 	}
 	file, err := os.Create(outputPath)
@@ -104,11 +104,34 @@ func captureDesktopScreenshot(ctx context.Context, cfg Config, target SSHTarget,
 	return nil
 }
 
-func captureLocalMacScreenshot(ctx context.Context, outputPath string) error {
+type desktopScreenshotCapturePath uint8
+
+const (
+	desktopScreenshotCaptureRemoteSSH desktopScreenshotCapturePath = iota
+	desktopScreenshotCaptureLocalMac
+	desktopScreenshotCaptureRemoteMacVNC
+)
+
+func desktopScreenshotCapturePathFor(cfg Config, target SSHTarget, localMacTarget bool) desktopScreenshotCapturePath {
+	if target.TargetOS != targetMacOS {
+		return desktopScreenshotCaptureRemoteSSH
+	}
+	providerName := normalizeProviderName(cfg.Provider)
+	if provider, err := ProviderFor(cfg.Provider); err == nil {
+		providerName = normalizeProviderName(provider.Name())
+	}
+	if localMacTarget && providerName != "external" && providerName != "exec-provider" {
+		return desktopScreenshotCaptureLocalMac
+	}
+	return desktopScreenshotCaptureRemoteMacVNC
+}
+
+func captureLocalMacScreenshot(ctx context.Context, target SSHTarget, outputPath string) error {
 	if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
 		return exit(2, "prepare screenshot %s: %v", outputPath, err)
 	}
 	cmd := exec.CommandContext(ctx, "screencapture", "-x", "-t", "png", outputPath)
+	applyTargetChildEnvironment(cmd, target)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -128,7 +151,7 @@ func runSSHToWriter(ctx context.Context, target SSHTarget, remote string, stdout
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
-		cmd := exec.CommandContext(ctx, "ssh", sshArgs(probe, remote)...)
+		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
 		cmd.Stdout = stdout
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr

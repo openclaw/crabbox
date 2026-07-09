@@ -5,17 +5,16 @@ package cli
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -148,7 +147,7 @@ func TestForceRFBVNCAuthenticationFiltersServerPreference(t *testing.T) {
 	if _, err := io.ReadFull(browser, version); err != nil {
 		t.Fatal(err)
 	}
-	if string(version) != "RFB 003.889\n" {
+	if string(version) != "RFB 003.008\n" {
 		t.Fatalf("server version=%q", version)
 	}
 	if _, err := browser.Write([]byte("RFB 003.008\n")); err != nil {
@@ -163,6 +162,66 @@ func TestForceRFBVNCAuthenticationFiltersServerPreference(t *testing.T) {
 	}
 	if _, err := browser.Write([]byte{localWebVNCSecurityTypePassword}); err != nil {
 		t.Fatal(err)
+	}
+	if err := <-serverResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-negotiation; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestForceRFBVNCAuthenticationFallsBackToRFB33ForUnknownServerVersion(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	browser, bridgeBrowser := net.Pipe()
+	server, bridgeServer := net.Pipe()
+	defer browser.Close()
+	defer bridgeBrowser.Close()
+	defer server.Close()
+	defer bridgeServer.Close()
+
+	negotiation := make(chan error, 1)
+	go func() {
+		negotiation <- forceRFBVNCAuthentication(ctx, bridgeBrowser, bridgeServer)
+	}()
+	serverResult := make(chan error, 1)
+	go func() {
+		if _, err := server.Write([]byte("RFB 003.009\n")); err != nil {
+			serverResult <- err
+			return
+		}
+		version := make([]byte, 12)
+		if _, err := io.ReadFull(server, version); err != nil {
+			serverResult <- err
+			return
+		}
+		if string(version) != "RFB 003.003\n" {
+			serverResult <- fmt.Errorf("browser version=%q", version)
+			return
+		}
+		security := make([]byte, 4)
+		binary.BigEndian.PutUint32(security, uint32(localWebVNCSecurityTypePassword))
+		_, err := server.Write(security)
+		serverResult <- err
+	}()
+
+	version := make([]byte, 12)
+	if _, err := io.ReadFull(browser, version); err != nil {
+		t.Fatal(err)
+	}
+	if string(version) != "RFB 003.003\n" {
+		t.Fatalf("server version=%q", version)
+	}
+	if _, err := browser.Write([]byte("RFB 003.003\n")); err != nil {
+		t.Fatal(err)
+	}
+	security := make([]byte, 4)
+	if _, err := io.ReadFull(browser, security); err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.BigEndian.Uint32(security); got != uint32(localWebVNCSecurityTypePassword) {
+		t.Fatalf("security type=%d", got)
 	}
 	if err := <-serverResult; err != nil {
 		t.Fatal(err)
@@ -198,7 +257,7 @@ func TestForceRFBARDAuthenticationAdaptsToNoAuthBrowser(t *testing.T) {
 	if _, err := io.ReadFull(browser, version); err != nil {
 		t.Fatal(err)
 	}
-	if string(version) != "RFB 003.889\n" {
+	if string(version) != "RFB 003.008\n" {
 		t.Fatalf("server version=%q", version)
 	}
 	if _, err := browser.Write([]byte("RFB 003.008\n")); err != nil {
@@ -514,7 +573,7 @@ func TestRelayWebSocketVNCWithARDAuthenticationTimeoutIsConfigurable(t *testing.
 		if _, err := io.ReadFull(viewer, version); err != nil {
 			t.Fatal(err)
 		}
-		if string(version) != "RFB 003.889\n" {
+		if string(version) != "RFB 003.008\n" {
 			t.Fatalf("server version=%q", version)
 		}
 		select {
@@ -562,7 +621,7 @@ func TestRelayWebSocketVNCWithARDAuthenticationTimeoutIsConfigurable(t *testing.
 		if _, err := io.ReadFull(viewer, version); err != nil {
 			t.Fatal(err)
 		}
-		if string(version) != "RFB 003.889\n" {
+		if string(version) != "RFB 003.008\n" {
 			t.Fatalf("server version=%q", version)
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -596,6 +655,44 @@ func TestRelayWebSocketVNCWithARDAuthenticationTimeoutIsConfigurable(t *testing.
 	})
 }
 
+func TestRelayWebSocketVNCWithMacOSAuthenticationUsesVNCFailureDiagnostics(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	viewerWS, bridgeWS := testWebSocketPair(t, ctx)
+	defer viewerWS.Close(websocket.StatusNormalClosure, "")
+	defer bridgeWS.Close(websocket.StatusNormalClosure, "")
+	server, bridgeTCP := net.Pipe()
+	defer server.Close()
+	defer bridgeTCP.Close()
+
+	relayResult := make(chan error, 1)
+	go func() {
+		relayResult <- relayWebSocketVNCWithMacOSAuthenticationWithTimeout(
+			ctx,
+			bridgeWS,
+			bridgeTCP,
+			rfbCredentials{Password: "example-pass"},
+			localWebVNCAuthVNC,
+			time.Second,
+		)
+	}()
+	if _, err := server.Write([]byte("RFB 006.000\n")); err != nil {
+		t.Fatal(err)
+	}
+	_, _, closeErr := viewerWS.Read(ctx)
+	if status := websocket.CloseStatus(closeErr); status != websocket.StatusPolicyViolation {
+		t.Fatalf("close status=%v error=%v", status, closeErr)
+	}
+	if !strings.Contains(closeErr.Error(), "VNC authentication negotiation failed") || strings.Contains(closeErr.Error(), "ARD authentication") {
+		t.Fatalf("close error=%v", closeErr)
+	}
+
+	err := <-relayResult
+	if err == nil || !strings.Contains(err.Error(), "VNC authentication negotiation failed") || strings.Contains(err.Error(), "ARD authentication") {
+		t.Fatalf("relay error=%v", err)
+	}
+}
+
 func testWebSocketPair(t *testing.T, ctx context.Context) (*websocket.Conn, *websocket.Conn) {
 	t.Helper()
 	accepted := make(chan *websocket.Conn, 1)
@@ -625,64 +722,6 @@ func testWebSocketPair(t *testing.T, ctx context.Context) (*websocket.Conn, *web
 	return nil, nil
 }
 
-func serveTestARDHandshakeUntilSecurityResult(conn net.Conn, username, password string) error {
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	if _, err := conn.Write([]byte("RFB 003.889\n")); err != nil {
-		return err
-	}
-	clientVersion := make([]byte, 12)
-	if _, err := io.ReadFull(conn, clientVersion); err != nil {
-		return err
-	}
-	if !bytes.Equal(clientVersion, []byte("RFB 003.008\n")) {
-		return fmt.Errorf("client version=%q", clientVersion)
-	}
-	if _, err := conn.Write([]byte{1, rfbSecurityARD}); err != nil {
-		return err
-	}
-	security := []byte{0}
-	if _, err := io.ReadFull(conn, security); err != nil {
-		return err
-	}
-	if security[0] != rfbSecurityARD {
-		return fmt.Errorf("security type=%d", security[0])
-	}
-
-	keyLength := 8
-	g := big.NewInt(5)
-	p := big.NewInt(23)
-	serverPrivate := big.NewInt(6)
-	serverPublic := new(big.Int).Exp(g, serverPrivate, p)
-	params := make([]byte, 4+keyLength*2)
-	binary.BigEndian.PutUint16(params[0:2], uint16(g.Uint64()))
-	binary.BigEndian.PutUint16(params[2:4], uint16(keyLength))
-	copy(params[4:4+keyLength], leftPadBigInt(p, keyLength))
-	copy(params[4+keyLength:], leftPadBigInt(serverPublic, keyLength))
-	if _, err := conn.Write(params); err != nil {
-		return err
-	}
-
-	response := make([]byte, 128+keyLength)
-	if _, err := io.ReadFull(conn, response); err != nil {
-		return err
-	}
-	clientPublic := new(big.Int).SetBytes(response[128:])
-	shared := new(big.Int).Exp(clientPublic, serverPrivate, p)
-	key := md5.Sum(leftPadBigInt(shared, keyLength))
-	credentials, err := aesECBDecryptForTest(key[:], response[:128])
-	if err != nil {
-		return err
-	}
-	if got := string(credentials[:bytes.IndexByte(credentials[:64], 0)]); got != username {
-		return fmt.Errorf("username=%q", got)
-	}
-	if got := string(credentials[64 : 64+bytes.IndexByte(credentials[64:], 0)]); got != password {
-		return fmt.Errorf("password mismatch")
-	}
-	_, err = conn.Write([]byte{0, 0, 0, 0})
-	return err
-}
-
 func TestValidateRFBServerVersionSupportsNoVNCAliases(t *testing.T) {
 	for _, version := range []string{
 		"RFB 003.889\n",
@@ -698,6 +737,31 @@ func TestValidateRFBServerVersionSupportsNoVNCAliases(t *testing.T) {
 	}
 	if err := validateRFBServerVersion([]byte("RFB 006.000\n")); err == nil {
 		t.Fatal("unsupported server version was accepted")
+	}
+}
+
+func TestRFBClientVersionForServer(t *testing.T) {
+	for _, test := range []struct {
+		server string
+		want   string
+	}{
+		{server: "RFB 003.003\n", want: "RFB 003.003\n"},
+		{server: "RFB 003.006\n", want: "RFB 003.003\n"},
+		{server: "RFB 003.007\n", want: "RFB 003.007\n"},
+		{server: "RFB 003.008\n", want: "RFB 003.008\n"},
+		{server: "RFB 003.009\n", want: "RFB 003.003\n"},
+		{server: "RFB 003.889\n", want: "RFB 003.008\n"},
+		{server: "RFB 004.000\n", want: "RFB 003.008\n"},
+	} {
+		t.Run(test.server[4:11], func(t *testing.T) {
+			got, err := rfbClientVersionForServer([]byte(test.server))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != test.want {
+				t.Fatalf("client version=%q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -745,7 +809,7 @@ func TestForceRFBVNCAuthenticationStopsAtDeadlineWhenBrowserStallsAfterServerVer
 	if _, err := io.ReadFull(browser, version); err != nil {
 		t.Fatal(err)
 	}
-	if string(version) != "RFB 003.889\n" {
+	if string(version) != "RFB 003.008\n" {
 		t.Fatalf("server version=%q", version)
 	}
 
@@ -1125,6 +1189,31 @@ func TestServeLocalWebVNCBridgeRelaysWithoutExposingCredentials(t *testing.T) {
 	if protocol == "" || strings.Contains(text, protocol) {
 		t.Fatalf("protocol=%q output=%q", protocol, text)
 	}
+	token := strings.TrimPrefix(protocol, "crabbox.")
+	credentialRequest, err := http.NewRequest(
+		http.MethodPost,
+		"http://127.0.0.1:"+webPort+"/credentials",
+		strings.NewReader(url.Values{"token": {token}}.Encode()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	credentialRequest.Header.Set("Origin", "null")
+	credentialResponse, err := http.DefaultClient.Do(credentialRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialBody, readErr := io.ReadAll(credentialResponse.Body)
+	credentialResponse.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if credentialResponse.StatusCode != http.StatusOK ||
+		!bytes.Contains(credentialBody, []byte(`"username":"admin"`)) ||
+		!bytes.Contains(credentialBody, []byte(`"password":"super-secret"`)) {
+		t.Fatalf("credentials status=%d body=%s", credentialResponse.StatusCode, credentialBody)
+	}
 
 	ws, _, err := websocket.Dial(context.Background(), "ws://127.0.0.1:"+webPort+"/websockify", &websocket.DialOptions{
 		HTTPHeader:   http.Header{"Origin": []string{"null"}},
@@ -1151,6 +1240,162 @@ func TestServeLocalWebVNCBridgeRelaysWithoutExposingCredentials(t *testing.T) {
 	}
 	if _, err := os.Stat(parsed.Path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("handoff file remained after bridge exit: %v", err)
+	}
+}
+
+func TestServeLocalWebVNCBridgeScrubsPassedTargetEnvironmentFromViewer(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	webPort := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	name, _ := openURLCommand("https://example.test")
+	if name == "" {
+		listener.Close()
+		t.Skip("local URL opening unsupported")
+	}
+	dir := t.TempDir()
+	result := filepath.Join(dir, "viewer-environment")
+	opener := filepath.Join(dir, name)
+	script := "#!/bin/sh\nif [ \"${TEST_EXTERNAL_DESKTOP_PASSWORD+x}\" = x ]; then printf leaked > \"$CRABBOX_TEST_VIEWER_RESULT\"; else printf scrubbed > \"$CRABBOX_TEST_VIEWER_RESULT\"; fi\n"
+	if err := os.WriteFile(opener, []byte(script), 0o755); err != nil {
+		listener.Close()
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TEST_VIEWER_RESULT", result)
+	t.Setenv("TEST_EXTERNAL_DESKTOP_PASSWORD", "must-not-reach-viewer")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	output := newNotifyBuffer("webvnc:")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (App{Stdout: output, Stderr: io.Discard}).serveLocalWebVNCBridge(
+			ctx,
+			listener,
+			webPort,
+			rfbCredentials{Password: "viewer-password"},
+			true,
+			localWebVNCAuthVNC,
+			func(context.Context) (net.Conn, error) {
+				return nil, errors.New("unexpected viewer VNC dial")
+			},
+			nil,
+			"TEST_EXTERNAL_DESKTOP_PASSWORD",
+		)
+	}()
+
+	select {
+	case <-output.ready:
+	case err := <-errCh:
+		t.Fatalf("bridge exited before viewer launch: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for WebVNC viewer launch")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(result); err == nil {
+			if string(data) != "scrubbed" {
+				t.Fatalf("viewer environment=%q", data)
+			}
+			cancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("bridge error=%v", err)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-errCh
+	t.Fatal("fake viewer did not report its environment")
+}
+
+func TestServeLocalWebVNCBridgeKeepsARDCredentialsServerSide(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	webPort := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	output := newNotifyBuffer("webvnc:")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (App{Stdout: output, Stderr: io.Discard}).serveLocalWebVNCBridge(
+			ctx,
+			listener,
+			webPort,
+			rfbCredentials{Username: "ard-admin", Password: "ard-super-secret"},
+			false,
+			localWebVNCAuthARD,
+			func(context.Context) (net.Conn, error) {
+				t.Error("ARD credential boundary test unexpectedly dialed VNC")
+				return nil, errors.New("unexpected VNC dial")
+			},
+			nil,
+		)
+	}()
+
+	select {
+	case <-output.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for ARD WebVNC handoff")
+	}
+	handoffURL := strings.TrimSpace(strings.TrimPrefix(output.String(), "webvnc:"))
+	parsed, err := url.Parse(handoffURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(parsed.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"ard-admin",
+		"ard-super-secret",
+		"/credentials",
+		`"credentialsURL"`,
+	} {
+		if bytes.Contains(content, []byte(forbidden)) {
+			t.Fatalf("ARD handoff contains %q", forbidden)
+		}
+	}
+
+	protocol := regexp.MustCompile(`crabbox\.[0-9a-f]{32}`).FindString(string(content))
+	if protocol == "" {
+		t.Fatal("ARD handoff missing session protocol")
+	}
+	credentialRequest, err := http.NewRequest(
+		http.MethodPost,
+		"http://127.0.0.1:"+webPort+"/credentials",
+		strings.NewReader(url.Values{"token": {strings.TrimPrefix(protocol, "crabbox.")}}.Encode()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	credentialRequest.Header.Set("Origin", "null")
+	credentialResponse, err := http.DefaultClient.Do(credentialRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialBody, readErr := io.ReadAll(credentialResponse.Body)
+	credentialResponse.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if credentialResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("ARD credentials status=%d body=%s", credentialResponse.StatusCode, credentialBody)
+	}
+
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("ARD bridge error=%v", err)
+	}
+	if _, err := os.Stat(parsed.Path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ARD handoff file remained after bridge exit: %v", err)
 	}
 }
 

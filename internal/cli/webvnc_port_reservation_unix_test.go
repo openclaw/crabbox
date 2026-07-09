@@ -192,6 +192,49 @@ func TestWebVNCDaemonInheritedTCPListenerAcceptsConnection(t *testing.T) {
 	}
 }
 
+func TestWebVNCDaemonSupervisorForwardsFreshListenerDuplicatePerRestart(t *testing.T) {
+	reservation, err := reserveWebVNCDaemonPort("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservation.release()
+	supervisorFile, err := reservation.tcpListener.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer supervisorFile.Close()
+	descriptor := strconv.FormatUint(uint64(supervisorFile.Fd()), 10)
+	t.Setenv(webVNCDaemonPortReservationEnv, reservation.port)
+	t.Setenv(webVNCDaemonPortReservationFDEnv, descriptor)
+	for restart := 0; restart < 2; restart++ {
+		cmd := exec.Command(os.Args[0], "-test.run=TestWebVNCDaemonInheritedTCPListenerHelper", "--")
+		cmd.Env = append(os.Environ(), webVNCTestInheritedListenerHelperEnv+"=1")
+		cleanup, err := forwardInheritedWebVNCDaemonPortReservation(cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			cleanup()
+			t.Fatal(err)
+		}
+		conn, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", reservation.port), time.Second)
+		if err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			cleanup()
+			t.Fatalf("restart %d dial forwarded listener: %v", restart, err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		data, readErr := io.ReadAll(conn)
+		_ = conn.Close()
+		waitErr := cmd.Wait()
+		cleanup()
+		if readErr != nil || waitErr != nil || string(data) != "accepted" {
+			t.Fatalf("restart %d data=%q read=%v wait=%v", restart, data, readErr, waitErr)
+		}
+	}
+}
+
 func TestWebVNCDaemonInheritedTCPListenerHelper(t *testing.T) {
 	if os.Getenv(webVNCTestInheritedListenerHelperEnv) != "1" {
 		return

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added macOS and Windows targets to the External SSH provider, including source-bound macOS Screen Sharing credentials and one-time WebVNC portal handoff. Thanks @MuduiClaw.
+- Added macOS and Windows targets to the External SSH provider, including source-bound macOS Screen Sharing credentials kept inside the Crabbox ARD relay and one-time browser handoffs for password-authenticated VNC. Thanks @MuduiClaw.
 - Added capability-aware AWS image promotion and lease selection by minimum OS, SDK/runtime versions, browser, WebView2, and desktop support, with fail-before-lease rejection when no promoted image satisfies every requirement.
 - Added provider-neutral Ed25519-signed run receipts through `crabbox run --attest` and integrity verification through `crabbox verify`, with collision-safe signing-key handling and explicit self-signed trust reporting. Thanks @yetval.
 - Documented a provider-neutral hermetic-agent evidence pattern with separate writer contexts, QA arbitration, required proof artifacts, and sync-safe local downloads. Thanks @zozo123.

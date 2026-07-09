@@ -200,6 +200,108 @@ func TestConfirmedAbsentRoutingRemovalRequiresDirectorySyncAndRetriesAfterDeleti
 	}
 }
 
+func TestRemoveExternalRoutingIfUnchangedIgnoresDesktopCredentials(t *testing.T) {
+	setExternalRoutingTestHome(t)
+	const leaseID = "cbx_desktop_runtime_123456"
+	stored := ExternalConfig{
+		Command:  "provider-adapter",
+		WorkRoot: "/work/crabbox",
+		Connection: ExternalConnectionConfig{
+			SSH: ExternalSSHConnectionConfig{User: "runner", Host: "example.internal"},
+			Desktop: ExternalDesktopConfig{
+				Username:    "stored-screen-user",
+				PasswordEnv: "STORED_SCREEN_PASSWORD",
+			},
+		},
+	}
+	SetExternalRoutingTarget(&stored, targetMacOS, windowsModeNormal)
+	path, err := PersistExternalRouting(leaseID, stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Connection.Desktop != stored.Connection.Desktop {
+		t.Fatalf("stored desktop route changed: got=%#v want=%#v", loaded.Connection.Desktop, stored.Connection.Desktop)
+	}
+
+	expected := stored
+	expected.Connection.Desktop = ExternalDesktopConfig{
+		Username:    "runtime-screen-user",
+		PasswordEnv: "RUNTIME_SCREEN_PASSWORD",
+	}
+	if err := RemoveExternalRoutingIfUnchanged(leaseID, expected); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("routing file remains after desktop-only CAS change: %v", err)
+	}
+}
+
+func TestRemoveExternalRoutingIfUnchangedPreservesChangedRoute(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*ExternalConfig)
+	}{
+		{
+			name: "work root",
+			mutate: func(cfg *ExternalConfig) {
+				cfg.WorkRoot = "/replacement/work"
+			},
+		},
+		{
+			name: "target",
+			mutate: func(cfg *ExternalConfig) {
+				SetExternalRoutingTarget(cfg, targetWindows, windowsModeWSL2)
+			},
+		},
+		{
+			name: "provider command",
+			mutate: func(cfg *ExternalConfig) {
+				cfg.Command = "replacement-provider-adapter"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setExternalRoutingTestHome(t)
+			const leaseID = "cbx_changed_route_123456"
+			stored := ExternalConfig{
+				Command:  "provider-adapter",
+				WorkRoot: "/work/crabbox",
+				Connection: ExternalConnectionConfig{
+					Desktop: ExternalDesktopConfig{Username: "stored-user", PasswordEnv: "STORED_PASSWORD"},
+				},
+			}
+			SetExternalRoutingTarget(&stored, targetMacOS, windowsModeNormal)
+			path, err := PersistExternalRouting(leaseID, stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := stored
+			test.mutate(&expected)
+			err = RemoveExternalRoutingIfUnchanged(leaseID, expected)
+			if err == nil || !strings.Contains(err.Error(), "external routing state changed") {
+				t.Fatalf("err=%v", err)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("changed routing state was not preserved: %v", err)
+			}
+			loaded, err := LoadExternalRouting(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Command != stored.Command || loaded.WorkRoot != stored.WorkRoot || loaded.Connection.Desktop != stored.Connection.Desktop {
+				t.Fatalf("stored route mutated after refused CAS cleanup: %#v", loaded)
+			}
+			if targetOS, windowsMode := ExternalRoutingTarget(loaded); targetOS != targetMacOS || windowsMode != windowsModeNormal {
+				t.Fatalf("stored target changed after refused CAS cleanup: target=%s windows-mode=%s", targetOS, windowsMode)
+			}
+		})
+	}
+}
+
 func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 	setExternalRoutingTestHome(t)
 	cfg := ExternalConfig{

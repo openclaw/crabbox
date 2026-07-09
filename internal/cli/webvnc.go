@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,8 @@ import (
 const (
 	webVNCDaemonPortReservationEnv   = "CRABBOX_WEBVNC_PORT_RESERVATION"
 	webVNCDaemonPortReservationFDEnv = "CRABBOX_WEBVNC_PORT_RESERVATION_FD"
+	webVNCDaemonCredentialMaxBytes   = 4 << 10
+	webVNCDaemonCredentialStdinFlag  = "internal-external-desktop-password-stdin"
 )
 
 type webVNCExpectedProviderIdentity struct {
@@ -161,6 +164,8 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(fs.Output(), "  --static-user <user>")
 		fmt.Fprintln(fs.Output(), "  --static-port <port>")
 		fmt.Fprintln(fs.Output(), "  --static-work-root <path>")
+		fmt.Fprintln(fs.Output(), "  --external-desktop-username <user>  macOS Screen Sharing account")
+		fmt.Fprintln(fs.Output(), "  --external-desktop-password-env <name>  macOS Screen Sharing password env name, never its value")
 		fmt.Fprintln(fs.Output(), "  --network auto|tailscale|public")
 		fmt.Fprintln(fs.Output(), "  --local-port <port>")
 		fmt.Fprintln(fs.Output(), "  --open")
@@ -174,6 +179,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	noProviderSideEffects := fs.Bool("no-provider-side-effects", false, "internal: resolve without claiming, touching, or heartbeating the provider")
 	controllerOwnerID := fs.String("controller-owner-id", "", "internal: controller ownership identity")
+	credentialStdin := fs.Bool(webVNCDaemonCredentialStdinFlag, false, "internal: read the external desktop credential from stdin")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	openPortal := fs.Bool("open", false, "open the web portal VNC page")
 	takeControl := fs.Bool("take-control", false, "ask the portal viewer to take keyboard and mouse control after connecting")
@@ -189,6 +195,14 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	expectedIdentityFlags := registerWebVNCExpectedProviderIdentityFlags(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	credentialInput := ""
+	if *credentialStdin {
+		var err error
+		credentialInput, err = readWebVNCDaemonCredentialStdin(a.input())
+		if err != nil {
+			return err
+		}
 	}
 	expectedIdentity, err := expectedIdentityFlags.value(fs)
 	if err != nil {
@@ -216,6 +230,9 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if *preflightOnly && (*daemonStatus || *stopDaemon || *daemon || *background) {
 		return exit(2, "--preflight cannot be combined with webvnc daemon/status/stop")
 	}
+	if *preflightOnly && (*openPortal || *takeControl || flagWasSet(fs, "local-port")) {
+		return exit(2, "--preflight cannot be combined with --open, --take-control, or --local-port")
+	}
 	if *daemonStatus {
 		return a.webVNCDaemonStatus(*id, *controllerOwnerID)
 	}
@@ -235,6 +252,11 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	cfg, _, err = macOSPortalWebVNCConfigForLease(cfg, *id)
 	if err != nil {
 		return err
+	}
+	if *credentialStdin {
+		if setErr := setExternalDesktopTransientCredential(&cfg, cfg.External.Connection.Desktop.PasswordEnv, credentialInput); setErr != nil {
+			return exit(2, "%v", setErr)
+		}
 	}
 	if useDirectSSHWebVNC(cfg) {
 		// macOS leases (e.g. tart) have no guest-side noVNC/websockify; serve the
@@ -300,6 +322,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	connHost := endpoint.Host
 	connPort := endpoint.Port
 	var tunnel *vncForegroundTunnel
+	var tunnelPort string
 	var proxyDone <-chan error
 	if !endpoint.Direct {
 		requestedTunnelPort := *localPort
@@ -308,7 +331,6 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 			requestedTunnelPort = ""
 			excludedTunnelPorts = append(excludedTunnelPorts, *localPort)
 		}
-		var tunnelPort string
 		tunnel, tunnelPort, err = startVNCForegroundTunnelOnReservedPort(ctx, target, requestedTunnelPort, endpoint.Host, endpoint.Port, excludedTunnelPorts...)
 		if err != nil {
 			return err
@@ -318,14 +340,30 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		connHost = "127.0.0.1"
 		connPort = tunnelPort
 		if inheritedListener != nil {
-			proxyDone = serveWebVNCLoopbackProxy(ctx, inheritedListener, tunnelPort, tunnel.PID())
+			proxyDone = serveWebVNCLoopbackProxyWithEnvironment(ctx, inheritedListener, tunnelPort, tunnel.PID(), tunnel.childEnvDenylist)
 			connPort = *localPort
 		} else {
 			*localPort = tunnelPort
 		}
 	}
+	bridgeCtx := ctx
+	var cancelBridge context.CancelCauseFunc
+	if tunnel != nil || proxyDone != nil {
+		bridgeCtx, cancelBridge = vncForegroundTunnelContext(ctx, tunnel, proxyDone)
+		defer cancelBridge(context.Canceled)
+	}
 	if managedMacOS {
-		if err := preflightMacOSScreenSharing(ctx, connHost, connPort, credentials, authMode); err != nil {
+		if tunnel != nil {
+			conn, dialErr := dialVNCForegroundTunnel(bridgeCtx, tunnel, tunnelPort)
+			if dialErr != nil {
+				return exit(5, "macOS Screen Sharing preflight failed: %v", dialErr)
+			}
+			err = preflightMacOSScreenSharingFromConn(bridgeCtx, conn, credentials, authMode)
+			_ = conn.Close()
+		} else {
+			err = preflightMacOSScreenSharing(bridgeCtx, connHost, connPort, credentials, authMode)
+		}
+		if err != nil {
 			return err
 		}
 		fmt.Fprintln(a.Stdout, "preflight: macOS Screen Sharing RFB authentication ok")
@@ -341,20 +379,11 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
 	opened := false
-	bridgeCtx := ctx
-	if tunnel != nil || proxyDone != nil {
-		var cancelBridge context.CancelCauseFunc
-		bridgeCtx, cancelBridge = context.WithCancelCause(ctx)
-		defer cancelBridge(context.Canceled)
-		go func() {
-			select {
-			case <-tunnel.Done():
-				cancelBridge(tunnel.ExitError())
-			case proxyErr := <-proxyDone:
-				cancelBridge(proxyErr)
-			case <-bridgeCtx.Done():
-			}
-		}()
+	var dialVNC func(context.Context) (net.Conn, error)
+	if tunnel != nil {
+		dialVNC = func(ctx context.Context) (net.Conn, error) {
+			return dialVNCForegroundTunnel(ctx, tunnel, tunnelPort)
+		}
 	}
 	return serveWebVNCBridgePool(bridgeCtx, webVNCBridgePoolConfig{
 		Coord:              coord,
@@ -363,6 +392,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		Port:               connPort,
 		Credentials:        credentials,
 		AuthenticationMode: authMode,
+		DialVNC:            dialVNC,
 		PoolSize:           webVNCBridgePoolSizeForTarget(target),
 		IdleTimeout:        cfg.IdleTimeout,
 		Telemetry:          leaseTelemetryCollectorForTarget(target),
@@ -388,7 +418,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 				}
 			}
 			if *openPortal && !opened {
-				if err := openLocalURL(portal); err != nil {
+				if err := openLocalURLWithEnvironment(portal, target.ChildEnvDenylist...); err != nil {
 					return err
 				}
 				opened = true
@@ -417,7 +447,19 @@ func preflightMacOSScreenSharing(ctx context.Context, host, port string, credent
 	if err := requireMacOSWebVNCCredentials(credentials, authMode); err != nil {
 		return err
 	}
-	if err := preflightRFBAuthenticationWithMode(ctx, net.JoinHostPort(host, port), credentials, authMode); err != nil {
+	conn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return exit(5, "macOS Screen Sharing preflight failed: %v", err)
+	}
+	defer conn.Close()
+	return preflightMacOSScreenSharingFromConn(ctx, conn, credentials, authMode)
+}
+
+func preflightMacOSScreenSharingFromConn(ctx context.Context, conn net.Conn, credentials rfbCredentials, authMode localWebVNCAuthenticationMode) error {
+	if err := requireMacOSWebVNCCredentials(credentials, authMode); err != nil {
+		return err
+	}
+	if err := preflightRFBAuthenticationFromConnWithMode(ctx, conn, credentials, authMode); err != nil {
 		return exit(5, "macOS Screen Sharing preflight failed: %v", err)
 	}
 	return nil
@@ -437,6 +479,7 @@ type webVNCBridgePoolConfig struct {
 	Port               string
 	Credentials        rfbCredentials
 	AuthenticationMode localWebVNCAuthenticationMode
+	DialVNC            func(context.Context) (net.Conn, error)
 	PoolSize           int
 	IdleTimeout        time.Duration
 	Telemetry          leaseTelemetryCollector
@@ -515,7 +558,7 @@ func serveWebVNCBridgeSlot(ctx context.Context, cfg webVNCBridgePoolConfig, slot
 	connectedOnce := false
 	attempt := 0
 	for {
-		bridge, err := connectWebVNCBridge(ctx, cfg.Coord, cfg.LeaseID, cfg.Host, cfg.Port, cfg.RescueCtx.Target, cfg.Credentials, cfg.AuthenticationMode, cfg.Log)
+		bridge, err := connectWebVNCBridgeWithDial(ctx, cfg.Coord, cfg.LeaseID, cfg.Host, cfg.Port, cfg.RescueCtx.Target, cfg.Credentials, cfg.AuthenticationMode, cfg.Log, cfg.DialVNC)
 		if err != nil {
 			attempt, kind := nextWebVNCBridgeFailure(connectedOnce, attempt)
 			events <- webVNCBridgePoolEvent{Kind: kind, Slot: slot, Attempt: attempt, Err: err}
@@ -583,12 +626,21 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	controllerOwned := fs.Bool("controller-owned", false, "internal: controller-owned persistent bridge")
 	controllerOwnerID := fs.String("controller-owner-id", "", "internal: controller ownership identity")
+	credentialStdin := fs.Bool(webVNCDaemonCredentialStdinFlag, false, "internal: read the external desktop credential from stdin")
 	expectedIdentityFlags := registerWebVNCExpectedProviderIdentityFlags(fs)
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	var credentialInput *string
+	if *credentialStdin {
+		value, err := readWebVNCDaemonCredentialStdin(a.input())
+		if err != nil {
+			return err
+		}
+		credentialInput = &value
 	}
 	expectedIdentity, err := expectedIdentityFlags.value(fs)
 	if err != nil {
@@ -720,7 +772,7 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 		daemonArgs = append(daemonArgs, "--reclaim")
 	}
 	daemonArgs = append(daemonArgs, expectedIdentity.args()...)
-	return a.startWebVNCDaemon(daemonArgs, *id, *controllerOwned, *controllerOwnerID)
+	return a.startWebVNCDaemon(daemonArgs, *id, *controllerOwned, *controllerOwnerID, credentialInput, target.ChildEnvDenylist...)
 }
 
 type webVNCRedactingWriter struct {
@@ -1074,6 +1126,12 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
+	// Resolve credentials before any portal, daemon, or remote reset mutation.
+	// A missing External desktop secret must not tear down a working bridge.
+	credentials, _, err := resolveWebVNCPortalCredentials(ctx, cfg, target, vncEndpoint{Managed: true}, runSSHOutput)
+	if err != nil {
+		return err
+	}
 	if automaticMacOSPortal {
 		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, false); err != nil {
 			return err
@@ -1096,10 +1154,6 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx))
 		return exit(5, "reset target WebVNC/input stack: %v", err)
 	}
-	credentials, _, err := resolveWebVNCPortalCredentials(ctx, cfg, target, vncEndpoint{Managed: true}, runSSHOutput)
-	if err != nil {
-		return err
-	}
 	username := credentials.Username
 	password := credentials.Password
 	portalUsername, portalPassword := "", ""
@@ -1115,7 +1169,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if strings.TrimSpace(daemonName) == "" {
 		daemonName = leaseID
 	}
-	if err := a.startWebVNCDaemon(daemonArgs, daemonName, false, ""); err != nil {
+	if err := a.startWebVNCDaemon(daemonArgs, daemonName, false, "", nil, target.ChildEnvDenylist...); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "webvnc reset: lease=%s slug=%s\n", leaseID, blank(serverSlug(server), "-"))
@@ -1127,7 +1181,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a App) startWebVNCDaemon(args []string, leaseID string, controllerOwned bool, controllerOwnerID string) error {
+func (a App) startWebVNCDaemon(args []string, leaseID string, controllerOwned bool, controllerOwnerID string, credentialInput *string, childEnvDenylist ...string) error {
 	args = prepareWebVNCDaemonArgs(args, controllerOwned)
 	localPort := webVNCDaemonLocalPortArg(args)
 	if localPort != "" && !validWebVNCDaemonPort(localPort) {
@@ -1141,6 +1195,24 @@ func (a App) startWebVNCDaemon(args []string, leaseID string, controllerOwned bo
 	}
 	if controllerOwned {
 		args = append(args, "--controller-owner-id", controllerOwnerID)
+	}
+	credentialName := webVNCDaemonCredentialName(append([]string{"webvnc"}, args...))
+	credentialValue := ""
+	if credentialName != "" {
+		if credentialInput != nil {
+			credentialValue = *credentialInput
+		} else {
+			var present bool
+			credentialValue, present = childEnvironmentValue(os.Environ(), credentialName)
+			if !present || strings.TrimSpace(credentialValue) == "" {
+				return exit(2, "external desktop password environment variable %s is unset or empty", credentialName)
+			}
+		}
+		if len(credentialValue) > webVNCDaemonCredentialMaxBytes {
+			return exit(2, "external desktop password environment variable %s exceeds %d bytes", credentialName, webVNCDaemonCredentialMaxBytes)
+		}
+	} else if credentialInput != nil {
+		return exit(2, "external desktop credential stdin requires an external macOS password environment reference")
 	}
 	unlock, err := acquireWebVNCDaemonLock(leaseID)
 	if err != nil {
@@ -1191,12 +1263,12 @@ func (a App) startWebVNCDaemon(args []string, leaseID string, controllerOwned bo
 		return exit(2, "create WebVNC daemon launch gate: %v", err)
 	}
 	defer gateWriter.Close()
-	supervisorScript := webVNCDaemonGatedSupervisorScript(exe, childArgs)
-	cmd := exec.Command("sh", "-c", supervisorScript, "crabbox-webvnc-supervisor", nonce)
+	supervisorArgs := append([]string{"__webvnc-supervisor", nonce}, childArgs...)
+	cmd := exec.Command(exe, supervisorArgs...)
 	cmd.Stdin = gateReader
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = webVNCDaemonPortReservationEnvironment(os.Environ(), "", "")
+	cmd.Env = webVNCDaemonPortReservationEnvironment(webVNCDaemonChildEnvironment(os.Environ(), args, childEnvDenylist...), "", "")
 	configureDaemonCommand(cmd)
 	descriptor, err := portReservation.inherit(cmd)
 	if err != nil {
@@ -1264,7 +1336,7 @@ func (a App) startWebVNCDaemon(args []string, leaseID string, controllerOwned bo
 		return failStartedDaemon(exit(2, "write WebVNC daemon identity: %v", err), false)
 	}
 	gateMayHaveReleased = true
-	if _, err := io.WriteString(gateWriter, "run\n"); err != nil {
+	if err := writeWebVNCDaemonSupervisorGate(gateWriter, credentialValue); err != nil {
 		return failStartedDaemon(exit(5, "release WebVNC daemon launch gate: %v", err), true)
 	}
 	_ = gateWriter.Close()
@@ -1288,7 +1360,8 @@ func prepareWebVNCDaemonArgs(args []string, controllerOwned bool) []string {
 	for _, arg := range args {
 		if webVNCDaemonFlagArg(arg, "redact-credentials") ||
 			webVNCDaemonFlagArg(arg, "reclaim") ||
-			webVNCDaemonFlagArg(arg, "no-provider-side-effects") {
+			webVNCDaemonFlagArg(arg, "no-provider-side-effects") ||
+			webVNCDaemonFlagArg(arg, webVNCDaemonCredentialStdinFlag) {
 			continue
 		}
 		out = append(out, arg)
@@ -1301,17 +1374,81 @@ func prepareWebVNCDaemonArgs(args []string, controllerOwned bool) []string {
 }
 
 func webVNCDaemonLocalPortArg(args []string) string {
+	return webVNCDaemonStringArg(args, "local-port")
+}
+
+func webVNCDaemonStringArg(args []string, name string) string {
 	for index, arg := range args {
-		for _, prefix := range []string{"--local-port=", "-local-port="} {
+		for _, prefix := range []string{"--" + name + "=", "-" + name + "="} {
 			if value, ok := strings.CutPrefix(arg, prefix); ok {
 				return strings.TrimSpace(value)
 			}
 		}
-		if (arg == "--local-port" || arg == "-local-port") && index+1 < len(args) {
+		if (arg == "--"+name || arg == "-"+name) && index+1 < len(args) {
 			return strings.TrimSpace(args[index+1])
 		}
 	}
 	return ""
+}
+
+func webVNCDaemonHasStringArg(args []string, name string) bool {
+	for index, arg := range args {
+		if strings.HasPrefix(arg, "--"+name+"=") || strings.HasPrefix(arg, "-"+name+"=") {
+			return true
+		}
+		if (arg == "--"+name || arg == "-"+name) && index+1 < len(args) {
+			return true
+		}
+	}
+	return false
+}
+
+func webVNCDaemonChildEnvironment(environment, args []string, additionalDenied ...string) []string {
+	passwordEnv := webVNCDaemonStringArg(args, "external-desktop-password-env")
+	denied := []string{
+		"BASH_ENV",
+		"BASHOPTS",
+		"ENV",
+		"IFS",
+		"PS4",
+		"SHELLOPTS",
+	}
+	denied = append(denied, additionalDenied...)
+	if passwordEnv != "" {
+		denied = append(denied, passwordEnv)
+	}
+	return childEnvironmentWithout(environment, denied...)
+}
+
+func childEnvironmentValue(environment []string, name string) (string, bool) {
+	return childEnvironmentValueWithCaseFolding(environment, name, runtime.GOOS == "windows")
+}
+
+func childEnvironmentValueWithCaseFolding(environment []string, name string, caseInsensitive bool) (string, bool) {
+	name = strings.TrimSpace(name)
+	var exact string
+	exactFound := false
+	var fallback string
+	fallbackFound := false
+	for _, entry := range environment {
+		entryName, entryValue, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if entryName == name {
+			exact = entryValue
+			exactFound = true
+			continue
+		}
+		if caseInsensitive && strings.EqualFold(entryName, name) {
+			fallback = entryValue
+			fallbackFound = true
+		}
+	}
+	if exactFound {
+		return exact, true
+	}
+	return fallback, fallbackFound
 }
 
 type webVNCDaemonPortReservation struct {
@@ -1528,11 +1665,15 @@ func inheritedWebVNCDaemonListener(port string) (net.Listener, error) {
 }
 
 func serveWebVNCLoopbackProxy(ctx context.Context, listener net.Listener, targetPort string, expectedOwnerPID ...int) <-chan error {
-	done := make(chan error, 1)
 	ownerPID := 0
 	if len(expectedOwnerPID) > 0 {
 		ownerPID = expectedOwnerPID[0]
 	}
+	return serveWebVNCLoopbackProxyWithEnvironment(ctx, listener, targetPort, ownerPID, nil)
+}
+
+func serveWebVNCLoopbackProxyWithEnvironment(ctx context.Context, listener net.Listener, targetPort string, ownerPID int, denied []string) <-chan error {
+	done := make(chan error, 1)
 	proxyCtx, cancelProxy := context.WithCancelCause(ctx)
 	var finishOnce sync.Once
 	finish := func(err error) {
@@ -1561,7 +1702,7 @@ func serveWebVNCLoopbackProxy(ctx context.Context, listener net.Listener, target
 				return
 			}
 			go func() {
-				if err := relayWebVNCLoopbackProxyConnection(proxyCtx, incoming, targetPort, ownerPID); err != nil && ownerPID > 0 {
+				if err := relayWebVNCLoopbackProxyConnection(proxyCtx, incoming, targetPort, ownerPID, denied); err != nil && ownerPID > 0 {
 					finish(err)
 				}
 			}()
@@ -1570,10 +1711,10 @@ func serveWebVNCLoopbackProxy(ctx context.Context, listener net.Listener, target
 	return done
 }
 
-func relayWebVNCLoopbackProxyConnection(ctx context.Context, incoming net.Conn, targetPort string, expectedOwnerPID int) error {
+func relayWebVNCLoopbackProxyConnection(ctx context.Context, incoming net.Conn, targetPort string, expectedOwnerPID int, denied []string) error {
 	defer incoming.Close()
 	if expectedOwnerPID > 0 {
-		if err := controllerVerifyDaemonOwnedListener(targetPort, expectedOwnerPID); err != nil {
+		if err := controllerVerifyDaemonOwnedListenerWithEnvironment(targetPort, expectedOwnerPID, denied); err != nil {
 			return fmt.Errorf("verify local VNC tunnel listener before proxy connect: %w", err)
 		}
 	}
@@ -1583,7 +1724,7 @@ func relayWebVNCLoopbackProxyConnection(ctx context.Context, incoming net.Conn, 
 	}
 	defer outgoing.Close()
 	if expectedOwnerPID > 0 {
-		if err := controllerVerifyDaemonOwnedListener(targetPort, expectedOwnerPID); err != nil {
+		if err := controllerVerifyDaemonOwnedListenerWithEnvironment(targetPort, expectedOwnerPID, denied); err != nil {
 			return fmt.Errorf("verify local VNC tunnel listener after proxy connect: %w", err)
 		}
 	}
@@ -1665,37 +1806,153 @@ func webVNCDaemonLogHasReady(path string) bool {
 	return strings.Contains(string(data), "bridge: connected; keep this process running while using WebVNC")
 }
 
-func webVNCDaemonSupervisorScript(exe string, args []string) string {
-	firstArgs := make([]string, 0, len(args)+1)
-	firstArgs = append(firstArgs, shellQuote(exe))
-	for _, arg := range args {
-		firstArgs = append(firstArgs, shellQuote(arg))
+func webVNCDaemonCredentialName(args []string) string {
+	credentialName := webVNCDaemonStringArg(args, "external-desktop-password-env")
+	if !validEnvName(credentialName) || normalizeTargetOS(webVNCDaemonStringArg(args, "target")) != targetMacOS {
+		return ""
 	}
-	restartArgs := make([]string, 0, len(args)+1)
-	restartArgs = append(restartArgs, shellQuote(exe))
-	for _, arg := range stripWebVNCOpenFlags(args) {
-		restartArgs = append(restartArgs, shellQuote(arg))
-	}
-	return "set -u\n" +
-		"echo 'webvnc daemon supervisor: starting'\n" +
-		"first=1\n" +
-		"while :; do\n" +
-		"  if [ \"$first\" = 1 ]; then\n" +
-		"    " + strings.Join(firstArgs, " ") + "\n" +
-		"    first=0\n" +
-		"  else\n" +
-		"    " + strings.Join(restartArgs, " ") + "\n" +
-		"  fi\n" +
-		"  code=$?\n" +
-		"  echo \"webvnc daemon supervisor: child exited code=$code; restarting in 1s\"\n" +
-		"  sleep 1\n" +
-		"done\n"
+	return credentialName
 }
 
-func webVNCDaemonGatedSupervisorScript(exe string, args []string) string {
-	return "IFS= read -r gate || exit 125\n" +
-		"[ \"$gate\" = run ] || exit 125\n" +
-		webVNCDaemonSupervisorScript(exe, args)
+func writeWebVNCDaemonSupervisorGate(w io.Writer, credential string) error {
+	if len(credential) > webVNCDaemonCredentialMaxBytes {
+		return fmt.Errorf("credential exceeds %d bytes", webVNCDaemonCredentialMaxBytes)
+	}
+	var size [4]byte
+	binary.BigEndian.PutUint32(size[:], uint32(len(credential)))
+	if _, err := w.Write(size[:]); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, credential); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, "run\n")
+	return err
+}
+
+func readWebVNCDaemonCredentialStdin(r io.Reader) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, webVNCDaemonCredentialMaxBytes+1))
+	if err != nil {
+		return "", exit(2, "read external desktop credential: %v", err)
+	}
+	if len(data) > webVNCDaemonCredentialMaxBytes {
+		return "", exit(2, "external desktop credential exceeds %d bytes", webVNCDaemonCredentialMaxBytes)
+	}
+	value := string(data)
+	if strings.TrimSpace(value) == "" {
+		return "", exit(2, "external desktop credential is empty")
+	}
+	return value, nil
+}
+
+func readWebVNCDaemonSupervisorGate(r io.Reader) (string, error) {
+	var size [4]byte
+	if _, err := io.ReadFull(r, size[:]); err != nil {
+		return "", err
+	}
+	length := binary.BigEndian.Uint32(size[:])
+	if length > webVNCDaemonCredentialMaxBytes {
+		return "", fmt.Errorf("credential exceeds %d bytes", webVNCDaemonCredentialMaxBytes)
+	}
+	credential := make([]byte, int(length))
+	if _, err := io.ReadFull(r, credential); err != nil {
+		return "", err
+	}
+	var release [4]byte
+	if _, err := io.ReadFull(r, release[:]); err != nil {
+		return "", err
+	}
+	if string(release[:]) != "run\n" {
+		return "", fmt.Errorf("invalid launch release")
+	}
+	return string(credential), nil
+}
+
+func (a App) webVNCDaemonSupervisor(ctx context.Context, args []string) error {
+	if len(args) < 2 || !validWebVNCDaemonNonce(args[0]) || args[1] != "webvnc" {
+		return exit(2, "invalid internal WebVNC supervisor invocation")
+	}
+	childArgs := append([]string(nil), args[1:]...)
+	for _, arg := range childArgs {
+		if webVNCDaemonFlagArg(arg, webVNCDaemonCredentialStdinFlag) {
+			return exit(2, "invalid internal WebVNC supervisor credential flag")
+		}
+	}
+	credential, err := readWebVNCDaemonSupervisorGate(a.input())
+	if err != nil {
+		return exit(2, "read WebVNC daemon launch gate: %v", err)
+	}
+	credentialName := webVNCDaemonCredentialName(childArgs)
+	if credentialName == "" && credential != "" {
+		return exit(2, "WebVNC daemon received an unexpected credential")
+	}
+	if credentialName != "" && strings.TrimSpace(credential) == "" {
+		return exit(2, "WebVNC daemon credential is empty")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return exit(2, "resolve WebVNC daemon executable: %v", err)
+	}
+	return runWebVNCDaemonSupervisor(ctx, exe, childArgs, credentialName, credential, a.Stdout, a.Stderr)
+}
+
+func runWebVNCDaemonSupervisor(ctx context.Context, exe string, args []string, credentialName, credential string, stdout, stderr io.Writer) error {
+	fmt.Fprintln(stdout, "webvnc daemon supervisor: starting")
+	first := true
+	for {
+		childArgs := webVNCDaemonSupervisorChildArgs(args, first, credentialName != "")
+		first = false
+		cmd := exec.CommandContext(ctx, exe, childArgs...)
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		cmd.Env = webVNCDaemonChildEnvironment(os.Environ(), args)
+		if credentialName != "" {
+			cmd.Stdin = strings.NewReader(credential)
+		}
+		code := 1
+		cleanupForward, err := forwardInheritedWebVNCDaemonPortReservation(cmd)
+		if err != nil {
+			fmt.Fprintf(stderr, "webvnc daemon supervisor: prepare child: %v\n", err)
+		} else {
+			runErr := cmd.Run()
+			cleanupForward()
+			if runErr == nil {
+				code = 0
+			} else if exitErr, ok := runErr.(*exec.ExitError); ok {
+				code = exitErr.ExitCode()
+			} else if ctx.Err() != nil {
+				return ctx.Err()
+			} else {
+				fmt.Fprintf(stderr, "webvnc daemon supervisor: run child: %v\n", runErr)
+			}
+		}
+		fmt.Fprintf(stdout, "webvnc daemon supervisor: child exited code=%d; restarting in 1s\n", code)
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func webVNCDaemonSupervisorChildArgs(args []string, first, credential bool) []string {
+	if !first {
+		args = stripWebVNCOpenFlags(args)
+	}
+	childArgs := append([]string(nil), args...)
+	if credential {
+		flag := "--" + webVNCDaemonCredentialStdinFlag
+		if len(childArgs) > 0 && childArgs[0] == "webvnc" {
+			childArgs = append(childArgs[:1], append([]string{flag}, childArgs[1:]...)...)
+		} else {
+			childArgs = append([]string{flag}, childArgs...)
+		}
+	}
+	return childArgs
 }
 
 func (a App) webVNCDaemonStatus(leaseID, expectedOwnerID string) error {
@@ -2299,11 +2556,33 @@ func safeWebVNCDaemonName(value string) string {
 }
 
 type vncForegroundTunnel struct {
-	cmd    *exec.Cmd
-	done   chan struct{}
-	output *strings.Builder
-	mu     sync.Mutex
-	err    error
+	cmd              *exec.Cmd
+	done             chan struct{}
+	output           *strings.Builder
+	childEnvDenylist []string
+	mu               sync.Mutex
+	err              error
+}
+
+func vncForegroundTunnelContext(ctx context.Context, tunnel *vncForegroundTunnel, proxyDone <-chan error) (context.Context, context.CancelCauseFunc) {
+	tunnelCtx, cancel := context.WithCancelCause(ctx)
+	var tunnelDone <-chan struct{}
+	if tunnel != nil {
+		tunnelDone = tunnel.Done()
+	}
+	go func() {
+		select {
+		case <-tunnelDone:
+			cancel(tunnel.ExitError())
+		case err := <-proxyDone:
+			if err == nil {
+				err = errors.New("local WebVNC proxy stopped")
+			}
+			cancel(err)
+		case <-tunnelCtx.Done():
+		}
+	}()
+	return tunnelCtx, cancel
 }
 
 func (t *vncForegroundTunnel) PID() int {
@@ -2340,14 +2619,14 @@ func (t *vncForegroundTunnel) ExitError() error {
 }
 
 func startVNCForegroundTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost, remotePort string) (*vncForegroundTunnel, error) {
-	cmd := exec.CommandContext(ctx, "ssh", vncTunnelArgs(target, localPort, remoteHost, remotePort)...)
+	cmd := sshCommandContext(ctx, target, vncTunnelArgs(target, localPort, remoteHost, remotePort)...)
 	var output strings.Builder
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	tunnel := &vncForegroundTunnel{cmd: cmd, done: make(chan struct{}), output: &output}
+	tunnel := &vncForegroundTunnel{cmd: cmd, done: make(chan struct{}), output: &output, childEnvDenylist: append([]string(nil), target.ChildEnvDenylist...)}
 	go func() {
 		err := cmd.Wait()
 		tunnel.mu.Lock()
@@ -2362,7 +2641,7 @@ func startVNCForegroundTunnel(ctx context.Context, target SSHTarget, localPort, 
 			stopProcess(tunnel)
 			return nil, context.Cause(ctx)
 		}
-		if ready, err := startedTunnelListenerReady(ctx, localPort, cmd.Process.Pid); ready {
+		if ready, err := startedTunnelListenerReady(ctx, localPort, cmd.Process.Pid, target.ChildEnvDenylist...); ready {
 			return tunnel, nil
 		} else {
 			listenerErr = err
@@ -2415,12 +2694,12 @@ func vncTunnelLocalBindConflict(err error) bool {
 		strings.Contains(message, "local forwarding failed")
 }
 
-func startedTunnelListenerReady(ctx context.Context, localPort string, processID int) (bool, error) {
+func startedTunnelListenerReady(ctx context.Context, localPort string, processID int, denied ...string) (bool, error) {
 	_ = ctx
 	if !controllerListenerOwnershipSupported() {
-		return false, controllerVerifyDaemonOwnedListener(localPort, processID)
+		return false, controllerVerifyDaemonOwnedListenerWithEnvironment(localPort, processID, denied)
 	}
-	if err := controllerVerifyDaemonOwnedListener(localPort, processID); err != nil {
+	if err := controllerVerifyDaemonOwnedListenerWithEnvironment(localPort, processID, denied); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -2440,11 +2719,20 @@ type webVNCBridge struct {
 const webVNCDesktopThemeSSHAttemptTimeout = 35 * time.Second
 
 func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string, target SSHTarget, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, log io.Writer) (*webVNCBridge, error) {
+	return connectWebVNCBridgeWithDial(ctx, coord, leaseID, host, port, target, credentials, authMode, log, nil)
+}
+
+func connectWebVNCBridgeWithDial(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string, target SSHTarget, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, log io.Writer, dialVNC func(context.Context) (net.Conn, error)) (*webVNCBridge, error) {
 	agentBaseURL, err := webVNCAgentBaseURL(coord.BaseURL)
 	if err != nil {
 		return nil, err
 	}
-	tcp, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	var tcp net.Conn
+	if dialVNC != nil {
+		tcp, err = dialVNC(ctx)
+	} else {
+		tcp, err = (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2971,7 +3259,7 @@ func (a App) directSSHWebVNC(ctx context.Context, cfg Config, id, localPort stri
 		case <-proxyCtx.Done():
 		}
 	}()
-	proxyDone := serveWebVNCLoopbackProxy(proxyCtx, listener, tunnelPort, tunnel.PID())
+	proxyDone := serveWebVNCLoopbackProxyWithEnvironment(proxyCtx, listener, tunnelPort, tunnel.PID(), tunnel.childEnvDenylist)
 	if err := verifyVNCForegroundTunnelListener(tunnel, tunnelPort); err != nil {
 		return exit(5, "verify direct SSH WebVNC tunnel before credential retrieval: %v", err)
 	}
@@ -2997,7 +3285,7 @@ func (a App) directSSHWebVNC(ctx context.Context, cfg Config, id, localPort stri
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", viewerURL)
 	fmt.Fprintf(a.Stdout, "password: %s\n", password)
 	if openViewer {
-		if err := openLocalURL(viewerURL); err != nil {
+		if err := openLocalURLWithEnvironment(viewerURL, target.ChildEnvDenylist...); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "opened: %s\n", viewerURL)
@@ -3063,6 +3351,7 @@ func (a App) directSSHWindowsWebVNC(
 			return dialVNCForegroundTunnel(ctx, tunnel, vncPort)
 		},
 		nil,
+		target.ChildEnvDenylist...,
 	)
 }
 
@@ -3075,7 +3364,7 @@ func verifyVNCForegroundTunnelListener(tunnel *vncForegroundTunnel, port string)
 		return tunnel.ExitError()
 	default:
 	}
-	if err := controllerVerifyDaemonOwnedListener(port, tunnel.PID()); err != nil {
+	if err := controllerVerifyDaemonOwnedListenerWithEnvironment(port, tunnel.PID(), tunnel.childEnvDenylist); err != nil {
 		return err
 	}
 	select {

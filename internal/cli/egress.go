@@ -237,7 +237,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 		hostArgs = append(hostArgs, "--allow", strings.Join(allow, ","))
 	}
 	if *daemon {
-		return a.startEgressHostDaemon(leaseID, hostArgs)
+		return a.startEgressHostDaemon(leaseID, hostArgs, target.ChildEnvDenylist)
 	}
 	hostTicket, err := coord.CreateEgressTicket(ctx, leaseID, "host", sessionID, *profile, allow)
 	if err != nil {
@@ -904,6 +904,7 @@ func installRemoteEgressClient(ctx context.Context, target SSHTarget) error {
 	defer cleanup()
 	args := append(scpBaseArgs(target), exe, target.User+"@"+target.Host+":"+egressRemoteBinary)
 	cmd := exec.CommandContext(ctx, "scp", args...)
+	applyTargetChildEnvironment(cmd, target)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return exit(5, "copy egress client: %v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -926,13 +927,24 @@ func egressClientBinaryForTarget(ctx context.Context, target SSHTarget) (string,
 		return "", func() {}, exit(2, "cross-build egress client: %v", err)
 	}
 	out := filepath.Join(os.TempDir(), "crabbox-egress-client-linux-amd64-"+strconv.FormatInt(time.Now().UnixNano(), 36))
-	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", out, "./cmd/crabbox")
-	cmd.Dir = repo.Root
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
-	if data, err := cmd.CombinedOutput(); err != nil {
-		return "", func() {}, exit(5, "cross-build linux egress client: %v: %s", err, strings.TrimSpace(string(data)))
+	if err := crossBuildEgressClient(ctx, target, repo.Root, out); err != nil {
+		return "", func() {}, err
 	}
 	return out, func() { _ = os.Remove(out) }, nil
+}
+
+func crossBuildEgressClient(ctx context.Context, target SSHTarget, repoRoot, out string) error {
+	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", out, "./cmd/crabbox")
+	cmd.Dir = repoRoot
+	buildEnv := os.Environ()
+	if len(target.ChildEnvDenylist) > 0 {
+		buildEnv = childEnvironmentWithout(buildEnv, target.ChildEnvDenylist...)
+	}
+	cmd.Env = append(buildEnv, "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
+	if data, err := cmd.CombinedOutput(); err != nil {
+		return exit(5, "cross-build linux egress client: %v: %s", err, strings.TrimSpace(string(data)))
+	}
+	return nil
 }
 
 func scpBaseArgs(target SSHTarget) []string {
@@ -1004,7 +1016,7 @@ func egressRemoteProbeCommand(host, port string) string {
 	return "if command -v nc >/dev/null 2>&1; then nc -z " + shellQuote(host) + " " + shellQuote(port) + " >/dev/null 2>&1; else timeout 1 bash -lc " + shellQuote("</dev/tcp/"+host+"/"+port) + " >/dev/null 2>&1; fi"
 }
 
-func (a App) startEgressHostDaemon(leaseID string, args []string) error {
+func (a App) startEgressHostDaemon(leaseID string, args, childEnvDenylist []string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return exit(2, "resolve crabbox executable: %v", err)
@@ -1026,7 +1038,7 @@ func (a App) startEgressHostDaemon(leaseID string, args []string) error {
 		return exit(2, "open egress daemon log: %v", err)
 	}
 	childArgs := append([]string{"egress"}, args...)
-	cmd := exec.Command("sh", "-c", egressDaemonSupervisorScript(exe, childArgs))
+	cmd := egressDaemonSupervisorCommand(exe, childArgs, childEnvDenylist)
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -1047,6 +1059,14 @@ func (a App) startEgressHostDaemon(leaseID string, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "egress host daemon: pid=%d log=%s\n", pid, logPath)
 	return nil
+}
+
+func egressDaemonSupervisorCommand(exe string, args, childEnvDenylist []string) *exec.Cmd {
+	cmd := exec.Command("sh", "-c", egressDaemonSupervisorScript(exe, args))
+	if len(childEnvDenylist) > 0 {
+		cmd.Env = childEnvironmentWithout(os.Environ(), childEnvDenylist...)
+	}
+	return cmd
 }
 
 func (a App) stopEgressHostDaemon(leaseID string) (bool, error) {

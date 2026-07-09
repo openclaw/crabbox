@@ -435,7 +435,7 @@ func (a App) startRegisteredWebVNCDaemonBestEffort(cfg Config, target SSHTarget,
 	if !shouldStartRegisteredWebVNCDaemon(cfg, keep) {
 		return
 	}
-	if err := a.startWebVNCDaemon(webVNCBridgeArgs(cfg, target, leaseID, false, false), leaseID, false, ""); err != nil {
+	if err := a.startWebVNCDaemon(webVNCBridgeArgs(cfg, target, leaseID, false, false), leaseID, false, "", nil, target.ChildEnvDenylist...); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: could not start registered WebVNC bridge for %s: %v\n", leaseID, err)
 	}
 }

@@ -86,7 +86,7 @@ func TestCreateMacOSWebVNCHandoffKeepsTokenOutOfOpenURL(t *testing.T) {
 		Token:    "deadbeefcafef00d",
 		Protocol: "crabbox.deadbeefcafef00d",
 	}
-	handoff, err := createMacOSWebVNCHandoff("6080", session)
+	handoff, err := createMacOSWebVNCHandoff("6080", session, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +114,36 @@ func TestCreateMacOSWebVNCHandoffKeepsTokenOutOfOpenURL(t *testing.T) {
 	} {
 		if !strings.Contains(string(content), want) {
 			t.Fatalf("handoff missing %q: %s", want, content)
+		}
+	}
+}
+
+func TestCreateMacOSWebVNCHandoffOmitsCredentialsForARD(t *testing.T) {
+	session := macOSWebVNCSession{
+		Token:    "deadbeefcafef00d",
+		Protocol: "crabbox.deadbeefcafef00d",
+	}
+	handoff, err := createMacOSWebVNCHandoff("6080", session, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(handoff.Path)
+	content, err := os.ReadFile(handoff.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"/credentials", `"credentialsURL"`} {
+		if strings.Contains(string(content), forbidden) {
+			t.Fatalf("ARD handoff contains %q: %s", forbidden, content)
+		}
+	}
+	for _, want := range []string{
+		"ws://127.0.0.1:6080/websockify",
+		"deadbeefcafef00d",
+		"crabbox.deadbeefcafef00d",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("ARD handoff missing %q: %s", want, content)
 		}
 	}
 }

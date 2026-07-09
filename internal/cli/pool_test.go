@@ -7,7 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -190,6 +193,83 @@ func TestListForwardsAllAndRefreshToBackend(t *testing.T) {
 	}
 	if stdout.Len() == 0 {
 		t.Fatal("list JSON output is empty")
+	}
+}
+
+func TestListRoutedExternalAdapterScrubsCurrentRoutedAndOverrideDesktopEnvironments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake external adapter uses POSIX shell")
+	}
+	root := setExternalRoutingTestHome(t)
+	adapterPath := filepath.Join(root, "external-adapter")
+	adapter := `#!/bin/sh
+if [ "${CURRENT_ARD_PASSWORD+x}" = x ]; then echo leaked-current >&2; exit 89; fi
+if [ "${ROUTED_ARD_PASSWORD+x}" = x ]; then echo leaked-routed >&2; exit 90; fi
+if [ "${OVERRIDE_ARD_PASSWORD+x}" = x ]; then echo leaked-override >&2; exit 91; fi
+[ "${CRABBOX_TEST_KEEP:-}" = preserved ] || exit 92
+printf '%s\n' '{"protocolVersion":1,"leases":[]}'
+`
+	if err := os.WriteFile(adapterPath, []byte(adapter), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	routing := ExternalConfig{
+		Command:  adapterPath,
+		WorkRoot: "/tmp/crabbox-routed-work",
+		Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+			PasswordEnv: "ROUTED_ARD_PASSWORD",
+		}},
+	}
+	SetExternalRoutingTarget(&routing, targetLinux, windowsModeNormal)
+	routingPath, err := PersistValidatedExternalRouting("cbx_monotonic123", routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	config := `provider: external
+target: linux
+external:
+  command: /bin/false
+  workRoot: /tmp/crabbox-current-work
+  connection:
+    desktop:
+      passwordEnv: CURRENT_ARD_PASSWORD
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{
+		"CRABBOX_PROVIDER",
+		"CRABBOX_TARGET",
+		"CRABBOX_TARGET_OS",
+		"CRABBOX_EXTERNAL_COMMAND",
+		"CRABBOX_EXTERNAL_ROUTING_FILE",
+		"CRABBOX_EXTERNAL_DESKTOP_USERNAME",
+		"CRABBOX_COORDINATOR",
+		"CRABBOX_COORDINATOR_TOKEN",
+		"CRABBOX_COORDINATOR_ADMIN_TOKEN",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "OVERRIDE_ARD_PASSWORD")
+	t.Setenv("CURRENT_ARD_PASSWORD", "current-secret")
+	t.Setenv("ROUTED_ARD_PASSWORD", "routed-secret")
+	t.Setenv("OVERRIDE_ARD_PASSWORD", "override-secret")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{
+		"list",
+		"--provider", "external",
+		"--external-routing-file", routingPath,
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("list error=%v stderr=%q", err, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "null" {
+		t.Fatalf("list output=%q", stdout.String())
 	}
 }
 

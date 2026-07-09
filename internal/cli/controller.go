@@ -117,13 +117,23 @@ func (a App) controllerServe(ctx context.Context, args []string) error {
 		ForbidClassOverride:      *forbidClassOverride,
 		ForbidServerTypeOverride: *forbidServerTypeOverride,
 	}
+	runnerConfig := expandUserPath(strings.TrimSpace(*configPath))
+	runnerProvider := strings.TrimSpace(*provider)
+	runnerWorkDir := expandUserPath(strings.TrimSpace(*workDir))
+	desktopPasswordEnv, targetOS, err := controllerRunnerCredentialBoundary(runnerConfig, runnerProvider, runnerWorkDir)
+	if err != nil {
+		return exit(2, "resolve controller child credential boundary: %v", err)
+	}
 	runner := &execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
-		Binary:    expandUserPath(strings.TrimSpace(*binary)),
-		Config:    expandUserPath(strings.TrimSpace(*configPath)),
-		Provider:  strings.TrimSpace(*provider),
-		WorkDir:   expandUserPath(strings.TrimSpace(*workDir)),
-		StateFile: opts.StateFile,
-		AdapterID: strings.TrimSpace(*adapterID),
+		Binary:                     expandUserPath(strings.TrimSpace(*binary)),
+		Config:                     runnerConfig,
+		Provider:                   runnerProvider,
+		TargetOS:                   targetOS,
+		ExternalDesktopPasswordEnv: desktopPasswordEnv,
+		ResolveCredentialBoundary:  true,
+		WorkDir:                    runnerWorkDir,
+		StateFile:                  opts.StateFile,
+		AdapterID:                  strings.TrimSpace(*adapterID),
 	}}
 	serviceCtx, cancelService := context.WithCancel(ctx)
 	defer cancelService()

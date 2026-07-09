@@ -486,6 +486,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	envSelection.Inline = mergeEnv(envSelection.Inline, expansion.Env)
 	envSelection.Effective = mergeEnv(envSelection.Effective, expansion.Env)
+	stripExternalDesktopPasswordFromRunEnv(cfg, &envSelection)
 	envHelperName := strings.TrimSpace(*envHelper)
 	if envHelperName != "" && len(envSelection.Profile) == 0 {
 		return exit(2, "--env-helper requires --env-from-profile values selected by --allow-env")

@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -320,6 +321,108 @@ func TestWebVNCDaemonPortReservationEnvironmentReplacesAmbientValue(t *testing.T
 	}
 }
 
+func TestWebVNCDaemonChildEnvironmentScrubsExternalDesktopPasswordOutsideMacOS(t *testing.T) {
+	base := []string{"PATH=/bin", "TEST_ARD_PASSWORD=operator-secret", "KEEP=value"}
+	for _, targetOS := range []string{"", targetLinux, targetWindows} {
+		t.Run(blank(targetOS, "unknown"), func(t *testing.T) {
+			args := []string{"--provider", "external", "--external-desktop-password-env", "TEST_ARD_PASSWORD"}
+			if targetOS != "" {
+				args = append(args, "--target", targetOS)
+			}
+			env := strings.Join(webVNCDaemonChildEnvironment(base, args), "\n")
+			if strings.Contains(env, "TEST_ARD_PASSWORD=") || !strings.Contains(env, "KEEP=value") {
+				t.Fatalf("target=%q daemon environment=%q", targetOS, env)
+			}
+		})
+	}
+}
+
+func TestWebVNCDaemonChildEnvironmentScrubsMacOSSupervisorCredentialAndShellControls(t *testing.T) {
+	base := []string{
+		"PATH=/bin",
+		"TEST_ARD_PASSWORD=operator-secret",
+		"BASH_ENV=/tmp/hostile",
+		"ENV=/tmp/hostile",
+		"SHELLOPTS=xtrace",
+		"KEEP=value",
+	}
+	args := []string{
+		"--provider", "external",
+		"--target=macos",
+		"--external-desktop-password-env=TEST_ARD_PASSWORD",
+	}
+	env := strings.Join(webVNCDaemonChildEnvironment(base, args), "\n")
+	for _, denied := range []string{"TEST_ARD_PASSWORD=", "BASH_ENV=", "ENV=", "SHELLOPTS="} {
+		if strings.Contains(env, denied) {
+			t.Fatalf("macOS supervisor environment retained %s: %q", denied, env)
+		}
+	}
+	if !strings.Contains(env, "KEEP=value") {
+		t.Fatalf("macOS supervisor removed unrelated environment: %q", env)
+	}
+}
+
+func TestWebVNCDaemonChildEnvironmentScrubsMonotonicDesktopDenylist(t *testing.T) {
+	base := []string{
+		"CURRENT_ARD_PASSWORD=current-secret",
+		"ROUTED_ARD_PASSWORD=routed-secret",
+		"OVERRIDE_ARD_PASSWORD=override-secret",
+		"KEEP=value",
+	}
+	args := []string{
+		"--provider", "external",
+		"--target=macos",
+		"--external-desktop-password-env=OVERRIDE_ARD_PASSWORD",
+	}
+	env := strings.Join(webVNCDaemonChildEnvironment(base, args, "CURRENT_ARD_PASSWORD", "ROUTED_ARD_PASSWORD"), "\n")
+	for _, denied := range []string{"CURRENT_ARD_PASSWORD=", "ROUTED_ARD_PASSWORD=", "OVERRIDE_ARD_PASSWORD="} {
+		if strings.Contains(env, denied) {
+			t.Fatalf("supervisor environment retained %s: %q", denied, env)
+		}
+	}
+	if !strings.Contains(env, "KEEP=value") {
+		t.Fatalf("supervisor removed unrelated environment: %q", env)
+	}
+}
+
+func TestChildEnvironmentValuePrefersExactCase(t *testing.T) {
+	value, ok := childEnvironmentValue([]string{
+		"ARD_PASSWORD=exact-secret",
+		"ard_password=case-shadow",
+	}, "ARD_PASSWORD")
+	if !ok || value != "exact-secret" {
+		t.Fatalf("value=%q ok=%t", value, ok)
+	}
+}
+
+func TestChildEnvironmentValueUsesOSCaseSemantics(t *testing.T) {
+	environment := []string{"ard_password=case-only-secret"}
+	value, ok := childEnvironmentValue(environment, "ARD_PASSWORD")
+	if runtime.GOOS == "windows" {
+		if !ok || value != "case-only-secret" {
+			t.Fatalf("Windows value=%q ok=%t", value, ok)
+		}
+	} else if ok || value != "" {
+		t.Fatalf("Unix value=%q ok=%t", value, ok)
+	}
+
+	value, ok = childEnvironmentValueWithCaseFolding(environment, "ARD_PASSWORD", true)
+	if !ok || value != "case-only-secret" {
+		t.Fatalf("case-insensitive helper value=%q ok=%t", value, ok)
+	}
+	if value, ok = childEnvironmentValueWithCaseFolding(environment, "ARD_PASSWORD", false); ok || value != "" {
+		t.Fatalf("case-sensitive helper value=%q ok=%t", value, ok)
+	}
+}
+
+func TestWebVNCDaemonChildEnvironmentPreservesLegacyEnvironmentWithoutPasswordReference(t *testing.T) {
+	base := []string{"PATH=/bin", "LEGACY_PROVIDER_TOKEN=value"}
+	env := webVNCDaemonChildEnvironment(base, []string{"--provider", "external", "--target", targetLinux})
+	if !slices.Equal(env, base) {
+		t.Fatalf("legacy daemon environment=%q want=%q", env, base)
+	}
+}
+
 func TestInheritedWebVNCDaemonPortReservationRequiresExactPort(t *testing.T) {
 	t.Setenv(webVNCDaemonPortReservationEnv, "5901")
 	t.Setenv(webVNCDaemonPortReservationFDEnv, "3")
@@ -337,6 +440,22 @@ func TestWebVNCRejectsReclaimInNoProviderSideEffectMode(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "cannot be combined with --reclaim") {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestWebVNCPreflightRejectsViewerAndListenerFlags(t *testing.T) {
+	for _, flagArgs := range [][]string{
+		{"--open"},
+		{"--take-control"},
+		{"--local-port", "5909"},
+	} {
+		t.Run(strings.Join(flagArgs, "_"), func(t *testing.T) {
+			args := append([]string{"--id", "cbx_abcdef123456", "--preflight"}, flagArgs...)
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).webvnc(context.Background(), args)
+			if err == nil || !strings.Contains(err.Error(), "--preflight cannot be combined") {
+				t.Fatalf("error=%v", err)
+			}
+		})
 	}
 }
 
@@ -1216,11 +1335,18 @@ func TestConnectWebVNCBridgeRegistersAgentBeforeServe(t *testing.T) {
 		t.Fatal(err)
 	}
 	coord := &CoordinatorClient{BaseURL: server.URL, Token: "test-token", Client: server.Client()}
-	bridge, err := connectWebVNCBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", port, SSHTarget{TargetOS: targetLinux}, rfbCredentials{}, localWebVNCAuthAuto, io.Discard)
+	customDialed := false
+	bridge, err := connectWebVNCBridgeWithDial(ctx, coord, "cbx_abcdef123456", "unused.invalid", "1", SSHTarget{TargetOS: targetLinux}, rfbCredentials{}, localWebVNCAuthAuto, io.Discard, func(ctx context.Context) (net.Conn, error) {
+		customDialed = true
+		return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", port))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer bridge.Close()
+	if !customDialed {
+		t.Fatal("custom ownership-verifying VNC dialer was not used")
+	}
 
 	select {
 	case <-agentConnected:
@@ -1828,30 +1954,18 @@ func TestWebVNCDaemonSupervisorRestartsWithoutReopeningPortal(t *testing.T) {
 		"--open",
 	}, true)
 	args := append([]string{"webvnc"}, prepared...)
-	got := webVNCDaemonSupervisorScript("/tmp/crabbox", args)
-	var firstCommand, restartCommand string
-	for _, line := range strings.Split(got, "\n") {
-		if !strings.Contains(line, "'/tmp/crabbox' 'webvnc'") {
-			continue
-		}
-		if strings.Contains(line, "'--open'") {
-			firstCommand = line
-		} else {
-			restartCommand = line
-		}
-	}
+	firstCommand := strings.Join(webVNCDaemonSupervisorChildArgs(args, true, false), " ")
+	restartCommand := strings.Join(webVNCDaemonSupervisorChildArgs(args, false, false), " ")
 	for name, command := range map[string]string{"first": firstCommand, "restart": restartCommand} {
 		for _, want := range []string{"'--no-provider-side-effects=true'", "'--provider' 'hetzner'", "'--id' 'pearl-krill'"} {
+			want = strings.ReplaceAll(want, "'", "")
 			if !strings.Contains(command, want) {
-				t.Fatalf("%s daemon command missing %q: %s", name, want, got)
+				t.Fatalf("%s daemon command missing %q: %s", name, want, command)
 			}
 		}
 	}
-	if strings.Count(got, "--open") != 1 {
-		t.Fatalf("daemon supervisor should only open portal once: %s", got)
-	}
-	if !strings.Contains(got, "webvnc daemon supervisor: child exited code=$code; restarting in 1s") {
-		t.Fatalf("daemon supervisor missing restart log: %s", got)
+	if !strings.Contains(firstCommand, "--open") || strings.Contains(restartCommand, "--open") {
+		t.Fatalf("daemon supervisor portal args first=%q restart=%q", firstCommand, restartCommand)
 	}
 }
 
@@ -1865,15 +1979,94 @@ func TestWebVNCDaemonSupervisorPreservesOwnerHeartbeatPolicy(t *testing.T) {
 		"--no-provider-side-effects=false",
 	}, true)
 	controllerArgs := append([]string{"webvnc"}, controllerPrepared...)
-	got := webVNCDaemonSupervisorScript("/tmp/crabbox", controllerArgs)
+	first := strings.Join(webVNCDaemonSupervisorChildArgs(controllerArgs, true, false), " ")
+	restart := strings.Join(webVNCDaemonSupervisorChildArgs(controllerArgs, false, false), " ")
+	got := first + "\n" + restart
 	if strings.Contains(got, "reclaim") || strings.Contains(got, "--no-provider-side-effects=false") || strings.Count(got, "--no-provider-side-effects=true") != 2 {
 		t.Fatalf("daemon supervisor can mutate provider state: %s", got)
 	}
 	ordinaryPrepared := prepareWebVNCDaemonArgs([]string{"--id", "pearl-krill"}, false)
 	ordinaryArgs := append([]string{"webvnc"}, ordinaryPrepared...)
-	ordinary := webVNCDaemonSupervisorScript("/tmp/crabbox", ordinaryArgs)
+	ordinary := strings.Join(webVNCDaemonSupervisorChildArgs(ordinaryArgs, true, false), " ")
 	if strings.Contains(ordinary, "--no-provider-side-effects") {
 		t.Fatalf("ordinary registered daemon lost coordinator heartbeat: %s", ordinary)
+	}
+}
+
+func TestWebVNCDaemonSupervisorScopesMacOSCredentialToBridgeChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell bridge fixture")
+	}
+	for _, credentialName := range []string{
+		"gate",
+		"credential_value",
+		"IFS",
+		"SHELLOPTS",
+	} {
+		t.Run(credentialName, func(t *testing.T) {
+			dir := t.TempDir()
+			ownerEnvironment := filepath.Join(dir, "owner.env")
+			credentialInput := filepath.Join(dir, "credential.input")
+			argvPath := filepath.Join(dir, "argv")
+			bridge := filepath.Join(dir, "crabbox")
+			script := "#!/bin/sh\n/usr/bin/env >\"$OWNER_ENVIRONMENT\"\n/bin/cat >\"$CREDENTIAL_INPUT\"\nprintf '%s\\n' \"$@\" >\"$ARGV_PATH\"\nexec /bin/sleep 30\n"
+			if err := os.WriteFile(bridge, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(credentialName, "operator-secret")
+			t.Setenv("OWNER_ENVIRONMENT", ownerEnvironment)
+			t.Setenv("CREDENTIAL_INPUT", credentialInput)
+			t.Setenv("ARGV_PATH", argvPath)
+			args := []string{
+				"webvnc", "--provider", "external", "--target", targetMacOS,
+				"--external-desktop-password-env", credentialName,
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			var log bytes.Buffer
+			done := make(chan error, 1)
+			go func() {
+				done <- runWebVNCDaemonSupervisor(ctx, bridge, args, credentialName, "operator-secret", &log, &log)
+			}()
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				if argv, err := os.ReadFile(argvPath); err == nil && strings.Contains(string(argv), "--"+webVNCDaemonCredentialStdinFlag) {
+					if credentialData, readErr := os.ReadFile(credentialInput); readErr == nil && string(credentialData) == "operator-secret" {
+						break
+					}
+				}
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatal("supervisor bridge fixture did not run")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			cancel()
+			<-done
+			ownerData, err := os.ReadFile(ownerEnvironment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(ownerData), credentialName+"=") || strings.Contains(string(ownerData), "operator-secret") {
+				t.Fatalf("credential entered bridge environment: %q", ownerData)
+			}
+			credentialData, err := os.ReadFile(credentialInput)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(credentialData) != "operator-secret" {
+				t.Fatalf("credential stdin=%q", credentialData)
+			}
+			argv, err := os.ReadFile(argvPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(argv), "--"+webVNCDaemonCredentialStdinFlag) {
+				t.Fatalf("bridge argv missing credential stdin flag: %q", argv)
+			}
+			if strings.Contains(log.String(), "operator-secret") {
+				t.Fatalf("credential leaked into supervisor log: %q", log.String())
+			}
+		})
 	}
 }
 
@@ -1884,12 +2077,12 @@ func TestWebVNCDaemonSupervisorExcludesRawControllerOwnerToken(t *testing.T) {
 	prepared := prepareWebVNCDaemonArgs([]string{"--id", "pearl-krill"}, true)
 	args := append([]string{"webvnc"}, prepared...)
 	args = append(args, "--controller-owner-id", ownerID)
-	script := webVNCDaemonSupervisorScript("/tmp/crabbox", args)
-	if strings.Contains(script, rawOwnerToken) {
-		t.Fatalf("raw controller owner token leaked into daemon argv: %s", script)
+	childArgs := strings.Join(webVNCDaemonSupervisorChildArgs(args, true, false), " ")
+	if strings.Contains(childArgs, rawOwnerToken) {
+		t.Fatalf("raw controller owner token leaked into daemon argv: %s", childArgs)
 	}
-	if !strings.Contains(script, ownerID) {
-		t.Fatalf("daemon argv lost its public owner identity: %s", script)
+	if !strings.Contains(childArgs, ownerID) {
+		t.Fatalf("daemon argv lost its public owner identity: %s", childArgs)
 	}
 }
 
@@ -1923,13 +2116,28 @@ func TestWebVNCDaemonStatusRedactsControllerOwnerIdentity(t *testing.T) {
 }
 
 func TestWebVNCDaemonSupervisorWaitsForIdentityHandshake(t *testing.T) {
-	got := webVNCDaemonGatedSupervisorScript("/tmp/crabbox", []string{"webvnc", "--id", "pearl-krill"})
-	gate := "IFS= read -r gate || exit 125\n[ \"$gate\" = run ] || exit 125\n"
-	if !strings.HasPrefix(got, gate) {
-		t.Fatalf("daemon supervisor can launch before identity handshake: %s", got)
+	reader, writer := io.Pipe()
+	type result struct {
+		credential string
+		err        error
 	}
-	if strings.Index(got, "webvnc daemon supervisor: starting") < len(gate) {
-		t.Fatalf("daemon supervisor starts before launch gate: %s", got)
+	done := make(chan result, 1)
+	go func() {
+		credential, err := readWebVNCDaemonSupervisorGate(reader)
+		done <- result{credential: credential, err: err}
+	}()
+	select {
+	case result := <-done:
+		t.Fatalf("supervisor passed launch gate early: %#v", result)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if err := writeWebVNCDaemonSupervisorGate(writer, "operator\nsecret\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.Close()
+	got := <-done
+	if got.err != nil || got.credential != "operator\nsecret\n" {
+		t.Fatalf("gate result=%#v", got)
 	}
 }
 

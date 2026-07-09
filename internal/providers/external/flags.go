@@ -34,8 +34,8 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 			defaults.External.RoutingFile,
 			"private external provider routing state file",
 		),
-		DesktopUsername:    fs.String("external-desktop-username", defaults.External.Connection.Desktop.Username, "external desktop username; defaults to resolved SSH user"),
-		DesktopPasswordEnv: fs.String("external-desktop-password-env", defaults.External.Connection.Desktop.PasswordEnv, "environment variable name containing the external desktop password"),
+		DesktopUsername:    fs.String("external-desktop-username", defaults.External.Connection.Desktop.Username, "external macOS Screen Sharing account; defaults to resolved SSH user"),
+		DesktopPasswordEnv: fs.String("external-desktop-password-env", defaults.External.Connection.Desktop.PasswordEnv, "environment variable name containing the external macOS Screen Sharing account password"),
 		IdempotentLeaseID:  fs.Bool("external-idempotent-lease-id", defaults.External.Capabilities.IdempotentLeaseID, "adapter guarantees idempotent acquisition for caller-supplied lease IDs"),
 	}
 }
@@ -52,20 +52,24 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		if err != nil {
 			return core.Exit(2, "%v", err)
 		}
+		core.PreserveExternalDesktopChildEnvironmentBoundary(cfg)
 		cfg.External = routing
-		core.MarkExternalRoutingCredentialSources(cfg)
-		core.ApplyExternalDesktopEnvironmentOverrides(cfg)
 		restoreRoutingTarget(cfg, fs)
+		core.MarkExternalRoutingCredentialSources(cfg)
+		markRestoredRoutingTargetSources(cfg, fs)
+		core.ApplyExternalDesktopEnvironmentOverrides(cfg)
 		cfg.WorkRoot = externalWorkRoot(*cfg)
 	} else if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !core.ExternalRoutingLoaded(cfg.External) {
 		routing, err := core.LoadExternalRouting(path)
 		if err != nil {
 			return core.Exit(2, "%v", err)
 		}
+		core.PreserveExternalDesktopChildEnvironmentBoundary(cfg)
 		cfg.External = routing
-		core.MarkExternalRoutingCredentialSources(cfg)
-		core.ApplyExternalDesktopEnvironmentOverrides(cfg)
 		restoreRoutingTarget(cfg, fs)
+		core.MarkExternalRoutingCredentialSources(cfg)
+		markRestoredRoutingTargetSources(cfg, fs)
+		core.ApplyExternalDesktopEnvironmentOverrides(cfg)
 		cfg.WorkRoot = externalWorkRoot(*cfg)
 	}
 	if core.FlagWasSet(fs, "external-command") {
@@ -93,8 +97,10 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "external-desktop-username") {
 		cfg.External.Connection.Desktop.Username = *v.DesktopUsername
+		core.MarkExternalDesktopUsernameExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "external-desktop-password-env") {
+		core.PreserveExternalDesktopChildEnvironmentBoundary(cfg)
 		cfg.External.Connection.Desktop.PasswordEnv = *v.DesktopPasswordEnv
 		core.MarkExternalDesktopPasswordEnvExplicit(cfg)
 	}
@@ -162,6 +168,9 @@ func validateConfig(cfg core.Config) error {
 	}
 	if desktopPasswordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); desktopPasswordEnv != "" && !lifecycleEnvNamePattern.MatchString(desktopPasswordEnv) {
 		return core.Exit(2, "external.connection.desktop.passwordEnv must be an environment variable name")
+	}
+	if err := core.ValidateExternalDesktopPasswordEnvironmentName(cfg.External.Connection.Desktop.PasswordEnv); err != nil {
+		return core.Exit(2, "%v", err)
 	}
 	workRoot := externalWorkRoot(cfg)
 	if cfg.TargetOS == core.TargetWindows && cfg.WindowsMode == core.WindowsModeNormal {
@@ -258,6 +267,22 @@ func restoreRoutingTarget(cfg *core.Config, fs *flag.FlagSet) {
 			cfg.WindowsMode = windowsMode
 		}
 	}
+}
+
+func markRestoredRoutingTargetSources(cfg *core.Config, fs *flag.FlagSet) {
+	targetFlag := core.FlagWasSet(fs, "target")
+	windowsModeRestored := !core.FlagWasSet(fs, "windows-mode")
+	if targetFlag {
+		target := *cfg
+		if value := fs.Lookup("target"); value != nil {
+			target.TargetOS = value.Value.String()
+			core.NormalizeTargetConfig(&target)
+			if target.TargetOS != core.TargetWindows {
+				windowsModeRestored = false
+			}
+		}
+	}
+	core.MarkExternalRoutingTargetRestored(cfg, !targetFlag, windowsModeRestored)
 }
 
 func validateExternalWindowsWorkRoot(value string) error {

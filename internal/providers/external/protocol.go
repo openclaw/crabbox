@@ -126,6 +126,7 @@ func leaseForProtocol(lease core.LeaseTarget) *protocolLease {
 }
 
 func (p protocolLease) target(cfg core.Config, keep bool) core.LeaseTarget {
+	core.NormalizeTargetConfig(&cfg)
 	leaseID := p.LeaseID
 	slug := core.NormalizeLeaseSlug(p.Slug)
 	if slug == "" {
@@ -140,6 +141,15 @@ func (p protocolLease) target(cfg core.Config, keep bool) core.LeaseTarget {
 		if labels[key] == "" {
 			labels[key] = value
 		}
+	}
+	// Target routing is operator-owned, never adapter-owned. Overwrite any
+	// stale or hostile adapter labels before the lease reaches core resolution.
+	labels["target"] = cfg.TargetOS
+	labels["work_root"] = cfg.WorkRoot
+	if cfg.TargetOS == core.TargetWindows {
+		labels["windows_mode"] = cfg.WindowsMode
+	} else {
+		delete(labels, "windows_mode")
 	}
 	if cfg.TargetOS == core.TargetMacOS {
 		// External macOS desktops use the host's native Screen Sharing service;
@@ -164,14 +174,23 @@ func (p protocolLease) target(cfg core.Config, keep bool) core.LeaseTarget {
 		target.Key = p.SSH.Key
 		target.Port = core.Blank(p.SSH.Port, "22")
 		target.FallbackPorts = p.SSH.FallbackPorts
-		target.ReadyCheck = core.Blank(p.SSH.ReadyCheck, externalDefaultReadyCheck)
+		target.ReadyCheck = core.Blank(p.SSH.ReadyCheck, externalDefaultReadyCheckForTarget(cfg.TargetOS, cfg.WindowsMode))
 		target.AuthSecret = p.SSH.AuthSecret
 		target.NoControlMaster = p.SSH.NoControlMaster
 		target.ProxyCommand = p.SSH.ProxyCommand
 		target.SSHConfigProxy = p.SSH.SSHConfigProxy || strings.TrimSpace(target.ProxyCommand) != ""
 		server.PublicNet.IPv4.IP = target.Host
 	}
+	core.ApplyTargetChildEnvironmentBoundary(cfg, &target)
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
 }
 
 const externalDefaultReadyCheck = "command -v bash >/dev/null && command -v python3 >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
+
+func externalDefaultReadyCheckForTarget(targetOS, windowsMode string) string {
+	if targetOS == core.TargetWindows && windowsMode == core.WindowsModeNormal {
+		// An empty override lets core use its native PowerShell readiness probe.
+		return ""
+	}
+	return externalDefaultReadyCheck
+}

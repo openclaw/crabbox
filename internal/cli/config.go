@@ -18,6 +18,9 @@ import (
 type Config struct {
 	Profile                       string
 	Provider                      string
+	externalDesktopCredentialName string
+	externalDesktopCredential     transientSecret
+	externalDesktopEnvDenylist    []string
 	providerExplicit              bool
 	providerDefaultsApplied       string
 	TargetOS                      string
@@ -506,7 +509,7 @@ type ExternalConnectionConfig struct {
 	ServerType           string                      `yaml:"serverType,omitempty" json:"serverType,omitempty"`
 	Labels               map[string]string           `yaml:"labels,omitempty" json:"labels,omitempty"`
 	SSH                  ExternalSSHConnectionConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
-	Desktop              ExternalDesktopConfig       `yaml:"desktop,omitempty" json:"desktop,omitempty"`
+	Desktop              ExternalDesktopConfig       `yaml:"desktop,omitempty" json:"desktop,omitzero"`
 }
 
 type ExternalSSHConnectionConfig struct {
@@ -2521,10 +2524,11 @@ func IsTargetExplicit(cfg *Config) bool {
 
 func MarkTargetExplicit(cfg *Config) {
 	cfg.targetExplicit = true
-}
-
-func IsWindowsModeExplicit(cfg *Config) bool {
-	return cfg.explicitWindowsMode != "" || cfg.windowsModeFlagExplicit
+	cfg.credentialProvenance.externalDesktopTarget = credentialSourceFlag
+	if normalizeTargetOS(cfg.TargetOS) != targetWindows {
+		cfg.WindowsMode = windowsModeNormal
+		cfg.credentialProvenance.externalDesktopMode = credentialSourceFlag
+	}
 }
 
 func IsSSHUserExplicit(cfg *Config) bool {
@@ -5905,24 +5909,29 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.credentialProvenance.externalLifecycle = credentialSource
 		}
 		if file.External.Connection != nil {
+			PreserveExternalDesktopChildEnvironmentBoundary(cfg)
 			cfg.External.Connection = *file.External.Connection
 			ssh := cfg.External.Connection.SSH
 			cfg.credentialProvenance.externalConnection = credentialSource
 			cfg.credentialProvenance.externalSSHConnection = credentialSource
 			if trusted {
+				targetOS, windowsMode := normalizedExternalDesktopTarget(*cfg)
 				outputContract, outputContractOK := externalProviderOutputContract(cfg.External)
 				if ssh.TrustProviderOutput && !outputContractOK {
 					return exit(2, "external provider-output contract must be JSON encodable")
 				}
 				cfg.credentialProvenance.externalApproved = externalCredentialApproval{
-					resource:       cfg.External.Connection.ResourceName,
-					host:           ssh.Host,
-					proxy:          ssh.ProxyCommand,
-					allowEnv:       ssh.AllowEnv,
-					envSSH:         ssh,
-					providerOutput: ssh.TrustProviderOutput,
-					desktopEnv:     cfg.External.Connection.Desktop.PasswordEnv,
-					outputContract: outputContract,
+					resource:           cfg.External.Connection.ResourceName,
+					host:               ssh.Host,
+					proxy:              ssh.ProxyCommand,
+					allowEnv:           ssh.AllowEnv,
+					envSSH:             ssh,
+					providerOutput:     ssh.TrustProviderOutput,
+					desktopUsername:    strings.TrimSpace(cfg.External.Connection.Desktop.Username),
+					desktopEnv:         cfg.External.Connection.Desktop.PasswordEnv,
+					desktopTarget:      targetOS,
+					desktopWindowsMode: windowsMode,
+					outputContract:     outputContract,
 				}
 				cfg.credentialProvenance.externalApproved.envSSH.FallbackPorts = append([]string(nil), ssh.FallbackPorts...)
 			}
@@ -5936,6 +5945,11 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 				ssh.ProxyCommand, cfg.credentialProvenance.externalApproved.proxy, credentialSource,
 			)
 			cfg.credentialProvenance.externalSSHAllowEnv = credentialSourceForBool(ssh.AllowEnv, credentialSource)
+			cfg.credentialProvenance.externalDesktopUser = credentialDestinationSource(
+				cfg.External.Connection.Desktop.Username,
+				cfg.credentialProvenance.externalApproved.desktopUsername,
+				credentialSource,
+			)
 			cfg.credentialProvenance.externalDesktopEnv = credentialDestinationSource(
 				cfg.External.Connection.Desktop.PasswordEnv,
 				cfg.credentialProvenance.externalApproved.desktopEnv,
@@ -7679,9 +7693,11 @@ func applyEnv(cfg *Config) error {
 	if t := os.Getenv("CRABBOX_TARGET"); t != "" {
 		cfg.TargetOS = t
 		cfg.targetExplicit = true
+		cfg.credentialProvenance.externalDesktopTarget = credentialSourceEnvironment
 	} else if t := os.Getenv("CRABBOX_TARGET_OS"); t != "" {
 		cfg.TargetOS = t
 		cfg.targetExplicit = true
+		cfg.credentialProvenance.externalDesktopTarget = credentialSourceEnvironment
 	}
 	if arch := os.Getenv("CRABBOX_ARCH"); arch != "" {
 		cfg.Architecture = arch
@@ -7698,6 +7714,7 @@ func applyEnv(cfg *Config) error {
 	if windowsMode := os.Getenv("CRABBOX_WINDOWS_MODE"); windowsMode != "" {
 		cfg.WindowsMode = windowsMode
 		cfg.explicitWindowsMode = windowsMode
+		cfg.credentialProvenance.externalDesktopMode = credentialSourceEnvironment
 	}
 	if value, ok := getenvBool("CRABBOX_DESKTOP"); ok {
 		cfg.Desktop = value
@@ -9192,8 +9209,15 @@ func ApplyExternalDesktopEnvironmentOverrides(cfg *Config) {
 	if cfg == nil {
 		return
 	}
-	cfg.External.Connection.Desktop.Username = getenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", cfg.External.Connection.Desktop.Username)
-	if value := os.Getenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV"); value != "" {
+	PreserveExternalDesktopChildEnvironmentBoundary(cfg)
+	configuredPasswordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
+	if !strings.EqualFold(configuredPasswordEnv, "CRABBOX_EXTERNAL_DESKTOP_USERNAME") {
+		cfg.External.Connection.Desktop.Username = getenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", cfg.External.Connection.Desktop.Username)
+	}
+	if os.Getenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME") != "" && !strings.EqualFold(configuredPasswordEnv, "CRABBOX_EXTERNAL_DESKTOP_USERNAME") {
+		cfg.credentialProvenance.externalDesktopUser = credentialSourceEnvironment
+	}
+	if value := os.Getenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV"); value != "" && !strings.EqualFold(configuredPasswordEnv, "CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV") {
 		cfg.External.Connection.Desktop.PasswordEnv = value
 		cfg.credentialProvenance.externalDesktopEnv = credentialSourceEnvironment
 	}

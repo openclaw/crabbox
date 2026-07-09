@@ -146,9 +146,10 @@ func (a App) cacheWarm(ctx context.Context, args []string) error {
 		actionsEnvFile = state.EnvFile
 		fmt.Fprintf(a.Stderr, "using GitHub Actions workspace %s\n", workdir)
 	}
-	remote := remoteCacheWarmCommand(workdir, allowedEnv(cfg.EnvAllow), actionsEnvFile, command)
+	remoteEnv := allowedRemoteEnv(cfg)
+	remote := remoteCacheWarmCommand(workdir, remoteEnv, actionsEnvFile, command)
 	if isWindowsNativeTarget(target) {
-		remote = windowsRemoteCommandWithEnvFile(workdir, allowedEnv(cfg.EnvAllow), actionsEnvFile, command)
+		remote = windowsRemoteCommandWithEnvFile(workdir, remoteEnv, actionsEnvFile, command)
 	}
 	code := runSSHStream(ctx, target, remote, a.Stdout, a.Stderr)
 	if code != 0 {

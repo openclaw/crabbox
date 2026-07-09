@@ -1,10 +1,12 @@
 # vnc
 
 `crabbox vnc` prints (or opens) the connection details for a desktop-capable
-lease. For a managed desktop lease it gives you a loopback SSH tunnel, a local
-VNC endpoint, and the generated per-lease password. For a static SSH host it
-describes an existing host-managed VNC service instead of pretending the host
-is a Crabbox-created box.
+lease. For a managed desktop lease it gives you a loopback SSH tunnel and a
+local VNC endpoint. Crabbox-bootstrapped desktops also print their generated
+per-lease password; External desktops keep operator-owned passwords out of
+normal command output. For a static SSH host it describes an existing
+host-managed VNC service instead of pretending the host is a Crabbox-created
+box.
 
 Use it when you want to view or manually drive the visible desktop inside a
 lease:
@@ -116,8 +118,10 @@ tracked process. Opening URLs is supported on macOS, Linux, and Windows.
 loopback tunnel is ready it writes exactly one JSON line to stdout, with schema
 `crabbox/vnc-handoff/v1`, loopback host and port, and the in-memory VNC
 credentials. It remains in the foreground until the client closes it. The flag
-is incompatible with `--open`; clients should consume stdout as a private pipe
-and terminate the Crabbox process when the viewer disconnects.
+is incompatible with `--open`. The JSON is intentionally secret-bearing,
+including an operator-owned External password when configured; clients must
+consume stdout as a private pipe, never log it, and terminate the Crabbox
+process when the viewer disconnects.
 
 For the same desktop inside the authenticated broker portal instead of a native
 VNC client, use [`crabbox webvnc --id <lease> --open`](webvnc.md). WebVNC still
@@ -153,9 +157,10 @@ such as Tailscale or a private LAN.
 
 ## Credentials
 
-Managed desktop leases use generated per-lease credentials. The password is
-stored only on the instance and is read over SSH when `crabbox vnc` runs;
-Crabbox does not keep it in provider tags, labels, or run history.
+Crabbox-bootstrapped managed desktop leases use generated per-lease
+credentials. The password is stored only on the instance and is read over SSH
+when `crabbox vnc` runs; Crabbox does not keep it in provider tags, labels, or
+run history.
 
 Password locations:
 
@@ -189,6 +194,22 @@ macos password: ...
 That password is generated per lease and set on the macOS account during
 bootstrap.
 
+External macOS desktops are different: their Screen Sharing account and
+password belong to the operator. Config stores only an approved environment
+variable name. Ordinary `crabbox vnc` output identifies the account and secret
+source but never prints the password value:
+
+```text
+credentials: operator-managed
+macos username: screen-user
+credential hint: password comes from environment variable SCREEN_SHARING_PASSWORD and is not printed
+```
+
+`--native-handoff` is the explicit exception: its one-line JSON includes the
+password so a native client can authenticate. Treat that stdout as a private
+pipe. WebVNC instead keeps External ARD credentials inside the local relay and
+does not return them to the browser.
+
 Static macOS and Windows hosts are different: their VNC or Screen Sharing
 credentials are host-managed because those targets are existing machines.
 Crabbox does not synthesize or print them. For static hosts the output prints
@@ -197,7 +218,8 @@ password.
 
 ## Managed vs static
 
-Managed means Crabbox created the box and owns the desktop setup:
+For Crabbox-bootstrapped providers, managed means Crabbox created the box and
+owns the desktop setup:
 
 - cloud instance lifecycle;
 - SSH key and connection metadata;
@@ -205,6 +227,11 @@ Managed means Crabbox created the box and owns the desktop setup:
 - generated per-lease password;
 - `desktop=true` lease capability;
 - tunnel-only access.
+
+An External lease may also report `managed: true` because Crabbox owns its lease
+lifecycle and claim, while the adapter points at an operator-managed host and
+account. That status does not imply that Crabbox generated the External desktop
+credentials.
 
 Static means Crabbox is pointing at an existing SSH host:
 
@@ -234,6 +261,8 @@ host's VNC or Screen Sharing prompt.
 | AWS Windows | Yes | Requires `--target windows --desktop`; installs Git for Windows and TightVNC after EC2Launch enables OpenSSH. Spot or On-Demand follows the AWS capacity config. |
 | Azure Windows | Yes | Requires `--target windows --desktop`; installs Git for Windows and TightVNC after the Custom Script Extension enables OpenSSH. Capacity follows the Azure class/SKU config. |
 | AWS macOS | Yes | Requires `--target macos --desktop --market on-demand` plus an available EC2 Mac Dedicated Host. Brokered mode can discover a host; direct mode requires `CRABBOX_HOST_ID` or `hostId`; `CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain compatibility aliases. |
+| External macOS | Adapter-managed | Uses the adapter's SSH-reachable Mac and native Screen Sharing. The operator supplies an account password through an approved environment variable; normal `crabbox vnc` output never prints its value. |
+| External Windows | Adapter-defined | SSH/run routing is supported, but Crabbox does not install VNC. VNC requires the adapter to provide a compatible loopback service, managed credential file, and desktop capability. |
 | Static Linux | Host-managed | Requires an existing loopback VNC service on the host. |
 | Static macOS | Host-managed | Uses existing Screen Sharing or VNC. |
 | Static Windows | Host-managed | Uses an existing VNC server. |
@@ -253,7 +282,9 @@ Crabbox VNC is tunnel-first:
 - the cloud security group does not open public VNC ingress;
 - your local machine connects through SSH port forwarding;
 - the normal lease TTL and idle-timeout lifecycle still apply;
-- generated passwords are read only on demand over SSH.
+- generated passwords are read only on demand over SSH;
+- External desktop passwords come from an approved process environment
+  variable and are omitted from ordinary `crabbox vnc` output.
 
 For static hosts, direct `host:5900` VNC is offered only when that endpoint is
 already reachable. Keep direct static VNC on a trusted network.
@@ -290,7 +321,9 @@ start or configure the host's VNC service.
 **VNC opens an OS credential prompt** — Check `managed:` in the output. If it
 says `managed: false`, you opened a static host; those credentials belong to
 that host. For a Crabbox-created Windows or macOS box, use the generated
-username/password printed by `crabbox vnc`.
+username/password printed by `crabbox vnc`. For an External macOS lease, use
+the configured operator account and the password from its approved environment
+variable; Crabbox does not print that value in ordinary output.
 
 **Tunnel command uses port `22` instead of `2222`** — Expected on AWS Windows.
 EC2Launch enables the first OpenSSH foothold on port `22`, and Crabbox records

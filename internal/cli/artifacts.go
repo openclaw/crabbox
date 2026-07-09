@@ -54,25 +54,26 @@ type artifactWarning struct {
 }
 
 type artifactPublishOptions struct {
-	Directory   string
-	Storage     string
-	Bucket      string
-	Prefix      string
-	BaseURL     string
-	PR          int
-	Repo        string
-	Template    string
-	Summary     string
-	SummaryFile string
-	Region      string
-	Profile     string
-	EndpointURL string
-	ACL         string
-	Presign     bool
-	Expires     time.Duration
-	DryRun      bool
-	NoComment   bool
-	NoManifest  bool
+	Directory        string
+	Storage          string
+	Bucket           string
+	Prefix           string
+	BaseURL          string
+	PR               int
+	Repo             string
+	Template         string
+	Summary          string
+	SummaryFile      string
+	Region           string
+	Profile          string
+	EndpointURL      string
+	ACL              string
+	Presign          bool
+	Expires          time.Duration
+	DryRun           bool
+	NoComment        bool
+	NoManifest       bool
+	ChildEnvDenylist []string
 }
 
 func (a App) artifactsCollect(ctx context.Context, args []string) error {
@@ -99,6 +100,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 	contactSheetCols := fs.Int("contact-sheet-cols", 5, "contact sheet columns")
 	contactSheetWidth := fs.Int("contact-sheet-width", 320, "width of each contact sheet tile")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	jsonOut := fs.Bool("json", false, "print machine-readable result")
@@ -140,6 +142,9 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 	needsDesktop := artifactCollectNeedsDesktop(*screenshot, *video, *doctor, *webvncStatus)
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: needsDesktop})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	if isBlacksmithProvider(cfg.Provider) {
@@ -239,7 +244,11 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 		}
 	}
 	if strings.TrimSpace(*runID) != "" {
-		logPath, runPath, err := writeArtifactRunLogs(ctx, strings.TrimSpace(*runID), dir)
+		runLogChildEnvDenylist := appendUniqueStrings(
+			externalDesktopChildEnvDenylist(defaults, defaults.TargetOS),
+			target.ChildEnvDenylist...,
+		)
+		logPath, runPath, err := writeArtifactRunLogs(ctx, cfg, runLogChildEnvDenylist, strings.TrimSpace(*runID), dir)
 		if err != nil {
 			return fail(err, artifactWarning{
 				Problem: rescueArtifactCaptureFailed,
@@ -271,11 +280,12 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 		if *contactSheet {
 			contactPath := filepath.Join(dir, "screen.contact.png")
 			if _, err := createMediaContactSheet(ctx, mediaContactSheetOptions{
-				Input:  path,
-				Output: contactPath,
-				Frames: *contactSheetFrames,
-				Cols:   *contactSheetCols,
-				Width:  *contactSheetWidth,
+				Input:            path,
+				Output:           contactPath,
+				ChildEnvDenylist: target.ChildEnvDenylist,
+				Frames:           *contactSheetFrames,
+				Cols:             *contactSheetCols,
+				Width:            *contactSheetWidth,
 			}); err != nil {
 				appendContactSheetWarning(&result.Warnings, err)
 			} else {
@@ -286,6 +296,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 			gifPath := filepath.Join(dir, "screen.trimmed.gif")
 			trimmedPath := filepath.Join(dir, "screen.trimmed.mp4")
 			options := defaultMediaPreviewOptions(path, gifPath, trimmedPath)
+			options.ChildEnvDenylist = target.ChildEnvDenylist
 			options.Width = *gifWidth
 			options.FPS = *gifFPS
 			preview, err := createMediaPreview(ctx, options)
@@ -398,11 +409,12 @@ func (a App) artifactsVideo(ctx context.Context, args []string) error {
 	fmt.Fprintf(a.Stdout, "video: %s\n", output)
 	if contactEnabled {
 		if _, err := createMediaContactSheet(ctx, mediaContactSheetOptions{
-			Input:  output,
-			Output: contactPath,
-			Frames: contactFrames,
-			Cols:   contactCols,
-			Width:  contactWidth,
+			Input:            output,
+			Output:           contactPath,
+			ChildEnvDenylist: target.ChildEnvDenylist,
+			Frames:           contactFrames,
+			Cols:             contactCols,
+			Width:            contactWidth,
 		}); err != nil {
 			printContactSheetWarning(a.Stdout, err)
 		} else {
@@ -454,6 +466,14 @@ func (a App) artifactsPublish(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if err := ValidateProviderCredentialDestination(cfg); err != nil {
+		return err
+	}
+	opts.ChildEnvDenylist = appendUniqueStrings(opts.ChildEnvDenylist, externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)...)
 	published, bodyPath, manifestPath, err := a.publishArtifactDirectory(ctx, opts)
 	if err != nil {
 		return err
@@ -541,6 +561,9 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 		if err != nil {
 			return nil, "", "", err
 		}
+		if coord != nil {
+			coord.ChildEnvDenylist = appendUniqueStrings(coord.ChildEnvDenylist, opts.ChildEnvDenylist...)
+		}
 		if opts.Storage == "auto" {
 			if useCoordinator && coord.hasConfiguredAuth() {
 				opts.Storage = "broker"
@@ -599,7 +622,7 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 		}
 		if opts.DryRun {
 			fmt.Fprintf(a.Stdout, "dry-run comment: gh issue comment %d --body-file %s\n", opts.PR, bodyPath)
-		} else if err := postGitHubPRComment(ctx, opts.PR, opts.Repo, bodyPath); err != nil {
+		} else if err := postGitHubPRComment(ctx, opts, bodyPath); err != nil {
 			return nil, "", "", err
 		}
 	}
@@ -720,11 +743,15 @@ func printArtifactWarning(w io.Writer, warning artifactWarning) {
 	printRescueWithFallback(w, warning.Problem, warning.Detail, warning.Fallback, warning.Rescue...)
 }
 
-func writeArtifactRunLogs(ctx context.Context, runID, dir string) (string, string, error) {
-	coord, err := configuredCoordinator()
+func writeArtifactRunLogs(ctx context.Context, cfg Config, childEnvDenylist []string, runID, dir string) (string, string, error) {
+	coord, configured, err := newCoordinatorClient(cfg)
 	if err != nil {
 		return "", "", err
 	}
+	if !configured {
+		return "", "", exit(2, "command requires a configured coordinator")
+	}
+	coord.ChildEnvDenylist = appendUniqueStrings(coord.ChildEnvDenylist, childEnvDenylist...)
 	logText, err := coord.RunLogs(ctx, runID)
 	if err != nil {
 		return "", "", err
@@ -882,16 +909,24 @@ func captureWindowsDesktopVideo(ctx context.Context, target SSHTarget, outputPat
 		"-movflags", "+faststart",
 		outputPath,
 	}
-	if out, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput(); err != nil {
+	cmd := windowsDesktopVideoEncoderCommand(ctx, target, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
 		_ = os.Remove(outputPath)
 		return exit(5, "encode Windows video: %v: %s", err, tailForError(string(out)))
 	}
 	return nil
 }
 
+func windowsDesktopVideoEncoderCommand(ctx context.Context, target SSHTarget, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	applyTargetChildEnvironment(cmd, target)
+	return cmd
+}
+
 func copyLocalFileToTarget(ctx context.Context, target SSHTarget, localPath, remotePath string) error {
 	args := append(scpBaseArgs(target), localPath, target.User+"@"+target.Host+":"+remotePath)
 	cmd := exec.CommandContext(ctx, "scp", args...)
+	applyTargetChildEnvironment(cmd, target)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return exit(5, "copy %s to target: %v: %s", filepath.Base(localPath), err, strings.TrimSpace(string(out)))
 	}

@@ -160,6 +160,295 @@ func TestControllerRunnerAddsRuntimeAdapterIdentity(t *testing.T) {
 	}
 }
 
+func TestControllerChildEnvironmentScrubsDesktopPasswordIncludingMacOSOwner(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	base := []string{"PATH=/bin", "TEST_ARD_PASSWORD=operator-secret", "KEEP=value"}
+	for _, test := range []struct {
+		name     string
+		targetOS string
+		args     []string
+	}{
+		{name: "linux daemon start", targetOS: targetLinux, args: []string{"webvnc", "daemon", "start", "--provider", "external"}},
+		{name: "windows daemon start", targetOS: targetWindows, args: []string{"webvnc", "daemon", "start", "--provider", "external"}},
+		{name: "mac status", targetOS: targetMacOS, args: []string{"webvnc", "status", "--provider", "external"}},
+		{name: "mac near match", targetOS: targetMacOS, args: []string{"webvnc", "daemon", "status", "--provider", "external"}},
+		{name: "mac owner", targetOS: targetMacOS, args: []string{"webvnc", "daemon", "start", "--provider", "external"}},
+		{name: "mac legacy alias owner", targetOS: targetMacOS, args: []string{"webvnc", "daemon", "start", "--provider", "exec-provider"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
+				Provider: "external", TargetOS: test.targetOS, ExternalDesktopPasswordEnv: "TEST_ARD_PASSWORD",
+			}}
+			env, err := runner.childEnvironment(base, controllerWorkspaceRequest{}, test.args, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotSecret := strings.Contains(strings.Join(env, "\n"), "TEST_ARD_PASSWORD=operator-secret")
+			if gotSecret {
+				t.Fatalf("environment retained credential: %q", env)
+			}
+			if !slices.Contains(env, "KEEP=value") {
+				t.Fatalf("unrelated environment removed: %q", env)
+			}
+		})
+	}
+}
+
+func TestControllerChildEnvironmentUsesPersistedMacOSRouteAndScrubsCurrentName(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	leaseID := "cbx_routedmac123"
+	external := ExternalConfig{Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+		Username: "route-user", PasswordEnv: "ROUTED_ARD_PASSWORD",
+	}}}
+	SetExternalRoutingTarget(&external, targetMacOS, "")
+	routingPath, err := PersistValidatedExternalRouting(leaseID, external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
+		Provider: "external", TargetOS: targetLinux, ExternalDesktopPasswordEnv: "CURRENT_ARD_PASSWORD",
+	}}
+	request := controllerDesktopTestRequest(leaseID)
+	args := []string{
+		"webvnc", "daemon", "start", "--provider", "external",
+		"--external-routing-file", routingPath,
+		"--target", targetMacOS,
+		"--external-desktop-password-env", "ROUTED_ARD_PASSWORD",
+		"--external-desktop-username", "route-user",
+	}
+	env, err := runner.childEnvironment([]string{
+		"CURRENT_ARD_PASSWORD=current-secret",
+		"ROUTED_ARD_PASSWORD=routed-secret",
+		"KEEP=value",
+	}, request, args, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(env, "\n")
+	if strings.Contains(joined, "CURRENT_ARD_PASSWORD=") || strings.Contains(joined, "ROUTED_ARD_PASSWORD=") {
+		t.Fatalf("routed owner environment retained credential=%q", env)
+	}
+
+	statusEnv, err := runner.childEnvironment(env, request, []string{"webvnc", "status", "--provider", "external", "--external-routing-file", routingPath}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined = strings.Join(statusEnv, "\n"); strings.Contains(joined, "CURRENT_ARD_PASSWORD=") || strings.Contains(joined, "ROUTED_ARD_PASSWORD=") {
+		t.Fatalf("status environment retained credential: %q", statusEnv)
+	}
+}
+
+func TestControllerChildCredentialPolicySkipsInvalidStaleRoutes(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, test := range []struct {
+		leaseID     string
+		passwordEnv string
+	}{
+		{leaseID: "cbx_stalelegacy1", passwordEnv: "CRABBOX_EXTERNAL_DESKTOP_PASSWORD"},
+		{leaseID: "cbx_stalepath001", passwordEnv: "PATH"},
+		{leaseID: "cbx_stalegithub1", passwordEnv: "GH_TOKEN"},
+	} {
+		external := ExternalConfig{Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+			PasswordEnv: test.passwordEnv,
+		}}}
+		if _, err := PersistExternalRouting(test.leaseID, external); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{Provider: "aws", TargetOS: targetLinux}}
+	policy, err := runner.childCredentialPolicy(controllerWorkspaceRequest{}, []string{"inspect", "--provider", "aws"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(policy.denied, "CRABBOX_EXTERNAL_DESKTOP_PASSWORD") {
+		t.Fatalf("legacy desktop secret missing from denylist: %v", policy.denied)
+	}
+	for _, invalid := range []string{"PATH", "GH_TOKEN"} {
+		if slices.Contains(policy.denied, invalid) {
+			t.Fatalf("invalid stale route suppressed %s: %v", invalid, policy.denied)
+		}
+	}
+}
+
+func TestControllerCredentialOwnerUsesRuntimePasswordOverrideForPersistedMacOSRoute(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_EXTERNAL_ROUTING_FILE", "")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", "")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "RUNTIME_SCREEN_PASSWORD")
+	leaseID := "cbx_runtimeard123"
+	external := ExternalConfig{Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+		Username: "route-user",
+	}}}
+	SetExternalRoutingTarget(&external, targetMacOS, "")
+	routingPath, err := PersistValidatedExternalRouting(leaseID, external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
+		Provider: "external", WorkDir: root, ResolveCredentialBoundary: true,
+	}}
+	request := controllerDesktopTestRequest(leaseID)
+	args, err := runner.pinExternalDesktopCredentialOwnerArgs([]string{
+		"webvnc", "daemon", "start", "--provider", "external", "--external-routing-file", routingPath,
+	}, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := webVNCDaemonStringArg(args, "target"); got != targetMacOS {
+		t.Fatalf("target=%q args=%q", got, args)
+	}
+	if got := webVNCDaemonStringArg(args, "external-desktop-username"); got != "route-user" {
+		t.Fatalf("username=%q args=%q", got, args)
+	}
+	if got := webVNCDaemonStringArg(args, "external-desktop-password-env"); got != "RUNTIME_SCREEN_PASSWORD" {
+		t.Fatalf("password env=%q args=%q", got, args)
+	}
+	environment, err := runner.childEnvironment([]string{
+		"RUNTIME_SCREEN_PASSWORD=runtime-secret",
+		"KEEP=value",
+	}, request, args, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(environment, "RUNTIME_SCREEN_PASSWORD=runtime-secret") || !slices.Contains(environment, "KEEP=value") {
+		t.Fatalf("credential owner environment=%q", environment)
+	}
+}
+
+func TestControllerCredentialOwnerUsesStdinWithoutSecretEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+	t.Setenv("SHELLOPTS", "operator-secret")
+	environmentPath := filepath.Join(dir, "environment")
+	stdinPath := filepath.Join(dir, "stdin")
+	argsPath := filepath.Join(dir, "args")
+	binary := filepath.Join(dir, "crabbox")
+	script := "#!/bin/sh\n/usr/bin/env >" + shellQuote(environmentPath) + "\n/bin/cat >" + shellQuote(stdinPath) + "\nprintf '%s\\n' \"$@\" >" + shellQuote(argsPath) + "\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
+		Binary: binary, Provider: "external", TargetOS: targetMacOS, ExternalDesktopPasswordEnv: "SHELLOPTS",
+	}}
+	args := []string{
+		"webvnc", "daemon", "start", "--provider", "external", "--target", targetMacOS,
+		"--external-desktop-password-env", "SHELLOPTS",
+	}
+	if err := runner.run(context.Background(), controllerWorkspaceRequest{}, args, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	environment, err := os.ReadFile(environmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(environment), "SHELLOPTS=") || strings.Contains(string(environment), "operator-secret") {
+		t.Fatalf("credential entered child environment: %q", environment)
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stdin) != "operator-secret" {
+		t.Fatalf("credential stdin=%q", stdin)
+	}
+	childArgs, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(childArgs), "--"+webVNCDaemonCredentialStdinFlag) {
+		t.Fatalf("credential stdin flag missing: %q", childArgs)
+	}
+}
+
+func TestControllerExternalRoutingAcceptsLegacyRouteWithTrustedDesktopApproval(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_EXTERNAL_ROUTING_FILE", "")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", "")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "")
+	configPath := filepath.Join(root, "trusted.yaml")
+	if err := os.WriteFile(configPath, []byte(`provider: external
+target: macos
+external:
+  connection:
+    desktop:
+      username: route-user
+      passwordEnv: LEGACY_SCREEN_PASSWORD
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	external := ExternalConfig{Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+		Username: "route-user", PasswordEnv: "LEGACY_SCREEN_PASSWORD",
+	}}}
+	SetExternalRoutingTarget(&external, targetMacOS, "")
+	routingPath, err := PersistExternalRouting("cbx_legacyard123", external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
+		Config: configPath, Provider: "external", WorkDir: workDir,
+	}}
+	resolved, err := runner.resolvedExternalRoutingConfig(routingPath, "external")
+	if err != nil {
+		t.Fatalf("trusted approval rejected legacy route: %v", err)
+	}
+	if resolved.Config.TargetOS != targetMacOS ||
+		resolved.Config.External.Connection.Desktop.Username != "route-user" ||
+		resolved.Config.External.Connection.Desktop.PasswordEnv != "LEGACY_SCREEN_PASSWORD" {
+		t.Fatalf("resolved route=%#v", resolved.Config.External.Connection.Desktop)
+	}
+}
+
+func TestControllerChildEnvironmentRetainsMonotonicCredentialDenylist(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{Provider: "external", TargetOS: targetLinux, ExternalDesktopPasswordEnv: "PASSWORD_A"}}
+	base := []string{"PASSWORD_A=secret-a", "PASSWORD_B=secret-b", "KEEP=value"}
+	for _, name := range []string{"PASSWORD_A", "PASSWORD_B", ""} {
+		runner.opts.ExternalDesktopPasswordEnv = name
+		env, err := runner.childEnvironment(base, controllerWorkspaceRequest{}, []string{"inspect", "--provider", "external"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined := strings.Join(env, "\n")
+		if strings.Contains(joined, "PASSWORD_A=") || (name != "PASSWORD_A" && strings.Contains(joined, "PASSWORD_B=")) {
+			t.Fatalf("name=%q monotonic environment=%q", name, env)
+		}
+	}
+}
+
+func TestControllerCredentialOwnerRejectsTrackedCallbackBeforeSpawn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("controller host is unsupported on Windows")
+	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	marker := filepath.Join(t.TempDir(), "spawned")
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
+		Binary: "/usr/bin/touch", Provider: "external", TargetOS: targetMacOS,
+		ExternalDesktopPasswordEnv: "TEST_ARD_PASSWORD", StateFile: filepath.Join(t.TempDir(), "state.json"),
+	}}
+	err := runner.runWithStarted(context.Background(), controllerWorkspaceRequest{}, []string{
+		"webvnc", "daemon", "start", "--provider", "external", marker,
+	}, io.Discard, func() error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "cannot use a tracked launch callback") {
+		t.Fatalf("error=%v", err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("credential owner spawned before rejection: %v", statErr)
+	}
+}
+
 func TestControllerAcquireIdentityGateWaitsForPersistenceAcknowledgment(t *testing.T) {
 	identity := controllerAcquireIdentity{
 		LeaseID: "cbx_123456789abc", Slug: "stable-slug", Provider: "external", ResourceID: "provider/resource-123",
@@ -1219,6 +1508,16 @@ func controllerDesktopTestRequest(leaseID string) controllerWorkspaceRequest {
 	}
 }
 
+func persistControllerDesktopRouteForTest(t *testing.T, root, leaseID, targetOS, passwordEnv string) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
+	external := ExternalConfig{Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{PasswordEnv: passwordEnv}}}
+	SetExternalRoutingTarget(&external, targetOS, "")
+	if _, err := PersistValidatedExternalRouting(leaseID, external); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func legacyControllerDesktopOwnerTokenForTest(r *execControllerWorkspaceRunner, identifier string, request controllerWorkspaceRequest) string {
 	values := []string{
 		filepath.Clean(r.controllerStatePath()), filepath.Clean(r.opts.Config),
@@ -1244,6 +1543,7 @@ func TestControllerDesktopConnectionRestartsDaemonWithoutRecordedPort(t *testing
 	binary := filepath.Join(dir, "crabbox")
 	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{Binary: binary, Provider: "external"}}
 	request := controllerDesktopTestRequest("cbx_legacy123")
+	persistControllerDesktopRouteForTest(t, dir, request.ProviderLeaseID, targetLinux, "")
 	script := `#!/bin/sh
 printf '%s\n' "$*" >>"$CONTROLLER_CALLS"
 if [ "$1 $2 $3" = 'webvnc daemon status' ]; then
@@ -1310,7 +1610,9 @@ exit 0
 	}
 	t.Setenv("CONTROLLER_CALLS", calls)
 	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{Binary: binary, Provider: "external"}}
-	_, err := runner.DesktopConnection(context.Background(), "cbx_missing123", controllerDesktopTestRequest("cbx_missing123"))
+	request := controllerDesktopTestRequest("cbx_missing123")
+	persistControllerDesktopRouteForTest(t, dir, request.ProviderLeaseID, targetLinux, "")
+	_, err := runner.DesktopConnection(context.Background(), "cbx_missing123", request)
 	if err == nil || !strings.Contains(err.Error(), "did not report its supervisor pid") {
 		t.Fatalf("error=%v", err)
 	}
@@ -1341,6 +1643,7 @@ func TestControllerDesktopConnectionReplacesMismatchedDaemonOwnership(t *testing
 		ProviderSlug: "owned-slug", ProviderResourceID: "provider/owned",
 	}
 	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{Binary: binary, Provider: "external", StateFile: filepath.Join(dir, "controller.json")}}
+	persistControllerDesktopRouteForTest(t, dir, request.ProviderLeaseID, targetLinux, "")
 	ownerID := runner.desktopControllerOwnerID(request.ProviderLeaseID, request)
 	legacyOwnerToken := legacyControllerDesktopOwnerTokenForTest(&runner, request.ProviderLeaseID, request)
 	if ownerID == legacyOwnerToken || len(ownerID) != sha256.Size*2 {

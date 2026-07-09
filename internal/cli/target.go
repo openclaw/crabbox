@@ -317,13 +317,13 @@ func autoRouteExternalLease(cfg *Config, fs *flag.FlagSet, id string) error {
 		cfg,
 		id,
 		flagWasSet(fs, "external-routing-file"),
-		cfg.targetFlagExplicit,
-		cfg.windowsModeFlagExplicit,
+		IsExternalDesktopTargetExplicit(cfg),
+		IsExternalDesktopWindowsModeExplicit(cfg),
 	)
 }
 
 func autoRouteExternalLeaseForConfig(cfg *Config, id string) error {
-	return autoRouteExternalLeaseWithHints(cfg, id, false, cfg.targetFlagExplicit, cfg.windowsModeFlagExplicit)
+	return autoRouteExternalLeaseWithHints(cfg, id, false, IsExternalDesktopTargetExplicit(cfg), IsExternalDesktopWindowsModeExplicit(cfg))
 }
 
 func routeExternalLeaseClaim(cfg *Config, leaseID string) error {
@@ -405,9 +405,30 @@ func loadExternalRoutingConfig(cfg *Config, path string, claimBound bool) error 
 			cfg.credentialProvenance.externalRouting = credentialSourceTrustedFile
 		}
 	}
+	explicitTargetOS := cfg.TargetOS
+	explicitWindowsMode := cfg.WindowsMode
+	explicitTargetSource := cfg.credentialProvenance.externalDesktopTarget
+	explicitWindowsModeSource := cfg.credentialProvenance.externalDesktopMode
+	targetExplicit := IsExternalDesktopTargetExplicit(cfg)
+	windowsModeExplicit := IsExternalDesktopWindowsModeExplicit(cfg)
+	windowsModeDerivedFromTarget := targetExplicit && normalizeTargetOS(explicitTargetOS) != targetWindows && !windowsModeExplicit
+	PreserveExternalDesktopChildEnvironmentBoundary(cfg)
 	cfg.External = routing
+	cfg.TargetOS, cfg.WindowsMode = ExternalRoutingTarget(routing)
 	MarkExternalRoutingCredentialSources(cfg)
+	MarkExternalRoutingTargetRestored(cfg, !targetExplicit, !windowsModeExplicit && !windowsModeDerivedFromTarget)
 	ApplyExternalDesktopEnvironmentOverrides(cfg)
+	if targetExplicit {
+		cfg.TargetOS = explicitTargetOS
+		cfg.credentialProvenance.externalDesktopTarget = explicitTargetSource
+	}
+	if windowsModeExplicit {
+		cfg.WindowsMode = explicitWindowsMode
+		cfg.credentialProvenance.externalDesktopMode = explicitWindowsModeSource
+	} else if windowsModeDerivedFromTarget {
+		cfg.WindowsMode = windowsModeNormal
+		cfg.credentialProvenance.externalDesktopMode = explicitTargetSource
+	}
 	if strings.TrimSpace(routing.WorkRoot) != "" {
 		cfg.WorkRoot = routing.WorkRoot
 	}
@@ -546,6 +567,7 @@ func applyResolvedLeaseConfig(cfg *Config, server Server, target *SSHTarget) {
 	normalizeTargetConfig(cfg)
 	target.TargetOS = cfg.TargetOS
 	target.WindowsMode = cfg.WindowsMode
+	ApplyTargetChildEnvironmentBoundary(*cfg, target)
 	if target.User == "" || target.User == configuredSSHUser {
 		target.User = cfg.SSHUser
 	}

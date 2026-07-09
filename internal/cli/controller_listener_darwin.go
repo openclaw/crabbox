@@ -17,12 +17,16 @@ import (
 func controllerListenerOwnershipSupported() bool { return true }
 
 func controllerVerifyDaemonOwnedListener(port string, supervisorPID int) error {
-	owners, err := controllerDarwinLoopbackListenerOwnerPIDs(port)
+	return controllerVerifyDaemonOwnedListenerWithEnvironment(port, supervisorPID, nil)
+}
+
+func controllerVerifyDaemonOwnedListenerWithEnvironment(port string, supervisorPID int, denied []string) error {
+	owners, err := controllerDarwinLoopbackListenerOwnerPIDsWithEnvironment(port, denied)
 	if err != nil {
 		return err
 	}
 	for _, pid := range owners {
-		owned, err := controllerDarwinProcessDescendsFrom(pid, supervisorPID)
+		owned, err := controllerDarwinProcessDescendsFromWithEnvironment(pid, supervisorPID, denied)
 		if err != nil {
 			return fmt.Errorf("verify listener process %d ancestry: %w", pid, err)
 		}
@@ -57,6 +61,10 @@ func localWebVNCListenerIdentity(port string) (localWebVNCSourceIdentity, error)
 }
 
 func controllerDarwinLoopbackListenerOwnerPIDs(port string) ([]int, error) {
+	return controllerDarwinLoopbackListenerOwnerPIDsWithEnvironment(port, nil)
+}
+
+func controllerDarwinLoopbackListenerOwnerPIDsWithEnvironment(port string, _ []string) ([]int, error) {
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 1 || portNumber > 65535 {
 		return nil, fmt.Errorf("invalid local listener port")
@@ -64,7 +72,9 @@ func controllerDarwinLoopbackListenerOwnerPIDs(port string) ([]int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	path := "/usr/sbin/lsof"
-	output, err := exec.CommandContext(ctx, path, controllerDarwinListenerLsofArgs(port)...).Output()
+	cmd := exec.CommandContext(ctx, path, controllerDarwinListenerLsofArgs(port)...)
+	cmd.Env = systemInspectionEnvironment()
+	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("inspect macOS listener ownership: %w", err)
 	}
@@ -102,7 +112,7 @@ func controllerDarwinLoopbackListenerOwners(output, port string) []int {
 	return out
 }
 
-func controllerDarwinProcessDescendsFrom(pid, ancestor int) (bool, error) {
+func controllerDarwinProcessDescendsFromWithEnvironment(pid, ancestor int, _ []string) (bool, error) {
 	seen := map[int]struct{}{}
 	for pid > 0 {
 		if pid == ancestor {
@@ -113,7 +123,9 @@ func controllerDarwinProcessDescendsFrom(pid, ancestor int) (bool, error) {
 		}
 		seen[pid] = struct{}{}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		output, err := exec.CommandContext(ctx, "/bin/ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+		cmd := exec.CommandContext(ctx, "/bin/ps", "-o", "ppid=", "-p", strconv.Itoa(pid))
+		cmd.Env = systemInspectionEnvironment()
+		output, err := cmd.Output()
 		cancel()
 		if err != nil {
 			return false, err

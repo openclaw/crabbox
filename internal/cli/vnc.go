@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -129,25 +130,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	} else {
 		fmt.Fprintf(a.Stdout, "  %s:%s\n", vncLoopbackHost, *localPort)
 	}
-	if strings.TrimSpace(credentials.Password) != "" {
-		fmt.Fprintf(a.Stdout, "password: %s\n", credentials.Password)
-		if endpoint.Managed && target.TargetOS == targetWindows {
-			fmt.Fprintf(a.Stdout, "windows username: %s\n", credentials.Username)
-			fmt.Fprintf(a.Stdout, "windows password: %s\n", credentials.Password)
-		}
-		if endpoint.Managed && target.TargetOS == targetMacOS {
-			fmt.Fprintf(a.Stdout, "macos username: %s\n", credentials.Username)
-			fmt.Fprintf(a.Stdout, "macos password: %s\n", credentials.Password)
-		}
-	} else if staticHostVNC {
-		fmt.Fprintln(a.Stdout, "credentials: host-managed")
-		if target.TargetOS == targetMacOS {
-			fmt.Fprintln(a.Stdout, "credential hint: use the macOS account or Screen Sharing password configured on that host")
-		}
-		if target.TargetOS == targetWindows {
-			fmt.Fprintln(a.Stdout, "credential hint: use the Windows/VNC password configured on that host")
-		}
-	}
+	writeVNCCredentials(a.Stdout, cfg, target, endpoint, staticHostVNC, credentials)
 	if *openClient {
 		if staticHostVNC {
 			fmt.Fprintln(a.Stdout, "opening existing host VNC; expect that host's OS credential prompt")
@@ -165,7 +148,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 			}
 			url = fmt.Sprintf("vnc://%s:%s", vncLoopbackHost, *localPort)
 		}
-		if err := openLocalURL(url); err != nil {
+		if err := openLocalURLWithEnvironment(url, target.ChildEnvDenylist...); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "opened: %s\n", url)
@@ -176,6 +159,42 @@ func (a App) vnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(a.Stdout, "Keep the tunnel process running while connected.")
 	}
 	return nil
+}
+
+func writeVNCCredentials(w io.Writer, cfg Config, target SSHTarget, endpoint vncEndpoint, staticHostVNC bool, credentials rfbCredentials) {
+	passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
+	providerName := normalizeProviderName(cfg.Provider)
+	if provider, err := ProviderFor(cfg.Provider); err == nil {
+		providerName = provider.Name()
+	}
+	externalDesktopCredentials := providerName == "external" || providerName == "exec-provider"
+	if externalDesktopCredentials && normalizeTargetOS(target.TargetOS) == targetMacOS && len(externalDesktopChildEnvDenylist(cfg, target.TargetOS)) > 0 {
+		fmt.Fprintln(w, "credentials: operator-managed")
+		if endpoint.Managed && strings.TrimSpace(credentials.Username) != "" {
+			fmt.Fprintf(w, "%s username: %s\n", target.TargetOS, credentials.Username)
+		}
+		fmt.Fprintf(w, "credential hint: password comes from environment variable %s and is not printed\n", passwordEnv)
+		return
+	}
+	if strings.TrimSpace(credentials.Password) != "" {
+		fmt.Fprintf(w, "password: %s\n", credentials.Password)
+		if endpoint.Managed && target.TargetOS == targetWindows {
+			fmt.Fprintf(w, "windows username: %s\n", credentials.Username)
+			fmt.Fprintf(w, "windows password: %s\n", credentials.Password)
+		}
+		if endpoint.Managed && target.TargetOS == targetMacOS {
+			fmt.Fprintf(w, "macos username: %s\n", credentials.Username)
+			fmt.Fprintf(w, "macos password: %s\n", credentials.Password)
+		}
+	} else if staticHostVNC {
+		fmt.Fprintln(w, "credentials: host-managed")
+		if target.TargetOS == targetMacOS {
+			fmt.Fprintln(w, "credential hint: use the macOS account or Screen Sharing password configured on that host")
+		}
+		if target.TargetOS == targetWindows {
+			fmt.Fprintln(w, "credential hint: use the Windows/VNC password configured on that host")
+		}
+	}
 }
 
 func resolveNativeVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, endpoint vncEndpoint) (rfbCredentials, error) {
@@ -422,6 +441,7 @@ func vncTunnelCommand(target SSHTarget, localPort string) string {
 
 func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost, remotePort string) (int, error) {
 	cmd := exec.Command("ssh", vncTunnelArgs(target, localPort, remoteHost, remotePort)...)
+	applyTargetChildEnvironment(cmd, target)
 	configureDaemonCommand(cmd)
 	var output bytes.Buffer
 	cmd.Stdout = &output
@@ -437,7 +457,7 @@ func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost
 			_ = cmd.Wait()
 			return 0, context.Cause(ctx)
 		}
-		if ready, err := startedTunnelListenerReady(ctx, localPort, cmd.Process.Pid); ready {
+		if ready, err := startedTunnelListenerReady(ctx, localPort, cmd.Process.Pid, target.ChildEnvDenylist...); ready {
 			pid := cmd.Process.Pid
 			if err := cmd.Process.Release(); err != nil {
 				_ = stopDaemonProcess(cmd.Process, pid)
@@ -492,12 +512,16 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 	return args
 }
 
-func openLocalURL(url string) error {
+func openLocalURLWithEnvironment(url string, denied ...string) error {
 	name, args := openURLCommand(url)
 	if name == "" {
 		return exit(2, "opening VNC URLs is not supported on this local OS")
 	}
-	return exec.Command(name, args...).Start()
+	cmd := exec.Command(name, args...)
+	if len(denied) > 0 {
+		cmd.Env = childEnvironmentWithout(os.Environ(), denied...)
+	}
+	return cmd.Start()
 }
 
 func openURLCommand(url string) (string, []string) {

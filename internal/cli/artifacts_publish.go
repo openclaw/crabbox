@@ -374,13 +374,13 @@ func uploadArtifactS3(ctx context.Context, opts artifactPublishOptions, path, ke
 	if _, err := exec.LookPath("aws"); err != nil {
 		return "", exit(2, "aws CLI is required for artifacts publish --storage s3: %v", err)
 	}
-	if out, err := commandOutput(ctx, "aws", args...); err != nil {
+	if out, err := artifactPublisherCommandOutput(ctx, opts, nil, "aws", args...); err != nil {
 		return "", exit(2, "aws s3 upload failed: %v: %s", err, tailForError(out))
 	}
 	if opts.Presign && opts.BaseURL == "" {
 		presignArgs := awsBaseArgs(opts)
 		presignArgs = append(presignArgs, "s3", "presign", dest, "--expires-in", fmt.Sprintf("%.0f", opts.Expires.Seconds()))
-		out, err := commandOutput(ctx, "aws", presignArgs...)
+		out, err := artifactPublisherCommandOutput(ctx, opts, nil, "aws", presignArgs...)
 		if err != nil {
 			return "", exit(2, "aws s3 presign failed: %v: %s", err, tailForError(out))
 		}
@@ -410,7 +410,7 @@ func uploadArtifactCloudflare(ctx context.Context, opts artifactPublishOptions, 
 	if _, err := exec.LookPath("wrangler"); err != nil {
 		return "", exit(2, "wrangler CLI is required for artifacts publish --storage cloudflare: %v", err)
 	}
-	out, err := commandOutputWithEnv(ctx, artifactCloudflareEnv(), "wrangler", "r2", "object", "put", opts.Bucket+"/"+key, "--file", path, "--content-type", artifactContentType(path), "--remote")
+	out, err := artifactPublisherCommandOutput(ctx, opts, artifactCloudflareEnv(), "wrangler", "r2", "object", "put", opts.Bucket+"/"+key, "--file", path, "--content-type", artifactContentType(path), "--remote")
 	if err != nil {
 		return "", exit(2, "wrangler r2 upload failed: %v: %s", err, tailForError(out))
 	}
@@ -432,6 +432,16 @@ func artifactCloudflareEnv() []string {
 		env = append(env, "CLOUDFLARE_ACCOUNT_ID="+accountID)
 	}
 	return env
+}
+
+func artifactPublisherCommandOutput(ctx context.Context, opts artifactPublishOptions, env []string, name string, args ...string) (string, error) {
+	if env == nil {
+		env = os.Environ()
+	}
+	if len(opts.ChildEnvDenylist) > 0 {
+		env = childEnvironmentWithout(env, opts.ChildEnvDenylist...)
+	}
+	return commandOutputWithEnv(ctx, env, name, args...)
 }
 
 func artifactS3URL(opts artifactPublishOptions, key string) string {
@@ -607,15 +617,15 @@ func summaryText(summary, summaryFile string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-func postGitHubPRComment(ctx context.Context, pr int, repo, bodyPath string) error {
-	args := []string{"issue", "comment", strconv.Itoa(pr), "--body-file", bodyPath}
-	if strings.TrimSpace(repo) != "" {
-		args = append(args, "--repo", strings.TrimSpace(repo))
+func postGitHubPRComment(ctx context.Context, opts artifactPublishOptions, bodyPath string) error {
+	args := []string{"issue", "comment", strconv.Itoa(opts.PR), "--body-file", bodyPath}
+	if strings.TrimSpace(opts.Repo) != "" {
+		args = append(args, "--repo", strings.TrimSpace(opts.Repo))
 	}
 	if _, err := exec.LookPath("gh"); err != nil {
 		return exit(2, "gh CLI is required for artifacts publish --pr: %v", err)
 	}
-	if out, err := commandOutput(ctx, "gh", args...); err != nil {
+	if out, err := artifactPublisherCommandOutput(ctx, opts, nil, "gh", args...); err != nil {
 		return exit(2, "gh issue comment failed: %v: %s", err, tailForError(out))
 	}
 	return nil

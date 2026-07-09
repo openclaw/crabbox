@@ -3,7 +3,6 @@ package external
 import (
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -43,12 +42,20 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 }
 
 func (Provider) ResolveDesktopCredentials(cfg core.Config, target core.SSHTarget) (core.DesktopCredentials, bool, error) {
+	desktopTarget := cfg
+	if strings.TrimSpace(target.TargetOS) != "" {
+		desktopTarget.TargetOS = target.TargetOS
+	}
+	core.NormalizeTargetConfig(&desktopTarget)
+	if desktopTarget.TargetOS != core.TargetMacOS {
+		return core.DesktopCredentials{}, false, nil
+	}
 	desktop := cfg.External.Connection.Desktop
 	passwordEnv := strings.TrimSpace(desktop.PasswordEnv)
 	if passwordEnv == "" {
-		return core.DesktopCredentials{}, false, nil
+		return core.DesktopCredentials{}, false, fmt.Errorf("external macOS desktop requires external.connection.desktop.passwordEnv")
 	}
-	password, ok := os.LookupEnv(passwordEnv)
+	password, ok := core.LookupExternalDesktopPassword(cfg, passwordEnv)
 	if !ok || strings.TrimSpace(password) == "" {
 		return core.DesktopCredentials{}, false, fmt.Errorf("external desktop password environment variable %s is unset or empty", passwordEnv)
 	}
@@ -79,10 +86,10 @@ func (Provider) CommandRoutingArgs(cfg core.Config, leaseID string) []string {
 		}
 	}
 	args := []string{"--external-routing-file", path}
-	if username := strings.TrimSpace(cfg.External.Connection.Desktop.Username); username != "" {
+	if username := strings.TrimSpace(cfg.External.Connection.Desktop.Username); username != "" || core.IsExternalDesktopUsernameExplicit(&cfg) {
 		args = append(args, "--external-desktop-username", username)
 	}
-	if passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); passwordEnv != "" {
+	if passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); passwordEnv != "" || core.IsExternalDesktopPasswordEnvExplicit(&cfg) {
 		args = append(args, "--external-desktop-password-env", passwordEnv)
 	}
 	return args
@@ -122,21 +129,36 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	cfg.Provider = providerName
 	loadedRouting := core.ExternalRoutingLoaded(cfg.External)
 	if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !loadedRouting {
+		targetExplicit := core.IsExternalDesktopTargetExplicit(&cfg)
+		windowsModeExplicit := core.IsExternalDesktopWindowsModeExplicit(&cfg)
 		routing, err := core.LoadExternalRouting(path)
 		if err != nil {
 			return nil, core.Exit(2, "%v", err)
 		}
+		core.PreserveExternalDesktopChildEnvironmentBoundary(&cfg)
 		cfg.External = routing
+		routingTargetOS, routingWindowsMode := core.ExternalRoutingTarget(routing)
+		if !targetExplicit {
+			cfg.TargetOS = routingTargetOS
+		}
+		if !windowsModeExplicit {
+			cfg.WindowsMode = core.WindowsModeNormal
+			if cfg.TargetOS == core.TargetWindows {
+				cfg.WindowsMode = routingWindowsMode
+			}
+		}
 		core.MarkExternalRoutingCredentialSources(&cfg)
+		windowsModeDerivedFromTarget := targetExplicit && cfg.TargetOS != core.TargetWindows && !windowsModeExplicit
+		core.MarkExternalRoutingTargetRestored(&cfg, !targetExplicit, !windowsModeExplicit && !windowsModeDerivedFromTarget)
 		core.ApplyExternalDesktopEnvironmentOverrides(&cfg)
 		loadedRouting = true
 	}
 	if loadedRouting {
 		targetOS, windowsMode := core.ExternalRoutingTarget(cfg.External)
-		if !core.IsTargetExplicit(&cfg) {
+		if !core.IsExternalDesktopTargetExplicit(&cfg) {
 			cfg.TargetOS = targetOS
 		}
-		if !core.IsWindowsModeExplicit(&cfg) {
+		if !core.IsExternalDesktopWindowsModeExplicit(&cfg) {
 			cfg.WindowsMode = core.WindowsModeNormal
 			if cfg.TargetOS == core.TargetWindows {
 				cfg.WindowsMode = windowsMode

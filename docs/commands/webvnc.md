@@ -46,12 +46,14 @@ exact listener and recorded websockify process, so concurrent workspaces on one
 SSH host remain isolated even when their first candidates collide. Adapter
 raw ownership material is domain-separated into the public owner ID before any
 subprocess starts. The remote websockify process carries only a fresh per-launch
-nonce, recorded in its identity, rather than the adapter owner token. After
-the SSH tunnel opens, Crabbox
-proves that the exact expected SSH process owns the local listener before
-retrieving a VNC credential, completes a noVNC WebSocket and VNC password
-challenge, and rechecks ownership before sending the credential to the
-coordinator through its authenticated one-time handoff API. A missing/zero
+nonce, recorded in its identity, rather than the adapter owner token. After the
+SSH tunnel opens, Crabbox proves that the exact expected SSH process owns the
+local listener before retrieving a VNC credential. Password-authenticated VNC
+sessions complete a noVNC WebSocket and VNC password challenge, recheck
+ownership, and only then use the authenticated one-time browser handoff. In ARD
+mode, whether the viewer uses the coordinator portal or a local bridge, the
+Crabbox relay authenticates to Screen Sharing itself; it exposes no credential
+endpoint and sends no account credential to the browser. A missing/zero
 expected PID, unrelated listener, or unauthenticated endpoint never receives a
 password probe or handoff.
 
@@ -123,12 +125,18 @@ remain end-to-end between noVNC and the loopback source. The default `auto`
 preserves the server's advertised order.
 
 The self-contained noVNC handoff is a mode-`0600` temporary file. It contains
-only a fresh per-process bridge token, never the VNC password. The username is
-the non-secret value supplied explicitly through `--username`. The password
-remains in process memory, is returned to that file-origin viewer only after a
-token-authenticated POST, and is absent from arguments, environment variables,
-browser URLs, and the handoff file. The WebSocket relay requires the same token
-as a per-session subprotocol. The handoff is removed when the bridge exits.
+only a fresh per-process bridge token, never the VNC password. In `auto` and
+`vnc` modes, the password remains in process memory and is returned to that
+file-origin viewer only after a token-authenticated POST. In macOS ARD mode,
+the local relay performs account authentication itself: it does not register a
+credential endpoint, and the viewer neither receives nor fetches the account
+username or password. ARD account credentials are never copied into arguments,
+browser URLs, the handoff file, or a browser credential response.
+An External provider may source its ARD password from an operator-approved
+environment variable; the local relay reads that value and keeps it
+server-side. The explicitly supplied legacy VNC username remains visible in the
+local command arguments. The WebSocket relay requires the same token as a
+per-session subprotocol. The handoff is removed when the bridge exits.
 
 The bridge opens a small warm pool of backend sessions (4 slots for Linux and
 Windows targets, 2 for macOS). That pool is what the `slots=` field in
@@ -282,9 +290,11 @@ provider/target/network flags. Running `status` with `--network public` or
 `--network tailscale` carries that same network selection into the printed
 fallback.
 
-`--open` still hands credentials directly to the browser without printing
-them. Credential-free viewer URLs and recovery commands remain visible. For a
-manual credential handoff in a private terminal, explicitly pass
+For password-authenticated VNC sessions, `--open` hands credentials to the
+browser without printing them. An ARD relay keeps the account credential
+server-side, including when it connects to a coordinator portal.
+Credential-free viewer URLs and recovery commands remain visible. For a manual
+coordinator credential handoff in a private terminal, explicitly pass
 `--redact-credentials=false`; treat that output as a reusable secret while the
 bridge remains active. Daemon and controller output always stays redacted.
 
@@ -307,17 +317,23 @@ instead of granting general passwordless sudo.
 
 ## Portal and passwords
 
-`--open` opens the portal page after the bridge starts. When the VNC password is
-available, the command sends it over the authenticated coordinator API and puts
-only a short-lived, one-use handoff ticket in the browser URL fragment. The
-portal consumes the ticket, loads the credential into browser memory, and
-removes the ticket from the address bar before connecting. Passwords and
-usernames never enter CLI-generated portal URLs. Ticket-bearing viewer URLs,
-usernames, and passwords remain redacted on stdout unless the operator
-explicitly sets `--redact-credentials=false`; credential-free URLs and recovery
-commands remain visible. Repeated `--open` calls hand the fresh ticket to an
-existing viewer tab for that lease and focus it when the browser permits,
-rather than starting a second active viewer.
+For a password-authenticated coordinator bridge, `--open` opens the portal page
+after the bridge starts. When the VNC password is available, the command sends it over the
+authenticated coordinator API and puts only a short-lived, one-use handoff
+ticket in the browser URL fragment. The portal consumes the ticket, loads the
+credential into browser memory, and removes the ticket from the address bar
+before connecting. Passwords and usernames never enter CLI-generated portal
+URLs. Ticket-bearing viewer URLs, usernames, and passwords remain redacted on
+stdout unless the operator explicitly sets `--redact-credentials=false`;
+credential-free URLs and recovery commands remain visible. Repeated `--open`
+calls hand the fresh ticket to an existing viewer tab for that lease and focus
+it when the browser permits, rather than starting a second active viewer.
+
+A macOS ARD bridge has a stricter boundary in both local and coordinator-backed
+modes: its relay performs ARD authentication, the browser receives no account
+credential, and a local viewer has no credential endpoint registered.
+`--redact-credentials=false` does not make the ARD account credential available
+to the browser.
 
 The portal page may show `WebVNC daemon not running` or `waiting for VNC bridge`
 until the local command has connected. If you opened the portal first, start the
@@ -327,10 +343,10 @@ bridge in a terminal and leave it running:
 crabbox webvnc --id <lease-id-or-slug>
 ```
 
-For human demos, prefer WebVNC over native VNC because `crabbox webvnc --open`
-preloads the per-lease password through a one-use browser handoff without
-putting the password in the URL. Use native VNC only as the fallback printed by
-`webvnc status` or `webvnc reset`.
+For human demos, prefer WebVNC over native VNC. Password-authenticated sessions
+use a one-use browser handoff without putting the password in the URL; macOS ARD
+sessions keep the account password inside the relay process. Use native VNC only
+as the fallback printed by `webvnc status` or `webvnc reset`.
 
 The WebVNC toolbar includes clipboard controls. The paste control reads the
 local browser clipboard, sends it through noVNC, then sends the target paste
@@ -344,7 +360,7 @@ explicit instead of fully automatic.
 
 ```text
 --id <lease-id-or-slug>     lease to bridge (also accepted as the first positional arg)
---provider hetzner|aws|azure
+--provider <name>           desktop-capable provider for the lease
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>
@@ -355,6 +371,7 @@ explicit instead of fully automatic.
 --local-port <port>         local VNC tunnel port (auto-selected when unset)
 --open                      open the portal VNC page once the bridge connects
 --take-control              ask the portal viewer to request control after connecting
+--preflight                 validate the target and authentication without opening a viewer
 --redact-credentials=false  reveal viewer URLs, usernames, and passwords (unsafe)
 --reclaim                   claim this lease for the current repo
 ```
@@ -428,11 +445,13 @@ If WebVNC remains unreliable, use the exact native fallback command printed by
 
 VNC authentication fails
 
-Retry with `--open` so Crabbox hands the credential directly to the browser. If
-manual entry is required, run the command in a private terminal with
-`--redact-credentials=false`; avoid copying that output into logs, issues, or
-chat. If a one-use handoff expires before the portal consumes it, rerun
-`crabbox webvnc --id <lease> --open` to mint a fresh ticket.
+For password-authenticated VNC sessions, retry with `--open` so Crabbox can mint
+a fresh one-use browser handoff. If manual entry is required, run the
+command in a private terminal with `--redact-credentials=false`; avoid copying
+that output into logs, issues, or chat. For a macOS ARD relay, verify the
+configured account and approved password environment variable, then run
+`crabbox webvnc --id <lease> --target macos --preflight`; ARD credentials are
+never handed to the browser.
 
 ## Related docs
 

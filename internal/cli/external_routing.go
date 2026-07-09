@@ -231,10 +231,17 @@ func RemoveExternalRouting(leaseID string) {
 }
 
 // RemoveExternalRoutingIfUnchanged removes only the routing record that
-// exactly matches the provider configuration used for the confirmed absence
-// check. A replaced lifecycle route is never deleted.
+// matches the provider configuration used for the confirmed absence check.
+// Runtime-only desktop credentials do not identify a lifecycle route; every
+// other provider, target, connection, and work-root field remains CAS-bound.
 func RemoveExternalRoutingIfUnchanged(leaseID string, expected ExternalConfig) error {
 	return removeExternalRoutingIfUnchangedWithSync(leaseID, expected, syncControllerDirectory)
+}
+
+func externalRoutingStateForCASComparison(cfg ExternalConfig) externalRoutingState {
+	state := externalRoutingStateForConfig(cfg, 0)
+	state.Connection.Desktop = ExternalDesktopConfig{}
+	return state
 }
 
 func removeExternalRoutingIfUnchangedWithSync(leaseID string, expected ExternalConfig, syncDirectory func(string) error) error {
@@ -259,11 +266,11 @@ func removeExternalRoutingIfUnchangedWithSync(leaseID string, expected ExternalC
 		if err != nil {
 			return err
 		}
-		actualData, err := json.Marshal(externalRoutingStateForConfig(actual, 0))
+		actualData, err := json.Marshal(externalRoutingStateForCASComparison(actual))
 		if err != nil {
 			return fmt.Errorf("encode current external routing state: %w", err)
 		}
-		expectedData, err := json.Marshal(externalRoutingStateForConfig(expected, 0))
+		expectedData, err := json.Marshal(externalRoutingStateForCASComparison(expected))
 		if err != nil {
 			return fmt.Errorf("encode expected external routing state: %w", err)
 		}

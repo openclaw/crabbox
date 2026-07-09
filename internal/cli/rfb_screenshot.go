@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/des"
@@ -36,28 +35,28 @@ type rfbCredentials struct {
 	Password string
 }
 
+type rfbClientProtocol struct {
+	legacySecurityType      bool
+	securityResultAfterNone bool
+}
+
 func captureRemoteMacVNCScreenshot(ctx context.Context, cfg Config, target SSHTarget, outputPath string) error {
-	localPort := availableLocalVNCPort()
-	tunnel, err := startVNCForegroundTunnel(ctx, target, localPort, "127.0.0.1", managedVNCPort)
+	tunnel, localPort, err := startVNCForegroundTunnelOnReservedPort(ctx, target, "", "127.0.0.1", managedVNCPort)
 	if err != nil {
 		return err
 	}
 	defer stopProcess(tunnel)
 
-	creds, credentialsAvailable, err := providerDesktopCredentials(cfg, target)
+	creds, authMode, err := resolveMacOSRFBAuthentication(ctx, cfg, target)
 	if err != nil {
 		return err
 	}
-	if !credentialsAvailable {
-		password := ""
-		if out, err := runSSHOutput(ctx, target, vncPasswordCommand(target)); err == nil {
-			password = strings.TrimSpace(out)
-		}
-		creds = rfbCredentials{
-			Password: password,
-		}
+	conn, err := dialVNCForegroundTunnel(ctx, tunnel, localPort)
+	if err != nil {
+		return fmt.Errorf("connect to verified macOS VNC tunnel: %w", err)
 	}
-	img, err := captureRFBFrame(ctx, "127.0.0.1:"+localPort, creds)
+	defer conn.Close()
+	img, err := captureRFBFrameFromConn(ctx, conn, creds, authMode)
 	if err != nil {
 		return exit(5, "capture macOS VNC screenshot: %v", err)
 	}
@@ -89,11 +88,16 @@ func clickRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, x, y i
 	}
 	defer stopProcess(tunnel)
 
-	creds, _, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	creds, authMode, err := resolveMacOSRFBAuthentication(ctx, cfg, target)
 	if err != nil {
 		return err
 	}
-	if err := clickRFBPointer(ctx, "127.0.0.1:"+localPort, creds, x, y); err != nil {
+	conn, err := dialVNCForegroundTunnel(ctx, tunnel, localPort)
+	if err != nil {
+		return fmt.Errorf("connect to verified macOS VNC tunnel: %w", err)
+	}
+	defer conn.Close()
+	if err := clickRFBPointerFromConn(ctx, conn, creds, authMode, x, y); err != nil {
 		return fmt.Errorf("click macOS VNC pointer: %w", err)
 	}
 	return nil
@@ -106,14 +110,30 @@ func typeRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, text st
 	}
 	defer stopProcess(tunnel)
 
-	creds, _, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	creds, authMode, err := resolveMacOSRFBAuthentication(ctx, cfg, target)
 	if err != nil {
 		return err
 	}
-	if err := typeRFBText(ctx, "127.0.0.1:"+localPort, creds, text); err != nil {
+	conn, err := dialVNCForegroundTunnel(ctx, tunnel, localPort)
+	if err != nil {
+		return fmt.Errorf("connect to verified macOS VNC tunnel: %w", err)
+	}
+	defer conn.Close()
+	if err := typeRFBTextFromConn(ctx, conn, creds, authMode, text); err != nil {
 		return fmt.Errorf("type macOS VNC text: %w", err)
 	}
 	return nil
+}
+
+func resolveMacOSRFBAuthentication(ctx context.Context, cfg Config, target SSHTarget) (rfbCredentials, localWebVNCAuthenticationMode, error) {
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	if err != nil {
+		return rfbCredentials{}, localWebVNCAuthAuto, err
+	}
+	if err := requireMacOSWebVNCCredentials(credentials, authMode); err != nil {
+		return rfbCredentials{}, localWebVNCAuthAuto, err
+	}
+	return credentials, authMode, nil
 }
 
 func providerDesktopCredentials(cfg Config, target SSHTarget) (rfbCredentials, bool, error) {
@@ -151,30 +171,6 @@ func desktopCredentialsFromProvider(provider Provider, cfg Config, target SSHTar
 	}, true, nil
 }
 
-func captureRFBFrame(ctx context.Context, address string, creds rfbCredentials) (image.Image, error) {
-	dialer := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	return captureRFBFrameFromConn(ctx, conn, creds)
-}
-
-func preflightRFBAuthentication(ctx context.Context, address string, creds rfbCredentials) error {
-	return preflightRFBAuthenticationWithMode(ctx, address, creds, localWebVNCAuthAuto)
-}
-
-func preflightRFBAuthenticationWithMode(ctx context.Context, address string, creds rfbCredentials, authMode localWebVNCAuthenticationMode) error {
-	dialer := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	return preflightRFBAuthenticationFromConnWithMode(ctx, conn, creds, authMode)
-}
-
 func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials) error {
 	return preflightRFBAuthenticationFromConnWithMode(ctx, conn, creds, localWebVNCAuthAuto)
 }
@@ -186,52 +182,13 @@ func preflightRFBAuthenticationFromConnWithMode(ctx context.Context, conn net.Co
 		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
-	version := make([]byte, 12)
-	if _, err := io.ReadFull(conn, version); err != nil {
-		return fmt.Errorf("read RFB version: %w", err)
+	protocol, err := negotiateRFBClientProtocol(conn)
+	if err != nil {
+		return err
 	}
-	if err := validateRFBServerVersion(version); err != nil {
-		return fmt.Errorf("unexpected RFB version %q", string(version))
-	}
-	major, minor, parseErr := parseRFBVersion(version)
-	clientVersion := []byte("RFB 003.008\n")
-	legacyVersion := parseErr == nil && major == 3 && minor < 7
-	if legacyVersion {
-		clientVersion = []byte("RFB 003.003\n")
-	} else if parseErr == nil && major == 3 && minor == 7 {
-		clientVersion = []byte("RFB 003.007\n")
-	}
-	if _, err := conn.Write(clientVersion); err != nil {
-		return fmt.Errorf("write RFB version: %w", err)
-	}
-
-	var securityType byte
-	if legacyVersion {
-		security := make([]byte, 4)
-		if _, err := io.ReadFull(conn, security); err != nil {
-			return fmt.Errorf("read RFB 3.3 security type: %w", err)
-		}
-		selected := binary.BigEndian.Uint32(security)
-		if selected == 0 {
-			reason, reasonErr := readRFBReason(conn)
-			if reasonErr != nil {
-				return reasonErr
-			}
-			return fmt.Errorf("RFB server rejected security negotiation: %s", reason)
-		}
-		if selected > 255 {
-			return fmt.Errorf("unsupported RFB 3.3 security type %d", selected)
-		}
-		securityType = byte(selected)
-		if expected := rfbSecurityTypeForAuthenticationMode(authMode); expected != 0 && securityType != expected {
-			return fmt.Errorf("RFB server selected security type %d, want %d", securityType, expected)
-		}
-	} else {
-		securityType, err := negotiateRFBSecurityTypeForMode(conn, creds, authMode)
-		if err != nil {
-			return err
-		}
-		return preflightRFBAuthenticationForSecurityType(conn, creds, securityType)
+	securityType, err := negotiateRFBClientSecurityType(conn, creds, authMode, protocol)
+	if err != nil {
+		return err
 	}
 	return preflightRFBAuthenticationForSecurityType(conn, creds, securityType)
 }
@@ -254,27 +211,7 @@ func preflightRFBAuthenticationForSecurityType(conn net.Conn, creds rfbCredentia
 	return readRFBSecurityResult(conn)
 }
 
-func clickRFBPointer(ctx context.Context, address string, creds rfbCredentials, x, y int) error {
-	dialer := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	return clickRFBPointerFromConn(ctx, conn, creds, x, y)
-}
-
-func typeRFBText(ctx context.Context, address string, creds rfbCredentials, text string) error {
-	dialer := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	return typeRFBTextFromConn(ctx, conn, creds, text)
-}
-
-func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, text string) error {
+func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode, text string) error {
 	if !utf8.ValidString(text) {
 		return fmt.Errorf("RFB text is not valid UTF-8")
 	}
@@ -283,7 +220,7 @@ func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredential
 	} else {
 		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
-	if _, _, err := initializeRFBConnection(conn, creds); err != nil {
+	if _, _, err := initializeRFBConnection(conn, creds, authMode); err != nil {
 		return err
 	}
 	for _, r := range text {
@@ -322,14 +259,14 @@ func rfbKeysymForRune(r rune) (uint32, error) {
 	return 0x01000000 | uint32(r), nil
 }
 
-func clickRFBPointerFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, x, y int) error {
+func clickRFBPointerFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode, x, y int) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
 		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
-	width, height, err := initializeRFBConnection(conn, creds)
+	width, height, err := initializeRFBConnection(conn, creds, authMode)
 	if err != nil {
 		return err
 	}
@@ -346,14 +283,14 @@ func clickRFBPointerFromConn(ctx context.Context, conn net.Conn, creds rfbCreden
 	return writeRFBPointerEvent(conn, 0, x, y)
 }
 
-func captureRFBFrameFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials) (image.Image, error) {
+func captureRFBFrameFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode) (image.Image, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
 		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
-	width, height, err := initializeRFBConnection(conn, creds)
+	width, height, err := initializeRFBConnection(conn, creds, authMode)
 	if err != nil {
 		return nil, err
 	}
@@ -370,19 +307,12 @@ func captureRFBFrameFromConn(ctx context.Context, conn net.Conn, creds rfbCreden
 	return readRFBFramebufferUpdate(conn, int(width), int(height))
 }
 
-func initializeRFBConnection(conn net.Conn, creds rfbCredentials) (uint16, uint16, error) {
-	version := make([]byte, 12)
-	if _, err := io.ReadFull(conn, version); err != nil {
-		return 0, 0, fmt.Errorf("read RFB version: %w", err)
+func initializeRFBConnection(conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode) (uint16, uint16, error) {
+	protocol, err := negotiateRFBClientProtocol(conn)
+	if err != nil {
+		return 0, 0, err
 	}
-	if !bytes.HasPrefix(version, []byte("RFB ")) {
-		return 0, 0, fmt.Errorf("unexpected RFB version %q", string(version))
-	}
-	if _, err := conn.Write([]byte("RFB 003.008\n")); err != nil {
-		return 0, 0, fmt.Errorf("write RFB version: %w", err)
-	}
-
-	securityType, err := negotiateRFBSecurityType(conn, creds)
+	securityType, err := negotiateRFBClientSecurityType(conn, creds, authMode, protocol)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -399,8 +329,10 @@ func initializeRFBConnection(conn net.Conn, creds rfbCredentials) (uint16, uint1
 	default:
 		return 0, 0, fmt.Errorf("unsupported RFB security type %d", securityType)
 	}
-	if err := readRFBSecurityResult(conn); err != nil {
-		return 0, 0, err
+	if securityType != rfbSecurityNone || protocol.securityResultAfterNone {
+		if err := readRFBSecurityResult(conn); err != nil {
+			return 0, 0, err
+		}
 	}
 
 	if _, err := conn.Write([]byte{1}); err != nil {
@@ -417,6 +349,57 @@ func initializeRFBConnection(conn net.Conn, creds rfbCredentials) (uint16, uint1
 		return 0, 0, fmt.Errorf("framebuffer %dx%d is too large", width, height)
 	}
 	return width, height, nil
+}
+
+func negotiateRFBClientProtocol(conn net.Conn) (rfbClientProtocol, error) {
+	version := make([]byte, 12)
+	if _, err := io.ReadFull(conn, version); err != nil {
+		return rfbClientProtocol{}, fmt.Errorf("read RFB version: %w", err)
+	}
+	clientVersion, err := rfbClientVersionForServer(version)
+	if err != nil {
+		return rfbClientProtocol{}, fmt.Errorf("unexpected RFB version %q", string(version))
+	}
+
+	protocol := rfbClientProtocol{securityResultAfterNone: true}
+	switch string(clientVersion) {
+	case "RFB 003.003\n":
+		protocol.legacySecurityType = true
+		protocol.securityResultAfterNone = false
+	case "RFB 003.007\n":
+		protocol.securityResultAfterNone = false
+	}
+	if _, err := conn.Write(clientVersion); err != nil {
+		return rfbClientProtocol{}, fmt.Errorf("write RFB version: %w", err)
+	}
+	return protocol, nil
+}
+
+func negotiateRFBClientSecurityType(conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode, protocol rfbClientProtocol) (byte, error) {
+	if !protocol.legacySecurityType {
+		return negotiateRFBSecurityTypeForMode(conn, creds, authMode)
+	}
+
+	security := make([]byte, 4)
+	if _, err := io.ReadFull(conn, security); err != nil {
+		return 0, fmt.Errorf("read RFB 3.3 security type: %w", err)
+	}
+	selected := binary.BigEndian.Uint32(security)
+	if selected == 0 {
+		reason, err := readRFBReason(conn)
+		if err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("RFB server rejected security negotiation: %s", reason)
+	}
+	if selected > 255 {
+		return 0, fmt.Errorf("unsupported RFB 3.3 security type %d", selected)
+	}
+	securityType := byte(selected)
+	if expected := rfbSecurityTypeForAuthenticationMode(authMode); expected != 0 && securityType != expected {
+		return 0, fmt.Errorf("RFB server selected security type %d, want %d", securityType, expected)
+	}
+	return securityType, nil
 }
 
 func writeRFBPointerEvent(conn net.Conn, buttonMask byte, x, y int) error {

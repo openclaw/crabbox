@@ -10,6 +10,18 @@ import (
 	"testing"
 )
 
+func TestRepositoryGitEnvironmentExcludesSecretsAndPreservesGitRouting(t *testing.T) {
+	t.Setenv("SCREEN_SHARING_PASSWORD", "operator-secret")
+	t.Setenv("GIT_CEILING_DIRECTORIES", "/safe/root")
+	env := strings.Join(repositoryGitEnvironment(), "\n")
+	if strings.Contains(env, "SCREEN_SHARING_PASSWORD=") {
+		t.Fatalf("repository git environment exposed ambient secret: %q", env)
+	}
+	if !strings.Contains(env, "GIT_CEILING_DIRECTORIES=/safe/root") {
+		t.Fatalf("repository git environment lost Git routing: %q", env)
+	}
+}
+
 func TestFindRepoUsesOriginNameInsideLinkedWorktree(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "crabbox")

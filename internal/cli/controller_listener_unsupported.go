@@ -9,3 +9,7 @@ func controllerListenerOwnershipSupported() bool { return false }
 func controllerVerifyDaemonOwnedListener(string, int) error {
 	return fmt.Errorf("SSH tunnel listener ownership verification is unsupported on this platform")
 }
+
+func controllerVerifyDaemonOwnedListenerWithEnvironment(port string, pid int, _ []string) error {
+	return controllerVerifyDaemonOwnedListener(port, pid)
+}

@@ -569,6 +569,7 @@ func watchGitPaths(root string, paths []string, gitArgs ...string) ([]string, er
 	args = append(args, paths...)
 	cmd := exec.Command("git", args...)
 	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, exit(1, "watch: git %s failed: %s", gitArgs[0], watchGitError(err))
@@ -579,6 +580,7 @@ func watchGitPaths(root string, paths []string, gitArgs ...string) ([]string, er
 func watchGitIgnored(root string, paths []string) (map[string]struct{}, error) {
 	cmd := exec.Command("git", "check-ignore", "--stdin", "-z")
 	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
 	cmd.Stdin = strings.NewReader(strings.Join(paths, "\x00") + "\x00")
 	out, err := cmd.Output()
 	if err != nil {

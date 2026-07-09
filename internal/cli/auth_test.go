@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,62 @@ func TestWriteBrokerLoginStoresTokenInUserConfig(t *testing.T) {
 	}
 	if cfg.Coordinator != "https://crabbox.example.test" || cfg.CoordToken != "secret" || cfg.Provider != "aws" {
 		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}
+
+func TestOpenLoginBrowserScrubsExternalDesktopPassword(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell opener fixture")
+	}
+	name, _ := openURLCommand("https://github.com/login")
+	if name == "" {
+		t.Skip("local URL opening unsupported")
+	}
+	dir := t.TempDir()
+	result := filepath.Join(dir, "result")
+	opener := filepath.Join(dir, name)
+	script := "#!/bin/sh\n" +
+		"if [ \"${TEST_LOGIN_DESKTOP_PASSWORD+x}\" = x ]; then printf leaked > \"$CRABBOX_TEST_LOGIN_OPENER_RESULT\"; exit 0; fi\n" +
+		"if [ \"$CRABBOX_TEST_BROWSER_KEEP\" != preserved ] || [ \"$DISPLAY\" != :99 ]; then printf stripped > \"$CRABBOX_TEST_LOGIN_OPENER_RESULT\"; exit 0; fi\n" +
+		"printf scrubbed > \"$CRABBOX_TEST_LOGIN_OPENER_RESULT\"\n"
+	if err := os.WriteFile(opener, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TEST_LOGIN_OPENER_RESULT", result)
+	t.Setenv("TEST_LOGIN_DESKTOP_PASSWORD", "must-not-reach-browser")
+	t.Setenv("CRABBOX_TEST_BROWSER_KEEP", "preserved")
+	t.Setenv("DISPLAY", ":99")
+	cfg := Config{Provider: "external", TargetOS: targetMacOS}
+	cfg.External.Connection.Desktop.PasswordEnv = "TEST_LOGIN_DESKTOP_PASSWORD"
+	MarkExternalDesktopPasswordEnvExplicit(&cfg)
+	MarkTargetExplicit(&cfg)
+	if err := openLoginBrowser("https://github.com/login", cfg); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(result); err == nil {
+			if len(data) == 0 {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			if string(data) != "scrubbed" {
+				t.Fatalf("login opener environment=%q", data)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("fake login opener did not report its environment")
+}
+
+func TestOpenLoginBrowserRejectsUntrustedDesktopEnvironment(t *testing.T) {
+	cfg := Config{Provider: "external", TargetOS: targetMacOS}
+	cfg.External.Connection.Desktop.PasswordEnv = "REPOSITORY_SELECTED_PASSWORD"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceRepository
+	if err := openLoginBrowser("https://github.com/login", cfg); err == nil || !strings.Contains(err.Error(), "trusted user config") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

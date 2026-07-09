@@ -131,7 +131,7 @@ func (a App) webCode(ctx context.Context, args []string) error {
 		fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using Code")
 		fmt.Fprintf(a.Stdout, "code: %s\n", portal)
 		if *openPortal && !opened {
-			if err := openLocalURL(portal); err != nil {
+			if err := openLocalURLWithEnvironment(portal, target.ChildEnvDenylist...); err != nil {
 				bridge.Close(websocket.StatusNormalClosure, "bridge stopped")
 				return err
 			}

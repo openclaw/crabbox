@@ -18,11 +18,12 @@ import (
 )
 
 type CoordinatorClient struct {
-	BaseURL      string
-	Token        string
-	TokenCommand []string
-	Access       AccessConfig
-	Client       *http.Client
+	BaseURL          string
+	Token            string
+	TokenCommand     []string
+	Access           AccessConfig
+	Client           *http.Client
+	ChildEnvDenylist []string
 }
 
 func (c *CoordinatorClient) hasConfiguredAuth() bool {
@@ -754,10 +755,11 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 	}
 	base.Path = strings.TrimRight(base.Path, "/")
 	return &CoordinatorClient{
-		BaseURL:      strings.TrimRight(base.String(), "/"),
-		Token:        cfg.CoordToken,
-		TokenCommand: append([]string(nil), cfg.CoordTokenCommand...),
-		Access:       cfg.Access,
+		BaseURL:          strings.TrimRight(base.String(), "/"),
+		Token:            cfg.CoordToken,
+		TokenCommand:     append([]string(nil), cfg.CoordTokenCommand...),
+		Access:           cfg.Access,
+		ChildEnvDenylist: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
 		Client: &http.Client{
 			Timeout: coordinatorHTTPTimeout,
 			Transport: &http.Transport{
@@ -1824,7 +1826,7 @@ func (c *CoordinatorClient) addRequestHeaders(ctx context.Context, headers http.
 		headers.Set("Authorization", "Bearer "+token)
 	}
 	c.addAccessHeaders(headers)
-	if owner := localCoordinatorOwner(); owner != "" {
+	if owner := c.localCoordinatorOwner(); owner != "" {
 		headers.Set("X-Crabbox-Owner", owner)
 	}
 	if org := os.Getenv("CRABBOX_ORG"); org != "" {
@@ -1840,6 +1842,7 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 	commandCtx, cancel := context.WithTimeout(ctx, coordinatorTokenCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(commandCtx, c.TokenCommand[0], c.TokenCommand[1:]...)
+	c.applyChildEnvironment(cmd)
 	var output limitedCoordinatorTokenOutput
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
@@ -1893,6 +1896,7 @@ func (c *CoordinatorClient) doCurl(ctx context.Context, method, path string, dat
 	// -q must be curl's first argument so ambient curlrc settings cannot
 	// re-enable redirects or otherwise change credential handling.
 	cmd := exec.CommandContext(ctx, "curl", "-q", "--config", "-")
+	c.applyChildEnvironment(cmd)
 	cmd.Stdin = strings.NewReader(config)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1954,7 +1958,7 @@ func (c *CoordinatorClient) curlConfig(ctx context.Context, method, path string,
 		curlConfigValue(&cfg, "header", "Authorization: Bearer "+token)
 	}
 	c.addCurlAccessHeaders(&cfg)
-	if owner := localCoordinatorOwner(); owner != "" {
+	if owner := c.localCoordinatorOwner(); owner != "" {
 		curlConfigValue(&cfg, "header", "X-Crabbox-Owner: "+owner)
 	}
 	if org := os.Getenv("CRABBOX_ORG"); org != "" {
@@ -2049,13 +2053,37 @@ func shouldUseCoordinatorCurlFallback(method string, hasBody bool, err error) bo
 	}
 }
 
+func (c *CoordinatorClient) applyChildEnvironment(cmd *exec.Cmd) {
+	if c != nil && cmd != nil && len(c.ChildEnvDenylist) > 0 {
+		cmd.Env = childEnvironmentWithout(os.Environ(), c.ChildEnvDenylist...)
+	}
+}
+
+func (c *CoordinatorClient) localCoordinatorOwner() string {
+	var denied []string
+	if c != nil {
+		denied = c.ChildEnvDenylist
+	}
+	return localCoordinatorOwnerWithEnvironment(denied)
+}
+
 func localCoordinatorOwner() string {
+	return localCoordinatorOwnerWithEnvironment(nil)
+}
+
+func localCoordinatorOwnerWithEnvironment(denied []string) string {
 	for _, key := range []string{"CRABBOX_OWNER", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
 		}
 	}
-	out, err := exec.Command("git", "config", "--get", "user.email").Output()
+	cmd := exec.Command("git", "config", "--get", "user.email")
+	gitEnv := repositoryGitEnvironment()
+	if len(denied) > 0 {
+		gitEnv = childEnvironmentWithout(gitEnv, denied...)
+	}
+	cmd.Env = gitEnv
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
