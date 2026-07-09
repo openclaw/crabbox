@@ -78,7 +78,7 @@ func cleanRemoteRepoName(name string) string {
 }
 
 func defaultExcludes() []string {
-	return []string{
+	excludes := []string{
 		".git",
 		"._*",
 		"node_modules",
@@ -96,11 +96,6 @@ func defaultExcludes() []string {
 		".cache",
 		".tmp",
 		".local",
-		".crabbox/env",
-		".crabbox/scripts",
-		".crabbox/logs",
-		".crabbox/captures",
-		".crabbox/runs",
 		".swiftpm",
 		".build",
 		"apps/*/.build",
@@ -115,6 +110,7 @@ func defaultExcludes() []string {
 		".gradle",
 		"target",
 	}
+	return append(excludes, protectedSyncExcludes()...)
 }
 
 func configuredExcludes(cfg Config) []string {

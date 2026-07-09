@@ -67,6 +67,10 @@ after repo rules are applied. Those paths can contain forwarded env profiles,
 uploaded scripts, local run artifacts, or failure bundles, so `.crabboxignore`
 cannot re-include them.
 
+If a project stores source files in one of these reserved directories, move
+them elsewhere before upgrading; reserved runtime paths are no longer eligible
+for sync even when they are tracked or explicitly re-included.
+
 Repo-local config should hold project-specific excludes and env allowlists.
 Secrets must never be passed as command-line arguments or via broad env globs.
 

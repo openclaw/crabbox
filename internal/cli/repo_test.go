@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -355,10 +356,21 @@ func TestCrabboxRuntimeExcludesCannotBeReincluded(t *testing.T) {
 	runGit(t, dir, "init")
 	runGit(t, dir, "config", "user.email", "test@example.com")
 	runGit(t, dir, "config", "user.name", "Test")
-	writeFile(t, filepath.Join(dir, ".crabboxignore"), "!.crabbox/env\n!.crabbox/scripts\n!.crabbox/runs\n")
-	writeFile(t, filepath.Join(dir, ".crabbox", "env", "live.env"), "export API_TOKEN=secret\n")
-	writeFile(t, filepath.Join(dir, ".crabbox", "scripts", "smoke.sh"), "echo hi\n")
-	writeFile(t, filepath.Join(dir, ".crabbox", "runs", "run_123", "artifact.tgz"), "artifact")
+	runtimeFiles := []string{
+		".crabbox/env/live.env",
+		".crabbox/scripts/smoke.sh",
+		".crabbox/logs/run.log",
+		".crabbox/captures/failure.tgz",
+		".crabbox/runs/run_123/artifact.tgz",
+	}
+	var ignore strings.Builder
+	for _, exclude := range protectedSyncExcludes() {
+		fmt.Fprintf(&ignore, "!%s\n", exclude)
+	}
+	writeFile(t, filepath.Join(dir, ".crabboxignore"), ignore.String())
+	for _, rel := range runtimeFiles {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(rel)), "runtime state\n")
+	}
 	writeFile(t, filepath.Join(dir, ".crabbox", "srt-settings.json"), "{}\n")
 	writeFile(t, filepath.Join(dir, "src", "main.go"), "package main\n")
 	runGit(t, dir, "add", ".")
@@ -378,13 +390,13 @@ func TestCrabboxRuntimeExcludesCannotBeReincluded(t *testing.T) {
 			t.Fatalf("manifest %q missing %q", got, want)
 		}
 	}
-	for _, notWant := range []string{".crabbox/env/live.env", ".crabbox/scripts/smoke.sh", ".crabbox/runs/run_123/artifact.tgz"} {
+	for _, notWant := range runtimeFiles {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("manifest %q should not include protected runtime path %q", got, notWant)
 		}
-	}
-	if !pathExcluded(".crabbox/env/live.env", excludes) || !pathExcluded(".crabbox/scripts/smoke.sh", excludes) || !pathExcluded(".crabbox/runs/run_123/artifact.tgz", excludes) {
-		t.Fatalf("protected runtime excludes were overridden: %v", excludes)
+		if !pathExcluded(notWant, excludes) {
+			t.Fatalf("protected runtime path %q was re-included: %v", notWant, excludes)
+		}
 	}
 }
 
