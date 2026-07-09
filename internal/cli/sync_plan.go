@@ -135,48 +135,30 @@ func syncPlanJSONRows(rows []syncPlanRow) []syncPlanJSONRow {
 }
 
 func syncPlanJSONGuardrailFor(manifest SyncManifest, cfg Config) syncPlanJSONGuardrail {
-	count, bytes, scope, _ := syncGuardrailScope(manifest)
+	evaluation := evaluateSyncGuardrail(manifest, cfg, false)
 	out := syncPlanJSONGuardrail{
-		Scope:      scope,
-		Files:      count,
-		Bytes:      bytes,
-		HumanBytes: humanBytes(bytes),
+		Scope:      evaluation.Scope,
+		Files:      evaluation.Count,
+		Bytes:      evaluation.Bytes,
+		HumanBytes: humanBytes(evaluation.Bytes),
 		Limits: syncPlanJSONGuardrailLimits{
 			WarnFiles: cfg.Sync.WarnFiles,
 			WarnBytes: cfg.Sync.WarnBytes,
 			FailFiles: cfg.Sync.FailFiles,
 			FailBytes: cfg.Sync.FailBytes,
 		},
-		AllowLarge: cfg.Sync.AllowLarge || os.Getenv("CRABBOX_SYNC_ALLOW_LARGE") == "1",
-		Status:     "ok",
+		AllowLarge: evaluation.AllowLarge,
+		Status:     evaluation.Status,
 	}
-	if !out.AllowLarge {
-		if cfg.Sync.FailFiles > 0 && count >= cfg.Sync.FailFiles {
-			out.addReason("failed", "files", int64(count), int64(cfg.Sync.FailFiles))
-		}
-		if cfg.Sync.FailBytes > 0 && bytes >= cfg.Sync.FailBytes {
-			out.addReason("failed", "bytes", bytes, cfg.Sync.FailBytes)
-		}
-	}
-	if cfg.Sync.WarnFiles > 0 && count >= cfg.Sync.WarnFiles {
-		out.addReason("warning", "files", int64(count), int64(cfg.Sync.WarnFiles))
-	}
-	if cfg.Sync.WarnBytes > 0 && bytes >= cfg.Sync.WarnBytes {
-		out.addReason("warning", "bytes", bytes, cfg.Sync.WarnBytes)
+	for _, reason := range evaluation.Reasons {
+		out.Reasons = append(out.Reasons, syncPlanJSONGuardrailReason{
+			Status: reason.Status,
+			Metric: reason.Metric,
+			Actual: reason.Actual,
+			Limit:  reason.Limit,
+		})
 	}
 	return out
-}
-
-func (g *syncPlanJSONGuardrail) addReason(status, metric string, actual, limit int64) {
-	if status == "failed" || g.Status == "ok" {
-		g.Status = status
-	}
-	g.Reasons = append(g.Reasons, syncPlanJSONGuardrailReason{
-		Status: status,
-		Metric: metric,
-		Actual: actual,
-		Limit:  limit,
-	})
 }
 
 func syncPlanRows(root string, manifest SyncManifest, limit int) ([]syncPlanRow, []syncPlanRow) {

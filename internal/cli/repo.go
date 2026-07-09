@@ -490,36 +490,94 @@ func safeRepoRel(rel string) bool {
 
 func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
 	fileCount := len(manifest.Files)
-	guardCount, guardBytes, guardScope, guardPaths := syncGuardrailScope(manifest)
+	guard := evaluateSyncGuardrail(manifest, cfg, force)
 	if len(manifest.Changed) > 0 {
 		fmt.Fprintf(stderr, "sync candidate: %d files, %s dirty_delta=%d files, %s\n", fileCount, humanBytes(manifest.Bytes), len(manifest.Changed), humanBytes(manifest.ChangedBytes))
 	} else {
 		fmt.Fprintf(stderr, "sync candidate: %d files, %s\n", fileCount, humanBytes(manifest.Bytes))
 	}
-	allowLarge := force || cfg.Sync.AllowLarge || os.Getenv("CRABBOX_SYNC_ALLOW_LARGE") == "1"
-	if !allowLarge {
-		if cfg.Sync.FailFiles > 0 && guardCount >= cfg.Sync.FailFiles {
-			printSyncTopDirs(stderr, guardPaths)
-			return exit(6, "sync %s too large: %d files >= limit %d; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guardScope, guardCount, cfg.Sync.FailFiles)
+	for _, reason := range guard.Reasons {
+		if reason.Status != "failed" {
+			continue
 		}
-		if cfg.Sync.FailBytes > 0 && guardBytes >= cfg.Sync.FailBytes {
-			printSyncTopDirs(stderr, guardPaths)
-			return exit(6, "sync %s too large: %s >= limit %s; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guardScope, humanBytes(guardBytes), humanBytes(cfg.Sync.FailBytes))
+		printSyncTopDirs(stderr, guard.Paths)
+		if reason.Metric == "files" {
+			return exit(6, "sync %s too large: %d files >= limit %d; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, reason.Actual, reason.Limit)
 		}
+		return exit(6, "sync %s too large: %s >= limit %s; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, humanBytes(reason.Actual), humanBytes(reason.Limit))
 	}
 	warned := false
-	if cfg.Sync.WarnFiles > 0 && guardCount >= cfg.Sync.WarnFiles {
-		fmt.Fprintf(stderr, "warning: large sync %s: %d files >= warning threshold %d\n", guardScope, guardCount, cfg.Sync.WarnFiles)
-		warned = true
-	}
-	if cfg.Sync.WarnBytes > 0 && guardBytes >= cfg.Sync.WarnBytes {
-		fmt.Fprintf(stderr, "warning: large sync %s: %s >= warning threshold %s\n", guardScope, humanBytes(guardBytes), humanBytes(cfg.Sync.WarnBytes))
+	for _, reason := range guard.Reasons {
+		if reason.Status != "warning" {
+			continue
+		}
+		if reason.Metric == "files" {
+			fmt.Fprintf(stderr, "warning: large sync %s: %d files >= warning threshold %d\n", guard.Scope, reason.Actual, reason.Limit)
+		} else {
+			fmt.Fprintf(stderr, "warning: large sync %s: %s >= warning threshold %s\n", guard.Scope, humanBytes(reason.Actual), humanBytes(reason.Limit))
+		}
 		warned = true
 	}
 	if warned {
-		printSyncTopDirs(stderr, guardPaths)
+		printSyncTopDirs(stderr, guard.Paths)
 	}
 	return nil
+}
+
+type syncGuardrailEvaluation struct {
+	Count      int
+	Bytes      int64
+	Scope      string
+	Paths      []string
+	AllowLarge bool
+	Status     string
+	Reasons    []syncGuardrailReason
+}
+
+type syncGuardrailReason struct {
+	Status string
+	Metric string
+	Actual int64
+	Limit  int64
+}
+
+func evaluateSyncGuardrail(manifest SyncManifest, cfg Config, force bool) syncGuardrailEvaluation {
+	count, bytes, scope, paths := syncGuardrailScope(manifest)
+	out := syncGuardrailEvaluation{
+		Count:      count,
+		Bytes:      bytes,
+		Scope:      scope,
+		Paths:      paths,
+		AllowLarge: force || cfg.Sync.AllowLarge || os.Getenv("CRABBOX_SYNC_ALLOW_LARGE") == "1",
+		Status:     "ok",
+	}
+	if !out.AllowLarge {
+		if cfg.Sync.FailFiles > 0 && count >= cfg.Sync.FailFiles {
+			out.addReason("failed", "files", int64(count), int64(cfg.Sync.FailFiles))
+		}
+		if cfg.Sync.FailBytes > 0 && bytes >= cfg.Sync.FailBytes {
+			out.addReason("failed", "bytes", bytes, cfg.Sync.FailBytes)
+		}
+	}
+	if cfg.Sync.WarnFiles > 0 && count >= cfg.Sync.WarnFiles {
+		out.addReason("warning", "files", int64(count), int64(cfg.Sync.WarnFiles))
+	}
+	if cfg.Sync.WarnBytes > 0 && bytes >= cfg.Sync.WarnBytes {
+		out.addReason("warning", "bytes", bytes, cfg.Sync.WarnBytes)
+	}
+	return out
+}
+
+func (g *syncGuardrailEvaluation) addReason(status, metric string, actual, limit int64) {
+	if status == "failed" || g.Status == "ok" {
+		g.Status = status
+	}
+	g.Reasons = append(g.Reasons, syncGuardrailReason{
+		Status: status,
+		Metric: metric,
+		Actual: actual,
+		Limit:  limit,
+	})
 }
 
 func syncGuardrailScope(manifest SyncManifest) (count int, bytes int64, scope string, paths []string) {
