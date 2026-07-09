@@ -189,6 +189,12 @@ environment. Enable this credential source explicitly:
 CRABBOX_GCP_CREDENTIAL_SOURCE=metadata
 ```
 
+The attached service account still needs the IAM permissions used by the
+coordinator. On Compute Engine, configure the VM with the
+`https://www.googleapis.com/auth/cloud-platform` access scope; VM access scopes
+cap the permissions available to metadata-issued tokens even when IAM grants
+the service account broader roles.
+
 For portable coordinator deployments without metadata server credentials, set
 both service-account key variables:
 
@@ -201,8 +207,10 @@ If either `GCP_CLIENT_EMAIL` or `GCP_PRIVATE_KEY` is set, both must be set.
 When `CRABBOX_GCP_CREDENTIAL_SOURCE` is unset, brokered GCP uses the
 service-account-key path. `CRABBOX_GCP_CREDENTIAL_SOURCE=service-account-key`
 is accepted as an explicit spelling of the same default. Metadata token requests
-retry connection/startup failures and transient `429`, `499`, `500`, and `503`
-responses with bounded exponential backoff.
+reject redirects and responses without Google's metadata marker, refresh before
+the metadata server's five-minute token-cache boundary, and retry
+connection/startup failures plus transient `429`, `499`, and `5xx` responses
+with bounded exponential backoff and a one-minute overall deadline.
 
 Optional coordinator defaults (same names as the direct-mode environment):
 

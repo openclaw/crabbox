@@ -24,8 +24,10 @@ const metadataTokenURL =
 const defaultImage = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64";
 const firewallName = "crabbox-ssh";
 const firewallVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
-const metadataTokenBackoffMs = [200, 400, 800, 1_600, 3_200];
-const metadataTokenRetryStatuses = new Set([429, 499, 500, 503]);
+const metadataTokenBackoffMs = [1_000, 2_000, 4_000, 8_000, 16_000, 28_000];
+const metadataTokenDeadlineMs = 60_000;
+const metadataTokenRequestTimeoutMs = 5_000;
+const tokenRefreshSkewSeconds = 300;
 
 interface TokenCache {
   token: string;
@@ -42,6 +44,10 @@ class GCPHTTPError extends Error {
     super(`gcp ${method} ${path}: http ${status}: ${body}`);
   }
 }
+
+class GCPMetadataTokenRequestError extends Error {}
+
+class GCPMetadataTokenTrustError extends Error {}
 
 interface GCPInstance {
   id?: string;
@@ -661,9 +667,11 @@ export class GCPClient {
 
   private async accessToken(): Promise<string> {
     const now = Math.trunc(Date.now() / 1000);
-    if (this.cache && this.cache.expiresAt - 60 > now) return this.cache.token;
+    if (this.cache && this.cache.expiresAt - tokenRefreshSkewSeconds > now) {
+      return this.cache.token;
+    }
     if (gcpCredentialSource(this.env) === "metadata") {
-      return this.metadataAccessToken(now);
+      return this.metadataAccessToken();
     }
     const assertion = await serviceAccountAssertion(this.env, now);
     const response = await this.fetcher(tokenURL, {
@@ -686,30 +694,29 @@ export class GCPClient {
     return data.access_token;
   }
 
-  private async metadataAccessToken(now: number): Promise<string> {
+  private async metadataAccessToken(): Promise<string> {
+    const deadline = Date.now() + metadataTokenDeadlineMs;
+    let lastFailure: Error | undefined;
     for (let attempt = 0; ; attempt += 1) {
-      const delay = metadataTokenBackoffMs[attempt];
+      if (deadline - Date.now() <= 0) {
+        throw lastFailure ?? new Error("gcp metadata token: deadline exceeded");
+      }
       let response: Response;
+      let text: string;
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
-        response = await this.fetcher(metadataTokenURL, {
-          headers: { "Metadata-Flavor": "Google" },
-        });
+        ({ response, text } = await this.metadataTokenResponse(deadline));
       } catch (error) {
-        if (delay !== undefined) {
+        if (!(error instanceof GCPMetadataTokenRequestError)) throw error;
+        lastFailure = error;
+        // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
+        if (await sleepBeforeMetadataRetry(attempt, deadline)) {
           // GKE metadata can refuse connections while the server starts; retry within the same bound.
-          // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
-          await sleep(delay);
           continue;
         }
-        const detail = error instanceof Error ? error.message.trim() : String(error).trim();
-        throw new Error(`gcp metadata token: request failed${detail ? `: ${detail}` : ""}`, {
-          cause: error,
-        });
+        throw lastFailure;
       }
       // Error responses from the metadata server are not guaranteed to be JSON.
-      // oxlint-disable-next-line eslint/no-await-in-loop -- consume each response before a retry.
-      const text = await response.text();
       const data = parseMetadataTokenResponse(text);
       const token = typeof data?.access_token === "string" ? data.access_token.trim() : "";
       if (response.ok && token) {
@@ -719,25 +726,71 @@ export class GCPClient {
           data.expires_in > 0
             ? data.expires_in
             : 3600;
-        this.cache = { token, expiresAt: now + expiresIn };
+        this.cache = {
+          token,
+          expiresAt: Math.trunc(Date.now() / 1000) + expiresIn,
+        };
         return token;
-      }
-      if (metadataTokenRetryStatuses.has(response.status) && delay !== undefined) {
-        // Google documents transient 429, 499, and 5xx metadata responses.
-        // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
-        await sleep(delay);
-        continue;
       }
       const detail =
         typeof data?.error === "string" && data.error.trim()
           ? data.error.trim()
           : response.statusText.trim();
+      lastFailure = !response.ok
+        ? new Error(`gcp metadata token: http ${response.status}${detail ? `: ${detail}` : ""}`)
+        : new Error("gcp metadata token: response missing access_token");
+      if (metadataTokenRetryStatus(response.status)) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
+        if (await sleepBeforeMetadataRetry(attempt, deadline)) {
+          continue;
+        }
+        throw lastFailure;
+      }
       if (!response.ok) {
-        throw new Error(
-          `gcp metadata token: http ${response.status}${detail ? `: ${detail}` : ""}`,
+        throw lastFailure;
+      }
+      throw lastFailure;
+    }
+  }
+
+  private async metadataTokenResponse(
+    deadline: number,
+  ): Promise<{ response: Response; text: string }> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new GCPMetadataTokenRequestError("gcp metadata token: deadline exceeded");
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Math.max(1, Math.min(metadataTokenRequestTimeoutMs, remaining)),
+    );
+    try {
+      const response = await this.fetcher(metadataTokenURL, {
+        headers: { "Metadata-Flavor": "Google" },
+        redirect: "error",
+        signal: controller.signal,
+      });
+      if (response.headers.get("Metadata-Flavor") !== "Google") {
+        throw new GCPMetadataTokenTrustError(
+          "gcp metadata token: response missing Metadata-Flavor: Google",
         );
       }
-      throw new Error("gcp metadata token: response missing access_token");
+      const text = await response.text();
+      return { response, text };
+    } catch (error) {
+      if (error instanceof GCPMetadataTokenTrustError) throw error;
+      const detail = controller.signal.aborted
+        ? "request timed out"
+        : error instanceof Error
+          ? error.message.trim()
+          : String(error ?? "").trim();
+      throw new GCPMetadataTokenRequestError(
+        `gcp metadata token: request failed${detail ? `: ${detail}` : ""}`,
+        { cause: error },
+      );
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -844,6 +897,18 @@ function parseMetadataTokenResponse(
   } catch {
     return undefined;
   }
+}
+
+function metadataTokenRetryStatus(status: number): boolean {
+  return status === 429 || status === 499 || (status >= 500 && status <= 599);
+}
+
+async function sleepBeforeMetadataRetry(attempt: number, deadline: number): Promise<boolean> {
+  const delay = metadataTokenBackoffMs[attempt];
+  const remaining = deadline - Date.now();
+  if (delay === undefined || remaining <= 1) return false;
+  await sleep(Math.min(delay, remaining - 1));
+  return Date.now() < deadline;
 }
 
 function toMachine(instance: GCPInstance, zone: string): ProviderMachine {

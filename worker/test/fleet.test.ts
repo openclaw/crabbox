@@ -24286,6 +24286,23 @@ describe("fleet identity", () => {
       missing: ["GCP_PRIVATE_KEY"],
     });
 
+    const gcpExplicitKeyFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        CRABBOX_GCP_CREDENTIAL_SOURCE: "service-account-key",
+      },
+    );
+    const gcpExplicitKey = await gcpExplicitKeyFleet.fetch(
+      request("GET", "/v1/providers/gcp/readiness"),
+    );
+    await expect(gcpExplicitKey.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
+    });
+
     const daytonaMissing = await fleet.fetch(request("GET", "/v1/providers/daytona/readiness"));
     await expect(daytonaMissing.json()).resolves.toMatchObject({
       provider: "daytona",

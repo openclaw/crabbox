@@ -12849,7 +12849,8 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
       if (!hasClientEmail) missing.push("GCP_CLIENT_EMAIL");
       if (!hasPrivateKey) missing.push("GCP_PRIVATE_KEY");
     } else if (validCredentialSource && !hasClientEmail && credentialSource !== "metadata") {
-      missing.push("GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY", "CRABBOX_GCP_CREDENTIAL_SOURCE");
+      missing.push("GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY");
+      if (!credentialSource) missing.push("CRABBOX_GCP_CREDENTIAL_SOURCE");
     }
     return {
       provider,
