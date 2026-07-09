@@ -900,6 +900,44 @@ func TestFalRollbackReclaimsOwnershipWhenClaimLossCleanupFails(t *testing.T) {
 	}
 }
 
+func TestFalRollbackReclaimsOwnershipWhenLiveDeleteReturnsNotFound(t *testing.T) {
+	notFound := &APIError{StatusCode: 404, Status: "404 Not Found", Message: "not found"}
+	api := &fakeFalAPI{
+		instances: map[string]ComputeInstance{
+			"inst_created": readyFalInstance("inst_created", "203.0.113.42"),
+		},
+		deleteErr: notFound,
+	}
+	b := newFalTestBackend(t, api)
+	claim, err := b.persistRecoveryClaimAtIfUnchanged(
+		"cbx_cleanup7890",
+		"live-delete-not-found",
+		b.configForRun(),
+		"",
+		"inst_created",
+		"provisioning",
+		false,
+		b.now(),
+		core.LeaseClaim{},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	err = b.rollbackClaimedAcquire("inst_created", claim.LeaseID, claim.Slug, b.configForRun(), "", "rollback-cleanup", errors.New("ready transition lost claim"))
+	if err == nil || !strings.Contains(err.Error(), errFalProviderAbsenceNotAccountBound.Error()) {
+		t.Fatalf("rollback err=%v", err)
+	}
+	recovered, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+	if readErr != nil || !exists || recovered.CloudID != "inst_created" {
+		t.Fatalf("recovered claim=%#v exists=%v err=%v", recovered, exists, readErr)
+	}
+}
+
 func TestFalRollbackRetainsClaimWhenNotFoundConflictsWithAccountInventory(t *testing.T) {
 	notFound := &APIError{StatusCode: 404, Status: "404 Not Found", Message: "not found"}
 	api := &fakeFalAPI{

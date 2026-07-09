@@ -660,11 +660,12 @@ func (b *backend) now() time.Time {
 }
 
 func (b *backend) createReplayContext(ctx context.Context, createStarted time.Time) (context.Context, context.CancelFunc, error) {
+	wallNow := time.Now()
 	remaining := createStarted.Add(falCreateRecoveryWindow).Sub(b.now())
 	if remaining <= 0 {
 		return nil, nil, context.DeadlineExceeded
 	}
-	replayCtx, cancel := context.WithTimeout(ctx, remaining)
+	replayCtx, cancel := context.WithDeadline(ctx, wallNow.Add(remaining))
 	return replayCtx, cancel, nil
 }
 
@@ -738,7 +739,7 @@ func (b *backend) rollbackAcquireAfterClaimRemoval(instanceID, leaseID, slug str
 		}
 		deleteErr := client.DeleteInstance(cleanupCtx, instanceID)
 		if isFalNotFound(deleteErr) {
-			return nil
+			return errFalProviderAbsenceNotAccountBound
 		}
 		return deleteErr
 	})
