@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,38 +36,27 @@ func TestWebVNCURLs(t *testing.T) {
 	if got := webVNCAgentURLWithCapabilities("https://broker.example.com", "cbx_abcdef123456", "desktop_theme"); got != "wss://broker.example.com/v1/leases/cbx_abcdef123456/webvnc/agent?capabilities=desktop_theme" {
 		t.Fatalf("agent capability URL=%q", got)
 	}
-	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "secret value"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#password=secret+value" {
+	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "vnc_handoff_deadbeef"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#handoff=vnc_handoff_deadbeef" {
 		t.Fatalf("portal URL=%q", got)
 	}
-	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "ec2-user", "secret value"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#password=secret+value&username=ec2-user" {
+	if got := webVNCPortalURL("https://broker.example.com/#stale", "cbx_abcdef123456", ""); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc" {
 		t.Fatalf("portal URL=%q", got)
 	}
-	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "Cb1!abc"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#password=Cb1%21abc" {
-		t.Fatalf("portal URL=%q", got)
-	}
-	if got := webVNCPortalURL("https://broker.example.com/#stale", "cbx_abcdef123456", "", ""); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc" {
-		t.Fatalf("portal URL=%q", got)
-	}
-	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "", webVNCPortalOptions{TakeControl: true}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take" {
+	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", webVNCPortalOptions{TakeControl: true}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take" {
 		t.Fatalf("portal URL with control=%q", got)
 	}
-	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "secret value", webVNCPortalOptions{TakeControl: true}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take&password=secret+value" {
-		t.Fatalf("portal URL with password and control=%q", got)
+	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "vnc_handoff_deadbeef", webVNCPortalOptions{TakeControl: true}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take&handoff=vnc_handoff_deadbeef" {
+		t.Fatalf("portal URL with handoff and control=%q", got)
 	}
-	got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "JVS/yMb%2B")
-	if got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#password=JVS%2FyMb%252B" {
-		t.Fatalf("portal URL with escaped password=%q", got)
-	}
-	fragment, ok := strings.CutPrefix(got, "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#")
-	if !ok {
-		t.Fatalf("portal URL missing expected fragment: %q", got)
-	}
-	values, err := url.ParseQuery(fragment)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if values.Get("password") != "JVS/yMb%2B" {
-		t.Fatalf("decoded portal password=%q", values.Get("password"))
+	for value, valid := range map[string]bool{
+		"vnc_handoff_0123456789abcdef0123456789abcdef": true,
+		"vnc_handoff_0123456789ABCDEF0123456789ABCDEF": false,
+		"vnc_handoff_short":                            false,
+		"password_0123456789abcdef0123456789abcdef":    false,
+	} {
+		if got := validWebVNCCredentialHandoffTicket(value); got != valid {
+			t.Fatalf("validWebVNCCredentialHandoffTicket(%q) = %t, want %t", value, got, valid)
+		}
 	}
 	if got := directSSHWebVNCURL("5901", "p+a ss"); got != "http://127.0.0.1:5901/vnc.html?autoconnect=1&compression=0&host=127.0.0.1&password=p%2Ba+ss&path=websockify&port=5901&quality=6&resize=scale" {
 		t.Fatalf("local container WebVNC URL=%q", got)
@@ -83,6 +71,45 @@ func TestWebVNCURLs(t *testing.T) {
 	}
 	if supportsDirectSSHWebVNC("static") || supportsDirectSSHWebVNC("aws") {
 		t.Fatal("static and coordinator-backed providers should not use direct SSH WebVNC")
+	}
+}
+
+func TestCreateWebVNCPortalURLUsesCredentialHandoff(t *testing.T) {
+	var received map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_abcdef123456/webvnc/handoff" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorWebVNCCredentialHandoff{
+			Ticket:    "vnc_handoff_0123456789abcdef0123456789abcdef",
+			ExpiresAt: "2026-07-09T12:00:00Z",
+		})
+	}))
+	defer server.Close()
+	coord := &CoordinatorClient{BaseURL: server.URL, Token: "test-token", Client: server.Client()}
+	got, err := createWebVNCPortalURL(
+		context.Background(),
+		coord,
+		"cbx_abcdef123456",
+		"vnc-user",
+		"generated-vnc-password",
+		webVNCPortalOptions{TakeControl: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if received["username"] != "vnc-user" || received["password"] != "generated-vnc-password" {
+		t.Fatalf("credential handoff body = %#v", received)
+	}
+	if strings.Contains(got, "vnc-user") || strings.Contains(got, "generated-vnc-password") || strings.Contains(got, "password=") || strings.Contains(got, "username=") {
+		t.Fatalf("portal URL exposed credentials: %s", got)
+	}
+	want := server.URL + "/portal/leases/cbx_abcdef123456/vnc#control=take&handoff=vnc_handoff_0123456789abcdef0123456789abcdef"
+	if got != want {
+		t.Fatalf("portal URL = %q, want %q", got, want)
 	}
 }
 
@@ -197,7 +224,7 @@ func TestWebVNCWebSocketDialRejectsCrossOriginDowngradeRedirect(t *testing.T) {
 func TestWebVNCRedactingWriterKeepsCredentialsOutOfDaemonLogs(t *testing.T) {
 	var output bytes.Buffer
 	writer := webVNCRedactingWriter{Writer: &output}
-	input := "bridge: connected\nwebvnc: https://portal.example/vnc#password=secret\npassword: secret\nusername: crabbox\nwebvnc: https://broker-user:broker-secret@portal.example/vnc\nopened: https://other-user:other-secret@portal.example/vnc\nwebvnc: run crabbox webvnc --id demo\nwebvnc: https://portal.example/vnc\n"
+	input := "bridge: connected\nwebvnc: https://portal.example/vnc#password=secret\npassword: secret\nusername: crabbox\nwebvnc: https://broker-user:broker-secret@portal.example/vnc\nopened: https://other-user:other-secret@portal.example/vnc\nopened: https://portal.example/vnc#handoff=vnc_handoff_secret\nwebvnc: run crabbox webvnc --id demo\nwebvnc: https://portal.example/vnc\n"
 	if _, err := writer.Write([]byte(input)); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +232,7 @@ func TestWebVNCRedactingWriterKeepsCredentialsOutOfDaemonLogs(t *testing.T) {
 	if strings.Contains(got, "secret") || strings.Contains(got, "broker-user") || strings.Contains(got, "other-user") || strings.Contains(got, "#password=") {
 		t.Fatalf("credential leaked: %q", got)
 	}
-	if !strings.Contains(got, "bridge: connected") || strings.Count(got, "[redacted]") != 5 {
+	if !strings.Contains(got, "bridge: connected") || strings.Count(got, "[redacted]") != 6 {
 		t.Fatalf("unexpected redacted output: %q", got)
 	}
 	if !strings.Contains(got, "webvnc: run crabbox webvnc --id demo") || !strings.Contains(got, "webvnc: https://portal.example/vnc") {

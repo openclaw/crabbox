@@ -1098,6 +1098,15 @@ export class FleetCoordinator {
         parts[1] === "leases" &&
         parts[2] &&
         parts[3] === "webvnc" &&
+        parts[4] === "handoff"
+      ) {
+        return await this.webVNCCredentialHandoff(request, parts[2]);
+      }
+      if (
+        parts[0] === "v1" &&
+        parts[1] === "leases" &&
+        parts[2] &&
+        parts[3] === "webvnc" &&
         parts[4] === "ticket"
       ) {
         return await this.createWebVNCTicket(request, parts[2]);
@@ -7859,7 +7868,14 @@ export class FleetCoordinator {
   }
 
   private async webVNCCredentialHandoff(request: Request, identifier: string): Promise<Response> {
-    const lease = await this.resolvePortalLease(identifier, request);
+    if (request.method.toUpperCase() !== "POST") {
+      return json({ error: "not_found" }, { status: 404 });
+    }
+    const portalRequest = new URL(request.url).pathname.startsWith("/portal/");
+    const admin = isAdminRequest(request);
+    const lease = portalRequest
+      ? await this.resolvePortalLease(identifier, request)
+      : await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
     }
@@ -7871,6 +7887,12 @@ export class FleetCoordinator {
       | { ticket?: unknown; username?: unknown; password?: unknown }
       | undefined;
     if (typeof body?.ticket === "string") {
+      if (!portalRequest) {
+        return json(
+          { error: "invalid_handoff", message: "portal handoff required" },
+          { status: 400 },
+        );
+      }
       const result = await this.webVNCCredentialHandoffs.consume(lease.id, body.ticket);
       if (result.status !== "accepted") {
         const expired = result.status === "expired";
@@ -7887,7 +7909,7 @@ export class FleetCoordinator {
         { headers: { "cache-control": "no-store" } },
       );
     }
-    if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     const username = typeof body?.username === "string" ? body.username : "";

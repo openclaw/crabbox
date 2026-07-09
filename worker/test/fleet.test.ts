@@ -19050,6 +19050,21 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).toContain('linkFragment.set("handoff", body.ticket)');
     expect(pageBody).not.toContain('linkFragment.set("username", username)');
     expect(pageBody).not.toContain('linkFragment.set("password", password)');
+    expect(pageBody).toContain("new BroadcastChannel(reuseWindowName)");
+    expect(pageBody).toContain('type: "handoff-offer"');
+    expect(pageBody).toContain('type: "handoff-candidate"');
+    expect(pageBody).toContain('type: "handoff-grant"');
+    expect(pageBody).toContain('type: "handoff-accepted"');
+    expect(pageBody).toContain("message.recipientID === recipientID");
+    expect(pageBody).toContain("message.recipientID !== viewerID");
+    expect(pageBody).toContain('reuseChannel.postMessage({ type: "handoff-offer", requestID })');
+    expect(pageBody).not.toContain(
+      'reuseChannel.postMessage({ type: "handoff-offer", requestID, fragment:',
+    );
+    expect(pageBody).toContain("WebVNC continued in the existing tab");
+    expect(pageBody).toContain('window.open("", reuseWindowName)?.focus()');
+    expect(pageBody).toContain('window.addEventListener("hashchange"');
+    expect(pageBody).toContain("nextTicket !== handoffTicket");
     expect(pageBody).toContain("await refreshShareState()");
     expect(pageBody).toContain("writeClipboardText(await shareableWebVNCURL())");
     expect(pageBody).toContain('document.getElementById("vnc-share")');
@@ -19215,7 +19230,7 @@ describe("fleet lease identity and idle", () => {
     });
 
     const issuedHandoff = await fleet.fetch(
-      request("POST", "/portal/leases/blue-lobster/vnc/handoff", {
+      request("POST", "/v1/leases/blue-lobster/webvnc/handoff", {
         headers,
         body: { username: "vnc-user", password: "generated-vnc-password" },
       }),
@@ -19230,6 +19245,14 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBe(Date.parse(issuedHandoffBody.expiresAt));
     expect(issuedHandoffBody).not.toHaveProperty("username");
     expect(issuedHandoffBody).not.toHaveProperty("password");
+
+    const apiCannotRedeem = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/webvnc/handoff", {
+        headers,
+        body: { ticket: issuedHandoffBody.ticket },
+      }),
+    );
+    expect(apiCannotRedeem.status).toBe(400);
 
     const friendCannotIssue = await fleet.fetch(
       request("POST", "/portal/leases/blue-lobster/vnc/handoff", {
