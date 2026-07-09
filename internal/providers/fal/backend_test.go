@@ -27,6 +27,12 @@ type fakeFalAPI struct {
 	listCalls      int
 }
 
+type mutableFalClock struct {
+	now time.Time
+}
+
+func (c *mutableFalClock) Now() time.Time { return c.now }
+
 func (f *fakeFalAPI) ListInstances(context.Context, int, string) (ListInstancesResponse, error) {
 	f.listCalls++
 	items := make([]ComputeInstance, 0, len(f.instances))
@@ -240,6 +246,50 @@ func TestFalAcquireReconcilesAmbiguousCreateWithIdempotentRetry(t *testing.T) {
 	}
 }
 
+func TestFalAcquireDoesNotReplayExplicitRateLimitRejection(t *testing.T) {
+	api := &fakeFalAPI{createErr: &APIError{StatusCode: 429, Status: "429 Too Many Requests", Message: "rate limited"}}
+	b := newFalTestBackend(t, api)
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "rate-limited"})
+	if err == nil || !strings.Contains(err.Error(), "rate limited") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.createRequests) != 1 {
+		t.Fatalf("rate-limit rejection replayed create: requests=%d", len(api.createRequests))
+	}
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("rate-limited", providerName); claimErr != nil || ok {
+		t.Fatalf("rate-limit rejection persisted recovery claim: ok=%v err=%v", ok, claimErr)
+	}
+}
+
+func TestFalAcquireAnchorsTTLToCreateAttempt(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	started := time.Date(2026, time.July, 9, 12, 0, 0, 0, time.UTC)
+	clock := &mutableFalClock{now: started}
+	b.rt.Clock = clock
+	b.cfg.TTL = 20 * time.Minute
+	b.cfg.IdleTimeout = time.Hour
+	b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		clock.now = started.Add(10 * time.Minute)
+		return nil
+	}
+
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "ttl-anchor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCreated := strconv.FormatInt(started.Unix(), 10)
+	wantExpires := strconv.FormatInt(started.Add(20*time.Minute).Unix(), 10)
+	if lease.Server.Labels["created_at"] != wantCreated || lease.Server.Labels["expires_at"] != wantExpires {
+		t.Fatalf("lease labels=%#v want created=%s expires=%s", lease.Server.Labels, wantCreated, wantExpires)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider("ttl-anchor", providerName)
+	if err != nil || !ok || claim.Labels["created_at"] != wantCreated || claim.Labels["expires_at"] != wantExpires {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
 func TestFalReconcileRefusesReplayAfterIdempotencyWindow(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
@@ -423,7 +473,7 @@ func TestFalKeepFailureDeletesKnownInstanceWhenClaimPersistenceFails(t *testing.
 				t.Fatalf("deletedIDs=%#v", api.deletedIDs)
 			}
 			if deleteErr == nil {
-				if !strings.Contains(err.Error(), "deleted fal instance") {
+				if !strings.Contains(err.Error(), "deleting fal instance") {
 					t.Fatalf("successful fallback cleanup not reported: %v", err)
 				}
 				if _, ok := api.instances["inst_created"]; ok {
@@ -469,6 +519,10 @@ func TestFalAcquireAcknowledgesProviderIdentityBeforeSSHWait(t *testing.T) {
 		Keep:          true,
 		OnAcquired: func(target core.LeaseTarget) error {
 			observed = target
+			claim, ok, claimErr := core.ReadLeaseClaimWithPresence(target.LeaseID)
+			if claimErr != nil || !ok || claim.CloudID != target.Server.CloudID || claim.Labels["recovery"] != "provisioning" {
+				t.Fatalf("durable pre-readiness claim=%#v ok=%v err=%v", claim, ok, claimErr)
+			}
 			return nil
 		},
 	})
