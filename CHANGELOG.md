@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Required E2B stop and automatic cleanup to hold an unchanged API-endpoint-, sandbox-, lease-, slug-, and provider-bound local claim across deletion; claimless recovery now requires explicit `--reclaim`. Thanks @coygeek.
 - Prevented config and `.crabboxignore` negations, including case aliases, from re-including Crabbox-owned env profiles, uploaded scripts, logs, captures, and run artifacts in sync manifests. Thanks @zozo123.
 - Allowed ordered `!` re-includes in `.crabboxignore` and `sync.exclude`, with `\!` for literal leading-bang paths. Thanks @chsong1.
 - Completed coordinator diagnostic redaction for non-Bearer authorization schemes, GCP signed URLs, and every configured provider credential field. Thanks @coygeek.

@@ -810,6 +810,10 @@ func providerClaimScope(provider string, cfg Config) string {
 		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.CubeSandbox.APIURL); endpoint != "" {
 			return "endpoint:" + endpoint
 		}
+	case "e2b":
+		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.E2B.APIURL); endpoint != "" {
+			return "endpoint:" + endpoint
+		}
 	case "namespace-instance":
 		parts := make([]string, 0, 3)
 		if endpoint := normalizedNamespaceClaimEndpoint(cfg.NamespaceInstance.Endpoint); endpoint != "" {
