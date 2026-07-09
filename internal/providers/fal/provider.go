@@ -72,6 +72,12 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 		return nil, exit(2, "--tailscale is not supported for provider=%s; fal Compute exposes public SSH only", providerName)
 	}
 	applyFalDefaults(&cfg)
+	if err := validateFalSSHUser(cfg.Fal.User); err != nil {
+		return nil, err
+	}
+	if err := validateFalSSHUser(cfg.SSHUser); err != nil {
+		return nil, err
+	}
 	return &backend{spec: p.Spec(), cfg: cfg, rt: rt, clientFactory: newClient}, nil
 }
 

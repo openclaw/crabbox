@@ -140,6 +140,29 @@ func TestConfigureRejectsUnsupportedTargetAndTailscale(t *testing.T) {
 	}
 }
 
+func TestConfigureRejectsUnsafeSSHUsers(t *testing.T) {
+	for _, user := range []string{
+		"-oProxyCommand=sh",
+		"user@host",
+		"user name",
+		"user;touch-pwned",
+		strings.Repeat("a", 33),
+	} {
+		t.Run(user, func(t *testing.T) {
+			_, err := (Provider{}).Configure(Config{
+				TargetOS: targetLinux,
+				Fal: FalConfig{
+					APIKey: "test-key",
+					User:   user,
+				},
+			}, newDiscardRuntime())
+			if err == nil || !strings.Contains(err.Error(), "valid Linux login name") {
+				t.Fatalf("user=%q err=%v", user, err)
+			}
+		})
+	}
+}
+
 func TestConfigureReturnsSSHLeaseBackend(t *testing.T) {
 	gotBackend, err := Provider{}.Configure(Config{TargetOS: targetLinux}, newDiscardRuntime())
 	if err != nil {

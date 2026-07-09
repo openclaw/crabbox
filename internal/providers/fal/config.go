@@ -1,6 +1,9 @@
 package fal
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 const (
 	defaultAPIURL       = "https://api.fal.ai/v1"
@@ -8,6 +11,8 @@ const (
 	defaultUser         = "ubuntu"
 	defaultWorkRoot     = "/home/ubuntu/crabbox"
 )
+
+var falSSHUserPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9._-]{0,31}$`)
 
 func applyFalDefaults(cfg *Config) {
 	if cfg == nil {
@@ -43,4 +48,11 @@ func applyFalDefaults(cfg *Config) {
 		cfg.WorkRoot = cfg.Fal.WorkRoot
 	}
 	cfg.ServerType = cfg.Fal.InstanceType
+}
+
+func validateFalSSHUser(user string) error {
+	if !falSSHUserPattern.MatchString(strings.TrimSpace(user)) {
+		return exit(2, "provider=%s SSH user must be a valid Linux login name, got %q", providerName, user)
+	}
+	return nil
 }

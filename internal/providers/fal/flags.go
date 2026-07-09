@@ -53,6 +53,12 @@ func ApplyFalProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if isFalProviderName(cfg.Provider) {
 		applyFalDefaults(cfg)
+		if err := validateFalSSHUser(cfg.Fal.User); err != nil {
+			return err
+		}
+		if err := validateFalSSHUser(cfg.SSHUser); err != nil {
+			return err
+		}
 	}
 	return nil
 }
