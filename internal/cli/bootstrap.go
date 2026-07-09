@@ -455,7 +455,7 @@ crabbox-ready
 }
 
 func windowsDesktopBootstrapPowerShell() string {
-	return `
+	return windowsDesktopLauncherServicePowerShell() + `
 	if (-not (Test-Path -LiteralPath "C:\Program Files\TightVNC\tvnserver.exe")) {
 	  Retry { Invoke-WebRequest -Uri ` + psQuote(tightVNCMSIURL) + ` -OutFile $tightVNCInstaller -UseBasicParsing }
 	  Assert-CrabboxFileSHA256 $tightVNCInstaller ` + psQuote(tightVNCMSISHA256) + `

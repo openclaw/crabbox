@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -665,23 +666,51 @@ func TestDesktopBrowserLaunchCheckAvoidsSelfMatchingShell(t *testing.T) {
 	}
 }
 
-func TestWindowsDesktopLaunchRemoteCommandUsesInteractiveTask(t *testing.T) {
-	got := desktopLaunchRemoteCommand(
-		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+func TestWindowsDesktopLaunchRemoteCommandUsesActiveInteractiveSession(t *testing.T) {
+	got := windowsDesktopLaunchPowerShell(
 		`C:\crabbox\cbx_1\repo`,
 		map[string]string{"BROWSER": `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`},
 		[]string{`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`, "https://example.com"},
-		desktopLaunchOptions{WindowedBrowser: true},
 	)
 	for _, want := range []string{
-		"CrabboxDesktopLaunch-",
-		"windows.username",
-		"windows.password",
-		"schtasks.exe /Delete",
-		`"/IT"`,
+		"CrabboxDesktopLauncher",
+		"desktop-launch-requests",
+		"CrabboxDesktopWindows",
+		"RelatedTo",
+		"AddSeconds(45)",
+		"SetForegroundWindow",
+		"GetForegroundWindow",
+		windowsDesktopWindowMarker,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("windows desktop launch command missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"schtasks.exe", "windows.username", "windows.password", `"/IT"`} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("windows desktop launch command still contains %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestParseWindowsDesktopWindow(t *testing.T) {
+	title := "Crabbox test — Edge"
+	encoded := base64.StdEncoding.EncodeToString([]byte(title))
+	got, err := parseWindowsDesktopWindow("noise\n" + windowsDesktopWindowMarker + " pid=421 session=3 title=" + encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PID != 421 || got.SessionID != 3 || got.Title != title {
+		t.Fatalf("window=%#v", got)
+	}
+	for _, invalid := range []string{
+		"",
+		windowsDesktopWindowMarker + " pid=0 session=3 title=" + encoded,
+		windowsDesktopWindowMarker + " pid=421 session=-1 title=" + encoded,
+		windowsDesktopWindowMarker + " pid=421 session=3 title=not-base64",
+	} {
+		if _, err := parseWindowsDesktopWindow(invalid); err == nil {
+			t.Fatalf("invalid marker accepted: %q", invalid)
 		}
 	}
 }
