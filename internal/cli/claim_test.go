@@ -258,6 +258,17 @@ func TestCubeSandboxProviderClaimScopeBindsAPIEndpoint(t *testing.T) {
 	}
 }
 
+func TestE2BProviderClaimScopeBindsAPIEndpoint(t *testing.T) {
+	cfg := Config{E2B: E2BConfig{APIURL: "HTTPS://API.E2B.APP:443/v1/"}}
+	if got, want := providerClaimScope("e2b", cfg), "endpoint:https://api.e2b.app/v1"; got != want {
+		t.Fatalf("providerClaimScope(e2b)=%q, want %q", got, want)
+	}
+	cfg.E2B.APIURL = ""
+	if got := providerClaimScope("e2b", cfg); got != "" {
+		t.Fatalf("providerClaimScope(e2b)=%q, want empty", got)
+	}
+}
+
 func TestConditionalClaimMutationRejectsChangedState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := baseConfig()

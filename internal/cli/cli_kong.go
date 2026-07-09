@@ -34,6 +34,7 @@ type crabboxKongCLI struct {
 	Events      eventsKongCmd      `cmd:"" passthrough:"" help:"Print recorded run events."`
 	Attach      attachKongCmd      `cmd:"" passthrough:"" help:"Follow recorded events for an active run."`
 	Results     resultsKongCmd     `cmd:"" passthrough:"" help:"Show recorded test result summaries."`
+	Verify      verifyKongCmd      `cmd:"" passthrough:"" help:"Verify a signed run receipt."`
 	Cache       cacheKongCmd       `cmd:"" help:"Inspect, purge, or warm remote caches."`
 	Status      statusKongCmd      `cmd:"" passthrough:"" help:"Show lease state; add --wait to block until ready."`
 	List        listKongCmd        `cmd:"" passthrough:"" help:"List Crabbox machines."`
@@ -209,6 +210,9 @@ type attachKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type resultsKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type verifyKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type portsKongCmd struct {
@@ -630,6 +634,7 @@ func (c *logsKongCmd) Run(ctx context.Context, app App) error      { return app.
 func (c *eventsKongCmd) Run(ctx context.Context, app App) error    { return app.events(ctx, c.Args) }
 func (c *attachKongCmd) Run(ctx context.Context, app App) error    { return app.attach(ctx, c.Args) }
 func (c *resultsKongCmd) Run(ctx context.Context, app App) error   { return app.results(ctx, c.Args) }
+func (c *verifyKongCmd) Run(ctx context.Context, app App) error    { return app.verify(ctx, c.Args) }
 func (c *portsKongCmd) Run(ctx context.Context, app App) error     { return app.ports(ctx, c.Args) }
 func (c *cpKongCmd) Run(ctx context.Context, app App) error        { return app.copyCommand(ctx, c.Args) }
 func (c *statusKongCmd) Run(ctx context.Context, app App) error    { return app.status(ctx, c.Args) }

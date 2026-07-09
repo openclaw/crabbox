@@ -5,11 +5,20 @@
 ### Added
 
 - Added a Unikraft Cloud service-control provider for claimed OCI-image instances, with endpoint- and instance-bound ownership, guarded cleanup, and live create/status/list/stop verification. Thanks @zozo123.
+- Added provider-neutral Ed25519-signed run receipts through `crabbox run --attest` and integrity verification through `crabbox verify`, with collision-safe signing-key handling and explicit self-signed trust reporting. Thanks @yetval.
+- Documented a provider-neutral hermetic-agent evidence pattern with separate writer contexts, QA arbitration, required proof artifacts, and sync-safe local downloads. Thanks @zozo123.
+- Added `sync-plan --json` with candidate and dirty-delta sizes, configured guardrail status, deleted-path counts, and ranked file and directory hotspots for automation. Thanks @zozo123.
 - Added a CubeSandbox delegated-run provider with E2B-compatible lifecycle and envd execution, archive sync, CubeProxy routing, exact API-endpoint/sandbox-bound ownership claims, conflict-safe explicit adoption, and guarded cleanup. Thanks @zozo123.
 - Added coordinator-managed Daytona Linux leases with a Worker-held API key, exact ownership cleanup, expiring SSH-token refresh, CLI secret redaction, and production Cloudflare configuration.
 
 ### Fixed
 
+- Required E2B stop and automatic cleanup to hold an unchanged API-endpoint-, sandbox-, lease-, slug-, and provider-bound local claim across deletion; claimless recovery now requires explicit `--reclaim`. Thanks @coygeek.
+- Prevented config and `.crabboxignore` negations, including case aliases, from re-including Crabbox-owned env profiles, uploaded scripts, logs, captures, and run artifacts in sync manifests. Thanks @zozo123.
+- Allowed ordered `!` re-includes in `.crabboxignore` and `sync.exclude`, with `\!` for literal leading-bang paths. Thanks @chsong1.
+- Completed coordinator diagnostic redaction for non-Bearer authorization schemes, GCP signed URLs, and every configured provider credential field. Thanks @coygeek.
+- Reconciled idle admin WebVNC, Code, egress, and control sockets during direct and Node scheduled maintenance after admin-token or GitHub-admin rotation. Thanks @coygeek.
+- Bound accepted WebVNC and Code backend agents to the manager grant that created them, closing attributable agents after share or credential revocation while preserving pre-upgrade hibernated sockets. Thanks @coygeek.
 - Bound non-admin shared-token WebVNC, Code, and egress bridges to the credential active at ticket creation, closing active and restored sessions after token rotation or removal. Thanks @coygeek.
 - Made Parallels macOS WebVNC use managed VNC credentials, authenticated screenshots, pointer and direct keyboard input, explicit host-side macOS routing, collision-safe local tunnels, XWayland-aware desktop input, and safe clipboard fallback.
 - Started delegated-provider sync timeouts at archive creation, matching SSH sync semantics and avoiding pre-transfer expiry during local Git manifest planning.

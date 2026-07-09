@@ -141,7 +141,8 @@ Pick whichever matches your intent:
   [Runtime adapter stack](features/runtime-adapter-stack.md),
   [Capabilities](features/capabilities.md),
   [Interactive desktop and VNC](features/interactive-desktop-vnc.md),
-  [Telemetry](features/telemetry.md), [Sync](features/sync.md).
+  [Telemetry](features/telemetry.md), [Sync](features/sync.md),
+  [Hermetic agent evidence](features/hermetic-agent-evidence.md).
 - **Pick or add a target:** [Provider reference](providers/README.md),
   [Providers feature overview](features/providers.md),
   [Provider selection](features/provider-selection.md),

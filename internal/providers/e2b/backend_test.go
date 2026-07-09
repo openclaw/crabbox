@@ -634,6 +634,7 @@ func TestE2BTimeoutCapsAtOneHour(t *testing.T) {
 }
 
 func TestE2BCreateSandboxCapsDefaultTTL(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeE2BSyncClient{}
 	backend := &e2bBackend{
 		cfg: Config{
@@ -656,11 +657,11 @@ func TestE2BCreateSandboxCapsDefaultTTL(t *testing.T) {
 }
 
 func TestE2BCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testing.T) {
-	origClaim := claimLeaseForRepoProviderPond
-	claimLeaseForRepoProviderPond = func(_, _, _, _, _ string, _ time.Duration, _ bool) error {
+	origClaim := claimLeaseTargetForRepoConfig
+	claimLeaseTargetForRepoConfig = func(_, _ string, _ Config, _ Server, _ SSHTarget, _ string, _ time.Duration, _ bool) error {
 		return errors.New("claim write failed")
 	}
-	t.Cleanup(func() { claimLeaseForRepoProviderPond = origClaim })
+	t.Cleanup(func() { claimLeaseTargetForRepoConfig = origClaim })
 
 	client := &fakeE2BSyncClient{deleteErr: errors.New("delete failed")}
 	var stderr bytes.Buffer
@@ -676,7 +677,7 @@ func TestE2BCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testing.T) {
 		"claim write failed",
 		"cleanup e2b sandbox sbx_1",
 		"delete failed",
-		"crabbox stop --provider e2b --id sbx_1",
+		"crabbox stop --provider e2b --id sbx_1 --reclaim",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err=%v, want %q", err, want)
@@ -778,6 +779,42 @@ func TestE2BRunReturnsSessionHandleWhenKeepOnFailureRetainsSandbox(t *testing.T)
 	}
 }
 
+func TestE2BRunCleanupUsesExactClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{}
+	restore := swapNewE2BClient(client)
+	defer restore()
+	backend := &e2bBackend{
+		cfg: Config{
+			IdleTimeout: 30 * time.Minute,
+			TTL:         2 * time.Minute,
+			E2B:         E2BConfig{APIKey: "test", Workdir: "repo"},
+		},
+		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"true"},
+		NoSync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil || result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "sbx_1" {
+		t.Fatalf("deleteIDs=%#v", client.deleteIDs)
+	}
+	if !client.deleteDeadlineSet {
+		t.Fatal("run cleanup did not use a bounded context")
+	}
+	if _, exists, err := readLeaseClaimWithPresence(result.Session.LeaseID); err != nil || exists {
+		t.Fatalf("cleanup claim exists=%t err=%v", exists, err)
+	}
+}
+
 func TestE2BSandboxToServerUsesMetadata(t *testing.T) {
 	server := e2bSandboxToServer(e2bSandbox{
 		SandboxID:  "sbx_1",
@@ -826,12 +863,176 @@ func TestE2BResolveSyntheticIDRequiresCrabboxMetadata(t *testing.T) {
 	}
 }
 
+func TestE2BCreateBindsExactSandboxAndEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{}
+	backend := &e2bBackend{
+		cfg: Config{
+			IdleTimeout: 30 * time.Minute,
+			E2B: E2BConfig{
+				APIURL:   "https://api.example.test/root/",
+				Template: "base",
+			},
+		},
+		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	leaseID, sandbox, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir()}, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, exact, err := resolveLeaseClaimForProviderScopeWithExact(leaseID, "endpoint:https://api.example.test/root")
+	if err != nil || !ok || !exact {
+		t.Fatalf("claim=%#v ok=%t exact=%t err=%v", claim, ok, exact, err)
+	}
+	if claim.CloudID != sandbox.SandboxID || claim.ProviderScope != "endpoint:https://api.example.test/root" {
+		t.Fatalf("claim=%#v sandbox=%#v", claim, sandbox)
+	}
+}
+
+func TestE2BStopRejectsLabelledButUnclaimedSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{sandbox: e2bSandbox{
+		SandboxID: "sbx_unclaimed",
+		Metadata: map[string]string{
+			"provider": e2bProvider,
+			"crabbox":  "true",
+			"lease":    "cbx_123456789abc",
+			"slug":     "unclaimed",
+		},
+	}}
+	restore := swapNewE2BClient(client)
+	defer restore()
+	backend := &e2bBackend{cfg: e2bClaimConfig(Config{}), rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	err := backend.Stop(context.Background(), StopRequest{ID: "sbx_unclaimed"})
+	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+		t.Fatalf("Stop err=%v, want exact-claim rejection", err)
+	}
+	if len(client.getIDs) != 0 || len(client.deleteIDs) != 0 {
+		t.Fatalf("unclaimed Stop touched provider: gets=%#v deletes=%#v", client.getIDs, client.deleteIDs)
+	}
+}
+
+func TestE2BStopChecksLiveOwnershipAndRemovesClaimAtomically(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{}
+	restore := swapNewE2BClient(client)
+	defer restore()
+	backend := &e2bBackend{
+		cfg: Config{E2B: E2BConfig{APIURL: "https://api.example.test", Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	leaseID, sandbox, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir()}, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.sandbox.Metadata["lease"] = "cbx_ffffffffffff"
+	err = backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "no longer has canonical ownership metadata") {
+		t.Fatalf("mismatched Stop err=%v", err)
+	}
+	if len(client.deleteIDs) != 0 {
+		t.Fatalf("mismatched Stop deleted %#v", client.deleteIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+		t.Fatalf("mismatched Stop lost recovery claim: exists=%t err=%v", exists, err)
+	}
+
+	client.sandbox.Metadata["lease"] = leaseID
+	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+		t.Fatalf("Stop exact claim: %v", err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != sandbox.SandboxID {
+		t.Fatalf("deleteIDs=%#v", client.deleteIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("successful Stop claim exists=%t err=%v", exists, err)
+	}
+}
+
+func TestE2BStopRetainsClaimWhenDeleteFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{deleteErr: errors.New("delete failed")}
+	restore := swapNewE2BClient(client)
+	defer restore()
+	backend := &e2bBackend{
+		cfg: Config{E2B: E2BConfig{APIURL: "https://api.example.test", Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	leaseID, sandbox, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir()}, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("Stop err=%v, want delete failure", err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != sandbox.SandboxID {
+		t.Fatalf("deleteIDs=%#v", client.deleteIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+		t.Fatalf("failed Stop lost recovery claim: exists=%t err=%v", exists, err)
+	}
+}
+
+func TestE2BStopRejectsDifferentAPIEndpointBeforeRemoteRead(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{}
+	creator := &e2bBackend{
+		cfg: Config{E2B: E2BConfig{APIURL: "https://api-a.example.test", Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	leaseID, _, _, err := creator.createSandbox(context.Background(), client, Repo{Root: t.TempDir()}, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.getIDs = nil
+	restore := swapNewE2BClient(client)
+	defer restore()
+	other := &e2bBackend{
+		cfg: Config{E2B: E2BConfig{APIURL: "https://api-b.example.test"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	err = other.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "different API endpoint") {
+		t.Fatalf("Stop err=%v, want endpoint rejection", err)
+	}
+	if len(client.getIDs) != 0 || len(client.deleteIDs) != 0 {
+		t.Fatalf("endpoint mismatch touched provider: gets=%#v deletes=%#v", client.getIDs, client.deleteIDs)
+	}
+}
+
+func TestE2BReclaimAndStopAdoptsExactSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{sandbox: e2bSandbox{
+		SandboxID: "sbx_reclaim",
+		Metadata: map[string]string{
+			"provider": e2bProvider,
+			"crabbox":  "true",
+			"lease":    "cbx_123456789abc",
+			"slug":     "reclaim-me",
+		},
+	}}
+	restore := swapNewE2BClient(client)
+	defer restore()
+	backend := &e2bBackend{cfg: e2bClaimConfig(Config{}), rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	if err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "sbx_reclaim"}); err != nil {
+		t.Fatalf("ReclaimAndStop: %v", err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "sbx_reclaim" {
+		t.Fatalf("deleteIDs=%#v", client.deleteIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence("cbx_123456789abc"); err != nil || exists {
+		t.Fatalf("successful reclaim claim exists=%t err=%v", exists, err)
+	}
+}
+
 type fakeE2BSyncClient struct {
 	commands          []string
 	users             []string
 	sandbox           e2bSandbox
 	createReq         e2bCreateSandboxRequest
 	createCalls       int
+	getIDs            []string
 	getErr            error
 	deleteIDs         []string
 	deleteErr         error
@@ -853,14 +1054,16 @@ func (f *fakeE2BSyncClient) CreateSandbox(_ context.Context, req e2bCreateSandbo
 	if f.sandbox.SandboxID != "" {
 		return f.sandbox, nil
 	}
-	return e2bSandbox{SandboxID: "sbx_1", Metadata: req.Metadata}, nil
+	f.sandbox = e2bSandbox{SandboxID: "sbx_1", Metadata: req.Metadata, State: "running"}
+	return f.sandbox, nil
 }
 
 func (f *fakeE2BSyncClient) ConnectSandbox(context.Context, string, int) (e2bSession, error) {
 	return e2bSession{}, nil
 }
 
-func (f *fakeE2BSyncClient) GetSandbox(context.Context, string) (e2bSandbox, error) {
+func (f *fakeE2BSyncClient) GetSandbox(_ context.Context, sandboxID string) (e2bSandbox, error) {
+	f.getIDs = append(f.getIDs, sandboxID)
 	if f.getErr != nil {
 		return e2bSandbox{}, f.getErr
 	}

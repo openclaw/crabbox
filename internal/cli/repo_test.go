@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -319,6 +320,132 @@ func TestCrabboxIgnoreExtendsSyncExcludes(t *testing.T) {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("manifest %q should exclude .crabboxignore pattern %q", got, notWant)
 		}
+	}
+}
+
+func TestCrabboxIgnoreCanReincludeDefaultExcludedSourcePath(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, ".crabboxignore"), "!apps/backend/app/connectors/target\n")
+	writeFile(t, filepath.Join(dir, "apps", "backend", "app", "connectors", "target", "schemas.py"), "class Schema: ...\n")
+	writeFile(t, filepath.Join(dir, "build", "target", "debug.o"), "cache")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+
+	excludes, err := syncExcludes(dir, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := syncManifest(dir, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(manifest.Files, ",")
+	if !strings.Contains(got, "apps/backend/app/connectors/target/schemas.py") {
+		t.Fatalf("manifest should reinclude source target path: %q", got)
+	}
+	if strings.Contains(got, "build/target/debug.o") {
+		t.Fatalf("manifest should still exclude unrelated target output: %q", got)
+	}
+}
+
+func TestCrabboxRuntimeExcludesCannotBeReincluded(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	runtimeFiles := []string{
+		".crabbox/env/live.env",
+		".crabbox/scripts/smoke.sh",
+		".crabbox/logs/run.log",
+		".crabbox/captures/failure.tgz",
+		".crabbox/runs/run_123/artifact.tgz",
+	}
+	var ignore strings.Builder
+	for _, exclude := range protectedSyncExcludes() {
+		fmt.Fprintf(&ignore, "!%s\n", exclude)
+	}
+	writeFile(t, filepath.Join(dir, ".crabboxignore"), ignore.String())
+	for _, rel := range runtimeFiles {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(rel)), "runtime state\n")
+	}
+	writeFile(t, filepath.Join(dir, ".crabbox", "srt-settings.json"), "{}\n")
+	writeFile(t, filepath.Join(dir, "src", "main.go"), "package main\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+
+	excludes, err := syncExcludes(dir, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := syncManifest(dir, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(manifest.Files, ",")
+	for _, want := range []string{".crabbox/srt-settings.json", "src/main.go"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("manifest %q missing %q", got, want)
+		}
+	}
+	for _, notWant := range runtimeFiles {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("manifest %q should not include protected runtime path %q", got, notWant)
+		}
+		if !pathExcluded(notWant, excludes) {
+			t.Fatalf("protected runtime path %q was re-included: %v", notWant, excludes)
+		}
+	}
+	for _, alias := range []string{
+		".CRABBOX/env/live.env",
+		".crabbox/SCRIPTS/smoke.sh",
+		".Crabbox/Logs/run.log",
+		".crabbox/CAPTURES/failure.tgz",
+		".CRABBOX/RUNS/run_123/artifact.tgz",
+	} {
+		if !pathExcluded(alias, excludes) {
+			t.Fatalf("case alias of protected runtime path %q was re-included: %v", alias, excludes)
+		}
+	}
+}
+
+func TestPathExcludedUsesOrderedNegation(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		patterns []string
+		want     bool
+	}{
+		{name: "exact reinclude", path: "apps/backend/target/schema.py", patterns: []string{"target", "!apps/backend/target"}, want: false},
+		{name: "unrelated default remains excluded", path: "build/target/debug.o", patterns: []string{"target", "!apps/backend/target"}, want: true},
+		{name: "last matching rule wins", path: "target/debug.o", patterns: []string{"target", "!target", "target"}, want: true},
+		{name: "escaped bang is literal", path: "!cache/item.bin", patterns: []string{`\!cache`}, want: true},
+		{name: "unescaped bang negates", path: "cache/item.bin", patterns: []string{"cache", "!cache"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := pathExcluded(test.path, test.patterns); got != test.want {
+				t.Fatalf("pathExcluded(%q, %q) = %v, want %v", test.path, test.patterns, got, test.want)
+			}
+		})
+	}
+}
+
+func TestSyncExcludesPreservesRepeatedRuleOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".crabboxignore"), "!target\ntarget\n!apps/backend/target\n")
+
+	excludes, err := syncExcludes(dir, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pathExcluded("apps/backend/target/schema.py", excludes) {
+		t.Fatal("final precise negation should reinclude source target path")
+	}
+	if !pathExcluded("build/target/debug.o", excludes) {
+		t.Fatal("repeated target rule should re-exclude unrelated target path")
 	}
 }
 

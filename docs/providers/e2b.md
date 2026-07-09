@@ -99,7 +99,8 @@ files.
 
 1. Create or resolve a Crabbox-owned E2B sandbox from `e2b.template` (default
    `base`), with internet access enabled.
-2. Store Crabbox metadata on the sandbox and write a local repo claim.
+2. Store Crabbox metadata on the sandbox and write a local repo claim bound to
+   the exact API endpoint and sandbox ID.
 3. Build the Crabbox sync manifest, upload a gzipped archive into `/tmp`, and
    extract it into the resolved workdir.
 4. Execute the command through the E2B process stream in that workdir.
@@ -162,8 +163,11 @@ Expected results:
 ## Gotchas
 
 - `--id` accepts a Crabbox slug, a `cbx_...` lease ID, or an E2B sandbox ID in
-  raw or `e2b_<sandboxID>` form. Raw and synthetic sandbox IDs are honored only
-  when the sandbox metadata marks it as Crabbox-owned.
+  raw or `e2b_<sandboxID>` form. Destructive cleanup requires an exact local
+  endpoint-and-sandbox claim. To recover a Crabbox-owned sandbox whose claim is
+  missing or legacy, inspect the exact sandbox ID and pass `stop --reclaim`;
+  Crabbox revalidates its canonical lease metadata before adopting and deleting
+  it.
 - `--class` and `--type` are rejected; the E2B template owns sandbox resources.
 - `--checksum` is rejected because there is no Crabbox SSH/rsync target. Large-
   sync preflight guardrails still apply.

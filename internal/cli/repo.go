@@ -78,7 +78,7 @@ func cleanRemoteRepoName(name string) string {
 }
 
 func defaultExcludes() []string {
-	return []string{
+	excludes := []string{
 		".git",
 		"._*",
 		"node_modules",
@@ -96,9 +96,6 @@ func defaultExcludes() []string {
 		".cache",
 		".tmp",
 		".local",
-		".crabbox/logs",
-		".crabbox/captures",
-		".crabbox/runs",
 		".swiftpm",
 		".build",
 		"apps/*/.build",
@@ -113,10 +110,11 @@ func defaultExcludes() []string {
 		".gradle",
 		"target",
 	}
+	return append(excludes, protectedSyncExcludes()...)
 }
 
 func configuredExcludes(cfg Config) []string {
-	return appendUniqueStrings(defaultExcludes(), cfg.Sync.Excludes...)
+	return appendOrderedStrings(defaultExcludes(), cfg.Sync.Excludes...)
 }
 
 func syncExcludes(root string, cfg Config) ([]string, error) {
@@ -125,7 +123,29 @@ func syncExcludes(root string, cfg Config) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return appendUniqueStrings(excludes, ignore...), nil
+	excludes = appendOrderedStrings(excludes, ignore...)
+	return appendOrderedStrings(excludes, protectedSyncExcludes()...), nil
+}
+
+func protectedSyncExcludes() []string {
+	return []string{
+		".crabbox/env",
+		".crabbox/scripts",
+		".crabbox/logs",
+		".crabbox/captures",
+		".crabbox/runs",
+	}
+}
+
+func protectedSyncExcludeMatches(rel, exclude string) bool {
+	rel = strings.ToLower(strings.Trim(filepath.ToSlash(rel), "/"))
+	exclude = strings.ToLower(strings.Trim(filepath.ToSlash(exclude), "/"))
+	for _, protected := range protectedSyncExcludes() {
+		if exclude == protected {
+			return rel == protected || strings.HasPrefix(rel, protected+"/")
+		}
+	}
+	return false
 }
 
 // syncIncludes returns the configured sync include (whitelist) patterns. When
@@ -470,36 +490,94 @@ func safeRepoRel(rel string) bool {
 
 func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
 	fileCount := len(manifest.Files)
-	guardCount, guardBytes, guardScope, guardPaths := syncGuardrailScope(manifest)
+	guard := evaluateSyncGuardrail(manifest, cfg, force)
 	if len(manifest.Changed) > 0 {
 		fmt.Fprintf(stderr, "sync candidate: %d files, %s dirty_delta=%d files, %s\n", fileCount, humanBytes(manifest.Bytes), len(manifest.Changed), humanBytes(manifest.ChangedBytes))
 	} else {
 		fmt.Fprintf(stderr, "sync candidate: %d files, %s\n", fileCount, humanBytes(manifest.Bytes))
 	}
-	allowLarge := force || cfg.Sync.AllowLarge || os.Getenv("CRABBOX_SYNC_ALLOW_LARGE") == "1"
-	if !allowLarge {
-		if cfg.Sync.FailFiles > 0 && guardCount >= cfg.Sync.FailFiles {
-			printSyncTopDirs(stderr, guardPaths)
-			return exit(6, "sync %s too large: %d files >= limit %d; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guardScope, guardCount, cfg.Sync.FailFiles)
+	for _, reason := range guard.Reasons {
+		if reason.Status != "failed" {
+			continue
 		}
-		if cfg.Sync.FailBytes > 0 && guardBytes >= cfg.Sync.FailBytes {
-			printSyncTopDirs(stderr, guardPaths)
-			return exit(6, "sync %s too large: %s >= limit %s; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guardScope, humanBytes(guardBytes), humanBytes(cfg.Sync.FailBytes))
+		printSyncTopDirs(stderr, guard.Paths)
+		if reason.Metric == "files" {
+			return exit(6, "sync %s too large: %d files >= limit %d; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, reason.Actual, reason.Limit)
 		}
+		return exit(6, "sync %s too large: %s >= limit %s; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, humanBytes(reason.Actual), humanBytes(reason.Limit))
 	}
 	warned := false
-	if cfg.Sync.WarnFiles > 0 && guardCount >= cfg.Sync.WarnFiles {
-		fmt.Fprintf(stderr, "warning: large sync %s: %d files >= warning threshold %d\n", guardScope, guardCount, cfg.Sync.WarnFiles)
-		warned = true
-	}
-	if cfg.Sync.WarnBytes > 0 && guardBytes >= cfg.Sync.WarnBytes {
-		fmt.Fprintf(stderr, "warning: large sync %s: %s >= warning threshold %s\n", guardScope, humanBytes(guardBytes), humanBytes(cfg.Sync.WarnBytes))
+	for _, reason := range guard.Reasons {
+		if reason.Status != "warning" {
+			continue
+		}
+		if reason.Metric == "files" {
+			fmt.Fprintf(stderr, "warning: large sync %s: %d files >= warning threshold %d\n", guard.Scope, reason.Actual, reason.Limit)
+		} else {
+			fmt.Fprintf(stderr, "warning: large sync %s: %s >= warning threshold %s\n", guard.Scope, humanBytes(reason.Actual), humanBytes(reason.Limit))
+		}
 		warned = true
 	}
 	if warned {
-		printSyncTopDirs(stderr, guardPaths)
+		printSyncTopDirs(stderr, guard.Paths)
 	}
 	return nil
+}
+
+type syncGuardrailEvaluation struct {
+	Count      int
+	Bytes      int64
+	Scope      string
+	Paths      []string
+	AllowLarge bool
+	Status     string
+	Reasons    []syncGuardrailReason
+}
+
+type syncGuardrailReason struct {
+	Status string
+	Metric string
+	Actual int64
+	Limit  int64
+}
+
+func evaluateSyncGuardrail(manifest SyncManifest, cfg Config, force bool) syncGuardrailEvaluation {
+	count, bytes, scope, paths := syncGuardrailScope(manifest)
+	out := syncGuardrailEvaluation{
+		Count:      count,
+		Bytes:      bytes,
+		Scope:      scope,
+		Paths:      paths,
+		AllowLarge: force || cfg.Sync.AllowLarge || os.Getenv("CRABBOX_SYNC_ALLOW_LARGE") == "1",
+		Status:     "ok",
+	}
+	if !out.AllowLarge {
+		if cfg.Sync.FailFiles > 0 && count >= cfg.Sync.FailFiles {
+			out.addReason("failed", "files", int64(count), int64(cfg.Sync.FailFiles))
+		}
+		if cfg.Sync.FailBytes > 0 && bytes >= cfg.Sync.FailBytes {
+			out.addReason("failed", "bytes", bytes, cfg.Sync.FailBytes)
+		}
+	}
+	if cfg.Sync.WarnFiles > 0 && count >= cfg.Sync.WarnFiles {
+		out.addReason("warning", "files", int64(count), int64(cfg.Sync.WarnFiles))
+	}
+	if cfg.Sync.WarnBytes > 0 && bytes >= cfg.Sync.WarnBytes {
+		out.addReason("warning", "bytes", bytes, cfg.Sync.WarnBytes)
+	}
+	return out
+}
+
+func (g *syncGuardrailEvaluation) addReason(status, metric string, actual, limit int64) {
+	if status == "failed" || g.Status == "ok" {
+		g.Status = status
+	}
+	g.Reasons = append(g.Reasons, syncGuardrailReason{
+		Status: status,
+		Metric: metric,
+		Actual: actual,
+		Limit:  limit,
+	})
 }
 
 func syncGuardrailScope(manifest SyncManifest) (count int, bytes int64, scope string, paths []string) {
@@ -616,36 +694,87 @@ func splitNul(data []byte) []string {
 
 func pathExcluded(rel string, excludes []string) bool {
 	rel = filepath.ToSlash(rel)
-	parts := strings.Split(rel, "/")
+	excluded := false
 	for _, exclude := range excludes {
-		exclude = strings.Trim(filepath.ToSlash(strings.TrimSpace(exclude)), "/")
-		if exclude == "" {
+		exclude, negated := excludeRule(exclude)
+		if excludeMatches(rel, exclude) || protectedSyncExcludeMatches(rel, exclude) {
+			excluded = !negated
+		}
+	}
+	return excluded
+}
+
+func excludeRule(rule string) (pattern string, negated bool) {
+	rule = strings.TrimSpace(rule)
+	if strings.HasPrefix(rule, `\!`) {
+		return strings.TrimPrefix(rule, `\`), false
+	}
+	if strings.HasPrefix(rule, "!") {
+		return strings.TrimSpace(strings.TrimPrefix(rule, "!")), true
+	}
+	return rule, false
+}
+
+// excludedDirMayContainReinclude keeps watch traversal open when a later file
+// can be re-included below an otherwise excluded directory.
+func excludedDirMayContainReinclude(rel string, excludes []string) bool {
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	for _, rule := range excludes {
+		pattern, negated := excludeRule(rule)
+		if !negated {
 			continue
 		}
-		if rel == exclude || strings.HasPrefix(rel, exclude+"/") {
+		pattern = strings.Trim(filepath.ToSlash(pattern), "/")
+		if pattern == "" {
+			continue
+		}
+		if !strings.Contains(pattern, "/") {
 			return true
 		}
-		if !strings.Contains(exclude, "/") {
-			for _, part := range parts {
-				if part == exclude {
-					return true
-				}
-				if ok, _ := filepath.Match(exclude, part); ok {
-					return true
-				}
-			}
-		}
-		if ok, _ := filepath.Match(exclude, filepath.Base(rel)); ok {
-			return true
-		}
-		if ok, _ := filepath.Match(exclude, rel); ok {
-			return true
-		}
-		for i := 1; i < len(parts); i++ {
-			prefix := strings.Join(parts[:i], "/")
-			if ok, _ := filepath.Match(exclude, prefix); ok {
+		meta := strings.IndexAny(pattern, "*?[")
+		if meta < 0 {
+			if pattern == rel || strings.HasPrefix(pattern, rel+"/") || strings.HasPrefix(rel, pattern+"/") {
 				return true
 			}
+			continue
+		}
+		prefix := strings.TrimSuffix(pattern[:meta], "/")
+		if prefix == "" || prefix == rel || strings.HasPrefix(prefix, rel+"/") || strings.HasPrefix(rel, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func excludeMatches(rel string, exclude string) bool {
+	parts := strings.Split(rel, "/")
+	exclude = strings.Trim(filepath.ToSlash(strings.TrimSpace(exclude)), "/")
+	if exclude == "" {
+		return false
+	}
+	if rel == exclude || strings.HasPrefix(rel, exclude+"/") {
+		return true
+	}
+	if !strings.Contains(exclude, "/") {
+		for _, part := range parts {
+			if part == exclude {
+				return true
+			}
+			if ok, _ := filepath.Match(exclude, part); ok {
+				return true
+			}
+		}
+	}
+	if ok, _ := filepath.Match(exclude, filepath.Base(rel)); ok {
+		return true
+	}
+	if ok, _ := filepath.Match(exclude, rel); ok {
+		return true
+	}
+	for i := 1; i < len(parts); i++ {
+		prefix := strings.Join(parts[:i], "/")
+		if ok, _ := filepath.Match(exclude, prefix); ok {
+			return true
 		}
 	}
 	return false
