@@ -30,6 +30,37 @@ func TestProviderSpecAndAlias(t *testing.T) {
 	}
 }
 
+func TestPrepareLeaseClaimEndpointPreservesCredentialBinding(t *testing.T) {
+	existing := core.LeaseClaim{
+		LeaseID:  "cbx_abcdef123456",
+		Slug:     "gpu-box",
+		Provider: providerName,
+		CloudID:  "inst_owned",
+		Labels:   map[string]string{falCredentialBindingLabel: "binding-a"},
+	}
+	server := core.Server{
+		CloudID:  "inst_owned",
+		Provider: providerName,
+		Labels: map[string]string{
+			"lease": existing.LeaseID,
+			"slug":  existing.Slug,
+		},
+	}
+	prepared, err := (Provider{}).PrepareLeaseClaimEndpoint(existing, providerName, existing.Slug, server, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Labels[falCredentialBindingLabel] != "binding-a" {
+		t.Fatalf("prepared labels=%#v", prepared.Labels)
+	}
+	changed := server
+	changed.Labels = cloneLabels(server.Labels)
+	changed.Labels[falCredentialBindingLabel] = "binding-b"
+	if _, err := (Provider{}).PrepareLeaseClaimEndpoint(existing, providerName, existing.Slug, changed, false); err == nil {
+		t.Fatal("expected credential-binding retarget rejection")
+	}
+}
+
 func TestIsFalProviderNameAcceptsAlias(t *testing.T) {
 	for _, name := range []string{"fal", "FAL", " fal-ai "} {
 		if !isFalProviderName(name) {

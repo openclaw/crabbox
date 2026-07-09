@@ -42,6 +42,28 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return ApplyFalProviderFlags(cfg, fs, values)
 }
 
+func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, _ bool) (core.Server, error) {
+	if !isFalProviderName(provider) {
+		return core.Server{}, core.Exit(2, "refusing to rewrite fal lease=%s as provider=%s", existing.LeaseID, provider)
+	}
+	if slug != existing.Slug || server.Labels["lease"] != existing.LeaseID || server.Labels["slug"] != existing.Slug {
+		return core.Server{}, core.Exit(2, "refusing to rewrite fal lease=%s with mismatched claim identity", existing.LeaseID)
+	}
+	if existing.CloudID != "" && server.CloudID != "" && existing.CloudID != server.CloudID {
+		return core.Server{}, core.Exit(2, "refusing to rewrite fal lease=%s with stale instance identity", existing.LeaseID)
+	}
+	binding := strings.TrimSpace(existing.Labels[falCredentialBindingLabel])
+	if binding == "" {
+		return core.Server{}, core.Exit(2, "fal lease %s has no credential binding; refusing endpoint rewrite", existing.LeaseID)
+	}
+	if supplied := strings.TrimSpace(server.Labels[falCredentialBindingLabel]); supplied != "" && supplied != binding {
+		return core.Server{}, core.Exit(2, "refusing to rewrite fal lease=%s with a different credential binding", existing.LeaseID)
+	}
+	server.Labels = cloneLabels(server.Labels)
+	server.Labels[falCredentialBindingLabel] = binding
+	return server, nil
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, exit(2, "provider=%s managed provisioning supports target=linux only", providerName)
