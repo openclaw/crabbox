@@ -75,6 +75,12 @@ import {
   requestOwner,
 } from "./http";
 import {
+  hasImageRequirements,
+  imageSatisfiesRequirements,
+  InvalidImageCapabilitiesError,
+  normalizeImageCapabilities,
+} from "./image-capabilities";
+import {
   MarketplaceInputError,
   marketplaceQuote,
   marketplaceStatus,
@@ -155,6 +161,7 @@ import type {
   LeaseShare,
   LeaseShareRole,
   LeaseTelemetry,
+  ImageCapabilities,
   Provider,
   ProviderFastSnapshotRestore,
   ProviderImage,
@@ -1025,6 +1032,9 @@ export class FleetCoordinator {
       if (method === "POST" && parts.join("/") === "v1/leases") {
         return await this.createLease(request);
       }
+      if (method === "POST" && parts.join("/") === "v1/leases/capability-aware") {
+        return await this.createLease(request);
+      }
       if (method === "POST" && parts.join("/") === "v1/workspaces") {
         return await this.createWorkspace(request);
       }
@@ -1092,6 +1102,15 @@ export class FleetCoordinator {
         parts[4] === "status"
       ) {
         return await this.egressStatus(request, parts[2]);
+      }
+      if (
+        parts[0] === "v1" &&
+        parts[1] === "leases" &&
+        parts[2] &&
+        parts[3] === "webvnc" &&
+        parts[4] === "handoff"
+      ) {
+        return await this.webVNCCredentialHandoff(request, parts[2]);
       }
       if (
         parts[0] === "v1" &&
@@ -2226,7 +2245,22 @@ export class FleetCoordinator {
       if (error instanceof InvalidAWSRegionError) {
         return json({ error: "invalid_region", message: error.message }, { status: 400 });
       }
+      if (error instanceof InvalidImageCapabilitiesError) {
+        return json(
+          { error: "invalid_image_requirements", message: error.message },
+          { status: 400 },
+        );
+      }
       throw error;
+    }
+    if (hasImageRequirements(config.imageRequirements) && config.provider !== "aws") {
+      return json(
+        {
+          error: "image_capability_unsupported",
+          message: "image capability selection currently requires provider=aws",
+        },
+        { status: 409 },
+      );
     }
     if (workspaceID) {
       const hostKeys = workspaceSSHHostKeysFromRequest(request);
@@ -2311,6 +2345,15 @@ export class FleetCoordinator {
       );
     }
     if (retainedMacHostLease) {
+      if (hasImageRequirements(config.imageRequirements)) {
+        return json(
+          {
+            error: "image_capability_mismatch",
+            message: "image capability requirements cannot be verified when reusing an instance",
+          },
+          { status: 409 },
+        );
+      }
       const missingCapabilities = [
         config.desktop && !retainedMacHostLease.desktop ? "desktop" : "",
         config.browser && !retainedMacHostLease.browser ? "browser" : "",
@@ -2377,7 +2420,17 @@ export class FleetCoordinator {
         { status: 424 },
       );
     }
-    config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
+    try {
+      config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
+    } catch (error) {
+      if (error instanceof ImageCapabilityMismatchError) {
+        return json(
+          { error: "image_capability_mismatch", message: error.message },
+          { status: 409 },
+        );
+      }
+      throw error;
+    }
     const provider = this.provider(
       config.provider,
       providerRegionForConfig(config),
@@ -7859,7 +7912,14 @@ export class FleetCoordinator {
   }
 
   private async webVNCCredentialHandoff(request: Request, identifier: string): Promise<Response> {
-    const lease = await this.resolvePortalLease(identifier, request);
+    if (request.method.toUpperCase() !== "POST") {
+      return json({ error: "not_found" }, { status: 404 });
+    }
+    const portalRequest = new URL(request.url).pathname.startsWith("/portal/");
+    const admin = isAdminRequest(request);
+    const lease = portalRequest
+      ? await this.resolvePortalLease(identifier, request)
+      : await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
     }
@@ -7871,6 +7931,12 @@ export class FleetCoordinator {
       | { ticket?: unknown; username?: unknown; password?: unknown }
       | undefined;
     if (typeof body?.ticket === "string") {
+      if (!portalRequest) {
+        return json(
+          { error: "invalid_handoff", message: "portal handoff required" },
+          { status: 400 },
+        );
+      }
       const result = await this.webVNCCredentialHandoffs.consume(lease.id, body.ticket);
       if (result.status !== "accepted") {
         const expired = result.status === "expired";
@@ -7887,7 +7953,7 @@ export class FleetCoordinator {
         { headers: { "cache-control": "no-store" } },
       );
     }
-    if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     const username = typeof body?.username === "string" ? body.username : "";
@@ -13010,6 +13076,34 @@ function promotedAWSImagePrefix(): string {
   return "image:aws:promoted";
 }
 
+function promotedAWSImageCatalogPrefix(
+  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
+    os?: string;
+  },
+): string {
+  const scope = promotedAWSImageKey(image).slice(`${promotedAWSImagePrefix()}:`.length);
+  return `image:aws:catalog:${scope}:`;
+}
+
+function promotedAWSImageCatalogKey(image: PromotedImageRecord): string {
+  return `${promotedAWSImageCatalogPrefix(image)}${encodeURIComponent(image.id)}`;
+}
+
+class ImageCapabilityMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ImageCapabilityMismatchError";
+  }
+}
+
+function promotionVersionMap(values: string[]): Record<string, string> | undefined {
+  const entries = values.map((value) => {
+    const separator = value.indexOf("=");
+    return separator > 0 ? [value.slice(0, separator), value.slice(separator + 1)] : [value, ""];
+  });
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
 function promotedAWSImageKey(
   image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
     os?: string;
@@ -17939,14 +18033,38 @@ export class AWSProvider implements CloudProvider {
   ): Promise<ReturnType<typeof leaseConfig>> {
     if (
       config.awsAMI ||
+      this.env.CRABBOX_AWS_AMI?.trim() ||
       config.awsSnapshot ||
       config.awsUseStockImage ||
       config.providerKey.startsWith(workspaceProviderKeyPrefix)
     ) {
+      if (hasImageRequirements(config.imageRequirements)) {
+        throw new ImageCapabilityMismatchError(
+          "image capability requirements cannot be verified for an explicit or stock image source",
+        );
+      }
       return config;
     }
     if (config.target === "macos") {
-      return { ...config, awsPromotedAMIs: await this.promotedImagesForFallback(config) };
+      const awsPromotedAMIs = await this.promotedImagesForFallback(config);
+      if (
+        hasImageRequirements(config.imageRequirements) &&
+        Object.keys(awsPromotedAMIs).length === 0
+      ) {
+        throw new ImageCapabilityMismatchError(
+          "no promoted AWS macOS image satisfies the requested image capabilities",
+        );
+      }
+      return { ...config, awsPromotedAMIs };
+    }
+    if (hasImageRequirements(config.imageRequirements)) {
+      const awsPromotedAMIs = await this.promotedImagesForFallback(config);
+      if (Object.keys(awsPromotedAMIs).length === 0) {
+        throw new ImageCapabilityMismatchError(
+          `no promoted AWS ${config.target} image satisfies the requested image capabilities`,
+        );
+      }
+      return { ...config, awsAMI: "", awsPromotedAMIs };
     }
     const promoted = await this.promotedImage(config);
     return {
@@ -18310,8 +18428,14 @@ export class AWSProvider implements CloudProvider {
     return this.client.fastSnapshotRestoreStatus(snapshotIDs, availabilityZones);
   }
 
-  deleteImage(imageID: string): Promise<void> {
-    return this.client.deleteImage(imageID);
+  async deleteImage(imageID: string): Promise<void> {
+    await this.client.deleteImage(imageID);
+    const catalog = await this.storage.list<PromotedImageRecord>({ prefix: "image:aws:catalog:" });
+    await Promise.all(
+      [...catalog.entries()]
+        .filter(([, image]) => image.id === imageID)
+        .map(([key]) => this.storage.delete(key)),
+    );
   }
 
   async storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
@@ -18395,6 +18519,7 @@ export class AWSProvider implements CloudProvider {
       region?: string;
       serverType?: string;
       architecture?: string;
+      capabilities?: ImageCapabilities;
       fastSnapshotRestore?: unknown;
       fastSnapshotRestoreAvailabilityZones?: string[];
     } = await readJson<{
@@ -18403,11 +18528,23 @@ export class AWSProvider implements CloudProvider {
       region?: string;
       serverType?: string;
       architecture?: string;
+      capabilities?: ImageCapabilities;
       fastSnapshotRestore?: unknown;
       fastSnapshotRestoreAvailabilityZones?: string[];
     }>(request).catch(() => ({}));
+    const requestedRegion = input.region ?? url.searchParams.get("region") ?? "";
+    const cataloged = await this.promotedCatalogImageByID(imageID, requestedRegion);
+    const priorCapabilities = known?.capabilities ?? cataloged?.capabilities;
+    const prior =
+      known || cataloged
+        ? {
+            ...cataloged,
+            ...known,
+            ...(priorCapabilities ? { capabilities: priorCapabilities } : {}),
+          }
+        : undefined;
     const target = normalizeAWSImageTarget(
-      input.target ?? url.searchParams.get("target") ?? known?.target ?? "linux",
+      input.target ?? url.searchParams.get("target") ?? prior?.target ?? "linux",
     );
     if (!target) {
       return json(
@@ -18418,7 +18555,7 @@ export class AWSProvider implements CloudProvider {
     let imageOS: string | undefined;
     if (target === "linux") {
       const requestedOS = input.os ?? url.searchParams.get("os");
-      const fallbackOS = known ? (known.os ?? "ubuntu:24.04") : defaultOSImage;
+      const fallbackOS = prior ? (prior.os ?? "ubuntu:24.04") : defaultOSImage;
       try {
         imageOS = normalizeOSImage(requestedOS ?? fallbackOS);
       } catch (error) {
@@ -18428,7 +18565,7 @@ export class AWSProvider implements CloudProvider {
         );
       }
     }
-    const rawRegion = input.region ?? url.searchParams.get("region") ?? known?.region ?? "";
+    const rawRegion = requestedRegion || prior?.region || "";
     const imageRegion = sanitizeAWSRegion(rawRegion);
     if (rawRegion && !imageRegion) {
       return json(
@@ -18436,15 +18573,57 @@ export class AWSProvider implements CloudProvider {
         { status: 400 },
       );
     }
-    const metadata: Partial<ProviderImage> = { ...known, target, region: imageRegion };
-    const serverType = input.serverType ?? url.searchParams.get("serverType") ?? known?.serverType;
+    const metadata: Partial<ProviderImage> = { ...prior, target, region: imageRegion };
+    const serverType = input.serverType ?? url.searchParams.get("serverType") ?? prior?.serverType;
     if (serverType) {
       metadata.serverType = serverType;
     }
     const architecture =
-      input.architecture ?? url.searchParams.get("architecture") ?? known?.architecture;
+      input.architecture ?? url.searchParams.get("architecture") ?? prior?.architecture;
     if (architecture) {
       metadata.architecture = architecture;
+    }
+    let capabilities: ImageCapabilities | undefined;
+    try {
+      capabilities = normalizeImageCapabilities({
+        ...prior?.capabilities,
+        ...input.capabilities,
+        osVersion:
+          input.capabilities?.osVersion ??
+          url.searchParams.get("osVersion") ??
+          prior?.capabilities?.osVersion,
+        sdks:
+          input.capabilities?.sdks ??
+          promotionVersionMap(url.searchParams.getAll("sdk")) ??
+          prior?.capabilities?.sdks,
+        runtimes:
+          input.capabilities?.runtimes ??
+          promotionVersionMap(url.searchParams.getAll("runtime")) ??
+          prior?.capabilities?.runtimes,
+        browser:
+          input.capabilities?.browser ??
+          (url.searchParams.has("browser")
+            ? boolFromUnknown(url.searchParams.get("browser"))
+            : undefined) ??
+          prior?.capabilities?.browser,
+        webview2:
+          input.capabilities?.webview2 ??
+          (url.searchParams.has("webview2")
+            ? boolFromUnknown(url.searchParams.get("webview2"))
+            : undefined) ??
+          prior?.capabilities?.webview2,
+        desktop:
+          input.capabilities?.desktop ??
+          (url.searchParams.has("desktop")
+            ? boolFromUnknown(url.searchParams.get("desktop"))
+            : undefined) ??
+          prior?.capabilities?.desktop,
+      });
+    } catch (error) {
+      return json(
+        { error: "invalid_image_capabilities", message: coordinatorErrorMessage(this.env, error) },
+        { status: 400 },
+      );
     }
     const fastSnapshotRestore = boolFromUnknown(
       input.fastSnapshotRestore ?? url.searchParams.get("fastSnapshotRestore"),
@@ -18508,8 +18687,10 @@ export class AWSProvider implements CloudProvider {
       architecture:
         image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
       promotedAt: new Date().toISOString(),
+      ...(capabilities ? { capabilities } : {}),
     };
     await this.storage.put(promotedAWSImageKey(promoted), promoted);
+    await this.storage.put(promotedAWSImageCatalogKey(promoted), promoted);
     if (target === "linux" && promoted.os) {
       await this.storage.put(promotedAWSLinuxOSImageKey(promoted), promoted);
     }
@@ -18542,12 +18723,39 @@ export class AWSProvider implements CloudProvider {
     os?: string;
     serverType: string;
     awsRegion: string;
+    imageRequirements: LeaseConfig["imageRequirements"];
   }): Promise<PromotedImageRecord | undefined> {
     const architecture = awsImageArchitectureForLease(
       config.target,
       config.serverType,
       config.architecture,
     );
+    if (hasImageRequirements(config.imageRequirements)) {
+      const imageScope = {
+        target: config.target,
+        ...(config.os ? { os: config.os } : {}),
+        architecture,
+        serverType: config.serverType,
+        region: config.awsRegion,
+      };
+      const [selected, catalog] = await Promise.all([
+        this.storage.get<PromotedImageRecord>(promotedAWSImageKey(imageScope)),
+        this.storage.list<PromotedImageRecord>({
+          prefix: promotedAWSImageCatalogPrefix(imageScope),
+        }),
+      ]);
+      const candidates = new Map(
+        [selected, ...catalog.values()]
+          .filter((image): image is PromotedImageRecord => Boolean(image))
+          .map((image) => [image.id, image]),
+      );
+      return [...candidates.values()]
+        .filter((image) => imageSatisfiesRequirements(image.capabilities, config.imageRequirements))
+        .toSorted(
+          (left, right) =>
+            right.promotedAt.localeCompare(left.promotedAt) || left.id.localeCompare(right.id),
+        )[0];
+    }
     const scoped = await this.storage.get<PromotedImageRecord>(
       promotedAWSImageKey({
         target: config.target,
@@ -18603,6 +18811,7 @@ export class AWSProvider implements CloudProvider {
           os: config.os,
           serverType,
           awsRegion: region,
+          imageRequirements: config.imageRequirements,
         });
         if (promoted?.id) {
           out[awsPromotedAMIConfigKey(region, serverType)] = promoted.id;
@@ -18617,6 +18826,15 @@ export class AWSProvider implements CloudProvider {
       prefix: promotedAWSImagePrefix(),
     });
     return [...promoted.values()].find((image) => image.id === imageID);
+  }
+
+  private async promotedCatalogImageByID(
+    imageID: string,
+    preferredRegion: string,
+  ): Promise<PromotedImageRecord | undefined> {
+    const catalog = await this.storage.list<PromotedImageRecord>({ prefix: "image:aws:catalog:" });
+    const matches = [...catalog.values()].filter((image) => image.id === imageID);
+    return matches.find((image) => image.region === preferredRegion) ?? matches[0];
   }
 }
 

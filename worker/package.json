@@ -8,8 +8,8 @@
     "build:cloudflare": "wrangler deploy --config wrangler.cloudflare.jsonc --dry-run --outdir dist-cloudflare",
     "build:cloudflare-dynamic-workers": "wrangler deploy --config wrangler.cloudflare-dynamic-workers.jsonc --dry-run --outdir dist-cloudflare-dynamic-workers",
     "build:node": "node scripts/build-node.mjs",
-    "check": "tsgo --noEmit",
-    "check:node": "tsgo --noEmit -p tsconfig.node.json",
+    "check": "tsc --noEmit",
+    "check:node": "tsc --noEmit -p tsconfig.node.json",
     "deploy": "wrangler deploy",
     "deploy:cloudflare": "wrangler deploy --config wrangler.cloudflare.jsonc --containers-rollout=immediate",
     "deploy:cloudflare-dynamic-workers": "wrangler deploy --config wrangler.cloudflare-dynamic-workers.jsonc",
@@ -23,28 +23,27 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@cloudflare/containers": "^0.3.5",
+    "@cloudflare/containers": "^0.3.7",
     "@novnc/novnc": "^1.7.0",
     "aws4fetch": "^1.0.20",
-    "fast-xml-parser": "^5.8.0",
+    "fast-xml-parser": "^5.9.3",
     "pg": "^8.22.0",
     "pg-boss": "^12.25.1",
     "ssh2": "^1.17.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260702.1",
-    "@types/node": "^22.20.0",
+    "@cloudflare/workers-types": "^5.20260708.1",
+    "@types/node": "^22.20.1",
     "@types/pg": "^8.20.0",
     "@types/ws": "^8.18.1",
-    "@typescript/native-preview": "^7.0.0-dev.20260705.1",
     "esbuild": "^0.28.1",
     "oxfmt": "^0.57.0",
-    "oxlint": "^1.72.0",
+    "oxlint": "^1.73.0",
     "oxlint-tsgolint": "^0.24.0",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.9",
-    "wrangler": "^4.107.0"
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.109.0"
   },
   "engines": {
     "node": ">=22.12.0"

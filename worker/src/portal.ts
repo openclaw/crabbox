@@ -1148,6 +1148,9 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       const handoffTicket = fragment.get("handoff") || "";
       let credentialsReady = !handoffTicket;
       const takeControlOnConnect = fragment.get("control") === "take";
+      const reuseWindowName = "crabbox-webvnc-" + ${JSON.stringify(lease.id)};
+      const reuseChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(reuseWindowName) : null;
+      let portalReadyForReuse = false;
       const bridgeMissingMessage = ${JSON.stringify(bridgeMissingMessage)};
       const missingVNCCredentialMessage = "VNC credentials missing; open WebVNC from crabbox webvnc status";
       const failedVNCCredentialMessage = "VNC authentication failed; reopen WebVNC from crabbox webvnc status";
@@ -1178,6 +1181,97 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       function setStatus(value, tone = "") {
         status.textContent = value;
         status.dataset.tone = tone;
+      }
+      function handoffFragment(value) {
+        const offered = new URLSearchParams(String(value || ""));
+        const ticket = offered.get("handoff") || "";
+        if (!/^vnc_handoff_[a-f0-9]{32}$/.test(ticket)) return "";
+        const safe = new URLSearchParams({ handoff: ticket });
+        if (offered.get("control") === "take") safe.set("control", "take");
+        return safe.toString();
+      }
+      reuseChannel?.addEventListener("message", (event) => {
+        const message = event.data;
+        if (!portalReadyForReuse || typeof message?.requestID !== "string") return;
+        if (message.type === "handoff-offer") {
+          reuseChannel.postMessage({
+            type: "handoff-candidate",
+            requestID: message.requestID,
+            recipientID: viewerID,
+            connected,
+            controller: isController,
+          });
+          return;
+        }
+        if (message.type !== "handoff-grant" || message.recipientID !== viewerID) return;
+        const nextFragment = handoffFragment(message.fragment);
+        if (!nextFragment) return;
+        reuseChannel.postMessage({
+          type: "handoff-accepted",
+          requestID: message.requestID,
+          recipientID: viewerID,
+        });
+        const nextURL = new URL(window.location.href);
+        nextURL.hash = nextFragment;
+        window.focus();
+        window.location.replace(nextURL);
+      });
+      window.addEventListener("hashchange", () => {
+        const nextTicket = new URLSearchParams(window.location.hash.slice(1)).get("handoff") || "";
+        if (nextTicket && nextTicket !== handoffTicket && handoffFragment("handoff=" + encodeURIComponent(nextTicket))) {
+          window.location.reload();
+        }
+      });
+      async function reuseExistingWebVNCTab() {
+        if (!handoffTicket || !reuseChannel) return false;
+        const requestID = viewerID;
+        const offered = new URLSearchParams({ handoff: handoffTicket });
+        if (takeControlOnConnect) offered.set("control", "take");
+        return await new Promise((resolve) => {
+          const candidates = new Map();
+          let recipientID = "";
+          let acceptedTimeout;
+          function finish(reused) {
+            window.clearTimeout(candidateTimeout);
+            window.clearTimeout(acceptedTimeout);
+            reuseChannel.removeEventListener("message", receive);
+            resolve(reused);
+          }
+          function receive(event) {
+            const message = event.data;
+            if (message?.requestID !== requestID) return;
+            if (message.type === "handoff-candidate" && typeof message.recipientID === "string") {
+              candidates.set(message.recipientID, {
+                recipientID: message.recipientID,
+                connected: message.connected === true,
+                controller: message.controller === true,
+              });
+              return;
+            }
+            if (message.type === "handoff-accepted" && message.recipientID === recipientID) {
+              finish(true);
+            }
+          }
+          reuseChannel.addEventListener("message", receive);
+          const candidateTimeout = window.setTimeout(() => {
+            const selected = [...candidates.values()].sort(
+              (left, right) => Number(right.controller) - Number(left.controller) || Number(right.connected) - Number(left.connected) || left.recipientID.localeCompare(right.recipientID),
+            )[0];
+            if (!selected) {
+              finish(false);
+              return;
+            }
+            recipientID = selected.recipientID;
+            reuseChannel.postMessage({
+              type: "handoff-grant",
+              requestID,
+              recipientID,
+              fragment: offered.toString(),
+            });
+            acceptedTimeout = window.setTimeout(() => finish(false), 180);
+          }, 80);
+          reuseChannel.postMessage({ type: "handoff-offer", requestID });
+        });
       }
       let rfb;
       let retryTimer;
@@ -1485,6 +1579,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         window.clearTimeout(retryTimer);
         window.clearInterval(statusTimer);
         window.clearTimeout(desktopThemeTimer);
+        reuseChannel?.close();
         rfb?.disconnect();
       });
       const takeoverBtn = document.getElementById("vnc-takeover");
@@ -1818,7 +1913,22 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         window.clearTimeout(copyResetTimer);
         copyResetTimer = window.setTimeout(() => { delete copyBtn.dataset.state; }, 1200);
       });
-      connect();
+      async function startViewer() {
+        if (await reuseExistingWebVNCTab()) {
+          const cleanURL = new URL(window.location.href);
+          cleanURL.hash = "";
+          window.history.replaceState(null, "", cleanURL);
+          setStatus("WebVNC continued in the existing tab", "ok");
+          try { window.open("", reuseWindowName)?.focus(); } catch (_) {}
+          reuseChannel?.close();
+          window.close();
+          return;
+        }
+        window.name = reuseWindowName;
+        portalReadyForReuse = true;
+        connect();
+      }
+      void startViewer();
     </script>`,
     200,
     nonce,
