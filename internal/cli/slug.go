@@ -125,17 +125,40 @@ func allocateDirectLeaseSlug(leaseID, requested string, servers []Server) (strin
 		}
 		slug = slugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt))
 	}
-	return slugWithCollisionSuffix(base, leaseID), nil
+	fallback := slugWithCollisionSuffix(base, leaseID)
+	inUse := serverSlugInUse(fallback, servers)
+	if !inUse {
+		var err error
+		if generated {
+			inUse, err = claimSlugInUseBestEffort(fallback, leaseID)
+		} else {
+			inUse, err = claimSlugInUse(fallback, leaseID)
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	if inUse {
+		return "", exit(2, "could not allocate a unique lease slug for %s", leaseID)
+	}
+	return fallback, nil
 }
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	base := normalizeLeaseSlug(requested)
+	generated := base == ""
 	if base == "" {
-		return newLeaseSlug(leaseID), nil
+		base = newLeaseSlug(leaseID)
 	}
 	slug := base
 	for attempt := 0; attempt < 20; attempt++ {
-		inUse, err := claimSlugInUse(slug, leaseID)
+		var inUse bool
+		var err error
+		if generated {
+			inUse, err = claimSlugInUseBestEffort(slug, leaseID)
+		} else {
+			inUse, err = claimSlugInUse(slug, leaseID)
+		}
 		if err != nil {
 			return "", err
 		}
@@ -144,7 +167,21 @@ func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 		}
 		slug = slugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt))
 	}
-	return slugWithCollisionSuffix(base, leaseID), nil
+	fallback := slugWithCollisionSuffix(base, leaseID)
+	var inUse bool
+	var err error
+	if generated {
+		inUse, err = claimSlugInUseBestEffort(fallback, leaseID)
+	} else {
+		inUse, err = claimSlugInUse(fallback, leaseID)
+	}
+	if err != nil {
+		return "", err
+	}
+	if inUse {
+		return "", exit(2, "could not allocate a unique lease slug for %s", leaseID)
+	}
+	return fallback, nil
 }
 
 func claimSlugInUse(slug, leaseID string) (bool, error) {

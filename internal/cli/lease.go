@@ -203,13 +203,17 @@ func removeStoredTestboxKeyWithError(leaseID string) error {
 }
 
 func syncNearestExistingDirectory(path string) error {
+	return syncNearestExistingDirectoryWithSync(path, syncControllerDirectory)
+}
+
+func syncNearestExistingDirectoryWithSync(path string, syncDirectory func(string) error) error {
 	for {
 		info, err := os.Stat(path)
 		if err == nil {
 			if !info.IsDir() {
-				return exit(2, "testbox key parent %s is not a directory", path)
+				return exit(2, "state path %s is not a directory", path)
 			}
-			return syncControllerDirectory(path)
+			return syncDirectory(path)
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			return err

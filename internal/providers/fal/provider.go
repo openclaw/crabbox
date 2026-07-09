@@ -46,6 +46,9 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 	if !isFalProviderName(provider) {
 		return core.Server{}, core.Exit(2, "refusing to rewrite fal lease=%s as provider=%s", existing.LeaseID, provider)
 	}
+	if falDeletionInProgress(existing) {
+		return core.Server{}, core.Exit(4, "fal lease %s deletion is in progress; refusing endpoint rewrite", existing.LeaseID)
+	}
 	if slug != existing.Slug || server.Labels["lease"] != existing.LeaseID || server.Labels["slug"] != existing.Slug {
 		return core.Server{}, core.Exit(2, "refusing to rewrite fal lease=%s with mismatched claim identity", existing.LeaseID)
 	}
@@ -99,7 +102,9 @@ type backend struct {
 	rt                       Runtime
 	clientFactory            func(Config, Runtime) (computeAPI, error)
 	persistCreateIntent      func(string, string, Config, string, bool, time.Time, CreateInstanceRequest) (core.LeaseClaim, error)
+	persistRollbackClaim     func(string, string, Config, string, string, string, bool) (core.LeaseClaim, error)
 	recoveryClaimReplacement func(core.LeaseClaim, Config, string, string, bool) (core.LeaseClaim, error)
+	removeLeaseKey           func(string) error
 	syncCreateKey            func(string) error
 	waitSSH                  func(context.Context, *core.SSHTarget, string, time.Duration) error
 	pollInterval             time.Duration
