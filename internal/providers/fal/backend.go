@@ -22,7 +22,10 @@ const (
 	falCredentialBindingLabel   = "fal_credential_binding"
 )
 
-var errFalProviderAbsenceNotAccountBound = errors.New("fal provider absence is not account-bound")
+var (
+	errFalProviderAbsenceNotAccountBound = errors.New("fal provider absence is not account-bound")
+	errFalRecoveryClaimRemoved           = errors.New("fal recovery claim was removed by concurrent cleanup")
+)
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
@@ -95,7 +98,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 			rawTarget.SSH = rawSSH
 		}
 		if err := req.OnAcquired(rawTarget); err != nil {
-			return core.LeaseTarget{}, b.rollbackAcquire(instanceID, leaseID, slug, cfg, req.Repo.Root, "rollback-cleanup", err)
+			return core.LeaseTarget{}, b.rollbackClaimedAcquire(instanceID, leaseID, slug, cfg, req.Repo.Root, "rollback-cleanup", err)
 		}
 	}
 
@@ -598,21 +601,13 @@ func (b *backend) recoverAmbiguousCreateForRelease(ctx context.Context, client c
 	cfg.Fal.Sector = sector
 	updated, err := b.persistRecoveryClaimIfUnchanged(claim.LeaseID, claim.Slug, cfg, claim.RepoRoot, instanceID, "rollback-cleanup", false, claim, true)
 	if err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		cleanupErr := client.DeleteInstance(cleanupCtx, instanceID)
-		if cleanupErr == nil {
-			removeErr := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim)
-			core.RemoveStoredTestboxKey(claim.LeaseID)
-			return core.LeaseClaim{}, errors.Join(
-				fmt.Errorf("persist recovered fal instance claim: %w", err),
-				removeErr,
-			)
+		current, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+		if readErr == nil && exists && current.Provider == providerName &&
+			current.ProviderScope == falClaimScope(cfg) && current.CloudID == instanceID &&
+			verifyFalClaimCredential(current, cfg) == nil {
+			return current, nil
 		}
-		return core.LeaseClaim{}, errors.Join(
-			fmt.Errorf("persist recovered fal instance claim: %w", err),
-			fmt.Errorf("fal cleanup failed for recovered instance %s: %w", instanceID, cleanupErr),
-		)
+		return core.LeaseClaim{}, errors.Join(fmt.Errorf("persist recovered fal instance claim: %w", err), readErr)
 	}
 	if updated.CloudID != instanceID {
 		return core.LeaseClaim{}, exit(5, "fal recovered instance claim is unavailable for lease=%s", claim.LeaseID)
@@ -628,7 +623,19 @@ func (b *backend) now() time.Time {
 }
 
 func (b *backend) rollbackAcquire(instanceID, leaseID, slug string, cfg Config, repoRoot, reason string, cause error) error {
-	claim, claimErr := b.transitionRecoveryClaim(leaseID, slug, cfg, repoRoot, instanceID, reason, false)
+	return b.rollbackAcquireWithClaimState(instanceID, leaseID, slug, cfg, repoRoot, reason, cause, false)
+}
+
+func (b *backend) rollbackClaimedAcquire(instanceID, leaseID, slug string, cfg Config, repoRoot, reason string, cause error) error {
+	return b.rollbackAcquireWithClaimState(instanceID, leaseID, slug, cfg, repoRoot, reason, cause, true)
+}
+
+func (b *backend) rollbackAcquireWithClaimState(instanceID, leaseID, slug string, cfg Config, repoRoot, reason string, cause error, expectedClaim bool) error {
+	claim, claimErr := b.transitionRecoveryClaim(leaseID, slug, cfg, repoRoot, instanceID, reason, false, expectedClaim)
+	if errors.Is(claimErr, errFalRecoveryClaimRemoved) {
+		core.RemoveStoredTestboxKey(leaseID)
+		return cause
+	}
 	client, err := b.api()
 	if err != nil {
 		return rollbackAcquireError(cause, instanceID, claimErr, err)
@@ -663,8 +670,8 @@ func rollbackAcquireError(cause error, instanceID string, claimErr error, cleanu
 
 func (b *backend) handleFailedAcquire(instanceID, leaseID, slug string, cfg Config, repoRoot string, keep bool, cause error) error {
 	if keep {
-		if _, claimErr := b.transitionRecoveryClaim(leaseID, slug, cfg, repoRoot, instanceID, "keep-failed-acquire", true); claimErr != nil {
-			return b.rollbackAcquire(instanceID, leaseID, slug, cfg, repoRoot, "rollback-cleanup", errors.Join(
+		if _, claimErr := b.transitionRecoveryClaim(leaseID, slug, cfg, repoRoot, instanceID, "keep-failed-acquire", true, true); claimErr != nil {
+			return b.rollbackClaimedAcquire(instanceID, leaseID, slug, cfg, repoRoot, "rollback-cleanup", errors.Join(
 				cause,
 				fmt.Errorf("persist fal keep recovery claim: %w", claimErr),
 				fmt.Errorf("deleting fal instance %s because --keep recovery state could not be persisted", instanceID),
@@ -672,15 +679,18 @@ func (b *backend) handleFailedAcquire(instanceID, leaseID, slug string, cfg Conf
 		}
 		return cause
 	}
-	return b.rollbackAcquire(instanceID, leaseID, slug, cfg, repoRoot, "rollback-cleanup", cause)
+	return b.rollbackClaimedAcquire(instanceID, leaseID, slug, cfg, repoRoot, "rollback-cleanup", cause)
 }
 
-func (b *backend) transitionRecoveryClaim(leaseID, slug string, cfg Config, repoRoot, instanceID, reason string, keep bool) (core.LeaseClaim, error) {
+func (b *backend) transitionRecoveryClaim(leaseID, slug string, cfg Config, repoRoot, instanceID, reason string, keep, expectedClaim bool) (core.LeaseClaim, error) {
 	current, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return core.LeaseClaim{}, err
 	}
 	if !exists {
+		if expectedClaim {
+			return core.LeaseClaim{}, errFalRecoveryClaimRemoved
+		}
 		return b.persistRecoveryClaimAtIfUnchanged(leaseID, slug, cfg, repoRoot, instanceID, reason, keep, time.Time{}, core.LeaseClaim{}, false)
 	}
 	if current.Provider != providerName || current.ProviderScope != falClaimScope(cfg) || (current.CloudID != "" && current.CloudID != instanceID) {

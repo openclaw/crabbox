@@ -52,14 +52,27 @@ classify_known_external_blocker() {
     classification="billing_blocked"
   elif [[ "$lower" == *quota* || "$lower" == *"rate limit"* || "$lower" == *"too many requests"* || "$lower" == *"account limit"* || "$lower" == *"resource exhausted"* ]]; then
     classification="quota_blocked"
-  elif [[ "$lower" == *capacity* || "$lower" == *"insufficient capacity"* || "$lower" == *"unavailable"* || "$lower" == *"no instances available"* ]]; then
+  elif [[ "$lower" == *capacity* || "$lower" == *"no instances available"* ]]; then
     classification="capacity_blocked"
-  elif [[ "$lower" == *"invalid key"* || "$lower" == *"invalid-api-key"* || "$lower" == *unauthorized* || "$lower" == *forbidden* || "$lower" == *"permission denied"* || "$lower" == *"missing"* || "$lower" == *"requires fal credentials"* ]]; then
-    classification="environment_blocked"
   else
     return 1
   fi
   printf 'classification=%s command=%q exit=%s\n' "$classification" "$command" "$exit_status" >&2
+  printf '%s\n' "$output" | redact_output >&2
+  return 0
+}
+
+classify_known_preflight_auth_blocker() {
+  local command="$1"
+  local exit_status="$2"
+  local output="$3"
+  local lower
+  lower="$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lower" != *"fal api"* ]] ||
+    [[ "$lower" != *"authorization_error:"* && "$lower" != *unauthorized* && "$lower" != *forbidden* && "$lower" != *"invalid api key"* && "$lower" != *"invalid key"* ]]; then
+    return 1
+  fi
+  printf 'classification=environment_blocked command=%q exit=%s reason=fal_api_auth\n' "$command" "$exit_status" >&2
   printf '%s\n' "$output" | redact_output >&2
   return 0
 }
@@ -82,6 +95,25 @@ run_capture() {
   set -e
   if [ "$exit_status" -ne 0 ]; then
     if classify_known_external_blocker "$command" "$exit_status" "$output"; then
+      exit 0
+    fi
+    classify_validation_failure "$command" "$exit_status" "$output"
+    exit "$exit_status"
+  fi
+  CAPTURED_OUTPUT="$(printf '%s\n' "$output" | redact_output)"
+}
+
+run_capture_preflight() {
+  local command="$1"
+  shift
+  local output
+  set +e
+  output="$("$@" 2>&1)"
+  local exit_status=$?
+  set -e
+  if [ "$exit_status" -ne 0 ]; then
+    if classify_known_external_blocker "$command" "$exit_status" "$output" ||
+      classify_known_preflight_auth_blocker "$command" "$exit_status" "$output"; then
       exit 0
     fi
     classify_validation_failure "$command" "$exit_status" "$output"
@@ -207,6 +239,50 @@ inventory_snapshot_from_doctor() {
   printf '%s:%s\n' "$count" "$fingerprint"
 }
 
+wait_for_provider_inventory_baseline() {
+  local attempts="${CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS:-65}"
+  local poll_seconds="${CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS:-2}"
+  local attempt
+  local inventory_output=""
+  local inventory_status=1
+  local current_provider_inventory=""
+  if [[ ! "$attempts" =~ ^[1-9][0-9]*$ ]]; then
+    attempts=65
+  fi
+  if [[ ! "$poll_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    poll_seconds=2
+  fi
+  INVENTORY_VERIFY_OUTPUT=""
+  INVENTORY_VERIFY_STATUS=1
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    set +e
+    inventory_output="$(bin/crabbox doctor --provider fal 2>&1)"
+    inventory_status=$?
+    set -e
+    current_provider_inventory=""
+    if [ "$inventory_status" -eq 0 ]; then
+      current_provider_inventory="$(inventory_snapshot_from_doctor "$inventory_output" || true)"
+    fi
+    if [ -n "$initial_provider_inventory" ] && [ "$current_provider_inventory" = "$initial_provider_inventory" ]; then
+      INVENTORY_VERIFY_OUTPUT="$inventory_output"
+      INVENTORY_VERIFY_STATUS=0
+      return 0
+    fi
+    if [ "$inventory_status" -eq 0 ]; then
+      inventory_status=1
+    fi
+    INVENTORY_VERIFY_STATUS="$inventory_status"
+    INVENTORY_VERIFY_OUTPUT="provider inventory did not return to the pre-create baseline; expected=$initial_provider_inventory current=${current_provider_inventory:-unavailable}"
+    if [ -n "$inventory_output" ]; then
+      INVENTORY_VERIFY_OUTPUT+=$'\n'"$inventory_output"
+    fi
+    if [ "$attempt" -lt "$attempts" ]; then
+      sleep "$poll_seconds"
+    fi
+  done
+  return 1
+}
+
 cleanup_armed=0
 slug="fal-smoke-$(date +%Y%m%d%H%M%S)-$$"
 config_file=""
@@ -230,27 +306,20 @@ cleanup() {
       cleanup_status=$?
       set -e
       if [ "$cleanup_status" -eq 0 ]; then
-        cleanup_armed=0
+        if wait_for_provider_inventory_baseline; then
+          cleanup_armed=0
+        else
+          cleanup_status="$INVENTORY_VERIFY_STATUS"
+          cleanup_output+=$'\n'"$INVENTORY_VERIFY_OUTPUT"
+        fi
         break
       fi
       if is_fal_not_found_output "$cleanup_output"; then
-        local inventory_output=""
-        local inventory_status=1
-        local current_provider_inventory=""
-        set +e
-        inventory_output="$(bin/crabbox doctor --provider fal 2>&1)"
-        inventory_status=$?
-        set -e
-        if [ "$inventory_status" -eq 0 ]; then
-          current_provider_inventory="$(inventory_snapshot_from_doctor "$inventory_output" || true)"
-        fi
-        if [ -n "$initial_provider_inventory" ] && [ "$current_provider_inventory" = "$initial_provider_inventory" ]; then
+        if wait_for_provider_inventory_baseline; then
           cleanup_armed=0
         else
-          cleanup_output+=$'\nprovider inventory does not prove the pre-create baseline; manual reconciliation required'
-          if [ -n "$inventory_output" ]; then
-            cleanup_output+=$'\n'"$inventory_output"
-          fi
+          cleanup_status="$INVENTORY_VERIFY_STATUS"
+          cleanup_output+=$'\nprovider inventory does not prove the pre-create baseline; manual reconciliation required\n'"$INVENTORY_VERIFY_OUTPUT"
         fi
         break
       fi
@@ -309,14 +378,14 @@ export CRABBOX_CONFIG="$config_file"
 export CRABBOX_COORDINATOR=
 export CRABBOX_FAL_KEY="$fal_key"
 
-run_capture "bin/crabbox doctor --provider fal" bin/crabbox doctor --provider fal
+run_capture_preflight "bin/crabbox doctor --provider fal" bin/crabbox doctor --provider fal
 doctor_output="$CAPTURED_OUTPUT"
 printf '%s\n' "$doctor_output"
 if ! initial_provider_inventory="$(inventory_snapshot_from_doctor "$doctor_output")"; then
   classify_validation_failure "bin/crabbox doctor --provider fal" 1 "doctor output omitted a complete provider inventory fingerprint"
   exit 1
 fi
-run_capture "bin/crabbox list --provider fal --json" bin/crabbox list --provider fal --json
+run_capture_preflight "bin/crabbox list --provider fal --json" bin/crabbox list --provider fal --json
 initial_list_output="$CAPTURED_OUTPUT"
 validate_list_json_empty "bin/crabbox list --provider fal --json" "$initial_list_output"
 cleanup_armed=1
@@ -335,6 +404,10 @@ list_output="$CAPTURED_OUTPUT"
 printf '%s\n' "$list_output"
 validate_list_json_contains_slug "bin/crabbox list --provider fal --json" "$list_output"
 run_capture_validation "bin/crabbox stop --provider fal $slug" bin/crabbox stop --provider fal "$slug"
+if ! wait_for_provider_inventory_baseline; then
+  classify_validation_failure "bin/crabbox doctor --provider fal (post-stop inventory baseline)" "$INVENTORY_VERIFY_STATUS" "$INVENTORY_VERIFY_OUTPUT"
+  exit 1
+fi
 cleanup_armed=0
 run_capture_validation "bin/crabbox cleanup --provider fal --dry-run" bin/crabbox cleanup --provider fal --dry-run
 cleanup_output="$CAPTURED_OUTPUT"

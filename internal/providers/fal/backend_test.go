@@ -25,6 +25,7 @@ type fakeFalAPI struct {
 	idempotency    []string
 	deletedIDs     []string
 	listCalls      int
+	createHook     func(CreateInstanceRequest, string, ComputeInstance)
 }
 
 type mutableFalClock struct {
@@ -78,6 +79,9 @@ func (f *fakeFalAPI) CreateInstance(_ context.Context, req CreateInstanceRequest
 		Status:       InstanceStatusReady,
 	}
 	f.instances[item.ID] = item
+	if f.createHook != nil {
+		f.createHook(req, idempotencyKey, item)
+	}
 	return item, nil
 }
 
@@ -354,6 +358,48 @@ func TestFalStopRecoversAmbiguousCreateWithExactIdempotentRequest(t *testing.T) 
 	}
 	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("unreconciled-create", providerName); claimErr != nil || ok {
 		t.Fatalf("recovery claim retained ok=%v err=%v", ok, claimErr)
+	}
+}
+
+func TestFalConcurrentAmbiguousCreateRecoveryAdoptsWinningClaim(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	if _, _, err := core.EnsureTestboxKeyForConfig(b.configForRun(), "cbx_recovery123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.persistRecoveryClaim("cbx_recovery123", "recovery-race", b.configForRun(), "", "", "ambiguous-create", false); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ReadLeaseClaimWithPresence("cbx_recovery123")
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+	api.createHook = func(_ CreateInstanceRequest, _ string, item ComputeInstance) {
+		api.createHook = nil
+		if _, updateErr := b.persistRecoveryClaimIfUnchanged(
+			claim.LeaseID,
+			claim.Slug,
+			b.configForRun(),
+			claim.RepoRoot,
+			item.ID,
+			"rollback-cleanup",
+			false,
+			claim,
+			true,
+		); updateErr != nil {
+			t.Fatalf("publish winning recovery claim: %v", updateErr)
+		}
+	}
+
+	updated, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.CloudID != "inst_created" || updated.Labels["recovery"] != "rollback-cleanup" {
+		t.Fatalf("updated claim=%#v", updated)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("losing recovery deleted the winner's instance: %#v", api.deletedIDs)
 	}
 }
 
@@ -655,6 +701,40 @@ func TestFalCleanupImmediatelyRetriesRollbackClaim(t *testing.T) {
 	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider("rollback", providerName); err != nil || ok {
 		t.Fatalf("rollback claim retained ok=%v err=%v", ok, err)
+	}
+}
+
+func TestFalRollbackTreatsRemovedProvisioningClaimAsConcurrentCleanup(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	claim, err := b.persistRecoveryClaimAtIfUnchanged(
+		"cbx_cleanup1234",
+		"cleanup-race",
+		b.configForRun(),
+		"",
+		"inst_created",
+		"provisioning",
+		false,
+		b.now(),
+		core.LeaseClaim{},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	cause := errors.New("ready transition lost race")
+	if err := b.rollbackClaimedAcquire("inst_created", claim.LeaseID, claim.Slug, b.configForRun(), "", "rollback-cleanup", cause); !errors.Is(err, cause) {
+		t.Fatalf("rollback err=%v", err)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("rollback issued a second delete after concurrent cleanup: %#v", api.deletedIDs)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
 	}
 }
 

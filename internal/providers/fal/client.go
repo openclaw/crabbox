@@ -29,6 +29,7 @@ type client struct {
 const maxResponseBytes = 16 << 20
 
 var errFalCrossOriginRedirect = errors.New("fal refused cross-origin redirect")
+var errFalUnsafeMutationRedirect = errors.New("fal refused method-rewriting mutation redirect")
 
 // APIError mirrors fal's documented standard error envelope. Request IDs are
 // taken from the error body when present; the OpenAPI schema does not document a
@@ -66,6 +67,9 @@ func newClient(cfg Config, rt Runtime) (computeAPI, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
 		return nil, exit(2, "%s api url is invalid", providerName)
 	}
+	if parsed.RawPath != "" {
+		return nil, exit(2, "%s api url contains an unsupported escaped path", providerName)
+	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return nil, exit(2, "%s api url contains unsupported sensitive components", providerName)
 	}
@@ -87,6 +91,15 @@ func secureHTTPClient(source *http.Client, apiURL string) *http.Client {
 		if !sameOrigin(trusted, req.URL) {
 			return errFalCrossOriginRedirect
 		}
+		if len(via) > 0 && isMutationMethod(via[0].Method) {
+			statusCode := 0
+			if req.Response != nil {
+				statusCode = req.Response.StatusCode
+			}
+			if (statusCode != http.StatusTemporaryRedirect && statusCode != http.StatusPermanentRedirect) || req.Method != via[0].Method {
+				return errFalUnsafeMutationRedirect
+			}
+		}
 		if originalCheckRedirect != nil {
 			return originalCheckRedirect(req, via)
 		}
@@ -96,6 +109,10 @@ func secureHTTPClient(source *http.Client, apiURL string) *http.Client {
 		return nil
 	}
 	return &client
+}
+
+func isMutationMethod(method string) bool {
+	return method == http.MethodPost || method == http.MethodDelete
 }
 
 func sameOrigin(a, b *url.URL) bool {
@@ -201,8 +218,11 @@ func (c *client) do(ctx context.Context, method, path string, body any, idempote
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		if errors.Is(err, errFalCrossOriginRedirect) {
-			return errFalCrossOriginRedirect
+		if errors.Is(err, errFalCrossOriginRedirect) || errors.Is(err, errFalUnsafeMutationRedirect) {
+			if errors.Is(err, errFalCrossOriginRedirect) {
+				return errFalCrossOriginRedirect
+			}
+			return errFalUnsafeMutationRedirect
 		}
 		return err
 	}
@@ -217,7 +237,10 @@ func (c *client) do(ctx context.Context, method, path string, body any, idempote
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return decodeAPIError(resp, bytes.ReplaceAll(data, []byte(c.apiKey), []byte("<redacted>")))
 	}
-	if out != nil && len(strings.TrimSpace(string(data))) > 0 {
+	if out != nil {
+		if len(bytes.TrimSpace(data)) == 0 {
+			return errors.New("decode fal data: empty response body")
+		}
 		if err := json.Unmarshal(data, out); err != nil {
 			return fmt.Errorf("decode fal data: %w", err)
 		}

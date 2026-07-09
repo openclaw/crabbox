@@ -179,6 +179,130 @@ func TestClientRejectsCredentialBearingBaseURLComponents(t *testing.T) {
 	}
 }
 
+func TestClientRejectsEscapedBaseURLPath(t *testing.T) {
+	_, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: "https://api.fal.ai/v1%2Ftenant"}}, Runtime{})
+	if err == nil || !strings.Contains(err.Error(), "unsupported escaped path") {
+		t.Fatalf("escaped API URL error=%v", err)
+	}
+}
+
+func TestClientRejectsMethodRewritingMutationRedirects(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		for _, statusCode := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther} {
+			t.Run(method+"/"+http.StatusText(statusCode), func(t *testing.T) {
+				redirected := false
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/redirected" {
+						redirected = true
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
+					http.Redirect(w, r, "/redirected", statusCode)
+				}))
+				defer server.Close()
+				api, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if method == http.MethodPost {
+					_, err = api.CreateInstance(context.Background(), CreateInstanceRequest{InstanceType: InstanceTypeH100x1, SSHKey: "ssh-ed25519 AAA test"}, "idem-1")
+				} else {
+					err = api.DeleteInstance(context.Background(), "inst_abc123xyz")
+				}
+				if !errors.Is(err, errFalUnsafeMutationRedirect) {
+					t.Fatalf("redirect err=%v, want %v", err, errFalUnsafeMutationRedirect)
+				}
+				if redirected {
+					t.Fatal("mutation redirect reached redirected handler")
+				}
+			})
+		}
+	}
+}
+
+func TestClientPreservesMutationMethodsAcrossSafeRedirects(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		for _, statusCode := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+			t.Run(method+"/"+http.StatusText(statusCode), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/redirected" {
+						http.Redirect(w, r, "/redirected", statusCode)
+						return
+					}
+					if r.Method != method {
+						t.Fatalf("redirected method=%s, want %s", r.Method, method)
+					}
+					if method == http.MethodPost {
+						w.WriteHeader(http.StatusCreated)
+						_, _ = w.Write([]byte(`{"id":"inst_created","instance_type":"gpu_1x_h100_sxm5","region":"us-west","status":"provisioning"}`))
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				defer server.Close()
+				api, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if method == http.MethodPost {
+					_, err = api.CreateInstance(context.Background(), CreateInstanceRequest{InstanceType: InstanceTypeH100x1, SSHKey: "ssh-ed25519 AAA test"}, "idem-1")
+				} else {
+					err = api.DeleteInstance(context.Background(), "inst_abc123xyz")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func TestClientRejectsMalformedListInventoryResponses(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty":               "",
+		"null":                "null",
+		"empty object":        `{}`,
+		"missing next cursor": `{"has_more":false,"instances":[]}`,
+		"missing has more":    `{"next_cursor":null,"instances":[]}`,
+		"missing instances":   `{"next_cursor":null,"has_more":false}`,
+		"null has more":       `{"next_cursor":null,"has_more":null,"instances":[]}`,
+		"null instances":      `{"next_cursor":null,"has_more":false,"instances":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+			api, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := api.ListInstances(context.Background(), 0, ""); err == nil || !strings.Contains(err.Error(), "decode fal data") {
+				t.Fatalf("ListInstances error=%v", err)
+			}
+		})
+	}
+}
+
+func TestClientAcceptsStructurallyCompleteEmptyInventory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"next_cursor":null,"has_more":false,"instances":[]}`))
+	}))
+	defer server.Close()
+	api, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := api.ListInstances(context.Background(), 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.HasMore || result.NextCursor != nil || result.Instances == nil || len(result.Instances) != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
 func TestClientRefusesCrossOriginRedirectBeforeReplayingAuth(t *testing.T) {
 	var redirectedAuth string
 	untrusted := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {

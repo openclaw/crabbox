@@ -97,6 +97,47 @@ test("live fal smoke requires token before building", () => {
   assert.match(result.stdout, /classification=environment_blocked reason=FAL_KEY_missing/);
 });
 
+test("live fal smoke classifies actual preflight fal API auth errors as environment blocked", () => {
+  for (const message of [
+    "fal API authorization_error: Authentication required",
+    "fal API authorization_error: Access denied",
+  ]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-auth-"));
+    const binDir = path.join(dir, "bin");
+    const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+    fs.mkdirSync(binDir, { recursive: true });
+    writeGoStub(
+      binDir,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "doctor" ]]; then
+  printf '${message}\n' >&2
+  exit 2
+fi
+exit 99
+`,
+    );
+
+    const result = spawnSync("bash", [smokeScript], {
+      cwd: tempRoot,
+      env: {
+        ...process.env,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        CRABBOX_LIVE: "1",
+        CRABBOX_LIVE_PROVIDERS: "fal",
+        CRABBOX_FAL_KEY: "test-secret-token",
+        FAL_KEY: "",
+      },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stderr, /classification=environment_blocked .*reason=fal_api_auth/);
+    assert.match(result.stderr, new RegExp(message));
+    assert.doesNotMatch(result.stderr, /classification=validation_failed/);
+  }
+});
+
 test("live fal smoke runs guarded lifecycle and redacts token", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-"));
   const binDir = path.join(dir, "bin");
@@ -174,8 +215,152 @@ esac
   assert.match(seen[4], /^run --provider fal --id fal-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
   assert.equal(seen[5], "list --provider fal --json");
   assert.match(seen[6], /^stop --provider fal fal-smoke-\d{14}-\d+$/);
-  assert.equal(seen[7], "cleanup --provider fal --dry-run");
-  assert.equal(seen[8], "list --provider fal --json");
+  assert.equal(seen[7], "doctor --provider fal");
+  assert.equal(seen[8], "cleanup --provider fal --dry-run");
+  assert.equal(seen[9], "list --provider fal --json");
+});
+
+test("live fal smoke polls raw inventory until asynchronous deletion completes", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-async-delete-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const doctorCalls = path.join(dir, "doctor-calls.log");
+  const slugFile = path.join(dir, "slug.txt");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor)
+    count="$(wc -l <"${doctorCalls}" 2>/dev/null || printf 0)"
+    printf 'doctor\n' >>"${doctorCalls}"
+    if [[ "$count" -eq 1 ]]; then
+      printf 'auth=ready inventory_count=1 inventory_fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    else
+      printf 'auth=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n'
+    fi
+    ;;
+  list)
+    slug="$(cat "${slugFile}" 2>/dev/null || true)"
+    if [[ -z "$slug" || -f "${slugFile}.stopped" ]]; then
+      printf '[]\n'
+    else
+      printf '[{"labels":{"slug":"%s"},"provider":"fal"}]\n' "$slug"
+    fi
+    ;;
+  warmup)
+    printf '%s\n' "$5" >"${slugFile}"
+    ;;
+  status)
+    printf 'status=ready\n'
+    ;;
+  run)
+    printf 'ok\n'
+    ;;
+  stop)
+    printf stopped >"${slugFile}.stopped"
+    ;;
+  cleanup)
+    printf 'clean\n'
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "fal",
+      CRABBOX_FAL_KEY: "test-secret-token",
+      FAL_KEY: "",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS: "3",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS: "0",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=live_fal_smoke_passed/);
+  assert.equal(fs.readFileSync(doctorCalls, "utf8"), "doctor\ndoctor\ndoctor\n");
+});
+
+test("live fal smoke fails when raw inventory lingers after a successful stop", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-lingering-delete-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const doctorCalls = path.join(dir, "doctor-calls.log");
+  const slugFile = path.join(dir, "slug.txt");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor)
+    count="$(wc -l <"${doctorCalls}" 2>/dev/null || printf 0)"
+    printf 'doctor\n' >>"${doctorCalls}"
+    if [[ "$count" -eq 0 ]]; then
+      printf 'auth=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n'
+    else
+      printf 'auth=ready inventory_count=1 inventory_fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    fi
+    ;;
+  list)
+    slug="$(cat "${slugFile}" 2>/dev/null || true)"
+    if [[ -z "$slug" || -f "${slugFile}.stopped" ]]; then
+      printf '[]\n'
+    else
+      printf '[{"labels":{"slug":"%s"},"provider":"fal"}]\n' "$slug"
+    fi
+    ;;
+  warmup)
+    printf '%s\n' "$5" >"${slugFile}"
+    ;;
+  status)
+    printf 'status=ready\n'
+    ;;
+  run)
+    printf 'ok\n'
+    ;;
+  stop)
+    printf stopped >"${slugFile}.stopped"
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "fal",
+      CRABBOX_FAL_KEY: "test-secret-token",
+      FAL_KEY: "",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS: "2",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS: "0",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=validation_failed/);
+  assert.match(result.stderr, /classification=cleanup_failed/);
+  assert.match(result.stderr, /provider inventory did not return to the pre-create baseline/);
+  assert.doesNotMatch(result.stdout, /classification=live_fal_smoke_passed/);
 });
 
 test("live fal smoke attempts cleanup after partial failure", () => {
@@ -231,6 +416,62 @@ exit 99
   assert.doesNotMatch(fs.readFileSync(calls, "utf8"), /^cleanup /m);
 });
 
+test("live fal smoke treats SSH and malformed-request warmup errors as validation failures", () => {
+  for (const [label, message] of [
+    ["ssh-permission", "ssh: Permission denied (publickey)"],
+    ["missing-field", "missing required field: instance_type"],
+  ]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `crabbox-live-fal-${label}-`));
+    const binDir = path.join(dir, "bin");
+    const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+    fs.mkdirSync(binDir, { recursive: true });
+
+    writeGoStub(
+      binDir,
+      `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor)
+    printf 'auth=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n'
+    ;;
+  list)
+    printf '[]\n'
+    ;;
+  warmup)
+    printf '${message}\n' >&2
+    exit 37
+    ;;
+  stop)
+    printf 'lease/fal instance not found or not locally claimed\n' >&2
+    exit 4
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+`,
+    );
+
+    const result = spawnSync("bash", [smokeScript], {
+      cwd: tempRoot,
+      env: {
+        ...process.env,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        CRABBOX_LIVE: "1",
+        CRABBOX_LIVE_PROVIDERS: "fal",
+        CRABBOX_FAL_KEY: "test-secret-token",
+        FAL_KEY: "",
+      },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 37, `${label}: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /classification=validation_failed/, label);
+    assert.match(result.stderr, new RegExp(message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), label);
+    assert.doesNotMatch(result.stderr, /classification=(environment|billing|quota|capacity)_blocked/, label);
+  }
+});
+
 test("live fal smoke classifies compute credit requirements as billing blockers", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-credit-"));
   const binDir = path.join(dir, "bin");
@@ -274,6 +515,8 @@ esac
       CRABBOX_LIVE_PROVIDERS: "fal",
       CRABBOX_FAL_KEY: "test-secret-token",
       FAL_KEY: "",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS: "1",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS: "0",
     },
     encoding: "utf8",
   });
@@ -333,11 +576,13 @@ esac
       CRABBOX_LIVE_PROVIDERS: "fal",
       CRABBOX_FAL_KEY: "test-secret-token",
       FAL_KEY: "",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS: "1",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS: "0",
     },
     encoding: "utf8",
   });
 
-  assert.equal(result.status, 4, result.stdout + result.stderr);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /classification=billing_blocked/);
   assert.match(result.stderr, /classification=cleanup_failed/);
   assert.match(result.stderr, /manual reconciliation required/);
