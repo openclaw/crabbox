@@ -398,6 +398,17 @@ func TestCrabboxRuntimeExcludesCannotBeReincluded(t *testing.T) {
 			t.Fatalf("protected runtime path %q was re-included: %v", notWant, excludes)
 		}
 	}
+	for _, alias := range []string{
+		".CRABBOX/env/live.env",
+		".crabbox/SCRIPTS/smoke.sh",
+		".Crabbox/Logs/run.log",
+		".crabbox/CAPTURES/failure.tgz",
+		".CRABBOX/RUNS/run_123/artifact.tgz",
+	} {
+		if !pathExcluded(alias, excludes) {
+			t.Fatalf("case alias of protected runtime path %q was re-included: %v", alias, excludes)
+		}
+	}
 }
 
 func TestPathExcludedUsesOrderedNegation(t *testing.T) {

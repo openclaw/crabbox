@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Prevented config and `.crabboxignore` negations from re-including Crabbox-owned env profiles, uploaded scripts, logs, captures, and run artifacts in sync manifests. Thanks @zozo123.
+- Prevented config and `.crabboxignore` negations, including case aliases, from re-including Crabbox-owned env profiles, uploaded scripts, logs, captures, and run artifacts in sync manifests. Thanks @zozo123.
 - Allowed ordered `!` re-includes in `.crabboxignore` and `sync.exclude`, with `\!` for literal leading-bang paths. Thanks @chsong1.
 - Completed coordinator diagnostic redaction for non-Bearer authorization schemes, GCP signed URLs, and every configured provider credential field. Thanks @coygeek.
 - Reconciled idle admin WebVNC, Code, egress, and control sockets during direct and Node scheduled maintenance after admin-token or GitHub-admin rotation. Thanks @coygeek.

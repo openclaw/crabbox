@@ -137,6 +137,17 @@ func protectedSyncExcludes() []string {
 	}
 }
 
+func protectedSyncExcludeMatches(rel, exclude string) bool {
+	rel = strings.ToLower(strings.Trim(filepath.ToSlash(rel), "/"))
+	exclude = strings.ToLower(strings.Trim(filepath.ToSlash(exclude), "/"))
+	for _, protected := range protectedSyncExcludes() {
+		if exclude == protected {
+			return rel == protected || strings.HasPrefix(rel, protected+"/")
+		}
+	}
+	return false
+}
+
 // syncIncludes returns the configured sync include (whitelist) patterns. When
 // empty the whole working tree is synced (minus excludes); when non-empty only
 // matching paths are synced.
@@ -628,7 +639,7 @@ func pathExcluded(rel string, excludes []string) bool {
 	excluded := false
 	for _, exclude := range excludes {
 		exclude, negated := excludeRule(exclude)
-		if excludeMatches(rel, exclude) {
+		if excludeMatches(rel, exclude) || protectedSyncExcludeMatches(rel, exclude) {
 			excluded = !negated
 		}
 	}

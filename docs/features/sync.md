@@ -65,7 +65,8 @@ Crabbox-owned runtime state under `.crabbox/env`, `.crabbox/scripts`,
 `.crabbox/logs`, `.crabbox/captures`, and `.crabbox/runs` is always excluded
 after repo rules are applied. Those paths can contain forwarded env profiles,
 uploaded scripts, local run artifacts, or failure bundles, so `.crabboxignore`
-cannot re-include them.
+cannot re-include them. Case aliases of these reserved paths are protected too,
+including on case-insensitive filesystems.
 
 If a project stores source files in one of these reserved directories, move
 them elsewhere before upgrading; reserved runtime paths are no longer eligible
