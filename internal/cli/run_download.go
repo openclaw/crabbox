@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -139,13 +140,26 @@ func preflightRunOutputCollisions(label, path, captureStdout, captureStderr stri
 func sameLocalOutputPath(left, right string) (bool, error) {
 	leftAbs, err := filepath.Abs(filepath.Clean(left))
 	if err != nil {
-		return false, exit(2, "capture stdout/stderr: %v", err)
+		return false, exit(2, "local output path: %v", err)
 	}
 	rightAbs, err := filepath.Abs(filepath.Clean(right))
 	if err != nil {
-		return false, exit(2, "capture stdout/stderr: %v", err)
+		return false, exit(2, "local output path: %v", err)
 	}
-	return leftAbs == rightAbs, nil
+	if leftAbs == rightAbs || ((runtime.GOOS == "darwin" || runtime.GOOS == "windows") && strings.EqualFold(leftAbs, rightAbs)) {
+		return true, nil
+	}
+	leftInfo, leftErr := os.Stat(leftAbs)
+	rightInfo, rightErr := os.Stat(rightAbs)
+	if leftErr == nil && rightErr == nil {
+		return os.SameFile(leftInfo, rightInfo), nil
+	}
+	for _, statErr := range []error{leftErr, rightErr} {
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return false, exit(2, "local output path: %v", statErr)
+		}
+	}
+	return false, nil
 }
 
 func preflightLocalOutputPath(label, path string, allowMissingDirs, replaceExisting bool) error {

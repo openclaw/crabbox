@@ -1848,15 +1848,24 @@ func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult
 	if command == "" {
 		command = runCommandDisplay(req.Command, req.ShellMode)
 	}
-	return writeRunReceipt(path, keyPath, runReceiptInput{
-		Provider:   firstNonBlank(result.Provider, cfg.Provider),
+	receipt := runReceiptInput{
+		Provider:   result.Provider,
 		LeaseID:    result.LeaseID,
 		Slug:       result.Slug,
 		Command:    command,
 		ExitCode:   result.ExitCode,
 		CommandMs:  result.Command.Milliseconds(),
 		ActionsURL: result.ActionsURL,
-	})
+	}
+	if session := result.Session; session != nil {
+		receipt.Provider = firstNonBlank(receipt.Provider, session.Provider)
+		receipt.LeaseID = firstNonBlank(receipt.LeaseID, session.LeaseID)
+		receipt.Slug = firstNonBlank(receipt.Slug, session.Slug)
+		receipt.RunID = session.RunID
+		receipt.ActionsURL = firstNonBlank(receipt.ActionsURL, session.ActionsURL)
+	}
+	receipt.Provider = firstNonBlank(receipt.Provider, cfg.Provider)
+	return writeRunReceipt(path, keyPath, receipt)
 }
 
 func runCommandDisplay(command []string, shellMode bool) string {

@@ -395,6 +395,53 @@ func TestDelegatedRunReceiptOmitsMissingLeaseID(t *testing.T) {
 	}
 }
 
+func TestDelegatedRunReceiptUsesSessionIdentityFallbacks(t *testing.T) {
+	setAttestTestHome(t)
+	path := filepath.Join(t.TempDir(), "receipt.json")
+	result := RunResult{
+		ExitCode:    0,
+		CommandText: "pnpm test",
+		Command:     1500 * time.Millisecond,
+		Session: &RunSessionHandle{
+			Provider:   "e2b",
+			LeaseID:    "cbx_session",
+			Slug:       "session-slug",
+			RunID:      "run_session",
+			ActionsURL: "https://github.com/example-org/my-app/actions/runs/7",
+		},
+	}
+	artifact, err := writeDelegatedRunReceipt(path, "", Config{Provider: "fallback"}, result, RunRequest{})
+	if err != nil {
+		t.Fatalf("write delegated receipt: %v", err)
+	}
+	if artifact.Kind != "receipt" {
+		t.Fatalf("unexpected artifact kind %q", artifact.Kind)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"provider":    "e2b",
+		"lease_id":    "cbx_session",
+		"slug":        "session-slug",
+		"run_id":      "run_session",
+		"actions_url": "https://github.com/example-org/my-app/actions/runs/7",
+	}
+	for key, value := range want {
+		if receipt[key] != value {
+			t.Fatalf("receipt[%q]=%v, want %q", key, receipt[key], value)
+		}
+	}
+	if out, err := runVerify(t, path); err != nil || !strings.HasPrefix(out, "PASS ") {
+		t.Fatalf("verify output=%q error=%v", out, err)
+	}
+}
+
 func TestAttestReceiptCreatesMissingParentDirectories(t *testing.T) {
 	setAttestTestHome(t)
 	path := filepath.Join(t.TempDir(), "nested", "deeper", "receipt.json")
@@ -534,15 +581,28 @@ func TestPreflightAttestPathsProtectsReceiptAndSigningKey(t *testing.T) {
 	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	keySymlink := filepath.Join(dir, "signer-symlink.pem")
+	symlinkAvailable := true
+	if err := os.Symlink(keyPath, keySymlink); err != nil {
+		symlinkAvailable = false
+		if runtime.GOOS != "windows" {
+			t.Fatal(err)
+		}
+	}
+	keyHardlink := filepath.Join(dir, "signer-hardlink.pem")
+	if err := os.Link(keyPath, keyHardlink); err != nil {
+		t.Fatal(err)
+	}
 	defaultKeyPath, err := attestKeyPath()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct {
+	type pathCase struct {
 		name string
 		opts attestPathPreflight
 		want string
-	}{
+	}
+	cases := []pathCase{
 		{
 			name: "key requires receipt",
 			opts: attestPathPreflight{KeyOverride: keyPath},
@@ -574,10 +634,34 @@ func TestPreflightAttestPathsProtectsReceiptAndSigningKey(t *testing.T) {
 			want: "attest key and download build.log paths must be different",
 		},
 		{
+			name: "hard link cannot alias key",
+			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: keyPath, TimingRecord: keyHardlink, TimingRecordEnabled: true},
+			want: "attest key and timing record paths must be different",
+		},
+		{
 			name: "invalid override fails before run",
 			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: filepath.Join(dir, "missing.pem")},
 			want: "attest key:",
 		},
+	}
+	if symlinkAvailable {
+		cases = append(cases, pathCase{
+			name: "symlink cannot alias key",
+			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: keyPath, LeaseOutput: keySymlink},
+			want: "attest key and lease output paths must be different",
+		})
+	}
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		cases = append(cases, pathCase{
+			name: "case variant receipt and timing paths",
+			opts: attestPathPreflight{
+				Receipt:             filepath.Join(dir, "Receipt.json"),
+				KeyOverride:         keyPath,
+				TimingRecord:        filepath.Join(dir, "receipt.JSON"),
+				TimingRecordEnabled: true,
+			},
+			want: "attest receipt and timing record paths must be different",
+		})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
