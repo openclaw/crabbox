@@ -1012,6 +1012,8 @@ func TestWatchRejectsConflictingRunFlags(t *testing.T) {
 		{"--download", "remote=local", "--", "echo", "ok"},
 		{"--emit-proof", "proof.md", "--", "echo", "ok"},
 		{"--proof-template", "default", "--", "echo", "ok"},
+		{"--attest", "receipt.json", "--", "echo", "ok"},
+		{"--attest-key", "key.pem", "--", "echo", "ok"},
 		{"-label", "custom", "--", "echo", "ok"},
 	} {
 		t.Run(args[0], func(t *testing.T) {
