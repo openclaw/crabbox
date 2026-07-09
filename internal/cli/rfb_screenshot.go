@@ -182,16 +182,44 @@ func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, cred
 	if _, err := io.ReadFull(conn, version); err != nil {
 		return fmt.Errorf("read RFB version: %w", err)
 	}
-	if !bytes.HasPrefix(version, []byte("RFB ")) {
+	major, minor, err := parseRFBVersion(version)
+	if err != nil {
 		return fmt.Errorf("unexpected RFB version %q", string(version))
 	}
-	if _, err := conn.Write([]byte("RFB 003.008\n")); err != nil {
+	clientVersion := []byte("RFB 003.008\n")
+	legacyVersion := major == 3 && minor < 7
+	if legacyVersion {
+		clientVersion = []byte("RFB 003.003\n")
+	} else if major == 3 && minor == 7 {
+		clientVersion = []byte("RFB 003.007\n")
+	}
+	if _, err := conn.Write(clientVersion); err != nil {
 		return fmt.Errorf("write RFB version: %w", err)
 	}
 
-	securityType, err := negotiateRFBSecurityType(conn, creds)
-	if err != nil {
-		return err
+	var securityType byte
+	if legacyVersion {
+		security := make([]byte, 4)
+		if _, err := io.ReadFull(conn, security); err != nil {
+			return fmt.Errorf("read RFB 3.3 security type: %w", err)
+		}
+		selected := binary.BigEndian.Uint32(security)
+		if selected == 0 {
+			reason, reasonErr := readRFBReason(conn)
+			if reasonErr != nil {
+				return reasonErr
+			}
+			return fmt.Errorf("RFB server rejected security negotiation: %s", reason)
+		}
+		if selected > 255 {
+			return fmt.Errorf("unsupported RFB 3.3 security type %d", selected)
+		}
+		securityType = byte(selected)
+	} else {
+		securityType, err = negotiateRFBSecurityType(conn, creds)
+		if err != nil {
+			return err
+		}
 	}
 	switch securityType {
 	case rfbSecurityNone:

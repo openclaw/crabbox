@@ -8,6 +8,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"flag"
+	"fmt"
 	"image/color"
 	"io"
 	"math/big"
@@ -131,6 +132,64 @@ func TestPreflightRFBAuthenticationRejectsNoAuth(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "did not require credential authentication") {
 		t.Fatalf("error=%v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreflightRFBAuthenticationSupportsRFB33VNC(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	const password = "example-pass"
+	serverErr := make(chan error, 1)
+	go func() {
+		if _, err := server.Write([]byte("RFB 003.003\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		version := make([]byte, 12)
+		if _, err := io.ReadFull(server, version); err != nil {
+			serverErr <- err
+			return
+		}
+		if string(version) != "RFB 003.003\n" {
+			serverErr <- fmt.Errorf("client version=%q", version)
+			return
+		}
+		security := make([]byte, 4)
+		binary.BigEndian.PutUint32(security, uint32(rfbSecurityVNC))
+		if _, err := server.Write(security); err != nil {
+			serverErr <- err
+			return
+		}
+		challenge := []byte("0123456789abcdef")
+		if _, err := server.Write(challenge); err != nil {
+			serverErr <- err
+			return
+		}
+		response := make([]byte, len(challenge))
+		if _, err := io.ReadFull(server, response); err != nil {
+			serverErr <- err
+			return
+		}
+		expected, err := directSSHWebVNCChallengeResponse(password, challenge)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if !bytes.Equal(response, expected) {
+			serverErr <- fmt.Errorf("unexpected VNC challenge response")
+			return
+		}
+		_, err = server.Write([]byte{0, 0, 0, 0})
+		serverErr <- err
+	}()
+
+	if err := preflightRFBAuthenticationFromConn(context.Background(), client, rfbCredentials{Password: password}); err != nil {
+		t.Fatalf("preflight RFB 3.3 authentication: %v", err)
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatal(err)

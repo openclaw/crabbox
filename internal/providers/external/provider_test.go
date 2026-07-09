@@ -285,6 +285,7 @@ func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
 	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "RUNTIME_DESKTOP_PASSWORD")
 	cfg := core.BaseConfig()
 	cfg.External.RoutingFile = path
+	cfg.WorkRoot = "/ambient/work-root"
 	backend, err := (Provider{}).Configure(cfg, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
