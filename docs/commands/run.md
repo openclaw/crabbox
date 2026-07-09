@@ -511,6 +511,12 @@ lease-acting commands):
 --desktop-env xfce|wayland|gnome
 --browser
 --code
+--image-min-os <version>
+--image-sdk <name=version>     Repeatable.
+--image-runtime <name=version> Repeatable.
+--image-require-browser
+--image-require-webview2
+--image-require-desktop
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>         provider=ssh

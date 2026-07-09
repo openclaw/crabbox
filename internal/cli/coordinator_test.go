@@ -1099,6 +1099,62 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCreateLeaseSendsImageRequirementsOnFailClosedRoute(t *testing.T) {
+	var body struct {
+		ImageRequirements imageRequirements `json:"imageRequirements"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/capability-aware" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"aws","state":"active","host":"192.0.2.10"}}`))
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	requirements := imageRequirements{
+		MinOS:    "26.04",
+		Runtimes: map[string]string{"node": "24"},
+		Browser:  true,
+	}
+	_, err := client.CreateLease(context.Background(), Config{
+		Provider:          "aws",
+		ServerType:        "t3.small",
+		imageRequirements: requirements,
+	}, "ssh-ed25519 test", false, "cbx_123", "blue-crab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(body.ImageRequirements, requirements) {
+		t.Fatalf("imageRequirements=%#v", body.ImageRequirements)
+	}
+}
+
+func TestCoordinatorImageRequirementsFailClosedOnOlderCoordinator(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	_, err := client.CreateLease(context.Background(), Config{
+		Provider:          "aws",
+		ServerType:        "t3.small",
+		imageRequirements: imageRequirements{Runtimes: map[string]string{"node": "24"}},
+	}, "ssh-ed25519 test", false, "cbx_123", "blue-crab")
+	if err == nil {
+		t.Fatal("older coordinator unexpectedly accepted image requirements")
+	}
+	if !reflect.DeepEqual(paths, []string{"/v1/leases/capability-aware"}) {
+		t.Fatalf("paths=%v", paths)
+	}
+}
+
 func TestCoordinatorCreateLeaseOmitsImplicitDaytonaArchitecture(t *testing.T) {
 	var bodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1526,6 +1582,18 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 			if got := r.URL.Query()["fsrAz"]; !reflect.DeepEqual(got, []string{"us-east-1a", "us-east-1b"}) {
 				t.Fatalf("promote fsrAz=%#v", got)
 			}
+			if got := r.URL.Query().Get("osVersion"); got != "15.5" {
+				t.Fatalf("promote osVersion=%q", got)
+			}
+			if got := r.URL.Query()["sdk"]; !reflect.DeepEqual(got, []string{"xcode=16.4"}) {
+				t.Fatalf("promote sdk=%#v", got)
+			}
+			if got := r.URL.Query()["runtime"]; !reflect.DeepEqual(got, []string{"go=1.25", "node=24.2"}) {
+				t.Fatalf("promote runtime=%#v", got)
+			}
+			if r.URL.Query().Get("browser") != "true" || r.URL.Query().Get("desktop") != "true" {
+				t.Fatalf("promote capabilities=%s", r.URL.RawQuery)
+			}
 			_, _ = w.Write([]byte(`{"image":{"id":"ami-12345678","name":"openclaw-crabbox-test","state":"available","region":"eu-west-1","promotedAt":"2026-05-01T12:46:00Z"}}`))
 		case "/v1/images/ami-12345678/fast-snapshot-restore":
 			if r.Method != http.MethodGet {
@@ -1558,7 +1626,7 @@ func TestCoordinatorImageCreateAndPromote(t *testing.T) {
 	if image, err := client.Image(context.Background(), "ami-12345678"); err != nil || image.State != "available" {
 		t.Fatalf("image=%#v err=%v", image, err)
 	}
-	if promoted, err := client.PromoteImage(context.Background(), "ami-12345678", CoordinatorImageRef{Provider: "aws", Region: "us-east-1", Target: "macos", OSImage: defaultOSImage, ServerType: "mac1.metal", Architecture: "x86_64_mac", FastSnapshotRestore: true, FastSnapshotRestoreAZs: []string{"us-east-1a", "us-east-1b"}}); err != nil || promoted.PromotedAt == "" {
+	if promoted, err := client.PromoteImage(context.Background(), "ami-12345678", CoordinatorImageRef{Provider: "aws", Region: "us-east-1", Target: "macos", OSImage: defaultOSImage, ServerType: "mac1.metal", Architecture: "x86_64_mac", FastSnapshotRestore: true, FastSnapshotRestoreAZs: []string{"us-east-1a", "us-east-1b"}, Capabilities: imageCapabilities{OSVersion: "15.5", SDKs: map[string]string{"xcode": "16.4"}, Runtimes: map[string]string{"node": "24.2", "go": "1.25"}, Browser: true, Desktop: true}}); err != nil || promoted.PromotedAt == "" {
 		t.Fatalf("promoted=%#v err=%v", promoted, err)
 	}
 	if status, err := client.FastSnapshotRestoreStatus(context.Background(), "ami-12345678", CoordinatorImageRef{Provider: "aws", Region: "us-east-1", FastSnapshotRestoreAZs: []string{"us-east-1a"}}); err != nil || len(status.FastSnapshotRestores) != 1 || status.FastSnapshotRestores[0].State != "enabled" {

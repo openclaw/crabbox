@@ -351,6 +351,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err := applyLeaseCreateFlagsForLease(&cfg, fs, leaseFlags, *leaseIDFlag); err != nil {
 		return err
 	}
+	if err := validateReadyPoolImageRequirements(cfg.imageRequirements, *readyPool); err != nil {
+		return err
+	}
 	expansion, err := expandRunProfile(cfg, *presetName, *scenario, presetVars, command, *shellMode, *preflight, artifactGlobs, *proofTemplate)
 	if err != nil {
 		return err

@@ -20458,6 +20458,225 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("image:aws:promoted")).toBeUndefined();
   });
 
+  it("stores declared image capabilities in the selectable AWS image catalog", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-tools",
+      name: "windows-tools",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-tools/promote?target=windows&region=eu-west-1&osVersion=11.0.26100&runtime=node%3D24.2&browser=true&webview2=true&desktop=true",
+    );
+    const response = await provider.promoteImage(
+      "ami-tools",
+      undefined,
+      new Request(url, { method: "POST", body: "{}" }),
+      url,
+    );
+
+    expect(response).toMatchObject({
+      image: {
+        id: "ami-tools",
+        capabilities: {
+          osVersion: "11.0.26100",
+          runtimes: { node: "24.2" },
+          browser: true,
+          webview2: true,
+          desktop: true,
+        },
+      },
+    });
+    expect(storage.value("image:aws:catalog:windows:x86_64:eu-west-1:ami-tools")).toEqual(
+      expect.objectContaining({ id: "ami-tools" }),
+    );
+  });
+
+  it("preserves catalog capabilities when re-promoting an older image", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (imageID: string, runtime?: string) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1${runtime ? `&runtime=node%3D${runtime}` : ""}`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, { method: "POST", body: "{}" }),
+        url,
+      );
+    };
+
+    await promote("ami-a", "24.2");
+    await promote("ami-b", "22.17");
+    const rollback = await promote("ami-a");
+
+    expect(rollback).toMatchObject({
+      image: { id: "ami-a", capabilities: { runtimes: { node: "24.2" } } },
+    });
+    expect(storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-a")).toEqual(
+      expect.objectContaining({ capabilities: { runtimes: { node: "24.2" } } }),
+    );
+  });
+
+  it("selects the newest promoted AWS image satisfying every requirement", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-node22", {
+      id: "ami-node22",
+      name: "node-22",
+      state: "available",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+      capabilities: { osVersion: "26.04", runtimes: { node: "22.17" }, browser: true },
+    });
+    storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-node24", {
+      id: "ami-node24",
+      name: "node-24",
+      state: "available",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-02T00:00:00Z",
+      capabilities: {
+        osVersion: "26.04",
+        sdks: { go: "1.25" },
+        runtimes: { node: "24.2" },
+        browser: true,
+        desktop: true,
+      },
+    });
+    storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-node24-old", {
+      id: "ami-node24-old",
+      name: "node-24-old",
+      state: "available",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-06-30T00:00:00Z",
+      capabilities: {
+        osVersion: "26.04",
+        sdks: { go: "1.25" },
+        runtimes: { node: "24.1" },
+        browser: true,
+        desktop: true,
+      },
+    });
+    storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:us-east-2:ami-node24-new", {
+      id: "ami-node24-new",
+      name: "node-24-new",
+      state: "available",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "us-east-2",
+      architecture: "x86_64",
+      promotedAt: "2026-07-03T00:00:00Z",
+      capabilities: {
+        osVersion: "26.04",
+        sdks: { go: "1.25" },
+        runtimes: { node: "24.3" },
+        browser: true,
+        desktop: true,
+      },
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const config = leaseConfig({
+      provider: "aws",
+      os: "ubuntu:26.04",
+      capacity: { regions: ["us-east-2"] },
+      sshPublicKey: "ssh-ed25519 test",
+      imageRequirements: {
+        minOS: "26.04",
+        sdks: { go: "1.24" },
+        runtimes: { node: "24" },
+        browser: true,
+        desktop: true,
+      },
+    });
+
+    await expect(provider.prepareLeaseConfig(config)).resolves.toMatchObject({
+      awsAMI: "",
+      awsPromotedAMIs: expect.objectContaining({
+        [awsPromotedAMIConfigKey("eu-west-1", config.serverType)]: "ami-node24",
+        [awsPromotedAMIConfigKey("us-east-2", config.serverType)]: "ami-node24-new",
+      }),
+    });
+  });
+
+  it("rejects unsatisfied image requirements before reserving or creating a lease", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(
+      storage,
+      {},
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "test",
+        CRABBOX_AWS_REGION: "eu-west-1",
+      },
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases/capability-aware", {
+        body: {
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+          imageRequirements: { runtimes: { node: "99" }, desktop: true },
+        },
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "image_capability_mismatch",
+    });
+    expect(await storage.list({ prefix: "lease:" })).toHaveLength(0);
+  });
+
+  it("rejects capability selection when an operator AMI override is configured", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-capable", {
+      id: "ami-capable",
+      name: "capable",
+      state: "available",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-03T00:00:00Z",
+      capabilities: { runtimes: { node: "24" } },
+    });
+    const provider = new AWSProvider(
+      { CRABBOX_AWS_AMI: "ami-operator" } as Env,
+      "eu-west-1",
+      storage,
+    );
+    const config = leaseConfig({
+      provider: "aws",
+      sshPublicKey: "ssh-ed25519 test",
+      imageRequirements: { runtimes: { node: "24" } },
+    });
+
+    await expect(provider.prepareLeaseConfig(config)).rejects.toThrow(
+      "cannot be verified for an explicit or stock image source",
+    );
+  });
+
   it("scopes promoted AWS macOS images by target, architecture, and server type", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {
