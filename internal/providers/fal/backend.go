@@ -585,8 +585,22 @@ func rollbackAcquireError(cause error, instanceID string, claimErr error, cleanu
 
 func (b *backend) handleFailedAcquire(instanceID, leaseID, slug string, cfg Config, repoRoot string, keep bool, cause error) error {
 	if keep {
-		if err := b.persistRecoveryClaim(leaseID, slug, cfg, repoRoot, instanceID, "keep-failed-acquire", true); err != nil {
-			return errors.Join(cause, fmt.Errorf("persist fal recovery claim: %w", err))
+		if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, repoRoot, instanceID, "keep-failed-acquire", true); claimErr != nil {
+			client, apiErr := b.api()
+			if apiErr != nil {
+				return rollbackAcquireError(cause, instanceID, claimErr, apiErr)
+			}
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if cleanupErr := client.DeleteInstance(cleanupCtx, instanceID); cleanupErr != nil {
+				return rollbackAcquireError(cause, instanceID, claimErr, cleanupErr)
+			}
+			core.RemoveStoredTestboxKey(leaseID)
+			return errors.Join(
+				cause,
+				fmt.Errorf("persist fal recovery claim: %w", claimErr),
+				fmt.Errorf("deleted fal instance %s because --keep recovery state could not be persisted", instanceID),
+			)
 		}
 		return cause
 	}

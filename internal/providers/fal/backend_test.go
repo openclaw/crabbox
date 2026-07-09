@@ -375,6 +375,43 @@ func TestFalAcquireKeepFailurePersistsRecoveryClaim(t *testing.T) {
 	}
 }
 
+func TestFalKeepFailureDeletesKnownInstanceWhenClaimPersistenceFails(t *testing.T) {
+	for name, deleteErr := range map[string]error{
+		"cleanup succeeds": nil,
+		"cleanup fails":    errors.New("delete unavailable"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := &fakeFalAPI{
+				instances: map[string]ComputeInstance{"inst_created": readyFalInstance("inst_created", "203.0.113.42")},
+				deleteErr: deleteErr,
+			}
+			b := newFalTestBackend(t, api)
+			stateFile := filepath.Join(t.TempDir(), "state-file")
+			if err := os.WriteFile(stateFile, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("XDG_STATE_HOME", stateFile)
+			err := b.handleFailedAcquire("inst_created", "cbx_abcdef123456", "keep-failed", b.configForRun(), "", true, errors.New("ssh not ready"))
+			if err == nil || !strings.Contains(err.Error(), "ssh not ready") || !strings.Contains(err.Error(), "persist fal recovery claim") || !strings.Contains(err.Error(), "inst_created") {
+				t.Fatalf("err=%v", err)
+			}
+			if len(api.deletedIDs) != 1 || api.deletedIDs[0] != "inst_created" {
+				t.Fatalf("deletedIDs=%#v", api.deletedIDs)
+			}
+			if deleteErr == nil {
+				if !strings.Contains(err.Error(), "deleted fal instance") {
+					t.Fatalf("successful fallback cleanup not reported: %v", err)
+				}
+				if _, ok := api.instances["inst_created"]; ok {
+					t.Fatal("known instance retained after recovery persistence failure")
+				}
+			} else if !strings.Contains(err.Error(), deleteErr.Error()) {
+				t.Fatalf("cleanup failure not reported: %v", err)
+			}
+		})
+	}
+}
+
 func TestFalAcquireOnAcquiredFailureRollsBackEvenWithKeep(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
