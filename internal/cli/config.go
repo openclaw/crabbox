@@ -35,6 +35,7 @@ type Config struct {
 	Desktop                       bool
 	DesktopEnv                    string
 	Browser                       bool
+	imageRequirements             imageRequirements
 	Code                          bool
 	Network                       NetworkMode
 	Class                         string

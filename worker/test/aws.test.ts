@@ -1530,6 +1530,75 @@ describe("aws provider", () => {
     expect(await gunzipBase64(userData)).toContain("crabbox-configure-desktop-theme");
   });
 
+  it("uses the capability-selected AMI for a Linux region", async () => {
+    let imageQueries = 0;
+    let runImage = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+        if (securityGroupResponse) return securityGroupResponse;
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse(
+            "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
+          );
+        }
+        if (action === "DescribeImages") {
+          imageQueries += 1;
+          return ec2XMLResponse("<DescribeImagesResponse><imagesSet /></DescribeImagesResponse>");
+        }
+        if (action === "RunInstances") {
+          runImage = params.get("ImageId") ?? "";
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<RunInstancesResponse><instancesSet><item>
+  <instanceId>i-linux</instanceId><instanceType>t3.small</instanceType>
+  <ipAddress>203.0.113.44</ipAddress><instanceState><name>pending</name></instanceState>
+</item></instancesSet></RunInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+      } as never,
+      "eu-west-1",
+    );
+    const config = leaseConfig({
+      provider: "aws",
+      target: "linux",
+      serverType: "t3.small",
+      serverTypeExplicit: true,
+      sshPublicKey: "ssh-ed25519 test",
+      imageRequirements: { runtimes: { node: "24" } },
+    });
+    config.awsPromotedAMIs[awsPromotedAMIConfigKey("eu-west-1", "t3.small")] = "ami-capable";
+
+    await client.createServerWithFallback(
+      config,
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(runImage).toBe("ami-capable");
+    expect(imageQueries).toBe(0);
+  });
+
   it("resolves macOS AMIs per fallback instance type", async () => {
     const imageQueries: string[] = [];
     const hostTypes: string[] = [];
@@ -2057,6 +2126,7 @@ describe("aws provider", () => {
 
   it("uses scoped promoted macOS AMIs for fallback host families", async () => {
     const runImages: string[] = [];
+    let imageQueries = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -2079,6 +2149,7 @@ describe("aws provider", () => {
           );
         }
         if (action === "DescribeImages") {
+          imageQueries += 1;
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <DescribeImagesResponse>
   <imagesSet>
@@ -2143,6 +2214,7 @@ describe("aws provider", () => {
       capacity: { market: "on-demand" },
       serverType: "mac2.metal",
       sshPublicKey: "ssh-ed25519 test",
+      imageRequirements: { desktop: true },
     });
     config.awsPromotedAMIs[awsPromotedAMIConfigKey("eu-west-1", "mac1.metal")] =
       "ami-promoted-mac1";
@@ -2154,6 +2226,7 @@ describe("aws provider", () => {
     );
 
     expect(runImages).toEqual(["ami-promoted-mac1"]);
+    expect(imageQueries).toBe(0);
     expect(result.serverType).toBe("mac1.metal");
   });
 

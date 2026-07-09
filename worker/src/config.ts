@@ -1,6 +1,7 @@
 import { requireAWSRegion } from "./aws-region";
+import { normalizeImageRequirements } from "./image-capabilities";
 import { normalizeOSImage, osImageSpec } from "./os-image";
-import type { LeaseRequest, Provider, TargetOS, WindowsMode } from "./types";
+import type { ImageRequirements, LeaseRequest, Provider, TargetOS, WindowsMode } from "./types";
 
 export const awsMacOSInstanceTypeCandidates = [
   "mac2.metal",
@@ -25,6 +26,7 @@ export interface LeaseConfig {
   desktop: boolean;
   desktopEnv: "xfce" | "wayland" | "gnome";
   browser: boolean;
+  imageRequirements: ImageRequirements;
   code: boolean;
   tailscale: boolean;
   tailscaleTags: string[];
@@ -291,6 +293,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     desktop: input.desktop ?? false,
     desktopEnv,
     browser: input.browser ?? false,
+    imageRequirements: normalizeImageRequirements(input.imageRequirements),
     code: input.code ?? false,
     tailscale: input.tailscale ?? false,
     tailscaleTags: normalizeTailscaleTags(input.tailscaleTags ?? ["tag:crabbox"]),

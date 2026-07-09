@@ -268,6 +268,12 @@ warmup, because it also dispatches the workflow and waits for the ready marker.
 --desktop-env xfce|wayland|gnome   Linux desktop environment
 --browser                          provision/require a browser binary
 --code                             provision/require code-server
+--image-min-os <version>           require a minimum promoted-image OS version
+--image-sdk <name=version>         require a minimum SDK version; repeatable
+--image-runtime <name=version>     require a minimum runtime version; repeatable
+--image-require-browser            require browser support in the promoted image
+--image-require-webview2           require WebView2 support in the promoted image
+--image-require-desktop            require desktop support in the promoted image
 --target linux|macos|windows       target OS
 --windows-mode normal|wsl2         Windows mode
 --static-host <host>               static SSH host (provider=ssh)
@@ -293,6 +299,15 @@ Provider-specific flags (for example `--azure-backend`, `--e2b-template`,
 `--daytona-snapshot`) are contributed by the selected provider; run
 `crabbox warmup --provider <name> --help` to see the set for a given provider,
 and `crabbox providers` to list all providers and their capabilities.
+
+Image requirement flags currently select AWS promoted images. Crabbox verifies
+the full requirement set before reserving a lease or calling AWS. Explicit AMI,
+snapshot, and stock-image overrides cannot be verified against the promotion
+catalog and fail closed when combined with image requirements.
+The CLI sends capability-aware creates to a dedicated coordinator route, so an
+older coordinator returns not found instead of silently ignoring requirements.
+Image requirements cannot be combined with `run --pool` because current pool
+entries do not record or prove image capabilities.
 
 ## SSH keys
 
