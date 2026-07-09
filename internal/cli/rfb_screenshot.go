@@ -86,7 +86,7 @@ func clickRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, x, y i
 	}
 	defer stopProcess(tunnel)
 
-	creds, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	creds, _, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
 	if err != nil {
 		return err
 	}
@@ -103,7 +103,7 @@ func typeRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, text st
 	}
 	defer stopProcess(tunnel)
 
-	creds, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	creds, _, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
 	if err != nil {
 		return err
 	}

@@ -66,11 +66,11 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {
 		return err
 	}
-	credentials, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
 	if err != nil {
 		return err
 	}
-	if err := requireMacOSScreenSharingCredentials(credentials); err != nil {
+	if err := requireMacOSWebVNCCredentials(credentials, authMode); err != nil {
 		return err
 	}
 
@@ -80,7 +80,7 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		return err
 	}
 	defer stopProcess(tunnel)
-	if err := preflightMacOSScreenSharing(ctx, "127.0.0.1", vncPort, credentials); err != nil {
+	if err := preflightMacOSWebVNC(ctx, "127.0.0.1", vncPort, credentials, authMode); err != nil {
 		return err
 	}
 	fmt.Fprintln(a.Stdout, "preflight: macOS Screen Sharing RFB authentication ok")
@@ -106,7 +106,7 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		webPort,
 		credentials,
 		openViewer,
-		localWebVNCAuthARD,
+		authMode,
 		func(ctx context.Context) (net.Conn, error) {
 			return dialVNCForegroundTunnel(ctx, tunnel, vncPort)
 		},
@@ -118,21 +118,44 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 
 type macOSVNCPasswordReader func(context.Context, SSHTarget, string) (string, error)
 
-func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, readPassword macOSVNCPasswordReader) (rfbCredentials, error) {
+func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, readPassword macOSVNCPasswordReader) (rfbCredentials, localWebVNCAuthenticationMode, error) {
 	if credentials, ok := providerDesktopCredentials(cfg, target); ok {
-		return credentials, nil
+		return credentials, localWebVNCAuthARD, nil
 	}
 	password, err := readPassword(ctx, target, vncPasswordCommand(target))
 	if err != nil {
-		return rfbCredentials{}, exit(5, "read managed macOS desktop credentials: %v", err)
+		return rfbCredentials{}, localWebVNCAuthAuto, exit(5, "read managed macOS desktop credentials: %v", err)
 	}
 	password = strings.TrimSpace(password)
 	if password == "" {
-		return rfbCredentials{}, exit(5, "managed macOS desktop password is empty")
+		return rfbCredentials{}, localWebVNCAuthAuto, exit(5, "managed macOS desktop password is empty")
 	}
 	return rfbCredentials{
 		Password: password,
-	}, nil
+	}, localWebVNCAuthVNC, nil
+}
+
+func requireMacOSWebVNCCredentials(credentials rfbCredentials, authMode localWebVNCAuthenticationMode) error {
+	if authMode == localWebVNCAuthARD {
+		return requireMacOSScreenSharingCredentials(credentials)
+	}
+	if authMode != localWebVNCAuthVNC {
+		return exit(2, "unsupported macOS WebVNC authentication mode")
+	}
+	if strings.TrimSpace(credentials.Password) == "" {
+		return exit(2, "managed macOS desktop password is required for WebVNC preflight")
+	}
+	return nil
+}
+
+func preflightMacOSWebVNC(ctx context.Context, host, port string, credentials rfbCredentials, authMode localWebVNCAuthenticationMode) error {
+	if err := requireMacOSWebVNCCredentials(credentials, authMode); err != nil {
+		return err
+	}
+	if err := preflightRFBAuthentication(ctx, net.JoinHostPort(host, port), credentials); err != nil {
+		return exit(5, "macOS Screen Sharing preflight failed: %v", err)
+	}
+	return nil
 }
 
 func dialVNCForegroundTunnel(ctx context.Context, tunnel *vncForegroundTunnel, port string) (net.Conn, error) {

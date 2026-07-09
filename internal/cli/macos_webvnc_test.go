@@ -13,7 +13,7 @@ import (
 func TestResolveMacOSWebVNCCredentialsFallsBackToManagedPassword(t *testing.T) {
 	target := SSHTarget{TargetOS: targetMacOS, User: "steipete"}
 	var gotCommand string
-	credentials, err := resolveMacOSWebVNCCredentials(
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(
 		context.Background(),
 		Config{Provider: parallelsProvider},
 		target,
@@ -33,6 +33,31 @@ func TestResolveMacOSWebVNCCredentialsFallsBackToManagedPassword(t *testing.T) {
 	}
 	if credentials.Username != "" || credentials.Password != "managed-secret" {
 		t.Fatalf("credentials = %#v", credentials)
+	}
+	if authMode != localWebVNCAuthVNC {
+		t.Fatalf("auth mode = %d, want VNC", authMode)
+	}
+}
+
+func TestResolveMacOSWebVNCCredentialsUsesProviderARDAccount(t *testing.T) {
+	target := SSHTarget{TargetOS: targetMacOS, User: "lease-user"}
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(
+		context.Background(),
+		Config{Provider: "direct-webvnc-test"},
+		target,
+		func(context.Context, SSHTarget, string) (string, error) {
+			t.Fatal("managed password fallback should not run")
+			return "", nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.Username != "provider-user" || credentials.Password != "provider-secret" {
+		t.Fatalf("credentials = %#v", credentials)
+	}
+	if authMode != localWebVNCAuthARD {
+		t.Fatalf("auth mode = %d, want ARD", authMode)
 	}
 }
 
