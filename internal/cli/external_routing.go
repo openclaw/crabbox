@@ -25,12 +25,15 @@ type externalRoutingState struct {
 	Lifecycle                 ExternalLifecycleConfig    `json:"lifecycle,omitempty"`
 	Connection                ExternalConnectionConfig   `json:"connection,omitempty"`
 	WorkRoot                  string                     `json:"workRoot,omitempty"`
+	TargetOS                  string                     `json:"targetOS,omitempty"`
+	WindowsMode               string                     `json:"windowsMode,omitempty"`
 	CredentialBoundaryVersion int                        `json:"credentialBoundaryVersion,omitempty"`
 }
 
 const externalRoutingCredentialVersion = 2
 
 func externalRoutingStateForConfig(cfg ExternalConfig, credentialVersion int) externalRoutingState {
+	targetOS, windowsMode := ExternalRoutingTarget(cfg)
 	return externalRoutingState{
 		Command:                   cfg.Command,
 		Args:                      append([]string(nil), cfg.Args...),
@@ -39,8 +42,27 @@ func externalRoutingStateForConfig(cfg ExternalConfig, credentialVersion int) ex
 		Lifecycle:                 cfg.Lifecycle,
 		Connection:                cfg.Connection,
 		WorkRoot:                  cfg.WorkRoot,
+		TargetOS:                  targetOS,
+		WindowsMode:               windowsMode,
 		CredentialBoundaryVersion: credentialVersion,
 	}
+}
+
+func SetExternalRoutingTarget(cfg *ExternalConfig, targetOS, windowsMode string) {
+	if cfg == nil {
+		return
+	}
+	cfg.routingTargetOS = normalizeTargetOS(targetOS)
+	cfg.routingWindowsMode = normalizeWindowsMode(windowsMode)
+}
+
+func ExternalRoutingTarget(cfg ExternalConfig) (string, string) {
+	targetOS := normalizeTargetOS(cfg.routingTargetOS)
+	windowsMode := normalizeWindowsMode(cfg.routingWindowsMode)
+	if targetOS != targetWindows {
+		windowsMode = windowsModeNormal
+	}
+	return targetOS, windowsMode
 }
 
 func ExternalRoutingPath(leaseID string) (string, error) {
@@ -176,7 +198,7 @@ func LoadExternalRouting(path string) (ExternalConfig, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return ExternalConfig{}, fmt.Errorf("parse external routing file: %w", err)
 	}
-	return ExternalConfig{
+	result := ExternalConfig{
 		Command:                  state.Command,
 		Args:                     append([]string(nil), state.Args...),
 		Config:                   state.Config,
@@ -187,7 +209,9 @@ func LoadExternalRouting(path string) (ExternalConfig, error) {
 		RoutingFile:              path,
 		routingLoaded:            true,
 		routingCredentialVersion: state.CredentialBoundaryVersion,
-	}, nil
+	}
+	SetExternalRoutingTarget(&result, state.TargetOS, state.WindowsMode)
+	return result, nil
 }
 
 func ExternalRoutingLoaded(cfg ExternalConfig) bool {

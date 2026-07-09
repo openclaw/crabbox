@@ -137,6 +137,7 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	cfg.Provider = providerName
 	cfg.SSHFallbackPorts = nil
 	cfg.WorkRoot = externalWorkRoot(cfg)
+	core.SetExternalRoutingTarget(&cfg.External, cfg.TargetOS, cfg.WindowsMode)
 	return &leaseBackend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
 }
 

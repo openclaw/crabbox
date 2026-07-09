@@ -418,11 +418,11 @@ func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit
 		cfg.WorkRoot = cfg.External.WorkRoot
 	}
 	if !targetExplicit {
-		cfg.TargetOS = targetLinux
+		cfg.TargetOS, _ = ExternalRoutingTarget(cfg.External)
 		cfg.inferredTargetProvider = ""
 	}
 	if !windowsModeExplicit {
-		cfg.WindowsMode = windowsModeNormal
+		_, cfg.WindowsMode = ExternalRoutingTarget(cfg.External)
 	}
 	normalizeTargetConfig(cfg)
 	return validateTargetConfig(*cfg)

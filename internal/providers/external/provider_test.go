@@ -114,6 +114,35 @@ func TestConfigureAcceptsMacOSTarget(t *testing.T) {
 	}
 }
 
+func TestConfigureAcceptsNativeWindowsWorkRoot(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetWindows
+	cfg.WindowsMode = core.WindowsModeNormal
+	cfg.WorkRoot = `C:\crabbox`
+	cfg.External.WorkRoot = core.BaseConfig().External.WorkRoot
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := backend.(*leaseBackend).cfg
+	if got.TargetOS != core.TargetWindows || got.WindowsMode != core.WindowsModeNormal || got.WorkRoot != `C:\crabbox` {
+		t.Fatalf("config=%#v", got)
+	}
+}
+
+func TestValidateConfigRejectsUnsafeNativeWindowsWorkRoot(t *testing.T) {
+	for _, workRoot := range []string{`/work/crabbox`, `C:\`, `D:\`, `C:\Windows`, `C:\safe\..\Users`} {
+		cfg := testConfig()
+		cfg.TargetOS = core.TargetWindows
+		cfg.WindowsMode = core.WindowsModeNormal
+		cfg.WorkRoot = workRoot
+		cfg.External.WorkRoot = workRoot
+		if err := validateConfig(cfg); err == nil {
+			t.Errorf("work root %q should be rejected", workRoot)
+		}
+	}
+}
+
 func TestDesktopCredentialsUseEnvReference(t *testing.T) {
 	t.Setenv("CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD", "provider-secret")
 	cfg := testConfig()
@@ -207,6 +236,7 @@ func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
 func TestApplyFlagsLoadsConfiguredRoutingFile(t *testing.T) {
 	isolateCrabboxState(t)
 	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetMacOS, core.WindowsModeNormal)
 	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +249,7 @@ func TestApplyFlagsLoadsConfiguredRoutingFile(t *testing.T) {
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.External.Command != saved.External.Command || cfg.WorkRoot != saved.External.WorkRoot || !core.ExternalRoutingLoaded(cfg.External) {
+	if cfg.External.Command != saved.External.Command || cfg.WorkRoot != saved.External.WorkRoot || !core.ExternalRoutingLoaded(cfg.External) || cfg.TargetOS != core.TargetMacOS {
 		t.Fatalf("config=%#v", cfg)
 	}
 }

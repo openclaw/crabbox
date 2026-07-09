@@ -467,6 +467,8 @@ type ExternalConfig struct {
 	RoutingFile              string
 	routingLoaded            bool
 	routingCredentialVersion int
+	routingTargetOS          string
+	routingWindowsMode       string
 }
 
 type ExternalCapabilitiesConfig struct {

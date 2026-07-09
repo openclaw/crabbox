@@ -54,6 +54,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		cfg.External = routing
 		core.MarkExternalRoutingCredentialSources(cfg)
+		restoreRoutingTarget(cfg, fs)
 		cfg.WorkRoot = externalWorkRoot(*cfg)
 	} else if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !core.ExternalRoutingLoaded(cfg.External) {
 		routing, err := core.LoadExternalRouting(path)
@@ -62,6 +63,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		cfg.External = routing
 		core.MarkExternalRoutingCredentialSources(cfg)
+		restoreRoutingTarget(cfg, fs)
 		cfg.WorkRoot = externalWorkRoot(*cfg)
 	}
 	if core.FlagWasSet(fs, "external-command") {
@@ -159,7 +161,11 @@ func validateConfig(cfg core.Config) error {
 	if desktopPasswordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); desktopPasswordEnv != "" && !lifecycleEnvNamePattern.MatchString(desktopPasswordEnv) {
 		return core.Exit(2, "external.connection.desktop.passwordEnv must be an environment variable name")
 	}
-	clean := path.Clean(externalWorkRoot(cfg))
+	workRoot := externalWorkRoot(cfg)
+	if cfg.TargetOS == core.TargetWindows && cfg.WindowsMode == core.WindowsModeNormal {
+		return validateExternalWindowsWorkRoot(workRoot)
+	}
+	clean := path.Clean(workRoot)
 	if !strings.HasPrefix(clean, "/") {
 		return core.Exit(2, "external.workRoot %q must resolve to an absolute path", cfg.External.WorkRoot)
 	}
@@ -230,5 +236,54 @@ func validateLifecycleOperation(name string, operation core.ExternalLifecycleOpe
 }
 
 func externalWorkRoot(cfg core.Config) string {
-	return core.Blank(strings.TrimSpace(cfg.External.WorkRoot), "/workspaces/crabbox")
+	providerRoot := strings.TrimSpace(cfg.External.WorkRoot)
+	if (providerRoot == "" || providerRoot == core.BaseConfig().External.WorkRoot) && core.IsDefaultWorkRoot(cfg.WorkRoot) {
+		if workRoot := strings.TrimSpace(cfg.WorkRoot); workRoot != "" {
+			return workRoot
+		}
+	}
+	return core.Blank(providerRoot, "/workspaces/crabbox")
+}
+
+func restoreRoutingTarget(cfg *core.Config, fs *flag.FlagSet) {
+	targetOS, windowsMode := core.ExternalRoutingTarget(cfg.External)
+	if !core.FlagWasSet(fs, "target") {
+		cfg.TargetOS = targetOS
+	}
+	if !core.FlagWasSet(fs, "windows-mode") {
+		cfg.WindowsMode = windowsMode
+	}
+}
+
+func validateExternalWindowsWorkRoot(value string) error {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "/", `\`)
+	if len(value) < 3 || value[1] != ':' || value[2] != '\\' {
+		return core.Exit(2, "external.workRoot %q must resolve to an absolute Windows path like C:\\crabbox", value)
+	}
+	drive := value[0]
+	if !((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) {
+		return core.Exit(2, "external.workRoot %q must start with a Windows drive letter like C:\\crabbox", value)
+	}
+	parts := make([]string, 0)
+	for _, part := range strings.Split(value[3:], `\`) {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+		default:
+			parts = append(parts, part)
+		}
+	}
+	clean := strings.ToUpper(value[:1]) + `:\` + strings.Join(parts, `\`)
+	if len(parts) == 0 {
+		return core.Exit(2, "external.workRoot %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	switch strings.ToUpper(clean) {
+	case `C:\WINDOWS`, `C:\USERS`, `C:\PROGRAM FILES`, `C:\PROGRAM FILES (X86)`:
+		return core.Exit(2, "external.workRoot %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	return nil
 }

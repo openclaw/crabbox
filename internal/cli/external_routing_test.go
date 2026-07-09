@@ -209,6 +209,7 @@ func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 		Capabilities: ExternalCapabilitiesConfig{IdempotentLeaseID: true},
 		WorkRoot:     "/workspaces/crabbox",
 	}
+	SetExternalRoutingTarget(&cfg, targetMacOS, windowsModeNormal)
 	path, err := PersistExternalRouting("../unsafe/lease", cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +228,9 @@ func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 	}
 	if loaded.Command != cfg.Command || len(loaded.Args) != 3 || loaded.Config["token"] != "secret-config" || !loaded.Capabilities.IdempotentLeaseID || loaded.WorkRoot != cfg.WorkRoot {
 		t.Fatalf("loaded=%#v", loaded)
+	}
+	if targetOS, windowsMode := ExternalRoutingTarget(loaded); targetOS != targetMacOS || windowsMode != windowsModeNormal {
+		t.Fatalf("routing target=%s windows-mode=%s", targetOS, windowsMode)
 	}
 	RemoveExternalRouting("../unsafe/lease")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -303,6 +307,7 @@ func TestAutoRouteExternalLeaseUsesPersistedClaimRouting(t *testing.T) {
 		Args:     []string{"release"},
 		WorkRoot: "/old/work",
 	}
+	SetExternalRoutingTarget(&oldRouting, targetMacOS, windowsModeNormal)
 	wantPath, err := PersistExternalRouting(leaseID, oldRouting)
 	if err != nil {
 		t.Fatal(err)
@@ -336,7 +341,7 @@ func TestAutoRouteExternalLeaseUsesPersistedClaimRouting(t *testing.T) {
 	if cfg.External.Command != oldRouting.Command || cfg.External.WorkRoot != oldRouting.WorkRoot || cfg.WorkRoot != oldRouting.WorkRoot {
 		t.Fatalf("config=%#v", cfg)
 	}
-	if cfg.TargetOS != targetLinux || cfg.WindowsMode != windowsModeNormal {
+	if cfg.TargetOS != targetMacOS || cfg.WindowsMode != windowsModeNormal {
 		t.Fatalf("target=%s windows-mode=%s", cfg.TargetOS, cfg.WindowsMode)
 	}
 }
