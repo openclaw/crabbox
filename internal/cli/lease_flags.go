@@ -28,6 +28,12 @@ type leaseCreateFlagValues struct {
 	Desktop       *bool
 	DesktopEnv    *string
 	Browser       *bool
+	ImageMinOS    *string
+	ImageSDK      *stringListFlag
+	ImageRuntime  *stringListFlag
+	ImageBrowser  *bool
+	ImageWebView2 *bool
+	ImageDesktop  *bool
 	Code          *bool
 	ProviderFlags providerFlagValues
 	Target        targetFlagValues
@@ -37,8 +43,12 @@ type leaseCreateFlagValues struct {
 func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlagValues {
 	expose := stringListFlag{}
 	cacheVolumes := stringListFlag{}
+	imageSDK := stringListFlag{}
+	imageRuntime := stringListFlag{}
 	fs.Var(&expose, "expose", "declare a TCP port this lease wants reachable over the SSH-mesh plane; repeatable")
 	fs.Var(&cacheVolumes, "cache-volume", "provider-backed cache volume [name=]key:path; repeatable")
+	fs.Var(&imageSDK, "image-sdk", "minimum SDK in name=version form; repeatable")
+	fs.Var(&imageRuntime, "image-runtime", "minimum runtime in name=version form; repeatable")
 	return leaseCreateFlagValues{
 		Provider:      fs.String("provider", defaults.Provider, providerHelpAll()),
 		Profile:       fs.String("profile", defaults.Profile, "profile"),
@@ -57,6 +67,12 @@ func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlag
 		Desktop:       fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session"),
 		DesktopEnv:    fs.String("desktop-env", defaults.DesktopEnv, "Linux desktop environment: xfce, wayland, or gnome"),
 		Browser:       fs.Bool("browser", defaults.Browser, "provision or require a browser binary"),
+		ImageMinOS:    fs.String("image-min-os", "", "minimum promoted-image OS version"),
+		ImageSDK:      &imageSDK,
+		ImageRuntime:  &imageRuntime,
+		ImageBrowser:  fs.Bool("image-require-browser", false, "require browser support in the promoted image"),
+		ImageWebView2: fs.Bool("image-require-webview2", false, "require WebView2 support in the promoted image"),
+		ImageDesktop:  fs.Bool("image-require-desktop", false, "require desktop support in the promoted image"),
 		Code:          fs.Bool("code", defaults.Code, "provision or require web code-server capability"),
 		ProviderFlags: registerProviderFlags(fs, defaults),
 		Target:        registerTargetFlags(fs, defaults),
@@ -109,6 +125,25 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 		cfg.Pond = pond
 	}
 	applyCapabilityFlags(cfg, *values.Desktop, *values.Browser, *values.Code)
+	if err := validateImageVersion(strings.TrimSpace(*values.ImageMinOS), "image-min-os"); err != nil {
+		return err
+	}
+	imageSDKs, err := parseImageVersions(*values.ImageSDK, "image-sdk")
+	if err != nil {
+		return err
+	}
+	imageRuntimes, err := parseImageVersions(*values.ImageRuntime, "image-runtime")
+	if err != nil {
+		return err
+	}
+	cfg.imageRequirements = imageRequirements{
+		MinOS:    strings.TrimSpace(*values.ImageMinOS),
+		SDKs:     imageSDKs,
+		Runtimes: imageRuntimes,
+		Browser:  *values.ImageBrowser,
+		WebView2: *values.ImageWebView2,
+		Desktop:  *values.ImageDesktop,
+	}
 	cfg.DesktopEnv = *values.DesktopEnv
 	if err := applyTargetFlagOverrides(cfg, fs, values.Target); err != nil {
 		return err
@@ -178,6 +213,9 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	if err := validateProviderTarget(*cfg); err != nil {
 		return err
 	}
+	if err := validateImageRequirementsForLease(*cfg, existingLeaseID); err != nil {
+		return err
+	}
 	if err := validateRequestedCapabilities(*cfg); err != nil {
 		return err
 	}
@@ -200,6 +238,21 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func validateImageRequirementsForLease(cfg Config, existingLeaseID string) error {
+	if imageRequirementsEmpty(cfg.imageRequirements) {
+		return nil
+	}
+	if existingLeaseID != "" {
+		return exit(2, "image capability requirements apply only when creating a new lease")
+	}
+	if cfg.Provider != "aws" ||
+		strings.TrimSpace(cfg.Coordinator) == "" ||
+		cfg.BrokerMode == BrokerModeRegistered {
+		return exit(2, "image capability requirements require a coordinator-managed AWS lease")
 	}
 	return nil
 }

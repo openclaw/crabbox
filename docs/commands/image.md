@@ -110,6 +110,12 @@ Flags:
 --type <instance-type>   instance type the AMI boots on, for example mac2.metal
 --server-type <type>     alias for --type
 --architecture <arch>    AWS AMI architecture, for example x86_64_mac or arm64_mac
+--os-version <version>   numeric OS version present in the image
+--sdk <name=version>     SDK present in the image (repeatable)
+--runtime <name=version> runtime present in the image (repeatable)
+--browser                image includes browser support
+--webview2               image includes Microsoft WebView2
+--desktop                image includes desktop support
 --fast-snapshot-restore  enable AWS Fast Snapshot Restore for the backing snapshots
 --fsr-az <az>            availability zone for Fast Snapshot Restore (repeatable)
 --json                   print the promoted image record as JSON
@@ -121,6 +127,11 @@ metadata from their source lease. For external macOS AMIs, Crabbox reads the
 architecture from AWS but also accepts `--type` or `--architecture` to pin the
 promotion metadata explicitly. Use `--os` to record the portable Linux selector
 for a promoted Linux AMI.
+
+Capability declarations make the AMI eligible for capability-aware selection.
+Versions use numeric dot notation, for example `--os-version 15.5`,
+`--sdk xcode=16.4`, or `--runtime node=24.2`. Omitted capabilities remain
+unknown and do not satisfy an explicit image requirement.
 
 Add `--fast-snapshot-restore` plus one or more `--fsr-az` values when the
 promoted image backs hot lanes that need immediate EBS snapshot reads:
@@ -142,6 +153,9 @@ Future brokered AWS leases use the promoted image when the request does not set
 an explicit `awsAMI`/`CRABBOX_AWS_AMI` override. Promotion stores coordinator
 metadata only; it does not copy or modify the AMI. A macOS promotion is scoped
 to matching macOS leases and never becomes the Linux or Windows default.
+Crabbox retains a scoped catalog of promoted AMIs so a lease can select the
+newest image satisfying every requested image capability, not only the last
+promoted default.
 
 Promote, smoke-test, and roll back if needed:
 
@@ -162,9 +176,10 @@ crabbox stop <slug>
 ```
 
 If the smoke fails, promote the previous known-good AMI again. The coordinator
-stores only scoped selected AMI IDs, so rollback is just another `image promote`
-for the same target and region. Keep the previous AMI available until at least
-one brokered AWS smoke succeeds on the new image.
+updates the scoped default and retains each promotion in the capability catalog,
+so rollback is another `image promote` for the same target and region. Keep the
+previous AMI available until at least one brokered AWS smoke succeeds on the new
+image.
 
 ## fsr-status
 
