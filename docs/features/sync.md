@@ -34,9 +34,10 @@ letting you test uncommitted local edits.
 The built-in excludes are intentionally conservative. They cover common churn
 such as `node_modules`, `.git`, `dist`, `coverage`, `playwright-report`,
 `test-results`, `.next`, `.vite`, `.turbo`, `target`, `.venv`, `__pycache__`,
-`.gradle`, and the local `.crabbox/logs`, `.crabbox/captures`, and
-`.crabbox/runs` directories. Crabbox does not globally drop tracked source files
-just because a path segment happens to be named `build` or `out`. Put
+`.gradle`, and Crabbox runtime state under `.crabbox/env`,
+`.crabbox/scripts`, `.crabbox/logs`, `.crabbox/captures`, and
+`.crabbox/runs`. Crabbox does not globally drop tracked source files just
+because a path segment happens to be named `build` or `out`. Put
 project-specific generated directories in `.crabboxignore` or `sync.exclude`.
 
 ## Excludes
@@ -59,6 +60,17 @@ read from the repository root. Blank lines and lines starting with `#` are
 ignored; the remaining lines are appended to `sync.exclude` and use the same
 matcher as config excludes. Crabbox supports only the exact `.crabboxignore`
 name; there is no short alias.
+
+Crabbox-owned runtime state under `.crabbox/env`, `.crabbox/scripts`,
+`.crabbox/logs`, `.crabbox/captures`, and `.crabbox/runs` is always excluded
+after repo rules are applied. Those paths can contain forwarded env profiles,
+uploaded scripts, local run artifacts, or failure bundles, so `.crabboxignore`
+cannot re-include them. Case aliases of these reserved paths are protected too,
+including on case-insensitive filesystems.
+
+If a project stores source files in one of these reserved directories, move
+them elsewhere before upgrading; reserved runtime paths are no longer eligible
+for sync even when they are tracked or explicitly re-included.
 
 Repo-local config should hold project-specific excludes and env allowlists.
 Secrets must never be passed as command-line arguments or via broad env globs.

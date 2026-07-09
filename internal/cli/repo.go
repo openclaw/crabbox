@@ -78,7 +78,7 @@ func cleanRemoteRepoName(name string) string {
 }
 
 func defaultExcludes() []string {
-	return []string{
+	excludes := []string{
 		".git",
 		"._*",
 		"node_modules",
@@ -96,9 +96,6 @@ func defaultExcludes() []string {
 		".cache",
 		".tmp",
 		".local",
-		".crabbox/logs",
-		".crabbox/captures",
-		".crabbox/runs",
 		".swiftpm",
 		".build",
 		"apps/*/.build",
@@ -113,6 +110,7 @@ func defaultExcludes() []string {
 		".gradle",
 		"target",
 	}
+	return append(excludes, protectedSyncExcludes()...)
 }
 
 func configuredExcludes(cfg Config) []string {
@@ -125,7 +123,29 @@ func syncExcludes(root string, cfg Config) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return appendOrderedStrings(excludes, ignore...), nil
+	excludes = appendOrderedStrings(excludes, ignore...)
+	return appendOrderedStrings(excludes, protectedSyncExcludes()...), nil
+}
+
+func protectedSyncExcludes() []string {
+	return []string{
+		".crabbox/env",
+		".crabbox/scripts",
+		".crabbox/logs",
+		".crabbox/captures",
+		".crabbox/runs",
+	}
+}
+
+func protectedSyncExcludeMatches(rel, exclude string) bool {
+	rel = strings.ToLower(strings.Trim(filepath.ToSlash(rel), "/"))
+	exclude = strings.ToLower(strings.Trim(filepath.ToSlash(exclude), "/"))
+	for _, protected := range protectedSyncExcludes() {
+		if exclude == protected {
+			return rel == protected || strings.HasPrefix(rel, protected+"/")
+		}
+	}
+	return false
 }
 
 // syncIncludes returns the configured sync include (whitelist) patterns. When
@@ -619,7 +639,7 @@ func pathExcluded(rel string, excludes []string) bool {
 	excluded := false
 	for _, exclude := range excludes {
 		exclude, negated := excludeRule(exclude)
-		if excludeMatches(rel, exclude) {
+		if excludeMatches(rel, exclude) || protectedSyncExcludeMatches(rel, exclude) {
 			excluded = !negated
 		}
 	}
