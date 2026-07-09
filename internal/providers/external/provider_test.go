@@ -130,6 +130,17 @@ func TestConfigureAcceptsNativeWindowsWorkRoot(t *testing.T) {
 	}
 }
 
+func TestValidateConfigAcceptsDedicatedNativeWindowsUserWorkRoot(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetWindows
+	cfg.WindowsMode = core.WindowsModeNormal
+	cfg.WorkRoot = `D:\Users\alice\crabbox`
+	cfg.External.WorkRoot = cfg.WorkRoot
+	if err := validateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateConfigRejectsUnsafeNativeWindowsWorkRoot(t *testing.T) {
 	for _, workRoot := range []string{
 		`/work/crabbox`,
@@ -140,6 +151,7 @@ func TestValidateConfigRejectsUnsafeNativeWindowsWorkRoot(t *testing.T) {
 		`C:\Windows \crabbox`,
 		`C:\Windows\crabbox`,
 		`D:\Program Files\crabbox`,
+		`D:\Users`,
 		`C:\PROGRA~1`,
 		`C:\safe:stream\crabbox`,
 		`C:\NUL\crabbox`,
