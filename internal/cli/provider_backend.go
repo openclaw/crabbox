@@ -71,6 +71,12 @@ type DesktopCredentialProvider interface {
 	DesktopCredentials(cfg Config, target SSHTarget) (DesktopCredentials, bool)
 }
 
+// DesktopCredentialResolver is the error-reporting form used by providers
+// whose configured credential source can be present but unavailable at runtime.
+type DesktopCredentialResolver interface {
+	ResolveDesktopCredentials(cfg Config, target SSHTarget) (DesktopCredentials, bool, error)
+}
+
 type ProviderServerTypeProvider interface {
 	ServerTypeForConfig(cfg Config) string
 	ServerTypeForClass(class string) string

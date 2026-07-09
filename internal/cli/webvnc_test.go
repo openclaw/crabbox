@@ -261,23 +261,48 @@ func TestWebVNCCredentialOutputDefaultsToRedacted(t *testing.T) {
 }
 
 func TestWebVNCCredentialsPreferProviderHook(t *testing.T) {
-	username, password := webVNCCredentials(
+	username, password, err := webVNCCredentials(
 		context.Background(),
 		Config{Provider: "direct-webvnc-test"},
 		SSHTarget{User: "ssh-user"},
 		vncEndpoint{Managed: true},
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if username != "provider-user" || password != "provider-secret" {
 		t.Fatalf("credentials=(%q,%q)", username, password)
 	}
-	username, password = webVNCCredentials(
+	username, password, err = webVNCCredentials(
 		context.Background(),
 		Config{Provider: "direct-webvnc-test"},
 		SSHTarget{User: "ssh-user"},
 		vncEndpoint{},
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if username != "" || password != "" {
 		t.Fatalf("unmanaged credentials=(%q,%q)", username, password)
+	}
+}
+
+func TestWebVNCPortalCredentialsOmitMacOSARDAccount(t *testing.T) {
+	username, password := webVNCPortalCredentials(
+		SSHTarget{TargetOS: targetMacOS},
+		"screen-user",
+		"screen-secret",
+	)
+	if username != "" || password != "" {
+		t.Fatalf("macOS portal credentials=(%q,%q)", username, password)
+	}
+	username, password = webVNCPortalCredentials(
+		SSHTarget{TargetOS: targetLinux},
+		"vnc-user",
+		"vnc-secret",
+	)
+	if username != "vnc-user" || password != "vnc-secret" {
+		t.Fatalf("Linux portal credentials=(%q,%q)", username, password)
 	}
 }
 

@@ -44,7 +44,10 @@ func captureRemoteMacVNCScreenshot(ctx context.Context, cfg Config, target SSHTa
 	}
 	defer stopProcess(tunnel)
 
-	creds, credentialsAvailable := providerDesktopCredentials(cfg, target)
+	creds, credentialsAvailable, err := providerDesktopCredentials(cfg, target)
+	if err != nil {
+		return err
+	}
 	if !credentialsAvailable {
 		password := ""
 		if out, err := runSSHOutput(ctx, target, vncPasswordCommand(target)); err == nil {
@@ -113,22 +116,30 @@ func typeRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, text st
 	return nil
 }
 
-func providerDesktopCredentials(cfg Config, target SSHTarget) (rfbCredentials, bool) {
+func providerDesktopCredentials(cfg Config, target SSHTarget) (rfbCredentials, bool, error) {
 	provider, err := ProviderFor(cfg.Provider)
 	if err != nil {
-		return rfbCredentials{}, false
+		return rfbCredentials{}, false, nil
 	}
 	return desktopCredentialsFromProvider(provider, cfg, target)
 }
 
-func desktopCredentialsFromProvider(provider Provider, cfg Config, target SSHTarget) (rfbCredentials, bool) {
-	credentialProvider, ok := provider.(DesktopCredentialProvider)
-	if !ok {
-		return rfbCredentials{}, false
+func desktopCredentialsFromProvider(provider Provider, cfg Config, target SSHTarget) (rfbCredentials, bool, error) {
+	var credentials DesktopCredentials
+	var ok bool
+	if resolver, supported := provider.(DesktopCredentialResolver); supported {
+		var err error
+		credentials, ok, err = resolver.ResolveDesktopCredentials(cfg, target)
+		if err != nil {
+			return rfbCredentials{}, false, err
+		}
+	} else if credentialProvider, supported := provider.(DesktopCredentialProvider); supported {
+		credentials, ok = credentialProvider.DesktopCredentials(cfg, target)
+	} else {
+		return rfbCredentials{}, false, nil
 	}
-	credentials, ok := credentialProvider.DesktopCredentials(cfg, target)
 	if !ok {
-		return rfbCredentials{}, false
+		return rfbCredentials{}, false, nil
 	}
 	username := strings.TrimSpace(credentials.Username)
 	if username == "" {
@@ -137,7 +148,7 @@ func desktopCredentialsFromProvider(provider Provider, cfg Config, target SSHTar
 	return rfbCredentials{
 		Username: username,
 		Password: credentials.Password,
-	}, true
+	}, true, nil
 }
 
 func captureRFBFrame(ctx context.Context, address string, creds rfbCredentials) (image.Image, error) {

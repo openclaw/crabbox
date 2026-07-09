@@ -147,7 +147,10 @@ func TestDesktopCredentialsUseEnvReference(t *testing.T) {
 	t.Setenv("CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD", "provider-secret")
 	cfg := testConfig()
 	cfg.External.Connection.Desktop.PasswordEnv = "CRABBOX_EXTERNAL_TEST_DESKTOP_PASSWORD"
-	credentials, ok := (Provider{}).DesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	credentials, ok, err := (Provider{}).ResolveDesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok {
 		t.Fatal("expected desktop credentials")
 	}
@@ -155,9 +158,26 @@ func TestDesktopCredentialsUseEnvReference(t *testing.T) {
 		t.Fatalf("credentials=%#v", credentials)
 	}
 	cfg.External.Connection.Desktop.Username = "screen-user"
-	credentials, ok = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	credentials, ok, err = (Provider{}).ResolveDesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || credentials.Username != "screen-user" {
 		t.Fatalf("explicit username credentials=%#v ok=%t", credentials, ok)
+	}
+}
+
+func TestDesktopCredentialsRejectMissingConfiguredEnvReference(t *testing.T) {
+	const passwordEnv = "CRABBOX_EXTERNAL_TEST_MISSING_DESKTOP_PASSWORD"
+	t.Setenv(passwordEnv, "")
+	cfg := testConfig()
+	cfg.External.Connection.Desktop.PasswordEnv = passwordEnv
+	credentials, ok, err := (Provider{}).ResolveDesktopCredentials(cfg, core.SSHTarget{User: "lease-user"})
+	if err == nil || !strings.Contains(err.Error(), passwordEnv) {
+		t.Fatalf("err=%v", err)
+	}
+	if ok || credentials != (core.DesktopCredentials{}) {
+		t.Fatalf("credentials=%#v ok=%t", credentials, ok)
 	}
 }
 

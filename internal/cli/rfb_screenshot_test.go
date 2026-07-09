@@ -34,11 +34,14 @@ func (desktopCredentialTestProvider) DesktopCredentials(Config, SSHTarget) (Desk
 }
 
 func TestDesktopCredentialsFromProvider(t *testing.T) {
-	got, ok := desktopCredentialsFromProvider(
+	got, ok, err := desktopCredentialsFromProvider(
 		desktopCredentialTestProvider{},
 		Config{},
 		SSHTarget{User: "lease-user"},
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok {
 		t.Fatal("provider desktop credentials should be available")
 	}

@@ -280,7 +280,10 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	username, password := webVNCCredentials(ctx, cfg, target, endpoint)
+	username, password, err := webVNCCredentials(ctx, cfg, target, endpoint)
+	if err != nil {
+		return err
+	}
 	credentials := rfbCredentials{Username: username, Password: password}
 	if target.TargetOS == targetMacOS {
 		if err := requireMacOSScreenSharingCredentials(credentials); err != nil {
@@ -363,7 +366,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		OnReady: func() error {
 			portalUsername, portalPassword := "", ""
 			if *openPortal || !*redactCredentials {
-				portalUsername, portalPassword = username, password
+				portalUsername, portalPassword = webVNCPortalCredentials(target, username, password)
 			}
 			portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl})
 			if err != nil {
@@ -739,19 +742,32 @@ func (w webVNCRedactingWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func webVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, endpoint vncEndpoint) (string, string) {
+func webVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, endpoint vncEndpoint) (string, string, error) {
 	if !endpoint.Managed {
-		return "", ""
+		return "", "", nil
 	}
-	if credentials, ok := providerDesktopCredentials(cfg, target); ok {
-		return strings.TrimSpace(credentials.Username), strings.TrimSpace(credentials.Password)
+	credentials, ok, err := providerDesktopCredentials(cfg, target)
+	if err != nil {
+		return "", "", err
+	}
+	if ok {
+		return strings.TrimSpace(credentials.Username), strings.TrimSpace(credentials.Password), nil
 	}
 	password, _ := runSSHOutput(ctx, target, vncPasswordCommand(target))
 	username := ""
 	if target.TargetOS == targetMacOS {
 		username = target.User
 	}
-	return strings.TrimSpace(username), strings.TrimSpace(password)
+	return strings.TrimSpace(username), strings.TrimSpace(password), nil
+}
+
+func webVNCPortalCredentials(target SSHTarget, username, password string) (string, string) {
+	// The macOS bridge authenticates to ARD itself and exposes an
+	// already-authenticated RFB stream to the portal viewer.
+	if target.TargetOS == targetMacOS {
+		return "", ""
+	}
+	return username, password
 }
 
 func webVNCOutputURLHasCredentials(value string) bool {
@@ -926,7 +942,10 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	username := ""
 	password := ""
 	if endpointErr == nil {
-		username, password = webVNCCredentials(ctx, cfg, target, endpoint)
+		username, password, err = webVNCCredentials(ctx, cfg, target, endpoint)
+		if err != nil {
+			return err
+		}
 	}
 	status, statusErr := coord.WebVNCStatus(ctx, leaseID)
 	daemon, daemonErr := localWebVNCDaemonStatus(leaseID)
@@ -976,7 +995,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	}
 	portalUsername, portalPassword := "", ""
 	if !*redactCredentials {
-		portalUsername, portalPassword = username, password
+		portalUsername, portalPassword = webVNCPortalCredentials(target, username, password)
 	}
 	portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword)
 	if err != nil {
@@ -1071,10 +1090,13 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		printRescue(a.Stdout, rescueVNCTargetUnreachable, endpointErr.Error(), desktopDoctorCommand(rescueCtx))
 		return endpointErr
 	}
-	username, password := webVNCCredentials(ctx, cfg, target, endpoint)
+	username, password, err := webVNCCredentials(ctx, cfg, target, endpoint)
+	if err != nil {
+		return err
+	}
 	portalUsername, portalPassword := "", ""
 	if *openPortal || !*redactCredentials {
-		portalUsername, portalPassword = username, password
+		portalUsername, portalPassword = webVNCPortalCredentials(target, username, password)
 	}
 	portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl})
 	if err != nil {

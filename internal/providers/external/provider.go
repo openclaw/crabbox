@@ -2,6 +2,7 @@ package external
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 
@@ -41,15 +42,15 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	return validateConfig(cfg)
 }
 
-func (Provider) DesktopCredentials(cfg core.Config, target core.SSHTarget) (core.DesktopCredentials, bool) {
+func (Provider) ResolveDesktopCredentials(cfg core.Config, target core.SSHTarget) (core.DesktopCredentials, bool, error) {
 	desktop := cfg.External.Connection.Desktop
 	passwordEnv := strings.TrimSpace(desktop.PasswordEnv)
 	if passwordEnv == "" {
-		return core.DesktopCredentials{}, false
+		return core.DesktopCredentials{}, false, nil
 	}
 	password, ok := os.LookupEnv(passwordEnv)
-	if !ok || password == "" {
-		return core.DesktopCredentials{}, false
+	if !ok || strings.TrimSpace(password) == "" {
+		return core.DesktopCredentials{}, false, fmt.Errorf("external desktop password environment variable %s is unset or empty", passwordEnv)
 	}
 	username := strings.TrimSpace(desktop.Username)
 	if username == "" {
@@ -58,7 +59,7 @@ func (Provider) DesktopCredentials(cfg core.Config, target core.SSHTarget) (core
 	if username == "" {
 		username = strings.TrimSpace(cfg.External.Connection.SSH.User)
 	}
-	return core.DesktopCredentials{Username: username, Password: password}, true
+	return core.DesktopCredentials{Username: username, Password: password}, true, nil
 }
 
 func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {

@@ -119,7 +119,11 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 type macOSVNCPasswordReader func(context.Context, SSHTarget, string) (string, error)
 
 func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, readPassword macOSVNCPasswordReader) (rfbCredentials, localWebVNCAuthenticationMode, error) {
-	if credentials, ok := providerDesktopCredentials(cfg, target); ok {
+	credentials, ok, err := providerDesktopCredentials(cfg, target)
+	if err != nil {
+		return rfbCredentials{}, localWebVNCAuthAuto, err
+	}
+	if ok {
 		return credentials, localWebVNCAuthARD, nil
 	}
 	password, err := readPassword(ctx, target, vncPasswordCommand(target))
