@@ -116,7 +116,7 @@ if [[ "\${CRABBOX_FAL_KEY:-}" != "test-secret-token" ]]; then
 fi
 case "$1" in
   doctor)
-    printf 'auth=ready control_plane=ready inventory=ready api=list mutation=false api_key=test-secret-token url=https://example.test/?token=abc\\n'
+    printf 'auth=ready control_plane=ready inventory=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 api=list mutation=false api_key=test-secret-token url=https://example.test/?token=abc\\n'
     ;;
   warmup)
     printf '%s\\n' "$5" >"${slugFile}"
@@ -192,7 +192,7 @@ test("live fal smoke attempts cleanup after partial failure", () => {
 set -euo pipefail
 printf '%s\\n' "$*" >>"${calls}"
 if [[ "$1" == "doctor" ]]; then
-  printf 'auth=ready\\n'
+  printf 'auth=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\\n'
   exit 0
 fi
 if [[ "$1" == "list" ]]; then
@@ -235,7 +235,7 @@ test("live fal smoke classifies compute credit requirements as billing blockers"
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-credit-"));
   const binDir = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
-  const stopped = path.join(dir, "stopped.log");
+  const doctorCalls = path.join(dir, "doctor-calls.log");
   fs.mkdirSync(binDir, { recursive: true });
 
   writeGoStub(
@@ -244,7 +244,8 @@ test("live fal smoke classifies compute credit requirements as billing blockers"
 set -euo pipefail
 case "$1" in
   doctor)
-    printf 'auth=ready\\n'
+    printf 'doctor\n' >>"${doctorCalls}"
+    printf 'auth=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\\n'
     ;;
   list)
     printf '[]\\n'
@@ -254,7 +255,8 @@ case "$1" in
     exit 37
     ;;
   stop)
-    printf '%s\\n' "$4" >>"${stopped}"
+    printf 'lease/fal instance not found or not locally claimed\\n' >&2
+    exit 4
     ;;
   *)
     exit 99
@@ -279,7 +281,66 @@ esac
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stderr, /classification=billing_blocked/);
   assert.match(result.stderr, /credit balance/);
-  assert.match(fs.readFileSync(stopped, "utf8"), /^fal-smoke-\d{14}-\d+\n$/);
+  assert.doesNotMatch(result.stderr, /classification=cleanup_failed/);
+  assert.equal(fs.readFileSync(doctorCalls, "utf8"), "doctor\ndoctor\n");
+});
+
+test("live fal smoke fails cleanup when provider inventory changed after an unclaimed create", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-inventory-change-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const doctorCalls = path.join(dir, "doctor-calls.log");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor)
+    count="$(wc -l <"${doctorCalls}" 2>/dev/null || printf 0)"
+    printf 'doctor\n' >>"${doctorCalls}"
+    if [[ "$count" -eq 0 ]]; then
+      printf 'auth=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\\n'
+    else
+      printf 'auth=ready inventory_count=1 inventory_fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n'
+    fi
+    ;;
+  list)
+    printf '[]\\n'
+    ;;
+  warmup)
+    printf 'compute credit balance required\\n' >&2
+    exit 37
+    ;;
+  stop)
+    printf 'lease/fal instance not found or not locally claimed\\n' >&2
+    exit 4
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "fal",
+      CRABBOX_FAL_KEY: "test-secret-token",
+      FAL_KEY: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 4, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=billing_blocked/);
+  assert.match(result.stderr, /classification=cleanup_failed/);
+  assert.match(result.stderr, /manual reconciliation required/);
 });
 
 test("live fal smoke treats post-create lifecycle failure as validation", () => {
@@ -296,7 +357,7 @@ test("live fal smoke treats post-create lifecycle failure as validation", () => 
 set -euo pipefail
 case "$1" in
   doctor)
-    printf 'auth=ready\\n'
+    printf 'auth=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\\n'
     ;;
   list)
     printf '[]\\n'
@@ -351,7 +412,7 @@ test("live fal smoke requires remote command output", () => {
 set -euo pipefail
 case "$1" in
   doctor)
-    printf 'auth=ready\n'
+    printf 'auth=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n'
     ;;
   list)
     printf '[]\n'

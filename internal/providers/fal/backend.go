@@ -187,7 +187,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return target, nil
 	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
-		if err := core.ClaimLeaseTargetForRepoConfig(target.LeaseID, claim.Slug, cfg, target.Server, target.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		if _, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchanged(target.LeaseID, claim.Slug, cfg, falClaimScope(cfg), target.Server, target.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, claim, true); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -527,25 +527,25 @@ func (b *backend) recoverAmbiguousCreateForRelease(ctx context.Context, client c
 	cfg.Fal.InstanceType = instanceType
 	cfg.ServerType = instanceType
 	cfg.Fal.Sector = sector
-	if err := b.persistRecoveryClaim(claim.LeaseID, claim.Slug, cfg, claim.RepoRoot, instanceID, "rollback-cleanup", false); err != nil {
+	updated, err := b.persistRecoveryClaimIfUnchanged(claim.LeaseID, claim.Slug, cfg, claim.RepoRoot, instanceID, "rollback-cleanup", false, claim, true)
+	if err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		cleanupErr := client.DeleteInstance(cleanupCtx, instanceID)
 		if cleanupErr == nil {
-			core.RemoveLeaseClaim(claim.LeaseID)
+			removeErr := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim)
 			core.RemoveStoredTestboxKey(claim.LeaseID)
-			return core.LeaseClaim{}, fmt.Errorf("persist recovered fal instance claim: %w", err)
+			return core.LeaseClaim{}, errors.Join(
+				fmt.Errorf("persist recovered fal instance claim: %w", err),
+				removeErr,
+			)
 		}
 		return core.LeaseClaim{}, errors.Join(
 			fmt.Errorf("persist recovered fal instance claim: %w", err),
 			fmt.Errorf("fal cleanup failed for recovered instance %s: %w", instanceID, cleanupErr),
 		)
 	}
-	updated, ok, err := core.ReadLeaseClaimWithPresence(claim.LeaseID)
-	if err != nil {
-		return core.LeaseClaim{}, err
-	}
-	if !ok || updated.CloudID != instanceID {
+	if updated.CloudID != instanceID {
 		return core.LeaseClaim{}, exit(5, "fal recovered instance claim is unavailable for lease=%s", claim.LeaseID)
 	}
 	return updated, nil
@@ -566,10 +566,23 @@ func (b *backend) rollbackAcquire(instanceID, leaseID, slug string, cfg Config, 
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := client.DeleteInstance(cleanupCtx, instanceID); err != nil {
-		return rollbackAcquireError(cause, instanceID, claimErr, err)
+	cleanupAction := func() error { return client.DeleteInstance(cleanupCtx, instanceID) }
+	var cleanupErr error
+	if claimErr == nil {
+		claim, ok, readErr := core.ReadLeaseClaimWithPresence(leaseID)
+		if readErr != nil {
+			cleanupErr = readErr
+		} else if !ok {
+			cleanupErr = exit(5, "fal recovery claim disappeared before rollback for lease=%s", leaseID)
+		} else {
+			cleanupErr = core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, cleanupAction)
+		}
+	} else {
+		cleanupErr = cleanupAction()
 	}
-	core.RemoveLeaseClaim(leaseID)
+	if cleanupErr != nil {
+		return rollbackAcquireError(cause, instanceID, claimErr, cleanupErr)
+	}
 	core.RemoveStoredTestboxKey(leaseID)
 	return cause
 }
@@ -612,6 +625,15 @@ func (b *backend) persistRecoveryClaim(leaseID, slug string, cfg Config, repoRoo
 }
 
 func (b *backend) persistRecoveryClaimAt(leaseID, slug string, cfg Config, repoRoot, instanceID, reason string, keep bool, createStarted time.Time) error {
+	_, err := b.persistRecoveryClaimAtIfUnchanged(leaseID, slug, cfg, repoRoot, instanceID, reason, keep, createStarted, core.LeaseClaim{}, false)
+	return err
+}
+
+func (b *backend) persistRecoveryClaimIfUnchanged(leaseID, slug string, cfg Config, repoRoot, instanceID, reason string, keep bool, expected core.LeaseClaim, expectedExists bool) (core.LeaseClaim, error) {
+	return b.persistRecoveryClaimAtIfUnchanged(leaseID, slug, cfg, repoRoot, instanceID, reason, keep, time.Time{}, expected, expectedExists)
+}
+
+func (b *backend) persistRecoveryClaimAtIfUnchanged(leaseID, slug string, cfg Config, repoRoot, instanceID, reason string, keep bool, createStarted time.Time, expected core.LeaseClaim, expectedExists bool) (core.LeaseClaim, error) {
 	labels := falLabels(cfg, leaseID, slug, keep, b.now())
 	if !createStarted.IsZero() {
 		labels["create_started_at"] = strconv.FormatInt(createStarted.UTC().Unix(), 10)
@@ -628,9 +650,9 @@ func (b *backend) persistRecoveryClaimAt(leaseID, slug string, cfg Config, repoR
 	server.ServerType.Name = cfg.Fal.InstanceType
 	target := core.SSHTargetFromConfig(cfg, "")
 	if repoRoot != "" {
-		return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, cfg.IdleTimeout, false)
+		return core.ClaimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, falClaimScope(cfg), server, target, repoRoot, cfg.IdleTimeout, false, expected, expectedExists)
 	}
-	return core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, target, cfg.IdleTimeout)
+	return core.ClaimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug, cfg, falClaimScope(cfg), server, target, cfg.IdleTimeout, expected, expectedExists)
 }
 
 func resolveFalClaim(identifier, providerScope string) (core.LeaseClaim, bool, error) {

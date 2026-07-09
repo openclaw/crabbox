@@ -190,6 +190,23 @@ is_fal_not_found_output() {
   [[ "$output" == *"lease/fal instance not found"* || "$output" == *"no local claim for fal lease"* || "$output" == *"not locally claimed"* ]]
 }
 
+inventory_snapshot_from_doctor() {
+  local output="$1"
+  local count=""
+  local fingerprint=""
+  local field
+  for field in $output; do
+    case "$field" in
+      inventory_count=*) count="${field#inventory_count=}" ;;
+      inventory_fingerprint=*) fingerprint="${field#inventory_fingerprint=}" ;;
+    esac
+  done
+  if [[ ! "$count" =~ ^[0-9]+$ || ! "$fingerprint" =~ ^[0-9a-f]{64}$ ]]; then
+    return 1
+  fi
+  printf '%s:%s\n' "$count" "$fingerprint"
+}
+
 cleanup_armed=0
 slug="fal-smoke-$(date +%Y%m%d%H%M%S)-$$"
 config_file=""
@@ -197,6 +214,7 @@ fal_key="${CRABBOX_FAL_KEY:-${FAL_KEY:-}}"
 fal_instance_type="${CRABBOX_LIVE_FAL_INSTANCE_TYPE:-gpu_1x_h100_sxm5}"
 fal_sector="${CRABBOX_LIVE_FAL_SECTOR:-}"
 fal_api_url="${CRABBOX_LIVE_FAL_API_URL:-https://api.fal.ai/v1}"
+initial_provider_inventory=""
 
 cleanup() {
   local exit_status=$?
@@ -216,7 +234,24 @@ cleanup() {
         break
       fi
       if is_fal_not_found_output "$cleanup_output"; then
-        cleanup_armed=0
+        local inventory_output=""
+        local inventory_status=1
+        local current_provider_inventory=""
+        set +e
+        inventory_output="$(bin/crabbox doctor --provider fal 2>&1)"
+        inventory_status=$?
+        set -e
+        if [ "$inventory_status" -eq 0 ]; then
+          current_provider_inventory="$(inventory_snapshot_from_doctor "$inventory_output" || true)"
+        fi
+        if [ -n "$initial_provider_inventory" ] && [ "$current_provider_inventory" = "$initial_provider_inventory" ]; then
+          cleanup_armed=0
+        else
+          cleanup_output+=$'\nprovider inventory does not prove the pre-create baseline; manual reconciliation required'
+          if [ -n "$inventory_output" ]; then
+            cleanup_output+=$'\n'"$inventory_output"
+          fi
+        fi
         break
       fi
       if [ "$attempt" -lt "$cleanup_attempts" ]; then
@@ -277,6 +312,10 @@ export CRABBOX_FAL_KEY="$fal_key"
 run_capture "bin/crabbox doctor --provider fal" bin/crabbox doctor --provider fal
 doctor_output="$CAPTURED_OUTPUT"
 printf '%s\n' "$doctor_output"
+if ! initial_provider_inventory="$(inventory_snapshot_from_doctor "$doctor_output")"; then
+  classify_validation_failure "bin/crabbox doctor --provider fal" 1 "doctor output omitted a complete provider inventory fingerprint"
+  exit 1
+fi
 run_capture "bin/crabbox list --provider fal --json" bin/crabbox list --provider fal --json
 initial_list_output="$CAPTURED_OUTPUT"
 validate_list_json_empty "bin/crabbox list --provider fal --json" "$initial_list_output"

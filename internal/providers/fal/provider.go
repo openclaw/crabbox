@@ -2,8 +2,11 @@ package fal
 
 import (
 	"context"
+	"crypto/sha256"
 	"flag"
+	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -82,13 +85,49 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	if err != nil {
 		return DoctorResult{}, err
 	}
-	if _, err := client.ListInstances(ctx, 1, ""); err != nil {
+	count, fingerprint, err := falInventoryFingerprint(ctx, client)
+	if err != nil {
 		return DoctorResult{}, exit(1, "fal auth check failed: %v", err)
 	}
 	return DoctorResult{
 		Provider: providerName,
-		Message:  "auth=ready control_plane=ready inventory=ready api=list mutation=false runtime=unchecked",
+		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready inventory_count=%d inventory_fingerprint=%s api=list mutation=false runtime=unchecked", count, fingerprint),
 	}, nil
+}
+
+func falInventoryFingerprint(ctx context.Context, client computeAPI) (int, string, error) {
+	const maxPages = 100
+	ids := make([]string, 0)
+	cursor := ""
+	seenCursors := map[string]struct{}{}
+	for page := 0; page < maxPages; page++ {
+		result, err := client.ListInstances(ctx, 100, cursor)
+		if err != nil {
+			return 0, "", err
+		}
+		for _, instance := range result.Instances {
+			id := strings.TrimSpace(instance.ID)
+			if id == "" {
+				return 0, "", exit(5, "fal inventory returned an instance without an id")
+			}
+			ids = append(ids, id)
+		}
+		if !result.HasMore {
+			sort.Strings(ids)
+			sum := sha256.Sum256([]byte(strings.Join(ids, "\x00")))
+			return len(ids), fmt.Sprintf("%x", sum), nil
+		}
+		if result.NextCursor == nil || strings.TrimSpace(*result.NextCursor) == "" {
+			return 0, "", exit(5, "fal inventory pagination omitted the next cursor")
+		}
+		next := strings.TrimSpace(*result.NextCursor)
+		if _, exists := seenCursors[next]; exists {
+			return 0, "", exit(5, "fal inventory pagination repeated a cursor")
+		}
+		seenCursors[next] = struct{}{}
+		cursor = next
+	}
+	return 0, "", exit(5, "fal inventory pagination exceeded %d pages", maxPages)
 }
 
 func newDiscardRuntime() Runtime {

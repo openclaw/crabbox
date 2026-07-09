@@ -191,7 +191,7 @@ func TestDoctorReportsMissingAuthWithoutTokenNames(t *testing.T) {
 	}
 }
 
-func TestDoctorReadyMessageDoesNotClaimLimitedInventoryCount(t *testing.T) {
+func TestDoctorReadyMessageReportsCompleteInventoryFingerprint(t *testing.T) {
 	gotBackend, err := Provider{}.Configure(Config{
 		TargetOS: targetLinux,
 		Fal:      FalConfig{APIKey: "test-key", APIURL: "https://api.example.test/v1"},
@@ -202,20 +202,22 @@ func TestDoctorReadyMessageDoesNotClaimLimitedInventoryCount(t *testing.T) {
 	backend := gotBackend.(*backend)
 	backend.clientFactory = func(Config, Runtime) (computeAPI, error) {
 		return stubComputeAPI{list: ListInstancesResponse{
-			HasMore:   true,
-			Instances: []ComputeInstance{{ID: "inst_1"}},
+			Instances: []ComputeInstance{{ID: "inst_2"}, {ID: "inst_1"}},
 		}}, nil
 	}
 	result, err := backend.Doctor(t.Context(), DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(result.Message, "leases=") {
-		t.Fatalf("doctor message claimed partial inventory count: %q", result.Message)
-	}
-	if !strings.Contains(result.Message, "auth=ready") || !strings.Contains(result.Message, "api=list") {
+	if !strings.Contains(result.Message, "auth=ready") || !strings.Contains(result.Message, "api=list") || !strings.Contains(result.Message, "inventory_count=2") {
 		t.Fatalf("doctor message missing readiness details: %q", result.Message)
 	}
+	for _, field := range strings.Fields(result.Message) {
+		if fingerprint, ok := strings.CutPrefix(field, "inventory_fingerprint="); ok && len(fingerprint) == 64 {
+			return
+		}
+	}
+	t.Fatalf("doctor message missing inventory fingerprint: %q", result.Message)
 }
 
 type stubComputeAPI struct {
