@@ -418,11 +418,15 @@ func relayWebSocketVNCWithARDAuthentication(ctx context.Context, ws *websocket.C
 }
 
 func relayWebSocketVNCWithARDAuthenticationWithTimeout(ctx context.Context, ws *websocket.Conn, tcp net.Conn, credentials rfbCredentials, negotiationTimeout time.Duration) error {
+	return relayWebSocketVNCWithMacOSAuthenticationWithTimeout(ctx, ws, tcp, credentials, localWebVNCAuthARD, negotiationTimeout)
+}
+
+func relayWebSocketVNCWithMacOSAuthenticationWithTimeout(ctx context.Context, ws *websocket.Conn, tcp net.Conn, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, negotiationTimeout time.Duration) error {
 	browser := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
 	negotiationCtx, cancelNegotiation := context.WithCancel(ctx)
 	negotiation := make(chan error, 1)
 	go func() {
-		negotiation <- forceRFBARDAuthenticationWithTimeout(negotiationCtx, browser, tcp, credentials, negotiationTimeout)
+		negotiation <- forceRFBMacOSAuthenticationWithTimeout(negotiationCtx, browser, tcp, credentials, authMode, negotiationTimeout)
 	}()
 	var timer *time.Timer
 	var timeout <-chan time.Time
@@ -474,7 +478,15 @@ func forceRFBARDAuthentication(ctx context.Context, browser, server net.Conn, cr
 	return forceRFBARDAuthenticationWithTimeout(ctx, browser, server, credentials, localWebVNCReadTimeout)
 }
 
+func forceRFBMacOSAuthentication(ctx context.Context, browser, server net.Conn, credentials rfbCredentials, authMode localWebVNCAuthenticationMode) error {
+	return forceRFBMacOSAuthenticationWithTimeout(ctx, browser, server, credentials, authMode, localWebVNCReadTimeout)
+}
+
 func forceRFBARDAuthenticationWithTimeout(ctx context.Context, browser, server net.Conn, credentials rfbCredentials, negotiationTimeout time.Duration) error {
+	return forceRFBMacOSAuthenticationWithTimeout(ctx, browser, server, credentials, localWebVNCAuthARD, negotiationTimeout)
+}
+
+func forceRFBMacOSAuthenticationWithTimeout(ctx context.Context, browser, server net.Conn, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, negotiationTimeout time.Duration) error {
 	if deadline, ok := rfbAuthenticationDeadline(ctx, negotiationTimeout); ok {
 		if err := browser.SetDeadline(deadline); err != nil {
 			return fmt.Errorf("set RFB browser authentication deadline: %w", err)
@@ -540,8 +552,11 @@ func forceRFBARDAuthenticationWithTimeout(ctx context.Context, browser, server n
 			return fmt.Errorf("unsupported RFB 3.3 security type %d", selected)
 		}
 		securityType = byte(selected)
+		if expected := rfbSecurityTypeForAuthenticationMode(authMode); expected != 0 && securityType != expected {
+			return fmt.Errorf("RFB server selected security type %d, want %d", securityType, expected)
+		}
 	} else {
-		securityType, err = negotiateRFBSecurityType(server, credentials)
+		securityType, err = negotiateRFBSecurityTypeForMode(server, credentials, authMode)
 		if err != nil {
 			return err
 		}

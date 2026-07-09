@@ -61,6 +61,26 @@ func TestResolveMacOSWebVNCCredentialsUsesProviderARDAccount(t *testing.T) {
 	}
 }
 
+func TestResolveMacOSWebVNCCredentialsUsesARDForManagedAccountPassword(t *testing.T) {
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(
+		context.Background(),
+		Config{Provider: "aws"},
+		SSHTarget{TargetOS: targetMacOS, User: "ec2-user"},
+		func(context.Context, SSHTarget, string) (string, error) {
+			return "account-secret\n", nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.Username != "ec2-user" || credentials.Password != "account-secret" {
+		t.Fatalf("credentials=%#v", credentials)
+	}
+	if authMode != localWebVNCAuthARD {
+		t.Fatalf("auth mode=%d, want ARD", authMode)
+	}
+}
+
 func TestCreateMacOSWebVNCHandoffKeepsTokenOutOfOpenURL(t *testing.T) {
 	session := macOSWebVNCSession{
 		Token:    "deadbeefcafef00d",

@@ -284,7 +284,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	credentials, err := resolveWebVNCPortalCredentials(ctx, cfg, target, endpoint, runSSHOutput)
+	credentials, authMode, err := resolveWebVNCPortalCredentials(ctx, cfg, target, endpoint, runSSHOutput)
 	if err != nil {
 		return err
 	}
@@ -292,7 +292,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	password := credentials.Password
 	managedMacOS := managedMacOSWebVNC(target, endpoint)
 	if managedMacOS {
-		if err := requireMacOSScreenSharingCredentials(credentials); err != nil {
+		if err := requireMacOSWebVNCCredentials(credentials, authMode); err != nil {
 			return err
 		}
 	}
@@ -325,7 +325,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		}
 	}
 	if managedMacOS {
-		if err := preflightMacOSScreenSharing(ctx, connHost, connPort, credentials); err != nil {
+		if err := preflightMacOSScreenSharing(ctx, connHost, connPort, credentials, authMode); err != nil {
 			return err
 		}
 		fmt.Fprintln(a.Stdout, "preflight: macOS Screen Sharing RFB authentication ok")
@@ -357,18 +357,19 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		}()
 	}
 	return serveWebVNCBridgePool(bridgeCtx, webVNCBridgePoolConfig{
-		Coord:            coord,
-		LeaseID:          leaseID,
-		Host:             connHost,
-		Port:             connPort,
-		Credentials:      credentials,
-		PoolSize:         webVNCBridgePoolSizeForTarget(target),
-		IdleTimeout:      cfg.IdleTimeout,
-		Telemetry:        leaseTelemetryCollectorForTarget(target),
-		DisableHeartbeat: *noProviderSideEffects,
-		RescueCtx:        rescueCtx,
-		NativeVNC:        nativeVNCOpenCommand(cfg, target, leaseID),
-		Log:              a.Stdout,
+		Coord:              coord,
+		LeaseID:            leaseID,
+		Host:               connHost,
+		Port:               connPort,
+		Credentials:        credentials,
+		AuthenticationMode: authMode,
+		PoolSize:           webVNCBridgePoolSizeForTarget(target),
+		IdleTimeout:        cfg.IdleTimeout,
+		Telemetry:          leaseTelemetryCollectorForTarget(target),
+		DisableHeartbeat:   *noProviderSideEffects,
+		RescueCtx:          rescueCtx,
+		NativeVNC:          nativeVNCOpenCommand(cfg, target, leaseID),
+		Log:                a.Stdout,
 		OnReady: func() error {
 			portalUsername, portalPassword := "", ""
 			if *openPortal || !*redactCredentials {
@@ -412,11 +413,11 @@ func webVNCBridgePoolSizeForTarget(target SSHTarget) int {
 	return defaultWebVNCBridgePoolSize
 }
 
-func preflightMacOSScreenSharing(ctx context.Context, host, port string, credentials rfbCredentials) error {
-	if err := requireMacOSScreenSharingCredentials(credentials); err != nil {
+func preflightMacOSScreenSharing(ctx context.Context, host, port string, credentials rfbCredentials, authMode localWebVNCAuthenticationMode) error {
+	if err := requireMacOSWebVNCCredentials(credentials, authMode); err != nil {
 		return err
 	}
-	if err := preflightRFBAuthentication(ctx, net.JoinHostPort(host, port), credentials); err != nil {
+	if err := preflightRFBAuthenticationWithMode(ctx, net.JoinHostPort(host, port), credentials, authMode); err != nil {
 		return exit(5, "macOS Screen Sharing preflight failed: %v", err)
 	}
 	return nil
@@ -430,19 +431,20 @@ func requireMacOSScreenSharingCredentials(credentials rfbCredentials) error {
 }
 
 type webVNCBridgePoolConfig struct {
-	Coord            *CoordinatorClient
-	LeaseID          string
-	Host             string
-	Port             string
-	Credentials      rfbCredentials
-	PoolSize         int
-	IdleTimeout      time.Duration
-	Telemetry        leaseTelemetryCollector
-	DisableHeartbeat bool
-	RescueCtx        rescueContext
-	NativeVNC        string
-	Log              io.Writer
-	OnReady          func() error
+	Coord              *CoordinatorClient
+	LeaseID            string
+	Host               string
+	Port               string
+	Credentials        rfbCredentials
+	AuthenticationMode localWebVNCAuthenticationMode
+	PoolSize           int
+	IdleTimeout        time.Duration
+	Telemetry          leaseTelemetryCollector
+	DisableHeartbeat   bool
+	RescueCtx          rescueContext
+	NativeVNC          string
+	Log                io.Writer
+	OnReady            func() error
 }
 
 type webVNCBridgePoolEvent struct {
@@ -513,7 +515,7 @@ func serveWebVNCBridgeSlot(ctx context.Context, cfg webVNCBridgePoolConfig, slot
 	connectedOnce := false
 	attempt := 0
 	for {
-		bridge, err := connectWebVNCBridge(ctx, cfg.Coord, cfg.LeaseID, cfg.Host, cfg.Port, cfg.RescueCtx.Target, cfg.Credentials, cfg.Log)
+		bridge, err := connectWebVNCBridge(ctx, cfg.Coord, cfg.LeaseID, cfg.Host, cfg.Port, cfg.RescueCtx.Target, cfg.Credentials, cfg.AuthenticationMode, cfg.Log)
 		if err != nil {
 			attempt, kind := nextWebVNCBridgeFailure(connectedOnce, attempt)
 			events <- webVNCBridgePoolEvent{Kind: kind, Slot: slot, Attempt: attempt, Err: err}
@@ -756,25 +758,6 @@ func (w webVNCRedactingWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func webVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, endpoint vncEndpoint) (string, string, error) {
-	if !endpoint.Managed {
-		return "", "", nil
-	}
-	credentials, ok, err := providerDesktopCredentials(cfg, target)
-	if err != nil {
-		return "", "", err
-	}
-	if ok {
-		return strings.TrimSpace(credentials.Username), credentials.Password, nil
-	}
-	password, _ := runSSHOutput(ctx, target, vncPasswordCommand(target))
-	username := ""
-	if target.TargetOS == targetMacOS {
-		username = target.User
-	}
-	return strings.TrimSpace(username), strings.TrimSpace(password), nil
-}
-
 func webVNCPortalCredentials(target SSHTarget, username, password string) (string, string) {
 	// The macOS bridge authenticates to ARD itself and exposes an
 	// already-authenticated RFB stream to the portal viewer.
@@ -959,7 +942,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	endpoint, endpointErr := resolveVNCEndpoint(ctx, cfg, &target)
 	credentials := rfbCredentials{}
 	if endpointErr == nil && !*redactCredentials && target.TargetOS != targetMacOS {
-		credentials, err = resolveWebVNCPortalCredentials(ctx, cfg, target, endpoint, runSSHOutput)
+		credentials, _, err = resolveWebVNCPortalCredentials(ctx, cfg, target, endpoint, runSSHOutput)
 		if err != nil {
 			return err
 		}
@@ -1113,7 +1096,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx))
 		return exit(5, "reset target WebVNC/input stack: %v", err)
 	}
-	credentials, err := resolveWebVNCPortalCredentials(ctx, cfg, target, vncEndpoint{Managed: true}, runSSHOutput)
+	credentials, _, err := resolveWebVNCPortalCredentials(ctx, cfg, target, vncEndpoint{Managed: true}, runSSHOutput)
 	if err != nil {
 		return err
 	}
@@ -2448,6 +2431,7 @@ type webVNCBridge struct {
 	ws                    *websocket.Conn
 	target                SSHTarget
 	credentials           rfbCredentials
+	authenticationMode    localWebVNCAuthenticationMode
 	log                   io.Writer
 	desktopThemeUpdates   chan string
 	applyDesktopThemeFunc func(context.Context, string) error
@@ -2455,7 +2439,7 @@ type webVNCBridge struct {
 
 const webVNCDesktopThemeSSHAttemptTimeout = 35 * time.Second
 
-func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string, target SSHTarget, credentials rfbCredentials, log io.Writer) (*webVNCBridge, error) {
+func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string, target SSHTarget, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, log io.Writer) (*webVNCBridge, error) {
 	agentBaseURL, err := webVNCAgentBaseURL(coord.BaseURL)
 	if err != nil {
 		return nil, err
@@ -2501,6 +2485,7 @@ func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 		ws:                  ws,
 		target:              target,
 		credentials:         credentials,
+		authenticationMode:  authMode,
 		log:                 log,
 		desktopThemeUpdates: make(chan string, 1),
 	}, nil
@@ -2637,8 +2622,9 @@ func (b *webVNCBridge) Serve(ctx context.Context) error {
 		cancelThemes()
 		<-themeDone
 	}()
-	if b.target.TargetOS == targetMacOS && strings.TrimSpace(b.credentials.Username) != "" && strings.TrimSpace(b.credentials.Password) != "" {
-		return relayWebSocketVNCWithARDAuthenticationWithTimeout(ctx, b.ws, b.tcp, b.credentials, 0)
+	if b.target.TargetOS == targetMacOS && strings.TrimSpace(b.credentials.Password) != "" &&
+		(b.authenticationMode == localWebVNCAuthVNC || strings.TrimSpace(b.credentials.Username) != "") {
+		return relayWebSocketVNCWithMacOSAuthenticationWithTimeout(ctx, b.ws, b.tcp, b.credentials, b.authenticationMode, 0)
 	}
 	errc := make(chan error, 2)
 	go func() { errc <- b.copyWebSocketToTCP(ctx) }()
@@ -2814,16 +2800,15 @@ func resolveWebVNCPortalCredentials(
 	target SSHTarget,
 	endpoint vncEndpoint,
 	readPassword macOSVNCPasswordReader,
-) (rfbCredentials, error) {
+) (rfbCredentials, localWebVNCAuthenticationMode, error) {
 	if !endpoint.Managed {
-		return rfbCredentials{}, nil
+		return rfbCredentials{}, localWebVNCAuthAuto, nil
 	}
 	if target.TargetOS == targetMacOS {
-		credentials, _, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, readPassword)
-		return credentials, err
+		return resolveMacOSWebVNCCredentials(ctx, cfg, target, readPassword)
 	}
 	password, _ := readPassword(ctx, target, vncPasswordCommand(target))
-	return rfbCredentials{Password: strings.TrimSpace(password)}, nil
+	return rfbCredentials{Password: strings.TrimSpace(password)}, localWebVNCAuthAuto, nil
 }
 
 func directSSHWebVNCAllowsNone(server Server, endpoint vncEndpoint) bool {

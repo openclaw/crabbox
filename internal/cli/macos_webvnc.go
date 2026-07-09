@@ -172,10 +172,14 @@ func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTa
 	if password == "" {
 		return rfbCredentials{}, localWebVNCAuthAuto, exit(5, "managed macOS desktop password is empty")
 	}
+	authMode := localWebVNCAuthARD
+	if provider, providerErr := ProviderFor(cfg.Provider); providerErr == nil && provider.Name() == parallelsProvider {
+		authMode = localWebVNCAuthVNC
+	}
 	return rfbCredentials{
 		Username: strings.TrimSpace(target.User),
 		Password: password,
-	}, localWebVNCAuthVNC, nil
+	}, authMode, nil
 }
 
 func requireMacOSWebVNCCredentials(credentials rfbCredentials, authMode localWebVNCAuthenticationMode) error {
@@ -195,7 +199,7 @@ func preflightMacOSWebVNC(ctx context.Context, host, port string, credentials rf
 	if err := requireMacOSWebVNCCredentials(credentials, authMode); err != nil {
 		return err
 	}
-	if err := preflightRFBAuthentication(ctx, net.JoinHostPort(host, port), credentials); err != nil {
+	if err := preflightRFBAuthenticationWithMode(ctx, net.JoinHostPort(host, port), credentials, authMode); err != nil {
 		return exit(5, "macOS Screen Sharing preflight failed: %v", err)
 	}
 	return nil

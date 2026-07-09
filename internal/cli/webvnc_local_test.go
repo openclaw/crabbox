@@ -242,10 +242,10 @@ func TestForceRFBARDAuthenticationAdaptsLegacyVNCToNoAuthBrowser(t *testing.T) {
 	const password = "example-pass"
 	negotiation := make(chan error, 1)
 	go func() {
-		negotiation <- forceRFBARDAuthentication(ctx, bridgeBrowser, bridgeServer, rfbCredentials{
+		negotiation <- forceRFBMacOSAuthentication(ctx, bridgeBrowser, bridgeServer, rfbCredentials{
 			Username: "screen-user",
 			Password: password,
-		})
+		}, localWebVNCAuthVNC)
 	}()
 	serverResult := make(chan error, 1)
 	go func() {
@@ -339,7 +339,7 @@ func TestForceRFBARDAuthenticationAdaptsRFB33VNCToNoAuthBrowser(t *testing.T) {
 	const password = "example-pass"
 	negotiation := make(chan error, 1)
 	go func() {
-		negotiation <- forceRFBARDAuthentication(ctx, bridgeBrowser, bridgeServer, rfbCredentials{Password: password})
+		negotiation <- forceRFBMacOSAuthentication(ctx, bridgeBrowser, bridgeServer, rfbCredentials{Password: password}, localWebVNCAuthVNC)
 	}()
 	serverResult := make(chan error, 1)
 	go func() {
@@ -418,7 +418,7 @@ func TestForceRFBARDAuthenticationOmitsNoneResultForRFB37Browser(t *testing.T) {
 
 	negotiation := make(chan error, 1)
 	go func() {
-		negotiation <- forceRFBARDAuthentication(ctx, bridgeBrowser, bridgeServer, rfbCredentials{Password: "example-pass"})
+		negotiation <- forceRFBMacOSAuthentication(ctx, bridgeBrowser, bridgeServer, rfbCredentials{Password: "example-pass"}, localWebVNCAuthVNC)
 	}()
 	serverErr := make(chan error, 1)
 	go func() {

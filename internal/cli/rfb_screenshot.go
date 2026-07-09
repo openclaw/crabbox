@@ -162,16 +162,24 @@ func captureRFBFrame(ctx context.Context, address string, creds rfbCredentials) 
 }
 
 func preflightRFBAuthentication(ctx context.Context, address string, creds rfbCredentials) error {
+	return preflightRFBAuthenticationWithMode(ctx, address, creds, localWebVNCAuthAuto)
+}
+
+func preflightRFBAuthenticationWithMode(ctx context.Context, address string, creds rfbCredentials, authMode localWebVNCAuthenticationMode) error {
 	dialer := net.Dialer{Timeout: 10 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	return preflightRFBAuthenticationFromConn(ctx, conn, creds)
+	return preflightRFBAuthenticationFromConnWithMode(ctx, conn, creds, authMode)
 }
 
 func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials) error {
+	return preflightRFBAuthenticationFromConnWithMode(ctx, conn, creds, localWebVNCAuthAuto)
+}
+
+func preflightRFBAuthenticationFromConnWithMode(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
@@ -215,8 +223,11 @@ func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, cred
 			return fmt.Errorf("unsupported RFB 3.3 security type %d", selected)
 		}
 		securityType = byte(selected)
+		if expected := rfbSecurityTypeForAuthenticationMode(authMode); expected != 0 && securityType != expected {
+			return fmt.Errorf("RFB server selected security type %d, want %d", securityType, expected)
+		}
 	} else {
-		securityType, err := negotiateRFBSecurityType(conn, creds)
+		securityType, err := negotiateRFBSecurityTypeForMode(conn, creds, authMode)
 		if err != nil {
 			return err
 		}
@@ -435,6 +446,10 @@ func writeRFBKeyEvent(conn net.Conn, down bool, key uint32) error {
 }
 
 func negotiateRFBSecurityType(conn net.Conn, creds rfbCredentials) (byte, error) {
+	return negotiateRFBSecurityTypeForMode(conn, creds, localWebVNCAuthAuto)
+}
+
+func negotiateRFBSecurityTypeForMode(conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode) (byte, error) {
 	count := []byte{0}
 	if _, err := io.ReadFull(conn, count); err != nil {
 		return 0, fmt.Errorf("read RFB security type count: %w", err)
@@ -457,6 +472,9 @@ func negotiateRFBSecurityType(conn net.Conn, creds rfbCredentials) (byte, error)
 	if creds.Password == "" {
 		preferences = []byte{rfbSecurityNone, rfbSecurityARD, rfbSecurityVNC}
 	}
+	if required := rfbSecurityTypeForAuthenticationMode(authMode); required != 0 {
+		preferences = []byte{required}
+	}
 	for _, preferred := range preferences {
 		for _, offered := range types {
 			if offered != preferred {
@@ -469,6 +487,17 @@ func negotiateRFBSecurityType(conn net.Conn, creds rfbCredentials) (byte, error)
 		}
 	}
 	return 0, fmt.Errorf("unsupported RFB security types %v", types)
+}
+
+func rfbSecurityTypeForAuthenticationMode(authMode localWebVNCAuthenticationMode) byte {
+	switch authMode {
+	case localWebVNCAuthVNC:
+		return rfbSecurityVNC
+	case localWebVNCAuthARD:
+		return rfbSecurityARD
+	default:
+		return 0
+	}
 }
 
 func negotiateRFBVNCAuth(conn net.Conn, creds rfbCredentials) error {

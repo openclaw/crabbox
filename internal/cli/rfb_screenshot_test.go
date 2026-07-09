@@ -101,6 +101,46 @@ func TestPreflightRFBAuthenticationSupportsAppleRemoteDesktopAuth(t *testing.T) 
 	}
 }
 
+func TestNegotiateRFBSecurityTypeHonorsAuthenticationMode(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		mode localWebVNCAuthenticationMode
+		want byte
+	}{
+		{name: "ARD", mode: localWebVNCAuthARD, want: rfbSecurityARD},
+		{name: "VNC", mode: localWebVNCAuthVNC, want: rfbSecurityVNC},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			serverErr := make(chan error, 1)
+			go func() {
+				if _, err := server.Write([]byte{2, rfbSecurityARD, rfbSecurityVNC}); err != nil {
+					serverErr <- err
+					return
+				}
+				selected := []byte{0}
+				_, err := io.ReadFull(server, selected)
+				if err == nil && selected[0] != test.want {
+					err = fmt.Errorf("selected security type=%d, want %d", selected[0], test.want)
+				}
+				serverErr <- err
+			}()
+			got, err := negotiateRFBSecurityTypeForMode(client, rfbCredentials{Username: "user", Password: "secret"}, test.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("security type=%d, want %d", got, test.want)
+			}
+			if err := <-serverErr; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestPreflightRFBAuthenticationRejectsNoAuth(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()

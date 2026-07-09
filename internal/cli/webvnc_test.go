@@ -260,33 +260,6 @@ func TestWebVNCCredentialOutputDefaultsToRedacted(t *testing.T) {
 	}
 }
 
-func TestWebVNCCredentialsPreferProviderHook(t *testing.T) {
-	username, password, err := webVNCCredentials(
-		context.Background(),
-		Config{Provider: "direct-webvnc-test"},
-		SSHTarget{User: "ssh-user"},
-		vncEndpoint{Managed: true},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if username != "provider-user" || password != " provider-secret " {
-		t.Fatalf("credentials=(%q,%q)", username, password)
-	}
-	username, password, err = webVNCCredentials(
-		context.Background(),
-		Config{Provider: "direct-webvnc-test"},
-		SSHTarget{User: "ssh-user"},
-		vncEndpoint{},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if username != "" || password != "" {
-		t.Fatalf("unmanaged credentials=(%q,%q)", username, password)
-	}
-}
-
 func TestWebVNCPortalCredentialsOmitMacOSARDAccount(t *testing.T) {
 	username, password := webVNCPortalCredentials(
 		SSHTarget{TargetOS: targetMacOS},
@@ -655,7 +628,7 @@ func (directWebVNCTestProvider) CommandRoutingArgs(_ Config, leaseID string) []s
 
 func TestWebVNCPortalCredentialsUseMacOSProviderAccount(t *testing.T) {
 	read := false
-	credentials, err := resolveWebVNCPortalCredentials(
+	credentials, authMode, err := resolveWebVNCPortalCredentials(
 		context.Background(),
 		Config{Provider: "direct-webvnc-test"},
 		SSHTarget{TargetOS: targetMacOS, User: "lease-user"},
@@ -673,6 +646,30 @@ func TestWebVNCPortalCredentialsUseMacOSProviderAccount(t *testing.T) {
 	}
 	if credentials.Username != "provider-user" || credentials.Password != " provider-secret " {
 		t.Fatalf("credentials=%#v", credentials)
+	}
+	if authMode != localWebVNCAuthARD {
+		t.Fatalf("auth mode=%d, want ARD", authMode)
+	}
+}
+
+func TestWebVNCPortalCredentialsPreserveParallelsVNCMode(t *testing.T) {
+	credentials, authMode, err := resolveWebVNCPortalCredentials(
+		context.Background(),
+		Config{Provider: parallelsProvider},
+		SSHTarget{TargetOS: targetMacOS, User: "vm-user"},
+		vncEndpoint{Managed: true},
+		func(context.Context, SSHTarget, string) (string, error) {
+			return "legacy-vnc-secret\n", nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.Username != "vm-user" || credentials.Password != "legacy-vnc-secret" {
+		t.Fatalf("credentials=%#v", credentials)
+	}
+	if authMode != localWebVNCAuthVNC {
+		t.Fatalf("auth mode=%d, want VNC", authMode)
 	}
 }
 
@@ -1219,7 +1216,7 @@ func TestConnectWebVNCBridgeRegistersAgentBeforeServe(t *testing.T) {
 		t.Fatal(err)
 	}
 	coord := &CoordinatorClient{BaseURL: server.URL, Token: "test-token", Client: server.Client()}
-	bridge, err := connectWebVNCBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", port, SSHTarget{TargetOS: targetLinux}, rfbCredentials{}, io.Discard)
+	bridge, err := connectWebVNCBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", port, SSHTarget{TargetOS: targetLinux}, rfbCredentials{}, localWebVNCAuthAuto, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1312,7 +1309,7 @@ func TestConnectWebVNCBridgeSplitOriginSendsOnlyBridgeTicket(t *testing.T) {
 		},
 		Client: apiServer.Client(),
 	}
-	bridge, err := connectWebVNCBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", port, SSHTarget{TargetOS: targetMacOS}, rfbCredentials{}, io.Discard)
+	bridge, err := connectWebVNCBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", port, SSHTarget{TargetOS: targetMacOS}, rfbCredentials{}, localWebVNCAuthAuto, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1713,7 +1710,7 @@ func TestManagedMacOSWebVNCPreservesHostManagedStaticRelay(t *testing.T) {
 }
 
 func TestPreflightMacOSScreenSharingRequiresCredentials(t *testing.T) {
-	err := preflightMacOSScreenSharing(context.Background(), "127.0.0.1", "5900", rfbCredentials{})
+	err := preflightMacOSScreenSharing(context.Background(), "127.0.0.1", "5900", rfbCredentials{}, localWebVNCAuthARD)
 	if err == nil || !strings.Contains(err.Error(), "credentials are required") {
 		t.Fatalf("error=%v", err)
 	}
