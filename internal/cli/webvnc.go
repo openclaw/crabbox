@@ -227,6 +227,10 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
+	cfg, _, err = macOSPortalWebVNCConfigForLease(cfg, *id)
+	if err != nil {
+		return err
+	}
 	if useDirectSSHWebVNC(cfg) {
 		// macOS leases (e.g. tart) have no guest-side noVNC/websockify; serve the
 		// browser viewer from a host-side bridge over the guest's native Screen
@@ -275,14 +279,12 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	password := ""
-	if endpoint.Managed {
-		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
+	credentials, err := resolveWebVNCPortalCredentials(ctx, cfg, target, endpoint, runSSHOutput)
+	if err != nil {
+		return err
 	}
-	username := ""
-	if endpoint.Managed && target.TargetOS == targetMacOS {
-		username = target.User
-	}
+	username := credentials.Username
+	password := credentials.Password
 
 	connHost := endpoint.Host
 	connPort := endpoint.Port
@@ -570,6 +572,10 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
+	cfg, _, err = macOSPortalWebVNCConfigForLease(cfg, *id)
+	if err != nil {
+		return err
+	}
 	target := SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}
 	bridgeID := *id
 	identityValidated := false
@@ -828,6 +834,10 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
+	cfg, _, err = macOSPortalWebVNCConfigForLease(cfg, *id)
+	if err != nil {
+		return err
+	}
 	if useDirectSSHWebVNC(cfg) {
 		if err := guardMacOSDirectWebVNC(cfg); err != nil {
 			return err
@@ -871,14 +881,15 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 		*localPort = availableLocalVNCPort()
 	}
 	endpoint, endpointErr := resolveVNCEndpoint(ctx, cfg, &target)
-	password := ""
-	username := ""
-	if endpointErr == nil && endpoint.Managed {
-		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
-		if target.TargetOS == targetMacOS {
-			username = target.User
+	credentials := rfbCredentials{}
+	if endpointErr == nil && !*redactCredentials {
+		credentials, err = resolveWebVNCPortalCredentials(ctx, cfg, target, endpoint, runSSHOutput)
+		if err != nil {
+			return err
 		}
 	}
+	username := credentials.Username
+	password := credentials.Password
 	status, statusErr := coord.WebVNCStatus(ctx, leaseID)
 	daemon, daemonErr := localWebVNCDaemonStatus(leaseID)
 	if daemonErr == nil && leaseID != *id {
@@ -977,6 +988,10 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
+	cfg, automaticMacOSPortal, err := macOSPortalWebVNCConfigForLease(cfg, *id)
+	if err != nil {
+		return err
+	}
 	if useDirectSSHWebVNC(cfg) {
 		if err := guardMacOSDirectWebVNC(cfg); err != nil {
 			return err
@@ -1000,6 +1015,11 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
+	if automaticMacOSPortal {
+		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, false); err != nil {
+			return err
+		}
+	}
 	if _, err := coord.ResetWebVNC(ctx, leaseID); err != nil {
 		fmt.Fprintf(a.Stdout, "portal reset: skipped (%v)\n", err)
 	}
@@ -1017,12 +1037,12 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx))
 		return exit(5, "reset target WebVNC/input stack: %v", err)
 	}
-	password := ""
-	username := ""
-	if target.TargetOS == targetMacOS {
-		username = target.User
+	credentials, err := resolveWebVNCPortalCredentials(ctx, cfg, target, vncEndpoint{Managed: true}, runSSHOutput)
+	if err != nil {
+		return err
 	}
-	password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
+	username := credentials.Username
+	password := credentials.Password
 	portalUsername, portalPassword := "", ""
 	if *openPortal || !*redactCredentials {
 		portalUsername, portalPassword = username, password
@@ -2644,6 +2664,84 @@ func supportsDirectSSHWebVNC(provider string) bool {
 
 func useDirectSSHWebVNC(cfg Config) bool {
 	return supportsDirectSSHWebVNC(cfg.Provider) && !shouldRegisterCoordinatorLease(cfg)
+}
+
+// macOSPortalWebVNCConfig registers direct macOS leases when the operator
+// already has coordinator auth. The registration follows the provider lease,
+// so overlapping bridges can share it and stop owns the matching cleanup.
+func macOSPortalWebVNCConfig(cfg Config) (Config, bool, error) {
+	if !useDirectSSHWebVNC(cfg) || !isMacOSDesktopProvider(cfg) || strings.TrimSpace(cfg.Coordinator) == "" {
+		return cfg, false, nil
+	}
+	if strings.TrimSpace(cfg.CoordToken) == "" && len(cfg.CoordTokenCommand) == 0 {
+		return cfg, false, nil
+	}
+	coord, configured, err := newCoordinatorClient(cfg)
+	if err != nil {
+		return cfg, false, err
+	}
+	if !configured || coord == nil || !coord.hasConfiguredAuth() {
+		return cfg, false, nil
+	}
+	cfg.BrokerMode = BrokerModeRegistered
+	cfg.macOSPortalAuto = true
+	cfg.macOSPortalCoordinator = coord.BaseURL
+	return cfg, true, nil
+}
+
+func macOSPortalWebVNCConfigForLease(cfg Config, id string) (Config, bool, error) {
+	var claim leaseClaim
+	var claimExists bool
+	if supportsDirectSSHWebVNC(cfg.Provider) && strings.TrimSpace(id) != "" {
+		var err error
+		claim, claimExists, err = resolveLeaseClaimForProvider(id, canonicalClaimProvider(cfg.Provider))
+		if err != nil {
+			return cfg, false, err
+		}
+		claimedTarget := firstNonBlank(claim.TargetOS, claim.Labels["target"])
+		if claimExists && !cfg.targetFlagExplicit && claimedTarget == targetMacOS {
+			cfg.TargetOS = targetMacOS
+			cfg.WindowsMode = claim.WindowsMode
+		}
+	}
+	routed, automatic, err := macOSPortalWebVNCConfig(cfg)
+	if err != nil {
+		return routed, false, err
+	}
+	boundCoordinator := strings.TrimSpace(claim.CoordinatorRegistrationURL)
+	if !claimExists || boundCoordinator == "" {
+		return routed, automatic, nil
+	}
+	if !shouldRegisterCoordinatorLease(routed) {
+		return routed, automatic, nil
+	}
+	currentCoordinator, bindingErr := coordinatorRegistrationURLForConfig(routed)
+	if bindingErr != nil {
+		return routed, false, bindingErr
+	}
+	routed.macOSPortalAuto = true
+	routed.macOSPortalCoordinator = boundCoordinator
+	if currentCoordinator != boundCoordinator {
+		return routed, false, exit(4, "macOS portal coordinator changed from persisted registration binding")
+	}
+	return routed, true, nil
+}
+
+func resolveWebVNCPortalCredentials(
+	ctx context.Context,
+	cfg Config,
+	target SSHTarget,
+	endpoint vncEndpoint,
+	readPassword macOSVNCPasswordReader,
+) (rfbCredentials, error) {
+	if !endpoint.Managed {
+		return rfbCredentials{}, nil
+	}
+	if target.TargetOS == targetMacOS {
+		return resolveMacOSWebVNCCredentials(ctx, cfg, target, readPassword)
+	}
+	password, _ := readPassword(ctx, target, vncPasswordCommand(target))
+	return rfbCredentials{Password: strings.TrimSpace(password)}, nil
 }
 
 func directSSHWebVNCAllowsNone(server Server, endpoint vncEndpoint) bool {

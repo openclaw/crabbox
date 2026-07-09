@@ -87,11 +87,11 @@ Lease with `--desktop` to get a visible macOS session:
 
 ```sh
 crabbox warmup --provider tart --desktop
-crabbox webvnc --provider tart --id <lease-id>   # browser viewer (host-side bridge)
+crabbox webvnc --provider tart --id <lease-id>   # shared portal, or local fallback without coordinator login
 crabbox screenshot --provider tart --id <lease-id> --output desktop.png
 ```
 
-`crabbox webvnc` runs a host-side bridge: it SSH-tunnels to the guest's Screen Sharing port, creates a self-contained mode-0600 noVNC viewer file, and opens that file in the browser — no noVNC/`websockify` tooling on the guest. The temporary viewer talks only to literal `127.0.0.1`, fetches the account credentials with an authenticated POST, and authenticates the WebSocket relay with a per-session subprotocol, keeping the bearer out of process arguments and browser URLs. The file contains only the ephemeral bridge token and is removed when the bridge exits. `crabbox screenshot` uses the same locally configured account credentials for noninteractive capture. noVNC authenticates via macOS Apple (ARD) auth with the lease account credentials (handed to the local viewer only). Prefer a native VNC client instead? Tunnel and connect directly:
+`crabbox webvnc` runs a host-side bridge to the guest's Screen Sharing port; the guest needs no noVNC/`websockify` tooling. With an authenticated coordinator login, Crabbox registers the Tart lease and presents it inside the same portal chrome and controls as Linux and Windows. The registration follows the Tart lease until `crabbox stop` or normal coordinator expiry and never grants the coordinator authority to delete the VM. Without coordinator auth, Crabbox keeps the self-contained mode-0600 localhost viewer as an offline fallback. `crabbox screenshot` uses the same locally configured account credentials for noninteractive capture. noVNC authenticates via macOS Apple (ARD) auth with the lease account credentials. Prefer a native VNC client instead? Tunnel and connect directly:
 
 ```sh
 ssh -i <lease-key> -o GatewayPorts=no -L 127.0.0.1:5900:127.0.0.1:5900 admin@<lease-ip>
@@ -110,7 +110,7 @@ open vnc://127.0.0.1:5900    # native VNC client on the controller
 
 **Exposure boundary:** macOS Screen Sharing binds all guest interfaces, so the VNC server is reachable at the guest's address on the tart host network (not localhost-only), gated by account authentication. tart's network is host-local (only the Mac can reach the guest), so the effective boundary is "account-authenticated VNC, reachable from the tart host." The SSH tunnels above keep the viewer side on `127.0.0.1`.
 
-> The browser viewer is a **host-side** bridge (the guest needs no noVNC/`websockify`). For the remote control-plane case, run `crabbox webvnc` on the Mac, tunnel the printed web port to your machine with `ssh -o GatewayPorts=no -L 127.0.0.1:<port>:127.0.0.1:<port> <user>@<mac>`, copy the printed handoff file to your machine with `scp`, and open the copied file while the bridge is running. The `webvnc status`/`reset`/`daemon` subcommands (the Linux noVNC-daemon model) remain unsupported for macOS and point you to `crabbox webvnc`.
+> The browser viewer is a **host-side** bridge (the guest needs no noVNC/`websockify`). With coordinator auth, `webvnc status`, `reset`, and `daemon` use the shared portal model. Without coordinator auth, remote operators can still forward the printed localhost web port and copy/open the mode-`0600` handoff file while the bridge is running.
 
 ## Not yet supported
 

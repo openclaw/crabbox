@@ -3287,6 +3287,17 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err := ValidateLeaseTargetProviderIdentity(lease, expectedIdentity); err != nil {
 		return err
 	}
+	coordinatorCleanupCfg := cfg
+	coordinatorCleanupCfg.TargetOS = lease.SSH.TargetOS
+	coordinatorCleanupCfg.WindowsMode = lease.SSH.WindowsMode
+	// Stop accepts provider resource IDs, but portal registration state is
+	// indexed by the canonical lease ID resolved above.
+	cleanupLeaseID := firstNonBlank(lease.LeaseID, *id)
+	routedCleanupCfg, _, routeErr := macOSPortalWebVNCConfigForLease(coordinatorCleanupCfg, cleanupLeaseID)
+	coordinatorCleanupCfg = routedCleanupCfg
+	if routeErr != nil {
+		fmt.Fprintf(a.Stderr, "warning: could not prepare macOS portal deregistration for %s: %v\n", lease.LeaseID, routeErr)
+	}
 	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(sshBackend)
 	if connectionCleanupSafe {
 		if lease.SSH.Host != "" {
@@ -3309,7 +3320,14 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if !connectionCleanupSafe {
 		a.cleanupBackendLeaseLocalConnectionsBestEffort(*id, lease.LeaseID)
 	}
-	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, cfg, lease.LeaseID)
+	if isMacOSDesktopProvider(coordinatorCleanupCfg) && supportsDirectSSHWebVNC(cfg.Provider) {
+		for _, daemonID := range uniqueNonBlankStrings(*id, lease.LeaseID, serverSlug(lease.Server)) {
+			if _, stopErr := a.stopWebVNCDaemonIfRunning(daemonID); stopErr != nil {
+				fmt.Fprintf(a.Stderr, "warning: could not stop macOS WebVNC daemon for %s: %v\n", daemonID, stopErr)
+			}
+		}
+	}
+	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, coordinatorCleanupCfg, lease.LeaseID)
 	if backendCoordinator(backend) != nil {
 		fmt.Fprintf(a.Stderr, "released lease=%s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 		return nil
