@@ -1,6 +1,10 @@
 package fal
 
-import "flag"
+import (
+	"flag"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+)
 
 type falFlagValues struct {
 	APIURL       *string
@@ -40,10 +44,12 @@ func ApplyFalProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if flagWasSet(fs, "fal-user") {
 		cfg.Fal.User = *v.User
 		cfg.SSHUser = *v.User
+		core.MarkSSHUserExplicit(cfg)
 	}
 	if flagWasSet(fs, "fal-work-root") {
 		cfg.Fal.WorkRoot = *v.WorkRoot
 		cfg.WorkRoot = *v.WorkRoot
+		core.MarkWorkRootExplicit(cfg)
 	}
 	if isFalProviderName(cfg.Provider) {
 		applyFalDefaults(cfg)

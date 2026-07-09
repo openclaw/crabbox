@@ -73,7 +73,9 @@ func TestFalFlagsApplyNonSecretConfig(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Provider: providerName}
+	cfg := Config{Provider: providerName, SSHUser: "old-user", WorkRoot: "/old/work-root"}
+	core.MarkSSHUserExplicit(&cfg)
+	core.MarkWorkRootExplicit(&cfg)
 	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}

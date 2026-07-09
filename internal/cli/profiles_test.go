@@ -753,6 +753,11 @@ func TestRunStopCommandRedactsProviderURLUserinfo(t *testing.T) {
 			cfg:      Config{Provider: "hostinger", Hostinger: HostingerConfig{APIURL: rawURL}},
 			wantFlag: "--hostinger-url 'https://provider.example.test/path?view=1'",
 		},
+		{
+			name:     "fal",
+			cfg:      Config{Provider: "fal", Fal: FalConfig{APIURL: rawURL}},
+			wantFlag: "--fal-api-url 'https://provider.example.test/path?view=1'",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := runStopCommand(test.cfg, "cbx_123")
