@@ -3,6 +3,7 @@ package unikraftcloud
 import (
 	"flag"
 	"io"
+	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -21,6 +22,7 @@ type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
 type StatusView = core.StatusView
 type StopRequest = core.StopRequest
+type CleanupRequest = core.CleanupRequest
 type DoctorRequest = core.DoctorRequest
 type DoctorResult = core.DoctorResult
 type Server = core.Server
@@ -64,12 +66,28 @@ func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
 
-func claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server) error {
-	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, core.SSHTarget{})
+func newLeaseID() string {
+	return leasePrefix + strings.TrimPrefix(core.NewLeaseID(), "cbx_")
+}
+
+func leaseProviderName(leaseID, slug string) string {
+	return core.LeaseProviderName(leaseID, slug)
+}
+
+func directLeaseLabels(cfg Config, leaseID, slug string, keep bool, now time.Time) map[string]string {
+	return core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
+}
+
+var claimLeaseTargetForRepoConfigScopeIfUnchangedDurable = func(leaseID, slug string, cfg Config, providerScope string, server Server, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, providerScope, server, core.SSHTarget{}, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
 
 func readLeaseClaim(leaseID string) (LeaseClaim, error) {
 	return core.ReadLeaseClaim(leaseID)
+}
+
+func readLeaseClaimWithPresence(leaseID string) (LeaseClaim, bool, error) {
+	return core.ReadLeaseClaimWithPresence(leaseID)
 }
 
 func listUnikraftCloudLeaseClaims() ([]LeaseClaim, error) {
@@ -78,6 +96,16 @@ func listUnikraftCloudLeaseClaims() ([]LeaseClaim, error) {
 
 func removeLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
 	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
+}
+
+func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
+	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
+}
+
+var replaceLeaseClaimIfUnchangedDurable = core.ReplaceLeaseClaimIfUnchangedDurable
+
+func shouldCleanupServer(server Server, now time.Time) (bool, string) {
+	return core.ShouldCleanupServer(server, now)
 }
 
 func writeTimingJSON(w io.Writer, report core.TimingReport) error {

@@ -21,6 +21,9 @@ func TestUnikraftCloudProviderSpec(t *testing.T) {
 	if spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("spec.Coordinator = %q, want never", spec.Coordinator)
 	}
+	if !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("spec.Features = %#v, want cleanup", spec.Features)
+	}
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("spec.Targets = %#v, want linux only", spec.Targets)
 	}

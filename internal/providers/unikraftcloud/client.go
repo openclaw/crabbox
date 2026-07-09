@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -32,11 +33,11 @@ const (
 
 type unikraftCloudAPI interface {
 	BaseURL() string
+	UserUUID(ctx context.Context) (string, error)
 	CreateInstance(ctx context.Context, req createInstanceRequest) (ukcInstance, error)
 	GetInstance(ctx context.Context, id string) (ukcInstance, error)
 	ListInstances(ctx context.Context) ([]ukcInstance, error)
-	StopInstance(ctx context.Context, id string) (ukcInstance, error)
-	DeleteInstance(ctx context.Context, id string) error
+	DeleteInstance(ctx context.Context, id string) (ukcInstance, error)
 }
 
 type unikraftCloudClient struct {
@@ -94,6 +95,22 @@ type ukcResponseError struct {
 	Message string `json:"message,omitempty"`
 }
 
+type ukcQuotasResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+	Data    struct {
+		Quotas []ukcQuota `json:"quotas"`
+	} `json:"data"`
+	Errors []ukcResponseError `json:"errors,omitempty"`
+}
+
+type ukcQuota struct {
+	UUID        string `json:"uuid"`
+	ItemStatus  string `json:"status,omitempty"`
+	ItemMessage string `json:"message,omitempty"`
+	ItemError   int    `json:"error,omitempty"`
+}
+
 type unikraftCloudAPIError struct {
 	StatusCode int
 	Message    string
@@ -116,7 +133,10 @@ func isUnauthorized(err error) bool {
 	return errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden)
 }
 
-var unikraftCloudMetroPattern = regexp.MustCompile(`^[a-z][a-z0-9]{1,15}$`)
+var (
+	unikraftCloudMetroPattern = regexp.MustCompile(`^[a-z][a-z0-9]{1,15}$`)
+	unikraftCloudUUIDPattern  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+)
 
 func newUnikraftCloudClient(cfg Config, rt Runtime) (unikraftCloudAPI, error) {
 	apiKey := strings.TrimSpace(cfg.UnikraftCloud.APIKey)
@@ -155,8 +175,7 @@ func unikraftCloudBaseURL(cfg Config) (string, error) {
 }
 
 func validateUnikraftCloudAPIURL(raw string) (string, error) {
-	apiURL := strings.TrimRight(strings.TrimSpace(raw), "/")
-	parsed, err := url.Parse(apiURL)
+	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
 		return "", exit(2, "provider=%s API URL must be an absolute HTTPS URL", providerName)
 	}
@@ -167,7 +186,12 @@ func validateUnikraftCloudAPIURL(raw string) (string, error) {
 	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
 		return "", exit(2, "provider=%s API URL must use HTTPS except for loopback development endpoints", providerName)
 	}
-	return apiURL, nil
+	if escapedPath := parsed.EscapedPath(); escapedPath != "" && escapedPath != "/" {
+		return "", exit(2, "provider=%s API URL must identify the endpoint root without a path", providerName)
+	}
+	parsed.Path = ""
+	parsed.RawPath = ""
+	return parsed.String(), nil
 }
 
 func isLoopbackHTTPURL(parsed *url.URL) bool {
@@ -186,6 +210,12 @@ func secureUnikraftCloudHTTPClient(source *http.Client, baseURL string) *http.Cl
 		if !sameUnikraftCloudOrigin(trusted, req.URL) {
 			return &unikraftCloudRedirectError{origin: unikraftCloudRedirectOrigin(req.URL)}
 		}
+		if !withinUnikraftCloudAPIPath(trusted, req.URL) {
+			return &unikraftCloudRedirectPathError{}
+		}
+		if len(via) > 0 && isUnikraftCloudMutation(via[0].Method) && req.Method != via[0].Method {
+			return &unikraftCloudRedirectMethodError{from: via[0].Method, to: req.Method}
+		}
 		if originalCheckRedirect != nil {
 			return originalCheckRedirect(req, via)
 		}
@@ -195,6 +225,33 @@ func secureUnikraftCloudHTTPClient(source *http.Client, baseURL string) *http.Cl
 		return nil
 	}
 	return &client
+}
+
+func withinUnikraftCloudAPIPath(baseURL, target *url.URL) bool {
+	if baseURL == nil || target == nil {
+		return false
+	}
+	// RawPath is populated when the redirect uses a non-canonical escape such
+	// as an encoded slash or dot segment. Refuse it rather than letting a
+	// downstream router reinterpret the authenticated request outside /v1/.
+	if target.RawPath != "" {
+		return false
+	}
+	cleanPath := path.Clean(target.Path)
+	if target.Path != cleanPath && target.Path != cleanPath+"/" {
+		return false
+	}
+	basePath := strings.TrimSuffix(baseURL.Path, "/") + "/v1/"
+	return strings.HasPrefix(target.Path, basePath)
+}
+
+func isUnikraftCloudMutation(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
 }
 
 func sameUnikraftCloudOrigin(a, b *url.URL) bool {
@@ -226,6 +283,21 @@ func (e *unikraftCloudRedirectError) Error() string {
 	return fmt.Sprintf("%s refused cross-origin redirect to %s", providerName, e.origin)
 }
 
+type unikraftCloudRedirectPathError struct{}
+
+func (e *unikraftCloudRedirectPathError) Error() string {
+	return fmt.Sprintf("%s refused redirect outside the trusted API path", providerName)
+}
+
+type unikraftCloudRedirectMethodError struct {
+	from string
+	to   string
+}
+
+func (e *unikraftCloudRedirectMethodError) Error() string {
+	return fmt.Sprintf("%s refused redirect that changed mutation method from %s to %s", providerName, e.from, e.to)
+}
+
 func unikraftCloudRedirectOrigin(value *url.URL) string {
 	if value == nil || value.Scheme == "" || value.Host == "" {
 		return "<redacted>"
@@ -235,15 +307,63 @@ func unikraftCloudRedirectOrigin(value *url.URL) string {
 
 func (c *unikraftCloudClient) BaseURL() string { return c.baseURL }
 
+func (c *unikraftCloudClient) UserUUID(ctx context.Context) (string, error) {
+	var envelope ukcQuotasResponse
+	statusCode, err := c.doJSON(ctx, http.MethodGet, "/v1/users/quotas", nil, &envelope)
+	if err != nil {
+		return "", err
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return "", &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(unikraftCloudQuotasEnvelopeMessage(envelope), c.apiKey)}
+	}
+	if !strings.EqualFold(strings.TrimSpace(envelope.Status), "success") {
+		if err := c.unikraftCloudQuotaError(envelope); err != nil {
+			return "", err
+		}
+		if len(envelope.Errors) > 0 {
+			return "", c.unikraftCloudResponseError(envelope.Errors[0], unikraftCloudQuotasEnvelopeMessage(envelope))
+		}
+		return "", &unikraftCloudAPIError{StatusCode: http.StatusInternalServerError, Message: redactSecret(unikraftCloudQuotasEnvelopeMessage(envelope), c.apiKey)}
+	}
+	if len(envelope.Errors) > 0 {
+		return "", c.unikraftCloudResponseError(envelope.Errors[0], unikraftCloudQuotasEnvelopeMessage(envelope))
+	}
+	if err := c.unikraftCloudQuotaError(envelope); err != nil {
+		return "", err
+	}
+	var userUUID string
+	for _, quota := range envelope.Data.Quotas {
+		candidate := strings.TrimSpace(quota.UUID)
+		if quota.UUID == "" {
+			continue
+		}
+		if candidate != quota.UUID || !unikraftCloudUUIDPattern.MatchString(candidate) {
+			return "", fmt.Errorf("%s quotas response contains an invalid user UUID", providerName)
+		}
+		if userUUID != "" && candidate != userUUID {
+			return "", fmt.Errorf("%s quotas response contains conflicting user UUIDs", providerName)
+		}
+		userUUID = candidate
+	}
+	if userUUID == "" {
+		return "", fmt.Errorf("%s quotas response contains no user UUID", providerName)
+	}
+	return userUUID, nil
+}
+
 func (c *unikraftCloudClient) CreateInstance(ctx context.Context, req createInstanceRequest) (ukcInstance, error) {
 	instances, err := c.doInstances(ctx, http.MethodPost, "/v1/instances", req)
 	if err != nil {
 		return ukcInstance{}, err
 	}
-	if len(instances) == 0 || strings.TrimSpace(instances[0].UUID) == "" {
-		return ukcInstance{}, exit(5, "%s create instance returned no instance uuid", providerName)
+	instance, err := requireExactUnikraftCloudInstance("create instance", "", instances)
+	if err != nil {
+		return ukcInstance{}, err
 	}
-	return instances[0], nil
+	if req.Name != "" && instance.Name != req.Name {
+		return ukcInstance{}, exit(5, "%s create instance returned an unexpected instance name", providerName)
+	}
+	return instance, nil
 }
 
 func (c *unikraftCloudClient) GetInstance(ctx context.Context, id string) (ukcInstance, error) {
@@ -258,51 +378,94 @@ func (c *unikraftCloudClient) GetInstance(ctx context.Context, id string) (ukcIn
 	if len(instances) == 0 {
 		return ukcInstance{}, &unikraftCloudAPIError{StatusCode: http.StatusNotFound, Message: fmt.Sprintf("instance %s not found", id)}
 	}
-	return instances[0], nil
+	return requireExactUnikraftCloudInstance("get instance", id, instances)
 }
 
 func (c *unikraftCloudClient) ListInstances(ctx context.Context) ([]ukcInstance, error) {
-	return c.doInstances(ctx, http.MethodGet, "/v1/instances", nil)
+	instances, err := c.doInstances(ctx, http.MethodGet, "/v1/instances", nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := indexUnikraftCloudInventory(instances); err != nil {
+		return nil, err
+	}
+	return instances, nil
 }
 
-func (c *unikraftCloudClient) StopInstance(ctx context.Context, id string) (ukcInstance, error) {
+func (c *unikraftCloudClient) DeleteInstance(ctx context.Context, id string) (ukcInstance, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return ukcInstance{}, fmt.Errorf("stop instance: instance uuid or name is required")
+		return ukcInstance{}, fmt.Errorf("delete instance: instance uuid or name is required")
 	}
-	instances, err := c.doInstances(ctx, http.MethodPut, "/v1/instances/"+url.PathEscape(id)+"/stop", map[string]any{})
+	instances, err := c.doInstances(ctx, http.MethodDelete, "/v1/instances/"+url.PathEscape(id), map[string]any{
+		"timeout_s":   -1,
+		"dont_retain": true,
+	})
 	if err != nil {
 		return ukcInstance{}, err
 	}
-	if len(instances) == 0 {
-		return ukcInstance{}, nil
+	instance, err := requireExactUnikraftCloudInstance("delete instance", id, instances)
+	if err != nil {
+		return ukcInstance{}, err
 	}
-	return instances[0], nil
-}
-
-func (c *unikraftCloudClient) DeleteInstance(ctx context.Context, id string) error {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return fmt.Errorf("delete instance: instance uuid or name is required")
+	if !strings.EqualFold(strings.TrimSpace(instance.ItemStatus), "success") {
+		return ukcInstance{}, exit(5, "%s delete instance returned an item without explicit success", providerName)
 	}
-	_, err := c.doInstances(ctx, http.MethodDelete, "/v1/instances/"+url.PathEscape(id), nil)
-	return err
+	return instance, nil
 }
 
 func (c *unikraftCloudClient) doInstances(ctx context.Context, method, apiPath string, body any) ([]ukcInstance, error) {
+	var envelope ukcResponse
+	statusCode, err := c.doJSON(ctx, method, apiPath, body, &envelope)
+	if err != nil {
+		return nil, err
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return nil, &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(unikraftCloudEnvelopeMessage(envelope), c.apiKey)}
+	}
+	status := strings.ToLower(strings.TrimSpace(envelope.Status))
+	if status == "error" {
+		if len(envelope.Errors) > 0 {
+			return nil, c.unikraftCloudResponseError(envelope.Errors[0], unikraftCloudEnvelopeMessage(envelope))
+		}
+		if err := c.unikraftCloudInstanceError(envelope); err != nil {
+			return nil, err
+		}
+		return nil, &unikraftCloudAPIError{StatusCode: http.StatusInternalServerError, Message: redactSecret(unikraftCloudEnvelopeMessage(envelope), c.apiKey)}
+	}
+	if status != "success" && status != "partial_success" {
+		redactedStatus := redactSecret(strings.TrimSpace(envelope.Status), c.apiKey)
+		return nil, fmt.Errorf("%s response has invalid status %q", providerName, redactedStatus)
+	}
+	// Partial and batch envelopes report failures inline even when the top-level
+	// status is not "error". Never return the successful subset silently.
+	if err := c.unikraftCloudInstanceError(envelope); err != nil {
+		return nil, err
+	}
+	if len(envelope.Errors) > 0 {
+		return nil, c.unikraftCloudResponseError(envelope.Errors[0], unikraftCloudEnvelopeMessage(envelope))
+	}
+	if status == "partial_success" {
+		message := blank(strings.TrimSpace(envelope.Message), "instance operation only partially succeeded")
+		return nil, &unikraftCloudAPIError{StatusCode: http.StatusInternalServerError, Message: redactSecret(message, c.apiKey)}
+	}
+	return envelope.Data.Instances, nil
+}
+
+func (c *unikraftCloudClient) doJSON(ctx context.Context, method, apiPath string, body, destination any) (int, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, unikraftCloudRequestTimeout)
 	defer cancel()
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("%s marshal %s: %w", providerName, apiPath, err)
+			return 0, fmt.Errorf("%s marshal %s: %w", providerName, apiPath, err)
 		}
 		reader = bytes.NewReader(buf)
 	}
 	req, err := http.NewRequestWithContext(requestCtx, method, c.baseURL+apiPath, reader)
 	if err != nil {
-		return nil, fmt.Errorf("%s request %s: %w", providerName, apiPath, err)
+		return 0, fmt.Errorf("%s request %s: %w", providerName, apiPath, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Accept", "application/json")
@@ -312,66 +475,98 @@ func (c *unikraftCloudClient) doInstances(ctx context.Context, method, apiPath s
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		var redirectErr *unikraftCloudRedirectError
+		var redirectPathErr *unikraftCloudRedirectPathError
+		var redirectMethodErr *unikraftCloudRedirectMethodError
 		if errors.As(err, &redirectErr) {
-			return nil, redirectErr
+			return 0, redirectErr
 		}
-		return nil, fmt.Errorf("%s %s %s: %s", providerName, method, apiPath, redactSecret(err.Error(), c.apiKey))
+		if errors.As(err, &redirectPathErr) {
+			return 0, redirectPathErr
+		}
+		if errors.As(err, &redirectMethodErr) {
+			return 0, redirectMethodErr
+		}
+		return 0, fmt.Errorf("%s %s %s: %s", providerName, method, apiPath, redactSecret(err.Error(), c.apiKey))
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, unikraftCloudMaxResponseBytes+1))
 	if readErr != nil {
-		return nil, readErr
+		return 0, readErr
 	}
 	if len(data) > unikraftCloudMaxResponseBytes {
-		return nil, fmt.Errorf("%s response exceeds %d bytes", providerName, unikraftCloudMaxResponseBytes)
+		return 0, fmt.Errorf("%s response exceeds %d bytes", providerName, unikraftCloudMaxResponseBytes)
 	}
-	var envelope ukcResponse
 	if len(data) > 0 {
 		if mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mediaType != "" && mediaType != "application/json" {
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				return nil, &unikraftCloudAPIError{StatusCode: resp.StatusCode, Message: redactSecret(strings.TrimSpace(string(data)), c.apiKey)}
+				return 0, &unikraftCloudAPIError{StatusCode: resp.StatusCode, Message: redactSecret(strings.TrimSpace(string(data)), c.apiKey)}
 			}
-			return nil, fmt.Errorf("%s expected application/json response, got %q", providerName, resp.Header.Get("Content-Type"))
+			return 0, fmt.Errorf("%s expected application/json response, got %q", providerName, resp.Header.Get("Content-Type"))
 		}
-		if err := json.Unmarshal(data, &envelope); err != nil {
+		if err := json.Unmarshal(data, destination); err != nil {
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				return nil, &unikraftCloudAPIError{StatusCode: resp.StatusCode, Message: redactSecret(strings.TrimSpace(string(data)), c.apiKey)}
+				return 0, &unikraftCloudAPIError{StatusCode: resp.StatusCode, Message: redactSecret(strings.TrimSpace(string(data)), c.apiKey)}
 			}
-			return nil, fmt.Errorf("decode %s response: %w", providerName, err)
+			return 0, fmt.Errorf("decode %s response: %w", providerName, err)
 		}
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &unikraftCloudAPIError{StatusCode: resp.StatusCode, Message: redactSecret(unikraftCloudEnvelopeMessage(envelope), c.apiKey)}
+	return resp.StatusCode, nil
+}
+
+func requireExactUnikraftCloudInstance(operation, requestedID string, instances []ukcInstance) (ukcInstance, error) {
+	if len(instances) != 1 {
+		return ukcInstance{}, exit(5, "%s %s returned %d instances; expected exactly one", providerName, operation, len(instances))
 	}
-	if strings.EqualFold(strings.TrimSpace(envelope.Status), "error") {
-		if len(envelope.Errors) > 0 {
-			statusCode := unikraftCloudHTTPStatus(envelope.Errors[0].Status)
-			return nil, &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(unikraftCloudEnvelopeMessage(envelope), c.apiKey)}
+	instance := instances[0]
+	if !unikraftCloudUUIDPattern.MatchString(instance.UUID) {
+		return ukcInstance{}, exit(5, "%s %s returned an invalid instance uuid", providerName, operation)
+	}
+	if requestedID != "" {
+		matches := instance.Name == requestedID
+		if unikraftCloudUUIDPattern.MatchString(requestedID) {
+			matches = instance.UUID == requestedID
 		}
-		if err := c.unikraftCloudInstanceError(envelope); err != nil {
-			return nil, err
+		if !matches {
+			return ukcInstance{}, exit(5, "%s %s returned an unexpected instance identity", providerName, operation)
 		}
-		return nil, &unikraftCloudAPIError{StatusCode: http.StatusInternalServerError, Message: redactSecret(unikraftCloudEnvelopeMessage(envelope), c.apiKey)}
 	}
-	if !strings.EqualFold(strings.TrimSpace(envelope.Status), "success") {
-		status := redactSecret(strings.TrimSpace(envelope.Status), c.apiKey)
-		return nil, fmt.Errorf("%s response has invalid status %q", providerName, status)
-	}
-	// Batch envelopes report per-item failures inline; surface the first one.
-	if err := c.unikraftCloudInstanceError(envelope); err != nil {
-		return nil, err
-	}
-	return envelope.Data.Instances, nil
+	return instance, nil
 }
 
 func (c *unikraftCloudClient) unikraftCloudInstanceError(envelope ukcResponse) error {
 	for _, instance := range envelope.Data.Instances {
-		if strings.EqualFold(strings.TrimSpace(instance.ItemStatus), "error") {
+		status := strings.ToLower(strings.TrimSpace(instance.ItemStatus))
+		if status == "error" || instance.ItemError != 0 {
 			statusCode := unikraftCloudHTTPStatus(instance.ItemError)
 			return &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(blank(instance.ItemMessage, "instance operation failed"), c.apiKey)}
 		}
+		if status != "" && status != "success" {
+			return fmt.Errorf("%s instance result has invalid status %q", providerName, redactSecret(instance.ItemStatus, c.apiKey))
+		}
 	}
 	return nil
+}
+
+func (c *unikraftCloudClient) unikraftCloudQuotaError(envelope ukcQuotasResponse) error {
+	for _, quota := range envelope.Data.Quotas {
+		status := strings.ToLower(strings.TrimSpace(quota.ItemStatus))
+		if status == "error" || quota.ItemError != 0 {
+			statusCode := unikraftCloudHTTPStatus(quota.ItemError)
+			return &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(blank(quota.ItemMessage, "quota lookup failed"), c.apiKey)}
+		}
+		if status != "" && status != "success" {
+			return fmt.Errorf("%s quota result has invalid status %q", providerName, redactSecret(quota.ItemStatus, c.apiKey))
+		}
+	}
+	return nil
+}
+
+func (c *unikraftCloudClient) unikraftCloudResponseError(responseErr ukcResponseError, fallback string) error {
+	message := blank(strings.TrimSpace(responseErr.Message), fallback)
+	return &unikraftCloudAPIError{
+		StatusCode: unikraftCloudHTTPStatus(responseErr.Status),
+		Message:    redactSecret(message, c.apiKey),
+	}
 }
 
 func unikraftCloudHTTPStatus(code int) int {
@@ -394,6 +589,23 @@ func unikraftCloudEnvelopeMessage(envelope ukcResponse) string {
 		}
 	}
 	for _, item := range envelope.Data.Instances {
+		if message := strings.TrimSpace(item.ItemMessage); message != "" {
+			return message
+		}
+	}
+	return ""
+}
+
+func unikraftCloudQuotasEnvelopeMessage(envelope ukcQuotasResponse) string {
+	if message := strings.TrimSpace(envelope.Message); message != "" {
+		return message
+	}
+	for _, item := range envelope.Errors {
+		if message := strings.TrimSpace(item.Message); message != "" {
+			return message
+		}
+	}
+	for _, item := range envelope.Data.Quotas {
 		if message := strings.TrimSpace(item.ItemMessage); message != "" {
 			return message
 		}

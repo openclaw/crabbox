@@ -15,32 +15,62 @@ import (
 )
 
 const testInstanceUUID = "11111111-2222-3333-4444-555555555555"
+const testUserUUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 type fakeUnikraftCloudAPI struct {
-	baseURL string
+	baseURL   string
+	userUUID  string
+	userErr   error
+	userCalls int
 
-	created      []createInstanceRequest
-	createErr    error
-	createResult ukcInstance
-	getErr       error
-	getResults   []ukcInstance
-	getCalls     int
-	listErr      error
-	listResult   []ukcInstance
-	stopErr      error
-	stoppedIDs   []string
-	deleteErr    error
-	deletedIDs   []string
+	created               []createInstanceRequest
+	createErr             error
+	createResult          ukcInstance
+	createBeforeError     bool
+	preserveCreateName    bool
+	onCreate              func(createInstanceRequest)
+	getErr                error
+	getResults            []ukcInstance
+	getCalls              int
+	listErr               error
+	listResult            []ukcInstance
+	deleteErr             error
+	deletedIDs            []string
+	deleted               map[string]bool
+	retainAfterDelete     bool
+	removeBeforeDeleteErr bool
 }
 
 func (f *fakeUnikraftCloudAPI) BaseURL() string { return f.baseURL }
 
+func (f *fakeUnikraftCloudAPI) UserUUID(_ context.Context) (string, error) {
+	f.userCalls++
+	if f.userErr != nil {
+		return "", f.userErr
+	}
+	if f.userUUID == "" {
+		return testUserUUID, nil
+	}
+	return f.userUUID, nil
+}
+
 func (f *fakeUnikraftCloudAPI) CreateInstance(_ context.Context, req createInstanceRequest) (ukcInstance, error) {
 	f.created = append(f.created, req)
+	result := f.createResult
+	if !f.preserveCreateName {
+		result.Name = req.Name
+	}
+	f.createResult = result
+	if f.onCreate != nil {
+		f.onCreate(req)
+	}
 	if f.createErr != nil {
+		if !f.createBeforeError {
+			f.createResult = ukcInstance{}
+		}
 		return ukcInstance{}, f.createErr
 	}
-	return f.createResult, nil
+	return result, nil
 }
 
 func (f *fakeUnikraftCloudAPI) GetInstance(_ context.Context, id string) (ukcInstance, error) {
@@ -48,8 +78,18 @@ func (f *fakeUnikraftCloudAPI) GetInstance(_ context.Context, id string) (ukcIns
 	if f.getErr != nil {
 		return ukcInstance{}, f.getErr
 	}
+	if f.deleted != nil && (f.deleted[id] || ((f.createResult.UUID == id || f.createResult.Name == id) && f.deleted[f.createResult.UUID])) {
+		return ukcInstance{}, notFoundErr()
+	}
 	if len(f.getResults) == 0 {
-		return ukcInstance{UUID: id, State: "running"}, nil
+		if f.createResult.UUID == id || f.createResult.Name == id {
+			result := f.createResult
+			if result.State == "" {
+				result.State = "running"
+			}
+			return result, nil
+		}
+		return ukcInstance{}, notFoundErr()
 	}
 	result := f.getResults[0]
 	if len(f.getResults) > 1 {
@@ -62,20 +102,43 @@ func (f *fakeUnikraftCloudAPI) ListInstances(_ context.Context) ([]ukcInstance, 
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return f.listResult, nil
-}
-
-func (f *fakeUnikraftCloudAPI) StopInstance(_ context.Context, id string) (ukcInstance, error) {
-	f.stoppedIDs = append(f.stoppedIDs, id)
-	if f.stopErr != nil {
-		return ukcInstance{}, f.stopErr
+	if f.listResult != nil {
+		out := make([]ukcInstance, 0, len(f.listResult))
+		for _, instance := range f.listResult {
+			if f.deleted == nil || !f.deleted[instance.UUID] {
+				out = append(out, instance)
+			}
+		}
+		return out, nil
 	}
-	return ukcInstance{UUID: id, State: "stopped"}, nil
+	if f.createResult.UUID != "" && (f.deleted == nil || !f.deleted[f.createResult.UUID]) {
+		return []ukcInstance{f.createResult}, nil
+	}
+	return nil, nil
 }
 
-func (f *fakeUnikraftCloudAPI) DeleteInstance(_ context.Context, id string) error {
+func (f *fakeUnikraftCloudAPI) DeleteInstance(_ context.Context, id string) (ukcInstance, error) {
 	f.deletedIDs = append(f.deletedIDs, id)
-	return f.deleteErr
+	if f.deleteErr != nil {
+		if f.removeBeforeDeleteErr {
+			if f.deleted == nil {
+				f.deleted = make(map[string]bool)
+			}
+			f.deleted[id] = true
+		}
+		return ukcInstance{}, f.deleteErr
+	}
+	if !f.retainAfterDelete {
+		if f.deleted == nil {
+			f.deleted = make(map[string]bool)
+		}
+		f.deleted[id] = true
+	}
+	name := f.createResult.Name
+	if name == "" {
+		name = id
+	}
+	return ukcInstance{UUID: id, Name: name, State: "deleted", ItemStatus: "success"}, nil
 }
 
 func testBackend(api unikraftCloudAPI, stdout, stderr *bytes.Buffer) *backend {
@@ -89,15 +152,38 @@ func testBackend(api unikraftCloudAPI, stdout, stderr *bytes.Buffer) *backend {
 		stderr = &bytes.Buffer{}
 	}
 	return &backend{
-		spec:      Provider{}.Spec(),
-		cfg:       cfg,
-		rt:        Runtime{Stdout: stdout, Stderr: stderr},
-		newClient: func(Config, Runtime) (unikraftCloudAPI, error) { return api, nil },
+		spec:                      Provider{}.Spec(),
+		cfg:                       cfg,
+		rt:                        Runtime{Stdout: stdout, Stderr: stderr},
+		newClient:                 func(Config, Runtime) (unikraftCloudAPI, error) { return api, nil },
+		pollInterval:              time.Millisecond,
+		deleteConfirmationTimeout: 20 * time.Millisecond,
 	}
 }
 
 func notFoundErr() error {
 	return &unikraftCloudAPIError{StatusCode: http.StatusNotFound, Message: "instance not found"}
+}
+
+func testClaimScope(t *testing.T, baseURL string) string {
+	t.Helper()
+	scope, err := unikraftCloudClaimScope(baseURL, testUserUUID)
+	if err != nil {
+		t.Fatalf("claim scope: %v", err)
+	}
+	return scope
+}
+
+func onlyTestClaim(t *testing.T) LeaseClaim {
+	t.Helper()
+	claims, err := listUnikraftCloudLeaseClaims()
+	if err != nil {
+		t.Fatalf("list claims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("claims = %#v, want one", claims)
+	}
+	return claims[0]
 }
 
 func TestWarmupCreatesInstanceAndClaimsLease(t *testing.T) {
@@ -125,20 +211,20 @@ func TestWarmupCreatesInstanceAndClaimsLease(t *testing.T) {
 	if api.created[0].Image != "unikraft.org/nginx:latest" || !api.created[0].Autostart || api.created[0].MemoryMB != 256 {
 		t.Fatalf("create request = %#v", api.created[0])
 	}
-	leaseID := leasePrefix + testInstanceUUID
+	claim := onlyTestClaim(t)
+	leaseID := claim.LeaseID
 	for _, want := range []string{"leased " + leaseID, "provider=" + providerName, "instance=" + testInstanceUUID, "state=running", "fqdn=funky-town.fra.unikraft.app"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 		}
 	}
-	if !strings.Contains(stderr.String(), "keeps the instance until explicit stop") {
+	if !strings.Contains(stderr.String(), "keeps the instance until explicit stop or eligible cleanup") {
 		t.Fatalf("stderr = %q, want keep warning", stderr.String())
 	}
-	claim, err := readLeaseClaim(leaseID)
-	if err != nil || claim.LeaseID != leaseID || claim.Provider != providerName || claim.CloudID != testInstanceUUID {
-		t.Fatalf("claim = %#v err = %v", claim, err)
+	if claim.LeaseID != leaseID || claim.Provider != providerName || claim.CloudID != testInstanceUUID {
+		t.Fatalf("claim = %#v", claim)
 	}
-	if claim.ProviderScope != "endpoint:https://api.fra.unikraft.cloud" {
+	if claim.ProviderScope != testClaimScope(t, api.BaseURL()) {
 		t.Fatalf("claim scope = %q", claim.ProviderScope)
 	}
 	if claim.Labels["lease"] != leaseID || claim.Labels["provider"] != providerName || claim.Labels["slug"] == "" {
@@ -210,7 +296,7 @@ func TestWarmupErrors(t *testing.T) {
 	}
 }
 
-func TestWarmupCleansUpInstanceWhenClaimFails(t *testing.T) {
+func TestWarmupDoesNotCreateWhenIntentCannotBePersisted(t *testing.T) {
 	stateRoot := filepath.Join(t.TempDir(), "state-file")
 	if err := os.WriteFile(stateRoot, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("write state sentinel: %v", err)
@@ -227,11 +313,8 @@ func TestWarmupCleansUpInstanceWhenClaimFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("Warmup succeeded, want claim write failure")
 	}
-	if len(api.deletedIDs) != 1 || api.deletedIDs[0] != testInstanceUUID {
-		t.Fatalf("deletedIDs = %#v, want created instance cleaned up", api.deletedIDs)
-	}
-	if claim, readErr := readLeaseClaim(leasePrefix + testInstanceUUID); readErr == nil && claim.LeaseID != "" {
-		t.Fatalf("claim = %#v, want none", claim)
+	if len(api.created) != 0 || len(api.deletedIDs) != 0 {
+		t.Fatalf("provider mutations = created %#v deleted %#v, want none", api.created, api.deletedIDs)
 	}
 }
 
@@ -335,7 +418,8 @@ func TestStatusResolvesClaimedSlug(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if view.ID != leasePrefix+testInstanceUUID || view.Slug != "my-ukc" || view.ServerID != testInstanceUUID {
+	claim := onlyTestClaim(t)
+	if view.ID != claim.LeaseID || view.Slug != "my-ukc" || view.ServerID != testInstanceUUID {
 		t.Fatalf("view = %#v", view)
 	}
 }
@@ -415,21 +499,24 @@ func TestListMergesRemoteInstancesWithLocalClaims(t *testing.T) {
 	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "my-ukc"}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
+	api.listResult[0].Name = api.createResult.Name
 	servers, err := b.List(context.Background(), ListRequest{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(servers) != 2 {
+	if len(servers) != 1 {
 		t.Fatalf("servers = %#v", servers)
 	}
 	if servers[0].CloudID != testInstanceUUID || servers[0].Status != "running" {
 		t.Fatalf("servers[0] = %#v", servers[0])
 	}
-	if servers[0].Labels["lease"] != leasePrefix+testInstanceUUID || servers[0].Labels["slug"] != "my-ukc" {
+	claim := onlyTestClaim(t)
+	if servers[0].Labels["lease"] != claim.LeaseID || servers[0].Labels["slug"] != "my-ukc" {
 		t.Fatalf("servers[0].Labels = %#v", servers[0].Labels)
 	}
-	if servers[1].Labels["lease"] != "" {
-		t.Fatalf("servers[1] unexpectedly claimed: %#v", servers[1].Labels)
+	all, err := b.List(context.Background(), ListRequest{All: true})
+	if err != nil || len(all) != 2 || all[1].Labels["lease"] != "" {
+		t.Fatalf("all = %#v err=%v, want claimed plus unclaimed", all, err)
 	}
 }
 
@@ -457,18 +544,14 @@ func TestListDoesNotPresentUnboundClaimAsOwned(t *testing.T) {
 	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: repoRoot, Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
-	leaseID := leasePrefix + testInstanceUUID
+	leaseID := onlyTestClaim(t).LeaseID
 	core.RemoveLeaseClaim(leaseID)
-	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "legacy-claim", providerName, claimScope(api.BaseURL()), "", repoRoot, time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "legacy-claim", providerName, testClaimScope(t, api.BaseURL()), "", repoRoot, time.Hour, false); err != nil {
 		t.Fatalf("write unbound claim: %v", err)
 	}
 
-	servers, err := b.List(context.Background(), ListRequest{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(servers) != 1 || servers[0].Labels["lease"] != "" {
-		t.Fatalf("servers = %#v, want remote instance without ownership labels", servers)
+	if _, err := b.List(context.Background(), ListRequest{}); err == nil || !strings.Contains(err.Error(), "ownership labels") {
+		t.Fatalf("List err = %v, want invalid legacy claim rejection", err)
 	}
 }
 
@@ -483,20 +566,18 @@ func TestStopDeletesClaimedInstance(t *testing.T) {
 	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "my-ukc"}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
+	claim := onlyTestClaim(t)
 	if err := b.Stop(context.Background(), StopRequest{ID: "my-ukc"}); err != nil {
 		t.Fatalf("Stop: %v", err)
-	}
-	if len(api.stoppedIDs) != 1 || api.stoppedIDs[0] != testInstanceUUID {
-		t.Fatalf("stoppedIDs = %#v", api.stoppedIDs)
 	}
 	if len(api.deletedIDs) != 1 || api.deletedIDs[0] != testInstanceUUID {
 		t.Fatalf("deletedIDs = %#v", api.deletedIDs)
 	}
-	if !strings.Contains(stderr.String(), "released lease="+leasePrefix+testInstanceUUID) {
+	if !strings.Contains(stderr.String(), "released lease="+claim.LeaseID) {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
-	if claim, err := readLeaseClaim(leasePrefix + testInstanceUUID); err == nil && claim.LeaseID != "" {
-		t.Fatalf("claim = %#v, want removed", claim)
+	if stored, err := readLeaseClaim(claim.LeaseID); err == nil && stored.LeaseID != "" {
+		t.Fatalf("claim = %#v, want removed", stored)
 	}
 }
 
@@ -512,7 +593,7 @@ func TestStopRequiresLocalClaim(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 4 {
 		t.Fatalf("err = %#v, want exit code 4", err)
 	}
-	if len(api.stoppedIDs) != 0 || len(api.deletedIDs) != 0 {
+	if len(api.deletedIDs) != 0 {
 		t.Fatalf("Stop touched the API for an unclaimed instance: %#v", api)
 	}
 }
@@ -528,17 +609,17 @@ func TestStopRejectsClaimWithoutExactInstanceBinding(t *testing.T) {
 	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: repoRoot, Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
-	leaseID := leasePrefix + testInstanceUUID
+	leaseID := onlyTestClaim(t).LeaseID
 	core.RemoveLeaseClaim(leaseID)
-	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "legacy-claim", providerName, claimScope(api.BaseURL()), "", repoRoot, time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "legacy-claim", providerName, testClaimScope(t, api.BaseURL()), "", repoRoot, time.Hour, false); err != nil {
 		t.Fatalf("write unbound claim: %v", err)
 	}
 
 	err := b.Stop(context.Background(), StopRequest{ID: leaseID})
-	if err == nil || !strings.Contains(err.Error(), "no exact instance binding") {
-		t.Fatalf("Stop err = %v, want exact instance binding rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "ownership labels") {
+		t.Fatalf("Stop err = %v, want incomplete legacy claim rejection", err)
 	}
-	if len(api.stoppedIDs) != 0 || len(api.deletedIDs) != 0 {
+	if len(api.deletedIDs) != 0 {
 		t.Fatalf("Stop touched API for unbound claim: %#v", api)
 	}
 }
@@ -554,8 +635,9 @@ func TestStopRemovesClaimWhenInstanceAlreadyGone(t *testing.T) {
 	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
-	api.stopErr = notFoundErr()
-	if err := b.Stop(context.Background(), StopRequest{ID: leasePrefix + testInstanceUUID}); err != nil {
+	claim := onlyTestClaim(t)
+	api.deleted = map[string]bool{testInstanceUUID: true}
+	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if len(api.deletedIDs) != 0 {
@@ -564,8 +646,8 @@ func TestStopRemovesClaimWhenInstanceAlreadyGone(t *testing.T) {
 	if !strings.Contains(stderr.String(), "already gone") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
-	if claim, err := readLeaseClaim(leasePrefix + testInstanceUUID); err == nil && claim.LeaseID != "" {
-		t.Fatalf("claim = %#v, want removed", claim)
+	if stored, err := readLeaseClaim(claim.LeaseID); err == nil && stored.LeaseID != "" {
+		t.Fatalf("claim = %#v, want removed", stored)
 	}
 }
 
@@ -580,13 +662,14 @@ func TestStopPropagatesDeleteError(t *testing.T) {
 	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
-	err := b.Stop(context.Background(), StopRequest{ID: leasePrefix + testInstanceUUID})
+	claim := onlyTestClaim(t)
+	err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
 	if err == nil || !strings.Contains(err.Error(), "backend unavailable") {
 		t.Fatalf("err = %v, want delete failure", err)
 	}
 	// The claim must survive so the user can retry stop.
-	if claim, readErr := readLeaseClaim(leasePrefix + testInstanceUUID); readErr != nil || claim.LeaseID == "" {
-		t.Fatalf("claim = %#v err = %v, want retained claim", claim, readErr)
+	if stored, readErr := readLeaseClaim(claim.LeaseID); readErr != nil || stored.LeaseID == "" {
+		t.Fatalf("claim = %#v err = %v, want retained claim", stored, readErr)
 	}
 }
 
@@ -600,13 +683,277 @@ func TestStopRejectsClaimFromDifferentEndpoint(t *testing.T) {
 	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
+	claim := onlyTestClaim(t)
 	api.baseURL = "https://api.dal.unikraft.cloud"
-	err := b.Stop(context.Background(), StopRequest{ID: leasePrefix + testInstanceUUID})
-	if err == nil || !strings.Contains(err.Error(), "different API endpoint or metro") {
+	err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	if err == nil || !strings.Contains(err.Error(), "different API endpoint or account") {
 		t.Fatalf("err = %v, want scope mismatch", err)
 	}
 	if len(api.deletedIDs) != 0 {
 		t.Fatalf("deletedIDs = %#v, want none", api.deletedIDs)
+	}
+}
+
+func TestWarmupPublishesCreateIntentBeforeProviderMutation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:      "https://api.fra.unikraft.cloud",
+		createResult: ukcInstance{UUID: testInstanceUUID, State: "running"},
+	}
+	api.onCreate = func(req createInstanceRequest) {
+		claims, err := listUnikraftCloudLeaseClaims()
+		if err != nil || len(claims) != 1 {
+			t.Fatalf("claims at create = %#v err=%v", claims, err)
+		}
+		intent := claims[0]
+		if intent.CloudID != "" || intent.Labels["state"] != ukcStateCreateIntent || intent.Labels[ukcLabelResourceName] != req.Name {
+			t.Fatalf("intent at create = %#v", intent)
+		}
+		if intent.Labels[ukcLabelAccountUUID] != testUserUUID || intent.Labels[ukcLabelRequestHash] == "" {
+			t.Fatalf("intent labels at create = %#v", intent.Labels)
+		}
+	}
+	b := testBackend(api, nil, nil)
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	if len(api.created) != 1 || !strings.HasPrefix(api.created[0].Name, "crabbox-ukc-") {
+		t.Fatalf("create requests = %#v", api.created)
+	}
+}
+
+func TestWarmupReconcilesAmbiguousCreateWithoutSecondPost(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:           "https://api.fra.unikraft.cloud",
+		createResult:      ukcInstance{UUID: testInstanceUUID, State: "running"},
+		createErr:         errors.New("connection reset after request"),
+		createBeforeError: true,
+	}
+	b := testBackend(api, nil, nil)
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	if len(api.created) != 1 {
+		t.Fatalf("created = %#v, want exactly one POST", api.created)
+	}
+	claim := onlyTestClaim(t)
+	if claim.CloudID != testInstanceUUID || claim.Labels["state"] != ukcStateReady {
+		t.Fatalf("claim = %#v", claim)
+	}
+}
+
+func TestWarmupRetainsIntentWhenCreateOutcomeIsAmbiguous(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:   "https://api.fra.unikraft.cloud",
+		createErr: errors.New("connection reset after request"),
+	}
+	b := testBackend(api, nil, nil)
+	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}})
+	if err == nil || !strings.Contains(err.Error(), "recovery claim") {
+		t.Fatalf("Warmup err = %v", err)
+	}
+	if len(api.created) != 1 {
+		t.Fatalf("created = %#v, want one POST", api.created)
+	}
+	claim := onlyTestClaim(t)
+	if claim.CloudID != "" || claim.Labels["state"] != ukcStateCreateIntent {
+		t.Fatalf("claim = %#v, want retained intent", claim)
+	}
+}
+
+func TestWarmupRejectsNegativeMemoryBeforeProviderAccess(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{baseURL: "https://api.fra.unikraft.cloud"}
+	b := testBackend(api, nil, nil)
+	b.cfg.UnikraftCloud.MemoryMB = -1
+	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}})
+	if err == nil || !strings.Contains(err.Error(), "memory must be zero or greater") {
+		t.Fatalf("Warmup err = %v", err)
+	}
+	if api.userCalls != 0 || len(api.created) != 0 {
+		t.Fatalf("provider accessed before validation: userCalls=%d created=%#v", api.userCalls, api.created)
+	}
+}
+
+func TestStopRejectsClaimFromDifferentAccount(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:      "https://api.fra.unikraft.cloud",
+		userUUID:     testUserUUID,
+		createResult: ukcInstance{UUID: testInstanceUUID, State: "running"},
+	}
+	b := testBackend(api, nil, nil)
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	claim := onlyTestClaim(t)
+	api.userUUID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+	err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	if err == nil || !strings.Contains(err.Error(), "different API endpoint or account") {
+		t.Fatalf("Stop err = %v", err)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("deletedIDs = %#v, want none", api.deletedIDs)
+	}
+	if stored, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID); readErr != nil || !exists || stored.CloudID != testInstanceUUID {
+		t.Fatalf("stored claim = %#v exists=%v err=%v", stored, exists, readErr)
+	}
+}
+
+func TestStopRetainsAcceptedClaimUntilStrongAbsenceProof(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:           "https://api.fra.unikraft.cloud",
+		createResult:      ukcInstance{UUID: testInstanceUUID, State: "running"},
+		retainAfterDelete: true,
+	}
+	b := testBackend(api, nil, nil)
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	claim := onlyTestClaim(t)
+	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err == nil || !strings.Contains(err.Error(), "absence is unconfirmed") {
+		t.Fatalf("first Stop err = %v", err)
+	}
+	accepted := onlyTestClaim(t)
+	if accepted.Labels["state"] != ukcStateDeleteAccepted || len(api.deletedIDs) != 1 {
+		t.Fatalf("accepted = %#v deleted=%#v", accepted, api.deletedIDs)
+	}
+	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err == nil {
+		t.Fatal("second Stop succeeded while instance remains visible")
+	}
+	if len(api.deletedIDs) != 1 {
+		t.Fatalf("accepted delete replayed: %#v", api.deletedIDs)
+	}
+	api.deleted = map[string]bool{testInstanceUUID: true}
+	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err != nil {
+		t.Fatalf("final Stop: %v", err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
+	}
+}
+
+func TestStopDoesNotTrustNotFoundWhenInventoryStillContainsInstance(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:      "https://api.fra.unikraft.cloud",
+		createResult: ukcInstance{UUID: testInstanceUUID, State: "running"},
+	}
+	b := testBackend(api, nil, nil)
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	claim := onlyTestClaim(t)
+	api.listResult = []ukcInstance{api.createResult}
+	api.getErr = notFoundErr()
+	err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	if err == nil {
+		t.Fatal("Stop succeeded on contradictory absence evidence")
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("deletedIDs = %#v, want none", api.deletedIDs)
+	}
+	if _, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID); readErr != nil || !exists {
+		t.Fatalf("claim exists=%v err=%v, want retained", exists, readErr)
+	}
+}
+
+func TestStopReconcilesAmbiguousDeleteAfterStrongAbsenceProof(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:               "https://api.fra.unikraft.cloud",
+		createResult:          ukcInstance{UUID: testInstanceUUID, State: "running"},
+		deleteErr:             errors.New("connection reset after delete"),
+		removeBeforeDeleteErr: true,
+	}
+	b := testBackend(api, nil, nil)
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	claim := onlyTestClaim(t)
+	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if len(api.deletedIDs) != 1 {
+		t.Fatalf("deletedIDs = %#v", api.deletedIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
+	}
+}
+
+func TestConcurrentWarmupsReserveDistinctRequestedSlugs(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	apis := []*fakeUnikraftCloudAPI{
+		{baseURL: "https://api.fra.unikraft.cloud", createResult: ukcInstance{UUID: testInstanceUUID, State: "running"}},
+		{baseURL: "https://api.fra.unikraft.cloud", createResult: ukcInstance{UUID: "66666666-7777-8888-9999-000000000000", State: "running"}},
+	}
+	errCh := make(chan error, len(apis))
+	for _, api := range apis {
+		api := api
+		go func() {
+			b := testBackend(api, nil, nil)
+			errCh <- b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "same-slug"})
+		}()
+	}
+	for range apis {
+		if err := <-errCh; err != nil {
+			t.Fatalf("Warmup: %v", err)
+		}
+	}
+	claims, err := listUnikraftCloudLeaseClaims()
+	if err != nil || len(claims) != 2 {
+		t.Fatalf("claims = %#v err=%v", claims, err)
+	}
+	if claims[0].Slug == claims[1].Slug {
+		t.Fatalf("duplicate slugs: %#v", claims)
+	}
+}
+
+func TestStatusWaitFailsImmediatelyOnTerminalState(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:    "https://api.fra.unikraft.cloud",
+		getResults: []ukcInstance{{UUID: testInstanceUUID, Name: testInstanceUUID, State: "stopped"}},
+	}
+	b := testBackend(api, nil, nil)
+	started := time.Now()
+	_, err := b.Status(context.Background(), StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: time.Second})
+	if err == nil || !strings.Contains(err.Error(), "terminal state=stopped") {
+		t.Fatalf("Status err = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("terminal status took %s", elapsed)
+	}
+}
+
+func TestCleanupResumesAcceptedDeletionWithoutReissuingDelete(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:           "https://api.fra.unikraft.cloud",
+		createResult:      ukcInstance{UUID: testInstanceUUID, State: "running"},
+		retainAfterDelete: true,
+	}
+	b := testBackend(api, nil, nil)
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	claim := onlyTestClaim(t)
+	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err == nil {
+		t.Fatal("Stop succeeded without absence proof")
+	}
+	api.deleted = map[string]bool{testInstanceUUID: true}
+	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if len(api.deletedIDs) != 1 {
+		t.Fatalf("accepted delete replayed: %#v", api.deletedIDs)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
 	}
 }
 

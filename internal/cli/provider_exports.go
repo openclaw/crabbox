@@ -134,6 +134,12 @@ func ClaimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug string, cfg Config,
 	return claimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, server, target, idleTimeout, expected, expectedExists)
 }
 
+// ClaimLeaseTargetForConfigScopeIfUnchangedDurable performs the same guarded
+// update and also durably syncs any newly created claim namespace ancestors.
+func ClaimLeaseTargetForConfigScopeIfUnchangedDurable(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, idleTimeout time.Duration, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseTargetForConfigScopeIfUnchangedDurable(leaseID, slug, cfg, providerScope, server, target, idleTimeout, expected, expectedExists)
+}
+
 func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 	return claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
@@ -142,6 +148,12 @@ func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, 
 // repository-scoped claim to routing identity outside the shared Config model.
 func ClaimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 	return claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
+// ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable performs the same
+// guarded update and durably syncs newly created claim namespace ancestors.
+func ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
 
 // ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged binds an
@@ -211,6 +223,10 @@ func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, 
 
 func ReplaceLeaseClaimIfUnchanged(leaseID string, current, replacement LeaseClaim) error {
 	return replaceLeaseClaimIfUnchanged(leaseID, current, replacement)
+}
+
+func ReplaceLeaseClaimIfUnchangedDurable(leaseID string, current, replacement LeaseClaim) error {
+	return replaceLeaseClaimIfUnchangedDurable(leaseID, current, replacement)
 }
 
 func ValidateAzureSSHCIDRsForAcquire(ctx context.Context, cfg Config) error {

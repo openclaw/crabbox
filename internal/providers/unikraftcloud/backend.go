@@ -10,13 +10,12 @@ import (
 
 const (
 	statusPollInterval = 250 * time.Millisecond
-	cleanupTimeout     = 15 * time.Second
 	defaultWaitTimeout = 5 * time.Minute
 )
 
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
-	return &backend{spec: spec, cfg: cfg, rt: rt, newClient: newUnikraftCloudClient}
+	return &backend{spec: spec, cfg: cfg, rt: rt, newClient: newUnikraftCloudClient, pollInterval: statusPollInterval, deleteConfirmationTimeout: 30 * time.Second}
 }
 
 type backend struct {
@@ -24,6 +23,9 @@ type backend struct {
 	cfg       Config
 	rt        Runtime
 	newClient func(Config, Runtime) (unikraftCloudAPI, error)
+
+	pollInterval              time.Duration
+	deleteConfirmationTimeout time.Duration
 }
 
 func (b *backend) Spec() ProviderSpec { return b.spec }
@@ -40,11 +42,20 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	if err != nil {
 		return DoctorResult{}, err
 	}
+	if _, err := api.UserUUID(ctx); err != nil {
+		if isUnauthorized(err) {
+			return DoctorResult{}, exit(3, "provider=%s API key was rejected; check UKC_TOKEN / UNIKRAFT_CLOUD_API_KEY and the configured metro: %v", providerName, err)
+		}
+		return DoctorResult{}, err
+	}
 	instances, err := api.ListInstances(ctx)
 	if err != nil {
 		if isUnauthorized(err) {
 			return DoctorResult{}, exit(3, "provider=%s API key was rejected; check UKC_TOKEN / UNIKRAFT_CLOUD_API_KEY and the configured metro: %v", providerName, err)
 		}
+		return DoctorResult{}, err
+	}
+	if _, err := indexUnikraftCloudInventory(instances); err != nil {
 		return DoctorResult{}, err
 	}
 	return inventoryDoctorResult(providerName, len(instances)), nil
@@ -65,65 +76,136 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if image == "" {
 		return exit(2, "provider=%s warmup requires an OCI image; set --unikraft-cloud-image, UNIKRAFT_CLOUD_IMAGE, or unikraftCloud.image", providerName)
 	}
+	if b.cfg.UnikraftCloud.MemoryMB < 0 {
+		return exit(2, "provider=%s memory must be zero or greater", providerName)
+	}
 	started := b.now()
 	api, err := b.client()
 	if err != nil {
 		return err
 	}
-	instance, err := api.CreateInstance(ctx, createInstanceRequest{
-		Image:     image,
-		MemoryMB:  b.cfg.UnikraftCloud.MemoryMB,
-		Autostart: true,
-	})
+	accountUUID, err := api.UserUUID(ctx)
 	if err != nil {
 		return err
 	}
-	leaseID := leasePrefix + instance.UUID
+	scope, err := unikraftCloudClaimScope(api.BaseURL(), accountUUID)
+	if err != nil {
+		return err
+	}
+	leaseID := newLeaseID()
+	unlockLease, err := lockUnikraftCloudLeaseOperation(ctx, leaseID)
+	if err != nil {
+		return err
+	}
+	defer unlockLease()
+	unlockSlug, err := lockUnikraftCloudSlugAllocation(ctx)
+	if err != nil {
+		return err
+	}
 	slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 	if err != nil {
-		return b.cleanupCreateFailure(ctx, api, instance.UUID, err)
+		unlockSlug()
+		return err
 	}
-	if err := claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, claimScope(api.BaseURL()), b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, Server{
-		CloudID:  instance.UUID,
-		Provider: providerName,
-		Name:     instance.Name,
-		Labels: map[string]string{
-			"lease":    leaseID,
-			"provider": providerName,
-			"slug":     slug,
-		},
-	}); err != nil {
-		return b.cleanupCreateFailure(ctx, api, instance.UUID, err)
+	createReq := createInstanceRequest{
+		Name:      leaseProviderName(leaseID, ""),
+		Image:     image,
+		MemoryMB:  b.cfg.UnikraftCloud.MemoryMB,
+		Autostart: true,
 	}
+	intent, err := b.createIntentClaim(leaseID, slug, scope, accountUUID, req, createReq)
+	unlockSlug()
+	if err != nil {
+		return err
+	}
+	intent, err = b.preflightCreateIntent(ctx, api, intent)
+	if err != nil {
+		return err
+	}
+	instance, createErr := api.CreateInstance(ctx, createReq)
+	if createErr != nil {
+		if definiteUnikraftCloudCreateRejection(createErr) {
+			conflict, transitionErr := transitionUnikraftCloudCreateState(intent, ukcStateCreateConflict)
+			if transitionErr != nil {
+				cause := errors.Join(createErr, fmt.Errorf("%s create rejection could not quarantine recovery claim %s: %w", providerName, leaseID, transitionErr))
+				return quarantineRejectedUnikraftCloudCreateClaim(intent, cause)
+			}
+			proofCtx := context.WithoutCancel(ctx)
+			resourceName := conflict.Labels[ukcLabelResourceName]
+			if proofErr := b.proveInstanceAbsent(proofCtx, api, resourceName, resourceName); proofErr != nil {
+				return errors.Join(createErr, fmt.Errorf("%s create rejection could not prove zero residue; non-adoptable recovery claim %s retained: %w", providerName, leaseID, proofErr))
+			}
+			if removeErr := removeLeaseClaimIfUnchanged(conflict.LeaseID, conflict); removeErr != nil {
+				return errors.Join(createErr, fmt.Errorf("remove rejected %s create claim %s: %w", providerName, leaseID, removeErr))
+			}
+			return createErr
+		}
+		reconciled, recovered, _, reconcileErr := b.reconcileCreateIntent(context.WithoutCancel(ctx), api, intent, false)
+		if reconcileErr != nil {
+			return errors.Join(createErr, fmt.Errorf("%s create outcome is ambiguous; recovery claim %s retained: %w", providerName, leaseID, reconcileErr))
+		}
+		if recovered != nil {
+			return b.finishWarmup(started, reconciled, *recovered, req)
+		}
+		return fmt.Errorf("%s create outcome is ambiguous; recovery claim %s retained for exact-name reconciliation: %w", providerName, leaseID, createErr)
+	}
+	ready, err := b.publishReadyClaim(intent, instance)
+	if err != nil {
+		return fmt.Errorf("%s instance %s was created but ready ownership could not be finalized; recovery claim %s retained: %w", providerName, instance.UUID, leaseID, err)
+	}
+	return b.finishWarmup(started, ready, instance, req)
+}
+
+func (b *backend) preflightCreateIntent(ctx context.Context, api unikraftCloudAPI, preflight LeaseClaim) (LeaseClaim, error) {
+	resourceName := strings.TrimSpace(preflight.Labels[ukcLabelResourceName])
+	instances, listErr := api.ListInstances(ctx)
+	if listErr == nil {
+		_, listErr = indexUnikraftCloudInventory(instances)
+	}
+	if listErr == nil {
+		for _, instance := range instances {
+			if instance.Name == resourceName {
+				cleanupErr := removeLeaseClaimIfUnchanged(preflight.LeaseID, preflight)
+				conflictErr := exit(4, "%s instance name %q already exists before create; refusing to claim or mutate it", providerName, resourceName)
+				if cleanupErr != nil {
+					return LeaseClaim{}, errors.Join(conflictErr, fmt.Errorf("remove unused preflight claim %s: %w", preflight.LeaseID, cleanupErr))
+				}
+				return LeaseClaim{}, conflictErr
+			}
+		}
+	}
+	if listErr != nil {
+		if cleanupErr := removeLeaseClaimIfUnchanged(preflight.LeaseID, preflight); cleanupErr != nil {
+			return LeaseClaim{}, errors.Join(listErr, fmt.Errorf("remove unused preflight claim %s: %w", preflight.LeaseID, cleanupErr))
+		}
+		return LeaseClaim{}, fmt.Errorf("preflight %s instance inventory: %w", providerName, listErr)
+	}
+	intent, err := transitionUnikraftCloudCreateState(preflight, ukcStateCreateIntent)
+	if err != nil {
+		cause := fmt.Errorf("arm %s create intent %s: %w", providerName, preflight.LeaseID, err)
+		return LeaseClaim{}, discardUnmutatedUnikraftCloudCreateClaim(preflight, cause)
+	}
+	return intent, nil
+}
+
+func (b *backend) finishWarmup(started time.Time, claim LeaseClaim, instance ukcInstance, req WarmupRequest) error {
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s instance=%s state=%s fqdn=%s\n",
-		leaseID, slug, providerName, instance.UUID, normalizedInstanceState(instance.State), blank(instanceFQDN(instance), "-"))
+		claim.LeaseID, claim.Slug, providerName, instance.UUID, normalizedInstanceState(instance.State), blank(instanceFQDN(instance), "-"))
 	if !req.Keep {
-		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the instance until explicit stop\n", providerName)
+		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the instance until explicit stop or eligible cleanup\n", providerName)
 	}
 	total := b.now().Sub(started)
 	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
 	if req.TimingJSON {
 		return writeTimingJSON(b.rt.Stderr, timingReport{
 			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
+			LeaseID:  claim.LeaseID,
+			Slug:     claim.Slug,
 			TotalMs:  total.Milliseconds(),
 			ExitCode: 0,
 		})
 	}
 	return nil
-}
-
-func (b *backend) cleanupCreateFailure(ctx context.Context, api unikraftCloudAPI, instanceID string, cause error) error {
-	if strings.TrimSpace(instanceID) == "" {
-		return cause
-	}
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-	defer cancel()
-	if err := api.DeleteInstance(cleanupCtx, instanceID); err != nil && !isNotFound(err) {
-		return errors.Join(cause, fmt.Errorf("%s cleanup failed for instance %s; delete it with the Unikraft Cloud console or kraft CLI: %w", providerName, instanceID, err))
-	}
-	return cause
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -138,8 +220,15 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 }
 
 func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
-	_ = req
 	api, err := b.client()
+	if err != nil {
+		return nil, err
+	}
+	accountUUID, err := api.UserUUID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	scope, err := unikraftCloudClaimScope(api.BaseURL(), accountUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -151,19 +240,75 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	if err != nil {
 		return nil, err
 	}
-	scope := claimScope(api.BaseURL())
-	claimByInstance := map[string]LeaseClaim{}
-	for _, claim := range claims {
-		if claim.Provider != providerName {
+	if err := preflightUnikraftCloudClaimOwnership(claims, scope); err != nil {
+		return nil, err
+	}
+	instanceByUUID, err := indexUnikraftCloudInventory(instances)
+	if err != nil {
+		return nil, err
+	}
+	claimedUUIDs := make(map[string]string)
+	servers := make([]Server, 0, len(instances)+len(claims))
+	for _, snapshot := range claims {
+		if snapshot.Provider != providerName || snapshot.ProviderScope != scope {
 			continue
 		}
-		if _, instanceID, _, err := finishResolvedClaim(claim, scope); err == nil {
-			claimByInstance[instanceID] = claim
+		if err := validateUnikraftCloudClaim(snapshot, scope); err != nil {
+			return nil, err
 		}
+		claim := snapshot
+		if claim.CloudID == "" {
+			unlock, err := lockUnikraftCloudLeaseOperation(ctx, claim.LeaseID)
+			if err != nil {
+				return nil, err
+			}
+			current, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID)
+			if readErr != nil {
+				unlock()
+				return nil, readErr
+			}
+			if !exists {
+				unlock()
+				continue
+			}
+			if err := validateUnikraftCloudClaim(current, scope); err != nil {
+				unlock()
+				return nil, err
+			}
+			claim, _, err = b.reconcileCreateIntentFromInventory(current, instances)
+			unlock()
+			if err != nil {
+				return nil, err
+			}
+		}
+		if claim.CloudID == "" {
+			servers = append(servers, serverFromClaim(claim))
+			continue
+		}
+		instanceKey := strings.ToLower(claim.CloudID)
+		if previous, exists := claimedUUIDs[instanceKey]; exists {
+			return nil, exit(5, "%s instance %s is claimed by both %s and %s", providerName, claim.CloudID, previous, claim.LeaseID)
+		}
+		claimedUUIDs[instanceKey] = claim.LeaseID
+		instance, exists := instanceByUUID[instanceKey]
+		if !exists {
+			missing := serverFromClaim(claim)
+			missing.Status = "missing"
+			servers = append(servers, missing)
+			continue
+		}
+		if err := validateUnikraftCloudInstanceIdentity(instance, claim.CloudID, claim.Labels[ukcLabelResourceName]); err != nil {
+			return nil, err
+		}
+		servers = append(servers, unikraftCloudServer(instance, claim))
 	}
-	servers := make([]Server, 0, len(instances))
-	for _, instance := range instances {
-		servers = append(servers, unikraftCloudServer(instance, claimByInstance[instance.UUID]))
+	if req.All {
+		for _, instance := range instances {
+			if _, claimed := claimedUUIDs[strings.ToLower(instance.UUID)]; claimed {
+				continue
+			}
+			servers = append(servers, unikraftCloudServer(instance, LeaseClaim{}))
+		}
 	}
 	return servers, nil
 }
@@ -173,20 +318,99 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, instanceID, slug, err := b.resolveInstanceID(req.ID, api.BaseURL())
+	accountUUID, err := api.UserUUID(ctx)
 	if err != nil {
 		return StatusView{}, err
 	}
+	scope, err := unikraftCloudClaimScope(api.BaseURL(), accountUUID)
+	if err != nil {
+		return StatusView{}, err
+	}
+	claim, claimed, claimErr := b.resolveClaim(req.ID, scope)
+	if claimErr != nil {
+		var notClaimed *unikraftCloudClaimNotFoundError
+		if !errors.As(claimErr, &notClaimed) || !unikraftCloudUUIDPattern.MatchString(strings.TrimSpace(req.ID)) {
+			return StatusView{}, claimErr
+		}
+	}
+	leaseID := ""
+	slug := ""
+	instanceID := strings.TrimSpace(req.ID)
+	resourceName := ""
 	waitTimeout := req.WaitTimeout
 	if waitTimeout <= 0 {
 		waitTimeout = defaultWaitTimeout
 	}
 	pollCtx := ctx
+	pollInterval := b.pollInterval
+	if pollInterval <= 0 {
+		pollInterval = statusPollInterval
+	}
 	cancel := func() {}
 	if req.Wait {
 		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
 	}
 	defer cancel()
+	if claimed {
+		for {
+			unlock, err := lockUnikraftCloudLeaseOperation(pollCtx, claim.LeaseID)
+			if err != nil {
+				return StatusView{}, err
+			}
+			current, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID)
+			if readErr != nil {
+				unlock()
+				return StatusView{}, readErr
+			}
+			if !exists {
+				unlock()
+				return StatusView{}, exit(4, "%s lease %s no longer exists", providerName, claim.LeaseID)
+			}
+			if err := validateUnikraftCloudClaim(current, scope); err != nil {
+				unlock()
+				return StatusView{}, err
+			}
+			claim = current
+			if claim.CloudID == "" {
+				claim, _, _, err = b.reconcileCreateIntent(pollCtx, api, current, false)
+				if err != nil {
+					unlock()
+					return StatusView{}, err
+				}
+			}
+			unlock()
+			if claim.CloudID != "" {
+				break
+			}
+			if !req.Wait {
+				return StatusView{
+					ID:         claim.LeaseID,
+					Slug:       claim.Slug,
+					Provider:   providerName,
+					TargetOS:   targetLinux,
+					State:      claim.Labels["state"],
+					ServerType: "unikraft-cloud-instance",
+					Network:    networkPublic,
+					Labels:     cloneLabels(claim.Labels),
+				}, nil
+			}
+			if state := claim.Labels["state"]; state == ukcStateCreatePreflight || state == ukcStateCreateConflict {
+				return StatusView{}, exit(5, "%s lease %s reached non-adoptable state=%s before an instance was created", providerName, claim.LeaseID, state)
+			}
+			select {
+			case <-pollCtx.Done():
+				return StatusView{}, exit(5, "timed out waiting for %s lease %s create outcome", providerName, claim.LeaseID)
+			case <-time.After(pollInterval):
+			}
+		}
+		leaseID = claim.LeaseID
+		slug = claim.Slug
+		resourceName = claim.Labels[ukcLabelResourceName]
+		instanceID = claim.CloudID
+	}
+	if instanceID == "" {
+		return StatusView{}, exit(2, "provider=%s requires --id <lease-id, slug, or instance uuid>", providerName)
+	}
 	for {
 		instance, getErr := api.GetInstance(pollCtx, instanceID)
 		if getErr != nil {
@@ -198,7 +422,23 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			}
 			return StatusView{}, getErr
 		}
+		expectedName := ""
+		expectedUUID := instanceID
+		if claimed {
+			expectedUUID = claim.CloudID
+			expectedName = resourceName
+		}
+		if err := validateUnikraftCloudInstanceIdentity(instance, expectedUUID, expectedName); err != nil {
+			return StatusView{}, err
+		}
 		state := normalizedInstanceState(instance.State)
+		labels := unikraftCloudLabels(instance)
+		if claimed {
+			for key, value := range claim.Labels {
+				labels[key] = value
+			}
+			labels[ukcLabelProviderState] = state
+		}
 		view := StatusView{
 			ID:         blank(leaseID, instance.UUID),
 			Slug:       slug,
@@ -210,10 +450,13 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			Host:       instanceFQDN(instance),
 			Network:    networkPublic,
 			Ready:      state == "running",
-			Labels:     unikraftCloudLabels(instance),
+			Labels:     labels,
 		}
 		if !req.Wait || view.Ready {
 			return view, nil
+		}
+		if unikraftCloudTerminalState(state) {
+			return StatusView{}, exit(5, "%s instance %s reached terminal state=%s before becoming ready", providerName, instanceID, state)
 		}
 		select {
 		case <-pollCtx.Done():
@@ -221,7 +464,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 				return StatusView{}, exit(5, "timed out waiting for %s instance %s to become ready", providerName, instanceID)
 			}
 			return StatusView{}, pollCtx.Err()
-		case <-time.After(statusPollInterval):
+		case <-time.After(pollInterval):
 		}
 	}
 }
@@ -231,133 +474,63 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, instanceID, _, err := b.resolveClaimedInstanceID(req.ID, api.BaseURL())
+	accountUUID, err := api.UserUUID(ctx)
 	if err != nil {
 		return err
 	}
-	claim, err := readLeaseClaim(leaseID)
+	scope, err := unikraftCloudClaimScope(api.BaseURL(), accountUUID)
 	if err != nil {
 		return err
 	}
-	if _, resolvedInstanceID, _, err := finishResolvedClaim(claim, claimScope(api.BaseURL())); err != nil {
+	snapshot, _, err := b.resolveClaim(req.ID, scope)
+	if err != nil {
 		return err
-	} else if resolvedInstanceID != instanceID {
-		return exit(4, "%s lease %q changed resource identity before cleanup", providerName, leaseID)
 	}
-	missing := false
-	err = removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
-		if _, err := api.StopInstance(ctx, instanceID); err != nil {
-			if isNotFound(err) {
-				missing = true
-				return nil
-			}
-			return err
-		}
-		if missing {
-			return nil
-		}
-		if err := api.DeleteInstance(ctx, instanceID); err != nil {
-			if !isNotFound(err) {
-				return err
-			}
-			missing = true
-		}
-		return nil
-	})
+	unlock, err := lockUnikraftCloudLeaseOperation(ctx, snapshot.LeaseID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	claim, exists, err := readLeaseClaimWithPresence(snapshot.LeaseID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return exit(4, "%s lease %s no longer exists", providerName, snapshot.LeaseID)
+	}
+	if err := validateUnikraftCloudClaim(claim, scope); err != nil {
+		return err
+	}
+	if err := verifyUnikraftCloudClaimSnapshot(snapshot, claim); err != nil {
+		return err
+	}
+	claims, err := listUnikraftCloudLeaseClaims()
+	if err != nil {
+		return err
+	}
+	if err := preflightUnikraftCloudClaimOwnership(claims, scope); err != nil {
+		return err
+	}
+	instanceID := claim.CloudID
+	missing, err := b.deleteClaimedInstance(ctx, api, claim)
 	if err != nil {
 		return err
 	}
 	if missing {
-		fmt.Fprintf(b.rt.Stderr, "warning: %s instance=%s was already gone; removing local claim\n", providerName, instanceID)
+		fmt.Fprintf(b.rt.Stderr, "warning: %s instance=%s was already gone; removed local claim\n", providerName, blank(instanceID, "pending"))
 	}
-	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s\n", leaseID, instanceID)
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s\n", claim.LeaseID, blank(instanceID, "pending"))
 	return nil
-}
-
-// resolveInstanceID accepts a Crabbox lease id, slug, or raw instance
-// UUID/name. Read paths (status) fall through to the raw identifier; a raw id
-// yields no lease binding.
-func (b *backend) resolveInstanceID(id, baseURL string) (string, string, string, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return "", "", "", exit(2, "provider=%s requires --id <lease-id, slug, or instance uuid>", providerName)
-	}
-	leaseID, instanceID, slug, err := b.resolveClaimedInstanceID(id, baseURL)
-	if err == nil {
-		return leaseID, instanceID, slug, nil
-	}
-	var exitErr ExitError
-	if errors.As(err, &exitErr) && exitErr.Code == 4 {
-		// Not claimed locally: treat the identifier as a raw instance UUID/name.
-		return "", id, "", nil
-	}
-	return "", "", "", err
-}
-
-// resolveClaimedInstanceID requires a Crabbox-created local claim. Stop uses
-// it so Crabbox never deletes instances it does not own.
-func (b *backend) resolveClaimedInstanceID(id, baseURL string) (string, string, string, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return "", "", "", exit(2, "provider=%s requires --id <lease-id or slug>", providerName)
-	}
-	scope := claimScope(baseURL)
-	exactLeaseID := id
-	if !strings.HasPrefix(exactLeaseID, leasePrefix) {
-		exactLeaseID = leasePrefix + exactLeaseID
-	}
-	if claim, err := readLeaseClaim(exactLeaseID); err == nil && claim.LeaseID == exactLeaseID && claim.Provider == providerName {
-		return finishResolvedClaim(claim, scope)
-	}
-	claims, err := listUnikraftCloudLeaseClaims()
-	if err != nil {
-		return "", "", "", err
-	}
-	slug := normalizeLeaseSlug(id)
-	for _, claim := range claims {
-		if claim.Provider != providerName {
-			continue
-		}
-		if claim.LeaseID == id || normalizeLeaseSlug(claim.Slug) == slug {
-			return finishResolvedClaim(claim, scope)
-		}
-	}
-	return "", "", "", exit(4, "%s instance %q is not claimed by Crabbox; warmup creates claimed instances, or use the Unikraft Cloud console or kraft CLI for unmanaged instances", providerName, id)
-}
-
-func finishResolvedClaim(claim LeaseClaim, scope string) (string, string, string, error) {
-	if claim.ProviderScope != scope {
-		return "", "", "", exit(4, "%s lease %q belongs to a different API endpoint or metro", providerName, claim.LeaseID)
-	}
-	instanceID := instanceIDFromLease(claim.LeaseID)
-	if claim.CloudID == "" || claim.CloudID != instanceID {
-		return "", "", "", exit(4, "%s lease %q has no exact instance binding", providerName, claim.LeaseID)
-	}
-	slug := claim.Slug
-	if strings.TrimSpace(slug) == "" {
-		slug = newLeaseSlug(claim.LeaseID)
-	}
-	if claim.Labels["provider"] != providerName || claim.Labels["lease"] != claim.LeaseID || claim.Labels["slug"] != slug {
-		return "", "", "", exit(4, "%s lease %q ownership labels do not match its local claim", providerName, claim.LeaseID)
-	}
-	return claim.LeaseID, instanceID, slug, nil
-}
-
-func claimScope(baseURL string) string {
-	return "endpoint:" + strings.TrimSpace(baseURL)
-}
-
-func instanceIDFromLease(leaseID string) string {
-	return strings.TrimPrefix(leaseID, leasePrefix)
 }
 
 func unikraftCloudServer(instance ukcInstance, claim LeaseClaim) Server {
 	labels := unikraftCloudLabels(instance)
 	if claim.LeaseID != "" {
-		labels["lease"] = claim.LeaseID
-		if strings.TrimSpace(claim.Slug) != "" {
-			labels["slug"] = claim.Slug
+		providerState := labels["state"]
+		for key, value := range claim.Labels {
+			labels[key] = value
 		}
+		labels[ukcLabelProviderState] = providerState
 	}
 	return Server{
 		CloudID:  instance.UUID,

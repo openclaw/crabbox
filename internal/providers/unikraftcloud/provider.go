@@ -21,7 +21,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "unikraft-cloud",
 		Kind:        core.ProviderKindServiceControl,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{},
+		Features:    core.FeatureSet{core.FeatureCleanup},
 		Coordinator: core.CoordinatorNever,
 	}
 }
