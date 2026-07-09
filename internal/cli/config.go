@@ -35,6 +35,7 @@ type Config struct {
 	Desktop                       bool
 	DesktopEnv                    string
 	Browser                       bool
+	imageRequirements             imageRequirements
 	Code                          bool
 	Network                       NetworkMode
 	Class                         string
@@ -49,6 +50,8 @@ type Config struct {
 	brokerProvider                string
 	BrokerLoginRedirectOrigins    []string
 	BrokerAutoWebVNC              bool
+	macOSPortalAuto               bool
+	macOSPortalCoordinator        string
 	CoordToken                    string
 	CoordTokenCommand             []string
 	CoordAdminToken               string

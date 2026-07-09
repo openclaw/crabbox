@@ -149,6 +149,7 @@ export interface LeaseRequest {
   desktop?: boolean;
   desktopEnv?: string;
   browser?: boolean;
+  imageRequirements?: ImageRequirements;
   code?: boolean;
   tailscale?: boolean;
   tailscaleTags?: string[];
@@ -207,6 +208,24 @@ export interface LeaseRequest {
   sshPublicKey?: string;
   pond?: string;
   exposedPorts?: string[];
+}
+
+export interface ImageCapabilities {
+  osVersion?: string;
+  sdks?: Record<string, string>;
+  runtimes?: Record<string, string>;
+  browser?: boolean;
+  webview2?: boolean;
+  desktop?: boolean;
+}
+
+export interface ImageRequirements {
+  minOS?: string;
+  sdks?: Record<string, string>;
+  runtimes?: Record<string, string>;
+  browser?: boolean;
+  webview2?: boolean;
+  desktop?: boolean;
 }
 
 export interface LeaseRegistrationRequest {
@@ -536,6 +555,7 @@ export interface ProviderImage {
   resourceID?: string;
   snapshots?: string[];
   fastSnapshotRestores?: ProviderFastSnapshotRestore[];
+  capabilities?: ImageCapabilities;
 }
 
 export interface ProviderFastSnapshotRestore {

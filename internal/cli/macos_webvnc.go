@@ -121,6 +121,7 @@ func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTa
 		return rfbCredentials{}, exit(5, "managed macOS desktop password is empty")
 	}
 	return rfbCredentials{
+		Username: strings.TrimSpace(target.User),
 		Password: password,
 	}, nil
 }
