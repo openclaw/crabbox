@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"math/bits"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,6 +97,43 @@ func TestPreflightRFBAuthenticationSupportsAppleRemoteDesktopAuth(t *testing.T) 
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatalf("fake RFB server: %v", err)
+	}
+}
+
+func TestPreflightRFBAuthenticationRejectsNoAuth(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if _, err := server.Write([]byte("RFB 003.008\n")); err != nil {
+			serverErr <- err
+			return
+		}
+		version := make([]byte, 12)
+		if _, err := io.ReadFull(server, version); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := server.Write([]byte{1, rfbSecurityNone}); err != nil {
+			serverErr <- err
+			return
+		}
+		selected := []byte{0}
+		_, err := io.ReadFull(server, selected)
+		serverErr <- err
+	}()
+
+	err := preflightRFBAuthenticationFromConn(context.Background(), client, rfbCredentials{
+		Username: "screen-user",
+		Password: "screen-secret",
+	})
+	if err == nil || !strings.Contains(err.Error(), "did not require credential authentication") {
+		t.Fatalf("error=%v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
 	}
 }
 

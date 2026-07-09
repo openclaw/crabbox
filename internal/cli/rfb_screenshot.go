@@ -195,6 +195,7 @@ func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, cred
 	}
 	switch securityType {
 	case rfbSecurityNone:
+		return fmt.Errorf("RFB server did not require credential authentication")
 	case rfbSecurityVNC:
 		if err := negotiateRFBVNCAuth(conn, creds); err != nil {
 			return err
