@@ -25,6 +25,7 @@ const defaultImage = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-
 const firewallName = "crabbox-ssh";
 const firewallVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
 const metadataTokenBackoffMs = [200, 400, 800, 1_600, 3_200];
+const metadataTokenRetryStatuses = new Set([429, 499, 500, 503]);
 
 interface TokenCache {
   token: string;
@@ -687,10 +688,25 @@ export class GCPClient {
 
   private async metadataAccessToken(now: number): Promise<string> {
     for (let attempt = 0; ; attempt += 1) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
-      const response = await this.fetcher(metadataTokenURL, {
-        headers: { "Metadata-Flavor": "Google" },
-      });
+      const delay = metadataTokenBackoffMs[attempt];
+      let response: Response;
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
+        response = await this.fetcher(metadataTokenURL, {
+          headers: { "Metadata-Flavor": "Google" },
+        });
+      } catch (error) {
+        if (delay !== undefined) {
+          // GKE metadata can refuse connections while the server starts; retry within the same bound.
+          // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
+          await sleep(delay);
+          continue;
+        }
+        const detail = error instanceof Error ? error.message.trim() : String(error).trim();
+        throw new Error(`gcp metadata token: request failed${detail ? `: ${detail}` : ""}`, {
+          cause: error,
+        });
+      }
       // Error responses from the metadata server are not guaranteed to be JSON.
       // oxlint-disable-next-line eslint/no-await-in-loop -- consume each response before a retry.
       const text = await response.text();
@@ -706,9 +722,8 @@ export class GCPClient {
         this.cache = { token, expiresAt: now + expiresIn };
         return token;
       }
-      const delay = metadataTokenBackoffMs[attempt];
-      if ((response.status === 429 || response.status === 503) && delay !== undefined) {
-        // Google documents transient 429/503 metadata responses and recommends exponential backoff.
+      if (metadataTokenRetryStatuses.has(response.status) && delay !== undefined) {
+        // Google documents transient 429, 499, and 5xx metadata responses.
         // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
         await sleep(delay);
         continue;

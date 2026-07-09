@@ -82,8 +82,11 @@ describe("gcp provider", () => {
       const url = String(input);
       if (url.includes("metadata.google.internal")) {
         metadataCalls += 1;
-        if (metadataCalls === 1) return new Response("busy", { status: 503 });
-        if (metadataCalls === 2) return new Response("rate limited", { status: 429 });
+        if (metadataCalls === 1) throw new TypeError("connection refused");
+        if (metadataCalls === 2) return new Response("client closed", { status: 499 });
+        if (metadataCalls === 3) return new Response("control plane unavailable", { status: 500 });
+        if (metadataCalls === 4) return new Response("busy", { status: 503 });
+        if (metadataCalls === 5) return new Response("rate limited", { status: 429 });
         return Response.json({ access_token: "metadata-token", expires_in: 1200 });
       }
       if (url.includes("/aggregated/instances")) return Response.json({ items: {} });
@@ -93,7 +96,7 @@ describe("gcp provider", () => {
     const result = client.listCrabboxServers();
     await vi.runAllTimersAsync();
     await expect(result).resolves.toEqual([]);
-    expect(metadataCalls).toBe(3);
+    expect(metadataCalls).toBe(6);
   });
 
   it("keeps the HTTP status when metadata errors are not JSON", async () => {
@@ -135,6 +138,32 @@ describe("gcp provider", () => {
     const error = await result;
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe("gcp metadata token: http 503: Service Unavailable");
+    expect(metadataCalls).toBe(6);
+  });
+
+  it("bounds metadata connection retries", async () => {
+    vi.useFakeTimers();
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    let metadataCalls = 0;
+    client.fetcher = async () => {
+      metadataCalls += 1;
+      throw new TypeError("connection refused");
+    };
+
+    const result = client.listCrabboxServers().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("gcp metadata token: request failed: connection refused");
     expect(metadataCalls).toBe(6);
   });
 
