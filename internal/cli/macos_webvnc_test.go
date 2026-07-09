@@ -31,7 +31,7 @@ func TestResolveMacOSWebVNCCredentialsFallsBackToManagedPassword(t *testing.T) {
 	if gotCommand != "sudo cat '/var/db/crabbox/vnc.password'" {
 		t.Fatalf("password command = %q", gotCommand)
 	}
-	if credentials.Username != "" || credentials.Password != "managed-secret" {
+	if credentials.Username != "steipete" || credentials.Password != "managed-secret" {
 		t.Fatalf("credentials = %#v", credentials)
 	}
 	if authMode != localWebVNCAuthVNC {

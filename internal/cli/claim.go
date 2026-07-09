@@ -47,6 +47,7 @@ type leaseClaim struct {
 	SSHHost                             string            `json:"sshHost,omitempty"`
 	SSHPort                             int               `json:"sshPort,omitempty"`
 	BridgeURL                           string            `json:"bridgeURL,omitempty"`
+	CoordinatorRegistrationURL          string            `json:"coordinatorRegistrationURL,omitempty"`
 	RuntimeAdapterRegistrationID        string            `json:"runtimeAdapterRegistrationID,omitempty"`
 	RuntimeAdapterPendingRegistrationID string            `json:"runtimeAdapterPendingRegistrationID,omitempty"`
 	CacheVolumes                        []string          `json:"cacheVolumes,omitempty"`

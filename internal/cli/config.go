@@ -49,6 +49,8 @@ type Config struct {
 	brokerProvider                string
 	BrokerLoginRedirectOrigins    []string
 	BrokerAutoWebVNC              bool
+	macOSPortalAuto               bool
+	macOSPortalCoordinator        string
 	CoordToken                    string
 	CoordTokenCommand             []string
 	CoordAdminToken               string

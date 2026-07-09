@@ -1,10 +1,13 @@
 # webvnc
 
-`crabbox webvnc` opens a desktop lease in a browser tab. For coordinator-backed
-leases it bridges into the authenticated coordinator portal. The local container
-provider also supports WebVNC by serving noVNC locally over an SSH tunnel. An
-existing loopback VNC tunnel can use the provider-neutral `webvnc local` bridge
-on a macOS or Linux host.
+`crabbox webvnc` opens a desktop lease in a browser tab. Coordinator-backed
+leases bridge into the authenticated coordinator portal. Direct macOS providers
+such as Tart and Parallels use that same portal whenever coordinator login is
+configured; Crabbox registers the external lease until `crabbox stop` or normal
+coordinator expiry. Without coordinator auth, direct macOS keeps a
+localhost viewer as its offline fallback. The local container provider serves
+noVNC locally over an SSH tunnel. An existing loopback VNC tunnel can use the
+provider-neutral `webvnc local` bridge on a macOS or Linux host.
 
 ```sh
 crabbox warmup --desktop
@@ -67,6 +70,11 @@ browser noVNC
   <-> SSH tunnel
   <-> runner 127.0.0.1:5900
 ```
+
+This path also carries Tart and Parallels macOS Screen Sharing sessions when a
+coordinator login is configured. The portal chrome, sharing, controller,
+clipboard, status, reset, and daemon controls are the same as for Linux and
+Windows.
 
 For the local container provider, the data path is local:
 

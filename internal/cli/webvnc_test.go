@@ -466,6 +466,134 @@ func TestRegisteredLeaseUsesCoordinatorWebVNC(t *testing.T) {
 	}
 }
 
+func TestMacOSWebVNCPortalConfigUsesAuthenticatedCoordinator(t *testing.T) {
+	cfg := Config{
+		Provider:    "direct-webvnc-test",
+		TargetOS:    targetMacOS,
+		Coordinator: "https://broker.example.test",
+		CoordToken:  "token",
+	}
+	got, temporary, err := macOSPortalWebVNCConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !temporary || got.BrokerMode != BrokerModeRegistered || useDirectSSHWebVNC(got) {
+		t.Fatalf("portal config=%#v temporary=%t", got, temporary)
+	}
+
+	withoutAuth := cfg
+	withoutAuth.CoordToken = ""
+	withoutAuth.Coordinator = "not-a-url"
+	got, temporary, err = macOSPortalWebVNCConfig(withoutAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if temporary || got.BrokerMode == BrokerModeRegistered || !useDirectSSHWebVNC(got) {
+		t.Fatalf("unauthenticated config=%#v temporary=%t", got, temporary)
+	}
+
+	registered := cfg
+	registered.BrokerMode = BrokerModeRegistered
+	got, temporary, err = macOSPortalWebVNCConfig(registered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if temporary || got.BrokerMode != BrokerModeRegistered {
+		t.Fatalf("explicit registered config=%#v temporary=%t", got, temporary)
+	}
+
+	invalid := cfg
+	invalid.Coordinator = "not-a-url"
+	if _, _, err := macOSPortalWebVNCConfig(invalid); err == nil {
+		t.Fatal("invalid authenticated coordinator URL should fail instead of silently using the local viewer")
+	}
+}
+
+func TestMacOSWebVNCPortalConfigUsesStoredMultiTargetLease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_macosportal123"
+	claimCfg := baseConfig()
+	claimCfg.Provider = "direct-webvnc-test"
+	claimCfg.TargetOS = targetMacOS
+	if err := claimLeaseTargetForRepoConfig(
+		leaseID,
+		"macos-portal",
+		claimCfg,
+		Server{Provider: "direct-webvnc-test", Labels: map[string]string{"state": "ready", "target": targetMacOS}},
+		SSHTarget{Host: "192.0.2.40", TargetOS: targetMacOS},
+		"/repo",
+		time.Hour,
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	stored, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || stored.Labels["target"] != targetMacOS {
+		t.Fatalf("stored claim=%#v exists=%t err=%v", stored, exists, err)
+	}
+	foreignCfg := baseConfig()
+	foreignCfg.Provider = "local-container"
+	foreignCfg.TargetOS = targetLinux
+	if err := claimLeaseTargetForRepoConfig(
+		"cbx_aaa_foreign",
+		"macos-portal",
+		foreignCfg,
+		Server{Provider: "local-container", Labels: map[string]string{"state": "ready", "target": targetLinux}},
+		SSHTarget{Host: "192.0.2.41", TargetOS: targetLinux},
+		"/repo",
+		time.Hour,
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got, automatic, err := macOSPortalWebVNCConfigForLease(Config{
+		Provider:    "direct-webvnc-test",
+		Coordinator: "https://broker.example.test",
+		CoordToken:  "token",
+	}, "macos-portal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !automatic || got.TargetOS != targetMacOS || got.BrokerMode != BrokerModeRegistered {
+		t.Fatalf("stored target config=%#v automatic=%t", got, automatic)
+	}
+	if err := persistAutomaticCoordinatorRegistrationBinding(leaseID, got, "https://broker.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	stored, exists, err = readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || stored.CoordinatorRegistrationURL != "https://broker.example.test" {
+		t.Fatalf("persisted coordinator claim=%#v exists=%t err=%v", stored, exists, err)
+	}
+	if _, _, err := macOSPortalWebVNCConfigForLease(Config{
+		Provider:    "direct-webvnc-test",
+		Coordinator: "https://other-broker.example.test",
+		CoordToken:  "token",
+	}, "macos-portal"); err == nil || !strings.Contains(err.Error(), "persisted registration binding") {
+		t.Fatalf("coordinator drift error=%v", err)
+	}
+	if _, _, err := macOSPortalWebVNCConfigForLease(Config{
+		Provider:    "direct-webvnc-test",
+		Coordinator: "https://other-broker.example.test",
+		CoordToken:  "token",
+		BrokerMode:  BrokerModeRegistered,
+	}, "macos-portal"); err == nil || !strings.Contains(err.Error(), "persisted registration binding") {
+		t.Fatalf("explicit registered coordinator drift error=%v", err)
+	}
+
+	explicitLinux := got
+	explicitLinux.BrokerMode = BrokerModeManaged
+	explicitLinux.TargetOS = targetLinux
+	explicitLinux.targetFlagExplicit = true
+	got, automatic, err = macOSPortalWebVNCConfigForLease(explicitLinux, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if automatic || got.TargetOS != targetLinux {
+		t.Fatalf("explicit target config=%#v automatic=%t", got, automatic)
+	}
+}
+
 func TestIsMacOSDesktopProviderUsesExplicitTargetOrDedicatedProvider(t *testing.T) {
 	// tart's only target is macOS -> uses the host-side Screen Sharing bridge.
 	if !isMacOSDesktopProvider(Config{Provider: "tart"}) {
@@ -523,6 +651,29 @@ func (directWebVNCTestProvider) DesktopCredentials(Config, SSHTarget) (DesktopCr
 }
 func (directWebVNCTestProvider) CommandRoutingArgs(_ Config, leaseID string) []string {
 	return []string{"--direct-webvnc-routing", "route-" + leaseID}
+}
+
+func TestWebVNCPortalCredentialsUseMacOSProviderAccount(t *testing.T) {
+	read := false
+	credentials, err := resolveWebVNCPortalCredentials(
+		context.Background(),
+		Config{Provider: "direct-webvnc-test"},
+		SSHTarget{TargetOS: targetMacOS, User: "lease-user"},
+		vncEndpoint{Managed: true},
+		func(context.Context, SSHTarget, string) (string, error) {
+			read = true
+			return "", errors.New("managed password file is absent")
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read {
+		t.Fatal("provider account credentials should avoid the managed password file")
+	}
+	if credentials.Username != "provider-user" || credentials.Password != " provider-secret " {
+		t.Fatalf("credentials=%#v", credentials)
+	}
 }
 
 func TestWebVNCResetRemoteCommandHandlesWaylandAndX11(t *testing.T) {
