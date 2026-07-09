@@ -260,6 +260,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err != nil {
 		return err
 	}
+	if err := preflightAttestPaths(attestPathPreflight{
+		Receipt:             *attestOut,
+		KeyOverride:         *attestKeyOverride,
+		LeaseOutput:         *leaseOutput,
+		EmitProof:           *emitProof,
+		CaptureStdout:       *captureStdout,
+		CaptureStderr:       *captureStderr,
+		TimingRecord:        timingRecordPath,
+		TimingRecordEnabled: timingRecordEnabled,
+		Downloads:           downloads,
+	}); err != nil {
+		return err
+	}
 	var cleanup leaseCleanupResult
 	var finalTimingReport *timingReport
 	var timingRecordRepo Repo
@@ -411,27 +424,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if strings.TrimSpace(*attestOut) != "" {
 		attestPath := strings.TrimSpace(*attestOut)
-		if strings.TrimSpace(*leaseOutput) != "" {
-			samePath, err := sameLocalOutputPath(strings.TrimSpace(*leaseOutput), attestPath)
-			if err != nil {
-				return err
-			}
-			if samePath {
-				return exit(2, "lease output and attest receipt paths must be different")
-			}
-		}
-		if strings.TrimSpace(*emitProof) != "" {
-			samePath, err := sameLocalOutputPath(strings.TrimSpace(*emitProof), attestPath)
-			if err != nil {
-				return err
-			}
-			if samePath {
-				return exit(2, "emit proof and attest receipt paths must be different")
-			}
-		}
-		if err := preflightRunOutputCollisions("attest receipt", attestPath, *captureStdout, *captureStderr, downloads); err != nil {
-			return err
-		}
 		if err := preflightLocalOutputPath("attest receipt", attestPath, true, true); err != nil {
 			return err
 		}

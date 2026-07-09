@@ -344,8 +344,9 @@ Use `--attest <path>` to write a signed run receipt after a successful run: a
 flat JSON record of the provider, lease, command, exit code, timing, and the
 SHA-256 of the combined live output stream, signed with a per-user Ed25519 key
 minted on first use under the user config dir. Check receipts later with
-[`crabbox verify`](verify.md). Pass `--attest-key <path>` to sign with an
-existing PKCS8 PEM Ed25519 key instead of the default one.
+[`crabbox verify`](verify.md), then compare the reported signer fingerprint
+through a trusted channel. Pass `--attest-key <path>` to sign with an existing
+PKCS8 PEM Ed25519 key instead of the default one.
 
 ## Artifacts and downloads
 

@@ -72,6 +72,9 @@ func TestAttestReceiptRoundTrip(t *testing.T) {
 	if !strings.HasPrefix(out, "PASS "+path+" signer=sha256:") {
 		t.Fatalf("unexpected verify output: %q", out)
 	}
+	if !strings.Contains(out, " trust=self-signed") {
+		t.Fatalf("verify output should expose the trust model: %q", out)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -470,6 +473,141 @@ func TestEnsureAttestKeyMintsOncePrivately(t *testing.T) {
 		if dirInfo.Mode().Perm() != 0o700 {
 			t.Fatalf("expected key dir mode 0700, got %v", dirInfo.Mode().Perm())
 		}
+	}
+}
+
+func TestEnsureAttestKeyMintsOnceAcrossConcurrentCallers(t *testing.T) {
+	setAttestTestHome(t)
+	const callers = 32
+	start := make(chan struct{})
+	keys := make(chan ed25519.PrivateKey, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			key, err := ensureAttestKey()
+			if err != nil {
+				errs <- err
+				return
+			}
+			keys <- key
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(keys)
+	close(errs)
+	for err := range errs {
+		t.Fatalf("ensure attest key: %v", err)
+	}
+	var first ed25519.PrivateKey
+	count := 0
+	for key := range keys {
+		if first == nil {
+			first = key
+		} else if !first.Equal(key) {
+			t.Fatal("concurrent callers returned different signing keys")
+		}
+		count++
+	}
+	if count != callers {
+		t.Fatalf("received %d keys, want %d", count, callers)
+	}
+}
+
+func TestPreflightAttestPathsProtectsReceiptAndSigningKey(t *testing.T) {
+	setAttestTestHome(t)
+	dir := t.TempDir()
+	receiptPath := filepath.Join(dir, "receipt.json")
+	keyPath := filepath.Join(dir, "signer.pem")
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defaultKeyPath, err := attestKeyPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		opts attestPathPreflight
+		want string
+	}{
+		{
+			name: "key requires receipt",
+			opts: attestPathPreflight{KeyOverride: keyPath},
+			want: "--attest-key requires --attest",
+		},
+		{
+			name: "receipt cannot replace default key",
+			opts: attestPathPreflight{Receipt: defaultKeyPath},
+			want: "attest receipt and attest key paths must be different",
+		},
+		{
+			name: "receipt cannot replace override key",
+			opts: attestPathPreflight{Receipt: keyPath, KeyOverride: keyPath},
+			want: "attest receipt and attest key paths must be different",
+		},
+		{
+			name: "receipt cannot share timing store",
+			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: keyPath, TimingRecord: receiptPath, TimingRecordEnabled: true},
+			want: "attest receipt and timing record paths must be different",
+		},
+		{
+			name: "capture cannot replace key",
+			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: keyPath, CaptureStdout: keyPath},
+			want: "attest key and capture stdout paths must be different",
+		},
+		{
+			name: "download cannot replace key",
+			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: keyPath, Downloads: []string{"build.log=" + keyPath}},
+			want: "attest key and download build.log paths must be different",
+		},
+		{
+			name: "invalid override fails before run",
+			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: filepath.Join(dir, "missing.pem")},
+			want: "attest key:",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := preflightAttestPaths(tc.opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	if err := preflightAttestPaths(attestPathPreflight{
+		Receipt:             receiptPath,
+		KeyOverride:         keyPath,
+		LeaseOutput:         filepath.Join(dir, "lease.json"),
+		EmitProof:           filepath.Join(dir, "proof.md"),
+		CaptureStdout:       filepath.Join(dir, "stdout.log"),
+		CaptureStderr:       filepath.Join(dir, "stderr.log"),
+		TimingRecord:        filepath.Join(dir, "timings.jsonl"),
+		TimingRecordEnabled: true,
+		Downloads:           []string{"build.log=" + filepath.Join(dir, "build.log")},
+	}); err != nil {
+		t.Fatalf("distinct attest paths: %v", err)
+	}
+}
+
+func TestRunRejectsAttestKeyWithoutAttest(t *testing.T) {
+	app := App{Stdout: io.Discard, Stderr: io.Discard, Stdin: strings.NewReader("")}
+	err := app.runCommand(context.Background(), []string{"--attest-key", "signer.pem", "--sync-only"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "--attest-key requires --attest") {
+		t.Fatalf("expected --attest-key dependency error, got %v", err)
 	}
 }
 

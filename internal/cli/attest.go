@@ -57,7 +57,7 @@ func ensureAttestKey() (ed25519.PrivateKey, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	if err := createPrivateRunOutputDir(filepath.Dir(path)); err != nil {
+	if err := ensurePrivateRunOutputDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
 	_, key, err := ed25519.GenerateKey(rand.Reader)
@@ -69,10 +69,96 @@ func ensureAttestKey() (ed25519.PrivateKey, error) {
 		return nil, err
 	}
 	encoded := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := writePrivateRunOutputFile(path, encoded); err != nil {
+	created, err := writePrivateRunOutputFileIfAbsent(path, encoded)
+	if err != nil {
 		return nil, err
 	}
+	if !created {
+		return loadAttestKey(path)
+	}
 	return key, nil
+}
+
+type attestPathPreflight struct {
+	Receipt             string
+	KeyOverride         string
+	LeaseOutput         string
+	EmitProof           string
+	CaptureStdout       string
+	CaptureStderr       string
+	TimingRecord        string
+	TimingRecordEnabled bool
+	Downloads           []string
+}
+
+type attestLocalPath struct {
+	label string
+	path  string
+}
+
+func preflightAttestPaths(opts attestPathPreflight) error {
+	receiptPath := strings.TrimSpace(opts.Receipt)
+	keyOverride := strings.TrimSpace(opts.KeyOverride)
+	if receiptPath == "" {
+		if keyOverride != "" {
+			return exit(2, "--attest-key requires --attest")
+		}
+		return nil
+	}
+	keyPath := keyOverride
+	if keyPath == "" {
+		var err error
+		keyPath, err = attestKeyPath()
+		if err != nil {
+			return exit(2, "attest key path: %v", err)
+		}
+	}
+	outputs := []attestLocalPath{
+		{label: "lease output", path: strings.TrimSpace(opts.LeaseOutput)},
+		{label: "emit proof", path: strings.TrimSpace(opts.EmitProof)},
+		{label: "capture stdout", path: strings.TrimSpace(opts.CaptureStdout)},
+		{label: "capture stderr", path: strings.TrimSpace(opts.CaptureStderr)},
+	}
+	if opts.TimingRecordEnabled {
+		outputs = append(outputs, attestLocalPath{label: "timing record", path: strings.TrimSpace(opts.TimingRecord)})
+	}
+	for _, spec := range opts.Downloads {
+		download, err := parseRunDownloadSpec(spec)
+		if err != nil {
+			return err
+		}
+		outputs = append(outputs, attestLocalPath{label: "download " + download.Remote, path: download.Local})
+	}
+	for _, left := range []attestLocalPath{
+		{label: "attest receipt", path: receiptPath},
+		{label: "attest key", path: keyPath},
+	} {
+		for _, right := range outputs {
+			if right.path == "" {
+				continue
+			}
+			same, err := sameLocalOutputPath(left.path, right.path)
+			if err != nil {
+				return err
+			}
+			if same {
+				return exit(2, "%s and %s paths must be different", left.label, right.label)
+			}
+		}
+	}
+	same, err := sameLocalOutputPath(receiptPath, keyPath)
+	if err != nil {
+		return err
+	}
+	if same {
+		return exit(2, "attest receipt and attest key paths must be different")
+	}
+	if keyOverride != "" {
+		if _, err := loadAttestKey(keyOverride); err != nil {
+			return exit(2, "attest key: %v", err)
+		}
+	}
+	return nil
 }
 
 func loadAttestKey(path string) (ed25519.PrivateKey, error) {
@@ -431,9 +517,9 @@ func (a App) verify(ctx context.Context, args []string) error {
 	}
 	fingerprint := attestFingerprint(ed25519.PublicKey(pub))
 	if !ed25519.Verify(ed25519.PublicKey(pub), canonical, sig) {
-		fmt.Fprintf(a.Stdout, "FAIL %s signer=%s: signature mismatch\n", path, fingerprint)
+		fmt.Fprintf(a.Stdout, "FAIL %s signer=%s trust=self-signed: signature mismatch\n", path, fingerprint)
 		return ExitError{Code: 1}
 	}
-	fmt.Fprintf(a.Stdout, "PASS %s signer=%s\n", path, fingerprint)
+	fmt.Fprintf(a.Stdout, "PASS %s signer=%s trust=self-signed\n", path, fingerprint)
 	return nil
 }

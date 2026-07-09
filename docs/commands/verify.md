@@ -3,7 +3,8 @@
 `crabbox verify` checks a signed run receipt produced by `crabbox run --attest`.
 It recomputes the receipt's canonical bytes, verifies the embedded Ed25519
 signature, and prints the signer's public key fingerprint, so a reviewer can
-confirm a pasted receipt has not been edited after the run.
+confirm a pasted receipt has not been edited after the run once they have
+matched the fingerprint through a trusted channel.
 
 ```sh
 crabbox run --attest receipt.json -- go test ./...
@@ -13,14 +14,14 @@ crabbox verify receipt.json
 On success it prints one line and exits 0:
 
 ```
-PASS receipt.json signer=sha256:6a5f...
+PASS receipt.json signer=sha256:6a5f... trust=self-signed
 ```
 
 If any signed field was modified after signing, it prints a failure line and
 exits 1:
 
 ```
-FAIL receipt.json signer=sha256:6a5f...: signature mismatch
+FAIL receipt.json signer=sha256:6a5f... trust=self-signed: signature mismatch
 ```
 
 A receipt that cannot be checked at all (unreadable file, invalid JSON,
@@ -35,7 +36,7 @@ The receipt is a flat JSON object. `schema_version`, `generated_at`,
 `provider`, `command`, `exit_code`, `command_ms`, and `public_key` are always
 present; `lease_id`, `slug`, `run_id`, `actions_url`, and `log_sha256` appear
 when the run produced them. `log_sha256` is the SHA-256 of the combined
-stdout and stderr stream as observed by the client during brokered SSH runs.
+stdout and stderr stream as observed by the client during SSH-backed runs.
 
 The signature covers the canonical encoding of every field except `signature`
 itself: the object is re-marshaled as compact JSON with lexicographically
@@ -52,7 +53,9 @@ PKCS8 PEM Ed25519 key instead; the override path is never auto-created.
 
 Verification trusts the key embedded in the receipt and reports its
 fingerprint. Binding that fingerprint to an identity is out of scope: compare
-it out of band with the signer.
+it out of band with the signer. The `trust=self-signed` marker is printed on
+every verification result so `PASS` cannot be mistaken for an identity or
+execution-provenance check.
 
 ## Non-goals
 
