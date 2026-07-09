@@ -27,6 +27,9 @@ const maxMacOSWebVNCCredentialBodyBytes = 4 << 10
 // Apple (ARD) authentication with credentials fetched into browser memory only
 // after the viewer proves its ephemeral session token.
 func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort string, openViewer, preflightOnly, reclaim, noProviderSideEffects bool, expected webVNCExpectedProviderIdentity) error {
+	if preflightOnly {
+		return a.macOSWebVNCPreflight(ctx, cfg, id, reclaim, noProviderSideEffects, expected)
+	}
 	// Claim the actual browser-facing TCP listener before provider or SSH work.
 	// Daemon children adopt the supervisor's inherited listener; foreground
 	// bridges turn their reservation into the listener directly.
@@ -51,28 +54,12 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	}
 	defer webListener.Close()
 
-	server, target, leaseID, err := a.resolveWebVNCLeaseTarget(ctx, cfg, id, reclaim, noProviderSideEffects, expected)
+	resolved, err := a.resolveMacOSWebVNCBridgeTarget(ctx, cfg, id, reclaim, noProviderSideEffects, expected)
 	if err != nil {
 		return err
 	}
-	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
-		return err
-	}
-	if !noProviderSideEffects {
-		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, reclaim); err != nil {
-			return err
-		}
-	}
-	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {
-		return err
-	}
-	credentials, authMode, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
-	if err != nil {
-		return err
-	}
-	if err := requireMacOSWebVNCCredentials(credentials, authMode); err != nil {
-		return err
-	}
+	server, target, leaseID := resolved.server, resolved.target, resolved.leaseID
+	credentials, authMode := resolved.credentials, resolved.authMode
 
 	// SSH tunnel: 127.0.0.1:vncPort -> guest 127.0.0.1:5900 (Screen Sharing).
 	tunnel, vncPort, err := startVNCForegroundTunnelOnReservedPort(ctx, target, "", "127.0.0.1", managedVNCPort, webPort)
@@ -84,9 +71,6 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		return err
 	}
 	fmt.Fprintln(a.Stdout, "preflight: macOS Screen Sharing RFB authentication ok")
-	if preflightOnly {
-		return nil
-	}
 	bridgeCtx, cancelBridge := context.WithCancelCause(ctx)
 	defer cancelBridge(context.Canceled)
 
@@ -114,6 +98,60 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 			fmt.Fprintf(a.Stdout, "remote: forward port %s over SSH, copy %s to your machine, then open the copied file\n", webPort, handoff.Path)
 		},
 	)
+}
+
+type macOSWebVNCBridgeTarget struct {
+	server      Server
+	target      SSHTarget
+	leaseID     string
+	credentials rfbCredentials
+	authMode    localWebVNCAuthenticationMode
+}
+
+func (a App) resolveMacOSWebVNCBridgeTarget(ctx context.Context, cfg Config, id string, reclaim, noProviderSideEffects bool, expected webVNCExpectedProviderIdentity) (macOSWebVNCBridgeTarget, error) {
+	server, target, leaseID, err := a.resolveWebVNCLeaseTarget(ctx, cfg, id, reclaim, noProviderSideEffects, expected)
+	if err != nil {
+		return macOSWebVNCBridgeTarget{}, err
+	}
+	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
+		return macOSWebVNCBridgeTarget{}, err
+	}
+	if !noProviderSideEffects {
+		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, reclaim); err != nil {
+			return macOSWebVNCBridgeTarget{}, err
+		}
+	}
+	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {
+		return macOSWebVNCBridgeTarget{}, err
+	}
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	if err != nil {
+		return macOSWebVNCBridgeTarget{}, err
+	}
+	if err := requireMacOSWebVNCCredentials(credentials, authMode); err != nil {
+		return macOSWebVNCBridgeTarget{}, err
+	}
+	return macOSWebVNCBridgeTarget{
+		server: server, target: target, leaseID: leaseID,
+		credentials: credentials, authMode: authMode,
+	}, nil
+}
+
+func (a App) macOSWebVNCPreflight(ctx context.Context, cfg Config, id string, reclaim, noProviderSideEffects bool, expected webVNCExpectedProviderIdentity) error {
+	resolved, err := a.resolveMacOSWebVNCBridgeTarget(ctx, cfg, id, reclaim, noProviderSideEffects, expected)
+	if err != nil {
+		return err
+	}
+	tunnel, vncPort, err := startVNCForegroundTunnelOnReservedPort(ctx, resolved.target, "", "127.0.0.1", managedVNCPort)
+	if err != nil {
+		return err
+	}
+	defer stopProcess(tunnel)
+	if err := preflightMacOSWebVNC(ctx, "127.0.0.1", vncPort, resolved.credentials, resolved.authMode); err != nil {
+		return err
+	}
+	fmt.Fprintln(a.Stdout, "preflight: macOS Screen Sharing RFB authentication ok")
+	return nil
 }
 
 type macOSVNCPasswordReader func(context.Context, SSHTarget, string) (string, error)

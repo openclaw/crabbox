@@ -247,6 +247,22 @@ func TestCommandRoutingArgsUsesPrivateLeaseState(t *testing.T) {
 	}
 }
 
+func TestCommandRoutingArgsCarryDesktopCredentialOverrides(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := testConfig()
+	cfg.External.Connection.Desktop.Username = "screen-user"
+	cfg.External.Connection.Desktop.PasswordEnv = "SCREEN_SHARING_PASSWORD"
+	args := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), " ")
+	for _, want := range []string{
+		"--external-desktop-username screen-user",
+		"--external-desktop-password-env SCREEN_SHARING_PASSWORD",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("args=%q missing %q", args, want)
+		}
+	}
+}
+
 func TestConfigurePreservesOverridesAppliedToLoadedRouting(t *testing.T) {
 	isolateCrabboxState(t)
 	saved := testConfig()

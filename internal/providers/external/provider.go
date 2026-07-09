@@ -78,7 +78,14 @@ func (Provider) CommandRoutingArgs(cfg core.Config, leaseID string) []string {
 			return nil
 		}
 	}
-	return []string{"--external-routing-file", path}
+	args := []string{"--external-routing-file", path}
+	if username := strings.TrimSpace(cfg.External.Connection.Desktop.Username); username != "" {
+		args = append(args, "--external-desktop-username", username)
+	}
+	if passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); passwordEnv != "" {
+		args = append(args, "--external-desktop-password-env", passwordEnv)
+	}
+	return args
 }
 
 func (Provider) ControllerProviderScope(cfg core.Config) (string, error) {
