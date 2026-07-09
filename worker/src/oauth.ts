@@ -5,6 +5,11 @@ import {
   userTokenSigningConfigurationError,
 } from "./auth";
 import type { CoordinatorRuntime, CoordinatorStorage } from "./coordinator-runtime";
+import {
+  githubUserIsRevoked,
+  GitHubAuthorizationError,
+  requireGitHubLoginMembership,
+} from "./github-membership";
 import { errorMessage, json, readJson } from "./http";
 import type { Env, Provider } from "./types";
 import { requestOrg } from "./usage";
@@ -13,7 +18,7 @@ const githubAuthorizeURL = "https://github.com/login/oauth/authorize";
 const githubTokenURL = "https://github.com/login/oauth/access_token";
 const githubAPIURL = "https://api.github.com";
 const maxPendingOAuthLogins = 100;
-const maxGitHubTeamPages = 10;
+const maxPendingOAuthLoginsPerSource = 10;
 const defaultUserTokenTTLSeconds = 180 * 24 * 60 * 60;
 const minUserTokenTTLSeconds = 60 * 60;
 const maxUserTokenTTLSeconds = 365 * 24 * 60 * 60;
@@ -22,9 +27,12 @@ interface OAuthPending {
   id: string;
   state: string;
   pollSecretHash?: string;
+  browserConfirmationHash?: string;
   mode?: "cli" | "portal";
   provider?: Provider;
   returnTo?: string;
+  loopbackRedirectURI?: string;
+  redirectURI: string;
   createdAt: string;
   expiresAt: string;
   token?: string;
@@ -34,6 +42,7 @@ interface OAuthPending {
   login?: string;
   error?: string;
   callbackClaim?: string;
+  sourceHash?: string;
 }
 
 interface GitHubUser {
@@ -47,18 +56,6 @@ interface GitHubEmail {
   verified?: boolean;
 }
 
-interface GitHubTeam {
-  slug?: string;
-  organization?: {
-    login?: string;
-  };
-}
-
-interface AllowedGitHubTeam {
-  org: string;
-  slug: string;
-}
-
 export async function githubAuthRoute(
   request: Request,
   action: string | undefined,
@@ -67,7 +64,7 @@ export async function githubAuthRoute(
 ): Promise<Response> {
   const method = request.method.toUpperCase();
   if (method === "POST" && action === "start") {
-    return await githubAuthStart(request, runtime.storage, env);
+    return await githubAuthStart(request, runtime, env);
   }
   if (method === "GET" && action === "callback") {
     return await githubAuthCallback(request, runtime, env);
@@ -80,29 +77,33 @@ export async function githubAuthRoute(
 
 export async function githubPortalLogin(
   request: Request,
-  storage: CoordinatorStorage,
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
   env: Env,
 ): Promise<Response> {
   const clientID = env.CRABBOX_GITHUB_CLIENT_ID;
   if (!clientID || !env.CRABBOX_GITHUB_CLIENT_SECRET) {
     return html("Crabbox login unavailable", "GitHub OAuth is not configured.", 503);
   }
+  const oauthConfig = githubOAuthConfiguration(env);
+  if ("error" in oauthConfig) {
+    return html("Crabbox login unavailable", oauthConfig.message, 503);
+  }
   const signingError = userTokenSigningConfigurationError(env);
   if (signingError) {
     return html("Crabbox login unavailable", signingError, 503);
-  }
-  const pendingCount = await cleanupExpiredPendingOAuth(storage);
-  if (pendingCount >= maxPendingOAuthLogins) {
-    return html("Crabbox login busy", "Too many pending GitHub logins. Try again shortly.", 429);
   }
   const url = new URL(request.url);
   const pending = newPendingOAuth({
     mode: "portal",
     returnTo: safePortalReturnTo(url.searchParams.get("returnTo")),
+    redirectURI: oauthConfig.redirectURI,
+    sourceHash: await pendingOAuthSourceHash(request, env.CRABBOX_SESSION_SECRET!),
   });
-  await storePendingOAuth(storage, pending);
+  if (!(await admitPendingOAuth(runtime, pending))) {
+    return html("Crabbox login busy", "Too many pending GitHub logins. Try again shortly.", 429);
+  }
 
-  return redirect(githubAuthorizeURLFor(request, env, clientID, pending.state), 302);
+  return redirect(githubAuthorizeURLFor(clientID, pending.state, pending.redirectURI), 302);
 }
 
 export function githubPortalLogout(): Response {
@@ -117,9 +118,23 @@ export function githubPortalLogout(): Response {
   );
 }
 
+export function githubPortalLogoutConfirmation(): Response {
+  return html(
+    "Log out of Crabbox?",
+    "This ends your portal session and any isolated Code viewer sessions.",
+    200,
+    {
+      "content-security-policy":
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "x-frame-options": "DENY",
+    },
+    `<form method="post" action="/portal/logout"><button type="submit">Log out</button></form><p><a href="/portal">Cancel</a></p>`,
+  );
+}
+
 async function githubAuthStart(
   request: Request,
-  storage: CoordinatorStorage,
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
   env: Env,
 ): Promise<Response> {
   const clientID = env.CRABBOX_GITHUB_CLIENT_ID;
@@ -129,6 +144,10 @@ async function githubAuthStart(
       { status: 503 },
     );
   }
+  const oauthConfig = githubOAuthConfiguration(env);
+  if ("error" in oauthConfig) {
+    return json({ error: oauthConfig.error, message: oauthConfig.message }, { status: 503 });
+  }
   const signingError = userTokenSigningConfigurationError(env);
   if (signingError) {
     return json({ error: "github_session_secret_invalid", message: signingError }, { status: 503 });
@@ -136,12 +155,32 @@ async function githubAuthStart(
   const input = await readJson<{
     pollSecretHash?: string;
     provider?: Provider;
+    loopbackRedirectURI?: string;
   }>(request);
   if (!input.pollSecretHash || !/^[a-f0-9]{64}$/.test(input.pollSecretHash)) {
     return json({ error: "invalid_poll_secret_hash" }, { status: 400 });
   }
-  const pendingCount = await cleanupExpiredPendingOAuth(storage);
-  if (pendingCount >= maxPendingOAuthLogins) {
+  const loopbackRedirectURI = validLoopbackRedirectURI(input.loopbackRedirectURI);
+  if (!loopbackRedirectURI) {
+    return json(
+      {
+        error: "loopback_redirect_required",
+        message: "Upgrade the Crabbox CLI to complete GitHub login on this device.",
+      },
+      { status: 400 },
+    );
+  }
+  const pending = newPendingOAuth({
+    mode: "cli",
+    pollSecretHash: input.pollSecretHash,
+    loopbackRedirectURI,
+    redirectURI: oauthConfig.redirectURI,
+    sourceHash: await pendingOAuthSourceHash(request, env.CRABBOX_SESSION_SECRET!),
+  });
+  if (input.provider === "aws" || input.provider === "hetzner" || input.provider === "gcp") {
+    pending.provider = input.provider;
+  }
+  if (!(await admitPendingOAuth(runtime, pending))) {
     return json(
       {
         error: "login_rate_limited",
@@ -150,18 +189,10 @@ async function githubAuthStart(
       { status: 429 },
     );
   }
-  const pending = newPendingOAuth({
-    mode: "cli",
-    pollSecretHash: input.pollSecretHash,
-  });
-  if (input.provider === "aws" || input.provider === "hetzner" || input.provider === "gcp") {
-    pending.provider = input.provider;
-  }
-  await storePendingOAuth(storage, pending);
 
   return json({
     loginID: pending.id,
-    url: githubAuthorizeURLFor(request, env, clientID, pending.state),
+    url: githubAuthorizeURLFor(clientID, pending.state, pending.redirectURI),
     expiresAt: pending.expiresAt,
   });
 }
@@ -187,15 +218,32 @@ async function storePendingOAuth(
   await storage.put(oauthStateKey(pending.state), pending.id);
 }
 
-function githubAuthorizeURLFor(
-  request: Request,
-  env: Env,
-  clientID: string,
-  state: string,
-): string {
+async function pendingOAuthSourceHash(request: Request, sessionSecret: string): Promise<string> {
+  const source = request.headers.get("cf-connecting-ip")?.trim() || "unknown";
+  return sha256Hex(`crabbox-oauth-source-v1\0${sessionSecret}\0${source}`);
+}
+
+async function admitPendingOAuth(
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
+  pending: OAuthPending,
+): Promise<boolean> {
+  return runtime.runExclusive(async () => {
+    const counts = await cleanupExpiredPendingOAuth(runtime.storage, pending.sourceHash);
+    if (
+      counts.total >= maxPendingOAuthLogins ||
+      counts.forSource >= maxPendingOAuthLoginsPerSource
+    ) {
+      return false;
+    }
+    await storePendingOAuth(runtime.storage, pending);
+    return true;
+  });
+}
+
+function githubAuthorizeURLFor(clientID: string, state: string, redirectURI: string): string {
   const authorize = new URL(githubAuthorizeURL);
   authorize.searchParams.set("client_id", clientID);
-  authorize.searchParams.set("redirect_uri", githubRedirectURI(request, env));
+  authorize.searchParams.set("redirect_uri", redirectURI);
   authorize.searchParams.set("scope", "read:user user:email read:org");
   authorize.searchParams.set("state", state);
   return authorize.toString();
@@ -207,6 +255,17 @@ async function githubAuthCallback(
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
+  const oauthConfig = githubOAuthConfiguration(env);
+  if ("error" in oauthConfig) {
+    return html("Crabbox login unavailable", oauthConfig.message, 503);
+  }
+  if (url.origin !== new URL(oauthConfig.redirectURI).origin) {
+    return html(
+      "Crabbox login denied",
+      "The GitHub OAuth callback did not arrive on the configured public origin.",
+      403,
+    );
+  }
   const code = url.searchParams.get("code") ?? "";
   const state = url.searchParams.get("state") ?? "";
   const error = url.searchParams.get("error") ?? "";
@@ -215,6 +274,11 @@ async function githubAuthCallback(
     return claimed.response;
   }
   const { pending, claim } = claimed;
+  if (pending.redirectURI !== oauthConfig.redirectURI) {
+    const message = "The GitHub OAuth public origin changed. Start a new login.";
+    await finishPendingOAuth(runtime, pending.id, claim, { error: message });
+    return html("Crabbox login unavailable", message, 503);
+  }
   if (error || !code) {
     await finishPendingOAuth(runtime, pending.id, claim, {
       error: error || "missing_code",
@@ -227,7 +291,7 @@ async function githubAuthCallback(
     return html("Crabbox login unavailable", signingError, 503);
   }
   try {
-    const accessToken = await exchangeGitHubCode(code, githubRedirectURI(request, env), env);
+    const accessToken = await exchangeGitHubCode(code, pending.redirectURI, env);
     const identity = await githubIdentity(accessToken);
     const requestedOrg = requestOrg(
       new Request(request.url, {
@@ -235,20 +299,24 @@ async function githubAuthCallback(
       }),
       env,
     );
-    const org = await requireAllowedOrgMembership(accessToken, identity.login, requestedOrg, env);
-    await requireAllowedTeamMembership(accessToken, identity.login, org, env);
+    if (githubUserIsRevoked(identity, env)) {
+      throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
+    }
+    const org = await requireGitHubLoginMembership(accessToken, identity.login, requestedOrg, env);
     const ttlSeconds = userTokenTTLSeconds(env);
     const tokenInput = {
       owner: identity.owner,
       ownerSource: identity.ownerSource,
       org,
       login: identity.login,
+      githubAccessToken: accessToken,
       ttlSeconds,
     } as {
       owner: string;
       ownerSource: "github-verified-email";
       org: string;
       login: string;
+      githubAccessToken: string;
       name?: string;
       ttlSeconds: number;
     };
@@ -268,7 +336,11 @@ async function githubAuthCallback(
     if (tokenExpiresAt) {
       completion.tokenExpiresAt = tokenExpiresAt;
     }
-    const completed = await finishPendingOAuth(runtime, pending.id, claim, completion);
+    const browserConfirmation = randomID("confirm");
+    const completed = await finishPendingOAuth(runtime, pending.id, claim, {
+      ...completion,
+      browserConfirmationHash: await sha256Hex(browserConfirmation),
+    });
     if (!completed) {
       return expiredOAuthResponse();
     }
@@ -278,10 +350,20 @@ async function githubAuthCallback(
         "set-cookie": portalSessionCookie(token, ttlSeconds),
       });
     }
-    return html(
-      "Crabbox login complete",
-      "GitHub authorized Crabbox. You can close this tab and return to the terminal.",
-    );
+    if (!completed.loopbackRedirectURI) {
+      await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, completed));
+      return html(
+        "Crabbox login unavailable",
+        "This login was started by an outdated client. Upgrade Crabbox and try again.",
+        400,
+      );
+    }
+    const loopback = new URL(completed.loopbackRedirectURI);
+    loopback.searchParams.set("confirmation", browserConfirmation);
+    return redirect(loopback.toString(), 303, {
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+    });
   } catch (err) {
     await finishPendingOAuth(runtime, pending.id, claim, { error: errorMessage(err) });
     if (err instanceof GitHubAuthorizationError) {
@@ -327,7 +409,10 @@ async function finishPendingOAuth(
   id: string,
   claim: string,
   result: Partial<
-    Pick<OAuthPending, "token" | "tokenExpiresAt" | "owner" | "org" | "login" | "error">
+    Pick<
+      OAuthPending,
+      "token" | "tokenExpiresAt" | "owner" | "org" | "login" | "error" | "browserConfirmationHash"
+    >
   >,
 ): Promise<OAuthPending | undefined> {
   return runtime.runExclusive(async () => {
@@ -355,7 +440,11 @@ function expiredOAuthResponse(): Response {
 }
 
 async function githubAuthPoll(request: Request, storage: CoordinatorStorage): Promise<Response> {
-  const input = await readJson<{ loginID?: string; pollSecret?: string }>(request);
+  const input = await readJson<{
+    loginID?: string;
+    pollSecret?: string;
+    browserConfirmation?: string;
+  }>(request);
   if (!input.loginID || !input.pollSecret) {
     return json({ error: "invalid_poll" }, { status: 400 });
   }
@@ -378,6 +467,22 @@ async function githubAuthPoll(request: Request, storage: CoordinatorStorage): Pr
   }
   if (!pending.token) {
     return json({ status: "pending", expiresAt: pending.expiresAt });
+  }
+  if (!pending.loopbackRedirectURI || !pending.browserConfirmationHash) {
+    await deletePendingOAuth(storage, pending);
+    return json(
+      { status: "failed", error: "This login was started by an outdated client." },
+      { status: 400 },
+    );
+  }
+  if (!input.browserConfirmation) {
+    return json({ status: "confirmation_required", expiresAt: pending.expiresAt });
+  }
+  if (
+    !/^confirm_[a-f0-9]{32}$/.test(input.browserConfirmation) ||
+    (await sha256Hex(input.browserConfirmation)) !== pending.browserConfirmationHash
+  ) {
+    return json({ error: "forbidden" }, { status: 403 });
   }
   const response = {
     status: "complete",
@@ -404,9 +509,70 @@ function userTokenTTLSeconds(env: Pick<Env, "CRABBOX_USER_TOKEN_TTL_SECONDS">): 
   return Math.min(maxUserTokenTTLSeconds, Math.max(minUserTokenTTLSeconds, Math.trunc(value)));
 }
 
-function githubRedirectURI(request: Request, env: Env): string {
-  const base = env.CRABBOX_PUBLIC_URL || new URL(request.url).origin;
-  return `${base.replace(/\/+$/, "")}/v1/auth/github/callback`;
+function validLoopbackRedirectURI(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+  const port = Number(parsed.port);
+  if (
+    parsed.protocol !== "http:" ||
+    parsed.hostname !== "127.0.0.1" ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535 ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    !/^\/crabbox\/oauth\/[a-f0-9]{64}$/.test(parsed.pathname)
+  ) {
+    return undefined;
+  }
+  return parsed.toString();
+}
+
+function githubOAuthConfiguration(
+  env: Pick<Env, "CRABBOX_PUBLIC_URL">,
+): { redirectURI: string } | { error: string; message: string } {
+  const configured = env.CRABBOX_PUBLIC_URL?.trim();
+  if (!configured) {
+    return {
+      error: "github_public_url_required",
+      message: "CRABBOX_PUBLIC_URL is required before GitHub OAuth can start.",
+    };
+  }
+  let publicURL: URL;
+  try {
+    publicURL = new URL(configured);
+  } catch {
+    return {
+      error: "github_public_url_invalid",
+      message: "CRABBOX_PUBLIC_URL must be a valid canonical HTTPS origin.",
+    };
+  }
+  const loopbackHTTP =
+    publicURL.protocol === "http:" &&
+    (publicURL.hostname === "localhost" ||
+      publicURL.hostname === "127.0.0.1" ||
+      publicURL.hostname === "[::1]");
+  if (
+    (publicURL.protocol !== "https:" && !loopbackHTTP) ||
+    publicURL.username !== "" ||
+    publicURL.password !== ""
+  ) {
+    return {
+      error: "github_public_url_invalid",
+      message:
+        "CRABBOX_PUBLIC_URL must be a canonical HTTPS origin (HTTP is allowed only for loopback development).",
+    };
+  }
+  return { redirectURI: `${publicURL.origin}/v1/auth/github/callback` };
 }
 
 async function exchangeGitHubCode(code: string, redirectURI: string, env: Env): Promise<string> {
@@ -480,136 +646,6 @@ async function githubIdentity(accessToken: string): Promise<{
   return identity;
 }
 
-async function requireAllowedOrgMembership(
-  accessToken: string,
-  login: string,
-  requestedOrg: string,
-  env: Env,
-): Promise<string> {
-  const allowed = allowedGitHubOrgs(env);
-  const requested = requestedOrg.toLowerCase();
-  const org = allowed.includes(requested) ? requested : allowed[0];
-  if (!org) {
-    throw new GitHubAuthorizationError("GitHub login is not configured with an allowed org.");
-  }
-  const response = await fetch(`${githubAPIURL}/user/memberships/orgs/${encodeURIComponent(org)}`, {
-    headers: githubHeaders(accessToken),
-  });
-  if (!response.ok) {
-    throw new GitHubAuthorizationError(`GitHub user ${login} is not an active member of ${org}.`);
-  }
-  const membership = (await response.json()) as {
-    state?: string;
-    organization?: { login?: string };
-  };
-  if (
-    membership.state !== "active" ||
-    membership.organization?.login?.toLowerCase() !== org.toLowerCase()
-  ) {
-    throw new GitHubAuthorizationError(`GitHub user ${login} is not an active member of ${org}.`);
-  }
-  return membership.organization.login || org;
-}
-
-async function requireAllowedTeamMembership(
-  accessToken: string,
-  login: string,
-  org: string,
-  env: Env,
-): Promise<void> {
-  const allowed = allowedGitHubTeams(env, org);
-  if (allowed.length === 0) {
-    return;
-  }
-  const allowedKeys = new Set(allowed.map((team) => teamKey(team.org, team.slug)));
-  for (const team of await userGitHubTeams(accessToken)) {
-    const teamOrg = team.organization?.login?.toLowerCase() ?? "";
-    const teamSlug = team.slug?.toLowerCase() ?? "";
-    if (teamOrg && teamSlug && allowedKeys.has(teamKey(teamOrg, teamSlug))) {
-      return;
-    }
-  }
-  throw new GitHubAuthorizationError(
-    `GitHub user ${login} is not a member of an allowed team in ${org}.`,
-  );
-}
-
-function allowedGitHubOrgs(env: Env): string[] {
-  const raw = env.CRABBOX_GITHUB_ALLOWED_ORGS || env.CRABBOX_GITHUB_ALLOWED_ORG;
-  const configured = raw
-    ? raw
-        .split(",")
-        .map((value) => value.trim().toLowerCase())
-        .filter(Boolean)
-    : [];
-  if (configured.length > 0) {
-    return configured;
-  }
-  return [(env.CRABBOX_DEFAULT_ORG || "").trim().toLowerCase()].filter(Boolean);
-}
-
-function allowedGitHubTeams(env: Env, defaultOrg: string): AllowedGitHubTeam[] {
-  const raw = env.CRABBOX_GITHUB_ALLOWED_TEAMS || env.CRABBOX_GITHUB_ALLOWED_TEAM;
-  if (!raw) {
-    return [];
-  }
-  return raw
-    .split(",")
-    .map((value) => parseAllowedGitHubTeam(value, defaultOrg))
-    .filter((team): team is AllowedGitHubTeam => team !== undefined);
-}
-
-function parseAllowedGitHubTeam(value: string, defaultOrg: string): AllowedGitHubTeam | undefined {
-  const trimmed = value.trim().toLowerCase();
-  if (!trimmed) {
-    return undefined;
-  }
-  const [org, slug] = trimmed.includes("/") ? trimmed.split("/", 2) : [defaultOrg, trimmed];
-  if (!org || !slug) {
-    return undefined;
-  }
-  return { org, slug };
-}
-
-async function userGitHubTeams(accessToken: string): Promise<GitHubTeam[]> {
-  return userGitHubTeamsPage(accessToken, 1, []);
-}
-
-async function userGitHubTeamsPage(
-  accessToken: string,
-  page: number,
-  teams: GitHubTeam[],
-): Promise<GitHubTeam[]> {
-  const url = `${githubAPIURL}/user/teams?per_page=100&page=${page}`;
-  const response = await fetch(url, { headers: githubHeaders(accessToken) });
-  if (!response.ok) {
-    throw new GitHubAuthorizationError(
-      `Could not verify GitHub team membership: GitHub returned ${response.status}.`,
-    );
-  }
-  const pageTeams = (await response.json()) as GitHubTeam[];
-  const next = [...teams, ...pageTeams];
-  if (pageTeams.length < 100 || page >= maxGitHubTeamPages) {
-    return next;
-  }
-  return userGitHubTeamsPage(accessToken, page + 1, next);
-}
-
-function teamKey(org: string, slug: string): string {
-  return `${org.toLowerCase()}/${slug.toLowerCase()}`;
-}
-
-function githubHeaders(accessToken: string): Record<string, string> {
-  return {
-    accept: "application/vnd.github+json",
-    authorization: `Bearer ${accessToken}`,
-    "user-agent": "crabbox-coordinator",
-    "x-github-api-version": "2022-11-28",
-  };
-}
-
-class GitHubAuthorizationError extends Error {}
-
 async function deletePendingOAuth(
   storage: CoordinatorStorage,
   pending: OAuthPending,
@@ -618,20 +654,27 @@ async function deletePendingOAuth(
   await storage.delete(oauthStateKey(pending.state));
 }
 
-async function cleanupExpiredPendingOAuth(storage: CoordinatorStorage): Promise<number> {
+async function cleanupExpiredPendingOAuth(
+  storage: CoordinatorStorage,
+  sourceHash?: string,
+): Promise<{ total: number; forSource: number }> {
   const entries = await storage.list<OAuthPending>({ prefix: "oauth:" });
-  let active = 0;
+  let total = 0;
+  let forSource = 0;
   const now = Date.now();
-  await Promise.all(
-    [...entries.values()].map(async (pending) => {
-      if (Date.parse(pending.expiresAt) <= now) {
-        await deletePendingOAuth(storage, pending);
-        return;
-      }
-      active += 1;
-    }),
-  );
-  return active;
+  const expired: OAuthPending[] = [];
+  for (const pending of entries.values()) {
+    if (Date.parse(pending.expiresAt) <= now) {
+      expired.push(pending);
+      continue;
+    }
+    total += 1;
+    if (sourceHash && pending.sourceHash === sourceHash) {
+      forSource += 1;
+    }
+  }
+  await Promise.all(expired.map((pending) => deletePendingOAuth(storage, pending)));
+  return { total, forSource };
 }
 
 function oauthKey(id: string): string {

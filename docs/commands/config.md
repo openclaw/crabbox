@@ -36,7 +36,9 @@ The merge combines, in order: the user config file, then any repo-local
 `crabbox.yaml` or `.crabbox.yaml` found in the current directory (a repo file
 overrides user defaults for that checkout), then environment variables. When
 `CRABBOX_CONFIG` is set, only that file is read (the repo-local files are
-skipped). `config show` reflects the resulting effective values, including
+skipped). This changes selection only: an explicit path inside the active
+repository, or a symlink that resolves into it, still has repository trust.
+`config show` reflects the resulting effective values, including
 provider defaults applied at load time; per-command flags are not part of what
 it reports.
 

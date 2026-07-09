@@ -25,6 +25,7 @@ export interface ArtifactUploadGrant {
     expiresAt: string;
   };
   url: string;
+  accessPolicy: "signed-url" | "public";
 }
 
 export interface ArtifactUploadResponse {
@@ -32,6 +33,7 @@ export interface ArtifactUploadResponse {
   bucket: string;
   prefix: string;
   expiresAt: string;
+  accessPolicy: "signed-url" | "public";
   files: ArtifactUploadGrant[];
 }
 
@@ -45,6 +47,7 @@ interface ArtifactConfig {
   bucket: string;
   prefix: string;
   baseURL: string;
+  publicReads: boolean;
   endpointURL: string;
   region: string;
   accessKeyID: string;
@@ -72,7 +75,13 @@ export async function artifactUploadResponse(
   if (files.length === 0) {
     throw new Error("artifacts upload request requires at least one file");
   }
-  const prefix = artifactPrefix(config.prefix, org, owner, request.prefix);
+  const prefix = artifactPrefix(
+    config.prefix,
+    org,
+    owner,
+    request.prefix,
+    config.publicReads ? randomArtifactCapability() : "",
+  );
   const now = new Date();
   const uploadExpiresAt = new Date(
     now.getTime() + config.uploadExpiresSeconds * 1000,
@@ -91,6 +100,7 @@ export async function artifactUploadResponse(
           expiresAt: uploadExpiresAt,
         },
         url: await artifactReadURL(config, key),
+        accessPolicy: config.publicReads ? ("public" as const) : ("signed-url" as const),
       };
     }),
   );
@@ -99,6 +109,7 @@ export async function artifactUploadResponse(
     bucket: config.bucket,
     prefix,
     expiresAt: uploadExpiresAt,
+    accessPolicy: config.publicReads ? "public" : "signed-url",
     files: grants,
   };
 }
@@ -118,11 +129,17 @@ function artifactConfig(env: Env): ArtifactConfig {
     throw new Error("artifact broker r2 backend requires CRABBOX_ARTIFACTS_ENDPOINT_URL");
   }
   const region = trimmed(env.CRABBOX_ARTIFACTS_REGION) || (backend === "r2" ? "auto" : "us-east-1");
+  const baseURL = stripTrailingSlash(env.CRABBOX_ARTIFACTS_BASE_URL);
+  const publicReads = enabled(env.CRABBOX_ARTIFACTS_PUBLIC_READS);
+  if (publicReads && !baseURL) {
+    throw new Error("artifact broker public reads require CRABBOX_ARTIFACTS_BASE_URL");
+  }
   return {
     backend,
     bucket,
     prefix: trimmed(env.CRABBOX_ARTIFACTS_PREFIX) || "crabbox-artifacts",
-    baseURL: stripTrailingSlash(env.CRABBOX_ARTIFACTS_BASE_URL),
+    baseURL,
+    publicReads,
     endpointURL,
     region,
     accessKeyID,
@@ -201,6 +218,7 @@ function artifactPrefix(
   org: string,
   owner: string,
   requestPrefix: string | undefined,
+  publicCapability: string,
 ): string {
   const parts = [
     normalizePrefixPart(configPrefix),
@@ -209,9 +227,14 @@ function artifactPrefix(
     opaqueArtifactIdentity(org),
     "owner",
     opaqueArtifactIdentity(owner),
+    ...(publicCapability ? ["public", publicCapability] : []),
     normalizePrefixPart(requestPrefix),
   ].filter(Boolean);
   return parts.join("/");
+}
+
+function randomArtifactCapability(): string {
+  return base64URL(crypto.getRandomValues(new Uint8Array(16)));
 }
 
 function opaqueArtifactIdentity(value: string): string {
@@ -245,7 +268,7 @@ function artifactUploadHeaders(file: Required<ArtifactUploadFile>): Record<strin
 }
 
 async function artifactReadURL(config: ArtifactConfig, key: string): Promise<string> {
-  if (config.baseURL) {
+  if (config.publicReads) {
     return joinURLPath(config.baseURL, pathEscapeSegments(key));
   }
   return presignArtifactURL(config, "GET", key, config.urlExpiresSeconds);
@@ -305,4 +328,8 @@ function positiveInt(value: string | undefined, fallback: number): number {
 
 function trimmed(value: string | undefined): string {
   return (value ?? "").trim();
+}
+
+function enabled(value: string | undefined): boolean {
+  return ["1", "true", "yes", "on"].includes(trimmed(value).toLowerCase());
 }

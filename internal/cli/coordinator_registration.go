@@ -52,6 +52,8 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	var err error
 	if resolved {
 		expected, expectedExists, err = resolvedLeaseClaimSnapshot(leaseID, server)
+	} else if server.claimSnapshotSet {
+		expected, expectedExists, err = resolvedLeaseClaimSnapshot(leaseID, server)
 	} else {
 		expected, expectedExists, err = readLeaseClaimWithPresence(leaseID)
 	}
@@ -170,6 +172,9 @@ func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config,
 		if adapterMode {
 			return fmt.Errorf("register adapter workspace with coordinator: %w", err)
 		}
+		if cfg.macOSPortalAuto {
+			return fmt.Errorf("register macOS portal lease with coordinator: %w", err)
+		}
 		return nil
 	}
 	if adapterMode && (registered.RuntimeAdapterID != adapterID ||
@@ -196,7 +201,40 @@ func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config,
 			return err
 		}
 	}
+	if cfg.macOSPortalAuto {
+		if err := persistAutomaticCoordinatorRegistrationBinding(lease.LeaseID, cfg, coord.BaseURL); err != nil {
+			callCtx, cancel := context.WithTimeout(context.Background(), coordinatorRegistrationTimeout)
+			_, releaseErr := coord.ReleaseLease(callCtx, lease.LeaseID, false)
+			cancel()
+			a.coordinatorRegistrationWarning(lease.LeaseID, errors.Join(err, releaseErr))
+			return err
+		}
+	}
 	return nil
+}
+
+func persistAutomaticCoordinatorRegistrationBinding(leaseID string, cfg Config, actualURL string) error {
+	expectedURL := strings.TrimSpace(cfg.macOSPortalCoordinator)
+	if expectedURL == "" || actualURL != expectedURL {
+		return fmt.Errorf("automatic macOS portal coordinator binding changed before persistence")
+	}
+	return mutateLeaseClaimGuarded(
+		leaseID,
+		func(claim leaseClaim, exists bool) error {
+			if !exists || claim.LeaseID != leaseID {
+				return fmt.Errorf("automatic macOS portal registration requires a persisted lease claim")
+			}
+			bound := strings.TrimSpace(claim.CoordinatorRegistrationURL)
+			if bound != "" && bound != expectedURL {
+				return fmt.Errorf("automatic macOS portal coordinator conflicts with persisted binding")
+			}
+			return nil
+		},
+		func(claim *leaseClaim) error {
+			claim.CoordinatorRegistrationURL = expectedURL
+			return nil
+		},
+	)
 }
 
 func coordinatorRegistrationSSHUser(target SSHTarget) string {
@@ -527,6 +565,12 @@ func (a App) releaseRegisteredCoordinatorLease(ctx context.Context, cfg Config, 
 			err = fmt.Errorf("coordinator is not configured")
 		}
 		return err
+	}
+	if cfg.macOSPortalAuto {
+		expectedURL := strings.TrimSpace(cfg.macOSPortalCoordinator)
+		if expectedURL == "" || coord.BaseURL != expectedURL {
+			return fmt.Errorf("macOS portal coordinator changed from persisted registration binding")
+		}
 	}
 	callCtx, cancel := context.WithTimeout(ctx, coordinatorRegistrationTimeout)
 	defer cancel()

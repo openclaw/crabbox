@@ -1,0 +1,120 @@
+# Hermetic connector-lifecycle gate (tier 1 of
+# https://github.com/openclaw/crabbox/issues/944).
+#
+# Every row runs with zero repository or provider credentials on hosted
+# runners. Tier 2 (secret-backed cloud providers) is intentionally out of
+# scope pending a maintainer credential policy; nothing in this file may
+# reference repository or environment credentials.
+#
+# Rows considered but dropped:
+#   - docker-sandbox live smoke (scripts/live-docker-sandbox-smoke.sh):
+#     requires the proprietary Docker Sandboxes `sbx` CLI, which is not
+#     preinstalled on hosted runners and needs `sbx login` account
+#     authentication. The docker-sandbox connector is covered hermetically
+#     by the trust-boundary row below, which drives the real CLI against a
+#     fake `sbx` at the process boundary.
+name: Connector E2E Smokes
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connector-e2e-smokes-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GOFLAGS: -mod=readonly -trimpath
+  GOTOOLCHAIN: local
+
+jobs:
+  hermetic:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: docker-sandbox-trust-boundary
+            runner: ubuntu-latest
+            build-cli: false
+            smoke: scripts/docker-sandbox-trust-boundary-smoke.sh
+
+          - name: local-container
+            runner: ubuntu-latest
+            build-cli: true
+            smoke: |
+              CRABBOX_LIVE=1 \
+              CRABBOX_LIVE_PROVIDERS=local-container \
+              CRABBOX_BIN="$PWD/bin/crabbox" \
+                scripts/live-smoke.sh
+
+          # Read-only doctor readiness contract. Hosted runners do not ship
+          # Firecracker or CNI plugins, so the script's own
+          # `classification=environment_blocked` outcome is an expected pass:
+          # it proves the doctor JSON contract classifies missing
+          # KVM/Firecracker/CNI prerequisites instead of failing opaquely.
+          # `classification=validation_failed` (malformed doctor output)
+          # still fails the row.
+          - name: firecracker-readiness
+            runner: ubuntu-latest
+            build-cli: true
+            smoke: |
+              status=0
+              output="$(scripts/live-firecracker-smoke.sh 2>&1)" || status=$?
+              printf '%s\n' "$output"
+              if [ "$status" -eq 0 ]; then
+                exit 0
+              fi
+              if printf '%s\n' "$output" | grep -q 'classification=environment_blocked'; then
+                echo "readiness contract held: missing prerequisites classified as environment_blocked"
+                exit 0
+              fi
+              exit "$status"
+
+          - name: ssh-localhost
+            runner: ubuntu-latest
+            build-cli: true
+            smoke: CRABBOX_BIN="$PWD/bin/crabbox" scripts/live-ssh-localhost-smoke.sh
+
+          # Mirrors the apple-vm job in ci.yml: hermetic native helper and
+          # embedded VM daemon proof on Apple Silicon.
+          - name: apple-vm
+            runner: macos-15
+            build-cli: false
+            smoke: |
+              test "$(uname -m)" = arm64
+              go vet ./internal/applevmhelper ./cmd/crabbox-apple-vm-helper
+              go test -race ./internal/applevmhelper ./internal/providers/applevm
+              sh scripts/build-vmd.sh
+              go build -trimpath -tags vmdembed -o /tmp/crabbox-apple-vm-helper ./cmd/crabbox-apple-vm-helper
+              /tmp/crabbox-apple-vm-helper vmd-info | grep -q '"embedded":true'
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install smoke dependencies
+        if: matrix.name == 'local-container'
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Build CLI
+        if: matrix.build-cli == true
+        run: go build -trimpath -o bin/crabbox ./cmd/crabbox
+
+      - name: Run connector lifecycle smoke
+        run: ${{ matrix.smoke }}

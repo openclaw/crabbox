@@ -28,24 +28,30 @@ import (
 )
 
 const (
-	azureAddressSpace                = "10.42.0.0/16"
-	azureSubnetCIDR                  = "10.42.0.0/24"
-	azureProviderTag                 = "crabbox"
-	AzureOSDiskAuto                  = "auto"
-	AzureOSDiskEphemeral             = "ephemeral"
-	AzureOSDiskEphemeralPreview      = "ephemeral-preview"
-	AzureOSDiskManaged               = "managed"
-	azureComputePreviewAPIVersion    = "2025-04-01"
-	defaultAzureLinuxImage           = "Canonical:ubuntu-26_04-lts:server:latest"
-	defaultAzureLinuxARM64Image      = "Canonical:ubuntu-26_04-lts:server-arm64:latest"
-	azureNobleLinuxImage             = "Canonical:ubuntu-24_04-lts:server:latest"
-	azureNobleLinuxARM64Image        = "Canonical:ubuntu-24_04-lts:server-arm64:latest"
-	legacyAzureJammyImage            = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
-	legacyAzureNobleGen2Image        = "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest"
-	defaultAzureWindowsImage         = "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest"
-	azureDeleteRetryDelay            = 15 * time.Second
-	azureDeleteRetryAttempts         = 13
-	azureSnapshotQuarantineNSGSuffix = "-q-nsg"
+	azureAddressSpace                 = "10.42.0.0/16"
+	azureSubnetCIDR                   = "10.42.0.0/24"
+	azureProviderTag                  = "crabbox"
+	AzureOSDiskAuto                   = "auto"
+	AzureOSDiskEphemeral              = "ephemeral"
+	AzureOSDiskEphemeralPreview       = "ephemeral-preview"
+	AzureOSDiskManaged                = "managed"
+	azureComputePreviewAPIVersion     = "2025-04-01"
+	defaultAzureLinuxImage            = "Canonical:ubuntu-26_04-lts:server:latest"
+	defaultAzureLinuxARM64Image       = "Canonical:ubuntu-26_04-lts:server-arm64:latest"
+	azureNobleLinuxImage              = "Canonical:ubuntu-24_04-lts:server:latest"
+	azureNobleLinuxARM64Image         = "Canonical:ubuntu-24_04-lts:server-arm64:latest"
+	legacyAzureJammyImage             = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
+	legacyAzureNobleGen2Image         = "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest"
+	defaultAzureWindowsImage          = "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest"
+	azureDeleteRetryDelay             = 15 * time.Second
+	azureDeleteRetryAttempts          = 13
+	azureSnapshotQuarantineNSGSuffix  = "-q-nsg"
+	AzureCleanupBindingLabel          = "_crabbox_azure_cleanup_binding"
+	azureCleanupBindingVersion        = "v1"
+	azureCleanupNICIdentityLabel      = "_crabbox_azure_cleanup_nic_id"
+	azureCleanupPublicIPIdentityLabel = "_crabbox_azure_cleanup_public_ip_id"
+	azureCleanupDiskIdentityLabel     = "_crabbox_azure_cleanup_disk_id"
+	azureCleanupNSGIdentityLabel      = "_crabbox_azure_cleanup_nsg_id"
 )
 
 type AzureClient struct {
@@ -776,6 +782,10 @@ func nextAzureNSGPriority(used map[int32]bool) (int32, error) {
 }
 
 func (c *AzureClient) CreateServerWithFallback(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
+	// Return the resolved account scope so the provider can persist an exact
+	// claim even when authentication was discovered through `az login`.
+	cfg.AzureSubscription = c.SubscriptionID
+	cfg.AzureResourceGroup = c.ResourceGroup
 	regions := azureRegionCandidates(cfg, c.Location)
 	var errs []error
 	for _, region := range regions {
@@ -801,6 +811,11 @@ func (c *AzureClient) CreateServerWithFallback(ctx context.Context, cfg Config, 
 		}
 	}
 	return Server{}, cfg, joinErrors(errs)
+}
+
+// LeaseClaimScope identifies the Azure account boundary used by this client.
+func (c *AzureClient) LeaseClaimScope() string {
+	return azureLeaseClaimScope(c.SubscriptionID, c.ResourceGroup)
 }
 
 func (c *AzureClient) createServerWithFallbackInLocation(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
@@ -1074,12 +1089,20 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 		createdVM = vmResp.VirtualMachine
 	}
 	if cfg.TargetOS == targetWindows {
-		command := azureWindowsBootstrapCommand()
+		commands := []string{azureWindowsBootstrapCommand()}
 		if cfg.AzureSnapshot != "" {
-			command, err = azureWindowsSnapshotRehydrateCommand(cfg, publicKey)
+			commands, err = azureWindowsSnapshotRehydrateCommands(cfg, publicKey)
 			if err != nil {
 				return Server{}, err
 			}
+		}
+		installWindowsBootstrap := func() error {
+			for _, command := range commands {
+				if err := c.installWindowsBootstrapExtension(ctx, name, tags, command); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
 		if quarantinedSnapshot {
 			releaseRequest, err := azureSnapshotNICReleaseRequest(network.nicCreateRequest, sharedNSGID)
@@ -1087,13 +1110,13 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 				return Server{}, err
 			}
 			if err := runAzureSnapshotExposureSequence(
-				func() error { return c.installWindowsBootstrapExtension(ctx, name, tags, command) },
+				installWindowsBootstrap,
 				func() error { return c.releaseSnapshotNIC(ctx, nicName, releaseRequest) },
 				func() error { return c.deleteSnapshotQuarantineNSGWithRetry(ctx, quarantineNSGName) },
 			); err != nil {
 				return Server{}, err
 			}
-		} else if err := c.installWindowsBootstrapExtension(ctx, name, tags, command); err != nil {
+		} else if err := installWindowsBootstrap(); err != nil {
 			return Server{}, err
 		}
 	}
@@ -1689,22 +1712,40 @@ func azureWindowsBootstrapCommand() string {
 	return `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=Join-Path $env:SystemDrive 'AzureData\CustomData.bin'; $d=Join-Path $env:SystemDrive 'AzureData\crabbox-bootstrap.ps1'; Copy-Item -Force $p $d; & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $d"`
 }
 
-func azureWindowsSnapshotRehydrateCommand(cfg Config, publicKey string) (string, error) {
+func azureWindowsSnapshotRehydrateCommands(cfg Config, publicKey string) ([]string, error) {
 	script := azureWindowsSnapshotRehydratePowerShell(cfg, publicKey)
 	var compressed bytes.Buffer
-	writer := gzip.NewWriter(&compressed)
+	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
+	if err != nil {
+		return nil, fmt.Errorf("create windows snapshot rehydrate compressor: %w", err)
+	}
 	if _, err := writer.Write([]byte(script)); err != nil {
-		return "", fmt.Errorf("compress windows snapshot rehydrate script: %w", err)
+		return nil, fmt.Errorf("compress windows snapshot rehydrate script: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return "", fmt.Errorf("close windows snapshot rehydrate script: %w", err)
+		return nil, fmt.Errorf("close windows snapshot rehydrate script: %w", err)
 	}
 	encoded := base64.StdEncoding.EncodeToString(compressed.Bytes())
-	command := "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$b=[Convert]::FromBase64String('" + encoded + "');$m=[IO.MemoryStream]::new($b);$g=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($g);$s=$r.ReadToEnd();& ([ScriptBlock]::Create($s))\""
-	if len(command) > 8000 {
-		return "", fmt.Errorf("windows snapshot rehydrate command is too large: %d bytes", len(command))
+	const chunkSize = 6000
+	path := `C:\ProgramData\crabbox\snapshot-rehydrate.b64`
+	commands := make([]string, 0, (len(encoded)+chunkSize-1)/chunkSize+1)
+	for start := 0; start < len(encoded); start += chunkSize {
+		end := min(start+chunkSize, len(encoded))
+		write := "Add-Content"
+		setup := ""
+		if start == 0 {
+			write = "Set-Content"
+			setup = "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p)|Out-Null;"
+		}
+		command := "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$p=" + psQuote(path) + ";" + setup + write + " -NoNewline -Encoding ASCII -LiteralPath $p -Value " + psQuote(encoded[start:end]) + "\""
+		if len(command) > 8000 {
+			return nil, fmt.Errorf("windows snapshot rehydrate upload command is too large: %d bytes", len(command))
+		}
+		commands = append(commands, command)
 	}
-	return command, nil
+	command := "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$p=" + psQuote(path) + ";$b=[Convert]::FromBase64String((Get-Content -Raw -LiteralPath $p));Remove-Item -Force -LiteralPath $p;$m=[IO.MemoryStream]::new($b);$g=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($g);$s=$r.ReadToEnd();& ([ScriptBlock]::Create($s))\""
+	commands = append(commands, command)
+	return commands, nil
 }
 
 func azureRandomAdminPassword() (string, error) {
@@ -1815,6 +1856,99 @@ func (c *AzureClient) ListCrabboxServers(ctx context.Context) ([]Server, error) 
 
 func (c *AzureClient) DeleteServer(ctx context.Context, name string) error {
 	return c.deleteVMResources(ctx, name)
+}
+
+// PrepareOwnedServer captures immutable companion identities before the VM can
+// be deleted. The caller persists the returned labels in the exact lease claim.
+func (c *AzureClient) PrepareOwnedServer(ctx context.Context, expected Server) (Server, error) {
+	return c.prepareAzureDeleteServer(ctx, expected, func(expected, live Server) error {
+		return validateAzureOwnedVM(expected, live)
+	})
+}
+
+// PrepareCleanupServer is the expiry-aware variant used by automatic cleanup.
+func (c *AzureClient) PrepareCleanupServer(ctx context.Context, expected Server, now time.Time) (Server, error) {
+	return c.prepareAzureDeleteServer(ctx, expected, func(expected, live Server) error {
+		return validateAzureCleanupVM(expected, live, now)
+	})
+}
+
+func (c *AzureClient) prepareAzureDeleteServer(ctx context.Context, expected Server, validateVM func(Server, Server) error) (Server, error) {
+	name := strings.TrimSpace(expected.CloudID)
+	if name == "" {
+		return Server{}, errors.New("azure delete candidate has no cloud id")
+	}
+	vmResponse, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil)
+	if err != nil {
+		if isAzureNotFoundError(err) {
+			if _, bindingErr := azureDeleteResourcesFromLabels(expected); bindingErr != nil {
+				return Server{}, fmt.Errorf("Azure VM %s is absent and its durable cleanup binding is unavailable: %w", name, bindingErr)
+			}
+			return expected, nil
+		}
+		return Server{}, fmt.Errorf("re-read Azure delete VM %s: %w", name, err)
+	}
+	live := azureVMToServer(vmResponse.VirtualMachine, "", "")
+	if err := validateVM(expected, live); err != nil {
+		return Server{}, &azureCleanupSkipError{err: err}
+	}
+	resources, err := c.azureCleanupDeleteResources(ctx, name, vmResponse.VirtualMachine, live.Labels, expected.ImmutableID)
+	if err != nil {
+		var readErr *azureCleanupResourceReadError
+		if errors.As(err, &readErr) && !isAzureNotFoundError(readErr.err) {
+			return Server{}, err
+		}
+		return Server{}, &azureCleanupSkipError{err: err}
+	}
+	if HasAzureCleanupBinding(expected.Labels) {
+		persisted, err := azureDeleteResourcesFromLabels(expected)
+		if err != nil {
+			return Server{}, err
+		}
+		if err := requireMatchingAzureDeleteResources(persisted, resources); err != nil {
+			return Server{}, &azureCleanupSkipError{err: err}
+		}
+	}
+	prepared := expected
+	prepared.Labels = azureDeleteResourcesToLabels(expected.Labels, resources)
+	return prepared, nil
+}
+
+// DeleteOwnedServer revalidates an exact owned VM and every associated resource
+// at the release mutation boundary. Lease expiry is intentionally irrelevant.
+func (c *AzureClient) DeleteOwnedServer(ctx context.Context, expected Server) error {
+	resources, err := azureDeleteResourcesFromLabels(expected)
+	if err != nil {
+		return err
+	}
+	return c.deleteAzureValidatedResourcesWithRetry(ctx, expected, resources, validateAzureOwnedVM)
+}
+
+type azureCleanupSkipError struct{ err error }
+
+func (e *azureCleanupSkipError) Error() string { return e.err.Error() }
+func (e *azureCleanupSkipError) Unwrap() error { return e.err }
+
+type azureCleanupResourceReadError struct{ err error }
+
+func (e *azureCleanupResourceReadError) Error() string { return e.err.Error() }
+func (e *azureCleanupResourceReadError) Unwrap() error { return e.err }
+
+// IsAzureCleanupSkipError reports a cleanup-time ownership or association
+// mismatch that must be reported and skipped rather than treated as fatal.
+func IsAzureCleanupSkipError(err error) bool {
+	var skipErr *azureCleanupSkipError
+	return errors.As(err, &skipErr)
+}
+
+// DeleteCleanupServer revalidates a cleanup candidate and every associated
+// resource consumed by deletion at the Azure mutation boundary.
+func (c *AzureClient) DeleteCleanupServer(ctx context.Context, expected Server, now time.Time) error {
+	resources, err := azureDeleteResourcesFromLabels(expected)
+	if err != nil {
+		return err
+	}
+	return c.deleteAzureCleanupResourcesWithRetry(ctx, expected, resources, now)
 }
 
 func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshotName, sku string) (image NativeCheckpointImage, err error) {
@@ -1940,9 +2074,347 @@ func (c *AzureClient) DeleteOSDiskSnapshot(ctx context.Context, snapshotID strin
 	return nil
 }
 
+type azureVMDeleteResources struct {
+	// Cleanup retries keep Azure-generated identities so deterministic names
+	// cannot redirect a later delete to replacement resources.
+	vm            bool
+	vmID          string
+	nic           string
+	nicID         string
+	publicIP      string
+	publicIPID    string
+	disk          string
+	diskID        string
+	quarantineNSG string
+	quarantineID  string
+}
+
+// HasAzureCleanupBinding reports whether a local claim contains a complete,
+// versioned companion-resource snapshot captured before Azure VM deletion.
+func HasAzureCleanupBinding(labels map[string]string) bool {
+	return strings.TrimSpace(labels[AzureCleanupBindingLabel]) == azureCleanupBindingVersion
+}
+
+func azureDeleteResourcesToLabels(labels map[string]string, resources azureVMDeleteResources) map[string]string {
+	out := cloneStringMap(labels)
+	if out == nil {
+		out = make(map[string]string)
+	}
+	out[AzureCleanupBindingLabel] = azureCleanupBindingVersion
+	out[azureCleanupNICIdentityLabel] = strings.TrimSpace(resources.nicID)
+	out[azureCleanupPublicIPIdentityLabel] = strings.TrimSpace(resources.publicIPID)
+	if resources.diskID != "" {
+		out[azureCleanupDiskIdentityLabel] = strings.TrimSpace(resources.diskID)
+	} else {
+		delete(out, azureCleanupDiskIdentityLabel)
+	}
+	if resources.quarantineID != "" {
+		out[azureCleanupNSGIdentityLabel] = strings.TrimSpace(resources.quarantineID)
+	} else {
+		delete(out, azureCleanupNSGIdentityLabel)
+	}
+	return out
+}
+
+func azureDeleteResourcesFromLabels(expected Server) (azureVMDeleteResources, error) {
+	name := strings.TrimSpace(expected.CloudID)
+	if name == "" {
+		return azureVMDeleteResources{}, errors.New("azure delete candidate has no cloud id")
+	}
+	if !HasAzureCleanupBinding(expected.Labels) {
+		return azureVMDeleteResources{}, errors.New("durable Azure cleanup binding is missing")
+	}
+	resources := azureVMDeleteResources{
+		vm:         true,
+		vmID:       strings.TrimSpace(expected.ImmutableID),
+		nic:        name + "-nic",
+		nicID:      strings.TrimSpace(expected.Labels[azureCleanupNICIdentityLabel]),
+		publicIP:   name + "-pip",
+		publicIPID: strings.TrimSpace(expected.Labels[azureCleanupPublicIPIdentityLabel]),
+	}
+	if resources.vmID == "" || resources.nicID == "" || resources.publicIPID == "" {
+		return azureVMDeleteResources{}, errors.New("durable Azure cleanup binding is incomplete")
+	}
+	if resources.diskID = strings.TrimSpace(expected.Labels[azureCleanupDiskIdentityLabel]); resources.diskID != "" {
+		resources.disk = name + "-osdisk"
+	}
+	if resources.quarantineID = strings.TrimSpace(expected.Labels[azureCleanupNSGIdentityLabel]); resources.quarantineID != "" {
+		resources.quarantineNSG = name + azureSnapshotQuarantineNSGSuffix
+	}
+	return resources, nil
+}
+
+func requireMatchingAzureDeleteResources(expected, live azureVMDeleteResources) error {
+	if expected.vmID != live.vmID || expected.nic != live.nic || expected.nicID != live.nicID ||
+		expected.publicIP != live.publicIP || expected.publicIPID != live.publicIPID ||
+		expected.disk != live.disk || expected.diskID != live.diskID ||
+		expected.quarantineNSG != live.quarantineNSG || expected.quarantineID != live.quarantineID {
+		return errors.New("live Azure companion resources do not match the durable cleanup binding")
+	}
+	return nil
+}
+
+func validateAzureCleanupVM(expected, live Server, now time.Time) error {
+	if err := validateAzureOwnedVM(expected, live); err != nil {
+		return err
+	}
+	if shouldDelete, reason := shouldCleanupServer(live, now); !shouldDelete {
+		return fmt.Errorf("live Azure VM is no longer cleanup eligible: %s", reason)
+	}
+	return nil
+}
+
+func validateAzureOwnedVM(expected, live Server) error {
+	expectedID := strings.TrimSpace(expected.CloudID)
+	if expectedID == "" || strings.TrimSpace(live.CloudID) != expectedID {
+		return fmt.Errorf("live Azure cloud id %q does not match cleanup candidate %q", live.CloudID, expected.CloudID)
+	}
+	if strings.TrimSpace(expected.ImmutableID) == "" || strings.TrimSpace(live.ImmutableID) != strings.TrimSpace(expected.ImmutableID) {
+		return fmt.Errorf("live Azure VM identity %q does not match cleanup candidate identity %q", live.ImmutableID, expected.ImmutableID)
+	}
+	labels := live.Labels
+	if labels == nil || labels["crabbox"] != "true" || labels["created_by"] != "crabbox" || labels["provider"] != "azure" ||
+		!isCanonicalLeaseID(labels["lease"]) || strings.TrimSpace(labels["slug"]) == "" {
+		return fmt.Errorf("live Azure VM %s no longer has canonical Crabbox ownership tags", expectedID)
+	}
+	if liveLeaseID, expectedLeaseID := strings.TrimSpace(labels["lease"]), strings.TrimSpace(expected.Labels["lease"]); liveLeaseID != expectedLeaseID {
+		return fmt.Errorf("live Azure VM lease %q does not match cleanup candidate lease %q", liveLeaseID, expectedLeaseID)
+	}
+	if liveSlug, expectedSlug := strings.TrimSpace(labels["slug"]), strings.TrimSpace(expected.Labels["slug"]); liveSlug != expectedSlug {
+		return fmt.Errorf("live Azure VM slug %q does not match cleanup candidate slug %q", liveSlug, expectedSlug)
+	}
+	if liveProviderKey, expectedProviderKey := strings.TrimSpace(labels["provider_key"]), strings.TrimSpace(expected.Labels["provider_key"]); liveProviderKey == "" || liveProviderKey != expectedProviderKey {
+		return fmt.Errorf("live Azure VM provider key does not match cleanup candidate")
+	}
+	return nil
+}
+
+func validateAzureCleanupResourceTags(kind, name string, tags map[string]*string, expected map[string]string) error {
+	labels := make(map[string]string, len(tags))
+	for key, value := range tags {
+		if value != nil {
+			labels[azureTagToLabelKey(key)] = *value
+		}
+	}
+	if labels["crabbox"] != "true" || labels["created_by"] != "crabbox" || labels["provider"] != "azure" {
+		return fmt.Errorf("Azure cleanup %s %s lacks canonical Crabbox ownership tags", kind, name)
+	}
+	if leaseID := strings.TrimSpace(labels["lease"]); !isCanonicalLeaseID(leaseID) || leaseID != strings.TrimSpace(expected["lease"]) {
+		return fmt.Errorf("Azure cleanup %s %s lease %q does not match VM lease %q", kind, name, leaseID, expected["lease"])
+	}
+	if slug := strings.TrimSpace(labels["slug"]); slug == "" || slug != strings.TrimSpace(expected["slug"]) {
+		return fmt.Errorf("Azure cleanup %s %s slug %q does not match VM slug %q", kind, name, slug, expected["slug"])
+	}
+	return nil
+}
+
+func azureScopedResourceName(id, subscriptionID, resourceGroup, namespace, resourceType string) (string, error) {
+	parts := strings.Split(strings.Trim(strings.TrimSpace(id), "/"), "/")
+	if len(parts) != 8 || !strings.EqualFold(parts[0], "subscriptions") || !strings.EqualFold(parts[1], subscriptionID) ||
+		!strings.EqualFold(parts[2], "resourceGroups") || !strings.EqualFold(parts[3], resourceGroup) ||
+		!strings.EqualFold(parts[4], "providers") || !strings.EqualFold(parts[5], namespace) ||
+		!strings.EqualFold(parts[6], resourceType) || strings.TrimSpace(parts[7]) == "" {
+		return "", fmt.Errorf("Azure resource id %q is not a %s/%s resource in subscription %s resource group %s", id, namespace, resourceType, subscriptionID, resourceGroup)
+	}
+	return parts[7], nil
+}
+
+func requireAzureResourceID(kind, name, actual, expected string) error {
+	if strings.TrimSpace(actual) == "" || !strings.EqualFold(strings.TrimSpace(actual), strings.TrimSpace(expected)) {
+		return fmt.Errorf("Azure cleanup %s %s id %q does not match VM reference %q", kind, name, actual, expected)
+	}
+	return nil
+}
+
+func requireAzureCleanupIdentity(kind, name, actual, expected string) error {
+	actual = strings.TrimSpace(actual)
+	expected = strings.TrimSpace(expected)
+	if actual == "" {
+		return fmt.Errorf("Azure cleanup %s %s has no immutable resource identity", kind, name)
+	}
+	if expected != "" && actual != expected {
+		return fmt.Errorf("Azure cleanup %s %s identity %q does not match validated identity %q", kind, name, actual, expected)
+	}
+	return nil
+}
+
+func (c *AzureClient) azureCleanupDeleteResources(ctx context.Context, vmName string, vm armcompute.VirtualMachine, labels map[string]string, expectedVMID string) (azureVMDeleteResources, error) {
+	resources := azureVMDeleteResources{vm: true}
+	if vm.Properties == nil {
+		return resources, fmt.Errorf("live Azure VM %s has no properties", vmName)
+	}
+	vmLocation := strings.TrimSpace(stringValue(vm.Location))
+	if vmLocation == "" {
+		return resources, fmt.Errorf("live Azure VM %s has no location", vmName)
+	}
+	resources.vmID = strings.TrimSpace(expectedVMID)
+	if err := requireAzureCleanupIdentity("VM", vmName, stringValue(vm.Properties.VMID), resources.vmID); err != nil {
+		return resources, err
+	}
+	if vm.Properties.NetworkProfile == nil || len(vm.Properties.NetworkProfile.NetworkInterfaces) != 1 ||
+		vm.Properties.NetworkProfile.NetworkInterfaces[0] == nil || vm.Properties.NetworkProfile.NetworkInterfaces[0].ID == nil {
+		return resources, fmt.Errorf("live Azure VM %s does not have exactly one identifiable network interface", vmName)
+	}
+	nicID := strings.TrimSpace(*vm.Properties.NetworkProfile.NetworkInterfaces[0].ID)
+	nicName, err := azureScopedResourceName(nicID, c.SubscriptionID, c.ResourceGroup, "Microsoft.Network", "networkInterfaces")
+	if err != nil {
+		return resources, err
+	}
+	if !strings.EqualFold(nicName, vmName+"-nic") {
+		return resources, fmt.Errorf("live Azure VM %s references unexpected network interface %s", vmName, nicName)
+	}
+	nic, err := c.nicc.Get(ctx, c.ResourceGroup, nicName, nil)
+	if err != nil {
+		return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup NIC %s: %w", nicName, err)}
+	}
+	if err := requireAzureResourceID("NIC", nicName, stringValue(nic.ID), nicID); err != nil {
+		return resources, err
+	}
+	if err := validateAzureCleanupResourceTags("NIC", nicName, nic.Tags, labels); err != nil {
+		return resources, err
+	}
+	if nic.Properties == nil {
+		return resources, fmt.Errorf("Azure cleanup NIC %s has no properties", nicName)
+	}
+	resources.nicID = stringValue(nic.Properties.ResourceGUID)
+	if err := requireAzureCleanupIdentity("NIC", nicName, resources.nicID, ""); err != nil {
+		return resources, err
+	}
+	resources.nic = nicName
+
+	var publicIPID string
+	if nic.Properties == nil {
+		return resources, fmt.Errorf("Azure cleanup NIC %s has no properties", nicName)
+	}
+	for _, config := range nic.Properties.IPConfigurations {
+		if config == nil || config.Properties == nil || config.Properties.PublicIPAddress == nil || config.Properties.PublicIPAddress.ID == nil {
+			continue
+		}
+		candidate := strings.TrimSpace(*config.Properties.PublicIPAddress.ID)
+		if candidate == "" {
+			continue
+		}
+		if publicIPID != "" && !strings.EqualFold(publicIPID, candidate) {
+			return resources, fmt.Errorf("Azure cleanup NIC %s references multiple public IP addresses", nicName)
+		}
+		publicIPID = candidate
+	}
+	if publicIPID == "" {
+		return resources, fmt.Errorf("Azure cleanup NIC %s has no identifiable public IP address", nicName)
+	}
+	publicIPName, err := azureScopedResourceName(publicIPID, c.SubscriptionID, c.ResourceGroup, "Microsoft.Network", "publicIPAddresses")
+	if err != nil {
+		return resources, err
+	}
+	if !strings.EqualFold(publicIPName, vmName+"-pip") {
+		return resources, fmt.Errorf("live Azure VM %s references unexpected public IP address %s", vmName, publicIPName)
+	}
+	publicIP, err := c.pipc.Get(ctx, c.ResourceGroup, publicIPName, nil)
+	if err != nil {
+		return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup public IP %s: %w", publicIPName, err)}
+	}
+	if err := requireAzureResourceID("public IP", publicIPName, stringValue(publicIP.ID), publicIPID); err != nil {
+		return resources, err
+	}
+	if err := validateAzureCleanupResourceTags("public IP", publicIPName, publicIP.Tags, labels); err != nil {
+		return resources, err
+	}
+	if publicIP.Properties == nil {
+		return resources, fmt.Errorf("Azure cleanup public IP %s has no properties", publicIPName)
+	}
+	resources.publicIPID = stringValue(publicIP.Properties.ResourceGUID)
+	if err := requireAzureCleanupIdentity("public IP", publicIPName, resources.publicIPID, ""); err != nil {
+		return resources, err
+	}
+	resources.publicIP = publicIPName
+
+	if vm.Properties.StorageProfile == nil || vm.Properties.StorageProfile.OSDisk == nil {
+		return resources, fmt.Errorf("live Azure VM %s has no identifiable OS disk", vmName)
+	}
+	osDisk := vm.Properties.StorageProfile.OSDisk
+	ephemeral := osDisk.DiffDiskSettings != nil && osDisk.DiffDiskSettings.Option != nil &&
+		strings.EqualFold(string(*osDisk.DiffDiskSettings.Option), string(armcompute.DiffDiskOptionsLocal))
+	if !ephemeral {
+		if osDisk.ManagedDisk == nil || osDisk.ManagedDisk.ID == nil || strings.TrimSpace(*osDisk.ManagedDisk.ID) == "" {
+			return resources, fmt.Errorf("live Azure VM %s has no identifiable managed OS disk", vmName)
+		}
+		diskID := strings.TrimSpace(*osDisk.ManagedDisk.ID)
+		diskName, err := azureScopedResourceName(diskID, c.SubscriptionID, c.ResourceGroup, "Microsoft.Compute", "disks")
+		if err != nil {
+			return resources, err
+		}
+		if !strings.EqualFold(diskName, vmName+"-osdisk") {
+			return resources, fmt.Errorf("live Azure VM %s references unexpected OS disk %s", vmName, diskName)
+		}
+		disk, err := c.diskc.Get(ctx, c.ResourceGroup, diskName, nil)
+		if err != nil {
+			return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup disk %s: %w", diskName, err)}
+		}
+		if err := requireAzureResourceID("disk", diskName, stringValue(disk.ID), diskID); err != nil {
+			return resources, err
+		}
+		if disk.Properties == nil {
+			return resources, fmt.Errorf("Azure cleanup disk %s has no properties", diskName)
+		}
+		resources.diskID = stringValue(disk.Properties.UniqueID)
+		if err := requireAzureCleanupIdentity("disk", diskName, resources.diskID, ""); err != nil {
+			return resources, err
+		}
+		// Image-created managed OS disks do not inherit VM tags. Azure's unique
+		// disk identity prevents a retry from targeting a same-name replacement.
+		resources.disk = diskName
+	}
+
+	if nic.Properties.NetworkSecurityGroup == nil || nic.Properties.NetworkSecurityGroup.ID == nil {
+		return resources, fmt.Errorf("Azure cleanup NIC %s has no identifiable network security group", nicName)
+	}
+	nsgID := strings.TrimSpace(*nic.Properties.NetworkSecurityGroup.ID)
+	nsgName, err := azureScopedResourceName(nsgID, c.SubscriptionID, c.ResourceGroup, "Microsoft.Network", "networkSecurityGroups")
+	if err != nil {
+		return resources, err
+	}
+	if strings.EqualFold(nsgName, vmName+azureSnapshotQuarantineNSGSuffix) {
+		nsg, err := c.sgc.Get(ctx, c.ResourceGroup, nsgName, nil)
+		if err != nil {
+			return resources, &azureCleanupResourceReadError{err: fmt.Errorf("re-read Azure cleanup quarantine NSG %s: %w", nsgName, err)}
+		}
+		if err := requireAzureResourceID("quarantine NSG", nsgName, stringValue(nsg.ID), nsgID); err != nil {
+			return resources, err
+		}
+		if err := validateAzureCleanupResourceTags("quarantine NSG", nsgName, nsg.Tags, labels); err != nil {
+			return resources, err
+		}
+		if nsg.Properties == nil {
+			return resources, fmt.Errorf("Azure cleanup quarantine NSG %s has no properties", nsgName)
+		}
+		resources.quarantineID = stringValue(nsg.Properties.ResourceGUID)
+		if err := requireAzureCleanupIdentity("quarantine NSG", nsgName, resources.quarantineID, ""); err != nil {
+			return resources, err
+		}
+		resources.quarantineNSG = nsgName
+	} else if !isAzureCleanupSharedNSG(nsgName, c.NSG, vmLocation) {
+		return resources, fmt.Errorf("Azure cleanup NIC %s references unexpected network security group %s", nicName, nsgName)
+	}
+	return resources, nil
+}
+
+func isAzureCleanupSharedNSG(name, baseName, vmLocation string) bool {
+	return strings.EqualFold(name, baseName) || strings.EqualFold(name, azureRegionalName(baseName, vmLocation))
+}
+
 func (c *AzureClient) deleteVMResources(ctx context.Context, name string) error {
+	return c.deleteVMResourcesWith(ctx, name, azureVMDeleteResources{
+		vm:            true,
+		nic:           name + "-nic",
+		publicIP:      name + "-pip",
+		disk:          name + "-osdisk",
+		quarantineNSG: name + azureSnapshotQuarantineNSGSuffix,
+	})
+}
+
+func (c *AzureClient) deleteVMResourcesWith(ctx context.Context, name string, resources azureVMDeleteResources) error {
 	for attempt := 0; ; attempt++ {
-		errs, retry := c.deleteVMResourcesOnce(ctx, name)
+		errs, retry := c.deleteVMResourcesOnce(ctx, name, resources)
 		if len(errs) == 0 {
 			return nil
 		}
@@ -1958,25 +2430,31 @@ func (c *AzureClient) deleteVMResources(ctx context.Context, name string) error 
 	}
 }
 
-func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string) ([]error, bool) {
+func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string, resources azureVMDeleteResources) ([]error, bool) {
 	var errs []error
 	retry := false
-	quarantineNSGName := name + azureSnapshotQuarantineNSGSuffix
-	if poller, err := c.vmc.BeginDelete(ctx, c.ResourceGroup, name, &armcompute.VirtualMachinesClientBeginDeleteOptions{
-		ForceDeletion: to.Ptr(true),
-	}); err == nil {
-		if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
-			errs = append(errs, fmt.Errorf("delete vm %s: %w", name, err))
+	if resources.vm {
+		if poller, err := c.vmc.BeginDelete(ctx, c.ResourceGroup, name, &armcompute.VirtualMachinesClientBeginDeleteOptions{
+			ForceDeletion: to.Ptr(true),
+		}); err == nil {
+			if _, err := poller.PollUntilDone(ctx, nil); err != nil && !isAzureNotFoundError(err) {
+				errs = append(errs, fmt.Errorf("delete vm %s: %w", name, err))
+				retry = retry || isAzureRetryableDeleteError(err)
+			}
+		} else if !isAzureNotFoundError(err) {
+			errs = append(errs, fmt.Errorf("begin delete vm: %w", err))
 			retry = retry || isAzureRetryableDeleteError(err)
 		}
-	} else if !isAzureNotFoundError(err) {
-		errs = append(errs, fmt.Errorf("begin delete vm: %w", err))
-		retry = retry || isAzureRetryableDeleteError(err)
 	}
-	dependentDeletes := []func() error{
-		func() error { return c.deleteNIC(ctx, name+"-nic") },
-		func() error { return c.deletePublicIP(ctx, name+"-pip") },
-		func() error { return c.deleteDisk(ctx, name+"-osdisk") },
+	dependentDeletes := make([]func() error, 0, 3)
+	if resources.nic != "" {
+		dependentDeletes = append(dependentDeletes, func() error { return c.deleteNIC(ctx, resources.nic) })
+	}
+	if resources.publicIP != "" {
+		dependentDeletes = append(dependentDeletes, func() error { return c.deletePublicIP(ctx, resources.publicIP) })
+	}
+	if resources.disk != "" {
+		dependentDeletes = append(dependentDeletes, func() error { return c.deleteDisk(ctx, resources.disk) })
 	}
 	deleteResults := make(chan error, len(dependentDeletes))
 	for _, deleteResource := range dependentDeletes {
@@ -1988,34 +2466,60 @@ func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string) ([
 			retry = retry || isAzureRetryableDeleteError(err)
 		}
 	}
-	if err := c.deleteSnapshotQuarantineNSG(ctx, quarantineNSGName); err != nil {
-		errs = append(errs, err)
-		retry = retry || isAzureRetryableDeleteError(err)
+	if resources.quarantineNSG != "" {
+		if err := c.deleteSnapshotQuarantineNSG(ctx, resources.quarantineNSG); err != nil {
+			errs = append(errs, err)
+			retry = retry || isAzureRetryableDeleteError(err)
+		}
 	}
-	absenceChecks := []struct {
+	absenceChecks := make([]struct {
 		name string
 		get  func() error
-	}{
-		{name: "vm " + name, get: func() error {
+	}, 0, 5)
+	if resources.vm {
+		absenceChecks = append(absenceChecks, struct {
+			name string
+			get  func() error
+		}{name: "vm " + name, get: func() error {
 			_, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil)
 			return err
-		}},
-		{name: "nic " + name + "-nic", get: func() error {
-			_, err := c.nicc.Get(ctx, c.ResourceGroup, name+"-nic", nil)
+		}})
+	}
+	if resources.nic != "" {
+		absenceChecks = append(absenceChecks, struct {
+			name string
+			get  func() error
+		}{name: "nic " + resources.nic, get: func() error {
+			_, err := c.nicc.Get(ctx, c.ResourceGroup, resources.nic, nil)
 			return err
-		}},
-		{name: "public ip " + name + "-pip", get: func() error {
-			_, err := c.pipc.Get(ctx, c.ResourceGroup, name+"-pip", nil)
+		}})
+	}
+	if resources.publicIP != "" {
+		absenceChecks = append(absenceChecks, struct {
+			name string
+			get  func() error
+		}{name: "public ip " + resources.publicIP, get: func() error {
+			_, err := c.pipc.Get(ctx, c.ResourceGroup, resources.publicIP, nil)
 			return err
-		}},
-		{name: "disk " + name + "-osdisk", get: func() error {
-			_, err := c.diskc.Get(ctx, c.ResourceGroup, name+"-osdisk", nil)
+		}})
+	}
+	if resources.disk != "" {
+		absenceChecks = append(absenceChecks, struct {
+			name string
+			get  func() error
+		}{name: "disk " + resources.disk, get: func() error {
+			_, err := c.diskc.Get(ctx, c.ResourceGroup, resources.disk, nil)
 			return err
-		}},
-		{name: "snapshot quarantine nsg " + quarantineNSGName, get: func() error {
-			_, err := c.sgc.Get(ctx, c.ResourceGroup, quarantineNSGName, nil)
+		}})
+	}
+	if resources.quarantineNSG != "" {
+		absenceChecks = append(absenceChecks, struct {
+			name string
+			get  func() error
+		}{name: "snapshot quarantine nsg " + resources.quarantineNSG, get: func() error {
+			_, err := c.sgc.Get(ctx, c.ResourceGroup, resources.quarantineNSG, nil)
 			return err
-		}},
+		}})
 	}
 	for _, check := range absenceChecks {
 		err := check.get()
@@ -2114,6 +2618,9 @@ func azureVMToServer(vm armcompute.VirtualMachine, ip, privateIP string) Server 
 	}
 	if vm.Properties != nil && vm.Properties.ProvisioningState != nil {
 		s.Status = *vm.Properties.ProvisioningState
+	}
+	if vm.Properties != nil && vm.Properties.VMID != nil {
+		s.ImmutableID = strings.TrimSpace(*vm.Properties.VMID)
 	}
 	if vm.Properties != nil && vm.Properties.HardwareProfile != nil && vm.Properties.HardwareProfile.VMSize != nil {
 		s.ServerType.Name = string(*vm.Properties.HardwareProfile.VMSize)

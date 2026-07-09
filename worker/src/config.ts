@@ -113,7 +113,13 @@ const maxExposedPortsPerLease = 10;
 
 export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults = {}): LeaseConfig {
   const provider = input.provider ?? "hetzner";
-  if (provider !== "hetzner" && provider !== "aws" && provider !== "azure" && provider !== "gcp") {
+  if (
+    provider !== "hetzner" &&
+    provider !== "aws" &&
+    provider !== "azure" &&
+    provider !== "gcp" &&
+    provider !== "daytona"
+  ) {
     throw new Error(`unsupported provider: ${String(provider)}`);
   }
   const target = normalizeTarget(input.target ?? input.targetOS ?? "linux");
@@ -145,7 +151,12 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     !(provider === "aws" && target === "macos") &&
     !(provider === "azure" && target === "windows")
   ) {
-    if (provider === "hetzner" || provider === "azure" || provider === "gcp") {
+    if (
+      provider === "hetzner" ||
+      provider === "azure" ||
+      provider === "gcp" ||
+      provider === "daytona"
+    ) {
       throw new Error(unsupportedManagedTargetMessage(provider, target));
     }
     throw new Error(`unsupported target for brokered ${provider}: ${target}`);
@@ -173,6 +184,21 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
         "brokered provider=azure target=windows architecture=arm64 requires azureImage with an ARM64 Windows image; the built-in Windows default is x64",
       );
     }
+  }
+  if (provider === "daytona" && architectureExplicit) {
+    throw new Error(
+      "brokered provider=daytona takes architecture from the configured Daytona snapshot",
+    );
+  }
+  if (provider === "daytona" && (input.desktop || input.browser || input.code || input.tailscale)) {
+    throw new Error(
+      "brokered provider=daytona currently supports SSH, sync, and run only; desktop/browser/code/tailscale are unavailable",
+    );
+  }
+  if (provider === "daytona" && input.serverTypeExplicit) {
+    throw new Error(
+      "brokered provider=daytona takes CPU, memory, and disk from the configured Daytona snapshot",
+    );
   }
   if (
     provider === "azure" &&
@@ -205,16 +231,18 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   const azureSnapshot = input.azureSnapshot ?? "";
   const serverTypeAzureOSDisk = azureSnapshot ? "managed" : azureOSDisk;
   const serverType =
-    input.serverType ??
-    serverTypeForConfig(
-      provider,
-      target,
-      windowsMode,
-      machineClass,
-      architecture,
-      serverTypeAzureOSDisk,
-    );
-  if (input.serverType) {
+    provider === "daytona"
+      ? "snapshot"
+      : (input.serverType ??
+        serverTypeForConfig(
+          provider,
+          target,
+          windowsMode,
+          machineClass,
+          architecture,
+          serverTypeAzureOSDisk,
+        ));
+  if (input.serverType && provider !== "daytona") {
     validateArchitectureServerType(
       provider,
       target,
@@ -315,10 +343,14 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     capacityAvailabilityZones: input.capacity?.availabilityZones ?? [],
     capacityHints: input.capacity?.hints ?? true,
     sshUser,
-    sshPort: input.sshPort ?? "2222",
-    sshFallbackPorts: validPorts(input.sshFallbackPorts ?? ["22"]),
+    sshPort: provider === "daytona" ? "22" : (input.sshPort ?? "2222"),
+    sshFallbackPorts: provider === "daytona" ? [] : validPorts(input.sshFallbackPorts ?? ["22"]),
     providerKey: input.providerKey?.trim() ?? "",
-    workRoot: input.workRoot ?? defaultWorkRoot(target, windowsMode, sshUser),
+    workRoot:
+      input.workRoot ??
+      (provider === "daytona"
+        ? "/home/daytona/crabbox"
+        : defaultWorkRoot(target, windowsMode, sshUser)),
     ttlSeconds,
     idleTimeoutSeconds,
     keep: input.keep ?? false,
@@ -513,6 +545,9 @@ function defaultWorkRoot(target: TargetOS, windowsMode: WindowsMode, sshUser: st
 }
 
 function defaultSSHUser(provider: Provider, target: TargetOS, windowsMode: WindowsMode): string {
+  if (provider === "daytona") {
+    return "daytona";
+  }
   if (provider === "aws" && target === "macos") {
     return "ec2-user";
   }
@@ -712,6 +747,9 @@ export function serverTypeForClass(machineClass: string): string {
 }
 
 export function serverTypeForProviderClass(provider: Provider, machineClass: string): string {
+  if (provider === "daytona") {
+    return "snapshot";
+  }
   if (provider === "aws") {
     return awsInstanceTypeCandidatesForClass(machineClass)[0] ?? machineClass;
   }
@@ -732,6 +770,9 @@ export function serverTypeForConfig(
   architecture: Architecture = "amd64",
   azureOSDisk: AzureOSDiskMode = "managed",
 ): string {
+  if (provider === "daytona") {
+    return "snapshot";
+  }
   if (provider === "aws") {
     return (
       awsInstanceTypeCandidatesForTargetClass(target, machineClass, windowsMode, architecture)[0] ??

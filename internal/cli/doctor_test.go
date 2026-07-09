@@ -26,8 +26,8 @@ func TestCoordinatorProviderReadinessSupported(t *testing.T) {
 		{provider: "azure", want: true},
 		{provider: "gcp", want: true},
 		{provider: "hetzner", want: true},
+		{provider: "daytona", want: true},
 		{provider: "proxmox", want: false},
-		{provider: "daytona", want: false},
 		{provider: "morph", want: false},
 		{provider: "islo", want: false},
 		{provider: "e2b", want: false},
@@ -315,7 +315,8 @@ func TestDoctorJSONCoordinatorOutput(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	brokerURL := strings.Replace(server.URL, "http://", "http://broker-user:broker-password@", 1)
+	t.Setenv("CRABBOX_COORDINATOR", brokerURL)
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "token")
 
 	var stdout, stderr bytes.Buffer
@@ -331,13 +332,126 @@ func TestDoctorJSONCoordinatorOutput(t *testing.T) {
 		t.Fatalf("view=%#v", view)
 	}
 	found := false
+	foundCoordinator := false
 	for _, check := range view.Checks {
+		if check.Check == "coord" {
+			foundCoordinator = true
+			if !strings.Contains(check.Message, "http://<redacted>@") || !strings.Contains(check.Details["url"], "http://<redacted>@") {
+				t.Fatalf("coordinator URL was not redacted: %#v", check)
+			}
+			for _, secret := range []string{"broker-user", "broker-password"} {
+				if strings.Contains(check.Message, secret) || strings.Contains(check.Details["url"], secret) {
+					t.Fatalf("coordinator check leaked %q: %#v", secret, check)
+				}
+			}
+		}
 		if check.Check == "provider" && check.Details["provider"] == "aws" && check.Details["coordinator_secrets"] == "ready" {
 			found = true
 		}
 	}
+	if !foundCoordinator {
+		t.Fatalf("coordinator check missing from JSON: %#v", view.Checks)
+	}
 	if !found {
 		t.Fatalf("provider readiness missing from JSON: %#v", view.Checks)
+	}
+}
+
+func TestDoctorRedactsCoordinatorAndProviderDiagnostics(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	const configuredSecret = "exact-doctor-secret"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{Auth: "token", Owner: "alice@example.test", Org: "example-org"})
+		case "/v1/providers/aws/readiness":
+			_ = json.NewEncoder(w).Encode(CoordinatorProviderReadiness{
+				Provider:   "aws",
+				Configured: true,
+				Checks: []DoctorCheck{{
+					Status:  "warning",
+					Check:   "diagnostic",
+					Message: "quota warning exact=" + configuredSecret + " Authorization: Bearer reflected-bearer",
+					Details: map[string]string{
+						"url":  "https://user:pass@example.test/path?token=query-secret&region=eu",
+						"json": `{"clientSecret":"json-secret","message":"detail retained"}`,
+						"pem":  "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----",
+					},
+				}},
+			})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", configuredSecret)
+
+	for _, jsonOutput := range []bool{false, true} {
+		name := "text"
+		args := []string{"--provider", "aws"}
+		if jsonOutput {
+			name = "json"
+			args = append(args, "--json")
+		}
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), args); err != nil {
+				t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			output := stdout.String()
+			for _, leaked := range []string{configuredSecret, "reflected-bearer", "user", "pass", "query-secret", "json-secret", "private-material"} {
+				if strings.Contains(output, leaked) {
+					t.Fatalf("doctor %s leaked %q:\n%s", name, leaked, output)
+				}
+			}
+			preserved := []string{"quota warning", "[redacted]"}
+			if jsonOutput {
+				preserved = append(preserved, "detail retained", "region=eu")
+			}
+			for _, preserved := range preserved {
+				if !strings.Contains(output, preserved) {
+					t.Fatalf("doctor %s lost %q:\n%s", name, preserved, output)
+				}
+			}
+		})
+	}
+}
+
+func TestDoctorRedactsRuntimeOnlyProviderSecret(t *testing.T) {
+	for _, tool := range []string{"git", "tar"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	const secret = "opaque-runtime-only-wandb-secret"
+	t.Setenv("WANDB_API_KEY", secret)
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "wandb", "--json"})
+	if err != nil {
+		t.Fatalf("doctor error=%v stderr=%q", err, stderr.String())
+	}
+	output := stdout.String()
+	if strings.Contains(output, secret) || !strings.Contains(output, "[redacted]") || !strings.Contains(output, "region=eu") {
+		t.Fatalf("doctor returned unsafe diagnostic: %s", output)
 	}
 }
 
@@ -515,7 +629,7 @@ func TestDoctorBrokerAuthFailureReportsExpiredUserToken(t *testing.T) {
 	t.Fatalf("missing broker check: %#v", view.Checks)
 }
 
-func TestDoctorSkipsProviderReadinessForCoordinatorUnsupportedProvider(t *testing.T) {
+func TestDoctorChecksProviderReadinessForCoordinatorSupportedDaytona(t *testing.T) {
 	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync", "curl"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("missing local doctor tool %s: %v", tool, err)
@@ -534,10 +648,10 @@ func TestDoctorSkipsProviderReadinessForCoordinatorUnsupportedProvider(t *testin
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/v1/whoami":
 			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{Auth: "token", Owner: "alice@example.test", Org: "example-org"})
+		case "/v1/providers/daytona/readiness":
+			readinessCalled = true
+			_ = json.NewEncoder(w).Encode(CoordinatorProviderReadiness{Provider: "daytona", Configured: true})
 		default:
-			if strings.Contains(r.URL.Path, "/readiness") {
-				readinessCalled = true
-			}
 			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
 		}
 	}))
@@ -550,11 +664,11 @@ func TestDoctorSkipsProviderReadinessForCoordinatorUnsupportedProvider(t *testin
 	if err != nil {
 		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}
-	if readinessCalled {
-		t.Fatal("doctor called provider readiness for coordinator-unsupported provider")
+	if !readinessCalled {
+		t.Fatal("doctor did not call Daytona provider readiness")
 	}
-	if strings.Contains(stdout.String(), "failed  provider") {
-		t.Fatalf("unexpected provider failure: %q", stdout.String())
+	if !strings.Contains(stdout.String(), "ok      provider provider=daytona coordinator_secrets=ready") {
+		t.Fatalf("missing Daytona readiness: %q", stdout.String())
 	}
 }
 

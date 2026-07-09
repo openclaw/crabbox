@@ -10,22 +10,23 @@ import (
 const protocolVersion = 1
 
 type protocolRequest struct {
-	ProtocolVersion int                               `json:"protocolVersion"`
-	Operation       string                            `json:"operation"`
-	Config          map[string]any                    `json:"config,omitempty"`
-	Desired         *desiredLease                     `json:"desired,omitempty"`
-	Lease           *protocolLease                    `json:"lease,omitempty"`
-	Expected        *protocolExpectedProviderIdentity `json:"expected,omitempty"`
-	ID              string                            `json:"id,omitempty"`
-	State           string                            `json:"state,omitempty"`
-	Keep            bool                              `json:"keep,omitempty"`
-	Reclaim         bool                              `json:"reclaim,omitempty"`
-	ReleaseOnly     bool                              `json:"releaseOnly,omitempty"`
-	Force           bool                              `json:"force,omitempty"`
-	All             bool                              `json:"all,omitempty"`
-	Refresh         bool                              `json:"refresh,omitempty"`
-	DryRun          bool                              `json:"dryRun,omitempty"`
-	Repo            *protocolRepo                     `json:"repo,omitempty"`
+	ProtocolVersion         int                               `json:"protocolVersion"`
+	Operation               string                            `json:"operation"`
+	Config                  map[string]any                    `json:"config,omitempty"`
+	Desired                 *desiredLease                     `json:"desired,omitempty"`
+	Lease                   *protocolLease                    `json:"lease,omitempty"`
+	Expected                *protocolExpectedProviderIdentity `json:"expected,omitempty"`
+	ID                      string                            `json:"id,omitempty"`
+	State                   string                            `json:"state,omitempty"`
+	Keep                    bool                              `json:"keep,omitempty"`
+	Reclaim                 bool                              `json:"reclaim,omitempty"`
+	ReleaseOnly             bool                              `json:"releaseOnly,omitempty"`
+	Force                   bool                              `json:"force,omitempty"`
+	All                     bool                              `json:"all,omitempty"`
+	Refresh                 bool                              `json:"refresh,omitempty"`
+	DryRun                  bool                              `json:"dryRun,omitempty"`
+	Repo                    *protocolRepo                     `json:"repo,omitempty"`
+	SkipSSHOutputValidation bool                              `json:"-"`
 }
 
 type protocolExpectedProviderIdentity struct {

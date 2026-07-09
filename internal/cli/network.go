@@ -345,6 +345,8 @@ func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend B
 	if server == nil || !serverTailscaleMetadata(*server).Enabled {
 		return
 	}
+	original := *server
+	original.Labels = cloneStringMap(server.Labels)
 	meta, err := readRemoteTailscaleMetadata(ctx, target)
 	if err != nil {
 		meta = serverTailscaleMetadata(*server)
@@ -368,10 +370,11 @@ func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend B
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata update failed for %s: %v\n", leaseID, err)
 		}
 	} else if direct, ok := backend.(TailscaleMetadataBackend); ok && leaseID != "" {
-		updated, err := direct.UpdateTailscaleMetadata(ctx, LeaseTarget{Server: *server, SSH: target, LeaseID: leaseID}, meta)
+		updated, err := direct.UpdateTailscaleMetadata(ctx, LeaseTarget{Server: original, SSH: target, LeaseID: leaseID}, meta)
 		if err == nil {
 			*server = updated
 		} else {
+			*server = original
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata update failed for %s: %v\n", leaseID, err)
 		}
 	}

@@ -391,6 +391,46 @@ func TestNormalizeTargetConfigForcesAWSMacOSLaunchdSSHPort(t *testing.T) {
 	}
 }
 
+func TestNormalizeTargetConfigUsesSealosWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "sealos-devbox"
+	cfg.SealosDevbox.WorkRoot = "/home/devbox/project"
+
+	normalizeTargetConfig(&cfg)
+
+	if cfg.WorkRoot != "/home/devbox/project" {
+		t.Fatalf("WorkRoot=%q want Sealos provider root", cfg.WorkRoot)
+	}
+}
+
+func TestNormalizeTargetConfigPreservesExplicitWorkRootForSealos(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "sealos-devbox"
+	cfg.WorkRoot = "/srv/crabbox"
+	MarkWorkRootExplicit(&cfg)
+
+	normalizeTargetConfig(&cfg)
+
+	if cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("WorkRoot=%q want explicit root", cfg.WorkRoot)
+	}
+}
+
+func TestNormalizeTargetConfigPrefersExplicitSealosWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "sealos-devbox"
+	cfg.WorkRoot = "/srv/crabbox"
+	MarkWorkRootExplicit(&cfg)
+	cfg.SealosDevbox.WorkRoot = "/home/devbox/override"
+	MarkSealosDevboxWorkRootExplicit(&cfg)
+
+	normalizeTargetConfig(&cfg)
+
+	if cfg.WorkRoot != "/home/devbox/override" {
+		t.Fatalf("WorkRoot=%q want explicit Sealos root", cfg.WorkRoot)
+	}
+}
+
 func TestLeaseCreateFlagsDoNotApplyPortableOSImageToAzureWindows(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)

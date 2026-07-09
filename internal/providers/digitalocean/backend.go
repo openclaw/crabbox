@@ -59,6 +59,7 @@ func NewDigitalOceanLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt cor
 		return core.WaitForSSHReady(ctx, target, b.RT.Stderr, phase, timeout)
 	}
 	b.Delete = b.deleteServer
+	b.CleanupEligible = b.cleanupEligible
 	return b
 }
 
@@ -327,6 +328,9 @@ func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.Resolve
 	servers := make([]core.Server, 0, len(droplets))
 	byID := map[int64]droplet{}
 	for _, item := range droplets {
+		if !isOwnedDroplet(item) {
+			continue
+		}
 		server := serverFromDroplet(item, b.Cfg)
 		servers = append(servers, server)
 		byID[server.ID] = item
@@ -369,7 +373,7 @@ func (b *digitalOceanLeaseBackend) releaseTargetFromClaim(ctx context.Context, c
 	} else {
 		var exact bool
 		claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, providerName)
-		if err == nil && exact && (!ok || claim.LeaseID != id) {
+		if err == nil && (exact || core.IsCanonicalLeaseID(id)) && (!exact || !ok || claim.LeaseID != id) {
 			return core.LeaseTarget{}, core.Exit(2, "digitalocean exact lease identifier %q does not match a valid digitalocean claim", id)
 		}
 	}
@@ -695,7 +699,7 @@ func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.Reso
 	if claimErr != nil {
 		return core.LeaseTarget{}, fmt.Errorf("read digitalocean lease claim: %w", claimErr)
 	}
-	if claimExists {
+	if claimExists && !req.IsReadOnlyStatus() {
 		if claim.Provider != providerName {
 			return core.LeaseTarget{}, core.Exit(2, "lease=%s is claimed by provider=%s; refusing digitalocean claim rewrite", leaseID, claim.Provider)
 		}
@@ -717,6 +721,15 @@ func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.Reso
 			return core.LeaseTarget{}, core.Exit(2, "digitalocean lease claim has no Droplet identity or valid pending recovery state for lease=%s", leaseID)
 		}
 		preserveDigitalOceanKeyIdentity(server.Labels, claim.Labels)
+	} else if !claimExists && req.ReleaseOnly {
+		return core.LeaseTarget{}, core.Exit(2, "digitalocean lease=%s has no exact local claim; refusing release", leaseID)
+	} else if !claimExists && !req.NoLocalStateMutations {
+		if !req.Reclaim {
+			return core.LeaseTarget{}, core.Exit(2, "digitalocean lease=%s is unclaimed; use --reclaim to adopt it explicitly", leaseID)
+		}
+		if req.Repo.Root == "" {
+			return core.LeaseTarget{}, core.Exit(2, "digitalocean lease=%s cannot be reclaimed without a repository root", leaseID)
+		}
 	}
 	if req.ReleaseOnly {
 		target := core.LeaseTarget{Server: server, LeaseID: leaseID}
@@ -731,7 +744,7 @@ func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.Reso
 			ssh.Key = keyPath
 		}
 	}
-	if req.Repo.Root != "" {
+	if req.Repo.Root != "" && !req.NoLocalStateMutations {
 		if _, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists); err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -751,6 +764,9 @@ func (b *digitalOceanLeaseBackend) List(ctx context.Context, req core.ListReques
 	}
 	out := make([]core.LeaseView, 0, len(droplets))
 	for _, item := range droplets {
+		if !isOwnedDroplet(item) {
+			continue
+		}
 		out = append(out, serverFromDroplet(item, b.Cfg))
 	}
 	return out, nil
@@ -779,6 +795,11 @@ func (b *digitalOceanLeaseBackend) ReleaseLease(ctx context.Context, req core.Re
 
 func (b *digitalOceanLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("deleted lease=%s droplet=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
+}
+
+func (b *digitalOceanLeaseBackend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
+	expected := strings.TrimSpace(claim.Labels[digitalOceanAccountLabel])
+	return expected != "" && expected == strings.TrimSpace(lease.Server.Labels[digitalOceanAccountLabel])
 }
 
 func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
@@ -867,6 +888,20 @@ func (b *digitalOceanLeaseBackend) Cleanup(ctx context.Context, req core.Cleanup
 		return err
 	}
 	return b.CleanupServers(ctx, req, servers)
+}
+
+func (b *digitalOceanLeaseBackend) cleanupEligible(ctx context.Context, server core.Server) (bool, error) {
+	client, err := b.clientFactory(b.RT)
+	if err != nil {
+		return false, err
+	}
+	accountID, err := client.AccountID(ctx)
+	if err != nil {
+		return false, err
+	}
+	server = shared.ServerWithDefaultLabel(server, digitalOceanAccountLabel, accountID)
+	_, err = b.ensureCleanupClaim(server, true)
+	return shared.CleanupClaimEligible(err)
 }
 
 func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
@@ -960,13 +995,12 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 	}
 	recoveryKeyID := strings.TrimSpace(claim.Labels[digitalOceanRecoveryKeyIDLabel])
 	keyOwned := strings.TrimSpace(claim.Labels[digitalOceanKeyOwnedLabel])
-	foreignClaim := claim.Provider != providerName
 	if server.ID != 0 {
 		if err := client.DeleteDroplet(ctx, server.ID); err != nil {
 			return err
 		}
 	}
-	if !foreignClaim && (keyOwned == "" || keyOwned == "unknown") {
+	if keyOwned == "" || keyOwned == "unknown" {
 		keyID, owned, known, recoveryErr := b.recoverDigitalOceanKeyIdentity(ctx, client, leaseID)
 		if recoveryErr != nil {
 			return recoveryErr
@@ -984,7 +1018,7 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 		recoveryKeyID = strings.TrimSpace(claim.Labels[digitalOceanRecoveryKeyIDLabel])
 		keyOwned = strings.TrimSpace(claim.Labels[digitalOceanKeyOwnedLabel])
 	}
-	if !foreignClaim && keyOwned == "true" && recoveryKeyID != "" {
+	if keyOwned == "true" && recoveryKeyID != "" {
 		keyID, parseErr := strconv.ParseInt(recoveryKeyID, 10, 64)
 		if parseErr != nil || keyID <= 0 {
 			return core.Exit(2, "invalid digitalocean recovery SSH key id %q", recoveryKeyID)
@@ -1001,13 +1035,10 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 		if err := client.DeleteSSHKey(ctx, keyID); err != nil {
 			return err
 		}
-	} else if !foreignClaim && keyOwned == "true" {
+	} else if keyOwned == "true" {
 		return core.Exit(2, "digitalocean lease=%s owns an SSH key but its immutable key id is missing", leaseID)
-	} else if !foreignClaim && keyOwned != "false" {
+	} else if keyOwned != "false" {
 		return core.Exit(4, "digitalocean SSH key ownership remains indeterminate for lease=%s; local claim and credentials retained", leaseID)
-	}
-	if foreignClaim {
-		return nil
 	}
 	if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
 		return fmt.Errorf("finalize digitalocean cleanup claim: %w", err)
@@ -1027,32 +1058,14 @@ func (b *digitalOceanLeaseBackend) ensureCleanupClaim(server core.Server, liveDr
 			return core.LeaseClaim{}, core.Exit(2, "digitalocean lease claim is incomplete for lease=%s", leaseID)
 		}
 	} else {
-		repoRoot, err := os.Getwd()
-		if err != nil {
-			return core.LeaseClaim{}, fmt.Errorf("resolve cleanup claim working directory: %w", err)
-		}
-		claim, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(
-			leaseID,
-			server.Labels["slug"],
-			b.Cfg,
-			server,
-			core.SSHTarget{},
-			repoRoot,
-			b.Cfg.IdleTimeout,
-			false,
-			claim,
-			false,
-		)
-		if err != nil {
-			return core.LeaseClaim{}, fmt.Errorf("persist digitalocean cleanup claim: %w", err)
-		}
+		return core.LeaseClaim{}, core.Exit(2, "digitalocean lease=%s has no exact local claim; refusing cleanup", leaseID)
 	}
 	cloudID := firstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
 	if claim.Provider == providerName && claim.CloudID != "" && claim.CloudID != cloudID {
 		return core.LeaseClaim{}, core.Exit(2, "refusing to release DigitalOcean Droplet %d from stale local claim", server.ID)
 	}
 	if claim.Provider != providerName {
-		return claim, nil
+		return core.LeaseClaim{}, core.Exit(2, "lease=%s is claimed by provider=%s; refusing digitalocean cleanup", leaseID, claim.Provider)
 	}
 	if err := validateDigitalOceanClaimIdentity(claim, leaseID, server.Labels["slug"]); err != nil {
 		return core.LeaseClaim{}, err

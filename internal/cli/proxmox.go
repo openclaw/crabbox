@@ -36,7 +36,7 @@ type ProxmoxReadinessCheck struct {
 var (
 	proxmoxRunSSHQuietWithOptions = runSSHQuietWithOptions
 	proxmoxRunSSHInputQuiet       = runSSHInputQuiet
-	proxmoxAPITokenPattern        = regexp.MustCompile(`PVEAPIToken=[^[:space:]]+`)
+	proxmoxAPITokenPattern        = regexp.MustCompile(`PVEAPIToken=[A-Za-z0-9@._!%+=:/~-]+`)
 )
 
 type ProxmoxError struct {
@@ -130,7 +130,7 @@ func (c *ProxmoxClient) doEnvelope(ctx context.Context, method, path string, for
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &ProxmoxError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: summarizeJSON(data)}
+		return &ProxmoxError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: summarizeJSON([]byte(c.redactErrorBody(string(data))))}
 	}
 	if out == nil {
 		return nil
@@ -148,6 +148,19 @@ func (c *ProxmoxClient) doEnvelope(ctx context.Context, method, path string, for
 		return fmt.Errorf("proxmox %s %s: missing required data in response", method, path)
 	}
 	return json.Unmarshal(envelope.Data, out)
+}
+
+func (c *ProxmoxClient) redactErrorBody(body string) string {
+	redacted := body
+	if strings.TrimSpace(c.TokenID) != "" && strings.TrimSpace(c.TokenSecret) != "" {
+		redacted = strings.ReplaceAll(redacted, "PVEAPIToken="+c.TokenID+"="+c.TokenSecret, "PVEAPIToken=<redacted>")
+	}
+	for _, secret := range []string{c.TokenID, c.TokenSecret} {
+		if strings.TrimSpace(secret) != "" {
+			redacted = strings.ReplaceAll(redacted, secret, "<redacted>")
+		}
+	}
+	return proxmoxAPITokenPattern.ReplaceAllString(redacted, "PVEAPIToken=<redacted>")
 }
 
 type proxmoxStorage struct {

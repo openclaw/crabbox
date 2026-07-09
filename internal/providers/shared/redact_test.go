@@ -7,9 +7,11 @@ import (
 
 func TestRedactErrorSecrets(t *testing.T) {
 	secret := "provider-secret-token"
-	value := `request failed: Bearer ` + secret + ` X-API-Key: ` + secret + ` {"accessToken":"derived-token","message":"quota exceeded"}`
+	value := `request failed: Bearer ` + secret + ` X-API-Key: ` + secret + ` {"accessToken":"derived-token","clientSecret":"client-secret","message":"quota exceeded"} https://user:pass@example.test/path?token=query-secret -----BEGIN PRIVATE KEY-----
+private-material
+-----END PRIVATE KEY-----`
 	got := RedactErrorSecrets(value, secret, " ")
-	for _, leaked := range []string{secret, "derived-token"} {
+	for _, leaked := range []string{secret, "derived-token", "client-secret", "user", "pass", "query-secret", "private-material"} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("redacted error leaked %q: %s", leaked, got)
 		}

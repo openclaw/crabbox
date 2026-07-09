@@ -33,8 +33,85 @@ export function pathParts(request: Request): string[] {
   return new URL(request.url).pathname.split("/").filter(Boolean);
 }
 
-export function errorMessage(error: unknown): string {
-  return firstLine(error instanceof Error ? error.message : String(error));
+export function errorMessage(
+  error: unknown,
+  secrets: readonly (string | undefined)[] = [],
+): string {
+  return redactDiagnosticSecrets(
+    firstLine(error instanceof Error ? error.message : String(error)),
+    secrets,
+  );
+}
+
+export function redactDiagnosticSecrets(
+  value: string,
+  secrets: readonly (string | undefined)[] = [],
+): string {
+  let redacted = value;
+  const exactSecrets = [
+    ...new Set(
+      secrets.flatMap((secret) => {
+        const trimmed = secret?.trim();
+        return trimmed ? [trimmed] : [];
+      }),
+    ),
+  ].toSorted((left, right) => right.length - left.length);
+  for (const secret of exactSecrets) {
+    redacted = redacted.replaceAll(secret, "[redacted]");
+  }
+  redacted = redacted.replaceAll(
+    /(^|[^?&A-Za-z0-9_-])(authorization|proxy-authorization)[ \t]*[:=][ \t]*[!#$%&'*+.^_`|~0-9A-Za-z-]+(?:(?:\r?\n[ \t]+)|[^\r\n])*/gi,
+    (match, prefix: string) => {
+      const colon = match.indexOf(":", prefix.length);
+      const equals = match.indexOf("=", prefix.length);
+      const separator = colon < 0 ? equals : equals < 0 ? colon : Math.min(colon, equals);
+      if (separator < 0) return match;
+      const scheme = match
+        .slice(separator + 1)
+        .trim()
+        .split(/\s+/, 1)[0]
+        ?.replace(/:$/, "")
+        .toLowerCase();
+      if (scheme === "bearer" || scheme === "basic") {
+        return match.replace(
+          /(^|[^?&A-Za-z0-9_-])(authorization|proxy-authorization)[ \t]*[:=][ \t]*(?:(?:bearer|basic)(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+))?(?:\\.|[^\s"])+/gi,
+          redactDiagnosticAssignment,
+        );
+      }
+      return redactDiagnosticAssignment(match, prefix);
+    },
+  );
+  redacted = redacted.replaceAll(
+    /(^|[^?&A-Za-z0-9_-])(authorization|proxy-authorization|x-api-key|api-key|api_key|access-token|access_token|client-secret|client_secret|session-token|session_token|token|password)[ \t]*[:=][ \t]*(?:(?:bearer|basic)(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+))?(?:\\.|[^\s"])+/gi,
+    redactDiagnosticAssignment,
+  );
+  redacted = redacted.replaceAll(
+    /"(authorization|proxy-authorization|x-api-key|apiKey|api-key|api_key|accessToken|access-token|access_token|clientSecret|client-secret|client_secret|credential|credentials|privateKey|private-key|private_key|secret|sessionToken|session-token|session_token|token|password)"\s*:\s*"(?:\\[\s\S]|[^"\\])*(?:"|$)/gi,
+    (match) => {
+      const separator = match.indexOf(":");
+      return separator >= 0 ? `${match.slice(0, separator + 1)}"[redacted]"` : match;
+    },
+  );
+  redacted = redacted.replaceAll(
+    /([?&](?:authorization|proxy-authorization|x-api-key|api[_-]?key|access[_-]?token|client[_-]?secret|session[_-]?token|password|token|signature|sig|x-amz-credential|x-amz-signature|x-amz-security-token|x-goog-credential|x-goog-signature|x-goog-security-token)=)[^&#\s]+/gi,
+    "$1[redacted]",
+  );
+  redacted = redacted.replaceAll(/\b(https?:\/\/)[^/\s:@]+:[^@\s/]+@/gi, "$1[redacted]@");
+  redacted = redacted.replaceAll(
+    /\bbearer(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+)(?:\\.|[^\s"])+/gi,
+    "Bearer [redacted]",
+  );
+  return redacted.replaceAll(
+    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/gi,
+    "[redacted]",
+  );
+}
+
+function redactDiagnosticAssignment(match: string, prefix: string): string {
+  const colon = match.indexOf(":", prefix.length);
+  const equals = match.indexOf("=", prefix.length);
+  const separator = colon < 0 ? equals : equals < 0 ? colon : Math.min(colon, equals);
+  return separator >= 0 ? `${match.slice(0, separator + 1)} [redacted]` : match;
 }
 
 function redactStackTraceFields(value: unknown, seen = new WeakSet<object>()): unknown {

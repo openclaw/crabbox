@@ -342,6 +342,11 @@ type CoordinatorWebVNCTicket struct {
 	ExpiresAt string `json:"expiresAt"`
 }
 
+type CoordinatorWebVNCCredentialHandoff struct {
+	Ticket    string `json:"ticket"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
 type CoordinatorWebVNCEvent struct {
 	At     string `json:"at"`
 	Event  string `json:"event"`
@@ -554,11 +559,12 @@ type CoordinatorArtifactUploadInput struct {
 }
 
 type CoordinatorArtifactUploadResponse struct {
-	Backend   string                           `json:"backend"`
-	Bucket    string                           `json:"bucket"`
-	Prefix    string                           `json:"prefix"`
-	ExpiresAt string                           `json:"expiresAt"`
-	Files     []CoordinatorArtifactUploadGrant `json:"files"`
+	Backend      string                           `json:"backend"`
+	Bucket       string                           `json:"bucket"`
+	Prefix       string                           `json:"prefix"`
+	ExpiresAt    string                           `json:"expiresAt"`
+	AccessPolicy string                           `json:"accessPolicy,omitempty"`
+	Files        []CoordinatorArtifactUploadGrant `json:"files"`
 }
 
 type CoordinatorArtifactUploadGrant struct {
@@ -570,7 +576,8 @@ type CoordinatorArtifactUploadGrant struct {
 		Headers   map[string]string `json:"headers"`
 		ExpiresAt string            `json:"expiresAt"`
 	} `json:"upload"`
-	URL string `json:"url"`
+	URL          string `json:"url"`
+	AccessPolicy string `json:"accessPolicy,omitempty"`
 }
 
 type TestResultSummary struct {
@@ -802,7 +809,6 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"profile":                         cfg.Profile,
 		"provider":                        cfg.Provider,
 		"target":                          cfg.TargetOS,
-		"architecture":                    effectiveArchitectureForConfig(cfg),
 		"windowsMode":                     cfg.WindowsMode,
 		"desktop":                         cfg.Desktop,
 		"desktopEnv":                      normalizedDesktopEnv(cfg.DesktopEnv),
@@ -844,6 +850,9 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"sshPublicKey":                    publicKey,
 		"pond":                            cfg.Pond,
 		"exposedPorts":                    cfg.ExposedPorts,
+	}
+	if cfg.Provider != "daytona" || cfg.architectureExplicit {
+		req["architecture"] = effectiveArchitectureForConfig(cfg)
 	}
 	if len(capacity) > 0 {
 		req["capacity"] = capacity
@@ -1177,9 +1186,12 @@ func (c *CoordinatorClient) ProviderReadiness(ctx context.Context, cfg Config) (
 	return res, err
 }
 
-func (c *CoordinatorClient) StartGitHubLogin(ctx context.Context, pollSecretHash, provider string) (CoordinatorGitHubLoginStart, error) {
+func (c *CoordinatorClient) StartGitHubLogin(ctx context.Context, pollSecretHash, provider, loopbackRedirectURI string) (CoordinatorGitHubLoginStart, error) {
 	var res CoordinatorGitHubLoginStart
-	body := map[string]any{"pollSecretHash": pollSecretHash}
+	body := map[string]any{
+		"pollSecretHash":      pollSecretHash,
+		"loopbackRedirectURI": loopbackRedirectURI,
+	}
 	if provider != "" {
 		body["provider"] = provider
 	}
@@ -1187,18 +1199,31 @@ func (c *CoordinatorClient) StartGitHubLogin(ctx context.Context, pollSecretHash
 	return res, err
 }
 
-func (c *CoordinatorClient) PollGitHubLogin(ctx context.Context, loginID, pollSecret string) (CoordinatorGitHubLoginPoll, error) {
+func (c *CoordinatorClient) PollGitHubLogin(ctx context.Context, loginID, pollSecret, browserConfirmation string) (CoordinatorGitHubLoginPoll, error) {
 	var res CoordinatorGitHubLoginPoll
-	err := c.do(ctx, http.MethodPost, "/v1/auth/github/poll", map[string]any{
+	body := map[string]any{
 		"loginID":    loginID,
 		"pollSecret": pollSecret,
-	}, &res)
+	}
+	if browserConfirmation != "" {
+		body["browserConfirmation"] = browserConfirmation
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/auth/github/poll", body, &res)
 	return res, err
 }
 
 func (c *CoordinatorClient) CreateWebVNCTicket(ctx context.Context, leaseID string) (CoordinatorWebVNCTicket, error) {
 	var res CoordinatorWebVNCTicket
 	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(leaseID)+"/webvnc/ticket", map[string]any{}, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) CreateWebVNCCredentialHandoff(ctx context.Context, leaseID, username, password string) (CoordinatorWebVNCCredentialHandoff, error) {
+	var res CoordinatorWebVNCCredentialHandoff
+	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(leaseID)+"/webvnc/handoff", map[string]string{
+		"username": username,
+		"password": password,
+	}, &res)
 	return res, err
 }
 
@@ -1757,47 +1782,13 @@ func (c *CoordinatorClient) doHTTP(ctx context.Context, method, path string, dat
 }
 
 func (c *CoordinatorClient) secureHTTPClient() *http.Client {
-	source := c.Client
-	if source == nil {
-		source = http.DefaultClient
-	}
-	client := *source
 	trusted, _ := url.Parse(c.BaseURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameCoordinatorOrigin(trusted, req.URL) {
+	return redirectCheckedHTTPClient(c.Client, func(req *http.Request) error {
+		if !sameHTTPOrigin(trusted, req.URL) {
 			return fmt.Errorf("coordinator refused cross-origin redirect to %s", req.URL.Redacted())
 		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
 		return nil
-	}
-	return &client
-}
-
-func sameCoordinatorOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveCoordinatorPort(a) == effectiveCoordinatorPort(b)
-}
-
-func effectiveCoordinatorPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+	})
 }
 
 func (c *CoordinatorClient) addRequestHeaders(ctx context.Context, headers http.Header) error {
@@ -2097,7 +2088,14 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 		cfg.WindowsMode = lease.WindowsMode
 	}
 	target := sshTargetForLease(cfg, lease.Host, lease.SSHUser, lease.SSHPort)
-	useStoredTestboxKey(&target, lease.ID)
+	if server.Provider == "daytona" {
+		target.Key = ""
+		target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
+		target.AuthSecret = true
+		target.NetworkKind = NetworkPublic
+	} else {
+		useStoredTestboxKey(&target, lease.ID)
+	}
 	return server, target, lease.ID
 }
 

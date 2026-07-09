@@ -20,6 +20,73 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
+func TestValidateAWSCleanupKeyPair(t *testing.T) {
+	name := "crabbox-cbx-123456abcdef"
+	owned := types.KeyPairInfo{
+		KeyName:   aws.String(name),
+		KeyPairId: aws.String("key-0123456789abcdef0"),
+		Tags: []types.Tag{
+			{Key: aws.String("crabbox"), Value: aws.String("true")},
+			{Key: aws.String("created_by"), Value: aws.String("crabbox")},
+		},
+	}
+	if keyPairID, err := validateAWSCleanupKeyPair(name, []types.KeyPairInfo{owned}); err != nil || keyPairID != "key-0123456789abcdef0" {
+		t.Fatalf("owned key id=%q err=%v", keyPairID, err)
+	}
+	unowned := owned
+	unowned.Tags = []types.Tag{{Key: aws.String("crabbox"), Value: aws.String("true")}}
+	_, err := validateAWSCleanupKeyPair(name, []types.KeyPairInfo{unowned})
+	if err == nil || !IsAWSCleanupKeyOwnershipError(err) {
+		t.Fatalf("unowned key error=%v", err)
+	}
+}
+
+func TestAWSDeleteCleanupSSHKeyUsesValidatedImmutableID(t *testing.T) {
+	const (
+		name      = "crabbox-cbx-123456abcdef"
+		keyPairID = "key-0123456789abcdef0"
+	)
+	var actions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		actions = append(actions, params.Get("Action"))
+		switch params.Get("Action") {
+		case "DescribeKeyPairs":
+			writeEC2XML(w, `<DescribeKeyPairsResponse><keySet><item><keyName>`+name+`</keyName><keyPairId>`+keyPairID+`</keyPairId><tagSet><item><key>crabbox</key><value>true</value></item><item><key>created_by</key><value>crabbox</value></item></tagSet></item></keySet></DescribeKeyPairsResponse>`)
+		case "DeleteKeyPair":
+			if got := params.Get("KeyPairId"); got != keyPairID {
+				t.Fatalf("KeyPairId=%q, want %q", got, keyPairID)
+			}
+			if got := params.Get("KeyName"); got != "" {
+				t.Fatalf("KeyName=%q, want empty immutable-id deletion", got)
+			}
+			writeEC2XML(w, `<DeleteKeyPairResponse><return>true</return></DeleteKeyPairResponse>`)
+		default:
+			writeEC2Error(w, "Unexpected", params.Get("Action"), http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := testAWSClient(server.URL)
+	resolvedID, err := client.ResolveCleanupSSHKeyID(context.Background(), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeleteCleanupSSHKeyID(context.Background(), resolvedID); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(actions, []string{"DescribeKeyPairs", "DeleteKeyPair"}) {
+		t.Fatalf("actions=%v", actions)
+	}
+}
+
 func TestAWSEnsureSSHKeyAcceptsMatchingExistingFingerprint(t *testing.T) {
 	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 1))
 	fingerprints, err := awsImportedPublicKeyFingerprints(publicKey)
@@ -56,6 +123,89 @@ func TestAWSEnsureSSHKeyAcceptsMatchingExistingFingerprint(t *testing.T) {
 	}
 	if !slices.Equal(actions, []string{"DescribeKeyPairs"}) {
 		t.Fatalf("actions=%v, want DescribeKeyPairs only", actions)
+	}
+}
+
+func TestAWSCreateRollbackDeletesOnlyNewImmutableKeyID(t *testing.T) {
+	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 1))
+	const keyPairID = "key-created-id"
+	var actions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		action := params.Get("Action")
+		actions = append(actions, action)
+		switch action {
+		case "DescribeKeyPairs":
+			writeEC2Error(w, "InvalidKeyPair.NotFound", "missing", http.StatusBadRequest)
+		case "ImportKeyPair":
+			writeEC2XML(w, `<ImportKeyPairResponse><keyName>crabbox-test</keyName><keyPairId>`+keyPairID+`</keyPairId></ImportKeyPairResponse>`)
+		case "DescribeSecurityGroups":
+			writeEC2Error(w, "UnauthorizedOperation", "denied", http.StatusForbidden)
+		case "DeleteKeyPair":
+			if got := params.Get("KeyPairId"); got != keyPairID {
+				t.Fatalf("KeyPairId=%q, want %q", got, keyPairID)
+			}
+			if got := params.Get("KeyName"); got != "" {
+				t.Fatalf("KeyName=%q, want no name-based rollback", got)
+			}
+			writeEC2XML(w, `<DeleteKeyPairResponse><return>true</return></DeleteKeyPairResponse>`)
+		default:
+			writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: "aws", ProviderKey: "crabbox-test", AWSAMI: "ami-test", AWSSGID: "sg-test"}
+	_, _, err := testAWSClient(server.URL).createServerWithFallbackInRegion(context.Background(), cfg, publicKey, "cbx_123", "rollback", false, nil)
+	if err == nil {
+		t.Fatal("expected create failure")
+	}
+	if !slices.Equal(actions, []string{"DescribeKeyPairs", "ImportKeyPair", "DescribeSecurityGroups", "DeleteKeyPair"}) {
+		t.Fatalf("actions=%v", actions)
+	}
+}
+
+func TestAWSCreateRollbackPreservesMatchingUnmanagedKey(t *testing.T) {
+	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 1))
+	var actions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		action := params.Get("Action")
+		actions = append(actions, action)
+		switch action {
+		case "DescribeKeyPairs":
+			writeEC2XML(w, `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-test</keyName><publicKey>`+publicKey+`</publicKey><keyPairId>key-unmanaged-id</keyPairId></item></keySet></DescribeKeyPairsResponse>`)
+		case "DescribeSecurityGroups":
+			writeEC2Error(w, "UnauthorizedOperation", "denied", http.StatusForbidden)
+		case "DeleteKeyPair":
+			t.Fatal("unmanaged key must not be deleted during rollback")
+		default:
+			writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: "aws", ProviderKey: "crabbox-test", AWSAMI: "ami-test", AWSSGID: "sg-test"}
+	_, _, err := testAWSClient(server.URL).createServerWithFallbackInRegion(context.Background(), cfg, publicKey, "cbx_123", "rollback", false, nil)
+	if err == nil {
+		t.Fatal("expected create failure")
+	}
+	if !slices.Equal(actions, []string{"DescribeKeyPairs", "DescribeSecurityGroups"}) {
+		t.Fatalf("actions=%v", actions)
 	}
 }
 

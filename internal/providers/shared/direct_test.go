@@ -110,6 +110,63 @@ func TestCleanupServersRequiresDeleteAndPropagatesDeleteErrors(t *testing.T) {
 	}
 }
 
+func TestCleanupServersSkipsIneligibleAndContinues(t *testing.T) {
+	clock := &testCleanupClock{now: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	var stderr bytes.Buffer
+	var deleted []string
+	backend := DirectSSHBackend{
+		RT: core.Runtime{Stderr: &stderr, Clock: clock},
+		CleanupEligible: func(_ context.Context, server core.Server) (bool, error) {
+			return server.Name == "claimed", nil
+		},
+		Delete: func(_ context.Context, _ core.Config, server core.Server) error {
+			deleted = append(deleted, server.Name)
+			return nil
+		},
+	}
+	servers := []core.Server{
+		testCleanupServer("claimless", clock.now.Add(-time.Hour)),
+		testCleanupServer("claimed", clock.now.Add(-time.Hour)),
+	}
+	if err := backend.CleanupServers(context.Background(), core.CleanupRequest{}, servers); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(deleted, ",") != "claimed" {
+		t.Fatalf("deleted=%v, want claimed", deleted)
+	}
+	if !strings.Contains(stderr.String(), "skip server id=claimless name=claimless reason=no-exact-local-claim") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestCleanupClaimEligible(t *testing.T) {
+	if eligible, err := CleanupClaimEligible(nil); err != nil || !eligible {
+		t.Fatalf("nil error eligible=%v err=%v", eligible, err)
+	}
+	if eligible, err := CleanupClaimEligible(core.Exit(2, "claim mismatch")); err != nil || eligible {
+		t.Fatalf("claim mismatch eligible=%v err=%v", eligible, err)
+	}
+	want := errors.New("read claim")
+	if eligible, err := CleanupClaimEligible(want); eligible || !errors.Is(err, want) {
+		t.Fatalf("read failure eligible=%v err=%v", eligible, err)
+	}
+}
+
+func TestServerWithDefaultLabelCopiesLabels(t *testing.T) {
+	original := core.Server{Labels: map[string]string{"lease": "cbx_123456789abc"}}
+	updated := ServerWithDefaultLabel(original, "provider_account", "account:test")
+	if updated.Labels["provider_account"] != "account:test" || updated.Labels["lease"] != original.Labels["lease"] {
+		t.Fatalf("updated labels=%v", updated.Labels)
+	}
+	if _, ok := original.Labels["provider_account"]; ok {
+		t.Fatalf("original labels mutated: %v", original.Labels)
+	}
+	existing := ServerWithDefaultLabel(updated, "provider_account", "account:other")
+	if existing.Labels["provider_account"] != "account:test" {
+		t.Fatalf("existing label overwritten: %v", existing.Labels)
+	}
+}
+
 func TestAcquireAttemptsRetry(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		lease := core.LeaseTarget{LeaseID: "lease-1"}

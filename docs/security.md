@@ -53,7 +53,7 @@ Every non-health route normally requires a Bearer token; requests without one
 are rejected `401 unauthorized`. The Node runtime can instead accept an
 explicitly configured trusted reverse-proxy identity from allowlisted peer
 CIDRs. The generally unauthenticated routes are `GET /v1/health`, the GitHub
-login/OAuth and portal login/logout routes, and bridge agent upgrades that use
+login/OAuth and portal login routes, and bridge agent upgrades that use
 short-lived tickets. The workspace lifecycle and desktop-connection routes also
 accept the dedicated `CRABBOX_RUNTIME_ADAPTER_TOKEN` as a non-admin service
 identity. That credential cannot attach workspace terminals and is rejected from
@@ -69,10 +69,13 @@ every other coordinator route. Normal authentication is resolved in
    base64url payload signed with `CRABBOX_SESSION_SECRET`, which must be set and
    must differ from `CRABBOX_SHARED_TOKEN`. The versioned payload carries a
    verified-email `owner`, its `github-verified-email` provenance, `org`, and
-   GitHub `login`, has a default 180-day expiry, and is rejected if it carries
-   an `admin` claim — browser login can never mint admin tokens. Tokens from
-   older schemas are rejected; users must log in again after this security
-   upgrade.
+   GitHub `login`, has a default 180-day expiry, and contains the OAuth
+   credential encrypted under a key derived from the session secret. Every
+   request revalidates current allowed-org/team membership through GitHub, with
+   successful checks cached for five minutes. GitHub errors fail closed after
+   the cache expires. The token is rejected if it carries an `admin` claim —
+   browser login can never mint admin tokens. Tokens from older schemas are
+   rejected; users must log in again after this security upgrade.
 
 ### GitHub browser login
 
@@ -84,11 +87,29 @@ by coordinator config:
   members of the listed GitHub org(s).
 - `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) further
   narrows access to selected team slugs after org membership passes.
+- `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` controls successful request-time
+  membership caching (default 300, maximum 3600; set 0 to check every request).
+- `CRABBOX_GITHUB_REVOKED_USERS` immediately rejects comma-separated GitHub
+  logins or verified emails. Optional `login:` / `owner:` prefixes disambiguate
+  values. Use this for narrow emergency revocation without rotating every token.
 - The GitHub account must expose at least one verified email through the OAuth
   `user:email` scope. Public profile and unverified emails are never trusted as
   the token owner.
 
-User tokens can only mutate leases, runs, and usage for their own `owner`/`org`
+CLI login also binds token release to the initiating device. The CLI opens a
+one-use listener on a random `127.0.0.1` port and path; after GitHub authorization,
+the browser receives a random confirmation through that loopback URL. Polling
+requires both the CLI-held secret and the browser confirmation, so forwarding an
+authorization URL cannot deliver the resulting user token to the sender.
+
+Unauthenticated CLI and portal login starts share a ten-pending-attempt limit per
+caller source and a 100-attempt global backstop. Admission and storage are serialized,
+expired attempts are removed first, and only a session-secret-keyed source hash is
+stored with each attempt. Cloudflare supplies the caller address; the portable Node
+server derives it from the socket or an explicitly trusted proxy instead of trusting
+a client-provided forwarding header.
+
+User tokens can only mutate or read leases, runs, and usage for their own `owner`/`org`
 identity. Lease owners also have read-only audit access to run history, logs,
 events, telemetry, and live event subscriptions for work recorded against
 their leases, including runs that later replace the active backing lease. See
@@ -162,7 +183,17 @@ Changing any configured admin source revokes older active, restored, ticketed,
 or durable-session grants on the next authenticated request or scheduled
 reconciliation; active senders and recipients are also revalidated while data
 flows. Legacy admin attachments without a verifiable source and version fail
-closed after upgrade.
+closed after upgrade. Restored Code viewer sessions without a complete
+organization-bound principal also fail closed during restore and whenever lease
+sharing access shrinks.
+Non-admin GitHub WebVNC, Code, and egress sessions bind to the exact portal
+session and preserve only the encrypted GitHub credential from its signed user
+token. Agent-ticket consumption and active traffic recheck portal logout and
+emergency user revocation, and revalidate GitHub membership under the configured
+membership-cache window. Membership errors fail closed. New or restored legacy
+GitHub bridge tickets and attachments without a complete encrypted grant and
+portal-session binding fail before carrying traffic; plaintext GitHub
+credentials are never stored in bridge state.
 Shared-operator requests do **not** trust caller-supplied `X-Crabbox-Owner` /
 `X-Crabbox-Org` headers — pin that automation's identity with
 `CRABBOX_SHARED_OWNER` (and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed
@@ -220,6 +251,9 @@ polling, or config write. Operators who are deliberately migrating between
 same-deployment broker aliases can allow specific callback origins with trusted
 user config `broker.loginRedirectOrigins` or
 `CRABBOX_BROKER_LOGIN_REDIRECT_ORIGINS`.
+The coordinator separately requires `CRABBOX_PUBLIC_URL` before GitHub OAuth can
+start, stores that exact callback with each pending login, and rejects callbacks
+from any other origin before exchanging the authorization code.
 
 Provider clients apply the same destination principle where custom endpoints
 are supported. Cloudflare runner, Morph, Railway, and RunPod requests reject
@@ -228,14 +262,31 @@ bodies. E2B API endpoints require HTTPS except for explicit localhost/loopback
 development URLs, and AWS region values are validated before constructing
 SigV4 service hosts.
 
-Repository-selected Static SSH, remote Parallels, and exe.dev control hosts
-cannot inherit a key, SSH agent, or local SSH configuration from a more trusted
-source. Put both a Static SSH or Parallels host and a relative, symlink-resolved
-key file contained by the repository in the same repository config, or
-explicitly approve the destination with the matching host flag or environment
-variable. Absolute, missing, and repository-escaping key paths do not count as
-same-source credentials. Because exe.dev control authentication is always
-ambient, a repository-defined custom control host requires an explicit
+`CRABBOX_CONFIG` changes which file is loaded, not its trust domain. An explicit
+path inside the active repository remains repository-sourced for credential
+destination checks, including a symlink outside the checkout that resolves
+back into it. The canonical user config and explicit files outside the active
+repository remain operator-trusted sources.
+
+Repository-selected Static SSH, remote Parallels, External SSH, and exe.dev
+control hosts cannot inherit a key, SSH agent, or local SSH configuration from
+a more trusted source. Static SSH and Parallels may pair the destination with
+a relative, symlink-resolved key file contained by the same repository;
+absolute, missing, and repository-escaping key paths do not count as
+same-source credentials. They can instead use the matching host flag or
+environment variable for approval. External SSH always requires the exact SSH
+endpoint (user, host, key, port, fallback ports, and proxy settings) plus any
+referenced `resourceName` to be repeated in trusted user config because
+operator SSH config and nested proxies can add
+authentication independently of an outer key. Repository-controlled template
+inputs keep the resulting destination in the repository trust domain, and the
+SSH environment-expansion opt-in is honored only from trusted user config.
+Protocol or declarative JSON output may supply SSH coordinates only when the
+exact output-producing adapter contract and `ssh.trustProviderOutput` are
+approved together in trusted user config; repository changes invalidate that
+approval.
+Because exe.dev control authentication is always ambient, a repository-defined
+custom control host requires an explicit
 `--exe-dev-control-host` or `CRABBOX_EXE_DEV_CONTROL_HOST` override.
 
 Cookie-authenticated portal mutations and portal viewer WebSocket upgrades
@@ -243,12 +294,25 @@ require an exact same-origin browser `Origin` matching `CRABBOX_PUBLIC_URL` (or
 the request origin when no public URL is configured). Missing or sibling-origin
 intent is rejected before the portal cookie is converted into bearer authority;
 explicit bearer API clients remain independent of this browser-only boundary.
+Portal logout follows the same boundary: `GET /portal/logout` only renders a
+confirmation page, and only a same-origin `POST` clears the portal cookie and
+revokes all WebVNC, Code, and mediated-egress bridges bound to that portal
+session.
 
 Configured provider credentials are redacted from documented HTTP or streamed
 error diagnostics, including Azure Dynamic Sessions, Cloudflare runner, Daytona,
 E2B, Freestyle, Islo, Morph, OpenComputer, Railway, RunPod, Semaphore, SmolVM,
-and Upstash Box. Generated stop and failure-routing commands retain provider
-endpoint routing but remove URL userinfo before they are printed or stored.
+Sprites, and Upstash Box. The same final redaction covers `doctor` text and JSON
+messages/details. It removes exact configured secrets, authorization and API-key
+headers, credential-bearing URL query/userinfo components, common secret JSON
+fields, bearer values, and PEM private keys while retaining non-secret routing
+context. Providers contribute runtime-only environment and local CLI-store
+credentials to that exact-value pass, keeping credential discovery beside the
+provider that owns it. Header and bearer fallbacks treat whitespace or an
+unescaped JSON quote as the credential boundary, so punctuation inside an
+otherwise unknown credential cannot expose a suffix. Generated stop and
+failure-routing commands retain provider endpoint routing but remove URL userinfo
+before they are printed or stored.
 GitHub Actions registration metadata and its short-lived runner token travel
 over SSH stdin rather than the remote command line. These guarantees apply to
 Crabbox-generated diagnostics and process arguments, not to arbitrary command
@@ -273,8 +337,15 @@ claim or explicit `stop --reclaim` adoption of the currently inspected
 deployment; a successful stop removes that one-deployment claim.
 Direct Hetzner release and cleanup similarly require canonical provider labels
 plus an unchanged local claim whose lease and cloud ID match the exact server.
-Cleanup skips weakly labeled, unclaimed, and stale-claim servers instead of
-turning provider inventory into ownership proof.
+Direct GCP release and cleanup require an unchanged local claim bound to the
+project, zone, instance name and immutable numeric ID, lease, slug, and provider
+key. Direct Azure release and cleanup likewise require an unchanged local claim
+bound to the subscription, resource group, VM name and immutable VM ID, lease,
+slug, and provider key. Before deleting a VM, Crabbox also persists immutable
+NIC, public IP, disk, and quarantine-NSG identities so an interrupted cleanup
+can resume without trusting reused names. Cleanup skips weakly labeled,
+unclaimed, and stale-claim servers instead of turning provider inventory into
+ownership proof.
 
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects. Required
@@ -293,7 +364,8 @@ repo:
   lifecycle and desktop-connection APIs only; it cannot attach terminals.
 - `CRABBOX_SHARED_TOKEN` — trusted operator automation only.
 - `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
-  `CRABBOX_SESSION_SECRET` — GitHub browser login and user-token signing. The
+  `CRABBOX_SESSION_SECRET` — GitHub browser login, user-token signing, and
+  encryption of the OAuth credential used for membership revalidation. The
   session secret is required, must be independent from the shared token, and
   should be rotated separately.
 - `CRABBOX_GITHUB_ADMIN_OWNERS`, `CRABBOX_GITHUB_ADMIN_LOGINS` — optional
@@ -307,7 +379,9 @@ repo:
   Scope these to the artifact bucket/prefix and use them only to sign
   short-lived upload/read URLs. New grants encode the exact authenticated
   owner/org identity in an opaque versioned namespace; existing object URLs are
-  not rewritten or resolved through a legacy lookup path.
+  not rewritten or resolved through a legacy lookup path. Reads remain signed
+  unless `CRABBOX_ARTIFACTS_PUBLIC_READS=1` explicitly opts into non-expiring
+  public links; public grants add an unguessable per-grant namespace.
 
 Deployments that previously relied on `CRABBOX_SHARED_TOKEN` as the implicit
 user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
@@ -316,13 +390,15 @@ user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
 
 Coordinator config values (not secret material):
 
-- `CRABBOX_GITHUB_ALLOWED_ORG(S)`, `CRABBOX_GITHUB_ALLOWED_TEAMS` —
-  browser-login authorization.
+- `CRABBOX_GITHUB_ALLOWED_ORG(S)`, `CRABBOX_GITHUB_ALLOWED_TEAMS`,
+  `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS`, `CRABBOX_GITHUB_REVOKED_USERS` —
+  browser-login and continuing user-token authorization.
 - `CRABBOX_TAILSCALE_TAGS` — allowlist/default for requested Tailscale ACL tags.
   Do not allow arbitrary user-supplied tags.
 - `CRABBOX_ACCESS_TEAM_DOMAIN`, `CRABBOX_ACCESS_AUD` — Access JWT verification.
 - `CRABBOX_ARTIFACTS_BACKEND`, `CRABBOX_ARTIFACTS_BUCKET`,
   `CRABBOX_ARTIFACTS_PREFIX`, `CRABBOX_ARTIFACTS_BASE_URL`,
+  `CRABBOX_ARTIFACTS_PUBLIC_READS`,
   `CRABBOX_ARTIFACTS_REGION`, `CRABBOX_ARTIFACTS_ENDPOINT_URL`,
   `CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS`,
   `CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS` — artifact storage settings.
@@ -332,13 +408,14 @@ it to commands, print it, or store it in repo config.
 
 ## Release Integrity
 
-Release publication uses the GoReleaser configuration from the reviewed branch
-that dispatched the workflow, never configuration from a manually selected
-release tag. Manual re-releases must be dispatched from the default branch,
-accept only an existing exact `vMAJOR.MINOR.PATCH` tag in that branch's history,
-and may fail for historical tags that are incompatible with the current
-reviewed release configuration rather than falling back to tag-controlled
-publishing behavior.
+Production release publication accepts only a `repository_dispatch` release
+event, which GitHub runs from the default branch; version-tag pushes and
+ref-selectable workflow dispatches do not start the credentialed workflow. The
+workflow accepts only an existing exact `vMAJOR.MINOR.PATCH` tag in
+default-branch history and uses the GoReleaser configuration from the reviewed
+default-branch commit, never from the selected release tag. Re-releases may fail
+for historical tags that are incompatible with the current reviewed
+configuration rather than falling back to tag-controlled publishing behavior.
 
 ## Managed Windows Artifact Integrity
 
@@ -391,6 +468,9 @@ never proxies SSH traffic. The posture:
   (`<user-config>/crabbox/testboxes/<lease-id>/id_ed25519`; RSA for AWS/Azure
   Windows). Matching cloud key pairs are removed when Crabbox deletes the box.
   See [SSH keys](features/ssh-keys.md).
+- CLI-managed SSH, rsync, SCP, VNC, and port-forward connections explicitly
+  disable agent and X11 forwarding, overriding broad settings inherited from
+  the operator's OpenSSH configuration.
 - SSH listens on the configured primary port (default `2222`) plus configured
   fallback ports (default `22`), because port 22 is not reliably reachable from
   every operator network.
@@ -470,6 +550,11 @@ Provider tags discover candidates and explain why they look stale, but do not
 authorize a destructive action. Automatic AWS or Azure deletion requires an
 exact retained coordinator lease binding for the same provider resource and
 region; EC2 Mac host release likewise requires an exact retained host binding.
+Before coordinator Azure cleanup deletes a VM, it also persists the managed
+disk's immutable ID while the live `managedBy` association still matches that
+VM. Later disk deletion revalidates that identity and any current attachment;
+an interrupted cleanup may continue after the VM is gone without trusting
+self-written tags, while missing or mismatched claims fail closed.
 Tag-only and legacy candidates remain report-only. Sweeps skip `keep=true`
 resources and apply a grace window before reporting missing labels or stale
 lease mappings.

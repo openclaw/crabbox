@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"reflect"
 	"strings"
 	"testing"
@@ -67,6 +68,166 @@ func TestParseAzureImageRef(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateAzureCleanupVM(t *testing.T) {
+	now := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
+	expected := Server{
+		CloudID:     "crabbox-live",
+		ImmutableID: "vmid-live",
+		Labels: map[string]string{
+			"crabbox":      "true",
+			"created_by":   "crabbox",
+			"provider":     "azure",
+			"lease":        "cbx_123456abcdef",
+			"slug":         "live",
+			"provider_key": providerKeyForLease("cbx_123456abcdef"),
+			"expires_at":   leaseLabelTime(now.Add(-time.Hour)),
+		},
+	}
+	if err := validateAzureCleanupVM(expected, expected, now); err != nil {
+		t.Fatalf("valid cleanup VM rejected: %v", err)
+	}
+	replacement := expected
+	replacement.ImmutableID = "vmid-replacement"
+	if err := validateAzureCleanupVM(expected, replacement, now); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("replacement VM error=%v", err)
+	}
+
+	changedSlug := expected
+	changedSlug.Labels = maps.Clone(expected.Labels)
+	changedSlug.Labels["slug"] = "other"
+	if err := validateAzureCleanupVM(expected, changedSlug, now); err == nil || !strings.Contains(err.Error(), "slug") {
+		t.Fatalf("changed slug error=%v", err)
+	}
+
+	renewed := expected
+	renewed.Labels = maps.Clone(expected.Labels)
+	renewed.Labels["expires_at"] = leaseLabelTime(now.Add(time.Hour))
+	if err := validateAzureCleanupVM(expected, renewed, now); err == nil || !strings.Contains(err.Error(), "no longer cleanup eligible") {
+		t.Fatalf("renewed VM error=%v", err)
+	}
+}
+
+func TestValidateAzureOwnedVMDoesNotRequireExpiry(t *testing.T) {
+	expected := Server{
+		CloudID:     "crabbox-release",
+		ImmutableID: "vmid-release",
+		Labels: map[string]string{
+			"crabbox":      "true",
+			"created_by":   "crabbox",
+			"provider":     "azure",
+			"lease":        "cbx_123456abcdef",
+			"slug":         "release",
+			"provider_key": providerKeyForLease("cbx_123456abcdef"),
+		},
+	}
+	if err := validateAzureOwnedVM(expected, expected); err != nil {
+		t.Fatalf("valid release VM rejected: %v", err)
+	}
+	replacement := expected
+	replacement.ImmutableID = "vmid-replacement"
+	if err := validateAzureOwnedVM(expected, replacement); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("replacement VM error=%v", err)
+	}
+	changedKey := expected
+	changedKey.Labels = maps.Clone(expected.Labels)
+	changedKey.Labels["provider_key"] = "replacement"
+	if err := validateAzureOwnedVM(expected, changedKey); err == nil || !strings.Contains(err.Error(), "provider key") {
+		t.Fatalf("changed provider key error=%v", err)
+	}
+}
+
+func TestAzureDeleteResourcesRoundTripDurableClaimLabels(t *testing.T) {
+	expected := Server{
+		CloudID:     "crabbox-owned",
+		ImmutableID: "vmid-owned",
+		Labels:      map[string]string{"lease": "cbx_123456abcdef", "slug": "owned"},
+	}
+	resources := azureVMDeleteResources{
+		vm:            true,
+		vmID:          "vmid-owned",
+		nic:           "crabbox-owned-nic",
+		nicID:         "nic-guid",
+		publicIP:      "crabbox-owned-pip",
+		publicIPID:    "pip-guid",
+		disk:          "crabbox-owned-osdisk",
+		diskID:        "disk-guid",
+		quarantineNSG: "crabbox-owned-q-nsg",
+		quarantineID:  "nsg-guid",
+	}
+	expected.Labels = azureDeleteResourcesToLabels(expected.Labels, resources)
+	if !HasAzureCleanupBinding(expected.Labels) {
+		t.Fatal("durable cleanup binding marker missing")
+	}
+	got, err := azureDeleteResourcesFromLabels(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := requireMatchingAzureDeleteResources(got, resources); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAzureDeleteResourcesRejectIncompleteDurableClaim(t *testing.T) {
+	expected := Server{
+		CloudID:     "crabbox-owned",
+		ImmutableID: "vmid-owned",
+		Labels:      map[string]string{AzureCleanupBindingLabel: azureCleanupBindingVersion},
+	}
+	if _, err := azureDeleteResourcesFromLabels(expected); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("err=%v, want incomplete binding rejection", err)
+	}
+}
+
+func TestValidateAzureCleanupResourceTags(t *testing.T) {
+	labels := map[string]string{
+		"crabbox":    "true",
+		"created_by": "crabbox",
+		"provider":   "azure",
+		"lease":      "cbx_123456abcdef",
+		"slug":       "live",
+	}
+	if err := validateAzureCleanupResourceTags("NIC", "crabbox-live-nic", azureLabelsToTags(labels), labels); err != nil {
+		t.Fatalf("valid resource tags rejected: %v", err)
+	}
+	wrongLease := maps.Clone(labels)
+	wrongLease["lease"] = "cbx_fedcba654321"
+	if err := validateAzureCleanupResourceTags("NIC", "crabbox-live-nic", azureLabelsToTags(wrongLease), labels); err == nil || !strings.Contains(err.Error(), "lease") {
+		t.Fatalf("wrong lease error=%v", err)
+	}
+}
+
+func TestAzureScopedResourceName(t *testing.T) {
+	id := "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/crabbox-live-nic"
+	name, err := azureScopedResourceName(id, "sub", "rg", "Microsoft.Network", "networkInterfaces")
+	if err != nil || name != "crabbox-live-nic" {
+		t.Fatalf("name=%q err=%v", name, err)
+	}
+	if _, err := azureScopedResourceName(id, "other", "rg", "Microsoft.Network", "networkInterfaces"); err == nil {
+		t.Fatal("cross-subscription resource id accepted")
+	}
+}
+
+func TestRequireAzureCleanupIdentity(t *testing.T) {
+	if err := requireAzureCleanupIdentity("disk", "crabbox-live-osdisk", "disk-guid", "disk-guid"); err != nil {
+		t.Fatalf("matching identity rejected: %v", err)
+	}
+	if err := requireAzureCleanupIdentity("disk", "crabbox-live-osdisk", "", ""); err == nil || !strings.Contains(err.Error(), "no immutable resource identity") {
+		t.Fatalf("missing identity error=%v", err)
+	}
+	if err := requireAzureCleanupIdentity("disk", "crabbox-live-osdisk", "replacement-guid", "disk-guid"); err == nil || !strings.Contains(err.Error(), "does not match validated identity") {
+		t.Fatalf("replacement identity error=%v", err)
+	}
+}
+
+func TestAzureCleanupSharedNSGUsesLiveVMLocation(t *testing.T) {
+	if !isAzureCleanupSharedNSG("crabbox-nsg-westus2", "crabbox-nsg", "westus2") {
+		t.Fatal("live fallback-region NSG rejected")
+	}
+	if isAzureCleanupSharedNSG("crabbox-nsg-eastus", "crabbox-nsg", "westus2") {
+		t.Fatal("primary-region NSG accepted for fallback-region VM")
 	}
 }
 
@@ -261,15 +422,21 @@ func TestAzureWindowsSnapshotRehydrateCommandIsBounded(t *testing.T) {
 	cfg.SSHUser = "crabbox"
 
 	publicKey := "ssh-ed25519 " + strings.Repeat("A", 68) + " crabbox@snapshot"
-	command, err := azureWindowsSnapshotRehydrateCommand(cfg, publicKey)
+	commands, err := azureWindowsSnapshotRehydrateCommands(cfg, publicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(command) > 8000 {
-		t.Fatalf("command length=%d", len(command))
+	if len(commands) < 2 {
+		t.Fatalf("commands=%d, want chunk uploads plus execution", len(commands))
 	}
-	if !strings.Contains(command, "FromBase64String") || !strings.Contains(command, "ScriptBlock]::Create") {
-		t.Fatalf("unexpected command: %s", command)
+	for index, command := range commands {
+		if len(command) > 8000 {
+			t.Fatalf("command %d length=%d", index, len(command))
+		}
+	}
+	final := commands[len(commands)-1]
+	if !strings.Contains(final, "FromBase64String") || !strings.Contains(final, "ScriptBlock]::Create") {
+		t.Fatalf("unexpected final command: %s", final)
 	}
 }
 
@@ -1441,11 +1608,16 @@ func TestAzureServerHostFallsBackToPublicWhenNoPrivateIP(t *testing.T) {
 
 func TestAzureVMToServerSetsPrivateIP(t *testing.T) {
 	t.Parallel()
-	server := azureVMToServer(armcompute.VirtualMachine{}, "1.2.3.4", "10.0.0.5")
+	server := azureVMToServer(armcompute.VirtualMachine{
+		Properties: &armcompute.VirtualMachineProperties{VMID: to.Ptr("vmid-live")},
+	}, "1.2.3.4", "10.0.0.5")
 	if server.PublicNet.IPv4.IP != "1.2.3.4" {
 		t.Fatalf("public IP: got %q", server.PublicNet.IPv4.IP)
 	}
 	if server.PrivateNet.IPv4.IP != "10.0.0.5" {
 		t.Fatalf("private IP: got %q", server.PrivateNet.IPv4.IP)
+	}
+	if server.ImmutableID != "vmid-live" {
+		t.Fatalf("immutable ID: got %q, want vmid-live", server.ImmutableID)
 	}
 }

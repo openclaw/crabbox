@@ -135,12 +135,12 @@ func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 			t.Fatalf("leases state=%q", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"leases": []CoordinatorLease{
-			{ID: "cbx_123", Provider: "aws", State: "active"},
+			{ID: "cbx_123", Provider: "daytona", State: "active", SSHUser: "daytona-live-token"},
 		}})
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: "aws", TargetOS: targetLinux, Coordinator: server.URL, CoordToken: "user-token"}
+	cfg := Config{Provider: "daytona", TargetOS: targetLinux, Coordinator: server.URL, CoordToken: "user-token"}
 	coord, _, err := newCoordinatorClient(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -159,8 +159,48 @@ func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 	if len(leases) != 1 || leases[0].ID != "cbx_123" {
 		t.Fatalf("leases=%#v", leases)
 	}
+	if leases[0].SSHUser != "<token>" {
+		t.Fatalf("sshUser=%q, want redacted token", leases[0].SSHUser)
+	}
 	if stderr.Len() != 0 {
 		t.Fatalf("unexpected warning: %q", stderr.String())
+	}
+}
+
+func TestCoordinatorStatusRedactsDaytonaSSHAccessToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_123" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID:       "cbx_123",
+			Provider: "daytona",
+			TargetOS: targetLinux,
+			SSHUser:  "daytona-live-token",
+			SSHPort:  "22",
+			State:    "active",
+		}})
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Provider:    "daytona",
+		TargetOS:    targetLinux,
+		Coordinator: server.URL,
+		CoordToken:  "user-token",
+	}
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord}
+
+	status, err := backend.Status(context.Background(), StatusRequest{ID: "cbx_123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.SSHUser != "<token>" {
+		t.Fatalf("sshUser=%q, want redacted token", status.SSHUser)
 	}
 }
 
@@ -384,6 +424,30 @@ func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 	applyResolvedServerConfig(&cfg, server)
 	if cfg.WorkRoot != defaultMacOSWorkRoot {
 		t.Fatalf("workRoot=%q want %q", cfg.WorkRoot, defaultMacOSWorkRoot)
+	}
+}
+
+func TestLeaseToServerTargetMarksDaytonaSSHUserSecret(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "daytona"
+	cfg.SSHKey = "/tmp/must-not-be-used"
+
+	_, target, _ := leaseToServerTarget(CoordinatorLease{
+		ID:       "cbx_123",
+		Provider: "daytona",
+		SSHUser:  "daytona-secret-token",
+		SSHPort:  "22",
+		Host:     "ssh.app.daytona.io",
+	}, cfg)
+
+	if target.User != "daytona-secret-token" || target.Key != "" || !target.AuthSecret {
+		t.Fatalf("target=%#v", target)
+	}
+	if target.ReadyCheck != "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null" {
+		t.Fatalf("ready check=%q", target.ReadyCheck)
+	}
+	if target.NetworkKind != NetworkPublic {
+		t.Fatalf("network kind=%q want public", target.NetworkKind)
 	}
 }
 

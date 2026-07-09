@@ -34,6 +34,36 @@ func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 	return nil
 }
 
+func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, allowProviderMetadata bool) (core.Server, error) {
+	_ = allowProviderMetadata
+	if provider != "aws" {
+		return core.Server{}, core.Exit(2, "refusing to rewrite AWS lease=%s as provider=%s", existing.LeaseID, provider)
+	}
+	if slug != existing.Slug || server.Labels["lease"] != existing.LeaseID || server.Labels["slug"] != existing.Slug {
+		return core.Server{}, core.Exit(2, "refusing to rewrite AWS lease=%s with mismatched label identity", existing.LeaseID)
+	}
+	if existing.CloudID != "" && server.CloudID != "" && existing.CloudID != server.CloudID {
+		return core.Server{}, core.Exit(2, "refusing to rewrite AWS lease=%s with stale instance identity", existing.LeaseID)
+	}
+	labels := make(map[string]string, len(server.Labels)+2)
+	for key, value := range server.Labels {
+		labels[key] = value
+	}
+	for _, key := range []string{"aws_key_pair_id", "aws_account_id"} {
+		existingValue := existing.Labels[key]
+		if cloudValue := labels[key]; existingValue != "" && cloudValue != "" && cloudValue != existingValue {
+			return core.Server{}, core.Exit(2, "refusing to rewrite AWS lease=%s with mismatched %s", existing.LeaseID, key)
+		}
+		if existingValue != "" {
+			labels[key] = existingValue
+		} else {
+			delete(labels, key)
+		}
+	}
+	server.Labels = labels
+	return server, nil
+}
+
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return core.AWSInstanceTypeCandidatesForConfig(cfg)[0]
 }

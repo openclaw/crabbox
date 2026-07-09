@@ -51,6 +51,8 @@ crabbox capsule from-actions https://github.com/example-org/my-app/actions/runs/
 ```
 
 This writes `capsules/example-org-my-app-actions-123/capsule.yaml` by default.
+On Unix, capsule directories use mode `0700`; manifests and captured logs use
+mode `0600`. Reusing an existing output path repairs broader permissions.
 Replay it on a normal lease:
 
 ```sh

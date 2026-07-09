@@ -2,13 +2,13 @@
 
 Read this when you stand up, audit, or operate a self-hosted Crabbox broker: the
 Cloudflare or Node.js/PostgreSQL coordinator, its secrets, the brokered providers
-(Hetzner, AWS, Azure, GCP), and the network front door.
+(Hetzner, AWS, Azure, GCP, Daytona), and the network front door.
 
 Crabbox runs in three modes (see [How It Works](how-it-works.md)). A *broker* is
 only required for **brokered mode**, where lease lifecycle, cost limits, cleanup,
 sharing, and `crabbox usage` are owned by the coordinator. Direct and delegated
-providers run straight from the CLI and need none of this. The four brokerable
-providers are `hetzner`, `aws`, `azure`, and `gcp`; even those run direct unless a
+providers run straight from the CLI and need none of this. The five brokerable
+providers are `hetzner`, `aws`, `azure`, `gcp`, and `daytona`; even those run direct unless a
 coordinator URL is configured.
 
 Use neutral placeholders below — `broker.example.com`, `example-org`,
@@ -216,16 +216,19 @@ Homepage URL: https://broker.example.com
 Callback URL: https://broker.example.com/v1/auth/github/callback
 ```
 
-The coordinator derives the callback from `CRABBOX_PUBLIC_URL` (falling back to
-the request origin). Inject the OAuth app values through the runtime's secret
-mechanism:
+The coordinator derives the callback from the required `CRABBOX_PUBLIC_URL` and
+rejects callbacks from other origins before code exchange. Inject the OAuth app
+values through the runtime's secret mechanism:
 
 ```text
 CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
+CRABBOX_PUBLIC_URL               # canonical HTTPS coordinator origin
 CRABBOX_SESSION_SECRET            # signs cbxu_ user tokens; required and distinct from CRABBOX_SHARED_TOKEN
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional: restrict to org teams (alias CRABBOX_GITHUB_ALLOWED_TEAM)
+CRABBOX_GITHUB_REVOKED_USERS     # optional: immediately deny listed logins or verified emails
+CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS # optional: positive-cache TTL, default 300, max 3600
 ```
 
 ### Cloudflare Access (optional)
@@ -305,7 +308,8 @@ Provider credentials live in coordinator secret injection, never in repo
 config. Configure at least one brokered provider before inviting users.
 Per-provider details are in
 [Hetzner](features/hetzner.md), [AWS](features/aws.md),
-[Azure](features/azure.md), and the [provider docs](providers/README.md).
+[Azure](features/azure.md), [Daytona](features/daytona.md), and the
+[provider docs](providers/README.md).
 
 ### Hetzner
 
@@ -430,6 +434,34 @@ Azure and GCP are also brokerable. Their coordinator secrets follow the same pat
 SDK credentials plus `CRABBOX_AZURE_*` / `CRABBOX_GCP_*` placement settings
 (location/region, resource group or project, image, network). See
 [Azure](features/azure.md) and the per-provider docs for the full set.
+
+### Daytona
+
+Brokered Daytona uses one coordinator-only API key:
+
+```text
+DAYTONA_CRABBOX_KEY
+```
+
+Optional coordinator settings:
+
+```text
+CRABBOX_DAYTONA_API_URL             # default https://app.daytona.io/api
+CRABBOX_DAYTONA_ORGANIZATION_ID     # only when the credential requires an organization
+CRABBOX_DAYTONA_SNAPSHOT            # optional snapshot name; Daytona default when empty
+CRABBOX_DAYTONA_TARGET              # optional Daytona compute target
+CRABBOX_DAYTONA_USER                # default daytona
+CRABBOX_DAYTONA_WORK_ROOT           # default /home/daytona/crabbox
+CRABBOX_DAYTONA_SSH_GATEWAY_HOST    # fallback host when sshCommand omits one
+CRABBOX_DAYTONA_SSH_ACCESS_MINUTES  # minimum token TTL; default 120
+```
+
+The Worker creates labelled Linux sandboxes, waits for `started`, mints SSH
+access for the lease, refreshes access before expiry, and verifies exact lease
+ownership before deletion. The SSH token is returned only to an authorized
+lease client and is redacted from the portal. Daytona does not support
+coordinator workspaces, ready pools, desktop/browser/code, Tailscale, or native
+image lifecycle.
 
 ## Machine Classes
 
@@ -622,12 +654,14 @@ AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN (optional)
 CRABBOX_HOST_ID / CRABBOX_AWS_MAC_HOST_ID (optional; admin-only except owner reactivation of a retained Mac instance)
 AZURE_* / CRABBOX_AZURE_* (Azure)
 GCP_* / CRABBOX_GCP_* (GCP)
+DAYTONA_CRABBOX_KEY / CRABBOX_DAYTONA_* (Daytona)
 
 # Auth
 CRABBOX_SHARED_TOKEN, CRABBOX_SHARED_OWNER
 CRABBOX_ADMIN_TOKEN                       # admin routes + image promotion
 CRABBOX_GITHUB_CLIENT_ID, CRABBOX_GITHUB_CLIENT_SECRET
 CRABBOX_GITHUB_ALLOWED_ORG[S], CRABBOX_GITHUB_ALLOWED_TEAMS (optional)
+CRABBOX_GITHUB_REVOKED_USERS, CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS (optional)
 CRABBOX_GITHUB_ADMIN_OWNERS, CRABBOX_GITHUB_ADMIN_LOGINS (optional)
 CRABBOX_SESSION_SECRET
 CRABBOX_DEFAULT_ORG

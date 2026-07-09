@@ -974,6 +974,7 @@ func TestRunStopCommandOmitsAmbientReleasePolicy(t *testing.T) {
 	for _, cfg := range []Config{
 		{Provider: "incus", Incus: IncusConfig{DeleteOnRelease: true}},
 		{Provider: "kubevirt", KubeVirt: KubeVirtConfig{DeleteOnRelease: true}},
+		{Provider: "sealos-devbox", SealosDevbox: SealosDevboxConfig{DeleteOnRelease: true}},
 		{Provider: "morph", Morph: MorphConfig{DeleteOnRelease: true}},
 		{Provider: "namespace-devbox", Namespace: NamespaceConfig{DeleteOnRelease: true}},
 		{Provider: "nvidia-brev", NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "delete"}},
@@ -1006,6 +1007,96 @@ func TestRunStopCommandIncludesInheritedKubeconfigForKubeVirt(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stop command missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestRunStopCommandIncludesSealosRoutingFlags(t *testing.T) {
+	cfg := Config{
+		Provider: "sealos-devbox",
+		TargetOS: targetLinux,
+		SealosDevbox: SealosDevboxConfig{
+			Kubectl:         "/opt/bin/kubectl",
+			Kubeconfig:      "/tmp/kube config",
+			Context:         "dev",
+			Namespace:       "team-devboxes",
+			Network:         "NodePort",
+			NodeHost:        "node.example.test",
+			SSHGatewayPort:  "2222",
+			SSHUser:         "alice",
+			WorkRoot:        "/home/alice/project",
+			DeleteOnRelease: false,
+		},
+	}
+	MarkDeleteOnReleaseExplicit(&cfg, "sealos-devbox")
+	got := runStopCommand(cfg, "cbx_123")
+	for _, want := range []string{
+		"--provider sealos-devbox",
+		"--sealos-devbox-kubectl /opt/bin/kubectl",
+		"--sealos-devbox-kubeconfig '/tmp/kube config'",
+		"--sealos-devbox-context dev",
+		"--sealos-devbox-namespace team-devboxes",
+		"--sealos-devbox-network NodePort",
+		"--sealos-devbox-node-host node.example.test",
+		"--sealos-devbox-delete-on-release=false",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStopCommandIncludesInheritedKubeconfigForSealos(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/tmp/base.yaml:/tmp/cluster.yaml")
+	got := runStopCommand(Config{
+		Provider: "sealos-devbox",
+		TargetOS: targetLinux,
+		SealosDevbox: SealosDevboxConfig{
+			Kubectl:        "kubectl",
+			Context:        "dev",
+			Namespace:      "team-devboxes",
+			Network:        "SSHGate",
+			SSHGatewayHost: "ssh.example.test",
+			SSHGatewayPort: "2222",
+			SSHUser:        "devbox",
+			WorkRoot:       "/home/devbox/project",
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox stop",
+		"--provider sealos-devbox",
+		"--sealos-devbox-context dev",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStopCommandUsesExplicitTopLevelWorkRootForSealos(t *testing.T) {
+	cfg := Config{
+		Provider: "sealos-devbox",
+		TargetOS: targetLinux,
+		WorkRoot: "/srv/crabbox",
+		SealosDevbox: SealosDevboxConfig{
+			Kubectl:        "kubectl",
+			Context:        "dev",
+			Namespace:      "team-devboxes",
+			Network:        "SSHGate",
+			SSHGatewayHost: "ssh.example.test",
+			SSHGatewayPort: "2222",
+			SSHUser:        "devbox",
+			WorkRoot:       "/home/devbox/project",
+		},
+	}
+	MarkWorkRootExplicit(&cfg)
+	got := runStopCommand(cfg, "cbx_123")
+	if !strings.Contains(got, "--sealos-devbox-work-root /srv/crabbox") {
+		t.Fatalf("stop command lost explicit work root:\n%s", got)
+	}
+	if strings.Contains(got, "--sealos-devbox-work-root /home/devbox/project") {
+		t.Fatalf("stop command retained stale provider work root:\n%s", got)
 	}
 }
 

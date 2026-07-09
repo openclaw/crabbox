@@ -26,6 +26,13 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func isolateIsloTestHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+}
+
 func TestParseIsloSSE(t *testing.T) {
 	body := strings.Join([]string{
 		"event: stdout",
@@ -249,9 +256,16 @@ func TestIsloMutationsRejectCanonicalSandboxWithoutExactClaim(t *testing.T) {
 
 func TestIsloStopDeletesExactlyClaimedSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("isb_crabbox-repo-abcdef", "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+	isolateIsloTestHome(t)
+	const leaseID = "isb_crabbox-repo-abcdef"
+	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
+	target := core.SSHTarget{}
+	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	knownHostsDir := filepath.Dir(target.KnownHostsFile)
 	client := &fakeIsloSyncClient{}
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
@@ -265,6 +279,9 @@ func TestIsloStopDeletesExactlyClaimedSandbox(t *testing.T) {
 	}
 	if client.deleteCalls != 1 {
 		t.Fatalf("delete calls=%d, want 1", client.deleteCalls)
+	}
+	if _, err := os.Stat(knownHostsDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lease SSH state remains after stop: %v", err)
 	}
 }
 
@@ -388,6 +405,7 @@ func TestIsloRunRejectsUnsafeWorkdirBeforeProviderClient(t *testing.T) {
 
 func TestIsloResolveSSHUsesSandboxHostnameDefaults(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	isolateIsloTestHome(t)
 	root := t.TempDir()
 	leaseID := "isb_crabbox-repo-abcdef"
 	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, root, time.Hour, false); err != nil {
@@ -413,8 +431,16 @@ func TestIsloResolveSSHUsesSandboxHostnameDefaults(t *testing.T) {
 	if lease.SSH.Host != "crabbox-repo-abcdef.islo" || lease.SSH.User != isloWorkloadUser || lease.SSH.Port != "22" {
 		t.Fatalf("ssh target=%#v", lease.SSH)
 	}
-	if lease.SSH.Key != "" || len(lease.SSH.FallbackPorts) != 0 || !lease.SSH.SSHConfigProxy || !lease.SSH.DisableHostKeyChecking {
+	if lease.SSH.Key != "" || len(lease.SSH.FallbackPorts) != 0 || !lease.SSH.SSHConfigProxy || lease.SSH.DisableHostKeyChecking {
 		t.Fatalf("islo ssh should not force Crabbox's default key or fallback ports: %#v", lease.SSH)
+	}
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKnownHosts := filepath.Join(filepath.Dir(keyPath), "known_hosts")
+	if lease.SSH.KnownHostsFile != wantKnownHosts {
+		t.Fatalf("KnownHostsFile=%q want %q", lease.SSH.KnownHostsFile, wantKnownHosts)
 	}
 	if lease.Server.PublicNet.IPv4.IP != "crabbox-repo-abcdef.islo" || lease.Server.Labels["ssh_host"] != "crabbox-repo-abcdef.islo" {
 		t.Fatalf("server ssh labels=%#v public=%q", lease.Server.Labels, lease.Server.PublicNet.IPv4.IP)
@@ -423,6 +449,7 @@ func TestIsloResolveSSHUsesSandboxHostnameDefaults(t *testing.T) {
 
 func TestIsloResolveSSHHonorsExplicitSSHOverrides(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	isolateIsloTestHome(t)
 	leaseID := "isb_crabbox-repo-abcdef"
 	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
@@ -449,6 +476,7 @@ func TestIsloResolveSSHHonorsExplicitSSHOverrides(t *testing.T) {
 
 func TestIsloResolveSSHResumesPausedSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	isolateIsloTestHome(t)
 	root := t.TempDir()
 	client := &fakeIsloSyncClient{
 		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"},
@@ -478,6 +506,7 @@ func TestIsloResolveSSHResumesPausedSandbox(t *testing.T) {
 
 func TestIsloResolveSSHRejectsUnclaimedSandboxBeforeResume(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	isolateIsloTestHome(t)
 	client := &fakeIsloSyncClient{
 		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"},
 	}
@@ -502,6 +531,7 @@ func TestIsloResolveSSHRejectsUnclaimedSandboxBeforeResume(t *testing.T) {
 
 func TestIsloResolveSSHRejectsForeignClaimBeforeResume(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	isolateIsloTestHome(t)
 	leaseID := "isb_crabbox-repo-abcdef"
 	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
@@ -530,6 +560,7 @@ func TestIsloResolveSSHRejectsForeignClaimBeforeResume(t *testing.T) {
 
 func TestIsloResolveSSHWaitsForStartingSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	isolateIsloTestHome(t)
 	leaseID := "isb_crabbox-repo-abcdef"
 	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)

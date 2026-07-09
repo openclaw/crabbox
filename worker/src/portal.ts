@@ -26,6 +26,7 @@ const providerIcons: Record<string, string> = {
   "blacksmith-testbox": `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v5H4z"/><path d="M4 13h16v5H4z"/><path d="M8 8.5h.01M8 15.5h.01M12 8.5h5M12 15.5h5"/></svg>`,
   aws: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15.5c3.8 2.2 9.1 2.5 14.8.9"/><path d="M17.5 13.2 20 16l-3.7.7"/><path d="M7 8.5h10l1.8 4H5.2z"/></svg>`,
   azure: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 17.5h9.2a4 4 0 0 0 .5-8 5.5 5.5 0 0 0-10.5-1.6A4.8 4.8 0 0 0 7.5 17.5Z"/><path d="M9 13h6"/></svg>`,
+  daytona: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M8 10h8M8 14h5"/></svg>`,
   gcp: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17 3.5 12.5 9.5 2h5L20.5 12.5 18 17z"/><path d="M8.5 17h9.5M9.5 2l3 5.5M14.5 2l-3 5.5"/></svg>`,
   hetzner: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M8 8v8M16 8v8M8 12h8"/></svg>`,
 };
@@ -183,7 +184,7 @@ export function portalHome(
     `<main class="portal-shell">
       ${portalHeader({
         meta: `${escapeHTML(new URL(request.url).host)}${admin ? ` <span class="pill admin-pill">admin</span>` : ""}`,
-        actions: `${admin ? `<a class="button secondary admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>` : ""}<a class="button secondary" href="/portal/logout">log out</a>`,
+        actions: `${admin ? `<a class="button secondary admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>` : ""}${portalLogoutButton()}`,
       })}
       ${admin ? portalAdminSummary({ owner, org, active: active.length, ended, runners: sortedRunners.length, system, providers: portalProviderSummary(sortedLeases, sortedRunners, macHosts) }) : ""}
       <section class="panel table-panel">
@@ -253,7 +254,7 @@ export function portalAdmin(
         actions: `
           <a class="button secondary" href="/portal">leases</a>
           <a class="button secondary admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       ${adminTabs(tab, providerFilter)}
@@ -549,7 +550,7 @@ export function portalLeaseDetail(
               : ""
           }
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section class="detail-grid">
@@ -564,7 +565,7 @@ export function portalLeaseDetail(
             ${metaHTMLRow("target", targetBadge(target, lease.windowsMode))}
             ${metaRow("class", lease.class)}
             ${metaRow("host", lease.host || "pending")}
-            ${metaRow("ssh", lease.sshPort ? `${lease.sshUser || "crabbox"}@${lease.host || "host"}:${lease.sshPort}` : "pending")}
+            ${metaRow("ssh", portalSSHAddress(lease))}
             ${metaRow("work root", lease.workRoot || "pending")}
             ${leaseTelemetryRows(lease.telemetry)}
             ${metaRow("expires", shortTime(lease.expiresAt))}
@@ -649,7 +650,7 @@ export function portalShareLease(
               actions: `
                 <a class="button secondary" href="/portal/leases/${encodeURIComponent(lease.id)}">back to lease</a>
                 <a class="button secondary" href="/portal">leases</a>
-                <a class="button secondary" href="/portal/logout">log out</a>
+                ${portalLogoutButton()}
               `,
             })
       }
@@ -720,7 +721,7 @@ export function portalExternalRunnerDetail(
         meta: `${escapeHTML(runner.id)} · ${escapeHTML(runner.provider)} external runner`,
         actions: `
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section class="detail-grid">
@@ -831,7 +832,7 @@ export function portalMacHostDetail(
         meta: `${escapeHTML(host.id)} · ${escapeHTML(host.provider)} ${escapeHTML(host.target)} dedicated host`,
         actions: `
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section class="detail-grid">
@@ -861,7 +862,7 @@ export function portalMacHostDetail(
               ? `<dl class="meta-grid">
                   ${metaRow("lease", activeLease.slug ? `${activeLease.slug} / ${activeLease.id}` : activeLease.id)}
                   ${metaRow("host", activeLease.host || "pending")}
-                  ${metaRow("ssh", activeLease.sshPort ? `${activeLease.sshUser || "crabbox"}@${activeLease.host || "host"}:${activeLease.sshPort}` : "pending")}
+                  ${metaRow("ssh", portalSSHAddress(activeLease))}
                   ${metaRow("desktop", activeLeaseVNC ? "enabled" : "disabled")}
                   ${metaRow("expires", shortTime(activeLease.expiresAt))}
                 </dl>`
@@ -916,7 +917,7 @@ export function portalRunDetail(
         actions: `
           <a class="button secondary" href="/portal/leases/${encodeURIComponent(run.leaseID)}">lease</a>
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section class="detail-grid">
@@ -1064,7 +1065,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
           <button id="vnc-fullscreen" class="icon-btn" type="button" title="fullscreen" aria-label="toggle fullscreen">${fullscreenIcon}</button>
           ${canManage ? `<button id="vnc-share" class="button secondary" type="button">share</button>` : ""}
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section id="screen" class="screen" aria-label="WebVNC display" tabindex="0"></section>
@@ -1147,6 +1148,9 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       const handoffTicket = fragment.get("handoff") || "";
       let credentialsReady = !handoffTicket;
       const takeControlOnConnect = fragment.get("control") === "take";
+      const reuseWindowName = "crabbox-webvnc-" + ${JSON.stringify(lease.id)};
+      const reuseChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(reuseWindowName) : null;
+      let portalReadyForReuse = false;
       const bridgeMissingMessage = ${JSON.stringify(bridgeMissingMessage)};
       const missingVNCCredentialMessage = "VNC credentials missing; open WebVNC from crabbox webvnc status";
       const failedVNCCredentialMessage = "VNC authentication failed; reopen WebVNC from crabbox webvnc status";
@@ -1177,6 +1181,97 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       function setStatus(value, tone = "") {
         status.textContent = value;
         status.dataset.tone = tone;
+      }
+      function handoffFragment(value) {
+        const offered = new URLSearchParams(String(value || ""));
+        const ticket = offered.get("handoff") || "";
+        if (!/^vnc_handoff_[a-f0-9]{32}$/.test(ticket)) return "";
+        const safe = new URLSearchParams({ handoff: ticket });
+        if (offered.get("control") === "take") safe.set("control", "take");
+        return safe.toString();
+      }
+      reuseChannel?.addEventListener("message", (event) => {
+        const message = event.data;
+        if (!portalReadyForReuse || typeof message?.requestID !== "string") return;
+        if (message.type === "handoff-offer") {
+          reuseChannel.postMessage({
+            type: "handoff-candidate",
+            requestID: message.requestID,
+            recipientID: viewerID,
+            connected,
+            controller: isController,
+          });
+          return;
+        }
+        if (message.type !== "handoff-grant" || message.recipientID !== viewerID) return;
+        const nextFragment = handoffFragment(message.fragment);
+        if (!nextFragment) return;
+        reuseChannel.postMessage({
+          type: "handoff-accepted",
+          requestID: message.requestID,
+          recipientID: viewerID,
+        });
+        const nextURL = new URL(window.location.href);
+        nextURL.hash = nextFragment;
+        window.focus();
+        window.location.replace(nextURL);
+      });
+      window.addEventListener("hashchange", () => {
+        const nextTicket = new URLSearchParams(window.location.hash.slice(1)).get("handoff") || "";
+        if (nextTicket && nextTicket !== handoffTicket && handoffFragment("handoff=" + encodeURIComponent(nextTicket))) {
+          window.location.reload();
+        }
+      });
+      async function reuseExistingWebVNCTab() {
+        if (!handoffTicket || !reuseChannel) return false;
+        const requestID = viewerID;
+        const offered = new URLSearchParams({ handoff: handoffTicket });
+        if (takeControlOnConnect) offered.set("control", "take");
+        return await new Promise((resolve) => {
+          const candidates = new Map();
+          let recipientID = "";
+          let acceptedTimeout;
+          function finish(reused) {
+            window.clearTimeout(candidateTimeout);
+            window.clearTimeout(acceptedTimeout);
+            reuseChannel.removeEventListener("message", receive);
+            resolve(reused);
+          }
+          function receive(event) {
+            const message = event.data;
+            if (message?.requestID !== requestID) return;
+            if (message.type === "handoff-candidate" && typeof message.recipientID === "string") {
+              candidates.set(message.recipientID, {
+                recipientID: message.recipientID,
+                connected: message.connected === true,
+                controller: message.controller === true,
+              });
+              return;
+            }
+            if (message.type === "handoff-accepted" && message.recipientID === recipientID) {
+              finish(true);
+            }
+          }
+          reuseChannel.addEventListener("message", receive);
+          const candidateTimeout = window.setTimeout(() => {
+            const selected = [...candidates.values()].sort(
+              (left, right) => Number(right.controller) - Number(left.controller) || Number(right.connected) - Number(left.connected) || left.recipientID.localeCompare(right.recipientID),
+            )[0];
+            if (!selected) {
+              finish(false);
+              return;
+            }
+            recipientID = selected.recipientID;
+            reuseChannel.postMessage({
+              type: "handoff-grant",
+              requestID,
+              recipientID,
+              fragment: offered.toString(),
+            });
+            acceptedTimeout = window.setTimeout(() => finish(false), 180);
+          }, 80);
+          reuseChannel.postMessage({ type: "handoff-offer", requestID });
+        });
       }
       let rfb;
       let retryTimer;
@@ -1484,6 +1579,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         window.clearTimeout(retryTimer);
         window.clearInterval(statusTimer);
         window.clearTimeout(desktopThemeTimer);
+        reuseChannel?.close();
         rfb?.disconnect();
       });
       const takeoverBtn = document.getElementById("vnc-takeover");
@@ -1817,7 +1913,22 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         window.clearTimeout(copyResetTimer);
         copyResetTimer = window.setTimeout(() => { delete copyBtn.dataset.state; }, 1200);
       });
-      connect();
+      async function startViewer() {
+        if (await reuseExistingWebVNCTab()) {
+          const cleanURL = new URL(window.location.href);
+          cleanURL.hash = "";
+          window.history.replaceState(null, "", cleanURL);
+          setStatus("WebVNC continued in the existing tab", "ok");
+          try { window.open("", reuseWindowName)?.focus(); } catch (_) {}
+          reuseChannel?.close();
+          window.close();
+          return;
+        }
+        window.name = reuseWindowName;
+        portalReadyForReuse = true;
+        connect();
+      }
+      void startViewer();
     </script>`,
     200,
     nonce,
@@ -1855,7 +1966,7 @@ export function portalCode(lease: LeaseRecord): Response {
           <span id="code-status" class="status-pill">checking bridge</span>
           <button id="code-reload" class="icon-btn" type="button" title="reload" aria-label="reload">${reloadIcon}</button>
           <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary" href="/portal/logout">log out</a>
+          ${portalLogoutButton()}
         `,
       })}
       <section class="screen code-wait-screen" aria-label="Code bridge waiting state">
@@ -2534,6 +2645,10 @@ function portalHeader(options: PortalHeaderOptions): string {
     </div>
     ${actions}
   </header>`;
+}
+
+function portalLogoutButton(): string {
+  return `<form method="post" action="/portal/logout"><button class="button secondary" type="submit">log out</button></form>`;
 }
 
 function leaseOwnership(lease: LeaseRecord, owner: string, org: string): "mine" | "system" {
@@ -3964,6 +4079,12 @@ function compactAge(value: string | undefined): string {
 
 function leaseSortTime(lease: LeaseRecord): string {
   return lease.endedAt || lease.releasedAt || lease.updatedAt || lease.expiresAt || lease.createdAt;
+}
+
+function portalSSHAddress(lease: LeaseRecord): string {
+  if (!lease.sshPort) return "pending";
+  const user = lease.provider === "daytona" ? "<token>" : lease.sshUser || "crabbox";
+  return `${user}@${lease.host || "host"}:${lease.sshPort}`;
 }
 
 function formatDuration(value: number | undefined): string {

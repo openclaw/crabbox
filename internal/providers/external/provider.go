@@ -90,6 +90,7 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
 	}
+	cfg.Provider = providerName
 	loadedRouting := core.ExternalRoutingLoaded(cfg.External)
 	if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !loadedRouting {
 		routing, err := core.LoadExternalRouting(path)
@@ -97,7 +98,11 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 			return nil, core.Exit(2, "%v", err)
 		}
 		cfg.External = routing
+		core.MarkExternalRoutingCredentialSources(&cfg)
 		loadedRouting = true
+	}
+	if err := core.ValidateProviderCredentialDestination(cfg); err != nil {
+		return nil, err
 	}
 	base := core.BaseConfig()
 	explicitTopLevelWorkRoot := !loadedRouting && strings.TrimSpace(cfg.WorkRoot) != "" && cfg.WorkRoot != base.WorkRoot
@@ -108,7 +113,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
-	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	cfg.SSHFallbackPorts = nil
 	cfg.WorkRoot = externalWorkRoot(cfg)

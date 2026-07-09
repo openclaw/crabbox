@@ -496,6 +496,66 @@ func TestSpritesClientLifecycleRequests(t *testing.T) {
 	}
 }
 
+func TestSpritesClientRedactsErrorResponseCredentials(t *testing.T) {
+	const token = "sprites-provider-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("auth=%q", got)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"message":"request denied","authorization":"Bearer `+token+`","clientSecret":"secondary-secret","url":"https://user:pass@example.test/?token=query-secret"}`)
+	}))
+	defer srv.Close()
+
+	client, err := newSpritesClient(Config{Sprites: SpritesConfig{Token: token, APIURL: srv.URL}}, Runtime{HTTP: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ListSprites(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected Sprites API error")
+	}
+	text := err.Error()
+	for _, leaked := range []string{token, "secondary-secret", "user", "pass", "query-secret"} {
+		if strings.Contains(text, leaked) {
+			t.Fatalf("Sprites error leaked %q: %s", leaked, text)
+		}
+	}
+	if !strings.Contains(text, "request denied") || !strings.Contains(text, "[redacted]") {
+		t.Fatalf("Sprites error lost useful diagnostic context: %s", text)
+	}
+}
+
+func TestSpritesClientRedactsErrorStatusText(t *testing.T) {
+	const token = "sprites-provider-secret"
+	httpClient := &http.Client{Transport: spritesRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("auth=%q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Status:     "401 Bearer " + token,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"message":"denied"}`)),
+			Request:    r,
+		}, nil
+	})}
+	client, err := newSpritesClient(Config{Sprites: SpritesConfig{Token: token}}, Runtime{HTTP: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ListSprites(context.Background(), "")
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("Sprites status redaction err=%v", err)
+	}
+}
+
+type spritesRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f spritesRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
 func TestSpritesClientRejectsBadPagination(t *testing.T) {
 	for name, response := range map[string]spritesListResponse{
 		"missing token": {HasMore: true},

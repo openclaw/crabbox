@@ -203,6 +203,13 @@ Verify configuration:
 crabbox doctor --provider gcp
 ```
 
+Maintainers can exercise the coordinator's exact ownership boundary against a
+disposable `e2-micro`: set the three required secrets above plus
+`LIVE_SSH_PUBLIC_KEY`, then run
+`CRABBOX_GCP_RELEASE_LIVE=1 npm test --prefix worker -- --run test/gcp-release.live.test.ts`.
+The smoke proves a foreign owner claim is denied, the exact owner claim is
+deleted, and neither the instance nor its boot disk remains.
+
 The readiness check reports missing secret names without exposing values. Lease
 creation fails with `provider_not_configured` until the Worker has the
 service-account credentials.
@@ -288,6 +295,14 @@ ttl_secs=<seconds>
 zone=<gcp_zone>
 ```
 
+Crabbox also records the immutable numeric Compute Engine instance ID in the
+local lease claim. Direct release and cleanup require that unchanged claim to
+match the exact project, zone, instance name and numeric ID, lease, slug, and
+provider key before deletion. Labels and deterministic names remain discovery
+hints, not destructive authority. Claimless or stale-claim resources are
+skipped; recover or remove them through an explicit operator-controlled GCP
+workflow instead of silently adopting cloud metadata.
+
 Direct cleanup:
 
 ```sh
@@ -317,7 +332,8 @@ duplicate exact-name matches fail as ambiguous. These checks are
 defense-in-depth against accidental or ambiguous resource adoption. GCP labels
 are operator metadata, not an authorization boundary against another principal
 that can already mutate instances in the same project. Brokered cleanup is
-coordinator-owned; direct cleanup is best-effort label cleanup.
+coordinator-owned; direct cleanup additionally requires the exact local claim
+described above.
 
 Three independent safety nets enforce expiry:
 

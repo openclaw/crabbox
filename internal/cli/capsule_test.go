@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -131,6 +133,93 @@ func TestCapsuleManifestRoundTrip(t *testing.T) {
 	}
 	if got.CapsuleID != manifest.CapsuleID || got.Replay.Command != manifest.Replay.Command {
 		t.Fatalf("got=%#v want=%#v", got, manifest)
+	}
+}
+
+func TestCapsuleFilesRepairPrivatePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "capsule")
+	logsDir := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dir, logsDir} {
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(logsDir, "failed.log")
+	manifestPath := filepath.Join(dir, capsuleManifestFileName)
+	for _, path := range []string{logPath, manifestPath} {
+		if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ensurePrivateCapsuleDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePrivateCapsuleDir(logsDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateCapsuleFile(logPath, []byte("secret log")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCapsuleManifest(manifestPath, capsuleManifest{CapsuleVersion: capsuleVersion}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dir, logsDir} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != privateCapsuleDirMode {
+			t.Fatalf("directory %s mode=%#o, want %#o", path, got, privateCapsuleDirMode)
+		}
+	}
+	for _, path := range []string{logPath, manifestPath} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != privateCapsuleFileMode {
+			t.Fatalf("file %s mode=%#o, want %#o", path, got, privateCapsuleFileMode)
+		}
+	}
+}
+
+func TestWriteCapsuleManifestDoesNotChangeExistingParentPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, capsuleManifestFileName)
+	if err := writeCapsuleManifest(path, capsuleManifest{CapsuleVersion: capsuleVersion}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("existing parent mode=%#o, want unchanged 0755", got)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != privateCapsuleFileMode {
+		t.Fatalf("manifest mode=%#o, want %#o", got, privateCapsuleFileMode)
 	}
 }
 

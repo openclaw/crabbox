@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type spritesAPI interface {
@@ -252,7 +254,11 @@ func (c *spritesClient) doJSON(ctx context.Context, method, requestPath string, 
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &spritesAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: summarizeSpritesBody(data)}
+		return &spritesAPIError{
+			StatusCode: resp.StatusCode,
+			Status:     shared.RedactErrorSecrets(resp.Status, c.token),
+			Body:       shared.RedactErrorSecrets(summarizeSpritesBody(data), c.token),
+		}
 	}
 	if out == nil || len(data) == 0 {
 		return nil

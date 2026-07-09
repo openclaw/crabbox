@@ -21,9 +21,12 @@ import (
 func testConfig() core.Config {
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
-		Command:  "provider-command",
-		Args:     []string{"--profile", "test"},
-		Config:   map[string]any{"namespace": "dev", "cpu": 32},
+		Command: "provider-command",
+		Args:    []string{"--profile", "test"},
+		Config:  map[string]any{"namespace": "dev", "cpu": 32},
+		Connection: core.ExternalConnectionConfig{SSH: core.ExternalSSHConnectionConfig{
+			TrustProviderOutput: true,
+		}},
 		WorkRoot: "/home/tester/crabbox",
 	}
 	return cfg
@@ -800,6 +803,66 @@ func TestInvokeDeclarativeLifecycleValidatesConnectionBeforeAcquire(t *testing.T
 	}
 }
 
+func TestLifecycleSSHRejectsEnvironmentDerivedFieldsByDefault(t *testing.T) {
+	t.Setenv("EXTERNAL_SSH_VALUE", "sensitive-value")
+	templateCtx := lifecycleTemplateContext{values: map[string]string{}}
+	tests := []struct {
+		name   string
+		field  string
+		mutate func(*core.ExternalSSHConnectionConfig)
+	}{
+		{name: "user", field: "ssh.user", mutate: func(cfg *core.ExternalSSHConnectionConfig) { cfg.User = "{{env.EXTERNAL_SSH_VALUE}}" }},
+		{name: "host", field: "ssh.host", mutate: func(cfg *core.ExternalSSHConnectionConfig) { cfg.Host = "{{env.EXTERNAL_SSH_VALUE}}" }},
+		{name: "key", field: "ssh.key", mutate: func(cfg *core.ExternalSSHConnectionConfig) { cfg.Key = "{{env.EXTERNAL_SSH_VALUE}}" }},
+		{name: "port", field: "ssh.port", mutate: func(cfg *core.ExternalSSHConnectionConfig) { cfg.Port = "{{env.EXTERNAL_SSH_VALUE}}" }},
+		{name: "ready check", field: "ssh.readyCheck", mutate: func(cfg *core.ExternalSSHConnectionConfig) { cfg.ReadyCheck = "{{env.EXTERNAL_SSH_VALUE}}" }},
+		{name: "proxy command", field: "ssh.proxyCommand", mutate: func(cfg *core.ExternalSSHConnectionConfig) { cfg.ProxyCommand = "{{env.EXTERNAL_SSH_VALUE}}" }},
+		{name: "fallback port", field: "ssh.fallbackPorts", mutate: func(cfg *core.ExternalSSHConnectionConfig) {
+			cfg.FallbackPorts = []string{"{{env.EXTERNAL_SSH_VALUE}}"}
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := core.ExternalSSHConnectionConfig{User: "developer", Host: "host.example.test"}
+			test.mutate(&cfg)
+			_, err := lifecycleSSH(cfg, templateCtx)
+			if err == nil || !strings.Contains(err.Error(), test.field) || !strings.Contains(err.Error(), "allowEnv") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestLifecycleSSHAllowsExplicitNonSecretEnvironmentFields(t *testing.T) {
+	t.Setenv("EXTERNAL_SSH_HOST", "host.example.test")
+	ssh, err := lifecycleSSH(core.ExternalSSHConnectionConfig{
+		User:     "developer",
+		Host:     "{{env.EXTERNAL_SSH_HOST}}",
+		AllowEnv: true,
+	}, lifecycleTemplateContext{values: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ssh.Host != "host.example.test" {
+		t.Fatalf("host=%q", ssh.Host)
+	}
+}
+
+func TestLifecycleSSHRejectsIndirectEnvironmentDerivedFieldsByDefault(t *testing.T) {
+	templateCtx := lifecycleTemplateContext{
+		values:    map[string]string{"resourceName": "sensitive-value"},
+		sensitive: map[string]bool{"resourceName": true},
+	}
+	_, err := lifecycleSSH(core.ExternalSSHConnectionConfig{
+		User: "{{resourceName}}",
+		Host: "approved.example.test",
+	}, templateCtx)
+	if err == nil || !strings.Contains(err.Error(), "ssh.user") || !strings.Contains(err.Error(), "allowEnv") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestInvokeDeclarativeLifecycleConnectionTemplatesUseRequestContext(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
@@ -853,7 +916,7 @@ func TestInvokeDeclarativeLifecycleParsesNameInventory(t *testing.T) {
 			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
 		},
 		Connection: core.ExternalConnectionConfig{
-			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}", SSHConfigProxy: true},
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}", SSHConfigProxy: true, TrustProviderOutput: true},
 		},
 		WorkRoot: "/home/developer/crabbox",
 	}
@@ -886,6 +949,31 @@ func TestInvokeDeclarativeLifecycleParsesNameInventory(t *testing.T) {
 	}
 }
 
+func TestInvokeDeclarativeLifecycleRejectsUntrustedNameInventoryTarget(t *testing.T) {
+	isolateCrabboxState(t)
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{Argv: []string{"provider", "acquire"}},
+			List: core.ExternalLifecycleOperation{
+				Argv: []string{"provider", "list"}, Output: lifecycleOutputJSONNameArray,
+			},
+			Release: core.ExternalLifecycleOperation{Argv: []string{"provider", "release"}},
+		},
+		Connection: core.ExternalConnectionConfig{SSH: core.ExternalSSHConnectionConfig{
+			User: "developer", Host: "{{resourceName}}",
+		}},
+	}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{
+		Stderr: io.Discard,
+		Exec:   &recordingRunner{stdout: `["attacker.invalid"]`},
+	}}
+	_, err := backend.invokeLifecycle(context.Background(), protocolRequest{Operation: "list"})
+	if err == nil || !strings.Contains(err.Error(), "trustProviderOutput") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestInvokeDeclarativeLifecycleParsesRawLease(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
@@ -895,6 +983,7 @@ func TestInvokeDeclarativeLifecycleParsesRawLease(t *testing.T) {
 				Output: lifecycleOutputJSONLease,
 			},
 		},
+		Connection: core.ExternalConnectionConfig{SSH: core.ExternalSSHConnectionConfig{TrustProviderOutput: true}},
 	}
 	runner := &recordingRunner{stdout: `{
 		"leaseId":"cbx_abcdef123456",
@@ -919,6 +1008,32 @@ func TestInvokeDeclarativeLifecycleParsesRawLease(t *testing.T) {
 	if response.SynthesizedIdentity || response.Lease == nil || response.Lease.CloudID != "provider/resource-123" ||
 		response.Lease.SSH == nil || response.Lease.SSH.Host != "resource-123" {
 		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleRejectsUntrustedRawSSHTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.External.Lifecycle.Acquire = core.ExternalLifecycleOperation{
+		Argv: []string{"devboxctl", "new", "{{name}}"}, Output: lifecycleOutputJSONLease,
+	}
+	runner := &recordingRunner{stdout: `{
+		"leaseId":"cbx_abcdef123456",
+		"slug":"fast-coral",
+		"name":"crabbox-fast-coral-deadbeef",
+		"cloudId":"provider/resource-123",
+		"ssh":{"user":"developer","host":"attacker.invalid","port":"22"}
+	}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired: &desiredLease{
+			LeaseID: "cbx_abcdef123456",
+			Slug:    "fast-coral",
+			Name:    "crabbox-fast-coral-deadbeef",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "trustProviderOutput") {
+		t.Fatalf("error=%v", err)
 	}
 }
 
@@ -1096,7 +1211,7 @@ func TestDeclarativeLifecycleCleanupDryRunDoesNotRunCommand(t *testing.T) {
 			Cleanup: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "gc"}},
 		},
 		Connection: core.ExternalConnectionConfig{
-			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}"},
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}", TrustProviderOutput: true},
 		},
 	}
 	runner := &recordingRunner{}
@@ -1162,7 +1277,7 @@ func TestInvokeDeclarativeLifecycleFiltersNameInventory(t *testing.T) {
 			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{name}}"}},
 		},
 		Connection: core.ExternalConnectionConfig{
-			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}"},
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}", TrustProviderOutput: true},
 		},
 		WorkRoot: "/home/developer/crabbox",
 	}
@@ -1477,7 +1592,7 @@ func TestDeclarativeInventoryUsesListedNameForLegacyClaim(t *testing.T) {
 		Connection: core.ExternalConnectionConfig{
 			ResourceName:         "{{env.DEVBOX_RESOURCE}}",
 			AllowEnvResourceName: true,
-			SSH:                  core.ExternalSSHConnectionConfig{User: "developer"},
+			SSH:                  core.ExternalSSHConnectionConfig{User: "developer", AllowEnv: true, TrustProviderOutput: true},
 		},
 		WorkRoot: "/home/developer/crabbox",
 	}
@@ -1520,7 +1635,7 @@ func TestDeclarativeInventoryPreservesEnvResourceNameProvenance(t *testing.T) {
 			Release: core.ExternalLifecycleOperation{Argv: []string{"devboxctl", "rm", "{{resourceName}}"}},
 		},
 		Connection: core.ExternalConnectionConfig{
-			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{resourceName}}"},
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{resourceName}}", AllowEnv: true, TrustProviderOutput: true},
 		},
 		WorkRoot: "/home/developer/crabbox",
 	}
@@ -1826,6 +1941,56 @@ func TestValidateConfigRejectsMixedOrIncompleteDeclarativeModes(t *testing.T) {
 	cfg.External.Lifecycle.List.Output = lifecycleOutputJSONLeaseArray
 	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "namePrefix requires") {
 		t.Fatalf("list name prefix err=%v", err)
+	}
+}
+
+func TestAcquirePreflightRequiresTrustedProviderOutputBeforeCommandRuns(t *testing.T) {
+	cfg := testConfig()
+	cfg.External.Connection.SSH.TrustProviderOutput = false
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("legacy command config rejected: %v", err)
+	}
+	backend := &leaseBackend{cfg: cfg}
+	if err := backend.validateAcquireProviderSSHOutput(); err == nil || !strings.Contains(err.Error(), "trustProviderOutput") {
+		t.Fatalf("command error=%v", err)
+	}
+
+	cfg.External.Command = ""
+	cfg.External.Lifecycle = core.ExternalLifecycleConfig{
+		Acquire: core.ExternalLifecycleOperation{Argv: []string{"provider", "acquire"}, Output: lifecycleOutputJSONLease},
+		List:    core.ExternalLifecycleOperation{Argv: []string{"provider", "list"}, Output: lifecycleOutputJSONLeaseArray},
+		Release: core.ExternalLifecycleOperation{Argv: []string{"provider", "release"}},
+	}
+	cfg.External.Connection.SSH.User = "developer"
+	backend.cfg = cfg
+	if err := backend.validateAcquireProviderSSHOutput(); err == nil || !strings.Contains(err.Error(), "trustProviderOutput") {
+		t.Fatalf("declarative error=%v", err)
+	}
+
+	cfg.External.Lifecycle.Acquire.Output = lifecycleOutputNone
+	cfg.External.Lifecycle.List.Output = lifecycleOutputJSONNameArray
+	backend.cfg = cfg
+	if err := backend.validateAcquireProviderSSHOutput(); err != nil {
+		t.Fatalf("configured acquire target rejected: %v", err)
+	}
+}
+
+func TestProtocolReleaseOnlyResolveAllowsLegacySSHOutputWithoutUsingIt(t *testing.T) {
+	cfg := testConfig()
+	cfg.External.Connection.SSH.TrustProviderOutput = false
+	runner := &recordingRunner{stdout: `{
+		"protocolVersion":1,
+		"lease":{"leaseId":"cbx_abcdef123456","slug":"fast-coral","name":"box","cloudId":"provider/resource","ssh":{"user":"developer","host":"legacy.example.test"}}
+	}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.invokeProtocol(context.Background(), protocolRequest{
+		Operation: "resolve", ReleaseOnly: true,
+	}); err != nil {
+		t.Fatalf("legacy release-only resolve rejected: %v", err)
+	}
+	if _, err := backend.invokeProtocol(context.Background(), protocolRequest{Operation: "resolve"}); err == nil ||
+		!strings.Contains(err.Error(), "trustProviderOutput") {
+		t.Fatalf("normal resolve error=%v", err)
 	}
 }
 

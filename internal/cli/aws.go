@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -163,18 +164,34 @@ func (c *AWSClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
 	return servers, nil
 }
 
-func (c *AWSClient) EnsureSSHKey(ctx context.Context, name, publicKey string) error {
+type awsKeyPairBinding struct {
+	ID      string
+	Managed bool
+	Created bool
+}
+
+func (c *AWSClient) ensureSSHKeyBinding(ctx context.Context, name, publicKey string) (awsKeyPairBinding, error) {
 	out, err := c.ec2.DescribeKeyPairs(ctx, &ec2.DescribeKeyPairsInput{
 		KeyNames:         []string{name},
 		IncludePublicKey: aws.Bool(true),
 	})
 	if err == nil {
-		return verifyAWSKeyPairMatches(name, publicKey, out.KeyPairs)
+		if err := verifyAWSKeyPairMatches(name, publicKey, out.KeyPairs); err != nil {
+			return awsKeyPairBinding{}, err
+		}
+		keyPairID, ownershipErr := validateAWSCleanupKeyPair(name, out.KeyPairs)
+		if ownershipErr != nil {
+			if IsAWSCleanupKeyOwnershipError(ownershipErr) {
+				return awsKeyPairBinding{}, nil
+			}
+			return awsKeyPairBinding{}, ownershipErr
+		}
+		return awsKeyPairBinding{ID: keyPairID, Managed: true}, nil
 	}
 	if !strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
-		return err
+		return awsKeyPairBinding{}, err
 	}
-	_, err = c.ec2.ImportKeyPair(ctx, &ec2.ImportKeyPairInput{
+	created, err := c.ec2.ImportKeyPair(ctx, &ec2.ImportKeyPairInput{
 		KeyName:           aws.String(name),
 		PublicKeyMaterial: []byte(publicKey),
 		TagSpecifications: []types.TagSpecification{
@@ -184,6 +201,18 @@ func (c *AWSClient) EnsureSSHKey(ctx context.Context, name, publicKey string) er
 			},
 		},
 	})
+	if err != nil {
+		return awsKeyPairBinding{}, err
+	}
+	keyPairID := strings.TrimSpace(aws.ToString(created.KeyPairId))
+	if keyPairID == "" {
+		return awsKeyPairBinding{}, exit(5, "aws imported key pair %q without an immutable key pair id", name)
+	}
+	return awsKeyPairBinding{ID: keyPairID, Managed: true, Created: true}, nil
+}
+
+func (c *AWSClient) EnsureSSHKey(ctx context.Context, name, publicKey string) error {
+	_, err := c.ensureSSHKeyBinding(ctx, name, publicKey)
 	return err
 }
 
@@ -357,6 +386,62 @@ func (c *AWSClient) DeleteSSHKey(ctx context.Context, name string) error {
 	return err
 }
 
+type awsCleanupKeyOwnershipError struct{ err error }
+
+func (e *awsCleanupKeyOwnershipError) Error() string { return e.err.Error() }
+func (e *awsCleanupKeyOwnershipError) Unwrap() error { return e.err }
+
+// IsAWSCleanupKeyOwnershipError reports a cleanup-time key ownership mismatch
+// that must skip the instance instead of deleting either resource.
+func IsAWSCleanupKeyOwnershipError(err error) bool {
+	var ownershipErr *awsCleanupKeyOwnershipError
+	return errors.As(err, &ownershipErr)
+}
+
+func NewAWSCleanupKeyOwnershipError(message string) error {
+	return &awsCleanupKeyOwnershipError{err: errors.New(message)}
+}
+
+func validateAWSCleanupKeyPair(name string, keyPairs []types.KeyPairInfo) (string, error) {
+	if len(keyPairs) != 1 || strings.TrimSpace(aws.ToString(keyPairs[0].KeyName)) != strings.TrimSpace(name) {
+		return "", &awsCleanupKeyOwnershipError{err: fmt.Errorf("AWS cleanup key %q did not resolve to one exact key pair", name)}
+	}
+	tags := make(map[string]string, len(keyPairs[0].Tags))
+	for _, tag := range keyPairs[0].Tags {
+		tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+	}
+	if tags["crabbox"] != "true" || tags["created_by"] != "crabbox" {
+		return "", &awsCleanupKeyOwnershipError{err: fmt.Errorf("AWS cleanup key %q lacks canonical Crabbox ownership tags", name)}
+	}
+	keyPairID := strings.TrimSpace(aws.ToString(keyPairs[0].KeyPairId))
+	if keyPairID == "" {
+		return "", &awsCleanupKeyOwnershipError{err: fmt.Errorf("AWS cleanup key %q has no immutable key pair id", name)}
+	}
+	return keyPairID, nil
+}
+
+func (c *AWSClient) ResolveCleanupSSHKeyID(ctx context.Context, name string) (string, error) {
+	out, err := c.ec2.DescribeKeyPairs(ctx, &ec2.DescribeKeyPairsInput{KeyNames: []string{name}})
+	if err != nil {
+		if strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
+			return "", nil
+		}
+		return "", err
+	}
+	return validateAWSCleanupKeyPair(name, out.KeyPairs)
+}
+
+func (c *AWSClient) DeleteCleanupSSHKeyID(ctx context.Context, keyPairID string) error {
+	if keyPairID == "" {
+		return nil
+	}
+	_, err := c.ec2.DeleteKeyPair(ctx, &ec2.DeleteKeyPairInput{KeyPairId: aws.String(keyPairID)})
+	if err != nil && strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
+		return nil
+	}
+	return err
+}
+
 func (c *AWSClient) CreateServerWithFallback(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
 	regions := awsRegionCandidates(cfg, c.region)
 	if len(regions) > 1 {
@@ -390,12 +475,29 @@ func (c *AWSClient) CreateServerWithFallback(ctx context.Context, cfg Config, pu
 	return c.createServerWithFallbackInRegion(ctx, cfg, publicKey, leaseID, slug, keep, logf)
 }
 
-func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
+func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (result Server, resolved Config, resultErr error) {
 	if cfg.ProviderKey == "" {
 		cfg.ProviderKey = "crabbox-steipete"
 	}
-	if err := c.EnsureSSHKey(ctx, cfg.ProviderKey, publicKey); err != nil {
+	keyBinding, err := c.ensureSSHKeyBinding(ctx, cfg.ProviderKey, publicKey)
+	if err != nil {
 		return Server{}, cfg, err
+	}
+	defer func() {
+		if resultErr == nil || !keyBinding.Created {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		if err := c.DeleteCleanupSSHKeyID(cleanupCtx, keyBinding.ID); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("rollback AWS key pair %s: %w", keyBinding.ID, err))
+		}
+	}()
+	bindCleanupKey := func(server Server) Server {
+		if keyBinding.Managed {
+			server.Labels["aws_key_pair_id"] = keyBinding.ID
+		}
+		return server
 	}
 	staticImageID := ""
 	if cfg.TargetOS != targetMacOS || cfg.AWSAMI != "" {
@@ -428,7 +530,7 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 		}
 		server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, useSpot)
 		if err == nil {
-			return server, next, nil
+			return bindCleanupKey(server), next, nil
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", instanceType, err))
 		if !isRetryableAWSProvisioningError(err) {
@@ -452,7 +554,7 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 			}
 			server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, false)
 			if err == nil {
-				return server, next, nil
+				return bindCleanupKey(server), next, nil
 			}
 			errs = append(errs, fmt.Errorf("on-demand %s: %w", instanceType, err))
 			if !isRetryableAWSProvisioningError(err) {

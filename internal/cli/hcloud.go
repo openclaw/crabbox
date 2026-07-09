@@ -68,6 +68,7 @@ type Server struct {
 	CloudID             string
 	Provider            string
 	HostID              string
+	ImmutableID         string `json:"-"` // Provider-generated identity for same-name replacement checks.
 	claimSnapshot       leaseClaim
 	claimSnapshotSet    bool
 	claimSnapshotExists bool

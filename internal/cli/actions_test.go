@@ -146,7 +146,11 @@ func TestGitHubActionsRunnerInstallScriptUsesOfficialRunner(t *testing.T) {
 	got := githubActionsRunnerInstallScript("latest", true)
 	for _, want := range []string{
 		"https://api.github.com/repos/actions/runner/releases/latest",
+		"https://api.github.com/repos/actions/runner/releases/tags/v${version}",
 		"https://github.com/actions/runner/releases/download/",
+		".assets[] | select(.name == $name) | .digest",
+		"sha256sum \"$archive\"",
+		"runner archive checksum mismatch",
 		"RUNNER_ALLOW_RUNASROOT=1",
 		"grep -qi microsoft /proc/version",
 		"sudo rm -rf /var/lib/apt/lists/*",
@@ -160,13 +164,24 @@ func TestGitHubActionsRunnerInstallScriptUsesOfficialRunner(t *testing.T) {
 			t.Fatalf("install script missing %q", want)
 		}
 	}
+	checksum := strings.Index(got, "actual_sha=")
+	clearRunner := strings.Index(got, "rm -rf ./*")
+	extract := strings.Index(got, "tar xzf")
+	if checksum < 0 || clearRunner < checksum || extract < clearRunner {
+		t.Fatalf("runner installer must verify checksum before replacing/extracting: checksum=%d clear=%d extract=%d", checksum, clearRunner, extract)
+	}
 }
 
 func TestGitHubActionsRunnerInstallPowerShellScriptUsesOfficialWindowsRunner(t *testing.T) {
 	got := githubActionsRunnerInstallScriptForTarget("latest", true, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
 	for _, want := range []string{
 		"https://api.github.com/repos/actions/runner/releases/latest",
+		"https://api.github.com/repos/actions/runner/releases/tags/v$version",
 		"actions-runner-win-$runnerArch-$version.zip",
+		"$release.assets | Where-Object { $_.name -eq $archiveName }",
+		"^sha256:(?<sha>[0-9a-fA-F]{64})$",
+		"Get-FileHash -LiteralPath $zip -Algorithm SHA256",
+		"runner archive checksum mismatch",
 		".\\config.cmd",
 		"--ephemeral",
 		"New-ScheduledTaskAction",
@@ -178,6 +193,68 @@ func TestGitHubActionsRunnerInstallPowerShellScriptUsesOfficialWindowsRunner(t *
 		if !strings.Contains(got, want) {
 			t.Fatalf("windows install script missing %q", want)
 		}
+	}
+	checksum := strings.Index(got, "Get-FileHash")
+	clearRunner := strings.Index(got, "Get-ChildItem -Force -LiteralPath $runnerDir | Remove-Item")
+	extract := strings.Index(got, "Expand-Archive")
+	if checksum < 0 || clearRunner < checksum || extract < clearRunner {
+		t.Fatalf("Windows runner installer must verify checksum before replacing/extracting: checksum=%d clear=%d extract=%d", checksum, clearRunner, extract)
+	}
+}
+
+func TestGitHubActionsRunnerInstallScriptRejectsChecksumMismatchBeforeExtraction(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commands := map[string]string{
+		"curl": `#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then shift; out="$1"; fi
+  shift
+done
+if [ -n "$out" ]; then printf archive >"$out"; else printf '{}'; fi
+`,
+		"jq": `#!/bin/sh
+case "$*" in
+  *tag_name*) printf '2.335.1' ;;
+  *digest*) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ;;
+  *) exit 2 ;;
+esac
+`,
+		"sha256sum": `#!/bin/sh
+printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  %s\n' "$1"
+`,
+		"tar": `#!/bin/sh
+touch "$TAR_CALLED"
+exit 99
+`,
+	}
+	for name, script := range commands {
+		commandPath := filepath.Join(binDir, name)
+		if err := os.WriteFile(commandPath, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tarCalled := filepath.Join(root, "tar-called")
+	cmd := exec.Command("bash", "-c", githubActionsRunnerInstallScript("2.335.1", true))
+	cmd.Env = append(os.Environ(),
+		"HOME="+root,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"RUNNER_REPO=example-org/my-app",
+		"RUNNER_NAME=test-runner",
+		"RUNNER_TOKEN=test-token",
+		"RUNNER_LABELS=test",
+		"TAR_CALLED="+tarCalled,
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "runner archive checksum mismatch") {
+		t.Fatalf("install err=%v output=%q, want checksum rejection", err, output)
+	}
+	if _, err := os.Stat(tarCalled); !os.IsNotExist(err) {
+		t.Fatalf("archive extraction ran before checksum rejection: %v", err)
 	}
 }
 

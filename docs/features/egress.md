@@ -79,7 +79,9 @@ Mediated egress has two long-running agents joined by one coordinator session:
   open each connection.
 - **Host egress agent** runs on the operator machine. It enforces the allowlist
   and opens the real outbound TCP connections, so remote services see the
-  operator's public IP.
+  operator's public IP. It resolves each allowed hostname once, rejects
+  non-public results, and dials the validated IP address directly so DNS cannot
+  retarget the connection after the allowlist check.
 - **Coordinator session** consumes one-use tickets, pairs the host and client
   sockets by `leaseID`/`sessionID`, and reports status. Cloudflare bridge
   sockets survive Durable Object hibernation. Node sockets are process-local;
@@ -259,14 +261,17 @@ Mediated egress defaults closed:
   `--profile` or `--allow`;
 - tickets are one-use, short-lived (120s), and bound to lease, owner/org, role,
   and session;
-- the host agent dials only allowlisted destinations;
+- the host agent dials only allowlisted destinations whose resolved address is
+  public; private, loopback, link-local, multicast, and reserved IP ranges are
+  rejected, including IP-literal requests;
 - a fatal bridge setup error (lease forbidden, gone, or conflicting session)
   stops the daemon instead of restarting it;
 - releasing or expiring the lease tears down the session.
 
 The host agent is powerful: it opens internet connections from the operator's
 network. Its startup line names the lease, session, profile, and allowlist so
-the operator can confirm scope before traffic flows.
+the operator can confirm scope before traffic flows. Mediated egress is
+internet-only; it does not provide an opt-in path to private network targets.
 
 ## Portal integration
 

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -19,6 +20,8 @@ const (
 	artifactManifestFilename = "artifact-manifest.json"
 	maxPulledArtifactBytes   = int64(1024 * 1024 * 1024)
 )
+
+var errArtifactCrossOriginRedirect = errors.New("refused cross-origin artifact redirect")
 
 type artifactManifest struct {
 	SchemaVersion int                    `json:"schemaVersion"`
@@ -116,9 +119,9 @@ func readArtifactManifestRef(ctx context.Context, ref string) (artifactManifest,
 		if err != nil {
 			return artifactManifest{}, path, exit(2, "create artifact manifest request: %v", err)
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := artifactHTTPClient(req.URL).Do(req)
 		if err != nil {
-			return artifactManifest{}, path, exit(2, "download artifact manifest: %v", err)
+			return artifactManifest{}, path, exit(2, "download artifact manifest: %v", artifactRequestError(err))
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -330,9 +333,9 @@ func downloadArtifactURL(ctx context.Context, file artifactManifestFile, outPath
 	if err != nil {
 		return "", 0, "", exit(2, "create artifact download request for %s: %v", file.Name, err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := artifactHTTPClient(req.URL).Do(req)
 	if err != nil {
-		return "", 0, "", exit(2, "download artifact %s: %v", file.Name, err)
+		return "", 0, "", exit(2, "download artifact %s: %v", file.Name, artifactRequestError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -357,6 +360,22 @@ func downloadArtifactURL(ctx context.Context, file artifactManifestFile, outPath
 		return "", 0, "", exit(2, "artifact %s is too large: response exceeds limit %d", file.Name, limit)
 	}
 	return resp.Header.Get("content-type"), written, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func artifactHTTPClient(origin *url.URL) *http.Client {
+	return redirectCheckedHTTPClient(nil, func(req *http.Request) error {
+		if !sameHTTPOrigin(origin, req.URL) {
+			return errArtifactCrossOriginRedirect
+		}
+		return nil
+	})
+}
+
+func artifactRequestError(err error) error {
+	if errors.Is(err, errArtifactCrossOriginRedirect) {
+		return errArtifactCrossOriginRedirect
+	}
+	return err
 }
 
 func artifactDownloadLimit(file artifactManifestFile) int64 {

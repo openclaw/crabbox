@@ -56,13 +56,13 @@ The CLI picks one of four modes per provider in `loadBackend`
   (`CRABBOX_COORDINATOR` or `config set-broker`). The provider's SSH backend is
   wrapped in a `coordinatorLeaseBackend`: lease lifecycle goes through the
   coordinator over HTTPS, but the CLI still drives SSH, rsync, and command execution
-  **directly** to the runner. The brokered set is exactly the four managed cloud
-  providers: `aws`, `azure`, `gcp`, `hetzner`.
+  **directly** to the runner. The brokered set is exactly the five managed cloud
+  providers: `aws`, `azure`, `daytona`, `gcp`, `hetzner`.
 - **Direct SSH mode** — the provider returns an SSH lease backend but no broker
   is configured. The CLI provisions and connects against the cloud or host API
-  itself; no coordinator is involved. The four brokerable providers fall back to this
+  itself; no coordinator is involved. The five brokerable providers fall back to this
   when no broker URL is set, and every other SSH-lease provider (`ssh`,
-  `parallels`, `proxmox`, `daytona`, `runpod`, and so on) always runs here.
+  `parallels`, `proxmox`, `runpod`, and so on) always runs here.
 - **Registered direct mode** — `broker.mode: registered` keeps the same direct
   SSH provider lifecycle but registers lease metadata and heartbeats with the
   coordinator. It can list and share portal bridges, but cannot directly call
@@ -116,8 +116,9 @@ adapter's `Spec()`; the type definitions live in
 Node runtime:
 
 - `GET /v1/health` returns liveness; `GET /` redirects to `/portal`.
-- `/v1/auth/*`, `/portal/login`, `/portal/logout`, and WebSocket upgrades for
-  the live bridges go to `FleetCoordinator`.
+- `/v1/auth/*`, `/portal/login`, and WebSocket upgrades for the live bridges go
+  to `FleetCoordinator` without the normal portal-session authentication;
+  `/portal/logout` remains authenticated and same-origin gated.
 - `/v1/internal/*` is 404 externally; runtime schedulers invoke maintenance
   internally.
 - Everything else passes through `authenticateRequest` and is forwarded with
@@ -126,7 +127,9 @@ Node runtime:
 Auth (`worker/src/auth.ts`) requires a Bearer token, matched in order:
 `CRABBOX_ADMIN_TOKEN` (admin), `CRABBOX_SHARED_TOKEN` (non-admin shared), then a
 signed user token (prefix `cbxu_`, HMAC-SHA256, 180-day default expiry) minted
-after GitHub OAuth login verifies allowed org membership. An optional Cloudflare
+after GitHub OAuth login verifies allowed org membership. The signed token keeps
+the OAuth credential encrypted under the session secret so request authentication
+can periodically revalidate current org/team membership. An optional Cloudflare
 Access JWT (`cf-access-jwt-assertion`) can supply the owner identity. The
 coordinator injects `x-crabbox-auth`, `-admin`, `-owner`, `-org`, and `-github-login`
 headers. The portal converts a `crabbox_session` cookie into a Bearer token.
@@ -220,10 +223,11 @@ GET  /v1/providers/{provider}/readiness
 GET  /v1/runners
 POST /v1/runners/sync
 POST /v1/images
-POST /v1/images/{id}/promote | fast-snapshot-restore
+POST /v1/images/{id}/promote
+GET  /v1/images/{id}/fast-snapshot-restore
 POST /v1/artifacts/uploads
 GET  /v1/admin/leases
-POST /v1/admin/lease-audit
+GET  /v1/admin/lease-audit
 POST /v1/admin/leases/{id-or-slug}/release | delete
 GET  /v1/admin/hosts
 POST /v1/admin/aws-orphan-sweep

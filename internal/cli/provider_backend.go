@@ -32,6 +32,13 @@ type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
 
+// ProviderDiagnosticSecretSource contributes runtime-only credentials to the
+// final diagnostic redaction pass. Providers should include every credential
+// source that is intentionally absent from Config, including local CLI stores.
+type ProviderDiagnosticSecretSource interface {
+	DiagnosticSecrets(cfg Config) []string
+}
+
 // ControllerProviderContract binds controller lifecycle retries to one opaque
 // provider configuration scope and an explicitly idempotent fixed-ID adapter.
 type ControllerProviderContract interface {
@@ -99,6 +106,12 @@ type SSHLeaseBackend interface {
 	Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error)
 	List(ctx context.Context, req ListRequest) ([]LeaseView, error)
 	ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error
+}
+
+// StatusTouchClaimValidator lets a provider require identity labels that core
+// cannot interpret before status --wait extends a remotely visible lease.
+type StatusTouchClaimValidator interface {
+	StatusTouchClaimMatches(LeaseTarget, LeaseClaim) bool
 }
 
 type ResolvedLeaseTargetRebinder interface {
@@ -180,6 +193,23 @@ type PausableBackend interface {
 type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
 }
+
+// ReleaseLeaseConnectionCleanupPolicy lets a provider defer generic connection
+// cleanup until after its guarded release succeeds.
+type ReleaseLeaseConnectionCleanupPolicy interface {
+	// ReleaseLeaseConnectionCleanupSafe reports whether generic remote cleanup
+	// may run before the provider's guarded release.
+	ReleaseLeaseConnectionCleanupSafe() bool
+}
+
+// ReleaseLeaseTargetRefresher opts a provider into refreshing authorization
+// and connection metadata immediately before automatic lease cleanup.
+type ReleaseLeaseTargetRefresher interface {
+	ReleaseLeaseConnectionCleanupPolicy
+	RefreshReleaseLeaseTarget(context.Context, LeaseTarget) (LeaseTarget, error)
+}
+
+var ErrReleaseLeaseOwnershipChanged = errors.New("release lease ownership changed")
 
 type CheckpointForkWorkdirValidator interface {
 	ValidateCheckpointForkWorkdir(ctx context.Context, lease LeaseTarget, workdir string) error
@@ -629,10 +659,19 @@ type ResolveRequest struct {
 	ExpectedProviderIdentity ProviderIdentityExpectation
 }
 
+// IsReadOnlyStatus reports whether resolution may inspect provider inventory
+// without trusting or rewriting local claim state.
+func (r ResolveRequest) IsReadOnlyStatus() bool {
+	return r.StatusOnly && r.NoLocalStateMutations && !r.ReleaseOnly && !r.Reclaim
+}
+
 type ReleaseLeaseRequest struct {
 	Lease                    LeaseTarget
 	Force                    bool
 	ExpectedProviderIdentity ProviderIdentityExpectation
+	// GuardedRemoteCleanup lets providers that fence release authorization run
+	// generic remote teardown only after ownership is verified under that fence.
+	GuardedRemoteCleanup func(context.Context, LeaseTarget)
 }
 
 // ConfirmedAbsentLocalCleanupRequest carries the immutable provider identity

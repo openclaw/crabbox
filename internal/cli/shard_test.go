@@ -410,6 +410,8 @@ func TestPartitionShardRunArgs(t *testing.T) {
 		{name: "timing-record is forbidden", args: []string{"--timing-record", "default"}, wantErr: "--timing-record cannot be used with shard"},
 		{name: "capture-stdout is forbidden", args: []string{"--capture-stdout", "out.log"}, wantErr: "--capture-stdout cannot be used with shard"},
 		{name: "label is forbidden", args: []string{"--label", "mine"}, wantErr: "--label cannot be used with shard"},
+		{name: "attest is forbidden", args: []string{"--attest", "receipt.json"}, wantErr: "--attest cannot be used with shard"},
+		{name: "attest-key is forbidden", args: []string{"--attest-key", "key.pem"}, wantErr: "--attest-key cannot be used with shard"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

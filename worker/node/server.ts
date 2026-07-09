@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, STATUS_CODES, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import type { Duplex } from "node:stream";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, URL as NodeURL } from "node:url";
 
 import { prepareCoordinatorRequest, routeCoordinatorRequest } from "../src/coordinator-entry";
 import { FleetCoordinator } from "../src/fleet";
@@ -35,7 +35,7 @@ const runtime = new NodeCoordinatorRuntime(databaseURL);
 const coordinator = new FleetCoordinator(runtime, env);
 const lifecycleMutex = new AsyncMutex();
 const activeRequests = new AsyncOperationTracker();
-const publicDirectory = resolve(fileURLToPath(new URL("../public", import.meta.url)));
+const publicDirectory = resolve(fileURLToPath(new NodeURL("../public", import.meta.url)));
 let shutdownPromise: Promise<void> | undefined;
 
 runtime.setOperationRunner((callback) => lifecycleMutex.run(callback));

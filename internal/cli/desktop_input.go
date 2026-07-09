@@ -57,6 +57,13 @@ func (a App) desktopClick(ctx context.Context, args []string) error {
 	if !desktopClickSupportsTarget(target) {
 		return exit(2, "desktop click supports target=linux, target=macos, or target=windows with windowsMode=normal")
 	}
+	if target.TargetOS == targetMacOS {
+		if err := clickRemoteMacVNC(ctx, cfg, target, x, y); err != nil {
+			return exit(5, "desktop click failed for %s: %v", leaseID, err)
+		}
+		fmt.Fprintf(a.Stdout, "clicked: lease=%s x=%d y=%d method=vnc\n", leaseID, x, y)
+		return nil
+	}
 	if out, err := runSSHCombinedOutput(ctx, target, desktopClickRemoteCommand(target, x, y)); err != nil {
 		a.printDesktopInputRescue(classifyDesktopFailure(out), out, cfg, target, leaseID)
 		return exit(5, "desktop click failed for %s: %v", leaseID, err)
@@ -70,13 +77,23 @@ func desktopClickSupportsTarget(target SSHTarget) bool {
 }
 
 func (a App) desktopPaste(ctx context.Context, args []string) error {
-	target, cfg, leaseID, err := a.desktopCommandTarget(ctx, "desktop paste", args, true)
+	target, cfg, leaseID, err := a.desktopCommandTarget(ctx, "desktop paste", args, false)
 	if err != nil {
 		return err
+	}
+	if !desktopTextSupportsTarget(target) {
+		return exit(2, "desktop paste supports target=linux or target=macos")
 	}
 	text, err := desktopTextArgOrStdin(a.Stderr, args, "desktop paste")
 	if err != nil {
 		return err
+	}
+	if target.TargetOS == targetMacOS {
+		if err := typeRemoteMacVNC(ctx, cfg, target, text); err != nil {
+			return exit(5, "desktop paste failed for %s: %v", leaseID, err)
+		}
+		fmt.Fprintf(a.Stdout, "pasted: lease=%s bytes=%d method=vnc-key\n", leaseID, len(text))
+		return nil
 	}
 	var stdout, stderr strings.Builder
 	if err := runSSHInput(ctx, target, desktopPasteRemoteCommand(), strings.NewReader(text), &stdout, &stderr); err != nil {
@@ -88,19 +105,40 @@ func (a App) desktopPaste(ctx context.Context, args []string) error {
 }
 
 func (a App) desktopType(ctx context.Context, args []string) error {
-	target, cfg, leaseID, err := a.desktopCommandTarget(ctx, "desktop type", args, true)
+	target, cfg, leaseID, err := a.desktopCommandTarget(ctx, "desktop type", args, false)
 	if err != nil {
 		return err
+	}
+	if !desktopTextSupportsTarget(target) {
+		return exit(2, "desktop type supports target=linux or target=macos")
 	}
 	text, err := desktopTextArgOrStdin(a.Stderr, args, "desktop type")
 	if err != nil {
 		return err
 	}
+	if target.TargetOS == targetMacOS {
+		if err := typeRemoteMacVNC(ctx, cfg, target, text); err != nil {
+			return exit(5, "desktop type failed for %s: %v", leaseID, err)
+		}
+		fmt.Fprintf(a.Stdout, "typed: lease=%s bytes=%d method=vnc-key\n", leaseID, len(text))
+		return nil
+	}
 	if desktopShouldPasteForType(text) {
 		var stdout, stderr strings.Builder
 		if err := runSSHInput(ctx, target, desktopPasteRemoteCommand(), strings.NewReader(text), &stdout, &stderr); err != nil {
-			a.printDesktopInputRescue(classifyDesktopFailure(stderr.String()+"\n"+stdout.String()), stderr.String()+"\n"+stdout.String(), cfg, target, leaseID)
-			return exit(5, "desktop type paste fallback failed for %s: %v", leaseID, err)
+			pasteDetail := stderr.String() + "\n" + stdout.String()
+			if !desktopPasteFailureSafeToRetry(pasteDetail) {
+				a.printDesktopInputRescue(classifyDesktopFailure(pasteDetail), pasteDetail, cfg, target, leaseID)
+				return exit(5, "desktop type paste failed for %s: %v", leaseID, err)
+			}
+			if out, typeErr := runSSHCombinedOutput(ctx, target, desktopTypeRemoteCommand(text)); typeErr == nil {
+				fmt.Fprintf(a.Stdout, "typed: lease=%s method=key-fallback bytes=%d\n", leaseID, len(text))
+				return nil
+			} else {
+				detail := pasteDetail + "\nkey fallback:\n" + out
+				a.printDesktopInputRescue(classifyDesktopFailure(detail), detail, cfg, target, leaseID)
+				return exit(5, "desktop type paste and key fallback failed for %s: %v", leaseID, typeErr)
+			}
 		}
 		fmt.Fprintf(a.Stdout, "typed: lease=%s method=paste bytes=%d\n", leaseID, len(text))
 		return nil
@@ -111,6 +149,29 @@ func (a App) desktopType(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "typed: lease=%s method=xdotool bytes=%d\n", leaseID, len(text))
 	return nil
+}
+
+func desktopTextSupportsTarget(target SSHTarget) bool {
+	return target.TargetOS == targetLinux || target.TargetOS == targetMacOS
+}
+
+// desktopPasteFailureSafeToRetry only permits a key-by-key retry when the
+// remote paste helper failed before it could send input to the active window.
+// Retrying after a post-paste clipboard-owner failure would duplicate text.
+func desktopPasteFailureSafeToRetry(detail string) bool {
+	for _, marker := range []string{
+		"missing clipboard tool",
+		"missing or unavailable xdotool",
+		"missing xdotool",
+		"missing wtype",
+		"clipboard helper exited before paste",
+		"clipboard helper failed to provide requested contents",
+	} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a App) desktopKey(ctx context.Context, args []string) error {
@@ -412,12 +473,15 @@ exit 127`, x, y, x, y)
 	}
 	return fmt.Sprintf(`set -eu
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
+export DISPLAY="${DISPLAY:-:99}"
+if ! command -v xdotool >/dev/null 2>&1 || ! xdotool getactivewindow >/dev/null 2>&1; then
+  if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "xfce" ]; then
+    echo "missing or unavailable xdotool; warm a new --desktop lease or install xdotool" >&2
+    exit 127
+  fi
   echo "desktop click is not supported on Wayland desktop envs yet; use WebVNC pointer input" >&2
   exit 2
 fi
-export DISPLAY="${DISPLAY:-:99}"
-command -v xdotool >/dev/null 2>&1 || { echo "missing xdotool; warm a new --desktop lease or install xdotool" >&2; exit 127; }
 xdotool mousemove %d %d click 1`, x, y)
 }
 
@@ -433,11 +497,13 @@ func desktopKeyRemoteCommand(keys string) string {
 	}
 	return `set -eu
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
+export DISPLAY="${DISPLAY:-:99}"
+x11_input=0
+if command -v xdotool >/dev/null 2>&1 && xdotool getactivewindow >/dev/null 2>&1; then x11_input=1; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ] && [ "$x11_input" -ne 1 ]; then
   export XDG_RUNTIME_DIR WAYLAND_DISPLAY
   command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new Wayland desktop lease or install wtype" >&2; exit 127; }
   ` + wayland.String() + `fi
-export DISPLAY="${DISPLAY:-:99}"
 command -v xdotool >/dev/null 2>&1 || { echo "missing xdotool; warm a new --desktop lease or install xdotool" >&2; exit 127; }
 xdotool key --clearmodifiers ` + shellQuote(strings.TrimSpace(keys))
 }
@@ -445,12 +511,14 @@ xdotool key --clearmodifiers ` + shellQuote(strings.TrimSpace(keys))
 func desktopTypeRemoteCommand(text string) string {
 	return `set -eu
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
+export DISPLAY="${DISPLAY:-:99}"
+x11_input=0
+if command -v xdotool >/dev/null 2>&1 && xdotool getactivewindow >/dev/null 2>&1; then x11_input=1; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ] && [ "$x11_input" -ne 1 ]; then
   export XDG_RUNTIME_DIR WAYLAND_DISPLAY
   command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new Wayland desktop lease or install wtype" >&2; exit 127; }
   exec wtype -d 1 -- ` + shellQuote(text) + `
 fi
-export DISPLAY="${DISPLAY:-:99}"
 command -v xdotool >/dev/null 2>&1 || { echo "missing xdotool; warm a new --desktop lease or install xdotool" >&2; exit 127; }
 xdotool type --clearmodifiers --delay 1 -- ` + shellQuote(text)
 }
@@ -463,13 +531,15 @@ clip_backend=""
 trap 'if [ -n "$clip_pid" ]; then kill "$clip_pid" 2>/dev/null || true; wait "$clip_pid" 2>/dev/null || true; fi; rm -f "$tmp"' EXIT
 cat > "$tmp"
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
-if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
+export DISPLAY="${DISPLAY:-:99}"
+x11_input=0
+if command -v xdotool >/dev/null 2>&1 && xdotool getactivewindow >/dev/null 2>&1; then x11_input=1; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ] && [ "$x11_input" -ne 1 ]; then
   export XDG_RUNTIME_DIR WAYLAND_DISPLAY
   command -v wtype >/dev/null 2>&1 || { echo "missing wtype; warm a new Wayland desktop lease or install wtype" >&2; exit 127; }
   wtype -d 1 - < "$tmp"
   exit 0
 fi
-export DISPLAY="${DISPLAY:-:99}"
 command -v xdotool >/dev/null 2>&1 || { echo "missing xdotool; warm a new --desktop lease or install xdotool" >&2; exit 127; }
 active_class="$(xdotool getactivewindow getwindowclassname 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
 active_name="$(xdotool getactivewindow getwindowname 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"

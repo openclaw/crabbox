@@ -60,6 +60,10 @@ read (in that order).
 
 If `CRABBOX_CONFIG` is set, it replaces the entire file search: only that file
 is loaded, and neither the user config nor the repo-local files are read. The
+override changes file selection, not its trust domain. A selected path inside
+the active repository remains repository configuration, including a path that
+enters the repository through a symlink; use the OS user config path or an
+explicit file outside the repository for trusted operator settings. The
 CLI writes new user config (for example via `crabbox login` or
 `crabbox config set-broker`) with `0600` permissions and warns if an existing
 file is group- or world-readable.
@@ -419,7 +423,7 @@ remains account-owned after Crabbox release. Repo-local config also cannot
 set the API token, API URL, item, payment method, template, data center, or
 purchase opt-in. Put those account and purchase selections in environment
 variables, CLI flags, private user config, or an explicit `CRABBOX_CONFIG`
-file. `paymentMethodId` may be omitted only when the account has exactly one
+file outside the active repository. `paymentMethodId` may be omitted only when the account has exactly one
 active default payment method; otherwise set it explicitly. Use
 `crabbox doctor --provider hostinger --json` to discover available ids without
 making a purchase.
@@ -482,7 +486,7 @@ XCP-ng password command-line flag. Prefer a pool-master `apiUrl`; if XAPI
 returns `HOST_IS_SLAVE`, Crabbox retries login once against the reported master.
 For credential safety, repository-local `crabbox.yaml` and `.crabbox.yaml`
 files cannot override `apiUrl` or `insecureTLS`; set those in user config, an
-explicit `CRABBOX_CONFIG` file, or environment variables.
+explicit `CRABBOX_CONFIG` file outside the active repository, or environment variables.
 
 `target: linux` describes the current Crabbox lease surface, not an XCP-ng
 hypervisor limitation. XCP-ng itself can host Linux, Windows, and BSD guests on
@@ -722,9 +726,17 @@ external:
   config:
     backend: vm
     namespace: team-devboxes
+  connection:
+    ssh:
+      trustProviderOutput: true
   workRoot: /workspaces/crabbox
   routingFile: ""
 ```
+
+If the protocol response contains SSH coordinates, keep
+`trustProviderOutput: true` together with the exact command, arguments, and
+`external.config` plus its connection inputs in trusted user config. Repository
+config cannot inherit the approval after changing that adapter contract.
 
 The executable receives one versioned JSON request on stdin per lifecycle
 operation and returns one JSON response on stdout. This keeps internal control
@@ -758,18 +770,29 @@ external:
     ssh:
       user: "{{env.DEVBOX_USER}}"
       host: "{{resourceName}}"
+      allowEnv: true
+      trustProviderOutput: true
       sshConfigProxy: true
   config:
     size: cpu16
   workRoot: /home/developer/crabbox
 ```
 
+Put this destination-bearing example in trusted user config. Repository config
+may define the lifecycle, but its exact `resourceName`, SSH destination, and
+environment opt-in must be repeated in trusted user config before Crabbox uses
+operator-managed SSH credentials.
+
 Declarative lifecycle entries use one `argv` array or an ordered `steps` list,
 not shell commands. Acquire steps can opt into release cleanup with
 `rollbackOnFailure: true`. Put credentials in an operation `env:` map, not in
 `argv` or `steps`; environment-derived argv values require the explicit
 `allowEnvArgv: true` compatibility opt-in, and environment-derived resource
-names require `connection.allowEnvResourceName: true`. See
+names require `connection.allowEnvResourceName: true`. Repository lifecycle
+commands cannot place inherited `external.config` values in argv without an
+exact lifecycle and config-derived connection-template contract carrying
+`allowConfigArgv: true` in trusted user config; repository-owned config values
+are unchanged. See
 [External Provider](../providers/external.md) for placeholders, output
 semantics, inventory formats, routing behavior, controller-safe raw
 `json-lease` identity attestation, and security guidance.

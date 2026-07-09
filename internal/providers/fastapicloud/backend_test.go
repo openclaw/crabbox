@@ -45,6 +45,30 @@ func TestFastAPICloudClientRejectsBareHTTPURL(t *testing.T) {
 	}
 }
 
+func TestFastAPICloudClientRejectsUnsafeAPIURLComponents(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		apiURL string
+		secret string
+	}{
+		{name: "userinfo", apiURL: "https://user:url-secret@api.fastapicloud.com/api/v1", secret: "url-secret"},
+		{name: "query", apiURL: "https://api.fastapicloud.com/api/v1?token=query-secret", secret: "query-secret"},
+		{name: "empty query", apiURL: "https://api.fastapicloud.com/api/v1?"},
+		{name: "fragment", apiURL: "https://api.fastapicloud.com/api/v1#fragment-secret", secret: "fragment-secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Config{FastAPICloud: FastAPICloudConfig{Token: "test-token", APIURL: test.apiURL}}
+			_, err := newFastAPICloudClient(cfg, Runtime{})
+			if err == nil || !strings.Contains(err.Error(), "must not contain userinfo, query parameters, or a fragment") {
+				t.Fatalf("newFastAPICloudClient error = %v, want unsafe URL rejection", err)
+			}
+			if test.secret != "" && strings.Contains(err.Error(), test.secret) {
+				t.Fatalf("newFastAPICloudClient error leaked URL secret: %v", err)
+			}
+		})
+	}
+}
+
 func TestFastAPICloudTokenFlagIsNotRegistered(t *testing.T) {
 	cfg := Config{}
 	cfg.FastAPICloud.Token = "secret-token"
@@ -138,6 +162,97 @@ func TestFastAPICloudClientSendsBearerAndUsesRESTPaths(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Fatalf("got paths = %#v, want 3 requests", got)
+	}
+}
+
+func TestFastAPICloudClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
+	targetRequests := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests++
+		t.Errorf("redirect target received %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+	}))
+	defer target.Close()
+	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/stolen?token=redirect-secret#fragment-secret", http.StatusTemporaryRedirect)
+	}))
+	defer trusted.Close()
+
+	api, err := newFastAPICloudClient(
+		Config{FastAPICloud: FastAPICloudConfig{Token: "test-token", APIURL: trusted.URL}},
+		Runtime{HTTP: trusted.Client()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.GetApp(context.Background(), "app-1")
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("GetApp error = %v, want cross-origin refusal", err)
+	}
+	for _, secret := range []string{"redirect-secret", "fragment-secret"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("GetApp error leaked redirect URL secret %q: %v", secret, err)
+		}
+	}
+	if targetRequests != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", targetRequests)
+	}
+}
+
+func TestFastAPICloudClientFollowsSameOriginRedirect(t *testing.T) {
+	var redirectedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/apps/app-1":
+			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+		case "/redirected":
+			redirectedAuth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(fastAPICloudApp{ID: "app-1"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	api, err := newFastAPICloudClient(
+		Config{FastAPICloud: FastAPICloudConfig{Token: "test-token", APIURL: server.URL + "/api/v1"}},
+		Runtime{HTTP: server.Client()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := api.GetApp(context.Background(), "app-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.ID != "app-1" || redirectedAuth != "Bearer test-token" {
+		t.Fatalf("app=%#v auth=%q, want app-1 with bearer token", app, redirectedAuth)
+	}
+}
+
+func TestFastAPICloudClientPreservesCallerRedirectPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/redirected", http.StatusFound)
+	}))
+	defer server.Close()
+	callerErr := errors.New("caller refused redirect")
+	callerChecks := 0
+	httpClient := server.Client()
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		callerChecks++
+		return callerErr
+	}
+	api, err := newFastAPICloudClient(
+		Config{FastAPICloud: FastAPICloudConfig{Token: "test-token", APIURL: server.URL}},
+		Runtime{HTTP: httpClient},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = api.GetApp(context.Background(), "app-1")
+	if !errors.Is(err, callerErr) || callerChecks != 1 {
+		t.Fatalf("GetApp error = %v, caller checks = %d", err, callerChecks)
 	}
 }
 
@@ -551,18 +666,21 @@ func TestFastAPICloudClientLoopbackHTTPAccepted(t *testing.T) {
 }
 
 func TestFastAPICloudClientLoopbackSpoofRejected(t *testing.T) {
-	for _, u := range []string{
-		"http://localhost@evil.com/api/v1",
-		"http://127.0.0.1.evil.com/api/v1",
-		"http://localhost.evil.com/api/v1",
-		"http://0x7f000001/api/v1",
+	for _, test := range []struct {
+		apiURL string
+		want   string
+	}{
+		{apiURL: "http://localhost@evil.com/api/v1", want: "must not contain userinfo"},
+		{apiURL: "http://127.0.0.1.evil.com/api/v1", want: "must use HTTPS"},
+		{apiURL: "http://localhost.evil.com/api/v1", want: "must use HTTPS"},
+		{apiURL: "http://0x7f000001/api/v1", want: "must use HTTPS"},
 	} {
 		cfg := Config{}
 		cfg.FastAPICloud.Token = "t"
-		cfg.FastAPICloud.APIURL = u
+		cfg.FastAPICloud.APIURL = test.apiURL
 		_, err := newFastAPICloudClient(cfg, Runtime{})
-		if err == nil || !strings.Contains(err.Error(), "must use https") {
-			t.Fatalf("spoofed loopback %q: err = %v, want https rejection", u, err)
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("spoofed loopback %q: err = %v, want %q", test.apiURL, err, test.want)
 		}
 	}
 }
@@ -573,8 +691,8 @@ func TestFastAPICloudClientInvalidURL(t *testing.T) {
 		cfg.FastAPICloud.Token = "t"
 		cfg.FastAPICloud.APIURL = u
 		_, err := newFastAPICloudClient(cfg, Runtime{})
-		if err == nil || !strings.Contains(err.Error(), "is invalid") {
-			t.Fatalf("invalid url %q: err = %v, want invalid", u, err)
+		if err == nil || !strings.Contains(err.Error(), "must be an absolute HTTPS URL") {
+			t.Fatalf("invalid url %q: err = %v, want absolute HTTPS URL rejection", u, err)
 		}
 	}
 }

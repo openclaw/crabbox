@@ -143,11 +143,9 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 			if !shouldStop {
 				return
 			}
-			if err := b.deleteSandboxForCleanup(client, sandboxID); err != nil {
+			if err := b.deleteClaimedSandboxForCleanup(client, leaseID, sandboxID); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: e2b stop failed for %s: %v\n", sandboxID, err)
-				return
 			}
-			removeLeaseClaim(leaseID)
 		}()
 	}
 	result := RunResult{
@@ -319,15 +317,106 @@ func (b *e2bBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, _, err := b.resolveSandboxID(ctx, client, req.ID, "", false)
+	claim, sandbox, err := b.resolveStopTarget(ctx, client, req.ID)
+	if err != nil {
+		var missing *e2bClaimedSandboxMissingError
+		if errors.As(err, &missing) {
+			if removeErr := removeLeaseClaimIfUnchangedAfter(missing.claim.LeaseID, missing.claim, nil); removeErr != nil {
+				return removeErr
+			}
+			fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s (already absent)\n", missing.claim.LeaseID, missing.claim.CloudID)
+			return nil
+		}
+		return err
+	}
+	if err := b.deleteClaimedSandbox(ctx, client, claim.LeaseID, sandbox.SandboxID); err != nil {
+		return err
+	}
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", claim.LeaseID, sandbox.SandboxID)
+	return nil
+}
+
+func (b *e2bBackend) ReclaimAndStop(ctx context.Context, req StopRequest) error {
+	if req.ID == "" {
+		return exit(2, "provider=e2b stop --reclaim requires an exact E2B sandbox id")
+	}
+	sandboxID := req.ID
+	if isE2BSyntheticID(sandboxID) {
+		sandboxID = strings.TrimPrefix(sandboxID, "e2b_")
+	} else if strings.HasPrefix(sandboxID, "cbx_") {
+		return exit(2, "provider=e2b stop --reclaim requires an exact E2B sandbox id, not lease %q", req.ID)
+	}
+	client, err := newE2BClient(b.cfg, b.rt)
 	if err != nil {
 		return err
 	}
-	if err := client.DeleteSandbox(ctx, sandboxID); err != nil {
-		return e2bError("delete sandbox", err)
+	sandbox, err := client.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return e2bError("get sandbox", err)
 	}
-	removeLeaseClaim(leaseID)
-	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxID)
+	if sandbox.SandboxID != sandboxID {
+		return exit(4, "e2b sandbox lookup for %q returned a different sandbox %q", sandboxID, sandbox.SandboxID)
+	}
+	if !isCrabboxE2BSandbox(sandbox) {
+		return exit(4, "e2b sandbox %q is not claimed by Crabbox", req.ID)
+	}
+	leaseID := strings.TrimSpace(sandbox.Metadata["lease"])
+	if !isCanonicalLeaseID(leaseID) {
+		return exit(4, "e2b sandbox %q lacks a canonical Crabbox lease id", req.ID)
+	}
+	slug := strings.TrimSpace(sandbox.Metadata["slug"])
+	if slug == "" {
+		return exit(4, "e2b sandbox %q lacks a canonical Crabbox slug", req.ID)
+	}
+	cfg := e2bClaimConfig(b.cfg)
+	if existing, ok, err := resolveLeaseClaimForProviderCloudIDScope(sandbox.SandboxID, providerClaimScope(cfg)); err != nil {
+		return err
+	} else if ok && existing.LeaseID != leaseID {
+		return exit(4, "e2b sandbox %q is already bound to lease %q", sandbox.SandboxID, existing.LeaseID)
+	}
+	previous, previousExists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return err
+	}
+	if err := validateE2BReclaimCollision(leaseID, sandbox.SandboxID, previous, previousExists); err != nil {
+		return err
+	}
+	var claim LeaseClaim
+	if previousExists && previous.RepoRoot != "" {
+		claim, err = claimLeaseTargetForRepoConfigIfUnchanged(
+			leaseID,
+			slug,
+			cfg,
+			e2bSandboxToServer(sandbox),
+			SSHTarget{},
+			previous.RepoRoot,
+			cfg.IdleTimeout,
+			true,
+			previous,
+			true,
+		)
+	} else {
+		claim, err = claimLeaseTargetForConfigIfUnchanged(
+			leaseID,
+			slug,
+			cfg,
+			e2bSandboxToServer(sandbox),
+			SSHTarget{},
+			cfg.IdleTimeout,
+			previous,
+			previousExists,
+		)
+	}
+	if err != nil {
+		return err
+	}
+	if err := validateE2BClaim(cfg, claim, sandbox); err != nil {
+		return err
+	}
+	if err := b.deleteClaimedSandbox(ctx, client, leaseID, sandbox.SandboxID); err != nil {
+		return err
+	}
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandbox.SandboxID)
 	return nil
 }
 
@@ -366,9 +455,10 @@ func (b *e2bBackend) createSandbox(ctx context.Context, client e2bAPI, repo Repo
 	if sandbox.SandboxID == "" {
 		return "", e2bSandbox{}, "", exit(5, "e2b create sandbox returned no sandbox id")
 	}
-	if err := claimLeaseForRepoProviderPond(leaseID, slug, e2bProvider, cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	cfg = e2bClaimConfig(cfg)
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, e2bSandboxToServer(sandbox), SSHTarget{}, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
 		if cleanupErr := b.deleteSandboxForCleanup(client, sandbox.SandboxID); cleanupErr != nil {
-			leakErr := fmt.Errorf("cleanup e2b sandbox %s after claim failure: %w; run `crabbox stop --provider e2b --id %s` to retry cleanup", sandbox.SandboxID, cleanupErr, sandbox.SandboxID)
+			leakErr := fmt.Errorf("cleanup e2b sandbox %s after claim failure: %w; run `crabbox stop --provider e2b --id %s --reclaim` to retry cleanup", sandbox.SandboxID, cleanupErr, sandbox.SandboxID)
 			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", leakErr)
 			return "", e2bSandbox{}, "", errors.Join(err, leakErr)
 		}
@@ -383,8 +473,139 @@ func (b *e2bBackend) deleteSandboxForCleanup(client e2bAPI, sandboxID string) er
 	return client.DeleteSandbox(ctx, sandboxID)
 }
 
+func (b *e2bBackend) deleteClaimedSandboxForCleanup(client e2bAPI, leaseID, sandboxID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), e2bCleanupTimeout)
+	defer cancel()
+	return b.deleteClaimedSandbox(ctx, client, leaseID, sandboxID)
+}
+
 func e2bCleanupCommand(leaseID string) string {
 	return fmt.Sprintf("crabbox stop --provider %s --id %s", e2bProvider, shellQuote(leaseID))
+}
+
+func (b *e2bBackend) resolveStopTarget(ctx context.Context, client e2bAPI, id string) (LeaseClaim, e2bSandbox, error) {
+	if id == "" {
+		return LeaseClaim{}, e2bSandbox{}, exit(2, "provider=e2b requires a Crabbox lease id, slug, or E2B sandbox id")
+	}
+	cfg := e2bClaimConfig(b.cfg)
+	claim, ok, exact, err := resolveLeaseClaimForProviderScopeWithExact(id, providerClaimScope(cfg))
+	if err != nil {
+		return LeaseClaim{}, e2bSandbox{}, err
+	}
+	if exact && !ok {
+		if claim.Provider != e2bProvider {
+			return LeaseClaim{}, e2bSandbox{}, exit(4, "e2b identifier %q is claimed by a different provider", id)
+		}
+		return LeaseClaim{}, e2bSandbox{}, exit(4, "e2b identifier %q is claimed for a different API endpoint", id)
+	}
+	if !ok {
+		if strings.HasPrefix(id, "cbx_") {
+			return LeaseClaim{}, e2bSandbox{}, exit(4, "e2b lease %q has no exact local claim", id)
+		}
+		sandboxID := id
+		if isE2BSyntheticID(id) {
+			sandboxID = strings.TrimPrefix(id, "e2b_")
+		}
+		claim, ok, err = resolveLeaseClaimForProviderCloudIDScope(sandboxID, providerClaimScope(cfg))
+		if err != nil {
+			return LeaseClaim{}, e2bSandbox{}, err
+		}
+		if !ok {
+			return LeaseClaim{}, e2bSandbox{}, exit(4, "e2b sandbox %q has no exact local claim; use --reclaim to adopt it explicitly", id)
+		}
+	}
+	if claim.ProviderScope != providerClaimScope(cfg) {
+		return LeaseClaim{}, e2bSandbox{}, exit(4, "e2b lease %q belongs to a different API endpoint; use --reclaim with the exact sandbox id to adopt it", claim.LeaseID)
+	}
+	if strings.TrimSpace(claim.CloudID) == "" {
+		return LeaseClaim{}, e2bSandbox{}, exit(4, "e2b lease %q has a legacy claim not bound to an exact sandbox; use --reclaim with the exact sandbox id to adopt it", claim.LeaseID)
+	}
+	sandbox, err := client.GetSandbox(ctx, claim.CloudID)
+	if err != nil {
+		if isNotFoundError(err) {
+			return LeaseClaim{}, e2bSandbox{}, &e2bClaimedSandboxMissingError{claim: claim}
+		}
+		return LeaseClaim{}, e2bSandbox{}, e2bError("get sandbox", err)
+	}
+	if err := validateE2BClaim(cfg, claim, sandbox); err != nil {
+		return LeaseClaim{}, e2bSandbox{}, err
+	}
+	return claim, sandbox, nil
+}
+
+func (b *e2bBackend) deleteClaimedSandbox(ctx context.Context, client e2bAPI, leaseID, sandboxID string) error {
+	cfg := e2bClaimConfig(b.cfg)
+	claim, ok, exact, err := resolveLeaseClaimForProviderScopeWithExact(leaseID, providerClaimScope(cfg))
+	if err != nil {
+		return err
+	}
+	if !ok || !exact {
+		return exit(4, "e2b lease %q has no exact local claim; refusing deletion", leaseID)
+	}
+	if claim.ProviderScope != providerClaimScope(cfg) || claim.CloudID != sandboxID {
+		return exit(4, "e2b lease %q is not bound to sandbox %q on this API endpoint; refusing deletion", leaseID, sandboxID)
+	}
+	return removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+		sandbox, err := client.GetSandbox(ctx, sandboxID)
+		if err != nil {
+			if isNotFoundError(err) {
+				return nil
+			}
+			return e2bError("get sandbox before delete", err)
+		}
+		if err := validateE2BClaim(cfg, claim, sandbox); err != nil {
+			return err
+		}
+		if err := client.DeleteSandbox(ctx, sandboxID); err != nil {
+			if isNotFoundError(err) {
+				return nil
+			}
+			return e2bError("delete sandbox", err)
+		}
+		return nil
+	})
+}
+
+func validateE2BReclaimCollision(leaseID, sandboxID string, previous LeaseClaim, previousExists bool) error {
+	if !previousExists {
+		return nil
+	}
+	if previous.Provider != e2bProvider {
+		return exit(4, "e2b lease %q is already claimed by provider %q; refusing reclaim", leaseID, previous.Provider)
+	}
+	if previous.CloudID != "" && previous.CloudID != sandboxID {
+		return exit(4, "e2b lease %q is already bound to sandbox %q; refusing retarget to %q", leaseID, previous.CloudID, sandboxID)
+	}
+	return nil
+}
+
+type e2bClaimedSandboxMissingError struct {
+	claim LeaseClaim
+}
+
+func (e *e2bClaimedSandboxMissingError) Error() string {
+	return fmt.Sprintf("e2b sandbox %q for lease %q no longer exists", e.claim.CloudID, e.claim.LeaseID)
+}
+
+func validateE2BClaim(cfg Config, claim LeaseClaim, sandbox e2bSandbox) error {
+	if claim.Provider != e2bProvider || claim.ProviderScope != providerClaimScope(e2bClaimConfig(cfg)) {
+		return exit(4, "e2b lease %q belongs to a different provider or API endpoint", claim.LeaseID)
+	}
+	if claim.CloudID == "" || claim.CloudID != sandbox.SandboxID {
+		return exit(4, "e2b lease %q is not bound to sandbox %q", claim.LeaseID, sandbox.SandboxID)
+	}
+	if !isCrabboxE2BSandbox(sandbox) || strings.TrimSpace(sandbox.Metadata["lease"]) != claim.LeaseID || strings.TrimSpace(sandbox.Metadata["slug"]) != claim.Slug {
+		return exit(4, "e2b sandbox %q no longer has canonical ownership metadata for lease %q", sandbox.SandboxID, claim.LeaseID)
+	}
+	return nil
+}
+
+func e2bClaimConfig(cfg Config) Config {
+	cfg.Provider = e2bProvider
+	if strings.TrimSpace(cfg.E2B.APIURL) == "" {
+		cfg.E2B.APIURL = "https://api.e2b.app"
+	}
+	return cfg
 }
 
 func (b *e2bBackend) resolveSandboxID(ctx context.Context, client e2bAPI, id, repoRoot string, reclaim bool) (string, string, string, error) {
@@ -394,6 +615,37 @@ func (b *e2bBackend) resolveSandboxID(ctx context.Context, client e2bAPI, id, re
 	if claim, ok, err := resolveLeaseClaim(id); err != nil {
 		return "", "", "", err
 	} else if ok && claim.Provider == e2bProvider {
+		if claim.CloudID != "" {
+			cfg := e2bClaimConfig(b.cfg)
+			if claim.ProviderScope != providerClaimScope(cfg) {
+				return "", "", "", exit(4, "e2b lease %q belongs to a different API endpoint", claim.LeaseID)
+			}
+			sandbox, err := client.GetSandbox(ctx, claim.CloudID)
+			if err != nil {
+				return "", "", "", e2bError("get sandbox", err)
+			}
+			if err := validateE2BClaim(cfg, claim, sandbox); err != nil {
+				return "", "", "", err
+			}
+			if repoRoot != "" {
+				claim, err = claimLeaseTargetForRepoConfigIfUnchanged(
+					claim.LeaseID,
+					claim.Slug,
+					cfg,
+					e2bSandboxToServer(sandbox),
+					SSHTarget{},
+					repoRoot,
+					time.Duration(claim.IdleTimeoutSeconds)*time.Second,
+					reclaim,
+					claim,
+					true,
+				)
+				if err != nil {
+					return "", "", "", err
+				}
+			}
+			return claim.LeaseID, sandbox.SandboxID, claim.Slug, nil
+		}
 		if repoRoot != "" {
 			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, e2bProvider, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
 				return "", "", "", err

@@ -122,7 +122,8 @@ scripts.
 5. Add ready-state Crabbox tags and claim the lease locally.
 6. Run normal Crabbox sync/run/ssh workflows over SSH.
 7. Delete the instance and managed SSH key on `stop`; `cleanup` deletes only
-   resources with a complete Crabbox Vultr ownership tag set.
+   resources with complete Crabbox Vultr ownership tags and an exact account-
+   and instance-bound local claim.
 
 If instance or SSH-key creation returns an indeterminate transport or server
 failure, Crabbox retains the SSH credentials and records a pending local
@@ -147,9 +148,12 @@ crabbox:target:linux
 crabbox:expires_at:<unix-seconds>
 ```
 
-Release and cleanup require a complete ownership predicate: Crabbox marker,
-provider marker, lease id, slug, and Linux target. Instances with partial,
-foreign, or malformed Crabbox-like tags are skipped/refused.
+Read-only inventory requires a complete ownership predicate: Crabbox marker,
+provider marker, canonical lease id, slug, and Linux target. Reuse and deletion
+also require an exact local claim for the same Vultr account, lease, and
+instance UUID. Instances with partial, foreign, malformed, claimless, or
+mismatched ownership are skipped or refused; a claimless instance must first
+be adopted through explicit supported `--reclaim` reuse.
 
 Direct mode has no coordinator alarm. Use:
 

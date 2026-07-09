@@ -39,8 +39,9 @@ crabbox login --url https://broker.example.com
 ```
 
 `login` opens a browser to the GitHub OAuth flow (pass `--no-browser` to print
-the URL instead). The broker exchanges the OAuth code, verifies your GitHub org
-membership, writes a signed token to your user config, and confirms the result:
+the URL for a browser on the same device). The broker exchanges the OAuth code,
+verifies your GitHub org membership, and redirects a one-use confirmation to the
+CLI's loopback listener before writing the signed token to your user config:
 
 ```text
 logged in broker=https://broker.example.com provider=hetzner user=alice@example.com org=example-org config=/Users/alice/.config/crabbox/config.yaml

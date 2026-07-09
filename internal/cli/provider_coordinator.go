@@ -315,7 +315,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		Network:          resolved.Network,
 		Tailscale:        lease.Tailscale,
 		SSHHost:          target.Host,
-		SSHUser:          target.User,
+		SSHUser:          redactedSSHUser(b.cfg, server, target),
 		SSHPort:          target.Port,
 		SSHFallbackPorts: target.FallbackPorts,
 		SSHKey:           target.Key,
@@ -366,7 +366,9 @@ func (b *coordinatorLeaseBackend) listUserLeases(ctx context.Context) ([]Coordin
 	if err != nil {
 		return nil, err
 	}
-	return filterCoordinatorLeasesForProvider(leases, b.cfg.Provider), nil
+	return redactCoordinatorLeaseListSecrets(
+		filterCoordinatorLeasesForProvider(leases, b.cfg.Provider),
+	), nil
 }
 
 func (b *coordinatorLeaseBackend) listMachines(ctx context.Context) ([]CoordinatorMachine, map[string]struct{}, error) {
@@ -424,6 +426,16 @@ func filterCoordinatorLeasesForProvider(leases []CoordinatorLease, provider stri
 	for _, lease := range leases {
 		if strings.EqualFold(strings.TrimSpace(lease.Provider), provider) {
 			out = append(out, lease)
+		}
+	}
+	return out
+}
+
+func redactCoordinatorLeaseListSecrets(leases []CoordinatorLease) []CoordinatorLease {
+	out := append([]CoordinatorLease(nil), leases...)
+	for i := range out {
+		if strings.EqualFold(strings.TrimSpace(out[i].Provider), "daytona") && out[i].SSHUser != "" {
+			out[i].SSHUser = "<token>"
 		}
 	}
 	return out

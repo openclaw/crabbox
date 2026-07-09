@@ -45,7 +45,7 @@ https://fallback.example.com                       # additional fallback
 complete a browser GitHub OAuth flow. The coordinator still requires Crabbox
 auth on every API route; the unauthenticated
 exceptions are `GET /v1/health`, the GitHub login/OAuth routes (`/v1/auth/*`,
-`/portal/login`, `/portal/logout`), and the per-lease websocket agent upgrades that
+`/portal/login`), and the per-lease websocket agent upgrades that
 authenticate via short-lived bridge tickets instead.
 
 `https://broker-access.example.com` is the **same** Worker fronted by a Cloudflare Access
@@ -85,8 +85,11 @@ matches the token in this precedence (`worker/src/auth.ts`):
    base64url payload, verified only with `CRABBOX_SESSION_SECRET`. The session
    secret must be configured and distinct from `CRABBOX_SHARED_TOKEN`. Minted by
    `crabbox login` only after GitHub returns a verified owner email, with a
-   default 180-day expiry. The payload records the verified-email provenance;
-   older unversioned user tokens are rejected and require a fresh login.
+   default 180-day expiry. The payload records the verified-email provenance
+   and an encrypted GitHub OAuth credential. Current allowed-org/team membership
+   is revalidated on requests, with positive checks cached for five minutes and
+   GitHub errors failing closed after cache expiry. Older token schemas are
+   rejected and require a fresh login.
    User tokens are non-admin unless their verified GitHub email or login matches
    `CRABBOX_GITHUB_ADMIN_OWNERS` or `CRABBOX_GITHUB_ADMIN_LOGINS`.
 
@@ -141,7 +144,14 @@ https://broker.example.com/v1/auth/github/callback
 The OAuth app requests the scopes `read:user user:email read:org`. A self-hosted coordinator
 needs its own OAuth app: the callback URL must exactly match the public origin, and the
 `CRABBOX_PUBLIC_URL` must use that same origin (it is used to build the callback and
-to canonicalize portal redirects).
+to canonicalize portal redirects). GitHub OAuth refuses to start without this setting,
+and callbacks from another origin are rejected before code exchange or session issuance.
+
+For CLI login, the public callback redirects completion to a one-use
+`http://127.0.0.1:<random-port>/crabbox/oauth/<random-path>` listener created by
+the initiating CLI. The coordinator releases the token only when polling proves
+both the terminal-held polling secret and the browser-delivered confirmation.
+This makes copied authorization URLs non-transferable to another terminal.
 
 The CLI treats that callback origin as a credential destination. If a login response
 from one broker points at a different callback origin, `crabbox login` fails before
@@ -177,6 +187,8 @@ CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separat
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional; comma-separated team slugs
 CRABBOX_GITHUB_ADMIN_OWNERS      # optional; comma-separated GitHub verified emails with admin
 CRABBOX_GITHUB_ADMIN_LOGINS      # optional; comma-separated GitHub logins with admin
+CRABBOX_GITHUB_REVOKED_USERS     # optional; comma-separated logins/emails denied immediately
+CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS # optional; default 300, range 0-3600
 CRABBOX_SESSION_SECRET           # required for user tokens; must differ from CRABBOX_SHARED_TOKEN
 CRABBOX_USER_TOKEN_TTL_SECONDS   # optional; default 15552000 (180 days), clamped to 1h-365d
 ```

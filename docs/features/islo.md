@@ -10,10 +10,11 @@ Read when:
 command transport, while Crabbox owns local config, repo claims, the sync
 manifest and its guardrails, slugs, timing summaries, and normalized
 `list`/`status` rendering. Crabbox uses the Islo Go SDK for auth and sandbox
-lifecycle (create, list, status) and calls the HTTP API directly for stop (an
-empty-body `DELETE`), archive upload, shares, and command output — the last via
-a small SSE reader for the `POST /sandboxes/{name}/exec/stream` endpoint, since
-the SDK's exec helper coalesces streamed output.
+lifecycle (create, list, status, pause, resume) and calls the HTTP API
+directly for stop (an empty-body `DELETE`), archive upload, shares, and
+command output — the last via a small SSE reader for the
+`POST /sandboxes/{name}/exec/stream` endpoint, since the SDK's exec helper
+coalesces streamed output.
 
 Sandboxes are Linux-only. `crabbox ssh --provider islo` can print a direct SSH
 command for a Crabbox-created sandbox at `<sandbox>.islo`, but Islo `run`
@@ -72,6 +73,12 @@ variable:
 | `memoryMB`       | `--islo-memory-mb`       | `CRABBOX_ISLO_MEMORY_MB`       |
 | `diskGB`         | `--islo-disk-gb`         | `CRABBOX_ISLO_DISK_GB`         |
 
+`gatewayProfile` accepts an Islo gateway profile name or id and is passed
+opaquely in the sandbox create request. Gateway profiles are created and
+managed on the Islo side and configure Islo's own egress gateway for the
+sandbox — the setting is unrelated to the Crabbox coordinator. When unset, the
+field is omitted from the create request so Islo applies its own default.
+
 ```sh
 crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:26.04
 crabbox run --provider islo -- pnpm test
@@ -106,6 +113,11 @@ HTTPS share for an exposed sandbox port via Islo's
 `POST /sandboxes/{name}/shares` API and reuses an existing share for the same
 port when one is present. This is how delegated providers surface a reachable
 URL in place of an SSH-tunneled bridge.
+
+Requested share TTLs are clamped into Islo's legal 60s–7d range, matching the
+`pond peers --share-ttl` contract. Reuse skips a share that expires within the
+next 30 seconds, so a nearly-expired share is replaced with a fresh one rather
+than handed out.
 
 ## Tailscale (userspace tailnet)
 
