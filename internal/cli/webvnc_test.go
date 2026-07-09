@@ -270,7 +270,7 @@ func TestWebVNCCredentialsPreferProviderHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if username != "provider-user" || password != "provider-secret" {
+	if username != "provider-user" || password != " provider-secret " {
 		t.Fatalf("credentials=(%q,%q)", username, password)
 	}
 	username, password, err = webVNCCredentials(
@@ -519,7 +519,7 @@ func (directWebVNCTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 }
 func (directWebVNCTestProvider) Configure(Config, Runtime) (Backend, error) { return nil, nil }
 func (directWebVNCTestProvider) DesktopCredentials(Config, SSHTarget) (DesktopCredentials, bool) {
-	return DesktopCredentials{Username: "provider-user", Password: "provider-secret"}, true
+	return DesktopCredentials{Username: "provider-user", Password: " provider-secret "}, true
 }
 func (directWebVNCTestProvider) CommandRoutingArgs(_ Config, leaseID string) []string {
 	return []string{"--direct-webvnc-routing", "route-" + leaseID}

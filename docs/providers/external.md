@@ -65,6 +65,13 @@ user. `passwordEnv` must be an environment variable name. Inject the secret into
 the Crabbox process from your normal secret store; do not put the password in
 YAML, argv, routing files, issue trackers, or logs.
 
+For native Windows SSH hosts, select `target: windows`, keep `windows.mode:
+normal`, and use a drive-absolute dedicated work root such as
+`C:\crabbox`. Windows drive roots, protected system directories, device names,
+short-name aliases, alternate data streams, and ambiguous trailing dots or
+spaces are rejected. For WSL2 hosts, select `windows.mode: wsl2` and use a POSIX
+work root inside the distribution instead.
+
 `external.config` is arbitrary YAML passed as JSON to the executable. Keep
 secrets in the executable's normal credential store or environment rather than
 the Crabbox config file. Generated SSH, retry, and stop commands store resolved

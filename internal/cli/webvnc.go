@@ -375,7 +375,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 			fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using WebVNC")
 			fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
 			if strings.TrimSpace(portalPassword) != "" {
-				fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(portalPassword))
+				fmt.Fprintf(a.Stdout, "password: %s\n", portalPassword)
 				if strings.TrimSpace(portalUsername) != "" {
 					fmt.Fprintf(a.Stdout, "username: %s\n", strings.TrimSpace(portalUsername))
 				}
@@ -751,7 +751,7 @@ func webVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, endpoi
 		return "", "", err
 	}
 	if ok {
-		return strings.TrimSpace(credentials.Username), strings.TrimSpace(credentials.Password), nil
+		return strings.TrimSpace(credentials.Username), credentials.Password, nil
 	}
 	password, _ := runSSHOutput(ctx, target, vncPasswordCommand(target))
 	username := ""
@@ -941,7 +941,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	endpoint, endpointErr := resolveVNCEndpoint(ctx, cfg, &target)
 	username := ""
 	password := ""
-	if endpointErr == nil {
+	if endpointErr == nil && !*redactCredentials && target.TargetOS != targetMacOS {
 		username, password, err = webVNCCredentials(ctx, cfg, target, endpoint)
 		if err != nil {
 			return err
@@ -1003,7 +1003,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
 	if strings.TrimSpace(portalPassword) != "" {
-		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(portalPassword))
+		fmt.Fprintf(a.Stdout, "password: %s\n", portalPassword)
 		if strings.TrimSpace(portalUsername) != "" {
 			fmt.Fprintf(a.Stdout, "username: %s\n", strings.TrimSpace(portalUsername))
 		}
@@ -1113,7 +1113,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	fmt.Fprintf(a.Stdout, "webvnc reset: lease=%s slug=%s\n", leaseID, blank(serverSlug(server), "-"))
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
 	if strings.TrimSpace(portalPassword) != "" {
-		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(portalPassword))
+		fmt.Fprintf(a.Stdout, "password: %s\n", portalPassword)
 	}
 	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(cfg, target, leaseID))
 	return nil

@@ -53,7 +53,7 @@ func TestResolveMacOSWebVNCCredentialsUsesProviderARDAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if credentials.Username != "provider-user" || credentials.Password != "provider-secret" {
+	if credentials.Username != "provider-user" || credentials.Password != " provider-secret " {
 		t.Fatalf("credentials = %#v", credentials)
 	}
 	if authMode != localWebVNCAuthARD {

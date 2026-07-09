@@ -2520,6 +2520,10 @@ func MarkTargetExplicit(cfg *Config) {
 	cfg.targetExplicit = true
 }
 
+func IsWindowsModeExplicit(cfg *Config) bool {
+	return cfg.explicitWindowsMode != "" || cfg.windowsModeFlagExplicit
+}
+
 func IsSSHUserExplicit(cfg *Config) bool {
 	return cfg.explicitSSHUser != ""
 }

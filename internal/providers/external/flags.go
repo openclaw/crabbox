@@ -267,23 +267,66 @@ func validateExternalWindowsWorkRoot(value string) error {
 	parts := make([]string, 0)
 	for _, part := range strings.Split(value[3:], `\`) {
 		switch part {
-		case "", ".":
+		case "":
 			continue
-		case "..":
-			if len(parts) > 0 {
-				parts = parts[:len(parts)-1]
-			}
-		default:
-			parts = append(parts, part)
+		case ".", "..":
+			return core.Exit(2, "external.workRoot %q must not contain relative Windows path components", value)
 		}
+		if err := validateWindowsWorkRootComponent(value, part); err != nil {
+			return err
+		}
+		parts = append(parts, part)
 	}
 	clean := strings.ToUpper(value[:1]) + `:\` + strings.Join(parts, `\`)
 	if len(parts) == 0 {
 		return core.Exit(2, "external.workRoot %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	switch strings.ToUpper(parts[0]) {
+	case "WINDOWS", "WINNT", "PROGRAM FILES", "PROGRAM FILES (X86)", "PROGRAMDATA", "$RECYCLE.BIN", "SYSTEM VOLUME INFORMATION", "DOCUMENTS AND SETTINGS":
+		return core.Exit(2, "external.workRoot %q is inside a protected Windows directory; choose a dedicated workspace", clean)
 	}
 	switch strings.ToUpper(clean) {
 	case `C:\WINDOWS`, `C:\USERS`, `C:\PROGRAM FILES`, `C:\PROGRAM FILES (X86)`:
 		return core.Exit(2, "external.workRoot %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return nil
+}
+
+func validateWindowsWorkRootComponent(value, part string) error {
+	if strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") {
+		return core.Exit(2, "external.workRoot %q contains a Windows-ambiguous path component", value)
+	}
+	if windowsShortNameComponent(part) {
+		return core.Exit(2, "external.workRoot %q must not use Windows short-name aliases", value)
+	}
+	if strings.ContainsAny(part, `<>:"|?*`) {
+		return core.Exit(2, "external.workRoot %q contains an invalid Windows path component", value)
+	}
+	for _, character := range part {
+		if character < 0x20 {
+			return core.Exit(2, "external.workRoot %q contains an invalid Windows path component", value)
+		}
+	}
+	base := strings.ToUpper(part)
+	if dot := strings.IndexByte(base, '.'); dot >= 0 {
+		base = base[:dot]
+	}
+	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" ||
+		(len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9') {
+		return core.Exit(2, "external.workRoot %q contains a reserved Windows device name", value)
+	}
+	return nil
+}
+
+func windowsShortNameComponent(part string) bool {
+	tilde := strings.LastIndex(part, "~")
+	if tilde < 1 || tilde == len(part)-1 {
+		return false
+	}
+	for _, character := range part[tilde+1:] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }

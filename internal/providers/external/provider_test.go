@@ -131,7 +131,20 @@ func TestConfigureAcceptsNativeWindowsWorkRoot(t *testing.T) {
 }
 
 func TestValidateConfigRejectsUnsafeNativeWindowsWorkRoot(t *testing.T) {
-	for _, workRoot := range []string{`/work/crabbox`, `C:\`, `D:\`, `C:\Windows`, `C:\safe\..\Users`} {
+	for _, workRoot := range []string{
+		`/work/crabbox`,
+		`C:\`,
+		`D:\`,
+		`C:\Windows`,
+		`C:\Windows.`,
+		`C:\Windows \crabbox`,
+		`C:\Windows\crabbox`,
+		`D:\Program Files\crabbox`,
+		`C:\PROGRA~1`,
+		`C:\safe:stream\crabbox`,
+		`C:\NUL\crabbox`,
+		`C:\safe\..\Users`,
+	} {
 		cfg := testConfig()
 		cfg.TargetOS = core.TargetWindows
 		cfg.WindowsMode = core.WindowsModeNormal
@@ -237,6 +250,7 @@ func TestConfigurePreservesOverridesAppliedToLoadedRouting(t *testing.T) {
 func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
 	isolateCrabboxState(t)
 	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetMacOS, core.WindowsModeNormal)
 	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
 	if err != nil {
 		t.Fatal(err)
@@ -248,8 +262,29 @@ func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := backend.(*leaseBackend).cfg
-	if got.External.Command != saved.External.Command || got.WorkRoot != saved.External.WorkRoot {
+	if got.External.Command != saved.External.Command || got.WorkRoot != saved.External.WorkRoot || got.TargetOS != core.TargetMacOS {
 		t.Fatalf("config=%#v", got)
+	}
+}
+
+func TestConfigurePreservesExplicitTargetOverRoutingFile(t *testing.T) {
+	isolateCrabboxState(t)
+	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetMacOS, core.WindowsModeNormal)
+	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.External.RoutingFile = path
+	cfg.TargetOS = core.TargetLinux
+	core.MarkTargetExplicit(&cfg)
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.(*leaseBackend).cfg.TargetOS; got != core.TargetLinux {
+		t.Fatalf("target=%q want explicit Linux", got)
 	}
 }
 
