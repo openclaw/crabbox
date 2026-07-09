@@ -353,6 +353,10 @@ func (c *unikraftCloudClient) doInstances(ctx context.Context, method, apiPath s
 		}
 		return nil, &unikraftCloudAPIError{StatusCode: http.StatusInternalServerError, Message: redactSecret(unikraftCloudEnvelopeMessage(envelope), c.apiKey)}
 	}
+	if !strings.EqualFold(strings.TrimSpace(envelope.Status), "success") {
+		status := redactSecret(strings.TrimSpace(envelope.Status), c.apiKey)
+		return nil, fmt.Errorf("%s response has invalid status %q", providerName, status)
+	}
 	// Batch envelopes report per-item failures inline; surface the first one.
 	if err := c.unikraftCloudInstanceError(envelope); err != nil {
 		return nil, err

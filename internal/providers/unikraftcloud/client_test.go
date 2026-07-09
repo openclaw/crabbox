@@ -342,6 +342,40 @@ func TestUnikraftCloudClientDoesNotLeakAPIKeyInErrors(t *testing.T) {
 	}
 }
 
+func TestUnikraftCloudDeleteRejectsMalformedSuccessEnvelope(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		body         string
+		wantRedacted bool
+	}{
+		{name: "missing status", body: `{}`},
+		{name: "unknown status", body: `{"status":"pending"}`},
+		{name: "secret in status", body: `{"status":"ukc-test-key"}`, wantRedacted: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+			if err != nil {
+				t.Fatalf("newUnikraftCloudClient: %v", err)
+			}
+			err = api.DeleteInstance(context.Background(), "11111111-2222-3333-4444-555555555555")
+			if err == nil || !strings.Contains(err.Error(), "invalid status") {
+				t.Fatalf("DeleteInstance err = %v, want malformed response rejection", err)
+			}
+			if strings.Contains(err.Error(), "ukc-test-key") {
+				t.Fatalf("DeleteInstance leaked API key: %v", err)
+			}
+			if test.wantRedacted && !strings.Contains(err.Error(), "[redacted]") {
+				t.Fatalf("DeleteInstance err = %v, want redaction marker", err)
+			}
+		})
+	}
+}
+
 func TestUnikraftCloudClientRefusesCrossOriginRedirect(t *testing.T) {
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
