@@ -54,6 +54,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		cfg.External = routing
 		core.MarkExternalRoutingCredentialSources(cfg)
+		core.ApplyExternalDesktopEnvironmentOverrides(cfg)
 		restoreRoutingTarget(cfg, fs)
 		cfg.WorkRoot = externalWorkRoot(*cfg)
 	} else if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !core.ExternalRoutingLoaded(cfg.External) {
@@ -63,6 +64,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		cfg.External = routing
 		core.MarkExternalRoutingCredentialSources(cfg)
+		core.ApplyExternalDesktopEnvironmentOverrides(cfg)
 		restoreRoutingTarget(cfg, fs)
 		cfg.WorkRoot = externalWorkRoot(*cfg)
 	}

@@ -480,6 +480,8 @@ func TestAutoRouteExternalLeaseHonorsConfiguredRoutingFile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", "runtime-user")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "RUNTIME_DESKTOP_PASSWORD")
 	cfg := baseConfig()
 	cfg.Provider = "external"
 	cfg.External.RoutingFile = selectedPath
@@ -492,6 +494,9 @@ func TestAutoRouteExternalLeaseHonorsConfiguredRoutingFile(t *testing.T) {
 	}
 	if cfg.External.Command != "cbx_111111111111" || !cfg.External.routingLoaded {
 		t.Fatalf("configured routing was not loaded: %#v", cfg.External)
+	}
+	if cfg.External.Connection.Desktop.Username != "runtime-user" || cfg.External.Connection.Desktop.PasswordEnv != "RUNTIME_DESKTOP_PASSWORD" {
+		t.Fatalf("desktop environment overrides were lost: %#v", cfg.External.Connection.Desktop)
 	}
 }
 

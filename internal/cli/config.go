@@ -8266,11 +8266,7 @@ func applyEnv(cfg *Config) error {
 		cfg.External.RoutingFile = value
 		cfg.credentialProvenance.externalRouting = credentialSourceEnvironment
 	}
-	cfg.External.Connection.Desktop.Username = getenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", cfg.External.Connection.Desktop.Username)
-	if value := os.Getenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV"); value != "" {
-		cfg.External.Connection.Desktop.PasswordEnv = value
-		cfg.credentialProvenance.externalDesktopEnv = credentialSourceEnvironment
-	}
+	ApplyExternalDesktopEnvironmentOverrides(cfg)
 	if value, ok := getenvBool("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID"); ok {
 		cfg.External.Capabilities.IdempotentLeaseID = value
 	}
@@ -9185,6 +9181,19 @@ func applyEnv(cfg *Config) error {
 		cfg.Run.PreflightTools = normalizePreflightToolNames(splitCommaList(tools))
 	}
 	return nil
+}
+
+// ApplyExternalDesktopEnvironmentOverrides reapplies process-local desktop
+// credential references after persisted routing replaces External config.
+func ApplyExternalDesktopEnvironmentOverrides(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.External.Connection.Desktop.Username = getenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", cfg.External.Connection.Desktop.Username)
+	if value := os.Getenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV"); value != "" {
+		cfg.External.Connection.Desktop.PasswordEnv = value
+		cfg.credentialProvenance.externalDesktopEnv = credentialSourceEnvironment
+	}
 }
 
 func expandUserPath(path string) string {

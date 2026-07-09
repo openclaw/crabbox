@@ -121,6 +121,7 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 		}
 		cfg.External = routing
 		core.MarkExternalRoutingCredentialSources(&cfg)
+		core.ApplyExternalDesktopEnvironmentOverrides(&cfg)
 		loadedRouting = true
 	}
 	if loadedRouting {

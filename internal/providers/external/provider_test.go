@@ -255,6 +255,8 @@ func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", "runtime-user")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "RUNTIME_DESKTOP_PASSWORD")
 	cfg := core.BaseConfig()
 	cfg.External.RoutingFile = path
 	backend, err := (Provider{}).Configure(cfg, core.Runtime{})
@@ -262,7 +264,8 @@ func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := backend.(*leaseBackend).cfg
-	if got.External.Command != saved.External.Command || got.WorkRoot != saved.External.WorkRoot || got.TargetOS != core.TargetMacOS {
+	if got.External.Command != saved.External.Command || got.WorkRoot != saved.External.WorkRoot || got.TargetOS != core.TargetMacOS ||
+		got.External.Connection.Desktop.Username != "runtime-user" || got.External.Connection.Desktop.PasswordEnv != "RUNTIME_DESKTOP_PASSWORD" {
 		t.Fatalf("config=%#v", got)
 	}
 }

@@ -1544,10 +1544,20 @@ func TestWebVNCBridgeArgsCarriesNetworkOverride(t *testing.T) {
 
 func TestWebVNCBridgePoolSizeForTarget(t *testing.T) {
 	if got := webVNCBridgePoolSizeForTarget(SSHTarget{TargetOS: targetMacOS}); got != 2 {
-		t.Fatalf("macOS pool size=%d, want 1", got)
+		t.Fatalf("macOS pool size=%d, want 2", got)
 	}
 	if got := webVNCBridgePoolSizeForTarget(SSHTarget{TargetOS: targetLinux}); got != defaultWebVNCBridgePoolSize {
 		t.Fatalf("linux pool size=%d, want default", got)
+	}
+}
+
+func TestManagedMacOSWebVNCPreservesHostManagedStaticRelay(t *testing.T) {
+	target := SSHTarget{TargetOS: targetMacOS}
+	if managedMacOSWebVNC(target, vncEndpoint{}) {
+		t.Fatal("unmanaged static macOS endpoint must keep host-managed browser authentication")
+	}
+	if !managedMacOSWebVNC(target, vncEndpoint{Managed: true}) {
+		t.Fatal("managed macOS endpoint must use provider-side authentication")
 	}
 }
 

@@ -407,6 +407,7 @@ func loadExternalRoutingConfig(cfg *Config, path string, claimBound bool) error 
 	}
 	cfg.External = routing
 	MarkExternalRoutingCredentialSources(cfg)
+	ApplyExternalDesktopEnvironmentOverrides(cfg)
 	if strings.TrimSpace(routing.WorkRoot) != "" {
 		cfg.WorkRoot = routing.WorkRoot
 	}

@@ -285,7 +285,8 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		return err
 	}
 	credentials := rfbCredentials{Username: username, Password: password}
-	if target.TargetOS == targetMacOS {
+	managedMacOS := managedMacOSWebVNC(target, endpoint)
+	if managedMacOS {
 		if err := requireMacOSScreenSharingCredentials(credentials); err != nil {
 			return err
 		}
@@ -318,7 +319,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 			*localPort = tunnelPort
 		}
 	}
-	if target.TargetOS == targetMacOS {
+	if managedMacOS {
 		if err := preflightMacOSScreenSharing(ctx, connHost, connPort, credentials); err != nil {
 			return err
 		}
@@ -327,7 +328,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 			return nil
 		}
 	} else if *preflightOnly {
-		return exit(2, "webvnc --preflight currently supports target=macos Screen Sharing leases")
+		return exit(2, "webvnc --preflight requires a managed macOS Screen Sharing lease")
 	}
 	if err := ensureOpenWebVNCPortalAccess(ctx, coord, leaseID, *openPortal, a.Stdout); err != nil {
 		return err
@@ -390,6 +391,10 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 			return nil
 		},
 	})
+}
+
+func managedMacOSWebVNC(target SSHTarget, endpoint vncEndpoint) bool {
+	return target.TargetOS == targetMacOS && endpoint.Managed
 }
 
 const defaultWebVNCBridgePoolSize = 4
