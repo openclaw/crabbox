@@ -68,6 +68,76 @@ describe("gcp provider", () => {
     expect(calls[1]?.headers.get("Authorization")).toBe("Bearer metadata-token");
   });
 
+  it("retries transient metadata token failures", async () => {
+    vi.useFakeTimers();
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    let metadataCalls = 0;
+    client.fetcher = async (input) => {
+      const url = String(input);
+      if (url.includes("metadata.google.internal")) {
+        metadataCalls += 1;
+        if (metadataCalls === 1) return new Response("busy", { status: 503 });
+        if (metadataCalls === 2) return new Response("rate limited", { status: 429 });
+        return Response.json({ access_token: "metadata-token", expires_in: 1200 });
+      }
+      if (url.includes("/aggregated/instances")) return Response.json({ items: {} });
+      throw new Error(`unexpected GCP request ${url}`);
+    };
+
+    const result = client.listCrabboxServers();
+    await vi.runAllTimersAsync();
+    await expect(result).resolves.toEqual([]);
+    expect(metadataCalls).toBe(3);
+  });
+
+  it("keeps the HTTP status when metadata errors are not JSON", async () => {
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    client.fetcher = async () =>
+      new Response("service account disabled", { status: 401, statusText: "Unauthorized" });
+
+    await expect(client.listCrabboxServers()).rejects.toThrow(
+      "gcp metadata token: http 401: Unauthorized",
+    );
+  });
+
+  it("bounds metadata retries", async () => {
+    vi.useFakeTimers();
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    let metadataCalls = 0;
+    client.fetcher = async () => {
+      metadataCalls += 1;
+      return new Response("busy", { status: 503, statusText: "Service Unavailable" });
+    };
+
+    const result = client.listCrabboxServers().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("gcp metadata token: http 503: Service Unavailable");
+    expect(metadataCalls).toBe(6);
+  });
+
   it("rejects partial service account key credentials", () => {
     expect(() => new GCPClient({ ...env, GCP_PRIVATE_KEY: "" })).toThrow(
       "GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY must be configured together",

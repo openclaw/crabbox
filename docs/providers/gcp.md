@@ -200,7 +200,8 @@ GCP_PRIVATE_KEY
 If either `GCP_CLIENT_EMAIL` or `GCP_PRIVATE_KEY` is set, both must be set.
 When `CRABBOX_GCP_CREDENTIAL_SOURCE` is unset, brokered GCP uses the
 service-account-key path. `CRABBOX_GCP_CREDENTIAL_SOURCE=service-account-key`
-is accepted as an explicit spelling of the same default.
+is accepted as an explicit spelling of the same default. Metadata token requests
+retry transient `429` and `503` responses with bounded exponential backoff.
 
 Optional coordinator defaults (same names as the direct-mode environment):
 

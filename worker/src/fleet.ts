@@ -12771,8 +12771,8 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
     ) {
       missing.unshift("GCP_PROJECT_ID");
     }
-    const hasClientEmail = nonSecretString(env.GCP_CLIENT_EMAIL);
-    const hasPrivateKey = nonSecretString(env.GCP_PRIVATE_KEY);
+    const hasClientEmail = Boolean(nonSecretString(env.GCP_CLIENT_EMAIL));
+    const hasPrivateKey = Boolean(nonSecretString(env.GCP_PRIVATE_KEY));
     const credentialSource = env.CRABBOX_GCP_CREDENTIAL_SOURCE?.trim() ?? "";
     const validCredentialSource =
       credentialSource === "" ||

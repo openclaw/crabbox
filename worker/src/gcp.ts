@@ -24,6 +24,7 @@ const metadataTokenURL =
 const defaultImage = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64";
 const firewallName = "crabbox-ssh";
 const firewallVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
+const metadataTokenBackoffMs = [200, 400, 800, 1_600, 3_200];
 
 interface TokenCache {
   token: string;
@@ -661,19 +662,7 @@ export class GCPClient {
     const now = Math.trunc(Date.now() / 1000);
     if (this.cache && this.cache.expiresAt - 60 > now) return this.cache.token;
     if (gcpCredentialSource(this.env) === "metadata") {
-      const response = await this.fetcher(metadataTokenURL, {
-        headers: { "Metadata-Flavor": "Google" },
-      });
-      const data = (await response.json()) as {
-        access_token?: string;
-        expires_in?: number;
-        error?: string;
-      };
-      if (!response.ok || !data.access_token) {
-        throw new Error(`gcp metadata token: ${data.error ?? response.statusText}`);
-      }
-      this.cache = { token: data.access_token, expiresAt: now + (data.expires_in ?? 3600) };
-      return data.access_token;
+      return this.metadataAccessToken(now);
     }
     const assertion = await serviceAccountAssertion(this.env, now);
     const response = await this.fetcher(tokenURL, {
@@ -694,6 +683,47 @@ export class GCPClient {
     }
     this.cache = { token: data.access_token, expiresAt: now + (data.expires_in ?? 3600) };
     return data.access_token;
+  }
+
+  private async metadataAccessToken(now: number): Promise<string> {
+    for (let attempt = 0; ; attempt += 1) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
+      const response = await this.fetcher(metadataTokenURL, {
+        headers: { "Metadata-Flavor": "Google" },
+      });
+      // Error responses from the metadata server are not guaranteed to be JSON.
+      // oxlint-disable-next-line eslint/no-await-in-loop -- consume each response before a retry.
+      const text = await response.text();
+      const data = parseMetadataTokenResponse(text);
+      const token = typeof data?.access_token === "string" ? data.access_token.trim() : "";
+      if (response.ok && token) {
+        const expiresIn =
+          typeof data?.expires_in === "number" &&
+          Number.isFinite(data.expires_in) &&
+          data.expires_in > 0
+            ? data.expires_in
+            : 3600;
+        this.cache = { token, expiresAt: now + expiresIn };
+        return token;
+      }
+      const delay = metadataTokenBackoffMs[attempt];
+      if ((response.status === 429 || response.status === 503) && delay !== undefined) {
+        // Google documents transient 429/503 metadata responses and recommends exponential backoff.
+        // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
+        await sleep(delay);
+        continue;
+      }
+      const detail =
+        typeof data?.error === "string" && data.error.trim()
+          ? data.error.trim()
+          : response.statusText.trim();
+      if (!response.ok) {
+        throw new Error(
+          `gcp metadata token: http ${response.status}${detail ? `: ${detail}` : ""}`,
+        );
+      }
+      throw new Error("gcp metadata token: response missing access_token");
+    }
   }
 
   private async waitZoneOperation(op: GCPOperation): Promise<void> {
@@ -785,6 +815,20 @@ function gcpCredentialSource(env: Env): "metadata" | "service-account-key" {
   if (!source) return "service-account-key";
   if (source === "metadata" || source === "service-account-key") return source;
   throw new Error("CRABBOX_GCP_CREDENTIAL_SOURCE must be metadata or service-account-key");
+}
+
+function parseMetadataTokenResponse(
+  text: string,
+): { access_token?: unknown; expires_in?: unknown; error?: unknown } | undefined {
+  if (!text) return undefined;
+  try {
+    const value = JSON.parse(text) as unknown;
+    return value && typeof value === "object"
+      ? (value as { access_token?: unknown; expires_in?: unknown; error?: unknown })
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function toMachine(instance: GCPInstance, zone: string): ProviderMachine {
