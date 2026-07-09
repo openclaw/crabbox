@@ -3,9 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -131,9 +133,19 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		WindowedBrowser: *browser && !*fullscreen,
 		VerifyProcess:   !expectBrowserLaunch || target.TargetOS != targetLinux,
 	}
-	if out, err := runSSHCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, command, launchOptions)); err != nil {
+	launchOutput, err := runDesktopLaunchRemoteCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, command, launchOptions))
+	if err != nil {
+		out := launchOutput
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, command))
 		return exit(5, "launch desktop command: %v", err)
+	}
+	var windowsWindow windowsDesktopWindow
+	if isWindowsNativeTarget(target) {
+		windowsWindow, err = parseWindowsDesktopWindow(launchOutput)
+		if err != nil {
+			printRescue(a.Stdout, rescueDesktopCommandNotLaunched, trimFailureDetail(launchOutput), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, command))
+			return exit(5, "launch desktop command: %v", err)
+		}
 	}
 	if expectBrowserLaunch && target.TargetOS == targetLinux {
 		if out, err := runSSHCombinedOutput(ctx, target, desktopBrowserLaunchCheckCommand()); err != nil {
@@ -142,10 +154,46 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		}
 	}
 	fmt.Fprintf(a.Stdout, "launched: %s\n", strings.Join(command, " "))
+	if windowsWindow.PID != 0 {
+		fmt.Fprintf(a.Stdout, "window: pid=%d session=%d title=%q\n", windowsWindow.PID, windowsWindow.SessionID, windowsWindow.Title)
+	}
 	if *webvnc {
 		return a.webvnc(ctx, desktopLaunchWebVNCArgs(cfg, target, leaseID, *openPortal, *takeControl))
 	}
 	return nil
+}
+
+type windowsDesktopWindow struct {
+	PID       int
+	SessionID int
+	Title     string
+}
+
+const windowsDesktopWindowMarker = "CRABBOX_DESKTOP_WINDOW"
+
+func parseWindowsDesktopWindow(output string) (windowsDesktopWindow, error) {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) != 4 || fields[0] != windowsDesktopWindowMarker {
+			continue
+		}
+		values := make(map[string]string, 3)
+		for _, field := range fields[1:] {
+			key, value, ok := strings.Cut(field, "=")
+			if !ok {
+				continue
+			}
+			values[key] = value
+		}
+		pid, pidErr := strconv.Atoi(values["pid"])
+		sessionID, sessionErr := strconv.Atoi(values["session"])
+		title, titleErr := base64.StdEncoding.DecodeString(values["title"])
+		if pidErr != nil || pid <= 0 || sessionErr != nil || sessionID < 0 || titleErr != nil || len(title) == 0 {
+			return windowsDesktopWindow{}, fmt.Errorf("invalid Windows desktop window result")
+		}
+		return windowsDesktopWindow{PID: pid, SessionID: sessionID, Title: string(title)}, nil
+	}
+	return windowsDesktopWindow{}, fmt.Errorf("Windows desktop launch did not return a visible window")
 }
 
 func (a App) desktopTerminal(ctx context.Context, args []string) error {
@@ -246,7 +294,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		}
 	}
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
-	if out, err := runSSHCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, desktopLaunchOptions{
+	if out, err := runDesktopLaunchRemoteCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, desktopLaunchOptions{
 		VerifyProcess:      true,
 		VisibleWindowTitle: terminalTitle,
 	})); err != nil {
@@ -444,7 +492,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		return err
 	}
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
-	if out, err := runSSHCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, desktopLaunchOptions{
+	if out, err := runDesktopLaunchRemoteCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, desktopLaunchOptions{
 		VerifyProcess:      true,
 		VisibleWindowTitle: terminalTitle,
 	})); err != nil {
@@ -957,44 +1005,243 @@ func writeShellArgv(b *bytes.Buffer, command []string) {
 }
 
 func windowsDesktopLaunchRemoteCommand(workdir string, env map[string]string, command []string) string {
+	return windowsDesktopLaunchPowerShell(workdir, env, command)
+}
+
+func windowsDesktopLaunchPowerShell(workdir string, env map[string]string, command []string) string {
 	inner := windowsDesktopLaunchScript(workdir, env, command)
 	return `$ErrorActionPreference = "Stop"
 $base = "C:\ProgramData\crabbox"
-$usernamePath = Join-Path $base "windows.username"
-$passwordPath = Join-Path $base "windows.password"
-$username = if (Test-Path -LiteralPath $usernamePath) { Get-Content -Raw -LiteralPath $usernamePath } else { $env:USERNAME }
-$username = $username.Trim()
-$password = if (Test-Path -LiteralPath $passwordPath) { (Get-Content -Raw -LiteralPath $passwordPath).Trim() } else { "" }
-$taskName = "CrabboxDesktopLaunch-" + [Guid]::NewGuid().ToString("N")
-$script = Join-Path $base ($taskName + ".ps1")
+New-Item -ItemType Directory -Force -Path $base | Out-Null
+$launchID = [Guid]::NewGuid().ToString("N")
+$script = Join-Path $base ("desktop-launch-" + $launchID + ".ps1")
+$result = Join-Path $base ("desktop-launch-" + $launchID + ".result")
 Set-Content -Encoding UTF8 -LiteralPath $script -Value ` + psQuote(inner) + `
-cmd.exe /c "schtasks.exe /Delete /TN $taskName /F 2>NUL" | Out-Null
-$startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
-$createArgs = @("/Create", "/TN", $taskName, "/SC", "ONCE", "/ST", $startTime, "/TR", "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $script", "/RU", $username, "/IT", "/F")
-& schtasks.exe @createArgs | Out-Null
-if ($LASTEXITCODE -ne 0 -and $password -ne "") {
-  & schtasks.exe @($createArgs + @("/RP", $password)) | Out-Null
+$serviceName = "CrabboxDesktopLauncher"
+$requestDirectory = Join-Path $base "desktop-launch-requests"
+$request = Join-Path $requestDirectory ("desktop-launch-" + $launchID + ".request")
+$requestTemp = $request + ".tmp"
+$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+if ($null -eq $service) {
+` + windowsDesktopLauncherServicePowerShell() + `
+  $service = Get-Service -Name $serviceName -ErrorAction Stop
 }
-if ($LASTEXITCODE -ne 0) { throw "failed to create interactive desktop launch task" }
-& schtasks.exe /Run /TN $taskName | Out-Null
-Start-Sleep -Seconds 2
-& schtasks.exe /Delete /TN $taskName /F | Out-Null
-Remove-Item -Force -LiteralPath $script -ErrorAction SilentlyContinue
+try {
+  New-Item -ItemType Directory -Force -Path $requestDirectory | Out-Null
+  Set-Content -Encoding UTF8 -LiteralPath $requestTemp -Value @($script, $result)
+  Move-Item -Force -LiteralPath $requestTemp -Destination $request
+  if ($service.Status -ne "Running") { Start-Service -Name $serviceName }
+  $deadline = [DateTime]::UtcNow.AddSeconds(45)
+  while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath $result)) {
+    Start-Sleep -Milliseconds 200
+  }
+  if (-not (Test-Path -LiteralPath $result)) { throw "desktop window not visible after direct interactive-session launch" }
+  $launchResult = (Get-Content -Raw -LiteralPath $result).Trim()
+  if ($launchResult.StartsWith("CRABBOX_DESKTOP_ERROR message=")) {
+    $encodedMessage = $launchResult.Substring("CRABBOX_DESKTOP_ERROR message=".Length)
+    throw [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encodedMessage))
+  }
+  if (-not $launchResult.StartsWith("CRABBOX_DESKTOP_WINDOW ")) { throw "invalid interactive desktop launch result" }
+  Write-Output $launchResult
+} finally {
+  Remove-Item -Force -LiteralPath $requestTemp -ErrorAction SilentlyContinue
+  Remove-Item -Force -LiteralPath $request -ErrorAction SilentlyContinue
+  Remove-Item -Force -LiteralPath $script -ErrorAction SilentlyContinue
+  Remove-Item -Force -LiteralPath $result -ErrorAction SilentlyContinue
+}
 `
+}
+
+func runDesktopLaunchRemoteCombinedOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
+	if !isWindowsNativeTarget(target) {
+		return runSSHCombinedOutput(ctx, target, remote)
+	}
+	var output bytes.Buffer
+	command := `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$path=Join-Path $env:TEMP ('crabbox-desktop-launch-command-'+[Guid]::NewGuid().ToString('N')+'.ps1');$source=[Console]::In.ReadToEnd();[IO.File]::WriteAllText($path,$source,(New-Object Text.UTF8Encoding($false)));try{& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path;$code=$LASTEXITCODE}finally{Remove-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue};if($null -eq $code){$code=0};exit $code"`
+	err := runSSHInput(
+		ctx,
+		target,
+		command,
+		strings.NewReader(remote),
+		&output,
+		&output,
+	)
+	return strings.TrimSpace(output.String()), err
 }
 
 func windowsDesktopLaunchScript(workdir string, env map[string]string, command []string) string {
 	var b bytes.Buffer
+	b.WriteString("param([Parameter(Mandatory=$true)][string]$ResultPath)\n")
 	b.WriteString("$ErrorActionPreference = \"Stop\"\n")
+	b.WriteString(`$windowSource = @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public sealed class CrabboxDesktopWindow {
+    public long Handle;
+    public int ProcessId;
+    public string Title;
+}
+
+public static class CrabboxDesktopWindows {
+    private const uint TH32CS_SNAPPROCESS = 0x00000002;
+    private const int SW_RESTORE = 9;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct PROCESSENTRY32 {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
+    private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextLength(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr window, StringBuilder title, int count);
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out int processId);
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern bool BringWindowToTop(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindowAsync(IntPtr window, int command);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint attach, uint attachTo, bool attached);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool Process32FirstW(IntPtr snapshot, ref PROCESSENTRY32 entry);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool Process32NextW(IntPtr snapshot, ref PROCESSENTRY32 entry);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static CrabboxDesktopWindow[] Visible() {
+        List<CrabboxDesktopWindow> windows = new List<CrabboxDesktopWindow>();
+        EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+            if (!IsWindowVisible(window)) return true;
+            int length = GetWindowTextLength(window);
+            if (length <= 0) return true;
+            int processId;
+            GetWindowThreadProcessId(window, out processId);
+            StringBuilder title = new StringBuilder(length + 1);
+            GetWindowText(window, title, title.Capacity);
+            if (title.Length > 0) {
+                windows.Add(new CrabboxDesktopWindow { Handle = window.ToInt64(), ProcessId = processId, Title = title.ToString() });
+            }
+            return true;
+        }, IntPtr.Zero);
+        return windows.ToArray();
+    }
+
+    public static bool RelatedTo(int candidateProcessId, int launchedProcessId, string expectedImage) {
+        if (candidateProcessId == launchedProcessId) return true;
+        try {
+            string candidateImage = Process.GetProcessById(candidateProcessId).ProcessName;
+            if (string.Equals(candidateImage, expectedImage, StringComparison.OrdinalIgnoreCase)) return true;
+        } catch { }
+        Dictionary<int, int> parents = new Dictionary<int, int>();
+        IntPtr snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == new IntPtr(-1)) return false;
+        try {
+            PROCESSENTRY32 entry = new PROCESSENTRY32();
+            entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+            if (Process32FirstW(snapshot, ref entry)) {
+                do {
+                    parents[(int)entry.th32ProcessID] = (int)entry.th32ParentProcessID;
+                } while (Process32NextW(snapshot, ref entry));
+            }
+        } finally {
+            CloseHandle(snapshot);
+        }
+        int current = candidateProcessId;
+        for (int depth = 0; depth < 64 && parents.ContainsKey(current); depth++) {
+            current = parents[current];
+            if (current == launchedProcessId) return true;
+            if (current <= 0) break;
+        }
+        return false;
+    }
+
+    public static bool Activate(long handle) {
+        IntPtr window = new IntPtr(handle);
+        DateTime deadline = DateTime.UtcNow.AddSeconds(3);
+        do {
+            ShowWindowAsync(window, SW_RESTORE);
+            BringWindowToTop(window);
+            SetForegroundWindow(window);
+            if (GetForegroundWindow() == window) return true;
+
+            int ignored;
+            uint currentThread = GetCurrentThreadId();
+            uint targetThread = GetWindowThreadProcessId(window, out ignored);
+            IntPtr foreground = GetForegroundWindow();
+            uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out ignored);
+            bool targetAttached = targetThread != 0 && targetThread != currentThread && AttachThreadInput(currentThread, targetThread, true);
+            bool foregroundAttached = foregroundThread != 0 && foregroundThread != currentThread && foregroundThread != targetThread && AttachThreadInput(currentThread, foregroundThread, true);
+            try {
+                BringWindowToTop(window);
+                SetForegroundWindow(window);
+            } finally {
+                if (foregroundAttached) AttachThreadInput(currentThread, foregroundThread, false);
+                if (targetAttached) AttachThreadInput(currentThread, targetThread, false);
+            }
+            if (GetForegroundWindow() == window) return true;
+            Thread.Sleep(100);
+        } while (DateTime.UtcNow < deadline);
+        return false;
+    }
+}
+'@
+
+function Write-LaunchError([string]$message) {
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($message))
+  Write-LaunchResult ("CRABBOX_DESKTOP_ERROR message=" + $encoded)
+}
+
+function Write-LaunchResult([string]$value) {
+  $temporaryResult = $ResultPath + ".tmp-" + [Guid]::NewGuid().ToString("N")
+  Set-Content -NoNewline -Encoding ASCII -LiteralPath $temporaryResult -Value $value
+  Move-Item -Force -LiteralPath $temporaryResult -Destination $ResultPath
+}
+
+try {
+  Add-Type -TypeDefinition $windowSource -Language CSharp
+  $before = @{}
+  foreach ($window in [CrabboxDesktopWindows]::Visible()) { $before[[string]$window.Handle] = $window.Title }
+`)
 	if workdir != "" {
-		b.WriteString("New-Item -ItemType Directory -Force -Path " + psQuote(workdir) + " | Out-Null\n")
-		b.WriteString("Set-Location -LiteralPath " + psQuote(workdir) + "\n")
+		b.WriteString("  New-Item -ItemType Directory -Force -Path " + psQuote(workdir) + " | Out-Null\n")
+		b.WriteString("  Set-Location -LiteralPath " + psQuote(workdir) + "\n")
 	}
 	for key, value := range env {
-		b.WriteString("$env:" + key + " = " + psQuote(value) + "\n")
+		b.WriteString("  $env:" + key + " = " + psQuote(value) + "\n")
 	}
-	b.WriteString("$file = " + psQuote(command[0]) + "\n")
-	b.WriteString("$arguments = @(")
+	b.WriteString("  $file = " + psQuote(command[0]) + "\n")
+	b.WriteString("  $arguments = @(")
 	for i, arg := range command[1:] {
 		if i > 0 {
 			b.WriteString(", ")
@@ -1002,14 +1249,39 @@ func windowsDesktopLaunchScript(workdir string, env map[string]string, command [
 		b.WriteString(psQuote(arg))
 	}
 	b.WriteString(")\n")
-	b.WriteString(`function Q([string]$s){if($null -eq $s){$s=""};if($s.Length -gt 0 -and $s -notmatch '[\s"]'){return $s};$r='"';$bs=0;foreach($ch in $s.ToCharArray()){if($ch -eq '\'){$bs++;continue};if($ch -eq '"'){if($bs -gt 0){$r+=('\'*($bs*2))};$r+='\"';$bs=0;continue};if($bs -gt 0){$r+=('\'*$bs);$bs=0};$r+=$ch};if($bs -gt 0){$r+=('\'*($bs*2))};$r+='"';return $r}
-$psi=New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName=$file
-$psi.Arguments=(($arguments|ForEach-Object{Q $_}) -join ' ')
-$psi.WorkingDirectory=(Get-Location).Path
-$psi.UseShellExecute=$false
-$psi.WindowStyle=[System.Diagnostics.ProcessWindowStyle]::Normal
-[System.Diagnostics.Process]::Start($psi)|Out-Null
+	b.WriteString(`  function Q([string]$s){if($null -eq $s){$s=""};if($s.Length -gt 0 -and $s -notmatch '[\s"]'){return $s};$r='"';$bs=0;foreach($ch in $s.ToCharArray()){if($ch -eq '\'){$bs++;continue};if($ch -eq '"'){if($bs -gt 0){$r+=('\'*($bs*2))};$r+='\"';$bs=0;continue};if($bs -gt 0){$r+=('\'*$bs);$bs=0};$r+=$ch};if($bs -gt 0){$r+=('\'*($bs*2))};$r+='"';return $r}
+  $psi=New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName=$file
+  $psi.Arguments=(($arguments|ForEach-Object{Q $_}) -join ' ')
+  $psi.WorkingDirectory=(Get-Location).Path
+  $psi.UseShellExecute=$false
+  $psi.WindowStyle=[System.Diagnostics.ProcessWindowStyle]::Normal
+  $launchedProcess=[System.Diagnostics.Process]::Start($psi)
+  $expectedImage=[IO.Path]::GetFileNameWithoutExtension($file)
+  $deadline=[DateTime]::UtcNow.AddSeconds(30)
+  $launchedWindow=$null
+  while ([DateTime]::UtcNow -lt $deadline -and $null -eq $launchedWindow) {
+    $candidates=@()
+    foreach ($window in [CrabboxDesktopWindows]::Visible()) {
+      $key=[string]$window.Handle
+      $changed=-not $before.ContainsKey($key) -or $before[$key] -ne $window.Title
+      if ($changed -and [CrabboxDesktopWindows]::RelatedTo($window.ProcessId, $launchedProcess.Id, $expectedImage)) { $candidates += $window }
+    }
+    if ($candidates.Count -gt 0) {
+      $launchedWindow=$candidates | Where-Object { $_.ProcessId -eq $launchedProcess.Id } | Select-Object -First 1
+      if ($null -eq $launchedWindow) { $launchedWindow=$candidates | Select-Object -First 1 }
+    }
+    if ($null -eq $launchedWindow) { Start-Sleep -Milliseconds 200 }
+  }
+  if ($null -eq $launchedWindow) { throw "desktop window not visible after launch" }
+  if (-not [CrabboxDesktopWindows]::Activate($launchedWindow.Handle)) { throw "desktop window could not be brought to the foreground" }
+  $sessionId=[System.Diagnostics.Process]::GetCurrentProcess().SessionId
+  $encodedTitle=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($launchedWindow.Title))
+  Write-LaunchResult ("CRABBOX_DESKTOP_WINDOW pid={0} session={1} title={2}" -f $launchedWindow.ProcessId, $sessionId, $encodedTitle)
+} catch {
+  Write-LaunchError $_.Exception.Message
+  exit 1
+}
 `)
 	return b.String()
 }

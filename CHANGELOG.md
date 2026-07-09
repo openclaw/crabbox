@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Launched native Windows desktop apps directly in the active interactive session without scheduled tasks, waiting for a visible window and reporting its process ID, session, and title.
 - Unified direct macOS WebVNC with the authenticated portal: Tart and Parallels viewers now use the same chrome and controls as Linux and Windows when coordinator login is configured, with provider-lifetime registration and the local viewer retained as the offline fallback.
 - Replaced WebVNC password and username URL fragments with one-time credential handoff tickets, and made repeated `--open` calls reuse and focus the existing lease viewer tab when the browser supports cross-tab handoff.
 - Required E2B stop and automatic cleanup to hold an unchanged API-endpoint-, sandbox-, lease-, slug-, and provider-bound local claim across deletion; claimless recovery now requires explicit `--reclaim`. Thanks @coygeek.

@@ -1089,12 +1089,20 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 		createdVM = vmResp.VirtualMachine
 	}
 	if cfg.TargetOS == targetWindows {
-		command := azureWindowsBootstrapCommand()
+		commands := []string{azureWindowsBootstrapCommand()}
 		if cfg.AzureSnapshot != "" {
-			command, err = azureWindowsSnapshotRehydrateCommand(cfg, publicKey)
+			commands, err = azureWindowsSnapshotRehydrateCommands(cfg, publicKey)
 			if err != nil {
 				return Server{}, err
 			}
+		}
+		installWindowsBootstrap := func() error {
+			for _, command := range commands {
+				if err := c.installWindowsBootstrapExtension(ctx, name, tags, command); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
 		if quarantinedSnapshot {
 			releaseRequest, err := azureSnapshotNICReleaseRequest(network.nicCreateRequest, sharedNSGID)
@@ -1102,13 +1110,13 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 				return Server{}, err
 			}
 			if err := runAzureSnapshotExposureSequence(
-				func() error { return c.installWindowsBootstrapExtension(ctx, name, tags, command) },
+				installWindowsBootstrap,
 				func() error { return c.releaseSnapshotNIC(ctx, nicName, releaseRequest) },
 				func() error { return c.deleteSnapshotQuarantineNSGWithRetry(ctx, quarantineNSGName) },
 			); err != nil {
 				return Server{}, err
 			}
-		} else if err := c.installWindowsBootstrapExtension(ctx, name, tags, command); err != nil {
+		} else if err := installWindowsBootstrap(); err != nil {
 			return Server{}, err
 		}
 	}
@@ -1704,22 +1712,40 @@ func azureWindowsBootstrapCommand() string {
 	return `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=Join-Path $env:SystemDrive 'AzureData\CustomData.bin'; $d=Join-Path $env:SystemDrive 'AzureData\crabbox-bootstrap.ps1'; Copy-Item -Force $p $d; & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $d"`
 }
 
-func azureWindowsSnapshotRehydrateCommand(cfg Config, publicKey string) (string, error) {
+func azureWindowsSnapshotRehydrateCommands(cfg Config, publicKey string) ([]string, error) {
 	script := azureWindowsSnapshotRehydratePowerShell(cfg, publicKey)
 	var compressed bytes.Buffer
-	writer := gzip.NewWriter(&compressed)
+	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
+	if err != nil {
+		return nil, fmt.Errorf("create windows snapshot rehydrate compressor: %w", err)
+	}
 	if _, err := writer.Write([]byte(script)); err != nil {
-		return "", fmt.Errorf("compress windows snapshot rehydrate script: %w", err)
+		return nil, fmt.Errorf("compress windows snapshot rehydrate script: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return "", fmt.Errorf("close windows snapshot rehydrate script: %w", err)
+		return nil, fmt.Errorf("close windows snapshot rehydrate script: %w", err)
 	}
 	encoded := base64.StdEncoding.EncodeToString(compressed.Bytes())
-	command := "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$b=[Convert]::FromBase64String('" + encoded + "');$m=[IO.MemoryStream]::new($b);$g=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($g);$s=$r.ReadToEnd();& ([ScriptBlock]::Create($s))\""
-	if len(command) > 8000 {
-		return "", fmt.Errorf("windows snapshot rehydrate command is too large: %d bytes", len(command))
+	const chunkSize = 6000
+	path := `C:\ProgramData\crabbox\snapshot-rehydrate.b64`
+	commands := make([]string, 0, (len(encoded)+chunkSize-1)/chunkSize+1)
+	for start := 0; start < len(encoded); start += chunkSize {
+		end := min(start+chunkSize, len(encoded))
+		write := "Add-Content"
+		setup := ""
+		if start == 0 {
+			write = "Set-Content"
+			setup = "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p)|Out-Null;"
+		}
+		command := "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$p=" + psQuote(path) + ";" + setup + write + " -NoNewline -Encoding ASCII -LiteralPath $p -Value " + psQuote(encoded[start:end]) + "\""
+		if len(command) > 8000 {
+			return nil, fmt.Errorf("windows snapshot rehydrate upload command is too large: %d bytes", len(command))
+		}
+		commands = append(commands, command)
 	}
-	return command, nil
+	command := "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$p=" + psQuote(path) + ";$b=[Convert]::FromBase64String((Get-Content -Raw -LiteralPath $p));Remove-Item -Force -LiteralPath $p;$m=[IO.MemoryStream]::new($b);$g=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($g);$s=$r.ReadToEnd();& ([ScriptBlock]::Create($s))\""
+	commands = append(commands, command)
+	return commands, nil
 }
 
 func azureRandomAdminPassword() (string, error) {
