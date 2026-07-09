@@ -312,7 +312,6 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		}
 	}
 
-	portal := webVNCPortalURL(coord.BaseURL, leaseID, username, password, webVNCPortalOptions{TakeControl: *takeControl})
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
 	opened := false
 	bridgeCtx := ctx
@@ -343,6 +342,14 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		NativeVNC:        nativeVNCOpenCommand(cfg, target, leaseID),
 		Log:              a.Stdout,
 		OnReady: func() error {
+			portalUsername, portalPassword := "", ""
+			if *openPortal || !*redactCredentials {
+				portalUsername, portalPassword = username, password
+			}
+			portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl})
+			if err != nil {
+				return err
+			}
 			fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using WebVNC")
 			fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
 			if strings.TrimSpace(password) != "" {
@@ -696,7 +703,7 @@ func (w webVNCRedactingWriter) Write(data []byte) (int, error) {
 }
 
 func webVNCOutputURLHasCredentials(value string) bool {
-	if strings.Contains(value, "password=") || strings.Contains(value, "username=") {
+	if strings.Contains(value, "password=") || strings.Contains(value, "username=") || strings.Contains(value, "handoff=") {
 		return true
 	}
 	parsed, err := url.Parse(value)
@@ -918,7 +925,14 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	for _, line := range recentWebVNCLogEvents(daemon.LogPath, 6) {
 		fmt.Fprintf(a.Stdout, "log event: %s\n", line)
 	}
-	portal := webVNCPortalURL(coord.BaseURL, leaseID, username, password)
+	portalUsername, portalPassword := "", ""
+	if !*redactCredentials {
+		portalUsername, portalPassword = username, password
+	}
+	portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword)
+	if err != nil {
+		return err
+	}
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
 	if strings.TrimSpace(password) != "" {
 		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
@@ -1009,7 +1023,14 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		username = target.User
 	}
 	password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
-	portal := webVNCPortalURL(coord.BaseURL, leaseID, username, password, webVNCPortalOptions{TakeControl: *takeControl})
+	portalUsername, portalPassword := "", ""
+	if *openPortal || !*redactCredentials {
+		portalUsername, portalPassword = username, password
+	}
+	portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl})
+	if err != nil {
+		return err
+	}
 	daemonArgs := webVNCBridgeArgs(cfg, target, leaseID, *openPortal, *takeControl)
 	daemonName := *id
 	if strings.TrimSpace(daemonName) == "" {
@@ -4052,7 +4073,35 @@ type webVNCPortalOptions struct {
 	TakeControl bool
 }
 
-func webVNCPortalURL(base, leaseID, username, password string, opts ...webVNCPortalOptions) string {
+func createWebVNCPortalURL(ctx context.Context, coord *CoordinatorClient, leaseID, username, password string, opts ...webVNCPortalOptions) (string, error) {
+	handoff := ""
+	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" {
+		issued, err := coord.CreateWebVNCCredentialHandoff(ctx, leaseID, username, password)
+		if err != nil {
+			return "", fmt.Errorf("create WebVNC credential handoff: %w", err)
+		}
+		if !validWebVNCCredentialHandoffTicket(issued.Ticket) {
+			return "", fmt.Errorf("create WebVNC credential handoff: coordinator returned an invalid ticket")
+		}
+		handoff = issued.Ticket
+	}
+	return webVNCPortalURL(coord.BaseURL, leaseID, handoff, opts...), nil
+}
+
+func validWebVNCCredentialHandoffTicket(value string) bool {
+	const prefix = "vnc_handoff_"
+	if len(value) != len(prefix)+32 || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	for _, character := range value[len(prefix):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func webVNCPortalURL(base, leaseID, handoff string, opts ...webVNCPortalOptions) string {
 	u, err := url.Parse(base)
 	if err != nil {
 		return base
@@ -4065,13 +4114,10 @@ func webVNCPortalURL(base, leaseID, username, password string, opts ...webVNCPor
 	for _, opt := range opts {
 		takeControl = takeControl || opt.TakeControl
 	}
-	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" || takeControl {
+	if strings.TrimSpace(handoff) != "" || takeControl {
 		values := url.Values{}
-		if strings.TrimSpace(username) != "" {
-			values.Set("username", strings.TrimSpace(username))
-		}
-		if strings.TrimSpace(password) != "" {
-			values.Set("password", strings.TrimSpace(password))
+		if strings.TrimSpace(handoff) != "" {
+			values.Set("handoff", strings.TrimSpace(handoff))
 		}
 		if takeControl {
 			values.Set("control", "take")

@@ -342,6 +342,11 @@ type CoordinatorWebVNCTicket struct {
 	ExpiresAt string `json:"expiresAt"`
 }
 
+type CoordinatorWebVNCCredentialHandoff struct {
+	Ticket    string `json:"ticket"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
 type CoordinatorWebVNCEvent struct {
 	At     string `json:"at"`
 	Event  string `json:"event"`
@@ -1210,6 +1215,15 @@ func (c *CoordinatorClient) PollGitHubLogin(ctx context.Context, loginID, pollSe
 func (c *CoordinatorClient) CreateWebVNCTicket(ctx context.Context, leaseID string) (CoordinatorWebVNCTicket, error) {
 	var res CoordinatorWebVNCTicket
 	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(leaseID)+"/webvnc/ticket", map[string]any{}, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) CreateWebVNCCredentialHandoff(ctx context.Context, leaseID, username, password string) (CoordinatorWebVNCCredentialHandoff, error) {
+	var res CoordinatorWebVNCCredentialHandoff
+	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(leaseID)+"/webvnc/handoff", map[string]string{
+		"username": username,
+		"password": password,
+	}, &res)
 	return res, err
 }
 

@@ -143,6 +143,7 @@ Provider deep-dives that live here in `features/`:
 - [events](../commands/events.md) — show run events
 - [attach](../commands/attach.md) — attach to an active run
 - [results](../commands/results.md) — show test results
+- [verify](../commands/verify.md) — check a signed run receipt
 - [artifacts](../commands/artifacts.md) — manage run artifacts
 - [media](../commands/media.md) — capture screenshots/video
 

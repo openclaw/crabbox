@@ -46,9 +46,10 @@ nonce, recorded in its identity, rather than the adapter owner token. After
 the SSH tunnel opens, Crabbox
 proves that the exact expected SSH process owns the local listener before
 retrieving a VNC credential, completes a noVNC WebSocket and VNC password
-challenge, and rechecks ownership before printing any credential-bearing
-viewer URL. A missing/zero expected PID, unrelated listener, or unauthenticated
-endpoint never receives a password probe or URL.
+challenge, and rechecks ownership before sending the credential to the
+coordinator through its authenticated one-time handoff API. A missing/zero
+expected PID, unrelated listener, or unauthenticated endpoint never receives a
+password probe or handoff.
 
 Deployments that expose the browser portal and bridge agent through different
 origins can set `CRABBOX_WEBVNC_AGENT_BASE_URL` to the agent's exact HTTPS
@@ -293,15 +294,16 @@ instead of granting general passwordless sudo.
 ## Portal and passwords
 
 `--open` opens the portal page after the bridge starts. When the VNC password is
-available, the command places it in the URL fragment handed to the local browser
-tab. URL fragments are not sent to the coordinator, and Crabbox preserves
-special characters such as `!` when building the fragment. Credential-bearing
-viewer URLs, usernames, and passwords remain redacted on stdout unless the
-operator explicitly sets `--redact-credentials=false`. Credential-free URLs and
-recovery commands remain visible. If the portal login flow redirects first,
-the page may still prompt for the VNC password; use the explicit reveal only in
-a private terminal. If an old tab is retrying with a stale fragment, close it
-before opening the new bridge URL.
+available, the command sends it over the authenticated coordinator API and puts
+only a short-lived, one-use handoff ticket in the browser URL fragment. The
+portal consumes the ticket, loads the credential into browser memory, and
+removes the ticket from the address bar before connecting. Passwords and
+usernames never enter CLI-generated portal URLs. Ticket-bearing viewer URLs,
+usernames, and passwords remain redacted on stdout unless the operator
+explicitly sets `--redact-credentials=false`; credential-free URLs and recovery
+commands remain visible. Repeated `--open` calls hand the fresh ticket to an
+existing viewer tab for that lease and focus it when the browser permits,
+rather than starting a second active viewer.
 
 The portal page may show `WebVNC daemon not running` or `waiting for VNC bridge`
 until the local command has connected. If you opened the portal first, start the
@@ -312,8 +314,9 @@ crabbox webvnc --id <lease-id-or-slug>
 ```
 
 For human demos, prefer WebVNC over native VNC because `crabbox webvnc --open`
-preloads the per-lease password in the local browser URL fragment. Use native
-VNC only as the fallback printed by `webvnc status` or `webvnc reset`.
+preloads the per-lease password through a one-use browser handoff without
+putting the password in the URL. Use native VNC only as the fallback printed by
+`webvnc status` or `webvnc reset`.
 
 The WebVNC toolbar includes clipboard controls. The paste control reads the
 local browser clipboard, sends it through noVNC, then sends the target paste
@@ -414,7 +417,8 @@ VNC authentication fails
 Retry with `--open` so Crabbox hands the credential directly to the browser. If
 manual entry is required, run the command in a private terminal with
 `--redact-credentials=false`; avoid copying that output into logs, issues, or
-chat. A portal login redirect can lose the URL fragment before noVNC sees it.
+chat. If a one-use handoff expires before the portal consumes it, rerun
+`crabbox webvnc --id <lease> --open` to mint a fresh ticket.
 
 ## Related docs
 

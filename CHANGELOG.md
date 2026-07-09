@@ -5,6 +5,7 @@
 ### Added
 
 - Added explicit metadata-server and Workload Identity authentication for brokered GCP coordinators, with fail-closed key configuration and bounded transient-token retries. Thanks @dani29.
+- Added provider-neutral Ed25519-signed run receipts through `crabbox run --attest` and integrity verification through `crabbox verify`, with collision-safe signing-key handling and explicit self-signed trust reporting. Thanks @yetval.
 - Documented a provider-neutral hermetic-agent evidence pattern with separate writer contexts, QA arbitration, required proof artifacts, and sync-safe local downloads. Thanks @zozo123.
 - Added `sync-plan --json` with candidate and dirty-delta sizes, configured guardrail status, deleted-path counts, and ranked file and directory hotspots for automation. Thanks @zozo123.
 - Added a CubeSandbox delegated-run provider with E2B-compatible lifecycle and envd execution, archive sync, CubeProxy routing, exact API-endpoint/sandbox-bound ownership claims, conflict-safe explicit adoption, and guarded cleanup. Thanks @zozo123.
@@ -12,6 +13,7 @@
 
 ### Fixed
 
+- Replaced WebVNC password and username URL fragments with one-time credential handoff tickets, and made repeated `--open` calls reuse and focus the existing lease viewer tab when the browser supports cross-tab handoff.
 - Required E2B stop and automatic cleanup to hold an unchanged API-endpoint-, sandbox-, lease-, slug-, and provider-bound local claim across deletion; claimless recovery now requires explicit `--reclaim`. Thanks @coygeek.
 - Prevented config and `.crabboxignore` negations, including case aliases, from re-including Crabbox-owned env profiles, uploaded scripts, logs, captures, and run artifacts in sync manifests. Thanks @zozo123.
 - Allowed ordered `!` re-includes in `.crabboxignore` and `sync.exclude`, with `\!` for literal leading-bang paths. Thanks @chsong1.
