@@ -141,6 +141,11 @@ func (p protocolLease) target(cfg core.Config, keep bool) core.LeaseTarget {
 			labels[key] = value
 		}
 	}
+	if cfg.TargetOS == core.TargetMacOS {
+		// External macOS desktops use the host's native Screen Sharing service;
+		// there is no separate Crabbox desktop provisioning label to echo.
+		labels["desktop"] = "true"
+	}
 	status := core.Blank(p.Status, "ready")
 	labels["name"] = p.Name
 	labels["state"] = core.Blank(labels["state"], status)

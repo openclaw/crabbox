@@ -2221,6 +2221,23 @@ func TestProtocolLeaseDefaultsReadyCheck(t *testing.T) {
 	}
 }
 
+func TestProtocolMacOSLeaseCarriesNativeDesktopCapability(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetMacOS
+	lease := protocolLease{
+		LeaseID: "cbx_abcdef123456",
+		Slug:    "test",
+		Name:    "devbox-test",
+		SSH: &protocolSSH{
+			User: "tester",
+			Host: "devbox-test",
+		},
+	}.target(cfg, true)
+	if lease.Server.Labels["desktop"] != "true" || lease.Server.Labels["target"] != core.TargetMacOS {
+		t.Fatalf("labels=%#v", lease.Server.Labels)
+	}
+}
+
 func TestAllocateLeaseSlugIgnoresOtherExternalScopes(t *testing.T) {
 	isolateCrabboxState(t)
 	cfg := testConfig()

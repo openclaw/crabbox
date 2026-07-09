@@ -86,22 +86,15 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	password := ""
-	if endpoint.Managed {
-		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
-	}
-	if !isStaticProvider(cfg.Provider) && password == "" {
-		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
+	credentials, err := resolveNativeVNCCredentials(ctx, cfg, target, endpoint)
+	if err != nil {
+		return err
 	}
 	if *nativeHandoff {
 		if err := validateNativeVNCHandoffEndpoint(endpoint); err != nil {
 			return err
 		}
-		username := ""
-		if endpoint.Managed && (target.TargetOS == targetWindows || target.TargetOS == targetMacOS) {
-			username = target.User
-		}
-		return runVNCNativeHandoff(ctx, a.Stdout, target, *localPort, endpoint, username, strings.TrimSpace(password))
+		return runVNCNativeHandoff(ctx, a.Stdout, target, *localPort, endpoint, credentials.Username, credentials.Password)
 	}
 	if *localPort == "" {
 		*localPort = availableLocalVNCPort()
@@ -136,15 +129,15 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	} else {
 		fmt.Fprintf(a.Stdout, "  %s:%s\n", vncLoopbackHost, *localPort)
 	}
-	if strings.TrimSpace(password) != "" {
-		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
+	if strings.TrimSpace(credentials.Password) != "" {
+		fmt.Fprintf(a.Stdout, "password: %s\n", credentials.Password)
 		if endpoint.Managed && target.TargetOS == targetWindows {
-			fmt.Fprintf(a.Stdout, "windows username: %s\n", target.User)
-			fmt.Fprintf(a.Stdout, "windows password: %s\n", strings.TrimSpace(password))
+			fmt.Fprintf(a.Stdout, "windows username: %s\n", credentials.Username)
+			fmt.Fprintf(a.Stdout, "windows password: %s\n", credentials.Password)
 		}
 		if endpoint.Managed && target.TargetOS == targetMacOS {
-			fmt.Fprintf(a.Stdout, "macos username: %s\n", target.User)
-			fmt.Fprintf(a.Stdout, "macos password: %s\n", strings.TrimSpace(password))
+			fmt.Fprintf(a.Stdout, "macos username: %s\n", credentials.Username)
+			fmt.Fprintf(a.Stdout, "macos password: %s\n", credentials.Password)
 		}
 	} else if staticHostVNC {
 		fmt.Fprintln(a.Stdout, "credentials: host-managed")
@@ -183,6 +176,27 @@ func (a App) vnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(a.Stdout, "Keep the tunnel process running while connected.")
 	}
 	return nil
+}
+
+func resolveNativeVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, endpoint vncEndpoint) (rfbCredentials, error) {
+	if endpoint.Managed {
+		credentials, ok, err := providerDesktopCredentials(cfg, target)
+		if err != nil {
+			return rfbCredentials{}, err
+		}
+		if ok {
+			return credentials, nil
+		}
+	}
+	password := ""
+	if endpoint.Managed || !isStaticProvider(cfg.Provider) {
+		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
+	}
+	username := ""
+	if endpoint.Managed && (target.TargetOS == targetWindows || target.TargetOS == targetMacOS) {
+		username = strings.TrimSpace(target.User)
+	}
+	return rfbCredentials{Username: username, Password: strings.TrimSpace(password)}, nil
 }
 
 func (a App) vncFromNativeGrant(ctx context.Context, expectedLeaseID, brokerURL, localPort string) error {

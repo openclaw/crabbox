@@ -45,6 +45,21 @@ func TestVNCNativeHandoffJSONContract(t *testing.T) {
 	}
 }
 
+func TestResolveNativeVNCCredentialsPrefersProviderCredentials(t *testing.T) {
+	credentials, err := resolveNativeVNCCredentials(
+		context.Background(),
+		Config{Provider: "direct-webvnc-test"},
+		SSHTarget{TargetOS: targetMacOS, User: "ssh-user"},
+		vncEndpoint{Managed: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.Username != "provider-user" || credentials.Password != " provider-secret " {
+		t.Fatalf("credentials=%#v", credentials)
+	}
+}
+
 func TestVNCNativeGrantRelaysCoordinatorWebSocketToLoopback(t *testing.T) {
 	const ticket = "native_vnc_0123456789abcdef0123456789abcdef"
 	serverErr := make(chan error, 1)
