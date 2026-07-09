@@ -143,6 +143,12 @@ func TestFalAcquireCreatesInstanceWaitsAndClaimsLease(t *testing.T) {
 	if claim.ProviderScope != falClaimScope(b.cfg) {
 		t.Fatalf("claim scope=%q want %q", claim.ProviderScope, falClaimScope(b.cfg))
 	}
+	if claim.Labels[falCredentialBindingLabel] == "" {
+		t.Fatalf("claim missing credential binding: %#v", claim.Labels)
+	}
+	if lease.Server.Labels[falCredentialBindingLabel] != "" {
+		t.Fatalf("credential binding leaked into lease labels: %#v", lease.Server.Labels)
+	}
 }
 
 func TestFalAcquireDefaultSingleGPUOmitsSector(t *testing.T) {
@@ -327,6 +333,24 @@ func TestFalStopRetainsAmbiguousClaimAfterIdempotencyWindow(t *testing.T) {
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+}
+
+func TestFalStopRefusesAmbiguousCreateReplayWithDifferentCredential(t *testing.T) {
+	api := &fakeFalAPI{createErrs: []error{io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF}}
+	b := newFalTestBackend(t, api)
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "credential-bound-recovery"})
+	if err == nil {
+		t.Fatal("expected ambiguous create failure")
+	}
+	b.cfg.Fal.APIKey = "different-test-key"
+	_, err = b.Resolve(context.Background(), core.ResolveRequest{ID: "credential-bound-recovery", ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "different credential identity") {
+		t.Fatalf("resolve err=%v", err)
+	}
+	if len(api.createRequests) != 4 {
+		t.Fatalf("credential mismatch replayed create: requests=%d", len(api.createRequests))
 	}
 }
 
@@ -871,8 +895,11 @@ func TestFalListShowsClaimsWhenProviderVerificationIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(views) != 1 || views[0].Status != "provider-verification-unavailable" {
+	if len(views) != 1 || views[0].Status != "credential-binding-mismatch" {
 		t.Fatalf("missing-credential views=%#v", views)
+	}
+	if views[0].Labels[falCredentialBindingLabel] != "" {
+		t.Fatalf("credential binding leaked into list labels: %#v", views[0].Labels)
 	}
 }
 
@@ -936,6 +963,7 @@ func readyFalInstance(id, ip string) ComputeInstance {
 func claimFalLease(t *testing.T, cfg Config, leaseID, slug, cloudID, host string, expired bool) {
 	t.Helper()
 	labels := falLabels(cfg, leaseID, slug, false, time.Now().UTC())
+	labels[falCredentialBindingLabel] = falCredentialBinding(cfg)
 	labels["ssh_user"] = cfg.SSHUser
 	labels["ssh_port"] = cfg.SSHPort
 	if expired {

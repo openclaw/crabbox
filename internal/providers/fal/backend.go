@@ -2,6 +2,7 @@ package fal
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -18,6 +19,7 @@ const (
 	falCreateReconcileAttempts  = 3
 	falCreateReconcileRetryWait = time.Second
 	falCreateRecoveryWindow     = 9 * time.Minute
+	falCredentialBindingLabel   = "fal_credential_binding"
 )
 
 var errFalProviderAbsenceNotAccountBound = errors.New("fal provider absence is not account-bound")
@@ -96,11 +98,19 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, b.handleFailedAcquire(instanceID, leaseID, slug, cfg, req.Repo.Root, req.Keep, err)
 	}
 	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		claimServer, err := falClaimServer(server, cfg)
+		if err != nil {
+			return core.LeaseTarget{}, b.handleFailedAcquire(instanceID, leaseID, slug, cfg, req.Repo.Root, req.Keep, err)
+		}
+		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, claimServer, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, b.handleFailedAcquire(instanceID, leaseID, slug, cfg, req.Repo.Root, req.Keep, err)
 		}
 	} else {
-		if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, ssh, cfg.IdleTimeout); err != nil {
+		claimServer, err := falClaimServer(server, cfg)
+		if err != nil {
+			return core.LeaseTarget{}, b.handleFailedAcquire(instanceID, leaseID, slug, cfg, req.Repo.Root, req.Keep, err)
+		}
+		if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, claimServer, ssh, cfg.IdleTimeout); err != nil {
 			return core.LeaseTarget{}, b.handleFailedAcquire(instanceID, leaseID, slug, cfg, req.Repo.Root, req.Keep, err)
 		}
 	}
@@ -161,6 +171,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if !ok {
 		return core.LeaseTarget{}, exit(4, "lease/fal instance not found or not locally claimed: %s", strings.TrimSpace(req.ID))
 	}
+	if err := verifyFalClaimCredential(claim, cfg); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if claim.CloudID == "" {
 		if !req.ReleaseOnly {
 			return core.LeaseTarget{}, exit(4, "fal recovery is still pending for lease=%s; local recovery state retained", claim.LeaseID)
@@ -187,7 +200,11 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return target, nil
 	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
-		if _, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchanged(target.LeaseID, claim.Slug, cfg, falClaimScope(cfg), target.Server, target.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, claim, true); err != nil {
+		claimServer, err := falClaimServer(target.Server, cfg)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if _, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchanged(target.LeaseID, claim.Slug, cfg, falClaimScope(cfg), claimServer, target.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, claim, true); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -203,6 +220,14 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 	views := make([]core.LeaseView, 0, len(claims))
 	needsProvider := false
 	for _, claim := range claims {
+		if err := verifyFalClaimCredential(claim, cfg); err != nil {
+			server, viewErr := falClaimView(claim, cfg, "credential-binding-mismatch")
+			if viewErr != nil {
+				return nil, viewErr
+			}
+			views = append(views, server)
+			continue
+		}
 		if claim.CloudID == "" {
 			server, err := falClaimView(claim, cfg, firstNonBlank(claim.Labels["recovery"], "recovery-pending"))
 			if err != nil {
@@ -219,6 +244,9 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 	client, apiErr := b.api()
 	for _, claim := range claims {
 		if claim.CloudID == "" {
+			continue
+		}
+		if verifyFalClaimCredential(claim, cfg) != nil {
 			continue
 		}
 		if apiErr != nil {
@@ -282,6 +310,9 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	if claim.ProviderScope != falClaimScope(cfg) {
 		return core.Server{}, exit(2, "fal lease %s belongs to a different API endpoint; refusing to touch it", req.Lease.LeaseID)
 	}
+	if err := verifyFalClaimCredential(claim, cfg); err != nil {
+		return core.Server{}, err
+	}
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
 	}
@@ -290,9 +321,12 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 		labels = cloneLabels(claim.Labels)
 	}
 	server.Labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
-	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, server.Labels); err != nil {
+	claimLabels := cloneLabels(server.Labels)
+	claimLabels[falCredentialBindingLabel] = claim.Labels[falCredentialBindingLabel]
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, claimLabels); err != nil {
 		return core.Server{}, err
 	}
+	delete(server.Labels, falCredentialBindingLabel)
 	return server, nil
 }
 
@@ -317,6 +351,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	cfg := b.configForRun()
 	if claim.ProviderScope != falClaimScope(cfg) {
 		return exit(2, "fal lease %s belongs to a different API endpoint; refusing to delete provider resources", leaseID)
+	}
+	if err := verifyFalClaimCredential(claim, cfg); err != nil {
+		return err
 	}
 	if claim.CloudID == "" {
 		return exit(4, "fal recovery is still pending for lease=%s; local recovery state retained", leaseID)
@@ -356,6 +393,11 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	claims, err := falClaims(falClaimScope(cfg))
 	if err != nil {
 		return err
+	}
+	for _, claim := range claims {
+		if err := verifyFalClaimCredential(claim, cfg); err != nil {
+			return err
+		}
 	}
 	client, err := b.api()
 	if err != nil {
@@ -635,6 +677,11 @@ func (b *backend) persistRecoveryClaimIfUnchanged(leaseID, slug string, cfg Conf
 
 func (b *backend) persistRecoveryClaimAtIfUnchanged(leaseID, slug string, cfg Config, repoRoot, instanceID, reason string, keep bool, createStarted time.Time, expected core.LeaseClaim, expectedExists bool) (core.LeaseClaim, error) {
 	labels := falLabels(cfg, leaseID, slug, keep, b.now())
+	binding := falCredentialBinding(cfg)
+	if binding == "" {
+		return core.LeaseClaim{}, exit(2, "provider=%s requires fal credentials to persist recovery ownership", providerName)
+	}
+	labels[falCredentialBindingLabel] = binding
 	if !createStarted.IsZero() {
 		labels["create_started_at"] = strconv.FormatInt(createStarted.UTC().Unix(), 10)
 	}
@@ -683,6 +730,40 @@ func falClaims(providerScope string) ([]core.LeaseClaim, error) {
 
 func falClaimScope(cfg Config) string {
 	return core.ProviderClaimScope(providerName, cfg)
+}
+
+func falCredentialBinding(cfg Config) string {
+	key := strings.TrimSpace(cfg.Fal.APIKey)
+	if key == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("crabbox/fal/credential-binding/v1\x00" + key))
+	return fmt.Sprintf("%x", sum)
+}
+
+func verifyFalClaimCredential(claim core.LeaseClaim, cfg Config) error {
+	expected := strings.TrimSpace(claim.Labels[falCredentialBindingLabel])
+	actual := falCredentialBinding(cfg)
+	if expected == "" {
+		return exit(2, "fal lease %s has no credential binding; refusing provider access", claim.LeaseID)
+	}
+	if actual == "" {
+		return exit(2, "fal lease %s requires the credential that created it; refusing provider access", claim.LeaseID)
+	}
+	if expected != actual {
+		return exit(2, "fal lease %s belongs to a different credential identity; refusing provider access", claim.LeaseID)
+	}
+	return nil
+}
+
+func falClaimServer(server core.Server, cfg Config) (core.Server, error) {
+	binding := falCredentialBinding(cfg)
+	if binding == "" {
+		return core.Server{}, exit(2, "provider=%s requires fal credentials to persist lease ownership", providerName)
+	}
+	server.Labels = cloneLabels(server.Labels)
+	server.Labels[falCredentialBindingLabel] = binding
+	return server, nil
 }
 
 func leaseTargetFromClaimedInstance(item ComputeInstance, claim core.LeaseClaim, cfg Config, includeSSH bool) (core.LeaseTarget, error) {
@@ -748,6 +829,7 @@ func serverFromClaim(claim core.LeaseClaim, cfg Config) (core.Server, error) {
 	if len(labels) == 0 {
 		labels = falLabels(cfg, claim.LeaseID, claim.Slug, false, time.Now().UTC())
 	}
+	delete(labels, falCredentialBindingLabel)
 	server := core.Server{
 		CloudID:  claim.CloudID,
 		Provider: providerName,
@@ -873,6 +955,7 @@ func mergeLabels(base, overlay map[string]string) map[string]string {
 
 func mergeFalClaimLabels(live, claim map[string]string) map[string]string {
 	out := mergeLabels(live, claim)
+	delete(out, falCredentialBindingLabel)
 	for _, key := range []string{"creator_user_nickname", "fal_instance_id", "region", "sector", "server_type", "state"} {
 		if value := strings.TrimSpace(live[key]); value != "" {
 			out[key] = value
