@@ -163,6 +163,24 @@ func TestConfigureRejectsUnsafeSSHUsers(t *testing.T) {
 	}
 }
 
+func TestConfigureNormalizesSSHUsersBeforeValidationAndUse(t *testing.T) {
+	got, err := (Provider{}).Configure(Config{
+		TargetOS: targetLinux,
+		SSHUser:  " root ",
+		Fal: FalConfig{
+			APIKey: "test-key",
+			User:   " ubuntu ",
+		},
+	}, newDiscardRuntime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := got.(*backend).cfg
+	if cfg.Fal.User != "ubuntu" || cfg.SSHUser != "root" {
+		t.Fatalf("normalized users fal=%q ssh=%q", cfg.Fal.User, cfg.SSHUser)
+	}
+}
+
 func TestConfigureReturnsSSHLeaseBackend(t *testing.T) {
 	gotBackend, err := Provider{}.Configure(Config{TargetOS: targetLinux}, newDiscardRuntime())
 	if err != nil {

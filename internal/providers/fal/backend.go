@@ -139,14 +139,16 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 func (b *backend) reconcileAmbiguousCreate(ctx context.Context, client computeAPI, req CreateInstanceRequest, leaseID string, createStarted time.Time, cause error) (ComputeInstance, error) {
 	var lastErr error
 	for attempt := 1; attempt <= falCreateReconcileAttempts; attempt++ {
-		if !b.now().Before(createStarted.Add(falCreateRecoveryWindow)) {
+		replayCtx, cancel, replayErr := b.createReplayContext(ctx, createStarted)
+		if replayErr != nil {
 			return ComputeInstance{}, errors.Join(
 				fmt.Errorf("fal instance creation remains indeterminate after the provider idempotency replay window expired; no provider id was returned"),
 				cause,
 				lastErr,
 			)
 		}
-		instance, err := client.CreateInstance(ctx, req, leaseID)
+		instance, err := client.CreateInstance(replayCtx, req, leaseID)
+		cancel()
 		if err == nil {
 			if strings.TrimSpace(instance.ID) != "" {
 				return instance, nil
@@ -156,6 +158,13 @@ func (b *backend) reconcileAmbiguousCreate(ctx context.Context, client computeAP
 		lastErr = err
 		if !isAmbiguousFalMutationError(err) {
 			return ComputeInstance{}, errors.Join(cause, fmt.Errorf("fal idempotent create retry failed: %w", err))
+		}
+		if !b.now().Before(createStarted.Add(falCreateRecoveryWindow)) {
+			return ComputeInstance{}, errors.Join(
+				fmt.Errorf("fal instance creation remains indeterminate after the provider idempotency replay window expired; no provider id was returned"),
+				cause,
+				lastErr,
+			)
 		}
 		if attempt == falCreateReconcileAttempts {
 			break
@@ -584,11 +593,16 @@ func (b *backend) recoverAmbiguousCreateForRelease(ctx context.Context, client c
 	if InstanceType(instanceType) != InstanceTypeH100x8 {
 		sector = ""
 	}
-	created, err := client.CreateInstance(ctx, CreateInstanceRequest{
+	replayCtx, cancel, replayErr := b.createReplayContext(ctx, time.Unix(createdAt, 0))
+	if replayErr != nil {
+		return core.LeaseClaim{}, exit(5, "fal create recovery window expired for lease=%s; local recovery claim retained for manual provider reconciliation", claim.LeaseID)
+	}
+	created, err := client.CreateInstance(replayCtx, CreateInstanceRequest{
 		InstanceType: InstanceType(instanceType),
 		SSHKey:       publicKey,
 		Sector:       Sector(sector),
 	}, claim.LeaseID)
+	cancel()
 	if err != nil {
 		return core.LeaseClaim{}, exit(5, "fal create recovery retry failed for lease=%s; local recovery claim retained: %v", claim.LeaseID, err)
 	}
@@ -645,6 +659,15 @@ func (b *backend) now() time.Time {
 	return time.Now().UTC()
 }
 
+func (b *backend) createReplayContext(ctx context.Context, createStarted time.Time) (context.Context, context.CancelFunc, error) {
+	remaining := createStarted.Add(falCreateRecoveryWindow).Sub(b.now())
+	if remaining <= 0 {
+		return nil, nil, context.DeadlineExceeded
+	}
+	replayCtx, cancel := context.WithTimeout(ctx, remaining)
+	return replayCtx, cancel, nil
+}
+
 func (b *backend) rollbackAcquire(instanceID, leaseID, slug string, cfg Config, repoRoot, reason string, cause error) error {
 	return b.rollbackAcquireWithClaimState(instanceID, leaseID, slug, cfg, repoRoot, reason, cause, false)
 }
@@ -656,8 +679,7 @@ func (b *backend) rollbackClaimedAcquire(instanceID, leaseID, slug string, cfg C
 func (b *backend) rollbackAcquireWithClaimState(instanceID, leaseID, slug string, cfg Config, repoRoot, reason string, cause error, expectedClaim bool) error {
 	claim, claimErr := b.transitionRecoveryClaim(leaseID, slug, cfg, repoRoot, instanceID, reason, false, expectedClaim)
 	if errors.Is(claimErr, errFalRecoveryClaimRemoved) {
-		core.RemoveStoredTestboxKey(leaseID)
-		return cause
+		return b.rollbackAcquireAfterClaimRemoval(instanceID, leaseID, slug, cfg, repoRoot, reason, cause)
 	}
 	client, err := b.api()
 	if err != nil {
@@ -680,6 +702,72 @@ func (b *backend) rollbackAcquireWithClaimState(instanceID, leaseID, slug string
 		return errors.Join(cause, fmt.Errorf("persist fal recovery claim: %w", claimErr))
 	}
 	return cause
+}
+
+func (b *backend) rollbackAcquireAfterClaimRemoval(instanceID, leaseID, slug string, cfg Config, repoRoot, reason string, cause error) error {
+	client, err := b.api()
+	if err != nil {
+		return b.retainKnownInstanceAfterClaimRemoval(instanceID, leaseID, slug, cfg, repoRoot, reason, cause, err)
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cleanupErr := core.CleanupLeaseClaimIfUnchangedAfter(leaseID, core.LeaseClaim{}, false, func() error {
+		live, getErr := client.GetInstance(cleanupCtx, instanceID)
+		if isFalNotFound(getErr) {
+			ids, inventoryErr := falInventoryIDs(cleanupCtx, client)
+			if inventoryErr != nil {
+				return errors.Join(errFalProviderAbsenceNotAccountBound, inventoryErr)
+			}
+			for _, id := range ids {
+				if id != instanceID {
+					continue
+				}
+				deleteErr := client.DeleteInstance(cleanupCtx, instanceID)
+				if isFalNotFound(deleteErr) {
+					return errFalProviderAbsenceNotAccountBound
+				}
+				return deleteErr
+			}
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		if strings.TrimSpace(live.ID) != instanceID {
+			return exit(2, "refusing rollback for fal instance %s after provider identity changed", instanceID)
+		}
+		deleteErr := client.DeleteInstance(cleanupCtx, instanceID)
+		if isFalNotFound(deleteErr) {
+			return nil
+		}
+		return deleteErr
+	})
+	if cleanupErr == nil {
+		core.RemoveStoredTestboxKey(leaseID)
+		return cause
+	}
+	current, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID)
+	if readErr == nil && exists && current.Provider == providerName && current.ProviderScope == falClaimScope(cfg) &&
+		(current.CloudID == "" || current.CloudID == instanceID) && verifyFalClaimCredential(current, cfg) == nil {
+		return errors.Join(cause, fmt.Errorf("fal rollback was superseded by a concurrent recovery claim for instance %s", instanceID))
+	}
+	return b.retainKnownInstanceAfterClaimRemoval(instanceID, leaseID, slug, cfg, repoRoot, reason, cause, errors.Join(cleanupErr, readErr))
+}
+
+func (b *backend) retainKnownInstanceAfterClaimRemoval(instanceID, leaseID, slug string, cfg Config, repoRoot, reason string, cause, cleanupErr error) error {
+	_, claimErr := b.persistRecoveryClaimAtIfUnchanged(
+		leaseID,
+		slug,
+		cfg,
+		repoRoot,
+		instanceID,
+		reason,
+		false,
+		time.Time{},
+		core.LeaseClaim{},
+		false,
+	)
+	return rollbackAcquireError(cause, instanceID, claimErr, cleanupErr)
 }
 
 func rollbackAcquireError(cause error, instanceID string, claimErr error, cleanupErr error) error {

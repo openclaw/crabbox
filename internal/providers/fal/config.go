@@ -18,6 +18,8 @@ func applyFalDefaults(cfg *Config) {
 	if cfg == nil {
 		return
 	}
+	cfg.Fal.User = strings.TrimSpace(cfg.Fal.User)
+	cfg.SSHUser = strings.TrimSpace(cfg.SSHUser)
 	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
 		cfg.Fal.InstanceType = strings.TrimSpace(cfg.ServerType)
 	}
@@ -51,7 +53,7 @@ func applyFalDefaults(cfg *Config) {
 }
 
 func validateFalSSHUser(user string) error {
-	if !falSSHUserPattern.MatchString(strings.TrimSpace(user)) {
+	if !falSSHUserPattern.MatchString(user) {
 		return exit(2, "provider=%s SSH user must be a valid Linux login name, got %q", providerName, user)
 	}
 	return nil

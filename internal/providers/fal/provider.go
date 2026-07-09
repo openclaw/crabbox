@@ -125,6 +125,15 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 }
 
 func falInventoryFingerprint(ctx context.Context, client computeAPI) (int, string, error) {
+	ids, err := falInventoryIDs(ctx, client)
+	if err != nil {
+		return 0, "", err
+	}
+	sum := sha256.Sum256([]byte(strings.Join(ids, "\x00")))
+	return len(ids), fmt.Sprintf("%x", sum), nil
+}
+
+func falInventoryIDs(ctx context.Context, client computeAPI) ([]string, error) {
 	const maxPages = 100
 	ids := make([]string, 0)
 	cursor := ""
@@ -132,31 +141,30 @@ func falInventoryFingerprint(ctx context.Context, client computeAPI) (int, strin
 	for page := 0; page < maxPages; page++ {
 		result, err := client.ListInstances(ctx, 100, cursor)
 		if err != nil {
-			return 0, "", err
+			return nil, err
 		}
 		for _, instance := range result.Instances {
 			id := strings.TrimSpace(instance.ID)
 			if id == "" {
-				return 0, "", exit(5, "fal inventory returned an instance without an id")
+				return nil, exit(5, "fal inventory returned an instance without an id")
 			}
 			ids = append(ids, id)
 		}
 		if !result.HasMore {
 			sort.Strings(ids)
-			sum := sha256.Sum256([]byte(strings.Join(ids, "\x00")))
-			return len(ids), fmt.Sprintf("%x", sum), nil
+			return ids, nil
 		}
 		if result.NextCursor == nil || strings.TrimSpace(*result.NextCursor) == "" {
-			return 0, "", exit(5, "fal inventory pagination omitted the next cursor")
+			return nil, exit(5, "fal inventory pagination omitted the next cursor")
 		}
 		next := strings.TrimSpace(*result.NextCursor)
 		if _, exists := seenCursors[next]; exists {
-			return 0, "", exit(5, "fal inventory pagination repeated a cursor")
+			return nil, exit(5, "fal inventory pagination repeated a cursor")
 		}
 		seenCursors[next] = struct{}{}
 		cursor = next
 	}
-	return 0, "", exit(5, "fal inventory pagination exceeded %d pages", maxPages)
+	return nil, exit(5, "fal inventory pagination exceeded %d pages", maxPages)
 }
 
 func newDiscardRuntime() Runtime {

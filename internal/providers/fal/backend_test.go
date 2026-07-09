@@ -16,16 +16,17 @@ import (
 )
 
 type fakeFalAPI struct {
-	instances      map[string]ComputeInstance
-	getErr         error
-	createErr      error
-	createErrs     []error
-	deleteErr      error
-	createRequests []CreateInstanceRequest
-	idempotency    []string
-	deletedIDs     []string
-	listCalls      int
-	createHook     func(CreateInstanceRequest, string, ComputeInstance)
+	instances               map[string]ComputeInstance
+	getErr                  error
+	createErr               error
+	createErrs              []error
+	deleteErr               error
+	createRequests          []CreateInstanceRequest
+	idempotency             []string
+	deletedIDs              []string
+	listCalls               int
+	createHook              func(CreateInstanceRequest, string, ComputeInstance)
+	blockCreateUntilContext bool
 }
 
 type mutableFalClock struct {
@@ -54,9 +55,13 @@ func (f *fakeFalAPI) GetInstance(_ context.Context, id string) (ComputeInstance,
 	return item, nil
 }
 
-func (f *fakeFalAPI) CreateInstance(_ context.Context, req CreateInstanceRequest, idempotencyKey string) (ComputeInstance, error) {
+func (f *fakeFalAPI) CreateInstance(ctx context.Context, req CreateInstanceRequest, idempotencyKey string) (ComputeInstance, error) {
 	f.createRequests = append(f.createRequests, req)
 	f.idempotency = append(f.idempotency, idempotencyKey)
+	if f.blockCreateUntilContext {
+		<-ctx.Done()
+		return ComputeInstance{}, ctx.Err()
+	}
 	if len(f.createErrs) > 0 {
 		err := f.createErrs[0]
 		f.createErrs = f.createErrs[1:]
@@ -310,6 +315,26 @@ func TestFalReconcileRefusesReplayAfterIdempotencyWindow(t *testing.T) {
 	}
 }
 
+func TestFalReconcileDeadlinesReplayInsideIdempotencyWindow(t *testing.T) {
+	api := &fakeFalAPI{blockCreateUntilContext: true}
+	b := newFalTestBackend(t, api)
+	started := time.Now().Add(-falCreateRecoveryWindow + 75*time.Millisecond)
+	begin := time.Now()
+	_, err := b.reconcileAmbiguousCreate(context.Background(), api, CreateInstanceRequest{
+		InstanceType: InstanceTypeH100x1,
+		SSHKey:       "ssh-ed25519 test",
+	}, "cbx_abcdef123456", started, io.ErrUnexpectedEOF)
+	if err == nil || !strings.Contains(err.Error(), "idempotency replay window expired") {
+		t.Fatalf("err=%v", err)
+	}
+	if elapsed := time.Since(begin); elapsed > time.Second {
+		t.Fatalf("replay outlived idempotency deadline: %v", elapsed)
+	}
+	if len(api.createRequests) != 1 {
+		t.Fatalf("create requests=%d, want one bounded replay", len(api.createRequests))
+	}
+}
+
 func TestFalStopRecoversAmbiguousCreateWithExactIdempotentRequest(t *testing.T) {
 	api := &fakeFalAPI{createErrs: []error{io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF}}
 	b := newFalTestBackend(t, api)
@@ -400,6 +425,37 @@ func TestFalConcurrentAmbiguousCreateRecoveryAdoptsWinningClaim(t *testing.T) {
 	}
 	if len(api.deletedIDs) != 0 {
 		t.Fatalf("losing recovery deleted the winner's instance: %#v", api.deletedIDs)
+	}
+}
+
+func TestFalStopRecoveryDeadlinesReplayInsideIdempotencyWindow(t *testing.T) {
+	api := &fakeFalAPI{blockCreateUntilContext: true}
+	b := newFalTestBackend(t, api)
+	created := time.Unix(time.Now().Unix(), 0).UTC()
+	clock := &mutableFalClock{now: created.Add(falCreateRecoveryWindow - 75*time.Millisecond)}
+	b.rt.Clock = clock
+	const leaseID = "cbx_recovery789"
+	if _, _, err := core.EnsureTestboxKeyForConfig(b.configForRun(), leaseID); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.persistRecoveryClaimAt(leaseID, "recovery-deadline", b.configForRun(), "", "", "ambiguous-create", false, created); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+
+	begin := time.Now()
+	_, err = b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
+	if err == nil || !strings.Contains(err.Error(), "recovery retry failed") || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("recovery err=%v", err)
+	}
+	if elapsed := time.Since(begin); elapsed > time.Second {
+		t.Fatalf("stop recovery outlived idempotency deadline: %v", elapsed)
+	}
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+		t.Fatalf("claim exists=%v err=%v", exists, readErr)
 	}
 }
 
@@ -765,6 +821,124 @@ func TestFalRollbackTreatsRemovedProvisioningClaimAsConcurrentCleanup(t *testing
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+}
+
+func TestFalRollbackDeletesLiveInstanceAfterClaimOnlyDisappearance(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{
+		"inst_created": readyFalInstance("inst_created", "203.0.113.42"),
+	}}
+	b := newFalTestBackend(t, api)
+	claim, err := b.persistRecoveryClaimAtIfUnchanged(
+		"cbx_cleanup5678",
+		"claim-only-loss",
+		b.configForRun(),
+		"",
+		"inst_created",
+		"provisioning",
+		false,
+		b.now(),
+		core.LeaseClaim{},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	cause := errors.New("ready transition lost claim")
+	if err := b.rollbackClaimedAcquire("inst_created", claim.LeaseID, claim.Slug, b.configForRun(), "", "rollback-cleanup", cause); !errors.Is(err, cause) {
+		t.Fatalf("rollback err=%v", err)
+	}
+	if len(api.deletedIDs) != 1 || api.deletedIDs[0] != "inst_created" {
+		t.Fatalf("orphaned live instance after claim loss: %#v", api.deletedIDs)
+	}
+	if _, exists := api.instances["inst_created"]; exists {
+		t.Fatal("instance remained live after claim-only disappearance")
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+}
+
+func TestFalRollbackReclaimsOwnershipWhenClaimLossCleanupFails(t *testing.T) {
+	api := &fakeFalAPI{
+		instances: map[string]ComputeInstance{
+			"inst_created": readyFalInstance("inst_created", "203.0.113.42"),
+		},
+		deleteErr: errors.New("delete unavailable"),
+	}
+	b := newFalTestBackend(t, api)
+	claim, err := b.persistRecoveryClaimAtIfUnchanged(
+		"cbx_cleanup9012",
+		"claim-loss-recovery",
+		b.configForRun(),
+		"",
+		"inst_created",
+		"provisioning",
+		false,
+		b.now(),
+		core.LeaseClaim{},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	err = b.rollbackClaimedAcquire("inst_created", claim.LeaseID, claim.Slug, b.configForRun(), "", "rollback-cleanup", errors.New("ready transition lost claim"))
+	if err == nil || !strings.Contains(err.Error(), "delete unavailable") {
+		t.Fatalf("rollback err=%v", err)
+	}
+	recovered, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+	if readErr != nil || !exists || recovered.CloudID != "inst_created" || recovered.Labels["recovery"] != "rollback-cleanup" {
+		t.Fatalf("recovered claim=%#v exists=%v err=%v", recovered, exists, readErr)
+	}
+}
+
+func TestFalRollbackRetainsClaimWhenNotFoundConflictsWithAccountInventory(t *testing.T) {
+	notFound := &APIError{StatusCode: 404, Status: "404 Not Found", Message: "not found"}
+	api := &fakeFalAPI{
+		instances: map[string]ComputeInstance{
+			"inst_created": readyFalInstance("inst_created", "203.0.113.42"),
+		},
+		getErr:    notFound,
+		deleteErr: notFound,
+	}
+	b := newFalTestBackend(t, api)
+	claim, err := b.persistRecoveryClaimAtIfUnchanged(
+		"cbx_cleanup3456",
+		"masked-absence",
+		b.configForRun(),
+		"",
+		"inst_created",
+		"provisioning",
+		false,
+		b.now(),
+		core.LeaseClaim{},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	err = b.rollbackClaimedAcquire("inst_created", claim.LeaseID, claim.Slug, b.configForRun(), "", "rollback-cleanup", errors.New("ready transition lost claim"))
+	if err == nil || !strings.Contains(err.Error(), errFalProviderAbsenceNotAccountBound.Error()) {
+		t.Fatalf("rollback err=%v", err)
+	}
+	recovered, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+	if readErr != nil || !exists || recovered.CloudID != "inst_created" {
+		t.Fatalf("recovered claim=%#v exists=%v err=%v", recovered, exists, readErr)
+	}
+	if _, exists := api.instances["inst_created"]; !exists {
+		t.Fatal("masked-absence rollback deleted provider state without confirmation")
 	}
 }
 
