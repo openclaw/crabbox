@@ -50,6 +50,12 @@ import {
   coordinatorRequestQueue,
   type CoordinatorRuntime,
 } from "./coordinator-runtime";
+import {
+  DaytonaClient,
+  daytonaAccessNeedsRefresh,
+  isDaytonaNotFound,
+  type DaytonaSSHEndpoint,
+} from "./daytona";
 import { GCPClient, gcpProviderLabelValue } from "./gcp";
 import {
   HetznerClient,
@@ -172,7 +178,12 @@ import type {
   TailscaleMetadata,
   WindowsMode,
 } from "./types";
-import { coordinatorProviders, coordinatorProviderSpec, isCoordinatorProvider } from "./types";
+import {
+  coordinatorProviderRegistry,
+  coordinatorProviders,
+  coordinatorProviderSpec,
+  isCoordinatorProvider,
+} from "./types";
 import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } from "./usage";
 import { WebVNCCredentialHandoffs } from "./webvnc-handoff";
 
@@ -261,12 +272,10 @@ function coordinatorDiagnosticText(env: Env, value: string): string {
 
 function coordinatorDiagnosticSecrets(env: Env): Array<string | undefined> {
   return [
-    env.HETZNER_TOKEN,
-    env.AWS_ACCESS_KEY_ID,
-    env.AWS_SECRET_ACCESS_KEY,
+    ...coordinatorProviderRegistry.flatMap((provider) =>
+      provider.requiredSecrets.map((name) => env[name]),
+    ),
     env.AWS_SESSION_TOKEN,
-    env.AZURE_CLIENT_SECRET,
-    env.GCP_PRIVATE_KEY,
     env.CRABBOX_RUNTIME_ADAPTER_TOKEN,
     env.CRABBOX_SHARED_TOKEN,
     env.CRABBOX_ADMIN_TOKEN,
@@ -291,11 +300,12 @@ interface CachedAdminGrant {
 interface CachedBridgeGrant extends CachedAdminGrant {
   auth?: AuthContext["auth"];
   login?: string;
+  sharedTokenHash?: string;
   portalSessionHash?: string;
   githubGrant?: GitHubUserGrant;
 }
 
-interface WebVNCTicketRecord extends CachedAdminGrant {
+interface WebVNCTicketRecord extends CachedBridgeGrant {
   ticket: string;
   leaseID: string;
   owner: string;
@@ -315,7 +325,7 @@ interface NativeVNCTicketRecord {
   expiresAt: string;
 }
 
-interface CodeTicketRecord extends CachedAdminGrant {
+interface CodeTicketRecord extends CachedBridgeGrant {
   ticket: string;
   leaseID: string;
   owner: string;
@@ -741,7 +751,15 @@ interface AzureOrphanSweepRecord {
 }
 
 type BridgeAttachment =
-  | { kind: "webvnc-agent"; leaseID: string; id: string; capabilities: Set<string> }
+  | (CachedBridgeGrant & {
+      kind: "webvnc-agent";
+      leaseID: string;
+      id: string;
+      capabilities: Set<string>;
+      owner?: string;
+      org?: string;
+      admin?: boolean;
+    })
   | (CachedBridgeGrant & {
       kind: "webvnc-viewer";
       leaseID: string;
@@ -752,7 +770,13 @@ type BridgeAttachment =
       admin?: boolean;
       label: string;
     })
-  | { kind: "code-agent"; leaseID: string }
+  | (CachedBridgeGrant & {
+      kind: "code-agent";
+      leaseID: string;
+      owner?: string;
+      org?: string;
+      admin?: boolean;
+    })
   | (CachedBridgeGrant & {
       kind: "code-viewer";
       leaseID: string;
@@ -868,7 +892,7 @@ export class FleetCoordinator {
 
   async fetch(request: Request): Promise<Response> {
     try {
-      this.reconcileAdminGrantVersion(request);
+      await this.reconcileAdminGrantVersion(request);
       if (!(await this.restoredBridgesReady())) {
         return json(
           {
@@ -894,7 +918,7 @@ export class FleetCoordinator {
         return await githubAuthRoute(request, parts[3], this.state, this.env);
       }
       if (method === "GET" && parts.join("/") === "portal/login") {
-        return await githubPortalLogin(request, this.state.storage, this.env);
+        return await githubPortalLogin(request, this.state, this.env);
       }
       if (method === "GET" && parts.join("/") === "portal/logout") {
         return githubPortalLogoutConfirmation();
@@ -1074,6 +1098,15 @@ export class FleetCoordinator {
         parts[1] === "leases" &&
         parts[2] &&
         parts[3] === "webvnc" &&
+        parts[4] === "handoff"
+      ) {
+        return await this.webVNCCredentialHandoff(request, parts[2]);
+      }
+      if (
+        parts[0] === "v1" &&
+        parts[1] === "leases" &&
+        parts[2] &&
+        parts[3] === "webvnc" &&
         parts[4] === "ticket"
       ) {
         return await this.createWebVNCTicket(request, parts[2]);
@@ -1216,8 +1249,36 @@ export class FleetCoordinator {
       socket: WebSocket;
       attachment: Extract<
         BridgeAttachment,
-        { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+        {
+          kind:
+            | "webvnc-agent"
+            | "webvnc-viewer"
+            | "code-agent"
+            | "code-viewer"
+            | "egress-host"
+            | "egress-client";
+        }
       >;
+    }> = [];
+    const sharedBridgesToCheck: Array<{
+      socket: WebSocket;
+      attachment: Extract<
+        BridgeAttachment,
+        {
+          kind:
+            | "webvnc-agent"
+            | "webvnc-viewer"
+            | "code-agent"
+            | "code-viewer"
+            | "egress-host"
+            | "egress-client";
+        }
+      >;
+    }> = [];
+    const adminPortalAgentsToCheck: Array<{
+      socket: WebSocket;
+      attachment: Extract<BridgeAttachment, { kind: "webvnc-agent" | "code-agent" }>;
+      portalSessionHash: string;
     }> = [];
     for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
@@ -1240,10 +1301,29 @@ export class FleetCoordinator {
         continue;
       }
       if (
+        (attachment.kind === "webvnc-agent" || attachment.kind === "code-agent") &&
+        attachment.admin === true &&
+        validPortalSessionHash(attachment.portalSessionHash)
+      ) {
+        adminPortalAgentsToCheck.push({
+          socket,
+          attachment,
+          portalSessionHash: attachment.portalSessionHash,
+        });
+      }
+      if (
         (attachment.kind === "webvnc-viewer" || attachment.kind === "code-viewer") &&
         !this.leaseViewerAuthorized(lease, attachment)
       ) {
         revokedViewers.set(socket, "lease access revoked");
+      }
+      if (
+        (attachment.kind === "webvnc-agent" || attachment.kind === "code-agent") &&
+        completeBridgePrincipal(attachment) &&
+        !this.leaseManagerAuthorized(lease, attachment)
+      ) {
+        revokedViewers.set(socket, "lease access revoked");
+        continue;
       }
       if (
         (attachment.kind === "egress-host" || attachment.kind === "egress-client") &&
@@ -1276,19 +1356,51 @@ export class FleetCoordinator {
           }
           continue;
         }
-        if (attachment.auth === "github" && attachment.admin !== true) {
+        if (
+          attachment.auth === "github" &&
+          (attachment.admin !== true ||
+            attachment.kind === "webvnc-agent" ||
+            attachment.kind === "code-agent")
+        ) {
           githubBridgesToCheck.push({ socket, attachment });
+        } else if (attachment.auth === "bearer" && attachment.admin !== true) {
+          sharedBridgesToCheck.push({ socket, attachment });
         }
       }
     }
-    const githubBridgeRevocations = await Promise.all(
-      githubBridgesToCheck.map(async ({ socket, attachment }) => ({
-        socket,
-        attachment,
-        reason: await this.githubBridgeGrantFailureReason(attachment),
-      })),
-    );
-    for (const { socket, attachment, reason } of githubBridgeRevocations) {
+    const [githubBridgeRevocations, sharedBridgeRevocations, adminPortalAgentRevocations] =
+      await Promise.all([
+        Promise.all(
+          githubBridgesToCheck.map(async ({ socket, attachment }) => ({
+            socket,
+            attachment,
+            reason: await this.githubBridgeGrantFailureReason(attachment),
+          })),
+        ),
+        Promise.all(
+          sharedBridgesToCheck.map(async ({ socket, attachment }) => ({
+            socket,
+            attachment,
+            reason: (await this.sharedBridgeGrantIsCurrent(attachment))
+              ? undefined
+              : "shared access revoked",
+          })),
+        ),
+        Promise.all(
+          adminPortalAgentsToCheck.map(async ({ socket, attachment, portalSessionHash }) => ({
+            socket,
+            attachment,
+            reason: (await this.portalSessionIsRevoked(portalSessionHash))
+              ? "portal session ended"
+              : undefined,
+          })),
+        ),
+      ]);
+    for (const { socket, attachment, reason } of [
+      ...githubBridgeRevocations,
+      ...sharedBridgeRevocations,
+      ...adminPortalAgentRevocations,
+    ]) {
       if (!reason) continue;
       if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
         revokedEgressSessions.set(egressSocketKey(attachment.leaseID, attachment.sessionID), {
@@ -1329,14 +1441,19 @@ export class FleetCoordinator {
         closeSocket(socket, 1008, reason);
       }
     }
-    for (const [socket, reason] of revokedViewers) {
+    const revokedUserBridges = [...revokedViewers].toSorted(([left], [right]) => {
+      const leftAttachment = this.bridgeAttachment(left);
+      const rightAttachment = this.bridgeAttachment(right);
+      const leftIsAgent =
+        leftAttachment?.kind === "webvnc-agent" || leftAttachment?.kind === "code-agent";
+      const rightIsAgent =
+        rightAttachment?.kind === "webvnc-agent" || rightAttachment?.kind === "code-agent";
+      return Number(leftIsAgent) - Number(rightIsAgent);
+    });
+    for (const [socket, reason] of revokedUserBridges) {
       const attachment = this.bridgeAttachment(socket);
-      if (attachment?.kind === "webvnc-viewer") {
-        this.clearWebVNCViewer(attachment.leaseID, attachment.id, socket);
-        closeSocket(socket, 1008, reason);
-      } else if (attachment?.kind === "code-viewer") {
-        this.clearCodeViewer(attachment.leaseID, attachment.id, socket, 1008, reason);
-        closeSocket(socket, 1008, reason);
+      if (attachment && revocableUserBridge(attachment)) {
+        this.closeRevokedUserBridge(socket, attachment, reason);
       }
     }
     this.restoredBridgeSockets.clear();
@@ -1366,31 +1483,53 @@ export class FleetCoordinator {
     return ready;
   }
 
-  private reconcileAdminGrantVersion(request: Request): void {
+  private async reconcileAdminGrantVersion(request: Request): Promise<void> {
     const version = trustedAdminGrantVersion(request);
-    if (!version || version === this.currentAdminGrantVersion) {
+    if (!version) {
       return;
     }
+    if (version === this.currentAdminGrantVersion) return;
+    await this.applyAdminGrantVersion(version);
+  }
+
+  private async applyAdminGrantVersion(version: string): Promise<void> {
     this.currentAdminGrantVersion = version;
+    const validation = await adminGrantValidation(this.env, version);
+    if (this.currentAdminGrantVersion === version) {
+      this.reconcileAdminBridgeSockets(validation);
+    }
+  }
+
+  private adminBridgeSockets(): Set<WebSocket> {
     const sockets = new Set<WebSocket>([
       ...this.controlSockets.values(),
+      ...this.codeAgents.values(),
       ...this.codeViewers.values(),
       ...this.egressHosts.values(),
       ...this.egressClients.values(),
     ]);
+    for (const agents of this.webVNCAgents.values()) {
+      for (const socket of agents.values()) {
+        sockets.add(socket);
+      }
+    }
     for (const viewers of this.webVNCViewers.values()) {
       for (const viewer of viewers.values()) {
         sockets.add(viewer.socket);
       }
     }
+    return sockets;
+  }
+
+  private reconcileAdminBridgeSockets(validation: AdminGrantValidation): void {
     const revokedEgressSessions = new Set<string>();
-    for (const socket of sockets) {
+    for (const socket of this.adminBridgeSockets()) {
       const attachment = this.bridgeAttachment(socket);
       if (
         !attachment ||
         !("admin" in attachment) ||
         attachment.admin !== true ||
-        attachment.adminGrantVersion === version
+        cachedAdminGrantIsCurrent(attachment, validation)
       ) {
         continue;
       }
@@ -1411,6 +1550,22 @@ export class FleetCoordinator {
       this.handleBridgeClose(socket, 1008, "admin access revoked");
       closeSocket(socket, 1008, "admin access revoked");
     }
+  }
+
+  private async reconcileScheduledAdminGrants(
+    forwardedVersion?: string,
+    preserveForwardedVersion = false,
+  ): Promise<void> {
+    let version =
+      forwardedVersion ?? (preserveForwardedVersion ? this.currentAdminGrantVersion : undefined);
+    if (!version) {
+      const derivedVersion = await configuredAdminGrantVersion(this.env);
+      version =
+        preserveForwardedVersion && this.currentAdminGrantVersion
+          ? this.currentAdminGrantVersion
+          : derivedVersion;
+    }
+    await this.applyAdminGrantVersion(version);
   }
 
   private async currentAdminGrantValidation(): Promise<AdminGrantValidation> {
@@ -1490,6 +1645,7 @@ export class FleetCoordinator {
           ...(attachment.admin !== undefined ? { admin: attachment.admin } : {}),
           ...(attachment.auth ? { auth: attachment.auth } : {}),
           ...(attachment.login ? { login: attachment.login } : {}),
+          ...(attachment.sharedTokenHash ? { sharedTokenHash: attachment.sharedTokenHash } : {}),
           ...(attachment.adminTokenHash ? { adminTokenHash: attachment.adminTokenHash } : {}),
           ...(attachment.adminGrantVersion
             ? { adminGrantVersion: attachment.adminGrantVersion }
@@ -1785,15 +1941,17 @@ export class FleetCoordinator {
         }
         await forwardWebVNC(
           message,
-          this.webVNCAgents.get(attachment.leaseID)?.get(attachment.agentID),
+          await this.currentBridgeRecipient(
+            this.webVNCAgents.get(attachment.leaseID)?.get(attachment.agentID),
+          ),
         );
         break;
       case "code-agent":
         await this.handleCodeAgentMessage(attachment.leaseID, message);
         break;
       case "code-viewer": {
-        const agent = this.codeAgents.get(attachment.leaseID);
-        if (agent?.readyState !== WebSocket.OPEN) {
+        const agent = await this.currentBridgeRecipient(this.codeAgents.get(attachment.leaseID));
+        if (!agent) {
           return;
         }
         const data = await normalizeWebVNCData(message);
@@ -1855,8 +2013,26 @@ export class FleetCoordinator {
   ): Promise<boolean> {
     if (
       revocableUserBridge(attachment) &&
-      attachment.auth === "github" &&
+      attachment.auth === "bearer" &&
       attachment.admin !== true
+    ) {
+      const now = Date.now();
+      const lastValidatedAt = this.userGrantValidationTimes.get(socket) ?? 0;
+      if (now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
+        if (!(await this.sharedBridgeGrantIsCurrent(attachment))) {
+          this.userGrantValidationTimes.delete(socket);
+          this.closeRevokedUserBridge(socket, attachment, "shared access revoked");
+          return false;
+        }
+        this.userGrantValidationTimes.set(socket, now);
+      }
+    }
+    if (
+      revocableUserBridge(attachment) &&
+      attachment.auth === "github" &&
+      (attachment.admin !== true ||
+        attachment.kind === "webvnc-agent" ||
+        attachment.kind === "code-agent")
     ) {
       const now = Date.now();
       const lastValidatedAt = this.userGrantValidationTimes.get(socket) ?? 0;
@@ -1897,6 +2073,16 @@ export class FleetCoordinator {
     return false;
   }
 
+  private async sharedBridgeGrantIsCurrent(attachment: CachedBridgeGrant): Promise<boolean> {
+    const sharedToken = this.env.CRABBOX_SHARED_TOKEN;
+    return (
+      typeof sharedToken === "string" &&
+      sharedToken.length > 0 &&
+      /^[a-f0-9]{64}$/.test(attachment.sharedTokenHash ?? "") &&
+      attachment.sharedTokenHash === (await sha256Hex(sharedToken))
+    );
+  }
+
   private async githubBridgeGrantFailureReason(
     attachment: CachedBridgeGrant & { owner?: string; org?: string; admin?: boolean },
   ): Promise<string | undefined> {
@@ -1933,7 +2119,15 @@ export class FleetCoordinator {
     socket: WebSocket,
     attachment: Extract<
       BridgeAttachment,
-      { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+      {
+        kind:
+          | "webvnc-agent"
+          | "webvnc-viewer"
+          | "code-agent"
+          | "code-viewer"
+          | "egress-host"
+          | "egress-client";
+      }
     >,
     reason: string,
   ): void {
@@ -1982,9 +2176,21 @@ export class FleetCoordinator {
   }
 
   async alarm(): Promise<void> {
+    await this.runScheduledMaintenance();
+  }
+
+  protected async durableObjectAlarm(): Promise<void> {
+    await this.runScheduledMaintenance(undefined, true);
+  }
+
+  private async runScheduledMaintenance(
+    forwardedAdminGrantVersion?: string,
+    preserveForwardedVersion = false,
+  ): Promise<void> {
     if (!(await this.restoredBridgesReady())) {
       throw new Error("restored bridge lease state is temporarily unavailable");
     }
+    await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
     await this.expireLeases();
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.reconcileRuntimeAdapterDeletes();
@@ -2004,7 +2210,7 @@ export class FleetCoordinator {
     if (request.headers.get("x-crabbox-internal") !== "scheduled") {
       return json({ error: "unauthorized" }, { status: 401 });
     }
-    await this.alarm();
+    await this.runScheduledMaintenance(trustedAdminGrantVersion(request));
     return json({ ok: true });
   }
 
@@ -2165,7 +2371,6 @@ export class FleetCoordinator {
     if (!config.providerKey) {
       config = { ...config, providerKey: canonicalProviderKey };
     }
-    config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
     const readiness = this.providerConfigurationReadiness(
       config.provider,
       providerProjectForConfig(config),
@@ -2181,6 +2386,7 @@ export class FleetCoordinator {
         { status: 424 },
       );
     }
+    config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
     const provider = this.provider(
       config.provider,
       providerRegionForConfig(config),
@@ -4527,7 +4733,10 @@ export class FleetCoordinator {
     if (method === "GET" && action === undefined) {
       const admin = isAdminRequest(request);
       const lease = await this.resolveLease(leaseID, request, false);
-      return lease ? json({ lease: this.leaseForRequest(lease, request, admin) }) : notFound();
+      const refreshed = lease ? await this.refreshLeaseAccessForResolution(lease) : undefined;
+      return refreshed
+        ? json({ lease: this.leaseForRequest(refreshed, request, admin) })
+        : notFound();
     }
     if (method === "POST" && action === "heartbeat") {
       return this.heartbeatLease(request, leaseID);
@@ -4920,6 +5129,40 @@ export class FleetCoordinator {
     return json({ lease });
   }
 
+  private async refreshLeaseAccessForResolution(lease: LeaseRecord): Promise<LeaseRecord> {
+    if (
+      lease.state !== "active" ||
+      lease.cleanupStartedAt ||
+      Date.parse(lease.expiresAt) <= Date.now()
+    ) {
+      return lease;
+    }
+    const managedProvider = managedLeaseProvider(lease);
+    if (!managedProvider) {
+      return lease;
+    }
+    const provider = this.provider(managedProvider, lease.region, lease.providerProject);
+    const refreshed = await provider.refreshLeaseAccessForResolution?.(structuredClone(lease));
+    if (!refreshed) {
+      return lease;
+    }
+    return await this.state.runExclusive(async () => {
+      const latest = await this.getLease(lease.id);
+      if (
+        !latest ||
+        latest.state !== "active" ||
+        latest.cleanupStartedAt ||
+        latest.cloudID !== lease.cloudID
+      ) {
+        return latest ?? lease;
+      }
+      const merged = applyLeaseRecordChanges(latest, lease, refreshed);
+      await this.putLease(merged);
+      await this.scheduleAlarm();
+      return merged;
+    });
+  }
+
   private async applyLeaseHeartbeatState(
     lease: LeaseRecord,
     input: {
@@ -5308,6 +5551,29 @@ export class FleetCoordinator {
     const code = 1008;
     const reason = "lease access revoked";
     const adminGrants = await this.currentAdminGrantValidation();
+    for (const agent of this.webVNCAgents.get(lease.id)?.values() ?? []) {
+      const attachment = this.bridgeAttachment(agent);
+      if (
+        attachment?.kind !== "webvnc-agent" ||
+        !completeBridgePrincipal(attachment) ||
+        this.leaseManagerAuthorized(lease, withCurrentAdminGrant(attachment, adminGrants))
+      ) {
+        continue;
+      }
+      this.clearWebVNCAgent(lease.id, attachment.id, agent);
+      closeSocket(agent, code, reason);
+    }
+    const codeAgent = this.codeAgents.get(lease.id);
+    const codeAgentAttachment = codeAgent ? this.bridgeAttachment(codeAgent) : undefined;
+    if (
+      codeAgent &&
+      codeAgentAttachment?.kind === "code-agent" &&
+      completeBridgePrincipal(codeAgentAttachment) &&
+      !this.leaseManagerAuthorized(lease, withCurrentAdminGrant(codeAgentAttachment, adminGrants))
+    ) {
+      this.clearCodeAgent(lease.id, codeAgent);
+      closeSocket(codeAgent, code, reason);
+    }
     for (const viewer of this.openWebVNCViewers(lease.id)) {
       if (this.leaseViewerAuthorized(lease, withCurrentAdminGrant(viewer, adminGrants))) {
         continue;
@@ -6626,7 +6892,7 @@ export class FleetCoordinator {
       if (consumed.status === "not_found") {
         return notFound();
       }
-      const { lease } = consumed;
+      const { lease, ticket } = consumed;
       const error = webVNCLeaseError(lease);
       if (error) {
         return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
@@ -6639,6 +6905,7 @@ export class FleetCoordinator {
       this.trackWebVNCAgent(lease.id, agentID, agent, capabilities);
       this.recordWebVNCEvent(lease.id, "bridge_connected");
       this.acceptBridgeWebSocket(agent, {
+        ...leaseBridgeTicketPrincipal(ticket),
         kind: "webvnc-agent",
         leaseID: lease.id,
         id: agentID,
@@ -6677,7 +6944,7 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    const bridgeGrant = await bridgeGrantForRequest(request, admin);
+    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
     if (!bridgeGrant) {
       return json(
         { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
@@ -7511,6 +7778,13 @@ export class FleetCoordinator {
     if (error) {
       return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
     }
+    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
+    if (!bridgeGrant) {
+      return json(
+        { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
+        { status: 401 },
+      );
+    }
     await this.cleanupExpiredWebVNCTickets();
     const now = new Date();
     const ticket: WebVNCTicketRecord = {
@@ -7519,7 +7793,7 @@ export class FleetCoordinator {
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       admin,
-      ...(await adminGrantForRequest(request, admin)),
+      ...bridgeGrant,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + webVNCTicketTTLSeconds * 1000).toISOString(),
     };
@@ -7594,7 +7868,14 @@ export class FleetCoordinator {
   }
 
   private async webVNCCredentialHandoff(request: Request, identifier: string): Promise<Response> {
-    const lease = await this.resolvePortalLease(identifier, request);
+    if (request.method.toUpperCase() !== "POST") {
+      return json({ error: "not_found" }, { status: 404 });
+    }
+    const portalRequest = new URL(request.url).pathname.startsWith("/portal/");
+    const admin = isAdminRequest(request);
+    const lease = portalRequest
+      ? await this.resolvePortalLease(identifier, request)
+      : await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
     }
@@ -7606,6 +7887,12 @@ export class FleetCoordinator {
       | { ticket?: unknown; username?: unknown; password?: unknown }
       | undefined;
     if (typeof body?.ticket === "string") {
+      if (!portalRequest) {
+        return json(
+          { error: "invalid_handoff", message: "portal handoff required" },
+          { status: 400 },
+        );
+      }
       const result = await this.webVNCCredentialHandoffs.consume(lease.id, body.ticket);
       if (result.status !== "accepted") {
         const expired = result.status === "expired";
@@ -7622,7 +7909,7 @@ export class FleetCoordinator {
         { headers: { "cache-control": "no-store" } },
       );
     }
-    if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     const username = typeof body?.username === "string" ? body.username : "";
@@ -7761,8 +8048,10 @@ export class FleetCoordinator {
         { status: 403 },
       );
     }
-    const agentSocket = this.webVNCAgents.get(lease.id)?.get(viewer.agentID);
-    if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
+    const agentSocket = await this.currentBridgeRecipient(
+      this.webVNCAgents.get(lease.id)?.get(viewer.agentID),
+    );
+    if (!agentSocket) {
       return json(
         { error: "webvnc_bridge_missing", message: "No WebVNC backend is available yet." },
         { status: 409 },
@@ -7799,6 +8088,13 @@ export class FleetCoordinator {
     if (error) {
       return json({ error: "code_unavailable", message: error }, { status: 409 });
     }
+    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
+    if (!bridgeGrant) {
+      return json(
+        { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
+        { status: 401 },
+      );
+    }
     await this.cleanupExpiredCodeTickets();
     const now = new Date();
     const ticket: CodeTicketRecord = {
@@ -7807,7 +8103,7 @@ export class FleetCoordinator {
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       admin,
-      ...(await adminGrantForRequest(request, admin)),
+      ...bridgeGrant,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + codeTicketTTLSeconds * 1000).toISOString(),
     };
@@ -7837,7 +8133,7 @@ export class FleetCoordinator {
       if (consumed.status === "not_found") {
         return notFound();
       }
-      const { lease } = consumed;
+      const { lease, ticket } = consumed;
       const error = codeLeaseError(lease);
       if (error) {
         return json({ error: "code_unavailable", message: error }, { status: 409 });
@@ -7848,7 +8144,11 @@ export class FleetCoordinator {
       closeSocket(this.codeAgents.get(lease.id), 1012, "replaced by a newer code bridge");
       this.clearCodeLease(lease.id);
       this.codeAgents.set(lease.id, agent);
-      this.acceptBridgeWebSocket(agent, { kind: "code-agent", leaseID: lease.id });
+      this.acceptBridgeWebSocket(agent, {
+        ...leaseBridgeTicketPrincipal(ticket),
+        kind: "code-agent",
+        leaseID: lease.id,
+      });
       return upgrade.response;
     });
   }
@@ -7903,7 +8203,7 @@ export class FleetCoordinator {
     if (error) {
       return portalError("Code unavailable", error, 409);
     }
-    const agent = this.codeAgents.get(lease.id);
+    const agent = await this.currentBridgeRecipient(this.codeAgents.get(lease.id));
     if (request.method.toUpperCase() === "GET" && _rest.length === 1 && _rest[0] === "health") {
       return this.codePortalHealth(lease, agent);
     }
@@ -7924,7 +8224,11 @@ export class FleetCoordinator {
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       const bridgeGrant = viewerSession
         ? copyBridgeGrant(viewerSession)
-        : await bridgeGrantForRequest(authorizedRequest, isAdminRequest(authorizedRequest));
+        : await bridgeGrantForRequest(
+            authorizedRequest,
+            isAdminRequest(authorizedRequest),
+            this.env.CRABBOX_SHARED_TOKEN,
+          );
       if (!bridgeGrant) {
         return json(
           { error: "code_viewer_session_revoked", message: "Code viewer session has ended" },
@@ -7945,7 +8249,7 @@ export class FleetCoordinator {
     const now = new Date();
     const auth = requestAuthType(request);
     const admin = isAdminRequest(request);
-    const bridgeGrant = await bridgeGrantForRequest(request, admin);
+    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
     if (!bridgeGrant) {
       return portalError("Code session ended", "Log in again to open Code.", 401);
     }
@@ -8063,7 +8367,10 @@ export class FleetCoordinator {
       (session.auth === "github" && !validPortalSessionHash(session.portalSessionHash)) ||
       (session.portalSessionHash &&
         (await this.portalSessionIsRevoked(session.portalSessionHash))) ||
-      (session.auth === "github" && (await this.githubBridgeGrantFailureReason(session)))
+      (session.auth === "github" && (await this.githubBridgeGrantFailureReason(session))) ||
+      (session.auth === "bearer" &&
+        session.admin !== true &&
+        !(await this.sharedBridgeGrantIsCurrent(session)))
     ) {
       if (session) {
         await this.state.storage.delete(codeViewerSessionKey(value));
@@ -8492,6 +8799,27 @@ export class FleetCoordinator {
       this.clearCodeViewer(attachment.leaseID, id, viewer, 1008, "portal session ended");
       closeSocket(viewer, 1008, "portal session ended");
     }
+    for (const [leaseID, agents] of this.webVNCAgents) {
+      for (const [id, agent] of agents) {
+        const attachment = this.bridgeAttachment(agent);
+        if (
+          attachment?.kind !== "webvnc-agent" ||
+          attachment.portalSessionHash !== portalSessionHash
+        ) {
+          continue;
+        }
+        this.clearWebVNCAgent(leaseID, id, agent);
+        closeSocket(agent, 1008, "portal session ended");
+      }
+    }
+    for (const [leaseID, agent] of this.codeAgents) {
+      const attachment = this.bridgeAttachment(agent);
+      if (attachment?.kind !== "code-agent" || attachment.portalSessionHash !== portalSessionHash) {
+        continue;
+      }
+      this.clearCodeAgent(leaseID, agent);
+      closeSocket(agent, 1008, "portal session ended");
+    }
     const egressSessions = new Map<string, { leaseID: string; sessionID: string }>();
     for (const socket of [...this.egressHosts.values(), ...this.egressClients.values()]) {
       const attachment = this.bridgeAttachment(socket);
@@ -8621,7 +8949,11 @@ export class FleetCoordinator {
         return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
       }
       const admin = isAdminRequest(request);
-      const bridgeGrant = await bridgeGrantForRequest(request, admin);
+      const bridgeGrant = await bridgeGrantForRequest(
+        request,
+        admin,
+        this.env.CRABBOX_SHARED_TOKEN,
+      );
       if (!bridgeGrant) {
         return json(
           { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
@@ -8639,7 +8971,7 @@ export class FleetCoordinator {
           { status: 401 },
         );
       }
-      const agent = this.claimIdleWebVNCAgent(lease.id);
+      const agent = await this.claimIdleWebVNCAgent(lease.id);
       if (!agent) {
         const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
         const command = canManage ? webVNCBridgeCommand(lease) : "";
@@ -8772,14 +9104,19 @@ export class FleetCoordinator {
     return this.openWebVNCViewers(leaseID).find((viewer) => viewer.agentID === agentID);
   }
 
-  private claimIdleWebVNCAgent(leaseID: string): { id: string; socket: WebSocket } | undefined {
+  private async claimIdleWebVNCAgent(
+    leaseID: string,
+  ): Promise<{ id: string; socket: WebSocket } | undefined> {
     const viewers = this.openWebVNCViewers(leaseID);
-    for (const [id, socket] of this.openWebVNCAgents(leaseID)) {
-      if (!viewers.some((viewer) => viewer.agentID === id)) {
-        return { id, socket };
-      }
-    }
-    return undefined;
+    const candidates = this.openWebVNCAgents(leaseID).filter(
+      ([id]) => !viewers.some((viewer) => viewer.agentID === id),
+    );
+    const current = await Promise.all(
+      candidates.map(async ([id, socket]) =>
+        (await this.currentBridgeRecipient(socket)) ? { id, socket } : undefined,
+      ),
+    );
+    return current.find((agent) => agent !== undefined);
   }
 
   private activeWebVNCControllerID(leaseID: string): string {
@@ -8925,6 +9262,32 @@ export class FleetCoordinator {
     return this.withBridgeTicketLock(() => this.consumeWebVNCTicketUnderLock(request, identifier));
   }
 
+  private async currentLeaseBridgeTicket<
+    T extends CachedBridgeGrant & { owner: string; org: string; admin?: boolean },
+  >(ticket: T, lease: LeaseRecord): Promise<T | undefined> {
+    const currentTicket =
+      ticket.admin === true
+        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
+        : ticket;
+    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
+      return undefined;
+    }
+    if (
+      currentTicket.auth === "github" &&
+      (await this.githubBridgeGrantFailureReason(currentTicket))
+    ) {
+      return undefined;
+    }
+    if (
+      currentTicket.auth === "bearer" &&
+      currentTicket.admin !== true &&
+      !(await this.sharedBridgeGrantIsCurrent(currentTicket))
+    ) {
+      return undefined;
+    }
+    return currentTicket;
+  }
+
   private async consumeWebVNCTicketUnderLock(
     request: Request,
     identifier: string,
@@ -8946,11 +9309,8 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    const currentTicket =
-      ticket.admin === true
-        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
-        : ticket;
-    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
+    const currentTicket = await this.currentLeaseBridgeTicket(ticket, lease);
+    if (!currentTicket) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
@@ -8998,11 +9358,8 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    const currentTicket =
-      ticket.admin === true
-        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
-        : ticket;
-    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
+    const currentTicket = await this.currentLeaseBridgeTicket(ticket, lease);
+    if (!currentTicket) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
@@ -9057,18 +9414,8 @@ export class FleetCoordinator {
     if (!lease || !identifierMatchesLease(identifier, lease)) {
       return { status: "not_found" };
     }
-    const currentTicket =
-      ticket.admin === true
-        ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
-        : ticket;
-    if (!this.leaseManagerAuthorized(lease, leaseBridgeTicketPrincipal(currentTicket))) {
-      await this.state.storage.delete(key);
-      return { status: "invalid" };
-    }
-    if (
-      currentTicket.auth === "github" &&
-      (await this.githubBridgeGrantFailureReason(currentTicket))
-    ) {
+    const currentTicket = await this.currentLeaseBridgeTicket(ticket, lease);
+    if (!currentTicket) {
       await this.state.storage.delete(key);
       return { status: "invalid" };
     }
@@ -9100,12 +9447,15 @@ export class FleetCoordinator {
             ? await this.provider("azure").listCrabboxServers()
             : provider === "gcp"
               ? await this.provider("gcp").listCrabboxServers()
-              : [
-                  ...(await this.provider("hetzner").listCrabboxServers()),
-                  ...(await this.listProviderMachinesSafe("aws")),
-                  ...(await this.listProviderMachinesSafe("azure")),
-                  ...(await this.listProviderMachinesSafe("gcp")),
-                ];
+              : provider === "daytona"
+                ? await this.provider("daytona").listCrabboxServers()
+                : [
+                    ...(await this.provider("hetzner").listCrabboxServers()),
+                    ...(await this.listProviderMachinesSafe("aws")),
+                    ...(await this.listProviderMachinesSafe("azure")),
+                    ...(await this.listProviderMachinesSafe("gcp")),
+                    ...(await this.listProviderMachinesSafe("daytona")),
+                  ];
     return json({ machines });
   }
 
@@ -9189,6 +9539,15 @@ export class FleetCoordinator {
           message: "registered leases cannot join coordinator-managed ready pools",
         },
         { status: 400 },
+      );
+    }
+    if (lease.provider === "daytona") {
+      return json(
+        {
+          error: "provider_not_supported",
+          message: "Daytona leases cannot join ready pools because their SSH token rotates",
+        },
+        { status: 409 },
       );
     }
     if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
@@ -9442,11 +9801,15 @@ export class FleetCoordinator {
     const leases = admin
       ? this.filterLeases(await this.leaseRecords(), request)
       : this.filterLeasesForRequest(await this.leaseRecords(), request);
-    return json({ leases: leases.map((lease) => this.leaseForRequest(lease, request, admin)) });
+    return json({ leases: leases.map((lease) => this.leaseForListRequest(lease, request, admin)) });
   }
 
   private async adminLeases(request: Request): Promise<Response> {
-    return json({ leases: this.filterLeases(await this.leaseRecords(), request) });
+    return json({
+      leases: this.filterLeases(await this.leaseRecords(), request).map((lease) =>
+        this.leaseForListRequest(lease, request, true),
+      ),
+    });
   }
 
   private async adminLeaseAudit(request: Request): Promise<Response> {
@@ -10960,6 +11323,7 @@ export class FleetCoordinator {
             location: record.location,
             subscription: scope.subscription,
             resourceGroup: scope.resourceGroup,
+            ownedDeleteClaimStorage: this.state.storage,
           }).deleteOwnedServer(lease);
         } catch (error) {
           await this.state.runExclusive(async () => {
@@ -11320,8 +11684,14 @@ export class FleetCoordinator {
       recordCloudOrphanSweepOwnership(candidate, ownershipLease);
       if (config.deleteEnabled && ownershipLease) {
         try {
+          const provider = this.provider("azure", region);
+          if (!provider.deleteOwnedServer) {
+            throw new ProviderCleanupManualResolutionError(
+              `refusing to delete Azure lease ${ownershipLease.id}: exact owned-delete support is unavailable`,
+            );
+          }
           // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
-          await this.provider("azure", region).deleteServer(machine.cloudID || machine.name);
+          await provider.deleteOwnedServer(ownershipLease);
           candidate.action = "terminated";
         } catch (error) {
           candidate.action = "terminate_failed";
@@ -11756,6 +12126,14 @@ export class FleetCoordinator {
     return visible;
   }
 
+  private leaseForListRequest(lease: LeaseRecord, request: Request, admin: boolean): LeaseRecord {
+    const visible = this.leaseForRequest(lease, request, admin);
+    if (visible.provider === "daytona" && visible.sshUser) {
+      visible.sshUser = "<token>";
+    }
+    return visible;
+  }
+
   private leaseAccessRole(
     lease: LeaseRecord,
     request: Request,
@@ -12044,6 +12422,9 @@ export class FleetCoordinator {
     }
     if (provider === "gcp") {
       return new GCPProvider(this.env, this.state.storage, region, project);
+    }
+    if (provider === "daytona") {
+      return new DaytonaProvider(this.env);
     }
     return new HetznerProvider(this.env);
   }
@@ -12374,7 +12755,7 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
   }
 
   override alarm(): Promise<void> {
-    return super.alarm();
+    return super.durableObjectAlarm();
   }
 
   override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -14112,6 +14493,7 @@ async function adminGrantForRequest(request: Request, admin: boolean): Promise<C
 async function bridgeGrantForRequest(
   request: Request,
   admin: boolean,
+  sharedToken?: string,
 ): Promise<CachedBridgeGrant | undefined> {
   const auth = requestAuthType(request);
   const adminGrant = await adminGrantForRequest(request, admin);
@@ -14119,6 +14501,13 @@ async function bridgeGrantForRequest(
     return adminGrant;
   }
   if (auth !== "github") {
+    if (auth === "bearer" && !admin && sharedToken) {
+      const token = bearerToken(request);
+      if (!token) {
+        return undefined;
+      }
+      return { auth, sharedTokenHash: await sha256Hex(token), ...adminGrant };
+    }
     return { auth, ...adminGrant };
   }
   const token = bearerToken(request);
@@ -14153,6 +14542,7 @@ function copyBridgeGrant(principal: CachedBridgeGrant): CachedBridgeGrant {
   return {
     ...(principal.auth ? { auth: principal.auth } : {}),
     ...(principal.login ? { login: principal.login } : {}),
+    ...(principal.sharedTokenHash ? { sharedTokenHash: principal.sharedTokenHash } : {}),
     ...(principal.adminTokenHash ? { adminTokenHash: principal.adminTokenHash } : {}),
     ...(principal.adminGrantVersion ? { adminGrantVersion: principal.adminGrantVersion } : {}),
     ...(principal.portalSessionHash ? { portalSessionHash: principal.portalSessionHash } : {}),
@@ -14407,7 +14797,7 @@ function providerFromQuery(value: string | null): Provider | undefined {
 function providerRegionForConfig(config: LeaseConfig): string | undefined {
   if (config.provider === "gcp") return config.gcpZone;
   if (config.provider === "azure") return config.azureLocation;
-  return config.awsRegion;
+  return config.provider === "aws" ? config.awsRegion : undefined;
 }
 
 function providerProjectForConfig(config: LeaseConfig): string | undefined {
@@ -14849,6 +15239,7 @@ const codePortalContentSecurityPolicy = [
   "child-src 'self' blob:",
   "connect-src 'self' ws: wss: https:",
   "font-src 'self' data: blob:",
+  "frame-ancestors 'self'",
   "frame-src 'self' https://*.vscode-cdn.net data:",
   "img-src 'self' https: data: blob:",
   "manifest-src 'self'",
@@ -14931,7 +15322,9 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
         ? attachment
         : undefined;
     case "webvnc-agent":
-      return typeof attachment.leaseID === "string" && validWebVNCSessionID(attachment.id)
+      return typeof attachment.leaseID === "string" &&
+        validWebVNCSessionID(attachment.id) &&
+        validOptionalBridgePrincipal(attachment)
         ? {
             ...attachment,
             capabilities:
@@ -14939,7 +15332,9 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
           }
         : undefined;
     case "code-agent":
-      return typeof attachment.leaseID === "string" ? attachment : undefined;
+      return typeof attachment.leaseID === "string" && validOptionalBridgePrincipal(attachment)
+        ? attachment
+        : undefined;
     case "code-viewer":
       const serializedCodeViewer = attachment as Omit<typeof attachment, "auth"> & {
         auth?: AuthContext["auth"];
@@ -15020,13 +15415,21 @@ function completeBridgePrincipal(value: {
   );
 }
 
-function revocableUserBridge(
-  attachment: BridgeAttachment,
-): attachment is Extract<
+function revocableUserBridge(attachment: BridgeAttachment): attachment is Extract<
   BridgeAttachment,
-  { kind: "webvnc-viewer" | "code-viewer" | "egress-host" | "egress-client" }
+  {
+    kind:
+      | "webvnc-agent"
+      | "webvnc-viewer"
+      | "code-agent"
+      | "code-viewer"
+      | "egress-host"
+      | "egress-client";
+  }
 > {
   return (
+    ((attachment.kind === "webvnc-agent" || attachment.kind === "code-agent") &&
+      completeBridgePrincipal(attachment)) ||
     attachment.kind === "webvnc-viewer" ||
     attachment.kind === "code-viewer" ||
     attachment.kind === "egress-host" ||
@@ -15056,6 +15459,7 @@ function leaseBridgeTicketPrincipal(
     admin: ticket.admin === true,
     ...(ticket.auth ? { auth: ticket.auth } : {}),
     ...(ticket.login ? { login: ticket.login } : {}),
+    ...(ticket.sharedTokenHash ? { sharedTokenHash: ticket.sharedTokenHash } : {}),
     ...(ticket.adminTokenHash ? { adminTokenHash: ticket.adminTokenHash } : {}),
     ...(ticket.adminGrantVersion ? { adminGrantVersion: ticket.adminGrantVersion } : {}),
     ...(ticket.portalSessionHash ? { portalSessionHash: ticket.portalSessionHash } : {}),
@@ -15469,7 +15873,8 @@ function boundedRunEvent(
     input.provider === "aws" ||
     input.provider === "hetzner" ||
     input.provider === "azure" ||
-    input.provider === "gcp"
+    input.provider === "gcp" ||
+    input.provider === "daytona"
   ) {
     event.provider = input.provider;
   }
@@ -16685,6 +17090,7 @@ interface CloudProvider {
     lease: LeaseRecord,
     context: ProviderAccessContext,
   ): Promise<LeaseRecord | void>;
+  refreshLeaseAccessForResolution?(lease: LeaseRecord): Promise<LeaseRecord | void>;
   reconcileLeaseAccess?(lease: LeaseRecord, context: ProviderAccessContext): Promise<void>;
   createServerWithFallback(
     config: ReturnType<typeof leaseConfig>,
@@ -16706,6 +17112,7 @@ interface CloudProvider {
   ): Promise<ProviderLeaseCreateFinalization>;
   releaseLease(lease: LeaseRecord): Promise<void>;
   deleteServer(id: string): Promise<void>;
+  deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
   supportsNativeImages(): boolean;
   nativeImagesUnsupportedMessage(): string;
   defaultImageStrategy(lease: LeaseRecord): "image" | "disk-snapshot";
@@ -16759,6 +17166,7 @@ interface ProviderStateStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   list<T>(options?: { prefix?: string }): Promise<Map<string, T>>;
+  delete(key: string): Promise<unknown>;
 }
 
 interface ProviderAccessContext {
@@ -16943,6 +17351,7 @@ export class AzureProvider implements CloudProvider {
     this.clientValue ??= new AzureClient(this.env, {
       ...(this.location ? { location: this.location } : {}),
       ...(this.deferredCleanup ? { deferredCleanup: this.deferredCleanup } : {}),
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
     });
     return this.clientValue;
   }
@@ -17015,6 +17424,7 @@ export class AzureProvider implements CloudProvider {
       ...(this.deferredCleanup ? { deferredCleanup: this.deferredCleanup } : {}),
       subscription: scope.subscription,
       resourceGroup: scope.resourceGroup,
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
     }).deleteOwnedServer(lease);
   }
 
@@ -17292,6 +17702,219 @@ export class GCPProvider implements CloudProvider {
 
   hourlyPriceUSD(): Promise<number | undefined> {
     return this.client.hourlyPriceUSD();
+  }
+}
+
+export class DaytonaProvider implements CloudProvider {
+  private clientValue?: DaytonaClient;
+  private readonly pendingAccess = new Map<string, DaytonaSSHEndpoint>();
+
+  constructor(private readonly env: Env) {}
+
+  private get client(): DaytonaClient {
+    this.clientValue ??= new DaytonaClient(this.env);
+    return this.clientValue;
+  }
+
+  listCrabboxServers(): Promise<ProviderMachine[]> {
+    return this.client.listCrabboxServers();
+  }
+
+  getServer(id: string): Promise<ProviderMachine> {
+    return this.client.getServer(id);
+  }
+
+  findServerByLease(leaseID: string): Promise<ProviderMachine | undefined> {
+    return this.client.findServerByLease(leaseID);
+  }
+
+  async recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    const server = await this.findServerByLease(lease.id);
+    return server && providerMachineOwnedByLease(server, lease, "daytona") ? server : undefined;
+  }
+
+  prepareLeaseConfig(
+    config: ReturnType<typeof leaseConfig>,
+  ): Promise<ReturnType<typeof leaseConfig>> {
+    return Promise.resolve({
+      ...config,
+      serverType: this.client.snapshot || "default",
+      sshUser: this.client.user,
+      sshPort: "22",
+      sshFallbackPorts: [],
+      workRoot: this.client.workRoot,
+    });
+  }
+
+  async createServerWithFallback(
+    config: ReturnType<typeof leaseConfig>,
+    leaseID: string,
+    slug: string,
+    owner: string,
+  ): Promise<{
+    server: ProviderMachine;
+    serverType: string;
+    market?: string;
+    attempts?: ProvisioningAttempt[];
+  }> {
+    let server: ProviderMachine;
+    try {
+      server = await this.client.createServer(config, leaseID, slug, owner);
+    } catch (error) {
+      const recovered = await this.client.findServerByLease(leaseID).catch(() => undefined);
+      if (
+        !recovered ||
+        !providerMachineOwnedByLease(
+          recovered,
+          {
+            id: leaseID,
+            slug,
+            provider: "daytona",
+            owner,
+            cloudID: recovered.cloudID,
+          },
+          "daytona",
+        )
+      ) {
+        throw error;
+      }
+      server = recovered;
+    }
+    try {
+      const ready = await this.client.waitForStarted(server.cloudID);
+      const access = await this.client.createSSHAccess(ready.cloudID, {
+        expiresAt: new Date(Date.now() + config.ttlSeconds * 1_000).toISOString(),
+      });
+      this.pendingAccess.set(ready.cloudID, access);
+      return {
+        server: { ...ready, host: access.host },
+        serverType: this.client.snapshot || ready.serverType || "default",
+      };
+    } catch (error) {
+      try {
+        const current = await this.client.getServer(server.cloudID);
+        const owned = providerMachineOwnedByLease(
+          current,
+          {
+            id: leaseID,
+            slug,
+            provider: "daytona",
+            owner,
+            cloudID: server.cloudID,
+          },
+          "daytona",
+        );
+        if (!owned) {
+          throw new Error(
+            `refusing to clean Daytona sandbox ${server.cloudID}: ownership does not match lease ${leaseID}`,
+            { cause: error },
+          );
+        }
+        await this.client.deleteServer(server.cloudID);
+      } catch (cleanupError) {
+        if (!isDaytonaNotFound(cleanupError)) {
+          throw new ProviderProvisioningCleanupError(
+            `${errorMessage(error)}; cleanup failed for Daytona sandbox ${server.cloudID}: ${errorMessage(cleanupError)}`,
+            { provider: "daytona", cloudID: server.cloudID, serverID: server.id },
+            cleanupError,
+          );
+        }
+      }
+      throw new Error(
+        `${errorMessage(error)}; deleted Daytona sandbox ${server.cloudID} after readiness failure`,
+        { cause: error },
+      );
+    }
+  }
+
+  async finalizeLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+    server: ProviderMachine,
+  ): Promise<ProviderLeaseCreateFinalization> {
+    const access =
+      this.pendingAccess.get(server.cloudID) ??
+      (await this.client.createSSHAccess(server.cloudID, lease));
+    this.pendingAccess.delete(server.cloudID);
+    return {
+      config,
+      lease: {
+        ...lease,
+        host: access.host,
+        sshUser: access.user,
+        sshPort: access.port,
+        sshFallbackPorts: [],
+        providerAccessExpiresAt: access.expiresAt,
+        workRoot: this.client.workRoot,
+        ...(server.region ? { region: server.region } : {}),
+      },
+    };
+  }
+
+  async refreshLeaseAccessForResolution(lease: LeaseRecord): Promise<LeaseRecord | void> {
+    if (!daytonaAccessNeedsRefresh(lease)) return;
+    const access = await this.client.createSSHAccess(lease.cloudID, lease);
+    return {
+      ...lease,
+      host: access.host,
+      sshUser: access.user,
+      sshPort: access.port,
+      sshFallbackPorts: [],
+      providerAccessExpiresAt: access.expiresAt,
+    };
+  }
+
+  async releaseLease(lease: LeaseRecord): Promise<void> {
+    this.pendingAccess.delete(lease.cloudID);
+    let server: ProviderMachine;
+    try {
+      server = await this.client.getServer(lease.cloudID);
+    } catch (error) {
+      if (isDaytonaNotFound(error)) return;
+      throw error;
+    }
+    if (!providerMachineOwnedByLease(server, lease, "daytona")) {
+      throw new Error(
+        `refusing to delete Daytona sandbox ${lease.cloudID}: ownership does not match lease ${lease.id}`,
+      );
+    }
+    await this.client.deleteServer(lease.cloudID);
+  }
+
+  deleteServer(id: string): Promise<void> {
+    this.pendingAccess.delete(id);
+    return this.client.deleteServer(id);
+  }
+
+  supportsNativeImages(): boolean {
+    return false;
+  }
+
+  nativeImagesUnsupportedMessage(): string {
+    return "Daytona sandboxes are selected through the coordinator snapshot configuration";
+  }
+
+  defaultImageStrategy(): "image" | "disk-snapshot" {
+    return "disk-snapshot";
+  }
+
+  validateLeaseImageStrategy(): string | undefined {
+    return undefined;
+  }
+
+  createLeaseImage = unsupportedProviderImageLifecycle("daytona");
+  getImage = unsupportedProviderImageLifecycle("daytona");
+  deleteImage = unsupportedProviderImageLifecycle("daytona");
+  storedImageMetadata = noStoredImageMetadata;
+  decorateImage = passthroughProviderImage;
+  validateDeleteImage = allowProviderImageDelete;
+
+  deleteSSHKey(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  hourlyPriceUSD(): Promise<number | undefined> {
+    return Promise.resolve(undefined);
   }
 }
 

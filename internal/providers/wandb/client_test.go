@@ -69,6 +69,19 @@ func TestMapRPCErrorExitCodes(t *testing.T) {
 	}
 }
 
+func TestMapRPCErrorRedactsOpaqueAPIKey(t *testing.T) {
+	const secret = "opaque-wandb-secret"
+	for _, err := range []error{
+		status.Error(codes.Internal, "provider rejected opaque="+secret+" region=eu"),
+		errors.New("transport rejected opaque=" + secret + " region=eu"),
+	} {
+		got := mapRPCError(err, "probe", secret).Error()
+		if strings.Contains(got, secret) || !strings.Contains(got, "region=eu") || !strings.Contains(got, "[redacted]") {
+			t.Fatalf("mapRPCError() returned unsafe diagnostic: %q", got)
+		}
+	}
+}
+
 func TestWandbAPIErrorAsExitError(t *testing.T) {
 	err := &wandbAPIError{ExitCode: 77, Stderr: "auth failed", Code: codes.Unauthenticated}
 	var ee ExitError

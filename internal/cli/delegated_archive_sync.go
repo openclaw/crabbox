@@ -63,13 +63,6 @@ func RunDelegatedArchiveSync(ctx context.Context, req DelegatedArchiveSyncReques
 	}
 
 	start := now()
-	syncCtx := ctx
-	cancel := func() {}
-	if req.Config.Sync.Timeout > 0 {
-		syncCtx, cancel = context.WithTimeout(ctx, req.Config.Sync.Timeout)
-	}
-	defer cancel()
-
 	excludes, err := syncExcludes(req.Repo.Root, req.Config)
 	if err != nil {
 		return nil, 0, err
@@ -89,6 +82,15 @@ func RunDelegatedArchiveSync(ctx context.Context, req DelegatedArchiveSyncReques
 		return nil, 0, err
 	}
 	preflightDuration := now().Sub(preflightStart)
+
+	// Match SSH sync semantics: local manifest planning is outside the transfer
+	// timeout. The timeout bounds archive creation and remote synchronization.
+	syncCtx := ctx
+	cancel := func() {}
+	if req.Config.Sync.Timeout > 0 {
+		syncCtx, cancel = context.WithTimeout(ctx, req.Config.Sync.Timeout)
+	}
+	defer cancel()
 
 	archiveStart := now()
 	archive, err := CreateSyncArchive(syncCtx, req.Repo, manifest, tempPattern)

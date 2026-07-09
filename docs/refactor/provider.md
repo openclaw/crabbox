@@ -540,9 +540,9 @@ provider spec and the non-brokered implementation. Brokered list/pool still
 enforces the existing admin-token requirement; the wrapper must not silently
 downgrade brokered pool/list to a direct provider listing.
 
-Only `hetzner`, `aws`, `azure`, and `gcp` declare `Coordinator: supported`; every
+Only `hetzner`, `aws`, `azure`, `daytona`, and `gcp` declare `Coordinator: supported`; every
 other adapter is `Coordinator: never` and always runs direct-from-CLI. Even the
-four brokerable providers run direct unless a broker URL is configured
+five brokerable providers run direct unless a broker URL is configured
 (`CRABBOX_COORDINATOR` / `config set-broker`). Adding broker support to another
 provider means changing its spec and implementing Worker-side support.
 

@@ -408,6 +408,17 @@ func configShowView(cfg Config) map[string]any {
 			"workdir":  cfg.E2B.Workdir,
 			"user":     cfg.E2B.User,
 		},
+		"cubeSandbox": map[string]any{
+			"apiUrl":        redactedConfigURL(cfg.CubeSandbox.APIURL),
+			"auth":          tokenState(cfg.CubeSandbox.APIKey),
+			"domain":        cfg.CubeSandbox.Domain,
+			"template":      cfg.CubeSandbox.Template,
+			"workdir":       cfg.CubeSandbox.Workdir,
+			"user":          cfg.CubeSandbox.User,
+			"proxyNodeIp":   cfg.CubeSandbox.ProxyNodeIP,
+			"proxyPortHttp": cfg.CubeSandbox.ProxyPortHTTP,
+			"proxyScheme":   cfg.CubeSandbox.ProxyScheme,
+		},
 		"cloudflare": map[string]any{
 			"apiUrl":  redactedConfigURL(cfg.Cloudflare.APIURL),
 			"auth":    tokenState(cfg.Cloudflare.Token),
@@ -727,6 +738,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "namespace_instance cli=%s machine_type=%s duration=%s region=%s endpoint=%s keychain=%s volumes=%d work_root=%s bare=%t\n", cfg.NamespaceInstance.CLIPath, blank(cfg.NamespaceInstance.MachineType, "-"), cfg.NamespaceInstance.Duration, blank(cfg.NamespaceInstance.Region, "-"), blank(redactedConfigURL(cfg.NamespaceInstance.Endpoint), "-"), blank(cfg.NamespaceInstance.Keychain, "-"), len(cfg.NamespaceInstance.Volumes), cfg.NamespaceInstance.WorkRoot, cfg.NamespaceInstance.Bare)
 	fmt.Fprintf(w, "morph api_url=%s snapshot=%s ssh_gateway_host=%s work_root=%s delete_on_release=%t wake_on_ssh=%t auth=%s\n", blank(redactedConfigURL(cfg.Morph.APIURL), "-"), blank(cfg.Morph.Snapshot, "-"), blank(cfg.Morph.SSHGatewayHost, "-"), blank(cfg.Morph.WorkRoot, "-"), cfg.Morph.DeleteOnRelease, cfg.Morph.WakeOnSSH, tokenState(cfg.Morph.APIKey))
 	fmt.Fprintf(w, "e2b api_url=%s domain=%s template=%s workdir=%s user=%s\n", redactedConfigURL(cfg.E2B.APIURL), cfg.E2B.Domain, cfg.E2B.Template, cfg.E2B.Workdir, blank(cfg.E2B.User, "-"))
+	fmt.Fprintf(w, "cubesandbox api_url=%s domain=%s template=%s workdir=%s user=%s proxy_node_ip=%s proxy_port_http=%d proxy_scheme=%s auth=%s\n", blank(redactedConfigURL(cfg.CubeSandbox.APIURL), "-"), blank(cfg.CubeSandbox.Domain, "-"), blank(cfg.CubeSandbox.Template, "-"), blank(cfg.CubeSandbox.Workdir, "-"), blank(cfg.CubeSandbox.User, "-"), blank(cfg.CubeSandbox.ProxyNodeIP, "-"), cfg.CubeSandbox.ProxyPortHTTP, blank(cfg.CubeSandbox.ProxyScheme, "-"), tokenState(cfg.CubeSandbox.APIKey))
 	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", redactedConfigURL(cfg.UpstashBox.BaseURL), cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
 	fmt.Fprintf(w, "smolvm base_url=%s image=%s workdir=%s cpus=%d memory_mb=%d network=%s keep=%t auth=%s\n", redactedConfigURL(cfg.Smolvm.BaseURL), cfg.Smolvm.Image, cfg.Smolvm.Workdir, cfg.Smolvm.CPUs, cfg.Smolvm.MemoryMB, cfg.Smolvm.Network, cfg.Smolvm.Keep, tokenState(cfg.Smolvm.APIKey))
 	fmt.Fprintf(w, "blaxel api_url=%s workspace=%s region=%s image=%s memory_mb=%d ttl=%s idle_ttl=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURL(cfg.Blaxel.APIURL), "-"), blank(cfg.Blaxel.Workspace, "-"), blank(cfg.Blaxel.Region, "-"), cfg.Blaxel.Image, cfg.Blaxel.MemoryMB, blank(cfg.Blaxel.TTL, "-"), blank(cfg.Blaxel.IdleTTL, "-"), cfg.Blaxel.Workdir, cfg.Blaxel.ExecTimeoutSecs, cfg.Blaxel.ForgetMissing, tokenState(cfg.Blaxel.APIKey))
@@ -1001,7 +1013,7 @@ func validateBrokerProvider(provider string) (string, error) {
 	}
 	spec := resolved.Spec()
 	if spec.Coordinator != CoordinatorSupported {
-		return "", exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, gcp, and hetzner", provider)
+		return "", exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, daytona, gcp, and hetzner", provider)
 	}
 	return resolved.Name(), nil
 }

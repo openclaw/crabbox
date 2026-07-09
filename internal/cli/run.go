@@ -41,6 +41,10 @@ func applyServerTypeFlagOverrides(cfg *Config, fs *flag.FlagSet, serverType stri
 }
 
 func (a App) warmup(ctx context.Context, args []string) error {
+	return a.warmupWithLeaseObserver(ctx, args, nil)
+}
+
+func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe func(LeaseTarget)) error {
 	started := time.Now()
 	defaults := defaultConfig()
 	fs := newFlagSet("warmup", a.Stderr)
@@ -119,6 +123,9 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, controllerOwnsCleanup.Load())
 		return err
+	}
+	if observe != nil {
+		observe(LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 	}
 	if serverTailscaleMetadata(server).Enabled {
 		target = bootstrapNetworkTarget(cfg, server, target)
@@ -225,6 +232,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	scenario := fs.String("scenario", "", "preset variable shorthand for --preset-var scenario=<value>")
 	emitProof := fs.String("emit-proof", "", "write a generated proof block after a successful run")
 	proofTemplate := fs.String("proof-template", "", "proof template name from the selected profile")
+	attestOut := fs.String("attest", "", "write a signed run receipt after a successful run")
+	attestKeyOverride := fs.String("attest-key", "", "path to an existing PKCS8 PEM ed25519 private key for --attest")
 	stopAfter := fs.String("stop-after", "", "stop policy for the lease: success, always, failure, or never")
 	leaseOutput := fs.String("lease-output", "", "write a small JSON lease handle for orchestrators")
 	readyPool := fs.String("pool", "", "borrow a broker ready-pool lease")
@@ -249,6 +258,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	timingRecordPath, timingRecordEnabled, err := resolveBenchmarkTimingStore(*timingRecord)
 	if err != nil {
+		return err
+	}
+	if err := preflightAttestPaths(attestPathPreflight{
+		Receipt:             *attestOut,
+		KeyOverride:         *attestKeyOverride,
+		LeaseOutput:         *leaseOutput,
+		EmitProof:           *emitProof,
+		CaptureStdout:       *captureStdout,
+		CaptureStderr:       *captureStderr,
+		TimingRecord:        timingRecordPath,
+		TimingRecordEnabled: timingRecordEnabled,
+		Downloads:           downloads,
+	}); err != nil {
 		return err
 	}
 	var cleanup leaseCleanupResult
@@ -366,6 +388,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if strings.TrimSpace(*emitProof) != "" {
 			return exit(2, "--emit-proof cannot be combined with --sync-only")
 		}
+		if strings.TrimSpace(*attestOut) != "" {
+			return exit(2, "--attest cannot be combined with --sync-only")
+		}
 	}
 	if err := preflightRunLocalOutputs(*captureStdout, *captureStderr, downloads); err != nil {
 		return err
@@ -394,6 +419,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 		}
 		if err := preflightLocalOutputPath("emit proof", strings.TrimSpace(*emitProof), true, true); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(*attestOut) != "" {
+		attestPath := strings.TrimSpace(*attestOut)
+		if err := preflightLocalOutputPath("attest receipt", attestPath, true, true); err != nil {
 			return err
 		}
 	}
@@ -612,6 +643,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 			result.Artifacts = append(result.Artifacts, proof)
 			fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
+		}
+		if runErr == nil && strings.TrimSpace(*attestOut) != "" {
+			receipt, err := writeDelegatedRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), cfg, result, runReq)
+			if err != nil {
+				return err
+			}
+			result.Artifacts = append(result.Artifacts, receipt)
+			fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", receipt.Path, receipt.Bytes)
 		}
 		if result.Session != nil {
 			coldRun := !result.Session.Reused
@@ -1481,6 +1520,11 @@ afterSync:
 	if stderrCaptured {
 		stderrEvents = nil
 	}
+	attestDigest := newAttestDigestWriter()
+	if strings.TrimSpace(*attestOut) != "" {
+		stdout = io.MultiWriter(stdout, attestDigest)
+		stderr = io.MultiWriter(stderr, attestDigest)
+	}
 	resultsMarker := ""
 	if cfg.Results.Auto {
 		resultsMarker = remoteResultsMarker
@@ -1597,6 +1641,25 @@ afterSync:
 		runArtifacts = append(runArtifacts, proof)
 		report.Artifacts = runArtifacts
 		fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
+	}
+	if strings.TrimSpace(*attestOut) != "" && code == 0 {
+		receipt, err := writeRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), runReceiptInput{
+			Provider:   cfg.Provider,
+			LeaseID:    leaseID,
+			Slug:       serverSlug(server),
+			RunID:      recorder.runID,
+			Command:    commandDisplay,
+			ExitCode:   code,
+			CommandMs:  report.CommandMs,
+			ActionsURL: actionsURL,
+			LogSHA256:  attestDigest.sum(),
+		})
+		if err != nil {
+			return recordFailure(err)
+		}
+		runArtifacts = append(runArtifacts, receipt)
+		report.Artifacts = runArtifacts
+		fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", receipt.Path, receipt.Bytes)
 	}
 	recorder.Finish(ctx, target, code, timings.sync, timings.command, logBuffer.String(), logBuffer.Truncated(), results, classification)
 	if a.runOutcome != nil {
@@ -1778,6 +1841,31 @@ func writeDelegatedRunProof(path, templateName string, cfg Config, result RunRes
 		ExitCode:    result.ExitCode,
 		GeneratedAt: time.Now(),
 	})
+}
+
+func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult, req RunRequest) (runArtifact, error) {
+	command := strings.TrimSpace(result.CommandText)
+	if command == "" {
+		command = runCommandDisplay(req.Command, req.ShellMode)
+	}
+	receipt := runReceiptInput{
+		Provider:   result.Provider,
+		LeaseID:    result.LeaseID,
+		Slug:       result.Slug,
+		Command:    command,
+		ExitCode:   result.ExitCode,
+		CommandMs:  result.Command.Milliseconds(),
+		ActionsURL: result.ActionsURL,
+	}
+	if session := result.Session; session != nil {
+		receipt.Provider = firstNonBlank(receipt.Provider, session.Provider)
+		receipt.LeaseID = firstNonBlank(receipt.LeaseID, session.LeaseID)
+		receipt.Slug = firstNonBlank(receipt.Slug, session.Slug)
+		receipt.RunID = session.RunID
+		receipt.ActionsURL = firstNonBlank(receipt.ActionsURL, session.ActionsURL)
+	}
+	receipt.Provider = firstNonBlank(receipt.Provider, cfg.Provider)
+	return writeRunReceipt(path, keyPath, receipt)
 }
 
 func runCommandDisplay(command []string, shellMode bool) string {
@@ -2761,19 +2849,73 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 }
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
-	a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
-	return a.releaseBackendLease(ctx, backend, cfg, lease)
+	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(backend)
+	if refresher, ok := backend.(ReleaseLeaseTargetRefresher); ok {
+		refreshed, err := refresher.RefreshReleaseLeaseTarget(ctx, lease)
+		if err != nil {
+			if errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
+				return err
+			}
+			fmt.Fprintf(a.Stderr, "warning: could not refresh lease %s before cleanup: %v; attempting release with acquired target\n", lease.LeaseID, err)
+		} else {
+			if refreshed.SSH.Host == "" {
+				refreshed.SSH = lease.SSH
+			}
+			if refreshed.Coordinator == nil {
+				refreshed.Coordinator = lease.Coordinator
+			}
+			lease = refreshed
+		}
+	}
+	if connectionCleanupSafe {
+		a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
+	}
+	if err := a.releaseBackendLease(ctx, backend, cfg, lease); err != nil {
+		return err
+	}
+	if !connectionCleanupSafe {
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(lease.LeaseID)
+	}
+	return nil
+}
+
+func releaseLeaseConnectionCleanupSafe(backend SSHLeaseBackend) bool {
+	policy, ok := backend.(ReleaseLeaseConnectionCleanupPolicy)
+	return !ok || policy.ReleaseLeaseConnectionCleanupSafe()
+}
+
+func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseIDs ...string) {
+	seen := map[string]bool{}
+	for _, leaseID := range leaseIDs {
+		leaseID = strings.TrimSpace(leaseID)
+		if leaseID == "" || seen[leaseID] {
+			continue
+		}
+		seen[leaseID] = true
+		if _, err := a.stopEgressHostDaemon(leaseID); err != nil {
+			fmt.Fprintf(a.Stderr, "warning: egress host daemon cleanup failed for %s: %v\n", leaseID, err)
+		}
+	}
 }
 
 func (a App) cleanupBackendLeaseConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
+	a.cleanupBackendLeaseLocalConnectionsBestEffort(lease.LeaseID)
+	a.cleanupBackendLeaseRemoteConnectionsBestEffort(ctx, lease)
+}
+
+func (a App) cleanupBackendLeaseRemoteConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
 	a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
-	a.cleanupMediatedEgressBestEffort(ctx, lease.LeaseID, lease)
+	a.cleanupMediatedEgressRemoteBestEffort(ctx, lease)
 	a.logoutRemoteTailscaleBestEffort(ctx, lease)
 }
 
 func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
-	if err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+	request := ReleaseLeaseRequest{Lease: lease, Force: true}
+	if !releaseLeaseConnectionCleanupSafe(backend) {
+		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
+	}
+	if err := backend.ReleaseLease(ctx, request); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: release failed for %s: %v\n", lease.LeaseID, err)
 		return err
 	}
@@ -3151,17 +3293,27 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err := ValidateLeaseTargetProviderIdentity(lease, expectedIdentity); err != nil {
 		return err
 	}
-	if lease.SSH.Host != "" {
-		a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
+	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(sshBackend)
+	if connectionCleanupSafe {
+		if lease.SSH.Host != "" {
+			a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
+		}
+		a.cleanupMediatedEgressBestEffort(ctx, *id, lease)
+		a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	}
-	a.cleanupMediatedEgressBestEffort(ctx, *id, lease)
-	a.logoutRemoteTailscaleBestEffort(ctx, lease)
-	if err := sshBackend.ReleaseLease(ctx, ReleaseLeaseRequest{
+	request := ReleaseLeaseRequest{
 		Lease:                    lease,
 		Force:                    true,
 		ExpectedProviderIdentity: expectedIdentity,
-	}); err != nil {
+	}
+	if !connectionCleanupSafe {
+		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
+	}
+	if err := sshBackend.ReleaseLease(ctx, request); err != nil {
 		return err
+	}
+	if !connectionCleanupSafe {
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(*id, lease.LeaseID)
 	}
 	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, cfg, lease.LeaseID)
 	if backendCoordinator(backend) != nil {

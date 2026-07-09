@@ -22,8 +22,8 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "daytona",
 		Kind:        core.ProviderKindSSHLease,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync},
-		Coordinator: core.CoordinatorNever,
+		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureArchiveSync},
+		Coordinator: core.CoordinatorSupported,
 	}
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {

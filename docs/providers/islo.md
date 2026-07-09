@@ -7,11 +7,12 @@ Read when:
 - changing `internal/providers/islo`.
 
 Islo is a delegated-run provider. Crabbox uses the Islo Go SDK for sandbox
-lifecycle (create, list, status) and calls the HTTP API directly for delete (an
-empty-body `DELETE`), archive upload, shares, and command output — reading a
-Server-Sent Events stream from the `POST /sandboxes/{name}/exec/stream` endpoint. Islo
-owns sandbox state and command transport; Crabbox owns local config, repo
-claims, sync manifests and guardrails, slugs, timing summaries, and normalized
+lifecycle (create, list, status, pause, resume) and calls the HTTP API directly
+for delete (an empty-body `DELETE`), archive upload, shares, and command
+output — reading a Server-Sent Events stream from the
+`POST /sandboxes/{name}/exec/stream` endpoint. Islo owns sandbox state and
+command transport; Crabbox owns local config, repo claims, sync manifests and
+guardrails, slugs, timing summaries, and normalized
 `list`/`status` rendering. There is no Crabbox SSH lease and no broker
 coordinator — the CLI talks to Islo directly.
 
@@ -105,6 +106,15 @@ compatibility, but the Islo create request omits implicit default `image`,
 defaults. Values explicitly supplied through config, environment, or flags are
 still sent, including values equal to the Crabbox defaults.
 
+### Gateway profile
+
+`--islo-gateway-profile` / `islo.gatewayProfile` accepts an Islo gateway
+profile name or id. Crabbox passes the value opaquely in the sandbox create
+request; the profile itself is created and managed on the Islo side and
+configures Islo's own egress gateway for the sandbox. It is unrelated to the
+Crabbox coordinator. When unset, the field is omitted from the create request
+so Islo applies its own default.
+
 ### Workdir resolution
 
 `--islo-workdir` / `islo.workdir` is a relative directory below `/workspace`
@@ -127,6 +137,17 @@ rejected before workspace preparation and sync.
 5. Require an `exit` event before treating a stream as successful.
 6. Delete the sandbox on release unless the lease is kept.
 
+`crabbox status --wait` polls the sandbox every 2 seconds until it reports
+`running`, bounded by `--wait-timeout` (default 5 minutes). If the sandbox
+enters a terminal state (`failed`, `stopped`, `stopping`, or `deleted`) before
+becoming ready, the wait fails fast with exit code 5 instead of polling out
+the deadline; hitting the deadline also exits 5.
+
+`crabbox ssh` resolves the sandbox before rendering the SSH command: a paused
+sandbox is resumed automatically and given up to 2 minutes to report `running`
+again before the command fails. A sandbox in a terminal state fails
+immediately with exit code 5.
+
 ## Capabilities
 
 - SSH: yes for direct login to existing Crabbox-created sandboxes. `crabbox ssh
@@ -136,7 +157,10 @@ rejected before workspace preparation and sync.
   base64 exec-upload fallback.
 - URL bridge: yes. Exposed ports become public HTTPS shares through Islo's
   `/sandboxes/{name}/shares` API, surfaced by `--expose` and the pond bridge
-  plane. Share creation is idempotent per port.
+  plane. Share creation is idempotent per port. Requested TTLs are clamped
+  into Islo's legal 60s–7d range, and an existing share is only reused while
+  it has more than 30 seconds left before expiry, so a nearly-expired share is
+  replaced instead of handed out.
 - Pause / resume: yes. `crabbox pause` snapshots the sandbox to disk and frees
   its CPU/memory via Islo's pause API; `crabbox resume` restores it. The lease
   claim is preserved across a pause.
@@ -172,7 +196,41 @@ rejected before workspace preparation and sync.
   claim. Names that require case, whitespace, or punctuation normalization and
   non-Crabbox sandboxes are rejected.
 
+## Live testing
+
+Two opt-in smoke tests in `internal/providers/islo/backend_live_test.go`
+(build tag `smoke`) exercise the real Islo API. Neither runs in the default
+`go test -race ./...` job, and both skip in `go test -short` mode. Both read
+`ISLO_API_KEY` only — `CRABBOX_ISLO_API_KEY`, which authenticates normal
+Crabbox runs, is not consulted — and skip when it is unset.
+
+Read-only status classification (lists live sandboxes against
+`https://api.islo.dev`, mutates nothing):
+
+```sh
+export ISLO_API_KEY=ak_...
+go test -tags smoke -run TestLiveIsloStatusClassification -v ./internal/providers/islo
+```
+
+Full pause/resume lifecycle (creates, pauses, resumes, runs a command in, and
+deletes a real sandbox — separately opt-in because it mutates paid provider
+state):
+
+```sh
+CRABBOX_LIVE_ISLO_PAUSE_RESUME=1 ISLO_API_KEY=... \
+  go test -tags smoke -run TestLiveIsloPauseResumeLifecycle -v ./internal/providers/islo
+```
+
+The lifecycle test honors `ISLO_BASE_URL` (default `https://api.islo.dev`) and
+`CRABBOX_LIVE_ISLO_IMAGE` (default `docker.io/library/ubuntu:26.04`). After it
+captures the lease ID, it attempts to delete the sandbox on exit even when a
+later assertion fails. If setup fails before lease capture or the process is
+interrupted, remove the leftover `crabbox-pause-resume-live-*` sandbox through
+the `--reclaim` adoption flow above followed by `crabbox stop`, or delete it on
+the Islo side.
+
 Related docs:
 
 - [Feature: Islo](../features/islo.md)
+- [Feature: Provider live smoke](../features/provider-live-smoke.md)
 - [Provider backends](../provider-backends.md)

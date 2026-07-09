@@ -443,6 +443,34 @@ describe("lease config", () => {
     expect(config.os).toBe("ubuntu:26.04");
   });
 
+  it("uses Daytona snapshot-managed SSH defaults", () => {
+    const config = leaseConfig({
+      provider: "daytona",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.serverType).toBe("snapshot");
+    expect(config.sshUser).toBe("daytona");
+    expect(config.sshPort).toBe("22");
+    expect(config.sshFallbackPorts).toEqual([]);
+    expect(config.workRoot).toBe("/home/daytona/crabbox");
+    expect(serverTypeForProviderClass("daytona", "beast")).toBe("snapshot");
+    expect(() =>
+      leaseConfig({
+        provider: "daytona",
+        serverType: "large",
+        serverTypeExplicit: true,
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("takes CPU, memory, and disk from the configured Daytona snapshot");
+    expect(() =>
+      leaseConfig({
+        provider: "daytona",
+        desktop: true,
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("supports SSH, sync, and run only");
+  });
+
   it("validates and normalizes AWS lease regions", () => {
     const config = leaseConfig({
       provider: "aws",

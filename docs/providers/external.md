@@ -216,6 +216,17 @@ later release still requires `allowEnvArgv` before placing `{{resourceName}}`
 back in argv. Do not use either opt-in for tokens, passwords, API keys, or
 other credential contents.
 
+Repository lifecycle commands also cannot place `{{config.*}}` values inherited
+from user config, an explicit config file, or `--external-config-json` in
+`argv` or `steps`. Pass credentials through the operation `env:` map. For an
+inherited non-secret value that must be an argument, set `allowConfigArgv: true`
+on that operation and repeat the exact full lifecycle plus `resourceName` and
+`cloudId` template contract in trusted user config. The repository cannot grant
+itself this opt-in, and changing any lifecycle command, argument, environment
+mapping, output mode, cleanup behavior, or config-derived connection template
+invalidates the approval. Repository-owned `external.config` values remain
+ordinary project automation.
+
 Environment-derived expansion in `connection.ssh` fields is rejected by
 default, including indirect use through an environment-backed `resourceName`,
 because values such as the SSH user, host, key path, ready check, or proxy

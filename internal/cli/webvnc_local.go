@@ -521,7 +521,7 @@ func forceRFBARDAuthenticationWithTimeout(ctx context.Context, browser, server n
 		return fmt.Errorf("write RFB browser version: %w", err)
 	}
 
-	securityType, err := negotiateRFBSecurityType(server)
+	securityType, err := negotiateRFBSecurityType(server, credentials)
 	if err != nil {
 		return err
 	}

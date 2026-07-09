@@ -15,6 +15,12 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   const url = new URL(request.url);
   const path = url.pathname.split("/").filter(Boolean);
   const method = request.method.toUpperCase();
+  if (
+    (method === "POST" && path.join("/") === "v1/auth/github/start") ||
+    (method === "GET" && path.join("/") === "portal/login")
+  ) {
+    return "direct";
+  }
   if (method === "GET" && path.join("/") === "v1/auth/github/callback") {
     return "direct";
   }
@@ -47,6 +53,15 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     return "direct";
   }
   if (path[0] === "v1" && path[1] === "providers" && path[3] === "readiness") {
+    return "direct";
+  }
+  if (
+    path[0] === "v1" &&
+    path[1] === "leases" &&
+    path[2] &&
+    method === "GET" &&
+    path.length === 3
+  ) {
     return "direct";
   }
   if (

@@ -18,6 +18,7 @@ const githubAuthorizeURL = "https://github.com/login/oauth/authorize";
 const githubTokenURL = "https://github.com/login/oauth/access_token";
 const githubAPIURL = "https://api.github.com";
 const maxPendingOAuthLogins = 100;
+const maxPendingOAuthLoginsPerSource = 10;
 const defaultUserTokenTTLSeconds = 180 * 24 * 60 * 60;
 const minUserTokenTTLSeconds = 60 * 60;
 const maxUserTokenTTLSeconds = 365 * 24 * 60 * 60;
@@ -41,6 +42,7 @@ interface OAuthPending {
   login?: string;
   error?: string;
   callbackClaim?: string;
+  sourceHash?: string;
 }
 
 interface GitHubUser {
@@ -62,7 +64,7 @@ export async function githubAuthRoute(
 ): Promise<Response> {
   const method = request.method.toUpperCase();
   if (method === "POST" && action === "start") {
-    return await githubAuthStart(request, runtime.storage, env);
+    return await githubAuthStart(request, runtime, env);
   }
   if (method === "GET" && action === "callback") {
     return await githubAuthCallback(request, runtime, env);
@@ -75,7 +77,7 @@ export async function githubAuthRoute(
 
 export async function githubPortalLogin(
   request: Request,
-  storage: CoordinatorStorage,
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
   env: Env,
 ): Promise<Response> {
   const clientID = env.CRABBOX_GITHUB_CLIENT_ID;
@@ -90,17 +92,16 @@ export async function githubPortalLogin(
   if (signingError) {
     return html("Crabbox login unavailable", signingError, 503);
   }
-  const pendingCount = await cleanupExpiredPendingOAuth(storage);
-  if (pendingCount >= maxPendingOAuthLogins) {
-    return html("Crabbox login busy", "Too many pending GitHub logins. Try again shortly.", 429);
-  }
   const url = new URL(request.url);
   const pending = newPendingOAuth({
     mode: "portal",
     returnTo: safePortalReturnTo(url.searchParams.get("returnTo")),
     redirectURI: oauthConfig.redirectURI,
+    sourceHash: await pendingOAuthSourceHash(request, env.CRABBOX_SESSION_SECRET!),
   });
-  await storePendingOAuth(storage, pending);
+  if (!(await admitPendingOAuth(runtime, pending))) {
+    return html("Crabbox login busy", "Too many pending GitHub logins. Try again shortly.", 429);
+  }
 
   return redirect(githubAuthorizeURLFor(clientID, pending.state, pending.redirectURI), 302);
 }
@@ -133,7 +134,7 @@ export function githubPortalLogoutConfirmation(): Response {
 
 async function githubAuthStart(
   request: Request,
-  storage: CoordinatorStorage,
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
   env: Env,
 ): Promise<Response> {
   const clientID = env.CRABBOX_GITHUB_CLIENT_ID;
@@ -169,8 +170,17 @@ async function githubAuthStart(
       { status: 400 },
     );
   }
-  const pendingCount = await cleanupExpiredPendingOAuth(storage);
-  if (pendingCount >= maxPendingOAuthLogins) {
+  const pending = newPendingOAuth({
+    mode: "cli",
+    pollSecretHash: input.pollSecretHash,
+    loopbackRedirectURI,
+    redirectURI: oauthConfig.redirectURI,
+    sourceHash: await pendingOAuthSourceHash(request, env.CRABBOX_SESSION_SECRET!),
+  });
+  if (input.provider === "aws" || input.provider === "hetzner" || input.provider === "gcp") {
+    pending.provider = input.provider;
+  }
+  if (!(await admitPendingOAuth(runtime, pending))) {
     return json(
       {
         error: "login_rate_limited",
@@ -179,16 +189,6 @@ async function githubAuthStart(
       { status: 429 },
     );
   }
-  const pending = newPendingOAuth({
-    mode: "cli",
-    pollSecretHash: input.pollSecretHash,
-    loopbackRedirectURI,
-    redirectURI: oauthConfig.redirectURI,
-  });
-  if (input.provider === "aws" || input.provider === "hetzner" || input.provider === "gcp") {
-    pending.provider = input.provider;
-  }
-  await storePendingOAuth(storage, pending);
 
   return json({
     loginID: pending.id,
@@ -216,6 +216,28 @@ async function storePendingOAuth(
 ): Promise<void> {
   await storage.put(oauthKey(pending.id), pending);
   await storage.put(oauthStateKey(pending.state), pending.id);
+}
+
+async function pendingOAuthSourceHash(request: Request, sessionSecret: string): Promise<string> {
+  const source = request.headers.get("cf-connecting-ip")?.trim() || "unknown";
+  return sha256Hex(`crabbox-oauth-source-v1\0${sessionSecret}\0${source}`);
+}
+
+async function admitPendingOAuth(
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
+  pending: OAuthPending,
+): Promise<boolean> {
+  return runtime.runExclusive(async () => {
+    const counts = await cleanupExpiredPendingOAuth(runtime.storage, pending.sourceHash);
+    if (
+      counts.total >= maxPendingOAuthLogins ||
+      counts.forSource >= maxPendingOAuthLoginsPerSource
+    ) {
+      return false;
+    }
+    await storePendingOAuth(runtime.storage, pending);
+    return true;
+  });
 }
 
 function githubAuthorizeURLFor(clientID: string, state: string, redirectURI: string): string {
@@ -632,20 +654,27 @@ async function deletePendingOAuth(
   await storage.delete(oauthStateKey(pending.state));
 }
 
-async function cleanupExpiredPendingOAuth(storage: CoordinatorStorage): Promise<number> {
+async function cleanupExpiredPendingOAuth(
+  storage: CoordinatorStorage,
+  sourceHash?: string,
+): Promise<{ total: number; forSource: number }> {
   const entries = await storage.list<OAuthPending>({ prefix: "oauth:" });
-  let active = 0;
+  let total = 0;
+  let forSource = 0;
   const now = Date.now();
-  await Promise.all(
-    [...entries.values()].map(async (pending) => {
-      if (Date.parse(pending.expiresAt) <= now) {
-        await deletePendingOAuth(storage, pending);
-        return;
-      }
-      active += 1;
-    }),
-  );
-  return active;
+  const expired: OAuthPending[] = [];
+  for (const pending of entries.values()) {
+    if (Date.parse(pending.expiresAt) <= now) {
+      expired.push(pending);
+      continue;
+    }
+    total += 1;
+    if (sourceHash && pending.sourceHash === sourceHash) {
+      forSource += 1;
+    }
+  }
+  await Promise.all(expired.map((pending) => deletePendingOAuth(storage, pending)));
+  return { total, forSource };
 }
 
 function oauthKey(id: string): string {

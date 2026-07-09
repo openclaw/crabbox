@@ -64,7 +64,7 @@ func controllerDarwinLoopbackListenerOwnerPIDs(port string) ([]int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	path := "/usr/sbin/lsof"
-	output, err := exec.CommandContext(ctx, path, "-nP", "-a", "-iTCP:"+port, "-sTCP:LISTEN", "-Fpn").Output()
+	output, err := exec.CommandContext(ctx, path, controllerDarwinListenerLsofArgs(port)...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("inspect macOS listener ownership: %w", err)
 	}
@@ -73,6 +73,13 @@ func controllerDarwinLoopbackListenerOwnerPIDs(port string) ([]int, error) {
 		return nil, fmt.Errorf("no process owns the IPv4 loopback listener")
 	}
 	return owners, nil
+}
+
+func controllerDarwinListenerLsofArgs(port string) []string {
+	// We only consume socket fields. Avoid filesystem metadata calls and lsof's
+	// helper-process overhead, which can exceed the fail-closed timeout when
+	// macOS has slow or unavailable simulator volumes mounted.
+	return []string{"-O", "-b", "-w", "-nP", "-a", "-iTCP:" + port, "-sTCP:LISTEN", "-Fpn"}
 }
 
 func controllerDarwinLoopbackListenerOwners(output, port string) []int {

@@ -2,6 +2,7 @@ package wandb
 
 import (
 	"flag"
+	"os"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -14,6 +15,15 @@ type Provider struct{}
 
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return []string{"weights-and-biases"} }
+
+func (Provider) DiagnosticSecrets(cfg core.Config) []string {
+	return []string{
+		os.Getenv("CRABBOX_WANDB_API_KEY"),
+		cfg.Wandb.APIKey,
+		os.Getenv("WANDB_API_KEY"),
+		readNetrcWandbKey(),
+	}
+}
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/aes"
+	"crypto/des"
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/binary"
@@ -13,17 +14,21 @@ import (
 	"image/png"
 	"io"
 	"math/big"
+	"math/bits"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	rfbSecurityNone = 1
-	rfbSecurityARD  = 30
-	rfbEncodingRaw  = 0
+	rfbSecurityNone  = 1
+	rfbSecurityVNC   = 2
+	rfbSecurityARD   = 30
+	rfbEncodingRaw   = 0
+	rfbKeyEventDelay = 5 * time.Millisecond
 )
 
 type rfbCredentials struct {
@@ -46,7 +51,6 @@ func captureRemoteMacVNCScreenshot(ctx context.Context, cfg Config, target SSHTa
 			password = strings.TrimSpace(out)
 		}
 		creds = rfbCredentials{
-			Username: strings.TrimSpace(target.User),
 			Password: password,
 		}
 	}
@@ -72,6 +76,40 @@ func captureRemoteMacVNCScreenshot(ctx context.Context, cfg Config, target SSHTa
 		return exit(5, "write screenshot PNG: %v", err)
 	}
 	ok = true
+	return nil
+}
+
+func clickRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, x, y int) error {
+	tunnel, localPort, err := startVNCForegroundTunnelOnReservedPort(ctx, target, "", "127.0.0.1", managedVNCPort)
+	if err != nil {
+		return err
+	}
+	defer stopProcess(tunnel)
+
+	creds, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	if err != nil {
+		return err
+	}
+	if err := clickRFBPointer(ctx, "127.0.0.1:"+localPort, creds, x, y); err != nil {
+		return fmt.Errorf("click macOS VNC pointer: %w", err)
+	}
+	return nil
+}
+
+func typeRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, text string) error {
+	tunnel, localPort, err := startVNCForegroundTunnelOnReservedPort(ctx, target, "", "127.0.0.1", managedVNCPort)
+	if err != nil {
+		return err
+	}
+	defer stopProcess(tunnel)
+
+	creds, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	if err != nil {
+		return err
+	}
+	if err := typeRFBText(ctx, "127.0.0.1:"+localPort, creds, text); err != nil {
+		return fmt.Errorf("type macOS VNC text: %w", err)
+	}
 	return nil
 }
 
@@ -133,19 +171,23 @@ func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, cred
 	if _, err := io.ReadFull(conn, version); err != nil {
 		return fmt.Errorf("read RFB version: %w", err)
 	}
-	if err := validateRFBServerVersion(version); err != nil {
+	if !bytes.HasPrefix(version, []byte("RFB ")) {
 		return fmt.Errorf("unexpected RFB version %q", string(version))
 	}
 	if _, err := conn.Write([]byte("RFB 003.008\n")); err != nil {
 		return fmt.Errorf("write RFB version: %w", err)
 	}
 
-	securityType, err := negotiateRFBSecurityType(conn)
+	securityType, err := negotiateRFBSecurityType(conn, creds)
 	if err != nil {
 		return err
 	}
 	switch securityType {
 	case rfbSecurityNone:
+	case rfbSecurityVNC:
+		if err := negotiateRFBVNCAuth(conn, creds); err != nil {
+			return err
+		}
 	case rfbSecurityARD:
 		if err := negotiateRFBARDAuth(conn, creds); err != nil {
 			return err
@@ -156,6 +198,98 @@ func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, cred
 	return readRFBSecurityResult(conn)
 }
 
+func clickRFBPointer(ctx context.Context, address string, creds rfbCredentials, x, y int) error {
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return clickRFBPointerFromConn(ctx, conn, creds, x, y)
+}
+
+func typeRFBText(ctx context.Context, address string, creds rfbCredentials, text string) error {
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return typeRFBTextFromConn(ctx, conn, creds, text)
+}
+
+func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, text string) error {
+	if !utf8.ValidString(text) {
+		return fmt.Errorf("RFB text is not valid UTF-8")
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	}
+	if _, _, err := initializeRFBConnection(conn, creds); err != nil {
+		return err
+	}
+	for _, r := range text {
+		key, err := rfbKeysymForRune(r)
+		if err != nil {
+			return err
+		}
+		if err := writeRFBKeyEvent(conn, true, key); err != nil {
+			return err
+		}
+		time.Sleep(rfbKeyEventDelay)
+		if err := writeRFBKeyEvent(conn, false, key); err != nil {
+			return err
+		}
+		time.Sleep(rfbKeyEventDelay)
+	}
+	time.Sleep(50 * time.Millisecond)
+	return nil
+}
+
+func rfbKeysymForRune(r rune) (uint32, error) {
+	switch r {
+	case '\n', '\r':
+		return 0xff0d, nil // XK_Return
+	case '\t':
+		return 0xff09, nil // XK_Tab
+	case '\b':
+		return 0xff08, nil // XK_BackSpace
+	}
+	if r < 0x20 || r == 0x7f {
+		return 0, fmt.Errorf("RFB typing does not support control character U+%04X", r)
+	}
+	if r <= 0xff {
+		return uint32(r), nil
+	}
+	return 0x01000000 | uint32(r), nil
+}
+
+func clickRFBPointerFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, x, y int) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	}
+
+	width, height, err := initializeRFBConnection(conn, creds)
+	if err != nil {
+		return err
+	}
+	if x < 0 || y < 0 || x >= int(width) || y >= int(height) {
+		return fmt.Errorf("pointer coordinates %d,%d exceed framebuffer %dx%d", x, y, width, height)
+	}
+	if err := writeRFBPointerEvent(conn, 0, x, y); err != nil {
+		return err
+	}
+	if err := writeRFBPointerEvent(conn, 1, x, y); err != nil {
+		return err
+	}
+	time.Sleep(80 * time.Millisecond)
+	return writeRFBPointerEvent(conn, 0, x, y)
+}
+
 func captureRFBFrameFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials) (image.Image, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
@@ -163,46 +297,9 @@ func captureRFBFrameFromConn(ctx context.Context, conn net.Conn, creds rfbCreden
 		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
-	version := make([]byte, 12)
-	if _, err := io.ReadFull(conn, version); err != nil {
-		return nil, fmt.Errorf("read RFB version: %w", err)
-	}
-	if !bytes.HasPrefix(version, []byte("RFB ")) {
-		return nil, fmt.Errorf("unexpected RFB version %q", string(version))
-	}
-	if _, err := conn.Write([]byte("RFB 003.008\n")); err != nil {
-		return nil, fmt.Errorf("write RFB version: %w", err)
-	}
-
-	securityType, err := negotiateRFBSecurityType(conn)
+	width, height, err := initializeRFBConnection(conn, creds)
 	if err != nil {
 		return nil, err
-	}
-	switch securityType {
-	case rfbSecurityNone:
-	case rfbSecurityARD:
-		if err := negotiateRFBARDAuth(conn, creds); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("unsupported RFB security type %d", securityType)
-	}
-	if err := readRFBSecurityResult(conn); err != nil {
-		return nil, err
-	}
-
-	if _, err := conn.Write([]byte{1}); err != nil {
-		return nil, fmt.Errorf("write RFB client init: %w", err)
-	}
-	width, height, err := readRFBServerInit(conn)
-	if err != nil {
-		return nil, err
-	}
-	if width == 0 || height == 0 {
-		return nil, fmt.Errorf("server reported empty framebuffer %dx%d", width, height)
-	}
-	if int(width)*int(height) > 16_000_000 {
-		return nil, fmt.Errorf("framebuffer %dx%d is too large", width, height)
 	}
 
 	if err := writeRFBPixelFormat(conn); err != nil {
@@ -217,7 +314,82 @@ func captureRFBFrameFromConn(ctx context.Context, conn net.Conn, creds rfbCreden
 	return readRFBFramebufferUpdate(conn, int(width), int(height))
 }
 
-func negotiateRFBSecurityType(conn net.Conn) (byte, error) {
+func initializeRFBConnection(conn net.Conn, creds rfbCredentials) (uint16, uint16, error) {
+	version := make([]byte, 12)
+	if _, err := io.ReadFull(conn, version); err != nil {
+		return 0, 0, fmt.Errorf("read RFB version: %w", err)
+	}
+	if !bytes.HasPrefix(version, []byte("RFB ")) {
+		return 0, 0, fmt.Errorf("unexpected RFB version %q", string(version))
+	}
+	if _, err := conn.Write([]byte("RFB 003.008\n")); err != nil {
+		return 0, 0, fmt.Errorf("write RFB version: %w", err)
+	}
+
+	securityType, err := negotiateRFBSecurityType(conn, creds)
+	if err != nil {
+		return 0, 0, err
+	}
+	switch securityType {
+	case rfbSecurityNone:
+	case rfbSecurityVNC:
+		if err := negotiateRFBVNCAuth(conn, creds); err != nil {
+			return 0, 0, err
+		}
+	case rfbSecurityARD:
+		if err := negotiateRFBARDAuth(conn, creds); err != nil {
+			return 0, 0, err
+		}
+	default:
+		return 0, 0, fmt.Errorf("unsupported RFB security type %d", securityType)
+	}
+	if err := readRFBSecurityResult(conn); err != nil {
+		return 0, 0, err
+	}
+
+	if _, err := conn.Write([]byte{1}); err != nil {
+		return 0, 0, fmt.Errorf("write RFB client init: %w", err)
+	}
+	width, height, err := readRFBServerInit(conn)
+	if err != nil {
+		return 0, 0, err
+	}
+	if width == 0 || height == 0 {
+		return 0, 0, fmt.Errorf("server reported empty framebuffer %dx%d", width, height)
+	}
+	if int(width)*int(height) > 16_000_000 {
+		return 0, 0, fmt.Errorf("framebuffer %dx%d is too large", width, height)
+	}
+	return width, height, nil
+}
+
+func writeRFBPointerEvent(conn net.Conn, buttonMask byte, x, y int) error {
+	if x < 0 || y < 0 || x > 0xffff || y > 0xffff {
+		return fmt.Errorf("RFB pointer coordinates %d,%d are outside the uint16 protocol range", x, y)
+	}
+	message := []byte{5, buttonMask, 0, 0, 0, 0}
+	binary.BigEndian.PutUint16(message[2:4], uint16(x))
+	binary.BigEndian.PutUint16(message[4:6], uint16(y))
+	if _, err := conn.Write(message); err != nil {
+		return fmt.Errorf("write RFB pointer event: %w", err)
+	}
+	return nil
+}
+
+func writeRFBKeyEvent(conn net.Conn, down bool, key uint32) error {
+	message := make([]byte, 8)
+	message[0] = 4
+	if down {
+		message[1] = 1
+	}
+	binary.BigEndian.PutUint32(message[4:8], key)
+	if _, err := conn.Write(message); err != nil {
+		return fmt.Errorf("write RFB key event: %w", err)
+	}
+	return nil
+}
+
+func negotiateRFBSecurityType(conn net.Conn, creds rfbCredentials) (byte, error) {
 	count := []byte{0}
 	if _, err := io.ReadFull(conn, count); err != nil {
 		return 0, fmt.Errorf("read RFB security type count: %w", err)
@@ -233,16 +405,54 @@ func negotiateRFBSecurityType(conn net.Conn) (byte, error) {
 	if _, err := io.ReadFull(conn, types); err != nil {
 		return 0, fmt.Errorf("read RFB security types: %w", err)
 	}
-	for _, preferred := range types {
-		switch preferred {
-		case rfbSecurityARD, rfbSecurityNone:
-			if _, err := conn.Write([]byte{preferred}); err != nil {
+	preferences := []byte{rfbSecurityARD, rfbSecurityVNC, rfbSecurityNone}
+	if creds.Username == "" {
+		preferences = []byte{rfbSecurityVNC, rfbSecurityARD, rfbSecurityNone}
+	}
+	if creds.Password == "" {
+		preferences = []byte{rfbSecurityNone, rfbSecurityARD, rfbSecurityVNC}
+	}
+	for _, preferred := range preferences {
+		for _, offered := range types {
+			if offered != preferred {
+				continue
+			}
+			if _, err := conn.Write([]byte{offered}); err != nil {
 				return 0, fmt.Errorf("write RFB security type: %w", err)
 			}
-			return preferred, nil
+			return offered, nil
 		}
 	}
 	return 0, fmt.Errorf("unsupported RFB security types %v", types)
+}
+
+func negotiateRFBVNCAuth(conn net.Conn, creds rfbCredentials) error {
+	if creds.Password == "" {
+		return fmt.Errorf("VNC password is required")
+	}
+	challenge := make([]byte, 16)
+	if _, err := io.ReadFull(conn, challenge); err != nil {
+		return fmt.Errorf("read VNC auth challenge: %w", err)
+	}
+	var key [8]byte
+	copy(key[:], []byte(creds.Password))
+	for i := range key {
+		key[i] = bits.Reverse8(key[i])
+	}
+	cipher, err := des.NewCipher(key[:])
+	if err != nil {
+		return fmt.Errorf("create VNC auth cipher: %w", err)
+	}
+	response := make([]byte, len(challenge))
+	for offset := 0; offset < len(challenge); offset += cipher.BlockSize() {
+		// RFB VNC Authentication mandates DES for protocol compatibility; it is
+		// not used here to protect application data or stored credentials.
+		cipher.Encrypt(response[offset:offset+cipher.BlockSize()], challenge[offset:offset+cipher.BlockSize()]) // lgtm[go/weak-cryptographic-algorithm]
+	}
+	if _, err := conn.Write(response); err != nil {
+		return fmt.Errorf("write VNC auth response: %w", err)
+	}
+	return nil
 }
 
 func negotiateRFBARDAuth(conn net.Conn, creds rfbCredentials) error {

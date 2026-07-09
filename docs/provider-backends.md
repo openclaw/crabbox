@@ -239,7 +239,7 @@ internal/providers/sprites              # Sprites SSH backend
 internal/providers/exedev               # exe.dev SSH backend
 internal/providers/runpod               # RunPod GPU pod SSH backend
 internal/providers/nvidiabrev           # NVIDIA Brev GPU workspace SSH backend
-internal/providers/railway              # Railway.app delegated backend
+internal/providers/railway              # Railway.app service-control backend
 internal/providers/blacksmith           # Blacksmith Testbox delegated backend
 internal/providers/e2b                  # E2B delegated backend
 internal/providers/islo                 # Islo delegated backend
@@ -370,6 +370,9 @@ type ProviderSpec struct {
 	Targets     []TargetSpec
 	Features    FeatureSet
 	Coordinator CoordinatorMode
+	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
+	// not a bidirectional peer endpoint.
+	TailscaleEgressOnly bool
 }
 ```
 
@@ -382,6 +385,9 @@ Pick `Kind` carefully:
 
 - `ProviderKindSSHLease`: provider returns SSH targets and Crabbox owns sync/run.
 - `ProviderKindDelegatedRun`: provider owns execution and output streaming.
+- `ProviderKindServiceControl`: provider inspects or controls an existing
+  hosted service instead of leasing a run surface (for example `railway` and
+  `fastapi-cloud`).
 
 `Targets` should describe what the provider can actually satisfy. Use `linux`,
 `macos`, or `windows` only for real operating-system targets. Use
@@ -412,6 +418,7 @@ cli.FeatureRunSession   // "run-session"
 cli.FeatureModuleRun    // "module-run"
 cli.FeatureRunArtifacts // "run-artifacts"
 cli.FeatureRunDownloads // "run-downloads"
+cli.FeaturePauseResume  // "pause-resume"
 cli.FeatureMCP          // "mcp-attachments"
 ```
 

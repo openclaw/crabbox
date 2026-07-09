@@ -26,9 +26,12 @@ type watchTestBackend struct {
 	resolveCalls int
 	releaseCalls int
 	releaseCtx   context.Context
+	releaseLease LeaseTarget
+	resolveReq   ResolveRequest
 	acquireErr   error
 	resolveErr   error
 	labels       map[string]string
+	resolveSSH   string
 	features     FeatureSet
 }
 
@@ -49,13 +52,14 @@ func (b *watchTestBackend) Acquire(ctx context.Context, req AcquireRequest) (Lea
 	}
 	server := Server{Provider: "watch-test", Labels: map[string]string{"lease": watchTestLeaseID}}
 	server.ServerType.Name = "test"
-	return LeaseTarget{LeaseID: watchTestLeaseID, Server: server}, nil
+	return LeaseTarget{LeaseID: watchTestLeaseID, Server: server, SSH: SSHTarget{Host: "acquired.example"}}, nil
 }
 
 func (b *watchTestBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.resolveCalls++
+	b.resolveReq = req
 	if b.resolveErr != nil {
 		return LeaseTarget{}, b.resolveErr
 	}
@@ -65,18 +69,25 @@ func (b *watchTestBackend) Resolve(ctx context.Context, req ResolveRequest) (Lea
 	}
 	server := Server{Provider: "watch-test", Labels: labels}
 	server.ServerType.Name = "test"
-	return LeaseTarget{LeaseID: req.ID, Server: server}, nil
+	return LeaseTarget{LeaseID: req.ID, Server: server, SSH: SSHTarget{Host: b.resolveSSH}}, nil
 }
+
+func (b *watchTestBackend) RefreshReleaseLeaseTarget(ctx context.Context, lease LeaseTarget) (LeaseTarget, error) {
+	return b.Resolve(ctx, ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+}
+
+func (b *watchTestBackend) ReleaseLeaseConnectionCleanupSafe() bool { return true }
 
 func (b *watchTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
 }
 
-func (b *watchTestBackend) ReleaseLease(ctx context.Context, _ ReleaseLeaseRequest) error {
+func (b *watchTestBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.releaseCalls++
 	b.releaseCtx = ctx
+	b.releaseLease = req.Lease
 	return nil
 }
 
@@ -636,6 +647,84 @@ func TestWatchKeepsExecutableModeChanges(t *testing.T) {
 	}
 }
 
+func TestWatchTraversesExcludedParentForReincludedDescendant(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, "target/keep.txt", "source")
+	watchTestWrite(t, root, "target/drop.bin", "generated")
+	excludes := appendOrderedStrings(defaultExcludes(), "!target/keep.txt")
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+
+	files, err := addWatchTree(watcher, root, root, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(files, ",")
+	if !strings.Contains(got, "target/keep.txt") {
+		t.Fatalf("watched files=%q should include re-included descendant", got)
+	}
+	if strings.Contains(got, "target/drop.bin") || strings.Contains(got, ".git/") {
+		t.Fatalf("watched files=%q should omit excluded paths", got)
+	}
+}
+
+func TestWatchQueuesReincludedDescendantWhenExcludedParentIsRemoved(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, ".crabboxignore", "")
+	watchTestWrite(t, root, "target/keep.txt", "source")
+	watchTestGit(t, root, "add", ".crabboxignore", "target/keep.txt")
+	watchTestGit(t, root, "commit", "-q", "-m", "add excluded source target")
+	excludes, err := syncExcludes(root, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	files, err := addWatchTree(watcher, root, root, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &watchSession{
+		root:     root,
+		cfg:      baseConfig(),
+		excludes: excludes,
+		paths:    map[string]watchPathState{},
+		watcher:  watcher,
+	}
+	for _, file := range files {
+		session.rememberPath(file, filepath.Join(root, filepath.FromSlash(file)))
+	}
+	watchTestWrite(t, root, ".crabboxignore", "!target/keep.txt\n")
+	if _, err := session.qualifyBatch([]string{".crabboxignore"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := session.paths["target/keep.txt"]; !ok {
+		t.Fatal("filter rewatch did not remember newly re-included descendant")
+	}
+	if err := os.RemoveAll(filepath.Join(root, "target")); err != nil {
+		t.Fatal(err)
+	}
+	batch := map[string]struct{}{}
+	if !session.observeEvent(nil, fsnotify.Event{
+		Name: filepath.Join(root, "target"),
+		Op:   fsnotify.Remove,
+	}, batch) {
+		t.Fatal("excluded parent removal did not qualify re-included descendant")
+	}
+	if _, ok := batch["target/keep.txt"]; !ok {
+		t.Fatalf("batch=%v, want removed re-included descendant", batch)
+	}
+	if _, ok := session.paths["target/keep.txt"]; ok {
+		t.Fatal("removed descendant remained in watch state")
+	}
+}
+
 func TestWatchIncludeWhitelistFiltersReruns(t *testing.T) {
 	root := newWatchGitRepo(t)
 	watchTestWrite(t, root, "src/app.go", "package app\n")
@@ -678,14 +767,65 @@ func TestWatchAcquiresLeaseWhenNoID(t *testing.T) {
 		t.Fatalf("watchWithBackend: %v", err)
 	}
 	acquires, resolves, releases := backend.counts()
-	if acquires != 1 || resolves != 0 || releases != 1 {
-		t.Fatalf("acquire=%d resolve=%d release=%d, want 1/0/1", acquires, resolves, releases)
+	if acquires != 1 || resolves != 1 || releases != 1 {
+		t.Fatalf("acquire=%d resolve=%d release=%d, want 1/1/1", acquires, resolves, releases)
 	}
 	if !strings.Contains(stdout.String(), "leased "+watchTestLeaseID) {
 		t.Fatalf("stdout missing leased line:\n%s", stdout.String())
 	}
 	if got := executor.call(0); !strings.Contains(strings.Join(got, " "), "--id "+watchTestLeaseID) {
 		t.Fatalf("iteration args=%v, want injected --id", got)
+	}
+}
+
+func TestWatchRefreshesReleaseAuthorizationAfterIterations(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	root := newWatchGitRepo(t)
+	backend := newWatchTestBackend()
+	backend.labels = map[string]string{"claim_revision": "after-run"}
+	backend.resolveSSH = "refreshed.example"
+	executor := newWatchTestExecutor()
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	opts := watchOptions{Debounce: 25 * time.Millisecond, IdleExit: 250 * time.Millisecond, IdleExitSet: true, Command: []string{"echo", "ok"}}
+	cfg := Config{Provider: "watch-test", IdleTimeout: time.Minute, TTL: time.Hour}
+
+	if err := app.watchWithBackend(context.Background(), opts, Repo{Root: root, Name: "my-app"}, cfg, backend, executor.run); err != nil {
+		t.Fatalf("watchWithBackend: %v", err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if !backend.resolveReq.ReleaseOnly || backend.resolveReq.ID != watchTestLeaseID {
+		t.Fatalf("resolve request=%+v, want release-only refresh", backend.resolveReq)
+	}
+	if got := backend.releaseLease.Server.Labels["claim_revision"]; got != "after-run" {
+		t.Fatalf("released claim revision=%q, want refreshed snapshot", got)
+	}
+	if got := backend.releaseLease.SSH.Host; got != "refreshed.example" {
+		t.Fatalf("released SSH host=%q, want refreshed connection metadata", got)
+	}
+}
+
+func TestWatchAttemptsReleaseWithAcquiredTargetWhenRefreshFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	root := newWatchGitRepo(t)
+	backend := newWatchTestBackend()
+	backend.resolveErr = errors.New("temporary inventory failure")
+	executor := newWatchTestExecutor()
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	opts := watchOptions{Debounce: 25 * time.Millisecond, IdleExit: 250 * time.Millisecond, IdleExitSet: true, Command: []string{"echo", "ok"}}
+	cfg := Config{Provider: "watch-test", IdleTimeout: time.Minute, TTL: time.Hour}
+
+	if err := app.watchWithBackend(context.Background(), opts, Repo{Root: root, Name: "my-app"}, cfg, backend, executor.run); err != nil {
+		t.Fatalf("watchWithBackend: %v", err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.releaseCalls != 1 || backend.releaseLease.LeaseID != watchTestLeaseID || backend.releaseLease.SSH.Host != "acquired.example" {
+		t.Fatalf("release calls=%d lease=%+v, want acquired target release attempt", backend.releaseCalls, backend.releaseLease)
 	}
 }
 
@@ -872,6 +1012,8 @@ func TestWatchRejectsConflictingRunFlags(t *testing.T) {
 		{"--download", "remote=local", "--", "echo", "ok"},
 		{"--emit-proof", "proof.md", "--", "echo", "ok"},
 		{"--proof-template", "default", "--", "echo", "ok"},
+		{"--attest", "receipt.json", "--", "echo", "ok"},
+		{"--attest-key", "key.pem", "--", "echo", "ok"},
 		{"-label", "custom", "--", "echo", "ok"},
 	} {
 		t.Run(args[0], func(t *testing.T) {

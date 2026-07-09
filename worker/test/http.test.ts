@@ -1233,10 +1233,14 @@ describe("http responses", () => {
       "standalone Bearer :\r\n spaced-folded-colon-standalone-secret",
       "standalone Bearer [redacted]",
       "Proxy-Authorization=Basic basic-secret",
+      "Authorization: Token token-scheme-secret",
+      "Proxy-Authorization: Digest digest-scheme-secret",
+      'Authorization: Digest username="digest-user", response="digest-response"',
+      "Authorization: 1custom digit-scheme-secret",
       "X-API-Key=header-secret",
       "client_secret=plain-secret",
       '{"token":"json-secret\\\"escaped-tail-leak","clientSecret":"client-secret","x-api-key":"json-api-secret"}',
-      "https://alice:password@example.test/path?api_key=query-secret&X-Amz-Signature=signed-secret",
+      "https://alice:password@example.test/path?api_key=query-secret&x-api-key=query-api-key&authorization=query-authorization&proxy-authorization=query-proxy-authorization&session_token=query-session-token&X-Amz-Signature=signed-secret&X-Goog-Credential=gcp-credential&X-Goog-Signature=gcp-signature&X-Goog-Security-Token=gcp-security-token&region=eu",
       "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
       "safe suffix",
     ].join("\n");
@@ -1257,6 +1261,11 @@ describe("http responses", () => {
       "folded-colon-standalone-secret",
       "spaced-folded-colon-standalone-secret",
       "basic-secret",
+      "token-scheme-secret",
+      "digest-scheme-secret",
+      "digest-user",
+      "digest-response",
+      "digit-scheme-secret",
       "header-secret",
       "plain-secret",
       "json-secret",
@@ -1266,7 +1275,14 @@ describe("http responses", () => {
       "alice",
       "password",
       "query-secret",
+      "query-api-key",
+      "query-authorization",
+      "query-proxy-authorization",
+      "query-session-token",
       "signed-secret",
+      "gcp-credential",
+      "gcp-signature",
+      "gcp-security-token",
       "PRIVATE KEY",
       "private-key-body",
     ]) {
@@ -1274,7 +1290,23 @@ describe("http responses", () => {
     }
     expect(redacted).toContain("[redacted]");
     expect(redacted).toContain("standalone Bearer [redacted]");
+    expect(redacted).toContain("region=eu");
     expect(redacted).toContain("safe suffix");
+  });
+
+  it("redacts punctuation-bearing credential suffixes while preserving context", () => {
+    for (const separator of [",", ";", "'", "}", "&", "#", "?", '\\"']) {
+      const credential = `prefix${separator}secret-suffix`;
+      expect(redactDiagnosticSecrets(`Authorization: Bearer ${credential} route=iad`)).toBe(
+        "Authorization: [redacted] route=iad",
+      );
+      expect(redactDiagnosticSecrets(`upstream Bearer ${credential} request=retry`)).toBe(
+        "upstream Bearer [redacted] request=retry",
+      );
+    }
+    expect(redactDiagnosticSecrets("provider:Authorization: Bearer prefix}secret route=iad")).toBe(
+      "provider:Authorization: [redacted] route=iad",
+    );
   });
 });
 

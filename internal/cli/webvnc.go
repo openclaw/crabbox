@@ -330,12 +330,6 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		return err
 	}
 
-	portalUsername, portalPassword := webVNCPortalCredentialsForTarget(target, username, password)
-	handoffTicket, err := webVNCPortalHandoffForTarget(ctx, coord, leaseID, target, username, password)
-	if err != nil {
-		return err
-	}
-	portal := webVNCPortalURL(coord.BaseURL, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl, Handoff: handoffTicket})
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
 	opened := false
 	bridgeCtx := ctx
@@ -367,6 +361,14 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		NativeVNC:        nativeVNCOpenCommand(cfg, target, leaseID),
 		Log:              a.Stdout,
 		OnReady: func() error {
+			portalUsername, portalPassword := "", ""
+			if *openPortal || !*redactCredentials {
+				portalUsername, portalPassword = username, password
+			}
+			portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl})
+			if err != nil {
+				return err
+			}
 			fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using WebVNC")
 			fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
 			if strings.TrimSpace(portalPassword) != "" {
@@ -752,29 +754,6 @@ func webVNCCredentials(ctx context.Context, cfg Config, target SSHTarget, endpoi
 	return strings.TrimSpace(username), strings.TrimSpace(password)
 }
 
-func webVNCPortalCredentialsForTarget(target SSHTarget, username, password string) (string, string) {
-	if target.TargetOS == targetMacOS {
-		return "", ""
-	}
-	return username, password
-}
-
-func webVNCPortalHandoffForTarget(ctx context.Context, coord *CoordinatorClient, leaseID string, target SSHTarget, username, password string) (string, error) {
-	if target.TargetOS != targetMacOS || coord == nil || !coord.hasConfiguredAuth() {
-		return "", nil
-	}
-	username = strings.TrimSpace(username)
-	password = strings.TrimSpace(password)
-	if username == "" && password == "" {
-		return "", nil
-	}
-	handoff, err := coord.CreateWebVNCCredentialHandoff(ctx, leaseID, username, password)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(handoff.Ticket), nil
-}
-
 func webVNCOutputURLHasCredentials(value string) bool {
 	if strings.Contains(value, "password=") || strings.Contains(value, "username=") || strings.Contains(value, "handoff=") {
 		return true
@@ -995,12 +974,14 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	for _, line := range recentWebVNCLogEvents(daemon.LogPath, 6) {
 		fmt.Fprintf(a.Stdout, "log event: %s\n", line)
 	}
-	portalUsername, portalPassword := webVNCPortalCredentialsForTarget(target, username, password)
-	handoffTicket, err := webVNCPortalHandoffForTarget(ctx, coord, leaseID, target, username, password)
+	portalUsername, portalPassword := "", ""
+	if !*redactCredentials {
+		portalUsername, portalPassword = username, password
+	}
+	portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword)
 	if err != nil {
 		return err
 	}
-	portal := webVNCPortalURL(coord.BaseURL, leaseID, portalUsername, portalPassword, webVNCPortalOptions{Handoff: handoffTicket})
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
 	if strings.TrimSpace(portalPassword) != "" {
 		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(portalPassword))
@@ -1091,12 +1072,14 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		return endpointErr
 	}
 	username, password := webVNCCredentials(ctx, cfg, target, endpoint)
-	portalUsername, portalPassword := webVNCPortalCredentialsForTarget(target, username, password)
-	handoffTicket, err := webVNCPortalHandoffForTarget(ctx, coord, leaseID, target, username, password)
+	portalUsername, portalPassword := "", ""
+	if *openPortal || !*redactCredentials {
+		portalUsername, portalPassword = username, password
+	}
+	portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl})
 	if err != nil {
 		return err
 	}
-	portal := webVNCPortalURL(coord.BaseURL, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl, Handoff: handoffTicket})
 	daemonArgs := webVNCBridgeArgs(cfg, target, leaseID, *openPortal, *takeControl)
 	daemonName := *id
 	if strings.TrimSpace(daemonName) == "" {
@@ -2673,19 +2656,22 @@ func guardMacOSDirectWebVNC(cfg Config) error {
 	return exit(2, "this webvnc subcommand is not available for macOS leases; run `crabbox webvnc --id <id>` for the host-side browser viewer, or use a native VNC client over an SSH tunnel:\n  ssh -o GatewayPorts=no -L 127.0.0.1:5900:127.0.0.1:5900 %s@<lease-ip>\n  open vnc://127.0.0.1:5900", blank(cfg.SSHUser, "<user>"))
 }
 
-// isMacOSDesktopProvider reports whether the lease should use the host-side
-// Screen Sharing bridge. Single-target macOS providers always qualify. Generic
-// multi-target adapters qualify only when they expose desktop credentials and the
-// selected target is macOS.
+// isMacOSDesktopProvider reports whether the resolved lease uses macOS native
+// Screen Sharing. An explicit target wins for multi-target providers such as
+// Parallels; provider-spec inference covers entrypoints that have not resolved
+// the target yet, such as Tart's macOS-only profile.
 func isMacOSDesktopProvider(cfg Config) bool {
+	switch strings.ToLower(strings.TrimSpace(cfg.TargetOS)) {
+	case targetMacOS:
+		return true
+	case "":
+		// Fall through to provider-spec inference.
+	default:
+		return false
+	}
 	p, err := ProviderFor(cfg.Provider)
 	if err != nil {
 		return false
-	}
-	if cfg.TargetOS == targetMacOS {
-		if _, ok := p.(DesktopCredentialProvider); ok {
-			return true
-		}
 	}
 	targets := p.Spec().Targets
 	if len(targets) == 0 {
@@ -4139,10 +4125,37 @@ func webVNCAgentURLWithCapabilities(base, leaseID, capabilities string) string {
 
 type webVNCPortalOptions struct {
 	TakeControl bool
-	Handoff     string
 }
 
-func webVNCPortalURL(base, leaseID, username, password string, opts ...webVNCPortalOptions) string {
+func createWebVNCPortalURL(ctx context.Context, coord *CoordinatorClient, leaseID, username, password string, opts ...webVNCPortalOptions) (string, error) {
+	handoff := ""
+	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" {
+		issued, err := coord.CreateWebVNCCredentialHandoff(ctx, leaseID, username, password)
+		if err != nil {
+			return "", fmt.Errorf("create WebVNC credential handoff: %w", err)
+		}
+		if !validWebVNCCredentialHandoffTicket(issued.Ticket) {
+			return "", fmt.Errorf("create WebVNC credential handoff: coordinator returned an invalid ticket")
+		}
+		handoff = issued.Ticket
+	}
+	return webVNCPortalURL(coord.BaseURL, leaseID, handoff, opts...), nil
+}
+
+func validWebVNCCredentialHandoffTicket(value string) bool {
+	const prefix = "vnc_handoff_"
+	if len(value) != len(prefix)+32 || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	for _, character := range value[len(prefix):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func webVNCPortalURL(base, leaseID, handoff string, opts ...webVNCPortalOptions) string {
 	u, err := url.Parse(base)
 	if err != nil {
 		return base
@@ -4152,23 +4165,13 @@ func webVNCPortalURL(base, leaseID, username, password string, opts ...webVNCPor
 	u.Fragment = ""
 	u.RawFragment = ""
 	takeControl := false
-	handoff := ""
 	for _, opt := range opts {
 		takeControl = takeControl || opt.TakeControl
-		if strings.TrimSpace(opt.Handoff) != "" && handoff == "" {
-			handoff = strings.TrimSpace(opt.Handoff)
-		}
 	}
-	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" || takeControl || handoff != "" {
+	if strings.TrimSpace(handoff) != "" || takeControl {
 		values := url.Values{}
-		if strings.TrimSpace(username) != "" {
-			values.Set("username", strings.TrimSpace(username))
-		}
-		if strings.TrimSpace(password) != "" {
-			values.Set("password", strings.TrimSpace(password))
-		}
-		if handoff != "" {
-			values.Set("handoff", handoff)
+		if strings.TrimSpace(handoff) != "" {
+			values.Set("handoff", strings.TrimSpace(handoff))
 		}
 		if takeControl {
 			values.Set("control", "take")
