@@ -530,6 +530,10 @@ func forceRFBARDAuthenticationWithTimeout(ctx context.Context, browser, server n
 		if err := negotiateRFBARDAuth(server, credentials); err != nil {
 			return err
 		}
+	case rfbSecurityVNC:
+		if err := negotiateRFBVNCAuth(server, credentials); err != nil {
+			return err
+		}
 	case rfbSecurityNone:
 	default:
 		return fmt.Errorf("unsupported RFB security type %d", securityType)
