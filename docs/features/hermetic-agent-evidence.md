@@ -9,14 +9,14 @@ Read this when:
 Crabbox is a useful execution layer for hermetic-agent workflows because the
 repository owns the agent protocol while Crabbox owns the remote run and
 evidence plumbing: sync the checkout, run the command on a clean runner or
-delegated sandbox, require proof artifacts, download bounded evidence, and keep
+delegated sandbox, require proof artifacts, download selected evidence, and keep
 the exact command output reviewable.
 
 The best Crabbox fit is a **run-evidence pattern**, not a new agent framework:
 
 - `crabbox run` executes the repo-owned hermetic harness.
 - `--require-artifact` turns the proof JSON into a post-run gate.
-- `--download` pulls the bounded proof files back for review or agent handoff.
+- `--download` pulls selected proof files back for review or agent handoff.
 - Provider choice stays ordinary Crabbox policy: SSH-backed Linux providers when
   the operator wants Crabbox-managed SSH and rsync, or delegated providers when
   their adapter advertises bounded artifact/download support.
@@ -39,11 +39,11 @@ A hermetic-agent harness usually models three roles:
 | Test writer | `spec/problem.md`, `guides/test-writer.md` | Must not read implementation output |
 | QA arbiter | Spec, both outputs, hidden oracle | May send blame backward, but not forbidden artifacts |
 
-The seeded failure is intentionally a bad generated test expectation. The
-implementation follows the spec, the test expects the wrong case-folding result,
-and QA assigns the disagreement to `test_writer`. That matters because hidden or
-generated tests are not automatically truth; the reviewer must still decide
-which side violated the spec.
+A useful validation fixture intentionally seeds a bad generated test
+expectation. For example, the implementation follows the spec, the test expects
+the wrong case-folding result, and QA assigns the disagreement to `test_writer`.
+That matters because hidden or generated tests are not automatically truth; the
+reviewer must still decide which side violated the spec.
 
 ## Local Proof
 
@@ -76,15 +76,18 @@ crabbox job run hermetic-agents
 ```
 
 The job runs the local proof script, requires the JSON proof file after command
-success, and downloads JSON/Markdown evidence into `.crabbox/proofs/`.
+success, and downloads JSON/Markdown evidence into
+`.crabbox/runs/hermetic-agents/`. Crabbox always excludes `.crabbox/runs/` from
+later workspace syncs, so a prior proof is not uploaded as source on the next
+run.
 
 The same flow without the job wrapper is:
 
 ```sh
 crabbox run \
   --require-artifact docs/metrics/hermetic-agents-e2e.json \
-  --download docs/metrics/hermetic-agents-e2e.json=.crabbox/proofs/hermetic-agents-e2e.json \
-  --download docs/metrics/hermetic-agents-e2e.md=.crabbox/proofs/hermetic-agents-e2e.md \
+  --download docs/metrics/hermetic-agents-e2e.json=.crabbox/runs/hermetic-agents/hermetic-agents-e2e.json \
+  --download docs/metrics/hermetic-agents-e2e.md=.crabbox/runs/hermetic-agents/hermetic-agents-e2e.md \
   --shell './scripts/run_hermetic_agents_demo.sh'
 ```
 
@@ -105,7 +108,7 @@ Pick the provider the same way you would for any other Crabbox run:
 | Provider | The remote execution substrate; use normal provider selection instead of coupling the pattern to one backend. |
 | SSH-backed mode | Crabbox owns SSH, rsync, command execution, artifacts, history, and telemetry when a brokered provider is used. |
 | Delegated mode | The provider owns workspace upload and command transport; Crabbox owns CLI semantics, claims, required artifacts, downloads, and status when the adapter supports them. |
-| Artifacts | The proof JSON/Markdown are bounded run evidence, not raw transcripts or secrets. |
+| Artifacts | The proof JSON/Markdown are small run evidence, not raw transcripts or secrets. Delegated retrieval is byte-bounded by the adapter contract. |
 | Jobs | `.crabbox.yaml` names the repeatable remote proof as `hermetic-agents`. |
 | History/logs | Brokered SSH providers can add central run history; direct/delegated runs still provide live output and local proof downloads. |
 | Station | Future fit for long-running agent harnesses. This pattern is intentionally a one-shot run. |
@@ -179,8 +182,8 @@ jobs:
     requiredArtifacts:
       - docs/metrics/hermetic-agents-e2e.json
     downloads:
-      - docs/metrics/hermetic-agents-e2e.json=.crabbox/proofs/hermetic-agents-e2e.json
-      - docs/metrics/hermetic-agents-e2e.md=.crabbox/proofs/hermetic-agents-e2e.md
+      - docs/metrics/hermetic-agents-e2e.json=.crabbox/runs/hermetic-agents/hermetic-agents-e2e.json
+      - docs/metrics/hermetic-agents-e2e.md=.crabbox/runs/hermetic-agents/hermetic-agents-e2e.md
     stop: always
 ```
 
