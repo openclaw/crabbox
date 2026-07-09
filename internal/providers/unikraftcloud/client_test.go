@@ -253,6 +253,24 @@ func TestUnikraftCloudClientErrorClassification(t *testing.T) {
 			wantErrContains: "no instance with that uuid",
 		},
 		{
+			name: "live missing instance envelope on 200",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"status":  "error",
+					"message": "Failed to perform all operations",
+					"data": map[string]any{"instances": []map[string]any{{
+						"status":  "error",
+						"uuid":    "11111111-2222-3333-4444-555555555555",
+						"message": "No instance with uuid '11111111-2222-3333-4444-555555555555'",
+						"error":   8,
+					}}},
+				})
+			},
+			wantNotFound:    true,
+			wantErrContains: "No instance with uuid",
+		},
+		{
 			name: "per-item error",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")

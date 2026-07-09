@@ -40,10 +40,10 @@ crabbox stop --provider unikraft-cloud ukc-smoke
 ```
 
 `warmup` creates an instance from the configured OCI image and records a local
-claim scoped to the Unikraft Cloud API endpoint. `stop` requires that local
-claim, then stops and deletes the instance. Unclaimed instances are visible in
-`list` and can be inspected by raw instance ID with `status`, but Crabbox will
-not delete them.
+claim bound to the Unikraft Cloud API endpoint and exact instance UUID. `stop`
+requires that unchanged local claim across stop and delete. Unclaimed instances
+are visible in `list` and can be inspected by raw instance ID with `status`, but
+Crabbox will not delete them.
 
 `run` is rejected before provider mutation because Unikraft Cloud executes the
 image entrypoint, not an arbitrary Crabbox command.
@@ -116,8 +116,8 @@ not choose a default application image.
 - `--actions-runner` and Tailscale options are rejected because the provider has
   no SSH lease or Crabbox-managed runtime setup.
 - `status --wait` polls until the instance reports `running`.
-- Local claims are scoped to the API endpoint, so a claim created for one metro
-  cannot be used to stop an instance in another metro.
+- Local claims are scoped to the API endpoint and exact instance UUID, so a
+  claim created for one metro or instance cannot stop another resource.
 - If claim creation fails after the remote create succeeds, Crabbox attempts to
   delete the newly created instance before returning the original error.
 

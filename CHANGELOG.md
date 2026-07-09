@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a Unikraft Cloud service-control provider for claimed OCI-image instances, with endpoint- and instance-bound ownership, guarded cleanup, and live create/status/list/stop verification. Thanks @zozo123.
 - Added a CubeSandbox delegated-run provider with E2B-compatible lifecycle and envd execution, archive sync, CubeProxy routing, exact API-endpoint/sandbox-bound ownership claims, conflict-safe explicit adoption, and guarded cleanup. Thanks @zozo123.
 - Added coordinator-managed Daytona Linux leases with a Worker-held API key, exact ownership cleanup, expiring SSH-token refresh, CLI secret redaction, and production Cloudflare configuration.
 

@@ -25,6 +25,9 @@ import (
 const (
 	unikraftCloudMaxResponseBytes = 16 << 20
 	unikraftCloudRequestTimeout   = 2 * time.Minute
+	// Unikraft Cloud reports a missing resource as application error 8 inside
+	// an HTTP 200 per-instance result.
+	unikraftCloudErrorNotFound = 8
 )
 
 type unikraftCloudAPI interface {
@@ -341,23 +344,40 @@ func (c *unikraftCloudClient) doInstances(ctx context.Context, method, apiPath s
 		return nil, &unikraftCloudAPIError{StatusCode: resp.StatusCode, Message: redactSecret(unikraftCloudEnvelopeMessage(envelope), c.apiKey)}
 	}
 	if strings.EqualFold(strings.TrimSpace(envelope.Status), "error") {
-		statusCode := resp.StatusCode
-		if len(envelope.Errors) > 0 && envelope.Errors[0].Status > 0 {
-			statusCode = envelope.Errors[0].Status
+		if len(envelope.Errors) > 0 {
+			statusCode := unikraftCloudHTTPStatus(envelope.Errors[0].Status)
+			return nil, &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(unikraftCloudEnvelopeMessage(envelope), c.apiKey)}
 		}
-		return nil, &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(unikraftCloudEnvelopeMessage(envelope), c.apiKey)}
+		if err := c.unikraftCloudInstanceError(envelope); err != nil {
+			return nil, err
+		}
+		return nil, &unikraftCloudAPIError{StatusCode: http.StatusInternalServerError, Message: redactSecret(unikraftCloudEnvelopeMessage(envelope), c.apiKey)}
 	}
 	// Batch envelopes report per-item failures inline; surface the first one.
-	for _, instance := range envelope.Data.Instances {
-		if strings.EqualFold(strings.TrimSpace(instance.ItemStatus), "error") {
-			statusCode := instance.ItemError
-			if statusCode <= 0 {
-				statusCode = http.StatusInternalServerError
-			}
-			return nil, &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(blank(instance.ItemMessage, "instance operation failed"), c.apiKey)}
-		}
+	if err := c.unikraftCloudInstanceError(envelope); err != nil {
+		return nil, err
 	}
 	return envelope.Data.Instances, nil
+}
+
+func (c *unikraftCloudClient) unikraftCloudInstanceError(envelope ukcResponse) error {
+	for _, instance := range envelope.Data.Instances {
+		if strings.EqualFold(strings.TrimSpace(instance.ItemStatus), "error") {
+			statusCode := unikraftCloudHTTPStatus(instance.ItemError)
+			return &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(blank(instance.ItemMessage, "instance operation failed"), c.apiKey)}
+		}
+	}
+	return nil
+}
+
+func unikraftCloudHTTPStatus(code int) int {
+	if code == unikraftCloudErrorNotFound {
+		return http.StatusNotFound
+	}
+	if code >= 100 && code <= 599 {
+		return code
+	}
+	return http.StatusInternalServerError
 }
 
 func unikraftCloudEnvelopeMessage(envelope ukcResponse) string {

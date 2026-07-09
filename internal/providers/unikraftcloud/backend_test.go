@@ -135,11 +135,14 @@ func TestWarmupCreatesInstanceAndClaimsLease(t *testing.T) {
 		t.Fatalf("stderr = %q, want keep warning", stderr.String())
 	}
 	claim, err := readLeaseClaim(leaseID)
-	if err != nil || claim.LeaseID != leaseID || claim.Provider != providerName {
+	if err != nil || claim.LeaseID != leaseID || claim.Provider != providerName || claim.CloudID != testInstanceUUID {
 		t.Fatalf("claim = %#v err = %v", claim, err)
 	}
 	if claim.ProviderScope != "endpoint:https://api.fra.unikraft.cloud" {
 		t.Fatalf("claim scope = %q", claim.ProviderScope)
+	}
+	if claim.Labels["lease"] != leaseID || claim.Labels["provider"] != providerName || claim.Labels["slug"] == "" {
+		t.Fatalf("claim labels = %#v", claim.Labels)
 	}
 }
 
@@ -442,6 +445,33 @@ func TestListPropagatesAPIError(t *testing.T) {
 	}
 }
 
+func TestListDoesNotPresentUnboundClaimAsOwned(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:      "https://api.fra.unikraft.cloud",
+		createResult: ukcInstance{UUID: testInstanceUUID, State: "running"},
+		listResult:   []ukcInstance{{UUID: testInstanceUUID, Name: "funky-town", State: "running"}},
+	}
+	b := testBackend(api, nil, nil)
+	repoRoot := t.TempDir()
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: repoRoot, Name: "demo"}}); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	leaseID := leasePrefix + testInstanceUUID
+	core.RemoveLeaseClaim(leaseID)
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "legacy-claim", providerName, claimScope(api.BaseURL()), "", repoRoot, time.Hour, false); err != nil {
+		t.Fatalf("write unbound claim: %v", err)
+	}
+
+	servers, err := b.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(servers) != 1 || servers[0].Labels["lease"] != "" {
+		t.Fatalf("servers = %#v, want remote instance without ownership labels", servers)
+	}
+}
+
 func TestStopDeletesClaimedInstance(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	api := &fakeUnikraftCloudAPI{
@@ -484,6 +514,32 @@ func TestStopRequiresLocalClaim(t *testing.T) {
 	}
 	if len(api.stoppedIDs) != 0 || len(api.deletedIDs) != 0 {
 		t.Fatalf("Stop touched the API for an unclaimed instance: %#v", api)
+	}
+}
+
+func TestStopRejectsClaimWithoutExactInstanceBinding(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeUnikraftCloudAPI{
+		baseURL:      "https://api.fra.unikraft.cloud",
+		createResult: ukcInstance{UUID: testInstanceUUID, State: "running"},
+	}
+	b := testBackend(api, nil, nil)
+	repoRoot := t.TempDir()
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: repoRoot, Name: "demo"}}); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	leaseID := leasePrefix + testInstanceUUID
+	core.RemoveLeaseClaim(leaseID)
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "legacy-claim", providerName, claimScope(api.BaseURL()), "", repoRoot, time.Hour, false); err != nil {
+		t.Fatalf("write unbound claim: %v", err)
+	}
+
+	err := b.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "no exact instance binding") {
+		t.Fatalf("Stop err = %v, want exact instance binding rejection", err)
+	}
+	if len(api.stoppedIDs) != 0 || len(api.deletedIDs) != 0 {
+		t.Fatalf("Stop touched API for unbound claim: %#v", api)
 	}
 }
 

@@ -64,8 +64,8 @@ func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
 
-func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
+func claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server) error {
+	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, core.SSHTarget{})
 }
 
 func readLeaseClaim(leaseID string) (LeaseClaim, error) {
@@ -76,8 +76,8 @@ func listUnikraftCloudLeaseClaims() ([]LeaseClaim, error) {
 	return core.ListLeaseClaimsWithPrefix(leasePrefix)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
+func removeLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
 }
 
 func writeTimingJSON(w io.Writer, report core.TimingReport) error {

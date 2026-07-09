@@ -83,7 +83,16 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return b.cleanupCreateFailure(ctx, api, instance.UUID, err)
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(api.BaseURL()), b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, claimScope(api.BaseURL()), b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, Server{
+		CloudID:  instance.UUID,
+		Provider: providerName,
+		Name:     instance.Name,
+		Labels: map[string]string{
+			"lease":    leaseID,
+			"provider": providerName,
+			"slug":     slug,
+		},
+	}); err != nil {
 		return b.cleanupCreateFailure(ctx, api, instance.UUID, err)
 	}
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s instance=%s state=%s fqdn=%s\n",
@@ -145,8 +154,11 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	scope := claimScope(api.BaseURL())
 	claimByInstance := map[string]LeaseClaim{}
 	for _, claim := range claims {
-		if claim.Provider == providerName && claim.ProviderScope == scope {
-			claimByInstance[instanceIDFromLease(claim.LeaseID)] = claim
+		if claim.Provider != providerName {
+			continue
+		}
+		if _, instanceID, _, err := finishResolvedClaim(claim, scope); err == nil {
+			claimByInstance[instanceID] = claim
 		}
 	}
 	servers := make([]Server, 0, len(instances))
@@ -223,26 +235,41 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
+	if _, resolvedInstanceID, _, err := finishResolvedClaim(claim, claimScope(api.BaseURL())); err != nil {
+		return err
+	} else if resolvedInstanceID != instanceID {
+		return exit(4, "%s lease %q changed resource identity before cleanup", providerName, leaseID)
+	}
 	missing := false
-	if _, err := api.StopInstance(ctx, instanceID); err != nil {
-		if isNotFound(err) {
-			missing = true
-		} else {
+	err = removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+		if _, err := api.StopInstance(ctx, instanceID); err != nil {
+			if isNotFound(err) {
+				missing = true
+				return nil
+			}
 			return err
 		}
-	}
-	if !missing {
+		if missing {
+			return nil
+		}
 		if err := api.DeleteInstance(ctx, instanceID); err != nil {
 			if !isNotFound(err) {
 				return err
 			}
 			missing = true
 		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	if missing {
 		fmt.Fprintf(b.rt.Stderr, "warning: %s instance=%s was already gone; removing local claim\n", providerName, instanceID)
 	}
-	removeLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s\n", leaseID, instanceID)
 	return nil
 }
@@ -302,11 +329,18 @@ func finishResolvedClaim(claim LeaseClaim, scope string) (string, string, string
 	if claim.ProviderScope != scope {
 		return "", "", "", exit(4, "%s lease %q belongs to a different API endpoint or metro", providerName, claim.LeaseID)
 	}
+	instanceID := instanceIDFromLease(claim.LeaseID)
+	if claim.CloudID == "" || claim.CloudID != instanceID {
+		return "", "", "", exit(4, "%s lease %q has no exact instance binding", providerName, claim.LeaseID)
+	}
 	slug := claim.Slug
 	if strings.TrimSpace(slug) == "" {
 		slug = newLeaseSlug(claim.LeaseID)
 	}
-	return claim.LeaseID, instanceIDFromLease(claim.LeaseID), slug, nil
+	if claim.Labels["provider"] != providerName || claim.Labels["lease"] != claim.LeaseID || claim.Labels["slug"] != slug {
+		return "", "", "", exit(4, "%s lease %q ownership labels do not match its local claim", providerName, claim.LeaseID)
+	}
+	return claim.LeaseID, instanceID, slug, nil
 }
 
 func claimScope(baseURL string) string {
