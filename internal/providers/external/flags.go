@@ -239,7 +239,7 @@ func validateLifecycleOperation(name string, operation core.ExternalLifecycleOpe
 
 func externalWorkRoot(cfg core.Config) string {
 	providerRoot := strings.TrimSpace(cfg.External.WorkRoot)
-	if (providerRoot == "" || providerRoot == core.BaseConfig().External.WorkRoot) && core.IsDefaultWorkRoot(cfg.WorkRoot) {
+	if providerRoot == "" || providerRoot == core.BaseConfig().External.WorkRoot {
 		if workRoot := strings.TrimSpace(cfg.WorkRoot); workRoot != "" {
 			return workRoot
 		}

@@ -130,6 +130,17 @@ func TestConfigureAcceptsNativeWindowsWorkRoot(t *testing.T) {
 	}
 }
 
+func TestValidateConfigUsesTopLevelNativeWindowsWorkRootBeforeConfigure(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetWindows
+	cfg.WindowsMode = core.WindowsModeNormal
+	cfg.WorkRoot = `D:\Users\alice\crabbox`
+	cfg.External.WorkRoot = core.BaseConfig().External.WorkRoot
+	if err := validateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateConfigAcceptsDedicatedNativeWindowsUserWorkRoot(t *testing.T) {
 	cfg := testConfig()
 	cfg.TargetOS = core.TargetWindows
