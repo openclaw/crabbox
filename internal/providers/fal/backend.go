@@ -1116,10 +1116,6 @@ func (b *backend) persistRecoveryClaimAt(leaseID, slug string, cfg Config, repoR
 	return err
 }
 
-func (b *backend) persistRecoveryClaimIfUnchanged(leaseID, slug string, cfg Config, repoRoot, instanceID, reason string, keep bool, expected core.LeaseClaim, expectedExists bool) (core.LeaseClaim, error) {
-	return b.persistRecoveryClaimAtIfUnchanged(leaseID, slug, cfg, repoRoot, instanceID, reason, keep, time.Time{}, expected, expectedExists)
-}
-
 func (b *backend) persistRecoveryClaimAtIfUnchanged(leaseID, slug string, cfg Config, repoRoot, instanceID, reason string, keep bool, createStarted time.Time, expected core.LeaseClaim, expectedExists bool, createRequest ...CreateInstanceRequest) (core.LeaseClaim, error) {
 	if len(createRequest) > 1 {
 		return core.LeaseClaim{}, exit(2, "fal recovery claim accepts at most one create request binding")
