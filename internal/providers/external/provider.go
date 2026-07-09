@@ -137,7 +137,10 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 			cfg.TargetOS = targetOS
 		}
 		if !core.IsWindowsModeExplicit(&cfg) {
-			cfg.WindowsMode = windowsMode
+			cfg.WindowsMode = core.WindowsModeNormal
+			if cfg.TargetOS == core.TargetWindows {
+				cfg.WindowsMode = windowsMode
+			}
 		}
 	}
 	if err := core.ValidateProviderCredentialDestination(cfg); err != nil {

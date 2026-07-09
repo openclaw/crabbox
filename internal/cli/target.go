@@ -424,7 +424,10 @@ func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit
 		cfg.inferredTargetProvider = ""
 	}
 	if !windowsModeExplicit {
-		_, cfg.WindowsMode = ExternalRoutingTarget(cfg.External)
+		cfg.WindowsMode = windowsModeNormal
+		if normalizeTargetOS(cfg.TargetOS) == targetWindows {
+			_, cfg.WindowsMode = ExternalRoutingTarget(cfg.External)
+		}
 	}
 	normalizeTargetConfig(cfg)
 	return validateTargetConfig(*cfg)

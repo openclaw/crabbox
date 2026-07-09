@@ -165,6 +165,7 @@ func TestValidateConfigRejectsUnsafeNativeWindowsWorkRoot(t *testing.T) {
 		`D:\Users`,
 		`D:\Users\alice`,
 		`C:\PROGRA~1`,
+		`C:\LONGFI~1.TXT\crabbox`,
 		`C:\safe:stream\crabbox`,
 		`C:\NUL\crabbox`,
 		`C:\COM¹\crabbox`,
@@ -316,7 +317,7 @@ func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
 func TestConfigurePreservesExplicitTargetOverRoutingFile(t *testing.T) {
 	isolateCrabboxState(t)
 	saved := testConfig()
-	core.SetExternalRoutingTarget(&saved.External, core.TargetMacOS, core.WindowsModeNormal)
+	core.SetExternalRoutingTarget(&saved.External, core.TargetWindows, core.WindowsModeWSL2)
 	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
 	if err != nil {
 		t.Fatal(err)
@@ -329,8 +330,36 @@ func TestConfigurePreservesExplicitTargetOverRoutingFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := backend.(*leaseBackend).cfg.TargetOS; got != core.TargetLinux {
-		t.Fatalf("target=%q want explicit Linux", got)
+	got := backend.(*leaseBackend).cfg
+	if got.TargetOS != core.TargetLinux || got.WindowsMode != core.WindowsModeNormal {
+		t.Fatalf("target=%q windows-mode=%q, want explicit Linux/normal", got.TargetOS, got.WindowsMode)
+	}
+}
+
+func TestApplyFlagsKeepsNormalModeForExplicitLinuxTarget(t *testing.T) {
+	isolateCrabboxState(t)
+	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetWindows, core.WindowsModeWSL2)
+	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.External.RoutingFile = path
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	fs.String("target", core.TargetLinux, "")
+	if err := fs.Parse([]string{"--target", core.TargetLinux}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.TargetOS = core.TargetLinux
+	cfg.WindowsMode = core.WindowsModeNormal
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != core.TargetLinux || cfg.WindowsMode != core.WindowsModeNormal {
+		t.Fatalf("target=%q windows-mode=%q", cfg.TargetOS, cfg.WindowsMode)
 	}
 }
 

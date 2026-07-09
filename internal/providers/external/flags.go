@@ -253,7 +253,10 @@ func restoreRoutingTarget(cfg *core.Config, fs *flag.FlagSet) {
 		cfg.TargetOS = targetOS
 	}
 	if !core.FlagWasSet(fs, "windows-mode") {
-		cfg.WindowsMode = windowsMode
+		cfg.WindowsMode = core.WindowsModeNormal
+		if cfg.TargetOS == core.TargetWindows {
+			cfg.WindowsMode = windowsMode
+		}
 	}
 }
 
@@ -342,7 +345,14 @@ func windowsShortNameComponent(part string) bool {
 	if tilde < 1 || tilde == len(part)-1 {
 		return false
 	}
-	for _, character := range part[tilde+1:] {
+	suffix := part[tilde+1:]
+	if dot := strings.IndexByte(suffix, '.'); dot >= 0 {
+		suffix = suffix[:dot]
+	}
+	if suffix == "" {
+		return false
+	}
+	for _, character := range suffix {
 		if character < '0' || character > '9' {
 			return false
 		}

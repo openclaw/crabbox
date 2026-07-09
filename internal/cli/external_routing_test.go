@@ -500,6 +500,20 @@ func TestAutoRouteExternalLeaseHonorsConfiguredRoutingFile(t *testing.T) {
 	}
 }
 
+func TestRestoreExternalLeaseTargetKeepsNormalModeForExplicitLinux(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.TargetOS = targetLinux
+	cfg.WindowsMode = windowsModeNormal
+	SetExternalRoutingTarget(&cfg.External, targetWindows, windowsModeWSL2)
+	if err := restoreExternalLeaseTarget(&cfg, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("target=%q windows-mode=%q", cfg.TargetOS, cfg.WindowsMode)
+	}
+}
+
 func TestRouteExternalLeaseClaimOverridesAmbientRouting(t *testing.T) {
 	root := setExternalRoutingTestHome(t)
 	paths := map[string]string{}
