@@ -306,14 +306,6 @@ func claimLeaseTargetForConfigIfUnchanged(leaseID, slug string, cfg Config, serv
 }
 
 func claimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, idleTimeout time.Duration, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
-	return claimLeaseTargetForConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, idleTimeout, expected, expectedExists, false)
-}
-
-func claimLeaseTargetForConfigScopeIfUnchangedDurable(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, idleTimeout time.Duration, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
-	return claimLeaseTargetForConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, idleTimeout, expected, expectedExists, true)
-}
-
-func claimLeaseTargetForConfigScopeIfUnchangedMode(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, idleTimeout time.Duration, expected leaseClaim, expectedExists, durable bool) (leaseClaim, error) {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, "", idleTimeout, false, claimMetadata{
@@ -325,7 +317,6 @@ func claimLeaseTargetForConfigScopeIfUnchangedMode(leaseID, slug string, cfg Con
 		allowEmptyRepoRoot: true,
 		guard:              unchangedLeaseClaimGuard(leaseID, expected, expectedExists),
 		result:             &updated,
-		durable:            durable,
 	})
 	return updated, err
 }

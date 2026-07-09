@@ -54,10 +54,6 @@ func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
 }
 
-func newLeaseSlug(leaseID string) string {
-	return core.NewLeaseSlug(leaseID)
-}
-
 func normalizeLeaseSlug(value string) string {
 	return core.NormalizeLeaseSlug(value)
 }
@@ -92,10 +88,6 @@ func readLeaseClaimWithPresence(leaseID string) (LeaseClaim, bool, error) {
 
 func listUnikraftCloudLeaseClaims() ([]LeaseClaim, error) {
 	return core.ListLeaseClaimsWithPrefix(leasePrefix)
-}
-
-func removeLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
-	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
 }
 
 func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {

@@ -134,12 +134,6 @@ func ClaimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug string, cfg Config,
 	return claimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, server, target, idleTimeout, expected, expectedExists)
 }
 
-// ClaimLeaseTargetForConfigScopeIfUnchangedDurable performs the same guarded
-// update and also durably syncs any newly created claim namespace ancestors.
-func ClaimLeaseTargetForConfigScopeIfUnchangedDurable(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, idleTimeout time.Duration, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
-	return claimLeaseTargetForConfigScopeIfUnchangedDurable(leaseID, slug, cfg, providerScope, server, target, idleTimeout, expected, expectedExists)
-}
-
 func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 	return claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
