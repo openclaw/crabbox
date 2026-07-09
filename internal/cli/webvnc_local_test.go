@@ -326,6 +326,86 @@ func TestForceRFBARDAuthenticationAdaptsLegacyVNCToNoAuthBrowser(t *testing.T) {
 	}
 }
 
+func TestForceRFBARDAuthenticationAdaptsRFB33VNCToNoAuthBrowser(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	browser, bridgeBrowser := net.Pipe()
+	server, bridgeServer := net.Pipe()
+	defer browser.Close()
+	defer bridgeBrowser.Close()
+	defer server.Close()
+	defer bridgeServer.Close()
+
+	const password = "example-pass"
+	negotiation := make(chan error, 1)
+	go func() {
+		negotiation <- forceRFBARDAuthentication(ctx, bridgeBrowser, bridgeServer, rfbCredentials{Password: password})
+	}()
+	serverResult := make(chan error, 1)
+	go func() {
+		if _, err := server.Write([]byte("RFB 003.003\n")); err != nil {
+			serverResult <- err
+			return
+		}
+		version := make([]byte, 12)
+		if _, err := io.ReadFull(server, version); err != nil {
+			serverResult <- err
+			return
+		}
+		security := make([]byte, 4)
+		binary.BigEndian.PutUint32(security, uint32(rfbSecurityVNC))
+		if _, err := server.Write(security); err != nil {
+			serverResult <- err
+			return
+		}
+		challenge := []byte("0123456789abcdef")
+		if _, err := server.Write(challenge); err != nil {
+			serverResult <- err
+			return
+		}
+		response := make([]byte, len(challenge))
+		if _, err := io.ReadFull(server, response); err != nil {
+			serverResult <- err
+			return
+		}
+		expected, err := directSSHWebVNCChallengeResponse(password, challenge)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		if !bytes.Equal(response, expected) {
+			serverResult <- fmt.Errorf("unexpected VNC challenge response")
+			return
+		}
+		_, err = server.Write([]byte{0, 0, 0, 0})
+		serverResult <- err
+	}()
+
+	version := make([]byte, 12)
+	if _, err := io.ReadFull(browser, version); err != nil {
+		t.Fatal(err)
+	}
+	if string(version) != "RFB 003.003\n" {
+		t.Fatalf("server version=%q", version)
+	}
+	if _, err := browser.Write([]byte("RFB 003.003\n")); err != nil {
+		t.Fatal(err)
+	}
+	security := make([]byte, 4)
+	if _, err := io.ReadFull(browser, security); err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.BigEndian.Uint32(security); got != uint32(localWebVNCSecurityTypeNone) {
+		t.Fatalf("browser security type=%d", got)
+	}
+	if err := <-serverResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-negotiation; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRelayWebSocketVNCWithARDAuthenticationTimeoutIsConfigurable(t *testing.T) {
 	t.Run("short timeout", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

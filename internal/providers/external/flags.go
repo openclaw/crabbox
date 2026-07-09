@@ -287,7 +287,7 @@ func validateExternalWindowsWorkRoot(value string) error {
 	case "WINDOWS", "WINNT", "PROGRAM FILES", "PROGRAM FILES (X86)", "PROGRAMDATA", "$RECYCLE.BIN", "SYSTEM VOLUME INFORMATION", "DOCUMENTS AND SETTINGS":
 		return core.Exit(2, "external.workRoot %q is inside a protected Windows directory; choose a dedicated workspace", clean)
 	}
-	if len(parts) == 1 && strings.EqualFold(parts[0], "Users") {
+	if len(parts) <= 2 && strings.EqualFold(parts[0], "Users") {
 		return core.Exit(2, "external.workRoot %q is too broad; choose a dedicated user workspace", clean)
 	}
 	switch strings.ToUpper(clean) {

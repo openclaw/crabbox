@@ -152,6 +152,7 @@ func TestValidateConfigRejectsUnsafeNativeWindowsWorkRoot(t *testing.T) {
 		`C:\Windows\crabbox`,
 		`D:\Program Files\crabbox`,
 		`D:\Users`,
+		`D:\Users\alice`,
 		`C:\PROGRA~1`,
 		`C:\safe:stream\crabbox`,
 		`C:\NUL\crabbox`,

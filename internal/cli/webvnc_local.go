@@ -521,9 +521,30 @@ func forceRFBARDAuthenticationWithTimeout(ctx context.Context, browser, server n
 		return fmt.Errorf("write RFB browser version: %w", err)
 	}
 
-	securityType, err := negotiateRFBSecurityType(server, credentials)
-	if err != nil {
-		return err
+	legacyVersion := major == 3 && minor < 7
+	var securityType byte
+	if legacyVersion {
+		security := make([]byte, 4)
+		if _, err := io.ReadFull(server, security); err != nil {
+			return fmt.Errorf("read RFB 3.3 security type: %w", err)
+		}
+		selected := binary.BigEndian.Uint32(security)
+		if selected == 0 {
+			reason, reasonErr := readRFBReason(server)
+			if reasonErr != nil {
+				return reasonErr
+			}
+			return fmt.Errorf("RFB server rejected security negotiation: %s", reason)
+		}
+		if selected > 255 {
+			return fmt.Errorf("unsupported RFB 3.3 security type %d", selected)
+		}
+		securityType = byte(selected)
+	} else {
+		securityType, err = negotiateRFBSecurityType(server, credentials)
+		if err != nil {
+			return err
+		}
 	}
 	switch securityType {
 	case rfbSecurityARD:
@@ -538,11 +559,13 @@ func forceRFBARDAuthenticationWithTimeout(ctx context.Context, browser, server n
 	default:
 		return fmt.Errorf("unsupported RFB security type %d", securityType)
 	}
-	if err := readRFBSecurityResult(server); err != nil {
-		return err
+	if !legacyVersion || securityType != rfbSecurityNone {
+		if err := readRFBSecurityResult(server); err != nil {
+			return err
+		}
 	}
 
-	if major == 3 && minor < 7 {
+	if legacyVersion {
 		security := make([]byte, 4)
 		binary.BigEndian.PutUint32(security, uint32(localWebVNCSecurityTypeNone))
 		if _, err := browser.Write(security); err != nil {
