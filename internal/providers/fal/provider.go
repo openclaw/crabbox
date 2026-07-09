@@ -94,14 +94,16 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 }
 
 type backend struct {
-	spec                  ProviderSpec
-	cfg                   Config
-	rt                    Runtime
-	clientFactory         func(Config, Runtime) (computeAPI, error)
-	persistRecoveredClaim func(core.LeaseClaim, Config, string) (core.LeaseClaim, error)
-	waitSSH               func(context.Context, *core.SSHTarget, string, time.Duration) error
-	pollInterval          time.Duration
-	pollTimeout           time.Duration
+	spec                     ProviderSpec
+	cfg                      Config
+	rt                       Runtime
+	clientFactory            func(Config, Runtime) (computeAPI, error)
+	persistCreateIntent      func(string, string, Config, string, bool, time.Time, CreateInstanceRequest) (core.LeaseClaim, error)
+	recoveryClaimReplacement func(core.LeaseClaim, Config, string, string, bool) (core.LeaseClaim, error)
+	syncCreateKey            func(string) error
+	waitSSH                  func(context.Context, *core.SSHTarget, string, time.Duration) error
+	pollInterval             time.Duration
+	pollTimeout              time.Duration
 }
 
 func (b *backend) Spec() ProviderSpec { return b.spec }

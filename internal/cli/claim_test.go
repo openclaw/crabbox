@@ -46,6 +46,187 @@ func TestConfirmedAbsentClaimRemovalRequiresDirectorySyncAndRetriesAfterDeletion
 	}
 }
 
+func TestWriteLeaseClaimAtomicPropagatesDirectorySyncFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_sync_failure"
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("directory sync unavailable")
+	err = writeLeaseClaimAtomicWithSync(path, leaseClaim{LeaseID: leaseID}, func(string) error { return syncErr })
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("write error=%v want %v", err, syncErr)
+	}
+}
+
+func TestFinalizeAbsentLeaseClaimSyncFailureSkipsAction(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	called := false
+	syncErr := errors.New("directory sync unavailable")
+	err := finalizeAbsentLeaseClaimAfterSyncWithSync("cbx_finalize_absent", func() error {
+		called = true
+		return nil
+	}, func(string) error { return syncErr })
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("finalize error=%v", err)
+	}
+	if called {
+		t.Fatal("action ran before durable absence was proven")
+	}
+}
+
+func TestFinalizeAbsentLeaseClaimPresentClaimSkipsAction(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_finalize_present"
+	if err := claimLeaseForRepoProvider(leaseID, "finalize-present", "external", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	synced := false
+	err := finalizeAbsentLeaseClaimAfterSyncWithSync(leaseID, func() error {
+		called = true
+		return nil
+	}, func(string) error {
+		synced = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("finalize error=%v", err)
+	}
+	if called || synced {
+		t.Fatalf("called=%v synced=%v", called, synced)
+	}
+	if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+		t.Fatalf("claim exists=%v err=%v", exists, readErr)
+	}
+}
+
+func TestReplaceOrRemoveLeaseClaimIfUnchangedAfterReplacesClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_replace_after"
+	if err := claimLeaseForRepoProvider(leaseID, "replace-after", "external", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := cloneLeaseClaim(expected)
+	replacement.CloudID = "instance-replaced"
+
+	updated, exists, err := replaceOrRemoveLeaseClaimIfUnchangedAfter(leaseID, expected, func(current leaseClaim) (leaseClaim, bool, error) {
+		if !reflect.DeepEqual(current, expected) {
+			t.Fatalf("callback claim=%#v want %#v", current, expected)
+		}
+		return replacement, false, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || !reflect.DeepEqual(updated, replacement) {
+		t.Fatalf("updated=%#v exists=%t want %#v, true", updated, exists, replacement)
+	}
+	stored, storedExists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !storedExists || !reflect.DeepEqual(stored, replacement) {
+		t.Fatalf("stored=%#v exists=%t want %#v, true", stored, storedExists, replacement)
+	}
+}
+
+func TestReplaceOrRemoveLeaseClaimIfUnchangedAfterRemovesClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_remove_after"
+	if err := claimLeaseForRepoProvider(leaseID, "remove-after", "external", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, exists, err := replaceOrRemoveLeaseClaimIfUnchangedAfter(leaseID, expected, func(current leaseClaim) (leaseClaim, bool, error) {
+		if !reflect.DeepEqual(current, expected) {
+			t.Fatalf("callback claim=%#v want %#v", current, expected)
+		}
+		return leaseClaim{}, true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists || !reflect.DeepEqual(updated, leaseClaim{}) {
+		t.Fatalf("updated=%#v exists=%t want empty, false", updated, exists)
+	}
+	if stored, storedExists, err := readLeaseClaimWithPresence(leaseID); err != nil || storedExists {
+		t.Fatalf("stored=%#v exists=%t err=%v", stored, storedExists, err)
+	}
+}
+
+func TestReplaceOrRemoveLeaseClaimIfUnchangedAfterCallbackErrorPreservesClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_callback_error"
+	if err := claimLeaseForRepoProvider(leaseID, "callback-error", "external", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionErr := errors.New("provider mutation failed")
+
+	if _, _, err := replaceOrRemoveLeaseClaimIfUnchangedAfter(leaseID, expected, func(leaseClaim) (leaseClaim, bool, error) {
+		return leaseClaim{}, false, actionErr
+	}); !errors.Is(err, actionErr) {
+		t.Fatalf("error=%v want %v", err, actionErr)
+	}
+	stored, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || !reflect.DeepEqual(stored, expected) {
+		t.Fatalf("stored=%#v exists=%t want %#v, true", stored, exists, expected)
+	}
+}
+
+func TestReplaceOrRemoveLeaseClaimIfUnchangedAfterChangedClaimSkipsCallback(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_changed_after"
+	if err := claimLeaseForRepoProvider(leaseID, "changed-after", "external", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := updateLeaseClaimLabelsIfUnchanged(leaseID, expected, map[string]string{"state": "changed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+
+	if _, _, err := replaceOrRemoveLeaseClaimIfUnchangedAfter(leaseID, expected, func(leaseClaim) (leaseClaim, bool, error) {
+		called = true
+		return leaseClaim{}, true, nil
+	}); err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("error=%v want changed-claim error", err)
+	}
+	if called {
+		t.Fatal("callback ran after claim changed")
+	}
+	stored, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || !reflect.DeepEqual(stored, changed) {
+		t.Fatalf("stored=%#v exists=%t want %#v, true", stored, exists, changed)
+	}
+}
+
 func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")

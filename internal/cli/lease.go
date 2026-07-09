@@ -70,6 +70,31 @@ func EnsureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, erro
 	return ensureTestboxKeyForConfig(cfg, leaseID)
 }
 
+func syncStoredTestboxKey(leaseID string) error {
+	privatePath, err := testboxKeyPath(leaseID)
+	if err != nil {
+		return err
+	}
+	for _, path := range []string{privatePath, privatePath + ".pub"} {
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			return err
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+	}
+	return syncControllerDirectoryAncestors(filepath.Dir(privatePath))
+}
+
+func SyncStoredTestboxKey(leaseID string) error {
+	return syncStoredTestboxKey(leaseID)
+}
+
 func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 	privatePath, err := testboxKeyPath(leaseID)
 	if err != nil {
@@ -160,15 +185,53 @@ func MoveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
 	return moveStoredTestboxKey(oldLeaseID, newLeaseID)
 }
 
-func removeStoredTestboxKey(leaseID string) {
+func removeStoredTestboxKeyWithError(leaseID string) error {
 	keyPath, err := testboxKeyPath(leaseID)
-	if err == nil {
-		_ = os.RemoveAll(filepath.Dir(keyPath))
+	if err != nil {
+		return err
 	}
+	keyDir := filepath.Dir(keyPath)
+	if _, err := os.Stat(keyDir); errors.Is(err, os.ErrNotExist) {
+		return syncNearestExistingDirectory(filepath.Dir(keyDir))
+	} else if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(keyDir); err != nil {
+		return err
+	}
+	return syncNearestExistingDirectory(filepath.Dir(keyDir))
+}
+
+func syncNearestExistingDirectory(path string) error {
+	for {
+		info, err := os.Stat(path)
+		if err == nil {
+			if !info.IsDir() {
+				return exit(2, "testbox key parent %s is not a directory", path)
+			}
+			return syncControllerDirectory(path)
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return err
+		}
+		path = parent
+	}
+}
+
+func removeStoredTestboxKey(leaseID string) {
+	_ = removeStoredTestboxKeyWithError(leaseID)
 }
 
 func RemoveStoredTestboxKey(leaseID string) {
 	removeStoredTestboxKey(leaseID)
+}
+
+func RemoveStoredTestboxKeyWithError(leaseID string) error {
+	return removeStoredTestboxKeyWithError(leaseID)
 }
 
 func providerKeyForLease(leaseID string) string {

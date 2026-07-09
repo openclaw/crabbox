@@ -2,6 +2,7 @@ package fal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ type fakeFalAPI struct {
 	deletedIDs              []string
 	listCalls               int
 	createHook              func(CreateInstanceRequest, string, ComputeInstance)
+	beforeCreateHook        func(string)
 	blockCreateUntilContext bool
 }
 
@@ -58,6 +61,9 @@ func (f *fakeFalAPI) GetInstance(_ context.Context, id string) (ComputeInstance,
 func (f *fakeFalAPI) CreateInstance(ctx context.Context, req CreateInstanceRequest, idempotencyKey string) (ComputeInstance, error) {
 	f.createRequests = append(f.createRequests, req)
 	f.idempotency = append(f.idempotency, idempotencyKey)
+	if f.beforeCreateHook != nil {
+		f.beforeCreateHook(idempotencyKey)
+	}
 	if f.blockCreateUntilContext {
 		<-ctx.Done()
 		return ComputeInstance{}, ctx.Err()
@@ -123,6 +129,28 @@ func newFalTestBackend(t *testing.T, api *fakeFalAPI) *backend {
 	return b
 }
 
+func persistFalCreateRecoveryClaim(t *testing.T, b *backend, leaseID, slug, reason string, keep bool, started time.Time) (core.LeaseClaim, CreateInstanceRequest) {
+	t.Helper()
+	cfg := b.configForRun()
+	_, publicKey, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sector := Sector(cfg.Fal.Sector)
+	if InstanceType(cfg.Fal.InstanceType) != InstanceTypeH100x8 {
+		sector = ""
+	}
+	req := CreateInstanceRequest{InstanceType: InstanceType(cfg.Fal.InstanceType), SSHKey: publicKey, Sector: sector}
+	if started.IsZero() {
+		started = b.now()
+	}
+	claim, err := b.persistRecoveryClaimAtIfUnchanged(leaseID, slug, cfg, "", "", reason, keep, started, core.LeaseClaim{}, false, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return claim, req
+}
+
 func TestFalAcquireCreatesInstanceWaitsAndClaimsLease(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
@@ -163,6 +191,110 @@ func TestFalAcquireCreatesInstanceWaitsAndClaimsLease(t *testing.T) {
 	}
 	if lease.Server.Labels[falCredentialBindingLabel] != "" {
 		t.Fatalf("credential binding leaked into lease labels: %#v", lease.Server.Labels)
+	}
+}
+
+func TestFalAcquirePersistsReplayIntentBeforeProviderMutation(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	observed := false
+	api.beforeCreateHook = func(leaseID string) {
+		data, err := os.ReadFile(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", leaseID+".json"))
+		if err != nil {
+			t.Fatalf("read pre-create claim: %v", err)
+		}
+		var claim core.LeaseClaim
+		if err := json.Unmarshal(data, &claim); err != nil {
+			t.Fatalf("decode pre-create claim: %v", err)
+		}
+		if claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create-inflight" || claim.Labels["create_started_at"] == "" {
+			t.Fatalf("pre-create claim=%#v", claim)
+		}
+		observed = true
+	}
+
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "durable-intent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed || lease.Server.CloudID != "inst_created" {
+		t.Fatalf("intent observed=%v lease=%#v", observed, lease)
+	}
+}
+
+func TestFalAcquireAbortsBeforeMutationWhenIntentPersistenceFails(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	b.persistCreateIntent = func(string, string, Config, string, bool, time.Time, CreateInstanceRequest) (core.LeaseClaim, error) {
+		return core.LeaseClaim{}, errors.New("claim store unavailable")
+	}
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "intent-write-fail"})
+	if err == nil || !strings.Contains(err.Error(), "persist fal create intent before provider mutation") {
+		t.Fatalf("acquire err=%v", err)
+	}
+	if len(api.createRequests) != 0 {
+		t.Fatalf("provider mutation occurred without durable intent: %#v", api.createRequests)
+	}
+}
+
+func TestFalAcquireAbortsBeforeIntentWhenKeySyncFails(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	var leaseID string
+	b.syncCreateKey = func(id string) error {
+		leaseID = id
+		return errors.New("key sync unavailable")
+	}
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "key-sync-fail"})
+	if err == nil || !strings.Contains(err.Error(), "sync fal create key before intent") {
+		t.Fatalf("acquire err=%v", err)
+	}
+	if len(api.createRequests) != 0 {
+		t.Fatalf("provider mutation occurred without durable key: %#v", api.createRequests)
+	}
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, readErr)
+	}
+	keyPath, keyErr := core.TestboxKeyPath(leaseID)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("unsynced key still exists: %v", statErr)
+	}
+}
+
+func TestFalAcquireCleansUpPartiallyPersistedIntentBeforeReturning(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	var leaseID string
+	b.persistCreateIntent = func(id, slug string, cfg Config, repoRoot string, keep bool, started time.Time, req CreateInstanceRequest) (core.LeaseClaim, error) {
+		leaseID = id
+		claim, err := b.persistRecoveryClaimAtIfUnchanged(id, slug, cfg, repoRoot, "", "create-intent", keep, started, core.LeaseClaim{}, false, req)
+		if err != nil {
+			return core.LeaseClaim{}, err
+		}
+		return claim, errors.New("directory sync unavailable")
+	}
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "partial-intent"})
+	if err == nil || !strings.Contains(err.Error(), "directory sync unavailable") {
+		t.Fatalf("acquire err=%v", err)
+	}
+	if len(api.createRequests) != 0 {
+		t.Fatalf("provider mutation occurred after rejected intent write: %#v", api.createRequests)
+	}
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, readErr)
+	}
+	keyPath, keyErr := core.TestboxKeyPath(leaseID)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("partial intent key still exists: %v", statErr)
 	}
 }
 
@@ -255,6 +387,24 @@ func TestFalAcquireReconcilesAmbiguousCreateWithIdempotentRetry(t *testing.T) {
 	}
 }
 
+func TestFalAcquireReplaysExactNormalizedCreateRequest(t *testing.T) {
+	api := &fakeFalAPI{createErrs: []error{io.ErrUnexpectedEOF}}
+	b := newFalTestBackend(t, api)
+	b.cfg.Fal.InstanceType = " " + string(InstanceTypeH100x8) + " "
+	b.cfg.Fal.Sector = " " + string(Sector2) + " "
+
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "normalized-replay"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.createRequests) != 2 || api.createRequests[0] != api.createRequests[1] {
+		t.Fatalf("create requests=%#v", api.createRequests)
+	}
+	want := CreateInstanceRequest{InstanceType: InstanceTypeH100x8, Sector: Sector2, SSHKey: api.createRequests[0].SSHKey}
+	if api.createRequests[0] != want {
+		t.Fatalf("create request=%#v want %#v", api.createRequests[0], want)
+	}
+}
+
 func TestFalAcquireDoesNotReplayExplicitRateLimitRejection(t *testing.T) {
 	api := &fakeFalAPI{createErr: &APIError{StatusCode: 429, Status: "429 Too Many Requests", Message: "rate limited"}}
 	b := newFalTestBackend(t, api)
@@ -268,6 +418,40 @@ func TestFalAcquireDoesNotReplayExplicitRateLimitRejection(t *testing.T) {
 	}
 	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("rate-limited", providerName); claimErr != nil || ok {
 		t.Fatalf("rate-limit rejection persisted recovery claim: ok=%v err=%v", ok, claimErr)
+	}
+	keyPath, keyErr := core.TestboxKeyPath(api.idempotency[0])
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("rate-limit rejection key still exists: %v", statErr)
+	}
+}
+
+func TestFalAcquireRetainsIntentAfterDefinitiveReplayRejection(t *testing.T) {
+	api := &fakeFalAPI{createErrs: []error{
+		io.ErrUnexpectedEOF,
+		&APIError{StatusCode: 401, Status: "401 Unauthorized", Message: "unauthorized"},
+	}}
+	b := newFalTestBackend(t, api)
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "replay-rejected"})
+	if err == nil || !strings.Contains(err.Error(), "unauthorized") {
+		t.Fatalf("acquire err=%v", err)
+	}
+	if len(api.idempotency) != 2 || api.idempotency[0] != api.idempotency[1] {
+		t.Fatalf("idempotency=%#v", api.idempotency)
+	}
+	claim, exists, readErr := core.ReadLeaseClaimWithPresence(api.idempotency[0])
+	if readErr != nil || !exists || claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create" {
+		t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, readErr)
+	}
+	keyPath, keyErr := core.TestboxKeyPath(api.idempotency[0])
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("rejected replay key missing: %v", statErr)
 	}
 }
 
@@ -303,11 +487,13 @@ func TestFalReconcileRefusesReplayAfterIdempotencyWindow(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
 	started := b.now().Add(-falCreateRecoveryWindow)
-	_, err := b.reconcileAmbiguousCreate(context.Background(), api, CreateInstanceRequest{
-		InstanceType: InstanceTypeH100x1,
-		SSHKey:       "ssh-ed25519 test",
-	}, "cbx_abcdef123456", started, io.ErrUnexpectedEOF)
-	if err == nil || !strings.Contains(err.Error(), "idempotency replay window expired") {
+	req := CreateInstanceRequest{InstanceType: InstanceTypeH100x1, SSHKey: "ssh-ed25519 test"}
+	claim, err := b.persistRecoveryClaimAtIfUnchanged("cbx_abcdef123456", "expired-replay", b.configForRun(), "", "", "ambiguous-create", false, started, core.LeaseClaim{}, false, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = b.reconcileAmbiguousCreate(context.Background(), api, req, claim, b.configForRun(), false, io.ErrUnexpectedEOF)
+	if err == nil || !strings.Contains(err.Error(), "recovery window expired") {
 		t.Fatalf("err=%v", err)
 	}
 	if len(api.createRequests) != 0 {
@@ -318,16 +504,18 @@ func TestFalReconcileRefusesReplayAfterIdempotencyWindow(t *testing.T) {
 func TestFalReconcileDeadlinesReplayInsideIdempotencyWindow(t *testing.T) {
 	api := &fakeFalAPI{blockCreateUntilContext: true}
 	b := newFalTestBackend(t, api)
-	started := time.Now().Add(-falCreateRecoveryWindow + 75*time.Millisecond)
+	started := time.Now().Add(-falCreateRecoveryWindow + 2*time.Second)
+	req := CreateInstanceRequest{InstanceType: InstanceTypeH100x1, SSHKey: "ssh-ed25519 test"}
+	claim, err := b.persistRecoveryClaimAtIfUnchanged("cbx_abcdef123456", "bounded-replay", b.configForRun(), "", "", "ambiguous-create", false, started, core.LeaseClaim{}, false, req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	begin := time.Now()
-	_, err := b.reconcileAmbiguousCreate(context.Background(), api, CreateInstanceRequest{
-		InstanceType: InstanceTypeH100x1,
-		SSHKey:       "ssh-ed25519 test",
-	}, "cbx_abcdef123456", started, io.ErrUnexpectedEOF)
+	_, _, err = b.reconcileAmbiguousCreate(context.Background(), api, req, claim, b.configForRun(), false, io.ErrUnexpectedEOF)
 	if err == nil || !strings.Contains(err.Error(), "idempotency replay window expired") {
 		t.Fatalf("err=%v", err)
 	}
-	if elapsed := time.Since(begin); elapsed > time.Second {
+	if elapsed := time.Since(begin); elapsed > 3*time.Second {
 		t.Fatalf("replay outlived idempotency deadline: %v", elapsed)
 	}
 	if len(api.createRequests) != 1 {
@@ -386,37 +574,140 @@ func TestFalStopRecoversAmbiguousCreateWithExactIdempotentRequest(t *testing.T) 
 	}
 }
 
-func TestFalConcurrentAmbiguousCreateRecoveryAdoptsWinningClaim(t *testing.T) {
+func TestFalStopRecoveryRetainsIntentAfterDefinitiveRejection(t *testing.T) {
+	api := &fakeFalAPI{createErr: &APIError{StatusCode: 403, Status: "403 Forbidden", Message: "forbidden"}}
+	b := newFalTestBackend(t, api)
+	const leaseID = "cbx_rejected_recovery"
+	claim, _ := persistFalCreateRecoveryClaim(t, b, leaseID, "rejected-recovery", "ambiguous-create", false, time.Time{})
+
+	_, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
+	if err == nil || !strings.Contains(err.Error(), "forbidden") {
+		t.Fatalf("recovery err=%v", err)
+	}
+	retained, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID)
+	if readErr != nil || !exists || retained.CloudID != "" || retained.Labels["recovery"] != "ambiguous-create" {
+		t.Fatalf("claim=%#v exists=%v err=%v", retained, exists, readErr)
+	}
+	keyPath, keyErr := core.TestboxKeyPath(leaseID)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("rejected recovery key missing: %v", statErr)
+	}
+}
+
+func TestFalStopCancelsCreateIntentWithoutProviderMutation(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
-	if _, _, err := core.EnsureTestboxKeyForConfig(b.configForRun(), "cbx_recovery123"); err != nil {
+	const leaseID = "cbx_cancel_create_intent"
+	claim, _ := persistFalCreateRecoveryClaim(t, b, leaseID, "cancel-create-intent", "create-intent", false, time.Time{})
+
+	target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.persistRecoveryClaim("cbx_recovery123", "recovery-race", b.configForRun(), "", "", "ambiguous-create", false); err != nil {
+	if target.LeaseID != leaseID || target.Server.CloudID != "" {
+		t.Fatalf("target=%#v", target)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: target}); err != nil {
 		t.Fatal(err)
 	}
-	claim, ok, err := core.ReadLeaseClaimWithPresence("cbx_recovery123")
-	if err != nil || !ok {
-		t.Fatalf("claim ok=%v err=%v", ok, err)
+	if len(api.createRequests) != 0 || len(api.deletedIDs) != 0 {
+		t.Fatalf("provider mutations create=%d delete=%#v", len(api.createRequests), api.deletedIDs)
 	}
-	api.createHook = func(_ CreateInstanceRequest, _ string, item ComputeInstance) {
-		api.createHook = nil
-		if _, updateErr := b.persistRecoveryClaimIfUnchanged(
-			claim.LeaseID,
-			claim.Slug,
-			b.configForRun(),
-			claim.RepoRoot,
-			item.ID,
-			"rollback-cleanup",
-			false,
-			claim,
-			true,
-		); updateErr != nil {
-			t.Fatalf("publish winning recovery claim: %v", updateErr)
-		}
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID); readErr != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, readErr)
+	}
+	keyPath, keyErr := core.TestboxKeyPath(leaseID)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("cancelled intent key still exists: %v", statErr)
+	}
+}
+
+func TestFalStopRecoveryRefusesMissingOrReplacedKeyBeforeMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(string) error
+		message string
+	}{
+		{
+			name:    "missing public key",
+			mutate:  func(path string) error { return os.Remove(path + ".pub") },
+			message: "public key is unavailable",
+		},
+		{
+			name: "replaced public key",
+			mutate: func(path string) error {
+				return os.WriteFile(path+".pub", []byte("ssh-ed25519 replaced-key\n"), 0o600)
+			},
+			message: "create request changed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeFalAPI{}
+			b := newFalTestBackend(t, api)
+			leaseID := "cbx_" + strings.ReplaceAll(tc.name, " ", "_")
+			claim, _ := persistFalCreateRecoveryClaim(t, b, leaseID, "key-binding", "ambiguous-create", false, time.Time{})
+			keyPath, err := core.TestboxKeyPath(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.mutate(keyPath); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun()); err == nil || !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("recovery err=%v", err)
+			}
+			if len(api.createRequests) != 0 {
+				t.Fatalf("provider mutation occurred with changed key: %#v", api.createRequests)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
+				t.Fatalf("claim exists=%v err=%v", exists, err)
+			}
+		})
+	}
+}
+
+func TestFalStopRecoveryRefusesWhitespaceChangedRequestBeforeMutation(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	b.cfg.Fal.InstanceType = string(InstanceTypeH100x8)
+	b.cfg.Fal.Sector = string(Sector2)
+	claim, _ := persistFalCreateRecoveryClaim(t, b, "cbx_changed_request", "changed-request", "ambiguous-create", false, time.Time{})
+	labels := cloneLabels(claim.Labels)
+	labels["sector"] = " " + string(Sector2) + " "
+	claim, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	updated, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
+	if _, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun()); err == nil || !strings.Contains(err.Error(), "create request changed") {
+		t.Fatalf("recovery err=%v", err)
+	}
+	if len(api.createRequests) != 0 {
+		t.Fatalf("provider mutation occurred with changed request: %#v", api.createRequests)
+	}
+}
+
+func TestFalAmbiguousCreateRecoveryResumesInterruptedInflightAttempt(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	claim, _ := persistFalCreateRecoveryClaim(t, b, "cbx_recovery123", "recovery-race", "ambiguous-create", false, time.Time{})
+	inflight, err := falRecoveryClaimReplacement(claim, b.configForRun(), "", "ambiguous-create-inflight", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inflight.Labels[falCreateAttemptLabel] = "interrupted-attempt"
+	if err := core.ReplaceLeaseClaimIfUnchanged(claim.LeaseID, claim, inflight); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, inflight, b.configForRun())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +715,50 @@ func TestFalConcurrentAmbiguousCreateRecoveryAdoptsWinningClaim(t *testing.T) {
 		t.Fatalf("updated claim=%#v", updated)
 	}
 	if len(api.deletedIDs) != 0 {
-		t.Fatalf("losing recovery deleted the winner's instance: %#v", api.deletedIDs)
+		t.Fatalf("recovery deleted the resumed instance: %#v", api.deletedIDs)
+	}
+}
+
+func TestFalConcurrentAmbiguousCreateRecoveryIssuesOneProviderRequest(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	claim, _ := persistFalCreateRecoveryClaim(t, b, "cbx_concurrent_recovery", "concurrent-recovery", "ambiguous-create", false, time.Time{})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	api.beforeCreateHook = func(string) {
+		once.Do(func() {
+			close(started)
+			<-release
+		})
+	}
+	type result struct {
+		claim core.LeaseClaim
+		err   error
+	}
+	firstResult := make(chan result, 1)
+	secondResult := make(chan result, 1)
+	go func() {
+		updated, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
+		firstResult <- result{claim: updated, err: err}
+	}()
+	<-started
+	go func() {
+		updated, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
+		secondResult <- result{claim: updated, err: err}
+	}()
+	close(release)
+
+	first := <-firstResult
+	second := <-secondResult
+	if first.err != nil || first.claim.CloudID != "inst_created" {
+		t.Fatalf("first recovery claim=%#v err=%v", first.claim, first.err)
+	}
+	if second.err == nil || !strings.Contains(second.err.Error(), "claim changed") {
+		t.Fatalf("second recovery claim=%#v err=%v", second.claim, second.err)
+	}
+	if len(api.createRequests) != 1 {
+		t.Fatalf("provider create requests=%d want 1", len(api.createRequests))
 	}
 }
 
@@ -435,19 +769,10 @@ func TestFalStopRecoveryDeadlinesReplayInsideIdempotencyWindow(t *testing.T) {
 	clock := &mutableFalClock{now: created.Add(falCreateRecoveryWindow - 75*time.Millisecond)}
 	b.rt.Clock = clock
 	const leaseID = "cbx_recovery789"
-	if _, _, err := core.EnsureTestboxKeyForConfig(b.configForRun(), leaseID); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.persistRecoveryClaimAt(leaseID, "recovery-deadline", b.configForRun(), "", "", "ambiguous-create", false, created); err != nil {
-		t.Fatal(err)
-	}
-	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
-	if err != nil || !ok {
-		t.Fatalf("claim ok=%v err=%v", ok, err)
-	}
+	claim, _ := persistFalCreateRecoveryClaim(t, b, leaseID, "recovery-deadline", "ambiguous-create", false, created)
 
 	begin := time.Now()
-	_, err = b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
+	_, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
 	if err == nil || !strings.Contains(err.Error(), "recovery retry failed") || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
 		t.Fatalf("recovery err=%v", err)
 	}
@@ -463,21 +788,15 @@ func TestFalAmbiguousCreateRecoveryCleansUpAfterClaimWriteFailure(t *testing.T) 
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
 	const leaseID = "cbx_recovery456"
-	if _, _, err := core.EnsureTestboxKeyForConfig(b.configForRun(), leaseID); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.persistRecoveryClaim(leaseID, "recovery-write-fail", b.configForRun(), "", "", "ambiguous-create", false); err != nil {
-		t.Fatal(err)
-	}
-	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
-	if err != nil || !ok {
-		t.Fatalf("claim ok=%v err=%v", ok, err)
-	}
-	b.persistRecoveredClaim = func(core.LeaseClaim, Config, string) (core.LeaseClaim, error) {
-		return core.LeaseClaim{}, errors.New("disk full")
+	claim, _ := persistFalCreateRecoveryClaim(t, b, leaseID, "recovery-write-fail", "ambiguous-create", false, time.Time{})
+	b.recoveryClaimReplacement = func(current core.LeaseClaim, cfg Config, instanceID, reason string, keep bool) (core.LeaseClaim, error) {
+		if strings.TrimSpace(instanceID) != "" {
+			return core.LeaseClaim{}, errors.New("disk full")
+		}
+		return falRecoveryClaimReplacement(current, cfg, instanceID, reason, keep)
 	}
 
-	_, err = b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
+	_, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
 	if err == nil || !strings.Contains(err.Error(), "disk full") || !strings.Contains(err.Error(), "inst_created") {
 		t.Fatalf("recovery err=%v", err)
 	}
@@ -486,6 +805,33 @@ func TestFalAmbiguousCreateRecoveryCleansUpAfterClaimWriteFailure(t *testing.T) 
 	}
 	if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || exists {
 		t.Fatalf("claim exists=%v err=%v", exists, readErr)
+	}
+}
+
+func TestFalKnownInstanceAdoptionRequiresDurableRewrite(t *testing.T) {
+	b := newFalTestBackend(t, &fakeFalAPI{})
+	claim, err := b.persistRecoveryClaimAtIfUnchanged(
+		"cbx_known_rewrite",
+		"known-rewrite",
+		b.configForRun(),
+		"",
+		"inst_created",
+		"provisioning",
+		false,
+		b.now(),
+		core.LeaseClaim{},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.recoveryClaimReplacement = func(core.LeaseClaim, Config, string, string, bool) (core.LeaseClaim, error) {
+		return core.LeaseClaim{}, errors.New("directory sync unavailable")
+	}
+
+	_, exists, err := b.adoptOrBindKnownFalInstance(claim, b.configForRun(), "inst_created", "provisioning", false)
+	if err == nil || !exists || !strings.Contains(err.Error(), "directory sync unavailable") {
+		t.Fatalf("adopt exists=%v err=%v", exists, err)
 	}
 }
 

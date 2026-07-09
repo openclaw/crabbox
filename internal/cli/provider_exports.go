@@ -205,12 +205,29 @@ func RemoveLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, actio
 func CleanupLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, expectedExists bool, action func() error) error {
 	return cleanupLeaseClaimIfUnchangedAfter(leaseID, expected, expectedExists, action)
 }
+
+// FinalizeAbsentLeaseClaimAfterSync verifies and syncs durable claim absence
+// before running action under the claim lock.
+func FinalizeAbsentLeaseClaimAfterSync(leaseID string, action func() error) error {
+	return finalizeAbsentLeaseClaimAfterSync(leaseID, action)
+}
+
+// ReplaceOrRemoveLeaseClaimIfUnchangedAfter holds the claim lock while action
+// runs, then atomically replaces or removes the still-matching claim.
+func ReplaceOrRemoveLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func(LeaseClaim) (LeaseClaim, bool, error)) (LeaseClaim, bool, error) {
+	return replaceOrRemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
+}
+
 func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {
 	return restoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
 }
 
 func ReplaceLeaseClaimIfUnchanged(leaseID string, current, replacement LeaseClaim) error {
 	return replaceLeaseClaimIfUnchanged(leaseID, current, replacement)
+}
+
+func ReplaceLeaseClaimIfUnchangedDurable(leaseID string, current, replacement LeaseClaim) error {
+	return replaceLeaseClaimIfUnchangedDurable(leaseID, current, replacement)
 }
 
 func ValidateAzureSSHCIDRsForAcquire(ctx context.Context, cfg Config) error {

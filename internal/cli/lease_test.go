@@ -36,6 +36,25 @@ func TestTestboxKeyPathAllowsSafeCustomIDs(t *testing.T) {
 	}
 }
 
+func TestSyncAndRemoveStoredTestboxKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const leaseID = "cbx_durable_key"
+	keyPath, _, err := ensureTestboxKey(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncStoredTestboxKey(leaseID); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStoredTestboxKeyWithError(leaseID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("removed key stat error=%v", err)
+	}
+}
+
 func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

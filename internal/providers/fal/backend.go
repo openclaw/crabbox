@@ -19,7 +19,10 @@ const (
 	falCreateReconcileAttempts  = 3
 	falCreateReconcileRetryWait = time.Second
 	falCreateRecoveryWindow     = 9 * time.Minute
+	falCreateRequestTimeout     = 30 * time.Second
 	falCredentialBindingLabel   = "fal_credential_binding"
+	falCreateAttemptLabel       = "fal_create_attempt"
+	falCreateRequestLabel       = "fal_create_request_binding"
 )
 
 var (
@@ -29,6 +32,9 @@ var (
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
+	cfg.Fal.InstanceType = strings.TrimSpace(cfg.Fal.InstanceType)
+	cfg.ServerType = cfg.Fal.InstanceType
+	cfg.Fal.Sector = strings.TrimSpace(cfg.Fal.Sector)
 	if InstanceType(cfg.Fal.InstanceType) != InstanceTypeH100x8 {
 		cfg.Fal.Sector = ""
 	}
@@ -45,6 +51,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if err := b.syncFalCreateKey(leaseID); err != nil {
+		return core.LeaseTarget{}, errors.Join(fmt.Errorf("sync fal create key before intent: %w", err), core.RemoveStoredTestboxKeyWithError(leaseID))
+	}
 	cfg.SSHKey = keyPath
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s instance=%s sector=%s keep=%v\n",
 		providerName, leaseID, slug, cfg.Fal.InstanceType, cfg.Fal.Sector, req.Keep)
@@ -55,39 +64,42 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		Sector:       Sector(cfg.Fal.Sector),
 	}
 	createStarted := b.now()
-	created, createErr := client.CreateInstance(ctx, createRequest, leaseID)
-	if createErr != nil || strings.TrimSpace(created.ID) == "" {
-		if createErr != nil && !isAmbiguousFalMutationError(createErr) {
-			core.RemoveStoredTestboxKey(leaseID)
+	intentClaim, claimErr := b.persistInitialFalCreateIntent(leaseID, slug, cfg, req.Repo.Root, req.Keep, createStarted, createRequest)
+	if claimErr != nil {
+		cleanupErr := b.cleanupRejectedFalCreateIntent(intentClaim)
+		if cleanupErr == nil {
+			cleanupErr = removeFalKeyIfClaimAbsent(leaseID)
+		}
+		return core.LeaseTarget{}, errors.Join(fmt.Errorf("persist fal create intent before provider mutation: %w", claimErr), cleanupErr)
+	}
+	created, initialClaim, ambiguous, createErr := b.replayFalCreateWithClaim(ctx, client, createRequest, intentClaim, cfg, "provisioning", req.Keep)
+	needsBind := strings.TrimSpace(created.ID) != "" && createErr != nil
+	if createErr != nil && !ambiguous && !needsBind {
+		return core.LeaseTarget{}, createErr
+	}
+	if ambiguous {
+		created, initialClaim, createErr = b.reconcileAmbiguousCreate(ctx, client, createRequest, initialClaim, cfg, req.Keep, createErr)
+		needsBind = strings.TrimSpace(created.ID) != "" && createErr != nil
+		if createErr != nil && !needsBind {
 			return core.LeaseTarget{}, createErr
 		}
-		if createErr == nil {
-			createErr = exit(5, "fal create instance returned an empty id")
-		}
-		reconciled, reconcileErr := b.reconcileAmbiguousCreate(ctx, client, createRequest, leaseID, createStarted, createErr)
-		if reconcileErr != nil {
-			claimErr := b.persistRecoveryClaimAt(leaseID, slug, cfg, req.Repo.Root, "", "ambiguous-create", false, createStarted)
-			if claimErr != nil {
-				return core.LeaseTarget{}, errors.Join(reconcileErr, fmt.Errorf("persist fal ambiguous-create recovery claim: %w", claimErr))
-			}
-			return core.LeaseTarget{}, reconcileErr
-		}
-		created = reconciled
 	}
 	instanceID := strings.TrimSpace(created.ID)
-	initialClaim, claimErr := b.persistRecoveryClaimAtIfUnchanged(leaseID, slug, cfg, req.Repo.Root, instanceID, "provisioning", req.Keep, createStarted, core.LeaseClaim{}, false)
-	if claimErr != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		cleanupErr := client.DeleteInstance(cleanupCtx, instanceID)
-		if cleanupErr == nil {
-			core.RemoveStoredTestboxKey(leaseID)
-			return core.LeaseTarget{}, fmt.Errorf("persist fal provisioning claim after creating instance %s: %w", instanceID, claimErr)
+	var bindErr error
+	if needsBind {
+		base := initialClaim
+		if base.LeaseID == "" {
+			base = intentClaim
 		}
-		return core.LeaseTarget{}, errors.Join(
-			fmt.Errorf("persist fal provisioning claim after creating instance %s: %w", instanceID, claimErr),
-			fmt.Errorf("fal cleanup failed for unclaimed instance %s: %w", instanceID, cleanupErr),
-		)
+		var bound bool
+		initialClaim, bound, bindErr = b.adoptOrBindKnownFalInstance(base, cfg, instanceID, "provisioning", req.Keep)
+		if bindErr == nil && !bound {
+			bindErr = errFalRecoveryClaimRemoved
+		}
+	}
+	if bindErr != nil {
+		cause := fmt.Errorf("persist fal provisioning claim after creating instance %s: %w", instanceID, bindErr)
+		return core.LeaseTarget{}, b.cleanupKnownFalCreateAfterBindFailure(ctx, client, intentClaim, cfg, instanceID, "provisioning", req.Keep, cause)
 	}
 	if req.OnAcquired != nil {
 		rawTarget := core.LeaseTarget{
@@ -136,31 +148,24 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	return target, nil
 }
 
-func (b *backend) reconcileAmbiguousCreate(ctx context.Context, client computeAPI, req CreateInstanceRequest, leaseID string, createStarted time.Time, cause error) (ComputeInstance, error) {
+func (b *backend) reconcileAmbiguousCreate(ctx context.Context, client computeAPI, req CreateInstanceRequest, claim core.LeaseClaim, cfg Config, keep bool, cause error) (ComputeInstance, core.LeaseClaim, error) {
 	var lastErr error
 	for attempt := 1; attempt <= falCreateReconcileAttempts; attempt++ {
-		replayCtx, cancel, replayErr := b.createReplayContext(ctx, createStarted)
-		if replayErr != nil {
-			return ComputeInstance{}, errors.Join(
-				fmt.Errorf("fal instance creation remains indeterminate after the provider idempotency replay window expired; no provider id was returned"),
-				cause,
-				lastErr,
-			)
+		instance, updated, ambiguous, err := b.replayFalCreateWithClaim(ctx, client, req, claim, cfg, "provisioning", keep)
+		claim = updated
+		if err == nil && strings.TrimSpace(instance.ID) != "" {
+			return instance, claim, nil
 		}
-		instance, err := client.CreateInstance(replayCtx, req, leaseID)
-		cancel()
-		if err == nil {
-			if strings.TrimSpace(instance.ID) != "" {
-				return instance, nil
-			}
-			err = exit(5, "fal idempotent create retry returned an empty id")
+		if strings.TrimSpace(instance.ID) != "" {
+			return instance, claim, errors.Join(cause, fmt.Errorf("persist fal idempotent create result: %w", err))
 		}
 		lastErr = err
-		if !isAmbiguousFalMutationError(err) {
-			return ComputeInstance{}, errors.Join(cause, fmt.Errorf("fal idempotent create retry failed: %w", err))
+		if !ambiguous {
+			return ComputeInstance{}, claim, errors.Join(cause, fmt.Errorf("fal idempotent create retry failed: %w", err))
 		}
-		if !b.now().Before(createStarted.Add(falCreateRecoveryWindow)) {
-			return ComputeInstance{}, errors.Join(
+		createStarted := falClaimStartedAt(claim, time.Time{})
+		if createStarted.IsZero() || !b.now().Before(createStarted.Add(falCreateRecoveryWindow)) {
+			return ComputeInstance{}, claim, errors.Join(
 				fmt.Errorf("fal instance creation remains indeterminate after the provider idempotency replay window expired; no provider id was returned"),
 				cause,
 				lastErr,
@@ -173,15 +178,103 @@ func (b *backend) reconcileAmbiguousCreate(ctx context.Context, client computeAP
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ComputeInstance{}, errors.Join(cause, ctx.Err())
+			return ComputeInstance{}, claim, errors.Join(cause, ctx.Err())
 		case <-timer.C:
 		}
 	}
-	return ComputeInstance{}, errors.Join(
+	return ComputeInstance{}, claim, errors.Join(
 		fmt.Errorf("fal instance creation remains indeterminate after idempotent retry; no provider id was returned"),
 		cause,
 		lastErr,
 	)
+}
+
+func (b *backend) replayFalCreateWithClaim(ctx context.Context, client computeAPI, req CreateInstanceRequest, claim core.LeaseClaim, cfg Config, successReason string, keep bool) (ComputeInstance, core.LeaseClaim, bool, error) {
+	if claim.LeaseID == "" || claim.CloudID != "" {
+		return ComputeInstance{}, claim, false, exit(2, "fal create replay requires an identityless recovery claim")
+	}
+	if claim.Provider != providerName || claim.ProviderScope != falClaimScope(cfg) {
+		return ComputeInstance{}, claim, false, exit(2, "fal lease %s create replay ownership changed", claim.LeaseID)
+	}
+	if err := verifyFalClaimCredential(claim, cfg); err != nil {
+		return ComputeInstance{}, claim, false, err
+	}
+	if err := verifyFalCreateRequestBinding(claim, req); err != nil {
+		return ComputeInstance{}, claim, false, err
+	}
+	recovery := strings.TrimSpace(claim.Labels["recovery"])
+	if recovery != "create-intent" && recovery != "ambiguous-create" && recovery != "ambiguous-create-inflight" {
+		return ComputeInstance{}, claim, false, exit(4, "fal recovery is still pending for lease=%s; local recovery state retained", claim.LeaseID)
+	}
+	createStarted := falClaimStartedAt(claim, time.Time{})
+	createCtx, cancel, err := b.createReplayContext(ctx, createStarted)
+	if err != nil {
+		return ComputeInstance{}, claim, false, exit(5, "fal create recovery window expired for lease=%s; local recovery claim retained for manual provider reconciliation", claim.LeaseID)
+	}
+	defer cancel()
+	hadPriorAttempt := recovery != "create-intent" || strings.TrimSpace(claim.Labels[falCreateAttemptLabel]) != ""
+
+	inflight, err := b.newFalRecoveryClaim(claim, cfg, "", "ambiguous-create-inflight", keep)
+	if err != nil {
+		return ComputeInstance{}, claim, false, err
+	}
+	inflight.Labels[falCreateAttemptLabel] = core.NewLeaseID()
+	if err := core.ReplaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, inflight); err != nil {
+		return ComputeInstance{}, claim, false, fmt.Errorf("claim fal create replay attempt: %w", err)
+	}
+
+	var created ComputeInstance
+	var createErr error
+	updated, exists, mutationErr := core.ReplaceOrRemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, inflight, func(current core.LeaseClaim) (core.LeaseClaim, bool, error) {
+		created, createErr = client.CreateInstance(createCtx, req, claim.LeaseID)
+		instanceID := strings.TrimSpace(created.ID)
+		if createErr == nil && instanceID == "" {
+			createErr = exit(5, "fal idempotent create returned an empty id")
+		}
+		if instanceID == "" && createErr != nil && !isAmbiguousFalMutationError(createErr) && !hadPriorAttempt {
+			return core.LeaseClaim{}, true, nil
+		}
+		reason := successReason
+		if instanceID == "" {
+			reason = "ambiguous-create"
+		}
+		replacement, err := b.newFalRecoveryClaim(current, cfg, instanceID, reason, keep)
+		if err != nil {
+			return core.LeaseClaim{}, false, err
+		}
+		replacement.Labels[falCreateAttemptLabel] = current.Labels[falCreateAttemptLabel]
+		return replacement, false, nil
+	})
+	if mutationErr != nil {
+		if current, currentExists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID); readErr == nil && currentExists &&
+			current.Provider == providerName && current.ProviderScope == falClaimScope(cfg) && verifyFalClaimCredential(current, cfg) == nil {
+			updated = current
+			exists = true
+		}
+		outcomeErr := fmt.Errorf("persist fal create replay outcome: %w", mutationErr)
+		if createErr != nil {
+			outcomeErr = errors.Join(createErr, outcomeErr)
+		}
+		if !exists && createErr != nil && !isAmbiguousFalMutationError(createErr) && !hadPriorAttempt {
+			outcomeErr = errors.Join(outcomeErr, removeFalKeyIfClaimAbsent(claim.LeaseID))
+		}
+		return created, updated, createErr != nil && isAmbiguousFalMutationError(createErr), outcomeErr
+	}
+	if strings.TrimSpace(created.ID) == "" && createErr != nil && !isAmbiguousFalMutationError(createErr) {
+		if !exists {
+			if keyErr := removeFalKeyIfClaimAbsent(claim.LeaseID); keyErr != nil {
+				return ComputeInstance{}, updated, false, errors.Join(createErr, keyErr)
+			}
+		}
+		return ComputeInstance{}, updated, false, createErr
+	}
+	if strings.TrimSpace(created.ID) != "" && createErr != nil {
+		return created, updated, false, createErr
+	}
+	if createErr != nil {
+		return ComputeInstance{}, updated, true, createErr
+	}
+	return created, updated, false, nil
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
@@ -206,6 +299,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if claim.CloudID == "" {
 		if !req.ReleaseOnly {
 			return core.LeaseTarget{}, exit(4, "fal recovery is still pending for lease=%s; local recovery state retained", claim.LeaseID)
+		}
+		if claim.Labels["recovery"] == "create-intent" {
+			return leaseTargetFromClaim(claim, cfg, false)
 		}
 		claim, err = b.recoverAmbiguousCreateForRelease(ctx, client, claim, cfg)
 		if err != nil {
@@ -388,6 +484,15 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return err
 	}
 	if claim.CloudID == "" {
+		if claim.Labels["recovery"] == "create-intent" {
+			if req.Lease.Server.CloudID != "" {
+				return exit(2, "refusing to cancel fal create intent %s from stale provider identity", leaseID)
+			}
+			if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+				return err
+			}
+			return removeFalKeyIfClaimAbsent(leaseID)
+		}
 		return exit(4, "fal recovery is still pending for lease=%s; local recovery state retained", leaseID)
 	}
 	if req.Lease.Server.CloudID != "" && claim.CloudID != req.Lease.Server.CloudID {
@@ -416,8 +521,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if err != nil {
 		return err
 	}
-	core.RemoveStoredTestboxKey(leaseID)
-	return nil
+	return removeFalKeyIfClaimAbsent(leaseID)
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -501,7 +605,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if err != nil {
 			return err
 		}
-		core.RemoveStoredTestboxKey(claim.LeaseID)
+		if err := removeFalKeyIfClaimAbsent(claim.LeaseID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -524,6 +630,13 @@ func (b *backend) waitForSSH(ctx context.Context, target *core.SSHTarget, phase 
 		return b.waitSSH(ctx, target, phase, timeout)
 	}
 	return core.WaitForSSHReady(ctx, target, b.rt.Stderr, phase, timeout)
+}
+
+func (b *backend) syncFalCreateKey(leaseID string) error {
+	if b.syncCreateKey != nil {
+		return b.syncCreateKey(leaseID)
+	}
+	return core.SyncStoredTestboxKey(leaseID)
 }
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client computeAPI, id string) (ComputeInstance, error) {
@@ -570,7 +683,7 @@ func (b *backend) effectivePollInterval() time.Duration {
 }
 
 func (b *backend) recoverAmbiguousCreateForRelease(ctx context.Context, client computeAPI, claim core.LeaseClaim, cfg Config) (core.LeaseClaim, error) {
-	if claim.Labels["recovery"] != "ambiguous-create" {
+	if claim.Labels["recovery"] != "ambiguous-create" && claim.Labels["recovery"] != "ambiguous-create-inflight" {
 		return core.LeaseClaim{}, exit(4, "fal recovery is still pending for lease=%s; local recovery state retained", claim.LeaseID)
 	}
 	createdAt, err := strconv.ParseInt(strings.TrimSpace(claim.Labels["create_started_at"]), 10, 64)
@@ -584,72 +697,244 @@ func (b *backend) recoverAmbiguousCreateForRelease(ctx context.Context, client c
 	if _, err := os.Stat(keyPath); err != nil {
 		return core.LeaseClaim{}, exit(5, "fal create recovery key is unavailable for lease=%s; local recovery claim retained", claim.LeaseID)
 	}
-	_, publicKey, err := core.EnsureTestboxKeyForConfig(cfg, claim.LeaseID)
+	publicKeyData, err := os.ReadFile(keyPath + ".pub")
 	if err != nil {
-		return core.LeaseClaim{}, err
+		return core.LeaseClaim{}, exit(5, "fal create recovery public key is unavailable for lease=%s; local recovery claim retained", claim.LeaseID)
+	}
+	publicKey := strings.TrimSpace(string(publicKeyData))
+	if publicKey == "" {
+		return core.LeaseClaim{}, exit(5, "fal create recovery public key is empty for lease=%s; local recovery claim retained", claim.LeaseID)
 	}
 	instanceType := firstNonBlank(claim.Labels["server_type"], cfg.Fal.InstanceType)
 	sector := claim.Labels["sector"]
 	if InstanceType(instanceType) != InstanceTypeH100x8 {
 		sector = ""
 	}
-	replayCtx, cancel, replayErr := b.createReplayContext(ctx, time.Unix(createdAt, 0))
-	if replayErr != nil {
-		return core.LeaseClaim{}, exit(5, "fal create recovery window expired for lease=%s; local recovery claim retained for manual provider reconciliation", claim.LeaseID)
-	}
-	created, err := client.CreateInstance(replayCtx, CreateInstanceRequest{
-		InstanceType: InstanceType(instanceType),
-		SSHKey:       publicKey,
-		Sector:       Sector(sector),
-	}, claim.LeaseID)
-	cancel()
-	if err != nil {
-		return core.LeaseClaim{}, exit(5, "fal create recovery retry failed for lease=%s; local recovery claim retained: %v", claim.LeaseID, err)
-	}
-	instanceID := strings.TrimSpace(created.ID)
-	if instanceID == "" {
-		return core.LeaseClaim{}, exit(5, "fal create recovery retry returned an empty id for lease=%s; local recovery claim retained", claim.LeaseID)
-	}
 	cfg.Fal.InstanceType = instanceType
 	cfg.ServerType = instanceType
 	cfg.Fal.Sector = sector
-	updated, err := b.persistRecoveredInstanceClaim(claim, cfg, instanceID)
-	if err != nil {
-		persistErr := fmt.Errorf("persist recovered fal instance %s claim: %w", instanceID, err)
-		current, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
-		if readErr == nil && exists && current.Provider == providerName &&
-			current.ProviderScope == falClaimScope(cfg) && current.CloudID == instanceID &&
-			verifyFalClaimCredential(current, cfg) == nil {
-			return current, nil
+	created, updated, ambiguous, replayErr := b.replayFalCreateWithClaim(ctx, client, CreateInstanceRequest{
+		InstanceType: InstanceType(instanceType),
+		SSHKey:       publicKey,
+		Sector:       Sector(sector),
+	}, claim, cfg, "rollback-cleanup", false)
+	instanceID := strings.TrimSpace(created.ID)
+	if replayErr == nil {
+		if instanceID == "" || updated.CloudID != instanceID {
+			return core.LeaseClaim{}, exit(5, "fal recovered instance claim is unavailable for lease=%s", claim.LeaseID)
 		}
+		return updated, nil
+	}
+	if instanceID == "" {
+		if ambiguous {
+			return core.LeaseClaim{}, exit(5, "fal create recovery retry failed for lease=%s; local recovery claim retained: %v", claim.LeaseID, replayErr)
+		}
+		return core.LeaseClaim{}, replayErr
+	}
+	persistErr := fmt.Errorf("persist recovered fal instance %s claim: %w", instanceID, replayErr)
+	base := updated
+	if base.LeaseID == "" {
+		base = claim
+	}
+	owned, exists, ownerErr := b.adoptOrBindKnownFalInstance(base, cfg, instanceID, "rollback-cleanup", false)
+	if ownerErr == nil && exists {
+		return owned, nil
+	}
+	if ownerErr == nil && !exists {
+		return core.LeaseClaim{}, b.rollbackAcquireAfterClaimRemoval(instanceID, claim.LeaseID, claim.Slug, cfg, claim.RepoRoot, "rollback-cleanup", persistErr)
+	}
+	current, currentExists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+	if readErr == nil && currentExists && current.Provider == providerName && current.ProviderScope == falClaimScope(cfg) &&
+		current.CloudID == "" && verifyFalClaimCredential(current, cfg) == nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, true, func() error {
+		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfter(claim.LeaseID, current, true, func() error {
 			return client.DeleteInstance(cleanupCtx, instanceID)
 		})
 		if cleanupErr == nil {
-			core.RemoveStoredTestboxKey(claim.LeaseID)
-			return core.LeaseClaim{}, persistErr
+			return core.LeaseClaim{}, errors.Join(persistErr, removeFalKeyIfClaimAbsent(claim.LeaseID))
 		}
-		current, exists, rereadErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
-		if rereadErr == nil && exists && current.Provider == providerName &&
-			current.ProviderScope == falClaimScope(cfg) && current.CloudID == instanceID &&
-			verifyFalClaimCredential(current, cfg) == nil {
-			return current, nil
+		owned, exists, retryOwnerErr := b.adoptOrBindKnownFalInstance(current, cfg, instanceID, "rollback-cleanup", false)
+		if retryOwnerErr == nil && exists {
+			return owned, nil
 		}
-		return core.LeaseClaim{}, errors.Join(persistErr, readErr, cleanupErr, rereadErr)
+		if retryOwnerErr == nil && !exists {
+			return core.LeaseClaim{}, errors.Join(
+				b.rollbackAcquireAfterClaimRemoval(instanceID, claim.LeaseID, claim.Slug, cfg, claim.RepoRoot, "rollback-cleanup", persistErr),
+				cleanupErr,
+			)
+		}
+		return core.LeaseClaim{}, errors.Join(persistErr, ownerErr, cleanupErr, retryOwnerErr)
 	}
-	if updated.CloudID != instanceID {
-		return core.LeaseClaim{}, exit(5, "fal recovered instance claim is unavailable for lease=%s", claim.LeaseID)
-	}
-	return updated, nil
+	return core.LeaseClaim{}, errors.Join(persistErr, ownerErr, readErr)
 }
 
-func (b *backend) persistRecoveredInstanceClaim(claim core.LeaseClaim, cfg Config, instanceID string) (core.LeaseClaim, error) {
-	if b.persistRecoveredClaim != nil {
-		return b.persistRecoveredClaim(claim, cfg, instanceID)
+func (b *backend) persistInitialFalCreateIntent(leaseID, slug string, cfg Config, repoRoot string, keep bool, createStarted time.Time, req CreateInstanceRequest) (core.LeaseClaim, error) {
+	if b.persistCreateIntent != nil {
+		return b.persistCreateIntent(leaseID, slug, cfg, repoRoot, keep, createStarted, req)
 	}
-	return b.persistRecoveryClaimIfUnchanged(claim.LeaseID, claim.Slug, cfg, claim.RepoRoot, instanceID, "rollback-cleanup", false, claim, true)
+	claim, err := b.persistRecoveryClaimAtIfUnchanged(
+		leaseID,
+		slug,
+		cfg,
+		repoRoot,
+		"",
+		"create-intent",
+		keep,
+		createStarted,
+		core.LeaseClaim{},
+		false,
+		req,
+	)
+	if err != nil {
+		return claim, err
+	}
+	if err := core.ReplaceLeaseClaimIfUnchangedDurable(leaseID, claim, claim); err != nil {
+		return claim, fmt.Errorf("sync fal create intent: %w", err)
+	}
+	return claim, nil
+}
+
+func (b *backend) cleanupRejectedFalCreateIntent(intent core.LeaseClaim) error {
+	if intent.LeaseID == "" {
+		return nil
+	}
+	_, exists, err := core.ReadLeaseClaimWithPresence(intent.LeaseID)
+	if err != nil || !exists {
+		return err
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(intent.LeaseID, intent); err != nil {
+		return fmt.Errorf("clean up rejected fal create intent: %w", err)
+	}
+	return nil
+}
+
+func removeFalKeyIfClaimAbsent(leaseID string) error {
+	return core.FinalizeAbsentLeaseClaimAfterSync(leaseID, func() error {
+		return core.RemoveStoredTestboxKeyWithError(leaseID)
+	})
+}
+
+func falRecoveryClaimReplacement(current core.LeaseClaim, cfg Config, instanceID, reason string, keep bool) (core.LeaseClaim, error) {
+	createStarted := falClaimStartedAt(current, time.Time{})
+	if createStarted.IsZero() {
+		return core.LeaseClaim{}, exit(2, "fal lease %s recovery claim has no create timestamp", current.LeaseID)
+	}
+	labels := falLabels(cfg, current.LeaseID, current.Slug, keep, createStarted)
+	binding := falCredentialBinding(cfg)
+	if binding == "" {
+		return core.LeaseClaim{}, exit(2, "provider=%s requires fal credentials to persist recovery ownership", providerName)
+	}
+	labels[falCredentialBindingLabel] = binding
+	if requestBinding := strings.TrimSpace(current.Labels[falCreateRequestLabel]); requestBinding != "" {
+		labels[falCreateRequestLabel] = requestBinding
+	}
+	labels["create_started_at"] = strconv.FormatInt(createStarted.UTC().Unix(), 10)
+	labels["state"] = reason
+	labels["recovery"] = reason
+	replacement := current
+	replacement.Provider = providerName
+	replacement.ProviderScope = falClaimScope(cfg)
+	replacement.CloudID = strings.TrimSpace(instanceID)
+	replacement.Labels = labels
+	return replacement, nil
+}
+
+func falCreateRequestBinding(req CreateInstanceRequest) string {
+	value := string(req.InstanceType) + "\x00" + string(req.Sector) + "\x00" + req.SSHKey
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("sha256:%x", sum[:])
+}
+
+func verifyFalCreateRequestBinding(claim core.LeaseClaim, req CreateInstanceRequest) error {
+	want := strings.TrimSpace(claim.Labels[falCreateRequestLabel])
+	if want == "" {
+		return exit(5, "fal create request binding is unavailable for lease=%s; local recovery claim retained", claim.LeaseID)
+	}
+	if got := falCreateRequestBinding(req); got != want {
+		return exit(5, "fal create request changed for lease=%s; local recovery claim retained", claim.LeaseID)
+	}
+	return nil
+}
+
+func (b *backend) newFalRecoveryClaim(current core.LeaseClaim, cfg Config, instanceID, reason string, keep bool) (core.LeaseClaim, error) {
+	if b.recoveryClaimReplacement != nil {
+		return b.recoveryClaimReplacement(current, cfg, instanceID, reason, keep)
+	}
+	return falRecoveryClaimReplacement(current, cfg, instanceID, reason, keep)
+}
+
+func (b *backend) adoptOrBindKnownFalInstance(intent core.LeaseClaim, cfg Config, instanceID, reason string, keep bool) (core.LeaseClaim, bool, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		current, exists, err := core.ReadLeaseClaimWithPresence(intent.LeaseID)
+		if err != nil {
+			return core.LeaseClaim{}, false, err
+		}
+		if !exists {
+			return core.LeaseClaim{}, false, nil
+		}
+		if current.Provider != providerName || current.ProviderScope != falClaimScope(cfg) {
+			return core.LeaseClaim{}, true, exit(2, "fal lease %s recovery ownership changed", intent.LeaseID)
+		}
+		if err := verifyFalClaimCredential(current, cfg); err != nil {
+			return core.LeaseClaim{}, true, err
+		}
+		if current.CloudID != "" {
+			if current.CloudID != instanceID {
+				return core.LeaseClaim{}, true, exit(2, "fal lease %s recovery instance changed from %s to %s", intent.LeaseID, instanceID, current.CloudID)
+			}
+		}
+		replacement, replaceErr := b.newFalRecoveryClaim(current, cfg, instanceID, reason, keep)
+		if replaceErr == nil {
+			replaceErr = core.ReplaceLeaseClaimIfUnchangedDurable(intent.LeaseID, current, replacement)
+		}
+		if replaceErr == nil {
+			return replacement, true, nil
+		}
+		lastErr = replaceErr
+	}
+	return core.LeaseClaim{}, true, fmt.Errorf("bind fal instance %s to recovery claim %s: %w", instanceID, intent.LeaseID, lastErr)
+}
+
+func (b *backend) cleanupKnownFalCreateAfterBindFailure(ctx context.Context, client computeAPI, intent core.LeaseClaim, cfg Config, instanceID, reason string, keep bool, cause error) error {
+	current, exists, readErr := core.ReadLeaseClaimWithPresence(intent.LeaseID)
+	if readErr != nil {
+		return errors.Join(cause, readErr)
+	}
+	if !exists {
+		return b.rollbackAcquireAfterClaimRemoval(instanceID, intent.LeaseID, intent.Slug, cfg, intent.RepoRoot, "rollback-cleanup", cause)
+	}
+	if current.Provider != providerName || current.ProviderScope != falClaimScope(cfg) ||
+		(current.CloudID != "" && current.CloudID != instanceID) {
+		return errors.Join(cause, exit(2, "fal lease %s recovery identity changed; refusing cleanup of instance %s", intent.LeaseID, instanceID))
+	}
+	if err := verifyFalClaimCredential(current, cfg); err != nil {
+		return errors.Join(cause, err)
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	cleanupErr := core.CleanupLeaseClaimIfUnchangedAfter(intent.LeaseID, current, true, func() error {
+		deleteErr := client.DeleteInstance(cleanupCtx, instanceID)
+		if isFalNotFound(deleteErr) {
+			return errFalProviderAbsenceNotAccountBound
+		}
+		return deleteErr
+	})
+	if cleanupErr == nil {
+		return errors.Join(cause, removeFalKeyIfClaimAbsent(intent.LeaseID))
+	}
+	owned, ownedExists, ownerErr := b.adoptOrBindKnownFalInstance(current, cfg, instanceID, reason, keep)
+	if ownerErr == nil && ownedExists {
+		return errors.Join(cause, fmt.Errorf("fal cleanup failed for instance %s: %w", instanceID, cleanupErr), fmt.Errorf("fal instance retained by recovery claim %s", owned.LeaseID))
+	}
+	if ownerErr == nil && !ownedExists {
+		return errors.Join(
+			b.rollbackAcquireAfterClaimRemoval(instanceID, intent.LeaseID, intent.Slug, cfg, intent.RepoRoot, "rollback-cleanup", cause),
+			cleanupErr,
+		)
+	}
+	return errors.Join(cause, fmt.Errorf("fal cleanup failed for instance %s: %w", instanceID, cleanupErr), ownerErr)
 }
 
 func (b *backend) now() time.Time {
@@ -664,6 +949,9 @@ func (b *backend) createReplayContext(ctx context.Context, createStarted time.Ti
 	remaining := createStarted.Add(falCreateRecoveryWindow).Sub(b.now())
 	if remaining <= 0 {
 		return nil, nil, context.DeadlineExceeded
+	}
+	if remaining > falCreateRequestTimeout {
+		remaining = falCreateRequestTimeout
 	}
 	replayCtx, cancel := context.WithDeadline(ctx, wallNow.Add(remaining))
 	return replayCtx, cancel, nil
@@ -698,7 +986,9 @@ func (b *backend) rollbackAcquireWithClaimState(instanceID, leaseID, slug string
 	if cleanupErr != nil {
 		return rollbackAcquireError(cause, instanceID, claimErr, cleanupErr)
 	}
-	core.RemoveStoredTestboxKey(leaseID)
+	if keyErr := removeFalKeyIfClaimAbsent(leaseID); keyErr != nil {
+		return rollbackAcquireError(cause, instanceID, claimErr, keyErr)
+	}
 	if claimErr != nil {
 		return errors.Join(cause, fmt.Errorf("persist fal recovery claim: %w", claimErr))
 	}
@@ -744,8 +1034,7 @@ func (b *backend) rollbackAcquireAfterClaimRemoval(instanceID, leaseID, slug str
 		return deleteErr
 	})
 	if cleanupErr == nil {
-		core.RemoveStoredTestboxKey(leaseID)
-		return cause
+		return errors.Join(cause, removeFalKeyIfClaimAbsent(leaseID))
 	}
 	current, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID)
 	if readErr == nil && exists && current.Provider == providerName && current.ProviderScope == falClaimScope(cfg) &&
@@ -831,7 +1120,10 @@ func (b *backend) persistRecoveryClaimIfUnchanged(leaseID, slug string, cfg Conf
 	return b.persistRecoveryClaimAtIfUnchanged(leaseID, slug, cfg, repoRoot, instanceID, reason, keep, time.Time{}, expected, expectedExists)
 }
 
-func (b *backend) persistRecoveryClaimAtIfUnchanged(leaseID, slug string, cfg Config, repoRoot, instanceID, reason string, keep bool, createStarted time.Time, expected core.LeaseClaim, expectedExists bool) (core.LeaseClaim, error) {
+func (b *backend) persistRecoveryClaimAtIfUnchanged(leaseID, slug string, cfg Config, repoRoot, instanceID, reason string, keep bool, createStarted time.Time, expected core.LeaseClaim, expectedExists bool, createRequest ...CreateInstanceRequest) (core.LeaseClaim, error) {
+	if len(createRequest) > 1 {
+		return core.LeaseClaim{}, exit(2, "fal recovery claim accepts at most one create request binding")
+	}
 	createStarted = falClaimStartedAt(expected, createStarted)
 	if createStarted.IsZero() {
 		createStarted = b.now()
@@ -842,6 +1134,11 @@ func (b *backend) persistRecoveryClaimAtIfUnchanged(leaseID, slug string, cfg Co
 		return core.LeaseClaim{}, exit(2, "provider=%s requires fal credentials to persist recovery ownership", providerName)
 	}
 	labels[falCredentialBindingLabel] = binding
+	if len(createRequest) == 1 {
+		labels[falCreateRequestLabel] = falCreateRequestBinding(createRequest[0])
+	} else if requestBinding := strings.TrimSpace(expected.Labels[falCreateRequestLabel]); requestBinding != "" {
+		labels[falCreateRequestLabel] = requestBinding
+	}
 	labels["create_started_at"] = strconv.FormatInt(createStarted.UTC().Unix(), 10)
 	labels["state"] = reason
 	labels["recovery"] = reason

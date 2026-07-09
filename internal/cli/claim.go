@@ -742,6 +742,13 @@ func leaseClaimLockPath(path string) (string, error) {
 }
 
 func writeLeaseClaimAtomic(path string, claim leaseClaim) error {
+	return writeLeaseClaimAtomicWithSync(path, claim, func(dir string) error {
+		fsyncDir(dir)
+		return nil
+	})
+}
+
+func writeLeaseClaimAtomicWithSync(path string, claim leaseClaim, syncDirectory func(string) error) error {
 	data, err := json.MarshalIndent(claim, "", "  ")
 	if err != nil {
 		return err
@@ -779,8 +786,31 @@ func writeLeaseClaimAtomic(path string, claim leaseClaim) error {
 		return exit(2, "write claim %s: %v", path, err)
 	}
 	removeTemp = false
-	fsyncDir(dir)
+	if err := syncDirectory(dir); err != nil {
+		return exit(2, "sync claim directory %s: %v", dir, err)
+	}
 	return nil
+}
+
+func writeLeaseClaimAtomicDurable(path string, claim leaseClaim) error {
+	if err := writeLeaseClaimAtomicWithSync(path, claim, syncControllerDirectory); err != nil {
+		return err
+	}
+	return syncControllerDirectoryAncestors(filepath.Dir(filepath.Dir(path)))
+}
+
+func syncControllerDirectoryAncestors(start string) error {
+	dir := filepath.Clean(start)
+	for {
+		if err := syncControllerDirectory(dir); err != nil {
+			return err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
 }
 
 func fsyncDir(dir string) {
@@ -1232,6 +1262,93 @@ func cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID string, expected leaseCla
 	})
 }
 
+func finalizeAbsentLeaseClaimAfterSync(leaseID string, action func() error) error {
+	return finalizeAbsentLeaseClaimAfterSyncWithSync(leaseID, action, syncControllerDirectory)
+}
+
+func finalizeAbsentLeaseClaimAfterSyncWithSync(leaseID string, action func() error, syncDirectory func(string) error) error {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	return withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+			return err
+		}
+		if err := unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false)(claim, exists); err != nil {
+			return err
+		}
+		if err := removeControllerFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return exit(2, "remove absent claim %s: %v", path, err)
+		}
+		if err := syncDirectory(filepath.Dir(path)); err != nil {
+			return exit(2, "sync absent claim directory %s: %v", filepath.Dir(path), err)
+		}
+		if action != nil {
+			return action()
+		}
+		return nil
+	})
+}
+
+func replaceOrRemoveLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, action func(leaseClaim) (leaseClaim, bool, error)) (leaseClaim, bool, error) {
+	if action == nil {
+		return leaseClaim{}, false, exit(2, "lease %s replacement action is required", leaseID)
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return leaseClaim{}, false, err
+	}
+	var updated leaseClaim
+	var existsAfter bool
+	err = withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+			return err
+		}
+		if err := unchangedLeaseClaimGuard(leaseID, expected, true)(claim, exists); err != nil {
+			return err
+		}
+		replacement, remove, err := action(cloneLeaseClaim(claim))
+		if err != nil {
+			return err
+		}
+		if remove {
+			if err := removeControllerFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return exit(2, "remove claim %s: %v", path, err)
+			}
+			if err := syncControllerDirectory(filepath.Dir(path)); err != nil {
+				return exit(2, "sync removed claim directory %s: %v", filepath.Dir(path), err)
+			}
+			updated = leaseClaim{}
+			existsAfter = false
+			return nil
+		}
+		if replacement.LeaseID == "" {
+			updated = cloneLeaseClaim(claim)
+			existsAfter = true
+			return nil
+		}
+		if replacement.LeaseID != leaseID {
+			return exit(2, "replacement claim id %s does not match %s", replacement.LeaseID, leaseID)
+		}
+		if err := writeLeaseClaimAtomicDurable(path, cloneLeaseClaim(replacement)); err != nil {
+			return err
+		}
+		updated = cloneLeaseClaim(replacement)
+		existsAfter = true
+		return nil
+	})
+	return updated, existsAfter, err
+}
+
 func restoreLeaseClaimIfUnchanged(leaseID string, current, previous leaseClaim, previousExists bool) error {
 	if !previousExists {
 		return removeLeaseClaimIfUnchanged(leaseID, current)
@@ -1256,6 +1373,14 @@ func restoreLeaseClaimIfUnchanged(leaseID string, current, previous leaseClaim, 
 }
 
 func replaceLeaseClaimIfUnchanged(leaseID string, current, replacement leaseClaim) error {
+	return replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomic)
+}
+
+func replaceLeaseClaimIfUnchangedDurable(leaseID string, current, replacement leaseClaim) error {
+	return replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomicDurable)
+}
+
+func replaceLeaseClaimIfUnchangedWithWrite(leaseID string, current, replacement leaseClaim, write func(string, leaseClaim) error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return err
@@ -1271,7 +1396,7 @@ func replaceLeaseClaimIfUnchanged(leaseID string, current, replacement leaseClai
 		if err := unchangedLeaseClaimGuard(leaseID, current, true)(claim, exists); err != nil {
 			return err
 		}
-		return writeLeaseClaimAtomic(path, cloneLeaseClaim(replacement))
+		return write(path, cloneLeaseClaim(replacement))
 	})
 }
 
