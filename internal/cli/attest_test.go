@@ -597,6 +597,14 @@ func TestPreflightAttestPathsProtectsReceiptAndSigningKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	danglingParentAlias := filepath.Join(dir, "future-key-dir")
+	danglingAliasAvailable := true
+	if err := os.Symlink(filepath.Dir(defaultKeyPath), danglingParentAlias); err != nil {
+		danglingAliasAvailable = false
+		if runtime.GOOS != "windows" {
+			t.Fatal(err)
+		}
+	}
 	type pathCase struct {
 		name string
 		opts attestPathPreflight
@@ -651,16 +659,11 @@ func TestPreflightAttestPathsProtectsReceiptAndSigningKey(t *testing.T) {
 			want: "attest key and lease output paths must be different",
 		})
 	}
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+	if danglingAliasAvailable {
 		cases = append(cases, pathCase{
-			name: "case variant receipt and timing paths",
-			opts: attestPathPreflight{
-				Receipt:             filepath.Join(dir, "Receipt.json"),
-				KeyOverride:         keyPath,
-				TimingRecord:        filepath.Join(dir, "receipt.JSON"),
-				TimingRecordEnabled: true,
-			},
-			want: "attest receipt and timing record paths must be different",
+			name: "dangling symlink parent cannot alias future default key",
+			opts: attestPathPreflight{Receipt: filepath.Join(danglingParentAlias, filepath.Base(defaultKeyPath))},
+			want: "attest receipt and attest key paths must be different",
 		})
 	}
 	for _, tc := range cases {
@@ -683,6 +686,21 @@ func TestPreflightAttestPathsProtectsReceiptAndSigningKey(t *testing.T) {
 		Downloads:           []string{"build.log=" + filepath.Join(dir, "build.log")},
 	}); err != nil {
 		t.Fatalf("distinct attest paths: %v", err)
+	}
+}
+
+func TestSameLocalOutputPathUsesFilesystemCaseSemantics(t *testing.T) {
+	dir := t.TempDir()
+	caseInsensitive, err := localPathCaseInsensitive(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err := sameLocalOutputPath(filepath.Join(dir, "Receipt.json"), filepath.Join(dir, "receipt.JSON"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same != caseInsensitive {
+		t.Fatalf("same=%t, filesystem case-insensitive=%t", same, caseInsensitive)
 	}
 }
 
