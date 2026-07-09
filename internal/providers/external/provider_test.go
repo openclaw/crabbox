@@ -156,6 +156,8 @@ func TestValidateConfigRejectsUnsafeNativeWindowsWorkRoot(t *testing.T) {
 		`C:\PROGRA~1`,
 		`C:\safe:stream\crabbox`,
 		`C:\NUL\crabbox`,
+		`C:\COM¹\crabbox`,
+		`C:\LPT³\crabbox`,
 		`C:\safe\..\Users`,
 	} {
 		cfg := testConfig()

@@ -316,11 +316,25 @@ func validateWindowsWorkRootComponent(value, part string) error {
 	if dot := strings.IndexByte(base, '.'); dot >= 0 {
 		base = base[:dot]
 	}
-	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" ||
-		(len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9') {
+	if windowsReservedDeviceBase(base) {
 		return core.Exit(2, "external.workRoot %q contains a reserved Windows device name", value)
 	}
 	return nil
+}
+
+func windowsReservedDeviceBase(base string) bool {
+	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" {
+		return true
+	}
+	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9' {
+		return true
+	}
+	for _, digit := range []string{"¹", "²", "³"} {
+		if base == "COM"+digit || base == "LPT"+digit {
+			return true
+		}
+	}
+	return false
 }
 
 func windowsShortNameComponent(part string) bool {
