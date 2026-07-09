@@ -394,10 +394,17 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err != nil {
 		return err
 	}
+	matchingClaims := make([]core.LeaseClaim, 0, len(claims))
 	for _, claim := range claims {
 		if err := verifyFalClaimCredential(claim, cfg); err != nil {
-			return err
+			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=credential_binding_mismatch\n", firstNonBlank(claim.CloudID, claim.LeaseID), firstNonBlank(claim.Slug, claim.LeaseID))
+			continue
 		}
+		matchingClaims = append(matchingClaims, claim)
+	}
+	claims = matchingClaims
+	if len(claims) == 0 {
+		return nil
 	}
 	client, err := b.api()
 	if err != nil {

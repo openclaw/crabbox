@@ -825,6 +825,37 @@ func TestFalCleanupDeletesOnlyExpiredClaimedInstances(t *testing.T) {
 	}
 }
 
+func TestFalCleanupSkipsOtherCredentialClaimsWithoutBlockingMatches(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{
+		"inst_first":  readyFalInstance("inst_first", "203.0.113.20"),
+		"inst_second": readyFalInstance("inst_second", "203.0.113.21"),
+	}}
+	b := newFalTestBackend(t, api)
+	firstCfg := b.cfg
+	secondCfg := b.cfg
+	secondCfg.Fal.APIKey = "second-test-key"
+	claimFalLease(t, firstCfg, "cbx_first123456", "first", "inst_first", "203.0.113.20", true)
+	claimFalLease(t, secondCfg, "cbx_second12345", "second", "inst_second", "203.0.113.21", true)
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deletedIDs) != 1 || api.deletedIDs[0] != "inst_first" {
+		t.Fatalf("first credential deletedIDs=%#v", api.deletedIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("second", providerName); err != nil || !ok {
+		t.Fatalf("other credential claim retained=%v err=%v", ok, err)
+	}
+
+	b.cfg.Fal.APIKey = secondCfg.Fal.APIKey
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deletedIDs) != 2 || api.deletedIDs[1] != "inst_second" {
+		t.Fatalf("second credential deletedIDs=%#v", api.deletedIDs)
+	}
+}
+
 func TestFalCleanupRejectsClaimChangedBeforeDeletion(t *testing.T) {
 	api := &fakeFalAPI{instances: map[string]ComputeInstance{
 		"inst_expired": readyFalInstance("inst_expired", "203.0.113.20"),

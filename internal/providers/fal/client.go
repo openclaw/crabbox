@@ -28,6 +28,8 @@ type client struct {
 
 const maxResponseBytes = 16 << 20
 
+var errFalCrossOriginRedirect = errors.New("fal refused cross-origin redirect")
+
 // APIError mirrors fal's documented standard error envelope. Request IDs are
 // taken from the error body when present; the OpenAPI schema does not document a
 // request-id response header for Compute as of 2026-06-25.
@@ -83,7 +85,7 @@ func secureHTTPClient(source *http.Client, apiURL string) *http.Client {
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if !sameOrigin(trusted, req.URL) {
-			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, req.URL.Redacted())
+			return errFalCrossOriginRedirect
 		}
 		if originalCheckRedirect != nil {
 			return originalCheckRedirect(req, via)
@@ -199,6 +201,9 @@ func (c *client) do(ctx context.Context, method, path string, body any, idempote
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if errors.Is(err, errFalCrossOriginRedirect) {
+			return errFalCrossOriginRedirect
+		}
 		return err
 	}
 	defer resp.Body.Close()

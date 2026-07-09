@@ -186,7 +186,7 @@ func TestClientRefusesCrossOriginRedirectBeforeReplayingAuth(t *testing.T) {
 	}))
 	defer untrusted.Close()
 	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, untrusted.URL+"/compute/instances", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, untrusted.URL+"/compute/instances?token=redirect-secret", http.StatusTemporaryRedirect)
 	}))
 	defer trusted.Close()
 	api, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: trusted.URL}}, Runtime{HTTP: trusted.Client()})
@@ -196,6 +196,9 @@ func TestClientRefusesCrossOriginRedirectBeforeReplayingAuth(t *testing.T) {
 	_, err = api.ListInstances(context.Background(), 0, "")
 	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
 		t.Fatalf("redirect err=%v", err)
+	}
+	if strings.Contains(err.Error(), "redirect-secret") || strings.Contains(err.Error(), untrusted.URL) {
+		t.Fatalf("redirect error leaked target: %v", err)
 	}
 	if redirectedAuth != "" {
 		t.Fatalf("auth replayed to untrusted origin: %q", redirectedAuth)
