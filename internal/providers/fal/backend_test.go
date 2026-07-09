@@ -562,6 +562,38 @@ func TestFalAcquireAcknowledgesProviderIdentityBeforeReadinessPolling(t *testing
 	}
 }
 
+func TestFalProvisioningClaimIsCleanupOnly(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{
+		"inst_provisioning": readyFalInstance("inst_provisioning", "203.0.113.42"),
+	}}
+	b := newFalTestBackend(t, api)
+	claim, err := b.persistRecoveryClaimAtIfUnchanged(
+		"cbx_abcdef123456",
+		"provisioning",
+		b.configForRun(),
+		"",
+		"inst_provisioning",
+		"provisioning",
+		false,
+		b.now(),
+		core.LeaseClaim{},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID}); err == nil || !strings.Contains(err.Error(), "still provisioning") {
+		t.Fatalf("resolve err=%v", err)
+	}
+	if _, err := b.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: claim.LeaseID}}); err == nil || !strings.Contains(err.Error(), "still provisioning") {
+		t.Fatalf("touch err=%v", err)
+	}
+	target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
+	if err != nil || target.Server.CloudID != "inst_provisioning" {
+		t.Fatalf("release-only target=%#v err=%v", target, err)
+	}
+}
+
 func TestFalAmbiguousCreateReportsRecoveryClaimFailure(t *testing.T) {
 	b := newFalTestBackend(t, &fakeFalAPI{})
 	stateFile := filepath.Join(t.TempDir(), "state-file")

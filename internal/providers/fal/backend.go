@@ -188,6 +188,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err := verifyFalClaimCredential(claim, cfg); err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if claim.Labels["recovery"] == "provisioning" && !req.ReleaseOnly {
+		return core.LeaseTarget{}, exit(4, "fal lease %s is still provisioning; retry after acquisition completes", claim.LeaseID)
+	}
 	if claim.CloudID == "" {
 		if !req.ReleaseOnly {
 			return core.LeaseTarget{}, exit(4, "fal recovery is still pending for lease=%s; local recovery state retained", claim.LeaseID)
@@ -326,6 +329,9 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	}
 	if err := verifyFalClaimCredential(claim, cfg); err != nil {
 		return core.Server{}, err
+	}
+	if claim.Labels["recovery"] == "provisioning" {
+		return core.Server{}, exit(4, "fal lease %s is still provisioning; refusing to update it", claim.LeaseID)
 	}
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
