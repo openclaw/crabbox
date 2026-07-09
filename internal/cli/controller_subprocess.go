@@ -1306,22 +1306,23 @@ func (r *execControllerWorkspaceRunner) RecoverControllerChildren(ctx context.Co
 }
 
 func terminateControllerProcessGroup(processGroupID int) error {
-	if err := stopControllerProcessGroup(processGroupID); err != nil {
-		// Darwin can report EPERM after the group leader was reaped even when no
-		// non-zombie member remains. Verify the group before retaining the
-		// durable child handle.
-		if !controllerProcessGroupAlive(processGroupID) {
-			return nil
-		}
-		return err
+	stopErr := stopControllerProcessGroup(processGroupID)
+	if processGroupID <= 0 {
+		return stopErr
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for controllerProcessGroupAlive(processGroupID) {
+	return waitForControllerProcessGroupExit(processGroupID, stopErr, controllerProcessGroupAlive, time.Now().Add(5*time.Second))
+}
+
+func waitForControllerProcessGroupExit(processGroupID int, stopErr error, alive func(int) bool, deadline time.Time) error {
+	for alive(processGroupID) {
 		if time.Now().After(deadline) {
-			return fmt.Errorf("controller process group %d survived termination", processGroupID)
+			return errors.Join(stopErr, fmt.Errorf("controller process group %d survived termination", processGroupID))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	// Darwin can report EPERM after the group leader was reaped while a
+	// signaled descendant is still transitioning to a zombie. The durable
+	// child handle is safe to remove once no live member remains.
 	return nil
 }
 
