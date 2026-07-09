@@ -3,6 +3,7 @@ package fal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -139,6 +140,9 @@ func TestFalAcquireCreatesInstanceWaitsAndClaimsLease(t *testing.T) {
 	if claim.CloudID != "inst_created" || claim.SSHHost != "203.0.113.42" || claim.Labels["provider"] != providerName || claim.Labels["sector"] != string(Sector2) {
 		t.Fatalf("claim=%#v", claim)
 	}
+	if claim.ProviderScope != falClaimScope(b.cfg) {
+		t.Fatalf("claim scope=%q want %q", claim.ProviderScope, falClaimScope(b.cfg))
+	}
 }
 
 func TestFalAcquireDefaultSingleGPUOmitsSector(t *testing.T) {
@@ -230,6 +234,22 @@ func TestFalAcquireReconcilesAmbiguousCreateWithIdempotentRetry(t *testing.T) {
 	}
 }
 
+func TestFalReconcileRefusesReplayAfterIdempotencyWindow(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	started := b.now().Add(-falCreateRecoveryWindow)
+	_, err := b.reconcileAmbiguousCreate(context.Background(), api, CreateInstanceRequest{
+		InstanceType: InstanceTypeH100x1,
+		SSHKey:       "ssh-ed25519 test",
+	}, "cbx_abcdef123456", started, io.ErrUnexpectedEOF)
+	if err == nil || !strings.Contains(err.Error(), "idempotency replay window expired") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.createRequests) != 0 {
+		t.Fatalf("expired idempotency replay issued create: %#v", api.createRequests)
+	}
+}
+
 func TestFalStopRecoversAmbiguousCreateWithExactIdempotentRequest(t *testing.T) {
 	api := &fakeFalAPI{createErrs: []error{io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF}}
 	b := newFalTestBackend(t, api)
@@ -246,6 +266,9 @@ func TestFalStopRecoversAmbiguousCreateWithExactIdempotentRequest(t *testing.T) 
 	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("unreconciled-create", providerName)
 	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create" {
 		t.Fatalf("recovery claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	if claim.Labels["create_started_at"] == "" {
+		t.Fatalf("recovery claim missing initial mutation time: %#v", claim.Labels)
 	}
 	views, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil {
@@ -291,7 +314,7 @@ func TestFalStopRetainsAmbiguousClaimAfterIdempotencyWindow(t *testing.T) {
 		t.Fatalf("claim ok=%v err=%v", ok, err)
 	}
 	labels := cloneLabels(claim.Labels)
-	labels["created_at"] = strconv.FormatInt(time.Now().Add(-falCreateRecoveryWindow-time.Minute).Unix(), 10)
+	labels["create_started_at"] = strconv.FormatInt(time.Now().Add(-falCreateRecoveryWindow-time.Minute).Unix(), 10)
 	claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
 	if err != nil {
 		t.Fatal(err)
@@ -544,6 +567,37 @@ func TestFalResolveListAndReleaseRequireLocalClaim(t *testing.T) {
 	}
 }
 
+func TestFalLifecycleRejectsClaimsFromAnotherAPIEndpoint(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{
+		"inst_owned": readyFalInstance("inst_owned", "203.0.113.10"),
+	}}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_abcdef123456", "owned", "inst_owned", "203.0.113.10", true)
+
+	other := *b
+	other.cfg.Fal.APIURL = "https://other.example.test/v1"
+	if _, err := other.Resolve(context.Background(), core.ResolveRequest{ID: "owned"}); err == nil || !strings.Contains(err.Error(), "not locally claimed") {
+		t.Fatalf("cross-endpoint resolve err=%v", err)
+	}
+	views, err := other.List(context.Background(), core.ListRequest{})
+	if err != nil || len(views) != 0 {
+		t.Fatalf("cross-endpoint views=%#v err=%v", views, err)
+	}
+	err = other.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: "cbx_abcdef123456",
+		Server:  core.Server{CloudID: "inst_owned", Provider: providerName, Labels: map[string]string{"lease": "cbx_abcdef123456"}},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "different API endpoint") {
+		t.Fatalf("cross-endpoint release err=%v", err)
+	}
+	if err := other.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("cross-endpoint lifecycle deleted instances: %#v", api.deletedIDs)
+	}
+}
+
 func TestFalResolveUsesPersistedSSHUserAndPort(t *testing.T) {
 	api := &fakeFalAPI{instances: map[string]ComputeInstance{
 		"inst_owned": readyFalInstance("inst_owned", "203.0.113.10"),
@@ -632,6 +686,39 @@ func TestFalReleaseRetainsClaimOnAmbiguousProviderRead(t *testing.T) {
 	}
 }
 
+func TestFalReleaseRejectsClaimChangedBeforeDeletion(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{
+		"inst_owned": readyFalInstance("inst_owned", "203.0.113.10"),
+	}}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_abcdef123456", "owned", "inst_owned", "203.0.113.10", false)
+	b.clientFactory = func(Config, Runtime) (computeAPI, error) {
+		claim, ok, err := core.ReadLeaseClaimWithPresence("cbx_abcdef123456")
+		if err != nil || !ok {
+			return nil, fmt.Errorf("read claim before release: ok=%v err=%w", ok, err)
+		}
+		labels := cloneLabels(claim.Labels)
+		labels["state"] = "renewed"
+		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
+			return nil, err
+		}
+		return api, nil
+	}
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: "cbx_abcdef123456",
+		Server:  core.Server{CloudID: "inst_owned", Provider: providerName, Labels: map[string]string{"lease": "cbx_abcdef123456"}},
+	}})
+	if err == nil {
+		t.Fatal("expected changed-claim release rejection")
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("changed claim was deleted: %#v", api.deletedIDs)
+	}
+	if _, ok, err := core.ReadLeaseClaimWithPresence("cbx_abcdef123456"); err != nil || !ok {
+		t.Fatalf("changed claim retained=%v err=%v", ok, err)
+	}
+}
+
 func TestFalReleaseRefusesRecoveryClaimWithoutCloudID(t *testing.T) {
 	api := &fakeFalAPI{instances: map[string]ComputeInstance{
 		"inst_foreign": readyFalInstance("inst_foreign", "203.0.113.40"),
@@ -674,6 +761,35 @@ func TestFalCleanupDeletesOnlyExpiredClaimedInstances(t *testing.T) {
 	}
 	if _, ok := api.instances["inst_foreign"]; !ok {
 		t.Fatal("cleanup deleted unclaimed foreign instance")
+	}
+}
+
+func TestFalCleanupRejectsClaimChangedBeforeDeletion(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{
+		"inst_expired": readyFalInstance("inst_expired", "203.0.113.20"),
+	}}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_expired1234", "expired", "inst_expired", "203.0.113.20", true)
+	b.clientFactory = func(Config, Runtime) (computeAPI, error) {
+		claim, ok, err := core.ReadLeaseClaimWithPresence("cbx_expired1234")
+		if err != nil || !ok {
+			return nil, fmt.Errorf("read claim before cleanup: ok=%v err=%w", ok, err)
+		}
+		labels := cloneLabels(claim.Labels)
+		labels["state"] = "renewed"
+		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
+			return nil, err
+		}
+		return api, nil
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err == nil {
+		t.Fatal("expected changed-claim cleanup rejection")
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("changed claim was deleted: %#v", api.deletedIDs)
+	}
+	if _, ok, err := core.ReadLeaseClaimWithPresence("cbx_expired1234"); err != nil || !ok {
+		t.Fatalf("changed claim retained=%v err=%v", ok, err)
 	}
 }
 

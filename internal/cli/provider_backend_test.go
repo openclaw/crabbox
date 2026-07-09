@@ -179,6 +179,12 @@ func TestLeaseOptionsFromConfigCanonicalizesProviderScope(t *testing.T) {
 	if scope := leaseOptionsFromConfig(cfg).ProviderScope; scope != "endpoint:https://pve.example.test:8006|node:pve1" {
 		t.Fatalf("proxmox provider scope=%q", scope)
 	}
+
+	cfg.Provider = "fal-ai"
+	cfg.Fal.APIURL = "HTTPS://API.FAL.AI:443/v1/"
+	if scope := leaseOptionsFromConfig(cfg).ProviderScope; scope != "endpoint:https://api.fal.ai/v1" {
+		t.Fatalf("fal provider scope=%q", scope)
+	}
 }
 
 func TestProviderHelpAllIncludesDelegatedProviders(t *testing.T) {

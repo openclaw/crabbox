@@ -9,6 +9,7 @@
 - Added `sync-plan --json` with candidate and dirty-delta sizes, configured guardrail status, deleted-path counts, and ranked file and directory hotspots for automation. Thanks @zozo123.
 - Added a CubeSandbox delegated-run provider with E2B-compatible lifecycle and envd execution, archive sync, CubeProxy routing, exact API-endpoint/sandbox-bound ownership claims, conflict-safe explicit adoption, and guarded cleanup. Thanks @zozo123.
 - Added coordinator-managed Daytona Linux leases with a Worker-held API key, exact ownership cleanup, expiring SSH-token refresh, CLI secret redaction, and production Cloudflare configuration.
+- Added fal Compute direct Linux GPU SSH leases with per-lease keys, API-endpoint-scoped and claim-locked cleanup, bounded ambiguous-create recovery, and guarded zero-residue live-smoke coverage. Thanks @coygeek.
 
 ### Fixed
 
@@ -56,10 +57,6 @@
 ### Added
 
 - Added Sealos DevBox Linux SSH leases through the Kubernetes CRD with exact provider/resource-bound claims, conflict-safe explicit `--reclaim` adoption, claim-locked release and cleanup, controller-owned Secret SSH routing, and guarded zero-residue lifecycle proof. Thanks @coygeek.
-
-### Added
-
-- Added fal Compute direct Linux GPU SSH leases with per-lease keys, claim-bound cleanup, bounded ambiguous-create recovery, and guarded zero-residue live-smoke coverage. Thanks @coygeek.
 
 ### Changed
 
