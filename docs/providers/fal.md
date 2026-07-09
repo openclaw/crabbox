@@ -52,8 +52,8 @@ target: linux
 fal:
   apiUrl: https://api.fal.ai/v1
   instanceType: gpu_1x_h100_sxm5
-  user: root
-  workRoot: /work/crabbox
+  user: ubuntu
+  workRoot: /home/ubuntu/crabbox
 ```
 
 Config keys under `fal:`:
@@ -63,8 +63,8 @@ Config keys under `fal:`:
 | `apiUrl` | `cfg.Fal.APIURL` | `https://api.fal.ai/v1` | fal Platform API base URL. HTTPS is required unless targeting localhost for tests. |
 | `instanceType` | `cfg.Fal.InstanceType` | `gpu_1x_h100_sxm5` | fal Compute instance type. |
 | `sector` | `cfg.Fal.Sector` | unset | fal Compute sector; set only for supported 8× H100 multi-node instance types. |
-| `user` | `cfg.Fal.User` | `root` | SSH user for the instance. |
-| `workRoot` | `cfg.Fal.WorkRoot` | `/work/crabbox` | Remote Crabbox work root. |
+| `user` | `cfg.Fal.User` | `ubuntu` | SSH user for the instance. |
+| `workRoot` | `cfg.Fal.WorkRoot` | `/home/ubuntu/crabbox` | Remote Crabbox work root. |
 
 The generic `--type` flag and fal-specific `--fal-instance-type` flag both
 select the Compute instance type. If both are present, explicit `--type` wins.

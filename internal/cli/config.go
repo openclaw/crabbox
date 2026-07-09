@@ -709,6 +709,11 @@ type FalConfig struct {
 	WorkRoot     string
 }
 
+const (
+	defaultFalUser     = "ubuntu"
+	defaultFalWorkRoot = "/home/ubuntu/crabbox"
+)
+
 // NvidiaBrevConfig is intentionally non-secret. Authentication stays in the
 // NVIDIA Brev CLI's own credential store and is never accepted as Crabbox
 // config or argv.
@@ -2040,10 +2045,10 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.Fal.InstanceType = "gpu_1x_h100_sxm5"
 		}
 		if cfg.Fal.User == "" {
-			cfg.Fal.User = "root"
+			cfg.Fal.User = defaultFalUser
 		}
 		if cfg.Fal.WorkRoot == "" {
-			cfg.Fal.WorkRoot = defaultPOSIXWorkRoot
+			cfg.Fal.WorkRoot = defaultFalWorkRoot
 		}
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetLinux
@@ -2055,7 +2060,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		if cfg.explicitWorkRoot != "" {
 			cfg.WorkRoot = cfg.explicitWorkRoot
-			if cfg.Fal.WorkRoot == "" || cfg.Fal.WorkRoot == defaultPOSIXWorkRoot {
+			if cfg.Fal.WorkRoot == "" || cfg.Fal.WorkRoot == defaultFalWorkRoot {
 				cfg.Fal.WorkRoot = cfg.explicitWorkRoot
 			}
 		} else {
@@ -2943,8 +2948,8 @@ func baseConfig() Config {
 		Fal: FalConfig{
 			APIURL:       "https://api.fal.ai/v1",
 			InstanceType: "gpu_1x_h100_sxm5",
-			User:         "root",
-			WorkRoot:     defaultPOSIXWorkRoot,
+			User:         defaultFalUser,
+			WorkRoot:     defaultFalWorkRoot,
 		},
 		NvidiaBrev: NvidiaBrevConfig{
 			CLI:           "brev",

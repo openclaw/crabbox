@@ -125,6 +125,10 @@ func TestConfigureReturnsSSHLeaseBackend(t *testing.T) {
 	if got := gotBackend.(*backend).Spec(); got.Name != providerName {
 		t.Fatalf("backend spec=%#v", got)
 	}
+	configured := gotBackend.(*backend).cfg
+	if configured.SSHUser != defaultUser || configured.Fal.User != defaultUser || configured.WorkRoot != defaultWorkRoot || configured.Fal.WorkRoot != defaultWorkRoot {
+		t.Fatalf("default ssh config=%#v", configured)
+	}
 	if _, err := (Provider{}).ConfigureDoctor(Config{TargetOS: targetLinux}, newDiscardRuntime()); err != nil {
 		t.Fatalf("ConfigureDoctor: %v", err)
 	}

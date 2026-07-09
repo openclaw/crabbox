@@ -5,8 +5,8 @@ import "strings"
 const (
 	defaultAPIURL       = "https://api.fal.ai/v1"
 	defaultInstanceType = "gpu_1x_h100_sxm5"
-	defaultUser         = "root"
-	defaultWorkRoot     = "/work/crabbox"
+	defaultUser         = "ubuntu"
+	defaultWorkRoot     = "/home/ubuntu/crabbox"
 )
 
 func applyFalDefaults(cfg *Config) {

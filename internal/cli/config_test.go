@@ -2266,13 +2266,13 @@ func TestFalProviderEmptyDefaultsAndExplicitOverrides(t *testing.T) {
 	}
 	if cfg.Fal.APIURL != "https://api.fal.ai/v1" ||
 		cfg.Fal.InstanceType != "gpu_1x_h100_sxm5" ||
-		cfg.Fal.User != "root" ||
-		cfg.Fal.WorkRoot != defaultPOSIXWorkRoot ||
+		cfg.Fal.User != defaultFalUser ||
+		cfg.Fal.WorkRoot != defaultFalWorkRoot ||
 		cfg.TargetOS != targetLinux ||
 		cfg.WindowsMode != windowsModeNormal ||
-		cfg.SSHUser != "root" ||
+		cfg.SSHUser != defaultFalUser ||
 		cfg.SSHPort != "22" ||
-		cfg.WorkRoot != defaultPOSIXWorkRoot ||
+		cfg.WorkRoot != defaultFalWorkRoot ||
 		cfg.ServerType != "gpu_1x_h100_sxm5" {
 		t.Fatalf("empty fal defaults=%#v", cfg)
 	}
@@ -2288,7 +2288,7 @@ func TestFalProviderEmptyDefaultsAndExplicitOverrides(t *testing.T) {
 		explicitSSHUser:     "ubuntu",
 		explicitSSHPort:     "2222",
 		Fal: FalConfig{
-			WorkRoot: defaultPOSIXWorkRoot,
+			WorkRoot: defaultFalWorkRoot,
 		},
 	}
 	if err := applyProviderConfigDefaults(&explicit); err != nil {

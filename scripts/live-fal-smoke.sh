@@ -263,8 +263,8 @@ target: linux
 fal:
   apiUrl: $fal_api_url
   instanceType: $fal_instance_type
-  user: root
-  workRoot: /work/crabbox
+  user: ubuntu
+  workRoot: /home/ubuntu/crabbox
 YAML
 if [[ -n "$fal_sector" ]]; then
   printf '  sector: %s\n' "$fal_sector" >>"$config_file"
