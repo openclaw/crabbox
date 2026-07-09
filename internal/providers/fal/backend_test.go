@@ -403,6 +403,36 @@ func TestFalConcurrentAmbiguousCreateRecoveryAdoptsWinningClaim(t *testing.T) {
 	}
 }
 
+func TestFalAmbiguousCreateRecoveryCleansUpAfterClaimWriteFailure(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	const leaseID = "cbx_recovery456"
+	if _, _, err := core.EnsureTestboxKeyForConfig(b.configForRun(), leaseID); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.persistRecoveryClaim(leaseID, "recovery-write-fail", b.configForRun(), "", "", "ambiguous-create", false); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+	b.persistRecoveredClaim = func(core.LeaseClaim, Config, string) (core.LeaseClaim, error) {
+		return core.LeaseClaim{}, errors.New("disk full")
+	}
+
+	_, err = b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
+	if err == nil || !strings.Contains(err.Error(), "disk full") || !strings.Contains(err.Error(), "inst_created") {
+		t.Fatalf("recovery err=%v", err)
+	}
+	if len(api.deletedIDs) != 1 || api.deletedIDs[0] != "inst_created" {
+		t.Fatalf("known recovered instance was not cleaned up: %#v", api.deletedIDs)
+	}
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, readErr)
+	}
+}
+
 func TestFalStopRetainsAmbiguousClaimAfterIdempotencyWindow(t *testing.T) {
 	api := &fakeFalAPI{createErrs: []error{io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF}}
 	b := newFalTestBackend(t, api)

@@ -599,20 +599,43 @@ func (b *backend) recoverAmbiguousCreateForRelease(ctx context.Context, client c
 	cfg.Fal.InstanceType = instanceType
 	cfg.ServerType = instanceType
 	cfg.Fal.Sector = sector
-	updated, err := b.persistRecoveryClaimIfUnchanged(claim.LeaseID, claim.Slug, cfg, claim.RepoRoot, instanceID, "rollback-cleanup", false, claim, true)
+	updated, err := b.persistRecoveredInstanceClaim(claim, cfg, instanceID)
 	if err != nil {
+		persistErr := fmt.Errorf("persist recovered fal instance %s claim: %w", instanceID, err)
 		current, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
 		if readErr == nil && exists && current.Provider == providerName &&
 			current.ProviderScope == falClaimScope(cfg) && current.CloudID == instanceID &&
 			verifyFalClaimCredential(current, cfg) == nil {
 			return current, nil
 		}
-		return core.LeaseClaim{}, errors.Join(fmt.Errorf("persist recovered fal instance claim: %w", err), readErr)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, true, func() error {
+			return client.DeleteInstance(cleanupCtx, instanceID)
+		})
+		if cleanupErr == nil {
+			core.RemoveStoredTestboxKey(claim.LeaseID)
+			return core.LeaseClaim{}, persistErr
+		}
+		current, exists, rereadErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+		if rereadErr == nil && exists && current.Provider == providerName &&
+			current.ProviderScope == falClaimScope(cfg) && current.CloudID == instanceID &&
+			verifyFalClaimCredential(current, cfg) == nil {
+			return current, nil
+		}
+		return core.LeaseClaim{}, errors.Join(persistErr, readErr, cleanupErr, rereadErr)
 	}
 	if updated.CloudID != instanceID {
 		return core.LeaseClaim{}, exit(5, "fal recovered instance claim is unavailable for lease=%s", claim.LeaseID)
 	}
 	return updated, nil
+}
+
+func (b *backend) persistRecoveredInstanceClaim(claim core.LeaseClaim, cfg Config, instanceID string) (core.LeaseClaim, error) {
+	if b.persistRecoveredClaim != nil {
+		return b.persistRecoveredClaim(claim, cfg, instanceID)
+	}
+	return b.persistRecoveryClaimIfUnchanged(claim.LeaseID, claim.Slug, cfg, claim.RepoRoot, instanceID, "rollback-cleanup", false, claim, true)
 }
 
 func (b *backend) now() time.Time {
