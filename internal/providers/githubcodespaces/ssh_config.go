@@ -188,22 +188,18 @@ func rewriteProxyCommandGHPath(command, ghPath string) string {
 	if len(fields) == 0 || fields[0] != defaultGHPath {
 		return command
 	}
-	return shellQuote(ghPath) + " " + strings.Join(fields[1:], " ")
+	return quoteSSHProxyExecutable(ghPath) + " " + strings.Join(fields[1:], " ")
 }
 
 func validatePrivateSSHConfigFile(path string) error {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if info.IsDir() {
-		return exit(2, "github-codespaces SSH config path %q is a directory", path)
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return exit(2, "github-codespaces SSH config path %q must be a regular non-symlink file", path)
 	}
-	mode := info.Mode().Perm()
-	if mode != defaultSSHConfigFileMode {
-		return exit(2, "github-codespaces SSH config path %q must have mode 0600, got %04o", path, mode)
-	}
-	return nil
+	return validatePrivateSSHConfigPermissions(path, info)
 }
 
 func storeSSHConfig(leaseID, data string) (string, error) {
@@ -219,10 +215,44 @@ func storeSSHConfig(leaseID, data string) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(dir, leaseID+".ssh_config")
-	if err := os.WriteFile(path, []byte(data), defaultSSHConfigFileMode); err != nil {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return "", exit(2, "refusing to replace non-regular github-codespaces SSH config path %q", path)
+		}
+	} else if !os.IsNotExist(err) {
 		return "", err
 	}
-	if err := os.Chmod(path, defaultSSHConfigFileMode); err != nil {
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := securePrivateSSHConfigFile(tmpPath); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if _, err := tmp.Write([]byte(data)); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := replaceSSHConfigFile(tmpPath, path); err != nil {
+		return "", err
+	}
+	removeTemp = false
+	if err := syncSSHConfigDirectory(dir); err != nil {
 		return "", err
 	}
 	if err := validatePrivateSSHConfigFile(path); err != nil {

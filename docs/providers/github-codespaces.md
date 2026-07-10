@@ -54,8 +54,11 @@ refuses to manage an unclaimed Codespace by name.
   ```
 
 - Ensure `GH_TOKEN`, `GITHUB_TOKEN`, or the `gh` credential store has a token
-  with access to Codespaces and the selected repository. For local `gh` auth,
-  refresh the missing OAuth scope before live smoke:
+  with access to Codespaces and the selected repository on GitHub.com. Custom
+  enterprise hosts use `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, or the
+  host-specific `gh` credential store; dotcom token variables are stripped from
+  enterprise `gh` commands. For local GitHub.com auth, refresh the missing OAuth
+  scope before live smoke:
   ```sh
   gh auth refresh -h github.com -s codespace
   gh codespace list --limit 1
@@ -96,7 +99,7 @@ Config keys under `githubCodespaces:`:
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `apiUrl` | `https://api.github.com` | Trusted config only; useful for GitHub Enterprise-style API routing when supported by the environment. |
+| `apiUrl` | `https://api.github.com` | Trusted config only; HTTPS is required except for loopback testing. The API host scopes auth, identity checks, and mutations; standard `api.SUBDOMAIN.ghe.com` endpoints map to the GitHub CLI host `SUBDOMAIN.ghe.com`. |
 | `ghPath` | `gh` | Trusted config only; local GitHub CLI executable. |
 | `repo` | inferred from the GitHub remote when possible | Repository in `owner/name` form. Trusted config, environment, or CLI flag only; repo-local config cannot redirect Codespaces creation. Required when no GitHub remote can be inferred. |
 | `ref` | empty | Git ref for new Codespaces. Empty uses GitHub's default behavior. |
@@ -147,16 +150,21 @@ Do not put GitHub tokens in Crabbox config or on command lines. Use
 
 ## Lifecycle
 
-1. Read GitHub CLI auth state and login identity.
+1. Read host-scoped GitHub CLI auth, then resolve the stable authenticated user
+   ID and login through the configured API base.
 2. Resolve the repository from `githubCodespaces.repo`, flags, env, or the
    current GitHub remote.
 3. Check available Codespaces machines for the repo/ref.
-4. Persist a local recovery claim bound to the API endpoint, repository, GitHub
-   login, and exact Crabbox display name.
+4. Generate a random recovery nonce, verify that its derived display name is
+   absent from inventory, then durably persist a local recovery claim bound to
+   the API endpoint, repository, GitHub user ID/login, and nonce-derived display
+   name.
 5. Create a Codespace with the configured machine, ref, devcontainer path,
    working directory, geo, idle timeout, retention period, and Crabbox display
    name.
-6. Bind the provider-assigned Codespace name to the existing claim.
+6. Validate the provider-assigned Codespace ID, name, environment ID, owner ID,
+   owner login, and repository; let the controller accept that raw identity;
+   then bind it to the existing claim.
 7. Wait for the Codespace to become available.
 8. Ask `gh codespace ssh --config -c <codespace>` for OpenSSH config, store it
    under Crabbox state, select the matching target, and wait for SSH readiness.
@@ -165,10 +173,12 @@ Do not put GitHub tokens in Crabbox config or on command lines. Use
     status, then delete or retain it according to the release policy.
 
 If a create response is lost, Crabbox retains the recovery claim and reconciles
-only one Codespace with the exact expected display name and repository in the
-same GitHub account. Missing or duplicate matches fail closed. Retry `crabbox
-stop --provider github-codespaces <lease-or-slug>` after GitHub inventory
-converges.
+only one Codespace with the nonce-derived display name and exact repository in
+the same GitHub account. Missing or duplicate matches fail closed. Retry
+`crabbox stop --provider github-codespaces <lease-or-slug>` after GitHub
+inventory converges. Pending claims created by older builds without a recovery
+nonce are never adopted automatically; inspect the matching Codespace and claim
+manually before deciding whether either should be removed.
 
 If a retained Codespace is stopped, resolving it later starts it and waits for
 availability before refreshing the generated SSH config.
@@ -177,8 +187,10 @@ availability before refreshing the generated SSH config.
 
 GitHub Codespaces does not expose custom user labels. Crabbox therefore uses a
 local claim as the ownership predicate. Release and cleanup require the claim to
-match the provider, API endpoint, repository, Codespace name, environment ID,
-display name, and creating GitHub login.
+match the provider, API endpoint, repository, Codespace ID/name, environment ID,
+owner ID, and creating GitHub user ID/login. The display name is recovery-only
+and may be renamed after creation; the Codespace ID/name, environment ID, owner
+ID, and repository are the bound resource identity.
 
 Deletion is conservative:
 
@@ -186,9 +198,13 @@ Deletion is conservative:
 - Crabbox stops and refetches a Codespace immediately before delete, then
   refuses deletion when GitHub reports uncommitted or unpushed changes or a
   changed resource identity.
-- Cleanup mutates only expired claim-owned Codespaces.
-- Account switches are rejected when the current `gh` login differs from the
-  claim login.
+- A successful asynchronous delete response does not remove local ownership;
+  Crabbox retains the claim and SSH config until an identity-checked GET confirms
+  absence.
+- Cleanup serializes each claim, rereads its current expiry, and mutates only
+  expired claim-owned Codespaces. A dirty Codespace is stopped and retained.
+- Account switches are rejected when the API-authenticated GitHub user ID/login
+  differs from the claim identity.
 
 Use dry-run cleanup before mutation:
 

@@ -446,6 +446,67 @@ func updateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected leaseClai
 	return updated, err
 }
 
+func withLeaseClaimUnchanged(leaseID string, expected leaseClaim, action func() error) error {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	return withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := unchangedLeaseClaimGuard(leaseID, expected, true)(claim, exists); err != nil {
+			return err
+		}
+		if action == nil {
+			return nil
+		}
+		return action()
+	})
+}
+
+func updateLeaseClaimEndpointIfUnchangedAction(
+	leaseID string,
+	expected leaseClaim,
+	action func() (Server, SSHTarget, bool, error),
+) (leaseClaim, Server, SSHTarget, error) {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return leaseClaim{}, Server{}, SSHTarget{}, err
+	}
+	var updated leaseClaim
+	var server Server
+	var target SSHTarget
+	err = withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := endpointClaimGuard(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true))(claim, exists); err != nil {
+			return err
+		}
+		if action == nil {
+			return nil
+		}
+		var shouldUpdate bool
+		server, target, shouldUpdate, err = action()
+		if err != nil || !shouldUpdate {
+			updated = cloneLeaseClaim(claim)
+			return err
+		}
+		provider := firstNonBlank(server.Labels["provider"], server.Provider)
+		prepared, err := prepareLeaseClaimEndpoint(claim, provider, server.Labels["slug"], server, false)
+		if err != nil {
+			return err
+		}
+		applyLeaseClaimEndpoint(&claim, prepared, target)
+		updated = cloneLeaseClaim(claim)
+		return writeLeaseClaimAtomic(path, claim)
+	})
+	return updated, server, target, err
+}
+
 func updateLeaseClaimEndpointIfUnchangedMode(leaseID string, expected leaseClaim, server Server, target SSHTarget, allowProviderMetadata, replaceEndpoint bool) (leaseClaim, error) {
 	if leaseID == "" {
 		return leaseClaim{}, nil
@@ -1540,4 +1601,15 @@ func crabboxStateDir() (string, error) {
 		return "", exit(2, "user state directory is unavailable")
 	}
 	return filepath.Join(dir, "crabbox", "state"), nil
+}
+
+func crabboxStateRootDir() (string, error) {
+	if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
+		return filepath.Clean(dir), nil
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", exit(2, "user state directory is unavailable")
+	}
+	return filepath.Clean(dir), nil
 }

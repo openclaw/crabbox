@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -27,6 +28,11 @@ type client struct {
 	token      string
 }
 
+type githubUser struct {
+	ID    int64  `json:"id"`
+	Login string `json:"login"`
+}
+
 type createCodespaceRequest struct {
 	Repo             string
 	Ref              string
@@ -40,13 +46,27 @@ type createCodespaceRequest struct {
 }
 
 type codespace struct {
+	ID            int64         `json:"id"`
 	Name          string        `json:"name"`
 	DisplayName   string        `json:"display_name"`
 	State         string        `json:"state"`
 	EnvironmentID string        `json:"environment_id"`
+	Owner         githubUser    `json:"owner"`
 	Repository    repositoryRef `json:"repository"`
 	Machine       machineRef    `json:"machine"`
 	GitStatus     gitStatus     `json:"git_status"`
+}
+
+func (c client) currentUser(ctx context.Context) (githubUser, error) {
+	var user githubUser
+	if err := c.do(ctx, http.MethodGet, "/user", nil, &user, nil); err != nil {
+		return githubUser{}, err
+	}
+	user.Login = strings.TrimSpace(user.Login)
+	if user.ID <= 0 || user.Login == "" {
+		return githubUser{}, exit(4, "github-codespaces API returned incomplete authenticated user identity")
+	}
+	return user, nil
 }
 
 type gitStatus struct {
@@ -55,6 +75,40 @@ type gitStatus struct {
 	HasUnpushedChanges    bool   `json:"has_unpushed_changes"`
 	HasUncommittedChanges bool   `json:"has_uncommitted_changes"`
 	Ref                   string `json:"ref"`
+	aheadPresent          bool
+	unpushedPresent       bool
+	uncommittedPresent    bool
+}
+
+func (s *gitStatus) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Ahead                 *int   `json:"ahead"`
+		Behind                int    `json:"behind"`
+		HasUnpushedChanges    *bool  `json:"has_unpushed_changes"`
+		HasUncommittedChanges *bool  `json:"has_uncommitted_changes"`
+		Ref                   string `json:"ref"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*s = gitStatus{Behind: raw.Behind, Ref: raw.Ref}
+	if raw.Ahead != nil {
+		s.Ahead = *raw.Ahead
+		s.aheadPresent = true
+	}
+	if raw.HasUnpushedChanges != nil {
+		s.HasUnpushedChanges = *raw.HasUnpushedChanges
+		s.unpushedPresent = true
+	}
+	if raw.HasUncommittedChanges != nil {
+		s.HasUncommittedChanges = *raw.HasUncommittedChanges
+		s.uncommittedPresent = true
+	}
+	return nil
+}
+
+func (s gitStatus) deletionSafetyKnown() bool {
+	return s.aheadPresent && s.unpushedPresent && s.uncommittedPresent
 }
 
 type codespaceMachine struct {
@@ -107,11 +161,17 @@ func newClient(cfg GitHubCodespacesConfig, rt Runtime, token string) client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	privateClient := *httpClient
+	// GitHub API requests carry a bearer token. API redirects are not required
+	// for this client, so fail closed before net/http can forward credentials.
+	privateClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/")
 	if baseURL == "" {
 		baseURL = defaultAPIURL
 	}
-	return client{httpClient: httpClient, baseURL: baseURL, token: token}
+	return client{httpClient: &privateClient, baseURL: baseURL, token: token}
 }
 
 func (c client) createCodespace(ctx context.Context, req createCodespaceRequest) (codespace, error) {
@@ -242,6 +302,9 @@ func (c client) do(ctx context.Context, method, path string, body any, out any, 
 }
 
 func (c client) doWithHeader(ctx context.Context, method, path string, body any, out any, accepted map[int]bool) (http.Header, error) {
+	if err := validateGitHubCodespacesAPIBase(c.baseURL); err != nil {
+		return nil, err
+	}
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -253,6 +316,17 @@ func (c client) doWithHeader(ctx context.Context, method, path string, body any,
 	reqURL := path
 	if !strings.HasPrefix(reqURL, "http://") && !strings.HasPrefix(reqURL, "https://") {
 		reqURL = c.baseURL + path
+	}
+	parsedRequestURL, err := url.Parse(reqURL)
+	if err != nil {
+		return nil, err
+	}
+	allowed, err := sameAPIBase(parsedRequestURL, c.baseURL)
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, fmt.Errorf("github-codespaces request outside configured API base: %s://%s%s", parsedRequestURL.Scheme, parsedRequestURL.Host, parsedRequestURL.EscapedPath())
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, method, reqURL, reader)
 	if err != nil {
@@ -285,6 +359,25 @@ func (c client) doWithHeader(ctx context.Context, method, path string, body any,
 		return resp.Header, json.Unmarshal(data, out)
 	}
 	return nil, githubAPIError(resp.StatusCode, resp.Header.Get("Retry-After"), string(data))
+}
+
+func validateGitHubCodespacesAPIBase(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("invalid github-codespaces API URL: %w", err)
+	}
+	if parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return exit(2, "github-codespaces API URL must be an origin with an optional path")
+	}
+	if strings.EqualFold(parsed.Scheme, "https") {
+		return nil
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	ip := net.ParseIP(host)
+	if strings.EqualFold(parsed.Scheme, "http") && (strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback())) {
+		return nil
+	}
+	return exit(2, "github-codespaces API URL must use https; http is allowed only for loopback testing")
 }
 
 func githubAPIError(status int, retryAfter, body string) error {

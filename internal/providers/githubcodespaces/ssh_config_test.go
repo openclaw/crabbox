@@ -138,3 +138,51 @@ func TestValidatePrivateSSHConfigFileRequires0600(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestStoreSSHConfigRejectsExistingSymlink(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	dir := filepath.Join(stateHome, "crabbox", "github-codespaces")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "cbx_123456789abc.ssh_config")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if _, err := storeSSHConfig("cbx_123456789abc", "replacement\n"); err == nil || !strings.Contains(err.Error(), "non-regular") {
+		t.Fatalf("err=%v", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "original\n" {
+		t.Fatalf("target=%q err=%v", data, err)
+	}
+}
+
+func TestStoreSSHConfigAtomicallyReplacesPrivateFile(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_123456789abd"
+	path, err := storeSSHConfig(leaseID, "first\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := storeSSHConfig(leaseID, "second\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated != path {
+		t.Fatalf("updated path=%q want %q", updated, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "second\n" {
+		t.Fatalf("data=%q err=%v", data, err)
+	}
+	if err := validatePrivateSSHConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+}

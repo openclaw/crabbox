@@ -91,6 +91,22 @@ func claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, 
 	return core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
 
+func claimLeaseTargetForRepoConfigIfUnchangedDurable(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(
+		leaseID,
+		slug,
+		cfg,
+		providerClaimScope(cfg),
+		server,
+		target,
+		repoRoot,
+		idleTimeout,
+		reclaim,
+		expected,
+		expectedExists,
+	)
+}
+
 func providerClaimScope(cfg Config) string {
 	return core.ProviderClaimScope(providerName, cfg)
 }
@@ -107,6 +123,22 @@ func listLeaseClaims() ([]LeaseClaim, error) {
 	return core.ListLeaseClaims()
 }
 
+func leaseClaimMatchesIdentifier(claim LeaseClaim, identifier string) bool {
+	return core.LeaseClaimMatchesIdentifier(claim, identifier)
+}
+
+func isCanonicalLeaseID(value string) bool {
+	return core.IsCanonicalLeaseID(value)
+}
+
+func setServerLeaseClaimSnapshot(server *Server, claim LeaseClaim, exists bool) {
+	core.SetServerLeaseClaimSnapshot(server, claim, exists)
+}
+
+func serverLeaseClaimSnapshot(server Server) (LeaseClaim, bool, bool) {
+	return core.ServerLeaseClaimSnapshot(server)
+}
+
 func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
 	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
 }
@@ -117,6 +149,18 @@ func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected LeaseClaim, se
 
 func updateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected LeaseClaim, server Server, target SSHTarget, action func() error) (LeaseClaim, error) {
 	return core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, server, target, action)
+}
+
+func withLeaseClaimUnchanged(leaseID string, expected LeaseClaim, action func() error) error {
+	return core.WithLeaseClaimUnchanged(leaseID, expected, action)
+}
+
+func updateLeaseClaimEndpointIfUnchangedAction(
+	leaseID string,
+	expected LeaseClaim,
+	action func() (Server, SSHTarget, bool, error),
+) (LeaseClaim, Server, SSHTarget, error) {
+	return core.UpdateLeaseClaimEndpointIfUnchangedAction(leaseID, expected, action)
 }
 
 func removeLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {

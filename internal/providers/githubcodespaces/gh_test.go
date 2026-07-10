@@ -19,7 +19,7 @@ func TestGHRunnerCodespaceSSHConfigArgv(t *testing.T) {
 	}
 	call := runner.onlyCall(t)
 	if call.Name != "/opt/gh" || strings.Join(call.Args, " ") != "codespace ssh --config -c sturdy-space" {
-		t.Fatalf("call=%#v", call)
+		t.Fatalf("command=%q args=%q", call.Name, strings.Join(call.Args, " "))
 	}
 	for _, arg := range call.Args {
 		if looksLikeGitHubToken(arg) {
@@ -35,8 +35,65 @@ func TestGHRunnerAuthStatusReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := runner.onlyCall(t)
-	if strings.Join(call.Args, " ") != "auth status" {
-		t.Fatalf("call=%#v", call)
+	if strings.Join(call.Args, " ") != "auth status --hostname github.com" {
+		t.Fatalf("args=%q", strings.Join(call.Args, " "))
+	}
+}
+
+func TestGHRunnerRoutesAuthAndCodespaceCommandsToConfiguredAPIHost(t *testing.T) {
+	t.Setenv("GH_TOKEN", "dotcom-test-token")
+	t.Setenv("GITHUB_TOKEN", "dotcom-fallback-token")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "enterprise-test-token")
+	runner := &recordingRunner{result: LocalCommandResult{Stdout: "token"}}
+	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "gh", APIURL: "https://api.enterprise.example:8443/api/v3"}, Runtime{Exec: runner})
+	if _, err := gh.authToken(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gh.codespaceSSHConfig(context.Background(), "sturdy-space"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(runner.calls[0].Args, " "); got != "auth token --hostname api.enterprise.example:8443" {
+		t.Fatalf("auth args=%q", got)
+	}
+	for i, call := range runner.calls {
+		foundHost := false
+		foundEnterpriseToken := false
+		foundDotcomToken := false
+		for _, entry := range call.Env {
+			if entry == "GH_HOST=api.enterprise.example:8443" {
+				foundHost = true
+			}
+			if strings.HasPrefix(entry, "GH_ENTERPRISE_TOKEN=") {
+				foundEnterpriseToken = true
+			}
+			if strings.HasPrefix(entry, "GH_TOKEN=") || strings.HasPrefix(entry, "GITHUB_TOKEN=") {
+				foundDotcomToken = true
+			}
+		}
+		if !foundHost || !foundEnterpriseToken || foundDotcomToken {
+			t.Fatalf("call %d host=%t enterprise_token=%t dotcom_token=%t", i, foundHost, foundEnterpriseToken, foundDotcomToken)
+		}
+	}
+}
+
+func TestGHRunnerMapsGHECloudAPIHostToCLIHost(t *testing.T) {
+	runner := &recordingRunner{}
+	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "gh", APIURL: "https://api.octocorp.ghe.com"}, Runtime{Exec: runner})
+	if err := gh.authStatus(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	call := runner.onlyCall(t)
+	if got := strings.Join(call.Args, " "); got != "auth status --hostname octocorp.ghe.com" {
+		t.Fatalf("args=%q", got)
+	}
+	foundHost := false
+	for _, entry := range call.Env {
+		if entry == "GH_HOST=octocorp.ghe.com" {
+			foundHost = true
+		}
+	}
+	if !foundHost {
+		t.Fatal("missing GHE.com CLI host")
 	}
 }
 
@@ -83,7 +140,7 @@ func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (Local
 func (r *recordingRunner) onlyCall(t *testing.T) LocalCommandRequest {
 	t.Helper()
 	if len(r.calls) != 1 {
-		t.Fatalf("calls=%#v", r.calls)
+		t.Fatalf("call count=%d, want 1", len(r.calls))
 	}
 	return r.calls[0]
 }

@@ -112,16 +112,25 @@ func TestAcquireRecoversAmbiguousCreateByExactIdentity(t *testing.T) {
 	}
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
+	callbackCalled := false
 
 	lease, err := b.Acquire(context.Background(), AcquireRequest{
 		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789aa2",
 		RequestedSlug:    "recovered-box",
+		OnAcquired: func(lease LeaseTarget) error {
+			callbackCalled = true
+			claim, ok, claimErr := resolveLeaseClaimForProvider(lease.LeaseID, providerName)
+			if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
+				t.Fatalf("claim was bound before callback: claim=%#v ok=%t err=%v", claim, ok, claimErr)
+			}
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.Server.CloudID != "cs-recovered" || len(fc.deletes) != 0 {
+	if !callbackCalled || lease.Server.CloudID != "cs-recovered" || len(fc.deletes) != 0 {
 		t.Fatalf("lease=%#v deletes=%#v", lease, fc.deletes)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(lease.LeaseID, providerName)
@@ -153,6 +162,51 @@ func TestAcquireRecoversIdentitylessSuccessByExactIdentity(t *testing.T) {
 	}
 	if lease.Server.CloudID != "cs-identityless" || len(fc.deletes) != 0 {
 		t.Fatalf("lease=%#v deletes=%#v", lease, fc.deletes)
+	}
+}
+
+func TestAcquireRejectsIncompletePermanentIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*codespace)
+		want   string
+	}{
+		{name: "codespace id", mutate: func(item *codespace) { item.ID = 0 }, want: "incomplete permanent resource identity"},
+		{name: "environment id", mutate: func(item *codespace) { item.EnvironmentID = "" }, want: "incomplete permanent resource identity"},
+		{name: "owner id", mutate: func(item *codespace) { item.Owner.ID = 0 }, want: "incomplete permanent resource identity"},
+		{name: "owner login", mutate: func(item *codespace) { item.Owner.Login = "" }, want: "incomplete permanent resource identity"},
+		{name: "wrong owner", mutate: func(item *codespace) { item.Owner = fakeGitHubUser("bob") }, want: "owner mismatch"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fc := newFakeCodespacesClient()
+			fc.useCreateResult = true
+			fc.createResult = fakeCodespace("cs-incomplete", "Available")
+			test.mutate(&fc.createResult)
+			b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+			leaseID := "cbx_123456789ab2"
+			callbackCalled := false
+
+			_, err := b.Acquire(context.Background(), AcquireRequest{
+				Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+				RequestedLeaseID: leaseID,
+				RequestedSlug:    "incomplete-box",
+				OnAcquired: func(LeaseTarget) error {
+					callbackCalled = true
+					return nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("err=%v", err)
+			}
+			if callbackCalled || len(fc.deletes) != 0 {
+				t.Fatalf("callback=%t deletes=%#v", callbackCalled, fc.deletes)
+			}
+			claim, ok, claimErr := readLeaseClaimWithPresence(leaseID)
+			if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
+				t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
+			}
+		})
 	}
 }
 
@@ -290,6 +344,158 @@ func TestAcquireDoesNotRollbackWhenPendingClaimRaces(t *testing.T) {
 	}
 	claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName)
 	if claimErr != nil || !ok || claim.Labels[labelRecovery] != recoveryPreCreate || claim.Labels["raced"] != "true" {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
+	}
+}
+
+func TestAcquireOnAcquiredErrorRollsBackEvenWhenKept(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789aaf"
+	callbackErr := errors.New("controller rejected identity")
+	called := false
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "callback-box",
+		Keep:             true,
+		OnAcquired: func(lease LeaseTarget) error {
+			called = true
+			if lease.LeaseID != leaseID || lease.Server.CloudID != "cs-1" || lease.SSH.Host != "" {
+				t.Fatalf("callback lease=%#v", lease)
+			}
+			claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName)
+			if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
+				t.Fatalf("claim was bound before callback: claim=%#v ok=%t err=%v", claim, ok, claimErr)
+			}
+			return callbackErr
+		},
+	})
+	if !called || !errors.Is(err, callbackErr) {
+		t.Fatalf("called=%t err=%v", called, err)
+	}
+	if got := strings.Join(fc.deletes, ","); got != "cs-1" {
+		t.Fatalf("deletes=%q", got)
+	}
+	if _, ok, claimErr := readLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
+	}
+}
+
+func TestAcquireOnAcquiredErrorRetainsPendingClaimWhenRollbackCannotConfirmResource(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789ab0"
+	callbackErr := errors.New("controller rejected identity")
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "callback-missing-box",
+		OnAcquired: func(lease LeaseTarget) error {
+			delete(fc.items, lease.Server.CloudID)
+			return callbackErr
+		},
+	})
+	if !errors.Is(err, callbackErr) || !strings.Contains(err.Error(), "recovery claim retained") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("deleted unconfirmed resource=%#v", fc.deletes)
+	}
+	claim, ok, claimErr := readLeaseClaimWithPresence(leaseID)
+	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
+	}
+}
+
+func TestAcquireOnAcquiredErrorRemovesClaimWhenResourceDisappearsAfterPreflight(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	getCount := 0
+	fc.onGet = func(name string) {
+		getCount++
+		if getCount == 2 {
+			delete(fc.items, name)
+		}
+	}
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789ab4"
+	callbackErr := errors.New("controller rejected identity")
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "callback-vanished-box",
+		OnAcquired: func(LeaseTarget) error {
+			return callbackErr
+		},
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("err=%v", err)
+	}
+	if getCount != 2 || len(fc.deletes) != 0 {
+		t.Fatalf("gets=%d deletes=%#v", getCount, fc.deletes)
+	}
+	if _, ok, claimErr := readLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
+	}
+}
+
+func TestAcquireOnAcquiredErrorRollsBackAfterDisplayNameChanges(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789ab5"
+	callbackErr := errors.New("controller rejected identity")
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "callback-renamed-box",
+		OnAcquired: func(lease LeaseTarget) error {
+			item := fc.items[lease.Server.CloudID]
+			item.DisplayName = "renamed-after-create"
+			fc.items[item.Name] = item
+			return callbackErr
+		},
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("err=%v", err)
+	}
+	if got := strings.Join(fc.deletes, ","); got != "cs-1" {
+		t.Fatalf("deletes=%q", got)
+	}
+	if _, ok, claimErr := readLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
+	}
+}
+
+func TestAcquireRetainsClaimAndRefusesRollbackAfterReadyIdentityChanges(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	replacement := fakeCodespace("cs-1", "Available")
+	replacement.EnvironmentID = "env-foreign-replacement"
+	fc.getSeq["cs-1"] = []codespace{replacement}
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789ab0"
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "replacement-box",
+	})
+	if err == nil || !strings.Contains(err.Error(), "environment id changed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("replacement deleted: %#v", fc.deletes)
+	}
+	claim, ok, claimErr := readLeaseClaimWithPresence(leaseID)
+	if claimErr != nil || !ok || claim.CloudID != "cs-1" {
 		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
 	}
 }
@@ -449,6 +655,27 @@ func TestResolveStatusOnlyReadyProbeDoesNotStartStoppedCodespace(t *testing.T) {
 	}
 }
 
+func TestResolveNoLocalStateMutationsDoesNotStartStoppedCodespace(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-readonly-stopped"] = fakeCodespace("cs-readonly-stopped", "Shutdown")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ac7"
+	server := b.serverFromCodespace(fc.items["cs-readonly-stopped"], b.labelsFor(leaseID, "readonly-stopped", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-readonly-stopped"], "stopped"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "readonly-stopped", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, NoLocalStateMutations: true, ReadyProbe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.starts) != 0 || lease.SSH.Host != "" || fg.configFor != "" || lease.Server.Labels[labelState] != "stopped" {
+		t.Fatalf("starts=%#v lease=%#v config=%q", fc.starts, lease, fg.configFor)
+	}
+}
+
 func TestResolveNoLocalStateMutationsDoesNotStoreSSHConfig(t *testing.T) {
 	stateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)
@@ -519,6 +746,40 @@ func TestReleaseDeleteRemovesOnlyClaimBackedCodespaceAndConfig(t *testing.T) {
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
 		t.Fatalf("claim remains ok=%t err=%v", ok, err)
+	}
+}
+
+func TestReleaseDeleteRetainsClaimUntilAbsenceIsConfirmed(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-delete-pending"] = fakeCodespace("cs-delete-pending", "Available")
+	fc.deleteKeepsItem = true
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ab1"
+	server := b.serverFromCodespace(fc.items["cs-delete-pending"], b.labelsFor(leaseID, "delete-pending-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-delete-pending"], "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "delete-pending-box", b.cfg, server, SSHTarget{Host: "cs-delete-pending", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := storeSSHConfig(leaseID, fg.config("cs-delete-pending"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fc.onDelete = func(string) { cancel() }
+	err = b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+	if strings.Join(fc.deletes, ",") != "cs-delete-pending" {
+		t.Fatalf("deletes=%#v", fc.deletes)
+	}
+	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName); claimErr != nil || !ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
+	}
+	if _, statErr := os.Stat(configPath); statErr != nil {
+		t.Fatalf("ssh config removed before confirmed absence: %v", statErr)
 	}
 }
 
@@ -783,7 +1044,7 @@ func TestCleanupRefusesIdentityMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := b.Cleanup(context.Background(), CleanupRequest{})
-	if err == nil || !strings.Contains(err.Error(), "login mismatch") {
+	if err == nil || !strings.Contains(err.Error(), "account mismatch") {
 		t.Fatalf("err=%v", err)
 	}
 	if len(fc.deletes) != 0 {
@@ -824,6 +1085,30 @@ func TestCleanupRejectsClaimRaceBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestListAllowsUserRenamedDisplayName(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-renamed-display", "Available")
+	fc.items[item.Name] = item
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789ad1"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "renamed-display", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	server.Labels[labelDisplayName] = "original-display"
+	if err := claimLeaseTargetForRepoConfig(leaseID, "renamed-display", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	item.DisplayName = "user-renamed-display"
+	fc.items[item.Name] = item
+
+	views, err := b.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].CloudID != item.Name {
+		t.Fatalf("views=%#v", views)
+	}
+}
+
 func TestDoctorIsNonMutating(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -842,6 +1127,27 @@ func TestDoctorIsNonMutating(t *testing.T) {
 	}
 }
 
+func TestDoctorFailsClosedAfterGitHubAccountSwitch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-other-account", "Available")
+	fc.items[item.Name] = item
+	b := newTestBackend(t, fc, &fakeGH{login: "bob", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789ad2"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "other-account", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "other-account", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	if err == nil || result.Status != "failed" || !strings.Contains(err.Error(), "account mismatch") {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if len(fc.starts) != 0 || len(fc.stops) != 0 || len(fc.deletes) != 0 {
+		t.Fatalf("doctor mutated: starts=%#v stops=%#v deletes=%#v", fc.starts, fc.stops, fc.deletes)
+	}
+}
+
 func TestControlPlanePrefersGitHubCLITokenPrecedence(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("GH_TOKEN", "gh-token")
@@ -855,15 +1161,39 @@ func TestControlPlanePrefersGitHubCLITokenPrecedence(t *testing.T) {
 		return fc
 	}
 
-	_, _, login, err := b.controlPlane(context.Background())
+	_, _, user, err := b.controlPlane(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if login != "alice" {
-		t.Fatalf("login=%q", login)
+	if user.Login != "alice" || user.ID != fakeGitHubUser("alice").ID {
+		t.Fatalf("user=%#v", user)
 	}
 	if gotToken != "gh-token" {
 		t.Fatalf("token=%q", gotToken)
+	}
+}
+
+func TestControlPlaneUsesEnterpriseTokenForCustomAPIHost(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("GH_TOKEN", "dotcom-token")
+	t.Setenv("GITHUB_TOKEN", "dotcom-fallback-token")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "enterprise-token")
+	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "enterprise-fallback-token")
+	fc := newFakeCodespacesClient()
+	fg := &fakeGH{login: "alice", token: "stored-token"}
+	b := newTestBackend(t, fc, fg)
+	b.cfg.GitHubCodespaces.APIURL = "https://github.enterprise.example/api/v3"
+	var gotToken string
+	b.clientFactory = func(token string) codespacesAPI {
+		gotToken = token
+		return fc
+	}
+
+	if _, _, _, err := b.controlPlane(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gotToken != "enterprise-token" {
+		t.Fatalf("selected wrong token family")
 	}
 }
 
@@ -910,12 +1240,15 @@ func TestLabelsCarryEffectiveWorkRoot(t *testing.T) {
 }
 
 func TestDisplayNameFitsGitHubCodespacesLimit(t *testing.T) {
-	name := githubCodespacesDisplayName("cbx_abcdef123456", strings.Repeat("a", 41))
+	name := githubCodespacesDisplayName("cbx_abcdef123456", strings.Repeat("a", 41), "nonce-a")
 	if len(name) > 48 {
 		t.Fatalf("display name length=%d name=%q", len(name), name)
 	}
-	if !strings.HasPrefix(name, "crabbox-") || !strings.HasSuffix(name, "-c80c2195") {
+	if !strings.HasPrefix(name, "crabbox-") || !strings.Contains(name, "-c80c2195-") {
 		t.Fatalf("display name=%q", name)
+	}
+	if other := githubCodespacesDisplayName("cbx_abcdef123456", strings.Repeat("a", 41), "nonce-b"); other == name {
+		t.Fatalf("recovery nonce did not affect display name: %q", name)
 	}
 }
 
@@ -949,6 +1282,7 @@ func newTestBackend(t *testing.T, fc *fakeCodespacesClient, fg *fakeGH) *testBac
 	}
 	rt := Runtime{}
 	b := newBackend(Provider{}.Spec(), cfg, rt)
+	fc.user = fakeGitHubUser(fg.login)
 	b.pollInterval = time.Nanosecond
 	tb := &testBackend{backend: b}
 	b.clientFactory = func(string) codespacesAPI { return fc }
@@ -961,6 +1295,7 @@ func newTestBackend(t *testing.T, fc *fakeCodespacesClient, fg *fakeGH) *testBac
 }
 
 type fakeCodespacesClient struct {
+	user            githubUser
 	items           map[string]codespace
 	getSeq          map[string][]codespace
 	creates         []createCodespaceRequest
@@ -977,6 +1312,15 @@ type fakeCodespacesClient struct {
 	deletes         []string
 	deleteErr       error
 	deleteDeadline  bool
+	deleteKeepsItem bool
+	onDelete        func(string)
+}
+
+func (f *fakeCodespacesClient) currentUser(context.Context) (githubUser, error) {
+	if f.user.ID <= 0 || strings.TrimSpace(f.user.Login) == "" {
+		return githubUser{}, errors.New("fake authenticated user is not configured")
+	}
+	return f.user, nil
 }
 
 func newFakeCodespacesClient() *fakeCodespacesClient {
@@ -1063,7 +1407,12 @@ func (f *fakeCodespacesClient) deleteCodespace(ctx context.Context, name string)
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
-	delete(f.items, name)
+	if f.onDelete != nil {
+		f.onDelete(name)
+	}
+	if !f.deleteKeepsItem {
+		delete(f.items, name)
+	}
 	return nil
 }
 
@@ -1081,9 +1430,6 @@ func (f *fakeGH) authStatus(context.Context) error { return nil }
 func (f *fakeGH) authToken(context.Context) (string, error) {
 	return f.token, nil
 }
-func (f *fakeGH) userLogin(context.Context) (string, error) {
-	return f.login, nil
-}
 func (f *fakeGH) codespaceSSHConfig(_ context.Context, codespace string) (string, error) {
 	f.configFor = codespace
 	return f.config(codespace), nil
@@ -1099,11 +1445,27 @@ func (f *fakeGH) config(codespace string) string {
 
 func fakeCodespace(name, state string) codespace {
 	return codespace{
+		ID:            int64(len(name) + 100),
 		Name:          name,
 		DisplayName:   "Crabbox",
 		State:         state,
 		EnvironmentID: "env-" + name,
+		Owner:         fakeGitHubUser("alice"),
 		Repository:    repositoryRef{FullName: "example-org/my-app"},
 		Machine:       machineRef{Name: "standardLinux32gb"},
+		GitStatus: gitStatus{
+			aheadPresent:       true,
+			unpushedPresent:    true,
+			uncommittedPresent: true,
+		},
 	}
+}
+
+func fakeGitHubUser(login string) githubUser {
+	login = strings.TrimSpace(login)
+	id := int64(42)
+	if !strings.EqualFold(login, "alice") {
+		id = 43
+	}
+	return githubUser{ID: id, Login: login}
 }

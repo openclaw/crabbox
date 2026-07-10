@@ -24,7 +24,7 @@ func TestClientCreateCodespaceRequestShape(t *testing.T) {
 			t.Fatal(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"name":"codespace-1","display_name":"Crabbox","state":"Available","environment_id":"env_1","repository":{"full_name":"example-org/my-app"},"machine":{"name":"standardLinux32gb"}}`))
+		_, _ = w.Write([]byte(`{"id":7,"name":"codespace-1","display_name":"Crabbox","state":"Available","environment_id":"env_1","owner":{"id":42,"login":"alice"},"repository":{"full_name":"example-org/my-app"},"machine":{"name":"standardLinux32gb"}}`))
 	}))
 	defer server.Close()
 
@@ -62,8 +62,49 @@ func TestClientCreateCodespaceRequestShape(t *testing.T) {
 	if _, ok := gotBody["location"]; ok {
 		t.Fatalf("body used legacy location key: %#v", gotBody)
 	}
-	if created.Repository.FullName != "example-org/my-app" || created.EnvironmentID != "env_1" || created.Machine.Name != "standardLinux32gb" {
+	if created.ID != 7 || created.Owner.ID != 42 || created.Owner.Login != "alice" || created.Repository.FullName != "example-org/my-app" || created.EnvironmentID != "env_1" || created.Machine.Name != "standardLinux32gb" {
 		t.Fatalf("created=%#v", created)
+	}
+}
+
+func TestClientCurrentUserUsesConfiguredAPIBase(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" || r.Header.Get("Authorization") != "Bearer ghp_this_token_value_is_redacted" {
+			t.Fatalf("request path=%q auth_present=%t", r.URL.Path, r.Header.Get("Authorization") != "")
+		}
+		_, _ = w.Write([]byte(`{"id":42,"login":"alice"}`))
+	}))
+	defer server.Close()
+
+	c := newClient(GitHubCodespacesConfig{APIURL: server.URL + "/api/v3"}, Runtime{HTTP: server.Client()}, "ghp_this_token_value_is_redacted")
+	user, err := c.currentUser(context.Background())
+	if err != nil || user.ID != 42 || user.Login != "alice" {
+		t.Fatalf("user=%#v err=%v", user, err)
+	}
+}
+
+func TestGitStatusDeletionSafetyRequiresAllFields(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload string
+		wantErr bool
+	}{
+		{name: "complete clean", payload: `{"name":"cs-safe","git_status":{"ahead":0,"has_unpushed_changes":false,"has_uncommitted_changes":false}}`},
+		{name: "missing ahead", payload: `{"name":"cs-unknown","git_status":{"has_unpushed_changes":false,"has_uncommitted_changes":false}}`, wantErr: true},
+		{name: "missing unpushed", payload: `{"name":"cs-unknown","git_status":{"ahead":0,"has_uncommitted_changes":false}}`, wantErr: true},
+		{name: "missing uncommitted", payload: `{"name":"cs-unknown","git_status":{"ahead":0,"has_unpushed_changes":false}}`, wantErr: true},
+		{name: "missing object", payload: `{"name":"cs-unknown"}`, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var item codespace
+			if err := json.Unmarshal([]byte(test.payload), &item); err != nil {
+				t.Fatal(err)
+			}
+			err := validateDeleteSafe(item)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validateDeleteSafe() err=%v wantErr=%t", err, test.wantErr)
+			}
+		})
 	}
 }
 
@@ -183,6 +224,41 @@ func TestClientListCodespacesRejectsCrossOriginPagination(t *testing.T) {
 	}
 	if got := strings.Join(calls, "\n"); got != "GET /api/v3/user/codespaces?per_page=100" {
 		t.Fatalf("calls=%q", got)
+	}
+}
+
+func TestClientRejectsRedirectWithoutForwardingAuthorization(t *testing.T) {
+	sinkCalls := 0
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sinkCalls++
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("redirect leaked authorization=%q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sink.Close()
+
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, sink.URL+r.URL.RequestURI(), http.StatusFound)
+	}))
+	defer origin.Close()
+
+	c := newClient(GitHubCodespacesConfig{APIURL: origin.URL}, Runtime{HTTP: origin.Client()}, "ghp_this_token_value_is_redacted")
+	_, err := c.listCodespaces(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "status=302") {
+		t.Fatalf("err=%v", err)
+	}
+	if sinkCalls != 0 {
+		t.Fatalf("redirect target calls=%d", sinkCalls)
+	}
+}
+
+func TestClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
+	if err := validateGitHubCodespacesAPIBase("http://api.example.test"); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("err=%v", err)
+	}
+	if err := validateGitHubCodespacesAPIBase("http://127.0.0.1:8080/api/v3"); err != nil {
+		t.Fatalf("loopback URL: %v", err)
 	}
 }
 
