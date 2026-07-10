@@ -4833,7 +4833,10 @@ export class FleetCoordinator {
     if (method === "GET" && action === undefined) {
       const admin = isAdminRequest(request);
       const lease = await this.resolveLease(leaseID, request, false);
-      const refreshed = lease ? await this.refreshLeaseAccessForResolution(lease) : undefined;
+      const refreshed =
+        lease && this.leaseProviderAccessVisibleToRequest(lease, request, admin)
+          ? await this.refreshLeaseAccessForResolution(lease)
+          : lease;
       return refreshed
         ? json({ lease: this.leaseForRequest(refreshed, request, admin) })
         : notFound();
@@ -4857,7 +4860,7 @@ export class FleetCoordinator {
       lease.tailscale = mergeTailscaleMetadata(lease.tailscale, input);
       lease.updatedAt = new Date().toISOString();
       await this.putLease(lease);
-      return json({ lease: publicLeaseRecord(lease) });
+      return json({ lease: this.leaseForRequest(lease, request, admin) });
     }
     if (method === "POST" && action === "release") {
       return this.releaseLease(request, leaseID, false);
@@ -5189,7 +5192,7 @@ export class FleetCoordinator {
     }
     const managedProvider = managedLeaseProvider(committed);
     if (requestCIDRs.length === 0 || !managedProvider) {
-      return json({ lease: publicLeaseRecord(committed) });
+      return json({ lease: this.leaseForRequest(committed, request, isAdminRequest(request)) });
     }
 
     const refresh = async (): Promise<LeaseRecord> => {
@@ -5239,7 +5242,7 @@ export class FleetCoordinator {
     };
     const lease =
       managedProvider === "aws" ? await this.withAWSIngressOperationLock(refresh) : await refresh();
-    return json({ lease: publicLeaseRecord(lease) });
+    return json({ lease: this.leaseForRequest(lease, request, isAdminRequest(request)) });
   }
 
   private async refreshLeaseAccessForResolution(lease: LeaseRecord): Promise<LeaseRecord> {
@@ -5466,7 +5469,7 @@ export class FleetCoordinator {
       return await this.deleteRegisteredRuntimeAdapterWorkspace(request, lease);
     }
     if (lease.runtimeAdapterDeleteRequestedAt) {
-      return runtimeAdapterDeletePendingResponse(lease);
+      return this.runtimeAdapterDeletePendingResponse(lease, request, admin);
     }
     const shouldDelete = body.delete ?? !lease.keep;
     if (lease.cleanupStartedAt) {
@@ -5475,29 +5478,29 @@ export class FleetCoordinator {
           {
             error: "cleanup_in_progress",
             message: "lease cleanup has already started",
-            lease: publicLeaseRecord(lease),
+            lease: this.leaseForRequest(lease, request, admin),
           },
           { status: 409 },
         );
       }
       await this.scheduleAlarm();
-      return json({ lease: publicLeaseRecord(lease) });
+      return json({ lease: this.leaseForRequest(lease, request, admin) });
     }
     const released = await this.releaseResolvedLease(lease, { deleteServer: shouldDelete });
     if (released.runtimeAdapterDeleteRequestedAt) {
-      return runtimeAdapterDeletePendingResponse(released);
+      return this.runtimeAdapterDeletePendingResponse(released, request, admin);
     }
     if (released.cleanupStartedAt && !shouldDelete) {
       return json(
         {
           error: "cleanup_in_progress",
           message: "lease cleanup has already started",
-          lease: publicLeaseRecord(released),
+          lease: this.leaseForRequest(released, request, admin),
         },
         { status: 409 },
       );
     }
-    return json({ lease: publicLeaseRecord(released) });
+    return json({ lease: this.leaseForRequest(released, request, admin) });
   }
 
   private async completeRuntimeAdapterDelete(
@@ -6615,7 +6618,10 @@ export class FleetCoordinator {
           latest.runtimeAdapterWorkspaceID === workspaceID &&
           latest.runtimeAdapterRegistrationID === lease.runtimeAdapterRegistrationID
         ) {
-          return json({ lease: publicLeaseRecord(latest), status: "deleted" });
+          return json({
+            lease: this.leaseForRequest(latest, request, isAdminRequest(request)),
+            status: "deleted",
+          });
         }
         return runtimeAdapterWorkspaceDeleteError(
           "runtime_adapter_lease_changed",
@@ -6626,7 +6632,11 @@ export class FleetCoordinator {
       }
       return json(
         {
-          lease: publicLeaseRecord((await this.getLease(lease.id)) ?? current),
+          lease: this.leaseForRequest(
+            (await this.getLease(lease.id)) ?? current,
+            request,
+            isAdminRequest(request),
+          ),
           status: "deleting",
         },
         { status: 202 },
@@ -10430,11 +10440,11 @@ export class FleetCoordinator {
       return notFound();
     }
     if (lease.runtimeAdapterDeleteRequestedAt) {
-      return runtimeAdapterDeletePendingResponse(lease);
+      return this.runtimeAdapterDeletePendingResponse(lease, request, true);
     }
     const released = await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
     return released.runtimeAdapterDeleteRequestedAt
-      ? runtimeAdapterDeletePendingResponse(released)
+      ? this.runtimeAdapterDeletePendingResponse(released, request, true)
       : json({ lease: publicLeaseRecord(released) });
   }
 
@@ -12302,6 +12312,14 @@ export class FleetCoordinator {
     return role === "owner" || role === "manage";
   }
 
+  private leaseProviderAccessVisibleToRequest(
+    lease: LeaseRecord,
+    request: Request,
+    admin: boolean,
+  ): boolean {
+    return this.leaseAccessRole(lease, request, admin) === "owner";
+  }
+
   private leaseForRequest(lease: LeaseRecord, request: Request, admin: boolean): LeaseRecord {
     const visible = publicLeaseRecord(lease);
     if (visible.cleanupError) {
@@ -12313,7 +12331,29 @@ export class FleetCoordinator {
     if (visible.share && !this.leaseManageableByRequest(lease, request, admin)) {
       delete visible.share;
     }
+    if (
+      visible.provider === "daytona" &&
+      visible.sshUser &&
+      !this.leaseProviderAccessVisibleToRequest(lease, request, admin)
+    ) {
+      visible.sshUser = "<token>";
+    }
     return visible;
+  }
+
+  private runtimeAdapterDeletePendingResponse(
+    lease: LeaseRecord,
+    request: Request,
+    admin: boolean,
+  ): Response {
+    return json(
+      {
+        error: "runtime_adapter_delete_pending",
+        message: "lease release is blocked while its runtime adapter delete is pending",
+        lease: this.leaseForRequest(lease, request, admin),
+      },
+      { status: 409 },
+    );
   }
 
   private leaseForListRequest(lease: LeaseRecord, request: Request, admin: boolean): LeaseRecord {
@@ -13645,17 +13685,6 @@ function runtimeAdapterWorkspaceDeleteError(
   status: number,
 ): Response {
   return json({ error, title, message }, { status });
-}
-
-function runtimeAdapterDeletePendingResponse(lease: LeaseRecord): Response {
-  return json(
-    {
-      error: "runtime_adapter_delete_pending",
-      message: "lease release is blocked while its runtime adapter delete is pending",
-      lease: publicLeaseRecord(lease),
-    },
-    { status: 409 },
-  );
 }
 
 function runtimeAdapterDeleteInFlightResponse(retryAt: string): Response {
