@@ -18779,6 +18779,11 @@ export class AWSProvider implements CloudProvider {
       input.awsSGID ? "awsSGID" : "",
       input.awsSubnetID ? "awsSubnetID" : "",
       input.awsProfile ? "awsProfile" : "",
+      input.awsInstanceTypes?.length ? "awsInstanceTypes" : "",
+      input.awsPrivate ? "awsPrivate" : "",
+      input.awsRequireSSM ? "awsRequireSSM" : "",
+      input.awsSSMBootstrapCommand ? "awsSSMBootstrapCommand" : "",
+      input.awsSSMLogGroup ? "awsSSMLogGroup" : "",
     ].filter(Boolean);
   }
 
