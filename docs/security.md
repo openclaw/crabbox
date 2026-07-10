@@ -367,9 +367,15 @@ unclaimed, and stale-claim servers instead of turning provider inventory into
 ownership proof.
 
 Artifact publishing rejects symlinks, directories at reserved generated-output
-paths, and other non-regular bundle entries before upload side effects. Required
-artifact paths must resolve to regular files. Automatic remote failure bundles
-confine member names and link targets to their generated subtree and omit
+paths, and other non-regular bundle entries before upload side effects.
+Publishing copies validated file objects into a private snapshot before broker,
+S3, R2, or Cloudflare uploads, so later bundle path replacement cannot change
+uploaded bytes. Local and dry-run manifests hash through rooted validated file
+handles without duplicating the bundle. Generated manifest and Markdown files
+replace reserved outputs through root-confined temporary files without
+following symlinks. Required artifact paths must resolve to regular files.
+Automatic remote failure bundles confine member names and link targets to their
+generated subtree and omit
 escaping, rooted, empty, or special-file entries. These filesystem checks do
 not redact the contents of accepted regular files.
 

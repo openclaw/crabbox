@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Bound artifact uploads to private snapshots and manifest hashes to rooted validated file handles, then replaced generated outputs through root-confined temporary files, preventing path races from reading or overwriting files outside the bundle. Thanks @coygeek.
 - Kept AWS developer-image minting compatible with macOS system Bash when AWS region selection is automatic.
 - Preserved exact coordinator organization identities in collision-free authorization keys, preventing distinct labels from sharing leases, runs, bridges, workspaces, runners, or usage limits after lossy normalization. Ambiguous legacy records now fail closed for non-admin access while remaining available for admin cleanup. Thanks @coygeek.
 - Confined Nomad API redirects to the configured scheme, hostname, and effective port before replaying ACL tokens or request bodies, while keeping rejected Location secrets out of diagnostics. Thanks @coygeek.
