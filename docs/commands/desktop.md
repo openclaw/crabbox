@@ -67,11 +67,12 @@ egress bridge first; the flag currently requires `--browser`. Override the proxy
 address with `--egress-proxy host:port` if egress is listening elsewhere. See
 [egress](egress.md) for the full bridge model.
 
-On Linux and macOS the process is detached with `setsid` or `nohup`. On native
-Windows, an SSH session cannot directly own the visible console desktop, so
-Crabbox writes a one-shot PowerShell launcher under `C:\ProgramData\crabbox` and
-runs it as an interactive scheduled task for the logged-in `crabbox` user. The
-launcher starts the app in a normal window and brings it to the foreground.
+On Linux and macOS the process is detached with `setsid` or `nohup`. Native
+Windows desktop bootstrap installs a restricted LocalSystem launch broker. It
+uses the active WTS session token to create the app directly on
+`winsta0\default`; it does not create a scheduled task or read the stored
+desktop password. The command waits for a new or changed visible window, brings
+it to the foreground, and reports the owning PID, session ID, and title.
 
 ```text
 desktop launch --id <lease-id-or-slug>

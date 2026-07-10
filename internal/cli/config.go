@@ -35,6 +35,7 @@ type Config struct {
 	Desktop                       bool
 	DesktopEnv                    string
 	Browser                       bool
+	imageRequirements             imageRequirements
 	Code                          bool
 	Network                       NetworkMode
 	Class                         string
@@ -49,6 +50,8 @@ type Config struct {
 	brokerProvider                string
 	BrokerLoginRedirectOrigins    []string
 	BrokerAutoWebVNC              bool
+	macOSPortalAuto               bool
+	macOSPortalCoordinator        string
 	CoordToken                    string
 	CoordTokenCommand             []string
 	CoordAdminToken               string
@@ -175,6 +178,7 @@ type Config struct {
 	ExeDev                        ExeDevConfig
 	Railway                       RailwayConfig
 	FastAPICloud                  FastAPICloudConfig
+	UnikraftCloud                 UnikraftCloudConfig
 	Runpod                        RunpodConfig
 	Vast                          VastConfig
 	vastWorkRootExplicit          bool
@@ -682,6 +686,14 @@ type FastAPICloudConfig struct {
 	APIURL string
 	AppID  string
 	TeamID string
+}
+
+type UnikraftCloudConfig struct {
+	APIKey   string
+	APIURL   string
+	Metro    string
+	Image    string
+	MemoryMB int
 }
 
 type RunpodConfig struct {
@@ -2927,6 +2939,9 @@ func baseConfig() Config {
 		FastAPICloud: FastAPICloudConfig{
 			APIURL: "https://api.fastapicloud.com/api/v1",
 		},
+		UnikraftCloud: UnikraftCloudConfig{
+			Metro: "fra",
+		},
 		Runpod: RunpodConfig{
 			APIURL:     "https://rest.runpod.io/v1",
 			CloudType:  "SECURE",
@@ -3278,6 +3293,7 @@ type fileConfig struct {
 	ExeDev                   *fileExeDevConfig                   `yaml:"exeDev,omitempty"`
 	Railway                  *fileRailwayConfig                  `yaml:"railway,omitempty"`
 	FastAPICloud             *fileFastAPICloudConfig             `yaml:"fastapiCloud,omitempty"`
+	UnikraftCloud            *fileUnikraftCloudConfig            `yaml:"unikraftCloud,omitempty"`
 	Runpod                   *fileRunpodConfig                   `yaml:"runpod,omitempty"`
 	Vast                     *fileVastConfig                     `yaml:"vast,omitempty"`
 	NvidiaBrev               *fileNvidiaBrevConfig               `yaml:"nvidiaBrev,omitempty"`
@@ -3897,6 +3913,14 @@ type fileFastAPICloudConfig struct {
 	APIURL string `yaml:"apiUrl,omitempty"`
 	AppID  string `yaml:"appId,omitempty"`
 	TeamID string `yaml:"teamId,omitempty"`
+}
+
+type fileUnikraftCloudConfig struct {
+	APIKey   string `yaml:"apiKey,omitempty"`
+	APIURL   string `yaml:"apiUrl,omitempty"`
+	Metro    string `yaml:"metro,omitempty"`
+	Image    string `yaml:"image,omitempty"`
+	MemoryMB int    `yaml:"memoryMB,omitempty"`
 }
 
 type fileRunpodConfig struct {
@@ -5745,8 +5769,8 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		applyLeaseDuration(&cfg.IdleTimeout, file.Lease.IdleTimeout)
 	}
 	if file.Sync != nil {
-		cfg.Sync.Excludes = appendUniqueStrings(cfg.Sync.Excludes, file.Sync.Exclude...)
-		cfg.Sync.Excludes = appendUniqueStrings(cfg.Sync.Excludes, file.Sync.Excludes...)
+		cfg.Sync.Excludes = appendOrderedStrings(cfg.Sync.Excludes, file.Sync.Exclude...)
+		cfg.Sync.Excludes = appendOrderedStrings(cfg.Sync.Excludes, file.Sync.Excludes...)
 		cfg.Sync.Includes = appendUniqueStrings(cfg.Sync.Includes, file.Sync.Include...)
 		cfg.Sync.Includes = appendUniqueStrings(cfg.Sync.Includes, file.Sync.Includes...)
 		if file.Sync.Delete != nil {
@@ -6348,6 +6372,25 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.FastAPICloud.TeamID != "" {
 			cfg.FastAPICloud.TeamID = file.FastAPICloud.TeamID
+		}
+	}
+	if file.UnikraftCloud != nil {
+		if file.UnikraftCloud.APIKey != "" {
+			cfg.UnikraftCloud.APIKey = file.UnikraftCloud.APIKey
+			cfg.credentialProvenance.unikraftCloudAPIKey = credentialSource
+		}
+		if file.UnikraftCloud.APIURL != "" {
+			cfg.UnikraftCloud.APIURL = file.UnikraftCloud.APIURL
+			cfg.credentialProvenance.unikraftCloudAPIURL = credentialSource
+		}
+		if file.UnikraftCloud.Metro != "" {
+			cfg.UnikraftCloud.Metro = file.UnikraftCloud.Metro
+		}
+		if file.UnikraftCloud.Image != "" {
+			cfg.UnikraftCloud.Image = file.UnikraftCloud.Image
+		}
+		if file.UnikraftCloud.MemoryMB > 0 {
+			cfg.UnikraftCloud.MemoryMB = file.UnikraftCloud.MemoryMB
 		}
 	}
 	if file.Runpod != nil {
@@ -8568,6 +8611,16 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.FastAPICloud.AppID = getenv("CRABBOX_FASTAPI_CLOUD_APP_ID", getenv("FASTAPI_CLOUD_APP_ID", cfg.FastAPICloud.AppID))
 	cfg.FastAPICloud.TeamID = getenv("CRABBOX_FASTAPI_CLOUD_TEAM_ID", getenv("FASTAPI_CLOUD_TEAM_ID", cfg.FastAPICloud.TeamID))
+	if value, ok := firstNonEmptyEnv("CRABBOX_UNIKRAFT_CLOUD_API_KEY", "UNIKRAFT_CLOUD_API_KEY", "UKC_API_KEY", "UKC_TOKEN"); ok {
+		cfg.UnikraftCloud.APIKey = value
+		cfg.credentialProvenance.unikraftCloudAPIKey = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_UNIKRAFT_CLOUD_API_URL", "UNIKRAFT_CLOUD_API_URL"); ok {
+		cfg.UnikraftCloud.APIURL = value
+		cfg.credentialProvenance.unikraftCloudAPIURL = credentialSourceEnvironment
+	}
+	cfg.UnikraftCloud.Metro = getenv("CRABBOX_UNIKRAFT_CLOUD_METRO", getenv("UNIKRAFT_CLOUD_METRO", getenv("UKC_METRO", cfg.UnikraftCloud.Metro)))
+	cfg.UnikraftCloud.Image = getenv("CRABBOX_UNIKRAFT_CLOUD_IMAGE", getenv("UNIKRAFT_CLOUD_IMAGE", cfg.UnikraftCloud.Image))
 	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_KEY", "RUNPOD_API_KEY"); ok {
 		cfg.Runpod.APIKey = value
 		cfg.credentialProvenance.runpodAPIKey = credentialSourceEnvironment
@@ -9942,6 +9995,16 @@ func appendUniqueStrings(values []string, extra ...string) []string {
 		}
 		seen[value] = true
 		out = append(out, value)
+	}
+	return out
+}
+
+func appendOrderedStrings(values []string, extra ...string) []string {
+	out := append([]string(nil), values...)
+	for _, value := range extra {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
 	}
 	return out
 }

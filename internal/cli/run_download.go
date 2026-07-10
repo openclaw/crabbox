@@ -95,25 +95,29 @@ func rejectCaptureDownloadCollision(label, capturePath string, download runDownl
 }
 
 func preflightProofOutputPath(proofPath, captureStdout, captureStderr string, downloads []string) error {
-	if proofPath == "" {
+	return preflightRunOutputCollisions("emit proof", proofPath, captureStdout, captureStderr, downloads)
+}
+
+func preflightRunOutputCollisions(label, path, captureStdout, captureStderr string, downloads []string) error {
+	if path == "" {
 		return nil
 	}
 	if captureStdout != "" {
-		same, err := sameLocalOutputPath(proofPath, captureStdout)
+		same, err := sameLocalOutputPath(path, captureStdout)
 		if err != nil {
 			return err
 		}
 		if same {
-			return exit(2, "emit proof/capture stdout: paths must be different")
+			return exit(2, "%s/capture stdout: paths must be different", label)
 		}
 	}
 	if captureStderr != "" {
-		same, err := sameLocalOutputPath(proofPath, captureStderr)
+		same, err := sameLocalOutputPath(path, captureStderr)
 		if err != nil {
 			return err
 		}
 		if same {
-			return exit(2, "emit proof/capture stderr: paths must be different")
+			return exit(2, "%s/capture stderr: paths must be different", label)
 		}
 	}
 	for _, spec := range downloads {
@@ -121,27 +125,156 @@ func preflightProofOutputPath(proofPath, captureStdout, captureStderr string, do
 		if err != nil {
 			return err
 		}
-		same, err := sameLocalOutputPath(proofPath, download.Local)
+		same, err := sameLocalOutputPath(path, download.Local)
 		if err != nil {
 			return err
 		}
 		if same {
-			return exit(2, "emit proof/download %s: paths must be different", download.Remote)
+			return exit(2, "%s/download %s: paths must be different", label, download.Remote)
 		}
 	}
 	return nil
 }
 
 func sameLocalOutputPath(left, right string) (bool, error) {
-	leftAbs, err := filepath.Abs(filepath.Clean(left))
+	leftCanonical, err := canonicalLocalOutputPath(left)
 	if err != nil {
-		return false, exit(2, "capture stdout/stderr: %v", err)
+		return false, exit(2, "local output path: %v", err)
 	}
-	rightAbs, err := filepath.Abs(filepath.Clean(right))
+	rightCanonical, err := canonicalLocalOutputPath(right)
 	if err != nil {
-		return false, exit(2, "capture stdout/stderr: %v", err)
+		return false, exit(2, "local output path: %v", err)
 	}
-	return leftAbs == rightAbs, nil
+	if leftCanonical == rightCanonical {
+		return true, nil
+	}
+	leftInfo, leftErr := os.Stat(leftCanonical)
+	rightInfo, rightErr := os.Stat(rightCanonical)
+	if leftErr == nil && rightErr == nil {
+		return os.SameFile(leftInfo, rightInfo), nil
+	}
+	for _, statErr := range []error{leftErr, rightErr} {
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return false, exit(2, "local output path: %v", statErr)
+		}
+	}
+	if strings.EqualFold(leftCanonical, rightCanonical) {
+		caseInsensitive, err := localPathCaseInsensitive(leftCanonical)
+		if err != nil {
+			return false, exit(2, "local output path case probe: %v", err)
+		}
+		if caseInsensitive {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func canonicalLocalOutputPath(path string) (string, error) {
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	return resolveLocalOutputSymlinks(abs, 0)
+}
+
+func resolveLocalOutputSymlinks(path string, depth int) (string, error) {
+	// Resolve each existing link even when its target or a later component is not created yet.
+	if depth > 64 {
+		return "", fmt.Errorf("too many symlinks in %s", path)
+	}
+	volume := filepath.VolumeName(path)
+	rest := strings.TrimPrefix(path, volume)
+	rest = strings.TrimLeft(rest, string(filepath.Separator))
+	current := volume + string(filepath.Separator)
+	if volume == "" {
+		current = string(filepath.Separator)
+	}
+	parts := strings.FieldsFunc(rest, func(r rune) bool { return r == rune(filepath.Separator) })
+	for i, part := range parts {
+		candidate := filepath.Join(current, part)
+		info, err := os.Lstat(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			return filepath.Join(append([]string{candidate}, parts[i+1:]...)...), nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			current = candidate
+			continue
+		}
+		target, err := os.Readlink(candidate)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(candidate), target)
+		}
+		if i+1 < len(parts) {
+			target = filepath.Join(append([]string{target}, parts[i+1:]...)...)
+		}
+		return resolveLocalOutputSymlinks(filepath.Clean(target), depth+1)
+	}
+	return current, nil
+}
+
+func localPathCaseInsensitive(path string) (bool, error) {
+	dir := path
+	for {
+		info, err := os.Stat(dir)
+		if err == nil {
+			if !info.IsDir() {
+				dir = filepath.Dir(dir)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false, err
+		}
+		dir = parent
+	}
+	// Probe the directory because supported platforms can host both case modes.
+	probe, err := os.CreateTemp(dir, ".crabbox-case-Aa-*")
+	if err != nil {
+		return false, err
+	}
+	probePath := probe.Name()
+	probeInfo, statErr := probe.Stat()
+	closeErr := probe.Close()
+	defer os.Remove(probePath)
+	if statErr != nil {
+		return false, statErr
+	}
+	if closeErr != nil {
+		return false, closeErr
+	}
+	foldedPath := filepath.Join(dir, flipASCIICase(filepath.Base(probePath)))
+	foldedInfo, err := os.Stat(foldedPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(probeInfo, foldedInfo), nil
+}
+
+func flipASCIICase(value string) string {
+	flipped := []byte(value)
+	for i, char := range flipped {
+		switch {
+		case char >= 'a' && char <= 'z':
+			flipped[i] = char - ('a' - 'A')
+		case char >= 'A' && char <= 'Z':
+			flipped[i] = char + ('a' - 'A')
+		}
+	}
+	return string(flipped)
 }
 
 func preflightLocalOutputPath(label, path string, allowMissingDirs, replaceExisting bool) error {

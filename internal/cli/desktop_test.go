@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -259,6 +260,40 @@ func TestDesktopTypeUsesPasteForSymbolHeavyText(t *testing.T) {
 	}
 }
 
+func TestDesktopTextInputSupportsLinuxAndMacOS(t *testing.T) {
+	for _, target := range []SSHTarget{{TargetOS: targetLinux}, {TargetOS: targetMacOS}} {
+		if !desktopTextSupportsTarget(target) {
+			t.Errorf("target %q should support desktop text input", target.TargetOS)
+		}
+	}
+	for _, target := range []SSHTarget{{TargetOS: targetWindows}, {TargetOS: "freebsd"}} {
+		if desktopTextSupportsTarget(target) {
+			t.Errorf("target %q should not support desktop text input", target.TargetOS)
+		}
+	}
+}
+
+func TestDesktopPasteFailureSafeToRetry(t *testing.T) {
+	for _, detail := range []string{
+		"missing clipboard tool; warm a new lease",
+		"clipboard helper exited before paste (status=42)",
+		"clipboard helper failed to provide requested contents (xsel)",
+	} {
+		if !desktopPasteFailureSafeToRetry(detail) {
+			t.Errorf("expected pre-input failure to be retryable: %q", detail)
+		}
+	}
+	for _, detail := range []string{
+		"clipboard helper failed while serving paste (status=42)",
+		"xdotool type failed after entering part of the text",
+		"wtype returned status 1",
+	} {
+		if desktopPasteFailureSafeToRetry(detail) {
+			t.Errorf("expected potentially partial input failure not to be retryable: %q", detail)
+		}
+	}
+}
+
 func TestDesktopPasteRemoteCommandPrefersClipboardTools(t *testing.T) {
 	got := desktopPasteRemoteCommand()
 	for _, want := range []string{
@@ -410,10 +445,13 @@ func TestDesktopLinuxTerminalSupportsWaylandAndX11(t *testing.T) {
 
 func TestDesktopClickRemoteCommandSupportsManagedTargets(t *testing.T) {
 	linux := desktopClickRemoteCommand(SSHTarget{TargetOS: targetLinux}, 12, 34)
-	for _, want := range []string{"CRABBOX_DESKTOP_ENV:-xfce", "not supported on Wayland desktop envs", "DISPLAY=\"${DISPLAY:-:99}\"", "xdotool mousemove 12 34 click 1"} {
+	for _, want := range []string{"CRABBOX_DESKTOP_ENV:-xfce", "not supported on Wayland desktop envs", "DISPLAY=\"${DISPLAY:-:99}\"", "xdotool getactivewindow", "xdotool mousemove 12 34 click 1"} {
 		if !strings.Contains(linux, want) {
 			t.Fatalf("linux click command missing %q:\n%s", want, linux)
 		}
+	}
+	if strings.Index(linux, "xdotool getactivewindow") > strings.Index(linux, "not supported on Wayland desktop envs") {
+		t.Fatalf("linux click must try an active XWayland window before rejecting the desktop env:\n%s", linux)
 	}
 	mac := desktopClickRemoteCommand(SSHTarget{TargetOS: targetMacOS}, 12, 34)
 	for _, want := range []string{"cliclick c:12,34", "import CoreGraphics", "CGEvent"} {
@@ -441,6 +479,9 @@ func TestDesktopWaylandInputBranches(t *testing.T) {
 			t.Fatalf("key command missing %q:\n%s", want, key)
 		}
 	}
+	if strings.Index(key, "xdotool getactivewindow") > strings.Index(key, "command -v wtype") {
+		t.Fatalf("key command must prefer an active XWayland window before native Wayland fallback:\n%s", key)
+	}
 	unsupported := desktopKeyRemoteCommand("ctrl+l alt+Tab")
 	if !strings.Contains(unsupported, "supports a single key or modifier+key sequence") {
 		t.Fatalf("complex wayland key sequence should be rejected:\n%s", unsupported)
@@ -450,6 +491,9 @@ func TestDesktopWaylandInputBranches(t *testing.T) {
 		if !strings.Contains(typed, want) {
 			t.Fatalf("type command missing %q:\n%s", want, typed)
 		}
+	}
+	if strings.Index(typed, "xdotool getactivewindow") > strings.Index(typed, "wtype -d 1") {
+		t.Fatalf("type command must prefer an active XWayland window before native Wayland fallback:\n%s", typed)
 	}
 }
 
@@ -622,23 +666,51 @@ func TestDesktopBrowserLaunchCheckAvoidsSelfMatchingShell(t *testing.T) {
 	}
 }
 
-func TestWindowsDesktopLaunchRemoteCommandUsesInteractiveTask(t *testing.T) {
-	got := desktopLaunchRemoteCommand(
-		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+func TestWindowsDesktopLaunchRemoteCommandUsesActiveInteractiveSession(t *testing.T) {
+	got := windowsDesktopLaunchPowerShell(
 		`C:\crabbox\cbx_1\repo`,
 		map[string]string{"BROWSER": `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`},
 		[]string{`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`, "https://example.com"},
-		desktopLaunchOptions{WindowedBrowser: true},
 	)
 	for _, want := range []string{
-		"CrabboxDesktopLaunch-",
-		"windows.username",
-		"windows.password",
-		"schtasks.exe /Delete",
-		`"/IT"`,
+		"CrabboxDesktopLauncher",
+		"desktop-launch-requests",
+		"CrabboxDesktopWindows",
+		"RelatedTo",
+		"AddSeconds(45)",
+		"SetForegroundWindow",
+		"GetForegroundWindow",
+		windowsDesktopWindowMarker,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("windows desktop launch command missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"schtasks.exe", "windows.username", "windows.password", `"/IT"`} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("windows desktop launch command still contains %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestParseWindowsDesktopWindow(t *testing.T) {
+	title := "Crabbox test — Edge"
+	encoded := base64.StdEncoding.EncodeToString([]byte(title))
+	got, err := parseWindowsDesktopWindow("noise\n" + windowsDesktopWindowMarker + " pid=421 session=3 title=" + encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PID != 421 || got.SessionID != 3 || got.Title != title {
+		t.Fatalf("window=%#v", got)
+	}
+	for _, invalid := range []string{
+		"",
+		windowsDesktopWindowMarker + " pid=0 session=3 title=" + encoded,
+		windowsDesktopWindowMarker + " pid=421 session=-1 title=" + encoded,
+		windowsDesktopWindowMarker + " pid=421 session=3 title=not-base64",
+	} {
+		if _, err := parseWindowsDesktopWindow(invalid); err == nil {
+			t.Fatalf("invalid marker accepted: %q", invalid)
 		}
 	}
 }

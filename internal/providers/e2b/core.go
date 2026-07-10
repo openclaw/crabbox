@@ -21,12 +21,14 @@ type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
 type RunSessionHandle = core.RunSessionHandle
+type LeaseClaim = core.LeaseClaim
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
 type StatusView = core.StatusView
 type StopRequest = core.StopRequest
 type Server = core.Server
+type SSHTarget = core.SSHTarget
 type Repo = core.Repo
 type SyncManifest = core.SyncManifest
 type ExitError = core.ExitError
@@ -72,14 +74,38 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 
 var claimLeaseForRepoProvider = core.ClaimLeaseForRepoProvider
 
-var claimLeaseForRepoProviderPond = core.ClaimLeaseForRepoProviderPond
+var claimLeaseTargetForRepoConfig = core.ClaimLeaseTargetForRepoConfig
+
+var claimLeaseTargetForRepoConfigIfUnchanged = core.ClaimLeaseTargetForRepoConfigIfUnchanged
+
+var claimLeaseTargetForConfigIfUnchanged = core.ClaimLeaseTargetForConfigIfUnchanged
+
+func resolveLeaseClaimForProviderScopeWithExact(identifier, providerScope string) (LeaseClaim, bool, bool, error) {
+	return core.ResolveLeaseClaimForProviderScopeWithExact(identifier, e2bProvider, providerScope)
+}
+
+func resolveLeaseClaimForProviderCloudIDScope(cloudID, providerScope string) (LeaseClaim, bool, error) {
+	return core.ResolveLeaseClaimForProviderCloudIDScope(cloudID, e2bProvider, providerScope)
+}
+
+func readLeaseClaimWithPresence(leaseID string) (LeaseClaim, bool, error) {
+	return core.ReadLeaseClaimWithPresence(leaseID)
+}
+
+func removeLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
+}
+
+func providerClaimScope(cfg Config) string {
+	return core.ProviderClaimScope(e2bProvider, cfg)
+}
+
+func isCanonicalLeaseID(value string) bool {
+	return core.IsCanonicalLeaseID(value)
+}
 
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
-}
-
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
 }
 
 func writeTimingJSON(w io.Writer, report timingReport) error {

@@ -64,8 +64,11 @@ Crabbox lease ID and local slug:
   exact local claim binds that RunPod id and provider-returned name. Unclaimed
   and legacy pods remain visible to status/list but require explicit
   `--reclaim` reuse before deletion.
-- `e2b` — accepts a Crabbox lease ID, a local slug, or a Crabbox-owned E2B
-  sandbox ID in raw or `e2b_<sandboxID>` form and deletes the E2B sandbox.
+- `e2b` — accepts a Crabbox lease ID, local slug, or E2B sandbox ID only when
+  an exact local claim binds the sandbox and configured API endpoint. Claimless
+  raw or `e2b_<sandboxID>` identifiers require explicit `--reclaim`; Crabbox
+  re-reads canonical remote ownership metadata and persists the exact claim
+  before deletion. Failed deletion retains the claim for an exact retry.
 - `railway` — refuses unclaimed service IDs. Use `--reclaim` only after
   inspecting the configured API endpoint, project, environment, service, and
   current deployment; Crabbox persists that exact one-deployment binding before

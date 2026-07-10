@@ -46,6 +46,164 @@ func TestConfirmedAbsentClaimRemovalRequiresDirectorySyncAndRetriesAfterDeletion
 	}
 }
 
+func TestWriteLeaseClaimAtomicWithSyncPropagatesDirectorySyncFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_sync_failure"
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("directory sync unavailable")
+	err = writeLeaseClaimAtomicWithSync(path, leaseClaim{LeaseID: leaseID}, func(string) error { return syncErr })
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("write error=%v want %v", err, syncErr)
+	}
+}
+
+func TestWriteLeaseClaimAtomicDurableDoesNotSyncExistingAncestors(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_existing_namespace"
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var synced []string
+	err = writeLeaseClaimAtomicDurableWithSync(path, leaseClaim{LeaseID: leaseID}, filepath.Dir(path), func(dir string) error {
+		synced = append(synced, filepath.Clean(dir))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Clean(filepath.Dir(path))}
+	if !reflect.DeepEqual(synced, want) {
+		t.Fatalf("synced=%q want %q", synced, want)
+	}
+}
+
+func TestDurableGuardedClaimWriteSyncsOnlyCreatedNamespaceParents(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(base, "new-state-root"))
+	const leaseID = "cbx_bounded_namespace"
+	var synced []string
+	err := mutateLeaseClaimGuardedDurableWithSync(leaseID, unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false), func(claim *leaseClaim) error {
+		*claim = leaseClaim{LeaseID: leaseID, Slug: "bounded"}
+		return nil
+	}, func(dir string) error {
+		synced = append(synced, filepath.Clean(dir))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := filepath.Dir(filepath.Dir(path))
+	want := []string{
+		filepath.Clean(filepath.Dir(path)),
+		filepath.Clean(stateRoot),
+		filepath.Clean(filepath.Dir(stateRoot)),
+		filepath.Clean(base),
+	}
+	if !reflect.DeepEqual(synced, want) {
+		t.Fatalf("synced=%q want %q", synced, want)
+	}
+}
+
+func TestDurableGuardedClaimWritePropagatesRequiredBoundarySyncFailure(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(base, "new-state-root"))
+	const leaseID = "cbx_boundary_sync_failure"
+	syncErr := errors.New("required namespace sync unavailable")
+	var synced []string
+	err := mutateLeaseClaimGuardedDurableWithSync(leaseID, unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false), func(claim *leaseClaim) error {
+		*claim = leaseClaim{LeaseID: leaseID, Slug: "boundary"}
+		return nil
+	}, func(dir string) error {
+		dir = filepath.Clean(dir)
+		synced = append(synced, dir)
+		if dir == filepath.Clean(base) {
+			return syncErr
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("write error=%v want %v", err, syncErr)
+	}
+	path, pathErr := leaseClaimPath(leaseID)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("claim should be installed before required directory sync error: %v", statErr)
+	}
+	if got := synced[len(synced)-1]; got != filepath.Clean(base) {
+		t.Fatalf("last synced directory=%q want boundary %q", got, base)
+	}
+}
+
+func TestDurableGuardedClaimWriteHoldsLockThroughDirectorySync(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_durable_lock"
+	first := leaseClaim{LeaseID: leaseID, Slug: "first"}
+	second := leaseClaim{LeaseID: leaseID, Slug: "second"}
+	reachedSync := make(chan struct{})
+	releaseSync := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		var once sync.Once
+		firstDone <- mutateLeaseClaimGuardedWithWrite(leaseID, unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false), func(claim *leaseClaim) error {
+			*claim = first
+			return nil
+		}, func(path string, claim leaseClaim) error {
+			return writeLeaseClaimAtomicDurableWithSync(path, claim, filepath.Dir(path), func(string) error {
+				once.Do(func() {
+					close(reachedSync)
+					<-releaseSync
+				})
+				return nil
+			})
+		})
+	}()
+	select {
+	case <-reachedSync:
+	case <-time.After(2 * time.Second):
+		t.Fatal("durable write did not reach directory sync")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- replaceLeaseClaimIfUnchanged(leaseID, first, second)
+	}()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("competing mutation completed before durable sync: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseSync)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	stored, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Slug != second.Slug {
+		t.Fatalf("stored claim=%#v want second mutation", stored)
+	}
+}
+
 func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")
@@ -265,6 +423,17 @@ func TestGitHubCodespacesProviderClaimScope(t *testing.T) {
 	want := "endpoint:https://api.github.example/api/v3|repo:example-org/my-app"
 	if got := providerClaimScope("github-codespaces", cfg); got != want {
 		t.Fatalf("providerClaimScope(github-codespaces)=%q, want %q", got, want)
+	}
+}
+
+func TestE2BProviderClaimScopeBindsAPIEndpoint(t *testing.T) {
+	cfg := Config{E2B: E2BConfig{APIURL: "HTTPS://API.E2B.APP:443/v1/"}}
+	if got, want := providerClaimScope("e2b", cfg), "endpoint:https://api.e2b.app/v1"; got != want {
+		t.Fatalf("providerClaimScope(e2b)=%q, want %q", got, want)
+	}
+	cfg.E2B.APIURL = ""
+	if got := providerClaimScope("e2b", cfg); got != "" {
+		t.Fatalf("providerClaimScope(e2b)=%q, want empty", got)
 	}
 }
 

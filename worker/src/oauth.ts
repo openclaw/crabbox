@@ -11,8 +11,8 @@ import {
   requireGitHubLoginMembership,
 } from "./github-membership";
 import { errorMessage, json, readJson } from "./http";
+import { requestOrgLabel } from "./org-identity";
 import type { Env, Provider } from "./types";
-import { requestOrg } from "./usage";
 
 const githubAuthorizeURL = "https://github.com/login/oauth/authorize";
 const githubTokenURL = "https://github.com/login/oauth/access_token";
@@ -293,12 +293,7 @@ async function githubAuthCallback(
   try {
     const accessToken = await exchangeGitHubCode(code, pending.redirectURI, env);
     const identity = await githubIdentity(accessToken);
-    const requestedOrg = requestOrg(
-      new Request(request.url, {
-        headers: { "x-crabbox-org": env.CRABBOX_DEFAULT_ORG ?? "" },
-      }),
-      env,
-    );
+    const requestedOrg = requestOrgLabel(new Request(request.url), env);
     if (githubUserIsRevoked(identity, env)) {
       throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
     }

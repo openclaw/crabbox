@@ -247,6 +247,7 @@ type CoordinatorImage struct {
 	Architecture         string                           `json:"architecture,omitempty"`
 	PromotedAt           string                           `json:"promotedAt,omitempty"`
 	FastSnapshotRestores []CoordinatorFastSnapshotRestore `json:"fastSnapshotRestores,omitempty"`
+	Capabilities         *imageCapabilities               `json:"capabilities,omitempty"`
 }
 
 type CoordinatorFastSnapshotRestore struct {
@@ -317,6 +318,7 @@ type CoordinatorImageRef struct {
 	Architecture           string
 	FastSnapshotRestore    bool
 	FastSnapshotRestoreAZs []string
+	Capabilities           imageCapabilities
 }
 
 type CoordinatorGitHubLoginStart struct {
@@ -339,6 +341,11 @@ type CoordinatorGitHubLoginPoll struct {
 type CoordinatorWebVNCTicket struct {
 	Ticket    string `json:"ticket"`
 	LeaseID   string `json:"leaseID"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
+type CoordinatorWebVNCCredentialHandoff struct {
+	Ticket    string `json:"ticket"`
 	ExpiresAt string `json:"expiresAt"`
 }
 
@@ -852,6 +859,9 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 	if len(capacity) > 0 {
 		req["capacity"] = capacity
 	}
+	if !imageRequirementsEmpty(cfg.imageRequirements) {
+		req["imageRequirements"] = cfg.imageRequirements
+	}
 	if cfg.osImageExplicit {
 		req["os"] = cfg.OSImage
 	}
@@ -859,7 +869,12 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		req["azureOSDisk"] = cfg.AzureOSDisk
 	}
 	addCoordinatorGCPFields(req, cfg)
-	err = c.do(ctx, http.MethodPost, "/v1/leases", req, &res)
+	path := "/v1/leases"
+	if !imageRequirementsEmpty(cfg.imageRequirements) {
+		// Older coordinators do not have this route, so mixed-version use fails closed.
+		path = "/v1/leases/capability-aware"
+	}
+	err = c.do(ctx, http.MethodPost, path, req, &res)
 	return res.Lease, err
 }
 
@@ -1210,6 +1225,15 @@ func (c *CoordinatorClient) PollGitHubLogin(ctx context.Context, loginID, pollSe
 func (c *CoordinatorClient) CreateWebVNCTicket(ctx context.Context, leaseID string) (CoordinatorWebVNCTicket, error) {
 	var res CoordinatorWebVNCTicket
 	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(leaseID)+"/webvnc/ticket", map[string]any{}, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) CreateWebVNCCredentialHandoff(ctx context.Context, leaseID, username, password string) (CoordinatorWebVNCCredentialHandoff, error) {
+	var res CoordinatorWebVNCCredentialHandoff
+	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(leaseID)+"/webvnc/handoff", map[string]string{
+		"username": username,
+		"password": password,
+	}, &res)
 	return res, err
 }
 
@@ -1588,6 +1612,20 @@ func imagePath(imageID, action string, refs ...CoordinatorImageRef) string {
 			if strings.TrimSpace(zone) != "" {
 				values.Add("fsrAz", strings.TrimSpace(zone))
 			}
+		}
+		if ref.Capabilities.OSVersion != "" {
+			values.Set("osVersion", ref.Capabilities.OSVersion)
+		}
+		addSortedImageVersions(func(value string) { values.Add("sdk", value) }, ref.Capabilities.SDKs)
+		addSortedImageVersions(func(value string) { values.Add("runtime", value) }, ref.Capabilities.Runtimes)
+		if ref.Capabilities.Browser {
+			values.Set("browser", "true")
+		}
+		if ref.Capabilities.WebView2 {
+			values.Set("webview2", "true")
+		}
+		if ref.Capabilities.Desktop {
+			values.Set("desktop", "true")
 		}
 	}
 	if encoded := values.Encode(); encoded != "" {

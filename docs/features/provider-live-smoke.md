@@ -226,6 +226,7 @@ Current coverage: 74 providers; 4 with convention-named hermetic lifecycle tests
 | [tencentcloud](../providers/tencentcloud.md) | — | dedicated + matrix | — |
 | [tenki](../providers/tenki.md) | — | matrix | — |
 | [tensorlake](../providers/tensorlake.md) | — | — | — |
+| [unikraft-cloud](../providers/unikraft-cloud.md) | — | dedicated + matrix | — |
 | [upstash-box](../providers/upstash-box.md) | — | — | — |
 | [vast](../providers/vast.md) | — | dedicated | — |
 | [vercel-sandbox](../providers/vercel-sandbox.md) | — | dedicated + matrix | — |

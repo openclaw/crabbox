@@ -422,15 +422,21 @@ func TestAzureWindowsSnapshotRehydrateCommandIsBounded(t *testing.T) {
 	cfg.SSHUser = "crabbox"
 
 	publicKey := "ssh-ed25519 " + strings.Repeat("A", 68) + " crabbox@snapshot"
-	command, err := azureWindowsSnapshotRehydrateCommand(cfg, publicKey)
+	commands, err := azureWindowsSnapshotRehydrateCommands(cfg, publicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(command) > 8000 {
-		t.Fatalf("command length=%d", len(command))
+	if len(commands) < 2 {
+		t.Fatalf("commands=%d, want chunk uploads plus execution", len(commands))
 	}
-	if !strings.Contains(command, "FromBase64String") || !strings.Contains(command, "ScriptBlock]::Create") {
-		t.Fatalf("unexpected command: %s", command)
+	for index, command := range commands {
+		if len(command) > 8000 {
+			t.Fatalf("command %d length=%d", index, len(command))
+		}
+	}
+	final := commands[len(commands)-1]
+	if !strings.Contains(final, "FromBase64String") || !strings.Contains(final, "ScriptBlock]::Create") {
+		t.Fatalf("unexpected final command: %s", final)
 	}
 }
 

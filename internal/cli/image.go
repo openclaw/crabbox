@@ -52,6 +52,14 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	serverType := fs.String("type", "", "AWS instance type the AMI boots on, for example mac1.metal")
 	serverTypeAlias := fs.String("server-type", "", "alias for --type")
 	architecture := fs.String("architecture", "", "AWS AMI architecture, for example x86_64_mac or arm64_mac")
+	osVersion := fs.String("os-version", "", "OS version present in the image")
+	var sdkVersions stringListFlag
+	var runtimeVersions stringListFlag
+	fs.Var(&sdkVersions, "sdk", "SDK present in name=version form; repeatable")
+	fs.Var(&runtimeVersions, "runtime", "runtime present in name=version form; repeatable")
+	browser := fs.Bool("browser", false, "image includes a browser")
+	webView2 := fs.Bool("webview2", false, "image includes Microsoft WebView2")
+	desktop := fs.Bool("desktop", false, "image includes desktop support")
 	fastSnapshotRestore := fs.Bool("fast-snapshot-restore", false, "enable AWS Fast Snapshot Restore for the promoted AMI snapshots")
 	var fastSnapshotRestoreAZs stringListFlag
 	fs.Var(&fastSnapshotRestoreAZs, "fsr-az", "availability zone for Fast Snapshot Restore; repeatable")
@@ -60,10 +68,21 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image promote <ami-id> [--target linux|macos|windows] [--os ubuntu:26.04|ubuntu:24.04] [--region <aws-region>] [--type <instance-type>] [--architecture <arch>] [--fast-snapshot-restore --fsr-az <az>]")
+		return exit(2, "usage: crabbox image promote <ami-id> [--target linux|macos|windows] [--os ubuntu:26.04|ubuntu:24.04] [--region <aws-region>] [--type <instance-type>] [--architecture <arch>] [--os-version <version>] [--sdk <name=version>] [--runtime <name=version>] [--browser] [--webview2] [--desktop] [--fast-snapshot-restore --fsr-az <az>]")
 	}
 	if *serverType == "" {
 		*serverType = *serverTypeAlias
+	}
+	if err := validateImageVersion(strings.TrimSpace(*osVersion), "os-version"); err != nil {
+		return err
+	}
+	sdks, err := parseImageVersions(sdkVersions, "sdk")
+	if err != nil {
+		return err
+	}
+	runtimes, err := parseImageVersions(runtimeVersions, "runtime")
+	if err != nil {
+		return err
 	}
 	if flagWasSet(fs, "os") {
 		normalized, err := normalizeOSImage(*osImage)
@@ -85,6 +104,14 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		Architecture:           *architecture,
 		FastSnapshotRestore:    *fastSnapshotRestore,
 		FastSnapshotRestoreAZs: fastSnapshotRestoreAZs,
+		Capabilities: imageCapabilities{
+			OSVersion: strings.TrimSpace(*osVersion),
+			SDKs:      sdks,
+			Runtimes:  runtimes,
+			Browser:   *browser,
+			WebView2:  *webView2,
+			Desktop:   *desktop,
+		},
 	})
 	if err != nil {
 		return err

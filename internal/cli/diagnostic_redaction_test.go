@@ -25,6 +25,10 @@ func TestRedactDiagnosticSecretsCoversCredentialEncodings(t *testing.T) {
 		"Standalone Bearer :\r\n spaced-folded-colon-bearer-token",
 		"Standalone Bearer [redacted]",
 		"Proxy-Authorization=Basic proxy-value",
+		"Authorization: Token token-scheme-value",
+		"Proxy-Authorization: Digest digest-scheme-value",
+		`Authorization: Digest username="digest-user", response="digest-response"`,
+		"Authorization: 1custom digit-scheme-value",
 		`{"clientSecret":"json-secret","privateKey":"json-key","message":"quota exceeded"}`,
 		"https://alice:password@example.test/path?access_token=query-token&x-api-key=query-api-key&authorization=query-authorization&proxy-authorization=query-proxy-authorization&session_token=query-session-token&x-amz-signature=signed-value&x-goog-credential=gcs-credential&x-goog-signature=gcs-signature&region=eu",
 		"https://single-userinfo-token@other.example.test/path",
@@ -34,7 +38,7 @@ func TestRedactDiagnosticSecretsCoversCredentialEncodings(t *testing.T) {
 	got := RedactDiagnosticSecrets(value, exact)
 	for _, leaked := range []string{
 		exact, "header-token", "colon-header-token", "folded-header-token", "folded-colon-header-token", "spaced-folded-colon-header-token", "spaced-bearer-token", "colon-bearer-token", "folded-bearer-token", "folded-colon-bearer-token", "spaced-folded-colon-bearer-token", "proxy-value", "json-secret", "json-key", "alice", "password",
-		"query-token", "query-api-key", "query-authorization", "query-proxy-authorization", "query-session-token", "signed-value", "gcs-credential", "gcs-signature", "single-userinfo-token", "private-material",
+		"token-scheme-value", "digest-scheme-value", "digest-user", "digest-response", "digit-scheme-value", "query-token", "query-api-key", "query-authorization", "query-proxy-authorization", "query-session-token", "signed-value", "gcs-credential", "gcs-signature", "single-userinfo-token", "private-material",
 	} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("diagnostic redaction leaked %q:\n%s", leaked, got)
