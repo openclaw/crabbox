@@ -584,19 +584,6 @@ func defaultArtifactPublishPrefix(opts artifactPublishOptions, now time.Time) st
 	return strings.Join([]string{scope, bundle, stamp}, "/")
 }
 
-func fileSHA256(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", exit(2, "open artifact %s: %v", path, err)
-	}
-	defer file.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", exit(2, "hash artifact %s: %v", path, err)
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
 func uploadArtifactGrant(ctx context.Context, path string, grant CoordinatorArtifactUploadGrant) error {
 	file, err := os.Open(path)
 	if err != nil {
