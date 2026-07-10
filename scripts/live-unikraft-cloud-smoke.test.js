@@ -53,7 +53,15 @@ function baseEnv(overrides = {}) {
     ...process.env,
     CRABBOX_LIVE: "1",
     CRABBOX_LIVE_PROVIDERS: "unikraft-cloud",
+    CRABBOX_UNIKRAFT_CLOUD_API_KEY: "",
+    UNIKRAFT_CLOUD_API_KEY: "",
+    UKC_API_KEY: "",
     UKC_TOKEN: "smoke-secret-token",
+    CRABBOX_UNIKRAFT_CLOUD_API_URL: "",
+    UNIKRAFT_CLOUD_API_URL: "",
+    CRABBOX_UNIKRAFT_CLOUD_METRO: "",
+    UNIKRAFT_CLOUD_METRO: "",
+    UKC_METRO: "",
     CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_CLEANUP_ATTEMPTS: "2",
     CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_CLEANUP_POLL_SECONDS: "0",
     ...overrides,
@@ -485,6 +493,71 @@ esac`,
   assert.doesNotMatch(fs.readFileSync(harness.rawCalls, "utf8"), /^delete /m);
 });
 
+test("deleted status rejects unrelated command failures", () => {
+  const harness = prepareHarness(
+    "crabbox-ukc-deleted-status-",
+    `case "$1" in
+  doctor) printf 'ready\n' ;;
+  warmup)
+    printf '%s' '[{"name":"existing-service","uuid":"${existingUUID}"},{"name":"${createdName}","uuid":"${createdUUID}"}]\n' >${JSON.stringify("$FAKE_REMOTE")}
+    while [[ "$#" -gt 0 ]]; do
+      if [[ "$1" == "--slug" ]]; then
+        printf '%s' "$2" >${JSON.stringify("$FAKE_SLUG")}
+        shift 2
+        continue
+      fi
+      shift
+    done
+    printf 'leased ${createdLease} slug=%s provider=unikraft-cloud instance=${createdUUID} state=running\n' "$(cat ${JSON.stringify("$FAKE_SLUG")})"
+    ;;
+  status)
+    if [[ -f ${JSON.stringify("$FAKE_STOPPED")} ]]; then
+      printf 'unauthorized\n' >&2
+      exit 3
+    fi
+    printf '{"id":"${createdLease}","slug":"%s","provider":"unikraft-cloud","serverId":"${createdUUID}","state":"running","ready":true}\n' "$(cat ${JSON.stringify("$FAKE_SLUG")})"
+    ;;
+  list)
+    if grep -q '${createdUUID}' ${JSON.stringify("$FAKE_REMOTE")}; then
+      printf '[{"CloudID":"${createdUUID}","Provider":"unikraft-cloud","name":"${createdName}","labels":{"lease":"${createdLease}","slug":"%s"}}]\n' "$(cat ${JSON.stringify("$FAKE_SLUG")})"
+    else
+      printf '[]\n'
+    fi
+    ;;
+  stop)
+    printf '%s' '[{"name":"existing-service","uuid":"${existingUUID}"}]\n' >${JSON.stringify("$FAKE_REMOTE")}
+    : >${JSON.stringify("$FAKE_STOPPED")}
+    ;;
+  *) exit 99 ;;
+esac`,
+  );
+  const stopped = path.join(harness.dir, "stopped");
+  const crabbox = fs
+    .readFileSync(harness.fakeCrabbox, "utf8")
+    .replaceAll('"$FAKE_REMOTE"', JSON.stringify(harness.remote))
+    .replaceAll('"$FAKE_STOPPED"', JSON.stringify(stopped))
+    .replaceAll('"$FAKE_SLUG"', JSON.stringify(harness.slugFile));
+  fs.writeFileSync(harness.fakeCrabbox, crabbox);
+
+  const result = spawnSync(bashPath, [smokeScript], {
+    cwd: repoRoot,
+    env: baseEnv({
+      CRABBOX_BIN: harness.fakeCrabbox,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_DIR: harness.proofDir,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_RAW_HELPER: harness.rawHelper,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_SLUG: "unikraft-cloud-live-smoke-test",
+    }),
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(
+    result.stdout,
+    /classification=validation_failed reason=deleted_status_did_not_prove_not_found/,
+  );
+  assert.equal(fs.readFileSync(harness.remote, "utf8"), harness.baseline);
+});
+
 test("lifecycle JSON proof requires UUID and slug on the same record", () => {
   const harness = prepareHarness(
     "crabbox-ukc-correlated-json-",
@@ -649,6 +722,179 @@ esac`,
   assert.equal(fs.readFileSync(harness.remote, "utf8"), harness.baseline);
   assert.ok(Number(fs.readFileSync(harness.inventoryCounter, "utf8")) >= 4);
   assert.equal(fs.readFileSync(harness.deleteAttempts, "utf8"), "1");
+});
+
+test("successful warmup cleanup waits for delayed provider visibility", () => {
+  const attempted = temporaryDirectory("crabbox-ukc-success-delayed-marker-");
+  const attemptedFile = path.join(attempted, "attempted");
+  const harness = prepareHarness(
+    "crabbox-ukc-success-delayed-",
+    `case "$1" in
+  doctor) printf 'ready\n' ;;
+  list)
+    if [[ -f ${JSON.stringify(attemptedFile)} ]]; then
+      printf '[{"CloudID":"${createdUUID}","Provider":"unikraft-cloud","name":"${createdName}","labels":{"lease":"${createdLease}","slug":"unikraft-cloud-live-smoke-test"}}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  warmup)
+    : >${JSON.stringify(attemptedFile)}
+    printf 'leased ${createdLease} slug=unikraft-cloud-live-smoke-test provider=unikraft-cloud instance=${createdUUID} state=running\n'
+    ;;
+  stop)
+    printf 'create outcome still pending\n' >&2
+    exit 5
+    ;;
+  *) exit 99 ;;
+esac`,
+  );
+
+  const result = spawnSync(bashPath, [smokeScript], {
+    cwd: repoRoot,
+    env: baseEnv({
+      CRABBOX_BIN: harness.fakeCrabbox,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_DIR: harness.proofDir,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_RAW_HELPER: harness.rawHelper,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_SLUG: "unikraft-cloud-live-smoke-test",
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_UNCERTAINTY_SECONDS: "5",
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_CLEANUP_TIMEOUT_SECONDS: "10",
+      FAKE_DELAY_VISIBILITY_AT: "5",
+    }),
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(
+    result.stdout,
+    /classification=validation_failed reason=created_instance_raw_identity_mismatch/,
+  );
+  assert.doesNotMatch(result.stderr, /classification=cleanup_failed/);
+  assert.equal(fs.readFileSync(harness.remote, "utf8"), harness.baseline);
+  assert.ok(Number(fs.readFileSync(harness.inventoryCounter, "utf8")) >= 5);
+  assert.equal(fs.readFileSync(harness.deleteAttempts, "utf8"), "1");
+});
+
+test("successful warmup never accepts a never-observed baseline as cleanup", () => {
+  const attempted = temporaryDirectory("crabbox-ukc-success-unseen-marker-");
+  const attemptedFile = path.join(attempted, "attempted");
+  const harness = prepareHarness(
+    "crabbox-ukc-success-unseen-",
+    `case "$1" in
+  doctor) printf 'ready\n' ;;
+  list)
+    if [[ -f ${JSON.stringify(attemptedFile)} ]]; then
+      printf '[{"CloudID":"${createdUUID}","Provider":"unikraft-cloud","name":"${createdName}","labels":{"lease":"${createdLease}","slug":"unikraft-cloud-live-smoke-test"}}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  warmup)
+    : >${JSON.stringify(attemptedFile)}
+    printf 'leased ${createdLease} slug=unikraft-cloud-live-smoke-test provider=unikraft-cloud instance=${createdUUID} state=running\n'
+    ;;
+  stop)
+    printf 'create outcome still pending\n' >&2
+    exit 5
+    ;;
+  *) exit 99 ;;
+esac`,
+  );
+
+  const startedAt = Date.now();
+  const result = spawnSync(bashPath, [smokeScript], {
+    cwd: repoRoot,
+    env: baseEnv({
+      CRABBOX_BIN: harness.fakeCrabbox,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_DIR: harness.proofDir,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_RAW_HELPER: harness.rawHelper,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_SLUG: "unikraft-cloud-live-smoke-test",
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_CLEANUP_POLL_SECONDS: "0.1",
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_CLEANUP_TIMEOUT_SECONDS: "10",
+    }),
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(
+    result.stdout,
+    /classification=validation_failed reason=created_instance_raw_identity_mismatch/,
+  );
+  assert.match(result.stderr, /classification=cleanup_failed reason=exact_baseline_not_restored/);
+  assert.ok(Date.now() - startedAt >= 8_000, result.stdout + result.stderr);
+  assert.equal(fs.readFileSync(harness.remote, "utf8"), harness.baseline);
+  assert.equal(fs.existsSync(harness.deleteAttempts), false);
+});
+
+test("TERM before cleanup arming redacts and removes the active capture", async () => {
+  const harness = prepareHarness(
+    "crabbox-ukc-preflight-signal-",
+    `case "$1" in
+  doctor)
+    for ((i = 0; i < 5000; i++)); do
+      printf '%s\n' "$UKC_TOKEN"
+    done
+    : >${JSON.stringify("$DOCTOR_STARTED")}
+    sleep 20
+    ;;
+  *) exit 99 ;;
+esac`,
+  );
+  const doctorStarted = path.join(harness.dir, "doctor-started");
+  const crabbox = fs
+    .readFileSync(harness.fakeCrabbox, "utf8")
+    .replaceAll('"$DOCTOR_STARTED"', JSON.stringify(doctorStarted));
+  fs.writeFileSync(harness.fakeCrabbox, crabbox);
+
+  const child = spawn(bashPath, [smokeScript], {
+    cwd: repoRoot,
+    env: baseEnv({
+      CRABBOX_BIN: harness.fakeCrabbox,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_DIR: harness.proofDir,
+      CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_RAW_HELPER: harness.rawHelper,
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => {
+    output += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    output += chunk;
+  });
+  await waitForFile(doctorStarted);
+  child.kill("SIGTERM");
+  const exit = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`preflight did not exit after TERM\n${output}`));
+    }, 7_000);
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+  });
+
+  assert.deepEqual(exit, { code: 143, signal: null }, output);
+  const runDir = fs
+    .readdirSync(harness.proofDir, { withFileTypes: true })
+    .find((entry) => entry.isDirectory() && entry.name.startsWith("run."));
+  assert.ok(runDir, output);
+  const proofRun = path.join(harness.proofDir, runDir.name);
+  const interruptedLog = path.join(proofRun, "interrupted-command.redacted.log");
+  assert.equal(fs.existsSync(interruptedLog), true, output);
+  assert.match(fs.readFileSync(interruptedLog, "utf8"), /<redacted>/);
+  const proofEntries = fs.readdirSync(proofRun, { recursive: true }).map(String);
+  assert.deepEqual(
+    proofEntries.filter((entry) => entry.endsWith(".capture") || entry.endsWith(".overflow")),
+    [],
+  );
+  const proofText = proofEntries
+    .map((entry) => path.join(proofRun, entry))
+    .filter((entry) => fs.statSync(entry).isFile())
+    .map((entry) => fs.readFileSync(entry, "utf8"))
+    .join("\n");
+  assert.doesNotMatch(proofText + output, /smoke-secret-token/);
 });
 
 test("TERM interrupts an active warmup and starts zero-residue cleanup promptly", async () => {
@@ -906,6 +1152,9 @@ test("raw helper deletes only the exact new UUID and proves strong absence", asy
   const currentFile = path.join(dir, "current.json");
   const finalFile = path.join(dir, "final.json");
   const badDeleteNameFile = path.join(dir, "bad-delete-name");
+  const badAbsentIdentityFile = path.join(dir, "bad-absent-identity");
+  const redirectInventoryFile = path.join(dir, "redirect-inventory");
+  const redirectTargetFile = path.join(dir, "redirect-target-reached");
   fs.writeFileSync(helper, embeddedRawHelper());
   fs.chmodSync(helper, 0o755);
   fs.writeFileSync(
@@ -926,8 +1175,12 @@ const http = require("node:http");
 const stateFile = process.argv[2];
 const requestLog = process.argv[3];
 const badDeleteNameFile = process.argv[4];
+const badAbsentIdentityFile = process.argv[5];
+const redirectInventoryFile = process.argv[6];
+const redirectTargetFile = process.argv[7];
 const createdUUID = ${JSON.stringify(createdUUID)};
 const createdName = ${JSON.stringify(createdName)};
+let missingGetCount = 0;
 function reply(response, value) {
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify(value));
@@ -944,6 +1197,16 @@ const server = http.createServer((request, response) => {
     fs.appendFileSync(requestLog, request.method + " " + request.url + "\\n");
     let state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
     if (request.method === "GET" && request.url === "/v1/instances") {
+      if (fs.existsSync(redirectInventoryFile)) {
+        response.writeHead(307, { "content-type": "application/json", location: "/redirect-target" });
+        response.end(JSON.stringify({ status: "error", message: "redirect refused" }));
+        return;
+      }
+      reply(response, { status: "success", data: { instances: state } });
+      return;
+    }
+    if (request.method === "GET" && request.url === "/redirect-target") {
+      fs.writeFileSync(redirectTargetFile, "reached");
       reply(response, { status: "success", data: { instances: state } });
       return;
     }
@@ -951,8 +1214,25 @@ const server = http.createServer((request, response) => {
       const item = state.find((value) => value.uuid === createdUUID);
       if (item) {
         reply(response, { status: "success", data: { instances: [{ ...item, status: "success" }] } });
+      } else if (fs.existsSync(badAbsentIdentityFile)) {
+        reply(response, { status: "error", data: { instances: [{ uuid: "ffffffff-ffff-ffff-ffff-ffffffffffff", status: "error", error: 8 }] } });
       } else {
-        reply(response, { status: "error", data: { instances: [{ uuid: createdUUID, status: "error", error: 8 }] } });
+        missingGetCount += 1;
+        if (missingGetCount === 1) {
+          reply(response, { status: "success", data: { instances: [{ uuid: createdUUID, status: "error", error: 8 }] } });
+        } else {
+          response.writeHead(404, { "content-type": "application/json" });
+          response.end(JSON.stringify({ status: "error", message: "instance not found" }));
+        }
+      }
+      return;
+    }
+    if (request.method === "GET" && request.url === "/v1/instances/" + createdName) {
+      if (fs.existsSync(badAbsentIdentityFile)) {
+        reply(response, { status: "error", data: { instances: [{ uuid: "ffffffff-ffff-ffff-ffff-ffffffffffff", status: "error", error: 8 }] } });
+      } else {
+        response.writeHead(404, { "content-type": "application/json" });
+        response.end(JSON.stringify({ status: "error", message: "instance not found" }));
       }
       return;
     }
@@ -980,9 +1260,19 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 `,
   );
-  const server = spawn(process.execPath, [serverFile, stateFile, requestLog, badDeleteNameFile], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const server = spawn(
+    process.execPath,
+    [
+      serverFile,
+      stateFile,
+      requestLog,
+      badDeleteNameFile,
+      badAbsentIdentityFile,
+      redirectInventoryFile,
+      redirectTargetFile,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
   const port = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("fake API did not start")), 5_000);
     server.once("error", reject);
@@ -1005,6 +1295,11 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
   const raw = (...args) => spawnSync(helper, args, { env, encoding: "utf8" });
   try {
     assert.equal(raw("validate").status, 0);
+    fs.writeFileSync(redirectInventoryFile, "1");
+    const redirectedInventory = raw("inventory", currentFile);
+    assert.notEqual(redirectedInventory.status, 0);
+    assert.equal(fs.existsSync(redirectTargetFile), false);
+    fs.rmSync(redirectInventoryFile);
     const inventory = raw("inventory", currentFile);
     assert.equal(inventory.status, 0, inventory.stdout + inventory.stderr);
     const invalidDestination = path.join(dir, "inventory-destination-directory");
@@ -1019,6 +1314,33 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
     const claimLease = path.join(dir, "claim-lease");
     const claimUUID = path.join(dir, "claim-uuid");
     const claimName = path.join(dir, "claim-name");
+    const zeroClaimView = path.join(dir, "zero-claim-view.json");
+    fs.writeFileSync(zeroClaimView, "[]\n");
+    const zeroClaim = raw("claim", zeroClaimView, "proof-slug", claimLease, claimUUID, claimName);
+    assert.notEqual(zeroClaim.status, 0);
+    assert.equal(fs.existsSync(claimLease), false);
+    assert.equal(fs.existsSync(claimUUID), false);
+    assert.equal(fs.existsSync(claimName), false);
+    const duplicateClaimView = path.join(dir, "duplicate-claim-view.json");
+    fs.writeFileSync(
+      duplicateClaimView,
+      JSON.stringify([
+        { CloudID: createdUUID, Name: createdName, labels: { lease: createdLease, slug: "proof-slug" } },
+        { CloudID: existingUUID, Name: "other", labels: { lease: "ukc_ffffffffffff", slug: "proof-slug" } },
+      ]),
+    );
+    const duplicateClaim = raw(
+      "claim",
+      duplicateClaimView,
+      "proof-slug",
+      claimLease,
+      claimUUID,
+      claimName,
+    );
+    assert.notEqual(duplicateClaim.status, 0);
+    assert.equal(fs.existsSync(claimLease), false);
+    assert.equal(fs.existsSync(claimUUID), false);
+    assert.equal(fs.existsSync(claimName), false);
     fs.writeFileSync(
       claimView,
       JSON.stringify([
@@ -1035,6 +1357,12 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
     assert.equal(fs.existsSync(claimLease), false);
     assert.equal(fs.readFileSync(claimUUID, "utf8"), "collision sentinel");
     assert.equal(fs.existsSync(claimName), false);
+    fs.rmSync(claimUUID);
+    const claimed = raw("claim", claimView, "proof-slug", claimLease, claimUUID, claimName);
+    assert.equal(claimed.status, 0, claimed.stdout + claimed.stderr);
+    assert.equal(fs.readFileSync(claimLease, "utf8"), createdLease);
+    assert.equal(fs.readFileSync(claimUUID, "utf8"), createdUUID);
+    assert.equal(fs.readFileSync(claimName, "utf8"), createdName);
     const owned = raw("owned", baselineFile, currentFile, createdName);
     assert.equal(owned.status, 0, owned.stdout + owned.stderr);
     assert.equal(owned.stdout.trim(), createdUUID);
@@ -1048,8 +1376,16 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
     fs.rmSync(badDeleteNameFile);
     const deleted = raw("delete", createdUUID, createdName);
     assert.equal(deleted.status, 0, deleted.stdout + deleted.stderr);
+    fs.writeFileSync(badAbsentIdentityFile, "1");
+    const mismatchedAbsent = raw("absent", createdUUID);
+    assert.notEqual(mismatchedAbsent.status, 0);
+    const mismatchedNameAbsent = raw("absent-name", createdName);
+    assert.notEqual(mismatchedNameAbsent.status, 0);
+    fs.rmSync(badAbsentIdentityFile);
     const absent = raw("absent", createdUUID);
     assert.equal(absent.status, 0, absent.stdout + absent.stderr);
+    const absentName = raw("absent-name", createdName);
+    assert.equal(absentName.status, 0, absentName.stdout + absentName.stderr);
     const final = raw("inventory", finalFile);
     assert.equal(final.status, 0, final.stdout + final.stderr);
     assert.equal(raw("compare", baselineFile, finalFile).status, 0);
@@ -1059,7 +1395,11 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
     const requests = fs.readFileSync(requestLog, "utf8");
     assert.equal(
       (requests.match(new RegExp(`GET /v1/instances/${createdUUID}`, "g")) ?? []).length,
-      2,
+      3,
+    );
+    assert.equal(
+      (requests.match(new RegExp(`GET /v1/instances/${createdName}`, "g")) ?? []).length,
+      3,
     );
     assert.match(requests, /^DELETE \/v1\/instances$/m);
     assert.equal((requests.match(/^DELETE \/v1\/instances$/gm) ?? []).length, 2);

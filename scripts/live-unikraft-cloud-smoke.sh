@@ -405,6 +405,12 @@ capture_step() {
   return "$rc"
 }
 
+deleted_status_proves_absence() {
+  local log="$proof_dir/live-deleted-status.redacted.log"
+  [[ -f "$log" ]] || return 1
+  grep -Eiq 'unikraft-cloud API error status=404:|instance (was )?not found|no instance with (uuid|name)' "$log"
+}
+
 failure_classification() {
   local lower
   lower="$(printf '%s' "$last_output" | tr '[:upper:]' '[:lower:]')"
@@ -583,6 +589,9 @@ def uuid_set(value):
 
 def error8_absent(identifier):
     code, payload = request("GET", "/v1/instances/" + urllib.parse.quote(identifier, safe=""))
+    envelope_status = str(payload.get("status", "")).strip().lower()
+    if code == 404:
+        return envelope_status == "error"
     if code < 200 or code >= 300:
         return False
     try:
@@ -592,6 +601,22 @@ def error8_absent(identifier):
     if len(result) != 1 or not isinstance(result[0], dict):
         return False
     item = result[0]
+    returned_uuid = str(item.get("uuid", "")).strip()
+    returned_name = str(item.get("name", "")).strip()
+    if UUID_RE.fullmatch(identifier):
+        if returned_uuid and (
+            not UUID_RE.fullmatch(returned_uuid)
+            or returned_uuid.lower() != identifier.lower()
+        ):
+            return False
+    else:
+        if returned_name and returned_name != identifier:
+            return False
+        if returned_uuid and (
+            not UUID_RE.fullmatch(returned_uuid)
+            or not returned_name
+        ):
+            return False
     return (
         item.get("error") == 8
         and str(item.get("status", "")).strip().lower() == "error"
@@ -935,7 +960,9 @@ known_outcome_cleanup() {
   while [[ "$cleanup_deadline" -eq 0 || "$SECONDS" -lt "$cleanup_deadline" ]]; do
     if raw_inventory "$current_inventory" >/dev/null 2>&1; then
       if inventory_restored >/dev/null 2>&1 && strong_absence >/dev/null 2>&1; then
-        return 0
+        if [[ "$warmup_succeeded" -eq 0 || "$remote_seen" -ne 0 ]]; then
+          return 0
+        fi
       fi
       local owned_uuid=""
       local owned_rc=0
@@ -1014,26 +1041,34 @@ recover_interrupted_capture() {
   if [[ -z "$active_capture" || ! -f "$active_capture" ]]; then
     return 0
   fi
+  local capture="$active_capture"
+  local overflow="$active_capture.overflow"
   local recovered=""
-  if ! recovered="$(cat "$active_capture")"; then
-    return 1
-  fi
   local log="$proof_dir/interrupted-command.redacted.log"
-  if ! secure_file "$log"; then
-    return 1
+  local log_created=0
+  local recovered_ok=1
+  if ! recovered="$(cat "$capture")"; then
+    recovered_ok=0
+  elif ! secure_file "$log"; then
+    recovered_ok=0
+  else
+    log_created=1
+    if ! printf '%s\n' "$recovered" | redact_stream >"$log" ||
+      ! last_output="$(cat "$log")"; then
+      recovered_ok=0
+    fi
   fi
-  if ! printf '%s\n' "$recovered" | redact_stream >"$log"; then
-    return 1
+  if [[ "$recovered_ok" -eq 0 && "$log_created" -ne 0 ]]; then
+    rm -f -- "$log" || true
   fi
-  if ! last_output="$(cat "$log")"; then
-    return 1
+  if ! rm -f -- "$capture"; then
+    recovered_ok=0
   fi
-  rm -f -- "$active_capture" || return 1
-  if [[ -e "$active_capture.overflow" ]] && ! rm -f -- "$active_capture.overflow"; then
-    return 1
+  if [[ -e "$overflow" ]] && ! rm -f -- "$overflow"; then
+    recovered_ok=0
   fi
   active_capture=""
-  return 0
+  [[ "$recovered_ok" -ne 0 ]]
 }
 
 # shellcheck disable=SC2329 # Reached through EXIT-trap cleanup.
@@ -1057,13 +1092,15 @@ cleanup() {
     exit "$original_rc"
   fi
   cleanup_running=1
+  if ! recover_interrupted_capture; then
+    original_rc=1
+  fi
   if [[ "$cleanup_armed" -eq 1 ]]; then
     local timeout="${CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_CLEANUP_TIMEOUT_SECONDS:-90}"
     if [[ ! "$timeout" =~ ^[1-9][0-9]*$ || "$timeout" -lt 10 || "$timeout" -gt 300 ]]; then
       timeout=90
     fi
     cleanup_deadline=$((SECONDS + timeout))
-    recover_interrupted_capture || true
     extract_created_identity "$last_output"
     set_cleanup_command_slice 10
     discover_claim_identity || true
@@ -1271,6 +1308,9 @@ fi
 require_step live-stop "$bin" stop "${provider_args[@]}" "$created_lease"
 if capture_step live-deleted-status "$bin" status "${provider_args[@]}" --id "$created_uuid" --json; then
   classify_and_exit validation_failed deleted_instance_still_resolves
+fi
+if ! deleted_status_proves_absence; then
+  classify_and_exit validation_failed deleted_status_did_not_prove_not_found
 fi
 printf 'step=live-deleted-status status=pass expected_absence_exit=%s log=<proof-dir>/live-deleted-status.redacted.log\n' "$last_rc"
 cleanup_deadline=$((SECONDS + 45))
