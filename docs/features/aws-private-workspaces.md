@@ -62,9 +62,8 @@ responsibility.
 
 ### Exact resource tags
 
-Crabbox applies the same sanitized lease tag set to the instance and root
-volume, and to the Spot request when Spot is enabled. The private-workspace tag
-keys are:
+Crabbox applies the same sanitized lease tag set to the on-demand instance and
+root volume. The private-workspace tag keys are:
 
 ```text
 Name
@@ -625,15 +624,12 @@ for attempt in $(seq 1 90); do
   workspace_api GET "/v1/workspaces/$workspace_id" >"$canary_dir/delete-status.json"
   workspace_status="$(jq -r '.status' "$canary_dir/delete-status.json")"
   case "$workspace_status" in
-    stopped|expired) break ;;
+    stopped) break ;;
     stopping) sleep 10 ;;
     *) jq . "$canary_dir/delete-status.json"; exit 1 ;;
   esac
 done
-case "$workspace_status" in
-  stopped|expired) ;;
-  *) exit 1 ;;
-esac
+test "$workspace_status" = stopped
 aws ec2 wait instance-terminated \
   --region "$EXPECTED_REGION" \
   --instance-ids "$instance_id"
