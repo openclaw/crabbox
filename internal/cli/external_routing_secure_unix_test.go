@@ -12,7 +12,7 @@ import (
 )
 
 func TestLoadExternalRoutingRejectsFinalSymlink(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "private")
+	dir := filepath.Join(privateExternalRoutingTempDir(t), "private")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestLoadExternalRoutingRejectsFinalSymlink(t *testing.T) {
 }
 
 func TestLoadExternalRoutingRejectsAncestorSymlink(t *testing.T) {
-	root := t.TempDir()
+	root := privateExternalRoutingTempDir(t)
 	realDir := filepath.Join(root, "real")
 	if err := os.Mkdir(realDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestLoadExternalRoutingRejectsAncestorSymlink(t *testing.T) {
 }
 
 func TestLoadExternalRoutingRejectsNonPrivateParent(t *testing.T) {
-	root := t.TempDir()
+	root := privateExternalRoutingTempDir(t)
 	dir := filepath.Join(root, "shared")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -63,7 +63,7 @@ func TestLoadExternalRoutingRejectsNonPrivateParent(t *testing.T) {
 }
 
 func TestLoadExternalRoutingRejectsNonRegularFileWithoutBlocking(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "private")
+	dir := filepath.Join(privateExternalRoutingTempDir(t), "private")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -91,5 +91,27 @@ func TestLoadExternalRoutingAllowsPrivateRouteBelowStickyTempRoot(t *testing.T) 
 	}
 	if _, err := LoadExternalRouting(path); err != nil {
 		t.Fatalf("private route below sticky temp root: %v", err)
+	}
+}
+
+func TestLoadExternalRoutingRejectsBroadIntermediateDirectory(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "crabbox-routing-broad-")
+	if err != nil {
+		t.Skipf("create Linux-style temp route: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "private")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "route.json")
+	if err := os.WriteFile(path, []byte(`{"command":"provider"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadExternalRouting(path); err == nil || !strings.Contains(err.Error(), "must not be writable") {
+		t.Fatalf("err=%v", err)
 	}
 }

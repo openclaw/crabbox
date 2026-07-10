@@ -195,7 +195,7 @@ func TestControllerChildEnvironmentScrubsDesktopPasswordIncludingMacOSOwner(t *t
 }
 
 func TestControllerChildEnvironmentUsesPersistedMacOSRouteAndScrubsCurrentName(t *testing.T) {
-	root := t.TempDir()
+	root := privateExternalRoutingTempDir(t)
 	t.Setenv("XDG_CONFIG_HOME", root)
 	leaseID := "cbx_routedmac123"
 	external := ExternalConfig{Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
@@ -1089,7 +1089,7 @@ func TestControllerLifecycleCommandsUsePersistedExternalRoutingWithoutClaim(t *t
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture")
 	}
-	root := t.TempDir()
+	root := privateExternalRoutingTempDir(t)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	leaseID := "cbx_routeonly123"
@@ -1153,7 +1153,7 @@ func TestControllerLifecycleCommandsUsePersistedExternalRoutingWithoutClaim(t *t
 }
 
 func TestControllerCredentialOwnerRejectsReplacedPersistedRoute(t *testing.T) {
-	root := t.TempDir()
+	root := privateExternalRoutingTempDir(t)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	const leaseID = "cbx_route_race123"
 	first := ExternalConfig{

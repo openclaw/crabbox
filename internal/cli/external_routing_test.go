@@ -13,11 +13,22 @@ import (
 
 func setExternalRoutingTestHome(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	root := privateExternalRoutingTempDir(t)
 	t.Setenv("HOME", root)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	return root
+}
+
+func privateExternalRoutingTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	// testing.TempDir creates its numbered child with 0777 before umask.
+	// Keep security-sensitive routing fixtures deterministic under umask 000.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("secure external routing temp directory: %v", err)
+	}
+	return dir
 }
 
 func TestExternalRoutingPathHonorsAbsoluteXDGConfigHome(t *testing.T) {
