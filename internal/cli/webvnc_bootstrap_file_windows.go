@@ -86,7 +86,8 @@ func webVNCPortalBootstrapSecurity() (*windows.SecurityAttributes, *windows.SID,
 	if user == nil || user.User.Sid == nil {
 		return nil, nil, fmt.Errorf("current Windows user SID is unavailable")
 	}
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;" + user.User.Sid.String() + ")")
+	sid := user.User.Sid.String()
+	sd, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;GA;;;" + sid + ")")
 	if err != nil {
 		return nil, nil, err
 	}
