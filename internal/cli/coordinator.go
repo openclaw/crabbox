@@ -350,6 +350,12 @@ type CoordinatorWebVNCCredentialHandoff struct {
 	ExpiresAt string `json:"expiresAt"`
 }
 
+type CoordinatorWebVNCViewerBootstrap struct {
+	Ticket    string `json:"ticket"`
+	LeaseID   string `json:"leaseID"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
 type CoordinatorWebVNCEvent struct {
 	At     string `json:"at"`
 	Event  string `json:"event"`
@@ -1236,6 +1242,19 @@ func (c *CoordinatorClient) CreateWebVNCCredentialHandoff(ctx context.Context, l
 		"username": username,
 		"password": password,
 	}, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) CreateWebVNCViewerBootstrap(ctx context.Context, leaseID, credentialHandoffTicket string, takeControl bool) (CoordinatorWebVNCViewerBootstrap, error) {
+	var res CoordinatorWebVNCViewerBootstrap
+	body := map[string]any{}
+	if strings.TrimSpace(credentialHandoffTicket) != "" {
+		body["credentialHandoffTicket"] = strings.TrimSpace(credentialHandoffTicket)
+	}
+	if takeControl {
+		body["takeControl"] = true
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(leaseID)+"/webvnc/viewer-bootstrap", body, &res)
 	return res, err
 }
 

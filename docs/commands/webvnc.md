@@ -57,6 +57,15 @@ endpoint and sends no account credential to the browser. A missing/zero
 expected PID, unrelated listener, or unauthenticated endpoint never receives a
 password probe or handoff.
 
+When the CLI is authenticated with a coordinator bearer token, `--open` mints a
+second one-use ticket for the Portal viewer itself. The CLI opens only a random
+localhost URL; that loopback page submits the opaque ticket in a POST body.
+The coordinator consumes it once and creates a short-lived, lease-scoped
+viewer-only session. This path does not start GitHub OAuth and does not place
+the bearer, viewer ticket, coordinator viewer URL, or VNC credential in the
+browser URL or process arguments. GitHub-authenticated human sessions continue
+to open the existing Portal path.
+
 Deployments that expose the browser portal and bridge agent through different
 origins can set `CRABBOX_WEBVNC_AGENT_BASE_URL` to the agent's exact HTTPS
 origin. Ticket creation, status, and portal URLs continue using the configured
@@ -148,10 +157,10 @@ Observer mode is a collaboration UX for trusted shared leases; it relies on the
 portal noVNC client staying read-only and is not a hostile-client isolation
 boundary.
 
-`--take-control` writes `control=take` into the portal URL fragment, asking the
-viewer to request control once it connects. It is a viewer hint, not a new
-permission boundary; portal auth and lease sharing still decide who can open the
-session.
+`--take-control` asks the viewer to request control once it connects. Bearer
+bootstrap sessions carry that hint server-side; the existing human Portal path
+uses the URL fragment. It is a viewer hint, not a new permission boundary:
+Portal auth and lease sharing still decide who can open the session.
 
 ## Security boundary
 
@@ -168,6 +177,13 @@ WebVNC keeps the same security boundary as `crabbox vnc`:
   temporary legacy rollout window can set
   `CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS=1`; remove that setting after affected
   clients upgrade.
+- Shared/admin bearer `--open` uses a distinct 120-second, one-use Portal
+  bootstrap ticket bound to the lease, owner, org, bearer identity, and current
+  grant version. Consumption creates only a browser-session cookie scoped to
+  that lease's `/vnc` path; the server expires it after at most 30 minutes and
+  revalidates lease access and grant revocation on every request. It cannot
+  access the Portal index, sharing, logout, bridge commands, or lease-management
+  routes.
 - A split agent origin is accepted only from the explicit
   `CRABBOX_WEBVNC_AGENT_BASE_URL` environment setting and must be one exact
   HTTPS origin (or loopback HTTP with an explicit port).
@@ -318,16 +334,22 @@ instead of granting general passwordless sudo.
 ## Portal and passwords
 
 For a password-authenticated coordinator bridge, `--open` opens the portal page
-after the bridge starts. When the VNC password is available, the command sends it over the
-authenticated coordinator API and puts only a short-lived, one-use handoff
-ticket in the browser URL fragment. The portal consumes the ticket, loads the
-credential into browser memory, and removes the ticket from the address bar
-before connecting. Passwords and usernames never enter CLI-generated portal
-URLs. Ticket-bearing viewer URLs, usernames, and passwords remain redacted on
-stdout unless the operator explicitly sets `--redact-credentials=false`;
-credential-free URLs and recovery commands remain visible. Repeated `--open`
-calls hand the fresh ticket to an existing viewer tab for that lease and focus
-it when the browser permits, rather than starting a second active viewer.
+after the bridge starts. When the CLI uses a shared/admin coordinator bearer,
+it sends any VNC credential handoff and the viewer bootstrap over authenticated
+API requests, opens a random localhost URL, and transfers only the opaque
+viewer ticket in a browser POST body. The resulting cookie is non-persistent,
+viewer-only, and scoped to one lease's WebVNC path. The credential handoff stays
+server-side until that session consumes it once.
+
+GitHub-authenticated human Portal sessions retain the existing behavior: a
+short-lived, one-use credential handoff ticket may travel in the URL fragment,
+the Portal consumes it, loads the credential into browser memory, and removes
+the fragment before connecting. Passwords and usernames never enter
+CLI-generated Portal URLs. Viewer URLs, usernames, and passwords remain
+redacted on stdout unless the operator explicitly sets
+`--redact-credentials=false`; credential-free URLs and recovery commands remain
+visible. Repeated `--open` calls focus and reload an existing viewer tab for
+that lease when the browser permits instead of leaving a second active viewer.
 
 A macOS ARD bridge has a stricter boundary in both local and coordinator-backed
 modes: its relay performs ARD authentication, the browser receives no account
@@ -399,9 +421,10 @@ and `daemon stop` forms take only `--id`.
 
 `webvnc requires a configured coordinator login`
 
-Run `crabbox login --url <broker-url>` for the coordinator you are using. Portal
-WebVNC needs both the CLI bridge and the browser portal to authenticate with the
-coordinator. The local container provider is the exception and needs no login.
+Configure either a coordinator bearer token for Agent/CLI use or run
+`crabbox login --url <broker-url>` for a human GitHub session. A bearer-backed
+`--open` bootstraps its scoped Portal viewer without GitHub OAuth. The local
+container provider is the exception and needs no coordinator login.
 
 `webvnc requires a configured coordinator login`
 

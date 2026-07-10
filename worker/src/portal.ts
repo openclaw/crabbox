@@ -1010,7 +1010,15 @@ export function portalRunDetail(
   );
 }
 
-export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } = {}): Response {
+export function portalVNC(
+  lease: LeaseRecord,
+  options: {
+    canManage?: boolean;
+    viewerOnly?: boolean;
+    sessionCredentialHandoff?: boolean;
+    takeControl?: boolean;
+  } = {},
+): Response {
   const nonce = scriptNonce();
   const slug = lease.slug || lease.id;
   const target = lease.target || "linux";
@@ -1023,6 +1031,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
   const sharePath = `/portal/leases/${encodeURIComponent(lease.id)}/share`;
   const shareAPIPath = `${sharePath}?format=json`;
   const canManage = options.canManage === true;
+  const viewerOnly = options.viewerOnly === true;
   const shareData = canManage
     ? {
         leaseID: lease.id,
@@ -1065,8 +1074,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
           <button id="vnc-reconnect" class="icon-btn" type="button" title="reconnect" aria-label="reconnect">${reconnectIcon}</button>
           <button id="vnc-fullscreen" class="icon-btn" type="button" title="fullscreen" aria-label="toggle fullscreen">${fullscreenIcon}</button>
           ${canManage ? `<button id="vnc-share" class="button secondary" type="button">share</button>` : ""}
-          <a class="button secondary" href="/portal">leases</a>
-          ${portalLogoutButton()}
+          ${viewerOnly ? "" : `<a class="button secondary" href="/portal">leases</a>${portalLogoutButton()}`}
         `,
       })}
       <section id="screen" class="screen" aria-label="WebVNC display" tabindex="0"></section>
@@ -1147,8 +1155,10 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       let username = fragment.get("username") || "";
       let password = fragment.get("password") || "";
       const handoffTicket = fragment.get("handoff") || "";
-      let credentialsReady = !handoffTicket;
-      const takeControlOnConnect = fragment.get("control") === "take";
+      const sessionCredentialHandoff = ${JSON.stringify(options.sessionCredentialHandoff === true)};
+      const viewerBootstrapSession = ${JSON.stringify(viewerOnly)};
+      let credentialsReady = !handoffTicket && !sessionCredentialHandoff;
+      const takeControlOnConnect = ${JSON.stringify(options.takeControl === true)} || fragment.get("control") === "take";
       const reuseWindowName = "crabbox-webvnc-" + ${JSON.stringify(lease.id)};
       const reuseChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(reuseWindowName) : null;
       let portalReadyForReuse = false;
@@ -1166,7 +1176,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         const response = await fetch(handoffURL, {
           method: "POST",
           headers: { "content-type": "application/json", accept: "application/json" },
-          body: JSON.stringify({ ticket: handoffTicket }),
+          body: JSON.stringify(handoffTicket ? { ticket: handoffTicket } : {}),
         });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(body.message || body.error || "VNC handoff failed");
@@ -1194,7 +1204,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       reuseChannel?.addEventListener("message", (event) => {
         const message = event.data;
         if (!portalReadyForReuse || typeof message?.requestID !== "string") return;
-        if (message.type === "handoff-offer") {
+        if (message.type === "handoff-offer" || message.type === "session-offer") {
           reuseChannel.postMessage({
             type: "handoff-candidate",
             requestID: message.requestID,
@@ -1202,6 +1212,16 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
             connected,
             controller: isController,
           });
+          return;
+        }
+        if (message.type === "session-grant" && message.recipientID === viewerID) {
+          reuseChannel.postMessage({
+            type: "handoff-accepted",
+            requestID: message.requestID,
+            recipientID: viewerID,
+          });
+          window.focus();
+          window.location.reload();
           return;
         }
         if (message.type !== "handoff-grant" || message.recipientID !== viewerID) return;
@@ -1224,7 +1244,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         }
       });
       async function reuseExistingWebVNCTab() {
-        if (!handoffTicket || !reuseChannel) return false;
+        if ((!handoffTicket && !viewerBootstrapSession) || !reuseChannel) return false;
         const requestID = viewerID;
         const offered = new URLSearchParams({ handoff: handoffTicket });
         if (takeControlOnConnect) offered.set("control", "take");
@@ -1263,15 +1283,23 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
               return;
             }
             recipientID = selected.recipientID;
-            reuseChannel.postMessage({
-              type: "handoff-grant",
-              requestID,
-              recipientID,
-              fragment: offered.toString(),
-            });
+            if (handoffTicket) {
+              reuseChannel.postMessage({
+                type: "handoff-grant",
+                requestID,
+                recipientID,
+                fragment: offered.toString(),
+              });
+            } else {
+              reuseChannel.postMessage({ type: "session-grant", requestID, recipientID });
+            }
             acceptedTimeout = window.setTimeout(() => finish(false), 180);
           }, 80);
-          reuseChannel.postMessage({ type: "handoff-offer", requestID });
+          if (handoffTicket) {
+            reuseChannel.postMessage({ type: "handoff-offer", requestID });
+          } else {
+            reuseChannel.postMessage({ type: "session-offer", requestID });
+          }
         });
       }
       let rfb;

@@ -103,6 +103,15 @@ export async function prepareCoordinatorRequest(
       authenticated: false,
     };
   }
+  if (isWebVNCViewerBootstrap(request, url) || isWebVNCViewerSessionRequest(request, url)) {
+    return {
+      request: await requestWithAdminGrantVersion(
+        requestWithoutCoordinatorAuthContext(request),
+        env,
+      ),
+      authenticated: false,
+    };
+  }
   const authRequest = portal ? requestWithPortalCookie(request) : request;
   const portalLogoutToken =
     portal &&
@@ -160,7 +169,10 @@ async function authenticatedCoordinatorRequest(
 
 function portalCookieRequestIntentAllowed(request: Request, env: Env, url: URL): boolean {
   if (request.headers.get("authorization")) return true;
-  if (!cookieValue(request.headers.get("cookie") ?? "", "crabbox_session")) return true;
+  const cookie = request.headers.get("cookie") ?? "";
+  if (!cookieValue(cookie, "crabbox_session") && !cookieValue(cookie, "crabbox_webvnc_session")) {
+    return true;
+  }
   const method = request.method.toUpperCase();
   const websocket =
     method === "GET" && request.headers.get("upgrade")?.toLowerCase() === "websocket";
@@ -175,6 +187,45 @@ function portalCookieRequestIntentAllowed(request: Request, env: Env, url: URL):
   } catch {
     return false;
   }
+}
+
+function isWebVNCViewerBootstrap(request: Request, url: URL): boolean {
+  return (
+    request.method.toUpperCase() === "POST" &&
+    /^\/portal\/leases\/[^/]+\/vnc\/bootstrap$/.test(url.pathname)
+  );
+}
+
+function isWebVNCViewerSessionRequest(request: Request, url: URL): boolean {
+  if (
+    request.headers.has("authorization") ||
+    cookieValue(request.headers.get("cookie") ?? "", "crabbox_session")
+  ) {
+    return false;
+  }
+  const session = cookieValue(request.headers.get("cookie") ?? "", "crabbox_webvnc_session");
+  return (
+    /^webvnc_session_[a-f0-9]{32}$/.test(session) &&
+    /^\/portal\/leases\/[^/]+\/vnc(?:\/(?:status|control|theme|handoff|viewer))?$/.test(
+      url.pathname,
+    )
+  );
+}
+
+function requestWithoutCoordinatorAuthContext(request: Request): Request {
+  const clean = requestWithoutTrustedHeaders(request);
+  const headers = new Headers(clean.headers);
+  for (const name of [
+    "x-crabbox-auth",
+    "x-crabbox-admin",
+    "x-crabbox-owner",
+    "x-crabbox-org",
+    "x-crabbox-github-login",
+    "x-crabbox-token-expires-at",
+  ]) {
+    headers.delete(name);
+  }
+  return new Request(clean, { headers });
 }
 
 function isWebVNCAgentUpgrade(request: Request, url: URL): boolean {

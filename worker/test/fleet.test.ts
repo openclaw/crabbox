@@ -163,6 +163,23 @@ class MemoryStorage {
   }
 }
 
+async function consumeWebVNCPortalViewerBootstrap(
+  fleet: FleetDurableObject,
+  env: Env,
+  ticket: string,
+  leaseID = "cbx_000000000001",
+): Promise<Response> {
+  return await routeCoordinatorRequest(
+    new Request(`https://crabbox.test/portal/leases/${leaseID}/vnc/bootstrap`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ ticket }),
+    }),
+    env,
+    async (prepared) => await fleet.fetch(prepared),
+  );
+}
+
 class HookedMemoryStorage extends MemoryStorage {
   beforePut?: (key: string, value: unknown) => Promise<void>;
 
@@ -19346,6 +19363,434 @@ describe("fleet lease identity and idle", () => {
 
     const admin = await resetAs("admin@example.com", "other-org", true);
     expect(admin.status).toBe(200);
+  });
+
+  it("bootstraps a one-use bearer WebVNC viewer session without GitHub OAuth", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared-operator-token",
+      CRABBOX_SHARED_OWNER: "automation@example.com",
+      CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_PUBLIC_URL: "https://crabbox.test",
+    } as Env;
+    const fleet = new FleetDurableObject({ storage } as unknown as DurableObjectState, env);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "automation@example.com",
+        org: "example-org",
+        desktop: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const throughCoordinator = async (input: Request): Promise<Response> =>
+      await routeCoordinatorRequest(input, env, async (prepared) => await fleet.fetch(prepared));
+    const bearerHeaders = {
+      authorization: "Bearer shared-operator-token",
+      "content-type": "application/json",
+    };
+
+    const handoff = await throughCoordinator(
+      new Request("https://crabbox.test/v1/leases/blue-lobster/webvnc/handoff", {
+        method: "POST",
+        headers: bearerHeaders,
+        body: JSON.stringify({
+          username: "vnc-user",
+          password: "generated-vnc-password",
+        }),
+      }),
+    );
+    expect(handoff.status).toBe(200);
+    const handoffBody = (await handoff.json()) as { ticket: string };
+
+    const issued = await throughCoordinator(
+      new Request("https://crabbox.test/v1/leases/blue-lobster/webvnc/viewer-bootstrap", {
+        method: "POST",
+        headers: bearerHeaders,
+        body: JSON.stringify({
+          credentialHandoffTicket: handoffBody.ticket,
+          takeControl: true,
+        }),
+      }),
+    );
+    expect(issued.status).toBe(200);
+    expect(issued.headers.get("cache-control")).toBe("no-store");
+    const issuedBody = (await issued.json()) as {
+      ticket: string;
+      leaseID: string;
+      expiresAt: string;
+    };
+    expect(issuedBody).toMatchObject({ leaseID: "cbx_000000000001" });
+    expect(issuedBody.ticket).toMatch(/^webvnc_view_[a-f0-9]{32}$/);
+    expect(JSON.stringify(issuedBody)).not.toContain("shared-operator-token");
+    expect(JSON.stringify(issuedBody)).not.toContain("/portal/");
+
+    const bootstrapURL = "https://crabbox.test/portal/leases/cbx_000000000001/vnc/bootstrap";
+    const bootstrap = await throughCoordinator(
+      new Request(bootstrapURL, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ ticket: issuedBody.ticket }),
+      }),
+    );
+    expect(bootstrap.status).toBe(303);
+    expect(bootstrap.headers.get("location")).toBe("/portal/leases/cbx_000000000001/vnc");
+    expect(bootstrap.headers.get("cache-control")).toBe("no-store");
+    expect(bootstrap.headers.get("referrer-policy")).toBe("no-referrer");
+    const setCookie = bootstrap.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain("crabbox_webvnc_session=webvnc_session_");
+    expect(setCookie).toContain("Path=/portal/leases/cbx_000000000001/vnc");
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("Secure");
+    expect(setCookie).toContain("SameSite=Strict");
+    expect(setCookie).not.toContain("Max-Age");
+    expect(setCookie).not.toContain("Expires");
+    const sessionCookie = setCookie.split(";", 1)[0] ?? "";
+    const sessionValue = sessionCookie.split("=", 2)[1] ?? "";
+
+    const replay = await throughCoordinator(
+      new Request(bootstrapURL, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ ticket: issuedBody.ticket }),
+      }),
+    );
+    expect(replay.status).toBe(401);
+
+    const page = await throughCoordinator(
+      new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc", {
+        headers: { cookie: sessionCookie },
+      }),
+    );
+    expect(page.status).toBe(200);
+    const pageBody = await page.text();
+    for (const secret of [
+      "shared-operator-token",
+      issuedBody.ticket,
+      handoffBody.ticket,
+      sessionValue,
+      "vnc-user",
+      "generated-vnc-password",
+    ]) {
+      expect(pageBody).not.toContain(secret);
+    }
+    expect(pageBody).not.toContain('<a class="button secondary" href="/portal">leases</a>');
+    expect(pageBody).not.toContain('action="/portal/logout"');
+    expect(pageBody).not.toContain('<button id="vnc-share"');
+    expect(pageBody).not.toContain('id="vnc-bridge-cmd"');
+    expect(pageBody).toContain("const sessionCredentialHandoff = true");
+    expect(pageBody).toContain("const takeControlOnConnect = true");
+    expect(pageBody).toContain('type: "session-offer"');
+    expect(pageBody).toContain('type: "session-grant"');
+
+    const credentials = await throughCoordinator(
+      new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc/handoff", {
+        method: "POST",
+        headers: {
+          cookie: sessionCookie,
+          origin: "https://crabbox.test",
+          "content-type": "application/json",
+        },
+        body: "{}",
+      }),
+    );
+    expect(credentials.status).toBe(200);
+    await expect(credentials.json()).resolves.toEqual({
+      username: "vnc-user",
+      password: "generated-vnc-password",
+    });
+
+    const credentialReplay = await throughCoordinator(
+      new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc/handoff", {
+        method: "POST",
+        headers: {
+          cookie: sessionCookie,
+          origin: "https://crabbox.test",
+          "content-type": "application/json",
+        },
+        body: "{}",
+      }),
+    );
+    expect(credentialReplay.status).toBe(401);
+
+    const status = await throughCoordinator(
+      new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc/status", {
+        headers: { cookie: sessionCookie },
+      }),
+    );
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toMatchObject({
+      leaseID: "cbx_000000000001",
+      command: "",
+    });
+
+    const sessionKey = `webvnc-viewer-session:${sessionValue}`;
+    storage.seed(sessionKey, {
+      ...storage.value<Record<string, unknown>>(sessionKey),
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    });
+    const expiredSession = await throughCoordinator(
+      new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc", {
+        headers: { cookie: sessionCookie },
+      }),
+    );
+    expect(expiredSession.status).toBe(401);
+    expect(storage.value(sessionKey)).toBeUndefined();
+  });
+
+  it("fails closed for invalid bearer WebVNC viewer bootstrap grants", async () => {
+    const issue = async (
+      storage: MemoryStorage,
+      env: Env,
+      leaseID = "blue-lobster",
+      authorization = "Bearer shared-operator-token",
+    ): Promise<{ fleet: FleetDurableObject; ticket: string }> => {
+      const fleet = new FleetDurableObject({ storage } as unknown as DurableObjectState, env);
+      storage.seed(
+        "lease:cbx_000000000001",
+        testLease({
+          id: "cbx_000000000001",
+          slug: "blue-lobster",
+          owner: "automation@example.com",
+          org: "example-org",
+          desktop: true,
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        }),
+      );
+      storage.seed(
+        "lease:cbx_000000000002",
+        testLease({
+          id: "cbx_000000000002",
+          slug: "red-lobster",
+          owner: "other@example.com",
+          org: "example-org",
+          desktop: true,
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        }),
+      );
+      const response = await routeCoordinatorRequest(
+        new Request(`https://crabbox.test/v1/leases/${leaseID}/webvnc/viewer-bootstrap`, {
+          method: "POST",
+          headers: {
+            authorization,
+            "content-type": "application/json",
+          },
+          body: "{}",
+        }),
+        env,
+        async (prepared) => await fleet.fetch(prepared),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ticket: string };
+      return { fleet, ticket: body.ticket };
+    };
+    const unauthEnv = {
+      CRABBOX_SHARED_TOKEN: "shared-operator-token",
+      CRABBOX_SHARED_OWNER: "automation@example.com",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const unauthStorage = new MemoryStorage();
+    const unauthFleet = new FleetDurableObject(
+      { storage: unauthStorage } as unknown as DurableObjectState,
+      unauthEnv,
+    );
+    const unauth = await routeCoordinatorRequest(
+      new Request("https://crabbox.test/v1/leases/blue-lobster/webvnc/viewer-bootstrap", {
+        method: "POST",
+        body: "{}",
+      }),
+      unauthEnv,
+      async (prepared) => await unauthFleet.fetch(prepared),
+    );
+    expect(unauth.status).toBe(401);
+
+    const githubStorage = new MemoryStorage();
+    const githubEnv = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const githubFleet = new FleetDurableObject(
+      { storage: githubStorage } as unknown as DurableObjectState,
+      githubEnv,
+    );
+    githubStorage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        desktop: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const githubToken = await issueUserToken(githubEnv, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+      ttlSeconds: 60 * 60,
+    });
+    const githubBootstrap = await routeCoordinatorRequest(
+      new Request("https://crabbox.test/v1/leases/blue-lobster/webvnc/viewer-bootstrap", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${githubToken}`,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      }),
+      githubEnv,
+      async (prepared) => await githubFleet.fetch(prepared),
+      { githubMembership: async (): Promise<void> => {} },
+    );
+    expect(githubBootstrap.status).toBe(401);
+
+    const expiredStorage = new MemoryStorage();
+    const expiredEnv = { ...unauthEnv } as Env;
+    const expired = await issue(expiredStorage, expiredEnv);
+    const expiredKey = `webvnc-viewer-ticket:${expired.ticket}`;
+    expiredStorage.seed(expiredKey, {
+      ...expiredStorage.value<Record<string, unknown>>(expiredKey),
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    });
+    expect(
+      (await consumeWebVNCPortalViewerBootstrap(expired.fleet, expiredEnv, expired.ticket)).status,
+    ).toBe(401);
+
+    const wrongLeaseStorage = new MemoryStorage();
+    const wrongLeaseEnv = { ...unauthEnv } as Env;
+    const wrongLease = await issue(wrongLeaseStorage, wrongLeaseEnv);
+    expect(
+      (
+        await consumeWebVNCPortalViewerBootstrap(
+          wrongLease.fleet,
+          wrongLeaseEnv,
+          wrongLease.ticket,
+          "cbx_000000000002",
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      (await consumeWebVNCPortalViewerBootstrap(wrongLease.fleet, wrongLeaseEnv, wrongLease.ticket))
+        .status,
+    ).toBe(401);
+
+    const wrongPrincipalStorage = new MemoryStorage();
+    const wrongPrincipalEnv = { ...unauthEnv } as Env;
+    const wrongPrincipal = await issue(wrongPrincipalStorage, wrongPrincipalEnv);
+    const wrongPrincipalKey = `webvnc-viewer-ticket:${wrongPrincipal.ticket}`;
+    wrongPrincipalStorage.seed(wrongPrincipalKey, {
+      ...wrongPrincipalStorage.value<Record<string, unknown>>(wrongPrincipalKey),
+      owner: "attacker@example.com",
+    });
+    expect(
+      (
+        await consumeWebVNCPortalViewerBootstrap(
+          wrongPrincipal.fleet,
+          wrongPrincipalEnv,
+          wrongPrincipal.ticket,
+        )
+      ).status,
+    ).toBe(401);
+
+    const rotatedSharedStorage = new MemoryStorage();
+    const rotatedSharedEnv = { ...unauthEnv } as Env;
+    const rotatedShared = await issue(rotatedSharedStorage, rotatedSharedEnv);
+    rotatedSharedEnv.CRABBOX_SHARED_TOKEN = "rotated-shared-token";
+    expect(
+      (
+        await consumeWebVNCPortalViewerBootstrap(
+          rotatedShared.fleet,
+          rotatedSharedEnv,
+          rotatedShared.ticket,
+        )
+      ).status,
+    ).toBe(401);
+
+    const revokedSessionStorage = new MemoryStorage();
+    const revokedSessionEnv = { ...unauthEnv } as Env;
+    const revokedSession = await issue(revokedSessionStorage, revokedSessionEnv);
+    const bootstrappedSession = await consumeWebVNCPortalViewerBootstrap(
+      revokedSession.fleet,
+      revokedSessionEnv,
+      revokedSession.ticket,
+    );
+    expect(bootstrappedSession.status).toBe(303);
+    const revokedCookie = bootstrappedSession.headers.get("set-cookie")?.split(";", 1)[0] ?? "";
+    const revokedSessionID = revokedCookie.split("=", 2)[1] ?? "";
+    revokedSessionEnv.CRABBOX_SHARED_TOKEN = "rotated-shared-token";
+    const revokedPage = await routeCoordinatorRequest(
+      new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc", {
+        headers: { cookie: revokedCookie },
+      }),
+      revokedSessionEnv,
+      async (prepared) => await revokedSession.fleet.fetch(prepared),
+    );
+    expect(revokedPage.status).toBe(401);
+    expect(
+      revokedSessionStorage.value(`webvnc-viewer-session:${revokedSessionID}`),
+    ).toBeUndefined();
+
+    const adminStorage = new MemoryStorage();
+    const adminEnv = {
+      CRABBOX_ADMIN_TOKEN: "admin-token",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const admin = await issue(adminStorage, adminEnv, "red-lobster", "Bearer admin-token");
+    adminEnv.CRABBOX_ADMIN_TOKEN = "rotated-admin-token";
+    expect(
+      (
+        await consumeWebVNCPortalViewerBootstrap(
+          admin.fleet,
+          adminEnv,
+          admin.ticket,
+          "cbx_000000000002",
+        )
+      ).status,
+    ).toBe(401);
+  });
+
+  it("keeps existing GitHub portal WebVNC sessions compatible", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_PUBLIC_URL: "https://crabbox.test",
+    } as Env;
+    const fleet = new FleetDurableObject({ storage } as unknown as DurableObjectState, env);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        desktop: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+      ttlSeconds: 60 * 60,
+    });
+    const response = await routeCoordinatorRequest(
+      new Request("https://crabbox.test/portal/leases/blue-lobster/vnc", {
+        headers: { cookie: `crabbox_session=${encodeURIComponent(token)}` },
+      }),
+      env,
+      async (prepared) => await fleet.fetch(prepared),
+      { githubMembership: async (): Promise<void> => {} },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("WebVNC blue-lobster");
   });
 
   it("serves WebVNC pages only for desktop leases and requires an agent upgrade", async () => {

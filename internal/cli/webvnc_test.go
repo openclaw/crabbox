@@ -114,6 +114,164 @@ func TestCreateWebVNCPortalURLUsesCredentialHandoff(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCreatesWebVNCViewerBootstrapWithoutReturningViewerURL(t *testing.T) {
+	var received struct {
+		CredentialHandoffTicket string `json:"credentialHandoffTicket"`
+		TakeControl             bool   `json:"takeControl"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_abcdef123456/webvnc/viewer-bootstrap" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer shared-token" {
+			t.Fatalf("authorization=%q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorWebVNCViewerBootstrap{
+			Ticket:    "webvnc_view_0123456789abcdef0123456789abcdef",
+			LeaseID:   "cbx_abcdef123456",
+			ExpiresAt: "2026-07-10T12:00:00Z",
+		})
+	}))
+	defer server.Close()
+
+	coord := &CoordinatorClient{BaseURL: server.URL, Token: "shared-token", Client: server.Client()}
+	got, err := coord.CreateWebVNCViewerBootstrap(
+		context.Background(),
+		"cbx_abcdef123456",
+		"vnc_handoff_0123456789abcdef0123456789abcdef",
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if received.CredentialHandoffTicket != "vnc_handoff_0123456789abcdef0123456789abcdef" || !received.TakeControl {
+		t.Fatalf("bootstrap body=%#v", received)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "/portal/") || strings.Contains(string(encoded), "shared-token") {
+		t.Fatalf("bootstrap response leaked routing or bearer data: %s", encoded)
+	}
+}
+
+func TestWebVNCPortalBootstrapLoopbackKeepsTicketOutOfBrowserURLAndArgv(t *testing.T) {
+	const ticket = "webvnc_view_0123456789abcdef0123456789abcdef"
+	loopback, err := startWebVNCPortalBootstrapLoopback(
+		"https://broker.example.test/portal/leases/cbx_abcdef123456/vnc/bootstrap",
+		ticket,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loopback.Close()
+
+	browserURL := loopback.URL()
+	if strings.Contains(browserURL, ticket) || strings.Contains(browserURL, "broker.example.test") {
+		t.Fatalf("browser URL leaked bootstrap data: %s", browserURL)
+	}
+	_, args := openURLCommand(browserURL)
+	if strings.Contains(strings.Join(args, " "), ticket) || strings.Contains(strings.Join(args, " "), "broker.example.test") {
+		t.Fatalf("browser argv leaked bootstrap data: %#v", args)
+	}
+
+	response, err := http.Get(browserURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("loopback status=%d", response.StatusCode)
+	}
+	if !strings.Contains(string(body), `method="post"`) ||
+		!strings.Contains(string(body), `name="ticket"`) ||
+		!strings.Contains(string(body), ticket) {
+		t.Fatalf("loopback handoff HTML incomplete: %s", body)
+	}
+	for _, secret := range []string{"shared-token", "generated-vnc-password", "crabbox_session"} {
+		if strings.Contains(string(body), secret) {
+			t.Fatalf("loopback HTML leaked %q: %s", secret, body)
+		}
+	}
+}
+
+func TestOpenWebVNCPortalUsesBearerBootstrapWithoutOpeningCoordinatorURL(t *testing.T) {
+	const bootstrapTicket = "webvnc_view_0123456789abcdef0123456789abcdef"
+	const handoffTicket = "vnc_handoff_0123456789abcdef0123456789abcdef"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/leases/cbx_abcdef123456/webvnc/handoff":
+			_ = json.NewEncoder(w).Encode(CoordinatorWebVNCCredentialHandoff{
+				Ticket: handoffTicket,
+			})
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{
+				Owner: "automation@example.com",
+				Org:   "example-org",
+				Auth:  "bearer",
+			})
+		case "/v1/leases/cbx_abcdef123456/webvnc/viewer-bootstrap":
+			var body struct {
+				CredentialHandoffTicket string `json:"credentialHandoffTicket"`
+				TakeControl             bool   `json:"takeControl"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.CredentialHandoffTicket != handoffTicket || !body.TakeControl {
+				t.Fatalf("bootstrap body=%#v", body)
+			}
+			_ = json.NewEncoder(w).Encode(CoordinatorWebVNCViewerBootstrap{
+				Ticket:  bootstrapTicket,
+				LeaseID: "cbx_abcdef123456",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	coord := &CoordinatorClient{BaseURL: server.URL, Token: "shared-token", Client: server.Client()}
+	var opened string
+	portal, bootstrap, err := openWebVNCPortalWithOpener(
+		context.Background(),
+		coord,
+		"cbx_abcdef123456",
+		"vnc-user",
+		"generated-vnc-password",
+		nil,
+		func(target string, _ ...string) error {
+			opened = target
+			response, err := http.Get(target)
+			if err == nil {
+				response.Body.Close()
+			}
+			return err
+		},
+		webVNCPortalOptions{TakeControl: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if portal != "" || !bootstrap {
+		t.Fatalf("portal=%q bootstrap=%t", portal, bootstrap)
+	}
+	if strings.Contains(opened, bootstrapTicket) ||
+		strings.Contains(opened, handoffTicket) ||
+		strings.Contains(opened, "shared-token") ||
+		strings.Contains(opened, server.URL) {
+		t.Fatalf("opened browser target leaked bootstrap data: %s", opened)
+	}
+}
+
 func TestWebVNCAgentBaseURL(t *testing.T) {
 	const base = "https://portal.example.test"
 	t.Setenv("CRABBOX_WEBVNC_AGENT_BASE_URL", "")
@@ -233,11 +391,11 @@ func TestWebVNCRedactingWriterKeepsCredentialsOutOfDaemonLogs(t *testing.T) {
 	if strings.Contains(got, "secret") || strings.Contains(got, "broker-user") || strings.Contains(got, "other-user") || strings.Contains(got, "#password=") {
 		t.Fatalf("credential leaked: %q", got)
 	}
-	if !strings.Contains(got, "bridge: connected") || strings.Count(got, "[redacted]") != 6 {
+	if !strings.Contains(got, "bridge: connected") || strings.Count(got, "[redacted]") != 7 {
 		t.Fatalf("unexpected redacted output: %q", got)
 	}
-	if !strings.Contains(got, "webvnc: run crabbox webvnc --id demo") || !strings.Contains(got, "webvnc: https://portal.example/vnc") {
-		t.Fatalf("non-secret WebVNC output was redacted: %q", got)
+	if !strings.Contains(got, "webvnc: run crabbox webvnc --id demo") || strings.Contains(got, "webvnc: https://portal.example/vnc") {
+		t.Fatalf("WebVNC command or URL redaction mismatch: %q", got)
 	}
 }
 
