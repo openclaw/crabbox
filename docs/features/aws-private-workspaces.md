@@ -162,7 +162,7 @@ Node deployment, configure the same contract:
 | `CRABBOX_WORKSPACE_AWS_SECURITY_GROUP_ID` | Required no-ingress, TCP-443-egress workspace group. |
 | `CRABBOX_WORKSPACE_AWS_CONTROLLER_SECURITY_GROUP_ID` | Required distinct controller group in the same VPC. |
 | `CRABBOX_WORKSPACE_AWS_INSTANCE_PROFILE` | Required SSM instance profile name. |
-| `CRABBOX_WORKSPACE_AWS_MARKET` | `on-demand` or `spot`; start with `on-demand` for a canary. |
+| `CRABBOX_WORKSPACE_AWS_MARKET` | Required `on-demand` for this dedicated deployment. |
 | `CRABBOX_WORKSPACE_AWS_SSM_LOG_GROUP` | Required CloudWatch log group for SSM command output. |
 | `CRABBOX_RUNTIME_ADAPTER_TOKEN` | Required route-scoped bearer; inject from secret storage. |
 | `CRABBOX_RUNTIME_ADAPTER_OWNER` | Stable service owner for all requests using that bearer. |
@@ -291,7 +291,9 @@ Before GO, prepare and review these non-secret values:
 - approved ingress and database CIDRs;
 - certificate ARN and canonical URL;
 - database URL secret ARN and route-token secret ARN;
-- explicit instance allowlist, resource ceilings, market, and log retention.
+- explicit instance allowlist, resource ceilings, and log retention. The
+  dedicated stack fixes the market to on-demand; it does not depend on the
+  account-level EC2 Spot service-linked role.
 - concurrent-workspace and monthly cost-reservation ceilings. The monthly
   ceiling is a coordinator admission guard, not a substitute for an AWS Budget.
 
@@ -330,7 +332,6 @@ aws cloudformation deploy \
     WorkspaceMaxVcpus=2 \
     WorkspaceMaxMemoryMiB=4096 \
     WorkspaceRootGiB="$WORKSPACE_ROOT_GIB" \
-    WorkspaceMarket=on-demand \
     MaxActiveWorkspaces=2 \
     MaxMonthlyWorkspaceUSD=100 \
     LogRetentionDays=30
