@@ -147,6 +147,7 @@ test("task uses separate execution and task roles with injected secrets", () => 
     /Name: CRABBOX_AWS_EXPECTED_TASK_ROLE_NAME\n\s+Value: !Ref CoordinatorTaskRole/,
   );
   assert.match(task, /Name: CRABBOX_WORKSPACE_AWS_PRIVATE\n\s+Value: "1"/);
+  assert.match(task, /Name: CRABBOX_WORKSPACE_AWS_MARKET\n\s+Value: on-demand/);
   assert.match(task, /CRABBOX_WORKSPACE_AWS_INSTANCE_TYPES/);
   assert.match(task, /Name: CRABBOX_WORKSPACE_AWS_ROOT_GB\n\s+Value: !Ref WorkspaceRootGiB/);
   assert.match(task, /CRABBOX_WORKSPACE_AWS_SUBNET_ID/);
@@ -208,7 +209,7 @@ test("stack-owned roles have scoped trust and workspace log access", () => {
     /Action: logs:DescribeLogStreams/,
     /- logs:CreateLogStream/,
     /- logs:PutLogEvents/,
-    /Resource: !GetAtt WorkspaceSSMLogGroup\.Arn/,
+    /Resource: !Sub arn:\$\{AWS::Partition\}:logs:\$\{ExpectedRegion\}:\$\{ExpectedAccountId\}:log-group:\$\{WorkspaceSSMLogGroup\}/,
     /log-group:\$\{WorkspaceSSMLogGroup\}:log-stream:\*/,
   ]);
   assert.match(policyStatementBlock(workspaceRole, "DenyParameterStoreReads"), /Resource: "\*"/);
@@ -250,7 +251,6 @@ test("workspace boundary is private, SSM-only, and IAM constrained", () => {
       "LaunchWorkspaceNetworkInterface",
       "UseWorkspaceSubnetForLaunch",
       "UseWorkspaceSecurityGroupForLaunch",
-      "LaunchWorkspaceSpotRequest",
     ],
   );
   for (const { body } of runInstanceAllows) {
@@ -275,6 +275,7 @@ test("workspace boundary is private, SSM-only, and IAM constrained", () => {
     "ec2:VolumeType",
   ]);
   assert.doesNotMatch(role, /Sid: LaunchBoundedPrivateWorkspace/);
+  assert.doesNotMatch(role, /spot-instances-request|DescribeSpotPriceHistory/);
 
   const image = policyStatementBlock(role, "LaunchFromCanonicalUbuntuImage");
   assertAllMatches(image, [
@@ -326,20 +327,10 @@ test("workspace boundary is private, SSM-only, and IAM constrained", () => {
   );
   assert.doesNotMatch(role, /subnet\/\*|security-group\/\*|key-pair\/|KeyPair/);
 
-  const spotRequest = policyStatementBlock(role, "LaunchWorkspaceSpotRequest");
-  assertAllMatches(spotRequest, [
-    /Resource: !Sub arn:\$\{AWS::Partition\}:ec2:\$\{ExpectedRegion\}:\$\{ExpectedAccountId\}:spot-instances-request\/\*/,
-    /"aws:RequestTag\/crabbox": "true"/,
-    /"aws:RequestTag\/created_by": "crabbox"/,
-    /"aws:RequestTag\/crabbox_workspace": "true"/,
-    /"aws:RequestTag\/access_mode": "ssm"/,
-  ]);
-
   const launchTags = policyStatementBlock(role, "TagWorkspaceAtLaunch");
   assertAllMatches(launchTags, [
     /instance\/\*/,
     /volume\/\*/,
-    /spot-instances-request\/\*/,
     /"aws:RequestTag\/crabbox": "true"/,
     /"aws:RequestTag\/created_by": "crabbox"/,
     /"aws:RequestTag\/crabbox_workspace": "true"/,
