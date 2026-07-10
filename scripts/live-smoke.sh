@@ -1301,6 +1301,10 @@ if has_provider phala || has_provider phala-cloud || has_provider dstack; then
   "$root/scripts/live-phala-smoke.sh"
 fi
 
+if has_provider unikraft-cloud || has_provider unikraftcloud || has_provider ukc; then
+  "$root/scripts/live-unikraft-cloud-smoke.sh"
+fi
+
 if has_provider semaphore; then
   semaphore_smoke
 fi

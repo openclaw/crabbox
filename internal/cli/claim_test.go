@@ -86,7 +86,7 @@ func TestAbsentClaimCleanupSyncsBeforeAction(t *testing.T) {
 	}
 }
 
-func TestWriteLeaseClaimAtomicPropagatesDirectorySyncFailure(t *testing.T) {
+func TestWriteLeaseClaimAtomicWithSyncPropagatesDirectorySyncFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_sync_failure"
 	path, err := leaseClaimPath(leaseID)
@@ -103,9 +103,9 @@ func TestWriteLeaseClaimAtomicPropagatesDirectorySyncFailure(t *testing.T) {
 	}
 }
 
-func TestWriteLeaseClaimAtomicDurablePropagatesAncestorSyncFailure(t *testing.T) {
+func TestWriteLeaseClaimAtomicDurableDoesNotSyncExistingAncestors(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	const leaseID = "cbx_ancestor_sync_failure"
+	const leaseID = "cbx_existing_namespace"
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
@@ -113,11 +113,64 @@ func TestWriteLeaseClaimAtomicDurablePropagatesAncestorSyncFailure(t *testing.T)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	syncErr := errors.New("ancestor sync unavailable")
 	var synced []string
-	err = writeLeaseClaimAtomicDurableWithSync(path, leaseClaim{LeaseID: leaseID}, func(dir string) error {
+	err = writeLeaseClaimAtomicDurableWithSync(path, leaseClaim{LeaseID: leaseID}, filepath.Dir(path), func(dir string) error {
 		synced = append(synced, filepath.Clean(dir))
-		if len(synced) == 2 {
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Clean(filepath.Dir(path))}
+	if !reflect.DeepEqual(synced, want) {
+		t.Fatalf("synced=%q want %q", synced, want)
+	}
+}
+
+func TestDurableGuardedClaimWriteSyncsOnlyCreatedNamespaceParents(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(base, "new-state-root"))
+	const leaseID = "cbx_bounded_namespace"
+	var synced []string
+	err := mutateLeaseClaimGuardedDurableWithSync(leaseID, unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false), func(claim *leaseClaim) error {
+		*claim = leaseClaim{LeaseID: leaseID, Slug: "bounded"}
+		return nil
+	}, func(dir string) error {
+		synced = append(synced, filepath.Clean(dir))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := filepath.Dir(filepath.Dir(path))
+	want := []string{
+		filepath.Clean(filepath.Dir(path)),
+		filepath.Clean(stateRoot),
+		filepath.Clean(filepath.Dir(stateRoot)),
+		filepath.Clean(base),
+	}
+	if !reflect.DeepEqual(synced, want) {
+		t.Fatalf("synced=%q want %q", synced, want)
+	}
+}
+
+func TestDurableGuardedClaimWritePropagatesRequiredBoundarySyncFailure(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(base, "new-state-root"))
+	const leaseID = "cbx_boundary_sync_failure"
+	syncErr := errors.New("required namespace sync unavailable")
+	var synced []string
+	err := mutateLeaseClaimGuardedDurableWithSync(leaseID, unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false), func(claim *leaseClaim) error {
+		*claim = leaseClaim{LeaseID: leaseID, Slug: "boundary"}
+		return nil
+	}, func(dir string) error {
+		dir = filepath.Clean(dir)
+		synced = append(synced, dir)
+		if dir == filepath.Clean(base) {
 			return syncErr
 		}
 		return nil
@@ -125,9 +178,15 @@ func TestWriteLeaseClaimAtomicDurablePropagatesAncestorSyncFailure(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
 		t.Fatalf("write error=%v want %v", err, syncErr)
 	}
-	want := []string{filepath.Clean(filepath.Dir(path)), filepath.Clean(filepath.Dir(filepath.Dir(path)))}
-	if !reflect.DeepEqual(synced, want) {
-		t.Fatalf("synced=%q want %q", synced, want)
+	path, pathErr := leaseClaimPath(leaseID)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("claim should be installed before required directory sync error: %v", statErr)
+	}
+	if got := synced[len(synced)-1]; got != filepath.Clean(base) {
+		t.Fatalf("last synced directory=%q want boundary %q", got, base)
 	}
 }
 
@@ -198,6 +257,60 @@ func TestFinalizeAbsentLeaseClaimPresentClaimSkipsAction(t *testing.T) {
 	}
 	if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v", exists, readErr)
+	}
+}
+
+func TestDurableGuardedClaimWriteHoldsLockThroughDirectorySync(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_durable_lock"
+	first := leaseClaim{LeaseID: leaseID, Slug: "first"}
+	second := leaseClaim{LeaseID: leaseID, Slug: "second"}
+	reachedSync := make(chan struct{})
+	releaseSync := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		var once sync.Once
+		firstDone <- mutateLeaseClaimGuardedWithWrite(leaseID, unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false), func(claim *leaseClaim) error {
+			*claim = first
+			return nil
+		}, func(path string, claim leaseClaim) error {
+			return writeLeaseClaimAtomicDurableWithSync(path, claim, filepath.Dir(path), func(string) error {
+				once.Do(func() {
+					close(reachedSync)
+					<-releaseSync
+				})
+				return nil
+			})
+		})
+	}()
+	select {
+	case <-reachedSync:
+	case <-time.After(2 * time.Second):
+		t.Fatal("durable write did not reach directory sync")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- replaceLeaseClaimIfUnchanged(leaseID, first, second)
+	}()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("competing mutation completed before durable sync: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseSync)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	stored, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Slug != second.Slug {
+		t.Fatalf("stored claim=%#v want second mutation", stored)
 	}
 }
 

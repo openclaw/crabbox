@@ -27,6 +27,7 @@ require (
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/gofrs/flock v0.13.0
 	github.com/google/go-tdx-guest v0.3.1
+	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/nomad/api v0.0.0-20260624190804-2007237ae08c
 	github.com/islo-labs/go-sdk v0.0.0-20260528125833-04a38f6f507c
 	github.com/lima-vm/go-qcow2reader v0.7.1
@@ -112,7 +113,6 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/hashicorp/cronexpr v1.1.3 // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
-	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
 	github.com/josharian/intern v1.0.0 // indirect

@@ -35,6 +35,7 @@ import {
   type WebVNCBuffer,
 } from "../src/fleet";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
+import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode } from "../src/portal";
 import {
   ProviderProvisioningCleanupError,
@@ -61,6 +62,36 @@ import type {
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+function currentOrgFixture<T>(value: T): T {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  const org = record.org;
+  const leaseOwners = record.leaseOwners;
+  const currentOrg =
+    typeof org === "string" && !isCurrentOrgKey(org)
+      ? org
+        ? orgKeyForLabel(org)
+        : MISSING_ORG_KEY
+      : org;
+  const currentLeaseOwners = Array.isArray(leaseOwners)
+    ? leaseOwners.map((owner) => currentOrgFixture(owner))
+    : leaseOwners;
+  if (currentOrg === org && currentLeaseOwners === leaseOwners) return value;
+  return {
+    ...record,
+    ...(currentOrg === undefined ? {} : { org: currentOrg }),
+    ...(currentLeaseOwners === undefined ? {} : { leaseOwners: currentLeaseOwners }),
+  } as T;
+}
+
+function workspaceFixtureKey(
+  workspaceID: string,
+  owner = "alice@example.com",
+  org = "example-org",
+): string {
+  return `workspace:${orgKeyForLabel(org)}:${encodeURIComponent(owner)}:${workspaceID}`;
+}
 
 class MemoryStorage {
   private readonly values = new Map<string, unknown>();
@@ -120,7 +151,7 @@ class MemoryStorage {
   }
 
   seed<T>(key: string, value: T): void {
-    this.values.set(key, value);
+    this.values.set(key, currentOrgFixture(value));
   }
 
   value<T>(key: string): T | undefined {
@@ -192,8 +223,8 @@ class FakeWebSocket {
   private readonly sent: string[] = [];
   onSend?: (data: string) => void;
 
-  constructor(attachment?: unknown) {
-    this.attachment = attachment;
+  constructor(attachment?: unknown, options: { legacyOrg?: boolean } = {}) {
+    this.attachment = options.legacyOrg ? attachment : currentOrgFixture(attachment);
   }
 
   send(data: string): void {
@@ -1187,9 +1218,13 @@ describe("runtime adapter relay", () => {
     );
 
     expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
-    for (const socket of [...revoked, ...legacy]) {
+    for (const socket of revoked) {
       expect(socket.closeCode).toBe(1008);
       expect(socket.closeReason).toBe("lease access revoked");
+    }
+    for (const socket of legacy) {
+      expect(socket.closeCode).toBe(1012);
+      expect(socket.closeReason).toBe("coordinator restarted");
     }
     for (const socket of admin) {
       expect(socket.closeCode).toBeUndefined();
@@ -1397,8 +1432,8 @@ describe("runtime adapter relay", () => {
     expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
     expect(viewer.closeCode).toBe(1008);
     expect(viewer.closeReason).toBe("portal session ended");
-    expect(legacyViewer.closeCode).toBe(1008);
-    expect(legacyViewer.closeReason).toBe("lease access revoked");
+    expect(legacyViewer.closeCode).toBe(1012);
+    expect(legacyViewer.closeReason).toBe("coordinator restarted");
     expect(agent.sentJSON()).toEqual([
       {
         type: "ws_close",
@@ -1406,18 +1441,12 @@ describe("runtime adapter relay", () => {
         code: 1008,
         reason: "portal session ended",
       },
-      {
-        type: "ws_close",
-        id: "viewer-legacy",
-        code: 1008,
-        reason: "lease access revoked",
-      },
     ]);
     const relay = fleet as unknown as { codeViewers: Map<string, WebSocket> };
     expect(relay.codeViewers.size).toBe(0);
 
     await fleet.webSocketMessage(viewer as unknown as WebSocket, "post-logout-frame");
-    expect(agent.sentJSON()).toHaveLength(2);
+    expect(agent.sentJSON()).toHaveLength(1);
   });
 
   it("rejects restored shared-token bridges after credential rotation", async () => {
@@ -1607,6 +1636,8 @@ describe("runtime adapter relay", () => {
       id: "viewer_revoked",
       agentID: "agent_revoked",
       owner: "revoked@example.com",
+      org: "other-org",
+      admin: false,
       label: "revoked@example.com",
     });
     const retainedWebAgent = new FakeWebSocket({
@@ -1671,9 +1702,9 @@ describe("runtime adapter relay", () => {
     expect(retainedWebViewer.closeCode).toBe(1008);
     expect(retainedWebViewer.closeReason).toBe("bridge authentication expired");
     expect(retainedWebAgent.closeCode).toBe(1011);
-    expect(legacyOwnerWebViewer.closeCode).toBe(1008);
-    expect(legacyOwnerWebViewer.closeReason).toBe("lease access revoked");
-    expect(legacyOwnerWebAgent.closeCode).toBe(1011);
+    expect(legacyOwnerWebViewer.closeCode).toBe(1012);
+    expect(legacyOwnerWebViewer.closeReason).toBe("coordinator restarted");
+    expect(legacyOwnerWebAgent.closeCode).toBeUndefined();
     expect(codeAgent.sentJSON()).toEqual([
       {
         type: "ws_close",
@@ -1853,7 +1884,7 @@ describe("runtime adapter relay", () => {
     expect(storage.value("runtime-adapter-identity:example-adapter")).toMatchObject({
       adapterID: "example-adapter",
       owner: "alice@example.com",
-      org: "example-org",
+      org: orgKeyForLabel("example-org"),
       claimVersion: 1,
       claimState: "provisional",
       claimExpiresAt: expect.any(String),
@@ -2186,7 +2217,7 @@ describe("runtime adapter relay", () => {
     expect(recovered.status).toBe(200);
     expect(recoverableStorage.value("runtime-adapter-identity:recoverable-adapter")).toMatchObject({
       owner: "mallory@example.com",
-      org: "example-org",
+      org: orgKeyForLabel("example-org"),
       claimVersion: 1,
       claimState: "provisional",
       claimExpiresAt: expect.any(String),
@@ -2208,10 +2239,15 @@ describe("runtime adapter relay", () => {
       ...expiredRuntimeAdapterClaim("fresh-adapter"),
       claimExpiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
+    await durableStorage.put("runtime-adapter-identity:future-adapter", {
+      ...expiredRuntimeAdapterClaim("future-adapter"),
+      org: "~2.future-key",
+    });
     const durableFleet = testFleet(durableStorage);
     await expectConflict(durableFleet, "legacy-adapter");
     await expectConflict(durableFleet, "confirmed-adapter");
     await expectConflict(durableFleet, "fresh-adapter");
+    await expectConflict(durableFleet, "future-adapter");
 
     const ticketStorage = new MemoryStorage();
     ticketStorage.seed(
@@ -3618,6 +3654,9 @@ describe("runtime adapter relay", () => {
       kind: "egress-host",
       leaseID: lease.id,
       sessionID: "restored-expired-session",
+      owner: lease.owner,
+      org: "example-org",
+      admin: false,
     });
     const fleet = new FleetDurableObject(
       {
@@ -5765,7 +5804,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBeUndefined();
   });
 
-  it("skips broker selector restrictions for internal workspace provisioning", async () => {
+  it("provisions missing-org workspaces without applying broker selector restrictions", async () => {
     let created = false;
     let restrictionChecks = 0;
     const fleet = testFleet(
@@ -5785,6 +5824,7 @@ describe("fleet lease identity and idle", () => {
         ),
       },
       {
+        CRABBOX_DEFAULT_ORG: "",
         CRABBOX_WORKSPACE_PROVIDER: "aws",
         CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-selector-test",
         CRABBOX_WORKSPACE_SSH_PRIVATE_KEY: "workspace-private-key",
@@ -5795,7 +5835,7 @@ describe("fleet lease identity and idle", () => {
       request("POST", "/v1/workspaces", {
         headers: {
           "x-crabbox-owner": "alice@example.com",
-          "x-crabbox-org": "example-org",
+          "x-crabbox-org": "",
         },
         body: {
           id: "selector-policy-workspace",
@@ -6008,7 +6048,7 @@ describe("fleet lease identity and idle", () => {
       request("POST", `/v1/leases/${lease.id}/release`, {
         headers: {
           "x-crabbox-owner": lease.owner,
-          "x-crabbox-org": lease.org,
+          "x-crabbox-org": "example-org",
         },
         body: { delete: true },
       }),
@@ -6206,9 +6246,8 @@ describe("fleet lease identity and idle", () => {
     expect(createdHostPrivateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
     expect(createdHostPublicKey).toMatch(/^ssh-ed25519 /);
     expect(
-      storage.value<{ sshHostKeySha256?: string }>(
-        "workspace:example-org:alice%40example.com:fleet-is-101",
-      )?.sshHostKeySha256,
+      storage.value<{ sshHostKeySha256?: string }>(workspaceFixtureKey("fleet-is-101"))
+        ?.sshHostKeySha256,
     ).toMatch(/^[a-f0-9]{64}$/);
     const ready = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     const readyBody = (await ready.json()) as {
@@ -6323,7 +6362,7 @@ describe("fleet lease identity and idle", () => {
       workspaceID: body.id,
       leaseID: created.providerResourceId,
     });
-    const nativeVNCConnectionKey = "workspace:example-org:alice%40example.com:fleet-is-101";
+    const nativeVNCConnectionKey = workspaceFixtureKey("fleet-is-101");
     const nativeVNCInternals = fleet as unknown as {
       workspaceTerminals: Map<string, Set<WebSocket>>;
     };
@@ -6400,16 +6439,13 @@ describe("fleet lease identity and idle", () => {
       status: "ready",
     });
     expect(
-      storage.value<{ desktopCapabilityVersion?: number }>(
-        "workspace:example-org:alice%40example.com:fleet-is-101",
-      )?.desktopCapabilityVersion,
+      storage.value<{ desktopCapabilityVersion?: number }>(workspaceFixtureKey("fleet-is-101"))
+        ?.desktopCapabilityVersion,
     ).toBe(1);
 
     const legacyID = "fleet-legacy-desktop";
-    storage.seed(`workspace:example-org:alice%40example.com:${legacyID}`, {
-      ...storage.value<Record<string, unknown>>(
-        "workspace:example-org:alice%40example.com:fleet-is-101",
-      ),
+    storage.seed(workspaceFixtureKey(legacyID), {
+      ...storage.value<Record<string, unknown>>(workspaceFixtureKey("fleet-is-101")),
       id: legacyID,
       leaseID: "cbx_legacydesktop",
       desktop: false,
@@ -6481,9 +6517,7 @@ describe("fleet lease identity and idle", () => {
       id: "fleet-maintenance-failure",
       status: "provisioning",
     });
-    expect(
-      storage.value("workspace:example-org:alice%40example.com:fleet-maintenance-failure"),
-    ).toBeDefined();
+    expect(storage.value(workspaceFixtureKey("fleet-maintenance-failure"))).toBeDefined();
   });
 
   it("keeps an organization-wide workspace spare while demand is active", async () => {
@@ -6572,7 +6606,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value<LeaseRecord>(`lease:${warmLeaseID}`)).toMatchObject({
       owner: "bob@example.com",
       providerOwner: "crabbox-internal-prewarm",
-      org: "example-org",
+      org: orgKeyForLabel("example-org"),
       workspaceID: "fleet-prewarm-bob",
     });
 
@@ -6940,11 +6974,11 @@ describe("fleet lease identity and idle", () => {
       "x-crabbox-org": "example-org",
     };
     const now = new Date().toISOString();
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-103", {
+    storage.seed(workspaceFixtureKey("fleet-is-103"), {
       id: "fleet-is-103",
       leaseID: "cbx_abcdef123456",
       owner: "alice@example.com",
-      org: "example-org",
+      org: orgKeyForLabel("example-org"),
       profile: "default",
       provider: "hetzner",
       class: "standard",
@@ -6985,7 +7019,7 @@ describe("fleet lease identity and idle", () => {
     const configuredSecret = "configured-workspace-secret";
     const reflectedSecret = "legacy-workspace-secret";
     const now = new Date().toISOString();
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-redacted", {
+    storage.seed(workspaceFixtureKey("fleet-is-redacted"), {
       id: "fleet-is-redacted",
       leaseID: "cbx_abcdef123456",
       owner: "alice@example.com",
@@ -7043,7 +7077,7 @@ describe("fleet lease identity and idle", () => {
       { CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test" },
     );
     const claimExpiresAt = new Date(Date.now() + 60_000).toISOString();
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-121", {
+    storage.seed(workspaceFixtureKey("fleet-is-121"), {
       id: "fleet-is-121",
       leaseID: "cbx_abcdef123456",
       owner: "alice@example.com",
@@ -7079,7 +7113,7 @@ describe("fleet lease identity and idle", () => {
       { CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test" },
     );
     const now = new Date().toISOString();
-    const workspaceKey = "workspace:example-org:alice%40example.com:fleet-is-123";
+    const workspaceKey = workspaceFixtureKey("fleet-is-123");
     storage.seed(workspaceKey, {
       id: "fleet-is-123",
       leaseID: "cbx_abcdef123456",
@@ -7152,7 +7186,7 @@ describe("fleet lease identity and idle", () => {
       }),
     });
     const old = new Date(Date.now() - 20 * 60_000).toISOString();
-    const workspaceKey = "workspace:example-org:alice%40example.com:fleet-is-124";
+    const workspaceKey = workspaceFixtureKey("fleet-is-124");
     storage.seed(workspaceKey, {
       id: "fleet-is-124",
       leaseID: "cbx_abcdef123456",
@@ -7212,7 +7246,7 @@ describe("fleet lease identity and idle", () => {
       { CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test" },
     );
     const old = new Date(Date.now() - 20 * 60_000).toISOString();
-    const workspaceKey = `workspace:example-org:alice%40example.com:${testCase.id}`;
+    const workspaceKey = workspaceFixtureKey(testCase.id);
     storage.seed(workspaceKey, {
       id: testCase.id,
       leaseID: "cbx_abcdef123456",
@@ -7288,7 +7322,7 @@ describe("fleet lease identity and idle", () => {
     });
     const now = new Date().toISOString();
     const claimExpiresAt = new Date(Date.now() + 60_000).toISOString();
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-125", {
+    storage.seed(workspaceFixtureKey("fleet-is-125"), {
       id: "fleet-is-125",
       leaseID: "cbx_abcdef123456",
       owner: "alice@example.com",
@@ -7336,7 +7370,7 @@ describe("fleet lease identity and idle", () => {
   it("does not start provider provisioning after workspace release wins", async () => {
     const storage = new MemoryStorage();
     let providerCreates = 0;
-    const workspaceKey = "workspace:example-org:alice%40example.com:fleet-is-126";
+    const workspaceKey = workspaceFixtureKey("fleet-is-126");
     const fleet = testFleet(
       storage,
       {
@@ -7387,7 +7421,7 @@ describe("fleet lease identity and idle", () => {
   it("revokes workspace terminals from the shared release transition", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
-    const key = "workspace:example-org:alice%40example.com:fleet-is-127";
+    const key = workspaceFixtureKey("fleet-is-127");
     const now = new Date().toISOString();
     const lease = testLease({
       id: "cbx_abcdef123457",
@@ -7442,7 +7476,7 @@ describe("fleet lease identity and idle", () => {
         CRABBOX_WORKSPACE_SSH_PRIVATE_KEY: "workspace-private-key",
       },
     );
-    const key = "workspace:example-org:alice%40example.com:fleet-is-128";
+    const key = workspaceFixtureKey("fleet-is-128");
     const now = new Date().toISOString();
     const lease = testLease({
       id: "cbx_abcdef123458",
@@ -7492,7 +7526,7 @@ describe("fleet lease identity and idle", () => {
           connection: "upgrade",
           upgrade: "websocket",
           "x-crabbox-owner": lease.owner,
-          "x-crabbox-org": lease.org,
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -7643,9 +7677,7 @@ describe("fleet lease identity and idle", () => {
 
     const pending = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     await expect(pending.json()).resolves.toMatchObject({ status: "provisioning" });
-    const workspace = storage.value<Record<string, unknown>>(
-      "workspace:example-org:alice%40example.com:fleet-is-116",
-    )!;
+    const workspace = storage.value<Record<string, unknown>>(workspaceFixtureKey("fleet-is-116"))!;
     expect(workspace["error"]).toBeUndefined();
     expect(Date.parse(String(workspace["reconcileAfter"]))).toBeGreaterThan(Date.now());
     expect(storage.alarm()).toBe(Date.parse(String(workspace["reconcileAfter"])));
@@ -7664,7 +7696,7 @@ describe("fleet lease identity and idle", () => {
       { CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test" },
     );
     const createdAt = new Date(Date.now() - 16 * 60_000).toISOString();
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-130", {
+    storage.seed(workspaceFixtureKey("fleet-is-130"), {
       id: "fleet-is-130",
       leaseID: "cbx_abcdef123456",
       owner: "alice@example.com",
@@ -7890,7 +7922,7 @@ describe("fleet lease identity and idle", () => {
     );
     const now = new Date().toISOString();
     const expiresAt = new Date(Date.now() - 1_000).toISOString();
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-106", {
+    storage.seed(workspaceFixtureKey("fleet-is-106"), {
       id: "fleet-is-106",
       leaseID,
       owner: "alice@example.com",
@@ -8062,7 +8094,7 @@ describe("fleet lease identity and idle", () => {
     leaseID = pending.providerResourceId;
 
     await fleet.alarm();
-    const workspaceKey = "workspace:example-org:alice%40example.com:fleet-is-112";
+    const workspaceKey = workspaceFixtureKey("fleet-is-112");
     const recovering = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     await expect(recovering.json()).resolves.toMatchObject({
       status: "provisioning",
@@ -8096,6 +8128,121 @@ describe("fleet lease identity and idle", () => {
       status: "stopped",
     });
     expect(providerReleases).toBe(1);
+  });
+
+  it("quarantines legacy workspaces and cleans recoverable and prewarmed resources", async () => {
+    const storage = new MemoryStorage();
+    const now = new Date().toISOString();
+    const legacyOrg = "science_team";
+    const recoveredLeaseID = "cbx_abcdef000001";
+    const prewarmLeaseID = "cbx_abcdef000002";
+    let creates = 0;
+    let recoveries = 0;
+    const releases: string[] = [];
+    const fleet = testFleet(
+      storage,
+      {
+        hetzner: fakeProvider(
+          () => {
+            creates += 1;
+          },
+          {
+            provider: "hetzner",
+            onRecoverServer(lease) {
+              recoveries += 1;
+              expect(lease.id).toBe(recoveredLeaseID);
+              return {
+                provider: "hetzner",
+                id: 777,
+                cloudID: "777",
+                name: "crabbox-legacy-recovery",
+                status: "running",
+                serverType: "cpx62",
+                host: "192.0.2.112",
+                labels: { lease: lease.id },
+              };
+            },
+            onReleaseLease(lease) {
+              releases.push(lease.id);
+            },
+          },
+        ),
+      },
+      {
+        CRABBOX_WORKSPACE_PREWARM_COUNT: "1",
+        CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test",
+      },
+    );
+    const workspace = (id: string, leaseID: string, owner: string, prewarm = false) => ({
+      id,
+      leaseID,
+      owner,
+      org: legacyOrg,
+      profile: "default",
+      provider: "hetzner" as const,
+      class: "standard",
+      desktop: false,
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      createdAt: now,
+      updatedAt: now,
+      ...(prewarm ? { prewarm: true } : {}),
+    });
+    const recoveredWorkspace = workspace("legacy-recovery", recoveredLeaseID, "alice@example.com");
+    const prewarmWorkspace = workspace(
+      "legacy-prewarm",
+      prewarmLeaseID,
+      "prewarm@example.com",
+      true,
+    );
+    const legacyLease = (id: string, workspaceID: string, owner: string) => ({
+      ...testLease({
+        id,
+        workspaceID,
+        owner,
+        state: "active",
+        cloudID: "888",
+        serverID: 888,
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      }),
+      org: legacyOrg,
+    });
+    await Promise.all([
+      storage.put(
+        `workspace:${legacyOrg}:alice%40example.com:${recoveredWorkspace.id}`,
+        recoveredWorkspace,
+      ),
+      storage.put(
+        `workspace:${legacyOrg}:prewarm%40example.com:${prewarmWorkspace.id}`,
+        prewarmWorkspace,
+      ),
+      storage.put(`lease:${recoveredLeaseID}`, {
+        ...legacyLease(recoveredLeaseID, recoveredWorkspace.id, recoveredWorkspace.owner),
+        state: "failed",
+        cloudID: "",
+        serverID: 0,
+        provisioningResourceMayExist: true,
+        provisioningRequestStartedAt: now,
+        cleanupError: "provider response timed out",
+      }),
+      storage.put(
+        `lease:${prewarmLeaseID}`,
+        legacyLease(prewarmLeaseID, prewarmWorkspace.id, prewarmWorkspace.owner),
+      ),
+    ]);
+
+    await fleet.alarm();
+
+    expect(creates).toBe(0);
+    expect(recoveries).toBe(1);
+    expect(releases.toSorted()).toEqual([prewarmLeaseID, recoveredLeaseID].toSorted());
+    expect(storage.value<LeaseRecord>(`lease:${recoveredLeaseID}`)?.state).toBe("released");
+    expect(storage.value<LeaseRecord>(`lease:${prewarmLeaseID}`)?.state).toBe("released");
+    expect(
+      storage.value<{ releaseRequestedAt?: string }>(
+        `workspace:${legacyOrg}:alice%40example.com:${recoveredWorkspace.id}`,
+      )?.releaseRequestedAt,
+    ).toBeDefined();
   });
 
   it("uses provider-owned GCP recovery instead of project-wide label inventory", async () => {
@@ -8145,7 +8292,7 @@ describe("fleet lease identity and idle", () => {
       }),
     });
     const now = new Date().toISOString();
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-gcp-recovery", {
+    storage.seed(workspaceFixtureKey("fleet-is-gcp-recovery"), {
       id: "fleet-is-gcp-recovery",
       leaseID,
       owner: "alice@example.com",
@@ -8598,7 +8745,7 @@ describe("fleet lease identity and idle", () => {
       storage.seed(`lease:${lease.id}`, lease);
       const headers = {
         "x-crabbox-owner": lease.owner,
-        "x-crabbox-org": lease.org,
+        "x-crabbox-org": "example-org",
       };
 
       const retain = await fleet.fetch(
@@ -8654,7 +8801,7 @@ describe("fleet lease identity and idle", () => {
       id: "cbx_abcdef123456",
       workspaceID: "fleet-is-retained",
       owner: "alice@example.com",
-      org: "example-org",
+      org: orgKeyForLabel("example-org"),
       state: "released",
       releaseDeletesServer: false,
       providerKeyCleanupPending: true,
@@ -8664,7 +8811,7 @@ describe("fleet lease identity and idle", () => {
       updatedAt: now,
     });
     storage.seed(`lease:${lease.id}`, lease);
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-retained", {
+    storage.seed(workspaceFixtureKey("fleet-is-retained"), {
       id: "fleet-is-retained",
       leaseID: lease.id,
       owner: lease.owner,
@@ -8846,7 +8993,7 @@ describe("fleet lease identity and idle", () => {
       capabilities: { desktop: false },
     };
     await fleet.fetch(request("POST", "/v1/workspaces", { headers, body }));
-    const workspaceKey = "workspace:example-org:alice%40example.com:fleet-is-119";
+    const workspaceKey = workspaceFixtureKey("fleet-is-119");
 
     await fleet.alarm();
     const recovering = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
@@ -8904,9 +9051,7 @@ describe("fleet lease identity and idle", () => {
       status: "failed",
       message: expect.stringContaining("active lease limit exceeded"),
     });
-    const workspace = storage.value<Record<string, unknown>>(
-      "workspace:example-org:alice%40example.com:fleet-is-118",
-    );
+    const workspace = storage.value<Record<string, unknown>>(workspaceFixtureKey("fleet-is-118"));
     expect(workspace?.["reconcileAfter"]).toBeUndefined();
   });
 
@@ -8916,7 +9061,7 @@ describe("fleet lease identity and idle", () => {
     for (let index = 0; index < 100; index += 1) {
       const id = `fleet-cap-${index}`;
       const leaseID = `cbx_${index.toString(16).padStart(12, "0")}`;
-      storage.seed(`workspace:example-org:alice%40example.com:${id}`, {
+      storage.seed(workspaceFixtureKey(id), {
         id,
         leaseID,
         owner: "alice@example.com",
@@ -8968,11 +9113,11 @@ describe("fleet lease identity and idle", () => {
   it("schedules terminal workspace retention cleanup", async () => {
     const storage = new MemoryStorage();
     const terminalAt = new Date().toISOString();
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-122", {
+    storage.seed(workspaceFixtureKey("fleet-is-122"), {
       id: "fleet-is-122",
       leaseID: "cbx_abcdef123456",
       owner: "alice@example.com",
-      org: "example-org",
+      org: orgKeyForLabel("example-org"),
       profile: "default",
       provider: "hetzner",
       class: "standard",
@@ -8993,7 +9138,7 @@ describe("fleet lease identity and idle", () => {
   it("detaches a retained lease when its terminal workspace record is pruned", async () => {
     const storage = new MemoryStorage();
     const terminalAt = new Date(Date.now() - 25 * 60 * 60_000).toISOString();
-    const workspaceKey = "workspace:example-org:alice%40example.com:fleet-is-131";
+    const workspaceKey = workspaceFixtureKey("fleet-is-131");
     storage.seed(workspaceKey, {
       id: "fleet-is-131",
       leaseID: "cbx_abcdef123456",
@@ -9140,7 +9285,7 @@ describe("fleet lease identity and idle", () => {
     const now = new Date().toISOString();
     const claimExpiresAt = new Date(Date.now() + 60_000).toISOString();
     const expiresAt = new Date(Date.now() + 5_000).toISOString();
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-108", {
+    storage.seed(workspaceFixtureKey("fleet-is-108"), {
       id: "fleet-is-108",
       leaseID,
       owner: "alice@example.com",
@@ -9223,7 +9368,7 @@ describe("fleet lease identity and idle", () => {
       ),
     });
     const now = new Date().toISOString();
-    const workspaceKey = "workspace:example-org:alice%40example.com:fleet-is-109";
+    const workspaceKey = workspaceFixtureKey("fleet-is-109");
     storage.seed(workspaceKey, {
       id: "fleet-is-109",
       leaseID,
@@ -9328,7 +9473,7 @@ describe("fleet lease identity and idle", () => {
       }),
     });
     const old = new Date(Date.now() - 20 * 60_000).toISOString();
-    storage.seed("workspace:example-org:alice%40example.com:fleet-is-129", {
+    storage.seed(workspaceFixtureKey("fleet-is-129"), {
       id: "fleet-is-129",
       leaseID,
       owner: "alice@example.com",
@@ -9395,7 +9540,7 @@ describe("fleet lease identity and idle", () => {
       }),
     });
     const now = new Date().toISOString();
-    const workspaceKey = "workspace:example-org:alice%40example.com:fleet-is-114";
+    const workspaceKey = workspaceFixtureKey("fleet-is-114");
     storage.seed(workspaceKey, {
       id: "fleet-is-114",
       leaseID,
@@ -11396,6 +11541,148 @@ describe("fleet lease identity and idle", () => {
     expect(deleted).toBe("123");
   });
 
+  it("keeps colliding exact org labels isolated across shares, runs, and filters", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000088";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        owner: "owner@example.com",
+        org: "science team",
+        share: { org: "use", users: {} },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const exactOrgHeaders = {
+      "x-crabbox-owner": "member@example.com",
+      "x-crabbox-org": "science team",
+    };
+    const collidingOrgHeaders = {
+      "x-crabbox-owner": "attacker@example.com",
+      "x-crabbox-org": "science_team",
+    };
+
+    const hidden = await fleet.fetch(
+      request("GET", `/v1/leases/${leaseID}`, { headers: collidingOrgHeaders }),
+    );
+    expect(hidden.status).toBe(404);
+    const blockedRun = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers: collidingOrgHeaders,
+        body: { leaseID, command: ["true"] },
+      }),
+    );
+    expect(blockedRun.status).toBe(404);
+
+    const visible = await fleet.fetch(
+      request("GET", `/v1/leases/${leaseID}`, { headers: exactOrgHeaders }),
+    );
+    expect(visible.status).toBe(200);
+    await expect(visible.json()).resolves.toMatchObject({ lease: { org: "science team" } });
+    const run = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers: exactOrgHeaders,
+        body: { leaseID, command: ["true"] },
+      }),
+    );
+    expect(run.status).toBe(201);
+    await expect(run.json()).resolves.toMatchObject({
+      run: {
+        org: "science team",
+        leaseOwners: [{ owner: "owner@example.com", org: "science team" }],
+      },
+    });
+
+    const exactFilter = await fleet.fetch(
+      request("GET", "/v1/leases?org=science%20team", {
+        headers: { ...exactOrgHeaders, "x-crabbox-admin": "true" },
+      }),
+    );
+    await expect(exactFilter.json()).resolves.toMatchObject({ leases: [{ id: leaseID }] });
+    const collidingFilter = await fleet.fetch(
+      request("GET", "/v1/leases?org=science_team", {
+        headers: { ...exactOrgHeaders, "x-crabbox-admin": "true" },
+      }),
+    );
+    await expect(collidingFilter.json()).resolves.toEqual({ leases: [] });
+  });
+
+  it("quarantines legacy org records but preserves admin cleanup", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000087";
+    const legacy = testLease({
+      id: leaseID,
+      owner: "owner@example.com",
+      share: { org: "use", users: { "friend@example.com": "manage" } },
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    legacy.org = "science_team";
+    await storage.put(`lease:${leaseID}`, legacy);
+    const friendHeaders = {
+      "x-crabbox-owner": "friend@example.com",
+      "x-crabbox-org": "science_team",
+    };
+
+    expect(
+      (await fleet.fetch(request("GET", `/v1/leases/${leaseID}`, { headers: friendHeaders })))
+        .status,
+    ).toBe(404);
+    const adminHeaders = { ...friendHeaders, "x-crabbox-admin": "true" };
+    const visible = await fleet.fetch(
+      request("GET", "/v1/admin/leases", { headers: adminHeaders }),
+    );
+    expect(visible.status).toBe(200);
+    await expect(visible.json()).resolves.toMatchObject({
+      leases: [{ id: leaseID, org: "science_team" }],
+    });
+    const filtered = await fleet.fetch(
+      request("GET", "/v1/admin/leases?org=science_team&orgKind=legacy", {
+        headers: adminHeaders,
+      }),
+    );
+    await expect(filtered.json()).resolves.toMatchObject({
+      leases: [{ id: leaseID, org: "science_team" }],
+    });
+    const released = await fleet.fetch(
+      request("POST", `/v1/admin/leases/${leaseID}/release`, {
+        headers: adminHeaders,
+        body: { delete: false },
+      }),
+    );
+    expect(released.status).toBe(200);
+    await expect(released.json()).resolves.toMatchObject({ lease: { state: "released" } });
+  });
+
+  it("does not treat missing org identity as an org share", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000086";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        owner: "owner@example.com",
+        org: MISSING_ORG_KEY,
+        share: { org: "use", users: { "friend@example.com": "use" } },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const missingHeaders = { "x-crabbox-owner": "other@example.com", "x-crabbox-org": "" };
+    const explicitHeaders = { "x-crabbox-owner": "friend@example.com", "x-crabbox-org": "" };
+
+    expect(
+      (await fleet.fetch(request("GET", `/v1/leases/${leaseID}`, { headers: missingHeaders })))
+        .status,
+    ).toBe(404);
+    expect(
+      (await fleet.fetch(request("GET", `/v1/leases/${leaseID}`, { headers: explicitHeaders })))
+        .status,
+    ).toBe(200);
+  });
+
   it("shares leases with explicit users or the owning org", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -11777,7 +12064,7 @@ describe("fleet lease identity and idle", () => {
             agentID: "agent_revoked",
             socket: revokedWebViewer as unknown as WebSocket,
             owner: "revoked@example.com",
-            org: "other-org",
+            org: orgKeyForLabel("other-org"),
             admin: false,
             label: "revoked@example.com",
             connectedAt: new Date().toISOString(),
@@ -11790,7 +12077,7 @@ describe("fleet lease identity and idle", () => {
             agentID: "agent_retained",
             socket: retainedWebViewer as unknown as WebSocket,
             owner: "retained@example.com",
-            org: "other-org",
+            org: orgKeyForLabel("other-org"),
             admin: false,
             label: "retained@example.com",
             connectedAt: new Date().toISOString(),
@@ -11803,7 +12090,7 @@ describe("fleet lease identity and idle", () => {
             agentID: "agent_owner",
             socket: ownerWebViewer as unknown as WebSocket,
             owner: "owner@example.com",
-            org: "example-org",
+            org: orgKeyForLabel("example-org"),
             admin: false,
             label: "owner@example.com",
             connectedAt: new Date().toISOString(),
@@ -12842,7 +13129,7 @@ describe("fleet lease identity and idle", () => {
     await expect(conflictingCreate.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
     expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
       owner: "alice@example.com",
-      org: "example-org",
+      org: orgKeyForLabel("example-org"),
       state: "provisioning",
     });
 
@@ -12851,7 +13138,7 @@ describe("fleet lease identity and idle", () => {
     expect(firstResult.status).toBe(201);
     expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
       owner: "alice@example.com",
-      org: "example-org",
+      org: orgKeyForLabel("example-org"),
       state: "active",
     });
   });
@@ -13414,7 +13701,9 @@ describe("fleet lease identity and idle", () => {
       lastTouchedAt: heartbeatLease.lastTouchedAt,
       expiresAt: heartbeatLease.expiresAt,
     });
-    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toEqual(createdLease);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toEqual(
+      currentOrgFixture(createdLease),
+    );
   });
 
   it("buffers Cloudflare heartbeat bodies before serializing state transitions", async () => {
@@ -16830,6 +17119,76 @@ describe("fleet lease identity and idle", () => {
     expect(hidden.status).toBe(404);
   });
 
+  it("round-trips missing, literal, and legacy org runner links without collisions", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const now = new Date().toISOString();
+    const owner = "alice@example.com";
+    const runner = (org: string, repo: string): ExternalRunnerRecord => ({
+      id: "tbx_same_identity",
+      provider: "blacksmith-testbox",
+      owner,
+      org,
+      status: "ready",
+      repo,
+      firstSeenAt: now,
+      lastSeenAt: now,
+      updatedAt: now,
+    });
+    const records = [
+      runner(MISSING_ORG_KEY, "missing-repo"),
+      runner(orgKeyForLabel("unknown"), "literal-unknown-repo"),
+      runner("science_team", "legacy-repo"),
+      runner(orgKeyForLabel("science_team"), "exact-repo"),
+    ];
+    await Promise.all(
+      records.map((record, index) => storage.put(`runner:identity-${index}`, record)),
+    );
+    const headers = {
+      "x-crabbox-admin": "true",
+      "x-crabbox-owner": owner,
+      "x-crabbox-org": "",
+    };
+
+    const home = await fleet.fetch(request("GET", "/portal", { headers }));
+    expect(home.status).toBe(200);
+    const body = await home.text();
+    expect(body.match(/owner:mine/g)).toHaveLength(1);
+    const links = [...body.matchAll(/href="([^"]*\/tbx_same_identity\?[^"]+)"/g)].map((match) =>
+      match[1].replaceAll("&amp;", "&"),
+    );
+    expect(links).toHaveLength(4);
+
+    const expectedRepos = new Map([
+      ["owner=alice%40example.com&orgKind=missing", "missing-repo"],
+      ["owner=alice%40example.com&org=unknown", "literal-unknown-repo"],
+      ["owner=alice%40example.com&org=science_team&orgKind=legacy", "legacy-repo"],
+      ["owner=alice%40example.com&org=science_team", "exact-repo"],
+    ]);
+    const resolvedLinks = await Promise.all(
+      links.map(async (link) => {
+        const url = new URL(link, "https://crabbox.test");
+        const query = url.searchParams.toString();
+        const expectedRepo = expectedRepos.get(query);
+        if (!expectedRepo) throw new Error(`unexpected runner detail link: ${link}`);
+        const detail = await fleet.fetch(
+          request("GET", `${url.pathname}${url.search}`, { headers }),
+        );
+        expect(detail.status).toBe(200);
+        expect(await detail.text()).toContain(expectedRepo);
+        return query;
+      }),
+    );
+    expect(resolvedLinks.toSorted()).toEqual([...expectedRepos.keys()].toSorted());
+
+    const exactHome = await fleet.fetch(
+      request("GET", "/portal", {
+        headers: { ...headers, "x-crabbox-org": "science_team" },
+      }),
+    );
+    expect((await exactHome.text()).match(/owner:mine/g)).toHaveLength(1);
+  });
+
   it("shows non-owned runner leases only in the admin portal", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -17459,6 +17818,7 @@ describe("fleet lease identity and idle", () => {
       CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
       CRABBOX_PUBLIC_URL: "https://crabbox.test",
       CRABBOX_SHARED_TOKEN: "portal-session-token",
+      CRABBOX_DEFAULT_ORG: "",
     };
     const fleet = testFleet(storage, {}, env);
     const leaseID = "cbx_000000000001";
@@ -17467,7 +17827,7 @@ describe("fleet lease identity and idle", () => {
       authorization: "Bearer portal-session-token",
       "x-crabbox-auth": "bearer",
       "x-crabbox-owner": "alice@example.com",
-      "x-crabbox-org": "example-org",
+      "x-crabbox-org": "",
       "x-crabbox-github-login": "alice",
       "x-crabbox-token-expires-at": tokenExpiresAt,
     };
@@ -17477,7 +17837,7 @@ describe("fleet lease identity and idle", () => {
         id: leaseID,
         slug: "blue-lobster",
         owner: "alice@example.com",
-        org: "example-org",
+        org: MISSING_ORG_KEY,
         code: true,
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
@@ -21873,7 +22233,7 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
-  it("rejects empty artifact authorization identities", async () => {
+  it("keeps missing-org artifact grants distinct from the literal unknown org", async () => {
     const fleet = testFleet(
       new MemoryStorage(),
       {},
@@ -21886,23 +22246,53 @@ describe("fleet lease identity and idle", () => {
         CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY: "super-secret",
       },
     );
-    const grant = async (headers: Record<string, string>) => {
+    const grant = async (org: string) => {
       const response = await fleet.fetch(
         request("POST", "/v1/artifacts/uploads", {
-          headers,
+          headers: { "x-crabbox-owner": "alice", "x-crabbox-org": org },
           body: { files: [{ name: "proof.txt", size: 1 }] },
         }),
       );
-      expect(response.status).toBe(400);
-      return (await response.json()) as { message: string };
+      expect(response.status).toBe(201);
+      return (await response.json()) as { prefix: string };
     };
 
-    await expect(grant({ "x-crabbox-owner": "alice", "x-crabbox-org": "" })).resolves.toMatchObject(
-      { message: "artifact upload organization identity is required" },
+    const missing = await grant("");
+    const literalUnknown = await grant("unknown");
+    expect(missing.prefix).not.toBe(literalUnknown.prefix);
+    expect(missing.prefix).toContain("/org/AA/");
+    expect(literalUnknown.prefix).toContain(
+      `/org/${Buffer.from("unknown").toString("base64url")}/`,
     );
-    await expect(
-      grant({ "x-crabbox-owner": "", "x-crabbox-org": "example-org" }),
-    ).resolves.toMatchObject({ message: "artifact upload owner identity is required" });
+    const missingIdentity = missing.prefix.split("/org/")[1].split("/")[0];
+    const literalIdentity = literalUnknown.prefix.split("/org/")[1].split("/")[0];
+    expect(Buffer.from(missingIdentity, "base64url").toString()).toBe("\0");
+    expect(Buffer.from(literalIdentity, "base64url").toString()).toBe("unknown");
+  });
+
+  it("rejects an empty artifact owner identity", async () => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_ARTIFACTS_BACKEND: "r2",
+        CRABBOX_ARTIFACTS_BUCKET: "qa-artifacts",
+        CRABBOX_ARTIFACTS_ENDPOINT_URL: "https://account.r2.cloudflarestorage.com",
+        CRABBOX_ARTIFACTS_ACCESS_KEY_ID: "access-key",
+        CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY: "super-secret",
+      },
+    );
+    const response = await fleet.fetch(
+      request("POST", "/v1/artifacts/uploads", {
+        headers: { "x-crabbox-owner": "", "x-crabbox-org": "example-org" },
+        body: { files: [{ name: "proof.txt", size: 1 }] },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      message: "artifact upload owner identity is required",
+    });
   });
 
   it("reports artifact broker setup errors without provider-specific local credentials", async () => {
@@ -22612,8 +23002,8 @@ describe("fleet run history", () => {
     expect(storage.value<RunRecord>("run:run_000000000001")).toMatchObject({
       leaseIDs: ["cbx_000000000001", "cbx_000000000002"],
       leaseOwners: [
-        { owner: "alice@example.com", org: "example-org" },
-        { owner: "bob@example.com", org: "elsewhere" },
+        { owner: "alice@example.com", org: orgKeyForLabel("example-org") },
+        { owner: "bob@example.com", org: orgKeyForLabel("elsewhere") },
       ],
     });
   });
@@ -22651,7 +23041,7 @@ describe("fleet run history", () => {
     expect(storage.value<RunRecord>("run:run_000000000001")).toMatchObject({
       leaseID: "cbx_000000000001",
       leaseIDs: ["cbx_000000000001"],
-      leaseOwners: [{ owner: "alice@example.com", org: "example-org" }],
+      leaseOwners: [{ owner: "alice@example.com", org: orgKeyForLabel("example-org") }],
     });
   });
 
@@ -25400,7 +25790,7 @@ function workerCloudReleaseCases() {
 }
 
 function testLease(overrides: Partial<LeaseRecord>): LeaseRecord {
-  return {
+  return currentOrgFixture({
     id: "cbx_000000000000",
     slug: "blue-lobster",
     provider: "hetzner",
@@ -25427,7 +25817,7 @@ function testLease(overrides: Partial<LeaseRecord>): LeaseRecord {
     updatedAt: "2026-05-01T00:00:00.000Z",
     expiresAt: "2026-05-01T01:30:00.000Z",
     ...overrides,
-  };
+  });
 }
 
 type CodePortalRuntime = {
@@ -25523,7 +25913,7 @@ function inlineScript(page: string, marker: string): string {
 }
 
 function testRun(overrides: Partial<RunRecord>): RunRecord {
-  return {
+  return currentOrgFixture({
     id: "run_000000000000",
     leaseID: "cbx_000000000000",
     owner: "peter@example.com",
@@ -25537,7 +25927,7 @@ function testRun(overrides: Partial<RunRecord>): RunRecord {
     logTruncated: false,
     startedAt: "2026-05-01T00:00:00.000Z",
     ...overrides,
-  };
+  });
 }
 
 function request(

@@ -71,6 +71,10 @@ func EnsureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, erro
 }
 
 func syncStoredTestboxKey(leaseID string) error {
+	return syncStoredTestboxKeyWithSync(leaseID, syncControllerDirectory)
+}
+
+func syncStoredTestboxKeyWithSync(leaseID string, syncDirectory func(string) error) error {
 	privatePath, err := testboxKeyPath(leaseID)
 	if err != nil {
 		return err
@@ -88,7 +92,31 @@ func syncStoredTestboxKey(leaseID string) error {
 			return err
 		}
 	}
-	return syncControllerDirectoryAncestors(filepath.Dir(privatePath))
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return exit(2, "user config directory is unavailable")
+	}
+	return syncTestboxKeyDirectoriesWithSync(filepath.Dir(privatePath), configDir, syncDirectory)
+}
+
+func syncTestboxKeyDirectoriesWithSync(keyDir, configDir string, syncDirectory func(string) error) error {
+	keyDir = filepath.Clean(keyDir)
+	configDir = filepath.Clean(configDir)
+	relative, err := filepath.Rel(configDir, keyDir)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return exit(2, "testbox key directory %s is outside user config directory %s", keyDir, configDir)
+	}
+	for current := keyDir; ; current = filepath.Dir(current) {
+		if err := syncDirectory(current); err != nil {
+			return exit(2, "sync testbox key directory %s: %v", current, err)
+		}
+		if current == configDir {
+			return nil
+		}
+		if parent := filepath.Dir(current); parent == current {
+			return exit(2, "sync testbox key directory: boundary %s is not an ancestor of %s", configDir, keyDir)
+		}
+	}
 }
 
 func SyncStoredTestboxKey(leaseID string) error {

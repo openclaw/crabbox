@@ -115,6 +115,8 @@ Leases are attributed to an owner and an org. The broker resolves them by token 
 - **Shared token** (`CRABBOX_SHARED_TOKEN`) — owner is a verified Access JWT email if present,
   else `CRABBOX_SHARED_OWNER`, else `unknown`; org is `CRABBOX_DEFAULT_ORG`, else `unknown`.
   The `X-Crabbox-Owner` / `X-Crabbox-Org` headers are not honored for shared-token requests.
+- A missing org displays as `unknown` but uses a distinct accounting identity from an org
+  explicitly configured with the label `unknown`.
 - Raw Cloudflare Access identity headers are ignored; only a verified Access JWT email
   (validated against `CRABBOX_ACCESS_TEAM_DOMAIN` / `CRABBOX_ACCESS_AUD`) can become the
   bearer-token owner.

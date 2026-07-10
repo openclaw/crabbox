@@ -10,6 +10,7 @@ import {
 import { codeProxyRequestBodyBytes, isIsolatedCodeRequest } from "./code-origin";
 import { cookieValue } from "./cookies";
 import { bearerToken, json, pathParts } from "./http";
+import { InvalidOrgLabelError, orgKeyForLabel } from "./org-identity";
 import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";
@@ -89,13 +90,11 @@ export async function prepareCoordinatorRequest(
   }
   const runtimeAdapterAuth = runtimeAdapterServiceAuth(request, env, route);
   if (runtimeAdapterAuth) {
-    return {
-      request: await requestWithAdminGrantVersion(
-        requestWithAuthContext(requestWithoutTrustedHeaders(request), runtimeAdapterAuth),
-        env,
-      ),
-      authenticated: true,
-    };
+    return await authenticatedCoordinatorRequest(
+      requestWithoutTrustedHeaders(request),
+      runtimeAdapterAuth,
+      env,
+    );
   }
   const portal = url.pathname.startsWith("/portal");
   if (portal && !portalCookieRequestIntentAllowed(request, env, url)) {
@@ -132,8 +131,29 @@ export async function prepareCoordinatorRequest(
       authenticated: false,
     };
   }
+  return await authenticatedCoordinatorRequest(authRequest, auth, env);
+}
+
+async function authenticatedCoordinatorRequest(
+  request: Request,
+  auth: AuthContext,
+  env: Env,
+): Promise<PreparedCoordinatorRequest> {
+  try {
+    if (auth.org) {
+      orgKeyForLabel(auth.org);
+    }
+  } catch (error) {
+    if (!(error instanceof InvalidOrgLabelError)) {
+      throw error;
+    }
+    return {
+      response: json({ error: "invalid_org_identity", message: error.message }, { status: 503 }),
+      authenticated: false,
+    };
+  }
   return {
-    request: await requestWithAdminGrantVersion(requestWithAuthContext(authRequest, auth), env),
+    request: await requestWithAdminGrantVersion(requestWithAuthContext(request, auth), env),
     authenticated: true,
   };
 }

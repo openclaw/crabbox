@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a Unikraft Cloud service-control provider for claimed OCI-image instances, with endpoint- and instance-bound ownership, guarded cleanup, and live create/status/list/stop verification. Thanks @zozo123.
 - Added capability-aware AWS image promotion and lease selection by minimum OS, SDK/runtime versions, browser, WebView2, and desktop support, with fail-before-lease rejection when no promoted image satisfies every requirement.
 - Added provider-neutral Ed25519-signed run receipts through `crabbox run --attest` and integrity verification through `crabbox verify`, with collision-safe signing-key handling and explicit self-signed trust reporting. Thanks @yetval.
 - Documented a provider-neutral hermetic-agent evidence pattern with separate writer contexts, QA arbitration, required proof artifacts, and sync-safe local downloads. Thanks @zozo123.
@@ -14,6 +15,9 @@
 
 ### Fixed
 
+- Kept AWS developer-image minting compatible with macOS system Bash when AWS region selection is automatic.
+- Preserved exact coordinator organization identities in collision-free authorization keys, preventing distinct labels from sharing leases, runs, bridges, workspaces, runners, or usage limits after lossy normalization. Ambiguous legacy records now fail closed for non-admin access while remaining available for admin cleanup. Thanks @coygeek.
+- Confined Nomad API redirects to the configured scheme, hostname, and effective port before replaying ACL tokens or request bodies, while keeping rejected Location secrets out of diagnostics. Thanks @coygeek.
 - Launched native Windows desktop apps directly in the active interactive session without scheduled tasks, waiting for a visible window and reporting its process ID, session, and title.
 - Unified direct macOS WebVNC with the authenticated portal: Tart and Parallels viewers now use the same chrome and controls as Linux and Windows when coordinator login is configured, with provider-lifetime registration and the local viewer retained as the offline fallback.
 - Replaced WebVNC password and username URL fragments with one-time credential handoff tickets, and made repeated `--open` calls reuse and focus the existing lease viewer tab when the browser supports cross-tab handoff.

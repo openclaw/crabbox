@@ -704,7 +704,25 @@ func mutateLeaseClaimGuarded(leaseID string, guard func(leaseClaim, bool) error,
 }
 
 func mutateLeaseClaimGuardedDurable(leaseID string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error) error {
-	return mutateLeaseClaimGuardedWithWrite(leaseID, guard, mutate, writeLeaseClaimAtomicDurable)
+	return mutateLeaseClaimGuardedDurableWithSync(leaseID, guard, mutate, syncControllerDirectory)
+}
+
+func mutateLeaseClaimGuardedDurableWithSync(leaseID string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error, syncDirectory func(string) error) error {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	firstExistingDir, err := nearestExistingClaimDirectory(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return exit(2, "create claim directory: %v", err)
+	}
+	return mutateLeaseClaimPathGuardedWithWrite(leaseID, path, guard, mutate, func(path string, claim leaseClaim) error {
+		return writeLeaseClaimAtomicDurableWithSync(path, claim, firstExistingDir, syncDirectory)
+	})
 }
 
 func mutateLeaseClaimGuardedWithWrite(leaseID string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error, write func(string, leaseClaim) error) error {
@@ -715,6 +733,10 @@ func mutateLeaseClaimGuardedWithWrite(leaseID string, guard func(leaseClaim, boo
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return exit(2, "create claim directory: %v", err)
 	}
+	return mutateLeaseClaimPathGuardedWithWrite(leaseID, path, guard, mutate, write)
+}
+
+func mutateLeaseClaimPathGuardedWithWrite(leaseID, path string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error, write func(string, leaseClaim) error) error {
 	return withLeaseClaimLock(path, func() error {
 		claim, exists, err := readLeaseClaimPathWithPresence(path)
 		if err != nil {
@@ -769,7 +791,10 @@ func leaseClaimLockPath(path string) (string, error) {
 }
 
 func writeLeaseClaimAtomic(path string, claim leaseClaim) error {
-	return writeLeaseClaimAtomicWithSync(path, claim, syncControllerDirectory)
+	return writeLeaseClaimAtomicWithSync(path, claim, func(dir string) error {
+		fsyncDir(dir)
+		return nil
+	})
 }
 
 func writeLeaseClaimAtomicWithSync(path string, claim leaseClaim, syncDirectory func(string) error) error {
@@ -817,31 +842,51 @@ func writeLeaseClaimAtomicWithSync(path string, claim leaseClaim, syncDirectory 
 }
 
 func writeLeaseClaimAtomicDurable(path string, claim leaseClaim) error {
-	return writeLeaseClaimAtomicDurableWithSync(path, claim, syncControllerDirectory)
+	return writeLeaseClaimAtomicDurableWithSync(path, claim, filepath.Dir(path), syncControllerDirectory)
 }
 
-func writeLeaseClaimAtomicDurableWithSync(path string, claim leaseClaim, syncDirectory func(string) error) error {
+func writeLeaseClaimAtomicDurableWithSync(path string, claim leaseClaim, firstExistingDir string, syncDirectory func(string) error) error {
 	if err := writeLeaseClaimAtomicWithSync(path, claim, syncDirectory); err != nil {
 		return err
 	}
-	return syncControllerDirectoryAncestorsWithSync(filepath.Dir(filepath.Dir(path)), syncDirectory)
+	return syncCreatedClaimDirectoryParentsWithSync(filepath.Dir(path), firstExistingDir, syncDirectory)
 }
 
-func syncControllerDirectoryAncestors(start string) error {
-	return syncControllerDirectoryAncestorsWithSync(start, syncControllerDirectory)
-}
-
-func syncControllerDirectoryAncestorsWithSync(start string, syncDirectory func(string) error) error {
-	dir := filepath.Clean(start)
-	for {
-		if err := syncDirectory(dir); err != nil {
-			return err
+func nearestExistingClaimDirectory(dir string) (string, error) {
+	dir = filepath.Clean(dir)
+	for current := dir; ; current = filepath.Dir(current) {
+		info, err := os.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				return "", exit(2, "create claim directory: %s is not a directory", current)
+			}
+			return current, nil
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", exit(2, "inspect claim directory %s: %v", current, err)
+		}
+		if parent := filepath.Dir(current); parent == current {
+			return "", exit(2, "create claim directory: no existing ancestor for %s", dir)
+		}
+	}
+}
+
+func syncCreatedClaimDirectoryParentsWithSync(claimDir, firstExistingDir string, syncDirectory func(string) error) error {
+	claimDir = filepath.Clean(claimDir)
+	firstExistingDir = filepath.Clean(firstExistingDir)
+	if claimDir == firstExistingDir {
+		return nil
+	}
+	for current := filepath.Dir(claimDir); ; current = filepath.Dir(current) {
+		if err := syncDirectory(current); err != nil {
+			return exit(2, "sync claim namespace parent %s: %v", current, err)
+		}
+		if current == firstExistingDir {
 			return nil
 		}
-		dir = parent
+		if parent := filepath.Dir(current); parent == current {
+			return exit(2, "sync claim namespace: boundary %s is not an ancestor of %s", firstExistingDir, claimDir)
+		}
 	}
 }
 

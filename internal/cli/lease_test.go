@@ -55,6 +55,40 @@ func TestSyncAndRemoveStoredTestboxKey(t *testing.T) {
 	}
 }
 
+func TestSyncStoredTestboxKeyStopsAtUserConfigBoundary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const leaseID = "cbx_bounded_key_sync"
+	keyPath, _, err := ensureTestboxKey(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var synced []string
+	if err := syncStoredTestboxKeyWithSync(leaseID, func(dir string) error {
+		synced = append(synced, filepath.Clean(dir))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		filepath.Dir(keyPath),
+		filepath.Dir(filepath.Dir(keyPath)),
+		filepath.Dir(filepath.Dir(filepath.Dir(keyPath))),
+		filepath.Clean(configDir),
+	}
+	if len(synced) != len(want) {
+		t.Fatalf("synced=%q want=%q", synced, want)
+	}
+	for index := range want {
+		if synced[index] != filepath.Clean(want[index]) {
+			t.Fatalf("synced=%q want=%q", synced, want)
+		}
+	}
+}
+
 func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

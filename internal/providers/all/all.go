@@ -68,6 +68,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/tencentcloud"
 	_ "github.com/openclaw/crabbox/internal/providers/tenki"
 	_ "github.com/openclaw/crabbox/internal/providers/tensorlake"
+	_ "github.com/openclaw/crabbox/internal/providers/unikraftcloud"
 	_ "github.com/openclaw/crabbox/internal/providers/upstashbox"
 	_ "github.com/openclaw/crabbox/internal/providers/vast"
 	_ "github.com/openclaw/crabbox/internal/providers/vercelsandbox"

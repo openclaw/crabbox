@@ -979,6 +979,20 @@
     "caveat": "Does not expose raw Firecracker provisioning",
     "docs": "tensorlake.md"
   },
+  "unikraft-cloud": {
+    "status": "built-in",
+    "category": "service-control",
+    "substrate": "Unikraft Cloud microVM service",
+    "location": "provider-managed",
+    "ssh": "no",
+    "sync": "none",
+    "gpu": "unknown",
+    "lifecycle": "Crabbox claim plus Unikraft Cloud instance",
+    "cleanup": "claimed instance stop and delete",
+    "bestFit": "Running a prebuilt OCI image as a cloud microVM service",
+    "caveat": "No SSH, workspace sync, or arbitrary command execution; package the app as an OCI image first",
+    "docs": "unikraft-cloud.md"
+  },
   "upstash-box": {
     "status": "built-in",
     "category": "delegated-sandbox",

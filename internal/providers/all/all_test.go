@@ -1316,6 +1316,7 @@ func allBuiltInProviderNames() []string {
 		"tencentcloud",
 		"tenki",
 		"tensorlake",
+		"unikraft-cloud",
 		"upstash-box",
 		"vast",
 		"vercel-sandbox",
