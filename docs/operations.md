@@ -415,9 +415,9 @@ CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for SSH-based terminal attachment; un
 CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; hetzner, aws, azure, or gcp
 CRABBOX_WORKSPACE_CLASS           optional workspace machine class; default standard
 CRABBOX_WORKSPACE_PREWARM_COUNT   optional ready spares per active organization; default 0, maximum 4
-CRABBOX_RUNTIME_ADAPTER_TOKEN     route-scoped workspace API bearer
-CRABBOX_RUNTIME_ADAPTER_OWNER     stable service owner for that bearer
-CRABBOX_RUNTIME_ADAPTER_ORG       stable organization for that bearer
+CRABBOX_RUNTIME_ADAPTER_TOKEN     route-scoped workspace API credential
+CRABBOX_RUNTIME_ADAPTER_OWNER     stable service owner for route-scoped access
+CRABBOX_RUNTIME_ADAPTER_ORG       stable organization for route-scoped access
 DAYTONA_CRABBOX_KEY               required for brokered Daytona leases
 CRABBOX_DAYTONA_*                 optional Daytona API, snapshot, target, user, work-root, and SSH-token settings
 CRABBOX_RUN_RETENTION_DAYS        terminal run history retention; default 30 days, minimum 1
