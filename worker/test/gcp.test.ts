@@ -297,6 +297,27 @@ describe("gcp provider", () => {
     expect(authorizations).toEqual(["Bearer fresh-token"]);
   });
 
+  it("keeps service account key tokens until the one-minute cache boundary", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "cached-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 120,
+    };
+    const calls: Array<{ url: string; authorization: string }> = [];
+    client.fetcher = async (input, init) => {
+      calls.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get("Authorization") ?? "",
+      });
+      return Response.json({ items: {} });
+    };
+
+    await expect(client.listCrabboxServers()).resolves.toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toContain("/aggregated/instances");
+    expect(calls[0]?.authorization).toBe("Bearer cached-token");
+  });
+
   it("rejects partial service account key credentials", () => {
     expect(() => new GCPClient({ ...env, GCP_PRIVATE_KEY: "" })).toThrow(
       "GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY must be configured together",

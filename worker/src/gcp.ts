@@ -27,7 +27,8 @@ const firewallVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
 const metadataTokenBackoffMs = [1_000, 2_000, 4_000, 8_000, 16_000, 28_000];
 const metadataTokenDeadlineMs = 60_000;
 const metadataTokenRequestTimeoutMs = 5_000;
-const tokenRefreshSkewSeconds = 300;
+const metadataTokenRefreshSkewSeconds = 300;
+const serviceAccountTokenRefreshSkewSeconds = 60;
 
 interface TokenCache {
   token: string;
@@ -667,10 +668,15 @@ export class GCPClient {
 
   private async accessToken(): Promise<string> {
     const now = Math.trunc(Date.now() / 1000);
-    if (this.cache && this.cache.expiresAt - tokenRefreshSkewSeconds > now) {
+    const credentialSource = gcpCredentialSource(this.env);
+    const refreshSkewSeconds =
+      credentialSource === "metadata"
+        ? metadataTokenRefreshSkewSeconds
+        : serviceAccountTokenRefreshSkewSeconds;
+    if (this.cache && this.cache.expiresAt - refreshSkewSeconds > now) {
       return this.cache.token;
     }
-    if (gcpCredentialSource(this.env) === "metadata") {
+    if (credentialSource === "metadata") {
       return this.metadataAccessToken();
     }
     const assertion = await serviceAccountAssertion(this.env, now);
