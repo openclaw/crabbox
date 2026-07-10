@@ -180,6 +180,7 @@ type Config struct {
 	ExeDev                        ExeDevConfig
 	Railway                       RailwayConfig
 	FastAPICloud                  FastAPICloudConfig
+	UnikraftCloud                 UnikraftCloudConfig
 	Runpod                        RunpodConfig
 	Vast                          VastConfig
 	vastWorkRootExplicit          bool
@@ -679,6 +680,14 @@ type FastAPICloudConfig struct {
 	APIURL string
 	AppID  string
 	TeamID string
+}
+
+type UnikraftCloudConfig struct {
+	APIKey   string
+	APIURL   string
+	Metro    string
+	Image    string
+	MemoryMB int
 }
 
 type RunpodConfig struct {
@@ -2884,6 +2893,9 @@ func baseConfig() Config {
 		FastAPICloud: FastAPICloudConfig{
 			APIURL: "https://api.fastapicloud.com/api/v1",
 		},
+		UnikraftCloud: UnikraftCloudConfig{
+			Metro: "fra",
+		},
 		Runpod: RunpodConfig{
 			APIURL:     "https://rest.runpod.io/v1",
 			CloudType:  "SECURE",
@@ -3234,6 +3246,7 @@ type fileConfig struct {
 	ExeDev                   *fileExeDevConfig                   `yaml:"exeDev,omitempty"`
 	Railway                  *fileRailwayConfig                  `yaml:"railway,omitempty"`
 	FastAPICloud             *fileFastAPICloudConfig             `yaml:"fastapiCloud,omitempty"`
+	UnikraftCloud            *fileUnikraftCloudConfig            `yaml:"unikraftCloud,omitempty"`
 	Runpod                   *fileRunpodConfig                   `yaml:"runpod,omitempty"`
 	Vast                     *fileVastConfig                     `yaml:"vast,omitempty"`
 	NvidiaBrev               *fileNvidiaBrevConfig               `yaml:"nvidiaBrev,omitempty"`
@@ -3838,6 +3851,14 @@ type fileFastAPICloudConfig struct {
 	APIURL string `yaml:"apiUrl,omitempty"`
 	AppID  string `yaml:"appId,omitempty"`
 	TeamID string `yaml:"teamId,omitempty"`
+}
+
+type fileUnikraftCloudConfig struct {
+	APIKey   string `yaml:"apiKey,omitempty"`
+	APIURL   string `yaml:"apiUrl,omitempty"`
+	Metro    string `yaml:"metro,omitempty"`
+	Image    string `yaml:"image,omitempty"`
+	MemoryMB int    `yaml:"memoryMB,omitempty"`
 }
 
 type fileRunpodConfig struct {
@@ -6270,6 +6291,25 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.FastAPICloud.TeamID = file.FastAPICloud.TeamID
 		}
 	}
+	if file.UnikraftCloud != nil {
+		if file.UnikraftCloud.APIKey != "" {
+			cfg.UnikraftCloud.APIKey = file.UnikraftCloud.APIKey
+			cfg.credentialProvenance.unikraftCloudAPIKey = credentialSource
+		}
+		if file.UnikraftCloud.APIURL != "" {
+			cfg.UnikraftCloud.APIURL = file.UnikraftCloud.APIURL
+			cfg.credentialProvenance.unikraftCloudAPIURL = credentialSource
+		}
+		if file.UnikraftCloud.Metro != "" {
+			cfg.UnikraftCloud.Metro = file.UnikraftCloud.Metro
+		}
+		if file.UnikraftCloud.Image != "" {
+			cfg.UnikraftCloud.Image = file.UnikraftCloud.Image
+		}
+		if file.UnikraftCloud.MemoryMB > 0 {
+			cfg.UnikraftCloud.MemoryMB = file.UnikraftCloud.MemoryMB
+		}
+	}
 	if file.Runpod != nil {
 		if file.Runpod.APIURL != "" {
 			cfg.Runpod.APIURL = file.Runpod.APIURL
@@ -8473,6 +8513,16 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.FastAPICloud.AppID = getenv("CRABBOX_FASTAPI_CLOUD_APP_ID", getenv("FASTAPI_CLOUD_APP_ID", cfg.FastAPICloud.AppID))
 	cfg.FastAPICloud.TeamID = getenv("CRABBOX_FASTAPI_CLOUD_TEAM_ID", getenv("FASTAPI_CLOUD_TEAM_ID", cfg.FastAPICloud.TeamID))
+	if value, ok := firstNonEmptyEnv("CRABBOX_UNIKRAFT_CLOUD_API_KEY", "UNIKRAFT_CLOUD_API_KEY", "UKC_API_KEY", "UKC_TOKEN"); ok {
+		cfg.UnikraftCloud.APIKey = value
+		cfg.credentialProvenance.unikraftCloudAPIKey = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_UNIKRAFT_CLOUD_API_URL", "UNIKRAFT_CLOUD_API_URL"); ok {
+		cfg.UnikraftCloud.APIURL = value
+		cfg.credentialProvenance.unikraftCloudAPIURL = credentialSourceEnvironment
+	}
+	cfg.UnikraftCloud.Metro = getenv("CRABBOX_UNIKRAFT_CLOUD_METRO", getenv("UNIKRAFT_CLOUD_METRO", getenv("UKC_METRO", cfg.UnikraftCloud.Metro)))
+	cfg.UnikraftCloud.Image = getenv("CRABBOX_UNIKRAFT_CLOUD_IMAGE", getenv("UNIKRAFT_CLOUD_IMAGE", cfg.UnikraftCloud.Image))
 	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_KEY", "RUNPOD_API_KEY"); ok {
 		cfg.Runpod.APIKey = value
 		cfg.credentialProvenance.runpodAPIKey = credentialSourceEnvironment
