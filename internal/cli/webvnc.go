@@ -4696,22 +4696,13 @@ func startWebVNCPortalBootstrapHandoff(action, ticket string) (*webVNCPortalBoot
 	if err != nil {
 		return nil, err
 	}
-	dir, err := os.MkdirTemp("", "crabbox-webvnc-bootstrap-*")
+	dir, path, file, err := createWebVNCPortalBootstrapFile()
 	if err != nil {
 		return nil, err
 	}
 	cleanup := func() {
+		_ = file.Close()
 		_ = os.RemoveAll(dir)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		cleanup()
-		return nil, err
-	}
-	path := filepath.Join(dir, "open.html")
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		cleanup()
-		return nil, err
 	}
 	actionOrigin := actionURL.Scheme + "://" + actionURL.Host
 	body := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="` +
@@ -4724,12 +4715,10 @@ func startWebVNCPortalBootstrapHandoff(action, ticket string) (*webVNCPortalBoot
 		nonce +
 		`">document.getElementById("webvnc-bootstrap").requestSubmit();</script></body></html>`
 	if _, err := io.WriteString(file, body); err != nil {
-		_ = file.Close()
 		cleanup()
 		return nil, err
 	}
 	if err := file.Sync(); err != nil {
-		_ = file.Close()
 		cleanup()
 		return nil, err
 	}

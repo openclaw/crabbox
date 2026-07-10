@@ -58,8 +58,9 @@ expected PID, unrelated listener, or unauthenticated endpoint never receives a
 password probe or handoff.
 
 When the CLI is authenticated with a coordinator bearer token, `--open` mints a
-second one-use ticket for the Portal viewer itself. The CLI opens only a random
-localhost URL; that loopback page submits the opaque ticket in a POST body.
+second one-use ticket for the Portal viewer itself. The CLI writes a private
+temporary HTML file and opens its random `file:` URL; that file-origin page
+submits the opaque ticket in a POST body.
 The coordinator consumes it once and creates a short-lived, lease-scoped
 viewer-only session. This path does not start GitHub OAuth and does not place
 the bearer, viewer ticket, coordinator viewer URL, or VNC credential in the
@@ -336,10 +337,11 @@ instead of granting general passwordless sudo.
 For a password-authenticated coordinator bridge, `--open` opens the portal page
 after the bridge starts. When the CLI uses a shared/admin coordinator bearer,
 it sends any VNC credential handoff and the viewer bootstrap over authenticated
-API requests, opens a random localhost URL, and transfers only the opaque
-viewer ticket in a browser POST body. The resulting cookie is non-persistent,
-viewer-only, and scoped to one lease's WebVNC path. The credential handoff stays
-server-side until that session consumes it once.
+API requests, writes a private temporary HTML file, and opens only its random
+`file:` URL. The file-origin page transfers the opaque viewer ticket in a
+browser POST body. The resulting cookie is non-persistent, viewer-only, and
+scoped to one lease's WebVNC path. The credential handoff stays server-side
+until that session consumes it once.
 
 GitHub-authenticated human Portal sessions retain the existing behavior: a
 short-lived, one-use credential handoff ticket may travel in the URL fragment,

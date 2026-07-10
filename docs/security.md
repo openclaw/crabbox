@@ -127,13 +127,16 @@ API request mints a 120-second, one-use opaque viewer ticket bound to the exact
 lease, owner, org, bearer credential hash or admin grant version, and current
 lease ACL. GitHub user tokens cannot mint this Agent bootstrap.
 
-The CLI opens only a random `127.0.0.1` URL. That one-use loopback page submits
-the opaque ticket to the coordinator in a form POST body, so the bearer, ticket,
-coordinator viewer URL, and VNC credential do not enter browser URLs, fragments,
-process arguments, or CLI output. The coordinator consumes the ticket before
-validation returns and creates a non-persistent HttpOnly cookie scoped to the
-selected lease's `/vnc` path. Server-side expiry is at most 30 minutes and is
-also capped by the originating token's expiry.
+The CLI writes a private temporary HTML file and opens only its random `file:`
+URL. The file-origin page submits the opaque ticket to the coordinator in a
+form POST body, so the bearer, ticket, coordinator viewer URL, and VNC
+credential do not enter browser URLs, fragments, process arguments, or CLI
+output. On Windows, the temporary directory and file use a protected DACL
+limited to the current user; other platforms use mode `0700`/`0600`. The
+coordinator consumes the ticket before validation returns and creates a
+non-persistent HttpOnly cookie scoped to the selected lease's `/vnc` path.
+Server-side expiry is at most 30 minutes and is also capped by the originating
+token's expiry.
 
 This cookie represents only a WebVNC viewer principal. It cannot become
 `crabbox_session`, access the Portal index, share or release a lease, show bridge
@@ -344,9 +347,9 @@ the request origin when no public URL is configured). Missing or sibling-origin
 intent is rejected before the portal cookie is converted into bearer authority;
 explicit bearer API clients remain independent of this browser-only boundary.
 The one-use WebVNC bootstrap POST is the narrow exception: it arrives from the
-CLI's loopback page without a Portal cookie and authorizes only by consuming the
-opaque, lease-bound ticket. Subsequent scoped-cookie mutations and viewer
-upgrades return to the exact same-origin requirement.
+CLI's file-origin bootstrap page without a Portal cookie and authorizes only by
+consuming the opaque, lease-bound ticket. Subsequent scoped-cookie mutations
+and viewer upgrades return to the exact same-origin requirement.
 Portal logout follows the same boundary: `GET /portal/logout` only renders a
 confirmation page, and only a same-origin `POST` clears the portal cookie and
 revokes all WebVNC, Code, and mediated-egress bridges bound to that portal

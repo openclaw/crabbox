@@ -95,12 +95,13 @@ scopes every page to that identity.
 
 Agent/CLI WebVNC `--open` has a narrower non-OAuth entrypoint. An authenticated
 shared/admin bearer request can mint a 120-second, one-use opaque viewer ticket
-for one visible desktop lease. The CLI opens a random localhost URL, whose page
-submits that ticket to `/vnc/bootstrap` in a POST body. Consumption binds a
-non-persistent `crabbox_webvnc_session` cookie to that lease's `/vnc` path and a
-server-side lifetime of at most 30 minutes. The stored principal uses the same
-owner/org, shared-token or admin-grant version, grant revocation, and lease ACL
-checks as existing Portal and bridge sessions.
+for one visible desktop lease. The CLI writes a private temporary HTML file and
+opens its random `file:` URL; that file-origin page submits the ticket to
+`/vnc/bootstrap` in a POST body. Consumption binds a non-persistent
+`crabbox_webvnc_session` cookie to that lease's `/vnc` path and a server-side
+lifetime of at most 30 minutes. The stored principal uses the same owner/org,
+shared-token or admin-grant version, grant revocation, and lease ACL checks as
+existing Portal and bridge sessions.
 
 The scoped WebVNC cookie is not a Portal login. It can reach only the viewer
 page, viewer WebSocket, status, control, theme, and its one-use server-bound
