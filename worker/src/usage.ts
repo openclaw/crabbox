@@ -1,4 +1,7 @@
+import { orgLabelForDisplay, orgMatchesForAccounting, orgMatchesForFilter } from "./org-identity";
 import type { Env, LeaseRecord, Provider } from "./types";
+
+export { requestOrg, requestOrgKey, requestOrgLabel } from "./org-identity";
 
 export interface LeaseCost {
   hourlyUSD: number;
@@ -72,17 +75,6 @@ const defaultHourlyUSD: Record<string, number> = {
   "aws:c7a.48xlarge": 9.0,
 };
 
-export function requestOrg(request: Request, env: Pick<Env, "CRABBOX_DEFAULT_ORG">): string {
-  const header = request.headers.get("x-crabbox-org")?.trim();
-  if (header) {
-    return sanitizeOrg(header);
-  }
-  if (env.CRABBOX_DEFAULT_ORG) {
-    return sanitizeOrg(env.CRABBOX_DEFAULT_ORG);
-  }
-  return "unknown";
-}
-
 export function leaseCost(
   env: Pick<Env, "CRABBOX_COST_RATES_JSON">,
   provider: Provider,
@@ -121,7 +113,7 @@ export function enforceCostLimits(
   const managedLeases = leases.filter(isManagedLease);
   const active = managedLeases.filter((lease) => isActiveLease(lease, now));
   const ownerActive = active.filter((lease) => lease.owner === candidate.owner);
-  const orgActive = active.filter((lease) => lease.org === candidate.org);
+  const orgActive = active.filter((lease) => orgMatchesForAccounting(lease.org, candidate.org));
   if (limits.maxActiveLeases > 0 && active.length + 1 > limits.maxActiveLeases) {
     return `active lease limit exceeded: ${active.length + 1}/${limits.maxActiveLeases}`;
   }
@@ -140,7 +132,7 @@ export function enforceCostLimits(
     { scope: "user", owner: candidate.owner, month },
     now,
   );
-  const orgUsage = usageSummary(managedLeases, { scope: "org", org: candidate.org, month }, now);
+  const orgUsage = orgUsageForAccounting(managedLeases, candidate.org, month, now);
   if (overBudget(allUsage.reservedUSD + candidate.maxEstimatedUSD, limits.maxMonthlyUSD)) {
     return `monthly budget exceeded: ${formatUSD(allUsage.reservedUSD + candidate.maxEstimatedUSD)}/${formatUSD(limits.maxMonthlyUSD)}`;
   }
@@ -177,7 +169,10 @@ export function usageSummary(leases: LeaseRecord[], filter: UsageFilter, now: Da
     scope: filter.scope,
     ...finalize(total),
     byOwner: finalizeGroups(byOwner),
-    byOrg: finalizeGroups(byOrg),
+    byOrg: finalizeGroups(byOrg).map((group) => ({
+      ...group,
+      key: orgLabelForDisplay(group.key),
+    })),
     byProvider: finalizeGroups(byProvider),
     byServerType: finalizeGroups(byServerType),
   };
@@ -185,7 +180,7 @@ export function usageSummary(leases: LeaseRecord[], filter: UsageFilter, now: Da
     summary.owner = filter.owner;
   }
   if (filter.org) {
-    summary.org = filter.org;
+    summary.org = orgLabelForDisplay(filter.org);
   }
   return summary;
 }
@@ -233,13 +228,29 @@ function leaseMatchesUsageFilter(lease: LeaseRecord, filter: UsageFilter): boole
   }
   if (filter.scope === "user") {
     return (
-      (!filter.owner || lease.owner === filter.owner) && (!filter.org || lease.org === filter.org)
+      (!filter.owner || lease.owner === filter.owner) &&
+      (!filter.org || orgMatchesForFilter(lease.org, filter.org))
     );
   }
   if (filter.scope === "org") {
-    return !filter.org || lease.org === filter.org;
+    return !filter.org || orgMatchesForFilter(lease.org, filter.org);
   }
   return true;
+}
+
+function orgUsageForAccounting(
+  leases: LeaseRecord[],
+  org: string,
+  month: string,
+  now: Date,
+): UsageAccumulator {
+  const usage = newAccumulator();
+  for (const lease of leases) {
+    if (monthKey(new Date(lease.createdAt)) === month && orgMatchesForAccounting(lease.org, org)) {
+      addUsage(usage, leaseUsage(lease, now));
+    }
+  }
+  return usage;
 }
 
 function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
@@ -353,10 +364,6 @@ function parseTime(value: string, fallback: Date): Date {
 
 function monthKey(date: Date): string {
   return date.toISOString().slice(0, 7);
-}
-
-function sanitizeOrg(value: string): string {
-  return value.replaceAll(/[^a-zA-Z0-9_.@-]/g, "_").slice(0, 63) || "unknown";
 }
 
 function roundUSD(value: number): number {

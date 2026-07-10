@@ -177,6 +177,25 @@ Admin scope comes from `CRABBOX_ADMIN_TOKEN`, or from a signed GitHub user token
 whose verified email or login matches `CRABBOX_GITHUB_ADMIN_OWNERS` or
 `CRABBOX_GITHUB_ADMIN_LOGINS`. Locally, admin commands can still send the admin
 bearer via `CRABBOX_COORDINATOR_ADMIN_TOKEN` or `broker.adminToken`.
+
+Organization labels are exact, case-sensitive identities: 1-63 printable ASCII
+characters with no leading or trailing spaces. The coordinator stores them in a
+reversible, versioned authorization namespace, so labels such as `science team`
+and `science_team` remain distinct. Missing organization identity is also
+distinct from a configured organization literally named `unknown`, although
+both display as `unknown` in user-facing status. Missing-org principals can
+still own resources and receive explicit user shares, but never receive an org
+share.
+
+Records created before this namespace was introduced contain only a lossy
+organization value, so their original identity cannot be recovered safely.
+Those leases, runs, workspaces, ready-pool entries, runners, bridge sessions,
+and tickets fail closed for non-admin access after upgrade. Admin lease cleanup
+and scheduled provider cleanup remain available; recreate active records under
+their exact organization label. Legacy workspace records are not reused or
+replenished as prewarms. Per-org admission limits conservatively count legacy
+records against every exact label they could have represented.
+
 Long-lived control, WebVNC, Code, and egress sessions bind cached admin authority
 to the exact GitHub identity or bearer token plus a deployment grant version.
 Changing any configured admin source revokes older active, restored, ticketed,

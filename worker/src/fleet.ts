@@ -92,6 +92,26 @@ import {
   githubPortalLogout,
   githubPortalLogoutConfirmation,
 } from "./oauth";
+import {
+  MISSING_ORG_KEY,
+  isCurrentOrgKey,
+  isLegacyOrgKey,
+  orgAuthLabelFromKey,
+  orgKeyForLabel,
+  orgLabelForDisplay,
+  orgLabelFromKey,
+  orgMatchesForFilter,
+  requestOrgLabel,
+  sameOrgIdentityKey,
+} from "./org-identity";
+import {
+  publicExternalRunnerRecord,
+  publicLeaseRecord,
+  publicReadyPoolEntry,
+  publicRunRecord,
+  portalExternalRunnerRecord,
+  portalLeaseRecord,
+} from "./org-records";
 import { defaultOSImage, normalizeOSImage } from "./os-image";
 import {
   portalCode,
@@ -2102,9 +2122,10 @@ export class FleetCoordinator {
     ) {
       return "portal session ended";
     }
+    const org = typeof attachment.org === "string" ? orgLabelFromKey(attachment.org) : undefined;
     if (
       typeof attachment.owner !== "string" ||
-      typeof attachment.org !== "string" ||
+      !org ||
       typeof attachment.admin !== "boolean" ||
       typeof attachment.login !== "string" ||
       !validPortalSessionHash(attachment.portalSessionHash) ||
@@ -2116,7 +2137,7 @@ export class FleetCoordinator {
       attachment.githubGrant,
       {
         owner: attachment.owner,
-        org: attachment.org,
+        org,
         login: attachment.login,
       },
       this.env,
@@ -2201,6 +2222,7 @@ export class FleetCoordinator {
       throw new Error("restored bridge lease state is temporarily unavailable");
     }
     await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
+    await this.quarantineLegacyWorkspaces();
     await this.expireLeases();
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.reconcileRuntimeAdapterDeletes();
@@ -2566,7 +2588,7 @@ export class FleetCoordinator {
           });
           throw error;
         }
-        return json({ lease: reactivation.reactivated }, { status: 201 });
+        return json({ lease: publicLeaseRecord(reactivation.reactivated) }, { status: 201 });
       }
       return json(
         {
@@ -2752,7 +2774,7 @@ export class FleetCoordinator {
         {
           error: "lease_state_changed",
           message: "lease changed state while provider preparation was in progress",
-          lease: current,
+          lease: current ? publicLeaseRecord(current) : undefined,
         },
         { status: 409 },
       );
@@ -2794,7 +2816,7 @@ export class FleetCoordinator {
         const workspace = await this.state.storage.get<WorkspaceRecord>(
           workspaceKey(current.owner, current.org, current.workspaceID),
         );
-        if (workspace?.releaseRequestedAt && workspaceOwnsLease(workspace, current)) {
+        if (workspace?.releaseRequestedAt && workspaceLeaseMatchesCleanup(workspace, current)) {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
             await this.deleteProviderAccess(current.id);
           }
@@ -2817,7 +2839,7 @@ export class FleetCoordinator {
         {
           error: "lease_state_changed",
           message: "lease changed state before provider provisioning began",
-          lease: current,
+          lease: current ? publicLeaseRecord(current) : undefined,
         },
         { status: 409 },
       );
@@ -3014,7 +3036,7 @@ export class FleetCoordinator {
       );
     }
     record = finalization.record;
-    return json({ lease: record }, { status: 201 });
+    return json({ lease: publicLeaseRecord(record) }, { status: 201 });
   }
 
   private async createWorkspace(request: Request): Promise<Response> {
@@ -3324,7 +3346,7 @@ export class FleetCoordinator {
       const now = Date.now();
       const templates = new Map<string, WorkspaceRecord>();
       for (const workspace of workspaces.values()) {
-        if (workspace.prewarm) continue;
+        if (workspace.prewarm || !isCurrentOrgKey(workspace.org)) continue;
         const status = workspaceStatus(workspace, leases.get(leaseKey(workspace.leaseID)));
         if (status !== "provisioning" && status !== "ready") continue;
         const shape = workspacePrewarmShape(workspace);
@@ -3338,7 +3360,7 @@ export class FleetCoordinator {
       const failedByShape = new Map<string, WorkspaceRecord[]>();
       const releaseUpdates: Array<[string, WorkspaceRecord]> = [];
       for (const [key, workspace] of workspaces) {
-        if (!workspace.prewarm) continue;
+        if (!workspace.prewarm || !isCurrentOrgKey(workspace.org)) continue;
         const lease = leases.get(leaseKey(workspace.leaseID));
         const shape = workspacePrewarmShape(workspace);
         const template = templates.get(shape);
@@ -3424,6 +3446,21 @@ export class FleetCoordinator {
     });
   }
 
+  private async quarantineLegacyWorkspaces(): Promise<void> {
+    await this.state.runExclusive(async () => {
+      const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
+      const now = new Date().toISOString();
+      const updates = [...workspaces.entries()]
+        .filter(([, workspace]) => isLegacyOrgKey(workspace.org) && !workspace.releaseRequestedAt)
+        .map(([key, workspace]) => {
+          const quarantined = { ...workspace, releaseRequestedAt: now, updatedAt: now };
+          delete quarantined.reconcileAfter;
+          return this.state.storage.put(key, quarantined);
+        });
+      await Promise.all(updates);
+    });
+  }
+
   private async allocateWorkspaceLeaseID(): Promise<string> {
     const leaseID = newLeaseID();
     if (
@@ -3478,7 +3515,7 @@ export class FleetCoordinator {
           if (terminalAt === undefined || terminalAt > cutoff) {
             return;
           }
-          if (lease && workspaceOwnsLease(current, lease)) {
+          if (lease && workspaceLeaseMatchesCleanup(current, lease)) {
             const detachedLease = structuredClone(lease);
             delete detachedLease.workspaceID;
             await this.putLease(detachedLease);
@@ -3499,7 +3536,7 @@ export class FleetCoordinator {
     initialLease?: LeaseRecord,
   ): Promise<void> {
     let lease = initialLease;
-    if (lease && !workspaceOwnsLease(workspace, lease)) {
+    if (lease && !workspaceLeaseMatchesCleanup(workspace, lease)) {
       await this.recordWorkspaceError(
         workspace,
         "workspace lease reservation conflicts with another lifecycle",
@@ -3796,9 +3833,9 @@ export class FleetCoordinator {
         await this.scheduleAlarm();
         return current;
       });
-      if (recovered.state === "active") {
+      if (recovered.state === "active" && !workspace.releaseRequestedAt) {
         await this.completeWorkspaceCreate(workspace, workspace.provisionClaim);
-      } else {
+      } else if (!workspace.releaseRequestedAt) {
         await this.deferWorkspaceReconciliation(workspace);
       }
       return recovered;
@@ -3991,14 +4028,23 @@ export class FleetCoordinator {
       const key = nativeVNCTicketKey(token);
       const ticket = await this.state.storage.get<NativeVNCTicketRecord>(key);
       await this.state.storage.delete(key);
-      if (!ticket || ticket.ticket !== token || Date.parse(ticket.expiresAt) <= Date.now()) {
+      if (
+        !ticket ||
+        ticket.ticket !== token ||
+        !isCurrentOrgKey(ticket.org) ||
+        Date.parse(ticket.expiresAt) <= Date.now()
+      ) {
         return undefined;
       }
       const workspace = await this.state.storage.get<WorkspaceRecord>(
         workspaceKey(ticket.owner, ticket.org, ticket.workspaceID),
       );
       const current = workspace ? await this.getLease(ticket.leaseID) : undefined;
-      return workspace && current && workspaceOwnsLease(workspace, current)
+      return workspace &&
+        current &&
+        isCurrentOrgKey(workspace.org) &&
+        isCurrentOrgKey(current.org) &&
+        workspaceOwnsLease(workspace, current)
         ? { workspace, lease: current }
         : undefined;
     });
@@ -4748,7 +4794,7 @@ export class FleetCoordinator {
     const workspace = await this.state.storage.get<WorkspaceRecord>(key);
     if (
       !workspace ||
-      !workspaceOwnsLease(workspace, lease) ||
+      !workspaceLeaseMatchesCleanup(workspace, lease) ||
       !workspace.releaseRequestedAt ||
       !workspace.error
     ) {
@@ -4763,7 +4809,7 @@ export class FleetCoordinator {
     workspace: WorkspaceRecord,
   ): Promise<LeaseRecord | undefined> {
     const lease = await this.getLease(workspace.leaseID);
-    if (!lease || !workspaceOwnsLease(workspace, lease)) {
+    if (!lease || !workspaceLeaseMatchesCleanup(workspace, lease)) {
       return lease;
     }
     return await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
@@ -4801,7 +4847,7 @@ export class FleetCoordinator {
       lease.tailscale = mergeTailscaleMetadata(lease.tailscale, input);
       lease.updatedAt = new Date().toISOString();
       await this.putLease(lease);
-      return json({ lease });
+      return json({ lease: publicLeaseRecord(lease) });
     }
     if (method === "POST" && action === "release") {
       return this.releaseLease(request, leaseID, false);
@@ -5083,7 +5129,7 @@ export class FleetCoordinator {
       await this.confirmRuntimeAdapterIdentity(runtimeAdapterIdentity, nowISO);
     }
     await this.scheduleAlarm();
-    return json({ lease: record }, { status: existing ? 200 : 201 });
+    return json({ lease: publicLeaseRecord(record) }, { status: existing ? 200 : 201 });
   }
 
   private async heartbeatLease(request: Request, leaseID: string): Promise<Response> {
@@ -5120,7 +5166,7 @@ export class FleetCoordinator {
     }
     const managedProvider = managedLeaseProvider(committed);
     if (requestCIDRs.length === 0 || !managedProvider) {
-      return json({ lease: committed });
+      return json({ lease: publicLeaseRecord(committed) });
     }
 
     const refresh = async (): Promise<LeaseRecord> => {
@@ -5170,7 +5216,7 @@ export class FleetCoordinator {
     };
     const lease =
       managedProvider === "aws" ? await this.withAWSIngressOperationLock(refresh) : await refresh();
-    return json({ lease });
+    return json({ lease: publicLeaseRecord(lease) });
   }
 
   private async refreshLeaseAccessForResolution(lease: LeaseRecord): Promise<LeaseRecord> {
@@ -5406,13 +5452,13 @@ export class FleetCoordinator {
           {
             error: "cleanup_in_progress",
             message: "lease cleanup has already started",
-            lease,
+            lease: publicLeaseRecord(lease),
           },
           { status: 409 },
         );
       }
       await this.scheduleAlarm();
-      return json({ lease });
+      return json({ lease: publicLeaseRecord(lease) });
     }
     const released = await this.releaseResolvedLease(lease, { deleteServer: shouldDelete });
     if (released.runtimeAdapterDeleteRequestedAt) {
@@ -5423,12 +5469,12 @@ export class FleetCoordinator {
         {
           error: "cleanup_in_progress",
           message: "lease cleanup has already started",
-          lease: released,
+          lease: publicLeaseRecord(released),
         },
         { status: 409 },
       );
     }
-    return json({ lease: released });
+    return json({ lease: publicLeaseRecord(released) });
   }
 
   private async completeRuntimeAdapterDelete(
@@ -5470,16 +5516,17 @@ export class FleetCoordinator {
         return runtimeAdapterDeleteInFlightResponse(result.retryAt);
       }
       if (result.status === "mismatch") {
+        const current = await this.getLease(lease.id);
         return json(
           {
             error: "lease_state_changed",
             message: "lease changed while completing its runtime adapter delete",
-            lease: await this.getLease(lease.id),
+            lease: current ? publicLeaseRecord(current) : undefined,
           },
           { status: 409 },
         );
       }
-      return json({ lease: result.lease });
+      return json({ lease: publicLeaseRecord(result.lease) });
     });
   }
 
@@ -5522,16 +5569,17 @@ export class FleetCoordinator {
         return runtimeAdapterDeleteInFlightResponse(result.retryAt);
       }
       if (result.status === "mismatch") {
+        const current = await this.getLease(lease.id);
         return json(
           {
             error: "lease_state_changed",
             message: "lease changed while completing its legacy runtime adapter delete",
-            lease: await this.getLease(lease.id),
+            lease: current ? publicLeaseRecord(current) : undefined,
           },
           { status: 409 },
         );
       }
-      return json({ lease: result.lease });
+      return json({ lease: publicLeaseRecord(result.lease) });
     });
   }
 
@@ -5684,7 +5732,7 @@ export class FleetCoordinator {
       tokenExpiresAt?: string;
     } = {
       owner: requestOwner(request),
-      org: requestOrg(request, this.env),
+      org: requestOrgLabel(request, this.env),
       auth: request.headers.get("x-crabbox-auth") || "bearer",
       admin: isAdminRequest(request),
     };
@@ -5788,13 +5836,13 @@ export class FleetCoordinator {
           .map((lease) => lease.id),
       );
       return portalHome(
-        leases,
-        runners,
+        leases.map(portalLeaseRecord),
+        runners.map(portalExternalRunnerRecord),
         request,
         this.attachPortalMacHostLeases(
           this.portalMacHostsVisibleToRequest(macHosts, hostLeases, request),
           hostLeases,
-        ),
+        ).map((host) => (host.lease ? { ...host, lease: portalLeaseRecord(host.lease) } : host)),
         manageableLeaseIDs,
       );
     }
@@ -5894,7 +5942,7 @@ export class FleetCoordinator {
       if (error) {
         return portalError("WebVNC unavailable", error, 409);
       }
-      return portalVNC(lease, {
+      return portalVNC(publicLeaseRecord(lease), {
         canManage: this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
       });
     }
@@ -6136,7 +6184,7 @@ export class FleetCoordinator {
         state: lease.state,
         target: lease.target || "linux",
         owner: lease.owner,
-        org: lease.org,
+        org: orgLabelForDisplay(lease.org),
         class: lease.class,
         serverType: lease.serverType,
         ...(lease.host ? { host: lease.host } : {}),
@@ -6201,9 +6249,12 @@ export class FleetCoordinator {
     const canManage = Boolean(
       host.lease && this.leaseManageableByRequest(host.lease, request, isAdminRequest(request)),
     );
-    return portalMacHostDetail(host, host.lease ? this.leaseBridgeStatus(host.lease) : undefined, {
-      canManage,
-    });
+    const publicHost = host.lease ? { ...host, lease: publicLeaseRecord(host.lease) } : host;
+    return portalMacHostDetail(
+      publicHost,
+      host.lease ? this.leaseBridgeStatus(host.lease) : undefined,
+      { canManage },
+    );
   }
 
   private async portalMacHostLeaseRedirect(
@@ -6221,9 +6272,10 @@ export class FleetCoordinator {
         404,
       );
     }
+    const publicHost = host.lease ? { ...host, lease: publicLeaseRecord(host.lease) } : host;
     if (!lease) {
       if (action === "vnc") {
-        return portalMacHostDetail(host, undefined);
+        return portalMacHostDetail(publicHost, undefined);
       }
       return portalError(
         "Code unavailable",
@@ -6233,7 +6285,7 @@ export class FleetCoordinator {
     }
     const error = action === "vnc" ? webVNCLeaseError(lease) : codeLeaseError(lease);
     if (action === "vnc" && error === "lease was not created with desktop=true") {
-      return portalMacHostDetail(host, this.leaseBridgeStatus(lease), {
+      return portalMacHostDetail(publicHost, this.leaseBridgeStatus(lease), {
         canManage: this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
       });
     }
@@ -6325,9 +6377,14 @@ export class FleetCoordinator {
         this.runReferencesLease(run, lease.id) && this.runReadableToRequest(run, request, lease)
       );
     });
-    return portalLeaseDetail(lease, visibleRuns, this.leaseBridgeStatus(lease), {
-      canManage: this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
-    });
+    return portalLeaseDetail(
+      publicLeaseRecord(lease),
+      visibleRuns.map(publicRunRecord),
+      this.leaseBridgeStatus(lease),
+      {
+        canManage: this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
+      },
+    );
   }
 
   private leaseBridgeStatus(lease: LeaseRecord): PortalLeaseBridgeStatus {
@@ -6535,7 +6592,7 @@ export class FleetCoordinator {
           latest.runtimeAdapterWorkspaceID === workspaceID &&
           latest.runtimeAdapterRegistrationID === lease.runtimeAdapterRegistrationID
         ) {
-          return json({ lease: latest, status: "deleted" });
+          return json({ lease: publicLeaseRecord(latest), status: "deleted" });
         }
         return runtimeAdapterWorkspaceDeleteError(
           "runtime_adapter_lease_changed",
@@ -6546,7 +6603,7 @@ export class FleetCoordinator {
       }
       return json(
         {
-          lease: (await this.getLease(lease.id)) ?? current,
+          lease: publicLeaseRecord((await this.getLease(lease.id)) ?? current),
           status: "deleting",
         },
         { status: 202 },
@@ -6810,12 +6867,12 @@ export class FleetCoordinator {
         leaseID: lease.id,
         slug: lease.slug || lease.id,
         owner: lease.owner,
-        org: lease.org,
+        org: orgLabelForDisplay(lease.org),
         share: normalizedLeaseShare(lease.share),
       });
     }
     const embedded = url.searchParams.get("embed") === "1";
-    return portalShareLease(lease, { embedded });
+    return portalShareLease(publicLeaseRecord(lease), { embedded });
   }
 
   private async portalShareLeaseAction(request: Request, identifier: string): Promise<Response> {
@@ -6841,7 +6898,7 @@ export class FleetCoordinator {
         leaseID: lease.id,
         slug: lease.slug || lease.id,
         owner: lease.owner,
-        org: lease.org,
+        org: orgLabelForDisplay(lease.org),
         share: normalizedLeaseShare(lease.share),
       });
     }
@@ -6913,7 +6970,7 @@ export class FleetCoordinator {
         this.runEvents(runID, 0, 100),
         this.readRunLog(runID),
       ]);
-      return portalRunDetail(run, events, tailString(log, 12 * 1024));
+      return portalRunDetail(publicRunRecord(run), events, tailString(log, 12 * 1024));
     }
     return json({ error: "not_found" }, { status: 404 });
   }
@@ -7352,6 +7409,7 @@ export class FleetCoordinator {
     );
     if (
       !identity ||
+      !isCurrentOrgKey(identity.org) ||
       identity.adapterID !== adapterID ||
       identity.owner !== ticket.owner ||
       identity.org !== ticket.org
@@ -7398,6 +7456,7 @@ export class FleetCoordinator {
     const attachment = agent ? this.bridgeAttachment(agent) : undefined;
     if (
       !identity ||
+      !isCurrentOrgKey(identity.org) ||
       identity.adapterID !== adapterID ||
       !agent ||
       agent.readyState !== WebSocket.OPEN ||
@@ -7475,6 +7534,20 @@ export class FleetCoordinator {
           {
             error: "runtime_adapter_unclaimed",
             message: "runtime adapter id has not been claimed",
+          },
+          { status: 409 },
+        ),
+      };
+    }
+    const legacyIdentity = isLegacyOrgKey(identity.org);
+    if (!isCurrentOrgKey(identity.org) && (method !== "DELETE" || !legacyIdentity)) {
+      return {
+        origin: "relay",
+        dispatched: false,
+        response: json(
+          {
+            error: "runtime_adapter_identity_legacy",
+            message: "runtime adapter identity must be reclaimed before use",
           },
           { status: 409 },
         ),
@@ -8220,12 +8293,16 @@ export class FleetCoordinator {
         );
       }
       viewerSession = session;
+      const org = orgAuthLabelFromKey(session.org);
+      if (org === undefined) {
+        return this.codeViewerAuthenticationRequired(request, identifier);
+      }
       authorizedRequest = requestWithAuthContext(request, {
         authorized: true,
         admin: session.admin,
         auth: session.auth,
         owner: session.owner,
-        org: session.org,
+        org,
         ...(session.login ? { login: session.login } : {}),
         ...(session.githubGrant
           ? {
@@ -8408,6 +8485,7 @@ export class FleetCoordinator {
       session.session !== value ||
       session.leaseID !== leaseID ||
       Date.parse(session.expiresAt) <= Date.now() ||
+      !isCurrentOrgKey(session.org) ||
       (session.auth === "github" && !validPortalSessionHash(session.portalSessionHash)) ||
       (session.portalSessionHash &&
         (await this.portalSessionIsRevoked(session.portalSessionHash))) ||
@@ -8466,6 +8544,7 @@ export class FleetCoordinator {
         !ticket ||
         ticket.ticket !== value ||
         ticket.leaseID !== leaseID ||
+        !isCurrentOrgKey(ticket.org) ||
         Date.parse(ticket.expiresAt) <= Date.now() ||
         (ticket.viewerExpiresAt !== undefined && Date.parse(ticket.viewerExpiresAt) <= Date.now())
       ) {
@@ -9215,7 +9294,7 @@ export class FleetCoordinator {
     return this.withBridgeTicketLock(async () => {
       const key = runtimeAdapterTicketKey(value);
       const ticket = await this.state.storage.get<RuntimeAdapterTicketRecord>(key);
-      if (!ticket || ticket.ticket !== value) {
+      if (!ticket || ticket.ticket !== value || !isCurrentOrgKey(ticket.org)) {
         return { status: "invalid" };
       }
       if (Date.parse(ticket.expiresAt) <= Date.now()) {
@@ -9249,6 +9328,7 @@ export class FleetCoordinator {
   ): Promise<boolean> {
     if (
       identity.adapterID !== adapterID ||
+      (!isCurrentOrgKey(identity.org) && !isLegacyOrgKey(identity.org)) ||
       identity.claimVersion !== 1 ||
       identity.claimState !== "provisional" ||
       identity.confirmedAt !== undefined ||
@@ -9309,6 +9389,9 @@ export class FleetCoordinator {
   private async currentLeaseBridgeTicket<
     T extends CachedBridgeGrant & { owner: string; org: string; admin?: boolean },
   >(ticket: T, lease: LeaseRecord): Promise<T | undefined> {
+    if (!isCurrentOrgKey(ticket.org) || !isCurrentOrgKey(lease.org)) {
+      return undefined;
+    }
     const currentTicket =
       ticket.admin === true
         ? withCurrentAdminGrant(ticket, await this.currentAdminGrantValidation())
@@ -9510,7 +9593,9 @@ export class FleetCoordinator {
   ): Promise<Response> {
     const method = request.method.toUpperCase();
     if (method === "GET" && !rawKey) {
-      return json({ pools: await this.allReadyPoolStatus(request) });
+      return json({
+        pools: (await this.allReadyPoolStatus(request)).map(publicReadyPoolEntry),
+      });
     }
     const decodedKey = decodeReadyPoolRouteKey(rawKey ?? "");
     const key = decodedKey === undefined ? "" : normalizeReadyPoolKey(decodedKey);
@@ -9518,7 +9603,7 @@ export class FleetCoordinator {
       return json({ error: "invalid_pool_key" }, { status: 400 });
     }
     if (method === "GET" && !action) {
-      return json({ pool: await this.readyPoolStatus(key, request) });
+      return json({ pool: (await this.readyPoolStatus(key, request)).map(publicReadyPoolEntry) });
     }
     if (method === "POST" && action === "register") {
       return await this.registerReadyPoolLease(request, key);
@@ -9644,7 +9729,7 @@ export class FleetCoordinator {
           .map((existing) => this.deleteReadyPoolEntry(existing)),
       );
       await this.putReadyPoolEntry(entry);
-      return json({ entry, lease });
+      return json({ entry: publicReadyPoolEntry(entry), lease: publicLeaseRecord(lease) });
     });
   }
 
@@ -9705,7 +9790,10 @@ export class FleetCoordinator {
           expiresAt: lease.expiresAt,
         };
         await this.putReadyPoolEntry(borrowed);
-        return json({ entry: borrowed, lease });
+        return json({
+          entry: publicReadyPoolEntry(borrowed),
+          lease: publicLeaseRecord(lease),
+        });
       });
     });
   }
@@ -9768,20 +9856,31 @@ export class FleetCoordinator {
         await this.putReadyPoolEntry(drained);
         if (lease && lease.state === "active") {
           return json({
-            entry: drained,
-            lease: await this.releaseResolvedLease(lease, { deleteServer: true, keep: false }),
+            entry: publicReadyPoolEntry(drained),
+            lease: publicLeaseRecord(
+              await this.releaseResolvedLease(lease, { deleteServer: true, keep: false }),
+            ),
           });
         }
-        return json({ entry: drained, lease });
+        return json({
+          entry: publicReadyPoolEntry(drained),
+          lease: lease ? publicLeaseRecord(lease) : undefined,
+        });
       }
       if (!lease || lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
         const stale = this.nextReturnedReadyPoolEntry(current, lease, "stale", input.reason);
         await this.putReadyPoolEntry(stale);
-        return json({ entry: stale, lease });
+        return json({
+          entry: publicReadyPoolEntry(stale),
+          lease: lease ? publicLeaseRecord(lease) : undefined,
+        });
       }
       const returned = this.nextReturnedReadyPoolEntry(current, lease, "ready", input.reason);
       await this.putReadyPoolEntry(returned);
-      return json({ entry: returned, lease });
+      return json({
+        entry: publicReadyPoolEntry(returned),
+        lease: publicLeaseRecord(lease),
+      });
     });
   }
 
@@ -9870,13 +9969,16 @@ export class FleetCoordinator {
     }
     const state = url.searchParams.get("state") ?? "expired";
     const owner = url.searchParams.get("owner") ?? "";
-    const org = url.searchParams.get("org") ?? "";
+    const org = orgFilterKey(url);
+    if (org === null) {
+      return json({ error: "invalid_org_identity" }, { status: 400 });
+    }
     const limit = clampLimit(url.searchParams.get("limit"), 100);
     const leases = (await this.leaseRecords())
       .filter((lease) => lease.provider === provider && !isRegisteredLease(lease))
       .filter((lease) => !state || lease.state === state)
       .filter((lease) => !owner || lease.owner === owner)
-      .filter((lease) => !org || lease.org === org)
+      .filter((lease) => !org || orgMatchesForFilter(lease.org, org))
       .filter((lease) => Boolean(lease.cloudID))
       .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit);
@@ -10159,7 +10261,7 @@ export class FleetCoordinator {
       state: lease.state,
       target: lease.target,
       owner: lease.owner,
-      org: lease.org,
+      org: orgLabelForDisplay(lease.org),
       cloudID: lease.cloudID,
       host: lease.host,
       serverType: lease.serverType,
@@ -10229,7 +10331,7 @@ export class FleetCoordinator {
       state: lease.state,
       target: lease.target,
       owner: lease.owner,
-      org: lease.org,
+      org: orgLabelForDisplay(lease.org),
       cloudID: lease.cloudID,
       host: lease.host,
       serverType: lease.serverType,
@@ -10310,7 +10412,7 @@ export class FleetCoordinator {
     const released = await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
     return released.runtimeAdapterDeleteRequestedAt
       ? runtimeAdapterDeletePendingResponse(released)
-      : json({ lease: released });
+      : json({ lease: publicLeaseRecord(released) });
   }
 
   private filterLeases(leases: LeaseRecord[], request: Request): LeaseRecord[] {
@@ -10324,12 +10426,13 @@ export class FleetCoordinator {
     const state = url.searchParams.get("state") ?? "";
     const provider = url.searchParams.get("provider") ?? "";
     const owner = url.searchParams.get("owner") ?? "";
-    const org = url.searchParams.get("org") ?? "";
+    const org = orgFilterKey(url);
+    if (org === null) return [];
     return leases
       .filter((lease) => !state || lease.state === state)
       .filter((lease) => !provider || lease.provider === provider)
       .filter((lease) => !owner || lease.owner === owner)
-      .filter((lease) => !org || lease.org === org)
+      .filter((lease) => !org || orgMatchesForFilter(lease.org, org))
       .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
@@ -10382,17 +10485,22 @@ export class FleetCoordinator {
     }
     await this.putRun(run);
     await this.appendRunEventRecord(run, { type: "run.started", phase: "starting" });
-    return json({ run }, { status: 201 });
+    return json({ run: publicRunRecord(run) }, { status: 201 });
   }
 
   private async createArtifactUploads(request: Request): Promise<Response> {
     try {
       const input = await readJson<ArtifactUploadRequest>(request);
+      // NUL cannot occur in a validated org label, so it preserves the missing-org tenant
+      // without colliding with the literal "unknown" label or exposing coordinator keys.
+      const artifactOrg =
+        requestOrg(request, this.env) === MISSING_ORG_KEY
+          ? "\0"
+          : requestOrgLabel(request, this.env);
       return json(
         await artifactUploadResponse(this.env, input, {
           owner: requestOwner(request),
-          // Artifact keys encode auth identity bytes exactly; usage org normalization is lossy.
-          org: request.headers.get("x-crabbox-org") ?? this.env.CRABBOX_DEFAULT_ORG ?? "",
+          org: artifactOrg,
         }),
         { status: 201 },
       );
@@ -10412,7 +10520,9 @@ export class FleetCoordinator {
     if (method === "GET" && action === undefined) {
       const run = await this.getRun(runID);
       const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
-      return run && this.runReadableToRequest(run, request, lease) ? json({ run }) : notFound();
+      return run && this.runReadableToRequest(run, request, lease)
+        ? json({ run: publicRunRecord(run) })
+        : notFound();
     }
     if (method === "GET" && action === "logs") {
       const run = await this.getRun(runID);
@@ -10472,7 +10582,7 @@ export class FleetCoordinator {
     }
     run.telemetry = appendRunTelemetrySample(run.telemetry, telemetry);
     await this.putRun(run);
-    return json({ run });
+    return json({ run: publicRunRecord(run) });
   }
 
   private async finishRun(request: Request, runID: string): Promise<Response> {
@@ -10523,7 +10633,7 @@ export class FleetCoordinator {
       phase: run.state,
       exitCode: run.exitCode,
     });
-    return json({ run });
+    return json({ run: publicRunRecord(run) });
   }
 
   private async readRunLog(runID: string): Promise<string> {
@@ -10559,14 +10669,17 @@ export class FleetCoordinator {
     const url = new URL(request.url);
     const leaseID = url.searchParams.get("leaseID") ?? "";
     const owner = url.searchParams.get("owner") ?? "";
-    const org = url.searchParams.get("org") ?? "";
+    const org = orgFilterKey(url);
+    if (org === null) {
+      return json({ error: "invalid_org_identity" }, { status: 400 });
+    }
     const state = url.searchParams.get("state") ?? "";
     const limit = clampLimit(url.searchParams.get("limit"), 50);
     const admin = isAdminRequest(request);
     const runs = await this.recentRuns(limit, async (run) => {
       if (
         (owner && run.owner !== owner) ||
-        (org && run.org !== org) ||
+        (org && !orgMatchesForFilter(run.org, org)) ||
         (state && run.state !== state) ||
         (leaseID && run.leaseIDs !== undefined && !this.runReferencesLease(run, leaseID))
       ) {
@@ -10584,7 +10697,7 @@ export class FleetCoordinator {
       }
       return admin || this.runReadableToRequest(run, request, currentLease);
     });
-    return json({ runs });
+    return json({ runs: runs.map(publicRunRecord) });
   }
 
   private async listExternalRunners(request: Request): Promise<Response> {
@@ -10607,7 +10720,8 @@ export class FleetCoordinator {
           return true;
         })
         .toSorted((a, b) => runnerSortTime(b).localeCompare(runnerSortTime(a)))
-        .slice(0, limit),
+        .slice(0, limit)
+        .map(publicExternalRunnerRecord),
     });
   }
 
@@ -10619,7 +10733,10 @@ export class FleetCoordinator {
     const admin = isAdminRequest(request);
     const url = new URL(request.url);
     const owner = admin ? url.searchParams.get("owner") : requestOwner(request);
-    const org = admin ? url.searchParams.get("org") : requestOrg(request, this.env);
+    const org = admin ? orgFilterKey(url) : requestOrg(request, this.env);
+    if (org === null) {
+      return portalError("Invalid organization", "That organization identifier is invalid.", 400);
+    }
     const runner = (await this.visibleExternalRunners(request)).find(
       (candidate) =>
         candidate.provider === provider &&
@@ -10634,7 +10751,7 @@ export class FleetCoordinator {
         404,
       );
     }
-    return portalExternalRunnerDetail(runner, { admin });
+    return portalExternalRunnerDetail(publicExternalRunnerRecord(runner), { admin });
   }
 
   private async syncExternalRunners(request: Request): Promise<Response> {
@@ -10703,7 +10820,10 @@ export class FleetCoordinator {
       stale.push(next);
     }
     await Promise.all(writes);
-    return json({ runners: synced, stale });
+    return json({
+      runners: synced.map(publicExternalRunnerRecord),
+      stale: stale.map(publicExternalRunnerRecord),
+    });
   }
 
   private async usage(request: Request): Promise<Response> {
@@ -10718,7 +10838,10 @@ export class FleetCoordinator {
     const owner = admin
       ? (url.searchParams.get("owner") ?? requestOwner(request))
       : requestOwner(request);
-    const requestedOrg = url.searchParams.get("org") ?? undefined;
+    const requestedOrg = orgFilterKey(url);
+    if (requestedOrg === null) {
+      return json({ error: "invalid_org_identity" }, { status: 400 });
+    }
     const org = admin
       ? (requestedOrg ?? (scope === "org" ? requestOrg(request, this.env) : undefined))
       : requestOrg(request, this.env);
@@ -10734,7 +10857,7 @@ export class FleetCoordinator {
     return json({
       marketplace: marketplaceStatus(this.env),
       owner: requestOwner(request),
-      org: requestOrg(request, this.env),
+      org: requestOrgLabel(request, this.env),
     });
   }
 
@@ -10756,7 +10879,7 @@ export class FleetCoordinator {
         quote: marketplaceQuote(this.env, input),
         marketplace: status,
         owner: requestOwner(request),
-        org: requestOrg(request, this.env),
+        org: requestOrgLabel(request, this.env),
       });
     } catch (error) {
       if (error instanceof MarketplaceInputError) {
@@ -10929,7 +11052,7 @@ export class FleetCoordinator {
         const workspace = workspacesByLeaseID.get(stored.id);
         if (
           workspace &&
-          workspaceOwnsLease(workspace, stored) &&
+          workspaceLeaseMatchesCleanup(workspace, stored) &&
           workspaceProvisioningNeedsRecovery(workspace, stored, now)
         ) {
           continue;
@@ -11067,7 +11190,7 @@ export class FleetCoordinator {
         return (
           !(
             workspace &&
-            workspaceOwnsLease(workspace, lease) &&
+            workspaceLeaseMatchesCleanup(workspace, lease) &&
             workspaceProvisioningNeedsRecovery(workspace, lease, now)
           ) &&
           (leaseIsLive(lease) ||
@@ -12157,7 +12280,7 @@ export class FleetCoordinator {
   }
 
   private leaseForRequest(lease: LeaseRecord, request: Request, admin: boolean): LeaseRecord {
-    const visible = { ...lease };
+    const visible = publicLeaseRecord(lease);
     if (visible.cleanupError) {
       visible.cleanupError = coordinatorDiagnosticText(this.env, visible.cleanupError);
     }
@@ -12194,12 +12317,19 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     principal: { owner: string; org: string; admin: boolean },
   ): "owner" | LeaseShareRole | undefined {
-    if (principal.admin || (lease.owner === principal.owner && lease.org === principal.org)) {
+    if (principal.admin) {
       return "owner";
     }
+    // Legacy org values are lossy and cannot safely prove any non-admin relationship,
+    // including an otherwise explicit user share carried by an ambiguous record.
+    if (!isCurrentOrgKey(lease.org) || !isCurrentOrgKey(principal.org)) {
+      return undefined;
+    }
+    const sameOrg = sameOrgIdentityKey(lease.org, principal.org);
+    if (lease.owner === principal.owner && sameOrg) return "owner";
     const share = normalizedLeaseShare(lease.share);
     const userRole = share.users[normalizeShareUser(principal.owner)];
-    const orgRole = lease.org === principal.org ? share.org : undefined;
+    const orgRole = sameOrg && lease.org !== MISSING_ORG_KEY ? share.org : undefined;
     if (userRole === "manage" || orgRole === "manage") {
       return "manage";
     }
@@ -12235,16 +12365,20 @@ export class FleetCoordinator {
     attachment: Extract<BridgeAttachment, { kind: "control" }>,
     lease?: LeaseRecord,
   ): boolean {
+    if (!attachment.admin && !isCurrentOrgKey(attachment.org)) {
+      return false;
+    }
     return Boolean(
       attachment.admin ||
-      (run.owner === attachment.owner && run.org === attachment.org) ||
+      (run.owner === attachment.owner && sameOrgIdentityKey(run.org, attachment.org)) ||
       run.leaseOwners?.some(
         (attribution) =>
-          attribution.owner === attachment.owner && attribution.org === attachment.org,
+          attribution.owner === attachment.owner &&
+          sameOrgIdentityKey(attribution.org, attachment.org),
       ) ||
       (!run.leaseOwners?.length &&
         lease?.owner === attachment.owner &&
-        lease.org === attachment.org),
+        sameOrgIdentityKey(lease.org, attachment.org)),
     );
   }
 
@@ -12309,7 +12443,8 @@ export class FleetCoordinator {
     attachment: Extract<BridgeAttachment, { kind: "control" }>,
   ): boolean {
     return Boolean(
-      attachment.admin || (lease.owner === attachment.owner && lease.org === attachment.org),
+      attachment.admin ||
+      (lease.owner === attachment.owner && sameOrgIdentityKey(lease.org, attachment.org)),
     );
   }
 
@@ -12534,7 +12669,7 @@ export class FleetCoordinator {
         {
           error: "lease_state_changed",
           message: "lease changed state while provider provisioning was in progress",
-          lease: preparation.lease,
+          lease: publicLeaseRecord(preparation.lease),
         },
         { status: 409 },
       );
@@ -12587,7 +12722,7 @@ export class FleetCoordinator {
           {
             error: "lease_state_changed",
             message: "lease changed state while provider provisioning was in progress",
-            lease: failure.lease,
+            lease: publicLeaseRecord(failure.lease),
           },
           { status: 409 },
         );
@@ -12621,7 +12756,7 @@ export class FleetCoordinator {
       {
         error: "lease_state_changed",
         message: "lease changed state while provider provisioning was in progress",
-        lease: latest,
+        lease: latest ? publicLeaseRecord(latest) : undefined,
       },
       { status: 409 },
     );
@@ -12661,7 +12796,7 @@ export class FleetCoordinator {
     const key = workspaceKey(lease.owner, lease.org, workspaceID);
     await this.state.runExclusive(async () => {
       const workspace = await this.state.storage.get<WorkspaceRecord>(key);
-      if (!workspace || !workspaceOwnsLease(workspace, lease)) {
+      if (!workspace || !workspaceLeaseMatchesCleanup(workspace, lease)) {
         throw new Error("workspace lease reservation conflicts with another lifecycle");
       }
       if (!workspace.releaseRequestedAt) {
@@ -12999,7 +13134,9 @@ function externalRunnerPrefix(): string {
 }
 
 function externalRunnerKey(provider: string, runnerID: string, owner: string, org: string): string {
-  return `${externalRunnerPrefix()}${provider}:${runnerID}:${org}:${owner}`;
+  return `${externalRunnerPrefix()}${[provider, runnerID, org, owner]
+    .map((value) => encodeURIComponent(value))
+    .join(":")}`;
 }
 
 function runLogKey(runID: string): string {
@@ -13492,7 +13629,7 @@ function runtimeAdapterDeletePendingResponse(lease: LeaseRecord): Response {
     {
       error: "runtime_adapter_delete_pending",
       message: "lease release is blocked while its runtime adapter delete is pending",
-      lease,
+      lease: publicLeaseRecord(lease),
     },
     { status: 409 },
   );
@@ -13611,7 +13748,7 @@ function workspacePrewarmMatches(
   target: Pick<WorkspaceRecord, "org" | "profile" | "provider" | "class" | "desktop">,
 ): boolean {
   return (
-    workspace.org === target.org &&
+    sameOrgIdentityKey(workspace.org, target.org) &&
     workspace.profile === target.profile &&
     workspace.provider === target.provider &&
     workspace.class === target.class &&
@@ -13686,10 +13823,14 @@ async function workspaceLeaseRequest(
 }
 
 function workspaceRecordHeaders(workspace: WorkspaceRecord): Headers {
+  const org = orgAuthLabelFromKey(workspace.org);
+  if (org === undefined) {
+    throw new Error("workspace organization identity must be recreated before provisioning");
+  }
   return new Headers({
     "content-type": "application/json",
     "x-crabbox-owner": workspace.owner,
-    "x-crabbox-org": workspace.org,
+    "x-crabbox-org": org,
   });
 }
 
@@ -13778,7 +13919,10 @@ function workspaceNextReconcileAt(
   lease?: LeaseRecord,
   now = Date.now(),
 ): number | undefined {
-  if (lease && !workspaceOwnsLease(workspace, lease)) return workspace.error ? undefined : now;
+  if (!isCurrentOrgKey(workspace.org) && !workspace.releaseRequestedAt) return undefined;
+  if (lease && !workspaceLeaseMatchesCleanup(workspace, lease)) {
+    return workspace.error ? undefined : now;
+  }
   if (lease?.state === "released" && lease.releaseDeletesServer === false) {
     return undefined;
   }
@@ -13898,6 +14042,20 @@ function workspaceTerminalTimestamp(
 
 function workspaceOwnsLease(workspace: WorkspaceRecord, lease: LeaseRecord): boolean {
   return (
+    lease.workspaceID === workspace.id &&
+    lease.id === workspace.leaseID &&
+    lease.owner === workspace.owner &&
+    sameOrgIdentityKey(lease.org, workspace.org)
+  );
+}
+
+/** Legacy orgs can prove only cleanup lifecycle linkage, never user access or adoption. */
+function workspaceLeaseMatchesCleanup(workspace: WorkspaceRecord, lease: LeaseRecord): boolean {
+  if (workspaceOwnsLease(workspace, lease)) return true;
+  return (
+    Boolean(workspace.releaseRequestedAt) &&
+    isLegacyOrgKey(workspace.org) &&
+    isLegacyOrgKey(lease.org) &&
     lease.workspaceID === workspace.id &&
     lease.id === workspace.leaseID &&
     lease.owner === workspace.owner &&
@@ -15002,6 +15160,24 @@ function clampLimit(value: string | null, fallback: number): number {
   return Math.min(Math.trunc(parsed), 500);
 }
 
+function orgFilterKey(url: URL): string | null | undefined {
+  const value = url.searchParams.get("org");
+  const kind = url.searchParams.get("orgKind");
+  if (kind === "missing") {
+    return value === null ? MISSING_ORG_KEY : null;
+  }
+  if (kind === "legacy") {
+    return value !== null && isLegacyOrgKey(value) ? value : null;
+  }
+  if (kind !== null) return null;
+  if (!value) return undefined;
+  try {
+    return orgKeyForLabel(value);
+  } catch {
+    return null;
+  }
+}
+
 function tailString(value: string, maxChars: number): string {
   if (value.length <= maxChars) {
     return value;
@@ -15389,7 +15565,7 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
         validWebVNCSessionID(attachment.id) &&
         validWebVNCSessionID(attachment.agentID) &&
         typeof attachment.owner === "string" &&
-        validOptionalBridgePrincipal(attachment) &&
+        completeBridgePrincipal(attachment) &&
         typeof attachment.label === "string"
         ? attachment
         : undefined;
@@ -15420,7 +15596,8 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
       if (serializedCodeViewer.auth === undefined) {
         // Old attachments had no auth binding. Treat them as GitHub sessions so the existing
         // portal-session revocation path closes them before any restored traffic is accepted.
-        return { ...serializedCodeViewer, auth: "github" };
+        const restored = { ...serializedCodeViewer, auth: "github" as const };
+        return completeBridgePrincipal(restored) ? restored : undefined;
       }
       return (serializedCodeViewer.auth === "bearer" ||
         serializedCodeViewer.auth === "github" ||
@@ -15434,13 +15611,14 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
     case "egress-client":
       return typeof attachment.leaseID === "string" &&
         typeof attachment.sessionID === "string" &&
-        validOptionalEgressBridgePrincipal(attachment)
+        completeBridgePrincipal(attachment)
         ? attachment
         : undefined;
     case "runtime-adapter-agent":
       return validRuntimeAdapterID(attachment.adapterID) &&
         typeof attachment.owner === "string" &&
         typeof attachment.org === "string" &&
+        isCurrentOrgKey(attachment.org) &&
         (attachment.desktopTimeoutMs === undefined ||
           validRuntimeAdapterDesktopRelayTimeout(attachment.desktopTimeoutMs))
         ? attachment
@@ -15448,7 +15626,8 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
     case "control":
       return typeof attachment.clientID === "string" &&
         typeof attachment.owner === "string" &&
-        typeof attachment.org === "string"
+        typeof attachment.org === "string" &&
+        (attachment.admin === true || isCurrentOrgKey(attachment.org))
         ? {
             ...attachment,
             subscriptions:
@@ -15471,7 +15650,8 @@ function validOptionalBridgePrincipal(value: {
   const complete =
     typeof value.owner === "string" &&
     typeof value.org === "string" &&
-    typeof value.admin === "boolean";
+    typeof value.admin === "boolean" &&
+    (value.admin || isCurrentOrgKey(value.org));
   return absent || complete;
 }
 
@@ -15483,7 +15663,8 @@ function completeBridgePrincipal(value: {
   return (
     typeof value.owner === "string" &&
     typeof value.org === "string" &&
-    typeof value.admin === "boolean"
+    typeof value.admin === "boolean" &&
+    (value.admin || isCurrentOrgKey(value.org))
   );
 }
 
@@ -15507,15 +15688,6 @@ function revocableUserBridge(attachment: BridgeAttachment): attachment is Extrac
     attachment.kind === "egress-host" ||
     attachment.kind === "egress-client"
   );
-}
-
-function validOptionalEgressBridgePrincipal(value: {
-  owner?: unknown;
-  org?: unknown;
-  admin?: unknown;
-}): boolean {
-  const legacy = value.owner === undefined && value.org === undefined && value.admin === undefined;
-  return legacy || completeBridgePrincipal(value);
 }
 
 function leaseBridgeTicketPrincipal(
