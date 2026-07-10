@@ -8,7 +8,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
 
 func TestClientUsesOfficialComputePathsAndKeyAuth(t *testing.T) {
 	var seen []string
@@ -107,6 +114,80 @@ func TestClientDecodesStandardErrorBody(t *testing.T) {
 	}
 }
 
+func TestClientGetInstanceRejectsMissingOrMismatchedResponseID(t *testing.T) {
+	for name, tc := range map[string]struct {
+		responseID string
+		want       string
+	}{
+		"empty":      {want: "missing an instance id"},
+		"whitespace": {responseID: "   ", want: "missing an instance id"},
+		"mismatch":   {responseID: "inst_other", want: "does not match"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if err := json.NewEncoder(w).Encode(ComputeInstance{ID: tc.responseID}); err != nil {
+					t.Fatal(err)
+				}
+			}))
+			defer server.Close()
+
+			api, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := api.GetInstance(context.Background(), "inst_requested"); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("GetInstance error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestClientBoundsStalledRequestsAndHonorsEarlierDeadlines(t *testing.T) {
+	for name, tc := range map[string]struct {
+		requestTimeout time.Duration
+		parentTimeout  time.Duration
+		clientTimeout  time.Duration
+	}{
+		"request default": {requestTimeout: 20 * time.Millisecond},
+		"parent":          {requestTimeout: 500 * time.Millisecond, parentTimeout: 20 * time.Millisecond},
+		"http client":     {requestTimeout: 500 * time.Millisecond, clientTimeout: 20 * time.Millisecond},
+	} {
+		t.Run(name, func(t *testing.T) {
+			httpClient := &http.Client{
+				Timeout: tc.clientTimeout,
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				}),
+			}
+			api, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: "https://api.fal.ai/v1"}}, Runtime{HTTP: httpClient})
+			if err != nil {
+				t.Fatal(err)
+			}
+			falClient := api.(*client)
+			if falClient.requestTimeout != defaultRequestTimeout {
+				t.Fatalf("default request timeout=%s, want %s", falClient.requestTimeout, defaultRequestTimeout)
+			}
+			falClient.requestTimeout = tc.requestTimeout
+
+			ctx := context.Background()
+			cancel := func() {}
+			if tc.parentTimeout > 0 {
+				ctx, cancel = context.WithTimeout(ctx, tc.parentTimeout)
+			}
+			defer cancel()
+			started := time.Now()
+			_, err = api.ListInstances(ctx, 0, "")
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("ListInstances error=%v, want context deadline exceeded", err)
+			}
+			if elapsed := time.Since(started); elapsed >= 300*time.Millisecond {
+				t.Fatalf("stalled request canceled after %s, want earlier deadline", elapsed)
+			}
+		})
+	}
+}
+
 func TestClientRedactsAPIKeyReflectedByErrorResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -120,6 +201,110 @@ func TestClientRedactsAPIKeyReflectedByErrorResponse(t *testing.T) {
 	_, err = api.ListInstances(context.Background(), 0, "")
 	if err == nil || strings.Contains(err.Error(), "test-key") || !strings.Contains(err.Error(), "<redacted>") {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestClientRedactsJSONEscapedAPIKeyFromStructuredErrorFields(t *testing.T) {
+	apiKey := `test-"key\suffix`
+	body, err := json.Marshal(APIErrorBody{Error: APIErrorDetail{
+		Type:      "authorization_" + apiKey,
+		Message:   "rejected " + apiKey,
+		DocsURL:   "https://example.test/docs?token=" + apiKey,
+		RequestID: "request_" + apiKey,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	api, err := newClient(Config{Fal: FalConfig{APIKey: apiKey, APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.ListInstances(context.Background(), 0, "")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error=%T %[1]v, want APIError", err)
+	}
+	encodedKey, err := json.Marshal(apiKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	escapedKey := string(encodedKey[1 : len(encodedKey)-1])
+	for field, value := range map[string]string{
+		"error":      apiErr.Error(),
+		"type":       apiErr.Type,
+		"message":    apiErr.Message,
+		"docs_url":   apiErr.DocsURL,
+		"request_id": apiErr.RequestID,
+	} {
+		if strings.Contains(value, apiKey) || strings.Contains(value, escapedKey) {
+			t.Fatalf("%s leaked API key: %q", field, value)
+		}
+		if !strings.Contains(value, "redacted") {
+			t.Fatalf("%s omitted redaction marker: %q", field, value)
+		}
+	}
+}
+
+func TestClientRedactsUnstructuredErrorBody(t *testing.T) {
+	apiKey := `raw-"secret\key`
+	encodedKey, err := json.Marshal(apiKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	escapedKey := string(encodedKey[1 : len(encodedKey)-1])
+	body := `malformed={"message":"reflected ` + escapedKey + ` token=secondary-secret`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	api, err := newClient(Config{Fal: FalConfig{APIKey: apiKey, APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.ListInstances(context.Background(), 0, "")
+	if err == nil {
+		t.Fatal("expected API error")
+	}
+	text := err.Error()
+	for _, secret := range []string{apiKey, escapedKey, "secondary-secret", "malformed"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("unstructured API error leaked %q: %q", secret, text)
+		}
+	}
+	if !strings.Contains(text, "400 Bad Request") {
+		t.Fatalf("unstructured API error omitted status: %q", text)
+	}
+}
+
+func TestClientRedactsTransportAndStatusErrors(t *testing.T) {
+	apiKey := "transport-secret-key"
+	transportCause := errors.New("transport reflected " + apiKey)
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportCause
+	})}
+	api, err := newClient(Config{Fal: FalConfig{APIKey: apiKey, APIURL: "https://api.fal.ai/v1"}}, Runtime{HTTP: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.ListInstances(context.Background(), 0, "")
+	if errors.Is(err, transportCause) || errors.Unwrap(err) != nil || strings.Contains(err.Error(), apiKey) || !strings.Contains(err.Error(), "redacted") {
+		t.Fatalf("transport error=%v", err)
+	}
+
+	statusErr := decodeAPIError(&http.Response{
+		StatusCode: http.StatusBadRequest,
+		Status:     "400 reflected " + apiKey,
+	}, nil, apiKey)
+	if strings.Contains(statusErr.Error(), apiKey) || !strings.Contains(statusErr.Error(), "redacted") {
+		t.Fatalf("status error=%v", statusErr)
 	}
 }
 
@@ -158,6 +343,14 @@ func TestClientRejectsPlainHTTPExceptLoopback(t *testing.T) {
 	}
 	if _, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: "http://127.0.0.1:8080/v1"}}, Runtime{}); err != nil {
 		t.Fatalf("loopback http rejected: %v", err)
+	}
+}
+
+func TestClientRejectsHostlessAPIURL(t *testing.T) {
+	for _, apiURL := range []string{"https://:443/v1", "https:///v1"} {
+		if _, err := newClient(Config{Fal: FalConfig{APIKey: "test-key", APIURL: apiURL}}, Runtime{}); err == nil {
+			t.Fatalf("accepted hostless API URL %q", apiURL)
+		}
 	}
 }
 

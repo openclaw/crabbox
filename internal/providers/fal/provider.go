@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -62,26 +63,73 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 	if supplied := strings.TrimSpace(server.Labels[falCredentialBindingLabel]); supplied != "" && supplied != binding {
 		return core.Server{}, core.Exit(2, "refusing to rewrite fal lease=%s with a different credential binding", existing.LeaseID)
 	}
+	lifetime := existing.Labels[falAcquireLifetimeLabel]
+	if supplied := server.Labels[falAcquireLifetimeLabel]; supplied != "" && supplied != lifetime {
+		return core.Server{}, core.Exit(2, "refusing to rewrite fal lease=%s with a different acquisition-lifetime marker", existing.LeaseID)
+	}
 	server.Labels = cloneLabels(server.Labels)
 	server.Labels[falCredentialBindingLabel] = binding
+	if lifetime == "" {
+		delete(server.Labels, falAcquireLifetimeLabel)
+	} else {
+		server.Labels[falAcquireLifetimeLabel] = lifetime
+	}
 	return server, nil
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
-		return nil, exit(2, "provider=%s managed provisioning supports target=linux only", providerName)
-	}
-	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
-		return nil, exit(2, "--tailscale is not supported for provider=%s; fal Compute exposes public SSH only", providerName)
+	if err := p.ValidateConfig(cfg); err != nil {
+		return nil, err
 	}
 	applyFalDefaults(&cfg)
+	return &backend{spec: p.Spec(), cfg: cfg, rt: rt, clientFactory: newClient}, nil
+}
+
+func (Provider) ValidateConfig(cfg core.Config) error {
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "fal.apiUrl", value: cfg.Fal.APIURL},
+		{name: "fal.instanceType", value: cfg.Fal.InstanceType},
+		{name: "fal.user", value: cfg.Fal.User},
+		{name: "fal.workRoot", value: cfg.Fal.WorkRoot},
+		{name: "sshUser", value: cfg.SSHUser},
+		{name: "workRoot", value: cfg.WorkRoot},
+	} {
+		if field.value != "" && strings.TrimSpace(field.value) == "" {
+			return exit(2, "%s must not be blank", field.name)
+		}
+	}
+	applyFalDefaults(&cfg)
+	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
+		return exit(2, "provider=%s managed provisioning supports target=linux only", providerName)
+	}
+	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
+		return exit(2, "--tailscale is not supported for provider=%s; fal Compute exposes public SSH only", providerName)
+	}
 	if err := validateFalSSHUser(cfg.Fal.User); err != nil {
-		return nil, err
+		return err
 	}
 	if err := validateFalSSHUser(cfg.SSHUser); err != nil {
-		return nil, err
+		return err
 	}
-	return &backend{spec: p.Spec(), cfg: cfg, rt: rt, clientFactory: newClient}, nil
+	if strings.TrimSpace(cfg.Fal.InstanceType) == "" {
+		return exit(2, "fal.instanceType must not be blank")
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "fal.workRoot", value: cfg.Fal.WorkRoot},
+		{name: "workRoot", value: cfg.WorkRoot},
+	} {
+		if !path.IsAbs(field.value) {
+			return exit(2, "%s must be an absolute Linux path", field.name)
+		}
+	}
+	_, err := validateFalAPIURL(cfg.Fal.APIURL)
+	return err
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
@@ -105,7 +153,7 @@ type backend struct {
 	persistRollbackClaim     func(string, string, Config, string, string, string, bool) (core.LeaseClaim, error)
 	recoveryClaimReplacement func(core.LeaseClaim, Config, string, string, bool) (core.LeaseClaim, error)
 	removeLeaseKey           func(string) error
-	syncCreateKey            func(string) error
+	ensureCreateKey          func(Config, string) (string, string, error)
 	waitSSH                  func(context.Context, *core.SSHTarget, string, time.Duration) error
 	pollInterval             time.Duration
 	pollTimeout              time.Duration

@@ -95,6 +95,12 @@ Do not pass the fal API key as a command-line argument. Crabbox intentionally
 has no fal key flag, so the key cannot leak through shell history or process
 listings.
 
+Fal persists crash-recovery claims and SSH keys beneath the normal local
+Crabbox state directories. On Windows clients, configure those directories
+with ordinary drive or UNC paths; extended device paths such as `\\?\` and
+`\??\` are rejected because they cannot provide the same stable durability
+boundary.
+
 ## Token Scope
 
 Crabbox sends the API key only in the `Authorization: Key ...` header to the fal
@@ -151,11 +157,23 @@ claims. Because fal does not expose an account identity for binding the current
 API key, an instance `404` is not sufficient proof that the resource is absent
 from the account that created it; Crabbox retains the local claim for manual
 reconciliation and shows it in `crabbox list` as
-`provider-absence-unverified`. Recovery-pending claims are likewise retained
-and listed with their recovery status so empty-inventory checks cannot hide
-local residue. If credentials or the control plane are unavailable, claimed
-instances remain visible as `provider-verification-unavailable` instead of
-being mistaken for an empty inventory.
+`provider-absence-unverified`. A per-lease process and filesystem lock keeps
+recovery-pending claims intact while their acquisition is still live. After an
+acquiring process exits, non-kept `create-intent` claims are removed locally,
+non-kept provisioning instances are deleted, and non-kept ambiguous creates are
+recovered with the exact request and idempotency key, then deleted. Dry-run
+reports those actions without replaying or deleting; kept claims and recoveries
+beyond fal's idempotency window remain listed for explicit stop or manual
+reconciliation. Unmarked transitional acquisition claims (`create-intent`,
+`ambiguous-create*`, and `provisioning`) written by Crabbox versions predating
+the acquisition-lifetime lock are also retained conservatively, because a
+missing new-format lock cannot prove that an older acquisition process has
+exited. Durable rollback and deletion markers still complete, while ordinary
+ready claims retain normal keep, TTL, and idle cleanup behavior. If credentials
+or the control plane are unavailable, claimed
+instances remain visible as
+`provider-verification-unavailable` instead of being mistaken for an empty
+inventory.
 
 ## Cost Discipline
 

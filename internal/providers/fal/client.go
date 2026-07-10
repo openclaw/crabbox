@@ -11,6 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type computeAPI interface {
@@ -21,12 +24,34 @@ type computeAPI interface {
 }
 
 type client struct {
-	apiKey     string
-	apiURL     string
-	httpClient *http.Client
+	apiKey         string
+	apiURL         string
+	httpClient     *http.Client
+	requestTimeout time.Duration
 }
 
-const maxResponseBytes = 16 << 20
+type falTransportError struct {
+	cause   error
+	message string
+}
+
+func (e *falTransportError) Error() string { return e.message }
+func (e *falTransportError) Unwrap() error { return e.cause }
+
+func safeFalTransportCause(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+const (
+	maxResponseBytes      = 16 << 20
+	defaultRequestTimeout = 2 * time.Minute
+)
 
 var errFalCrossOriginRedirect = errors.New("fal refused cross-origin redirect")
 var errFalUnsafeMutationRedirect = errors.New("fal refused method-rewriting mutation redirect")
@@ -62,25 +87,38 @@ func newClient(cfg Config, rt Runtime) (computeAPI, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=%s requires fal credentials in environment", providerName)
 	}
-	apiURL := strings.TrimRight(strings.TrimSpace(blank(cfg.Fal.APIURL, defaultAPIURL)), "/")
-	parsed, err := url.Parse(apiURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return nil, exit(2, "%s api url is invalid", providerName)
-	}
-	if parsed.RawPath != "" {
-		return nil, exit(2, "%s api url contains an unsupported escaped path", providerName)
-	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return nil, exit(2, "%s api url contains unsupported sensitive components", providerName)
-	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return nil, exit(2, "%s api url must use https unless it targets localhost", providerName)
+	apiURL, err := validateFalAPIURL(cfg.Fal.APIURL)
+	if err != nil {
+		return nil, err
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &client{apiKey: apiKey, apiURL: apiURL, httpClient: secureHTTPClient(httpClient, apiURL)}, nil
+	return &client{
+		apiKey:         apiKey,
+		apiURL:         apiURL,
+		httpClient:     secureHTTPClient(httpClient, apiURL),
+		requestTimeout: defaultRequestTimeout,
+	}, nil
+}
+
+func validateFalAPIURL(raw string) (string, error) {
+	apiURL := strings.TrimRight(strings.TrimSpace(blank(raw, defaultAPIURL)), "/")
+	parsed, err := url.Parse(apiURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+		return "", exit(2, "%s api url is invalid", providerName)
+	}
+	if parsed.RawPath != "" {
+		return "", exit(2, "%s api url contains an unsupported escaped path", providerName)
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", exit(2, "%s api url contains unsupported sensitive components", providerName)
+	}
+	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
+		return "", exit(2, "%s api url must use https unless it targets localhost", providerName)
+	}
+	return apiURL, nil
 }
 
 func secureHTTPClient(source *http.Client, apiURL string) *http.Client {
@@ -176,6 +214,12 @@ func (c *client) GetInstance(ctx context.Context, id string) (ComputeInstance, e
 	if err := c.do(ctx, http.MethodGet, "/compute/instances/"+url.PathEscape(id), nil, "", &out); err != nil {
 		return ComputeInstance{}, err
 	}
+	if strings.TrimSpace(out.ID) == "" {
+		return ComputeInstance{}, errors.New("fal get instance response is missing an instance id")
+	}
+	if out.ID != id {
+		return ComputeInstance{}, errors.New("fal get instance response id does not match the requested instance")
+	}
 	return out, nil
 }
 
@@ -196,6 +240,13 @@ func (c *client) DeleteInstance(ctx context.Context, id string) error {
 }
 
 func (c *client) do(ctx context.Context, method, path string, body any, idempotencyKey string, out any) error {
+	timeout := c.requestTimeout
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -204,7 +255,7 @@ func (c *client) do(ctx context.Context, method, path string, body any, idempote
 		}
 		reader = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.apiURL+path, reader)
+	req, err := http.NewRequestWithContext(requestCtx, method, c.apiURL+path, reader)
 	if err != nil {
 		return err
 	}
@@ -224,7 +275,7 @@ func (c *client) do(ctx context.Context, method, path string, body any, idempote
 			}
 			return errFalUnsafeMutationRedirect
 		}
-		return err
+		return &falTransportError{cause: safeFalTransportCause(err), message: redactAPIErrorText(err.Error(), c.apiKey)}
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
@@ -235,7 +286,7 @@ func (c *client) do(ctx context.Context, method, path string, body any, idempote
 		return fmt.Errorf("fal response exceeds %d bytes", maxResponseBytes)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return decodeAPIError(resp, bytes.ReplaceAll(data, []byte(c.apiKey), []byte("<redacted>")))
+		return decodeAPIError(resp, data, c.apiKey)
 	}
 	if out != nil {
 		if len(bytes.TrimSpace(data)) == 0 {
@@ -248,17 +299,24 @@ func (c *client) do(ctx context.Context, method, path string, body any, idempote
 	return nil
 }
 
-func decodeAPIError(resp *http.Response, data []byte) error {
-	apiErr := &APIError{StatusCode: resp.StatusCode, Status: resp.Status}
+func decodeAPIError(resp *http.Response, data []byte, apiKey string) error {
+	apiErr := &APIError{StatusCode: resp.StatusCode, Status: strings.TrimSpace(redactAPIErrorText(resp.Status, apiKey))}
 	var body APIErrorBody
-	if len(strings.TrimSpace(string(data))) > 0 && json.Unmarshal(data, &body) == nil {
-		apiErr.Type = strings.TrimSpace(body.Error.Type)
-		apiErr.Message = strings.TrimSpace(body.Error.Message)
-		apiErr.DocsURL = strings.TrimSpace(body.Error.DocsURL)
-		apiErr.RequestID = strings.TrimSpace(body.Error.RequestID)
-	}
-	if apiErr.Message == "" {
-		apiErr.Message = strings.TrimSpace(string(data))
+	if len(bytes.TrimSpace(data)) > 0 && json.Unmarshal(data, &body) == nil {
+		apiErr.Type = strings.TrimSpace(redactAPIErrorText(body.Error.Type, apiKey))
+		apiErr.Message = strings.TrimSpace(redactAPIErrorText(body.Error.Message, apiKey))
+		apiErr.DocsURL = strings.TrimSpace(redactAPIErrorText(body.Error.DocsURL, apiKey))
+		apiErr.RequestID = strings.TrimSpace(redactAPIErrorText(body.Error.RequestID, apiKey))
 	}
 	return apiErr
+}
+
+func redactAPIErrorText(value, apiKey string) string {
+	if apiKey != "" {
+		value = strings.ReplaceAll(value, apiKey, "<redacted>")
+		if encoded, err := json.Marshal(apiKey); err == nil && len(encoded) >= 2 {
+			value = strings.ReplaceAll(value, string(encoded[1:len(encoded)-1]), "<redacted>")
+		}
+	}
+	return shared.RedactErrorSecrets(value)
 }

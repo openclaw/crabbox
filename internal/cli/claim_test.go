@@ -190,6 +190,215 @@ func TestDurableGuardedClaimWritePropagatesRequiredBoundarySyncFailure(t *testin
 	}
 }
 
+func TestEnsurePrivateDirectoryDurableSyncsFreshAncestorChain(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "new-state", "crabbox", "claim-locks")
+	var synced []string
+	if err := ensurePrivateDirectoryDurableWithinWithSync(dir, base, func(path string) error {
+		synced = append(synced, filepath.Clean(path))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		filepath.Join(base, "new-state", "crabbox"),
+		filepath.Join(base, "new-state"),
+		base,
+	}
+	if !reflect.DeepEqual(synced, want) {
+		t.Fatalf("synced=%q want=%q", synced, want)
+	}
+}
+
+func TestEnsurePrivateDirectoryDurableRejectsFilesystemRootBoundary(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.VolumeName(base) + string(filepath.Separator)
+	dir := filepath.Join(root, "crabbox-missing-"+filepath.Base(base), "private")
+	err := ensurePrivateDirectoryDurableWithinWithSync(dir, root, func(string) error {
+		t.Fatal("filesystem root boundary must fail before syncing")
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "not a safe existing directory") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestEnsurePrivateDirectoryDurableRetryRepeatsFixedBoundary(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "new-state", "crabbox", "claim-locks")
+	syncErr := errors.New("boundary sync unavailable")
+	err := ensurePrivateDirectoryDurableWithinWithSync(dir, base, func(path string) error {
+		if filepath.Clean(path) == filepath.Clean(base) {
+			return syncErr
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("first attempt error=%v", err)
+	}
+	var synced []string
+	if err := ensurePrivateDirectoryDurableWithinWithSync(dir, base, func(path string) error {
+		synced = append(synced, filepath.Clean(path))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(synced) == 0 || synced[len(synced)-1] != filepath.Clean(base) {
+		t.Fatalf("retry syncs=%q want original boundary %q", synced, base)
+	}
+}
+
+func TestEnsurePrivateDirectoryDurableLogicalRootRetryKeepsOriginalBoundary(t *testing.T) {
+	base := t.TempDir()
+	logicalRoot := filepath.Join(base, "new-state")
+	dir := filepath.Join(logicalRoot, "crabbox", "claim-locks")
+	boundary, err := privateDirectoryDurabilityBoundary(dir, logicalRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("stable boundary sync unavailable")
+	err = ensurePrivateDirectoryDurableWithSync(dir, logicalRoot, func(path string) error {
+		if filepath.Clean(path) == boundary {
+			return syncErr
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("first attempt error=%v", err)
+	}
+	var synced []string
+	if err := ensurePrivateDirectoryDurableWithSync(dir, logicalRoot, func(path string) error {
+		synced = append(synced, filepath.Clean(path))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(synced) == 0 || synced[len(synced)-1] != boundary {
+		t.Fatalf("retry syncs=%q want original boundary %q", synced, boundary)
+	}
+}
+
+func TestEnsurePrivateDirectoryDurableCreatesCustomXDGRootFromStableTopLevel(t *testing.T) {
+	base := t.TempDir()
+	alternateTemp := filepath.Join(base, "alternate-temp")
+	alternateHome := filepath.Join(base, "alternate-home")
+	if err := os.MkdirAll(alternateTemp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", alternateTemp)
+	t.Setenv("TEMP", alternateTemp)
+	t.Setenv("TMP", alternateTemp)
+	t.Setenv("HOME", alternateHome)
+	logicalRoot := filepath.Join(base, "custom-xdg", "state")
+	dir := filepath.Join(logicalRoot, "crabbox", "claims")
+	boundary, err := privateDirectoryDurabilityBoundary(dir, logicalRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boundary == filepath.Clean(logicalRoot) || filepath.Dir(boundary) == boundary {
+		t.Fatalf("boundary=%q is not a stable non-root ancestor", boundary)
+	}
+	syncErr := errors.New("top-level sync unavailable")
+	err = ensurePrivateDirectoryDurableWithSync(dir, logicalRoot, func(path string) error {
+		if filepath.Clean(path) == boundary {
+			return syncErr
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("first attempt error=%v", err)
+	}
+	var synced []string
+	if err := ensurePrivateDirectoryDurableWithSync(dir, logicalRoot, func(path string) error {
+		synced = append(synced, filepath.Clean(path))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(synced) == 0 || synced[len(synced)-1] != boundary {
+		t.Fatalf("retry syncs=%q want stable top-level boundary %q", synced, boundary)
+	}
+}
+
+func TestEnsureCrabboxClaimNamespaceDurableRejectsRelativeXDGRoot(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", filepath.Join("relative-home", "state"))
+	called := false
+	err := ensureCrabboxClaimNamespaceDurableWithSync(func(string) error {
+		called = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be absolute") {
+		t.Fatalf("error=%v", err)
+	}
+	if called {
+		t.Fatal("relative state root reached directory sync")
+	}
+}
+
+func TestIsWindowsDevicePathRecognizesSeparatorVariants(t *testing.T) {
+	for _, path := range []string{
+		`\\?\UNC\server\share\state`,
+		`//?/UNC/server/share/state`,
+		`/\?\UNC/server/share/state`,
+		`\??\UNC\server\share\state`,
+		`/??/UNC/server/share/state`,
+		`\\.\C:\state`,
+		`//./UNC/server/share/state`,
+	} {
+		t.Run(path, func(t *testing.T) {
+			if !isWindowsDevicePath(path) {
+				t.Fatalf("isWindowsDevicePath(%q)=false", path)
+			}
+			if filepath.Separator == '\\' {
+				_, err := privateDirectoryDurabilityBoundary(path+`\crabbox\claims`, path)
+				if err == nil || !strings.Contains(err.Error(), "Windows device paths are not supported") {
+					t.Fatalf("error=%v", err)
+				}
+			}
+		})
+	}
+	if filepath.Separator == '/' {
+		_, err := privateDirectoryDurabilityBoundary(`/??/state/crabbox/claims`, `/??/state`)
+		if err != nil && strings.Contains(err.Error(), "Windows device paths are not supported") {
+			t.Fatalf("valid POSIX path was classified as a Windows device path: %v", err)
+		}
+	}
+}
+
+func TestEnsureCrabboxClaimNamespaceDurableSyncsPreexistingClaimsDirectory(t *testing.T) {
+	base := t.TempDir()
+	stateRoot := filepath.Join(base, "fresh", "state")
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	stateDir, err := crabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimDir := filepath.Join(stateDir, "claims")
+	if err := os.MkdirAll(claimDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	boundary, err := privateDirectoryDurabilityBoundary(claimDir, stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var synced []string
+	if err := ensureCrabboxClaimNamespaceDurableWithSync(func(path string) error {
+		synced = append(synced, filepath.Clean(path))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(claimDir); err != nil || !info.IsDir() {
+		t.Fatalf("claim namespace stat=%v info=%v", err, info)
+	}
+	if len(synced) == 0 || synced[0] != filepath.Clean(stateDir) {
+		t.Fatalf("claim namespace syncs=%q want state parent first %q", synced, stateDir)
+	}
+	if len(synced) == 0 || synced[len(synced)-1] != boundary {
+		t.Fatalf("state namespace syncs=%q want stable boundary %q", synced, boundary)
+	}
+}
+
 func TestFinalizeAbsentLeaseClaimSyncFailureSkipsAction(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	called := false

@@ -60,14 +60,44 @@ func EnsureTestboxKey(leaseID string) (string, string, error) {
 }
 
 func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
-	if (cfg.Provider == "aws" || cfg.Provider == "azure") && cfg.TargetOS == targetWindows {
-		return ensureTestboxKeyWithType(leaseID, "rsa")
-	}
-	return ensureTestboxKey(leaseID)
+	return ensureTestboxKeyWithType(leaseID, testboxKeyTypeForConfig(cfg))
 }
 
 func EnsureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
 	return ensureTestboxKeyForConfig(cfg, leaseID)
+}
+
+func testboxKeyTypeForConfig(cfg Config) string {
+	if (cfg.Provider == "aws" || cfg.Provider == "azure") && cfg.TargetOS == targetWindows {
+		return "rsa"
+	}
+	return "ed25519"
+}
+
+func ensureTestboxKeyForConfigDurable(cfg Config, leaseID string) (string, string, error) {
+	return ensureTestboxKeyForConfigDurableWithSync(cfg, leaseID, syncControllerDirectory)
+}
+
+func ensureTestboxKeyForConfigDurableWithSync(cfg Config, leaseID string, syncDirectory func(string) error) (string, string, error) {
+	privatePath, err := testboxKeyPath(leaseID)
+	if err != nil {
+		return "", "", err
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", "", exit(2, "user config directory is unavailable")
+	}
+	if err := ensurePrivateDirectoryDurableWithSync(filepath.Dir(privatePath), configDir, syncDirectory); err != nil {
+		return "", "", exit(2, "create durable testbox key directory: %v", err)
+	}
+	privatePath, publicKey, err := ensureTestboxKeyWithType(leaseID, testboxKeyTypeForConfig(cfg))
+	if err != nil {
+		return "", "", err
+	}
+	if err := syncStoredTestboxKeyWithSync(leaseID, syncDirectory); err != nil {
+		return "", "", exit(2, "sync durable testbox key: %v", err)
+	}
+	return privatePath, publicKey, nil
 }
 
 func syncStoredTestboxKey(leaseID string) error {
@@ -117,10 +147,6 @@ func syncTestboxKeyDirectoriesWithSync(keyDir, configDir string, syncDirectory f
 			return exit(2, "sync testbox key directory: boundary %s is not an ancestor of %s", configDir, keyDir)
 		}
 	}
-}
-
-func SyncStoredTestboxKey(leaseID string) error {
-	return syncStoredTestboxKey(leaseID)
 }
 
 func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {

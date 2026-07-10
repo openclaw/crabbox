@@ -435,6 +435,14 @@ func CrabboxStateDir() (string, error) {
 	return crabboxStateDir()
 }
 
+func EnsureCrabboxClaimNamespaceDurable() error {
+	return ensureCrabboxClaimNamespaceDurable()
+}
+
+func EnsureTestboxKeyForConfigDurable(cfg Config, leaseID string) (string, string, error) {
+	return ensureTestboxKeyForConfigDurable(cfg, leaseID)
+}
+
 func DirectLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {
 	return directLeaseLabels(cfg, leaseID, slug, provider, market, keep, now)
 }

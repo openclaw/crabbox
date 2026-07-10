@@ -215,6 +215,71 @@ func TestConfigShowIncludesFalConfigWithoutCredentialDetails(t *testing.T) {
 	}
 }
 
+func TestConfigShowRejectsBlankFalIdentityFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{name: "api url", config: "fal:\n  apiUrl: '   '\n", want: "fal.apiUrl must not be blank"},
+		{name: "user", config: "fal:\n  user: '   '\n", want: "fal.user must not be blank"},
+		{name: "ssh user", config: "ssh:\n  user: '   '\n", want: "ssh.user must not be blank"},
+		{name: "work root", config: "workRoot: '   '\n", want: "workRoot must not be blank"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			home := t.TempDir()
+			configPath := filepath.Join(home, "config.yaml")
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			config := "provider: fal\n" + tc.config
+			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+			for _, args := range [][]string{nil, {"--json"}} {
+				if err := app.configShow(args); err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("configShow(%v) err=%v want %q", args, err, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigShowNormalizesFalIdentityFields(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	config := "provider: fal\nworkRoot: '  /srv/crabbox  '\nssh:\n  user: '  runner  '\nfal:\n  apiUrl: '  https://api.fal.example.test/v1  '\n  user: '  root  '\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		SSHUser  string `json:"sshUser"`
+		WorkRoot string `json:"workRoot"`
+		Fal      struct {
+			APIURL   string `json:"apiUrl"`
+			User     string `json:"user"`
+			WorkRoot string `json:"workRoot"`
+		} `json:"fal"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Fal.APIURL != "https://api.fal.example.test/v1" || got.Fal.User != "root" || got.Fal.WorkRoot != "/srv/crabbox" || got.SSHUser != "runner" || got.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("normalized config=%#v", got)
+	}
+}
+
 func TestConfigSetBrokerRegisteredMode(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -57,6 +59,7 @@ func TestSyncAndRemoveStoredTestboxKey(t *testing.T) {
 
 func TestSyncStoredTestboxKeyStopsAtUserConfigBoundary(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +89,64 @@ func TestSyncStoredTestboxKeyStopsAtUserConfigBoundary(t *testing.T) {
 		if synced[index] != filepath.Clean(want[index]) {
 			t.Fatalf("synced=%q want=%q", synced, want)
 		}
+	}
+}
+
+func TestEnsureTestboxKeyForConfigDurableRetriesStableBoundary(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "fresh", "home")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const leaseID = "cbx_durable_key_boundary"
+	keyPath, err := testboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary, err := privateDirectoryDurabilityBoundary(filepath.Dir(keyPath), configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("stable boundary sync unavailable")
+	var failedSyncs []string
+	_, _, err = ensureTestboxKeyForConfigDurableWithSync(Config{}, leaseID, func(dir string) error {
+		dir = filepath.Clean(dir)
+		failedSyncs = append(failedSyncs, dir)
+		if dir == boundary {
+			return syncErr
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("durable key err=%v", err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("key created before durable namespace: %v", err)
+	}
+	if len(failedSyncs) == 0 || failedSyncs[len(failedSyncs)-1] != boundary {
+		t.Fatalf("failed syncs=%q want boundary %q", failedSyncs, boundary)
+	}
+
+	var retrySyncs []string
+	gotPath, publicKey, err := ensureTestboxKeyForConfigDurableWithSync(Config{}, leaseID, func(dir string) error {
+		retrySyncs = append(retrySyncs, filepath.Clean(dir))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != keyPath || publicKey == "" {
+		t.Fatalf("path=%q publicKeyPresent=%t", gotPath, publicKey != "")
+	}
+	if _, err := os.Stat(keyPath + ".pub"); err != nil {
+		t.Fatalf("public key stat: %v", err)
+	}
+	if !slices.Contains(retrySyncs, boundary) || retrySyncs[len(retrySyncs)-1] != filepath.Clean(configDir) {
+		t.Fatalf("retry syncs=%q want stable boundary %q and final config dir %q", retrySyncs, boundary, configDir)
 	}
 }
 

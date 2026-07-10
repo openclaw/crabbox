@@ -52,13 +52,10 @@ func ApplyFalProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 		core.MarkWorkRootExplicit(cfg)
 	}
 	if isFalProviderName(cfg.Provider) {
+		if err := (Provider{}).ValidateConfig(*cfg); err != nil {
+			return err
+		}
 		applyFalDefaults(cfg)
-		if err := validateFalSSHUser(cfg.Fal.User); err != nil {
-			return err
-		}
-		if err := validateFalSSHUser(cfg.SSHUser); err != nil {
-			return err
-		}
 	}
 	return nil
 }

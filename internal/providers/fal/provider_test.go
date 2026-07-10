@@ -36,7 +36,10 @@ func TestPrepareLeaseClaimEndpointPreservesCredentialBinding(t *testing.T) {
 		Slug:     "gpu-box",
 		Provider: providerName,
 		CloudID:  "inst_owned",
-		Labels:   map[string]string{falCredentialBindingLabel: "binding-a"},
+		Labels: map[string]string{
+			falCredentialBindingLabel: "binding-a",
+			falAcquireLifetimeLabel:   falAcquireLifetimeVersion,
+		},
 	}
 	server := core.Server{
 		CloudID:  "inst_owned",
@@ -53,11 +56,47 @@ func TestPrepareLeaseClaimEndpointPreservesCredentialBinding(t *testing.T) {
 	if prepared.Labels[falCredentialBindingLabel] != "binding-a" {
 		t.Fatalf("prepared labels=%#v", prepared.Labels)
 	}
+	if prepared.Labels[falAcquireLifetimeLabel] != falAcquireLifetimeVersion {
+		t.Fatalf("prepared lifetime marker=%q", prepared.Labels[falAcquireLifetimeLabel])
+	}
 	changed := server
 	changed.Labels = cloneLabels(server.Labels)
 	changed.Labels[falCredentialBindingLabel] = "binding-b"
 	if _, err := (Provider{}).PrepareLeaseClaimEndpoint(existing, providerName, existing.Slug, changed, false); err == nil {
 		t.Fatal("expected credential-binding retarget rejection")
+	}
+	changed = server
+	changed.Labels = cloneLabels(server.Labels)
+	changed.Labels[falAcquireLifetimeLabel] = "2"
+	if _, err := (Provider{}).PrepareLeaseClaimEndpoint(existing, providerName, existing.Slug, changed, false); err == nil {
+		t.Fatal("expected lifetime-marker retarget rejection")
+	}
+
+	legacy := existing
+	legacy.Labels = cloneLabels(existing.Labels)
+	delete(legacy.Labels, falAcquireLifetimeLabel)
+	supplied := server
+	supplied.Labels = cloneLabels(server.Labels)
+	supplied.Labels[falAcquireLifetimeLabel] = falAcquireLifetimeVersion
+	if _, err := (Provider{}).PrepareLeaseClaimEndpoint(legacy, providerName, legacy.Slug, supplied, false); err == nil {
+		t.Fatal("expected legacy lifetime-marker upgrade rejection")
+	}
+	prepared, err = (Provider{}).PrepareLeaseClaimEndpoint(legacy, providerName, legacy.Slug, server, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := prepared.Labels[falAcquireLifetimeLabel]; ok {
+		t.Fatalf("legacy endpoint rewrite added lifetime marker: %#v", prepared.Labels)
+	}
+	malformed := existing
+	malformed.Labels = cloneLabels(existing.Labels)
+	malformed.Labels[falAcquireLifetimeLabel] = " 1 "
+	prepared, err = (Provider{}).PrepareLeaseClaimEndpoint(malformed, providerName, malformed.Slug, server, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Labels[falAcquireLifetimeLabel] != " 1 " {
+		t.Fatalf("malformed existing lifetime marker was normalized: %#v", prepared.Labels)
 	}
 }
 
@@ -137,6 +176,31 @@ func TestConfigureRejectsUnsupportedTargetAndTailscale(t *testing.T) {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+func TestValidateConfigRejectsUnsafeNonRuntimeConfig(t *testing.T) {
+	for name, cfg := range map[string]Config{
+		"macos target":        {TargetOS: "macos"},
+		"tailscale":           {TargetOS: targetLinux, Tailscale: core.TailscaleConfig{Enabled: true}},
+		"ssh user":            {TargetOS: targetLinux, Fal: FalConfig{User: "bad user"}},
+		"blank fal user":      {TargetOS: targetLinux, Fal: FalConfig{User: "   "}},
+		"blank ssh user":      {TargetOS: targetLinux, SSHUser: "   "},
+		"api url":             {TargetOS: targetLinux, Fal: FalConfig{APIURL: "http://api.fal.ai/v1"}},
+		"blank api url":       {TargetOS: targetLinux, Fal: FalConfig{APIURL: "   "}},
+		"instance type":       {TargetOS: targetLinux, Fal: FalConfig{InstanceType: "   "}},
+		"fal work root":       {TargetOS: targetLinux, Fal: FalConfig{WorkRoot: "relative/work"}},
+		"blank fal work root": {TargetOS: targetLinux, Fal: FalConfig{WorkRoot: "   "}},
+		"work root":           {TargetOS: targetLinux, WorkRoot: "   "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := (Provider{}).ValidateConfig(cfg); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+	if err := (Provider{}).ValidateConfig(Config{}); err != nil {
+		t.Fatalf("default config validation failed: %v", err)
 	}
 }
 

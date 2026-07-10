@@ -1589,3 +1589,14 @@ func crabboxStateDir() (string, error) {
 	}
 	return filepath.Join(dir, "crabbox", "state"), nil
 }
+
+func crabboxStateRootDir() (string, error) {
+	if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
+		return filepath.Clean(dir), nil
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", exit(2, "user state directory is unavailable")
+	}
+	return filepath.Clean(dir), nil
+}

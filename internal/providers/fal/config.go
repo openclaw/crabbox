@@ -18,8 +18,12 @@ func applyFalDefaults(cfg *Config) {
 	if cfg == nil {
 		return
 	}
+	cfg.Fal.APIURL = strings.TrimSpace(cfg.Fal.APIURL)
+	cfg.Fal.InstanceType = strings.TrimSpace(cfg.Fal.InstanceType)
 	cfg.Fal.User = strings.TrimSpace(cfg.Fal.User)
+	cfg.Fal.WorkRoot = strings.TrimSpace(cfg.Fal.WorkRoot)
 	cfg.SSHUser = strings.TrimSpace(cfg.SSHUser)
+	cfg.WorkRoot = strings.TrimSpace(cfg.WorkRoot)
 	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
 		cfg.Fal.InstanceType = strings.TrimSpace(cfg.ServerType)
 	}

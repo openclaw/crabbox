@@ -2045,6 +2045,28 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		return validateTargetConfig(*cfg)
 	}
 	if cfg.Provider == "fal" {
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{name: "fal.apiUrl", value: cfg.Fal.APIURL},
+			{name: "fal.instanceType", value: cfg.Fal.InstanceType},
+			{name: "fal.user", value: cfg.Fal.User},
+			{name: "fal.workRoot", value: cfg.Fal.WorkRoot},
+			{name: "ssh.user", value: cfg.explicitSSHUser},
+			{name: "workRoot", value: cfg.explicitWorkRoot},
+		} {
+			if field.value != "" && strings.TrimSpace(field.value) == "" {
+				return exit(2, "%s must not be blank", field.name)
+			}
+		}
+		cfg.Fal.APIURL = strings.TrimSpace(cfg.Fal.APIURL)
+		cfg.Fal.InstanceType = strings.TrimSpace(cfg.Fal.InstanceType)
+		cfg.Fal.Sector = strings.TrimSpace(cfg.Fal.Sector)
+		cfg.Fal.User = strings.TrimSpace(cfg.Fal.User)
+		cfg.Fal.WorkRoot = strings.TrimSpace(cfg.Fal.WorkRoot)
+		cfg.explicitSSHUser = strings.TrimSpace(cfg.explicitSSHUser)
+		cfg.explicitWorkRoot = strings.TrimSpace(cfg.explicitWorkRoot)
 		if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
 			cfg.Fal.InstanceType = strings.TrimSpace(cfg.ServerType)
 		}
