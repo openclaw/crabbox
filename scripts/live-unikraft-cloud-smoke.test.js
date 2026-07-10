@@ -463,6 +463,9 @@ esac`,
   assert.match(result.stdout, /classification=live_unikraft_cloud_smoke_passed/);
   assert.doesNotMatch(result.stdout + result.stderr, /smoke-secret-token/);
   assert.equal(fs.readFileSync(harness.remote, "utf8"), harness.baseline);
+  const generatedSlug = fs.readFileSync(harness.slugFile, "utf8");
+  assert.ok(generatedSlug.length <= 41, generatedSlug);
+  assert.match(generatedSlug, /^[a-z0-9]+(?:-[a-z0-9]+)*$/);
   const calls = fs.readFileSync(harness.calls, "utf8");
   assert.match(calls, /^doctor --provider unikraft-cloud$/m);
   assert.match(calls, /^list --provider unikraft-cloud --all --json$/m);

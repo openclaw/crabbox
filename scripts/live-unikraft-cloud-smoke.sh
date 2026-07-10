@@ -1170,7 +1170,11 @@ nonce="$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')"
 if [[ ! "$nonce" =~ ^[0-9a-f]{12}$ ]]; then
   classify_and_exit environment_blocked random_nonce_failed
 fi
-slug="${slug_prefix:0:32}-$(date -u +%Y%m%d%H%M%S)-$nonce"
+# Requested Crabbox slugs are capped at 41 characters. The timestamp, nonce,
+# and separators consume 28, leaving 13 for the readable prefix.
+slug_prefix="${slug_prefix:0:13}"
+slug_prefix="${slug_prefix%-}"
+slug="$slug_prefix-$(date -u +%Y%m%d%H%M%S)-$nonce"
 
 export CRABBOX_UNIKRAFT_CLOUD_SMOKE_TOKEN="$token"
 export CRABBOX_UNIKRAFT_CLOUD_SMOKE_API_URL="$api_url"
