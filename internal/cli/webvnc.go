@@ -1164,12 +1164,12 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	daemonArgs := webVNCBridgeArgs(cfg, target, leaseID, *openPortal, *takeControl)
+	daemonArgs, credentialInput := webVNCResetDaemonLaunch(cfg, target, leaseID, *openPortal, *takeControl)
 	daemonName := *id
 	if strings.TrimSpace(daemonName) == "" {
 		daemonName = leaseID
 	}
-	if err := a.startWebVNCDaemon(daemonArgs, daemonName, false, "", nil, target.ChildEnvDenylist...); err != nil {
+	if err := a.startWebVNCDaemon(daemonArgs, daemonName, false, "", credentialInput, target.ChildEnvDenylist...); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "webvnc reset: lease=%s slug=%s\n", leaseID, blank(serverSlug(server), "-"))
@@ -1179,6 +1179,11 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(cfg, target, leaseID))
 	return nil
+}
+
+func webVNCResetDaemonLaunch(cfg Config, target SSHTarget, leaseID string, openPortal, takeControl bool) ([]string, *string) {
+	args := webVNCBridgeArgs(cfg, target, leaseID, openPortal, takeControl)
+	return args, registeredWebVNCDaemonCredentialInput(cfg, args)
 }
 
 func (a App) startWebVNCDaemon(args []string, leaseID string, controllerOwned bool, controllerOwnerID string, credentialInput *string, childEnvDenylist ...string) error {
