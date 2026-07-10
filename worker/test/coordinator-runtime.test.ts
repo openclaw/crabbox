@@ -11,8 +11,11 @@ import {
 } from "../src/coordinator-runtime";
 import { FleetCoordinator } from "../src/fleet";
 import { githubAuthRoute } from "../src/oauth";
+import { orgKeyForLabel } from "../src/org-identity";
 import { runtimeAdapterRelayFrameLimit } from "../src/runtime-adapter-relay";
 import type { Env, LeaseRecord } from "../src/types";
+
+const exampleOrgKey = orgKeyForLabel("example-org");
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -204,7 +207,7 @@ describe("coordinator runtimes", () => {
       target: "linux",
       cloudID: "external-shared-egress",
       owner: "owner@example.com",
-      org: "example-org",
+      org: exampleOrgKey,
       share: { users: { "manager@example.com": "manage" } },
       profile: "default",
       class: "default",
@@ -261,7 +264,7 @@ describe("coordinator runtimes", () => {
       leaseID: lease.id,
       sessionID: "egress_accepted",
       owner: "manager@example.com",
-      org: "example-org",
+      org: exampleOrgKey,
       admin: false,
     });
 
@@ -351,7 +354,7 @@ describe("coordinator runtimes", () => {
       target: "linux",
       cloudID: "external-shared-bridges",
       owner: "owner@example.com",
-      org: "example-org",
+      org: exampleOrgKey,
       share: { users: { "manager@example.com": "manage" } },
       profile: "default",
       class: "default",
@@ -420,7 +423,7 @@ describe("coordinator runtimes", () => {
       kind: "webvnc-agent",
       leaseID: lease.id,
       owner: "manager@example.com",
-      org: "example-org",
+      org: exampleOrgKey,
       admin: false,
     });
 
@@ -430,7 +433,7 @@ describe("coordinator runtimes", () => {
       kind: "code-agent",
       leaseID: lease.id,
       owner: "manager@example.com",
-      org: "example-org",
+      org: exampleOrgKey,
       admin: false,
     });
 
@@ -439,7 +442,7 @@ describe("coordinator runtimes", () => {
       kind: "webvnc-agent",
       leaseID: lease.id,
       owner: "admin@example.com",
-      org: "example-org",
+      org: exampleOrgKey,
       admin: true,
       auth: "bearer",
       adminGrantVersion: currentGrantVersion,
@@ -449,7 +452,7 @@ describe("coordinator runtimes", () => {
       kind: "code-agent",
       leaseID: lease.id,
       owner: "admin@example.com",
-      org: "example-org",
+      org: exampleOrgKey,
       admin: true,
       auth: "bearer",
       adminGrantVersion: currentGrantVersion,

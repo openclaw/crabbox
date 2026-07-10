@@ -1,3 +1,4 @@
+import type { PortalExternalRunnerRecord, PortalLeaseRecord } from "./org-records";
 import type {
   ExternalRunnerRecord,
   LeaseRecord,
@@ -64,7 +65,7 @@ export interface PortalMacHostRecord {
   instanceType: string;
   autoPlacement: string;
   allocationTime?: string;
-  lease?: LeaseRecord;
+  lease?: PortalLeaseRecord;
 }
 
 export interface PortalAdminProviderStatus {
@@ -119,8 +120,8 @@ export interface PortalAdminView {
 export type PortalAdminTab = "health" | "leases" | "users";
 
 export function portalHome(
-  leases: LeaseRecord[],
-  runners: ExternalRunnerRecord[],
+  leases: PortalLeaseRecord[],
+  runners: PortalExternalRunnerRecord[],
   request: Request,
   macHosts: PortalMacHostRecord[] = [],
   manageableLeaseIDs: ReadonlySet<string> = new Set(),
@@ -2145,7 +2146,7 @@ function shellArg(value: string): string {
 }
 
 function leaseRow(
-  lease: LeaseRecord,
+  lease: PortalLeaseRecord,
   context: { admin: boolean; owner: string; org: string; canManage: boolean },
 ): string {
   const label = lease.slug || lease.id;
@@ -2442,7 +2443,7 @@ function macHostStateTone(value: string): "ok" | "warn" | "bad" {
 }
 
 function externalRunnerLeaseRow(
-  runner: ExternalRunnerRecord,
+  runner: PortalExternalRunnerRecord,
   context: { admin: boolean; owner: string; org: string },
 ): string {
   const ownership = context.admin ? runnerOwnership(runner, context.owner, context.org) : "mine";
@@ -2489,7 +2490,7 @@ function externalRunnerLeaseRow(
 }
 
 function externalRunnerDetailPath(
-  runner: ExternalRunnerRecord,
+  runner: PortalExternalRunnerRecord,
   context?: { admin: boolean; owner: string; org: string },
 ): string {
   const path = `/portal/runners/${encodeURIComponent(runner.provider)}/${encodeURIComponent(runner.id)}`;
@@ -2498,7 +2499,14 @@ function externalRunnerDetailPath(
   }
   const params = new URLSearchParams();
   params.set("owner", runner.owner);
-  params.set("org", runner.org);
+  if (runner.portalOrgKind === "missing" || runner.portalOrgKind === "unsupported") {
+    params.set("orgKind", runner.portalOrgKind);
+  } else {
+    params.set("org", runner.org);
+    if (runner.portalOrgKind === "legacy") {
+      params.set("orgKind", runner.portalOrgKind);
+    }
+  }
   return `${path}?${params.toString()}`;
 }
 
@@ -2651,16 +2659,28 @@ function portalLogoutButton(): string {
   return `<form method="post" action="/portal/logout"><button class="button secondary" type="submit">log out</button></form>`;
 }
 
-function leaseOwnership(lease: LeaseRecord, owner: string, org: string): "mine" | "system" {
-  return lease.owner === owner && lease.org === org ? "mine" : "system";
+function leaseOwnership(lease: PortalLeaseRecord, owner: string, org: string): "mine" | "system" {
+  const orgMatches = lease.portalOrgKind === "missing" ? org === "" : lease.org === org;
+  return lease.portalOrgKind !== "legacy" &&
+    lease.portalOrgKind !== "unsupported" &&
+    lease.owner === owner &&
+    orgMatches
+    ? "mine"
+    : "system";
 }
 
 function runnerOwnership(
-  runner: ExternalRunnerRecord,
+  runner: PortalExternalRunnerRecord,
   owner: string,
   org: string,
 ): "mine" | "system" {
-  return runner.owner === owner && runner.org === org ? "mine" : "system";
+  const orgMatches = runner.portalOrgKind === "missing" ? org === "" : runner.org === org;
+  return runner.portalOrgKind !== "legacy" &&
+    runner.portalOrgKind !== "unsupported" &&
+    runner.owner === owner &&
+    orgMatches
+    ? "mine"
+    : "system";
 }
 
 function runnerSortTime(runner: ExternalRunnerRecord): string {
