@@ -49,7 +49,7 @@ export async function prepareCoordinatorRequest(
     };
   }
   const isolatedCode = await isIsolatedCodeRequest(request, env);
-  const canonicalPortal = canonicalPortalRedirect(request, env, url, isolatedCode);
+  const canonicalPortal = await canonicalPortalRedirect(request, env, url, isolatedCode);
   if (canonicalPortal) {
     return { response: canonicalPortal, authenticated: false };
   }
@@ -197,10 +197,7 @@ function isWebVNCViewerBootstrap(request: Request, url: URL): boolean {
 }
 
 function isWebVNCViewerSessionRequest(request: Request, url: URL): boolean {
-  if (
-    request.headers.has("authorization") ||
-    cookieValue(request.headers.get("cookie") ?? "", "crabbox_session")
-  ) {
+  if (request.headers.has("authorization")) {
     return false;
   }
   const session = cookieValue(request.headers.get("cookie") ?? "", "crabbox_webvnc_session");
@@ -282,14 +279,15 @@ function runtimeAdapterServiceAuth(
   };
 }
 
-function canonicalPortalRedirect(
+async function canonicalPortalRedirect(
   request: Request,
   env: Env,
   url: URL,
   isolatedCode: boolean,
-): Response | undefined {
+): Promise<Response | undefined> {
+  const bootstrap = isWebVNCViewerBootstrap(request, url);
   if (
-    request.method !== "GET" ||
+    (request.method !== "GET" && !bootstrap) ||
     request.headers.get("upgrade")?.toLowerCase() === "websocket" ||
     !url.pathname.startsWith("/portal") ||
     isolatedCode ||
@@ -307,7 +305,44 @@ function canonicalPortalRedirect(
     return undefined;
   }
   const location = new URL(`${url.pathname}${url.search}`, publicURL.origin);
-  return new Response(null, { status: 302, headers: { location: location.toString() } });
+  if (bootstrap) {
+    const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    const ticket =
+      contentType === "application/x-www-form-urlencoded"
+        ? (new URLSearchParams(await request.clone().text()).get("ticket") ?? "")
+        : "";
+    if (/^webvnc_view_[a-f0-9]{32}$/.test(ticket)) {
+      const nonce = crypto.randomUUID().replaceAll("-", "");
+      return new Response(
+        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Opening WebVNC</title></head><body><form id="webvnc-bootstrap" method="post" action="${escapeHTMLAttribute(location.toString())}" autocomplete="off"><input type="hidden" name="ticket" value="${escapeHTMLAttribute(ticket)}"><p>Opening WebVNC...</p><button type="submit">Continue</button></form><script nonce="${nonce}">document.getElementById("webvnc-bootstrap").requestSubmit()</script></body></html>`,
+        {
+          status: 200,
+          headers: {
+            "cache-control": "no-store",
+            "content-security-policy": `default-src 'none'; base-uri 'none'; form-action ${publicURL.origin}; frame-ancestors 'none'; script-src 'nonce-${nonce}'`,
+            "content-type": "text/html; charset=utf-8",
+            "referrer-policy": "no-referrer",
+            "x-content-type-options": "nosniff",
+          },
+        },
+      );
+    }
+  }
+  return new Response(null, {
+    status: bootstrap ? 307 : 302,
+    headers: {
+      location: location.toString(),
+      ...(bootstrap ? { "cache-control": "no-store" } : {}),
+    },
+  });
+}
+
+function escapeHTMLAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 function requestWithPortalCookie(request: Request): Request {

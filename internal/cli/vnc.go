@@ -518,10 +518,63 @@ func openLocalURLWithEnvironment(url string, denied ...string) error {
 		return exit(2, "opening VNC URLs is not supported on this local OS")
 	}
 	cmd := exec.Command(name, args...)
-	if len(denied) > 0 {
-		cmd.Env = childEnvironmentWithout(os.Environ(), denied...)
-	}
+	cmd.Env = browserOpenerEnvironment(os.Environ(), denied...)
 	return cmd.Start()
+}
+
+func browserOpenerEnvironment(environment []string, denied ...string) []string {
+	allowed := map[string]struct{}{
+		"PATH": {}, "HOME": {}, "USER": {}, "LOGNAME": {}, "SHELL": {},
+		"TMPDIR": {}, "TMP": {}, "TEMP": {}, "LANG": {}, "TZ": {},
+		"LC_ALL": {}, "LC_CTYPE": {}, "LC_MESSAGES": {},
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		allowed["__CF_USER_TEXT_ENCODING"] = struct{}{}
+	case "linux":
+		for _, name := range []string{
+			"DISPLAY",
+			"WAYLAND_DISPLAY",
+			"XDG_RUNTIME_DIR",
+			"DBUS_SESSION_BUS_ADDRESS",
+			"XDG_CURRENT_DESKTOP",
+			"DESKTOP_SESSION",
+		} {
+			allowed[name] = struct{}{}
+		}
+	case "windows":
+		for _, name := range []string{
+			"SYSTEMROOT",
+			"WINDIR",
+			"COMSPEC",
+			"PATHEXT",
+			"USERPROFILE",
+			"HOMEDRIVE",
+			"HOMEPATH",
+			"APPDATA",
+			"LOCALAPPDATA",
+		} {
+			allowed[name] = struct{}{}
+		}
+	}
+	blocked := make(map[string]struct{}, len(denied))
+	for _, name := range denied {
+		if name = strings.TrimSpace(name); name != "" {
+			blocked[strings.ToUpper(name)] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(allowed)+4)
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(name)
+		if _, denied := blocked[upper]; denied {
+			continue
+		}
+		if _, ok := allowed[upper]; ok {
+			result = append(result, entry)
+		}
+	}
+	return result
 }
 
 func openURLCommand(url string) (string, []string) {

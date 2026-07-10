@@ -806,6 +806,8 @@ type BridgeAttachment =
       org?: string;
       admin?: boolean;
       label: string;
+      viewerSessionID?: string;
+      viewerSessionExpiresAt?: string;
     })
   | (CachedBridgeGrant & {
       kind: "code-agent";
@@ -884,6 +886,8 @@ interface WebVNCViewerSession extends CachedBridgeGrant {
   org?: string;
   admin?: boolean;
   label: string;
+  viewerSessionID?: string;
+  viewerSessionExpiresAt?: string;
   connectedAt: string;
 }
 
@@ -909,6 +913,7 @@ export class FleetCoordinator {
   private readonly restoredBridgeSockets = new Set<WebSocket>();
   private readonly adminGrantValidationTimes = new WeakMap<WebSocket, number>();
   private readonly userGrantValidationTimes = new WeakMap<WebSocket, number>();
+  private readonly viewerSessionValidationTimes = new WeakMap<WebSocket, number>();
   private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
@@ -1329,6 +1334,13 @@ export class FleetCoordinator {
       attachment: Extract<BridgeAttachment, { kind: "webvnc-agent" | "code-agent" }>;
       portalSessionHash: string;
     }> = [];
+    const viewerSessionsToCheck: Array<{
+      socket: WebSocket;
+      attachment: Extract<BridgeAttachment, { kind: "webvnc-viewer" }> & {
+        viewerSessionID: string;
+        viewerSessionExpiresAt: string;
+      };
+    }> = [];
     for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
       if (!attachment) {
@@ -1348,6 +1360,13 @@ export class FleetCoordinator {
           lease && leaseIsLive(lease) ? "lease expired" : "lease ended",
         );
         continue;
+      }
+      if (attachment.kind === "webvnc-viewer" && webVNCViewerSessionAttachment(attachment)) {
+        if (Date.parse(attachment.viewerSessionExpiresAt) <= now) {
+          revokedViewers.set(socket, "viewer session expired");
+          continue;
+        }
+        viewerSessionsToCheck.push({ socket, attachment });
       }
       if (
         (attachment.kind === "webvnc-agent" || attachment.kind === "code-agent") &&
@@ -1417,38 +1436,50 @@ export class FleetCoordinator {
         }
       }
     }
-    const [githubBridgeRevocations, sharedBridgeRevocations, adminPortalAgentRevocations] =
-      await Promise.all([
-        Promise.all(
-          githubBridgesToCheck.map(async ({ socket, attachment }) => ({
-            socket,
-            attachment,
-            reason: await this.githubBridgeGrantFailureReason(attachment),
-          })),
-        ),
-        Promise.all(
-          sharedBridgesToCheck.map(async ({ socket, attachment }) => ({
-            socket,
-            attachment,
-            reason: (await this.sharedBridgeGrantIsCurrent(attachment))
-              ? undefined
-              : "shared access revoked",
-          })),
-        ),
-        Promise.all(
-          adminPortalAgentsToCheck.map(async ({ socket, attachment, portalSessionHash }) => ({
-            socket,
-            attachment,
-            reason: (await this.portalSessionIsRevoked(portalSessionHash))
-              ? "portal session ended"
-              : undefined,
-          })),
-        ),
-      ]);
+    const [
+      githubBridgeRevocations,
+      sharedBridgeRevocations,
+      adminPortalAgentRevocations,
+      viewerSessionRevocations,
+    ] = await Promise.all([
+      Promise.all(
+        githubBridgesToCheck.map(async ({ socket, attachment }) => ({
+          socket,
+          attachment,
+          reason: await this.githubBridgeGrantFailureReason(attachment),
+        })),
+      ),
+      Promise.all(
+        sharedBridgesToCheck.map(async ({ socket, attachment }) => ({
+          socket,
+          attachment,
+          reason: (await this.sharedBridgeGrantIsCurrent(attachment))
+            ? undefined
+            : "shared access revoked",
+        })),
+      ),
+      Promise.all(
+        adminPortalAgentsToCheck.map(async ({ socket, attachment, portalSessionHash }) => ({
+          socket,
+          attachment,
+          reason: (await this.portalSessionIsRevoked(portalSessionHash))
+            ? "portal session ended"
+            : undefined,
+        })),
+      ),
+      Promise.all(
+        viewerSessionsToCheck.map(async ({ socket, attachment }) => ({
+          socket,
+          attachment,
+          reason: await this.webVNCPortalViewerAttachmentFailureReason(attachment),
+        })),
+      ),
+    ]);
     for (const { socket, attachment, reason } of [
       ...githubBridgeRevocations,
       ...sharedBridgeRevocations,
       ...adminPortalAgentRevocations,
+      ...viewerSessionRevocations,
     ]) {
       if (!reason) continue;
       if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
@@ -1703,6 +1734,10 @@ export class FleetCoordinator {
             ? { portalSessionHash: attachment.portalSessionHash }
             : {}),
           ...(attachment.githubGrant ? { githubGrant: attachment.githubGrant } : {}),
+          ...(attachment.viewerSessionID ? { viewerSessionID: attachment.viewerSessionID } : {}),
+          ...(attachment.viewerSessionExpiresAt
+            ? { viewerSessionExpiresAt: attachment.viewerSessionExpiresAt }
+            : {}),
           label: attachment.label,
           connectedAt: new Date().toISOString(),
         });
@@ -2060,6 +2095,24 @@ export class FleetCoordinator {
     socket: WebSocket,
     attachment: BridgeAttachment,
   ): Promise<boolean> {
+    if (attachment.kind === "webvnc-viewer" && webVNCViewerSessionAttachment(attachment)) {
+      const now = Date.now();
+      if (Date.parse(attachment.viewerSessionExpiresAt) <= now) {
+        this.viewerSessionValidationTimes.delete(socket);
+        this.closeRevokedUserBridge(socket, attachment, "viewer session expired");
+        return false;
+      }
+      const lastValidatedAt = this.viewerSessionValidationTimes.get(socket) ?? 0;
+      if (now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
+        const failureReason = await this.webVNCPortalViewerAttachmentFailureReason(attachment);
+        if (failureReason) {
+          this.viewerSessionValidationTimes.delete(socket);
+          this.closeRevokedUserBridge(socket, attachment, failureReason);
+          return false;
+        }
+        this.viewerSessionValidationTimes.set(socket, now);
+      }
+    }
     if (
       revocableUserBridge(attachment) &&
       attachment.auth === "bearer" &&
@@ -2132,6 +2185,23 @@ export class FleetCoordinator {
     );
   }
 
+  private async webVNCPortalViewerAttachmentFailureReason(
+    attachment: Extract<BridgeAttachment, { kind: "webvnc-viewer" }> & {
+      viewerSessionID: string;
+      viewerSessionExpiresAt: string;
+    },
+  ): Promise<string | undefined> {
+    if (Date.parse(attachment.viewerSessionExpiresAt) <= Date.now()) {
+      return "viewer session expired";
+    }
+    const session = await this.state.storage.get<WebVNCPortalViewerSessionRecord>(
+      webVNCPortalViewerSessionKey(attachment.viewerSessionID),
+    );
+    return webVNCPortalViewerSessionMatchesAttachment(session, attachment)
+      ? undefined
+      : "viewer session ended";
+  }
+
   private async githubBridgeGrantFailureReason(
     attachment: CachedBridgeGrant & { owner?: string; org?: string; admin?: boolean },
   ): Promise<string | undefined> {
@@ -2181,6 +2251,7 @@ export class FleetCoordinator {
     >,
     reason: string,
   ): void {
+    this.viewerSessionValidationTimes.delete(socket);
     if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
       this.clearEgressSession(attachment.leaseID, attachment.sessionID, 1008, reason);
       return;
@@ -2191,6 +2262,7 @@ export class FleetCoordinator {
 
   private handleBridgeClose(socket: WebSocket, code: number, reason: string): void {
     this.restoredBridgeSockets.delete(socket);
+    this.viewerSessionValidationTimes.delete(socket);
     const attachment = this.bridgeAttachment(socket);
     if (!attachment || !this.bridgeSocketIsCurrent(socket, attachment)) {
       return;
@@ -8064,15 +8136,22 @@ export class FleetCoordinator {
     };
     await this.state.storage.put(webVNCPortalViewerSessionKey(session.session), session);
     await this.scheduleAlarm();
-    return new Response(null, {
-      status: 303,
-      headers: {
-        "cache-control": "no-store",
-        location: `/portal/leases/${encodeURIComponent(ticket.leaseID)}/vnc`,
-        "referrer-policy": "no-referrer",
-        "set-cookie": webVNCPortalViewerSessionCookie(session),
+    const location = `/portal/leases/${encodeURIComponent(ticket.leaseID)}/vnc`;
+    const nonce = randomHexToken("");
+    return new Response(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opening WebVNC</title></head><body><p>Opening WebVNC...</p><script nonce="${nonce}">location.replace(${JSON.stringify(location)})</script></body></html>`,
+      {
+        status: 200,
+        headers: {
+          "cache-control": "no-store",
+          "content-security-policy": `default-src 'none'; base-uri 'none'; frame-ancestors 'none'; script-src 'nonce-${nonce}'`,
+          "content-type": "text/html; charset=utf-8",
+          "referrer-policy": "no-referrer",
+          "set-cookie": webVNCPortalViewerSessionCookie(session),
+          "x-content-type-options": "nosniff",
+        },
       },
-    });
+    );
   }
 
   private async consumeWebVNCPortalViewerTicket(
@@ -8168,6 +8247,24 @@ export class FleetCoordinator {
 
   private webVNCPortalViewerAuthenticationRequired(request: Request): Response {
     const websocket = request.headers.get("upgrade")?.toLowerCase() === "websocket";
+    const url = new URL(request.url);
+    const clearCookie = clearWebVNCPortalViewerSessionCookie(request);
+    if (
+      !websocket &&
+      request.method.toUpperCase() === "GET" &&
+      /^\/portal\/leases\/[^/]+\/vnc$/.test(url.pathname) &&
+      cookieValue(request.headers.get("cookie") ?? "", "crabbox_session")
+    ) {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          "cache-control": "no-store",
+          location: `${url.pathname}${url.search}`,
+          "referrer-policy": "no-referrer",
+          "set-cookie": clearCookie,
+        },
+      });
+    }
     return json(
       {
         error: "webvnc_viewer_session_required",
@@ -8177,6 +8274,7 @@ export class FleetCoordinator {
         status: 401,
         headers: {
           "cache-control": "no-store",
+          "set-cookie": clearCookie,
           ...(websocket ? {} : { "referrer-policy": "no-referrer" }),
         },
       },
@@ -8920,10 +9018,26 @@ export class FleetCoordinator {
   }
 
   private async cleanupExpiredWebVNCPortalViewerAuth(now = Date.now()): Promise<void> {
+    this.closeExpiredWebVNCPortalViewerSockets(now);
     await this.cleanupExpiredPortalViewerRecords(
       [webVNCPortalViewerTicketPrefix(), webVNCPortalViewerSessionPrefix()],
       now,
     );
+  }
+
+  private closeExpiredWebVNCPortalViewerSockets(now: number): void {
+    for (const viewers of this.webVNCViewers.values()) {
+      for (const viewer of viewers.values()) {
+        const attachment = this.bridgeAttachment(viewer.socket);
+        if (
+          attachment?.kind === "webvnc-viewer" &&
+          webVNCViewerSessionAttachment(attachment) &&
+          Date.parse(attachment.viewerSessionExpiresAt) <= now
+        ) {
+          this.closeRevokedUserBridge(viewer.socket, attachment, "viewer session expired");
+        }
+      }
+    }
   }
 
   private async cleanupExpiredPortalViewerRecords(
@@ -9496,6 +9610,12 @@ export class FleetCoordinator {
       const upgrade = this.state.createWebSocketUpgrade();
       const viewer = upgrade.socket;
       const label = webVNCViewerLabel(owner);
+      const viewerSessionAttachment = viewerSession
+        ? {
+            viewerSessionID: viewerSession.session,
+            viewerSessionExpiresAt: viewerSession.expiresAt,
+          }
+        : {};
 
       this.trackWebVNCViewer(lease.id, {
         id: viewerID,
@@ -9506,6 +9626,7 @@ export class FleetCoordinator {
         admin,
         ...bridgeGrant,
         label,
+        ...viewerSessionAttachment,
         connectedAt: new Date().toISOString(),
       });
       if (!this.activeWebVNCControllerID(lease.id)) {
@@ -9523,6 +9644,7 @@ export class FleetCoordinator {
         admin,
         ...bridgeGrant,
         label,
+        ...viewerSessionAttachment,
       });
       flushPendingWebVNC(this.pendingWebVNCToViewer, webVNCBufferKey(lease.id, agent.id), viewer);
       return upgrade.response;
@@ -15323,6 +15445,19 @@ function webVNCPortalViewerSessionCookie(session: WebVNCPortalViewerSessionRecor
   ].join("; ");
 }
 
+function clearWebVNCPortalViewerSessionCookie(request: Request): string {
+  const match = /^(\/portal\/leases\/[^/]+\/vnc)(?:\/|$)/.exec(new URL(request.url).pathname);
+  const path = match?.[1] ?? "/portal";
+  return [
+    "crabbox_webvnc_session=",
+    `Path=${path}`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Strict",
+    "Max-Age=0",
+  ].join("; ");
+}
+
 export function bridgeTicketFromRequest(
   request: Request,
   env?: Pick<Env, "CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS">,
@@ -16021,7 +16156,8 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
         validWebVNCSessionID(attachment.agentID) &&
         typeof attachment.owner === "string" &&
         completeBridgePrincipal(attachment) &&
-        typeof attachment.label === "string"
+        typeof attachment.label === "string" &&
+        validOptionalWebVNCViewerSessionAttachment(attachment)
         ? attachment
         : undefined;
     case "webvnc-agent":
@@ -16094,6 +16230,47 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
     default:
       return undefined;
   }
+}
+
+function validOptionalWebVNCViewerSessionAttachment(value: {
+  viewerSessionID?: unknown;
+  viewerSessionExpiresAt?: unknown;
+}): boolean {
+  const absent = value.viewerSessionID === undefined && value.viewerSessionExpiresAt === undefined;
+  return absent || webVNCViewerSessionAttachment(value);
+}
+
+function webVNCViewerSessionAttachment<
+  T extends { viewerSessionID?: unknown; viewerSessionExpiresAt?: unknown },
+>(value: T): value is T & { viewerSessionID: string; viewerSessionExpiresAt: string } {
+  return (
+    validWebVNCPortalViewerSession(
+      typeof value.viewerSessionID === "string" ? value.viewerSessionID : undefined,
+    ) &&
+    typeof value.viewerSessionExpiresAt === "string" &&
+    Number.isFinite(Date.parse(value.viewerSessionExpiresAt))
+  );
+}
+
+function webVNCPortalViewerSessionMatchesAttachment(
+  session: WebVNCPortalViewerSessionRecord | undefined,
+  attachment: Extract<BridgeAttachment, { kind: "webvnc-viewer" }> & {
+    viewerSessionID: string;
+    viewerSessionExpiresAt: string;
+  },
+): boolean {
+  return (
+    session !== undefined &&
+    session.session === attachment.viewerSessionID &&
+    session.leaseID === attachment.leaseID &&
+    session.owner === attachment.owner &&
+    session.org === attachment.org &&
+    session.admin === (attachment.admin === true) &&
+    session.auth === attachment.auth &&
+    session.expiresAt === attachment.viewerSessionExpiresAt &&
+    Date.parse(session.expiresAt) > Date.now() &&
+    JSON.stringify(copyBridgeGrant(session)) === JSON.stringify(copyBridgeGrant(attachment))
+  );
 }
 
 function validOptionalBridgePrincipal(value: {

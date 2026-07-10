@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -159,18 +160,25 @@ func TestCoordinatorCreatesWebVNCViewerBootstrapWithoutReturningViewerURL(t *tes
 	}
 }
 
-func TestWebVNCPortalBootstrapLoopbackKeepsTicketOutOfBrowserURLAndArgv(t *testing.T) {
+func TestWebVNCPortalBootstrapHandoffKeepsTicketOutOfBrowserURLAndArgv(t *testing.T) {
 	const ticket = "webvnc_view_0123456789abcdef0123456789abcdef"
-	loopback, err := startWebVNCPortalBootstrapLoopback(
+	handoff, err := startWebVNCPortalBootstrapHandoff(
 		"https://broker.example.test/portal/leases/cbx_abcdef123456/vnc/bootstrap",
 		ticket,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer loopback.Close()
+	defer handoff.Close()
 
-	browserURL := loopback.URL()
+	browserURL := handoff.URL()
+	parsed, err := url.Parse(browserURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Scheme != "file" {
+		t.Fatalf("browser URL scheme=%q want file", parsed.Scheme)
+	}
 	if strings.Contains(browserURL, ticket) || strings.Contains(browserURL, "broker.example.test") {
 		t.Fatalf("browser URL leaked bootstrap data: %s", browserURL)
 	}
@@ -179,26 +187,25 @@ func TestWebVNCPortalBootstrapLoopbackKeepsTicketOutOfBrowserURLAndArgv(t *testi
 		t.Fatalf("browser argv leaked bootstrap data: %#v", args)
 	}
 
-	response, err := http.Get(browserURL)
+	info, err := os.Stat(handoff.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("handoff mode=%#o want 0600", info.Mode().Perm())
+	}
+	body, err := os.ReadFile(handoff.path)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("loopback status=%d", response.StatusCode)
 	}
 	if !strings.Contains(string(body), `method="post"`) ||
 		!strings.Contains(string(body), `name="ticket"`) ||
 		!strings.Contains(string(body), ticket) {
-		t.Fatalf("loopback handoff HTML incomplete: %s", body)
+		t.Fatalf("file handoff HTML incomplete: %s", body)
 	}
 	for _, secret := range []string{"shared-token", "generated-vnc-password", "crabbox_session"} {
 		if strings.Contains(string(body), secret) {
-			t.Fatalf("loopback HTML leaked %q: %s", secret, body)
+			t.Fatalf("file handoff HTML leaked %q: %s", secret, body)
 		}
 	}
 }
@@ -250,11 +257,21 @@ func TestOpenWebVNCPortalUsesBearerBootstrapWithoutOpeningCoordinatorURL(t *test
 		nil,
 		func(target string, _ ...string) error {
 			opened = target
-			response, err := http.Get(target)
-			if err == nil {
-				response.Body.Close()
+			parsed, err := url.Parse(target)
+			if err != nil {
+				return err
 			}
-			return err
+			if parsed.Scheme != "file" {
+				return fmt.Errorf("browser handoff scheme=%q want file", parsed.Scheme)
+			}
+			body, err := os.ReadFile(filepath.FromSlash(parsed.Path))
+			if err != nil {
+				return err
+			}
+			if !strings.Contains(string(body), bootstrapTicket) {
+				return errors.New("browser handoff omitted bootstrap ticket")
+			}
+			return nil
 		},
 		webVNCPortalOptions{TakeControl: true},
 	)

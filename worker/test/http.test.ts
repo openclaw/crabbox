@@ -290,7 +290,7 @@ describe("coordinator auth", () => {
 
     const page = await prepareCoordinatorRequest(
       new Request("https://broker.example.test/portal/leases/cbx_000000000001/vnc", {
-        headers: { cookie: sessionCookie },
+        headers: { cookie: `crabbox_session=existing-github-session; ${sessionCookie}` },
       }),
       env,
     );
@@ -1392,6 +1392,32 @@ describe("coordinator auth", () => {
     );
     expect(logout.status).toBe(302);
     expect(logout.headers.get("location")).toBe("https://broker.example.com/portal/logout");
+
+    const bootstrap = await coordinator.fetch(
+      new Request(
+        "https://crabbox-coordinator.steipete.workers.dev/portal/leases/cbx_1/vnc/bootstrap",
+        {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: "ticket=webvnc_view_0123456789abcdef0123456789abcdef",
+        },
+      ),
+      env,
+    );
+    expect(bootstrap.status).toBe(200);
+    expect(bootstrap.headers.get("location")).toBeNull();
+    expect(bootstrap.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(bootstrap.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(bootstrap.headers.get("content-security-policy")).toContain(
+      "form-action https://broker.example.com",
+    );
+    expect(bootstrap.headers.get("cache-control")).toBe("no-store");
+    const bootstrapBody = await bootstrap.text();
+    expect(bootstrapBody).toContain(
+      'action="https://broker.example.com/portal/leases/cbx_1/vnc/bootstrap"',
+    );
+    expect(bootstrapBody).toContain('value="webvnc_view_0123456789abcdef0123456789abcdef"');
+    expect(bootstrapBody).toContain('document.getElementById("webvnc-bootstrap").requestSubmit()');
     expect(fleetCalled).toBe(false);
   });
 });

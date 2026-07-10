@@ -4582,7 +4582,7 @@ func openWebVNCPortal(ctx context.Context, coord *CoordinatorClient, leaseID, us
 }
 
 func openWebVNCPortalWithOpener(ctx context.Context, coord *CoordinatorClient, leaseID, username, password string, denied []string, opener func(string, ...string) error, opts ...webVNCPortalOptions) (string, bool, error) {
-	handoff, err := createWebVNCCredentialHandoff(ctx, coord, leaseID, username, password)
+	credentialHandoff, err := createWebVNCCredentialHandoff(ctx, coord, leaseID, username, password)
 	if err != nil {
 		return "", false, err
 	}
@@ -4591,7 +4591,7 @@ func openWebVNCPortalWithOpener(ctx context.Context, coord *CoordinatorClient, l
 		return "", false, fmt.Errorf("resolve coordinator identity before opening WebVNC: %w", err)
 	}
 	if who.Auth != "bearer" {
-		portal := webVNCPortalURL(coord.BaseURL, leaseID, handoff, opts...)
+		portal := webVNCPortalURL(coord.BaseURL, leaseID, credentialHandoff, opts...)
 		if err := opener(portal, denied...); err != nil {
 			return "", false, err
 		}
@@ -4601,7 +4601,7 @@ func openWebVNCPortalWithOpener(ctx context.Context, coord *CoordinatorClient, l
 	for _, opt := range opts {
 		takeControl = takeControl || opt.TakeControl
 	}
-	bootstrap, err := coord.CreateWebVNCViewerBootstrap(ctx, leaseID, handoff, takeControl)
+	bootstrap, err := coord.CreateWebVNCViewerBootstrap(ctx, leaseID, credentialHandoff, takeControl)
 	if err != nil {
 		return "", false, fmt.Errorf("create WebVNC viewer bootstrap: %w", err)
 	}
@@ -4609,12 +4609,12 @@ func openWebVNCPortalWithOpener(ctx context.Context, coord *CoordinatorClient, l
 		return "", false, fmt.Errorf("create WebVNC viewer bootstrap: coordinator returned an invalid ticket")
 	}
 	action := webVNCPortalBootstrapURL(coord.BaseURL, leaseID)
-	loopback, err := startWebVNCPortalBootstrapLoopback(action, bootstrap.Ticket)
+	browserHandoff, err := startWebVNCPortalBootstrapHandoff(action, bootstrap.Ticket)
 	if err != nil {
 		return "", false, fmt.Errorf("start local WebVNC viewer bootstrap: %w", err)
 	}
-	if err := opener(loopback.URL(), denied...); err != nil {
-		loopback.Close()
+	if err := opener(browserHandoff.URL(), denied...); err != nil {
+		browserHandoff.Close()
 		return "", false, err
 	}
 	return "", true, nil
@@ -4672,18 +4672,14 @@ func webVNCPortalBootstrapURL(base, leaseID string) string {
 	return u.String()
 }
 
-type webVNCPortalBootstrapLoopback struct {
-	listener net.Listener
-	server   *http.Server
-	path     string
-	action   string
-	ticket   string
-	nonce    string
-	mu       sync.Mutex
-	used     bool
+type webVNCPortalBootstrapHandoff struct {
+	path       string
+	dir        string
+	browserURL string
+	closeOnce  sync.Once
 }
 
-func startWebVNCPortalBootstrapLoopback(action, ticket string) (*webVNCPortalBootstrapLoopback, error) {
+func startWebVNCPortalBootstrapHandoff(action, ticket string) (*webVNCPortalBootstrapHandoff, error) {
 	if !validWebVNCViewerBootstrapTicket(ticket) {
 		return nil, fmt.Errorf("invalid WebVNC viewer bootstrap ticket")
 	}
@@ -4696,86 +4692,82 @@ func startWebVNCPortalBootstrapLoopback(action, ticket string) (*webVNCPortalBoo
 	if actionURL.Scheme != "https" && !loopbackHTTP {
 		return nil, fmt.Errorf("WebVNC viewer bootstrap action must use HTTPS or loopback HTTP")
 	}
-	pathToken, err := randomHex(32)
-	if err != nil {
-		return nil, err
-	}
 	nonce, err := randomHex(16)
 	if err != nil {
 		return nil, err
 	}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	dir, err := os.MkdirTemp("", "crabbox-webvnc-bootstrap-*")
 	if err != nil {
 		return nil, err
 	}
-	loopback := &webVNCPortalBootstrapLoopback{
-		listener: listener,
-		path:     "/crabbox/webvnc/" + pathToken,
-		action:   actionURL.String(),
-		ticket:   ticket,
-		nonce:    nonce,
+	cleanup := func() {
+		_ = os.RemoveAll(dir)
 	}
-	loopback.server = &http.Server{
-		Handler:           http.HandlerFunc(loopback.handle),
-		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       5 * time.Second,
+	if err := os.Chmod(dir, 0o700); err != nil {
+		cleanup()
+		return nil, err
 	}
-	go func() {
-		_ = loopback.server.Serve(listener)
-	}()
+	path := filepath.Join(dir, "open.html")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	actionOrigin := actionURL.Scheme + "://" + actionURL.Host
+	body := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="` +
+		html.EscapeString("default-src 'none'; base-uri 'none'; form-action "+actionOrigin+"; frame-ancestors 'none'; script-src 'nonce-"+nonce+"'") +
+		`"><title>Opening WebVNC</title></head><body><form id="webvnc-bootstrap" method="post" action="` +
+		html.EscapeString(actionURL.String()) +
+		`" autocomplete="off"><input type="hidden" name="ticket" value="` +
+		html.EscapeString(ticket) +
+		`"><p>Opening WebVNC...</p><button type="submit">Continue</button></form><script nonce="` +
+		nonce +
+		`">document.getElementById("webvnc-bootstrap").requestSubmit();</script></body></html>`
+	if _, err := io.WriteString(file, body); err != nil {
+		_ = file.Close()
+		cleanup()
+		return nil, err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		cleanup()
+		return nil, err
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return nil, err
+	}
+	pathForURL := filepath.ToSlash(path)
+	if runtime.GOOS == "windows" && !strings.HasPrefix(pathForURL, "/") {
+		pathForURL = "/" + pathForURL
+	}
+	handoff := &webVNCPortalBootstrapHandoff{
+		path:       path,
+		dir:        dir,
+		browserURL: (&url.URL{Scheme: "file", Path: pathForURL}).String(),
+	}
 	go func() {
 		time.Sleep(2 * time.Minute)
-		loopback.Close()
+		handoff.Close()
 	}()
-	return loopback, nil
+	return handoff, nil
 }
 
-func (l *webVNCPortalBootstrapLoopback) URL() string {
-	return "http://" + l.listener.Addr().String() + l.path
+func (l *webVNCPortalBootstrapHandoff) URL() string {
+	if l == nil {
+		return ""
+	}
+	return l.browserURL
 }
 
-func (l *webVNCPortalBootstrapLoopback) Close() {
-	_ = l.server.Close()
-}
-
-func (l *webVNCPortalBootstrapLoopback) handle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet || r.URL.Path != l.path || r.URL.RawQuery != "" || r.Host != l.listener.Addr().String() {
-		http.NotFound(w, r)
+func (l *webVNCPortalBootstrapHandoff) Close() {
+	if l == nil {
 		return
 	}
-	l.mu.Lock()
-	if l.used {
-		l.mu.Unlock()
-		http.Error(w, "WebVNC viewer bootstrap already used", http.StatusGone)
-		return
-	}
-	l.used = true
-	l.mu.Unlock()
-
-	actionURL, _ := url.Parse(l.action)
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set(
-		"Content-Security-Policy",
-		"default-src 'none'; base-uri 'none'; form-action "+actionURL.Scheme+"://"+actionURL.Host+"; frame-ancestors 'none'; script-src 'nonce-"+l.nonce+"'",
-	)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(
-		w,
-		`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opening WebVNC</title></head><body><form id="webvnc-bootstrap" method="post" action="`+
-			html.EscapeString(l.action)+
-			`" autocomplete="off"><input type="hidden" name="ticket" value="`+
-			html.EscapeString(l.ticket)+
-			`"><p>Opening WebVNC...</p><button type="submit">Continue</button></form><script nonce="`+
-			l.nonce+
-			`">document.getElementById("webvnc-bootstrap").requestSubmit();</script></body></html>`,
-	)
-	go func() {
-		time.Sleep(250 * time.Millisecond)
-		l.Close()
-	}()
+	l.closeOnce.Do(func() {
+		_ = os.Remove(l.path)
+		_ = os.Remove(l.dir)
+	})
 }
 
 func webVNCPortalURL(base, leaseID, handoff string, opts ...webVNCPortalOptions) string {

@@ -1378,13 +1378,12 @@ func TestServeLocalWebVNCBridgeScrubsPassedTargetEnvironmentFromViewer(t *testin
 	dir := t.TempDir()
 	result := filepath.Join(dir, "viewer-environment")
 	opener := filepath.Join(dir, name)
-	script := "#!/bin/sh\nif [ \"${TEST_EXTERNAL_DESKTOP_PASSWORD+x}\" = x ]; then printf leaked > \"$CRABBOX_TEST_VIEWER_RESULT\"; else printf scrubbed > \"$CRABBOX_TEST_VIEWER_RESULT\"; fi\n"
+	script := "#!/bin/sh\nif [ \"${TEST_EXTERNAL_DESKTOP_PASSWORD+x}\" = x ]; then printf leaked > " + shellQuote(result) + "; else printf scrubbed > " + shellQuote(result) + "; fi\n"
 	if err := os.WriteFile(opener, []byte(script), 0o755); err != nil {
 		listener.Close()
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_TEST_VIEWER_RESULT", result)
 	t.Setenv("TEST_EXTERNAL_DESKTOP_PASSWORD", "must-not-reach-viewer")
 
 	ctx, cancel := context.WithCancel(context.Background())
