@@ -21,6 +21,7 @@ import {
   awsManagedSecurityGroupName,
   awsLaunchCandidates,
   awsPrivateWorkspaceConfig,
+  awsPrivateWorkspaceModeEnabled,
   awsProvisioningErrorCategory,
   awsRegionCandidates,
   isAWSInstanceCleanedAfterReadinessFailure,
@@ -3045,15 +3046,13 @@ export class FleetCoordinator {
       );
     }
     record = finalization.record;
-    if (config.awsPrivate) {
-      privateAWSWorkspaceLifecycleLog("ready", {
-        lease_id: record.id,
-        cloud_id: record.cloudID,
-        region: record.region,
-        instance_type: record.serverType,
-        ssm_command_id: record.awsSSMCommandID,
-      });
-    }
+    provider.workspaceCapability?.(record, "observe")?.log("ready", {
+      lease_id: record.id,
+      cloud_id: record.cloudID,
+      region: record.region,
+      instance_type: record.serverType,
+      ssm_command_id: record.awsSSMCommandID,
+    });
     return json({ lease: publicLeaseRecord(record) }, { status: 201 });
   }
 
@@ -3082,13 +3081,13 @@ export class FleetCoordinator {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     let provider: Provider;
-    let privateAWS: AWSPrivateWorkspaceConfig | undefined;
+    let workspaceCapability: ProviderWorkspaceCapability | undefined;
     try {
       provider = workspaceProvider(this.env.CRABBOX_WORKSPACE_PROVIDER);
-      privateAWS = awsPrivateWorkspaceConfig(this.env);
-      if (privateAWS && provider !== "aws") {
+      if (awsPrivateWorkspaceModeEnabled(this.env) && provider !== "aws") {
         throw new Error("private AWS workspace mode requires CRABBOX_WORKSPACE_PROVIDER=aws");
       }
+      workspaceCapability = this.provider(provider).workspaceCapability?.();
     } catch (error) {
       return json(
         { error: "workspace_not_configured", message: coordinatorErrorMessage(this.env, error) },
@@ -3111,7 +3110,7 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    if (privateAWS && !input.command?.trim()) {
+    if (workspaceCapability?.requiresCommand && !input.command?.trim()) {
       return json(
         {
           error: "invalid_workspace_request",
@@ -3138,7 +3137,7 @@ export class FleetCoordinator {
       );
     }
     const desktop = input.capabilities?.desktop === true;
-    if (privateAWS && desktop) {
+    if (workspaceCapability && !workspaceCapability.supportsDesktop && desktop) {
       return json(
         {
           error: "unsupported_workspace_capability",
@@ -3172,14 +3171,14 @@ export class FleetCoordinator {
       if (workspaceNextReconcileAt(existing, lease) !== undefined) {
         await this.scheduleAlarm();
       }
-      return json(workspaceResponse(existing, lease, this.env), {
+      return json(workspaceResponse(existing, lease, this.env, workspaceCapability), {
         status: workspaceHTTPStatus(existing, lease),
       });
     });
     if (existingResponse) {
       return existingResponse;
     }
-    if (!privateAWS && !this.env.CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?.trim()) {
+    if (!workspaceCapability && !this.env.CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?.trim()) {
       return json(
         {
           error: "workspace_not_configured",
@@ -3225,7 +3224,8 @@ export class FleetCoordinator {
         idleTimeoutSeconds,
       };
       const prewarmEnabled =
-        !privateAWS && workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT) > 0;
+        (!workspaceCapability || workspaceCapability.supportsPrewarm) &&
+        workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT) > 0;
       const now = Date.now();
       let ownerWorkspaceCount = 0;
       let prewarmCandidate:
@@ -3304,13 +3304,9 @@ export class FleetCoordinator {
     if ("response" in reservation) {
       return reservation.response;
     }
-    if (privateAWS) {
-      privateAWSWorkspaceLifecycleLog("create_accepted", {
-        lease_id: reservation.record.leaseID,
-        region: privateAWS.region,
-        instance_type: privateAWS.instanceTypes[0],
-      });
-    }
+    workspaceCapability?.log("create_accepted", {
+      lease_id: reservation.record.leaseID,
+    });
     try {
       await this.maintainWorkspacePrewarm();
     } catch (error) {
@@ -3319,9 +3315,12 @@ export class FleetCoordinator {
       );
     }
     await this.state.runExclusive(() => this.scheduleAlarm());
-    return json(workspaceResponse(reservation.record, reservation.lease, this.env), {
-      status: workspaceHTTPStatus(reservation.record, reservation.lease),
-    });
+    return json(
+      workspaceResponse(reservation.record, reservation.lease, this.env, workspaceCapability),
+      {
+        status: workspaceHTTPStatus(reservation.record, reservation.lease),
+      },
+    );
   }
 
   private async adoptPrewarmedWorkspace(input: {
@@ -3406,9 +3405,16 @@ export class FleetCoordinator {
   }
 
   private async maintainWorkspacePrewarm(): Promise<void> {
-    const count = awsPrivateWorkspaceConfig(this.env)
-      ? 0
-      : workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT);
+    const configuredWorkspaceProvider = workspaceProvider(this.env.CRABBOX_WORKSPACE_PROVIDER);
+    const privateAWSMode = awsPrivateWorkspaceModeEnabled(this.env);
+    const workspaceProviderCapability = privateAWSMode
+      ? undefined
+      : this.provider(configuredWorkspaceProvider).workspaceCapability?.();
+    const count =
+      privateAWSMode ||
+      (workspaceProviderCapability && !workspaceProviderCapability.supportsPrewarm)
+        ? 0
+        : workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT);
     await this.state.runExclusive(async () => {
       const now = Date.now();
       const templates = new Map<string, WorkspaceRecord>();
@@ -3680,24 +3686,26 @@ export class FleetCoordinator {
     if (lease) {
       return;
     }
-    let privateAWS: AWSPrivateWorkspaceConfig | undefined;
+    let workspaceCapability: ProviderWorkspaceCapability | undefined;
     try {
-      privateAWS = awsPrivateWorkspaceConfig(this.env);
-      if (privateAWS && workspace.provider !== "aws") {
+      if (awsPrivateWorkspaceModeEnabled(this.env) && workspace.provider !== "aws") {
         throw new Error("private AWS workspace mode requires provider=aws");
       }
+      workspaceCapability = this.provider(workspace.provider).workspaceCapability?.();
     } catch (error) {
       await this.recordWorkspaceError(workspace, coordinatorErrorMessage(this.env, error));
       return;
     }
-    const sshPublicKey = privateAWS ? undefined : this.env.CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?.trim();
-    if (!privateAWS && !sshPublicKey) {
+    const sshPublicKey = workspaceCapability
+      ? undefined
+      : this.env.CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?.trim();
+    if (!workspaceCapability && !sshPublicKey) {
       await this.recordWorkspaceError(workspace, "CRABBOX_WORKSPACE_SSH_PUBLIC_KEY is required");
       return;
     }
     let createResponse: Response;
     const provisionClaim = crypto.randomUUID();
-    const sshHostKeys = privateAWS
+    const sshHostKeys = workspaceCapability
       ? undefined
       : sshUtils.generateKeyPairSync("ed25519", {
           comment: `crabbox-${workspace.id}`,
@@ -3709,7 +3717,7 @@ export class FleetCoordinator {
       createResponse = await this.createLease(
         await workspaceLeaseRequest(
           workspace,
-          privateAWS,
+          workspaceCapability,
           sshPublicKey && sshHostKeys
             ? { publicKey: sshPublicKey, hostKeys: sshHostKeys }
             : undefined,
@@ -3847,12 +3855,9 @@ export class FleetCoordinator {
     }
     if (server) {
       let recoveredServer = server;
-      let privatePolicy: AWSPrivateWorkspaceConfig | undefined;
+      let workspaceCapability: ProviderWorkspaceCapability | undefined;
       try {
-        privatePolicy = lease.network?.awsPrivate ? awsPrivateWorkspaceConfig(this.env) : undefined;
-        if (lease.network?.awsPrivate && !privatePolicy) {
-          throw new Error("private AWS workspace recovery policy is unavailable");
-        }
+        workspaceCapability = provider.workspaceCapability?.(lease);
       } catch (error) {
         await this.recordWorkspaceError(workspace, coordinatorErrorMessage(this.env, error));
         return lease;
@@ -3870,21 +3875,13 @@ export class FleetCoordinator {
         ttlSeconds: lease.ttlSeconds,
         idleTimeoutSeconds: lease.idleTimeoutSeconds ?? lease.ttlSeconds,
         keep: lease.keep,
-        ...(privatePolicy
-          ? privateAWSWorkspaceLeaseFields(workspace, privatePolicy)
+        ...(workspaceCapability
+          ? workspaceCapability.recoveryLeaseRequestFields(workspace, recoveredServer)
           : {
               sshPublicKey:
                 this.env.CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?.trim() || readinessDummySSHPublicKey,
             }),
       });
-      if (privatePolicy) {
-        recoveryConfig = {
-          ...recoveryConfig,
-          serverType: recoveredServer.serverType,
-          serverTypeExplicit: true,
-          awsUseStockImage: true,
-        };
-      }
       const resumeAllowed = await this.state.runExclusive(async () => {
         const currentWorkspace = await this.state.storage.get<WorkspaceRecord>(
           workspaceKey(workspace.owner, workspace.org, workspace.id),
@@ -4019,12 +4016,14 @@ export class FleetCoordinator {
         current.estimatedHourlyUSD = recoveredCost.hourlyUSD;
         current.maxEstimatedUSD = recoveredCost.maxUSD;
         if (
-          recoveryConfig.awsPrivate
-            ? recoveredServer.awsSSMCommandStatus === "Success"
+          workspaceCapability
+            ? workspaceCapability.recoveredReady(recoveredServer)
             : recoveredServer.status === "running" && recoveredServer.host.trim()
         ) {
           current.state = "active";
-          current.host = recoveryConfig.awsPrivate ? "" : recoveredServer.host;
+          current.host = workspaceCapability
+            ? workspaceCapability.recoveredHost(recoveredServer)
+            : recoveredServer.host;
         } else {
           current.state = "provisioning";
         }
@@ -4034,15 +4033,7 @@ export class FleetCoordinator {
         if (recoveredServer.hostID) {
           current.hostId = recoveredServer.hostID;
         }
-        if (recoveredServer.awsSSMCommandID) {
-          current.awsSSMCommandID = recoveredServer.awsSSMCommandID;
-        }
-        if (recoveredServer.awsSSMCommandStatus) {
-          current.awsSSMCommandStatus = recoveredServer.awsSSMCommandStatus;
-        }
-        if (recoveryConfig.awsPrivate) {
-          current.awsSSMLogGroup = recoveryConfig.awsSSMLogGroup;
-        }
+        workspaceCapability?.applyRecoveredEvidence(current, recoveryConfig, recoveredServer);
         current.updatedAt = recoveredAt;
         current.lastTouchedAt = recoveredAt;
         delete current.failureError;
@@ -4079,7 +4070,7 @@ export class FleetCoordinator {
         recovered.state === "active"
       ) {
         await this.completeWorkspaceCreate(currentWorkspace, currentWorkspace.provisionClaim);
-        privateAWSWorkspaceLifecycleLog("recovered_ready", {
+        workspaceCapability?.log("recovered_ready", {
           lease_id: recovered.id,
           cloud_id: recovered.cloudID,
           region: recovered.region,
@@ -4148,7 +4139,12 @@ export class FleetCoordinator {
           return notFound();
         }
         const lease = await this.getLease(record.leaseID);
-        return json(workspaceResponse(record, lease, this.env));
+        const workspaceCapability = this.provider(
+          record.provider,
+          lease?.region,
+          lease?.providerProject,
+        ).workspaceCapability?.(lease, "observe");
+        return json(workspaceResponse(record, lease, this.env, workspaceCapability));
       });
     }
     if (method === "POST" && action === "connections" && connection === "desktop") {
@@ -4200,13 +4196,13 @@ export class FleetCoordinator {
         return release.response;
       }
       this.closeWorkspaceTerminals(key, 1008, "workspace stopping");
-      if (release.lease?.network?.awsPrivate) {
-        privateAWSWorkspaceLifecycleLog("delete_requested", {
+      this.provider(release.record.provider, release.lease?.region, release.lease?.providerProject)
+        .workspaceCapability?.(release.lease, "observe")
+        ?.log("delete_requested", {
           lease_id: release.record.leaseID,
-          cloud_id: release.lease.cloudID,
-          region: release.lease.region,
+          cloud_id: release.lease?.cloudID,
+          region: release.lease?.region,
         });
-      }
       if (release.release) {
         try {
           await this.releaseWorkspaceLease(release.record);
@@ -4216,7 +4212,12 @@ export class FleetCoordinator {
       }
       const record = (await this.state.storage.get<WorkspaceRecord>(key)) ?? release.record;
       const lease = await this.getLease(record.leaseID);
-      return json(workspaceResponse(record, lease, this.env));
+      const workspaceCapability = this.provider(
+        record.provider,
+        lease?.region,
+        lease?.providerProject,
+      ).workspaceCapability?.(lease, "observe");
+      return json(workspaceResponse(record, lease, this.env, workspaceCapability));
     }
     return json({ error: "not_found" }, { status: 404 });
   }
@@ -14210,7 +14211,7 @@ async function workspaceAdmissionRetryable(response: Response): Promise<boolean>
 
 async function workspaceLeaseRequest(
   workspace: WorkspaceRecord,
-  privateAWS: AWSPrivateWorkspaceConfig | undefined,
+  workspaceCapability: ProviderWorkspaceCapability | undefined,
   sshAccess?: {
     publicKey: string;
     hostKeys: { private: string; public: string };
@@ -14221,15 +14222,12 @@ async function workspaceLeaseRequest(
     throw new Error("workspace provisioning recovery window no longer fits before hard TTL");
   }
   const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
-  if (privateAWS && workspace.provider !== "aws") {
-    throw new Error("private AWS workspace policy cannot provision a non-AWS workspace");
-  }
-  if (!privateAWS && !sshAccess) {
+  if (!workspaceCapability && !sshAccess) {
     throw new Error("workspace SSH access is required");
   }
   const providerKey = `${workspaceProviderKeyPrefix}${(
     await sha256Hex(
-      privateAWS ? workspace.leaseID : sshPublicKeyIdentity(sshAccess?.publicKey ?? ""),
+      workspaceCapability ? workspace.leaseID : sshPublicKeyIdentity(sshAccess?.publicKey ?? ""),
     )
   ).slice(0, 12)}`;
   const headers = workspaceRecordHeaders(workspace);
@@ -14237,8 +14235,8 @@ async function workspaceLeaseRequest(
     headers.set(workspaceSSHHostPrivateKeyHeader, btoa(sshAccess.hostKeys.private));
     headers.set(workspaceSSHHostPublicKeyHeader, btoa(sshAccess.hostKeys.public));
   }
-  const providerRequest: Partial<LeaseRequest> = privateAWS
-    ? privateAWSWorkspaceLeaseFields(workspace, privateAWS)
+  const providerRequest: Partial<LeaseRequest> = workspaceCapability
+    ? workspaceCapability.leaseRequestFields(workspace)
     : {
         sshPublicKey: sshAccess!.publicKey,
         ...(workspace.provider === "aws" ? { awsSSHCIDRs: ["0.0.0.0/0"] } : {}),
@@ -14289,6 +14287,67 @@ function privateAWSWorkspaceLeaseFields(
     sshUser: "crabbox",
     sshFallbackPorts: [],
     workRoot: privateAWSWorkspaceWorkRoot,
+  };
+}
+
+function privateAWSWorkspaceCapability(
+  policy: AWSPrivateWorkspaceConfig | undefined,
+  env: Env,
+): ProviderWorkspaceCapability {
+  const requiredPolicy = (): AWSPrivateWorkspaceConfig => {
+    if (!policy) {
+      throw new Error("private AWS workspace policy is unavailable");
+    }
+    return policy;
+  };
+  return {
+    requiresCommand: true,
+    supportsDesktop: false,
+    supportsPrewarm: false,
+    leaseRequestFields: (workspace) => privateAWSWorkspaceLeaseFields(workspace, requiredPolicy()),
+    recoveryLeaseRequestFields: (workspace, server) => {
+      const activePolicy = requiredPolicy();
+      return {
+        ...privateAWSWorkspaceLeaseFields(workspace, activePolicy),
+        serverType: server.serverType,
+        serverTypeExplicit: true,
+        awsUseStockImage: true,
+      };
+    },
+    recoveredReady: (server) => server.awsSSMCommandStatus === "Success",
+    recoveredHost: () => "",
+    applyRecoveredEvidence: (lease, config, server) => {
+      if (server.awsSSMCommandID) {
+        lease.awsSSMCommandID = server.awsSSMCommandID;
+      }
+      if (server.awsSSMCommandStatus) {
+        lease.awsSSMCommandStatus = server.awsSSMCommandStatus;
+      }
+      lease.awsSSMLogGroup = config.awsSSMLogGroup;
+    },
+    bootstrapEvidence: (lease, status) => ({
+      transport: "ssm",
+      status:
+        lease?.awsSSMCommandStatus ??
+        (status === "ready" ? "Success" : status === "failed" ? "Failed" : "Pending"),
+      ...(lease?.awsSSMCommandID ? { commandId: lease.awsSSMCommandID } : {}),
+      ...(lease?.awsSSMLogGroup?.trim() || env.CRABBOX_WORKSPACE_AWS_SSM_LOG_GROUP?.trim()
+        ? {
+            logGroup:
+              lease?.awsSSMLogGroup?.trim() || env.CRABBOX_WORKSPACE_AWS_SSM_LOG_GROUP?.trim(),
+          }
+        : {}),
+    }),
+    log: (event, fields) =>
+      privateAWSWorkspaceLifecycleLog(event, {
+        ...(event === "create_accepted"
+          ? {
+              region: requiredPolicy().region,
+              instance_type: requiredPolicy().instanceTypes[0],
+            }
+          : {}),
+        ...fields,
+      }),
   };
 }
 
@@ -15046,26 +15105,12 @@ function workspaceResponse(
   workspace: WorkspaceRecord,
   lease?: LeaseRecord,
   env?: Env,
+  workspaceCapability?: ProviderWorkspaceCapability,
 ): Record<string, unknown> {
   const status = workspaceStatus(workspace, lease);
   const terminalUrl = env ? workspaceTerminalURL(workspace, lease, env) : undefined;
   const nativeVnc = env ? !workspaceNativeVNCError(workspace, lease, env) : false;
-  const privateAWS = lease?.network?.awsPrivate === true;
-  const bootstrap = privateAWS
-    ? {
-        transport: "ssm",
-        status:
-          lease?.awsSSMCommandStatus ??
-          (status === "ready" ? "Success" : status === "failed" ? "Failed" : "Pending"),
-        ...(lease?.awsSSMCommandID ? { commandId: lease.awsSSMCommandID } : {}),
-        ...(lease?.awsSSMLogGroup?.trim() || env?.CRABBOX_WORKSPACE_AWS_SSM_LOG_GROUP?.trim()
-          ? {
-              logGroup:
-                lease?.awsSSMLogGroup?.trim() || env?.CRABBOX_WORKSPACE_AWS_SSM_LOG_GROUP?.trim(),
-            }
-          : {}),
-      }
-    : undefined;
+  const bootstrap = workspaceCapability?.bootstrapEvidence(lease, status);
   const message =
     workspace.error ??
     (lease && !workspaceOwnsLease(workspace, lease)
@@ -17906,6 +17951,10 @@ function parseProviderLabelTime(value: string | undefined): number {
 
 interface CloudProvider {
   listCrabboxServers(): Promise<ProviderMachine[]>;
+  workspaceCapability?(
+    lease?: LeaseRecord,
+    purpose?: "operate" | "observe",
+  ): ProviderWorkspaceCapability | undefined;
   restrictedLeaseRequestFields?(input: LeaseRequest): string[];
   recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   resumeRecoveredServer?(
@@ -17997,6 +18046,33 @@ interface CloudProvider {
     serverType: string,
     config: ReturnType<typeof leaseConfig>,
   ): Promise<number | undefined>;
+}
+
+type ProviderWorkspaceLifecycleEvent =
+  | "create_accepted"
+  | "ready"
+  | "recovered_ready"
+  | "delete_requested"
+  | "terminated";
+
+interface ProviderWorkspaceCapability {
+  requiresCommand: boolean;
+  supportsDesktop: boolean;
+  supportsPrewarm: boolean;
+  leaseRequestFields(workspace: WorkspaceRecord): Partial<LeaseRequest>;
+  recoveryLeaseRequestFields(
+    workspace: WorkspaceRecord,
+    server: ProviderMachine,
+  ): Partial<LeaseRequest>;
+  recoveredReady(server: ProviderMachine): boolean;
+  recoveredHost(server: ProviderMachine): string;
+  applyRecoveredEvidence(
+    lease: LeaseRecord,
+    config: ReturnType<typeof leaseConfig>,
+    server: ProviderMachine,
+  ): void;
+  bootstrapEvidence(lease: LeaseRecord | undefined, status: string): Record<string, unknown>;
+  log(event: ProviderWorkspaceLifecycleEvent, fields: Record<string, string | undefined>): void;
 }
 
 interface ProviderStateStorage {
@@ -18771,6 +18847,33 @@ export class AWSProvider implements CloudProvider {
   private get client(): EC2SpotClient {
     this.clientValue ??= new EC2SpotClient(this.env, this.region);
     return this.clientValue;
+  }
+
+  workspaceCapability(
+    lease?: LeaseRecord,
+    purpose: "operate" | "observe" = "operate",
+  ): ProviderWorkspaceCapability | undefined {
+    if (lease && lease.network?.awsPrivate !== true) {
+      return undefined;
+    }
+    let policy: AWSPrivateWorkspaceConfig | undefined;
+    try {
+      policy = awsPrivateWorkspaceConfig(this.env);
+    } catch (error) {
+      if (purpose !== "observe" || !lease?.network?.awsPrivate) {
+        throw error;
+      }
+    }
+    if (!policy) {
+      if (lease?.network?.awsPrivate) {
+        if (purpose === "observe") {
+          return privateAWSWorkspaceCapability(undefined, this.env);
+        }
+        throw new Error("private AWS workspace recovery policy is unavailable");
+      }
+      return undefined;
+    }
+    return privateAWSWorkspaceCapability(policy, this.env);
   }
 
   restrictedLeaseRequestFields(input: LeaseRequest): string[] {

@@ -83,6 +83,17 @@ export interface AWSPrivateWorkspaceConfig {
   ssmLogGroup: string;
 }
 
+export function awsPrivateWorkspaceModeEnabled(
+  env: Pick<Env, "CRABBOX_WORKSPACE_AWS_PRIVATE">,
+): boolean {
+  const enabled = env.CRABBOX_WORKSPACE_AWS_PRIVATE?.trim() ?? "";
+  if (!enabled || enabled === "0") return false;
+  if (enabled !== "1") {
+    throw new Error("CRABBOX_WORKSPACE_AWS_PRIVATE must be 0 or 1");
+  }
+  return true;
+}
+
 export function awsPrivateWorkspaceConfig(
   env: Pick<
     Env,
@@ -101,11 +112,7 @@ export function awsPrivateWorkspaceConfig(
     | "CRABBOX_AWS_EXPECTED_REGION"
   >,
 ): AWSPrivateWorkspaceConfig | undefined {
-  const enabled = env.CRABBOX_WORKSPACE_AWS_PRIVATE?.trim() ?? "";
-  if (!enabled || enabled === "0") return undefined;
-  if (enabled !== "1") {
-    throw new Error("CRABBOX_WORKSPACE_AWS_PRIVATE must be 0 or 1");
-  }
+  if (!awsPrivateWorkspaceModeEnabled(env)) return undefined;
   const expected = awsExpectedIdentityConfig(env);
   if (!expected) {
     throw new Error(
@@ -625,10 +632,7 @@ export class EC2SpotClient {
       // oxlint-disable-next-line eslint/no-await-in-loop -- fail closed before checking next shape.
       await this.expectDryRun("RunInstances", { ...params, DryRun: "true" });
     }
-    await this.ssm("DescribeInstanceInformation", {
-      Filters: [{ Key: "InstanceIds", Values: ["i-00000000000000000"] }],
-      MaxResults: 5,
-    });
+    await this.ssm("DescribeInstanceInformation", { MaxResults: 5 });
     return identity;
   }
 
@@ -1057,11 +1061,20 @@ export class EC2SpotClient {
   async waitForSSMOnline(instanceID: string): Promise<void> {
     const deadline = Date.now() + 10 * 60_000;
     while (Date.now() < deadline) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- SSM registration is polled serially.
-      const result = await this.ssm("DescribeInstanceInformation", {
-        Filters: [{ Key: "InstanceIds", Values: [instanceID] }],
-        MaxResults: 5,
-      });
+      let result: Record<string, unknown>;
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- SSM registration is polled serially.
+        result = await this.ssm("DescribeInstanceInformation", {
+          Filters: [{ Key: "InstanceIds", Values: [instanceID] }],
+          MaxResults: 5,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isAWSManagedNodePendingError(message)) {
+          throw error;
+        }
+        result = {};
+      }
       const instances = items(result["InstanceInformationList"]).map(record);
       if (
         instances.some(
@@ -3395,6 +3408,10 @@ export function isRetryableAWSProvisioningError(message: string): boolean {
 
 export function isAWSInstanceNotFoundError(message: string): boolean {
   return message.includes("InvalidInstanceID.NotFound");
+}
+
+export function isAWSManagedNodePendingError(message: string): boolean {
+  return message.includes("InvalidInstanceId");
 }
 
 export function isAWSRunInstancesOutcomeUncertain(message: string): boolean {
