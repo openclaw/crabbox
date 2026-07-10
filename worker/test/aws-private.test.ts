@@ -70,6 +70,30 @@ describe("private AWS workspaces", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("keeps existing private workspace evidence observable after policy removal", () => {
+    const env = privateWorkspaceEnv();
+    const provider = new AWSProvider(env, region, {} as never);
+    const lease = {
+      network: { awsPrivate: true },
+      awsSSMCommandID: "command-private123",
+      awsSSMCommandStatus: "Success",
+      awsSSMLogGroup: "/crabbox/private-workspaces",
+    } as LeaseRecord;
+    delete env.CRABBOX_WORKSPACE_AWS_PRIVATE;
+
+    expect(() => provider.workspaceCapability(lease)).toThrow(
+      "private AWS workspace recovery policy is unavailable",
+    );
+    expect(
+      provider.workspaceCapability(lease, "observe")?.bootstrapEvidence(lease, "ready"),
+    ).toMatchObject({
+      transport: "ssm",
+      status: "Success",
+      commandId: "command-private123",
+      logGroup: "/crabbox/private-workspaces",
+    });
+  });
+
   it("encodes a private launch without SSH or public networking", async () => {
     const config = privateLeaseConfig();
     const params = await awsRunInstancesParams({
@@ -183,6 +207,7 @@ describe("private AWS workspaces", () => {
     let runInstances: URLSearchParams | undefined;
     let instanceTypes: URLSearchParams | undefined;
     let ssmTarget = "";
+    let ssmBody: Record<string, unknown> | undefined;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -191,6 +216,7 @@ describe("private AWS workspaces", () => {
         if (host.startsWith("sts.")) return stsIdentityResponse(expectedAccountID);
         if (host.startsWith("ssm.")) {
           ssmTarget = request.headers.get("x-amz-target") ?? "";
+          ssmBody = JSON.parse(await request.clone().text()) as Record<string, unknown>;
           return jsonResponse({ InstanceInformationList: [] });
         }
         const params = new URLSearchParams(await request.clone().text());
@@ -256,6 +282,7 @@ describe("private AWS workspaces", () => {
     expect(instanceTypes?.get("InstanceType.1")).toBe("t3a.small");
     expect(instanceTypes?.get("InstanceType.2")).toBeNull();
     expect(ssmTarget).toBe("AmazonSSM.DescribeInstanceInformation");
+    expect(ssmBody).toEqual({ MaxResults: 5 });
     expect(runInstances?.get("DryRun")).toBe("true");
     expect(runInstances?.get("InstanceType")).toBe("t3a.small");
     expect(runInstances?.get("KeyName")).toBeNull();
@@ -352,6 +379,40 @@ describe("private AWS workspaces", () => {
       CommandId: "command-private123",
       InstanceId: "i-private123",
     });
+  });
+
+  it("keeps polling while a new instance is not registered with SSM", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      region,
+    ) as unknown as {
+      waitForSSMOnline(instanceID: string): Promise<void>;
+      ssm(action: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
+    };
+    client.ssm = async (action, body) => {
+      expect(action).toBe("DescribeInstanceInformation");
+      expect(body).toEqual({
+        Filters: [{ Key: "InstanceIds", Values: ["i-private123"] }],
+        MaxResults: 5,
+      });
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error(
+          "aws DescribeInstanceInformation: http 400: InvalidInstanceId: The managed node is not registered yet",
+        );
+      }
+      return {
+        InstanceInformationList: [{ InstanceId: "i-private123", PingStatus: "Online" }],
+      };
+    };
+
+    const readiness = client.waitForSSMOnline("i-private123");
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(readiness).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
   });
 
   it("uses a private instance address only when private readiness is explicit", async () => {
@@ -703,6 +764,19 @@ function expectedEnv(): Env {
     AWS_SECRET_ACCESS_KEY: "secret",
     CRABBOX_AWS_EXPECTED_ACCOUNT_ID: expectedAccountID,
     CRABBOX_AWS_EXPECTED_REGION: region,
+  };
+}
+
+function privateWorkspaceEnv(): Env {
+  return {
+    ...expectedEnv(),
+    CRABBOX_WORKSPACE_AWS_PRIVATE: "1",
+    CRABBOX_WORKSPACE_AWS_INSTANCE_TYPES: "t3a.small",
+    CRABBOX_WORKSPACE_AWS_SUBNET_ID: "subnet-private123",
+    CRABBOX_WORKSPACE_AWS_SECURITY_GROUP_ID: "sg-workspace123",
+    CRABBOX_WORKSPACE_AWS_CONTROLLER_SECURITY_GROUP_ID: "sg-controller123",
+    CRABBOX_WORKSPACE_AWS_INSTANCE_PROFILE: "crabbox-private-workspace",
+    CRABBOX_WORKSPACE_AWS_SSM_LOG_GROUP: "/crabbox/private-workspaces",
   };
 }
 

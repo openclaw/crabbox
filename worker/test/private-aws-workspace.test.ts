@@ -8,7 +8,7 @@ import type {
   CoordinatorStorage,
   CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
-import { FleetCoordinator } from "../src/fleet";
+import { AWSProvider, FleetCoordinator } from "../src/fleet";
 import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 
 afterEach(() => {
@@ -135,6 +135,20 @@ function workspaceRequest(command?: string): Request {
 }
 
 describe("private AWS workspaces", () => {
+  it("fails closed when private AWS mode selects another workspace provider", async () => {
+    const env = privateAWSEnv();
+    env.CRABBOX_WORKSPACE_PROVIDER = "hetzner";
+    const fleet = new FleetCoordinator(new MemoryRuntime(), env);
+
+    const response = await fleet.fetch(workspaceRequest("node server.js"));
+
+    expect(response.status).toBe(424);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "workspace_not_configured",
+      message: "private AWS workspace mode requires CRABBOX_WORKSPACE_PROVIDER=aws",
+    });
+  });
+
   it("requires an explicit command before reserving a workspace", async () => {
     const fleet = new FleetCoordinator(new MemoryRuntime(), privateAWSEnv());
 
@@ -170,6 +184,7 @@ describe("private AWS workspaces", () => {
     let requested: LeaseConfig | undefined;
     let releases = 0;
     const provider = {
+      workspaceCapability: privateWorkspaceCapability(),
       async listCrabboxServers(): Promise<ProviderMachine[]> {
         return [];
       },
@@ -531,6 +546,7 @@ interface RecoveryProviderState {
 
 function privateRecoveryProvider(state: RecoveryProviderState): Record<string, unknown> {
   return {
+    workspaceCapability: privateWorkspaceCapability(),
     async listCrabboxServers(): Promise<ProviderMachine[]> {
       return [];
     },
@@ -596,6 +612,11 @@ function privateRecoveryProvider(state: RecoveryProviderState): Record<string, u
       return undefined;
     },
   };
+}
+
+function privateWorkspaceCapability(): AWSProvider["workspaceCapability"] {
+  const provider = new AWSProvider(privateAWSEnv(), "us-west-2", {} as never);
+  return provider.workspaceCapability.bind(provider);
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
