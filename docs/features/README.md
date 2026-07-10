@@ -26,6 +26,7 @@ Read when:
 - [Coordinator](coordinator.md): shared broker behavior across Cloudflare
   Durable Object and Node.js/PostgreSQL runtimes.
 - [Portable coordinator](portable-coordinator.md): deploy and operate the Node/PostgreSQL runtime on a conventional container platform.
+- [Private AWS workspaces](aws-private-workspaces.md): dedicated ECS Fargate coordinator, task-role credentials, SSM-only workspaces, and live canary.
 - [Bring your own infrastructure](bring-your-own-infrastructure.md): connect a private control plane through generic providers and optional registered mode.
 - [Slurm academic sandboxes](slurm-academic-sandboxes.md): offer Crabbox on campus Slurm clusters through a site-local external adapter before adding a built-in provider.
 - [Browser portal](portal.md): authenticated lease/run UI, detail pages, bridge routes, and runner visibility.
@@ -60,6 +61,7 @@ Read when:
 Provider deep-dives that live here in `features/`:
 
 - [AWS](aws.md): EC2 Linux, Windows, WSL2, EC2 Mac, capacity, AMIs, and security groups.
+- [Private AWS workspaces](aws-private-workspaces.md): exact-account/Region, small-instance, private-network workspace API deployment.
 - [Azure](azure.md): Azure Linux, Windows, WSL2, shared infra, capacity, and cleanup.
 - [Hetzner](hetzner.md): Linux-only managed Hetzner behavior, classes, and cleanup.
 - [Blacksmith Testbox](blacksmith-testbox.md): delegated Testbox runner behavior.

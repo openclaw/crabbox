@@ -33,12 +33,14 @@ the portal then confirms provider deletion through that adapter before removing
 the registration. Registered records remain excluded from provider access
 reconciliation, ready pools, image operations, orphan sweeps, and cost totals.
 
-The coordinator brokers the **control plane**, not the data plane. Lease
-lifecycle, run recording, usage, and bridges flow through the coordinator over
-HTTP. SSH readiness, rsync, command execution, and output streaming always
-happen directly from the CLI to the runner host and never traverse the
-coordinator. See
-[Architecture](../architecture.md) for the full topology.
+For normal CLI leases, the coordinator brokers the **control plane**, not the
+data plane. Lease lifecycle, run recording, usage, and bridges flow through the
+coordinator over HTTP. SSH readiness, rsync, command execution, and output
+streaming happen directly from the CLI to the runner host and never traverse
+the coordinator. The dedicated
+[private AWS workspace service](aws-private-workspaces.md) is a separate
+SSM-only workspace API path. See [Architecture](../architecture.md) for the full
+topology.
 
 ## Responsibilities
 

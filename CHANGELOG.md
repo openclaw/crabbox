@@ -18,6 +18,7 @@
 
 ### Added
 
+- Added a dedicated ECS Fargate deployment for small private AWS workspaces with task-role credentials, exact account/Region and instance allowlist preflight, encrypted gp3 volumes, no public IP or SSH, IMDSv2, SSM bootstrap/log evidence, route-scoped workspace lifecycle, and idempotent cleanup.
 - Added Sealos DevBox Linux SSH leases through the Kubernetes CRD with exact provider/resource-bound claims, conflict-safe explicit `--reclaim` adoption, claim-locked release and cleanup, controller-owned Secret SSH routing, and guarded zero-residue lifecycle proof. Thanks @coygeek.
 - Added a Unikraft Cloud service-control provider for claimed OCI-image instances, with endpoint- and instance-bound ownership, guarded cleanup, and live create/status/list/stop verification. Thanks @zozo123.
 - Added capability-aware AWS image promotion and lease selection by minimum OS, SDK/runtime versions, browser, WebView2, and desktop support, with fail-before-lease rejection when no promoted image satisfies every requirement.

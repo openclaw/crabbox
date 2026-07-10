@@ -37,8 +37,11 @@ Crabbox CLI ---- HTTPS / WebSocket ---- ingress ---- Node coordinator
 
 The coordinator remains a control plane. SSH readiness, repository sync,
 command execution, and stdout/stderr streaming stay direct between the CLI and
-the runner. The coordinator handles authentication, leases, run records,
-sharing, usage, cleanup, and optional live bridges.
+the runner for normal CLI leases. The specialized
+[private AWS workspace service](aws-private-workspaces.md) instead uses SSM for
+an API-managed workspace bootstrap and intentionally exposes no SSH path. The
+coordinator handles authentication, leases, run records, sharing, usage,
+cleanup, and optional live bridges.
 
 ## Runtime boundary
 
@@ -87,7 +90,8 @@ The initial production shape is intentionally small:
 - one PostgreSQL 13 or newer database reachable through `DATABASE_URL`;
 - durable PostgreSQL storage and backups;
 - an HTTPS ingress that supports WebSocket upgrades;
-- secret injection for coordinator auth and any managed-provider credentials;
+- secret injection for coordinator auth and any managed-provider credentials
+  that are not supplied by a workload identity or default provider chain;
 - outbound access to configured provider APIs;
 - an HTTP timeout long enough for persistent WebSockets.
 
@@ -116,8 +120,11 @@ CRABBOX_SHUTDOWN_TIMEOUT_MS          graceful shutdown budget, default 120000
 Authentication requires at least one supported coordinator identity path. Use
 signed user sessions, a shared operator token, an admin token, or a trusted
 reverse-proxy identity as documented in [Coordinator](coordinator.md) and
-[Security](../security.md). Managed provider credentials remain environment
-secrets; registered direct leases need no provider credentials in the service.
+[Security](../security.md). Managed-provider authentication can come from
+environment secrets or a provider default chain. On ECS, the dedicated private
+AWS deployment requires temporary task-role credentials and rejects static
+access keys. Registered direct leases need no provider credentials in the
+service.
 
 ## PostgreSQL state
 
@@ -281,6 +288,7 @@ ordering, maintenance, and shutdown.
 
 - [Coordinator](coordinator.md)
 - [Bring Your Own Infrastructure](bring-your-own-infrastructure.md)
+- [Private AWS workspaces](aws-private-workspaces.md)
 - [Infrastructure](../infrastructure.md)
 - [Security](../security.md)
 - [Browser portal](portal.md)
