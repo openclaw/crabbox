@@ -52,6 +52,8 @@ type credentialDestinationProvenance struct {
 	railwayAPIToken       credentialValueSource
 	fastAPICloudAPIURL    credentialValueSource
 	fastAPICloudToken     credentialValueSource
+	unikraftCloudAPIURL   credentialValueSource
+	unikraftCloudAPIKey   credentialValueSource
 	runpodAPIURL          credentialValueSource
 	runpodAPIKey          credentialValueSource
 	vastAPIURL            credentialValueSource
@@ -195,6 +197,9 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "fastapi-cloud-url") {
 		provenance.fastAPICloudAPIURL = credentialSourceFlag
+	}
+	if flagWasSet(fs, "unikraft-cloud-url") {
+		provenance.unikraftCloudAPIURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "runpod-url") {
 		provenance.runpodAPIURL = credentialSourceFlag
@@ -355,6 +360,11 @@ func validateProviderCredentialDestination(cfg Config) error {
 		if provenance.fastAPICloudAPIURL == credentialSourceRepository &&
 			inheritedCredential(sourcedCredential{cfg.FastAPICloud.Token, provenance.fastAPICloudToken}) {
 			return repositoryCredentialDestinationError("fastapi-cloud", "fastapiCloud.apiUrl", "CRABBOX_FASTAPI_CLOUD_API_URL or --fastapi-cloud-url")
+		}
+	case "unikraft-cloud":
+		if provenance.unikraftCloudAPIURL == credentialSourceRepository &&
+			inheritedCredential(sourcedCredential{cfg.UnikraftCloud.APIKey, provenance.unikraftCloudAPIKey}) {
+			return repositoryCredentialDestinationError("unikraft-cloud", "unikraftCloud.apiUrl", "CRABBOX_UNIKRAFT_CLOUD_API_URL or --unikraft-cloud-url")
 		}
 	case "runpod":
 		if provenance.runpodAPIURL == credentialSourceRepository &&
