@@ -319,7 +319,7 @@ func TestRouteConfigUsesProviderWorkRoot(t *testing.T) {
 func TestCommandRoutingArgsUsesPrivateLeaseState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	args := (Provider{}).CommandRoutingArgs(testConfig(), "cbx_abcdef123456")
-	if len(args) != 2 || args[0] != "--external-routing-file" || !strings.HasSuffix(args[1], ".json") {
+	if len(args) != 4 || args[0] != "--external-routing-file" || !strings.HasSuffix(args[1], ".json") || args[2] != "--external-routing-digest" || args[3] != "" {
 		t.Fatalf("args=%#v", args)
 	}
 }
@@ -337,6 +337,56 @@ func TestCommandRoutingArgsCarryDesktopCredentialOverrides(t *testing.T) {
 		if !strings.Contains(args, want) {
 			t.Fatalf("args=%q missing %q", args, want)
 		}
+	}
+}
+
+func TestCommandRoutingArgsBindChildToExactRouteDigest(t *testing.T) {
+	isolateCrabboxState(t)
+	const leaseID = "cbx_digest_child_123456"
+	first := testConfig()
+	path, err := core.PersistValidatedExternalRouting(leaseID, first.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := core.LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.External = loaded
+	args := (Provider{}).CommandRoutingArgs(first, leaseID)
+	if len(args) < 4 || args[2] != "--external-routing-digest" || args[3] != core.ExternalRoutingDigest(loaded) {
+		t.Fatalf("routing args=%#v", args)
+	}
+
+	replacement := testConfig()
+	replacement.External.Command = "replacement-provider"
+	if _, err := core.PersistValidatedExternalRouting(leaseID, replacement.External); err != nil {
+		t.Fatal(err)
+	}
+	child := core.BaseConfig()
+	fs := flag.NewFlagSet("external-digest-child", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := registerFlags(fs, child)
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&child, fs, values); err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestApplyFlagsRejectsRoutingDigestWithoutRoutingFileFlag(t *testing.T) {
+	isolateCrabboxState(t)
+	cfg := core.BaseConfig()
+	cfg.External.RoutingFile = filepath.Join(t.TempDir(), "configured-route.json")
+	fs := flag.NewFlagSet("external-digest-only", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--external-routing-digest", strings.Repeat("0", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err == nil || !strings.Contains(err.Error(), "requires --external-routing-file") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -358,7 +408,7 @@ func TestCommandRoutingArgsPreserveExplicitDesktopCredentialClears(t *testing.T)
 	if err := applyFlags(&zero, zeroFS, zeroValues); err != nil {
 		t.Fatal(err)
 	}
-	if args := (Provider{}).CommandRoutingArgs(zero, zeroLeaseID); len(args) != 2 {
+	if args := (Provider{}).CommandRoutingArgs(zero, zeroLeaseID); len(args) != 4 || args[2] != "--external-routing-digest" || args[3] != core.ExternalRoutingDigest(zero.External) {
 		t.Fatalf("non-explicit zero desktop changed legacy routing args: %#v", args)
 	}
 
@@ -391,6 +441,7 @@ func TestCommandRoutingArgsPreserveExplicitDesktopCredentialClears(t *testing.T)
 	args := (Provider{}).CommandRoutingArgs(cfg, leaseID)
 	want := []string{
 		"--external-routing-file", path,
+		"--external-routing-digest", core.ExternalRoutingDigest(cfg.External),
 		"--external-desktop-username", "",
 		"--external-desktop-password-env", "",
 	}
@@ -2489,13 +2540,17 @@ func TestDeclarativeResolveThenReleaseReusesPersistedResourceName(t *testing.T) 
 func TestConfirmedAbsentLocalCleanupRemovesMatchingRoutingAndSlugReservation(t *testing.T) {
 	isolateCrabboxState(t)
 	cfg := testConfig()
-	backend := &leaseBackend{cfg: cfg}
 	leaseID := "cbx_abcdef123456"
 	slug := "fast-coral"
 	routingPath, err := core.PersistExternalRouting(leaseID, cfg.External)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.External, err = core.LoadExternalRouting(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &leaseBackend{cfg: cfg}
 	dir, err := backend.slugReservationDir()
 	if err != nil {
 		t.Fatal(err)
@@ -2579,11 +2634,19 @@ func TestConfirmedAbsentLocalCleanupPreservesChangedSlugReservationAndRouting(t 
 func TestConfirmedAbsentLocalCleanupPreservesReplacedRouting(t *testing.T) {
 	isolateCrabboxState(t)
 	cfg := testConfig()
-	backend := &leaseBackend{cfg: cfg}
 	leaseID := "cbx_abcdef123456"
+	routingPath, err := core.PersistExternalRouting(leaseID, cfg.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.External, err = core.LoadExternalRouting(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &leaseBackend{cfg: cfg}
 	replacement := cfg.External
 	replacement.WorkRoot = "/home/replacement/crabbox"
-	routingPath, err := core.PersistExternalRouting(leaseID, replacement)
+	routingPath, err = core.PersistExternalRouting(leaseID, replacement)
 	if err != nil {
 		t.Fatal(err)
 	}

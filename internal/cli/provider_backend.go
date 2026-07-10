@@ -489,6 +489,28 @@ func CLIDoctorResult(provider string, leases int, runtime string) DoctorResult {
 
 type execCommandRunner struct{}
 
+type childCredentialBoundaryCommandRunner struct {
+	next   CommandRunner
+	denied []string
+}
+
+func (r childCredentialBoundaryCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	env := req.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	req.Env = childEnvironmentWithout(env, r.denied...)
+	return r.next.Run(ctx, req)
+}
+
+func commandRunnerWithChildCredentialBoundary(next CommandRunner, denied []string) CommandRunner {
+	denied = appendUniqueStrings(nil, denied...)
+	if len(denied) == 0 {
+		return next
+	}
+	return childCredentialBoundaryCommandRunner{next: next, denied: denied}
+}
+
 func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	commandCtx := ctx
 	var cancel context.CancelFunc
@@ -1307,6 +1329,13 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if rt.Exec == nil {
 		rt.Exec = execCommandRunner{}
 	}
+	// The merged config can retain trusted External desktop secret names even
+	// when a repository selects another provider. Enforce that boundary at the
+	// shared command runner so every provider-owned local child is covered.
+	rt.Exec = commandRunnerWithChildCredentialBoundary(
+		rt.Exec,
+		externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
+	)
 	provider, err := ProviderFor(cfg.Provider)
 	if err != nil {
 		return nil, err

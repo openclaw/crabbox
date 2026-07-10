@@ -35,7 +35,7 @@ import {
   type WebVNCBuffer,
 } from "../src/fleet";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
-import { portalCode } from "../src/portal";
+import { portalCode, portalVNC } from "../src/portal";
 import {
   ProviderProvisioningCleanupError,
   providerProvisioningCleanupClaim,
@@ -19453,6 +19453,126 @@ describe("fleet lease identity and idle", () => {
     expect(missingTicket.status).toBe(401);
   });
 
+  it("opens a credential-free macOS viewer through the server-authenticated bridge", async () => {
+    const page = await macOSPortalPage();
+    const connectSource = emittedFunction(page, "async function connect()");
+    const constructed: unknown[][] = [];
+    const stoppedLabels: string[] = [];
+    const retryLabels: string[] = [];
+
+    class RFBStub {
+      constructor(...args: unknown[]) {
+        constructed.push(args);
+      }
+
+      addEventListener(): void {}
+    }
+
+    const context = createContext({
+      RFB: RFBStub,
+      URL,
+      constructed,
+      retryLabels,
+      stoppedLabels,
+    });
+    new Script(`
+      let stopped = false;
+      let connected = false;
+      let credentialsSent = false;
+      let authenticationFailed = false;
+      let retryAttempt = 0;
+      let rfb;
+      const target = "macos";
+      const password = "";
+      const screen = { replaceChildren() {} };
+      const wsURL = new URL("wss://example.test/portal/leases/mac-mini/vnc/viewer");
+      async function loadHandoffCredentials() {}
+      async function bridgeState() {
+        return { bridgeConnected: true, availableViewerSlots: 1 };
+      }
+      function stopPolling(label) {
+        stopped = true;
+        stoppedLabels.push(label);
+      }
+      function scheduleRetry(label) { retryLabels.push(label); }
+      function setStatus() {}
+      function clearDesktopThemeSyncState() {}
+      function rfbOptions() { return {}; }
+      ${connectSource}
+      globalThis.result = connect();
+    `).runInContext(context);
+
+    await context.result;
+
+    expect(constructed).toHaveLength(1);
+    expect(stoppedLabels).toEqual([]);
+    expect(retryLabels).toEqual([]);
+  });
+
+  it("copies a clean ACL-controlled WebVNC URL without creating a credential handoff", async () => {
+    const page = await macOSPortalPage();
+    const shareURLSource = emittedFunction(page, "async function shareableWebVNCURL()");
+    const fetchMock = vi.fn<(input: URL, init: RequestInit) => Promise<never>>(async () => {
+      throw new Error("credential-free sharing must not create a handoff");
+    });
+    const context = createContext({ fetch: fetchMock, URL, URLSearchParams });
+    new Script(`
+      const username = "";
+      const password = "";
+      const handoffURL = new URL("https://example.test/portal/leases/mac-mini/vnc/handoff");
+      const window = {
+        location: {
+          href: "https://example.test/portal/leases/mac-mini/vnc#handoff=vnc_handoff_0123456789abcdef0123456789abcdef&control=take",
+        },
+      };
+      ${shareURLSource}
+      globalThis.result = shareableWebVNCURL();
+    `).runInContext(context);
+
+    await expect(context.result).resolves.toBe("https://example.test/portal/leases/mac-mini/vnc");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves WebVNC credential handoffs for legacy browser-authenticated viewers", async () => {
+    const page = await macOSPortalPage();
+    const shareURLSource = emittedFunction(page, "async function shareableWebVNCURL()");
+    const fetchMock = vi.fn<
+      (
+        input: URL,
+        init: RequestInit,
+      ) => Promise<{ ok: boolean; json: () => Promise<{ ticket: string }> }>
+    >(async () => ({
+      ok: true,
+      json: async () => ({ ticket: "vnc_handoff_0123456789abcdef0123456789abcdef" }),
+    }));
+    const context = createContext({ fetch: fetchMock, URL, URLSearchParams });
+    new Script(`
+      const username = "vnc-user";
+      const password = "generated-vnc-password";
+      const handoffURL = new URL("https://example.test/portal/leases/mac-mini/vnc/handoff");
+      const window = {
+        location: { href: "https://example.test/portal/leases/mac-mini/vnc" },
+      };
+      ${shareURLSource}
+      globalThis.result = shareableWebVNCURL();
+    `).runInContext(context);
+
+    await expect(context.result).resolves.toBe(
+      "https://example.test/portal/leases/mac-mini/vnc#handoff=vnc_handoff_0123456789abcdef0123456789abcdef",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [handoffURL, init] = fetchMock.mock.calls[0] ?? [];
+    expect(String(handoffURL)).toBe("https://example.test/portal/leases/mac-mini/vnc/handoff");
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        username: "vnc-user",
+        password: "generated-vnc-password",
+      }),
+    });
+  });
+
   it("buffers initial WebVNC bridge bytes until the viewer attaches", async () => {
     const buffers = new Map<string, WebVNCBuffer>();
     const sent: Array<string | ArrayBuffer> = [];
@@ -25428,6 +25548,57 @@ function testLease(overrides: Partial<LeaseRecord>): LeaseRecord {
     expiresAt: "2026-05-01T01:30:00.000Z",
     ...overrides,
   };
+}
+
+async function macOSPortalPage(): Promise<string> {
+  const response = portalVNC(
+    testLease({
+      id: "cbx_macmini",
+      slug: "mac-mini",
+      provider: "external",
+      target: "macos",
+      owner: "alice@example.com",
+      org: "example-org",
+      desktop: true,
+      state: "active",
+    }),
+    { canManage: true },
+  );
+  return await response.text();
+}
+
+function emittedFunction(page: string, signature: string): string {
+  const script = inlineScript(page, 'const status = document.getElementById("status")');
+  const start = script.indexOf(signature);
+  if (start < 0) throw new Error(`function not found: ${signature}`);
+  const bodyStart = script.indexOf("{", start + signature.length);
+  if (bodyStart < 0) throw new Error(`function body not found: ${signature}`);
+
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = bodyStart; index < script.length; index += 1) {
+    const character = script[index] ?? "";
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (character === '"' || character === "'" || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "{") depth += 1;
+    if (character === "}" && --depth === 0) {
+      return script.slice(start, index + 1);
+    }
+  }
+  throw new Error(`unterminated function: ${signature}`);
 }
 
 type CodePortalRuntime = {

@@ -231,7 +231,7 @@ func TestRunFailureDigestRoutingArgsUseExternalRoutingFile(t *testing.T) {
 		},
 	}, "provider-id")
 	got := strings.Join(args, " ")
-	for _, want := range []string{"--provider external", "--external-routing-file"} {
+	for _, want := range []string{"--provider external", "--external-routing-file", "--external-routing-digest"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("routing args missing %q: %s", want, got)
 		}
@@ -254,7 +254,7 @@ func TestRunFailureDigestSSHRoutingArgsUseExternalRoutingFile(t *testing.T) {
 		},
 	}, "cbx_abcdef123456")
 	got := strings.Join(args, " ")
-	for _, want := range []string{"--provider external", "--external-routing-file"} {
+	for _, want := range []string{"--provider external", "--external-routing-file", "--external-routing-digest"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("ssh routing args missing %q: %s", want, got)
 		}

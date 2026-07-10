@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -180,8 +181,12 @@ func TestConfirmedAbsentRoutingRemovalRequiresDirectorySyncAndRetriesAfterDeleti
 	if err != nil {
 		t.Fatal(err)
 	}
+	expected, err := LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	syncErr := errors.New("routing directory sync unavailable")
-	err = removeExternalRoutingIfUnchangedWithSync(leaseID, cfg, func(string) error { return syncErr })
+	err = removeExternalRoutingIfUnchangedWithSync(leaseID, expected, func(string) error { return syncErr })
 	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
 		t.Fatalf("routing removal error=%v", err)
 	}
@@ -189,7 +194,7 @@ func TestConfirmedAbsentRoutingRemovalRequiresDirectorySyncAndRetriesAfterDeleti
 		t.Fatalf("routing file remains after removal sync failure: %v", statErr)
 	}
 	var synced string
-	if err := removeExternalRoutingIfUnchangedWithSync(leaseID, cfg, func(dir string) error {
+	if err := removeExternalRoutingIfUnchangedWithSync(leaseID, expected, func(dir string) error {
 		synced = filepath.Clean(dir)
 		return nil
 	}); err != nil {
@@ -200,7 +205,7 @@ func TestConfirmedAbsentRoutingRemovalRequiresDirectorySyncAndRetriesAfterDeleti
 	}
 }
 
-func TestRemoveExternalRoutingIfUnchangedIgnoresDesktopCredentials(t *testing.T) {
+func TestRemoveExternalRoutingIfUnchangedPreservesDesktopRouteChange(t *testing.T) {
 	setExternalRoutingTestHome(t)
 	const leaseID = "cbx_desktop_runtime_123456"
 	stored := ExternalConfig{
@@ -227,16 +232,82 @@ func TestRemoveExternalRoutingIfUnchangedIgnoresDesktopCredentials(t *testing.T)
 		t.Fatalf("stored desktop route changed: got=%#v want=%#v", loaded.Connection.Desktop, stored.Connection.Desktop)
 	}
 
-	expected := stored
+	expected := loaded
 	expected.Connection.Desktop = ExternalDesktopConfig{
 		Username:    "runtime-screen-user",
 		PasswordEnv: "RUNTIME_SCREEN_PASSWORD",
 	}
-	if err := RemoveExternalRoutingIfUnchanged(leaseID, expected); err != nil {
+	if err := RemoveExternalRoutingIfUnchanged(leaseID, expected); err == nil || !strings.Contains(err.Error(), "external routing state changed") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("desktop route change was removed: %v", err)
+	}
+}
+
+func TestLoadExternalRoutingWithDigestBindsExactGeneration(t *testing.T) {
+	setExternalRoutingTestHome(t)
+	const leaseID = "cbx_digest_route_123456"
+	path, err := PersistValidatedExternalRouting(leaseID, ExternalConfig{Command: "first-provider", WorkRoot: "/work/crabbox"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("routing file remains after desktop-only CAS change: %v", err)
+	first, err := LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := ExternalRoutingDigest(first)
+	if len(digest) != sha256.Size*2 {
+		t.Fatalf("digest=%q", digest)
+	}
+	if _, err := PersistValidatedExternalRouting(leaseID, ExternalConfig{Command: "replacement-provider", WorkRoot: "/work/crabbox"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadExternalRoutingWithDigest(path, digest); err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestPersistExternalRoutingPreservesOnlyCurrentLoadedGeneration(t *testing.T) {
+	setExternalRoutingTestHome(t)
+	const leaseID = "cbx_generation_route_123456"
+	base := ExternalConfig{Command: "provider", WorkRoot: "/work/crabbox"}
+	path, err := PersistValidatedExternalRouting(leaseID, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PersistValidatedExternalRouting(leaseID, first); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ExternalRoutingGeneration(restored) != ExternalRoutingGeneration(first) || ExternalRoutingDigest(restored) != ExternalRoutingDigest(first) {
+		t.Fatalf("unchanged loaded route changed generation: first=%s/%s restored=%s/%s", ExternalRoutingGeneration(first), ExternalRoutingDigest(first), ExternalRoutingGeneration(restored), ExternalRoutingDigest(restored))
+	}
+
+	// A reacquire/rewrite without the loaded generation is a distinct route,
+	// even when every semantic field is identical.
+	if _, err := PersistValidatedExternalRouting(leaseID, base); err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ExternalRoutingGeneration(rewritten) == ExternalRoutingGeneration(first) || ExternalRoutingDigest(rewritten) == ExternalRoutingDigest(first) {
+		t.Fatalf("identical rewrite reused stale generation: first=%s/%s rewritten=%s/%s", ExternalRoutingGeneration(first), ExternalRoutingDigest(first), ExternalRoutingGeneration(rewritten), ExternalRoutingDigest(rewritten))
+	}
+	if err := RemoveExternalRoutingIfUnchanged(leaseID, first); err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("stale cleanup err=%v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stale cleanup removed rewritten route: %v", err)
 	}
 }
 
@@ -279,7 +350,10 @@ func TestRemoveExternalRoutingIfUnchangedPreservesChangedRoute(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			expected := stored
+			expected, err := LoadExternalRouting(path)
+			if err != nil {
+				t.Fatal(err)
+			}
 			test.mutate(&expected)
 			err = RemoveExternalRoutingIfUnchanged(leaseID, expected)
 			if err == nil || !strings.Contains(err.Error(), "external routing state changed") {
@@ -337,6 +411,29 @@ func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 	RemoveExternalRouting("../unsafe/lease")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("routing file still exists: %v", err)
+	}
+}
+
+func TestRestoreExternalLeaseTargetPreservesPersistedPlatformDefaultWorkRoot(t *testing.T) {
+	setExternalRoutingTestHome(t)
+	const leaseID = "cbx_routed_root_123456"
+	routing := ExternalConfig{Command: "provider-adapter", WorkRoot: defaultPOSIXWorkRoot}
+	SetExternalRoutingTarget(&routing, targetMacOS, windowsModeNormal)
+	path, err := PersistExternalRouting(leaseID, routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	if err := loadExternalRoutingConfig(&cfg, path, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreExternalLeaseTarget(&cfg, false, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.TargetOS != targetMacOS || cfg.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("restored config target=%q workRoot=%q", cfg.TargetOS, cfg.WorkRoot)
 	}
 }
 

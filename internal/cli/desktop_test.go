@@ -684,6 +684,10 @@ func TestDesktopLaunchWebVNCArgsCarriesExternalPrivateRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	routing, err := LoadExternalRouting(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := Config{Provider: "external", TargetOS: targetMacOS}
 	cfg.External.Connection.Desktop.Username = "screen-user"
 	cfg.External.Connection.Desktop.PasswordEnv = "SCREEN_SHARING_PASSWORD"
@@ -693,6 +697,7 @@ func TestDesktopLaunchWebVNCArgsCarriesExternalPrivateRouting(t *testing.T) {
 		"--target", targetMacOS,
 		"--id", leaseID,
 		"--external-routing-file", routingPath,
+		"--external-routing-digest", ExternalRoutingDigest(routing),
 		"--external-desktop-username", "screen-user",
 		"--external-desktop-password-env", "SCREEN_SHARING_PASSWORD",
 		"--open",

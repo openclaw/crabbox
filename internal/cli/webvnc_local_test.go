@@ -544,6 +544,127 @@ func TestForceRFBARDAuthenticationOmitsNoneResultForRFB37Browser(t *testing.T) {
 	}
 }
 
+func TestForceRFBMacOSAuthenticationHandlesUpstreamNoneResultByVersion(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		version           string
+		serverResult      []byte
+		wantBrowserResult bool
+	}{
+		{
+			name:    "RFB 3.7 omits SecurityResult",
+			version: "RFB 003.007\n",
+		},
+		{
+			name:              "RFB 3.8 includes SecurityResult",
+			version:           "RFB 003.008\n",
+			serverResult:      []byte{0, 0, 0, 0},
+			wantBrowserResult: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			browser, bridgeBrowser := net.Pipe()
+			server, bridgeServer := net.Pipe()
+			defer browser.Close()
+			defer bridgeBrowser.Close()
+			defer server.Close()
+			defer bridgeServer.Close()
+			if err := browser.SetDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := server.SetDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+
+			negotiation := make(chan error, 1)
+			go func() {
+				negotiation <- forceRFBMacOSAuthenticationWithTimeout(
+					ctx,
+					bridgeBrowser,
+					bridgeServer,
+					rfbCredentials{},
+					localWebVNCAuthAuto,
+					250*time.Millisecond,
+				)
+			}()
+			serverErr := make(chan error, 1)
+			go func() {
+				if _, err := server.Write([]byte(test.version)); err != nil {
+					serverErr <- err
+					return
+				}
+				version := make([]byte, 12)
+				if _, err := io.ReadFull(server, version); err != nil {
+					serverErr <- err
+					return
+				}
+				if string(version) != test.version {
+					serverErr <- fmt.Errorf("client version=%q, want %q", version, test.version)
+					return
+				}
+				if _, err := server.Write([]byte{1, rfbSecurityNone}); err != nil {
+					serverErr <- err
+					return
+				}
+				selected := []byte{0}
+				if _, err := io.ReadFull(server, selected); err != nil {
+					serverErr <- err
+					return
+				}
+				if selected[0] != rfbSecurityNone {
+					serverErr <- fmt.Errorf("selected security type=%d, want %d", selected[0], rfbSecurityNone)
+					return
+				}
+				if len(test.serverResult) > 0 {
+					if _, err := server.Write(test.serverResult); err != nil {
+						serverErr <- err
+						return
+					}
+				}
+				serverErr <- nil
+			}()
+
+			version := make([]byte, 12)
+			if _, err := io.ReadFull(browser, version); err != nil {
+				t.Fatal(err)
+			}
+			if string(version) != test.version {
+				t.Fatalf("server version=%q, want %q", version, test.version)
+			}
+			if _, err := browser.Write([]byte(test.version)); err != nil {
+				t.Fatal(err)
+			}
+			filtered := make([]byte, 2)
+			if _, err := io.ReadFull(browser, filtered); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(filtered, []byte{1, localWebVNCSecurityTypeNone}) {
+				t.Fatalf("filtered security types=%v", filtered)
+			}
+			if _, err := browser.Write([]byte{localWebVNCSecurityTypeNone}); err != nil {
+				t.Fatal(err)
+			}
+			if test.wantBrowserResult {
+				result := make([]byte, 4)
+				if _, err := io.ReadFull(browser, result); err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(result, test.serverResult) {
+					t.Fatalf("browser security result=%v, want %v", result, test.serverResult)
+				}
+			}
+			if err := <-serverErr; err != nil {
+				t.Fatal(err)
+			}
+			if err := <-negotiation; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestRelayWebSocketVNCWithARDAuthenticationTimeoutIsConfigurable(t *testing.T) {
 	t.Run("short timeout", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

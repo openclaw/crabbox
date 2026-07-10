@@ -2620,6 +2620,9 @@ func (t *vncForegroundTunnel) ExitError() error {
 
 func startVNCForegroundTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost, remotePort string) (*vncForegroundTunnel, error) {
 	cmd := sshCommandContext(ctx, target, vncTunnelArgs(target, localPort, remoteHost, remotePort)...)
+	// ProxyCommand descendants must share the tunnel's owned process tree so
+	// cancellation cannot leave credential-bearing SSH helpers behind.
+	configureDaemonCommand(cmd)
 	var output strings.Builder
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -2648,6 +2651,9 @@ func startVNCForegroundTunnel(ctx context.Context, target SSHTarget, localPort, 
 		}
 		select {
 		case <-tunnel.Done():
+			// The SSH leader may exit before a ProxyCommand descendant. Reap the
+			// tracked tree before returning the leader's diagnostic.
+			stopProcess(tunnel)
 			return nil, tunnel.ExitError()
 		default:
 		}
@@ -4588,7 +4594,7 @@ func stopProcess(tunnel *vncForegroundTunnel) {
 	if tunnel == nil || tunnel.cmd == nil || tunnel.cmd.Process == nil {
 		return
 	}
-	_ = tunnel.cmd.Process.Kill()
+	_ = terminateWebVNCDaemonProcessTree(tunnel.cmd.Process.Pid)
 	select {
 	case <-tunnel.Done():
 	case <-time.After(2 * time.Second):

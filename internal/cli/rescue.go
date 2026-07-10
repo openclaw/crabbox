@@ -136,13 +136,13 @@ func externalLeaseCommandRoutingArgs(cfg Config, leaseID string) []string {
 
 	routingPath := strings.TrimSpace(cfg.External.RoutingFile)
 	if routingPath != "" {
-		return appendExternalDesktopRoutingArgs([]string{"--external-routing-file", routingPath}, cfg)
+		return appendExternalDesktopRoutingArgs(externalRoutingFileArgs(routingPath, cfg.External), cfg)
 	}
 	canonicalPath, pathErr := ExternalRoutingPath(leaseID)
 	if pathErr == nil {
 		_, statErr := os.Stat(expandUserPath(canonicalPath))
 		if statErr == nil || !os.IsNotExist(statErr) {
-			return appendExternalDesktopRoutingArgs([]string{"--external-routing-file", canonicalPath}, cfg)
+			return appendExternalDesktopRoutingArgs(externalRoutingFileArgs(canonicalPath, cfg.External), cfg)
 		}
 	}
 
@@ -151,7 +151,7 @@ func externalLeaseCommandRoutingArgs(cfg Config, leaseID string) []string {
 		// config, lifecycle templates, or connection data could put secrets on
 		// argv or silently address a different resource.
 		if pathErr == nil {
-			return appendExternalDesktopRoutingArgs([]string{"--external-routing-file", canonicalPath}, cfg)
+			return appendExternalDesktopRoutingArgs(externalRoutingFileArgs(canonicalPath, cfg.External), cfg)
 		}
 		return appendExternalDesktopRoutingArgs(nil, cfg)
 	}
@@ -162,6 +162,19 @@ func externalLeaseCommandRoutingArgs(cfg Config, leaseID string) []string {
 	}
 	args = append(args, fmt.Sprintf("--external-idempotent-lease-id=%t", cfg.External.Capabilities.IdempotentLeaseID))
 	return appendExternalDesktopRoutingArgs(args, cfg)
+}
+
+func externalRoutingFileArgs(path string, cfg ExternalConfig) []string {
+	digest := ExternalRoutingDigest(cfg)
+	if digest == "" {
+		if routing, err := LoadExternalRouting(path); err == nil {
+			digest = ExternalRoutingDigest(routing)
+		}
+	}
+	// Always emit the binding flag. An unreadable/missing route therefore
+	// produces an invalid empty digest and the generated child fails closed;
+	// it can never accept a later path replacement as an unbound route.
+	return []string{"--external-routing-file", path, "--external-routing-digest", digest}
 }
 
 func externalRoutingHasSafeFlagFallback(cfg ExternalConfig) bool {

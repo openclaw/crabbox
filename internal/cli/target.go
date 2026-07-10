@@ -50,7 +50,7 @@ func normalizeTargetConfig(cfg *Config) {
 			cfg.SSHUser = cfg.Static.User
 		}
 	}
-	if isDefaultWorkRoot(cfg.WorkRoot) {
+	if shouldDeriveTargetWorkRoot(cfg) {
 		cfg.WorkRoot = defaultWorkRootForTarget(cfg.TargetOS, cfg.WindowsMode)
 	}
 	if isStaticProvider(cfg.Provider) {
@@ -67,6 +67,21 @@ func normalizeTargetConfig(cfg *Config) {
 	if cfg.Provider == "sealos-devbox" && (IsSealosDevboxWorkRootExplicit(cfg) || (!IsWorkRootExplicit(cfg) && isDefaultWorkRoot(cfg.WorkRoot))) {
 		cfg.WorkRoot = EffectiveSealosDevboxWorkRoot(*cfg)
 	}
+}
+
+func shouldDeriveTargetWorkRoot(cfg *Config) bool {
+	if strings.TrimSpace(cfg.WorkRoot) == "" {
+		return true
+	}
+	if IsWorkRootExplicit(cfg) {
+		return false
+	}
+	// The external provider owns its work root. This also covers persisted
+	// routing state, whose root must survive target normalization verbatim.
+	if cfg.Provider == "external" && strings.TrimSpace(cfg.External.WorkRoot) != "" && cfg.WorkRoot == cfg.External.WorkRoot {
+		return false
+	}
+	return isDefaultWorkRoot(cfg.WorkRoot)
 }
 
 func isDefaultWorkRoot(value string) bool {
@@ -395,7 +410,19 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 }
 
 func loadExternalRoutingConfig(cfg *Config, path string, claimBound bool) error {
-	routing, err := LoadExternalRouting(path)
+	return loadExternalRoutingConfigWithDigest(cfg, path, "", claimBound)
+}
+
+func loadExternalRoutingConfigWithDigest(cfg *Config, path, expectedDigest string, claimBound bool) error {
+	var (
+		routing ExternalConfig
+		err     error
+	)
+	if strings.TrimSpace(expectedDigest) == "" {
+		routing, err = LoadExternalRouting(path)
+	} else {
+		routing, err = LoadExternalRoutingWithDigest(path, expectedDigest)
+	}
 	if err != nil {
 		return err
 	}
@@ -561,10 +588,11 @@ func applyResolvedLeaseConfig(cfg *Config, server Server, target *SSHTarget) {
 	} else if cfg.TargetOS != targetWindows {
 		cfg.WindowsMode = ""
 	}
-	if workRoot := strings.TrimSpace(server.Labels["work_root"]); workRoot != "" {
+	workRoot := strings.TrimSpace(server.Labels["work_root"])
+	normalizeTargetConfig(cfg)
+	if workRoot != "" {
 		cfg.WorkRoot = workRoot
 	}
-	normalizeTargetConfig(cfg)
 	target.TargetOS = cfg.TargetOS
 	target.WindowsMode = cfg.WindowsMode
 	ApplyTargetChildEnvironmentBoundary(*cfg, target)

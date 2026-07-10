@@ -21,15 +21,16 @@ import (
 )
 
 type execControllerRunnerOptions struct {
-	Binary                     string
-	Config                     string
-	Provider                   string
-	TargetOS                   string
-	ExternalDesktopPasswordEnv string
-	ResolveCredentialBoundary  bool
-	WorkDir                    string
-	StateFile                  string
-	AdapterID                  string
+	Binary                      string
+	Config                      string
+	Provider                    string
+	TargetOS                    string
+	ExternalDesktopPasswordEnv  string
+	ExternalDesktopPasswordEnvs []string
+	ResolveCredentialBoundary   bool
+	WorkDir                     string
+	StateFile                   string
+	AdapterID                   string
 }
 
 type execControllerWorkspaceRunner struct {
@@ -148,21 +149,23 @@ func loadControllerRunnerConfig(configPath, provider, workDir string) (Config, e
 }
 
 type controllerExternalRoutingConfig struct {
-	Config                    Config
-	CurrentDesktopPasswordEnv string
-	CurrentTargetOS           string
+	Config                     Config
+	CurrentDesktopPasswordEnv  string
+	CurrentDesktopPasswordEnvs []string
+	CurrentTargetOS            string
 }
 
-func (r *execControllerWorkspaceRunner) resolvedExternalRoutingConfig(path, provider string) (controllerExternalRoutingConfig, error) {
+func (r *execControllerWorkspaceRunner) resolvedExternalRoutingConfig(path, provider, expectedDigest string) (controllerExternalRoutingConfig, error) {
 	cfg, err := loadControllerRunnerConfigState(r.opts.Config, provider, r.opts.WorkDir)
 	if err != nil {
 		return controllerExternalRoutingConfig{}, err
 	}
 	resolved := controllerExternalRoutingConfig{
-		CurrentDesktopPasswordEnv: strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv),
-		CurrentTargetOS:           normalizeTargetOS(cfg.TargetOS),
+		CurrentDesktopPasswordEnv:  strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv),
+		CurrentDesktopPasswordEnvs: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
+		CurrentTargetOS:            normalizeTargetOS(cfg.TargetOS),
 	}
-	if err := loadExternalRoutingConfig(&cfg, path, true); err != nil {
+	if err := loadExternalRoutingConfigWithDigest(&cfg, path, expectedDigest, true); err != nil {
 		return controllerExternalRoutingConfig{}, err
 	}
 	cfg, err = validateControllerRunnerConfig(cfg)
@@ -173,23 +176,34 @@ func (r *execControllerWorkspaceRunner) resolvedExternalRoutingConfig(path, prov
 	return resolved, nil
 }
 
-func controllerRunnerCredentialBoundary(configPath, provider, workDir string) (string, string, error) {
+type controllerRunnerCredentialBoundaryConfig struct {
+	CurrentDesktopPasswordEnv string
+	DesktopPasswordEnvs       []string
+	TargetOS                  string
+}
+
+func controllerRunnerCredentialBoundary(configPath, provider, workDir string) (controllerRunnerCredentialBoundaryConfig, error) {
 	cfg, err := loadControllerRunnerConfig(configPath, provider, workDir)
 	if err != nil {
-		return "", "", err
+		return controllerRunnerCredentialBoundaryConfig{}, err
+	}
+	result := controllerRunnerCredentialBoundaryConfig{
+		DesktopPasswordEnvs: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
+		TargetOS:            normalizeTargetOS(cfg.TargetOS),
 	}
 	providerName := normalizeProviderName(cfg.Provider)
 	if registered, providerErr := ProviderFor(cfg.Provider); providerErr == nil {
 		providerName = registered.Name()
 	}
 	if providerName != "external" && providerName != "exec-provider" {
-		return "", normalizeTargetOS(cfg.TargetOS), nil
+		return result, nil
 	}
 	passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
 	if err := ValidateExternalDesktopPasswordEnvironmentName(passwordEnv); err != nil {
-		return "", "", err
+		return controllerRunnerCredentialBoundaryConfig{}, err
 	}
-	return passwordEnv, normalizeTargetOS(cfg.TargetOS), nil
+	result.CurrentDesktopPasswordEnv = passwordEnv
+	return result, nil
 }
 
 func controllerWorkDirRepositoryRoot(workDir string) string {
@@ -711,17 +725,22 @@ func (r *execControllerWorkspaceRunner) appendPersistedProviderRoutingArgs(args 
 	if err != nil {
 		return nil, fmt.Errorf("resolve persisted external controller routing: %w", err)
 	}
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
+	routing, err := LoadExternalRouting(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			// Acquire persists routing only after its raw identity callback and
 			// lease validation. Before that point the persisted provider scope is
 			// still the exact routing guard, so inventory must remain available for
 			// late-create recovery instead of requiring a file that cannot exist yet.
 			return args, nil
 		}
-		return nil, fmt.Errorf("inspect persisted external controller routing: %w", err)
+		return nil, fmt.Errorf("load persisted external controller routing: %w", err)
 	}
-	return append(args, "--external-routing-file", path), nil
+	return append(
+		args,
+		"--external-routing-file", path,
+		"--external-routing-digest", ExternalRoutingDigest(routing),
+	), nil
 }
 
 func (r *execControllerWorkspaceRunner) pinExternalDesktopCredentialOwnerArgs(args []string, request controllerWorkspaceRequest) ([]string, error) {
@@ -746,7 +765,11 @@ func (r *execControllerWorkspaceRunner) pinExternalDesktopCredentialOwnerArgs(ar
 			return nil, err
 		}
 	}
-	resolved, err := r.resolvedExternalRoutingConfig(routingPath, provider)
+	resolved, err := r.resolvedExternalRoutingConfig(
+		routingPath,
+		provider,
+		webVNCDaemonStringArg(args, "external-routing-digest"),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("load external WebVNC credential route: %w", err)
 	}
@@ -1587,6 +1610,11 @@ func (r *execControllerWorkspaceRunner) childCredentialPolicy(request controller
 		}
 		rememberDenied(name)
 	}
+	for _, name := range r.opts.ExternalDesktopPasswordEnvs {
+		if err := addDenied(name); err != nil {
+			return policy, err
+		}
+	}
 	currentName := strings.TrimSpace(r.opts.ExternalDesktopPasswordEnv)
 	currentTarget := normalizeTargetOS(r.opts.TargetOS)
 	effectiveProvider := firstNonBlank(webVNCDaemonStringArg(args, "provider"), request.ProviderRoute, r.opts.Provider)
@@ -1617,22 +1645,36 @@ func (r *execControllerWorkspaceRunner) childCredentialPolicy(request controller
 		}
 	}
 	if routingPath != "" {
-		resolved, resolveErr := r.resolvedExternalRoutingConfig(routingPath, provider)
+		resolved, resolveErr := r.resolvedExternalRoutingConfig(
+			routingPath,
+			provider,
+			webVNCDaemonStringArg(args, "external-routing-digest"),
+		)
 		if resolveErr != nil {
 			return policy, fmt.Errorf("load external child credential route: %w", resolveErr)
 		}
 		routed = &resolved
 		if r.opts.ResolveCredentialBoundary {
+			for _, name := range resolved.CurrentDesktopPasswordEnvs {
+				if err := addDenied(name); err != nil {
+					return policy, err
+				}
+			}
 			currentName = resolved.CurrentDesktopPasswordEnv
 			currentTarget = resolved.CurrentTargetOS
 		}
 	} else if r.opts.ResolveCredentialBoundary {
-		resolvedName, resolvedTarget, resolveErr := controllerRunnerCredentialBoundary(r.opts.Config, effectiveProvider, r.opts.WorkDir)
+		resolved, resolveErr := controllerRunnerCredentialBoundary(r.opts.Config, effectiveProvider, r.opts.WorkDir)
 		if resolveErr != nil {
 			return policy, resolveErr
 		}
-		currentName = resolvedName
-		currentTarget = resolvedTarget
+		for _, name := range resolved.DesktopPasswordEnvs {
+			if err := addDenied(name); err != nil {
+				return policy, err
+			}
+		}
+		currentName = resolved.CurrentDesktopPasswordEnv
+		currentTarget = resolved.TargetOS
 	}
 	if err := addDenied(currentName); err != nil {
 		return policy, err
@@ -1729,7 +1771,7 @@ func controllerPersistedExternalDesktopPasswordEnvironments() ([]string, error) 
 		}
 		routing, err := LoadExternalRouting(filepath.Join(dir, entry.Name()))
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("load persisted external routing %s: %w", entry.Name(), err)
 		}
 		if name := strings.TrimSpace(routing.Connection.Desktop.PasswordEnv); name != "" {
 			names = append(names, name)

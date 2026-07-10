@@ -120,20 +120,21 @@ func (a App) controllerServe(ctx context.Context, args []string) error {
 	runnerConfig := expandUserPath(strings.TrimSpace(*configPath))
 	runnerProvider := strings.TrimSpace(*provider)
 	runnerWorkDir := expandUserPath(strings.TrimSpace(*workDir))
-	desktopPasswordEnv, targetOS, err := controllerRunnerCredentialBoundary(runnerConfig, runnerProvider, runnerWorkDir)
+	credentialBoundary, err := controllerRunnerCredentialBoundary(runnerConfig, runnerProvider, runnerWorkDir)
 	if err != nil {
 		return exit(2, "resolve controller child credential boundary: %v", err)
 	}
 	runner := &execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
-		Binary:                     expandUserPath(strings.TrimSpace(*binary)),
-		Config:                     runnerConfig,
-		Provider:                   runnerProvider,
-		TargetOS:                   targetOS,
-		ExternalDesktopPasswordEnv: desktopPasswordEnv,
-		ResolveCredentialBoundary:  true,
-		WorkDir:                    runnerWorkDir,
-		StateFile:                  opts.StateFile,
-		AdapterID:                  strings.TrimSpace(*adapterID),
+		Binary:                      expandUserPath(strings.TrimSpace(*binary)),
+		Config:                      runnerConfig,
+		Provider:                    runnerProvider,
+		TargetOS:                    credentialBoundary.TargetOS,
+		ExternalDesktopPasswordEnv:  credentialBoundary.CurrentDesktopPasswordEnv,
+		ExternalDesktopPasswordEnvs: credentialBoundary.DesktopPasswordEnvs,
+		ResolveCredentialBoundary:   true,
+		WorkDir:                     runnerWorkDir,
+		StateFile:                   opts.StateFile,
+		AdapterID:                   strings.TrimSpace(*adapterID),
 	}}
 	serviceCtx, cancelService := context.WithCancel(ctx)
 	defer cancelService()

@@ -1496,10 +1496,6 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
             scheduleRetry(state.message || "waiting for an available WebVNC observer slot");
             return;
           }
-          if (target === "macos" && !password) {
-            stopPolling(missingVNCCredentialMessage);
-            return;
-          }
           setStatus(retryAttempt ? "bridge connected; opening viewer" : "connecting");
           clearDesktopThemeSyncState();
           rfb = new RFB(screen, wsURL.toString(), rfbOptions());
@@ -1631,7 +1627,11 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         return String(value || "").trim().toLowerCase();
       }
       async function shareableWebVNCURL() {
-        if (!username && !password) throw new Error(missingVNCCredentialMessage);
+        const url = new URL(window.location.href);
+        if (!username && !password) {
+          url.hash = "";
+          return url.toString();
+        }
         const response = await fetch(handoffURL, {
           method: "POST",
           headers: { "content-type": "application/json", accept: "application/json" },
@@ -1639,7 +1639,6 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(body.message || body.error || "VNC handoff failed");
-        const url = new URL(window.location.href);
         const linkFragment = new URLSearchParams();
         linkFragment.set("handoff", body.ticket);
         url.hash = linkFragment.toString();

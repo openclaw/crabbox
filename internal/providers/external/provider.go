@@ -86,6 +86,16 @@ func (Provider) CommandRoutingArgs(cfg core.Config, leaseID string) []string {
 		}
 	}
 	args := []string{"--external-routing-file", path}
+	digest := core.ExternalRoutingDigest(cfg.External)
+	if digest == "" {
+		if routing, err := core.LoadExternalRouting(path); err == nil {
+			digest = core.ExternalRoutingDigest(routing)
+		}
+	}
+	// Keep generated children fail-closed if the route cannot be read now.
+	// The explicit empty digest is invalid and cannot become an unbound load if
+	// another process later replaces the deterministic path.
+	args = append(args, "--external-routing-digest", digest)
 	if username := strings.TrimSpace(cfg.External.Connection.Desktop.Username); username != "" || core.IsExternalDesktopUsernameExplicit(&cfg) {
 		args = append(args, "--external-desktop-username", username)
 	}
@@ -131,7 +141,8 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !loadedRouting {
 		targetExplicit := core.IsExternalDesktopTargetExplicit(&cfg)
 		windowsModeExplicit := core.IsExternalDesktopWindowsModeExplicit(&cfg)
-		routing, err := core.LoadExternalRouting(path)
+		digest := core.ExternalRoutingDigest(cfg.External)
+		routing, err := loadRoutingFile(path, digest, digest != "")
 		if err != nil {
 			return nil, core.Exit(2, "%v", err)
 		}

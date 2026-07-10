@@ -16,6 +16,7 @@ type flagValues struct {
 	ConfigJSON         *string
 	WorkRoot           *string
 	RoutingFile        *string
+	RoutingDigest      *string
 	DesktopUsername    *string
 	DesktopPasswordEnv *string
 	IdempotentLeaseID  *bool
@@ -34,6 +35,11 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 			defaults.External.RoutingFile,
 			"private external provider routing state file",
 		),
+		RoutingDigest: fs.String(
+			"external-routing-digest",
+			core.ExternalRoutingDigest(defaults.External),
+			"expected SHA-256 digest for an internal external-provider routing handoff",
+		),
 		DesktopUsername:    fs.String("external-desktop-username", defaults.External.Connection.Desktop.Username, "external macOS Screen Sharing account; defaults to resolved SSH user"),
 		DesktopPasswordEnv: fs.String("external-desktop-password-env", defaults.External.Connection.Desktop.PasswordEnv, "environment variable name containing the external macOS Screen Sharing account password"),
 		IdempotentLeaseID:  fs.Bool("external-idempotent-lease-id", defaults.External.Capabilities.IdempotentLeaseID, "adapter guarantees idempotent acquisition for caller-supplied lease IDs"),
@@ -45,10 +51,14 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
+	digestWasSet := core.FlagWasSet(fs, "external-routing-digest")
+	if digestWasSet && !core.FlagWasSet(fs, "external-routing-file") {
+		return core.Exit(2, "--external-routing-digest requires --external-routing-file")
+	}
 	if core.FlagWasSet(fs, "external-routing-file") {
 		core.MarkExternalRoutingFileExplicit(cfg)
 		cfg.External.RoutingFile = *v.RoutingFile
-		routing, err := core.LoadExternalRouting(cfg.External.RoutingFile)
+		routing, err := loadRoutingFile(cfg.External.RoutingFile, *v.RoutingDigest, digestWasSet)
 		if err != nil {
 			return core.Exit(2, "%v", err)
 		}
@@ -60,7 +70,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		core.ApplyExternalDesktopEnvironmentOverrides(cfg)
 		cfg.WorkRoot = externalWorkRoot(*cfg)
 	} else if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !core.ExternalRoutingLoaded(cfg.External) {
-		routing, err := core.LoadExternalRouting(path)
+		digest := core.ExternalRoutingDigest(cfg.External)
+		routing, err := loadRoutingFile(path, digest, digest != "")
 		if err != nil {
 			return core.Exit(2, "%v", err)
 		}
@@ -105,6 +116,13 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		core.MarkExternalDesktopPasswordEnvExplicit(cfg)
 	}
 	return validateConfig(*cfg)
+}
+
+func loadRoutingFile(path, digest string, bound bool) (core.ExternalConfig, error) {
+	if bound {
+		return core.LoadExternalRoutingWithDigest(path, digest)
+	}
+	return core.LoadExternalRouting(path)
 }
 
 type stringListFlag struct {

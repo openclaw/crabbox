@@ -593,7 +593,9 @@ func forceRFBMacOSAuthenticationWithTimeout(ctx context.Context, browser, server
 	default:
 		return fmt.Errorf("unsupported RFB security type %d", securityType)
 	}
-	if !legacyVersion || securityType != rfbSecurityNone {
+	// RFB 3.7 advances directly after selecting None; RFB 3.8 added a
+	// SecurityResult for the None security type.
+	if securityType != rfbSecurityNone || (major == 3 && minor >= 8) {
 		if err := readRFBSecurityResult(server); err != nil {
 			return err
 		}

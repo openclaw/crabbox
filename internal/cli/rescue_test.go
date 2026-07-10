@@ -109,6 +109,10 @@ func TestRescueCommandsCarryExternalPrivateRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	loadedRouting, err := LoadExternalRouting(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := rescueContext{
 		Cfg: Config{
 			Provider: "external",
@@ -132,6 +136,7 @@ func TestRescueCommandsCarryExternalPrivateRouting(t *testing.T) {
 			"--provider external",
 			"--target macos",
 			"--external-routing-file " + routingPath,
+			"--external-routing-digest " + ExternalRoutingDigest(loadedRouting),
 			"--external-desktop-username screen-user",
 			"--external-desktop-password-env SCREEN_SHARING_PASSWORD",
 			"--id " + leaseID,
@@ -180,7 +185,7 @@ func TestExternalLeaseCommandRoutingArgsKeepComplexStateOffArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--external-routing-file", routingPath}
+	want := []string{"--external-routing-file", routingPath, "--external-routing-digest", ""}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("routing args=%#v, want fail-closed %#v", got, want)
 	}
@@ -216,6 +221,7 @@ func TestExternalLeaseCommandRoutingArgsPreserveExplicitDesktopCredentialClears(
 	got := externalLeaseCommandRoutingArgs(cfg, leaseID)
 	want := []string{
 		"--external-routing-file", path,
+		"--external-routing-digest", ExternalRoutingDigest(loaded),
 		"--external-desktop-username", "",
 		"--external-desktop-password-env", "",
 	}

@@ -473,6 +473,8 @@ type ExternalConfig struct {
 	RoutingFile              string
 	routingLoaded            bool
 	routingCredentialVersion int
+	routingDigest            string
+	routingGeneration        string
 	routingTargetOS          string
 	routingWindowsMode       string
 }

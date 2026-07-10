@@ -131,8 +131,10 @@ support matrix.
 External macOS uses the direct Screen Sharing bridge too. Crabbox resolves the
 operator-managed account password from its approved environment reference,
 authenticates the ARD session in the local relay, and never sends that account
-credential to the browser. Use `webvnc --preflight` to test the exact SSH,
-RFB, and ARD authentication path without opening a viewer.
+credential to the browser. Because the coordinator authenticates portal access,
+the toolbar copies a clean, ticket-free URL for these relay-authenticated
+sessions; access remains subject to the lease ACL. Use `webvnc --preflight` to
+test the exact SSH, RFB, and ARD authentication path without opening a viewer.
 
 For kept registered desktop leases, `broker.autoWebVNC: true` starts the bridge
 daemon automatically. The daemon heartbeats the registration while connected;

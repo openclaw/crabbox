@@ -65,7 +65,7 @@ printf '[]'
 		{name: "native Windows", targetOS: targetWindows, windowsMode: windowsModeNormal},
 	} {
 		t.Run(target.name, func(t *testing.T) {
-			cfg := defaultConfig()
+			cfg := baseConfig()
 			cfg.Provider = "external"
 			cfg.TargetOS = target.targetOS
 			cfg.WindowsMode = target.windowsMode

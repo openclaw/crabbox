@@ -272,6 +272,76 @@ func TestControllerChildCredentialPolicySkipsInvalidStaleRoutes(t *testing.T) {
 	}
 }
 
+func TestControllerChildEnvironmentScrubsTrustedDesktopPasswordForNonExternalProvider(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	configPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`external:
+  connection:
+    desktop:
+      passwordEnv: TRUSTED_DESKTOP_PASSWORD
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "crabbox.yaml"), []byte("provider: aws\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	boundary, err := controllerRunnerCredentialBoundary("", "", workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boundary.CurrentDesktopPasswordEnv != "" {
+		t.Fatalf("non-External provider selected credential owner %q", boundary.CurrentDesktopPasswordEnv)
+	}
+	if !slices.Contains(boundary.DesktopPasswordEnvs, "TRUSTED_DESKTOP_PASSWORD") {
+		t.Fatalf("merged credential denylist=%v", boundary.DesktopPasswordEnvs)
+	}
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
+		WorkDir:                     workDir,
+		ResolveCredentialBoundary:   true,
+		ExternalDesktopPasswordEnvs: boundary.DesktopPasswordEnvs,
+	}}
+	environment, err := runner.childEnvironment(
+		[]string{"TRUSTED_DESKTOP_PASSWORD=operator-secret", "KEEP=value"},
+		controllerWorkspaceRequest{},
+		[]string{"inspect", "--provider", "aws"},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(environment, "TRUSTED_DESKTOP_PASSWORD=operator-secret") || !slices.Contains(environment, "KEEP=value") {
+		t.Fatalf("non-External child environment=%q", environment)
+	}
+}
+
+func TestControllerChildCredentialPolicyFailsClosedOnCorruptPersistedRoute(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	dir := filepath.Join(root, "crabbox", "external")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "corrupt.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{Provider: "aws", TargetOS: targetLinux}}
+	_, err := runner.childCredentialPolicy(controllerWorkspaceRequest{}, []string{"inspect", "--provider", "aws"})
+	if err == nil || !strings.Contains(err.Error(), "load persisted external routing corrupt.json") || !strings.Contains(err.Error(), "parse external routing file") {
+		t.Fatalf("corrupt route error=%v", err)
+	}
+}
+
 func TestControllerCredentialOwnerUsesRuntimePasswordOverrideForPersistedMacOSRoute(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
@@ -400,7 +470,7 @@ external:
 	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
 		Config: configPath, Provider: "external", WorkDir: workDir,
 	}}
-	resolved, err := runner.resolvedExternalRoutingConfig(routingPath, "external")
+	resolved, err := runner.resolvedExternalRoutingConfig(routingPath, "external", "")
 	if err != nil {
 		t.Fatalf("trusted approval rejected legacy route: %v", err)
 	}
@@ -1027,6 +1097,10 @@ func TestControllerLifecycleCommandsUsePersistedExternalRoutingWithoutClaim(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	routing, err := LoadExternalRouting(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("claim exists=%t err=%v", exists, err)
 	}
@@ -1067,12 +1141,53 @@ func TestControllerLifecycleCommandsUsePersistedExternalRoutingWithoutClaim(t *t
 		t.Fatalf("calls=%q", string(data))
 	}
 	for _, line := range lines {
-		if !strings.Contains(line, "--provider external") || !strings.Contains(line, "--external-routing-file "+routingPath) {
+		if !strings.Contains(line, "--provider external") ||
+			!strings.Contains(line, "--external-routing-file "+routingPath) ||
+			!strings.Contains(line, "--external-routing-digest "+ExternalRoutingDigest(routing)) {
 			t.Fatalf("lifecycle command did not use persisted route: %q", line)
 		}
 	}
 	if !strings.Contains(lines[3], "--expected-coordinator-registration-url https://coordinator.example.test/root") {
 		t.Fatalf("confirmed-absence cleanup omitted coordinator binding: %q", lines[3])
+	}
+}
+
+func TestControllerCredentialOwnerRejectsReplacedPersistedRoute(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	const leaseID = "cbx_route_race123"
+	first := ExternalConfig{
+		Command:  "provider-command",
+		WorkRoot: "/workspace",
+		Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+			Username: "first-user", PasswordEnv: "FIRST_SCREEN_PASSWORD",
+		}},
+	}
+	SetExternalRoutingTarget(&first, targetMacOS, windowsModeNormal)
+	if _, err := PersistValidatedExternalRouting(leaseID, first); err != nil {
+		t.Fatal(err)
+	}
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{Provider: "external"}}
+	request := controllerDesktopTestRequest(leaseID)
+	args, err := runner.appendPersistedProviderRoutingArgs(
+		[]string{"webvnc", "daemon", "start", "--id", leaseID},
+		request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest := webVNCDaemonStringArg(args, "external-routing-digest"); len(digest) != sha256.Size*2 {
+		t.Fatalf("routing digest=%q args=%q", digest, args)
+	}
+
+	replacement := first
+	replacement.Connection.Desktop.Username = "replacement-user"
+	replacement.Connection.Desktop.PasswordEnv = "REPLACEMENT_SCREEN_PASSWORD"
+	if _, err := PersistValidatedExternalRouting(leaseID, replacement); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.pinExternalDesktopCredentialOwnerArgs(args, request); err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("replaced route error=%v", err)
 	}
 }
 

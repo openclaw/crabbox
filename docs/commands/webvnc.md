@@ -333,7 +333,8 @@ A macOS ARD bridge has a stricter boundary in both local and coordinator-backed
 modes: its relay performs ARD authentication, the browser receives no account
 credential, and a local viewer has no credential endpoint registered.
 `--redact-credentials=false` does not make the ARD account credential available
-to the browser.
+to the browser. Its portal share action therefore copies a clean URL without
+minting a credential handoff; the coordinator still enforces the lease ACL.
 
 The portal page may show `WebVNC daemon not running` or `waiting for VNC bridge`
 until the local command has connected. If you opened the portal first, start the
