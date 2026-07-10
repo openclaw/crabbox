@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -405,24 +406,41 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 			if *openPortal || !*redactCredentials {
 				portalUsername, portalPassword = webVNCPortalCredentials(target, username, password)
 			}
-			portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl})
+			portal := ""
+			var err error
+			if *openPortal {
+				if !opened {
+					_, _, err = openWebVNCPortal(
+						ctx,
+						coord,
+						leaseID,
+						portalUsername,
+						portalPassword,
+						target.ChildEnvDenylist,
+						webVNCPortalOptions{TakeControl: *takeControl},
+					)
+				}
+			} else {
+				portal, err = createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl})
+			}
 			if err != nil {
 				return err
 			}
 			fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using WebVNC")
-			fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
-			if strings.TrimSpace(portalPassword) != "" {
+			if *openPortal {
+				fmt.Fprintln(a.Stdout, "webvnc: opened in browser")
+			} else {
+				fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
+			}
+			if !*openPortal && strings.TrimSpace(portalPassword) != "" {
 				fmt.Fprintf(a.Stdout, "password: %s\n", portalPassword)
 				if strings.TrimSpace(portalUsername) != "" {
 					fmt.Fprintf(a.Stdout, "username: %s\n", strings.TrimSpace(portalUsername))
 				}
 			}
 			if *openPortal && !opened {
-				if err := openLocalURLWithEnvironment(portal, target.ChildEnvDenylist...); err != nil {
-					return err
-				}
 				opened = true
-				fmt.Fprintf(a.Stdout, "opened: %s\n", portal)
+				fmt.Fprintln(a.Stdout, "opened: browser viewer")
 			}
 			return nil
 		},
@@ -791,7 +809,7 @@ func (w webVNCRedactingWriter) Write(data []byte) (int, error) {
 		for _, prefix := range []string{"password:", "username:", "webvnc:", "opened:"} {
 			if strings.HasPrefix(trimmed, prefix) {
 				if (prefix == "webvnc:" || prefix == "opened:") &&
-					!webVNCOutputURLHasCredentials(strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))) {
+					!webVNCOutputIsURL(strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))) {
 					break
 				}
 				ending := ""
@@ -810,6 +828,11 @@ func (w webVNCRedactingWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
+func webVNCOutputIsURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	return err == nil && parsed.IsAbs() && parsed.Host != ""
+}
+
 func webVNCPortalCredentials(target SSHTarget, username, password string) (string, string) {
 	// The macOS bridge authenticates to ARD itself and exposes an
 	// already-authenticated RFB stream to the portal viewer.
@@ -817,14 +840,6 @@ func webVNCPortalCredentials(target SSHTarget, username, password string) (strin
 		return "", ""
 	}
 	return username, password
-}
-
-func webVNCOutputURLHasCredentials(value string) bool {
-	if strings.Contains(value, "password=") || strings.Contains(value, "username=") || strings.Contains(value, "handoff=") {
-		return true
-	}
-	parsed, err := url.Parse(value)
-	return err == nil && parsed.User != nil
 }
 
 func (a App) webVNCDaemonStatusCommand(args []string) error {
@@ -1160,9 +1175,12 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if *openPortal || !*redactCredentials {
 		portalUsername, portalPassword = webVNCPortalCredentials(target, username, password)
 	}
-	portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl})
-	if err != nil {
-		return err
+	portal := ""
+	if !*openPortal {
+		portal, err = createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword, webVNCPortalOptions{TakeControl: *takeControl})
+		if err != nil {
+			return err
+		}
 	}
 	daemonArgs, credentialInput := webVNCResetDaemonLaunch(cfg, target, leaseID, *openPortal, *takeControl)
 	daemonName := *id
@@ -1173,8 +1191,12 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "webvnc reset: lease=%s slug=%s\n", leaseID, blank(serverSlug(server), "-"))
-	fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
-	if strings.TrimSpace(portalPassword) != "" {
+	if *openPortal {
+		fmt.Fprintln(a.Stdout, "webvnc: opening in browser")
+	} else {
+		fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
+	}
+	if !*openPortal && strings.TrimSpace(portalPassword) != "" {
 		fmt.Fprintf(a.Stdout, "password: %s\n", portalPassword)
 	}
 	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(cfg, target, leaseID))
@@ -4539,18 +4561,90 @@ type webVNCPortalOptions struct {
 }
 
 func createWebVNCPortalURL(ctx context.Context, coord *CoordinatorClient, leaseID, username, password string, opts ...webVNCPortalOptions) (string, error) {
-	handoff := ""
-	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" {
-		issued, err := coord.CreateWebVNCCredentialHandoff(ctx, leaseID, username, password)
-		if err != nil {
-			return "", fmt.Errorf("create WebVNC credential handoff: %w", err)
-		}
-		if !validWebVNCCredentialHandoffTicket(issued.Ticket) {
-			return "", fmt.Errorf("create WebVNC credential handoff: coordinator returned an invalid ticket")
-		}
-		handoff = issued.Ticket
+	handoff, err := createWebVNCCredentialHandoff(ctx, coord, leaseID, username, password)
+	if err != nil {
+		return "", err
 	}
 	return webVNCPortalURL(coord.BaseURL, leaseID, handoff, opts...), nil
+}
+
+func openWebVNCPortal(ctx context.Context, coord *CoordinatorClient, leaseID, username, password string, denied []string, opts ...webVNCPortalOptions) (string, bool, error) {
+	return openWebVNCPortalWithOpener(
+		ctx,
+		coord,
+		leaseID,
+		username,
+		password,
+		denied,
+		openLocalURLWithEnvironment,
+		opts...,
+	)
+}
+
+func openWebVNCPortalWithOpener(ctx context.Context, coord *CoordinatorClient, leaseID, username, password string, denied []string, opener func(string, ...string) error, opts ...webVNCPortalOptions) (string, bool, error) {
+	credentialHandoff, err := createWebVNCCredentialHandoff(ctx, coord, leaseID, username, password)
+	if err != nil {
+		return "", false, err
+	}
+	who, err := coord.Whoami(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve coordinator identity before opening WebVNC: %w", err)
+	}
+	if who.Auth != "bearer" {
+		portal := webVNCPortalURL(coord.BaseURL, leaseID, credentialHandoff, opts...)
+		if err := opener(portal, denied...); err != nil {
+			return "", false, err
+		}
+		return portal, false, nil
+	}
+	takeControl := false
+	for _, opt := range opts {
+		takeControl = takeControl || opt.TakeControl
+	}
+	bootstrap, err := coord.CreateWebVNCViewerBootstrap(ctx, leaseID, credentialHandoff, takeControl)
+	if err != nil {
+		return "", false, fmt.Errorf("create WebVNC viewer bootstrap: %w", err)
+	}
+	if !validWebVNCViewerBootstrapTicket(bootstrap.Ticket) || strings.TrimSpace(bootstrap.LeaseID) != leaseID {
+		return "", false, fmt.Errorf("create WebVNC viewer bootstrap: coordinator returned an invalid ticket")
+	}
+	action := webVNCPortalBootstrapURL(coord.BaseURL, leaseID)
+	browserHandoff, err := startWebVNCPortalBootstrapHandoff(action, bootstrap.Ticket)
+	if err != nil {
+		return "", false, fmt.Errorf("start local WebVNC viewer bootstrap: %w", err)
+	}
+	if err := opener(browserHandoff.URL(), denied...); err != nil {
+		browserHandoff.Close()
+		return "", false, err
+	}
+	return "", true, nil
+}
+
+func createWebVNCCredentialHandoff(ctx context.Context, coord *CoordinatorClient, leaseID, username, password string) (string, error) {
+	if strings.TrimSpace(username) == "" && strings.TrimSpace(password) == "" {
+		return "", nil
+	}
+	issued, err := coord.CreateWebVNCCredentialHandoff(ctx, leaseID, username, password)
+	if err != nil {
+		return "", fmt.Errorf("create WebVNC credential handoff: %w", err)
+	}
+	if !validWebVNCCredentialHandoffTicket(issued.Ticket) {
+		return "", fmt.Errorf("create WebVNC credential handoff: coordinator returned an invalid ticket")
+	}
+	return issued.Ticket, nil
+}
+
+func validWebVNCViewerBootstrapTicket(value string) bool {
+	const prefix = "webvnc_view_"
+	if len(value) != len(prefix)+32 || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	for _, character := range value[len(prefix):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func validWebVNCCredentialHandoffTicket(value string) bool {
@@ -4564,6 +4658,105 @@ func validWebVNCCredentialHandoffTicket(value string) bool {
 		}
 	}
 	return true
+}
+
+func webVNCPortalBootstrapURL(base, leaseID string) string {
+	u, err := url.Parse(base)
+	if err != nil {
+		return base
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/portal/leases/" + url.PathEscape(leaseID) + "/vnc/bootstrap"
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String()
+}
+
+type webVNCPortalBootstrapHandoff struct {
+	path       string
+	dir        string
+	browserURL string
+	closeOnce  sync.Once
+}
+
+func startWebVNCPortalBootstrapHandoff(action, ticket string) (*webVNCPortalBootstrapHandoff, error) {
+	if !validWebVNCViewerBootstrapTicket(ticket) {
+		return nil, fmt.Errorf("invalid WebVNC viewer bootstrap ticket")
+	}
+	actionURL, err := url.Parse(action)
+	if err != nil || actionURL.User != nil || actionURL.RawQuery != "" || actionURL.Fragment != "" {
+		return nil, fmt.Errorf("invalid WebVNC viewer bootstrap action")
+	}
+	loopbackHTTP := actionURL.Scheme == "http" &&
+		(actionURL.Hostname() == "127.0.0.1" || actionURL.Hostname() == "::1" || actionURL.Hostname() == "localhost")
+	if actionURL.Scheme != "https" && !loopbackHTTP {
+		return nil, fmt.Errorf("WebVNC viewer bootstrap action must use HTTPS or loopback HTTP")
+	}
+	nonce, err := randomHex(16)
+	if err != nil {
+		return nil, err
+	}
+	dir, path, file, err := createWebVNCPortalBootstrapFile()
+	if err != nil {
+		return nil, err
+	}
+	cleanup := func() {
+		_ = file.Close()
+		_ = os.RemoveAll(dir)
+	}
+	actionOrigin := actionURL.Scheme + "://" + actionURL.Host
+	body := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="` +
+		html.EscapeString("default-src 'none'; base-uri 'none'; form-action "+actionOrigin+"; frame-ancestors 'none'; script-src 'nonce-"+nonce+"'") +
+		`"><title>Opening WebVNC</title></head><body><form id="webvnc-bootstrap" method="post" action="` +
+		html.EscapeString(actionURL.String()) +
+		`" autocomplete="off"><input type="hidden" name="ticket" value="` +
+		html.EscapeString(ticket) +
+		`"><p>Opening WebVNC...</p><button type="submit">Continue</button></form><script nonce="` +
+		nonce +
+		`">document.getElementById("webvnc-bootstrap").requestSubmit();</script></body></html>`
+	if _, err := io.WriteString(file, body); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if err := file.Sync(); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return nil, err
+	}
+	pathForURL := filepath.ToSlash(path)
+	if runtime.GOOS == "windows" && !strings.HasPrefix(pathForURL, "/") {
+		pathForURL = "/" + pathForURL
+	}
+	handoff := &webVNCPortalBootstrapHandoff{
+		path:       path,
+		dir:        dir,
+		browserURL: (&url.URL{Scheme: "file", Path: pathForURL}).String(),
+	}
+	go func() {
+		time.Sleep(2 * time.Minute)
+		handoff.Close()
+	}()
+	return handoff, nil
+}
+
+func (l *webVNCPortalBootstrapHandoff) URL() string {
+	if l == nil {
+		return ""
+	}
+	return l.browserURL
+}
+
+func (l *webVNCPortalBootstrapHandoff) Close() {
+	if l == nil {
+		return
+	}
+	l.closeOnce.Do(func() {
+		_ = os.Remove(l.path)
+		_ = os.Remove(l.dir)
+	})
 }
 
 func webVNCPortalURL(base, leaseID, handoff string, opts ...webVNCPortalOptions) string {

@@ -47,18 +47,23 @@ func TestOpenLoginBrowserScrubsExternalDesktopPassword(t *testing.T) {
 	}
 	dir := t.TempDir()
 	result := filepath.Join(dir, "result")
+	home := filepath.Join(dir, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	opener := filepath.Join(dir, name)
 	script := "#!/bin/sh\n" +
-		"if [ \"${TEST_LOGIN_DESKTOP_PASSWORD+x}\" = x ]; then printf leaked > \"$CRABBOX_TEST_LOGIN_OPENER_RESULT\"; exit 0; fi\n" +
-		"if [ \"$CRABBOX_TEST_BROWSER_KEEP\" != preserved ] || [ \"$DISPLAY\" != :99 ]; then printf stripped > \"$CRABBOX_TEST_LOGIN_OPENER_RESULT\"; exit 0; fi\n" +
-		"printf scrubbed > \"$CRABBOX_TEST_LOGIN_OPENER_RESULT\"\n"
+		"if [ \"${TEST_LOGIN_DESKTOP_PASSWORD+x}\" = x ] || [ \"${CRABBOX_COORDINATOR_TOKEN+x}\" = x ] || [ \"${GH_TOKEN+x}\" = x ]; then printf leaked > " + shellQuote(result) + "; exit 0; fi\n" +
+		"if [ \"$HOME\" != " + shellQuote(home) + " ]; then printf stripped > " + shellQuote(result) + "; exit 0; fi\n" +
+		"printf scrubbed > " + shellQuote(result) + "\n"
 	if err := os.WriteFile(opener, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_TEST_LOGIN_OPENER_RESULT", result)
+	t.Setenv("HOME", home)
 	t.Setenv("TEST_LOGIN_DESKTOP_PASSWORD", "must-not-reach-browser")
-	t.Setenv("CRABBOX_TEST_BROWSER_KEEP", "preserved")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "must-not-reach-browser")
+	t.Setenv("GH_TOKEN", "must-not-reach-browser")
 	t.Setenv("DISPLAY", ":99")
 	cfg := Config{Provider: "external", TargetOS: targetMacOS}
 	cfg.External.Connection.Desktop.PasswordEnv = "TEST_LOGIN_DESKTOP_PASSWORD"
@@ -67,7 +72,7 @@ func TestOpenLoginBrowserScrubsExternalDesktopPassword(t *testing.T) {
 	if err := openLoginBrowser("https://github.com/login", cfg); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(result); err == nil {
 			if len(data) == 0 {

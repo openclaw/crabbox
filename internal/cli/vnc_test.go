@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -102,18 +103,33 @@ func TestOpenLocalURLScrubsExternalDesktopPassword(t *testing.T) {
 	}
 	dir := t.TempDir()
 	result := filepath.Join(dir, "result")
+	home := filepath.Join(dir, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	opener := filepath.Join(dir, name)
-	script := "#!/bin/sh\nif [ \"${TEST_ARD_PASSWORD+x}\" = x ]; then printf leaked > \"$CRABBOX_TEST_OPENER_RESULT\"; else printf scrubbed > \"$CRABBOX_TEST_OPENER_RESULT\"; fi\n"
+	script := "#!/bin/sh\n" +
+		"if [ \"${TEST_ARD_PASSWORD+x}\" = x ] || [ \"${CRABBOX_COORDINATOR_TOKEN+x}\" = x ] || [ \"${CRABBOX_COORDINATOR_ADMIN_TOKEN+x}\" = x ] || [ \"${CF_ACCESS_CLIENT_SECRET+x}\" = x ] || [ \"${GH_TOKEN+x}\" = x ] || [ \"${GITHUB_TOKEN+x}\" = x ] || [ \"${AWS_SECRET_ACCESS_KEY+x}\" = x ] || [ \"${CUSTOM_AMBIENT_SECRET+x}\" = x ]; then printf leaked > " + shellQuote(result) + "; exit 0; fi\n" +
+		"if [ \"$HOME\" != " + shellQuote(home) + " ]; then printf stripped > " + shellQuote(result) + "; exit 0; fi\n" +
+		"printf scrubbed > " + shellQuote(result) + "\n"
 	if err := os.WriteFile(opener, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_TEST_OPENER_RESULT", result)
+	t.Setenv("HOME", home)
+	t.Setenv("DISPLAY", ":99")
 	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-browser")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "must-not-reach-browser")
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "must-not-reach-browser")
+	t.Setenv("CF_ACCESS_CLIENT_SECRET", "must-not-reach-browser")
+	t.Setenv("GH_TOKEN", "must-not-reach-browser")
+	t.Setenv("GITHUB_TOKEN", "must-not-reach-browser")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "must-not-reach-browser")
+	t.Setenv("CUSTOM_AMBIENT_SECRET", "must-not-reach-browser")
 	if err := openLocalURLWithEnvironment("https://example.test", "TEST_ARD_PASSWORD"); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(result); err == nil {
 			if string(data) != "scrubbed" {
@@ -124,6 +140,58 @@ func TestOpenLocalURLScrubsExternalDesktopPassword(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("fake opener did not report its environment")
+}
+
+func TestBrowserOpenerEnvironmentUsesMinimalAllowlist(t *testing.T) {
+	environment := []string{
+		"PATH=/usr/bin",
+		"HOME=/tmp/home",
+		"LANG=en_US.UTF-8",
+		"LC_CTYPE=en_US.UTF-8",
+		"DISPLAY=:99",
+		"SSH_AUTH_SOCK=/tmp/agent.sock",
+		"CRABBOX_COORDINATOR_TOKEN=coordinator-secret",
+		"GH_TOKEN=github-secret",
+		"LC_SECRET=locale-shaped-secret",
+		"CUSTOM_AMBIENT_SECRET=custom-secret",
+	}
+	filtered := browserOpenerEnvironment(environment)
+	got := make(map[string]string, len(filtered))
+	for _, entry := range filtered {
+		name, value, _ := strings.Cut(entry, "=")
+		got[name] = value
+	}
+	for name, value := range map[string]string{
+		"PATH":     "/usr/bin",
+		"HOME":     "/tmp/home",
+		"LANG":     "en_US.UTF-8",
+		"LC_CTYPE": "en_US.UTF-8",
+	} {
+		if got[name] != value {
+			t.Fatalf("%s=%q want %q", name, got[name], value)
+		}
+	}
+	if runtime.GOOS == "linux" {
+		if got["DISPLAY"] != ":99" {
+			t.Fatalf("DISPLAY=%q want :99", got["DISPLAY"])
+		}
+	} else if _, ok := got["DISPLAY"]; ok {
+		t.Fatalf("DISPLAY unexpectedly preserved on %s", runtime.GOOS)
+	}
+	for _, name := range []string{
+		"SSH_AUTH_SOCK",
+		"CRABBOX_COORDINATOR_TOKEN",
+		"GH_TOKEN",
+		"LC_SECRET",
+		"CUSTOM_AMBIENT_SECRET",
+	} {
+		if _, ok := got[name]; ok {
+			t.Fatalf("%s unexpectedly preserved", name)
+		}
+	}
+	if denied := browserOpenerEnvironment(environment, "HOME"); slices.Contains(denied, "HOME=/tmp/home") {
+		t.Fatal("explicit denylist did not override the browser allowlist")
+	}
 }
 
 func TestWriteVNCCredentialsDoesNotApplyExternalMacHintToOtherTargets(t *testing.T) {
