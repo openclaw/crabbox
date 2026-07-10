@@ -619,9 +619,9 @@ run_prep "$source_lease"
 reboot_windows_source_if_needed "$source_lease"
 smoke "$source_lease"
 
-image_env=()
+image_env=(env)
 [[ -n "$region" ]] && image_env+=(CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
-image_output="$(env "${image_env[@]}" "$CRABBOX_BIN" checkpoint create \
+image_output="$("${image_env[@]}" "$CRABBOX_BIN" checkpoint create \
   --provider aws --target "$target" --id "$source_lease" --name "$image_name" \
   --mode native --strategy image --no-reboot=false --wait --wait-timeout "$wait_timeout")"
 printf '%s\n' "$image_output"
