@@ -1,0 +1,800 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Generic single-replica Crabbox coordinator on ECS Fargate. The stack expects
+  existing networking, TLS, and PostgreSQL resources.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Deployment boundary
+        Parameters:
+          - ExpectedAccountId
+          - ExpectedRegion
+          - ImageUri
+          - PublicUrl
+      - Label:
+          default: Coordinator networking
+        Parameters:
+          - VpcId
+          - LoadBalancerSubnetIds
+          - ServiceSubnetIds
+          - IngressCidr
+          - CertificateArn
+          - DatabaseCidr
+          - DatabasePort
+      - Label:
+          default: Coordinator identity and storage
+        Parameters:
+          - DatabaseUrlSecretArn
+          - AuthTokenSecretArn
+          - RuntimeAdapterOwner
+          - RuntimeAdapterOrg
+      - Label:
+          default: Private AWS workspaces
+        Parameters:
+          - WorkspaceSubnetId
+          - AllowedWorkspaceInstanceTypes
+          - WorkspaceMaxVcpus
+          - WorkspaceMaxMemoryMiB
+          - WorkspaceRootGiB
+          - WorkspaceMarket
+          - MaxActiveWorkspaces
+          - MaxMonthlyWorkspaceUSD
+      - Label:
+          default: Operations
+        Parameters:
+          - LogRetentionDays
+
+Parameters:
+  ExpectedAccountId:
+    Type: String
+    Description: AWS account that must own this stack and all managed workspaces.
+    AllowedPattern: "^[0-9]{12}$"
+    ConstraintDescription: Must be a 12-digit AWS account ID.
+  ExpectedRegion:
+    Type: String
+    Description: AWS region that must host this stack and all managed workspaces.
+    AllowedPattern: "^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$"
+    ConstraintDescription: Must be an AWS region name.
+  ImageUri:
+    Type: String
+    Description: Immutable OCI image reference for the Node coordinator.
+    AllowedPattern: "^.+@sha256:[0-9a-f]{64}$"
+    ConstraintDescription: Must be an image URI pinned by a lowercase sha256 digest.
+  PublicUrl:
+    Type: String
+    Description: Canonical HTTPS origin routed to the load balancer.
+    AllowedPattern: '^https://\S+$'
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  LoadBalancerSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two subnets in distinct availability zones.
+  ServiceSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for the Fargate task.
+  IngressCidr:
+    Type: String
+    Description: IPv4 CIDR permitted to reach the HTTPS listener.
+    AllowedPattern: "^[0-9.]+/([1-9]|[12][0-9]|3[0-2])$"
+  CertificateArn:
+    Type: String
+    Description: ACM certificate covering the canonical coordinator hostname.
+    AllowedPattern: "^arn:[^:]+:acm:[^:]+:[0-9]{12}:certificate/.+$"
+  DatabaseCidr:
+    Type: String
+    Description: Narrow IPv4 CIDR containing the PostgreSQL endpoint.
+    AllowedPattern: "^[0-9.]+/([1-9]|[12][0-9]|3[0-2])$"
+  DatabasePort:
+    Type: Number
+    Default: 5432
+    MinValue: 1
+    MaxValue: 65535
+  DatabaseUrlSecretArn:
+    Type: String
+    Description: Secrets Manager ARN whose value is the TLS-verified PostgreSQL URL.
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+  AuthTokenSecretArn:
+    Type: String
+    Description: Secrets Manager ARN whose value is the route-scoped workspace API token.
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+  RuntimeAdapterOwner:
+    Type: String
+    Description: Stable owner identity assigned to route-scoped workspace requests.
+    MinLength: 1
+    MaxLength: 254
+    AllowedPattern: '^[!-~](?:[ -~]{0,252}[!-~])?$'
+    ConstraintDescription: Must be printable ASCII without leading or trailing spaces.
+  RuntimeAdapterOrg:
+    Type: String
+    Description: Stable organization label assigned to route-scoped workspace requests.
+    MinLength: 1
+    MaxLength: 63
+    AllowedPattern: '^[!-~](?:[ -~]{0,61}[!-~])?$'
+    ConstraintDescription: Must be 1-63 printable ASCII characters without edge spaces.
+  WorkspaceSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet used for every managed workspace.
+  AllowedWorkspaceInstanceTypes:
+    Type: CommaDelimitedList
+    Default: t3a.small,t3.small
+    Description: Exact EC2 instance-type allowlist for workspace admission and IAM.
+  WorkspaceMaxVcpus:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 64
+  WorkspaceMaxMemoryMiB:
+    Type: Number
+    Default: 4096
+    MinValue: 512
+    MaxValue: 262144
+  WorkspaceRootGiB:
+    Type: Number
+    Default: 20
+    MinValue: 8
+    MaxValue: 100
+    Description: Exact encrypted gp3 root volume size enforced by runtime and IAM.
+  WorkspaceMarket:
+    Type: String
+    Default: on-demand
+    AllowedValues:
+      - on-demand
+      - spot
+  MaxActiveWorkspaces:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 20
+    Description: Maximum concurrent workspaces across the dedicated service.
+  MaxMonthlyWorkspaceUSD:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 10000
+    Description: Conservative coordinator cost-reservation ceiling, not an AWS billing alarm.
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues:
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 180
+      - 365
+
+Rules:
+  ExpectedAccountMatchesDeployment:
+    Assertions:
+      - Assert:
+          Fn::Equals:
+            - Ref: ExpectedAccountId
+            - Ref: AWS::AccountId
+        AssertDescription: ExpectedAccountId must match the active AWS account.
+  ExpectedRegionMatchesDeployment:
+    Assertions:
+      - Assert:
+          Fn::Equals:
+            - Ref: ExpectedRegion
+            - Ref: AWS::Region
+        AssertDescription: ExpectedRegion must match the active AWS region.
+  CoordinatorIngressIsBounded:
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: IngressCidr
+                - 0.0.0.0/0
+        AssertDescription: IngressCidr must be narrower than the IPv4 internet.
+  DatabaseEgressIsBounded:
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: DatabaseCidr
+                - 0.0.0.0/0
+        AssertDescription: DatabaseCidr must be narrower than the IPv4 internet.
+
+Resources:
+  CoordinatorLogGroup:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: crabbox
+          Value: coordinator
+
+  WorkspaceSSMLogGroup:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: crabbox
+          Value: workspace-ssm
+        - Key: created_by
+          Value: crabbox
+
+  WorkspaceInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: DenyWorkspaceParameterReads
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DenyParameterStoreReads
+                Effect: Deny
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameterHistory
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: "*"
+        - PolicyName: WriteWorkspaceSSMLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DescribeWorkspaceLogGroups
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: "*"
+              - Sid: DescribeWorkspaceLogStreams
+                Effect: Allow
+                Action: logs:DescribeLogStreams
+                Resource: !GetAtt WorkspaceSSMLogGroup.Arn
+              - Sid: WriteWorkspaceCommandLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${ExpectedRegion}:${ExpectedAccountId}:log-group:${WorkspaceSSMLogGroup}:log-stream:*
+      Tags:
+        - Key: crabbox
+          Value: workspace
+        - Key: created_by
+          Value: crabbox
+
+  WorkspaceInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref WorkspaceInstanceRole
+
+  CoordinatorCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: crabbox
+          Value: coordinator
+
+  CoordinatorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Coordinator task; ingress is added only from the load balancer.
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - Description: HTTPS provider and AWS API traffic
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - Description: PostgreSQL
+          IpProtocol: tcp
+          FromPort: !Ref DatabasePort
+          ToPort: !Ref DatabasePort
+          CidrIp: !Ref DatabaseCidr
+      Tags:
+        - Key: crabbox
+          Value: coordinator
+
+  WorkspaceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Private SSM-only workspaces; deliberately no inbound rules.
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - Description: SSM, workspace agent, and HTTPS bootstrap traffic
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: crabbox
+          Value: workspace
+        - Key: created_by
+          Value: crabbox
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTPS ingress for the coordinator load balancer.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: Approved coordinator clients
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref IngressCidr
+      SecurityGroupEgress:
+        - Description: Coordinator HTTP target
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          DestinationSecurityGroupId: !Ref CoordinatorSecurityGroup
+      Tags:
+        - Key: crabbox
+          Value: coordinator-load-balancer
+
+  CoordinatorIngressFromLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Coordinator HTTP from its load balancer only
+      GroupId: !Ref CoordinatorSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+
+  CoordinatorLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internal
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets: !Ref LoadBalancerSubnetIds
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "180"
+      Tags:
+        - Key: crabbox
+          Value: coordinator
+
+  CoordinatorTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      TargetType: ip
+      Protocol: HTTP
+      Port: 8080
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /v1/ready
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "120"
+      Tags:
+        - Key: crabbox
+          Value: coordinator
+
+  CoordinatorHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref CoordinatorLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref CoordinatorTargetGroup
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref ExpectedAccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:ecs:${ExpectedRegion}:${ExpectedAccountId}:*
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadCoordinatorSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref DatabaseUrlSecretArn
+                  - !Ref AuthTokenSecretArn
+      Tags:
+        - Key: crabbox
+          Value: coordinator-execution
+
+  CoordinatorTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref ExpectedAccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:ecs:${ExpectedRegion}:${ExpectedAccountId}:*
+      Policies:
+        - PolicyName: PrivateWorkspaceLifecycle
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: VerifyCallerIdentity
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: "*"
+              - Sid: InspectWorkspaceResources
+                Effect: Allow
+                Action:
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:DescribeInstanceTypes
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSpotPriceHistory
+                  - ec2:DescribeTags
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeVpcs
+                  - servicequotas:GetServiceQuota
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+              - Sid: LaunchFromCanonicalUbuntuImage
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}::image/ami-*
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+                    ec2:Owner: "099720109477"
+              - Sid: LaunchWorkspaceInstance
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:instance/*
+                Condition:
+                  ArnEquals:
+                    ec2:InstanceProfile: !GetAtt WorkspaceInstanceProfile.Arn
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+                    ec2:InstanceType: !Ref AllowedWorkspaceInstanceTypes
+                    ec2:MetadataHttpTokens: required
+                    "aws:RequestTag/crabbox": "true"
+                    "aws:RequestTag/created_by": "crabbox"
+                    "aws:RequestTag/crabbox_workspace": "true"
+                    "aws:RequestTag/access_mode": "ssm"
+              - Sid: LaunchWorkspaceVolume
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:volume/*
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+                    ec2:VolumeType: gp3
+                    "aws:RequestTag/crabbox": "true"
+                    "aws:RequestTag/created_by": "crabbox"
+                    "aws:RequestTag/crabbox_workspace": "true"
+                    "aws:RequestTag/access_mode": "ssm"
+                  Bool:
+                    ec2:Encrypted: "true"
+                  NumericEquals:
+                    ec2:VolumeSize: !Ref WorkspaceRootGiB
+              - Sid: LaunchWorkspaceNetworkInterface
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:network-interface/*
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+                    ec2:Subnet: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:subnet/${WorkspaceSubnetId}
+                  Bool:
+                    ec2:AssociatePublicIpAddress: "false"
+              - Sid: UseWorkspaceSubnetForLaunch
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:subnet/${WorkspaceSubnetId}
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+              - Sid: UseWorkspaceSecurityGroupForLaunch
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:security-group/${WorkspaceSecurityGroup}
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+              - Sid: LaunchWorkspaceSpotRequest
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:spot-instances-request/*
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+                    "aws:RequestTag/crabbox": "true"
+                    "aws:RequestTag/created_by": "crabbox"
+                    "aws:RequestTag/crabbox_workspace": "true"
+                    "aws:RequestTag/access_mode": "ssm"
+              - Sid: DenyPublicWorkspaceAddress
+                Effect: Deny
+                Action: ec2:RunInstances
+                Resource: "*"
+                Condition:
+                  Bool:
+                    ec2:AssociatePublicIpAddress: "true"
+              - Sid: DenyWorkspaceOutsideExpectedRegion
+                Effect: Deny
+                Action:
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                  - ssm:SendCommand
+                Resource: "*"
+                Condition:
+                  StringNotEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+              - Sid: TagWorkspaceAtLaunch
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:instance/*
+                  - !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:volume/*
+                  - !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:spot-instances-request/*
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+                    ec2:CreateAction: RunInstances
+                    "aws:RequestTag/crabbox": "true"
+                    "aws:RequestTag/created_by": "crabbox"
+                    "aws:RequestTag/crabbox_workspace": "true"
+                    "aws:RequestTag/access_mode": "ssm"
+              - Sid: TerminateOwnedWorkspace
+                Effect: Allow
+                Action: ec2:TerminateInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:instance/*
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+                    "ec2:ResourceTag/crabbox": "true"
+                    "ec2:ResourceTag/created_by": "crabbox"
+                    "ec2:ResourceTag/crabbox_workspace": "true"
+                    "ec2:ResourceTag/access_mode": "ssm"
+              - Sid: AllowWorkspaceCommandDocument
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub arn:${AWS::Partition}:ssm:${ExpectedRegion}::document/AWS-RunShellScript
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+              - Sid: SendCommandToOwnedWorkspace
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:instance/*
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+                    "ssm:resourceTag/crabbox": "true"
+                    "ssm:resourceTag/created_by": "crabbox"
+                    "ssm:resourceTag/crabbox_workspace": "true"
+                    "ssm:resourceTag/access_mode": "ssm"
+              - Sid: InspectWorkspaceCommands
+                Effect: Allow
+                Action:
+                  - ssm:DescribeInstanceInformation
+                  - ssm:GetCommandInvocation
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ExpectedRegion
+              - Sid: PassWorkspaceInstanceRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt WorkspaceInstanceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com
+      Tags:
+        - Key: crabbox
+          Value: coordinator-task
+
+  CoordinatorTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: "512"
+      Memory: "1024"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt CoordinatorTaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: coordinator
+          Image: !Ref ImageUri
+          Essential: true
+          ReadonlyRootFilesystem: true
+          StopTimeout: 120
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: "8080"
+            - Name: CRABBOX_PUBLIC_URL
+              Value: !Ref PublicUrl
+            - Name: CRABBOX_SHUTDOWN_TIMEOUT_MS
+              Value: "100000"
+            - Name: CRABBOX_AWS_EXPECTED_ACCOUNT_ID
+              Value: !Ref ExpectedAccountId
+            - Name: CRABBOX_AWS_EXPECTED_REGION
+              Value: !Ref ExpectedRegion
+            - Name: CRABBOX_AWS_EXPECTED_TASK_ROLE_NAME
+              Value: !Ref CoordinatorTaskRole
+            - Name: CRABBOX_AWS_REGION
+              Value: !Ref ExpectedRegion
+            - Name: CRABBOX_AWS_REQUIRE_ECS_TASK
+              Value: "1"
+            - Name: CRABBOX_RUNTIME_ADAPTER_OWNER
+              Value: !Ref RuntimeAdapterOwner
+            - Name: CRABBOX_RUNTIME_ADAPTER_ORG
+              Value: !Ref RuntimeAdapterOrg
+            - Name: CRABBOX_WORKSPACE_PROVIDER
+              Value: aws
+            - Name: CRABBOX_WORKSPACE_AWS_PRIVATE
+              Value: "1"
+            - Name: CRABBOX_WORKSPACE_AWS_INSTANCE_TYPES
+              Value: !Join [",", !Ref AllowedWorkspaceInstanceTypes]
+            - Name: CRABBOX_WORKSPACE_AWS_MAX_VCPUS
+              Value: !Ref WorkspaceMaxVcpus
+            - Name: CRABBOX_WORKSPACE_AWS_MAX_MEMORY_MIB
+              Value: !Ref WorkspaceMaxMemoryMiB
+            - Name: CRABBOX_WORKSPACE_AWS_ROOT_GB
+              Value: !Ref WorkspaceRootGiB
+            - Name: CRABBOX_WORKSPACE_AWS_SUBNET_ID
+              Value: !Ref WorkspaceSubnetId
+            - Name: CRABBOX_WORKSPACE_AWS_SECURITY_GROUP_ID
+              Value: !Ref WorkspaceSecurityGroup
+            - Name: CRABBOX_WORKSPACE_AWS_CONTROLLER_SECURITY_GROUP_ID
+              Value: !Ref CoordinatorSecurityGroup
+            - Name: CRABBOX_WORKSPACE_AWS_INSTANCE_PROFILE
+              Value: !Ref WorkspaceInstanceProfile
+            - Name: CRABBOX_WORKSPACE_AWS_MARKET
+              Value: !Ref WorkspaceMarket
+            - Name: CRABBOX_WORKSPACE_AWS_SSM_LOG_GROUP
+              Value: !Ref WorkspaceSSMLogGroup
+            - Name: CRABBOX_MAX_ACTIVE_LEASES
+              Value: !Ref MaxActiveWorkspaces
+            - Name: CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER
+              Value: !Ref MaxActiveWorkspaces
+            - Name: CRABBOX_MAX_ACTIVE_LEASES_PER_ORG
+              Value: !Ref MaxActiveWorkspaces
+            - Name: CRABBOX_MAX_MONTHLY_USD
+              Value: !Ref MaxMonthlyWorkspaceUSD
+            - Name: CRABBOX_MAX_MONTHLY_USD_PER_OWNER
+              Value: !Ref MaxMonthlyWorkspaceUSD
+            - Name: CRABBOX_MAX_MONTHLY_USD_PER_ORG
+              Value: !Ref MaxMonthlyWorkspaceUSD
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Ref DatabaseUrlSecretArn
+            - Name: CRABBOX_RUNTIME_ADAPTER_TOKEN
+              ValueFrom: !Ref AuthTokenSecretArn
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - >-
+                node -e "fetch('http://127.0.0.1:8080/v1/health').then((response) =>
+                process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CoordinatorLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: coordinator
+      Tags:
+        - Key: crabbox
+          Value: coordinator
+
+  CoordinatorService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - CoordinatorHttpsListener
+    Properties:
+      Cluster: !Ref CoordinatorCluster
+      TaskDefinition: !Ref CoordinatorTaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      SchedulingStrategy: REPLICA
+      DesiredCount: 1
+      EnableECSManagedTags: true
+      EnableExecuteCommand: false
+      PropagateTags: SERVICE
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref CoordinatorSecurityGroup
+          Subnets: !Ref ServiceSubnetIds
+      LoadBalancers:
+        - ContainerName: coordinator
+          ContainerPort: 8080
+          TargetGroupArn: !Ref CoordinatorTargetGroup
+      Tags:
+        - Key: crabbox
+          Value: coordinator
+
+Outputs:
+  CanonicalUrl:
+    Value: !Ref PublicUrl
+  LoadBalancerDnsName:
+    Value: !GetAtt CoordinatorLoadBalancer.DNSName
+  ClusterArn:
+    Value: !GetAtt CoordinatorCluster.Arn
+  ServiceArn:
+    Value: !Ref CoordinatorService
+  TaskRoleArn:
+    Value: !GetAtt CoordinatorTaskRole.Arn
+  CoordinatorSecurityGroupId:
+    Value: !Ref CoordinatorSecurityGroup
+  WorkspaceSecurityGroupId:
+    Value: !Ref WorkspaceSecurityGroup
+  WorkspaceInstanceRoleArn:
+    Value: !GetAtt WorkspaceInstanceRole.Arn
+  WorkspaceInstanceProfileName:
+    Value: !Ref WorkspaceInstanceProfile
+  WorkspaceSSMLogGroupName:
+    Value: !Ref WorkspaceSSMLogGroup
