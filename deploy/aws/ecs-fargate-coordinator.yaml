@@ -38,7 +38,6 @@ Metadata:
           - WorkspaceMaxVcpus
           - WorkspaceMaxMemoryMiB
           - WorkspaceRootGiB
-          - WorkspaceMarket
           - MaxActiveWorkspaces
           - MaxMonthlyWorkspaceUSD
       - Label:
@@ -136,12 +135,6 @@ Parameters:
     MinValue: 8
     MaxValue: 100
     Description: Exact encrypted gp3 root volume size enforced by runtime and IAM.
-  WorkspaceMarket:
-    Type: String
-    Default: on-demand
-    AllowedValues:
-      - on-demand
-      - spot
   MaxActiveWorkspaces:
     Type: Number
     Default: 2
@@ -257,7 +250,7 @@ Resources:
               - Sid: DescribeWorkspaceLogStreams
                 Effect: Allow
                 Action: logs:DescribeLogStreams
-                Resource: !GetAtt WorkspaceSSMLogGroup.Arn
+                Resource: !Sub arn:${AWS::Partition}:logs:${ExpectedRegion}:${ExpectedAccountId}:log-group:${WorkspaceSSMLogGroup}
               - Sid: WriteWorkspaceCommandLogs
                 Effect: Allow
                 Action:
@@ -472,7 +465,6 @@ Resources:
                   - ec2:DescribeRouteTables
                   - ec2:DescribeSecurityGroups
                   - ec2:DescribeSubnets
-                  - ec2:DescribeSpotPriceHistory
                   - ec2:DescribeTags
                   - ec2:DescribeVolumes
                   - ec2:DescribeVpcs
@@ -544,17 +536,6 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:RequestedRegion: !Ref ExpectedRegion
-              - Sid: LaunchWorkspaceSpotRequest
-                Effect: Allow
-                Action: ec2:RunInstances
-                Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:spot-instances-request/*
-                Condition:
-                  StringEquals:
-                    aws:RequestedRegion: !Ref ExpectedRegion
-                    "aws:RequestTag/crabbox": "true"
-                    "aws:RequestTag/created_by": "crabbox"
-                    "aws:RequestTag/crabbox_workspace": "true"
-                    "aws:RequestTag/access_mode": "ssm"
               - Sid: DenyPublicWorkspaceAddress
                 Effect: Deny
                 Action: ec2:RunInstances
@@ -578,7 +559,6 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:instance/*
                   - !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:volume/*
-                  - !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:spot-instances-request/*
                 Condition:
                   StringEquals:
                     aws:RequestedRegion: !Ref ExpectedRegion
@@ -702,7 +682,7 @@ Resources:
             - Name: CRABBOX_WORKSPACE_AWS_INSTANCE_PROFILE
               Value: !Ref WorkspaceInstanceProfile
             - Name: CRABBOX_WORKSPACE_AWS_MARKET
-              Value: !Ref WorkspaceMarket
+              Value: on-demand
             - Name: CRABBOX_WORKSPACE_AWS_SSM_LOG_GROUP
               Value: !Ref WorkspaceSSMLogGroup
             - Name: CRABBOX_MAX_ACTIVE_LEASES
