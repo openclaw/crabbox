@@ -985,19 +985,6 @@ func waitForCodespaceDeleted(ctx context.Context, api codespacesAPI, name string
 	}
 }
 
-func (b *backend) sshTarget(ctx context.Context, gh githubCLI, leaseID, codespaceName, repo string, store bool) (SSHTarget, error) {
-	target, data, err := b.sshTargetWithConfig(ctx, gh, codespaceName, repo)
-	if err != nil {
-		return SSHTarget{}, err
-	}
-	if store {
-		if _, err := storeSSHConfig(leaseID, data); err != nil {
-			return SSHTarget{}, err
-		}
-	}
-	return target, nil
-}
-
 func (b *backend) sshTargetWithConfig(ctx context.Context, gh githubCLI, codespaceName, repo string) (SSHTarget, string, error) {
 	data, err := gh.codespaceSSHConfig(ctx, codespaceName)
 	if err != nil {
