@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Preserved exact coordinator organization identities in collision-free authorization keys, preventing distinct labels from sharing leases, runs, bridges, workspaces, runners, or usage limits after lossy normalization. Ambiguous legacy records now fail closed for non-admin access while remaining available for admin cleanup. Thanks @coygeek.
 - Confined Nomad API redirects to the configured scheme, hostname, and effective port before replaying ACL tokens or request bodies, while keeping rejected Location secrets out of diagnostics. Thanks @coygeek.
 - Launched native Windows desktop apps directly in the active interactive session without scheduled tasks, waiting for a visible window and reporting its process ID, session, and title.
 - Unified direct macOS WebVNC with the authenticated portal: Tart and Parallels viewers now use the same chrome and controls as Linux and Windows when coordinator login is configured, with provider-lifetime registration and the local viewer retained as the offline fallback.

@@ -198,7 +198,9 @@ caller-supplied connection identity and derives the client address from the
 rightmost untrusted member of the forwarded chain. The ingress must strip any
 incoming copy of the trusted user header before setting its authenticated
 value. Set a stable trusted-user organization before creating records; without
-it, proxy-authenticated requests use the literal organization `unknown`.
+it, proxy-authenticated requests use a dedicated missing-org identity that is
+displayed as `unknown` but remains distinct from an org literally named
+`unknown`.
 
 Trust only the actual ingress addresses or a dedicated ingress subnet, and use
 network policy to block direct access from other workloads. Do not configure

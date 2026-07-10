@@ -98,7 +98,7 @@ export async function authenticateRequest(
         trustedIdentity?.owner ??
         request.headers.get("x-crabbox-owner") ??
         "unknown",
-      org: request.headers.get("x-crabbox-org") ?? env.CRABBOX_DEFAULT_ORG ?? "unknown",
+      org: request.headers.get("x-crabbox-org") ?? env.CRABBOX_DEFAULT_ORG ?? "",
     };
   }
   if (env.CRABBOX_SHARED_TOKEN && timingSafeEqual(token ?? "", env.CRABBOX_SHARED_TOKEN)) {
@@ -112,7 +112,7 @@ export async function authenticateRequest(
         trustedIdentity?.owner ??
         env.CRABBOX_SHARED_OWNER?.trim() ??
         "unknown",
-      org: env.CRABBOX_DEFAULT_ORG ?? "unknown",
+      org: env.CRABBOX_DEFAULT_ORG ?? "",
     };
   }
   if (token) {
@@ -476,7 +476,7 @@ function trustedProxyIdentity(
     admin: false,
     auth: "proxy",
     owner,
-    org: env.CRABBOX_TRUSTED_USER_ORG?.trim() || "unknown",
+    org: env.CRABBOX_TRUSTED_USER_ORG ?? "",
   };
 }
 
