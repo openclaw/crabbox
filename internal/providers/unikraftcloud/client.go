@@ -394,13 +394,13 @@ func (c *unikraftCloudClient) ListInstances(ctx context.Context) ([]ukcInstance,
 
 func (c *unikraftCloudClient) DeleteInstance(ctx context.Context, id string) (ukcInstance, error) {
 	id = strings.TrimSpace(id)
-	if id == "" {
-		return ukcInstance{}, fmt.Errorf("delete instance: instance uuid or name is required")
+	if !unikraftCloudUUIDPattern.MatchString(id) {
+		return ukcInstance{}, fmt.Errorf("delete instance: a valid instance UUID is required")
 	}
-	instances, err := c.doInstances(ctx, http.MethodDelete, "/v1/instances/"+url.PathEscape(id), map[string]any{
-		"timeout_s":   -1,
-		"dont_retain": true,
-	})
+	id = strings.ToLower(id)
+	// The deployed API accepts deletion as a UUID-only batch item and rejects
+	// the optional timeout and retention fields documented for this endpoint.
+	instances, err := c.doInstances(ctx, http.MethodDelete, "/v1/instances", []map[string]string{{"uuid": id}})
 	if err != nil {
 		return ukcInstance{}, err
 	}
@@ -524,7 +524,7 @@ func requireExactUnikraftCloudInstance(operation, requestedID string, instances 
 	if requestedID != "" {
 		matches := instance.Name == requestedID
 		if unikraftCloudUUIDPattern.MatchString(requestedID) {
-			matches = instance.UUID == requestedID
+			matches = strings.EqualFold(instance.UUID, requestedID)
 		}
 		if !matches {
 			return ukcInstance{}, exit(5, "%s %s returned an unexpected instance identity", providerName, operation)

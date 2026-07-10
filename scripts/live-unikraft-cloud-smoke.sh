@@ -683,18 +683,20 @@ elif mode == "delete" and len(sys.argv) == 4:
     expected_name = sys.argv[3]
     if not UUID_RE.fullmatch(uuid):
         fail("invalid delete UUID")
+    if not re.fullmatch(r"crabbox-ukc-[0-9a-f]{12}", expected_name):
+        fail("invalid delete name")
     matches = [item for item in read_inventory() if item["uuid"] == uuid and item["name"] == expected_name]
     if len(matches) != 1:
         fail("refusing cleanup without exact UUID and name ownership")
-    code, payload = request("DELETE", "/v1/instances/" + urllib.parse.quote(uuid, safe=""), {
-        "timeout_s": -1,
-        "dont_retain": True,
-    })
+    code, payload = request("DELETE", "/v1/instances", [{"uuid": uuid}])
     if code < 200 or code >= 300:
         fail("delete request failed")
     result = validate_success(payload)
     if len(result) != 1 or str(result[0].get("uuid", "")).lower() != uuid or str(result[0].get("status", "")).lower() != "success":
         fail("delete did not explicitly accept the exact UUID")
+    returned_name = str(result[0].get("name", result[0].get("Name", ""))).strip()
+    if returned_name and returned_name != expected_name:
+        fail("delete response changed the owned name")
 elif mode == "absent" and len(sys.argv) == 3:
     uuid = sys.argv[2].lower()
     if not UUID_RE.fullmatch(uuid):

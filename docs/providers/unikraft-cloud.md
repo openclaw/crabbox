@@ -139,6 +139,9 @@ Crabbox persists a `delete-attempt` marker. It accepts the request only when the
 API returns one exact matching item with explicit success, then persists
 `delete-accepted`.
 
+Wire deletion uses a one-item, UUID-only batch request. Crabbox never sends a
+user-supplied instance name to the mutation endpoint.
+
 Deletion acceptance is not treated as proof that the resource is gone. Crabbox
 removes the local claim only after two exact lookups report not found with a
 complete inventory lookup between them that omits both the UUID and generated

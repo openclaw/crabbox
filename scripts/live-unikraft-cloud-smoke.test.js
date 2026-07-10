@@ -873,8 +873,8 @@ test("raw cleanup helper sources authorization from environment and refuses redi
   assert.match(source, /"Authorization": "Bearer " \+ TOKEN/);
   assert.match(source, /class NoRedirect/);
   assert.match(source, /ProxyHandler\(\{\}\)/);
-  assert.match(source, /"timeout_s": -1/);
-  assert.match(source, /"dont_retain": True/);
+  assert.match(source, /request\("DELETE", "\/v1\/instances", \[\{"uuid": uuid\}\]\)/);
+  assert.doesNotMatch(source, /"timeout_s"|"dont_retain"/);
   assert.match(source, /if \(delay > 5\) delay = 5/);
   assert.match(source, /if \(delay > remaining\) delay = remaining/);
   assert.doesNotMatch(source, /--(?:api-key|token)/);
@@ -905,6 +905,7 @@ test("raw helper deletes only the exact new UUID and proves strong absence", asy
   const baselineFile = path.join(dir, "baseline.json");
   const currentFile = path.join(dir, "current.json");
   const finalFile = path.join(dir, "final.json");
+  const badDeleteNameFile = path.join(dir, "bad-delete-name");
   fs.writeFileSync(helper, embeddedRawHelper());
   fs.chmodSync(helper, 0o755);
   fs.writeFileSync(
@@ -924,7 +925,9 @@ test("raw helper deletes only the exact new UUID and proves strong absence", asy
 const http = require("node:http");
 const stateFile = process.argv[2];
 const requestLog = process.argv[3];
+const badDeleteNameFile = process.argv[4];
 const createdUUID = ${JSON.stringify(createdUUID)};
+const createdName = ${JSON.stringify(createdName)};
 function reply(response, value) {
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify(value));
@@ -953,16 +956,20 @@ const server = http.createServer((request, response) => {
       }
       return;
     }
-    if (request.method === "DELETE" && request.url === "/v1/instances/" + createdUUID) {
+    if (request.method === "DELETE" && request.url === "/v1/instances") {
       const parsed = JSON.parse(body);
-      if (parsed.timeout_s !== -1 || parsed.dont_retain !== true) {
+      if (!Array.isArray(parsed) || parsed.length !== 1 || Object.keys(parsed[0]).length !== 1 || parsed[0].uuid !== createdUUID) {
         response.writeHead(400, { "content-type": "application/json" });
         response.end(JSON.stringify({ status: "error", message: "bad delete body" }));
         return;
       }
+      if (fs.existsSync(badDeleteNameFile)) {
+        reply(response, { status: "success", data: { instances: [{ uuid: createdUUID, name: "crabbox-ukc-ffffffffffff", status: "success" }] } });
+        return;
+      }
       state = state.filter((value) => value.uuid !== createdUUID);
       fs.writeFileSync(stateFile, JSON.stringify(state));
-      reply(response, { status: "success", data: { instances: [{ uuid: createdUUID, status: "success" }] } });
+      reply(response, { status: "success", data: { instances: [{ uuid: createdUUID, name: createdName, status: "success" }] } });
       return;
     }
     response.writeHead(404, { "content-type": "application/json" });
@@ -973,7 +980,7 @@ server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address()
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 `,
   );
-  const server = spawn(process.execPath, [serverFile, stateFile, requestLog], {
+  const server = spawn(process.execPath, [serverFile, stateFile, requestLog, badDeleteNameFile], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const port = await new Promise((resolve, reject) => {
@@ -1031,6 +1038,14 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
     const owned = raw("owned", baselineFile, currentFile, createdName);
     assert.equal(owned.status, 0, owned.stdout + owned.stderr);
     assert.equal(owned.stdout.trim(), createdUUID);
+    const unownedDelete = raw("delete", createdUUID, "crabbox-ukc-ffffffffffff");
+    assert.notEqual(unownedDelete.status, 0);
+    assert.doesNotMatch(fs.readFileSync(requestLog, "utf8"), /^DELETE \/v1\/instances$/m);
+    fs.writeFileSync(badDeleteNameFile, "1");
+    const conflictingDelete = raw("delete", createdUUID, createdName);
+    assert.notEqual(conflictingDelete.status, 0);
+    assert.equal(JSON.parse(fs.readFileSync(stateFile, "utf8")).length, 2);
+    fs.rmSync(badDeleteNameFile);
     const deleted = raw("delete", createdUUID, createdName);
     assert.equal(deleted.status, 0, deleted.stdout + deleted.stderr);
     const absent = raw("absent", createdUUID);
@@ -1046,7 +1061,8 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
       (requests.match(new RegExp(`GET /v1/instances/${createdUUID}`, "g")) ?? []).length,
       2,
     );
-    assert.match(requests, new RegExp(`DELETE /v1/instances/${createdUUID}`));
+    assert.match(requests, /^DELETE \/v1\/instances$/m);
+    assert.equal((requests.match(/^DELETE \/v1\/instances$/gm) ?? []).length, 2);
   } finally {
     await new Promise((resolve) => {
       const timer = setTimeout(() => {

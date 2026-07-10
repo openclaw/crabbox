@@ -135,9 +135,9 @@ func TestUnikraftCloudClientLifecycleEndpoints(t *testing.T) {
 					{"uuid": "66666666-7777-8888-9999-000000000000", "name": "quiet-village", "state": "stopped"},
 				}},
 			})
-		case "DELETE /v1/instances/11111111-2222-3333-4444-555555555555":
-			var req map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req["timeout_s"] != float64(-1) || req["dont_retain"] != true {
+		case "DELETE /v1/instances":
+			var req []map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req) != 1 || len(req[0]) != 1 || req[0]["uuid"] != "11111111-2222-3333-4444-555555555555" {
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "message": "bad delete body"})
 				return
@@ -204,7 +204,7 @@ func TestUnikraftCloudClientLifecycleEndpoints(t *testing.T) {
 		"POST /v1/instances",
 		"GET /v1/instances/11111111-2222-3333-4444-555555555555",
 		"GET /v1/instances",
-		"DELETE /v1/instances/11111111-2222-3333-4444-555555555555",
+		"DELETE /v1/instances",
 	}
 	if len(requests) != len(want) {
 		t.Fatalf("requests = %#v", requests)
@@ -213,6 +213,65 @@ func TestUnikraftCloudClientLifecycleEndpoints(t *testing.T) {
 		if requests[i] != path {
 			t.Fatalf("requests[%d] = %q, want %q", i, requests[i], path)
 		}
+	}
+}
+
+func TestUnikraftCloudDeleteRejectsNameBeforeRequest(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatalf("newUnikraftCloudClient: %v", err)
+	}
+	_, err = api.DeleteInstance(context.Background(), "wanted-name")
+	if err == nil || !strings.Contains(err.Error(), "valid instance UUID") {
+		t.Fatalf("DeleteInstance err = %v", err)
+	}
+	if called {
+		t.Fatal("delete name reached the API")
+	}
+}
+
+func TestUnikraftCloudDeleteNormalizesUUIDAndMatchesResponseCase(t *testing.T) {
+	const lowerUUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	upperUUID := strings.ToUpper(lowerUUID)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/instances" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var request []map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request) != 1 || len(request[0]) != 1 || request[0]["uuid"] != lowerUUID {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "message": "bad delete body"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{"instances": []map[string]any{{
+				"status": "success",
+				"uuid":   upperUUID,
+			}}},
+		})
+	}))
+	defer server.Close()
+
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatalf("newUnikraftCloudClient: %v", err)
+	}
+	deleted, err := api.DeleteInstance(context.Background(), upperUUID)
+	if err != nil {
+		t.Fatalf("DeleteInstance: %v", err)
+	}
+	if deleted.UUID != upperUUID {
+		t.Fatalf("deleted UUID = %q, want %q", deleted.UUID, upperUUID)
 	}
 }
 
@@ -717,7 +776,7 @@ func TestUnikraftCloudClientAllowsMethodPreservingMutationRedirect(t *testing.T)
 	const instanceID = "11111111-2222-3333-4444-555555555555"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/v1/instances/"+instanceID {
+		if r.URL.Path == "/v1/instances" {
 			http.Redirect(w, r, "/v1/instances/delete-result", http.StatusTemporaryRedirect)
 			return
 		}
@@ -731,8 +790,8 @@ func TestUnikraftCloudClientAllowsMethodPreservingMutationRedirect(t *testing.T)
 			_, _ = w.Write([]byte(`{"status":"error","message":"missing auth"}`))
 			return
 		}
-		var request map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["timeout_s"] != float64(-1) || request["dont_retain"] != true {
+		var request []map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request) != 1 || len(request[0]) != 1 || request[0]["uuid"] != instanceID {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"status":"error","message":"redirect lost body"}`))
 			return
