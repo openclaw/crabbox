@@ -738,11 +738,26 @@ func (directWebVNCTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (directWebVNCTestProvider) Configure(Config, Runtime) (Backend, error) { return nil, nil }
-func (directWebVNCTestProvider) DesktopCredentials(Config, SSHTarget) (DesktopCredentials, bool) {
+func (directWebVNCTestProvider) DesktopCredentials(cfg Config, target SSHTarget) (DesktopCredentials, bool) {
+	if passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); passwordEnv != "" {
+		password, ok := LookupExternalDesktopPassword(cfg, passwordEnv)
+		if !ok || strings.TrimSpace(password) == "" {
+			return DesktopCredentials{}, false
+		}
+		username := firstNonBlank(cfg.External.Connection.Desktop.Username, target.User)
+		return DesktopCredentials{Username: username, Password: password}, true
+	}
 	return DesktopCredentials{Username: "provider-user", Password: " provider-secret "}, true
 }
-func (directWebVNCTestProvider) CommandRoutingArgs(_ Config, leaseID string) []string {
-	return []string{"--direct-webvnc-routing", "route-" + leaseID}
+func (directWebVNCTestProvider) CommandRoutingArgs(cfg Config, leaseID string) []string {
+	args := []string{"--direct-webvnc-routing", "route-" + leaseID}
+	if username := strings.TrimSpace(cfg.External.Connection.Desktop.Username); username != "" {
+		args = append(args, "--external-desktop-username", username)
+	}
+	if passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); passwordEnv != "" {
+		args = append(args, "--external-desktop-password-env", passwordEnv)
+	}
+	return args
 }
 
 func TestWebVNCPortalCredentialsUseMacOSProviderAccount(t *testing.T) {
@@ -806,6 +821,107 @@ func TestWebVNCResetRemoteCommandHandlesWaylandAndX11(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("reset command missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestWebVNCResetDaemonLaunchPreservesExternalDesktopCredentialHandoff(t *testing.T) {
+	const passwordEnv = "TEST_WEBVNC_RESET_ARD_PASSWORD"
+	cfg := baseConfig()
+	cfg.Provider = "direct-webvnc-test"
+	cfg.TargetOS = targetMacOS
+	cfg.External.Connection.Desktop = ExternalDesktopConfig{
+		Username:    "screen-user",
+		PasswordEnv: passwordEnv,
+	}
+	if err := setExternalDesktopTransientCredential(&cfg, passwordEnv, "synthetic-reset-secret"); err != nil {
+		t.Fatal(err)
+	}
+	target := SSHTarget{TargetOS: targetMacOS, User: "ssh-user"}
+	credentials, ok, err := desktopCredentialsFromProvider(directWebVNCTestProvider{}, cfg, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || credentials.Username != "screen-user" || credentials.Password != "synthetic-reset-secret" {
+		t.Fatalf("provider credentials=%#v ok=%t", credentials, ok)
+	}
+
+	args, credentialInput := webVNCResetDaemonLaunch(
+		cfg,
+		target,
+		"cbx_abcdef123456",
+		false,
+		false,
+	)
+	joinedArgs := strings.Join(args, "\n")
+	for _, want := range []string{
+		"--external-desktop-username\nscreen-user",
+		"--external-desktop-password-env\n" + passwordEnv,
+	} {
+		if !strings.Contains(joinedArgs, want) {
+			t.Fatalf("reset daemon args=%q, missing %q", joinedArgs, want)
+		}
+	}
+	if strings.Contains(joinedArgs, "synthetic-reset-secret") {
+		t.Fatalf("reset daemon args exposed credential input: %q", joinedArgs)
+	}
+	if credentialInput == nil || *credentialInput != "synthetic-reset-secret" {
+		t.Fatalf("reset daemon credential input=%v", credentialInput)
+	}
+	childEnvironment := strings.Join(webVNCDaemonChildEnvironment([]string{
+		"PATH=/bin",
+		passwordEnv + "=synthetic-reset-secret",
+	}, args), "\n")
+	if strings.Contains(childEnvironment, passwordEnv) || strings.Contains(childEnvironment, "synthetic-reset-secret") {
+		t.Fatalf("reset daemon environment retained desktop credential: %q", childEnvironment)
+	}
+	var launchGate bytes.Buffer
+	if err := writeWebVNCDaemonSupervisorGate(&launchGate, *credentialInput); err != nil {
+		t.Fatal(err)
+	}
+	receivedCredential, err := readWebVNCDaemonSupervisorGate(&launchGate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receivedCredential != "synthetic-reset-secret" {
+		t.Fatalf("reset daemon launch gate credential=%q", receivedCredential)
+	}
+}
+
+func TestWebVNCResetDaemonLaunchRejectsMissingExternalDesktopCredential(t *testing.T) {
+	const passwordEnv = "TEST_WEBVNC_RESET_MISSING_ARD_PASSWORD"
+	t.Setenv(passwordEnv, "")
+
+	cfg := baseConfig()
+	cfg.Provider = "direct-webvnc-test"
+	cfg.TargetOS = targetMacOS
+	cfg.External.Connection.Desktop = ExternalDesktopConfig{
+		Username:    "screen-user",
+		PasswordEnv: passwordEnv,
+	}
+	args, credentialInput := webVNCResetDaemonLaunch(
+		cfg,
+		SSHTarget{TargetOS: targetMacOS, User: "ssh-user"},
+		"cbx_abcdef123456",
+		false,
+		false,
+	)
+	if credentialInput != nil {
+		t.Fatal("missing external desktop credential produced daemon stdin")
+	}
+
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).startWebVNCDaemon(
+		args,
+		"cbx_abcdef123456",
+		false,
+		"",
+		credentialInput,
+	)
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("missing credential error=%v", err)
+	}
+	if !strings.Contains(err.Error(), "external desktop password environment variable "+passwordEnv+" is unset or empty") {
+		t.Fatalf("missing credential error=%v", err)
 	}
 }
 
