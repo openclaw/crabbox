@@ -6,7 +6,7 @@ import { fileURLToPath, URL as NodeURL } from "node:url";
 
 import { prepareCoordinatorRequest, routeCoordinatorRequest } from "../src/coordinator-entry";
 import { FleetCoordinator } from "../src/fleet";
-import type { Env } from "../src/types";
+import { createAWSDeploymentGuard, nodeCoordinatorEnv } from "./aws-deployment";
 import { NodeCoordinatorRuntime, type NodeUpgradeContext } from "./node-runtime";
 import {
   AsyncMutex,
@@ -30,7 +30,8 @@ import {
 const databaseURL = requiredEnv("DATABASE_URL");
 const port = positiveInt(process.env["PORT"], 8080);
 const shutdownTimeoutMs = positiveInt(process.env["CRABBOX_SHUTDOWN_TIMEOUT_MS"], 120_000);
-const env = process.env as unknown as Env;
+const env = nodeCoordinatorEnv(process.env);
+const awsDeployment = createAWSDeploymentGuard(env);
 const runtime = new NodeCoordinatorRuntime(databaseURL);
 const coordinator = new FleetCoordinator(runtime, env);
 const lifecycleMutex = new AsyncMutex();
@@ -39,6 +40,7 @@ const publicDirectory = resolve(fileURLToPath(new NodeURL("../public", import.me
 let shutdownPromise: Promise<void> | undefined;
 
 runtime.setOperationRunner((callback) => lifecycleMutex.run(callback));
+await awsDeployment.start();
 await runtime.start(() => coordinator.alarm());
 
 const server = createServer((request, response) => {
@@ -59,11 +61,18 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (new URL(requestMetadata.url).pathname === "/v1/ready") {
       let result: Response;
       if (isReadinessRequestMethod(requestMetadata.method)) {
-        await runtime.storage.ready();
-        result =
-          requestMetadata.method === "HEAD"
-            ? new Response(null, { status: 200 })
-            : Response.json({ ok: true });
+        try {
+          await Promise.all([runtime.storage.ready(), awsDeployment.ready()]);
+          result =
+            requestMetadata.method === "HEAD"
+              ? new Response(null, { status: 200 })
+              : Response.json({ ok: true });
+        } catch {
+          result =
+            requestMetadata.method === "HEAD"
+              ? new Response(null, { status: 503 })
+              : Response.json({ ok: false, error: "dependency_unavailable" }, { status: 503 });
+        }
       } else {
         result = Response.json(
           { error: "method_not_allowed" },
