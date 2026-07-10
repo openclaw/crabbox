@@ -6,6 +6,9 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
+const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-vultr-home-"));
+process.env.HOME = isolatedHome;
+process.env.XDG_CONFIG_HOME = path.join(isolatedHome, ".config");
 
 function writeExecutable(file, body) {
   fs.writeFileSync(file, body, "utf8");
