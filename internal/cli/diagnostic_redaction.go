@@ -50,6 +50,7 @@ func redactDiagnosticPass(value string, secrets []string) string {
 	markerRanges := diagnosticMarkerRanges(value)
 	ranges := append([]diagnosticRedactionRange(nil), markerRanges...)
 	added := false
+	closeUnterminatedJSON := false
 	addRedaction := func(start, end int) {
 		if start >= end || diagnosticRangeInsideMarker(start, end, markerRanges) {
 			return
@@ -98,6 +99,8 @@ func redactDiagnosticPass(value string, secrets []string) string {
 		secretEnd := end
 		if secretEnd > secretStart && value[secretEnd-1] == '"' {
 			secretEnd--
+		} else if end == len(value) {
+			closeUnterminatedJSON = true
 		}
 		addRedaction(secretStart, secretEnd)
 	}
@@ -128,10 +131,23 @@ func redactDiagnosticPass(value string, secrets []string) string {
 			offset = start + 1
 		}
 	}
-	if !added {
+	if !added && !closeUnterminatedJSON {
 		return value
 	}
-	return applyDiagnosticRedactionRanges(value, ranges)
+	redacted := applyDiagnosticRedactionRanges(value, ranges)
+	if closeUnterminatedJSON && diagnosticUnterminatedJSONAtEnd(redacted) {
+		redacted += `"`
+	}
+	return redacted
+}
+
+func diagnosticUnterminatedJSONAtEnd(value string) bool {
+	matches := diagnosticJSONPattern.FindAllStringIndex(value, -1)
+	if len(matches) == 0 {
+		return false
+	}
+	last := matches[len(matches)-1]
+	return last[1] == len(value) && value[last[1]-1] != '"'
 }
 
 func diagnosticMarkerRanges(value string) []diagnosticRedactionRange {

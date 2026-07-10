@@ -160,15 +160,21 @@ func TestRedactDiagnosticSecretsFailsClosedAtPassLimit(t *testing.T) {
 }
 
 func TestRedactDiagnosticSecretsConsumesUnterminatedSecretJSON(t *testing.T) {
-	for _, leaked := range []string{"unterminated-refresh-value", "dangling-backslash-refresh-value"} {
-		input := `{"refresh_token":"` + leaked
-		if strings.HasPrefix(leaked, "dangling-") {
-			input += `\`
+	for _, input := range []string{
+		`{"refresh_token":"unterminated-refresh-value`,
+		`{"refresh_token":"dangling-backslash-refresh-value\`,
+		`{"refresh_token":"[redacted]`,
+	} {
+		if got, want := RedactDiagnosticSecrets(input), `{"refresh_token":"[redacted]"`; got != want {
+			t.Fatalf("unterminated JSON secret redaction = %q, want %q", got, want)
 		}
-		got := RedactDiagnosticSecrets(input)
-		if strings.Contains(got, leaked) {
-			t.Fatalf("unterminated JSON secret leaked: %q", got)
-		}
+	}
+	malformed := `{"refresh_token":"unterminated-refresh-value`
+	if got := RedactDiagnosticSecrets(malformed, malformed); got != diagnosticRedaction {
+		t.Fatalf("whole malformed JSON secret redaction = %q, want %q", got, diagnosticRedaction)
+	}
+	if got, want := RedactDiagnosticSecrets(`Authorization: Digest `+malformed), `Authorization: [redacted]`; got != want {
+		t.Fatalf("header-wrapped malformed JSON secret redaction = %q, want %q", got, want)
 	}
 }
 
