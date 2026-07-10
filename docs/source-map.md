@@ -138,7 +138,7 @@ Shared and registration:
 Coordinator-side provider operations (brokered providers only):
 
 - Hetzner: `worker/src/hetzner.ts`
-- AWS EC2 (provision, capacity fallback, Mac hosts, orphan sweep): `worker/src/aws.ts`
+- AWS EC2 (provision, capacity fallback, private SSM workspaces, Mac hosts, orphan sweep): `worker/src/aws.ts`
 - Azure / GCP provision and image routes: `worker/src/azure.ts`, `worker/src/gcp.ts`
 - Image create/read/delete/promote routing: `worker/src/fleet.ts`, `worker/src/os-image.ts`
 
@@ -211,13 +211,13 @@ Provider docs:
 - GitHub OAuth login flow and user-token issuance: `worker/src/oauth.ts`
 - Shared fleet routes and behavior: `worker/src/fleet.ts`
 - Cloudflare runtime adapter: `worker/src/coordinator-runtime.ts`
-- Node.js/PostgreSQL runtime, HTTP/WebSocket server, and durable jobs: `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts`, `worker/node/server.ts`
+- Node.js/PostgreSQL runtime, HTTP/WebSocket server, default-chain AWS credentials, private AWS deployment guard, and durable jobs: `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts`, `worker/node/server.ts`, `worker/node/aws-credentials.ts`, `worker/node/aws-deployment.ts`
 - Node request limits, trusted proxy handling, and graceful shutdown: `worker/node/server-support.ts`, `worker/node/server.ts`
 - Direct-provider coordinator registration and automatic WebVNC bridge startup: `internal/cli/coordinator_registration.go`, `internal/cli/coordinator.go`, `internal/cli/webvnc.go`
 - Browser portal lease detail, bridge status, and run log/event pages: `worker/src/portal.ts`, `worker/src/fleet.ts`
 - Usage aggregation, pricing fallback, owner/org limits, and cost guardrails: `worker/src/usage.ts`
 - Worker package scripts and dependencies: `worker/package.json`
-- Coordinator deployment config: `worker/wrangler.jsonc`, `worker/wrangler.cloudflare.jsonc`, `worker/Dockerfile.node`
+- Coordinator deployment config: `worker/wrangler.jsonc`, `worker/wrangler.cloudflare.jsonc`, `worker/Dockerfile.node`, `deploy/aws/ecs-fargate-coordinator.yaml`
 
 ## Cross-cutting Feature Docs
 
