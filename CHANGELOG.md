@@ -10,6 +10,7 @@
 ### Fixed
 
 - Verified Node.js release archives against published SHA-256 checksums before local Actions hydration installs or reuses them, preventing unverified setup-node downloads from reaching the workflow PATH. Thanks @coygeek.
+- Limited shared egress status to coarse active visibility unless the caller has manage access, keeping per-side host and client connection state private. Thanks @coygeek.
 - Counted live managed leases against monthly reserved-USD budgets after UTC month rollover until cleanup commits a terminal state, preventing overlapping reservations from bypassing configured cost caps. Thanks @coygeek.
 - Bounded coordinator lease and workspace history scans and kept saturated cleanup retry batches scheduled promptly, preventing large retained histories from exhausting Durable Object memory or stranding cleanup.
 

@@ -7448,11 +7448,16 @@ export class FleetCoordinator {
     return json({
       leaseID: lease.id,
       slug: lease.slug,
+      active: session !== undefined,
       sessionID: canManage ? (session?.sessionID ?? "") : "",
       profile: canManage ? (session?.profile ?? "") : "",
       allow: canManage ? (session?.allow ?? []) : [],
-      hostConnected: host?.readyState === WebSocket.OPEN,
-      clientConnected: client?.readyState === WebSocket.OPEN,
+      ...(canManage
+        ? {
+            hostConnected: host?.readyState === WebSocket.OPEN,
+            clientConnected: client?.readyState === WebSocket.OPEN,
+          }
+        : {}),
       createdAt: canManage ? (session?.createdAt ?? "") : "",
       updatedAt: canManage ? (session?.updatedAt ?? "") : "",
     });

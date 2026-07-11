@@ -389,11 +389,12 @@ type CoordinatorEgressTicket struct {
 type CoordinatorEgressStatus struct {
 	LeaseID         string   `json:"leaseID"`
 	Slug            string   `json:"slug,omitempty"`
+	Active          bool     `json:"active"`
 	SessionID       string   `json:"sessionID,omitempty"`
 	Profile         string   `json:"profile,omitempty"`
 	Allow           []string `json:"allow,omitempty"`
-	HostConnected   bool     `json:"hostConnected"`
-	ClientConnected bool     `json:"clientConnected"`
+	HostConnected   *bool    `json:"hostConnected,omitempty"`
+	ClientConnected *bool    `json:"clientConnected,omitempty"`
 	CreatedAt       string   `json:"createdAt,omitempty"`
 	UpdatedAt       string   `json:"updatedAt,omitempty"`
 }

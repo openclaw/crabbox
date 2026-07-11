@@ -225,12 +225,14 @@ authorization.
 `GET /egress/status` reports the tracked session:
 
 ```text
-leaseID, sessionID, profile, allow, hostConnected, clientConnected,
+leaseID, active, sessionID, profile, allow, hostConnected, clientConnected,
 createdAt, updatedAt
 ```
 
-`hostConnected`/`clientConnected` reflect whether each side's WebSocket is
-currently open.
+All visible callers receive the coarse `active` session state. The detailed
+`hostConnected`/`clientConnected` fields reflect whether each side's WebSocket
+is currently open and are returned only to owners and callers with `manage`
+access.
 
 ## Bridge protocol
 
