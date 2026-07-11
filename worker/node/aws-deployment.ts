@@ -25,7 +25,10 @@ export interface AWSDeploymentGuardDependencies {
 }
 
 export function requiresAWSDeploymentReadiness(request: Request): boolean {
-  return request.method === "POST" && new URL(request.url).pathname === "/v1/workspaces";
+  const path = new URL(request.url).pathname.split("/").filter(Boolean);
+  return (
+    request.method === "POST" && path.length === 2 && path[0] === "v1" && path[1] === "workspaces"
+  );
 }
 
 interface ECSTaskMetadata {
