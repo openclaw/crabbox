@@ -4,6 +4,7 @@ import {
   createAWSDeploymentGuard,
   nodeCoordinatorEnv,
   privateWorkspacePreflightConfig,
+  requiresAWSDeploymentReadiness,
   type AWSDeploymentGuardDependencies,
 } from "../node/aws-deployment";
 import type { AWSPrivateWorkspaceConfig } from "../src/aws";
@@ -15,6 +16,24 @@ const privateBearer = "x".repeat(20);
 type Preflight = NonNullable<AWSDeploymentGuardDependencies["preflight"]>;
 
 describe("Node AWS deployment guard", () => {
+  it("gates only private workspace creation on deployment readiness", () => {
+    expect(
+      requiresAWSDeploymentReadiness(
+        new Request("https://coordinator.test/v1/workspaces", { method: "POST" }),
+      ),
+    ).toBe(true);
+    for (const [method, path] of [
+      ["GET", "/v1/workspaces/example"],
+      ["DELETE", "/v1/workspaces/example"],
+      ["POST", "/v1/leases"],
+      ["POST", "/v1/adapters/example/proxy/v1/workspaces"],
+    ]) {
+      expect(
+        requiresAWSDeploymentReadiness(new Request(`https://coordinator.test${path}`, { method })),
+      ).toBe(false);
+    }
+  });
+
   it("preserves public Node startup behavior when the ECS guard is disabled", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
     const preflight = vi.fn<Preflight>();

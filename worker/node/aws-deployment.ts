@@ -24,6 +24,10 @@ export interface AWSDeploymentGuardDependencies {
   preflight?: (env: Env, config: LeaseConfig, policy: AWSPrivateWorkspaceConfig) => Promise<void>;
 }
 
+export function requiresAWSDeploymentReadiness(request: Request): boolean {
+  return request.method === "POST" && new URL(request.url).pathname === "/v1/workspaces";
+}
+
 interface ECSTaskMetadata {
   TaskARN?: unknown;
   AvailabilityZone?: unknown;
