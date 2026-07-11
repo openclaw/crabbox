@@ -57,6 +57,11 @@ export interface LeaseConfig {
   awsSubnetID: string;
   awsProfile: string;
   awsRootGB: number;
+  awsInstanceTypes: string[];
+  awsPrivate: boolean;
+  awsRequireSSM: boolean;
+  awsSSMBootstrapCommand: string;
+  awsSSMLogGroup: string;
   awsSSHCIDRs: string[];
   awsSSHCIDRsPinned: boolean;
   awsMacHostID: string;
@@ -259,12 +264,24 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     provider === "aws"
       ? validatedCIDRs(input.awsSSHCIDRs ?? [], "awsSSHCIDRs")
       : validCIDRs(input.awsSSHCIDRs ?? []);
+  const awsInstanceTypes = validatedAWSInstanceTypes(input.awsInstanceTypes ?? []);
+  const awsPrivate = input.awsPrivate ?? false;
+  const awsRequireSSM = input.awsRequireSSM ?? false;
+  if ((awsPrivate || awsRequireSSM || awsInstanceTypes.length > 0) && provider !== "aws") {
+    throw new Error("private AWS workspace settings require provider=aws");
+  }
+  if (awsPrivate && target !== "linux") {
+    throw new Error("private AWS workspaces currently require target=linux");
+  }
+  if (awsPrivate && !awsRequireSSM) {
+    throw new Error("private AWS workspaces require SSM management");
+  }
   const gcpSSHCIDRs =
     provider === "gcp"
       ? validatedCIDRs(input.gcpSSHCIDRs ?? [], "gcpSSHCIDRs")
       : validCIDRs(input.gcpSSHCIDRs ?? []);
   const sshPublicKey = input.sshPublicKey?.trim() ?? "";
-  if (!sshPublicKey) {
+  if (!sshPublicKey && !awsPrivate) {
     throw new Error("sshPublicKey is required");
   }
   const sshUser = input.sshUser ?? defaultSSHUser(provider, target, windowsMode);
@@ -321,6 +338,11 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     awsSubnetID: input.awsSubnetID ?? "",
     awsProfile: input.awsProfile ?? "",
     awsRootGB: input.awsRootGB ?? 400,
+    awsInstanceTypes,
+    awsPrivate,
+    awsRequireSSM,
+    awsSSMBootstrapCommand: input.awsSSMBootstrapCommand ?? "",
+    awsSSMLogGroup: input.awsSSMLogGroup ?? "",
     awsSSHCIDRs,
     awsSSHCIDRsPinned: input.awsSSHCIDRsPinned ?? (input.awsSSHCIDRs?.length ?? 0) > 0,
     awsMacHostID: input.awsMacHostID ?? "",
@@ -648,6 +670,19 @@ export function validatedCIDRs(values: string[], fieldName: string): string[] {
     throw new Error(`${fieldName} entries must be valid IPv4 or IPv6 CIDR ranges`);
   }
   return valid;
+}
+
+export function validatedAWSInstanceTypes(values: string[]): string[] {
+  const normalized = uniqueStrings(values.map((value) => value.trim()).filter(Boolean));
+  if (
+    normalized.length > 8 ||
+    normalized.some(
+      (value) => value.length > 64 || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(value),
+    )
+  ) {
+    throw new Error("awsInstanceTypes must contain at most 8 valid EC2 instance types");
+  }
+  return normalized;
 }
 
 function isValidCIDR(cidr: string): boolean {

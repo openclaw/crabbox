@@ -268,8 +268,15 @@ func (a App) egressStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Stdout, "egress: lease=%s session=%s profile=%s host=%t client=%t allow=%s\n", status.LeaseID, blank(status.SessionID, "-"), blank(status.Profile, "-"), status.HostConnected, status.ClientConnected, strings.Join(status.Allow, ","))
+	fmt.Fprintln(a.Stdout, formatEgressStatus(status))
 	return nil
+}
+
+func formatEgressStatus(status CoordinatorEgressStatus) string {
+	if status.HostConnected == nil || status.ClientConnected == nil {
+		return fmt.Sprintf("egress: lease=%s active=%t", status.LeaseID, status.Active)
+	}
+	return fmt.Sprintf("egress: lease=%s session=%s profile=%s host=%t client=%t allow=%s", status.LeaseID, blank(status.SessionID, "-"), blank(status.Profile, "-"), *status.HostConnected, *status.ClientConnected, strings.Join(status.Allow, ","))
 }
 
 func (a App) egressStop(ctx context.Context, args []string) error {

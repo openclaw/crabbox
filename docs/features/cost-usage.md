@@ -11,8 +11,9 @@ elapsed runtime, estimated elapsed cost, and reserved worst-case cost. This is a
 operational guardrail, not invoice reconciliation. Provider extras such as static IP
 charges, egress, snapshots, taxes, credits, and discounts are not modeled.
 
-Cost tracking only applies to brokered providers (`aws`, `azure`, `gcp`, `hetzner`).
-Direct-from-CLI leases never reach the broker and are not accounted for.
+Cost tracking only applies to brokered providers (`aws`, `azure`, `daytona`,
+`gcp`, `hetzner`). Direct-from-CLI leases never reach the broker and are not
+accounted for.
 
 ## Reading `crabbox usage`
 
@@ -102,8 +103,9 @@ CRABBOX_DEFAULT_ORG                  org assigned when no org header is present
 ```
 
 Monthly budget checks add the candidate lease's `reservedUSD` to the month's existing
-reserved total for the relevant scope, so a lease that would push the scope over budget
-is refused before it provisions.
+reserved total for the relevant scope. Live managed leases keep reserving budget after
+a UTC month rollover until cleanup commits a terminal state. A lease that would push
+the scope over budget is refused before it provisions.
 
 ## Identity for usage accounting
 

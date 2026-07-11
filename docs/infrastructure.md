@@ -331,7 +331,7 @@ default, can launch managed Windows and WSL2 targets, and can launch EC2 Mac
 instances on an operator-provided Dedicated Host. The direct CLI provider remains
 available with `--provider aws` when no broker is configured.
 
-Brokered credentials and host pinning (coordinator secrets):
+Brokered credentials and host pinning for existing static-key deployments:
 
 ```text
 AWS_ACCESS_KEY_ID
@@ -340,6 +340,10 @@ AWS_SESSION_TOKEN                # optional
 CRABBOX_HOST_ID                  # optional; admin-only except owner reactivation of a retained Mac instance
 CRABBOX_AWS_MAC_HOST_ID          # optional legacy AWS alias for CRABBOX_HOST_ID
 ```
+
+The Node coordinator can use the AWS default credential chain instead. The
+dedicated ECS private-workspace deployment uses temporary task-role credentials
+and rejects static access keys.
 
 AWS-specific coordinator settings (all optional unless noted):
 
@@ -367,6 +371,32 @@ added; otherwise the CLI sends its detected outbound IPv4 `/32`, and the Worker
 falls back to `CF-Connecting-IP` (`/32` or `/128`). Crabbox revokes any legacy
 managed `0.0.0.0/0` SSH rule when it touches the managed security group. Supplying
 `CRABBOX_AWS_SECURITY_GROUP_ID` makes network policy your responsibility.
+
+#### Dedicated SSM-only private workspace service
+
+[`deploy/aws/ecs-fargate-coordinator.yaml`](../deploy/aws/ecs-fargate-coordinator.yaml)
+deploys a single-replica Node/PostgreSQL coordinator for API-managed private
+Linux workspaces. It owns its ECS cluster/service, task roles, workspace
+instance role/profile, retained SSM log group, internal HTTPS load balancer, CloudWatch
+logging, and separate controller/workspace/load-balancer security groups. It
+expects existing VPC/subnet routing, an ACM certificate and canonical hostname,
+an immutable coordinator image digest, a TLS-verified PostgreSQL database, and
+Secrets Manager references for the database URL and route-scoped workspace
+bearer.
+
+This path is intentionally not the normal SSH lease policy above. Server-side
+configuration pins one AWS account and Region, an exact x86_64 instance
+allowlist, resource ceilings, one private subnet, one no-ingress/TCP-443-egress
+security group, an encrypted gp3 root size, and SSM bootstrap/logging. The task
+role is resolved through the Node AWS default credential chain; the task
+definition contains no reusable static AWS key. Startup remains unready on
+identity, placement, instance-type, subnet, security-group, launch-permission,
+SSM, or database preflight failure.
+
+Client-side labels and Region hints are metadata and cannot select this
+placement. The dedicated service URL does. See
+[Private AWS Workspaces](features/aws-private-workspaces.md) for configuration,
+the client API, separate AWS-GO gate, live canary, and retirement order.
 
 #### AWS IAM
 
@@ -577,6 +607,10 @@ Node/PostgreSQL prerequisites:
 - one always-on service replica;
 - TLS ingress with WebSocket upgrades and health/readiness probes.
 
+For a dedicated AWS-owned deployment with SSM-only private workspaces, use the
+[ECS Fargate template and runbook](features/aws-private-workspaces.md) instead
+of assembling a reusable shared control plane.
+
 Pick an auth model:
 
 - **Browser login** — create the GitHub OAuth app (above) and set
@@ -650,7 +684,7 @@ is in [Node.js And PostgreSQL](#node-js-and-postgresql).
 ```text
 # Providers (at least one set)
 HETZNER_TOKEN
-AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN (optional)
+AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN (optional static compatibility; Node can use its default credential chain)
 CRABBOX_HOST_ID / CRABBOX_AWS_MAC_HOST_ID (optional; admin-only except owner reactivation of a retained Mac instance)
 AZURE_* / CRABBOX_AZURE_* (Azure)
 GCP_* / CRABBOX_GCP_* (GCP)

@@ -14,9 +14,9 @@ through a coordinator.
 
 ## Brokered lifecycle
 
-When a provider is brokered (only `aws`, `azure`, `gcp`, and `hetzner`, and only
-when a coordinator URL is configured), the coordinator owns the lease record
-and its lifecycle. A brokered lease record moves through four states
+When a provider is brokered (only `aws`, `azure`, `daytona`, `gcp`, and
+`hetzner`, and only when a coordinator URL is configured), the coordinator owns
+the lease record and its lifecycle. A brokered lease record moves through four states
 (`worker/src/types.ts`):
 
 ```text

@@ -222,6 +222,10 @@ const restrictedBrokerSelectorCases = [
   { provider: "aws" as const, field: "awsSGID", value: "sg-000000000001" },
   { provider: "aws" as const, field: "awsSubnetID", value: "subnet-000000000001" },
   { provider: "aws" as const, field: "awsProfile", value: "crabbox-runner" },
+  { provider: "aws" as const, field: "awsInstanceTypes", value: ["m5.24xlarge"] },
+  { provider: "aws" as const, field: "awsRequireSSM", value: true },
+  { provider: "aws" as const, field: "awsSSMBootstrapCommand", value: "true" },
+  { provider: "aws" as const, field: "awsSSMLogGroup", value: "/crabbox/test" },
   { provider: "gcp" as const, field: "gcpProject", value: "other-project" },
   {
     provider: "gcp" as const,
@@ -19719,6 +19723,7 @@ describe("fleet lease identity and idle", () => {
     expect(status.status).toBe(200);
     await expect(status.json()).resolves.toMatchObject({
       leaseID: "cbx_000000000001",
+      active: true,
       sessionID: "egress_camel123",
       profile: "discord",
       allow: ["discord.com"],
@@ -19746,24 +19751,27 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(viewerStatus.status).toBe(200);
-    await expect(viewerStatus.json()).resolves.toMatchObject({
+    const viewerStatusBody = (await viewerStatus.json()) as Record<string, unknown>;
+    expect(viewerStatusBody).toMatchObject({
       leaseID: "cbx_000000000001",
+      active: true,
       sessionID: "",
       profile: "",
       allow: [],
-      hostConnected: false,
-      clientConnected: false,
       createdAt: "",
       updatedAt: "",
     });
+    expect(viewerStatusBody).not.toHaveProperty("hostConnected");
+    expect(viewerStatusBody).not.toHaveProperty("clientConnected");
 
     const viewerPortal = await fleet.fetch(
       request("GET", "/portal/leases/blue-lobster", { headers: viewerHeaders }),
     );
     expect(viewerPortal.status).toBe(200);
     const viewerPortalBody = await viewerPortal.text();
-    expect(viewerPortalBody).toContain("<strong>egress</strong><small>waiting for host</small>");
+    expect(viewerPortalBody).toContain("<strong>egress</strong><small>active</small>");
     expect(viewerPortalBody).toContain('<span class="muted">active</span>');
+    expect(viewerPortalBody).toContain('<span class="pill" data-tone="ok">active</span>');
     expect(viewerPortalBody).not.toContain("discord · discord.com");
     expect(viewerPortalBody).not.toContain("*.discordcdn.com");
     expect(viewerPortalBody).not.toContain("crabbox egress status --id blue-lobster");
@@ -19778,10 +19786,27 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     await expect(managerStatus.json()).resolves.toMatchObject({
+      active: true,
       sessionID: "egress_camel123",
       profile: "discord",
       allow: ["discord.com"],
+      hostConnected: false,
+      clientConnected: false,
     });
+
+    const orgViewerStatus = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster/egress/status", {
+        headers: {
+          "x-crabbox-owner": "org-viewer@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(orgViewerStatus.status).toBe(200);
+    const orgViewerStatusBody = (await orgViewerStatus.json()) as Record<string, unknown>;
+    expect(orgViewerStatusBody).toMatchObject({ active: true });
+    expect(orgViewerStatusBody).not.toHaveProperty("hostConnected");
+    expect(orgViewerStatusBody).not.toHaveProperty("clientConnected");
 
     const missingTicket = await fleet.fetch(
       request("GET", "/v1/leases/blue-lobster/egress/host", {

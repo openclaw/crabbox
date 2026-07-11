@@ -2,7 +2,7 @@
 
 Read when:
 
-- changing Hetzner, AWS, Azure, or Google Cloud provisioning;
+- changing AWS, Azure, Daytona, Google Cloud, or Hetzner provisioning;
 - adding or wiring a new backend;
 - adjusting machine classes, fallback order, regions, or images.
 
@@ -24,8 +24,8 @@ Each adapter declares a `Spec` that drives how Crabbox treats it:
   cannot execute arbitrary run commands there).
 - **Coordinator** — `supported` means the provider *may* be brokered through
   either coordinator runtime; `never` means it always runs direct from the CLI. Only
-  `aws`, `azure`, `gcp`, and `hetzner` are `supported`, and even those run direct
-  unless a broker URL and token are configured (see
+  `aws`, `azure`, `daytona`, `gcp`, and `hetzner` are `supported`, and even those
+  run direct unless a broker URL and token are configured (see
   [Configuration](configuration.md) and `crabbox config set-broker`).
 - **Targets** — which runtime category the provider can satisfy. OS-backed
   providers advertise Linux, macOS, or Windows; module/runtime providers can

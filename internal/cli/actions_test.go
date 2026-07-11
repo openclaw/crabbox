@@ -926,6 +926,92 @@ func TestLocalActionsHydrateScriptAllowsSetupNodeCheckLatest(t *testing.T) {
 	}
 }
 
+func TestLocalActionsSetupNodeVerifiesArchiveBeforeExtraction(t *testing.T) {
+	got := localActionsRuntimeShell()
+	for _, want := range []string{
+		`SHASUMS256.txt`,
+		`Node release checksums did not contain a valid digest`,
+		`Node archive checksum mismatch`,
+		`.crabbox-node-sha256`,
+		`tar -xJf "$tmp" -C "$extract"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("setup-node runtime missing %q", want)
+		}
+	}
+	checksum := strings.Index(got, `actual="$(sha256sum "$tmp"`)
+	extract := strings.Index(got, `tar -xJf "$tmp"`)
+	if checksum < 0 || extract < checksum {
+		t.Fatalf("setup-node must verify the archive before extraction: checksum=%d extract=%d", checksum, extract)
+	}
+}
+
+func TestLocalActionsSetupNodeRejectsMissingOrMismatchedChecksum(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		checksums string
+		want      string
+	}{
+		{name: "missing", checksums: "", want: "did not contain a valid digest"},
+		{name: "mismatch", checksums: strings.Repeat("a", 64) + "  node-v88.0.0-linux-x64.tar.xz\n", want: "checksum mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			binDir := filepath.Join(root, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			commands := map[string]string{
+				"curl": `#!/bin/sh
+out=
+url=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then shift; out="$1"; else url="$1"; fi
+  shift
+done
+case "$url" in
+  */index.tab) printf 'version\n%s\n' 'v88.0.0' ;;
+  */SHASUMS256.txt) printf '%s' "$TEST_CHECKSUMS" >"$out" ;;
+  *) printf archive >"$out" ;;
+esac
+`,
+				"sha256sum": `#!/bin/sh
+printf '%s  %s\n' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$1"
+`,
+				"tar": `#!/bin/sh
+touch "$TAR_CALLED"
+exit 99
+`,
+				"node":  "#!/bin/sh\nprintf '22.0.0\\n'\n",
+				"uname": "#!/bin/sh\nprintf 'x86_64\\n'\n",
+			}
+			for name, script := range commands {
+				if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tarCalled := filepath.Join(root, "tar-called")
+			script := localActionsRuntimeShell() + "\n__crabbox_setup_node 88\n"
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = append(os.Environ(),
+				"GITHUB_WORKSPACE="+root,
+				"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"RUNNER_TEMP="+filepath.Join(root, "tmp"),
+				"RUNNER_TOOL_CACHE="+filepath.Join(root, "tools"),
+				"TAR_CALLED="+tarCalled,
+				"TEST_CHECKSUMS="+tc.checksums,
+			)
+			output, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), tc.want) {
+				t.Fatalf("setup-node err=%v output=%q, want %q", err, output, tc.want)
+			}
+			if _, err := os.Stat(tarCalled); !os.IsNotExist(err) {
+				t.Fatalf("archive extraction ran before checksum rejection: %v", err)
+			}
+		})
+	}
+}
+
 func TestLocalActionsHydrateScriptKeepsToolCacheOffWorkRoot(t *testing.T) {
 	job := localHydrateJob{Steps: []localHydrateStep{{Uses: "actions/setup-node@v4", With: map[string]string{"node-version": "22"}}}}
 	workdir := "/work/cbx_123/repo"

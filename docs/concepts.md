@@ -95,14 +95,14 @@ cleanup, and review evidence.
 coordinator for lease creation, state, and cleanup, while still doing SSH,
 rsync, and command execution directly to the runner. Provider secrets stay
 coordinator-side.
-Chosen when the provider supports the coordinator (AWS, Azure, Google Cloud,
-Hetzner) and a broker URL is configured via `CRABBOX_COORDINATOR` or
+Chosen when the provider supports the coordinator (AWS, Azure, Daytona, Google
+Cloud, Hetzner) and a broker URL is configured via `CRABBOX_COORDINATOR` or
 `config set-broker`.
 
 **Direct mode** / **direct-provider mode** - the CLI talks straight to the
 provider API with no broker, no central run history, and no spend caps. This is
-the only mode for every provider outside the brokerable four, and the fallback
-for those four when no broker URL is configured.
+the only mode for every provider outside the brokerable five, and the fallback
+for those five when no broker URL is configured.
 
 **Static mode** - lease behavior for `provider: ssh`. The host is operator-owned;
 Crabbox neither provisions nor deletes it. Always direct, never brokered.

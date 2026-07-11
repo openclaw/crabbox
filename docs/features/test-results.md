@@ -51,8 +51,13 @@ Or through the environment: `CRABBOX_RESULTS_JUNIT` (comma-separated paths),
 `crabbox run` collects results only when `--results-auto` is set or at least one
 explicit `--junit` path is configured.
 
-For explicit `--junit` paths, the CLI reads each listed file from the workdir
-(Windows-native targets use a PowerShell variant) and parses it.
+For explicit `--junit` paths, the CLI resolves each listed file and reads it
+only when its final target remains inside the workdir, then parses it. Relative
+paths, absolute paths within the workdir, and symlinks that stay within the
+workdir remain supported. Windows-native targets apply the same rule while
+resolving directory junctions and symbolic links. Collection validates the
+opened file and reads from the same descriptor or stream, so a background
+process cannot swap a checked path before the read.
 
 Auto discovery (`--results-auto`) is freshness-aware so it never reports stale
 reports from an earlier run:

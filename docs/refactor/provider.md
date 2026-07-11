@@ -350,7 +350,7 @@ aws                     ssh-lease      supported    ssh, crabbox-sync, cleanup, 
 azure                   ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, tailscale
 gcp                     ssh-lease      supported    ssh, crabbox-sync, cleanup, tailscale
 ssh                     ssh-lease      never        ssh, crabbox-sync, desktop, browser, code
-daytona                 ssh-lease      never        ssh, crabbox-sync
+daytona                 ssh-lease      supported    ssh, crabbox-sync, archive-sync
 blacksmith-testbox      delegated-run  never        run-proof, run-session
 islo                    delegated-run  never        url-bridge
 ```
@@ -867,13 +867,14 @@ release. No provider cleanup, no coordinator.
 > command. This is functionally the "hybrid" model from the original plan,
 > expressed as one backend implementing both shapes' relevant methods.
 
-Coordinator never, Linux only, features ssh/crabbox-sync. Owns the Daytona
-generated Go API client (auth + organization header), the SDK/toolbox, sandbox
-lifecycle, labels and last-activity touch, SSH-access token minting, toolbox
-archive upload and command execution for `run`, sandbox-to-`Server` mapping, and
-secret SSH-user metadata. Reuses sync guardrails, claims, status rendering, and
-explicit release/stop. Constraints: Linux only, no coordinator, no Tailscale, no
-desktop/VNC/browser/code portal, no Actions-runner hydration, snapshot mode only.
+Coordinator supported, Linux only, features ssh/crabbox-sync/archive-sync. Owns
+the Daytona generated Go API client (auth + organization header), the SDK/toolbox,
+sandbox lifecycle, labels and last-activity touch, SSH-access token minting,
+toolbox archive upload and command execution for `run`, sandbox-to-`Server`
+mapping, and secret SSH-user metadata. Reuses sync guardrails, claims, status
+rendering, and explicit release/stop. Constraints: Linux only, no Tailscale, no
+desktop/VNC/browser/code portal, no Actions-runner hydration, snapshot mode only;
+brokered workspaces and ready pools remain disabled because SSH credentials rotate.
 
 ### Blacksmith Testbox — `DelegatedRunBackend`
 

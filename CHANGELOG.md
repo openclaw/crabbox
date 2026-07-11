@@ -4,11 +4,16 @@
 
 ### Added
 
+- Redesigned the documentation site around first-class provider discovery, with complete provider navigation, multi-category filtering, responsive tables and mobile navigation, and accessibility improvements. Thanks @zozo123.
 - Added explicit GCP metadata-server authentication for brokered coordinators, with hardened token validation, bounded retries, source-aware readiness diagnostics, and preserved service-account-key defaults. Thanks @dani29.
 
 ### Fixed
 
 - Bootstrapped strict Tailscale AWS leases through their rendered tailnet hostname while preserving public and automatic network selection, allowing same-account EC2 operators without public-IP reachability to create leases successfully. Thanks @SebTardif.
+- Confined explicit JUnit result collection to final paths inside the remote workdir on POSIX and Windows while preserving safe in-workdir symlinks and absolute paths. Thanks @coygeek.
+- Verified Node.js release archives against published SHA-256 checksums before local Actions hydration installs or reuses them, preventing unverified setup-node downloads from reaching the workflow PATH. Thanks @coygeek.
+- Limited shared egress status to coarse active visibility unless the caller has manage access, keeping per-side host and client connection state private. Thanks @coygeek.
+- Counted live managed leases against monthly reserved-USD budgets after UTC month rollover until cleanup commits a terminal state, preventing overlapping reservations from bypassing configured cost caps. Thanks @coygeek.
 - Bounded coordinator lease and workspace history scans and kept saturated cleanup retry batches scheduled promptly, preventing large retained histories from exhausting Durable Object memory or stranding cleanup.
 
 ## 0.37.1 - 2026-07-11
@@ -27,6 +32,7 @@
 
 ### Added
 
+- Added a dedicated ECS Fargate deployment for small private AWS workspaces with task-role credentials, exact account/Region and instance allowlist preflight, encrypted gp3 volumes, no public IP or SSH, IMDSv2, SSM bootstrap/log evidence, route-scoped workspace lifecycle, and idempotent cleanup.
 - Added Sealos DevBox Linux SSH leases through the Kubernetes CRD with exact provider/resource-bound claims, conflict-safe explicit `--reclaim` adoption, claim-locked release and cleanup, controller-owned Secret SSH routing, and guarded zero-residue lifecycle proof. Thanks @coygeek.
 - Added a Unikraft Cloud service-control provider for claimed OCI-image instances, with endpoint- and instance-bound ownership, guarded cleanup, and live create/status/list/stop verification. Thanks @zozo123.
 - Added capability-aware AWS image promotion and lease selection by minimum OS, SDK/runtime versions, browser, WebView2, and desktop support, with fail-before-lease rejection when no promoted image satisfies every requirement.
