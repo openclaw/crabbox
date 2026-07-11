@@ -2,6 +2,10 @@
 
 ## 0.37.2 - Unreleased
 
+### Added
+
+- Added explicit GCP metadata-server authentication for brokered coordinators, with hardened token validation, bounded retries, source-aware readiness diagnostics, and preserved service-account-key defaults. Thanks @dani29.
+
 ## 0.37.1 - 2026-07-11
 
 ### Added
