@@ -34,7 +34,18 @@ export function nodeCoordinatorEnv(
   source: NodeJS.ProcessEnv,
   credentialProvider: AWSCredentialProvider = nodeAWSCredentialProvider(),
 ): Env {
-  return { ...source, awsCredentialProvider: credentialProvider } as unknown as Env;
+  const useDefaultChain =
+    source.CRABBOX_WORKSPACE_PROVIDER?.trim() === "aws" ||
+    deploymentFlag(source.CRABBOX_AWS_REQUIRE_ECS_TASK, "CRABBOX_AWS_REQUIRE_ECS_TASK") ||
+    deploymentFlag(source.CRABBOX_WORKSPACE_AWS_PRIVATE, "CRABBOX_WORKSPACE_AWS_PRIVATE") ||
+    deploymentFlag(
+      source.CRABBOX_AWS_ORPHAN_SWEEP_ENABLED,
+      "CRABBOX_AWS_ORPHAN_SWEEP_ENABLED",
+    );
+  return {
+    ...source,
+    ...(useDefaultChain ? { awsCredentialProvider: credentialProvider } : {}),
+  } as unknown as Env;
 }
 
 export function createAWSDeploymentGuard(

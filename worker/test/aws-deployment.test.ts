@@ -38,13 +38,38 @@ describe("Node AWS deployment guard", () => {
       accessKeyId: "task-access-key",
       secretAccessKey: "task-key",
     }));
-    const source = { DATABASE_URL: "postgres://coordinator.test/crabbox" };
+    const source = {
+      DATABASE_URL: "postgres://coordinator.test/crabbox",
+      CRABBOX_WORKSPACE_PROVIDER: "aws",
+    };
 
     const env = nodeCoordinatorEnv(source, provider);
 
     expect(env.DATABASE_URL).toBe(source.DATABASE_URL);
     expect(env.awsCredentialProvider).toBe(provider);
     expect(source).not.toHaveProperty("awsCredentialProvider");
+  });
+
+  it("does not advertise AWS credentials when the default chain is not intended", () => {
+    const provider = vi.fn<AWSCredentialProvider>();
+
+    const env = nodeCoordinatorEnv(
+      { DATABASE_URL: "postgres://coordinator.test/crabbox" },
+      provider,
+    );
+
+    expect(env.awsCredentialProvider).toBeUndefined();
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { CRABBOX_AWS_REQUIRE_ECS_TASK: "1" },
+    { CRABBOX_WORKSPACE_AWS_PRIVATE: "1" },
+    { CRABBOX_AWS_ORPHAN_SWEEP_ENABLED: "true" },
+  ])("injects the default chain for an explicit AWS deployment intent", (source) => {
+    const provider = vi.fn<AWSCredentialProvider>();
+
+    expect(nodeCoordinatorEnv(source, provider).awsCredentialProvider).toBe(provider);
   });
 
   it.each([
