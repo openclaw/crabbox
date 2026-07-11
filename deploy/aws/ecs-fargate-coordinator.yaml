@@ -379,7 +379,9 @@ Resources:
       Port: 8080
       HealthCheckEnabled: true
       HealthCheckProtocol: HTTP
-      HealthCheckPath: /v1/ready
+      # Keep cleanup and status routes reachable if launch-only AWS preflight
+      # later fails. New workspace POSTs still use the readiness guard.
+      HealthCheckPath: /v1/health
       HealthCheckPort: traffic-port
       HealthCheckIntervalSeconds: 30
       HealthCheckTimeoutSeconds: 5

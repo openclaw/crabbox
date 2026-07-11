@@ -137,7 +137,8 @@ test("stack owns the single-replica Fargate and HTTPS ingress resources", () => 
   assert.match(service, /LaunchType: FARGATE/);
 
   const target = resourceBlock("CoordinatorTargetGroup");
-  assert.match(target, /HealthCheckPath: \/v1\/ready/);
+  assert.match(target, /HealthCheckPath: \/v1\/health/);
+  assert.doesNotMatch(target, /HealthCheckPath: \/v1\/ready/);
   assert.match(target, /TargetType: ip/);
 
   for (const name of ["CoordinatorLogGroup", "WorkspaceSSMLogGroup"]) {
