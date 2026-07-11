@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.37.1 - 2026-07-11
+
+### Added
+
+- Added Orgo Linux workspaces with API-key authentication, image and region selection, exact workspace-bound claims, WebVNC support, guarded cleanup, credential provenance checks, and a full live-smoke workflow. Thanks @zozo123.
+
+### Fixed
+
+- Preserved the Foundation Developer ID and notarization trust of the embedded Apple VM daemon at runtime instead of replacing its accepted signature with an ad-hoc one.
+- Rebuilt production releases as a local-produced, signed, notarized, draft-first pipeline with protected default-branch verification, exact source provenance, native execution proof, serialized publication, and separately verified Homebrew installation.
+- Authenticated the complete packaging-tool closure before exposing signing credentials, kept credential-free release builds read-only, and made signed-tag publication tests deterministic across Linux and macOS CI.
+
 ## 0.37.0 - 2026-07-10
 
 ### Added
