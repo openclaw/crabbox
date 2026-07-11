@@ -562,7 +562,7 @@ Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment liv
 - **Set it up or audit it:** [Infrastructure](docs/infrastructure.md), [Security Policy](SECURITY.md), [Operational Security](docs/security.md), [Getting Started](docs/getting-started.md), [Source Map](docs/source-map.md)
 - **Changes:** [CHANGELOG.md](CHANGELOG.md)
 
-The GitHub Pages site at <https://openclaw.github.io/crabbox/> is generated from
+The documentation site at <https://crabbox.sh/> is generated from
 the `docs/` Markdown:
 
 ```sh

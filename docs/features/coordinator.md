@@ -17,9 +17,9 @@ and runs through either:
 - the Node.js service with PostgreSQL and pg-boss (`worker/node`).
 
 The default `broker.mode: managed` lets brokerable providers (`aws`, `azure`,
-`gcp`, and `hetzner`) transfer lifecycle operations to the coordinator. Every
-other adapter runs direct from the CLI. A brokerable provider also runs direct
-unless a broker URL is configured (`CRABBOX_COORDINATOR`, or
+`daytona`, `gcp`, and `hetzner`) transfer lifecycle operations to the coordinator.
+Every other adapter runs direct from the CLI. A brokerable provider also runs
+direct unless a broker URL is configured (`CRABBOX_COORDINATOR`, or
 `config set-broker --url`).
 
 `broker.mode: registered` is provider-neutral. Provisioning, SSH, touch, and

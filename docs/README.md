@@ -48,9 +48,9 @@ the runner host**. Runners hold no coordinator credentials; they are leaf nodes.
 
 Crabbox selects one of three execution modes per provider:
 
-- **Brokered** — for `aws`, `azure`, `gcp`, and `hetzner` when a broker URL is
-  configured (`CRABBOX_COORDINATOR`). The coordinator provisions and tracks
-  leases; the CLI still drives sync and command execution over SSH.
+- **Brokered** — for `aws`, `azure`, `daytona`, `gcp`, and `hetzner` when a
+  broker URL is configured (`CRABBOX_COORDINATOR`). The coordinator provisions
+  and tracks leases; the CLI still drives sync and command execution over SSH.
 - **Direct SSH** — the same SSH-lease providers without a broker, plus static
   hosts (`provider: ssh`) and self-hosted/local providers. The CLI talks to the
   cloud or host API itself.
@@ -193,8 +193,8 @@ Pick whichever matches your intent:
 
 Markdown in this directory is the user-facing documentation source.
 Implementation truth stays in code; the [Source Map](source-map.md) lists the
-files behind each documented behavior. The GitHub Pages site at
-<https://openclaw.github.io/crabbox/> is generated from these Markdown files by
+files behind each documented behavior. The documentation site at
+<https://crabbox.sh/> is generated from these Markdown files by
 `scripts/build-docs-site.mjs` and deployed by `.github/workflows/pages.yml`.
 Pages must be enabled on the repository or organization for the workflow to
 publish.

@@ -122,7 +122,7 @@ CLI -> runner over SSH/rsync
 Use it when people or agents share infrastructure. Provider secrets stay off
 local machines; cleanup, usage, and cost control all flow through the broker.
 Brokering is available for the managed cloud providers (`hetzner`, `aws`,
-`azure`, `gcp`) and is engaged only when a broker URL is configured
+`azure`, `daytona`, `gcp`) and is engaged only when a broker URL is configured
 (`CRABBOX_COORDINATOR` or `config set-broker`).
 
 The **direct path** is the fallback when no broker is configured:

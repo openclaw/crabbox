@@ -11,8 +11,9 @@ elapsed runtime, estimated elapsed cost, and reserved worst-case cost. This is a
 operational guardrail, not invoice reconciliation. Provider extras such as static IP
 charges, egress, snapshots, taxes, credits, and discounts are not modeled.
 
-Cost tracking only applies to brokered providers (`aws`, `azure`, `gcp`, `hetzner`).
-Direct-from-CLI leases never reach the broker and are not accounted for.
+Cost tracking only applies to brokered providers (`aws`, `azure`, `daytona`,
+`gcp`, `hetzner`). Direct-from-CLI leases never reach the broker and are not
+accounted for.
 
 ## Reading `crabbox usage`
 

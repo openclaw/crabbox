@@ -162,8 +162,9 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
   run-event subscriptions and lease heartbeats. Cloudflare can hibernate
   sockets; Node keeps them in process and clients reconnect after restarts.
 - **Provider operations** — per-provider adapters (`aws.ts`, `azure.ts`,
-  `gcp.ts`, `hetzner.ts`) handle provision/release/images/identity/capacity. The
-  core stays provider-neutral through hooks such as `prepareLeaseCreate`,
+  `daytona.ts`, `gcp.ts`, `hetzner.ts`) handle provision/release and their
+  supported image, identity, and capacity hooks. The core stays provider-neutral
+  through hooks such as `prepareLeaseCreate`,
   `createServerWithFallback`, `finalizeLeaseCreate`, and `hourlyPriceUSD`.
 
 Runtime-specific persistence and scheduling stay behind `CoordinatorRuntime`:

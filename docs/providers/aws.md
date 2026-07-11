@@ -10,9 +10,9 @@ Read this when you are:
 AWS is the broad managed provider. It is an SSH-lease backend: Crabbox
 provisions an EC2 instance, then owns SSH readiness, sync, command execution,
 results, desktop tunnels, and cleanup. It supports Linux, native Windows,
-Windows under WSL2, and EC2 Mac. AWS is one of the four providers that can run
-through the coordinator (alongside Hetzner, Azure, and GCP); without a broker
-URL configured it runs direct-from-CLI against the EC2 API.
+Windows under WSL2, and EC2 Mac. AWS is one of the five providers that can run
+through the coordinator (alongside Azure, Daytona, GCP, and Hetzner); without a
+broker URL configured it runs direct-from-CLI against the EC2 API.
 
 ## When to use AWS
 
