@@ -2,6 +2,7 @@
 /.github/CODEOWNERS @openclaw/openclaw-secops
 /.github/release-allowed-signers @openclaw/openclaw-secops
 /.github/workflows/release-assets.yml @openclaw/openclaw-secops
+/.mac-release.env @openclaw/openclaw-secops
 /.goreleaser.yaml @openclaw/openclaw-secops
 /release/records/ @openclaw/openclaw-secops
 /scripts/*release* @openclaw/openclaw-secops

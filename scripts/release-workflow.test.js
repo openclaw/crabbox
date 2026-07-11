@@ -541,6 +541,21 @@ test("v0.37.1 is pinned to the signed trust-repair source and ready for publicat
   assert.equal(record.publicationStatus, "ready");
 });
 
+test("managed Foundation signing and notary configuration is repository-owned and secret-free", () => {
+  const manifest = read(".mac-release.env");
+  const codeowners = read(".github/CODEOWNERS");
+  assert.match(
+    manifest,
+    /MAC_RELEASE_CODESIGN_IDENTITY='Developer ID Application: OpenClaw Foundation \(FWJYW4S8P8\)'/,
+  );
+  assert.match(manifest, /MAC_RELEASE_OP_FIELDS=NOTARYTOOL_KEYCHAIN_PROFILE/);
+  assert.match(manifest, /MAC_RELEASE_CODESIGN_KEYCHAIN_MANAGED=1/);
+  assert.match(manifest, /MAC_RELEASE_CODESIGN_PASSWORDLESS=1/);
+  assert.match(manifest, /MAC_RELEASE_OP_USE_SERVICE_ACCOUNT=0/);
+  assert.doesNotMatch(manifest, /(?:PASSWORD|TOKEN|SECRET)=/);
+  assert.match(codeowners, /^\/\.mac-release\.env @openclaw\/openclaw-secops$/m);
+});
+
 test("draft creation performs static-only verification and never deletes or replaces partial records", () => {
   const script = read("scripts/create-release-draft.sh");
   const verifyIndex = script.indexOf('env -i');
