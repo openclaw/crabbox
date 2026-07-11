@@ -6,6 +6,7 @@ import {
   applyAWSRunInstanceTargetOptions,
   awsAvailabilityZoneForRegion,
   awsCapacityReadinessCheckForQuota,
+  awsEndpointSuffixForRegion,
   awsInstanceTypeVCPUs,
   awsHostIDsFromSet,
   awsLaunchCandidates,
@@ -42,6 +43,12 @@ describe("aws provider", () => {
     expect(awsUbuntuOwnerForRegion("eu-west-1")).toBe("099720109477");
     expect(awsUbuntuOwnerForRegion("us-gov-west-1")).toBe("513442679011");
     expect(awsUbuntuOwnerForRegion("cn-north-1")).toBe("837727238323");
+  });
+
+  it("uses the AWS China endpoint suffix only for China regions", () => {
+    expect(awsEndpointSuffixForRegion("eu-west-1")).toBe("amazonaws.com");
+    expect(awsEndpointSuffixForRegion("us-gov-west-1")).toBe("amazonaws.com");
+    expect(awsEndpointSuffixForRegion("cn-north-1")).toBe("amazonaws.com.cn");
   });
 
   it("rejects a canonical SSH key name reserved for another lease", async () => {

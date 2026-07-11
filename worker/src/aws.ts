@@ -41,6 +41,10 @@ export function awsUbuntuOwnerForRegion(region: string): string {
   return awsUbuntuOwner;
 }
 
+export function awsEndpointSuffixForRegion(region: string): string {
+  return region.startsWith("cn-") ? "amazonaws.com.cn" : "amazonaws.com";
+}
+
 const ec2Version = "2016-11-15";
 const stsVersion = "2011-06-15";
 const awsSpotQuotaCode = "L-34B43A08";
@@ -561,10 +565,11 @@ export class EC2SpotClient {
       );
     }
     const credentials = awsCredentialProvider(env);
-    this.endpoint = `https://ec2.${this.region}.amazonaws.com/`;
-    this.serviceQuotasEndpoint = `https://servicequotas.${this.region}.amazonaws.com/`;
-    this.stsEndpoint = `https://sts.${this.region}.amazonaws.com/`;
-    this.ssmEndpoint = `https://ssm.${this.region}.amazonaws.com/`;
+    const endpointSuffix = awsEndpointSuffixForRegion(this.region);
+    this.endpoint = `https://ec2.${this.region}.${endpointSuffix}/`;
+    this.serviceQuotasEndpoint = `https://servicequotas.${this.region}.${endpointSuffix}/`;
+    this.stsEndpoint = `https://sts.${this.region}.${endpointSuffix}/`;
+    this.ssmEndpoint = `https://ssm.${this.region}.${endpointSuffix}/`;
     this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region);
     this.serviceQuotas = new RefreshingAWSFetchClient(credentials, "servicequotas", this.region);
     this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region);
@@ -2822,7 +2827,7 @@ export async function awsRunInstancesParams(input: {
     params["NetworkInterface.1.AssociatePublicIpAddress"] = config.awsPrivate ? "false" : "true";
     params["NetworkInterface.1.DeleteOnTermination"] = "true";
     params["NetworkInterface.1.DeviceIndex"] = "0";
-    params["NetworkInterface.1.GroupSet.1"] = input.securityGroupID;
+    params["NetworkInterface.1.SecurityGroupId.1"] = input.securityGroupID;
     params["NetworkInterface.1.SubnetId"] = input.subnetID;
   } else {
     params["SecurityGroupId.1"] = input.securityGroupID;

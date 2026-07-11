@@ -155,7 +155,7 @@ describe("private AWS workspaces", () => {
     expect(params["KeyName"]).toBeUndefined();
     expect(params["NetworkInterface.1.AssociatePublicIpAddress"]).toBe("false");
     expect(params["NetworkInterface.1.SubnetId"]).toBe("subnet-private123");
-    expect(params["NetworkInterface.1.GroupSet.1"]).toBe("sg-workspace123");
+    expect(params["NetworkInterface.1.SecurityGroupId.1"]).toBe("sg-workspace123");
     expect(params["IamInstanceProfile.Name"]).toBe("crabbox-private-workspace");
     expect(params["MetadataOptions.HttpEndpoint"]).toBe("enabled");
     expect(params["MetadataOptions.HttpTokens"]).toBe("required");
