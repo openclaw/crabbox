@@ -21,6 +21,7 @@ export interface AWSDeploymentGuardDependencies {
   fetch?: typeof globalThis.fetch;
   now?: () => number;
   readinessCacheMs?: number;
+  identity?: (env: Env) => Promise<void>;
   preflight?: (env: Env, config: LeaseConfig, policy: AWSPrivateWorkspaceConfig) => Promise<void>;
 }
 
@@ -85,24 +86,45 @@ export function createAWSDeploymentGuard(
   const fetchImpl = dependencies.fetch ?? globalThis.fetch;
   const now = dependencies.now ?? Date.now;
   const readinessCacheMs = dependencies.readinessCacheMs ?? defaultReadinessCacheMs;
+  const client = new EC2SpotClient(env, expected.region);
+  const identity =
+    dependencies.identity ??
+    (async () => {
+      await client.verifiedIdentity();
+    });
   const preflight =
     dependencies.preflight ??
-    (async (preflightEnv, config, preflightPolicy) => {
-      await new EC2SpotClient(preflightEnv, preflightPolicy.region).privateWorkspacePreflight(
-        config,
-        preflightPolicy,
-      );
+    (async (_preflightEnv, config, preflightPolicy) => {
+      await client.privateWorkspacePreflight(config, preflightPolicy);
     });
   const config = policy ? privateWorkspacePreflightConfig(policy) : undefined;
 
   let lastSuccess = Number.NEGATIVE_INFINITY;
-  let pending: Promise<void> | undefined;
+  let boundaryVerified = false;
+  let boundaryPending: Promise<void> | undefined;
+  let readinessPending: Promise<void> | undefined;
 
-  const verify = async (force: boolean): Promise<void> => {
-    if (!force && now() - lastSuccess < readinessCacheMs) return;
-    pending ??= (async () => {
+  const verifyBoundary = async (): Promise<void> => {
+    if (boundaryVerified) return;
+    boundaryPending ??= (async () => {
       rejectStaticCredentials(env);
       await verifyECSTaskMetadata(env, expected.accountID, expected.region, fetchImpl);
+      try {
+        await identity(env);
+      } catch {
+        throw deploymentError("identity_verification_failed");
+      }
+      boundaryVerified = true;
+    })().finally(() => {
+      boundaryPending = undefined;
+    });
+    await boundaryPending;
+  };
+
+  const verifyReadiness = async (): Promise<void> => {
+    await verifyBoundary();
+    if (now() - lastSuccess < readinessCacheMs) return;
+    readinessPending ??= (async () => {
       if (policy && config) {
         try {
           await preflight(env, config, policy);
@@ -112,14 +134,14 @@ export function createAWSDeploymentGuard(
       }
       lastSuccess = now();
     })().finally(() => {
-      pending = undefined;
+      readinessPending = undefined;
     });
-    await pending;
+    await readinessPending;
   };
 
   return {
-    start: () => verify(true),
-    ready: () => verify(false),
+    start: verifyBoundary,
+    ready: verifyReadiness,
   };
 }
 

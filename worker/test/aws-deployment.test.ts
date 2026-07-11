@@ -14,6 +14,7 @@ const expectedAccountID = "123456789012";
 const expectedRegion = "us-west-2";
 const privateBearer = "x".repeat(20);
 type Preflight = NonNullable<AWSDeploymentGuardDependencies["preflight"]>;
+type Identity = NonNullable<AWSDeploymentGuardDependencies["identity"]>;
 
 describe("Node AWS deployment guard", () => {
   it("gates only private workspace creation on deployment readiness", () => {
@@ -236,12 +237,14 @@ describe("Node AWS deployment guard", () => {
   it("runs the private permission preflight and caches successful readiness checks", async () => {
     let now = 1_000;
     const fetchImpl = vi.fn<() => Promise<Response>>(async () => Response.json(taskMetadata()));
+    const identity = vi.fn<Identity>(async () => {});
     const preflight = vi.fn<Preflight>(async () => {});
     const env = privateEnv({ CRABBOX_AWS_AMI: "ami-legacy-override" });
     const guard = createAWSDeploymentGuard(env, {
       fetch: fetchImpl,
       now: () => now,
       readinessCacheMs: 60_000,
+      identity,
       preflight,
     });
 
@@ -249,6 +252,7 @@ describe("Node AWS deployment guard", () => {
     await guard.ready();
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(identity).toHaveBeenCalledTimes(1);
     expect(preflight).toHaveBeenCalledTimes(1);
     expect(preflight).toHaveBeenCalledWith(
       env,
@@ -275,11 +279,28 @@ describe("Node AWS deployment guard", () => {
     now += 60_001;
     await guard.ready();
 
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(identity).toHaveBeenCalledTimes(1);
     expect(preflight).toHaveBeenCalledTimes(2);
   });
 
-  it("reports a generic readiness failure and retries it", async () => {
+  it("keeps startup fatal for an unverified task-role identity", async () => {
+    const preflight = vi.fn<Preflight>();
+    const guard = createAWSDeploymentGuard(privateEnv(), {
+      fetch: async () => Response.json(taskMetadata()),
+      identity: async () => {
+        throw new Error(`wrong account ${expectedAccountID}`);
+      },
+      preflight,
+    });
+
+    await expect(guard.start()).rejects.toThrow(
+      "AWS deployment guard failed: identity_verification_failed",
+    );
+    expect(preflight).not.toHaveBeenCalled();
+  });
+
+  it("starts for cleanup while reporting and retrying launch readiness failures", async () => {
     let now = 1_000;
     const preflight = vi
       .fn<() => Promise<void>>()
@@ -290,9 +311,11 @@ describe("Node AWS deployment guard", () => {
       fetch: async () => Response.json(taskMetadata()),
       now: () => now,
       readinessCacheMs: 60_000,
+      identity: async () => {},
       preflight,
     });
     await guard.start();
+    await guard.ready();
     now += 60_001;
 
     await expect(guard.ready()).rejects.toThrow(

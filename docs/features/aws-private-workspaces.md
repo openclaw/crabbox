@@ -191,7 +191,9 @@ rejected by the dedicated ECS path.
 
 ## Startup preflight and readiness
 
-Before the service becomes ready, the private deployment verifies:
+Before the HTTP service starts, the private deployment rejects static keys and
+verifies the ECS metadata plus exact STS task-role identity. Before the service
+becomes ready or accepts a new workspace POST, it verifies:
 
 1. ECS task metadata reports the expected account and Region from the exact
    Fargate metadata endpoint.
