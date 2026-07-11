@@ -121,7 +121,10 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		return LeaseTarget{}, fmt.Errorf("bind AWS caller account: %w", err)
 	}
 	server.Labels["aws_account_id"] = accountID
-	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+	if cfg.Tailscale.Enabled && strings.TrimSpace(cfg.Tailscale.Hostname) == "" {
+		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+	}
+	target := sshTargetForBootstrap(cfg, server.PublicNet.IPv4.IP, leaseID, slug)
 	if err := bootstrapAWSWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
 		return LeaseTarget{}, err
 	}
@@ -154,7 +157,8 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 				return LeaseTarget{}, exit(4, "lease/server not found: %s (instance exists but is not Crabbox-managed)", req.ID)
 			}
 			leaseID := blank(server.Labels["lease"], req.ID)
-			target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+			slug := strings.TrimSpace(server.Labels["slug"])
+			target := sshTargetForBootstrap(cfg, server.PublicNet.IPv4.IP, leaseID, slug)
 			useStoredTestboxKey(&target, leaseID)
 			return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 		}
@@ -170,7 +174,8 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 		return LeaseTarget{}, err
 	} else if leaseID != "" {
 		cfg := awsConfigForServer(b.Cfg, server)
-		target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+		slug := strings.TrimSpace(server.Labels["slug"])
+		target := sshTargetForBootstrap(cfg, server.PublicNet.IPv4.IP, leaseID, slug)
 		useStoredTestboxKey(&target, leaseID)
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
@@ -408,6 +413,28 @@ func providerKeyForLease(leaseID string) string          { return core.ProviderK
 func ensureAWSSSHCIDRs(ctx context.Context, cfg *Config) { core.EnsureAWSSSHCIDRs(ctx, cfg) }
 func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
+}
+
+// bootstrapSSHHost returns the address used for bootstrap readiness probes and
+// subsequent SSH dials. When Tailscale is enabled the box self-enrolls via
+// cloud-init; EC2 operators cannot reach same-account public IPs, so probe the
+// rendered tailnet hostname instead of PublicNet IPv4 (#1049).
+func bootstrapSSHHost(cfg Config, publicIP, leaseID, slug string) string {
+	if !cfg.Tailscale.Enabled {
+		return publicIP
+	}
+	hostname := strings.TrimSpace(cfg.Tailscale.Hostname)
+	if hostname == "" {
+		hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+	}
+	if hostname == "" {
+		return publicIP
+	}
+	return hostname
+}
+
+func sshTargetForBootstrap(cfg Config, publicIP, leaseID, slug string) SSHTarget {
+	return sshTargetFromConfig(cfg, bootstrapSSHHost(cfg, publicIP, leaseID, slug))
 }
 
 var bootstrapAWSWindowsDesktop = core.BootstrapAWSWindowsDesktop

@@ -1087,3 +1087,28 @@ func awsTestServer(id, leaseID, slug, region string) Server {
 	server.PublicNet.IPv4.IP = "203.0.113.20"
 	return server
 }
+
+func TestBootstrapSSHHostUsesTailscaleHostnameWhenEnabled(t *testing.T) {
+	t.Parallel()
+	cfg := Config{}
+	cfg.Provider = "aws"
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.HostnameTemplate = "crabbox-{slug}"
+	host := bootstrapSSHHost(cfg, "203.0.113.10", "cbx_testlease", "blue")
+	if host == "203.0.113.10" {
+		t.Fatalf("expected tailscale hostname, got public IP %q", host)
+	}
+	if host == "" {
+		t.Fatal("expected non-empty host")
+	}
+	// Explicit hostname wins over template.
+	cfg.Tailscale.Hostname = "explicit-host"
+	if got := bootstrapSSHHost(cfg, "203.0.113.10", "cbx_testlease", "blue"); got != "explicit-host" {
+		t.Fatalf("got %q want explicit-host", got)
+	}
+	// Disabled tailscale keeps public IP.
+	cfg.Tailscale.Enabled = false
+	if got := bootstrapSSHHost(cfg, "203.0.113.10", "cbx_testlease", "blue"); got != "203.0.113.10" {
+		t.Fatalf("got %q want public IP", got)
+	}
+}
