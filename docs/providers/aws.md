@@ -97,6 +97,7 @@ AWS_SECRET_ACCESS_KEY
 AWS_SESSION_TOKEN
 AWS_REGION
 CRABBOX_AWS_REGION                  # overrides AWS_REGION / aws.region
+CRABBOX_AWS_CREDENTIAL_SOURCE       # Node only: default-chain
 CRABBOX_AWS_AMI
 CRABBOX_AWS_SECURITY_GROUP_ID
 CRABBOX_AWS_SUBNET_ID
@@ -122,8 +123,9 @@ Notes:
   `capacity.regions` reject malformed request values before constructing a
   SigV4 endpoint; invalid environment/config fallback candidates are skipped.
 - For brokered AWS, cloud credentials live in the coordinator, not on developer
-  machines. Existing Worker deployments can inject static credentials; the
-  Node runtime also supports the AWS default credential chain. The dedicated
+  machines. Existing Worker deployments can inject static credentials. Ordinary
+  Node coordinators opt into the AWS default credential chain with
+  `CRABBOX_AWS_CREDENTIAL_SOURCE=default-chain`; the dedicated
   ECS private-workspace deployment requires its task role and rejects static
   access keys. See `crabbox config set-broker --provider aws`, the brokered IAM
   policy from `crabbox admin aws-policy`, and

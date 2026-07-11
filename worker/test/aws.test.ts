@@ -17,6 +17,7 @@ import {
   awsQuotaPreflightAttempt,
   awsRegionCandidates,
   awsReleaseHostsResult,
+  awsUbuntuOwnerForRegion,
   crabboxSSHIngressRules,
   createSecurityGroupParams,
   isAWSInstanceCleanedAfterReadinessFailure,
@@ -37,6 +38,12 @@ afterEach(() => {
 });
 
 describe("aws provider", () => {
+  it("uses Canonical's partition-specific Ubuntu publisher", () => {
+    expect(awsUbuntuOwnerForRegion("eu-west-1")).toBe("099720109477");
+    expect(awsUbuntuOwnerForRegion("us-gov-west-1")).toBe("513442679011");
+    expect(awsUbuntuOwnerForRegion("cn-north-1")).toBe("837727238323");
+  });
+
   it("rejects a canonical SSH key name reserved for another lease", async () => {
     const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>();
     vi.stubGlobal("fetch", fetchMock);

@@ -121,10 +121,12 @@ Authentication requires at least one supported coordinator identity path. Use
 signed user sessions, a shared operator token, an admin token, or a trusted
 reverse-proxy identity as documented in [Coordinator](coordinator.md) and
 [Security](../security.md). Managed-provider authentication can come from
-environment secrets or a provider default chain. On ECS, the dedicated private
-AWS deployment requires temporary task-role credentials and rejects static
-access keys. Registered direct leases need no provider credentials in the
-service.
+environment secrets or a provider default chain. Ordinary brokered AWS leases
+use the Node default chain only when
+`CRABBOX_AWS_CREDENTIAL_SOURCE=default-chain` is configured. On ECS, the
+dedicated private AWS deployment requires temporary task-role credentials and
+rejects static access keys. Registered direct leases need no provider
+credentials in the service.
 
 ## PostgreSQL state
 

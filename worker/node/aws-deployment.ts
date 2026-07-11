@@ -34,7 +34,12 @@ export function nodeCoordinatorEnv(
   source: NodeJS.ProcessEnv,
   credentialProvider: AWSCredentialProvider = nodeAWSCredentialProvider(),
 ): Env {
+  const credentialSource = source["CRABBOX_AWS_CREDENTIAL_SOURCE"]?.trim() ?? "";
+  if (credentialSource && credentialSource !== "default-chain") {
+    throw new Error("CRABBOX_AWS_CREDENTIAL_SOURCE must be default-chain");
+  }
   const useDefaultChain =
+    credentialSource === "default-chain" ||
     source["CRABBOX_WORKSPACE_PROVIDER"]?.trim() === "aws" ||
     deploymentFlag(source["CRABBOX_AWS_REQUIRE_ECS_TASK"], "CRABBOX_AWS_REQUIRE_ECS_TASK") ||
     deploymentFlag(source["CRABBOX_WORKSPACE_AWS_PRIVATE"], "CRABBOX_WORKSPACE_AWS_PRIVATE") ||

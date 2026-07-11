@@ -2306,7 +2306,7 @@ export class FleetCoordinator {
       );
     }
     if (workspaceID) {
-      config = { ...config, awsUseStockImage: config.provider === "aws" };
+      config = { ...config, awsUseStockImage: config.provider === "aws" && config.awsPrivate };
       if (!config.awsPrivate) {
         const hostKeys = workspaceSSHHostKeysFromRequest(request);
         if (!hostKeys) {

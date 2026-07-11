@@ -32,6 +32,15 @@ import type {
 } from "./types";
 
 const awsUbuntuOwner = "099720109477";
+const awsGovCloudUbuntuOwner = "513442679011";
+const awsChinaUbuntuOwner = "837727238323";
+
+export function awsUbuntuOwnerForRegion(region: string): string {
+  if (region.startsWith("us-gov-")) return awsGovCloudUbuntuOwner;
+  if (region.startsWith("cn-")) return awsChinaUbuntuOwner;
+  return awsUbuntuOwner;
+}
+
 const ec2Version = "2016-11-15";
 const stsVersion = "2011-06-15";
 const awsSpotQuotaCode = "L-34B43A08";
@@ -1940,7 +1949,7 @@ export class EC2SpotClient {
     const architecture = config.architecture === "arm64" ? "arm64" : "x86_64";
     const name = config.architecture === "arm64" ? os.awsArm64Name : os.awsName;
     return this.resolveLatestAMI(
-      awsUbuntuOwner,
+      awsUbuntuOwnerForRegion(this.region),
       name,
       architecture,
       `no ${os.awsLabel} ${architecture} AMI found in ${this.region}`,

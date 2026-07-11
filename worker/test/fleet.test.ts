@@ -5811,13 +5811,15 @@ describe("fleet lease identity and idle", () => {
 
   it("provisions missing-org workspaces without applying broker selector restrictions", async () => {
     let created = false;
+    let createdConfig: LeaseConfig | undefined;
     let restrictionChecks = 0;
     const fleet = testFleet(
       new MemoryStorage(),
       {
         aws: fakeProvider(
-          () => {
+          (config) => {
             created = true;
+            createdConfig = config;
           },
           {
             provider: "aws",
@@ -5830,6 +5832,7 @@ describe("fleet lease identity and idle", () => {
       },
       {
         CRABBOX_DEFAULT_ORG: "",
+        CRABBOX_AWS_AMI: "ami-operator-configured",
         CRABBOX_WORKSPACE_PROVIDER: "aws",
         CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-selector-test",
         CRABBOX_WORKSPACE_SSH_PRIVATE_KEY: "workspace-private-key",
@@ -5855,6 +5858,7 @@ describe("fleet lease identity and idle", () => {
     await fleet.alarm();
     expect(restrictionChecks).toBe(0);
     expect(created).toBe(true);
+    expect(createdConfig?.awsUseStockImage).toBe(false);
   });
 
   it("requires admin auth for custom provider key names before provider preparation", async () => {

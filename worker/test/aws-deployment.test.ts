@@ -63,6 +63,7 @@ describe("Node AWS deployment guard", () => {
   });
 
   it.each([
+    { CRABBOX_AWS_CREDENTIAL_SOURCE: "default-chain" },
     { CRABBOX_AWS_REQUIRE_ECS_TASK: "1" },
     { CRABBOX_WORKSPACE_AWS_PRIVATE: "1" },
     { CRABBOX_AWS_ORPHAN_SWEEP_ENABLED: "true" },
@@ -70,6 +71,12 @@ describe("Node AWS deployment guard", () => {
     const provider = vi.fn<AWSCredentialProvider>();
 
     expect(nodeCoordinatorEnv(source, provider).awsCredentialProvider).toBe(provider);
+  });
+
+  it("rejects an unknown AWS credential source", () => {
+    expect(() => nodeCoordinatorEnv({ CRABBOX_AWS_CREDENTIAL_SOURCE: "ambient-magic" })).toThrow(
+      "CRABBOX_AWS_CREDENTIAL_SOURCE must be default-chain",
+    );
   });
 
   it.each([
