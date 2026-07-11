@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
+import { markdownToHtml } from "./build-docs-site.mjs";
+
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const providersDir = path.join(repoRoot, "docs", "providers");
 const siteDir = path.join(repoRoot, "dist", "docs-site");
@@ -94,6 +96,17 @@ generatedTest("generated provider markup hides comments and preserves list struc
   assert.doesNotMatch(indexHtml, /BEGIN GENERATED PROVIDER MATRIX|END GENERATED PROVIDER MATRIX/);
   assertValidListChildren(article(indexHtml), "provider index");
   assertValidListChildren(article(awsHtml), "AWS provider");
+});
+
+test("Markdown comments remain literal inside fenced code", () => {
+  const html = markdownToHtml(
+    "```html\n<!-- marker -->\n<div>example</div>\n```\n\nVisible paragraph.",
+    "example.md",
+  );
+
+  assert.match(html, /&lt;!-- marker --&gt;/);
+  assert.match(html, /&lt;div&gt;example&lt;\/div&gt;/);
+  assert.match(html, /<p>Visible paragraph\.<\/p>/);
 });
 
 function readGenerated(relativePath) {

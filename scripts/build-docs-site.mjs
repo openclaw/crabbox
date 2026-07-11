@@ -160,7 +160,7 @@ function titleize(input) {
   return input.replaceAll("-", " ").replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
-function markdownToHtml(markdown, currentRel) {
+export function markdownToHtml(markdown, currentRel) {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const html = [];
   let paragraph = [];
@@ -188,16 +188,6 @@ function markdownToHtml(markdown, currentRel) {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (htmlComment) {
-      if (line.includes("-->")) htmlComment = false;
-      continue;
-    }
-    if (line.trimStart().startsWith("<!--")) {
-      flushParagraph();
-      closeList();
-      htmlComment = !line.includes("-->");
-      continue;
-    }
     const fenceMatch = line.match(/^```(\w+)?\s*$/);
     if (fenceMatch) {
       flushParagraph();
@@ -212,6 +202,16 @@ function markdownToHtml(markdown, currentRel) {
     }
     if (fence) {
       fence.lines.push(line);
+      continue;
+    }
+    if (htmlComment) {
+      if (line.includes("-->")) htmlComment = false;
+      continue;
+    }
+    if (line.trimStart().startsWith("<!--")) {
+      flushParagraph();
+      closeList();
+      htmlComment = !line.includes("-->");
       continue;
     }
     if (!line.trim()) {
