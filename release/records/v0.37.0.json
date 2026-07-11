@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "repository": "openclaw/crabbox",
+  "tag": "v0.37.0",
+  "tagObject": "d3e0da6a0355372bb3600ef9f2360983acd8272e",
+  "sourceCommit": "99c82134c62e0da795b6165efa6affe7140c20dd",
+  "publicationStatus": "blocked",
+  "blocker": "The tagged Apple VM helper ad-hoc re-signs its embedded VMD before execution, destroying the required Foundation Developer ID and notarization trust. Preserve this tag and release from a new signed tag containing the runtime fix."
+}
