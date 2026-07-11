@@ -121,7 +121,7 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		return LeaseTarget{}, fmt.Errorf("bind AWS caller account: %w", err)
 	}
 	server.Labels["aws_account_id"] = accountID
-	if cfg.Tailscale.Enabled && strings.TrimSpace(cfg.Tailscale.Hostname) == "" {
+	if cfg.Network == core.NetworkTailscale && cfg.Tailscale.Enabled && strings.TrimSpace(cfg.Tailscale.Hostname) == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
 	target := sshTargetForBootstrap(cfg, server.PublicNet.IPv4.IP, leaseID, slug)
@@ -157,8 +157,7 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 				return LeaseTarget{}, exit(4, "lease/server not found: %s (instance exists but is not Crabbox-managed)", req.ID)
 			}
 			leaseID := blank(server.Labels["lease"], req.ID)
-			slug := strings.TrimSpace(server.Labels["slug"])
-			target := sshTargetForBootstrap(cfg, server.PublicNet.IPv4.IP, leaseID, slug)
+			target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 			useStoredTestboxKey(&target, leaseID)
 			return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 		}
@@ -174,8 +173,7 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 		return LeaseTarget{}, err
 	} else if leaseID != "" {
 		cfg := awsConfigForServer(b.Cfg, server)
-		slug := strings.TrimSpace(server.Labels["slug"])
-		target := sshTargetForBootstrap(cfg, server.PublicNet.IPv4.IP, leaseID, slug)
+		target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 		useStoredTestboxKey(&target, leaseID)
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
@@ -415,12 +413,11 @@ func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
 
-// bootstrapSSHHost returns the address used for bootstrap readiness probes and
-// subsequent SSH dials. When Tailscale is enabled the box self-enrolls via
-// cloud-init; EC2 operators cannot reach same-account public IPs, so probe the
-// rendered tailnet hostname instead of PublicNet IPv4 (#1049).
+// bootstrapSSHHost returns the address used for the acquisition readiness probe.
+// Strict Tailscale mode cannot fall back to the public address, which can be
+// unreachable from same-account EC2 operators even after cloud-init succeeds.
 func bootstrapSSHHost(cfg Config, publicIP, leaseID, slug string) string {
-	if !cfg.Tailscale.Enabled {
+	if cfg.Network != core.NetworkTailscale || !cfg.Tailscale.Enabled {
 		return publicIP
 	}
 	hostname := strings.TrimSpace(cfg.Tailscale.Hostname)

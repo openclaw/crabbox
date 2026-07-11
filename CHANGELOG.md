@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Bootstrapped strict Tailscale AWS leases through their rendered tailnet hostname while preserving public and automatic network selection, allowing same-account EC2 operators without public-IP reachability to create leases successfully. Thanks @SebTardif.
 - Bounded coordinator lease and workspace history scans and kept saturated cleanup retry batches scheduled promptly, preventing large retained histories from exhausting Durable Object memory or stranding cleanup.
 
 ## 0.37.1 - 2026-07-11
