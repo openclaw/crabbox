@@ -287,6 +287,55 @@ export function awsCredentialsConfigured(
   );
 }
 
+export function awsAutomaticProbesConfigured(
+  env: Pick<
+    Env,
+    | "awsCredentialProvider"
+    | "AWS_ACCESS_KEY_ID"
+    | "AWS_SECRET_ACCESS_KEY"
+    | "AWS_PROFILE"
+    | "AWS_CONFIG_FILE"
+    | "AWS_SHARED_CREDENTIALS_FILE"
+    | "AWS_ROLE_ARN"
+    | "AWS_WEB_IDENTITY_TOKEN_FILE"
+    | "AWS_REGION"
+    | "AWS_DEFAULT_REGION"
+    | "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"
+    | "AWS_CONTAINER_CREDENTIALS_FULL_URI"
+    | "CRABBOX_AWS_REGION"
+    | "CRABBOX_AWS_EXPECTED_ACCOUNT_ID"
+    | "CRABBOX_AWS_EXPECTED_REGION"
+    | "CRABBOX_WORKSPACE_PROVIDER"
+  >,
+): boolean {
+  if (env.AWS_ACCESS_KEY_ID?.trim() && env.AWS_SECRET_ACCESS_KEY?.trim()) {
+    return true;
+  }
+  if (!env.awsCredentialProvider) {
+    return false;
+  }
+  const expectedIdentity = Boolean(
+    env.CRABBOX_AWS_EXPECTED_ACCOUNT_ID?.trim() && env.CRABBOX_AWS_EXPECTED_REGION?.trim(),
+  );
+  const explicitDefaultChain = Boolean(
+    env.AWS_PROFILE?.trim() ||
+    env.AWS_CONFIG_FILE?.trim() ||
+    env.AWS_SHARED_CREDENTIALS_FILE?.trim() ||
+    env.AWS_REGION?.trim() ||
+    env.AWS_DEFAULT_REGION?.trim() ||
+    env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI?.trim() ||
+    env.AWS_CONTAINER_CREDENTIALS_FULL_URI?.trim() ||
+    env.CRABBOX_AWS_REGION?.trim(),
+  );
+  const webIdentity = Boolean(env.AWS_ROLE_ARN?.trim() && env.AWS_WEB_IDENTITY_TOKEN_FILE?.trim());
+  return (
+    expectedIdentity ||
+    explicitDefaultChain ||
+    webIdentity ||
+    env.CRABBOX_WORKSPACE_PROVIDER?.trim() === "aws"
+  );
+}
+
 export function awsOrphanSweepCredentialsConfigured(
   env: Pick<
     Env,

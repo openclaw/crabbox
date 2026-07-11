@@ -16,6 +16,7 @@ import {
 } from "./auth";
 import {
   EC2SpotClient,
+  awsAutomaticProbesConfigured,
   awsCredentialsConfigured,
   awsConfiguredSecurityGroupID,
   awsOrphanSweepCredentialsConfigured,
@@ -6099,7 +6100,7 @@ export class FleetCoordinator {
       const [visibleLeases, runners, macHosts] = await Promise.all([
         this.portalVisibleLeases(request),
         this.visibleExternalRunners(request),
-        this.portalMacHosts(),
+        this.portalMacHosts(true),
       ]);
       const admin = isAdminRequest(request);
       const leases = this.filterLeases(visibleLeases, request);
@@ -6283,8 +6284,8 @@ export class FleetCoordinator {
       : leases.filter((lease) => this.leaseVisibleToRequest(lease, request, false));
   }
 
-  private async portalMacHosts(): Promise<PortalMacHostRecord[]> {
-    if (!awsCredentialsConfigured(this.env)) {
+  private async portalMacHosts(automatic = false): Promise<PortalMacHostRecord[]> {
+    if (automatic && !awsAutomaticProbesConfigured(this.env)) {
       return [];
     }
     const region = sanitizeAWSRegion(this.env.CRABBOX_AWS_REGION || "eu-west-1");
@@ -6391,7 +6392,15 @@ export class FleetCoordinator {
     provider: Provider,
     leases: PortalAdminLeaseSummary[],
   ): Promise<PortalAdminProviderStatus> {
-    const readiness = this.providerConfigurationReadiness(provider);
+    const readiness =
+      provider === "aws" && !this.testProviders.aws && !awsAutomaticProbesConfigured(this.env)
+        ? {
+            provider,
+            configured: false,
+            missing: ["explicit AWS configuration"],
+            message: "aws automatic probes are disabled until AWS is explicitly configured",
+          }
+        : this.providerConfigurationReadiness(provider);
     const providerLeases = leases.filter(
       (lease) => lease.provider === provider && lease.lifecycle !== "registered",
     );
