@@ -533,6 +533,14 @@ test("preserved v0.37.0 identity is pinned and publication-blocked without rewri
   }
 });
 
+test("v0.37.1 is pinned to the signed trust-repair source and ready for publication", () => {
+  const record = JSON.parse(read("release/records/v0.37.1.json"));
+  assert.equal(record.tag, "v0.37.1");
+  assert.equal(record.tagObject, "8ce4ec011cc1027622552d1e952b8e0ee3e60198");
+  assert.equal(record.sourceCommit, "205dcfc52b60a09239e5ef0267e4a1cdef06b7d3");
+  assert.equal(record.publicationStatus, "ready");
+});
+
 test("draft creation performs static-only verification and never deletes or replaces partial records", () => {
   const script = read("scripts/create-release-draft.sh");
   const verifyIndex = script.indexOf('env -i');
