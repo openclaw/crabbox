@@ -40,6 +40,9 @@ The supported private mode has these invariants:
   recommended small starting policy;
 - the root disk is exactly the configured encrypted gp3 size and is deleted
   with the instance. The recommended default is 20 GiB;
+- runtime image discovery filters Canonical's exact Ubuntu publisher account;
+  the task policy uses EC2's `amazon` authorization alias because that is how
+  EC2 exposes Canonical public AMIs to `RunInstances` policy evaluation;
 - the workspace subnet must be available, must not auto-assign IPv4 or IPv6,
   and must not have a direct internet-gateway default route;
 - the instance has no public IP, EC2 key pair, SSH ingress, or supported SSH
