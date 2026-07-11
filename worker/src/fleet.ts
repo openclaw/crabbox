@@ -18,6 +18,7 @@ import {
   EC2SpotClient,
   awsCredentialsConfigured,
   awsConfiguredSecurityGroupID,
+  awsOrphanSweepCredentialsConfigured,
   awsManagedSecurityGroupName,
   awsLaunchCandidates,
   awsPrivateWorkspaceConfig,
@@ -12009,7 +12010,7 @@ export class FleetCoordinator {
   }
 
   private awsOrphanSweepConfig(): AWSOrphanSweepConfig {
-    const hasAWSCredentials = awsCredentialsConfigured(this.env);
+    const hasAWSCredentials = awsOrphanSweepCredentialsConfigured(this.env);
     const enabled =
       hasAWSCredentials && !envFlagDisabled(this.env.CRABBOX_AWS_ORPHAN_SWEEP_ENABLED);
     return {
