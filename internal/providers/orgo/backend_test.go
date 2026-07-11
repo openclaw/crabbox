@@ -201,7 +201,7 @@ func TestRunCreatesExecutesAndDeletesTemporaryWorkspace(t *testing.T) {
 		Repo:       Repo{Root: t.TempDir()},
 		NoSync:     true,
 		Command:    []string{"printf", "crabbox-orgo-ok"},
-		Env:        map[string]string{"EXAMPLE_TOKEN": "secret value"},
+		Env:        map[string]string{"EXAMPLE_TOKEN": "test value"},
 		EnvSummary: true,
 	})
 	if err != nil {

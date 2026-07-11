@@ -2158,7 +2158,7 @@ func TestConfigMergeIgnoresRepositoryOrgoCredential(t *testing.T) {
 	if err := applyFileConfigWithTrust(&cfg, fileConfig{
 		Orgo: &fileOrgoConfig{
 			APIBase: "https://repo.example.test",
-			APIKey:  "project-secret",
+			APIKey:  "test-key",
 		},
 	}, false); err != nil {
 		t.Fatal(err)
