@@ -6,7 +6,11 @@ import { fileURLToPath, URL as NodeURL } from "node:url";
 
 import { prepareCoordinatorRequest, routeCoordinatorRequest } from "../src/coordinator-entry";
 import { FleetCoordinator } from "../src/fleet";
-import { createAWSDeploymentGuard, nodeCoordinatorEnv } from "./aws-deployment";
+import {
+  createAWSDeploymentGuard,
+  nodeCoordinatorEnv,
+  requiresAWSDeploymentReadiness,
+} from "./aws-deployment";
 import { NodeCoordinatorRuntime, type NodeUpgradeContext } from "./node-runtime";
 import {
   AsyncMutex,
@@ -99,6 +103,19 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
         request.destroy();
       }
       return;
+    }
+    if (requiresAWSDeploymentReadiness(prepared.request)) {
+      try {
+        await awsDeployment.ready();
+      } catch {
+        await writeResponse(
+          response,
+          Response.json({ error: "dependency_unavailable" }, { status: 503 }),
+          true,
+        );
+        request.destroy();
+        return;
+      }
     }
     const webRequest = await requestWithNodeBody(
       prepared.request,
