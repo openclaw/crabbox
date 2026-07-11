@@ -166,7 +166,9 @@ write_files:
       git --version
       curl --version >/dev/null
       jq --version >/dev/null
-      runuser -u ${config.sshUser} -- test -w ${config.workRoot}
+      test -d ${config.workRoot}/workspaces
+      test ! -L ${config.workRoot}
+      test ! -L ${config.workRoot}/workspaces
       if systemctl list-unit-files amazon-ssm-agent.service >/dev/null 2>&1; then
         systemctl is-active --quiet amazon-ssm-agent.service
       else
@@ -202,8 +204,8 @@ runcmd:
     fi
     retry apt-get update
     retry apt-get install -y --no-install-recommends ca-certificates curl git jq util-linux
-    install -d -m 0755 ${config.workRoot} /var/lib/crabbox
-    chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot}
+    install -d -m 0755 -o root -g root ${config.workRoot} ${config.workRoot}/workspaces
+    install -d -m 0755 /var/lib/crabbox
     touch /var/lib/crabbox/bootstrapped
     crabbox-ready
     BOOT

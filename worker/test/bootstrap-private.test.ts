@@ -26,7 +26,10 @@ describe("private AWS cloud-init", () => {
     expect(got).toContain(
       "retry apt-get install -y --no-install-recommends ca-certificates curl git jq util-linux",
     );
-    expect(got).toContain("runuser -u crabbox -- test -w /work/crabbox");
+    expect(got).toContain(
+      "install -d -m 0755 -o root -g root /work/crabbox /work/crabbox/workspaces",
+    );
+    expect(got).not.toContain("chown -R crabbox:crabbox /work/crabbox");
     expect(got).toContain("test -f /var/lib/crabbox/bootstrapped");
   });
 

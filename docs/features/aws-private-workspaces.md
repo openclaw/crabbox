@@ -116,8 +116,8 @@ creates the deployment-owned control plane:
 - an internal HTTPS Application Load Balancer with an explicit client CIDR;
 - retained coordinator and workspace-SSM CloudWatch log groups plus ECS
   Container Insights;
-- deployment circuit-breaker rollback and an ALB readiness check on
-  `/v1/ready`.
+- deployment circuit-breaker rollback and an ALB liveness check on
+  `/v1/health`; client admission uses the stricter readiness route.
 
 The template deliberately expects existing account-owned dependencies rather
 than creating reusable shared infrastructure:
@@ -212,9 +212,11 @@ resource: its IAM condition depends on tags on the live instance. The first
 AWS-GO canary proves termination permission by deleting its real canary and
 waiting for `terminated`.
 
-`GET /v1/health` is liveness only. The load balancer and consumers must use
+`GET /v1/health` is liveness only and keeps status/delete routes reachable when
+a launch dependency later fails. The load balancer uses liveness; clients use
 `GET /v1/ready`. A failed identity, policy, network, permission, or database
-check keeps readiness closed and prevents workspace launch.
+check keeps readiness closed, makes new workspace POSTs return `503`, and does
+not block observation or cleanup of existing workspaces.
 
 ## Client API contract
 
@@ -351,7 +353,7 @@ aws cloudformation deploy \
 ```
 
 Confirm the stack reaches `CREATE_COMPLETE` or `UPDATE_COMPLETE`, the ECS
-service has one healthy task, and the canonical hostname reaches
+service has one healthy task on `/v1/health`, and the canonical hostname reaches
 `/v1/ready`. A failed deployment circuit breaker should roll the task back;
 inspect the task stop reason and CloudWatch logs before retrying.
 
