@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,12 @@ import (
 )
 
 const defaultEndpoint = "https://api.us.ovhcloud.com/1.0"
+
+var (
+	errOVHCrossOriginRedirect = errors.New("ovh refused cross-origin redirect")
+	errOVHInvalidRedirect     = errors.New("ovh refused invalid redirect")
+	errOVHRedirectLimit       = errors.New("ovh redirect stopped after 10 redirects")
+)
 
 type clientConfig struct {
 	Endpoint          string
@@ -229,6 +236,7 @@ func newClientWithConfig(cfg clientConfig) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
+	httpClient = secureOVHHTTPClient(httpClient, endpoint)
 	return &Client{
 		endpoint:          endpoint,
 		applicationKey:    applicationKey,
@@ -239,6 +247,64 @@ func newClientWithConfig(cfg clientConfig) (*Client, error) {
 			return time.Now().Unix()
 		},
 	}, nil
+}
+
+func secureOVHHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
+	client := *source
+	originalCheckRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameOVHOrigin(trusted, req.URL) {
+			return errOVHCrossOriginRedirect
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errOVHRedirectLimit
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameOVHOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveOVHPort(a) == effectiveOVHPort(b)
+}
+
+func effectiveOVHPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
+
+func sanitizeOVHClientError(err error) error {
+	// net/http wraps redirect failures with the untrusted Location URL. Return
+	// only stable sentinels so provider diagnostics cannot retain it.
+	if errors.Is(err, errOVHCrossOriginRedirect) {
+		return errOVHCrossOriginRedirect
+	}
+	if errors.Is(err, errOVHRedirectLimit) {
+		return errOVHRedirectLimit
+	}
+	var requestErr *url.Error
+	if errors.As(err, &requestErr) && strings.Contains(requestErr.Err.Error(), "failed to parse Location header") {
+		return errOVHInvalidRedirect
+	}
+	if err != nil && strings.Contains(err.Error(), "invalid redirect location") {
+		return errOVHInvalidRedirect
+	}
+	return err
 }
 
 func (c *Client) AuthTime(ctx context.Context) (int64, error) {
@@ -362,7 +428,7 @@ func (c *Client) do(ctx context.Context, method, requestPath string, body any, o
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return sanitizeOVHClientError(err)
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(resp.Body)

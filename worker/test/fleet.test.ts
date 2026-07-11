@@ -10211,13 +10211,17 @@ describe("fleet lease identity and idle", () => {
 
   it("does not postpone the first AWS orphan sweep alarm on repeated scheduling", async () => {
     const storage = new MemoryStorage();
+    const now = new Date();
     storage.seed(
       "lease:cbx_000000000001",
       testLease({
         id: "cbx_000000000001",
         owner: "alice@example.com",
         org: "example-org",
-        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        lastTouchedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
       }),
     );
     const fleet = testFleet(
@@ -15478,6 +15482,82 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("keeps expired managed leases inside active limits and rejects heartbeat revival", async () => {
+    const storage = new MemoryStorage();
+    let created = false;
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(
+          () => {
+            created = true;
+          },
+          { provider: "aws" },
+        ),
+      },
+      { CRABBOX_MAX_ACTIVE_LEASES: "1" },
+    );
+    const lastTouchedAt = new Date(Date.now() - 120_000).toISOString();
+    const expiresAt = new Date(Date.now() - 60_000).toISOString();
+    const cleanupRetryAt = new Date(Date.now() + 300_000).toISOString();
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "aws",
+        owner: "alice@example.com",
+        org: "example-org",
+        lastTouchedAt,
+        expiresAt,
+        cleanupAttempts: 1,
+        cleanupError: "provider cleanup failed",
+        cleanupRetryAt,
+      }),
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "cf-connecting-ip": "203.0.113.7",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          class: "standard",
+          serverType: "c7a.8xlarge",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(429);
+    await expect(create.json()).resolves.toMatchObject({
+      error: "cost_limit_exceeded",
+      message: "active lease limit exceeded: 2/1",
+    });
+    expect(created).toBe(false);
+
+    const heartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_000000000001/heartbeat", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { idleTimeoutSeconds: 900 },
+      }),
+    );
+    expect(heartbeat.status).toBe(409);
+    await expect(heartbeat.json()).resolves.toMatchObject({ error: "lease_expired" });
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000001")).toMatchObject({
+      lastTouchedAt,
+      expiresAt,
+      cleanupAttempts: 1,
+      cleanupError: "provider cleanup failed",
+      cleanupRetryAt,
+    });
+  });
+
   it("requires admin auth for new AWS macOS host pins but reactivates an owner's retained Mac", async () => {
     let created = false;
     let preparedProviderKey = "";
@@ -17649,6 +17729,223 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it("keeps Daytona SSH tokens out of shared lease responses without refreshing them", async () => {
+    const storage = new MemoryStorage();
+    let refreshes = 0;
+    const now = new Date();
+    const storedToken = "daytona-expiring-token";
+    const refreshedToken = "daytona-refreshed-token";
+    const fleet = testFleet(storage, {
+      daytona: fakeProvider(undefined, {
+        provider: "daytona",
+        onRefreshLeaseAccessForResolution: (lease) => {
+          refreshes += 1;
+          return {
+            ...lease,
+            sshUser: refreshedToken,
+            providerAccessExpiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          };
+        },
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "shared-daytona",
+        provider: "daytona",
+        cloudID: "sandbox-one",
+        owner: "alice@example.com",
+        org: "example-org",
+        sshUser: storedToken,
+        providerAccessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        share: {
+          users: {
+            "viewer@example.com": "use",
+            "manager@example.com": "manage",
+          },
+        },
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        lastTouchedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const viewerHeaders = {
+      "x-crabbox-owner": "viewer@example.com",
+      "x-crabbox-org": "other-org",
+    };
+    const managerHeaders = {
+      "x-crabbox-owner": "manager@example.com",
+      "x-crabbox-org": "other-org",
+    };
+    const adminHeaders = {
+      "x-crabbox-admin": "true",
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const expectRedacted = async (response: Response, status = 200) => {
+      expect(response.status).toBe(status);
+      const body = await response.text();
+      expect(body).toContain('"sshUser":"<token>"');
+      expect(body).not.toContain(storedToken);
+      expect(body).not.toContain(refreshedToken);
+    };
+
+    await expectRedacted(
+      await fleet.fetch(request("GET", "/v1/leases/shared-daytona", { headers: viewerHeaders })),
+    );
+    await expectRedacted(
+      await fleet.fetch(request("GET", "/v1/leases/shared-daytona", { headers: managerHeaders })),
+    );
+    expect(refreshes).toBe(0);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000001")?.sshUser).toBe(storedToken);
+
+    const adminResponse = await fleet.fetch(
+      request("GET", "/v1/leases/shared-daytona", { headers: adminHeaders }),
+    );
+    expect(adminResponse.status).toBe(200);
+    await expect(adminResponse.json()).resolves.toMatchObject({
+      lease: { sshUser: refreshedToken },
+    });
+    expect(refreshes).toBe(1);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000001")?.sshUser).toBe(refreshedToken);
+
+    await expectRedacted(
+      await fleet.fetch(
+        request("POST", "/v1/leases/shared-daytona/heartbeat", {
+          headers: managerHeaders,
+          body: { idleTimeoutSeconds: 2400 },
+        }),
+      ),
+    );
+    await expectRedacted(
+      await fleet.fetch(
+        request("POST", "/v1/leases/shared-daytona/heartbeat", {
+          headers: { ...managerHeaders, "cf-connecting-ip": "203.0.113.7" },
+          body: { idleTimeoutSeconds: 2400 },
+        }),
+      ),
+    );
+    await expectRedacted(
+      await fleet.fetch(
+        request("POST", "/v1/leases/shared-daytona/tailscale", {
+          headers: managerHeaders,
+          body: { ipv4: "100.64.0.10", state: "ready" },
+        }),
+      ),
+    );
+    await expectRedacted(
+      await fleet.fetch(
+        request("POST", "/v1/leases/shared-daytona/release", {
+          headers: managerHeaders,
+          body: { delete: false },
+        }),
+      ),
+    );
+
+    const pendingLease = testLease({
+      id: "cbx_000000000002",
+      slug: "pending-daytona",
+      provider: "daytona",
+      lifecycle: "registered",
+      owner: "alice@example.com",
+      org: "my org",
+      sshUser: refreshedToken,
+      share: { users: { "manager@example.com": "manage" } },
+      runtimeAdapterID: "daytona-adapter",
+      runtimeAdapterWorkspaceID: "daytona-workspace-pending",
+      runtimeAdapterRegistrationID: "daytona-registration-pending",
+      runtimeAdapterDeleteRequestedAt: now.toISOString(),
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      lastTouchedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${pendingLease.id}`, pendingLease);
+    const pendingResponse = await fleet.fetch(
+      request("POST", `/v1/leases/${pendingLease.id}/release`, {
+        headers: managerHeaders,
+        body: { delete: false },
+      }),
+    );
+    await expectRedacted(pendingResponse.clone(), 409);
+    await expect(pendingResponse.json()).resolves.toMatchObject({ lease: { org: "my org" } });
+
+    const cleanupLease = testLease({
+      id: "cbx_000000000004",
+      slug: "cleanup-daytona",
+      provider: "daytona",
+      owner: "alice@example.com",
+      org: "example-org",
+      sshUser: refreshedToken,
+      share: { users: { "manager@example.com": "manage" } },
+      cleanupStartedAt: now.toISOString(),
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      lastTouchedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${cleanupLease.id}`, cleanupLease);
+    await expectRedacted(
+      await fleet.fetch(
+        request("POST", `/v1/leases/${cleanupLease.id}/release`, {
+          headers: managerHeaders,
+          body: { delete: false },
+        }),
+      ),
+      409,
+    );
+
+    const deletingLease = testLease({
+      ...pendingLease,
+      id: "cbx_000000000003",
+      slug: "deleting-daytona",
+      org: "example-org",
+      runtimeAdapterWorkspaceID: "daytona-workspace-deleting",
+      runtimeAdapterRegistrationID: "daytona-registration-deleting",
+      runtimeAdapterDeleteRequestedAt: undefined,
+    });
+    storage.seed("runtime-adapter-identity:daytona-adapter", {
+      adapterID: "daytona-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: now.toISOString(),
+    });
+    storage.seed(`lease:${deletingLease.id}`, deletingLease);
+    const adapterSocket = new FakeWebSocket({
+      kind: "runtime-adapter-agent",
+      adapterID: "daytona-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+    });
+    const relayState = fleet as unknown as { runtimeAdapterAgents: Map<string, WebSocket> };
+    relayState.runtimeAdapterAgents.set("daytona-adapter", adapterSocket as unknown as WebSocket);
+    adapterSocket.onSend = (data) => {
+      const message = JSON.parse(data) as { id: string };
+      void fleet.webSocketMessage(
+        adapterSocket as unknown as WebSocket,
+        JSON.stringify({
+          type: "response",
+          id: message.id,
+          status: 202,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: deletingLease.runtimeAdapterWorkspaceID, status: "stopping" }),
+        }),
+      );
+    };
+    await expectRedacted(
+      await fleet.fetch(
+        request("POST", `/v1/leases/${deletingLease.id}/release`, {
+          headers: managerHeaders,
+          body: { delete: true },
+        }),
+      ),
+      202,
+    );
+    expect(refreshes).toBe(1);
+  });
+
   it("fails closed without an isolated Code origin while retaining health and bridge tickets", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -19606,6 +19903,24 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBe(Date.parse(issuedHandoffBody.expiresAt));
     expect(issuedHandoffBody).not.toHaveProperty("username");
     expect(issuedHandoffBody).not.toHaveProperty("password");
+    const storedHandoffs = await storage.list<Record<string, unknown>>({
+      prefix: "webvnc-credential-handoff:",
+    });
+    expect(storedHandoffs.size).toBe(1);
+    const [storedKey, storedHandoff] = [...storedHandoffs.entries()][0]!;
+    expect(storedKey).toMatch(/^webvnc-credential-handoff:cbx_000000000001:[a-f0-9]{64}$/);
+    expect(storedKey).not.toContain(issuedHandoffBody.ticket.slice("vnc_handoff_".length));
+    expect(JSON.stringify({ storedKey, storedHandoff })).not.toContain(issuedHandoffBody.ticket);
+    expect(JSON.stringify(storedHandoff)).not.toContain("vnc-user");
+    expect(JSON.stringify(storedHandoff)).not.toContain("generated-vnc-password");
+    expect(storedHandoff).toMatchObject({
+      version: 1,
+      leaseID: "cbx_000000000001",
+      expiresAt: issuedHandoffBody.expiresAt,
+    });
+    expect(storedHandoff).not.toHaveProperty("ticket");
+    expect(storedHandoff).not.toHaveProperty("username");
+    expect(storedHandoff).not.toHaveProperty("password");
 
     const apiCannotRedeem = await fleet.fetch(
       request("POST", "/v1/leases/blue-lobster/webvnc/handoff", {
@@ -19637,6 +19952,19 @@ describe("fleet lease identity and idle", () => {
     );
     expect(outsiderCannotRedeem.status).toBe(404);
 
+    const wrongTicket = `${issuedHandoffBody.ticket.slice(0, -1)}${issuedHandoffBody.ticket.endsWith("0") ? "1" : "0"}`;
+    const wrongTicketCannotRedeem = await fleet.fetch(
+      request("POST", "/portal/leases/blue-lobster/vnc/handoff", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { ticket: wrongTicket },
+      }),
+    );
+    expect(wrongTicketCannotRedeem.status).toBe(401);
+    expect((await storage.list({ prefix: "webvnc-credential-handoff:" })).size).toBe(1);
+
     const redeemedHandoff = await fleet.fetch(
       request("POST", "/portal/leases/blue-lobster/vnc/handoff", {
         headers: {
@@ -19663,6 +19991,38 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(replayedHandoff.status).toBe(401);
+
+    const tamperedHandoff = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/webvnc/handoff", {
+        headers,
+        body: { username: "tampered-user", password: "tampered-password" },
+      }),
+    );
+    expect(tamperedHandoff.status).toBe(200);
+    const tamperedHandoffBody = (await tamperedHandoff.json()) as { ticket: string };
+    const tamperedStoredHandoffs = await storage.list<Record<string, unknown>>({
+      prefix: "webvnc-credential-handoff:",
+    });
+    expect(tamperedStoredHandoffs.size).toBe(1);
+    const [tamperedStoredKey, tamperedStoredHandoff] = [...tamperedStoredHandoffs.entries()][0]!;
+    const originalCiphertext = tamperedStoredHandoff.ciphertext;
+    expect(originalCiphertext).toEqual(expect.stringMatching(/^[a-f0-9]+$/));
+    const ciphertext = originalCiphertext as string;
+    await storage.put(tamperedStoredKey, {
+      ...tamperedStoredHandoff,
+      ciphertext: `${ciphertext.slice(0, -1)}${ciphertext.endsWith("0") ? "1" : "0"}`,
+    });
+    const tamperedCannotRedeem = await fleet.fetch(
+      request("POST", "/portal/leases/blue-lobster/vnc/handoff", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { ticket: tamperedHandoffBody.ticket },
+      }),
+    );
+    expect(tamperedCannotRedeem.status).toBe(401);
+    expect((await storage.list({ prefix: "webvnc-credential-handoff:" })).size).toBe(0);
 
     const invalidTheme = await fleet.fetch(
       request("POST", "/portal/leases/blue-lobster/vnc/theme", {
@@ -23074,6 +23434,21 @@ describe("fleet run history", () => {
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
     );
+    const expiredTouchedAt = new Date(Date.now() - 120_000).toISOString();
+    const expiredRetryAt = new Date(Date.now() + 300_000).toISOString();
+    storage.seed(
+      "lease:cbx_000000000003",
+      testLease({
+        id: "cbx_000000000003",
+        slug: "expired-lobster",
+        owner: "peter@example.com",
+        org: "openclaw",
+        lastTouchedAt: expiredTouchedAt,
+        expiresAt: new Date(Date.now() - 60_000).toISOString(),
+        cleanupAttempts: 1,
+        cleanupRetryAt: expiredRetryAt,
+      }),
+    );
     storage.seed(
       "run:run_000000000001",
       testRun({
@@ -23152,6 +23527,22 @@ describe("fleet run history", () => {
       leaseID: "cbx_000000000002",
       ok: false,
       error: "workspace_managed_lease",
+    });
+
+    await fleet.webSocketMessage(
+      socket as unknown as WebSocket,
+      JSON.stringify({ type: "heartbeat", leaseID: "cbx_000000000003" }),
+    );
+    expect(socket.sentJSON()[4]).toMatchObject({
+      type: "heartbeat",
+      leaseID: "cbx_000000000003",
+      ok: false,
+      error: "lease_expired",
+    });
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000003")).toMatchObject({
+      lastTouchedAt: expiredTouchedAt,
+      cleanupAttempts: 1,
+      cleanupRetryAt: expiredRetryAt,
     });
   });
 

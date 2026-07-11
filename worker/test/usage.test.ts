@@ -170,6 +170,50 @@ describe("usage accounting", () => {
     );
   });
 
+  it.each(["active", "provisioning"] as const)(
+    "counts expired %s records against active lease limits until cleanup completes",
+    (state) => {
+      const now = new Date("2026-05-01T02:00:00Z");
+      const existing = testLease({
+        state,
+        expiresAt: "2026-05-01T01:00:00Z",
+      });
+      const candidate = testLease({
+        id: "cbx_expired_limit_candidate",
+        createdAt: now.toISOString(),
+        expiresAt: "2026-05-01T03:00:00Z",
+      });
+
+      expect(
+        enforceCostLimits(
+          [existing],
+          candidate,
+          { ...costLimits({} as never), maxActiveLeases: 1 },
+          now,
+        ),
+      ).toContain("active lease limit exceeded: 2/1");
+      expect(
+        enforceCostLimits(
+          [existing],
+          candidate,
+          { ...costLimits({} as never), maxActiveLeasesPerOwner: 1 },
+          now,
+        ),
+      ).toContain("active lease limit for owner exceeded: 2/1");
+      expect(
+        enforceCostLimits(
+          [existing],
+          candidate,
+          { ...costLimits({} as never), maxActiveLeasesPerOrg: 1 },
+          now,
+        ),
+      ).toContain("active lease limit for org exceeded: 2/1");
+      expect(usageSummary([existing], { scope: "all", month: "2026-05" }, now).activeLeases).toBe(
+        1,
+      );
+    },
+  );
+
   it("keeps legacy reservations in matching monthly org budgets", () => {
     const now = new Date("2026-05-01T02:00:00Z");
     const legacy = testLease({

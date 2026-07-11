@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
 )
 
 func (a App) results(ctx context.Context, args []string) error {
@@ -64,20 +65,7 @@ func printTestResults(out io.Writer, results TestResultSummary) {
 	}
 	fmt.Fprintln(out, "failed:")
 	for _, failure := range results.Failed {
-		name := failure.Name
-		if failure.Classname != "" {
-			name = failure.Classname + "." + name
-		}
-		location := failure.File
-		if location == "" {
-			location = failure.Suite
-		}
-		fmt.Fprintf(out, "  %s %-8s %s", blank(location, "-"), failure.Kind, name)
-		msg := strings.TrimSpace(failure.Message)
-		if msg != "" {
-			fmt.Fprintf(out, " — %s", firstLine(msg))
-		}
-		fmt.Fprintln(out)
+		printTestFailure(out, failure)
 	}
 }
 
@@ -100,20 +88,57 @@ func nonNilTestFailures(failures []TestFailure) []TestFailure {
 }
 
 func printTestFailure(out io.Writer, failure TestFailure) {
-	name := failure.Name
-	if failure.Classname != "" {
-		name = failure.Classname + "." + name
-	}
-	location := failure.File
-	if location == "" {
-		location = failure.Suite
-	}
-	fmt.Fprintf(out, "  %s %-8s %s", blank(location, "-"), failure.Kind, name)
-	msg := strings.TrimSpace(failure.Message)
-	if msg != "" {
-		fmt.Fprintf(out, " — %s", firstLine(msg))
+	display := terminalSafeTestFailure(failure)
+	fmt.Fprintf(out, "  %s %-8s %s", display.location, display.kind, display.name)
+	if display.message != "" {
+		fmt.Fprintf(out, " — %s", display.message)
 	}
 	fmt.Fprintln(out)
+}
+
+type displayedTestFailure struct {
+	location string
+	kind     string
+	name     string
+	message  string
+}
+
+func terminalSafeTestFailure(failure TestFailure) displayedTestFailure {
+	name := terminalSafeResultField(failure.Name)
+	if failure.Classname != "" {
+		name = terminalSafeResultField(failure.Classname) + "." + name
+	}
+	location := firstNonBlank(failure.File, failure.Suite, "-")
+	message := strings.TrimSpace(failure.Message)
+	if message != "" {
+		message = terminalSafeResultField(firstLine(message))
+	}
+	return displayedTestFailure{
+		location: terminalSafeResultField(location),
+		kind:     terminalSafeResultField(failure.Kind),
+		name:     name,
+		message:  message,
+	}
+}
+
+func terminalSafeResultField(value string) string {
+	var out strings.Builder
+	for _, r := range value {
+		if !isTerminalControl(r) {
+			out.WriteRune(r)
+			continue
+		}
+		if r <= 0xffff {
+			fmt.Fprintf(&out, `\u%04X`, r)
+		} else {
+			fmt.Fprintf(&out, `\U%08X`, r)
+		}
+	}
+	return out.String()
+}
+
+func isTerminalControl(r rune) bool {
+	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
 }
 
 func firstLine(value string) string {

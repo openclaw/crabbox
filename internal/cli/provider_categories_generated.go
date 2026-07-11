@@ -52,6 +52,7 @@ var benchmarkProviderCategories = map[string]string{
 	"nvidia-brev":                "gpu-cloud",
 	"opencomputer":               "delegated-sandbox",
 	"opensandbox":                "delegated-sandbox",
+	"orgo":                       "delegated-sandbox",
 	"ovh":                        "direct-cloud",
 	"parallels":                  "local-vm",
 	"phala":                      "direct-cloud",

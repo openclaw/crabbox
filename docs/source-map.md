@@ -245,8 +245,9 @@ Provider docs:
 - Go module and toolchain version: `go.mod`
 - Go core coverage gate: `scripts/check-go-coverage.sh`
 - CI gate: `.github/workflows/ci.yml`
-- Release workflow and Homebrew tap fallback: `.github/workflows/release.yml`
-- GoReleaser archives and Homebrew formula config: `.goreleaser.yaml`
+- Protected native release verifier: `.github/workflows/release-assets.yml`
+- Credential-free GoReleaser archive config: `.goreleaser.yaml`
+- Local signing, draft, publication, and downstream proof contract: `docs/RELEASING.md`, `scripts/package-release.sh`, `scripts/create-release-draft.sh`, `scripts/publish-release.sh`, `scripts/verify-homebrew-release.sh`
 - Docs command-surface check, link check, site builder, and Pages deploy: `scripts/check-command-docs.mjs`, `scripts/check-docs-links.mjs`, `scripts/build-docs-site.mjs`, `.github/workflows/pages.yml`
 - Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-vultr-smoke.sh`, `scripts/live-vast-smoke.sh`, and `scripts/live-superserve-smoke.sh`
 - Live coordinator auth smoke coverage: `scripts/live-auth-smoke.sh`

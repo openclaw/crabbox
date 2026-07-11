@@ -84,6 +84,9 @@ are quoted in EUR and converted to USD by multiplying with `CRABBOX_EUR_TO_USD`
 Budgets are enforced on lease creation. Exceeding any active-lease limit or monthly
 reserved-USD budget rejects the request with HTTP 429 (`cost_limit_exceeded`). All
 budgets default to `off` when their environment variable is unset or non-positive.
+Active limits keep counting a live managed lease after its heartbeat deadline until
+cleanup commits a terminal state, because its provider resource may still exist. The
+usage summary's active count uses the same definition.
 
 ```text
 CRABBOX_MAX_ACTIVE_LEASES            fleet-wide active lease cap

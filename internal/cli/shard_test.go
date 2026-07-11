@@ -297,7 +297,7 @@ func TestShardInfraFailureTakesPrecedenceOverCommandFailure(t *testing.T) {
 func TestShardMergedVerdict(t *testing.T) {
 	provisioner := newShardTestProvisioner()
 	executor := newShardTestExecutor()
-	executor.outcomes[1] = recordedOutcome(0, &TestResultSummary{Format: "junit", Suites: 1, Tests: 10, Failures: 1, TimeSeconds: 2.5, Failed: []TestFailure{{Suite: "pkg", Name: "TestA", Kind: "failure", Message: "boom"}}})
+	executor.outcomes[1] = recordedOutcome(0, &TestResultSummary{Format: "junit", Suites: 1, Tests: 10, Failures: 1, TimeSeconds: 2.5, Failed: []TestFailure{{Suite: "pkg\x1b]0;suite\x07", Name: "TestA\rhidden", Kind: "failure", Message: "boom\x1b]8;;https://example.test\x07link"}}})
 	executor.outcomes[2] = recordedOutcome(0, &TestResultSummary{Format: "junit", Suites: 1, Tests: 20, Skipped: 2, TimeSeconds: 3.5})
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: io.Discard}
@@ -310,12 +310,15 @@ func TestShardMergedVerdict(t *testing.T) {
 		"shard verdict shards=2 failed_shards=0 tests=30 failures=1 errors=0 skipped=2 suite_time=6.000s",
 		"failed:",
 		"[1/2] run=run_test",
-		"TestA",
+		`pkg\u001B]0;suite\u0007`,
+		`TestA\u000Dhidden`,
+		`boom\u001B]8;;https://example.test\u0007link`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q:\n%s", want, out)
 		}
 	}
+	assertTerminalSafe(t, out)
 }
 
 func TestShardFailOnTestFailuresAppliesToMergedSummary(t *testing.T) {

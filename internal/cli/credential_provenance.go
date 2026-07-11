@@ -52,6 +52,8 @@ type credentialDestinationProvenance struct {
 	railwayAPIToken       credentialValueSource
 	fastAPICloudAPIURL    credentialValueSource
 	fastAPICloudToken     credentialValueSource
+	orgoAPIBase           credentialValueSource
+	orgoAPIKey            credentialValueSource
 	unikraftCloudAPIURL   credentialValueSource
 	unikraftCloudAPIKey   credentialValueSource
 	runpodAPIURL          credentialValueSource
@@ -197,6 +199,9 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "fastapi-cloud-url") {
 		provenance.fastAPICloudAPIURL = credentialSourceFlag
+	}
+	if flagWasSet(fs, "orgo-api-base") {
+		provenance.orgoAPIBase = credentialSourceFlag
 	}
 	if flagWasSet(fs, "unikraft-cloud-url") {
 		provenance.unikraftCloudAPIURL = credentialSourceFlag
@@ -360,6 +365,11 @@ func validateProviderCredentialDestination(cfg Config) error {
 		if provenance.fastAPICloudAPIURL == credentialSourceRepository &&
 			inheritedCredential(sourcedCredential{cfg.FastAPICloud.Token, provenance.fastAPICloudToken}) {
 			return repositoryCredentialDestinationError("fastapi-cloud", "fastapiCloud.apiUrl", "CRABBOX_FASTAPI_CLOUD_API_URL or --fastapi-cloud-url")
+		}
+	case "orgo":
+		if provenance.orgoAPIBase == credentialSourceRepository &&
+			inheritedCredential(sourcedCredential{cfg.Orgo.APIKey, provenance.orgoAPIKey}) {
+			return repositoryCredentialDestinationError("orgo", "orgo.apiBase", "CRABBOX_ORGO_API_BASE or --orgo-api-base")
 		}
 	case "unikraft-cloud":
 		if provenance.unikraftCloudAPIURL == credentialSourceRepository &&

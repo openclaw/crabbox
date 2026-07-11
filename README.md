@@ -3,7 +3,7 @@
 ![Crabbox banner](docs/assets/readme-banner.jpg)
 
 [![CI](https://github.com/openclaw/crabbox/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/openclaw/crabbox/actions/workflows/ci.yml)
-[![Release](https://github.com/openclaw/crabbox/actions/workflows/release.yml/badge.svg?event=repository_dispatch)](https://github.com/openclaw/crabbox/actions/workflows/release.yml)
+[![Release verification](https://github.com/openclaw/crabbox/actions/workflows/release-assets.yml/badge.svg)](https://github.com/openclaw/crabbox/actions/workflows/release-assets.yml)
 [![Latest release](https://badgen.net/github/release/openclaw/crabbox/stable)](https://github.com/openclaw/crabbox/releases/latest)
 
 **Warm a box, sync the diff, run the suite.**
@@ -137,8 +137,8 @@ crabbox --version
 No Homebrew? Grab a [GoReleaser archive](https://github.com/openclaw/crabbox/releases)
 for macOS, Linux, or Windows.
 
-Apple Silicon Homebrew bottles and archives also include the native
-`crabbox-apple-vm-helper` used by the local Apple VZ provider.
+The Apple Silicon Homebrew install uses the release archive that also contains
+the native `crabbox-apple-vm-helper` for the local Apple VZ provider.
 
 Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 
@@ -540,9 +540,12 @@ CRABBOX_BIN=./bin/crabbox scripts/live-firecracker-smoke.sh
 
 CI runs the full gate (gofmt, vet, race tests, all Go modules, coverage
 threshold, repository script tests, docs link/build check, GoReleaser snapshot, and Worker
-lint/typecheck/tests/build) on every push and PR. Tagged pushes matching `v*`
-publish Go archives via GoReleaser and bump the Homebrew formula at
-[openclaw/homebrew-tap](https://github.com/openclaw/homebrew-tap).
+lint/typecheck/tests/build) on every push and PR. Production releases use a
+serialized, draft-first process: preserve and verify the signed tag, build and
+Developer ID sign/notarize the macOS candidates locally, verify the exact draft
+on native Apple Silicon and Intel runners from protected-default code, then
+authorize publication and the Homebrew update as separate gates. See
+[Release engineering](docs/RELEASING.md).
 
 Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment live in
 [docs/infrastructure.md](docs/infrastructure.md).
@@ -555,7 +558,7 @@ Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment liv
 - **Advanced features:** [Actions hydration](docs/features/actions-hydration.md), [Capsules](docs/features/capsules.md), [Checkpoints](docs/features/checkpoints.md), [Jobs](docs/features/jobs.md), [Pond](docs/features/pond.md)
 - **Interactive QA:** [Interactive Desktop and VNC](docs/features/interactive-desktop-vnc.md), [Artifacts](docs/features/artifacts.md), [Portal](docs/features/portal.md)
 - **Integrate infrastructure:** [Bring Your Own Infrastructure](docs/features/bring-your-own-infrastructure.md), [Portable Coordinator](docs/features/portable-coordinator.md), [External Provider](docs/providers/external.md)
-- **Operate it:** [Operations](docs/operations.md), [Observability](docs/observability.md), [Troubleshooting](docs/troubleshooting.md), [Performance](docs/performance.md)
+- **Operate it:** [Operations](docs/operations.md), [Release engineering](docs/RELEASING.md), [Observability](docs/observability.md), [Troubleshooting](docs/troubleshooting.md), [Performance](docs/performance.md)
 - **Set it up or audit it:** [Infrastructure](docs/infrastructure.md), [Security Policy](SECURITY.md), [Operational Security](docs/security.md), [Getting Started](docs/getting-started.md), [Source Map](docs/source-map.md)
 - **Changes:** [CHANGELOG.md](CHANGELOG.md)
 

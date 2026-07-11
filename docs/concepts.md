@@ -150,7 +150,8 @@ touch.
 
 **Heartbeat** - a `POST /v1/leases/{id}/heartbeat` call sent by the CLI during
 long-running commands. Bumps `lastTouchedAt`, can ship telemetry samples, and can
-update the idle timeout when explicitly requested.
+update the idle timeout when explicitly requested. Heartbeats at or after
+`expiresAt` are rejected; once the deadline passes, cleanup owns the lease.
 
 **Touch** - lower-level synonym for "update lease state and idle". The provider's
 `Touch` method handles direct-provider state updates; the heartbeat is the

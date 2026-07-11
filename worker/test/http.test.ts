@@ -1380,14 +1380,22 @@ describe("http responses", () => {
       "standalone Bearer :\r\n spaced-folded-colon-standalone-secret",
       "standalone Bearer [redacted]",
       "Proxy-Authorization=Basic basic-secret",
+      "refresh_token=refresh-assignment-value",
+      "api-secret=api-assignment-value",
+      "refreshToken=refresh-camel-assignment-value",
+      "idToken=id-camel-assignment-value",
+      "secretAccessKey=aws-camel-assignment-value",
+      "apiSecret=api-camel-assignment-value",
       "Authorization: Token token-scheme-secret",
       "Proxy-Authorization: Digest digest-scheme-secret",
       'Authorization: Digest username="digest-user", response="digest-response"',
       "Authorization: 1custom digit-scheme-secret",
       "X-API-Key=header-secret",
       "client_secret=plain-secret",
-      '{"token":"json-secret\\\"escaped-tail-leak","clientSecret":"client-secret","x-api-key":"json-api-secret"}',
-      "https://alice:password@example.test/path?api_key=query-secret&x-api-key=query-api-key&authorization=query-authorization&proxy-authorization=query-proxy-authorization&session_token=query-session-token&X-Amz-Signature=signed-secret&X-Goog-Credential=gcp-credential&X-Goog-Signature=gcp-signature&X-Goog-Security-Token=gcp-security-token&region=eu",
+      '{"token":"json-secret\\\"escaped-tail-leak","clientSecret":"client-secret","x-api-key":"json-api-secret","accessToken":"access-json-value","refresh_token":"refresh-snake-value\\\"refresh-escaped-tail","refreshToken":"refresh-camel-value","refresh-token":"refresh-kebab-value","id_token":"id-snake-value","idToken":"id-camel-value","id-token":"id-kebab-value","secretAccessKey":"aws-camel-value","secret_access_key":"aws-snake-value","secret-access-key":"aws-kebab-value","apiSecret":"api-camel-value","api_secret":"api-snake-value","api-secret":"api-kebab-value","nextToken":"page-2","token_type":"Bearer"}',
+      "https://alice:password@example.test/path?api_key=query-secret&refresh_token=query-refresh-token&id_token=query-id-token&secret_access_key=query-aws-secret&api_secret=query-api-secret&x-api-key=query-api-key&authorization=query-authorization&proxy-authorization=query-proxy-authorization&session_token=query-session-token&X-Amz-Signature=signed-secret&X-Goog-Credential=gcp-credential&X-Goog-Signature=gcp-signature&X-Goog-Security-Token=gcp-security-token&region=eu",
+      "https://single-userinfo-token@other.example.test/path",
+      "https://first-userinfo-value@second-userinfo-value@multi.example.test/path",
       "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
       "safe suffix",
     ].join("\n");
@@ -1408,6 +1416,12 @@ describe("http responses", () => {
       "folded-colon-standalone-secret",
       "spaced-folded-colon-standalone-secret",
       "basic-secret",
+      "refresh-assignment-value",
+      "api-assignment-value",
+      "refresh-camel-assignment-value",
+      "id-camel-assignment-value",
+      "aws-camel-assignment-value",
+      "api-camel-assignment-value",
       "token-scheme-secret",
       "digest-scheme-secret",
       "digest-user",
@@ -1419,9 +1433,30 @@ describe("http responses", () => {
       "escaped-tail-leak",
       "client-secret",
       "json-api-secret",
+      "access-json-value",
+      "refresh-snake-value",
+      "refresh-escaped-tail",
+      "refresh-camel-value",
+      "refresh-kebab-value",
+      "id-snake-value",
+      "id-camel-value",
+      "id-kebab-value",
+      "aws-camel-value",
+      "aws-snake-value",
+      "aws-kebab-value",
+      "api-camel-value",
+      "api-snake-value",
+      "api-kebab-value",
       "alice",
       "password",
+      "single-userinfo-token",
+      "first-userinfo-value",
+      "second-userinfo-value",
       "query-secret",
+      "query-refresh-token",
+      "query-id-token",
+      "query-aws-secret",
+      "query-api-secret",
       "query-api-key",
       "query-authorization",
       "query-proxy-authorization",
@@ -1438,7 +1473,73 @@ describe("http responses", () => {
     expect(redacted).toContain("[redacted]");
     expect(redacted).toContain("standalone Bearer [redacted]");
     expect(redacted).toContain("region=eu");
+    expect(redacted).toContain('"nextToken":"page-2"');
+    expect(redacted).toContain('"token_type":"Bearer"');
+    expect(redacted).toContain("multi.example.test/path");
     expect(redacted).toContain("safe suffix");
+    expect(redactDiagnosticSecrets(redacted, secrets)).toBe(redacted);
+  });
+
+  it("preserves already-redacted and non-userinfo URL at-signs", () => {
+    const value =
+      "http://<redacted>@broker.example.test https://[redacted]@api.example.test https://host.example.test?email=alice@example.test https://host.example.test#realm@tenant";
+    expect(redactDiagnosticSecrets(value, ["redacted"])).toBe(value);
+  });
+
+  it("removes whole exact secrets that contain structured credentials", () => {
+    for (const [value, secret, expected] of [
+      ["prefix Bearer opaque-suffix", "prefix Bearer opaque-suffix", "[redacted]"],
+      ["abc?token=xyz", "abc?token=xyz", "[redacted]"],
+      ["?token=xyz&supersecretSuffix", "token=xyz&supersecretSuffix", "?[redacted]"],
+    ]) {
+      expect(redactDiagnosticSecrets(value, [secret])).toBe(expected);
+    }
+  });
+
+  it("stabilizes structural boundaries created by exact redaction", () => {
+    const secrets = ["refresh_token"];
+    const redacted = redactDiagnosticSecrets('refresh_tokenBearer b?token=""', secrets);
+    expect(redacted).not.toContain("Bearer b");
+    expect(redactDiagnosticSecrets(redacted, secrets)).toBe(redacted);
+  });
+
+  it("redacts structured values before overlapping exact secrets", () => {
+    const redacted = redactDiagnosticSecrets(
+      '{"refresh_token":"upstream-minted-value","region":"iad"}',
+      ["refresh_token"],
+    );
+    expect(redacted).not.toContain("upstream-minted-value");
+    expect(redacted).toContain("region");
+  });
+
+  it("redacts exact secrets that overlap an existing marker", () => {
+    for (const [value, secrets] of [
+      ["[redacted]suffix route=iad", ["[redacted]suffix"]],
+      ["prefix[redacted]suffix route=iad", ["redacted]suffix"]],
+      ["[redacted]suffix route=iad", ["redacted", "acted]suffix"]],
+      ["triggersuffix route=iad", ["trigger", "redacted]suffix"]],
+    ] as const) {
+      const redacted = redactDiagnosticSecrets(value, secrets);
+      expect(redacted).not.toContain("suffix");
+      expect(redacted).toContain("route=iad");
+      expect(redacted).not.toContain("[[redacted]");
+      expect(redacted).not.toContain("[red[redacted]");
+      expect(redactDiagnosticSecrets(redacted, secrets)).toBe(redacted);
+    }
+  });
+
+  it("fails closed when redaction does not converge within its pass limit", () => {
+    const value = "trigger" + "x".repeat(72);
+    expect(redactDiagnosticSecrets(value, ["trigger", "redacted]x"])).toBe("[redacted]");
+  });
+
+  it("redacts unterminated secret JSON values", () => {
+    for (const diagnostic of [
+      '{"refresh_token":"unterminated-refresh-value',
+      ['{"refresh_token":"dangling-backslash-refresh-value', "\\"].join(""),
+    ]) {
+      expect(redactDiagnosticSecrets(diagnostic)).not.toContain("refresh-value");
+    }
   });
 
   it("redacts punctuation-bearing credential suffixes while preserving context", () => {

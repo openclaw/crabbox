@@ -111,7 +111,9 @@ export function enforceCostLimits(
   now: Date,
 ): string {
   const managedLeases = leases.filter(isManagedLease);
-  const active = managedLeases.filter((lease) => isActiveLease(lease, now));
+  // A live record still owns provider capacity after its heartbeat deadline
+  // until cleanup commits a terminal state.
+  const active = managedLeases.filter(isLiveLease);
   const ownerActive = active.filter((lease) => lease.owner === candidate.owner);
   const orgActive = active.filter((lease) => orgMatchesForAccounting(lease.org, candidate.org));
   if (limits.maxActiveLeases > 0 && active.length + 1 > limits.maxActiveLeases) {
@@ -261,15 +263,11 @@ function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
   const estimatedUSD = roundUSD((runtimeSeconds / 3600) * (lease.estimatedHourlyUSD || 0));
   return {
     leases: 1,
-    activeLeases: isActiveLease(lease, now) ? 1 : 0,
+    activeLeases: isLiveLease(lease) ? 1 : 0,
     runtimeSeconds,
     estimatedUSD,
     reservedUSD: roundUSD(lease.maxEstimatedUSD || estimatedUSD),
   };
-}
-
-function isActiveLease(lease: LeaseRecord, now: Date): boolean {
-  return isLiveLease(lease) && Date.parse(lease.expiresAt) > now.getTime();
 }
 
 function isLiveLease(lease: LeaseRecord): boolean {

@@ -1,6 +1,7 @@
 package applevmhelper
 
 import (
+	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"net/url"
@@ -19,11 +20,17 @@ const (
 	// still recognized when verifying daemons started by older releases.
 	LegacyManagedHelperName = "crabbox-apple-vz-helper"
 
-	// ManagedVMDName is the Swift Virtualization.framework daemon binary; the
-	// helper installs and entitlement-signs a managed copy under the state
-	// root. VMDPathEnv overrides the daemon source for source builds.
-	ManagedVMDName = "crabbox-apple-vm-vmd"
-	VMDPathEnv     = "CRABBOX_APPLE_VM_VMD"
+	// ManagedVMDName is the Swift Virtualization.framework daemon binary. Release
+	// builds preserve and verify its embedded Developer ID signature; source
+	// builds install an entitlement-signed development copy. VMDPathEnv is an
+	// explicit unmanaged override for development builds only; official helpers
+	// reject it so callers cannot bypass the embedded release trust policy.
+	ManagedVMDName       = "crabbox-apple-vm-vmd"
+	ManagedVMDIdentifier = "org.openclaw.crabbox.apple-vm-vmd"
+	VMDPathEnv           = "CRABBOX_APPLE_VM_VMD"
+	// ReleaseVMDTrustPolicyVersion is a stable packaging/runtime contract marker.
+	// Release tooling must reject source tags that predate the matching policy.
+	ReleaseVMDTrustPolicyVersion = 1
 
 	StatusStarting = "starting"
 	StatusRunning  = "running"
@@ -43,19 +50,12 @@ const (
 	PreparationFileName = "preparing.json"
 )
 
-const HelperEntitlements = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>com.apple.security.virtualization</key>
-  <true/>
-  <key>com.apple.security.network.client</key>
-  <true/>
-  <key>com.apple.security.network.server</key>
-  <true/>
-</dict>
-</plist>
-`
+// HelperEntitlements is the single runtime and release-signing policy source.
+// Release tooling passes the tracked plist itself to codesign; runtime embeds
+// the same bytes for development signing and exact release verification.
+//
+//go:embed vmd-entitlements.plist
+var HelperEntitlements string
 
 type Instance struct {
 	Name                 string    `json:"name"`
