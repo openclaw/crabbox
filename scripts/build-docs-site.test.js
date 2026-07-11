@@ -84,6 +84,11 @@ generatedTest("provider index renders filterable rows in a scroll region", () =>
   assert.match(filter, /data-provider-group-filter="all"[^>]*aria-pressed="true"/);
   assert.match(filter, /data-provider-empty/);
   assert.match(matrixRegion, /<table class="provider-matrix">/);
+  assert.equal(
+    occurrences(html, "split(/\\s+/)"),
+    3,
+    "generated search and provider filters should split on whitespace",
+  );
   assert.equal(rows.length, Object.keys(metadata).length);
   assert.deepEqual(
     new Set(rows.map((match) => match[1])),

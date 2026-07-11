@@ -832,7 +832,7 @@ const navEmpty=document.querySelector('.nav-empty');
 let navOpenState=null;
 input?.addEventListener('input',()=>{
   const q=input.value.trim().toLowerCase();
-  const terms=q.split(/\s+/).filter(Boolean);
+  const terms=q.split(/\\s+/).filter(Boolean);
   if(q&&!navOpenState)navOpenState=new Map(navSections.map((section)=>[section,section.open]));
   let matches=0;
   navSections.forEach((section)=>{
@@ -861,10 +861,10 @@ if(providerFilter){
   const providerEmpty=providerFilter.querySelector('[data-provider-empty]');
   let providerGroup='all';
   const applyProviderFilters=()=>{
-    const terms=(providerInput?.value.trim().toLowerCase()||'').split(/\s+/).filter(Boolean);
+    const terms=(providerInput?.value.trim().toLowerCase()||'').split(/\\s+/).filter(Boolean);
     let count=0;
     providerRows.forEach((row)=>{
-      const groups=(row.dataset.providerGroups||'').split(/\s+/);
+      const groups=(row.dataset.providerGroups||'').split(/\\s+/);
       const groupMatch=providerGroup==='all'||groups.includes(providerGroup);
       const search=row.dataset.providerSearch||row.textContent.toLowerCase();
       const textMatch=terms.every((term)=>search.includes(term));
