@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   EC2SpotClient,
+  awsOrphanSweepCredentialsConfigured,
   awsPrivateWorkspaceConfig,
   awsRunInstancesParams,
   type AWSPrivateWorkspaceConfig,
@@ -53,6 +54,43 @@ describe("private AWS workspaces", () => {
     expect(authorizations[0]).toContain("Credential=TASKKEY1/");
     expect(authorizations[1]).toContain("Credential=TASKKEY2/");
     expect(sessionTokens).toEqual(["task-token-1", "task-token-2"]);
+  });
+
+  it("retries an expected identity check after a transient failure", async () => {
+    const client = new EC2SpotClient(expectedEnv(), region);
+    const identity = vi
+      .spyOn(client, "identity")
+      .mockRejectedValueOnce(new Error("temporary STS failure"))
+      .mockResolvedValue({
+        account: expectedAccountID,
+        arn: `arn:aws:sts::${expectedAccountID}:assumed-role/crabbox-controller/task`,
+        userId: "task-id",
+        region,
+      });
+
+    await expect(client.verifiedIdentity()).rejects.toThrow("temporary STS failure");
+    await expect(client.verifiedIdentity()).resolves.toMatchObject({ account: expectedAccountID });
+    expect(identity).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not enable orphan sweeps from an unproven default credential chain", () => {
+    expect(
+      awsOrphanSweepCredentialsConfigured({ awsCredentialProvider: testAWSCredentialProvider }),
+    ).toBe(false);
+    expect(
+      awsOrphanSweepCredentialsConfigured({
+        awsCredentialProvider: testAWSCredentialProvider,
+        CRABBOX_WORKSPACE_PROVIDER: "aws",
+      }),
+    ).toBe(true);
+    for (const value of ["1", "true", "yes", "on"]) {
+      expect(
+        awsOrphanSweepCredentialsConfigured({
+          awsCredentialProvider: testAWSCredentialProvider,
+          CRABBOX_AWS_ORPHAN_SWEEP_ENABLED: value,
+        }),
+      ).toBe(true);
+    }
   });
 
   it("does not use spot history as an on-demand cost estimate", async () => {
@@ -777,6 +815,13 @@ function privateWorkspaceEnv(): Env {
     CRABBOX_WORKSPACE_AWS_CONTROLLER_SECURITY_GROUP_ID: "sg-controller123",
     CRABBOX_WORKSPACE_AWS_INSTANCE_PROFILE: "crabbox-private-workspace",
     CRABBOX_WORKSPACE_AWS_SSM_LOG_GROUP: "/crabbox/private-workspaces",
+  };
+}
+
+async function testAWSCredentialProvider() {
+  return {
+    accessKeyId: "task-access-key",
+    secretAccessKey: "task-secret-key",
   };
 }
 

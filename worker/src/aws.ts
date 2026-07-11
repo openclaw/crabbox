@@ -287,6 +287,28 @@ export function awsCredentialsConfigured(
   );
 }
 
+export function awsOrphanSweepCredentialsConfigured(
+  env: Pick<
+    Env,
+    | "awsCredentialProvider"
+    | "AWS_ACCESS_KEY_ID"
+    | "AWS_SECRET_ACCESS_KEY"
+    | "CRABBOX_AWS_ORPHAN_SWEEP_ENABLED"
+    | "CRABBOX_WORKSPACE_PROVIDER"
+  >,
+): boolean {
+  if (env.AWS_ACCESS_KEY_ID?.trim() && env.AWS_SECRET_ACCESS_KEY?.trim()) {
+    return true;
+  }
+  if (!env.awsCredentialProvider) {
+    return false;
+  }
+  const sweepEnabled = ["1", "true", "yes", "on"].includes(
+    (env.CRABBOX_AWS_ORPHAN_SWEEP_ENABLED ?? "").trim().toLowerCase(),
+  );
+  return sweepEnabled || env.CRABBOX_WORKSPACE_PROVIDER?.trim() === "aws";
+}
+
 export interface AWSExpectedIdentityConfig {
   accountID: string;
   region: string;
@@ -573,23 +595,33 @@ export class EC2SpotClient {
   async verifiedIdentity(): Promise<AWSIdentity> {
     const expected = awsExpectedIdentityConfig(this.env);
     if (!expected) return await this.identity();
-    this.expectedIdentity ??= (async () => {
-      const identity = await this.identity();
-      if (identity.account !== expected.accountID) {
-        throw new Error(
-          `AWS account mismatch: expected ${expected.accountID}, authenticated ${identity.account || "unknown"}`,
-        );
+    const verification =
+      this.expectedIdentity ??
+      (async () => {
+        const identity = await this.identity();
+        if (identity.account !== expected.accountID) {
+          throw new Error(
+            `AWS account mismatch: expected ${expected.accountID}, authenticated ${identity.account || "unknown"}`,
+          );
+        }
+        if (
+          expected.taskRoleName &&
+          (identity.policyTarget?.source !== "assumed-role" ||
+            identity.policyTarget.name !== expected.taskRoleName)
+        ) {
+          throw new Error("AWS task role mismatch");
+        }
+        return identity;
+      })();
+    this.expectedIdentity = verification;
+    try {
+      return await verification;
+    } catch (error) {
+      if (this.expectedIdentity === verification) {
+        delete this.expectedIdentity;
       }
-      if (
-        expected.taskRoleName &&
-        (identity.policyTarget?.source !== "assumed-role" ||
-          identity.policyTarget.name !== expected.taskRoleName)
-      ) {
-        throw new Error("AWS task role mismatch");
-      }
-      return identity;
-    })();
-    return await this.expectedIdentity;
+      throw error;
+    }
   }
 
   async privateWorkspacePreflight(
