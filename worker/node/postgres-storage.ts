@@ -50,7 +50,7 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
     await this.pool.end();
   }
 
-  async get<T>(key: string): Promise<T | undefined> {
+  async get<T>(key: string, _options?: { noCache?: boolean }): Promise<T | undefined> {
     const result = await this.pool.query<{ encoded_value: unknown }>(
       `
         select case
@@ -66,7 +66,7 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
     return row ? decodeStoredValue<T>(row.encoded_value) : undefined;
   }
 
-  async put<T>(key: string, value: T): Promise<void> {
+  async put<T>(key: string, value: T, _options?: { noCache?: boolean }): Promise<void> {
     const encoded = JSON.stringify(value);
     if (encoded === undefined) {
       throw new TypeError("coordinator storage cannot persist undefined");
@@ -106,7 +106,19 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
     return row ? decodeStoredValue<T>(row.encoded_value) : undefined;
   }
 
-  async list<T>({ prefix = "" }: { prefix?: string } = {}): Promise<Map<string, T>> {
+  async list<T>({
+    prefix = "",
+    limit,
+    startAfter,
+  }: {
+    prefix?: string;
+    limit?: number;
+    startAfter?: string;
+    noCache?: boolean;
+  } = {}): Promise<Map<string, T>> {
+    const values: unknown[] = [`${escapeLike(prefix)}%`];
+    const afterClause = startAfter ? `and key > $${values.push(startAfter)}` : "";
+    const limitClause = limit === undefined ? "" : `limit $${values.push(limit)}`;
     const result = await this.pool.query<{ key: string; encoded_value: unknown }>(
       `
         select key,
@@ -116,9 +128,11 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
                end as encoded_value
         from ${table}
         where key like $1 escape '\\'
+        ${afterClause}
         order by key
+        ${limitClause}
       `,
-      [`${escapeLike(prefix)}%`],
+      values,
     );
     return new Map(result.rows.map((row) => [row.key, decodeStoredValue<T>(row.encoded_value)]));
   }

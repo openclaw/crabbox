@@ -7,6 +7,10 @@
 - Added a dedicated ECS Fargate deployment for small private AWS workspaces with task-role credentials, exact account/Region and instance allowlist preflight, encrypted gp3 volumes, no public IP or SSH, IMDSv2, SSM bootstrap/log evidence, route-scoped workspace lifecycle, and idempotent cleanup.
 - Added explicit GCP metadata-server authentication for brokered coordinators, with hardened token validation, bounded retries, source-aware readiness diagnostics, and preserved service-account-key defaults. Thanks @dani29.
 
+### Fixed
+
+- Bounded coordinator lease and workspace history scans and kept saturated cleanup retry batches scheduled promptly, preventing large retained histories from exhausting Durable Object memory or stranding cleanup.
+
 ## 0.37.1 - 2026-07-11
 
 ### Added
