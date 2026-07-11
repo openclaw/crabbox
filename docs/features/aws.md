@@ -7,15 +7,22 @@ Read when:
 - changing AWS provisioning code in the CLI (`internal/cli/aws.go`) or coordinator
   (`worker/src/aws.ts`).
 
-AWS is Crabbox's broadest managed provider. It leases full SSH-reachable EC2
-boxes and supports four targets: Linux, native Windows, Windows WSL2, and EC2
-Mac. AWS is one of the five brokerable providers, so it can run two ways:
+AWS is Crabbox's broadest managed provider. Its normal CLI path leases full
+SSH-reachable EC2 boxes and supports four targets: Linux, native Windows,
+Windows WSL2, and EC2 Mac. AWS is one of the five brokerable providers, so that
+path can run two ways:
 
 - **Brokered** — the coordinator holds the AWS credentials and provisions
   on your behalf. The CLI still talks SSH/rsync directly to the runner.
 - **Direct** — no broker configured. The CLI uses the local AWS credential chain
   (`AWS_PROFILE`, env keys, or shared config) and provisions itself. This is the
   usual path for provider debugging.
+
+A specialized third shape, the
+[private AWS workspace service](aws-private-workspaces.md), exposes only the
+route-scoped workspace API. It uses an exact server-side small-instance
+allowlist and SSM bootstrap in one dedicated account/Region; it is not an SSH
+class or a client-selectable capacity fallback.
 
 ## Targets
 
@@ -136,6 +143,15 @@ volume is 400 GB gp3, encrypted; override with `CRABBOX_AWS_ROOT_GB` /
 Supplying `CRABBOX_AWS_SECURITY_GROUP_ID` makes ingress policy your
 responsibility. Set `CRABBOX_AWS_SUBNET_ID` to launch into a non-default VPC.
 
+The dedicated private-workspace mode does not inherit these SSH defaults. It
+requires a private subnet with no direct internet-gateway route, a separate
+no-ingress workspace security group whose egress is TCP 443, no public address
+or key pair, IMDSv2, an encrypted gp3 root volume, and SSM-only bootstrap. Its
+recommended small policy is `t3a.small,t3.small` with two-vCPU/4096-MiB ceilings
+and a 20 GiB disk. See
+[Private AWS Workspaces](aws-private-workspaces.md) for the fail-closed
+deployment and live proof.
+
 Account-level AWS guardrails should cover every region Crabbox can allocate in:
 
 - **S3 Block Public Access** is an account-wide control. Enable all four settings
@@ -161,8 +177,8 @@ done
 ### Orphan sweep
 
 The brokered coordinator can sweep stray AWS instances itself. When
-`CRABBOX_AWS_ORPHAN_SWEEP_ENABLED` is not disabled and AWS broker credentials are
-present, the Fleet Durable Object alarm periodically scans `CRABBOX_AWS_REGION`
+`CRABBOX_AWS_ORPHAN_SWEEP_ENABLED` is not disabled and AWS credentials are
+available, the Fleet Durable Object alarm periodically scans `CRABBOX_AWS_REGION`
 plus `CRABBOX_CAPACITY_REGIONS` for Crabbox-tagged EC2 instances; the Worker cron
 handler bootstraps the alarm for idle fleets after a deploy or config change. The
 sweep uses equivalent pg-boss scheduling and reconciliation on Node/PostgreSQL. The
@@ -229,7 +245,12 @@ grants separately with `crabbox admin providers policy --provider aws` and
 
 ## Credentials And Configuration
 
-### Broker secrets
+### Broker credentials
+
+Existing Worker deployments accept the static credential contract below. The
+Node runtime can instead use its AWS default credential chain. The dedicated
+ECS private-workspace deployment requires temporary task-role credentials and
+rejects static access keys.
 
 ```text
 AWS_ACCESS_KEY_ID
@@ -267,6 +288,10 @@ CRABBOX_CAPACITY_AVAILABILITY_ZONES
 CRABBOX_CAPACITY_HINTS
 CRABBOX_CAPACITY_LARGE_CLASSES
 ```
+
+Private workspace settings and their required combinations are documented in
+[Private AWS Workspaces](aws-private-workspaces.md#configuration). They are
+deployment policy, not request fields.
 
 The same values are available as `aws.*` keys (`region`, `ami`,
 `securityGroupId`, `subnetId`, `instanceProfile`, `rootGB`, `sshCIDRs`,

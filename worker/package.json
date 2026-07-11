@@ -23,6 +23,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@aws-sdk/credential-providers": "^3.1084.0",
     "@cloudflare/containers": "^0.3.7",
     "@novnc/novnc": "^1.7.0",
     "aws4fetch": "^1.0.20",

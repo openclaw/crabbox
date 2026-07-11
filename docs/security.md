@@ -408,6 +408,11 @@ repo:
   unless `CRABBOX_ARTIFACTS_PUBLIC_READS=1` explicitly opts into non-expiring
   public links; public grants add an unguessable per-grant namespace.
 
+Set the non-secret `CRABBOX_RUNTIME_ADAPTER_OWNER` and
+`CRABBOX_RUNTIME_ADAPTER_ORG` to stable deployment identities when the
+route-scoped token is enabled. Callers cannot override that identity with
+request headers.
+
 Deployments that previously relied on `CRABBOX_SHARED_TOKEN` as the implicit
 user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
 `cbxu_` tokens from the old key stop authenticating, so users must run
@@ -631,6 +636,35 @@ resources and apply a grace window before reporting missing labels or stale
 lease mappings.
 
 Release is idempotent, and delete tolerates already-deleted provider resources.
+
+### Dedicated private AWS workspaces
+
+The [private AWS workspace service](features/aws-private-workspaces.md) narrows
+the workspace boundary beyond the normal SSH lease path:
+
+- the ECS task uses refreshable task-role credentials through the AWS default
+  provider chain; the task definition contains no static AWS access keys;
+- startup verifies the exact account and Region through task metadata and STS,
+  then keeps readiness closed if placement or policy differs;
+- the stack owns a separate least-privilege workspace instance role/profile
+  and a retained SSM log group;
+- the workspace subnet has no public-address assignment or direct
+  internet-gateway default route;
+- EC2 receives no public IP or key pair, IMDSv2 is mandatory, the workspace
+  security group has no ingress, and every egress rule is TCP 443;
+- SSM is the only bootstrap/control path. `ready` follows SSM registration and
+  successful command completion, not merely EC2 running state;
+- the instance and volume carry exact lease and ownership tags, but cleanup
+  still requires the durable workspace/lease/resource binding;
+- SSM and coordinator logs are evidence, not secret stores. Bearers, AWS
+  credentials, database URLs, and signed requests must remain redacted.
+
+Keep the route-scoped workspace bearer separate from the database secret, ECS
+execution role, ECS task role, workspace instance role, human AWS identity, and
+any broader Crabbox shared/admin token. The client reaches this isolation
+boundary by using the dedicated service URL; a client-side label does not
+change placement. Live deployment and canary mutation require a separate AWS
+GO.
 
 ## AWS Account Guardrails
 

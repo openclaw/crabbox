@@ -96,6 +96,17 @@ export async function prepareCoordinatorRequest(
       env,
     );
   }
+  const runtimeAdapterPath = runtimeAdapterProxyPath(route);
+  if (
+    env.CRABBOX_WORKSPACE_AWS_PRIVATE?.trim() === "1" &&
+    runtimeAdapterPath &&
+    runtimeAdapterRelayMethodAllowed(request.method, runtimeAdapterPath)
+  ) {
+    return {
+      response: json({ error: "unauthorized" }, { status: 401 }),
+      authenticated: false,
+    };
+  }
   const portal = url.pathname.startsWith("/portal");
   if (portal && !portalCookieRequestIntentAllowed(request, env, url)) {
     return {
@@ -211,7 +222,13 @@ function isRuntimeAdapterAgentUpgrade(request: Request, url: URL): boolean {
 
 function runtimeAdapterServiceAuth(
   request: Request,
-  env: Pick<Env, "CRABBOX_RUNTIME_ADAPTER_TOKEN" | "CRABBOX_DEFAULT_ORG">,
+  env: Pick<
+    Env,
+    | "CRABBOX_RUNTIME_ADAPTER_TOKEN"
+    | "CRABBOX_RUNTIME_ADAPTER_OWNER"
+    | "CRABBOX_RUNTIME_ADAPTER_ORG"
+    | "CRABBOX_DEFAULT_ORG"
+  >,
   route: string[],
 ): AuthContext | undefined {
   const path = runtimeAdapterProxyPath(route);
@@ -226,8 +243,8 @@ function runtimeAdapterServiceAuth(
     authorized: true,
     admin: false,
     auth: "bearer",
-    owner: "service@openclaw.org",
-    org: env.CRABBOX_DEFAULT_ORG ?? "openclaw",
+    owner: env.CRABBOX_RUNTIME_ADAPTER_OWNER || "service@openclaw.org",
+    org: env.CRABBOX_RUNTIME_ADAPTER_ORG || env.CRABBOX_DEFAULT_ORG || "openclaw",
   };
 }
 
