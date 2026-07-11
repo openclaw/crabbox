@@ -222,6 +222,10 @@ const restrictedBrokerSelectorCases = [
   { provider: "aws" as const, field: "awsSGID", value: "sg-000000000001" },
   { provider: "aws" as const, field: "awsSubnetID", value: "subnet-000000000001" },
   { provider: "aws" as const, field: "awsProfile", value: "crabbox-runner" },
+  { provider: "aws" as const, field: "awsInstanceTypes", value: ["m5.24xlarge"] },
+  { provider: "aws" as const, field: "awsRequireSSM", value: true },
+  { provider: "aws" as const, field: "awsSSMBootstrapCommand", value: "true" },
+  { provider: "aws" as const, field: "awsSSMLogGroup", value: "/crabbox/test" },
   { provider: "gcp" as const, field: "gcpProject", value: "other-project" },
   {
     provider: "gcp" as const,

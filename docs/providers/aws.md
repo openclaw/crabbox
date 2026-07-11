@@ -7,12 +7,17 @@ Read this when you are:
   Dedicated Hosts;
 - changing `internal/providers/aws` or brokered AWS provisioning in the coordinator.
 
-AWS is the broad managed provider. It is an SSH-lease backend: Crabbox
-provisions an EC2 instance, then owns SSH readiness, sync, command execution,
-results, desktop tunnels, and cleanup. It supports Linux, native Windows,
-Windows under WSL2, and EC2 Mac. AWS is one of the five providers that can run
-through the coordinator (alongside Azure, Daytona, GCP, and Hetzner); without a
-broker URL configured it runs direct-from-CLI against the EC2 API.
+AWS is the broad managed provider. Its normal CLI path is an SSH-lease backend:
+Crabbox provisions an EC2 instance, then owns SSH readiness, sync, command
+execution, results, desktop tunnels, and cleanup. It supports Linux, native
+Windows, Windows under WSL2, and EC2 Mac. AWS is one of the five providers that
+can run through the coordinator (alongside Azure, Daytona, GCP, and Hetzner);
+without a broker URL configured it runs direct-from-CLI against the EC2 API.
+
+A separate [private AWS workspace service](../features/aws-private-workspaces.md)
+uses the Node/PostgreSQL coordinator, an exact small-instance allowlist, and SSM
+instead of SSH. It is an API-managed deployment shape, not another CLI machine
+class.
 
 ## When to use AWS
 
@@ -116,13 +121,38 @@ Notes:
   as `eu-west-1`. Broker readiness, lease `awsRegion`, and
   `capacity.regions` reject malformed request values before constructing a
   SigV4 endpoint; invalid environment/config fallback candidates are skipped.
-- For brokered AWS, the cloud credentials live in the Worker, not on developer
-  machines. See `crabbox config set-broker --provider aws` and the brokered
-  IAM policy from `crabbox admin aws-policy`.
+- For brokered AWS, cloud credentials live in the coordinator, not on developer
+  machines. Existing Worker deployments can inject static credentials; the
+  Node runtime also supports the AWS default credential chain. The dedicated
+  ECS private-workspace deployment requires its task role and rejects static
+  access keys. See `crabbox config set-broker --provider aws`, the brokered IAM
+  policy from `crabbox admin aws-policy`, and
+  [Private AWS Workspaces](../features/aws-private-workspaces.md).
 - In brokered mode, explicit `aws.ami`, `aws.securityGroupId`, `aws.subnetId`,
   and `aws.instanceProfile` selectors require admin-token authentication.
   Normal broker users receive the coordinator-managed image, network, and
   instance identity. Direct mode keeps these local configuration overrides.
+
+## Private workspace service
+
+Use the dedicated private mode when a service client needs create/status/delete
+workspaces in one isolated AWS account and Region without public addresses or
+SSH. Its placement is entirely server-side:
+
+- exact expected account and Region, verified through ECS metadata and STS;
+- explicit x86_64 instance allowlist and vCPU/memory ceilings, with
+  `t3a.small,t3.small` as the recommended starting set;
+- 20 GiB encrypted gp3 root volume by default;
+- private subnet, no public IP or key pair, IMDSv2, no ingress, TCP 443 egress;
+- SSM managed-node readiness, SSM command bootstrap, and CloudWatch log output;
+- task-role credentials refreshed through the Node AWS default chain;
+- ownership-tagged, generation-fenced, idempotent termination.
+
+The client selects this placement by using the dedicated service URL and
+route-scoped bearer. Client target labels or Region-shaped metadata are not
+placement controls. The full deployment template, environment contract,
+readiness preflight, API, AWS-GO gate, and live canary are in
+[Private AWS Workspaces](../features/aws-private-workspaces.md).
 
 ## Targets
 
@@ -133,7 +163,7 @@ Notes:
 | Windows WSL2 | `--windows-mode wsl2`; launches on nested-virtualization families (`c8i`/`m8i`/`m8i-flex`/`r8i`); POSIX sync and commands run inside WSL. |
 | macOS | Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin only a host from their own released lease and otherwise use automatic discovery. |
 
-## Lifecycle
+## Normal SSH lifecycle
 
 1. Import or reuse the per-lease SSH key (RSA for native Windows, ed25519
    otherwise).
@@ -195,6 +225,7 @@ In brokered mode you can promote and warm AMIs:
 ## Related docs
 
 - [AWS feature notes](../features/aws.md)
+- [Private AWS workspaces](../features/aws-private-workspaces.md)
 - [Windows VNC](../features/vnc-windows.md)
 - [macOS VNC](../features/vnc-macos.md)
 - [Provider backends](../provider-backends.md)

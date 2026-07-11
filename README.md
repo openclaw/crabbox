@@ -99,8 +99,11 @@ crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azu
   secrets) come from your repo's GitHub Actions hydration, devcontainer, Nix,
   mise/asdf, or setup scripts — not from Crabbox.
 
-The data plane — SSH, rsync, command execution — always runs directly from the
-CLI to the runner. The coordinator only manages leases, cost, and observability.
+The normal CLI data plane — SSH, rsync, command execution — runs directly from
+the CLI to the runner. A dedicated
+[private AWS workspace service](docs/features/aws-private-workspaces.md) is a
+separate SSM-only controller path for API-managed workspaces; it has no public
+instance address or SSH access.
 
 Only `aws`, `azure`, `daytona`, `gcp`, and `hetzner` can transfer provider lifecycle to the
 coordinator, and even those run direct from the CLI when no coordinator URL is
@@ -123,6 +126,10 @@ automatically migrated between Durable Object storage and PostgreSQL.
 Cloudflare is the established deployment; validate the newly shipped Node
 runtime against the production proof checklist before cutover. See
 [Infrastructure](docs/infrastructure.md) for deployment and ingress details.
+For a dedicated Node/PostgreSQL service that owns small private AWS workspaces,
+use the fail-closed ECS Fargate deployment and canary in
+[Private AWS Workspaces](docs/features/aws-private-workspaces.md). Client-side
+labels do not select that service's AWS placement; its URL and server policy do.
 
 For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For
 the doc-to-code map, see [Source Map](docs/source-map.md).
@@ -190,7 +197,7 @@ from the CLI.
 
 | Provider and aliases | Runs on / mode | Notes |
 | --- | --- | --- |
-| [AWS EC2](docs/providers/aws.md) — `aws` | Linux, macOS, Windows · brokered | EC2 instances and EC2 Mac; native AMI/EBS checkpoints. |
+| [AWS EC2](docs/providers/aws.md) — `aws` | Linux, macOS, Windows · brokered | EC2 instances and EC2 Mac; native AMI/EBS checkpoints; optional dedicated SSM-only private workspace service. |
 | [Azure](docs/providers/azure.md) — `azure` | Linux, Windows · brokered | VMs with Tailscale support; native Windows and WSL2. |
 | [Google Cloud](docs/providers/gcp.md) — `gcp` (`google`, `google-cloud`) | Linux · brokered | Compute Engine VMs with Tailscale support. |
 | [Hetzner Cloud](docs/providers/hetzner.md) — `hetzner` | Linux · brokered | VMs with desktop/browser/code and Tailscale. |
@@ -392,6 +399,10 @@ Cloudflare also accepts `lite`, `basic`, `standard-1`, `standard-2`, and
 Providers without a row either use provider-native capacity settings or reject
 class/type selection.
 
+The dedicated private AWS workspace API does not use these AWS class tables. It
+accepts only its server-configured instance allowlist; the recommended small
+policy starts with `t3a.small,t3.small` and a 20 GiB encrypted gp3 root volume.
+
 ## Configuration
 
 Config resolves in order: flags → env → repo `.crabbox.yaml` → user
@@ -547,8 +558,10 @@ on native Apple Silicon and Intel runners from protected-default code, then
 authorize publication and the Homebrew update as separate gates. See
 [Release engineering](docs/RELEASING.md).
 
-Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment live in
-[docs/infrastructure.md](docs/infrastructure.md).
+Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment live
+in [docs/infrastructure.md](docs/infrastructure.md). The dedicated ECS Fargate
+path is documented in
+[Private AWS Workspaces](docs/features/aws-private-workspaces.md).
 
 ## Docs
 
@@ -557,7 +570,7 @@ Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment liv
 - **Choose a provider:** [Providers](docs/providers/README.md), [AWS](docs/providers/aws.md), [Azure](docs/providers/azure.md), [GCP](docs/providers/gcp.md), [Hetzner](docs/providers/hetzner.md), [DigitalOcean](docs/providers/digitalocean.md), [Linode](docs/providers/linode.md), [Hostinger](docs/providers/hostinger.md)
 - **Advanced features:** [Actions hydration](docs/features/actions-hydration.md), [Capsules](docs/features/capsules.md), [Checkpoints](docs/features/checkpoints.md), [Jobs](docs/features/jobs.md), [Pond](docs/features/pond.md)
 - **Interactive QA:** [Interactive Desktop and VNC](docs/features/interactive-desktop-vnc.md), [Artifacts](docs/features/artifacts.md), [Portal](docs/features/portal.md)
-- **Integrate infrastructure:** [Bring Your Own Infrastructure](docs/features/bring-your-own-infrastructure.md), [Portable Coordinator](docs/features/portable-coordinator.md), [External Provider](docs/providers/external.md)
+- **Integrate infrastructure:** [Bring Your Own Infrastructure](docs/features/bring-your-own-infrastructure.md), [Portable Coordinator](docs/features/portable-coordinator.md), [Private AWS Workspaces](docs/features/aws-private-workspaces.md), [External Provider](docs/providers/external.md)
 - **Operate it:** [Operations](docs/operations.md), [Release engineering](docs/RELEASING.md), [Observability](docs/observability.md), [Troubleshooting](docs/troubleshooting.md), [Performance](docs/performance.md)
 - **Set it up or audit it:** [Infrastructure](docs/infrastructure.md), [Security Policy](SECURITY.md), [Operational Security](docs/security.md), [Getting Started](docs/getting-started.md), [Source Map](docs/source-map.md)
 - **Changes:** [CHANGELOG.md](CHANGELOG.md)

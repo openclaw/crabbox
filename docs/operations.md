@@ -363,14 +363,32 @@ the shutdown timeout.
 PostgreSQL state and pg-boss jobs are durable, but lifecycle serialization and
 live bridge ownership remain process-local. Do not horizontally scale yet.
 
+### Dedicated AWS private-workspace service
+
+Use the checked-in ECS Fargate deployment when one Node/PostgreSQL coordinator
+must own small, private, SSM-only Linux workspaces in one AWS account and
+Region. The stack owns its single-replica ECS control plane, task roles,
+workspace instance role/profile, retained SSM log group, internal HTTPS load balancer,
+and separate security groups. It injects the database URL and route-scoped
+workspace bearer from Secrets Manager and uses refreshable task-role
+credentials rather than static AWS keys.
+
+The runbook in [Private AWS Workspaces](features/aws-private-workspaces.md)
+covers the exact account/Region preflight, small instance allowlist, 20 GiB
+encrypted gp3 disk, private subnet, no public IP/SSH, IMDSv2, SSM bootstrap,
+CloudWatch evidence, client URL/bearer contract, idempotent cleanup, rollback,
+and retirement. Deployment and the paid create/delete canary require a separate
+AWS GO; code merge alone is not approval.
+
 ### Minimum coordinator configuration
 
 Configure `CRABBOX_PUBLIC_URL`, one auth model, and at least one brokered
 provider. Shared-token automation needs `CRABBOX_SHARED_TOKEN` and
 `CRABBOX_SHARED_OWNER`; browser login needs the GitHub OAuth settings below.
-Provider choices are `HETZNER_TOKEN`, an AWS credential set, an Azure service
-principal, a GCP service account, or `DAYTONA_CRABBOX_KEY`. Node additionally
-requires `DATABASE_URL`.
+Provider choices are `HETZNER_TOKEN`, AWS credentials from the default chain or
+an existing static credential contract, an Azure service principal, a GCP
+service account, or `DAYTONA_CRABBOX_KEY`. Node additionally requires
+`DATABASE_URL`.
 
 GitHub OAuth start routes remain unauthenticated so a new user can bootstrap login.
 The coordinator limits active attempts to ten per caller source and 100 globally for
@@ -392,11 +410,14 @@ CRABBOX_HOST_ID                    optional; admin-only except owner reactivatio
 CRABBOX_AWS_MAC_HOST_ID            optional legacy AWS alias for CRABBOX_HOST_ID
 CRABBOX_SHARED_OWNER              optional fixed owner identity for shared-token automation
 CRABBOX_ADMIN_TOKEN               required for admin routes and image promotion
-CRABBOX_WORKSPACE_SSH_PUBLIC_KEY  required for /v1/workspaces lease provisioning
-CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for /v1/workspaces terminal attachment
+CRABBOX_WORKSPACE_SSH_PUBLIC_KEY  required for SSH-based /v1/workspaces provisioning; unused by private AWS mode
+CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for SSH-based terminal attachment; unused by private AWS mode
 CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; hetzner, aws, azure, or gcp
 CRABBOX_WORKSPACE_CLASS           optional workspace machine class; default standard
 CRABBOX_WORKSPACE_PREWARM_COUNT   optional ready spares per active organization; default 0, maximum 4
+CRABBOX_RUNTIME_ADAPTER_TOKEN     route-scoped workspace API credential
+CRABBOX_RUNTIME_ADAPTER_OWNER     stable service owner for route-scoped access
+CRABBOX_RUNTIME_ADAPTER_ORG       stable organization for route-scoped access
 DAYTONA_CRABBOX_KEY               required for brokered Daytona leases
 CRABBOX_DAYTONA_*                 optional Daytona API, snapshot, target, user, work-root, and SSH-token settings
 CRABBOX_RUN_RETENTION_DAYS        terminal run history retention; default 30 days, minimum 1
@@ -438,10 +459,12 @@ CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS    optional; default 900
 CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE optional; set 1 to release stale pending EC2 Mac hosts during orphan sweep
 ```
 
-AWS workspace bridges use a dedicated `crabbox-workspaces` security group, separate
-from ordinary runner ingress. Workers TCP egress has no published allowlist, so
-that group accepts key-only SSH from `0.0.0.0/0`; workspace keys are deployment
-specific, host keys are pinned, and leases expire automatically.
+Normal SSH-based AWS workspace bridges use a dedicated `crabbox-workspaces`
+security group, separate from ordinary runner ingress. Workers TCP egress has
+no published allowlist, so that group accepts key-only SSH from `0.0.0.0/0`;
+workspace keys are deployment specific, host keys are pinned, and leases expire
+automatically. The dedicated private AWS mode does not use this group or any SSH
+key: it requires a separate no-ingress group and SSM-only bootstrap.
 
 Workspace leases currently use their hard TTL for provider expiry because the
 adapter does not yet receive a trustworthy activity signal. Workspace TTLs must
@@ -455,6 +478,13 @@ also receives a coordinator-generated SSH host identity whose fingerprint is
 persisted before provisioning, so first attachment does not rely on TOFU.
 The versioned workspace `attachUrl` is a bearer-authenticated server-to-server
 endpoint for control planes such as Crabfleet, not a browser portal URL.
+
+Private AWS workspaces intentionally omit terminal attachment. Their client
+contract is the dedicated service URL, `CRABBOX_RUNTIME_ADAPTER_TOKEN`, and
+`POST`/`GET`/`DELETE /v1/workspaces`; a `ready` status means SSM registration and
+bootstrap succeeded. Client labels and Region-shaped metadata do not choose
+placement.
+
 Desktop workspaces report `capabilities.nativeVnc=true` when the native CLI
 handoff is available. This does not imply a browser desktop endpoint:
 `capabilities.vnc` and `capabilities.desktop` remain false unless

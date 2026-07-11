@@ -29,10 +29,13 @@ Crabbox has three parts:
   delegated sandboxes that actually run commands. See the
   [provider reference](features/providers.md).
 
-The coordinator manages leases. The CLI executes work. Runners do not call back
-to the coordinator for ordinary command execution; lease bridges (WebVNC,
-code-server, egress) are the only on-demand paths that route runner traffic
-through it.
+For normal CLI leases, the coordinator manages leases and the CLI executes
+work. Runners do not call back to the coordinator for ordinary command
+execution; lease bridges (WebVNC, code-server, egress) are the only on-demand
+paths that route runner traffic through it. The dedicated
+[private AWS workspace service](features/aws-private-workspaces.md) is a
+separate route-scoped API deployment that bootstraps an SSM-only workspace from
+the coordinator and exposes no SSH path.
 
 ```text
 developer machine

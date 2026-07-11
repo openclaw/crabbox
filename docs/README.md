@@ -29,6 +29,11 @@ usage accounting, and cost guardrails so individual machines and CLIs never
 hold those. The coordinator runs either on Cloudflare Workers with a Durable
 Object or on Node.js with PostgreSQL.
 
+The Node runtime can also own a
+[dedicated private AWS workspace service](features/aws-private-workspaces.md):
+small allowlisted EC2 instances, no public address or SSH, task-role
+credentials, SSM bootstrap, and an authenticated create/status/delete API.
+
 ## How it fits together
 
 ```text
@@ -42,9 +47,11 @@ crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azu
 
 The CLI is a Go binary (`cmd/crabbox`, `internal/cli`). Shared coordinator
 behavior lives in `worker/src`; Cloudflare and Node/PostgreSQL provide runtime
-adapters. Lease lifecycle calls go through the coordinator over HTTPS, but the
-data plane — SSH, rsync, and command execution — goes **directly from the CLI to
-the runner host**. Runners hold no coordinator credentials; they are leaf nodes.
+adapters. For normal CLI leases, lifecycle calls go through the coordinator
+over HTTPS, but the data plane — SSH, rsync, and command execution — goes
+**directly from the CLI to the runner host**. The dedicated private AWS
+workspace API is the documented SSM-only exception. Runners hold no coordinator
+credentials; they are leaf nodes.
 
 Crabbox selects one of three execution modes per provider:
 

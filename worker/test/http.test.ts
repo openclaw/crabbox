@@ -707,6 +707,37 @@ describe("coordinator auth", () => {
     ]);
   });
 
+  it("requires the dedicated runtime token for private AWS workspace routes", async () => {
+    const env = {
+      CRABBOX_WORKSPACE_AWS_PRIVATE: "1",
+      CRABBOX_RUNTIME_ADAPTER_TOKEN: "dedicated",
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_ADMIN_TOKEN: "admin",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const rejected = await Promise.all(
+      [undefined, "Bearer wrong", "Bearer shared", "Bearer admin"].map(async (authorization) => {
+        const headers = new Headers();
+        if (authorization) headers.set("authorization", authorization);
+        return await prepareCoordinatorRequest(
+          new Request("https://example.test/v1/workspaces/private-gateway", { headers }),
+          env,
+        );
+      }),
+    );
+    expect(
+      rejected.map((prepared) => ("response" in prepared ? prepared.response.status : 0)),
+    ).toEqual([401, 401, 401, 401]);
+
+    const accepted = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/workspaces/private-gateway", {
+        headers: { authorization: "Bearer dedicated" },
+      }),
+      env,
+    );
+    expect(accepted).toMatchObject({ authenticated: true });
+  });
+
   it("keeps shared bearer token non-admin and ignores caller-supplied identity headers", async () => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",

@@ -1,10 +1,34 @@
+export interface AWSCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+  expiration?: Date;
+}
+
+export type AWSCredentialProvider = () => Promise<AWSCredentials>;
+
 export interface Env {
   FLEET: DurableObjectNamespace;
   HETZNER_TOKEN: string;
+  awsCredentialProvider?: AWSCredentialProvider;
   AWS_ACCESS_KEY_ID?: string;
   AWS_SECRET_ACCESS_KEY?: string;
   AWS_SESSION_TOKEN?: string;
+  AWS_PROFILE?: string;
+  AWS_CONFIG_FILE?: string;
+  AWS_SHARED_CREDENTIALS_FILE?: string;
+  AWS_ROLE_ARN?: string;
+  AWS_WEB_IDENTITY_TOKEN_FILE?: string;
+  AWS_REGION?: string;
+  AWS_DEFAULT_REGION?: string;
+  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI?: string;
+  AWS_CONTAINER_CREDENTIALS_FULL_URI?: string;
+  ECS_CONTAINER_METADATA_URI_V4?: string;
   CRABBOX_AWS_REGION?: string;
+  CRABBOX_AWS_EXPECTED_ACCOUNT_ID?: string;
+  CRABBOX_AWS_EXPECTED_REGION?: string;
+  CRABBOX_AWS_EXPECTED_TASK_ROLE_NAME?: string;
+  CRABBOX_AWS_REQUIRE_ECS_TASK?: string;
   CRABBOX_AWS_AMI?: string;
   CRABBOX_AWS_SECURITY_GROUP_ID?: string;
   CRABBOX_AWS_SUBNET_ID?: string;
@@ -88,6 +112,19 @@ export interface Env {
   CRABBOX_WORKSPACE_PREWARM_COUNT?: string;
   CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?: string;
   CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?: string;
+  CRABBOX_WORKSPACE_AWS_PRIVATE?: string;
+  CRABBOX_WORKSPACE_AWS_INSTANCE_TYPES?: string;
+  CRABBOX_WORKSPACE_AWS_MAX_VCPUS?: string;
+  CRABBOX_WORKSPACE_AWS_MAX_MEMORY_MIB?: string;
+  CRABBOX_WORKSPACE_AWS_ROOT_GB?: string;
+  CRABBOX_WORKSPACE_AWS_SUBNET_ID?: string;
+  CRABBOX_WORKSPACE_AWS_SECURITY_GROUP_ID?: string;
+  CRABBOX_WORKSPACE_AWS_CONTROLLER_SECURITY_GROUP_ID?: string;
+  CRABBOX_WORKSPACE_AWS_INSTANCE_PROFILE?: string;
+  CRABBOX_WORKSPACE_AWS_MARKET?: string;
+  CRABBOX_WORKSPACE_AWS_SSM_LOG_GROUP?: string;
+  CRABBOX_RUNTIME_ADAPTER_OWNER?: string;
+  CRABBOX_RUNTIME_ADAPTER_ORG?: string;
   CRABBOX_DEFAULT_ORG?: string;
   CRABBOX_ACCESS_TEAM_DOMAIN?: string;
   CRABBOX_ACCESS_AUD?: string;
@@ -171,6 +208,11 @@ export interface LeaseRequest {
   awsSubnetID?: string;
   awsProfile?: string;
   awsRootGB?: number;
+  awsInstanceTypes?: string[];
+  awsPrivate?: boolean;
+  awsRequireSSM?: boolean;
+  awsSSMBootstrapCommand?: string;
+  awsSSMLogGroup?: string;
   awsSSHCIDRs?: string[];
   awsSSHCIDRsPinned?: boolean;
   awsMacHostID?: string;
@@ -383,6 +425,9 @@ export interface LeaseRecord {
   hostID?: string;
   market?: string;
   provisioningAttempts?: ProvisioningAttempt[];
+  awsSSMCommandID?: string;
+  awsSSMCommandStatus?: string;
+  awsSSMLogGroup?: string;
   capacityHints?: CapacityHint[];
   serverID: number;
   serverName: string;
@@ -495,6 +540,7 @@ export interface LeaseNetworkState {
   awsSecurityGroupID?: string;
   awsSecurityGroupName?: string;
   awsSubnetID?: string;
+  awsPrivate?: boolean;
 }
 
 export type LeaseShareRole = "use" | "manage";
@@ -779,6 +825,20 @@ export interface ProviderMachine {
   serverType: string;
   hostID?: string;
   host: string;
+  privateHost?: string;
+  awsIPv6Addresses?: string[];
+  awsKeyName?: string;
+  awsSubnetID?: string;
+  awsSecurityGroupIDs?: string[];
+  awsInstanceProfileARN?: string;
+  awsMetadataHttpEndpoint?: string;
+  awsMetadataHttpTokens?: string;
+  awsMetadataHttpPutResponseHopLimit?: number;
+  awsMetadataInstanceTags?: string;
+  awsRootVolumeID?: string;
+  awsRootDeleteOnTermination?: boolean;
   labels: Record<string, string>;
   providerKey?: string;
+  awsSSMCommandID?: string;
+  awsSSMCommandStatus?: string;
 }
