@@ -2813,7 +2813,7 @@ export async function awsRunInstancesParams(input: {
     params["NetworkInterface.1.AssociatePublicIpAddress"] = config.awsPrivate ? "false" : "true";
     params["NetworkInterface.1.DeleteOnTermination"] = "true";
     params["NetworkInterface.1.DeviceIndex"] = "0";
-    params["NetworkInterface.1.GroupSet.1"] = input.securityGroupID;
+    params["NetworkInterface.1.SecurityGroupId.1"] = input.securityGroupID;
     params["NetworkInterface.1.SubnetId"] = input.subnetID;
   } else {
     params["SecurityGroupId.1"] = input.securityGroupID;
