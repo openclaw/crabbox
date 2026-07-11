@@ -22,6 +22,13 @@ describe("Node AWS deployment guard", () => {
         new Request("https://coordinator.test/v1/workspaces", { method: "POST" }),
       ),
     ).toBe(true);
+    for (const path of ["/v1/workspaces/", "/v1//workspaces"]) {
+      expect(
+        requiresAWSDeploymentReadiness(
+          new Request(`https://coordinator.test${path}`, { method: "POST" }),
+        ),
+      ).toBe(true);
+    }
     for (const [method, path] of [
       ["GET", "/v1/workspaces/example"],
       ["DELETE", "/v1/workspaces/example"],
