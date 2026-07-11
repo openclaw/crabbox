@@ -569,6 +569,15 @@ test("credential-free producer captures tool output before parsing under pipefai
   assert.doesNotMatch(producer, /(?:goreleaser --version|swift --version|xcodebuild -version|vtool -show-build[^\n]*) \|/);
 });
 
+test("credential-bearing packager is pipefail-safe and removes read-only Go toolchains", () => {
+  const packager = read("scripts/package-release.sh");
+  assert.match(packager, /unsigned_vmd_build=\$\(vtool -show-build/);
+  assert.match(packager, /packager_xcode_version_output=\$\(xcodebuild -version\)/);
+  assert.doesNotMatch(packager, /(?:xcodebuild -version|vtool -show-build[^\n]*) \|/);
+  assert.match(packager, /chmod -R u\+w "\$path"/);
+  assert.match(packager, /remove_tree "\$WORK"/);
+});
+
 test("draft creation performs static-only verification and never deletes or replaces partial records", () => {
   const script = read("scripts/create-release-draft.sh");
   const verifyIndex = script.indexOf('env -i');

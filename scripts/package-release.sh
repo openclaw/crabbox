@@ -87,9 +87,15 @@ OUT_DIR="$(cd "$out_parent" && pwd -P)/$(basename "$OUT_DIR")"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-release-package.XXXXXX")
 PAYLOAD="$OUT_DIR.partial.$$"
 [[ ! -e "$PAYLOAD" ]]
+remove_tree() {
+  local path=$1
+  [[ -e "$path" ]] || return 0
+  chmod -R u+w "$path" 2>/dev/null || true
+  rm -rf "$path"
+}
 cleanup() {
-  rm -rf "$WORK"
-  [[ -z "${PAYLOAD:-}" || ! -e "$PAYLOAD" ]] || rm -rf "$PAYLOAD"
+  remove_tree "$WORK"
+  [[ -z "${PAYLOAD:-}" ]] || remove_tree "$PAYLOAD"
 }
 trap cleanup EXIT
 SOURCE="$WORK/source"
@@ -138,7 +144,8 @@ unsigned_vmd="$CANDIDATE/.components/crabbox-apple-vm-vmd"
   echo "unsigned Apple VM daemon must be thin arm64" >&2
   exit 1
 }
-[[ "$(vtool -show-build "$unsigned_vmd" | awk '$1 == "minos" { print $2; exit }')" == 13.0 ]] || {
+unsigned_vmd_build=$(vtool -show-build "$unsigned_vmd")
+[[ "$(awk '$1 == "minos" { print $2 }' <<<"$unsigned_vmd_build")" == 13.0 ]] || {
   echo "unsigned Apple VM daemon must target macOS 13.0" >&2
   exit 1
 }
@@ -154,8 +161,9 @@ packager_go_version=$(env -i \
   echo "release packager Go version mismatch: $packager_go_version" >&2
   exit 1
 }
-packager_xcode_version=$(xcodebuild -version | awk '$1 == "Xcode" { print $2; exit }')
-packager_xcode_build=$(xcodebuild -version | awk '$1 == "Build" && $2 == "version" { print $3; exit }')
+packager_xcode_version_output=$(xcodebuild -version)
+packager_xcode_version=$(awk '$1 == "Xcode" { print $2 }' <<<"$packager_xcode_version_output")
+packager_xcode_build=$(awk '$1 == "Build" && $2 == "version" { print $3 }' <<<"$packager_xcode_version_output")
 [[ -n "$packager_xcode_version" && -n "$packager_xcode_build" ]] || {
   echo "could not capture the Xcode packager toolchain" >&2
   exit 1
