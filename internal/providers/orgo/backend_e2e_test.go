@@ -24,7 +24,7 @@ func TestOrgoBackendEndToEndCreateRunDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	const (
-		dummyKey    = "dummy-orgo-key"
+		dummyKey    = "test-key"
 		workspaceID = "ws_e2e"
 		computerID  = "computer_e2e"
 	)

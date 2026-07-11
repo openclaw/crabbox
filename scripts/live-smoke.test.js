@@ -3797,7 +3797,7 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-if [[ "$auth_header" != "Authorization: Bearer dummy-orgo-key" ]]; then
+if [[ "$auth_header" != "Authorization: Bearer test-key" ]]; then
   printf 'missing expected Authorization header\\n' >&2
   exit 98
 fi
@@ -3839,7 +3839,7 @@ esac
       CRABBOX_LIVE_PROVIDERS: "orgo",
       CRABBOX_LIVE_REPO: repoRoot,
       CRABBOX_ORGO_API_BASE: "https://orgo.test",
-      ORGO_API_KEY: "dummy-orgo-key",
+      ORGO_API_KEY: "test-key",
     },
     encoding: "utf8",
   });
@@ -3847,7 +3847,7 @@ esac
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /orgo computer=computer_test workspace=ws_test/);
   assert.match(result.stdout, /crabbox-orgo-ok/);
-  assert.doesNotMatch(result.stdout + result.stderr, /dummy-orgo-key/);
+  assert.doesNotMatch(result.stdout + result.stderr, /test-key/);
 
   const curlCalls = fs.readFileSync(curlLog, "utf8");
   assert.match(curlCalls, /POST https:\/\/orgo\.test\/workspaces data=\{\n  "name": "crabbox-smoke-test"\n\}/);
@@ -3856,7 +3856,7 @@ esac
   assert.match(curlCalls, /POST https:\/\/orgo\.test\/computers\/computer_test\/bash data=\{\n  "command": "printf crabbox-orgo-ok"\n\}/);
   assert.match(curlCalls, /^DELETE https:\/\/orgo\.test\/computers\/computer_test data=$/m);
   assert.match(curlCalls, /^DELETE https:\/\/orgo\.test\/workspaces\/ws_test data=$/m);
-  assert.doesNotMatch(curlCalls, /dummy-orgo-key/);
+  assert.doesNotMatch(curlCalls, /test-key/);
 
 	const failedResult = spawnSync("bash", ["scripts/live-smoke.sh"], {
 		cwd: repoRoot,
@@ -3872,7 +3872,7 @@ esac
 			CRABBOX_LIVE_PROVIDERS: "orgo",
 			CRABBOX_LIVE_REPO: repoRoot,
 			CRABBOX_ORGO_API_BASE: "https://orgo.test",
-			ORGO_API_KEY: "dummy-orgo-key",
+			ORGO_API_KEY: "test-key",
 		},
 		encoding: "utf8",
 	});
@@ -3893,7 +3893,7 @@ esac
 			CRABBOX_LIVE_PROVIDERS: "orgo",
 			CRABBOX_LIVE_REPO: repoRoot,
 			CRABBOX_ORGO_API_BASE: "https://orgo.test",
-			ORGO_API_KEY: "dummy-orgo-key",
+			ORGO_API_KEY: "test-key",
 		},
 		encoding: "utf8",
 	});
@@ -3911,7 +3911,7 @@ test("orgo live smoke reuses an explicit workspace", () => {
   fs.writeFileSync(
     config,
     `orgo:
-  apiKey: config-orgo-key
+  apiKey: test-key
   apiBase: https://orgo.test
 `,
     "utf8",
@@ -3941,7 +3941,7 @@ while [[ $# -gt 0 ]]; do
     *) url="$1"; shift ;;
   esac
 done
-if [[ "$auth_header" != "Authorization: Bearer config-orgo-key" ]]; then
+if [[ "$auth_header" != "Authorization: Bearer test-key" ]]; then
   printf 'unexpected auth header: %s\\n' "$auth_header" >&2
   exit 98
 fi
@@ -3976,7 +3976,7 @@ esac
       CRABBOX_LIVE_ORGO_SUFFIX: "test",
       CRABBOX_LIVE_PROVIDERS: "orgo",
       CRABBOX_LIVE_REPO: repoRoot,
-      ORGO_API_KEY: "wrong-env-key",
+      ORGO_API_KEY: "wrong-key",
       ORGO_WORKSPACE_ID: "ws_existing",
     },
     encoding: "utf8",
@@ -4055,14 +4055,14 @@ exit 99
       CRABBOX_LIVE_COORDINATOR: "0",
       CRABBOX_LIVE_PROVIDERS: "orgo",
       CRABBOX_LIVE_REPO: repoRoot,
-      ORGO_API_KEY: "dummy-orgo-key\nurl = https://attacker.invalid",
+      ORGO_API_KEY: "test-key" + "\nurl = https://attacker.invalid",
     },
     encoding: "utf8",
   });
 
   assert.equal(result.status, 2, result.stdout + result.stderr);
   assert.match(result.stderr, /API key must not contain line breaks/);
-  assert.doesNotMatch(result.stdout + result.stderr, /dummy-orgo-key|attacker/);
+  assert.doesNotMatch(result.stdout + result.stderr, /test-key|attacker/);
   const calls = fs.existsSync(curlLog) ? fs.readFileSync(curlLog, "utf8") : "";
   assert.equal(calls, "");
 });
@@ -4135,7 +4135,7 @@ exit 99
       CRABBOX_LIVE_COORDINATOR: "0",
       CRABBOX_LIVE_PROVIDERS: "orgo",
       CRABBOX_LIVE_REPO: repoRoot,
-      ORGO_API_KEY: "dummy-orgo-key",
+      ORGO_API_KEY: "test-key",
     },
     encoding: "utf8",
   });
@@ -4171,7 +4171,7 @@ exit 99
       CRABBOX_LIVE_PROVIDERS: "orgo",
       CRABBOX_LIVE_REPO: repoRoot,
       CRABBOX_ORGO_API_BASE: "http://api.example.test",
-      ORGO_API_KEY: "dummy-orgo-key",
+      ORGO_API_KEY: "test-key",
     },
     encoding: "utf8",
   });
