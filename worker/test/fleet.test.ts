@@ -98,12 +98,12 @@ class MemoryStorage {
   private alarmTime: number | undefined;
   beforeGet?: (key: string) => Promise<void>;
 
-  async get<T>(key: string): Promise<T | undefined> {
+  async get<T>(key: string, _options?: { noCache?: boolean }): Promise<T | undefined> {
     await this.beforeGet?.(key);
     return this.values.get(key) as T | undefined;
   }
 
-  async put<T>(key: string, value: T): Promise<void> {
+  async put<T>(key: string, value: T, _options?: { noCache?: boolean }): Promise<void> {
     this.values.set(key, value);
   }
 
@@ -135,6 +135,7 @@ class MemoryStorage {
     prefix?: string;
     limit?: number;
     startAfter?: string;
+    noCache?: boolean;
   } = {}): Promise<Map<string, T>> {
     const matches = new Map<string, T>();
     for (const [key, value] of [...this.values].toSorted(([left], [right]) =>
@@ -173,10 +174,20 @@ class HookedMemoryStorage extends MemoryStorage {
 }
 
 class ObservedMemoryStorage extends MemoryStorage {
-  readonly listOptions: Array<{ prefix?: string; limit?: number; startAfter?: string }> = [];
+  readonly listOptions: Array<{
+    prefix?: string;
+    limit?: number;
+    startAfter?: string;
+    noCache?: boolean;
+  }> = [];
 
   override async list<T>(
-    options: { prefix?: string; limit?: number; startAfter?: string } = {},
+    options: {
+      prefix?: string;
+      limit?: number;
+      startAfter?: string;
+      noCache?: boolean;
+    } = {},
   ): Promise<Map<string, T>> {
     this.listOptions.push({ ...options });
     return await super.list<T>(options);
@@ -184,6 +195,25 @@ class ObservedMemoryStorage extends MemoryStorage {
 
   resetListOptions(): void {
     this.listOptions.length = 0;
+  }
+}
+
+class BoundedObservedMemoryStorage extends ObservedMemoryStorage {
+  override async list<T>(
+    options: {
+      prefix?: string;
+      limit?: number;
+      startAfter?: string;
+      noCache?: boolean;
+    } = {},
+  ): Promise<Map<string, T>> {
+    if (
+      (options.prefix === "lease:" || options.prefix === "workspace:") &&
+      options.limit === undefined
+    ) {
+      throw new Error(`unbounded ${options.prefix} list`);
+    }
+    return await super.list<T>(options);
   }
 }
 
@@ -5733,6 +5763,7 @@ describe("fleet lease identity and idle", () => {
         CRABBOX_GCP_SUBNET: "operator-subnet",
         CRABBOX_GCP_TAGS: "operator-runner",
         CRABBOX_GCP_SERVICE_ACCOUNT: "runner@operator-project.iam.gserviceaccount.com",
+        GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
       },
       body: { os: "ubuntu:24.04" },
     },
@@ -9971,6 +10002,62 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBeUndefined();
   });
 
+  it("schedules another cleanup alarm when more than one claim batch is due", async () => {
+    const storage = new MemoryStorage();
+    const cleaned: string[] = [];
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, {
+        provider: "hetzner",
+        onReleaseLease(lease) {
+          cleaned.push(lease.id);
+        },
+      }),
+    });
+    const now = Date.now();
+    const futureExpiry = new Date(now + 60 * 60_000).toISOString();
+    const failedAt = new Date(now - 60_000).toISOString();
+    const retryAt = new Date(now - 1_000).toISOString();
+    for (let index = 0; index < 17; index += 1) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      storage.seed(
+        `lease:${id}`,
+        testLease({
+          id,
+          owner: "alice@example.com",
+          org: "example-org",
+          state: "released",
+          keep: false,
+          releaseDeletesServer: true,
+          cleanupAttempts: 1,
+          cleanupError: "previous cleanup failure",
+          cleanupFailedAt: failedAt,
+          cleanupRetryAt: retryAt,
+          releasedAt: failedAt,
+          endedAt: failedAt,
+          updatedAt: failedAt,
+          expiresAt: futureExpiry,
+        }),
+      );
+    }
+
+    const alarmStartedAt = Date.now();
+    await fleet.alarm();
+
+    expect(cleaned).toHaveLength(16);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000010")).toMatchObject({
+      cleanupError: "previous cleanup failure",
+      cleanupRetryAt: retryAt,
+    });
+    expect(storage.alarm()).toBeGreaterThanOrEqual(alarmStartedAt);
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1_000);
+    expect(storage.alarm()).toBeLessThan(Date.parse(futureExpiry));
+
+    await fleet.alarm();
+
+    expect(cleaned).toHaveLength(17);
+    expect(storage.alarm()).toBeUndefined();
+  });
+
   it("keeps heartbeats flowing while expiry cleanup runs and reconciles AWS ingress", async () => {
     const storage = new MemoryStorage();
     const deleteStarted = deferred<void>();
@@ -10778,9 +10865,10 @@ describe("fleet lease identity and idle", () => {
         providerScope: "/subscriptions/subscription/resourceGroups/crabbox-leases",
       }),
     ]);
-    expect(
-      list.mock.calls.filter(([options]) => options?.prefix === "lease:" && options.limit === 128),
-    ).toHaveLength(2);
+    const boundedLeaseScans = list.mock.calls.filter(
+      ([options]) => options?.prefix === "lease:" && options.limit === 128,
+    );
+    expect(boundedLeaseScans.length).toBeGreaterThanOrEqual(2);
     expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
     expect(sweep?.candidates).toEqual([
       expect.objectContaining({
@@ -11177,6 +11265,197 @@ describe("fleet lease identity and idle", () => {
     const found = (await bySlug.json()) as { lease: LeaseRecord };
     expect(found.lease.id).toBe("cbx_abcdef123456");
     expect(found.lease.slug).toBe("blue-lobster");
+  });
+
+  it("creates leases with bounded scans after bulky terminal history", async () => {
+    const storage = new BoundedObservedMemoryStorage();
+    const now = new Date();
+    const endedAt = now.toISOString();
+    for (let index = 0; index < 260; index += 1) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      storage.seed(
+        `lease:${id}`,
+        testLease({
+          id,
+          owner: "alice@example.com",
+          org: "example-org",
+          state: "expired",
+          cloudID: "",
+          createdAt: endedAt,
+          updatedAt: endedAt,
+          endedAt,
+          expiresAt: endedAt,
+          failureError: "terminal-history".repeat(2048),
+        }),
+      );
+    }
+    storage.seed(
+      "lease:cbx_ffffffffffff",
+      testLease({
+        id: "cbx_ffffffffffff",
+        slug: "bounded-scan",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(now.getTime() + 60 * 60_000).toISOString(),
+      }),
+    );
+    const fleet = testFleet(storage, { hetzner: fakeProvider() });
+
+    storage.resetListOptions();
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_eeeeeeeeeeee",
+          slug: "bounded-scan",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(201);
+    const { lease } = (await create.json()) as { lease: LeaseRecord };
+    expect(lease.slug).not.toBe("bounded-scan");
+    const coordinatorScans = storage.listOptions.filter(
+      ({ prefix }) => prefix === "lease:" || prefix === "workspace:",
+    );
+    expect(coordinatorScans.length).toBeGreaterThan(0);
+    expect(coordinatorScans.every(({ limit, noCache }) => limit === 128 && noCache)).toBe(true);
+    expect(
+      coordinatorScans.some(
+        ({ prefix, startAfter }) => prefix === "lease:" && startAfter !== undefined,
+      ),
+    ).toBe(true);
+
+    const limitedFleet = testFleet(
+      storage,
+      { hetzner: fakeProvider() },
+      { CRABBOX_MAX_MONTHLY_USD: "300" },
+    );
+    const overBudget = await limitedFleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_dddddddddddd",
+          provider: "hetzner",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(overBudget.status).toBe(429);
+    expect(await overBudget.json()).toMatchObject({
+      error: "cost_limit_exceeded",
+      message: expect.stringContaining("monthly budget exceeded"),
+    });
+  });
+
+  it("runs alarm maintenance with bounded scans after bulky terminal history", async () => {
+    const storage = new BoundedObservedMemoryStorage();
+    const now = Date.now();
+    const terminalAt = new Date(now - 1_000).toISOString();
+    for (let index = 0; index < 260; index += 1) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      const workspaceID = `history-${index.toString().padStart(3, "0")}`;
+      storage.seed(
+        `lease:${id}`,
+        testLease({
+          id,
+          owner: "alice@example.com",
+          org: "example-org",
+          cloudID: "",
+          workspaceID,
+          state: "expired",
+          createdAt: terminalAt,
+          updatedAt: terminalAt,
+          endedAt: terminalAt,
+          expiresAt: terminalAt,
+          failureError: "terminal-history".repeat(2048),
+        }),
+      );
+      storage.seed(workspaceFixtureKey(workspaceID), {
+        id: workspaceID,
+        leaseID: id,
+        owner: "alice@example.com",
+        org: "example-org",
+        profile: "default",
+        repo: "",
+        branch: "main",
+        command: "terminal-workspace-history".repeat(1024),
+        provider: "hetzner",
+        class: "standard",
+        desktop: false,
+        ttlSeconds: 3600,
+        idleTimeoutSeconds: 1800,
+        createdAt: terminalAt,
+        updatedAt: terminalAt,
+      });
+    }
+    const anchor = testLease({
+      id: "cbx_ffffffffffff",
+      provider: "aws",
+      cloudID: "i-active",
+      region: "eu-west-1",
+      expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      network: {
+        awsSecurityGroupID: "sg-active",
+        sshSourceCIDRs: ["198.51.100.10/32"],
+        sshSourceCIDRsComplete: true,
+      },
+    });
+    storage.seed(`lease:${anchor.id}`, anchor);
+    storage.seed("aws-ingress-reconcile:pending", {
+      targets: [
+        {
+          anchor,
+          attempts: 0,
+          generation: "generation-1",
+          updatedAt: terminalAt,
+          retryAt: terminalAt,
+        },
+      ],
+    });
+    const reconciliations: string[][] = [];
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        region: "eu-west-1",
+        onReconcileLeaseAccess(_lease, context) {
+          reconciliations.push(context.activeLeases.map((lease) => lease.id).toSorted());
+        },
+      }),
+    });
+
+    storage.resetListOptions();
+    await fleet.alarm();
+
+    expect(reconciliations).toEqual([[anchor.id]]);
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+    expect(storage.alarm()).toBe(Date.parse(anchor.expiresAt));
+    const coordinatorScans = storage.listOptions.filter(
+      ({ prefix }) => prefix === "lease:" || prefix === "workspace:",
+    );
+    expect(coordinatorScans.length).toBeGreaterThan(0);
+    expect(coordinatorScans.every(({ limit, noCache }) => limit === 128 && noCache)).toBe(true);
+    for (const prefix of ["lease:", "workspace:"]) {
+      expect(
+        coordinatorScans.some(
+          (options) => options.prefix === prefix && options.startAfter !== undefined,
+        ),
+      ).toBe(true);
+    }
   });
 
   it("registers, borrows, and returns ready-pool leases", async () => {
@@ -22765,9 +23044,9 @@ describe("fleet run history", () => {
       "run_000000000295",
     ]);
     expect(storage.listOptions).toEqual([
-      { prefix: "run:", limit: 128 },
-      { prefix: "run:", limit: 128, startAfter: "run:run_000000000127" },
-      { prefix: "run:", limit: 128, startAfter: "run:run_000000000255" },
+      { prefix: "run:", limit: 128, noCache: true },
+      { prefix: "run:", limit: 128, noCache: true, startAfter: "run:run_000000000127" },
+      { prefix: "run:", limit: 128, noCache: true, startAfter: "run:run_000000000255" },
     ]);
 
     storage.resetListOptions();
@@ -22781,9 +23060,9 @@ describe("fleet run history", () => {
     expect(portalHTML).not.toContain("run_000000000261");
     expect(portalHTML).not.toContain("run_000000000299");
     expect(storage.listOptions).toEqual([
-      { prefix: "run:", limit: 128 },
-      { prefix: "run:", limit: 128, startAfter: "run:run_000000000127" },
-      { prefix: "run:", limit: 128, startAfter: "run:run_000000000255" },
+      { prefix: "run:", limit: 128, noCache: true },
+      { prefix: "run:", limit: 128, noCache: true, startAfter: "run:run_000000000127" },
+      { prefix: "run:", limit: 128, noCache: true, startAfter: "run:run_000000000255" },
     ]);
   });
 
@@ -25007,6 +25286,112 @@ describe("fleet identity", () => {
         "AZURE_CLIENT_SECRET",
         "AZURE_SUBSCRIPTION_ID",
       ],
+    });
+
+    const gcpMissingProject = await fleet.fetch(request("GET", "/v1/providers/gcp/readiness"));
+    expect(gcpMissingProject.status).toBe(200);
+    await expect(gcpMissingProject.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["GCP_PROJECT_ID", "GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
+    });
+
+    const gcpProjectOnlyFleet = testFleet(
+      undefined,
+      {},
+      { CRABBOX_GCP_PROJECT: "example-project" },
+    );
+    const gcpProjectOnly = await gcpProjectOnlyFleet.fetch(
+      request("GET", "/v1/providers/gcp/readiness"),
+    );
+    await expect(gcpProjectOnly.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
+    });
+
+    const gcpDefaultKeyFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+        GCP_PRIVATE_KEY: "test-private-key",
+      },
+    );
+    const gcpDefaultKey = await gcpDefaultKeyFleet.fetch(
+      request("GET", "/v1/providers/gcp/readiness"),
+    );
+    await expect(gcpDefaultKey.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: true,
+      missing: [],
+    });
+
+    const gcpInvalidSourceFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+        GCP_PRIVATE_KEY: "test-private-key",
+        CRABBOX_GCP_CREDENTIAL_SOURCE: "workload-identity",
+      },
+    );
+    const gcpInvalidSource = await gcpInvalidSourceFleet.fetch(
+      request("GET", "/v1/providers/gcp/readiness"),
+    );
+    await expect(gcpInvalidSource.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["CRABBOX_GCP_CREDENTIAL_SOURCE"],
+    });
+
+    const gcpMetadataFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+      },
+    );
+    const gcpMetadata = await gcpMetadataFleet.fetch(request("GET", "/v1/providers/gcp/readiness"));
+    await expect(gcpMetadata.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: true,
+      missing: [],
+    });
+
+    const gcpPartialFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+      },
+    );
+    const gcpPartial = await gcpPartialFleet.fetch(request("GET", "/v1/providers/gcp/readiness"));
+    await expect(gcpPartial.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["GCP_PRIVATE_KEY"],
+    });
+
+    const gcpExplicitKeyFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        CRABBOX_GCP_CREDENTIAL_SOURCE: "service-account-key",
+      },
+    );
+    const gcpExplicitKey = await gcpExplicitKeyFleet.fetch(
+      request("GET", "/v1/providers/gcp/readiness"),
+    );
+    await expect(gcpExplicitKey.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
     });
 
     const daytonaMissing = await fleet.fetch(request("GET", "/v1/providers/daytona/readiness"));

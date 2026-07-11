@@ -2,6 +2,14 @@
 
 ## 0.37.2 - Unreleased
 
+### Added
+
+- Added explicit GCP metadata-server authentication for brokered coordinators, with hardened token validation, bounded retries, source-aware readiness diagnostics, and preserved service-account-key defaults. Thanks @dani29.
+
+### Fixed
+
+- Bounded coordinator lease and workspace history scans and kept saturated cleanup retry batches scheduled promptly, preventing large retained histories from exhausting Durable Object memory or stranding cleanup.
+
 ## 0.37.1 - 2026-07-11
 
 ### Added
