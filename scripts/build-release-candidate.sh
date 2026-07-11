@@ -33,7 +33,8 @@ for tool in git go goreleaser lipo node shasum swift sw_vers tar vtool xcodebuil
     exit 1
   }
 done
-goreleaser_version=$(goreleaser --version | awk '$1 == "GitVersion:" { print $2; exit }')
+goreleaser_version_output=$(goreleaser --version)
+goreleaser_version=$(awk '$1 == "GitVersion:" { print $2 }' <<<"$goreleaser_version_output")
 [[ "$goreleaser_version" == "$CRABBOX_RELEASE_GORELEASER_VERSION" ]] || {
   echo "official builds require GoReleaser $CRABBOX_RELEASE_GORELEASER_VERSION, got ${goreleaser_version:-unknown}" >&2
   exit 1
@@ -82,9 +83,11 @@ producer_go_version=$(env -i \
   echo "credential-free producer Go version mismatch: $producer_go_version" >&2
   exit 1
 }
-producer_swift_version=$(swift --version | sed -n '1p')
-producer_xcode_version=$(xcodebuild -version | awk '$1 == "Xcode" { print $2; exit }')
-producer_xcode_build=$(xcodebuild -version | awk '$1 == "Build" && $2 == "version" { print $3; exit }')
+producer_swift_version_output=$(swift --version)
+producer_swift_version=$(sed -n '1p' <<<"$producer_swift_version_output")
+producer_xcode_version_output=$(xcodebuild -version)
+producer_xcode_version=$(awk '$1 == "Xcode" { print $2 }' <<<"$producer_xcode_version_output")
+producer_xcode_build=$(awk '$1 == "Build" && $2 == "version" { print $3 }' <<<"$producer_xcode_version_output")
 producer_os=$(sw_vers -productVersion)
 producer_arch=$(uname -m)
 [[ -n "$producer_swift_version" && -n "$producer_xcode_version" && -n "$producer_xcode_build" ]] || {
@@ -147,7 +150,8 @@ unsigned_vmd="$SOURCE/vmd/.build/release/crabbox-apple-vm-vmd"
   echo "credential-free Apple VM daemon must be thin arm64" >&2
   exit 1
 }
-[[ "$(vtool -show-build "$unsigned_vmd" | awk '$1 == "minos" { print $2; exit }')" == 13.0 ]] || {
+unsigned_vmd_build=$(vtool -show-build "$unsigned_vmd")
+[[ "$(awk '$1 == "minos" { print $2 }' <<<"$unsigned_vmd_build")" == 13.0 ]] || {
   echo "credential-free Apple VM daemon must target macOS 13.0" >&2
   exit 1
 }

@@ -556,6 +556,15 @@ test("managed Foundation signing and notary configuration is repository-owned an
   assert.match(codeowners, /^\/\.mac-release\.env @openclaw\/openclaw-secops$/m);
 });
 
+test("credential-free producer captures tool output before parsing under pipefail", () => {
+  const producer = read("scripts/build-release-candidate.sh");
+  assert.match(producer, /goreleaser_version_output=\$\(goreleaser --version\)/);
+  assert.match(producer, /producer_swift_version_output=\$\(swift --version\)/);
+  assert.match(producer, /producer_xcode_version_output=\$\(xcodebuild -version\)/);
+  assert.match(producer, /unsigned_vmd_build=\$\(vtool -show-build/);
+  assert.doesNotMatch(producer, /(?:goreleaser --version|swift --version|xcodebuild -version|vtool -show-build[^\n]*) \|/);
+});
+
 test("draft creation performs static-only verification and never deletes or replaces partial records", () => {
   const script = read("scripts/create-release-draft.sh");
   const verifyIndex = script.indexOf('env -i');
