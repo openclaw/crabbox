@@ -262,6 +262,56 @@ describe("usage accounting", () => {
     expect(error).toContain("monthly budget for owner exceeded");
   });
 
+  it.each([
+    ["fleet", { maxMonthlyUSD: 10 }, "monthly budget exceeded"],
+    ["owner", { maxMonthlyUSDPerOwner: 10 }, "monthly budget for owner exceeded"],
+    ["org", { maxMonthlyUSDPerOrg: 10 }, "monthly budget for org exceeded"],
+  ] as const)(
+    "counts live prior-month reservations against the %s monthly budget",
+    (_, limit, message) => {
+      const now = new Date("2026-06-01T00:30:00Z");
+      const existing = testLease({
+        createdAt: "2026-05-31T23:30:00Z",
+        expiresAt: "2026-06-01T23:30:00Z",
+        maxEstimatedUSD: 9,
+      });
+      const candidate = testLease({
+        id: "cbx_month_boundary_candidate",
+        createdAt: now.toISOString(),
+        expiresAt: "2026-06-01T01:30:00Z",
+        maxEstimatedUSD: 2,
+      });
+
+      expect(
+        enforceCostLimits([existing], candidate, { ...costLimits({} as never), ...limit }, now),
+      ).toContain(message);
+    },
+  );
+
+  it("does not carry terminal prior-month reservations into the current budget", () => {
+    const now = new Date("2026-06-01T00:30:00Z");
+    const released = testLease({
+      createdAt: "2026-05-31T22:00:00Z",
+      endedAt: "2026-05-31T23:00:00Z",
+      state: "released",
+      maxEstimatedUSD: 9,
+    });
+    const candidate = testLease({
+      id: "cbx_month_boundary_released_candidate",
+      createdAt: now.toISOString(),
+      maxEstimatedUSD: 2,
+    });
+
+    expect(
+      enforceCostLimits(
+        [released],
+        candidate,
+        { ...costLimits({} as never), maxMonthlyUSD: 10 },
+        now,
+      ),
+    ).toBe("");
+  });
+
   it("allows configured capacity admins to use the admin owner active cap", () => {
     const now = new Date("2026-05-01T02:00:00Z");
     const activeLeases = Array.from({ length: 4 }, (_, index) =>

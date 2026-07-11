@@ -165,7 +165,9 @@ export function addLeaseToCostLimitUsage(
       usage.orgActiveLeases += 1;
     }
   }
-  if (monthKey(new Date(lease.createdAt)) !== usage.month) {
+  // A live lease still reserves provider spend in the active budget window,
+  // even when its creation month has rolled over.
+  if (!isLiveLease(lease) && monthKey(new Date(lease.createdAt)) !== usage.month) {
     return;
   }
   const reservedUSD = leaseUsage(lease, now).reservedUSD;

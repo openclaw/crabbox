@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Counted live managed leases against monthly reserved-USD budgets after UTC month rollover until cleanup commits a terminal state, preventing overlapping reservations from bypassing configured cost caps. Thanks @coygeek.
 - Bounded coordinator lease and workspace history scans and kept saturated cleanup retry batches scheduled promptly, preventing large retained histories from exhausting Durable Object memory or stranding cleanup.
 
 ## 0.37.1 - 2026-07-11
