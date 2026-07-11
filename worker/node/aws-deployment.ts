@@ -191,7 +191,7 @@ async function verifyECSTaskMetadata(
 }
 
 function taskARNMatchesIdentity(taskARN: string, accountID: string, region: string): boolean {
-  const match = /^arn:aws(?:-[a-z]+)?:ecs:([^:]+):(\d{12}):task\/.+$/.exec(taskARN);
+  const match = /^arn:[a-z0-9-]+:ecs:([^:]+):(\d{12}):task\/.+$/.exec(taskARN);
   return match?.[1] === region && match[2] === accountID;
 }
 

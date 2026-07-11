@@ -192,6 +192,21 @@ describe("Node AWS deployment guard", () => {
     },
   );
 
+  it("accepts ECS task metadata from a multi-hyphen AWS partition", async () => {
+    const govRegion = "us-gov-west-1";
+    const guard = createAWSDeploymentGuard(privateEnv({ CRABBOX_AWS_EXPECTED_REGION: govRegion }), {
+      fetch: async () =>
+        Response.json({
+          TaskARN: `arn:aws-us-gov:ecs:${govRegion}:${expectedAccountID}:task/cluster/task-id`,
+          AvailabilityZone: `${govRegion}a`,
+          LaunchType: "FARGATE",
+        }),
+      preflight: vi.fn<Preflight>(),
+    });
+
+    await expect(guard.start()).resolves.toBeUndefined();
+  });
+
   it("runs the private permission preflight and caches successful readiness checks", async () => {
     let now = 1_000;
     const fetchImpl = vi.fn<() => Promise<Response>>(async () => Response.json(taskMetadata()));
