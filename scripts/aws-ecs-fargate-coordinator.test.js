@@ -61,6 +61,7 @@ test("Fargate coordinator template is generic and digest pinned", () => {
   );
   assert.doesNotMatch(template, /AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN/);
   assert.match(template, /AllowedPattern: "\^\.\+@sha256:\[0-9a-f\]\{64\}\$"/);
+  assert.match(template, /DeploymentUsesCommercialAWSPartition:/);
   assert.match(template, /ExpectedAccountMatchesDeployment:/);
   assert.match(template, /ExpectedRegionMatchesDeployment:/);
   assert.match(template, /CoordinatorIngressIsBounded:/);

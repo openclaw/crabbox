@@ -192,7 +192,7 @@ describe("Node AWS deployment guard", () => {
     },
   );
 
-  it("accepts ECS task metadata from a multi-hyphen AWS partition", async () => {
+  it("rejects ECS task metadata from an unsupported AWS partition", async () => {
     const govRegion = "us-gov-west-1";
     const guard = createAWSDeploymentGuard(privateEnv({ CRABBOX_AWS_EXPECTED_REGION: govRegion }), {
       fetch: async () =>
@@ -204,7 +204,7 @@ describe("Node AWS deployment guard", () => {
       preflight: vi.fn<Preflight>(),
     });
 
-    await expect(guard.start()).resolves.toBeUndefined();
+    await expect(guard.start()).rejects.toThrow("AWS deployment guard failed: metadata_mismatch");
   });
 
   it("runs the private permission preflight and caches successful readiness checks", async () => {

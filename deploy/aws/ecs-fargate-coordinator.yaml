@@ -160,6 +160,13 @@ Parameters:
       - 365
 
 Rules:
+  DeploymentUsesCommercialAWSPartition:
+    Assertions:
+      - Assert:
+          Fn::Equals:
+            - Ref: AWS::Partition
+            - aws
+        AssertDescription: This deployment supports only the commercial aws partition.
   ExpectedAccountMatchesDeployment:
     Assertions:
       - Assert:

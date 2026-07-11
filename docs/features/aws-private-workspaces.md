@@ -15,6 +15,10 @@ normal Crabbox CLI AWS path:
   the AWS account, Region, subnet, security group, instance type, or volume
   size. Only the dedicated coordinator configuration does that.
 
+The current deployment supports the commercial `aws` partition only. It fails
+closed in GovCloud, China, or other partitions whose endpoints and Canonical
+Ubuntu publisher identity differ.
+
 Do not point an isolation-sensitive client at a shared coordinator and treat a
 client-side label as proof of placement. The client URL must resolve to this
 dedicated service.
