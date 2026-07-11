@@ -6287,7 +6287,7 @@ describe("fleet lease identity and idle", () => {
       `lease:${created.providerResourceId}`,
     );
     expect(persistedWorkspaceLease?.sshHostKey).toBe(createdHostKeyIdentity);
-    expect(JSON.stringify(persistedWorkspaceLease)).not.toContain(createdHostPrivateKey);
+    expect(JSON.stringify(persistedWorkspaceLease)).not.toContain("BEGIN OPENSSH PRIVATE KEY");
     expect(
       storage.value<{ sshHostKeySha256?: string }>(workspaceFixtureKey("fleet-is-101"))
         ?.sshHostKeySha256,
@@ -13374,7 +13374,7 @@ describe("fleet lease identity and idle", () => {
     expect(injectedHostKeyIdentity).toMatch(/^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/u);
     expect(injectedHostKeyIdentity.split(/\s+/u)).toHaveLength(2);
     expect(storedDuringCreate?.sshHostKey).toBe(injectedHostKeyIdentity);
-    expect(JSON.stringify(storedDuringCreate)).not.toContain(injectedHostPrivateKey);
+    expect(JSON.stringify(storedDuringCreate)).not.toContain("BEGIN OPENSSH PRIVATE KEY");
     const { lease } = (await create.json()) as { lease: LeaseRecord };
     expect(lease).toMatchObject({
       id: "cbx_abcdef123456",
@@ -13386,7 +13386,7 @@ describe("fleet lease identity and idle", () => {
     const storedLease = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
     expect(storedLease?.state).toBe("active");
     expect(storedLease?.sshHostKey).toBe(injectedHostKeyIdentity);
-    expect(JSON.stringify(storedLease)).not.toContain(injectedHostPrivateKey);
+    expect(JSON.stringify(storedLease)).not.toContain("BEGIN OPENSSH PRIVATE KEY");
   });
 
   it("omits SSH host keys when a provider cannot inject them before boot", async () => {
@@ -13449,6 +13449,7 @@ describe("fleet lease identity and idle", () => {
           provider: "aws",
           target: "linux",
           awsPrivate: true,
+          awsRequireSSM: true,
           sshPublicKey: "",
         }),
       ),

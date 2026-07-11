@@ -2283,6 +2283,7 @@ export class FleetCoordinator {
     request: Request,
     reservationGuard?: () => Promise<Response | undefined>,
     workspaceID?: string,
+    workspaceCapability?: ProviderWorkspaceCapability,
   ): Promise<Response> {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
@@ -2319,7 +2320,7 @@ export class FleetCoordinator {
     }
     if (workspaceID) {
       config = { ...config, awsUseStockImage: config.provider === "aws" };
-      if (!config.awsPrivate) {
+      if (!workspaceCapability) {
         const hostKeys = workspaceSSHHostKeysFromRequest(request);
         if (!hostKeys) {
           return json(
@@ -2485,7 +2486,7 @@ export class FleetCoordinator {
       providerRegionForConfig(config),
       providerProjectForConfig(config),
     );
-    const injectsSSHHostKey = provider.supportsSSHHostKeyInjection(config);
+    const injectsSSHHostKey = !workspaceCapability && provider.supportsSSHHostKeyInjection(config);
     if (injectsSSHHostKey) {
       config = withSSHHostKey(config, `crabbox-${leaseID}`);
     }
@@ -3779,6 +3780,7 @@ export class FleetCoordinator {
           return undefined;
         },
         workspace.id,
+        workspaceCapability,
       );
     } catch (error) {
       const persistedLease = await this.getLease(workspace.leaseID);

@@ -37,10 +37,11 @@ is sent only in the provider bootstrap payload. `crabbox inspect --json`
 exposes the public identity as `sshHostKey` in exact `algorithm base64` form for
 automation that pins the server identity before connecting.
 
-This pre-boot path is available for Hetzner, AWS, and GCP Linux leases, and for
-Azure Linux leases not created from a snapshot. The field is omitted for
-Windows, macOS, Daytona, Azure snapshot, registered, and direct-provider leases,
-where Crabbox cannot authoritatively inject a host key before boot.
+This pre-boot path is available for Hetzner, GCP, and non-private AWS Linux
+leases, and for Azure Linux leases not created from a snapshot. The field is
+omitted for private AWS workspaces, Windows, macOS, Daytona, Azure snapshot,
+registered, and direct-provider leases, where Crabbox cannot authoritatively
+inject a host key before boot.
 
 ## Host-key trust and connection reuse
 
