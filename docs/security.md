@@ -693,8 +693,10 @@ The coordinator stores only operational metadata:
 - the command string, unless disabled.
 
 The coordinator does **not** store unbounded logs, environment values, file
-contents, or SSH keys. Run records keep bounded stdout/stderr captures (chunked,
-with a stored cap) and optional structured JUnit summaries for debugging.
+contents, or SSH private keys. For supported leases it stores the authoritative
+public SSH host key injected before first boot as operational identity metadata.
+Run records keep bounded stdout/stderr captures (chunked, with a stored cap) and
+optional structured JUnit summaries for debugging.
 
 For binary or sensitive-by-format output, use `crabbox run --capture-stdout
 <path>` or `--capture-stderr <path>` so the stream is written to a local file

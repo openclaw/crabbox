@@ -439,6 +439,7 @@ export interface LeaseRecord {
   sshUser: string;
   sshPort: string;
   sshFallbackPorts?: string[];
+  sshHostKey?: string;
   providerAccessExpiresAt?: string;
   workRoot: string;
   keep: boolean;

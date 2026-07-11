@@ -83,6 +83,7 @@ type CoordinatorLease struct {
 	Host                  string                `json:"host"`
 	SSHUser               string                `json:"sshUser"`
 	SSHPort               string                `json:"sshPort"`
+	SSHHostKey            string                `json:"sshHostKey,omitempty"`
 	SSHFallbackPorts      []string              `json:"sshFallbackPorts,omitempty"`
 	WorkRoot              string                `json:"workRoot"`
 	Keep                  bool                  `json:"keep"`
@@ -2112,6 +2113,7 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 		cfg.WindowsMode = lease.WindowsMode
 	}
 	target := sshTargetForLease(cfg, lease.Host, lease.SSHUser, lease.SSHPort)
+	target.SSHHostKey = lease.SSHHostKey
 	if server.Provider == "daytona" {
 		target.Key = ""
 		target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"

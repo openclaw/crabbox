@@ -188,6 +188,9 @@ describe("private AWS workspaces", () => {
       async listCrabboxServers(): Promise<ProviderMachine[]> {
         return [];
       },
+      supportsSSHHostKeyInjection(): boolean {
+        return false;
+      },
       async findServerByLease(): Promise<ProviderMachine | undefined> {
         return undefined;
       },

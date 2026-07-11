@@ -17,6 +17,7 @@ import { CloudflareCoordinatorRuntime } from "../src/coordinator-runtime";
 import {
   AWSProvider,
   AzureProvider,
+  DaytonaProvider,
   FleetCoordinator,
   FleetDurableObject,
   GCPProvider,
@@ -6280,6 +6281,13 @@ describe("fleet lease identity and idle", () => {
     );
     expect(createdHostPrivateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
     expect(createdHostPublicKey).toMatch(/^ssh-ed25519 /);
+    const createdHostKeyIdentity = createdHostPublicKey.trim().split(/\s+/u).slice(0, 2).join(" ");
+    expect(createdHostKeyIdentity.split(/\s+/u)).toHaveLength(2);
+    const persistedWorkspaceLease = storage.value<LeaseRecord>(
+      `lease:${created.providerResourceId}`,
+    );
+    expect(persistedWorkspaceLease?.sshHostKey).toBe(createdHostKeyIdentity);
+    expect(JSON.stringify(persistedWorkspaceLease)).not.toContain(createdHostPrivateKey);
     expect(
       storage.value<{ sshHostKeySha256?: string }>(workspaceFixtureKey("fleet-is-101"))
         ?.sshHostKeySha256,
@@ -13321,9 +13329,13 @@ describe("fleet lease identity and idle", () => {
   it("persists brokered leases as provisioning before provider create returns", async () => {
     const storage = new MemoryStorage();
     let storedDuringCreate: LeaseRecord | undefined;
+    let injectedHostPrivateKey = "";
+    let injectedHostPublicKey = "";
     const fleet = testFleet(storage, {
       azure: fakeProvider(
-        () => {
+        (config) => {
+          injectedHostPrivateKey = config.sshHostPrivateKey;
+          injectedHostPublicKey = config.sshHostPublicKey;
           storedDuringCreate = structuredClone(storage.value("lease:cbx_abcdef123456"));
         },
         { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
@@ -13353,14 +13365,134 @@ describe("fleet lease identity and idle", () => {
       state: "provisioning",
       cloudID: "",
     });
+    expect(injectedHostPrivateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
+    const injectedHostKeyIdentity = injectedHostPublicKey
+      .trim()
+      .split(/\s+/u)
+      .slice(0, 2)
+      .join(" ");
+    expect(injectedHostKeyIdentity).toMatch(/^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/u);
+    expect(injectedHostKeyIdentity.split(/\s+/u)).toHaveLength(2);
+    expect(storedDuringCreate?.sshHostKey).toBe(injectedHostKeyIdentity);
+    expect(JSON.stringify(storedDuringCreate)).not.toContain(injectedHostPrivateKey);
     const { lease } = (await create.json()) as { lease: LeaseRecord };
     expect(lease).toMatchObject({
       id: "cbx_abcdef123456",
       provider: "azure",
       state: "active",
       cloudID: "vm-cbx-abcdef123456",
+      sshHostKey: injectedHostKeyIdentity,
     });
-    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.state).toBe("active");
+    const storedLease = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    expect(storedLease?.state).toBe("active");
+    expect(storedLease?.sshHostKey).toBe(injectedHostKeyIdentity);
+    expect(JSON.stringify(storedLease)).not.toContain(injectedHostPrivateKey);
+  });
+
+  it("omits SSH host keys when a provider cannot inject them before boot", async () => {
+    const storage = new MemoryStorage();
+    let createdConfig: LeaseConfig | undefined;
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        (config) => {
+          createdConfig = config;
+        },
+        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+      ),
+    });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+          "x-crabbox-admin": "true",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          azureSnapshot: "snapshot-cbx-abcdef123456",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(201);
+    expect(createdConfig?.sshHostPrivateKey).toBe("");
+    expect(createdConfig?.sshHostPublicKey).toBe("");
+    const { lease } = (await create.json()) as { lease: LeaseRecord };
+    expect(lease.sshHostKey).toBeUndefined();
+    expect(lease).not.toHaveProperty("sshHostKey");
+    const storedLease = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    expect(storedLease?.sshHostKey).toBeUndefined();
+    expect(storedLease).not.toHaveProperty("sshHostKey");
+  });
+
+  it("limits SSH host-key injection to authoritative provider paths", () => {
+    const env = {} as Env;
+    const storage = new MemoryStorage();
+
+    expect(
+      new HetznerProvider(env).supportsSSHHostKeyInjection(
+        leaseConfig({ provider: "hetzner", target: "linux", sshPublicKey: "ssh-ed25519 test" }),
+      ),
+    ).toBe(true);
+    expect(
+      new AWSProvider(env, "us-east-1", storage).supportsSSHHostKeyInjection(
+        leaseConfig({ provider: "aws", target: "linux", sshPublicKey: "ssh-ed25519 test" }),
+      ),
+    ).toBe(true);
+    expect(
+      new AWSProvider(env, "us-east-1", storage).supportsSSHHostKeyInjection(
+        leaseConfig({
+          provider: "aws",
+          target: "linux",
+          awsPrivate: true,
+          sshPublicKey: "",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      new GCPProvider(env).supportsSSHHostKeyInjection(
+        leaseConfig({ provider: "gcp", target: "linux", sshPublicKey: "ssh-ed25519 test" }),
+      ),
+    ).toBe(true);
+    expect(
+      new AzureProvider(env).supportsSSHHostKeyInjection(
+        leaseConfig({ provider: "azure", target: "linux", sshPublicKey: "ssh-ed25519 test" }),
+      ),
+    ).toBe(true);
+    expect(
+      new AzureProvider(env).supportsSSHHostKeyInjection(
+        leaseConfig({
+          provider: "azure",
+          target: "linux",
+          azureSnapshot: "snapshot-cbx-abcdef123456",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      new AWSProvider(env, "us-east-1", storage).supportsSSHHostKeyInjection(
+        leaseConfig({ provider: "aws", target: "windows", sshPublicKey: "ssh-ed25519 test" }),
+      ),
+    ).toBe(false);
+    expect(
+      new AWSProvider(env, "us-east-1", storage).supportsSSHHostKeyInjection(
+        leaseConfig({
+          provider: "aws",
+          target: "macos",
+          capacity: { market: "on-demand" },
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      new DaytonaProvider(env).supportsSSHHostKeyInjection(
+        leaseConfig({ provider: "daytona", target: "linux", sshPublicKey: "ssh-ed25519 test" }),
+      ),
+    ).toBe(false);
   });
 
   it("rejects a concurrent create with the same lease ID", async () => {
@@ -25858,6 +25990,15 @@ function fakeProvider(
         return await result.onList();
       }
       return result.servers ?? [];
+    },
+    supportsSSHHostKeyInjection(config: LeaseConfig) {
+      const provider = result.provider ?? config.provider;
+      return (
+        config.target === "linux" &&
+        provider !== "daytona" &&
+        !(provider === "aws" && config.awsPrivate) &&
+        !(provider === "azure" && config.azureSnapshot)
+      );
     },
     restrictedLeaseRequestFields(input: LeaseRequest) {
       return result.onRestrictedLeaseRequestFields?.(input) ?? [];
