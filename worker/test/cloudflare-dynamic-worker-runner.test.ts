@@ -211,12 +211,12 @@ class MockDurableObjectStorage {
   deleteAllCalls = 0;
   alarmTime: number | null = null;
 
-  async get<T>(key: string): Promise<T | undefined> {
+  async get<T>(key: string, _options?: { noCache?: boolean }): Promise<T | undefined> {
     this.getCalls.push(key);
     return this.values.get(key) as T | undefined;
   }
 
-  async put(key: string, value: unknown): Promise<void> {
+  async put(key: string, value: unknown, _options?: { noCache?: boolean }): Promise<void> {
     this.values.set(key, structuredClone(value));
   }
 
@@ -230,7 +230,12 @@ class MockDurableObjectStorage {
   }
 
   async list<T>(
-    options: { prefix?: string; limit?: number; startAfter?: string } = {},
+    options: {
+      prefix?: string;
+      limit?: number;
+      startAfter?: string;
+      noCache?: boolean;
+    } = {},
   ): Promise<Map<string, T>> {
     const entries = [...this.values.entries()]
       .toSorted(([left], [right]) => left.localeCompare(right))

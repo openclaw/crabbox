@@ -211,7 +211,16 @@ import {
   coordinatorProviderSpec,
   isCoordinatorProvider,
 } from "./types";
-import { costLimits, enforceCostLimits, leaseCost, requestOrg, usageSummary } from "./usage";
+import {
+  addLeaseToCostLimitUsage,
+  costLimits,
+  createCostLimitUsage,
+  enforceCostLimitUsage,
+  leaseCost,
+  requestOrg,
+  usageSummary,
+  type CostLimitUsage,
+} from "./usage";
 import { WebVNCCredentialHandoffs } from "./webvnc-handoff";
 
 const fleetID = "default";
@@ -242,6 +251,7 @@ const runtimeAdapterReservedDeletesGlobal = 16;
 const runtimeAdapterMaxBufferedBytes = runtimeAdapterRelayFrameLimit * 2;
 const leaseCleanupRetryDelayMs = 5 * 60 * 1000;
 const leaseCleanupClaimStaleMs = 30 * 60 * 1000;
+const leaseCleanupBatchSize = 16;
 const awsOrphanSweepInitialDelayMs = 60 * 1000;
 const azureOrphanSweepInitialDelayMs = 60 * 1000;
 const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
@@ -250,6 +260,7 @@ const defaultAzureOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAzureOrphanSweepGraceSeconds = 15 * 60;
 const storageRecordScanBatchSize = 128;
 const terminalRunPruneBatchSize = 16;
+const runtimeAdapterDeleteBatchSize = 16;
 const defaultTerminalRunRetentionDays = 30;
 const runPruneCursorKey = "maintenance:run-prune-cursor";
 const providerAccessReservationTTLMS = 15 * 60 * 1000;
@@ -2351,20 +2362,12 @@ export class FleetCoordinator {
     const requestedHostID = config.hostID || config.awsMacHostID;
     const retainedMacHostLease =
       requestedHostID && config.provider === "aws" && config.target === "macos"
-        ? (await this.leaseRecords())
-            .filter(
-              (lease) =>
-                lease.state === "released" &&
-                lease.releaseDeletesServer === false &&
-                Boolean(lease.cloudID) &&
-                lease.owner === owner &&
-                lease.org === org &&
-                lease.provider === "aws" &&
-                lease.target === "macos" &&
-                leaseHostID(lease) === requestedHostID &&
-                (!config.serverTypeExplicit || lease.serverType === config.serverType),
-            )
-            .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
+        ? await this.retainedMacHostLease(
+            owner,
+            org,
+            requestedHostID,
+            config.serverTypeExplicit ? config.serverType : undefined,
+          )
         : undefined;
     const reusesOwnedReleasedMacHost = Boolean(retainedMacHostLease);
     if (!isAdminRequest(request) && requestedHostID && !reusesOwnedReleasedMacHost) {
@@ -2480,21 +2483,19 @@ export class FleetCoordinator {
     );
     if (!workspaceID && retainedMacHostLease) {
       const reactivation = await this.state.runExclusive(async () => {
-        const leases = await this.leaseRecords();
-        const current = leases.find(
-          (lease) =>
-            lease.id === retainedMacHostLease.id &&
-            lease.state === "released" &&
-            lease.releaseDeletesServer === false &&
-            Boolean(lease.cloudID) &&
-            lease.owner === owner &&
-            lease.org === org &&
-            lease.provider === "aws" &&
-            lease.target === "macos" &&
-            leaseHostID(lease) === requestedHostID &&
-            lease.serverType === config.serverType,
-        );
-        if (!current) {
+        const current = await this.getLease(retainedMacHostLease.id);
+        if (
+          !current ||
+          current.state !== "released" ||
+          current.releaseDeletesServer !== false ||
+          !current.cloudID ||
+          current.owner !== owner ||
+          current.org !== org ||
+          current.provider !== "aws" ||
+          current.target !== "macos" ||
+          leaseHostID(current) !== requestedHostID ||
+          current.serverType !== config.serverType
+        ) {
           return undefined;
         }
         const blocked = await reservationGuard?.();
@@ -2502,6 +2503,7 @@ export class FleetCoordinator {
           return blocked;
         }
         const now = new Date();
+        const admission = await this.leaseAdmissionState({ owner, org }, now, current.id);
         let reactivated: LeaseRecord = {
           ...current,
           profile: config.profile,
@@ -2525,10 +2527,7 @@ export class FleetCoordinator {
         };
         const sourceCIDRs = awsLeaseSSHSourceCIDRs(
           config,
-          providerAccessContext(
-            requestSourceCIDRs(request),
-            mergeProviderAccessState(leases, await this.providerAccessRecords()),
-          ),
+          providerAccessContext(requestSourceCIDRs(request), admission.accessLeases),
         );
         reactivated = withLeaseSSHSourceCIDRs(
           reactivated,
@@ -2554,11 +2553,11 @@ export class FleetCoordinator {
         delete reactivated.failureError;
         delete reactivated.provisioningRequestStartedAt;
         clearLeaseCleanupMetadata(reactivated);
-        const otherLeases = mergeProviderAccessState(
-          leases.filter((lease) => lease.id !== current.id),
-          await this.providerAccessRecords(),
+        const limitError = enforceCostLimitUsage(
+          admission.costUsage,
+          reactivated,
+          costLimits(this.env),
         );
-        const limitError = enforceCostLimits(otherLeases, reactivated, costLimits(this.env), now);
         if (limitError) {
           return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
         }
@@ -2573,15 +2572,11 @@ export class FleetCoordinator {
       if (reactivation) {
         try {
           if (provider.reconcileLeaseAccess) {
-            const leases = await this.leaseRecords();
-            const providerAccessLeases = await this.providerAccessRecords();
+            const accessLeases = await this.providerAccessLeaseRecords();
             await this.withAWSIngressOperationLock(() =>
               provider.reconcileLeaseAccess!(
                 reactivation.reactivated,
-                providerAccessContext(
-                  requestSourceCIDRs(request),
-                  mergeProviderAccessState(leases, providerAccessLeases),
-                ),
+                providerAccessContext(requestSourceCIDRs(request), accessLeases),
               ),
             );
           }
@@ -2616,22 +2611,21 @@ export class FleetCoordinator {
       if (!workspaceID && (await this.state.storage.get(workspaceLeaseReservationKey(leaseID)))) {
         return workspaceManagedLeaseResponse();
       }
-      const leases = await this.leaseRecords();
-      if (leases.some((lease) => lease.id === leaseID)) {
+      if (await this.getLease(leaseID)) {
         return json(
           { error: "lease_id_conflict", message: "lease id already exists" },
           { status: 409 },
         );
       }
+      const now = new Date();
+      const admission = await this.leaseAdmissionState({ owner, org }, now);
       const slug = allocateLeaseSlug(
         normalizeLeaseSlug(input.slug ?? input.requestedSlug) || leaseSlugFromID(leaseID),
         leaseID,
         owner,
         org,
-        leases,
+        admission.accessLeases,
       );
-      const providerAccessLeases = await this.providerAccessRecords();
-      const now = new Date();
       const providerProject = providerProjectForConfig(config);
       const providerRegion = ["aws", "azure", "gcp"].includes(config.provider)
         ? providerRegionForConfig(config)
@@ -2703,12 +2697,7 @@ export class FleetCoordinator {
           state: "requested",
         };
       }
-      const limitError = enforceCostLimits(
-        mergeProviderAccessState(leases, providerAccessLeases),
-        record,
-        costLimits(this.env),
-        now,
-      );
+      const limitError = enforceCostLimitUsage(admission.costUsage, record, costLimits(this.env));
       if (limitError) {
         return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
       }
@@ -2745,12 +2734,8 @@ export class FleetCoordinator {
         if (!latest || latest.state !== "provisioning") {
           return { committed: false as const, current: latest };
         }
-        const leases = await this.leaseRecords();
-        const providerAccessLeases = await this.providerAccessRecords();
-        const accessContext = providerAccessContext(
-          requestSourceCIDRs(request),
-          mergeProviderAccessState(leases, providerAccessLeases),
-        );
+        const accessLeases = await this.providerAccessLeaseRecords();
+        const accessContext = providerAccessContext(requestSourceCIDRs(request), accessLeases);
         const prepared = await provider.prepareLeaseCreate?.(config, record, accessContext);
         const preparedConfig = prepared?.config ?? config;
         const preparedRecord = prepared?.lease ?? record;
@@ -2871,8 +2856,7 @@ export class FleetCoordinator {
                   if (!current || current.state !== "provisioning") {
                     return undefined;
                   }
-                  const leases = await this.leaseRecords();
-                  const providerAccessLeases = await this.providerAccessRecords();
+                  const accessLeases = await this.providerAccessLeaseRecords();
                   const recoveryRegion = lastProvisioningTarget?.region;
                   const recoveryLease = recoveryRegion
                     ? { ...current, region: recoveryRegion }
@@ -2880,10 +2864,7 @@ export class FleetCoordinator {
                   return {
                     current: structuredClone(recoveryLease),
                     accessState: structuredClone(
-                      replaceProviderAccessState(
-                        mergeProviderAccessState(leases, providerAccessLeases),
-                        recoveryLease,
-                      ),
+                      replaceProviderAccessState(accessLeases, recoveryLease),
                     ),
                   };
                 });
@@ -3179,22 +3160,7 @@ export class FleetCoordinator {
           ? { response: conflict }
           : { record: current, lease: await this.getLease(current.leaseID) };
       }
-      const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
-      const ownerWorkspaceCount = [...workspaces.values()].filter(
-        (candidate) => !candidate.prewarm && candidate.owner === owner && candidate.org === org,
-      ).length;
-      if (ownerWorkspaceCount >= workspaceMaxRecordsPerOwner) {
-        return {
-          response: json(
-            {
-              error: "workspace_limit_exceeded",
-              message: `workspace record limit exceeded: ${ownerWorkspaceCount}/${workspaceMaxRecordsPerOwner}`,
-            },
-            { status: 429 },
-          ),
-        };
-      }
-      const prewarmed = await this.adoptPrewarmedWorkspace({
+      const adoptionInput = {
         id,
         owner,
         org,
@@ -3207,7 +3173,55 @@ export class FleetCoordinator {
         desktop,
         ttlSeconds,
         idleTimeoutSeconds,
-        workspaces,
+      };
+      const prewarmEnabled = workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT) > 0;
+      const now = Date.now();
+      let ownerWorkspaceCount = 0;
+      let prewarmCandidate:
+        | { key: string; workspace: WorkspaceRecord; lease: LeaseRecord }
+        | undefined;
+      await this.visitStorageRecords<WorkspaceRecord>(
+        "workspace:",
+        async (workspace, workspaceStorageKey) => {
+          if (!workspace.prewarm && workspace.owner === owner && workspace.org === org) {
+            ownerWorkspaceCount += 1;
+          }
+          if (
+            !prewarmEnabled ||
+            !workspace.prewarm ||
+            workspace.org !== org ||
+            !workspacePrewarmMatches(workspace, adoptionInput) ||
+            !workspace.sshHostKeySha256
+          ) {
+            return;
+          }
+          const lease = await this.getLease(workspace.leaseID, { noCache: true });
+          if (
+            !lease ||
+            workspaceStatus(workspace, lease) !== "ready" ||
+            Date.parse(lease.expiresAt) <= now + workspacePrewarmReplacementLeadMs ||
+            (prewarmCandidate !== undefined &&
+              Date.parse(prewarmCandidate.workspace.createdAt) <= Date.parse(workspace.createdAt))
+          ) {
+            return;
+          }
+          prewarmCandidate = { key: workspaceStorageKey, workspace, lease };
+        },
+      );
+      if (ownerWorkspaceCount >= workspaceMaxRecordsPerOwner) {
+        return {
+          response: json(
+            {
+              error: "workspace_limit_exceeded",
+              message: `workspace record limit exceeded: ${ownerWorkspaceCount}/${workspaceMaxRecordsPerOwner}`,
+            },
+            { status: 429 },
+          ),
+        };
+      }
+      const prewarmed = await this.adoptPrewarmedWorkspace({
+        ...adoptionInput,
+        ...(prewarmCandidate ? { candidate: prewarmCandidate } : {}),
       });
       if (prewarmed) {
         return prewarmed;
@@ -3265,32 +3279,15 @@ export class FleetCoordinator {
     desktop: boolean;
     ttlSeconds: number;
     idleTimeoutSeconds: number;
-    workspaces: Map<string, WorkspaceRecord>;
+    candidate?: { key: string; workspace: WorkspaceRecord; lease: LeaseRecord };
   }): Promise<{ record: WorkspaceRecord; lease: LeaseRecord } | undefined> {
-    if (workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT) === 0) {
+    if (!input.candidate) {
       return undefined;
     }
-    const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
     const now = new Date();
-    const candidate = [...input.workspaces.entries()]
-      .filter(([, workspace]) => {
-        const lease = leases.get(leaseKey(workspace.leaseID));
-        return (
-          workspace.prewarm === true &&
-          workspace.org === input.org &&
-          workspacePrewarmMatches(workspace, input) &&
-          workspaceStatus(workspace, lease) === "ready" &&
-          Boolean(workspace.sshHostKeySha256) &&
-          Date.parse(lease?.expiresAt ?? "") > now.getTime() + workspacePrewarmReplacementLeadMs
-        );
-      })
-      .toSorted((a, b) => Date.parse(a[1].createdAt) - Date.parse(b[1].createdAt))[0];
-    if (!candidate) {
-      return undefined;
-    }
-    const [candidateKey, prewarm] = candidate;
-    const lease = structuredClone(leases.get(leaseKey(prewarm.leaseID)));
-    if (!lease || !workspaceOwnsLease(prewarm, lease)) {
+    const { key: candidateKey, workspace: prewarm } = input.candidate;
+    const lease = structuredClone(input.candidate.lease);
+    if (!workspaceOwnsLease(prewarm, lease)) {
       return undefined;
     }
     const expiresAt = new Date(now.getTime() + input.ttlSeconds * 1000);
@@ -3316,10 +3313,12 @@ export class FleetCoordinator {
     );
     lease.estimatedHourlyUSD = cost.hourlyUSD;
     lease.maxEstimatedUSD = cost.maxUSD;
-    const otherLeases = [...leases.values()].filter(
-      (candidateLease) => candidateLease.id !== lease.id,
+    const admission = await this.leaseAdmissionState(
+      { owner: input.owner, org: input.org },
+      now,
+      lease.id,
     );
-    if (enforceCostLimits(otherLeases, lease, costLimits(this.env), now)) {
+    if (enforceCostLimitUsage(admission.costUsage, lease, costLimits(this.env))) {
       return undefined;
     }
     const nowISO = now.toISOString();
@@ -3351,27 +3350,33 @@ export class FleetCoordinator {
   private async maintainWorkspacePrewarm(): Promise<void> {
     const count = workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT);
     await this.state.runExclusive(async () => {
-      const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
-      const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
       const now = Date.now();
       const templates = new Map<string, WorkspaceRecord>();
-      for (const workspace of workspaces.values()) {
-        if (workspace.prewarm || !isCurrentOrgKey(workspace.org)) continue;
-        const status = workspaceStatus(workspace, leases.get(leaseKey(workspace.leaseID)));
-        if (status !== "provisioning" && status !== "ready") continue;
-        const shape = workspacePrewarmShape(workspace);
-        const current = templates.get(shape);
-        if (!current || Date.parse(workspace.createdAt) > Date.parse(current.createdAt)) {
-          templates.set(shape, workspace);
-        }
+      if (count > 0) {
+        await this.visitStorageRecords<WorkspaceRecord>("workspace:", async (workspace) => {
+          if (workspace.prewarm || !isCurrentOrgKey(workspace.org)) {
+            return;
+          }
+          const lease = await this.getLease(workspace.leaseID, { noCache: true });
+          const status = workspaceStatus(workspace, lease);
+          if (status !== "provisioning" && status !== "ready") {
+            return;
+          }
+          const shape = workspacePrewarmShape(workspace);
+          const current = templates.get(shape);
+          if (!current || Date.parse(workspace.createdAt) > Date.parse(current.createdAt)) {
+            templates.set(shape, workspace);
+          }
+        });
       }
       let changed = false;
-      const usableByShape = new Map<string, WorkspaceRecord[]>();
-      const failedByShape = new Map<string, WorkspaceRecord[]>();
-      const releaseUpdates: Array<[string, WorkspaceRecord]> = [];
-      for (const [key, workspace] of workspaces) {
-        if (!workspace.prewarm || !isCurrentOrgKey(workspace.org)) continue;
-        const lease = leases.get(leaseKey(workspace.leaseID));
+      const usableByShape = new Map<string, number>();
+      const recentFailureShapes = new Set<string>();
+      await this.visitStorageRecords<WorkspaceRecord>("workspace:", async (workspace, key) => {
+        if (!workspace.prewarm || !isCurrentOrgKey(workspace.org)) {
+          return;
+        }
+        const lease = await this.getLease(workspace.leaseID, { noCache: true });
         const shape = workspacePrewarmShape(workspace);
         const template = templates.get(shape);
         const status = workspaceStatus(workspace, lease);
@@ -3385,39 +3390,35 @@ export class FleetCoordinator {
           (status === "provisioning" || status === "ready") &&
           !expiresSoon;
         if (usable) {
-          const current = usableByShape.get(shape) ?? [];
-          current.push(workspace);
-          usableByShape.set(shape, current);
-          continue;
+          usableByShape.set(shape, (usableByShape.get(shape) ?? 0) + 1);
+          return;
         }
-        if (
+        const failedMatchingTemplate = Boolean(
           (status === "failed" || workspace.error || lease?.state === "failed") &&
           template &&
-          workspacePrewarmMatches(workspace, template)
+          workspacePrewarmMatches(workspace, template),
+        );
+        if (
+          failedMatchingTemplate &&
+          (!workspace.releaseRequestedAt ||
+            Date.parse(workspace.updatedAt) > now - workspacePrewarmRetryDelayMs)
         ) {
-          const current = failedByShape.get(shape) ?? [];
-          current.push(workspace);
-          failedByShape.set(shape, current);
+          recentFailureShapes.add(shape);
         }
         if (!workspace.releaseRequestedAt) {
           workspace.releaseRequestedAt = new Date(now).toISOString();
           workspace.updatedAt = workspace.releaseRequestedAt;
           delete workspace.reconcileAfter;
-          releaseUpdates.push([key, workspace]);
+          await this.state.storage.put(key, workspace, { noCache: true });
           changed = true;
         }
-      }
-      await Promise.all(
-        releaseUpdates.map(([key, workspace]) => this.state.storage.put(key, workspace)),
-      );
+      });
       if (count > 0) {
         for (const [shape, template] of templates) {
-          const usable = usableByShape.get(shape) ?? [];
-          const recentFailure = (failedByShape.get(shape) ?? []).some(
-            (workspace) => Date.parse(workspace.updatedAt) > now - workspacePrewarmRetryDelayMs,
-          );
-          if (recentFailure) continue;
-          for (let index = usable.length; index < count; index += 1) {
+          if (recentFailureShapes.has(shape)) {
+            continue;
+          }
+          for (let index = usableByShape.get(shape) ?? 0; index < count; index += 1) {
             const id = newWorkspacePrewarmID();
             // oxlint-disable-next-line eslint/no-await-in-loop -- each ID must be reserved before allocating the next spare.
             const leaseID = await this.allocateWorkspaceLeaseID();
@@ -3458,16 +3459,15 @@ export class FleetCoordinator {
 
   private async quarantineLegacyWorkspaces(): Promise<void> {
     await this.state.runExclusive(async () => {
-      const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
       const now = new Date().toISOString();
-      const updates = [...workspaces.entries()]
-        .filter(([, workspace]) => isLegacyOrgKey(workspace.org) && !workspace.releaseRequestedAt)
-        .map(([key, workspace]) => {
-          const quarantined = { ...workspace, releaseRequestedAt: now, updatedAt: now };
-          delete quarantined.reconcileAfter;
-          return this.state.storage.put(key, quarantined);
-        });
-      await Promise.all(updates);
+      await this.visitStorageRecords<WorkspaceRecord>("workspace:", async (workspace, key) => {
+        if (!isLegacyOrgKey(workspace.org) || workspace.releaseRequestedAt) {
+          return;
+        }
+        const quarantined = { ...workspace, releaseRequestedAt: now, updatedAt: now };
+        delete quarantined.reconcileAfter;
+        await this.state.storage.put(key, quarantined, { noCache: true });
+      });
     });
   }
 
@@ -3483,61 +3483,48 @@ export class FleetCoordinator {
   }
 
   private async provisionPendingWorkspace(): Promise<void> {
-    const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
-    const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
-    const leasesByID = new Map([...leases.values()].map((lease) => [lease.id, lease]));
     const now = Date.now();
-    const candidates = [...workspaces.values()]
-      .filter((record) => {
-        const dueAt = workspaceNextReconcileAt(record, leasesByID.get(record.leaseID), now);
-        return dueAt !== undefined && dueAt <= now;
-      })
-      .slice(0, 3);
+    const candidates: Array<{ workspace: WorkspaceRecord; lease: LeaseRecord | undefined }> = [];
+    await this.visitStorageRecords<WorkspaceRecord>("workspace:", async (workspace) => {
+      if (candidates.length >= 3) {
+        return false;
+      }
+      const lease = await this.getLease(workspace.leaseID, { noCache: true });
+      const dueAt = workspaceNextReconcileAt(workspace, lease, now);
+      if (dueAt !== undefined && dueAt <= now) {
+        candidates.push({ workspace, lease });
+        if (candidates.length >= 3) {
+          return false;
+        }
+      }
+      return true;
+    });
     await Promise.all(
-      candidates.map((workspace) =>
-        this.reconcileWorkspace(workspace, leasesByID.get(workspace.leaseID)),
-      ),
+      candidates.map(({ workspace, lease }) => this.reconcileWorkspace(workspace, lease)),
     );
   }
 
   private async pruneTerminalWorkspaces(): Promise<void> {
     const cutoff = Date.now() - workspaceTerminalRetentionMs;
-    const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
-    const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
-    const leasesByID = new Map([...leases.values()].map((lease) => [lease.id, lease]));
-    const stale = [...workspaces.entries()].filter(([, workspace]) => {
-      const lease = leasesByID.get(workspace.leaseID);
-      const terminalAt = workspaceTerminalTimestamp(workspace, lease);
-      return terminalAt !== undefined && terminalAt <= cutoff;
-    });
-    if (stale.length === 0) {
-      return;
-    }
     await this.state.runExclusive(async () => {
-      await Promise.all(
-        stale.map(async ([key, workspace]) => {
-          const current = await this.state.storage.get<WorkspaceRecord>(key);
-          if (!current || current.leaseID !== workspace.leaseID) {
-            return;
-          }
-          const lease = await this.getLease(current.leaseID);
-          const terminalAt = workspaceTerminalTimestamp(current, lease);
-          if (terminalAt === undefined || terminalAt > cutoff) {
-            return;
-          }
-          if (lease && workspaceLeaseMatchesCleanup(current, lease)) {
-            const detachedLease = structuredClone(lease);
-            delete detachedLease.workspaceID;
-            await this.putLease(detachedLease);
-          }
-          this.closeWorkspaceTerminals(key, 1008, "workspace archived");
-          const cleanup = [
-            this.state.storage.delete(key),
-            this.state.storage.delete(workspaceLeaseReservationKey(current.leaseID)),
-          ];
-          await Promise.all(cleanup);
-        }),
-      );
+      await this.visitStorageRecords<WorkspaceRecord>("workspace:", async (workspace, key) => {
+        const lease = await this.getLease(workspace.leaseID, { noCache: true });
+        const terminalAt = workspaceTerminalTimestamp(workspace, lease);
+        if (terminalAt === undefined || terminalAt > cutoff) {
+          return;
+        }
+        if (lease && workspaceLeaseMatchesCleanup(workspace, lease)) {
+          const detachedLease = structuredClone(lease);
+          delete detachedLease.workspaceID;
+          await this.putLease(detachedLease, { noCache: true });
+        }
+        this.closeWorkspaceTerminals(key, 1008, "workspace archived");
+        const cleanup = [
+          this.state.storage.delete(key),
+          this.state.storage.delete(workspaceLeaseReservationKey(workspace.leaseID)),
+        ];
+        await Promise.all(cleanup);
+      });
     });
   }
 
@@ -5201,16 +5188,12 @@ export class FleetCoordinator {
         if (!latest || latest.state !== "active" || latest.cleanupStartedAt) {
           return undefined;
         }
-        const leases = await this.leaseRecords();
-        const providerAccessLeases = await this.providerAccessRecords();
+        const accessLeases = await this.providerAccessLeaseRecords();
         return {
           lease: structuredClone(latest),
           context: providerAccessContext(
             requestCIDRs,
-            replaceProviderAccessState(
-              mergeProviderAccessState(leases, providerAccessLeases),
-              latest,
-            ),
+            replaceProviderAccessState(accessLeases, latest),
           ),
         };
       });
@@ -7203,21 +7186,28 @@ export class FleetCoordinator {
 
   private async reconcileRuntimeAdapterDeletes(): Promise<void> {
     const pending = await this.state.runExclusive(async () => {
-      const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
       const now = Date.now();
-      return [...leases.values()]
-        .filter(
-          (lease) =>
-            (leaseIsLive(lease) || lease.state === "expired") &&
-            isRegisteredLease(lease) &&
-            Boolean(lease.runtimeAdapterID && lease.runtimeAdapterWorkspaceID) &&
-            Boolean(lease.runtimeAdapterDeleteRequestedAt) &&
-            (!Number.isFinite(Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "")) ||
-              Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "") <= now) &&
-            (!Number.isFinite(Date.parse(lease.runtimeAdapterDeleteDispatchUntil ?? "")) ||
-              Date.parse(lease.runtimeAdapterDeleteDispatchUntil ?? "") <= now),
-        )
-        .map((lease) => structuredClone(lease));
+      const due: LeaseRecord[] = [];
+      await this.visitLeaseRecords((lease) => {
+        if (
+          due.length < runtimeAdapterDeleteBatchSize &&
+          (leaseIsLive(lease) || lease.state === "expired") &&
+          isRegisteredLease(lease) &&
+          Boolean(lease.runtimeAdapterID && lease.runtimeAdapterWorkspaceID) &&
+          lease.runtimeAdapterDeleteRequestedAt &&
+          (!Number.isFinite(Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "")) ||
+            Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "") <= now) &&
+          (!Number.isFinite(Date.parse(lease.runtimeAdapterDeleteDispatchUntil ?? "")) ||
+            Date.parse(lease.runtimeAdapterDeleteDispatchUntil ?? "") <= now)
+        ) {
+          due.push(structuredClone(lease));
+          if (due.length >= runtimeAdapterDeleteBatchSize) {
+            return false;
+          }
+        }
+        return true;
+      });
+      return due;
     });
     await Promise.all(pending.map((lease) => this.reconcileRuntimeAdapterDelete(lease)));
   }
@@ -11071,36 +11061,36 @@ export class FleetCoordinator {
 
   private async expireLeases(): Promise<void> {
     const claims = await this.state.runExclusive(async () => {
-      const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
-      const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
-      const workspacesByLeaseID = new Map(
-        [...workspaces.values()].map((workspace) => [workspace.leaseID, workspace]),
-      );
       const now = Date.now();
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
-      for (const stored of leases.values()) {
+      await this.visitLeaseRecords(async (stored) => {
         if (!leaseIsLive(stored)) {
           this.closeLeaseBridges(stored.id, 1008, "lease ended");
         }
-        const workspace = workspacesByLeaseID.get(stored.id);
+        const workspace = stored.workspaceID
+          ? await this.state.storage.get<WorkspaceRecord>(
+              workspaceKey(stored.owner, stored.org, stored.workspaceID),
+              { noCache: true },
+            )
+          : undefined;
         if (
           workspace &&
           workspaceLeaseMatchesCleanup(workspace, stored) &&
           workspaceProvisioningNeedsRecovery(workspace, stored, now)
         ) {
-          continue;
+          return;
         }
         if (!leaseNeedsCleanup(stored, now)) {
-          continue;
+          return;
         }
         const lease = structuredClone(stored);
         const claimExpiresAt = cleanupClaimDeadline(lease);
         if (lease.cleanupStartedAt && claimExpiresAt > now) {
-          continue;
+          return;
         }
         const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
         if (Number.isFinite(retryAt) && retryAt > now) {
-          continue;
+          return;
         }
         const nowDate = new Date();
         const nowISO = nowDate.toISOString();
@@ -11115,10 +11105,9 @@ export class FleetCoordinator {
           }
           delete lease.cleanupStartedAt;
           delete lease.cleanupClaimExpiresAt;
-          // oxlint-disable-next-line eslint/no-await-in-loop -- each lease claim is committed while the state lock is held.
-          await this.putLease(lease);
+          await this.putLease(lease, { noCache: true });
           this.closeLeaseBridges(lease.id, 1008, "lease expired");
-          continue;
+          return;
         }
         if (lease.state === "provisioning" && !lease.cloudID) {
           lease.state = "failed";
@@ -11126,19 +11115,20 @@ export class FleetCoordinator {
           lease.endedAt = nowISO;
           lease.cleanupFailedAt = nowISO;
           lease.cleanupError = "lease expired before provider returned a cloud resource";
-          // oxlint-disable-next-line eslint/no-await-in-loop -- each lease claim is committed while the state lock is held.
-          await this.putLease(lease);
-          continue;
+          await this.putLease(lease, { noCache: true });
+          return;
+        }
+        if (claimed.length >= leaseCleanupBatchSize) {
+          return;
         }
         lease.cleanupStartedAt = nowISO;
         lease.cleanupClaimExpiresAt = new Date(
           nowDate.getTime() + leaseCleanupClaimStaleMs,
         ).toISOString();
         lease.updatedAt = nowISO;
-        // oxlint-disable-next-line eslint/no-await-in-loop -- each cleanup claim must be durable before provider I/O starts.
-        await this.putLease(lease);
+        await this.putLease(lease, { noCache: true });
         claimed.push({ claim: nowISO, lease });
-      }
+      });
       return claimed;
     });
     await Promise.all(
@@ -11211,106 +11201,99 @@ export class FleetCoordinator {
   }
 
   private async scheduleAlarm(): Promise<void> {
-    const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
-    const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
     const now = Date.now();
-    const workspacesByLeaseID = new Map(
-      [...workspaces.values()].map((workspace) => [workspace.leaseID, workspace]),
-    );
-    const alarmTimes = [...leases.values()]
-      .filter((lease) => {
-        const workspace = workspacesByLeaseID.get(lease.id);
-        return (
-          !(
-            workspace &&
-            workspaceLeaseMatchesCleanup(workspace, lease) &&
-            workspaceProvisioningNeedsRecovery(workspace, lease, now)
-          ) &&
-          (leaseIsLive(lease) ||
-            Boolean(lease.runtimeAdapterDeleteRequestedAt) ||
-            leaseNeedsCleanup(lease, now))
-        );
-      })
-      .map((lease) => nextLeaseAlarmTime(lease))
-      .filter((time) => Number.isFinite(time));
-    alarmTimes.push(...(await this.webVNCCredentialHandoffs.alarmTimes(now)));
-    const leasesByID = new Map([...leases.values()].map((lease) => [lease.id, lease]));
-    const workspaceAlarm = [...workspaces.values()]
-      .map((workspace) =>
-        workspaceNextReconcileAt(workspace, leasesByID.get(workspace.leaseID), now),
-      )
-      .filter((time): time is number => time !== undefined)
-      .toSorted((left, right) => left - right)[0];
-    if (workspaceAlarm !== undefined) {
-      alarmTimes.push(Math.max(now + 1, workspaceAlarm));
-    }
-    const workspaceRetentionAlarm = [...workspaces.values()]
-      .map((workspace) => workspaceTerminalTimestamp(workspace, leasesByID.get(workspace.leaseID)))
-      .filter((time): time is number => time !== undefined)
-      .map((time) => time + workspaceTerminalRetentionMs)
-      .filter((time) => time > now)
-      .toSorted((left, right) => left - right)[0];
-    if (workspaceRetentionAlarm !== undefined) {
-      alarmTimes.push(workspaceRetentionAlarm);
-    }
-    if (workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT) > 0) {
-      const activeWorkspaceOrgs = new Set(
-        [...workspaces.values()]
-          .filter((workspace) => !workspace.prewarm)
-          .filter((workspace) => {
-            const status = workspaceStatus(workspace, leasesByID.get(workspace.leaseID));
-            return status === "provisioning" || status === "ready";
-          })
-          .map((workspace) => workspace.org),
-      );
-      const workspacePrewarmAlarm = [...workspaces.values()]
-        .filter((workspace) => workspace.prewarm && !workspace.releaseRequestedAt)
-        .map((workspace) => leasesByID.get(workspace.leaseID))
-        .filter((lease): lease is LeaseRecord => lease?.state === "active")
-        .map((lease) => Date.parse(lease.expiresAt) - workspacePrewarmReplacementLeadMs)
-        .filter((time) => time > now)
-        .toSorted((left, right) => left - right)[0];
-      if (workspacePrewarmAlarm !== undefined) {
-        alarmTimes.push(workspacePrewarmAlarm);
+    let alarmTime: number | undefined;
+    const retainAlarm = (candidate: number | undefined) => {
+      if (candidate === undefined || !Number.isFinite(candidate)) {
+        return;
       }
-      const workspacePrewarmRetryAlarm = [...workspaces.values()]
-        .filter(
-          (workspace) =>
-            workspace.prewarm &&
-            activeWorkspaceOrgs.has(workspace.org) &&
-            Boolean(workspace.error || leasesByID.get(workspace.leaseID)?.state === "failed"),
-        )
-        .map((workspace) => Date.parse(workspace.updatedAt) + workspacePrewarmRetryDelayMs)
-        .filter(Number.isFinite)
-        .toSorted((left, right) => left - right)[0];
-      if (workspacePrewarmRetryAlarm !== undefined) {
-        alarmTimes.push(Math.max(now + 1, workspacePrewarmRetryAlarm));
+      alarmTime = alarmTime === undefined ? candidate : Math.min(alarmTime, candidate);
+    };
+    const prewarmEnabled = workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT) > 0;
+    const activeWorkspaceOrgs = new Set<string>();
+    await this.visitStorageRecords<WorkspaceRecord>("workspace:", async (workspace) => {
+      const lease = await this.getLease(workspace.leaseID, { noCache: true });
+      const reconcileAt = workspaceNextReconcileAt(workspace, lease, now);
+      if (reconcileAt !== undefined) {
+        retainAlarm(Math.max(now + 1, reconcileAt));
       }
+      const terminalAt = workspaceTerminalTimestamp(workspace, lease);
+      if (terminalAt !== undefined) {
+        retainAlarm(Math.max(now + 1, terminalAt + workspaceTerminalRetentionMs));
+      }
+      if (!prewarmEnabled) {
+        return;
+      }
+      if (!workspace.prewarm) {
+        const status = workspaceStatus(workspace, lease);
+        if (status === "provisioning" || status === "ready") {
+          activeWorkspaceOrgs.add(workspace.org);
+        }
+        return;
+      }
+      if (!workspace.releaseRequestedAt && lease?.state === "active") {
+        const replacementAt = Date.parse(lease.expiresAt) - workspacePrewarmReplacementLeadMs;
+        if (replacementAt > now) {
+          retainAlarm(replacementAt);
+        }
+      }
+    });
+    if (prewarmEnabled && activeWorkspaceOrgs.size > 0) {
+      await this.visitStorageRecords<WorkspaceRecord>("workspace:", async (workspace) => {
+        if (!workspace.prewarm || !activeWorkspaceOrgs.has(workspace.org)) {
+          return;
+        }
+        const lease = await this.getLease(workspace.leaseID, { noCache: true });
+        if (!workspace.error && lease?.state !== "failed") {
+          return;
+        }
+        const retryAt = Date.parse(workspace.updatedAt) + workspacePrewarmRetryDelayMs;
+        if (Number.isFinite(retryAt)) {
+          retainAlarm(Math.max(now + 1, retryAt));
+        }
+      });
+    }
+    await this.visitLeaseRecords(async (lease) => {
+      const workspace = lease.workspaceID
+        ? await this.state.storage.get<WorkspaceRecord>(
+            workspaceKey(lease.owner, lease.org, lease.workspaceID),
+            { noCache: true },
+          )
+        : undefined;
+      if (
+        workspace &&
+        workspaceLeaseMatchesCleanup(workspace, lease) &&
+        workspaceProvisioningNeedsRecovery(workspace, lease, now)
+      ) {
+        return;
+      }
+      if (
+        leaseIsLive(lease) ||
+        lease.runtimeAdapterDeleteRequestedAt ||
+        leaseNeedsCleanup(lease, now)
+      ) {
+        retainAlarm(nextLeaseAlarmTime(lease));
+      }
+    });
+    for (const handoffAlarm of await this.webVNCCredentialHandoffs.alarmTimes(now)) {
+      retainAlarm(handoffAlarm);
     }
     const orphanSweepAlarm = await this.nextAWSOrphanSweepAlarmTime();
-    if (orphanSweepAlarm !== undefined) {
-      alarmTimes.push(orphanSweepAlarm);
-    }
+    retainAlarm(orphanSweepAlarm);
     const azureOrphanSweepAlarm = await this.nextAzureOrphanSweepAlarmTime();
-    if (azureOrphanSweepAlarm !== undefined) {
-      alarmTimes.push(azureOrphanSweepAlarm);
-    }
+    retainAlarm(azureOrphanSweepAlarm);
     const azureCleanupAlarm = await this.nextAzureDeferredCleanupAlarmTime();
-    if (azureCleanupAlarm !== undefined) {
-      alarmTimes.push(azureCleanupAlarm);
-    }
+    retainAlarm(azureCleanupAlarm);
     const awsIngressAlarm = await this.nextAWSIngressReconcileAlarmTime();
-    if (awsIngressAlarm !== undefined) {
-      alarmTimes.push(awsIngressAlarm);
-    }
+    retainAlarm(awsIngressAlarm);
     if ((await this.state.storage.get<string>(runPruneCursorKey)) !== undefined) {
-      alarmTimes.push(now + 1000);
+      retainAlarm(now + 1000);
     }
-    if (alarmTimes.length === 0) {
+    if (alarmTime === undefined) {
       await this.state.clearAlarm();
       return;
     }
-    await this.state.scheduleAlarm(Math.min(...alarmTimes));
+    await this.state.scheduleAlarm(alarmTime);
   }
 
   private async nextAWSIngressReconcileAlarmTime(): Promise<number | undefined> {
@@ -11369,9 +11352,7 @@ export class FleetCoordinator {
       if (due.length === 0) {
         return undefined;
       }
-      const leases = await this.leaseRecords();
-      const providerAccessLeases = await this.providerAccessRecords();
-      const accessState = mergeProviderAccessState(leases, providerAccessLeases);
+      const accessState = await this.providerAccessLeaseRecords();
       if (
         accessState.some(
           (lease) =>
@@ -11408,9 +11389,7 @@ export class FleetCoordinator {
           if (!current) {
             return undefined;
           }
-          const leases = await this.leaseRecords();
-          const providerAccessLeases = await this.providerAccessRecords();
-          const accessState = mergeProviderAccessState(leases, providerAccessLeases);
+          const accessState = await this.providerAccessLeaseRecords();
           if (
             accessState.some(
               (lease) =>
@@ -11610,21 +11589,12 @@ export class FleetCoordinator {
     config = this.awsOrphanSweepConfig(),
   ): Promise<AWSOrphanSweepRecord> {
     const startedAt = new Date().toISOString();
-    const leases = await this.state.runExclusive(async () => [
-      ...(await this.state.storage.list<LeaseRecord>({ prefix: "lease:" })).values(),
-    ]);
     const now = Date.now();
-    const awsLeases = leases.filter(
-      (lease) => lease.provider === "aws" && !isRegisteredLease(lease),
-    );
-    const activeAWSLeases = awsLeases.filter((lease) =>
-      leaseOwnsCloudResourceDuringSweep(lease, now),
-    );
-    const activeLeases = new Map(activeAWSLeases.map((lease) => [lease.id, lease]));
-    const activeCloudIDs = new Set(activeAWSLeases.map((lease) => lease.cloudID).filter(Boolean));
     const candidates: AWSOrphanSweepCandidate[] = [];
     const macHostCandidates: AWSMacHostSweepCandidate[] = [];
     const errors: AWSOrphanSweepRecord["errors"] = [];
+    const inventory: Array<{ machine: ProviderMachine; region: string }> = [];
+    const macHostInventory: Array<{ client: EC2SpotClient; host: AWSMacHost; region: string }> = [];
     let scanned = 0;
     let macHostsScanned = 0;
     for (const region of config.regions) {
@@ -11632,80 +11602,117 @@ export class FleetCoordinator {
         // oxlint-disable-next-line eslint/no-await-in-loop -- regions are swept independently.
         const machines = await this.provider("aws", region).listCrabboxServers();
         scanned += machines.length;
-        for (const machine of machines) {
-          const candidate = awsOrphanSweepCandidate(
-            machine,
-            activeLeases,
-            activeCloudIDs,
-            region,
-            config.graceSeconds,
-          );
-          if (!candidate) {
-            continue;
-          }
-          const ownershipLease = cloudOrphanSweepOwnershipLease(
-            machine,
-            awsLeases,
-            "aws",
-            region,
-            now,
-          );
-          recordCloudOrphanSweepOwnership(candidate, ownershipLease);
-          if (config.deleteEnabled && ownershipLease) {
-            try {
-              // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
-              await this.provider("aws", region).deleteServer(
-                machine.cloudID || String(machine.id),
-              );
-              candidate.action = "terminated";
-            } catch (error) {
-              candidate.action = "terminate_failed";
-              candidate.error = coordinatorErrorMessage(this.env, error);
-              console.warn(
-                `aws orphan sweep terminate failed region=${region} cloud=${machine.cloudID}: ${candidate.error}`,
-              );
-            }
-          }
-          candidates.push(candidate);
-        }
+        inventory.push(...machines.map((machine) => ({ machine, region })));
         if (config.macHostReleaseEnabled) {
           const client = new EC2SpotClient(this.env, region);
           // oxlint-disable-next-line eslint/no-await-in-loop -- keep host cleanup attached to its region.
           const macHosts = await client.listMacHosts();
           macHostsScanned += macHosts.length;
-          for (const host of macHosts) {
-            const candidate = awsMacHostSweepCandidate(
-              host,
-              activeAWSLeases,
-              region,
-              Math.max(config.graceSeconds, 3600),
-            );
-            if (!candidate) {
-              continue;
-            }
-            const ownershipLease = awsMacHostSweepOwnershipLease(host, awsLeases, region, now);
-            recordAWSMacHostSweepOwnership(candidate, ownershipLease);
-            if (config.deleteEnabled && ownershipLease) {
-              try {
-                // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the host.
-                await client.releaseMacHost(host.id);
-                candidate.action = "released";
-              } catch (error) {
-                candidate.action = "release_failed";
-                candidate.error = coordinatorErrorMessage(this.env, error);
-                console.warn(
-                  `aws orphan sweep mac host release failed region=${region} host=${host.id}: ${candidate.error}`,
-                );
-              }
-            }
-            macHostCandidates.push(candidate);
-          }
+          macHostInventory.push(...macHosts.map((host) => ({ client, host, region })));
         }
       } catch (error) {
         const message = coordinatorErrorMessage(this.env, error);
         errors.push({ region, message });
         console.warn(`aws orphan sweep failed region=${region}: ${message}`);
       }
+    }
+    const inventoryKeys = new Set(
+      inventory.map(({ machine, region }) =>
+        cloudOrphanSweepResourceKey(machine.cloudID || machine.name || String(machine.id), region),
+      ),
+    );
+    const macHostKeys = new Set(
+      macHostInventory.map(({ host, region }) => cloudOrphanSweepResourceKey(host.id, region)),
+    );
+    const activeAWSLeases: LeaseRecord[] = [];
+    const ownershipLeases = new Map<string, LeaseRecord>();
+    const macHostOwnershipLeases = new Map<string, LeaseRecord>();
+    await this.state.runExclusive(() =>
+      this.visitLeaseRecords((lease) => {
+        if (lease.provider !== "aws" || isRegisteredLease(lease)) {
+          return;
+        }
+        if (leaseOwnsCloudResourceDuringSweep(lease, now)) {
+          activeAWSLeases.push(lease);
+          return;
+        }
+        if (lease.keep || !lease.region) {
+          return;
+        }
+        if (lease.cloudID && lease.releaseDeletesServer !== false) {
+          const key = cloudOrphanSweepResourceKey(lease.cloudID, lease.region);
+          if (inventoryKeys.has(key) && !ownershipLeases.has(key)) {
+            ownershipLeases.set(key, lease);
+          }
+        }
+        const hostID = leaseHostID(lease);
+        if (hostID) {
+          const key = cloudOrphanSweepResourceKey(hostID, lease.region);
+          if (macHostKeys.has(key) && !macHostOwnershipLeases.has(key)) {
+            macHostOwnershipLeases.set(key, lease);
+          }
+        }
+      }),
+    );
+    const activeLeases = new Map(activeAWSLeases.map((lease) => [lease.id, lease]));
+    const activeCloudIDs = new Set(activeAWSLeases.map((lease) => lease.cloudID).filter(Boolean));
+    for (const { machine, region } of inventory) {
+      const candidate = awsOrphanSweepCandidate(
+        machine,
+        activeLeases,
+        activeCloudIDs,
+        region,
+        config.graceSeconds,
+      );
+      if (!candidate) {
+        continue;
+      }
+      const cloudID = machine.cloudID || machine.name || String(machine.id);
+      const ownershipLease = ownershipLeases.get(cloudOrphanSweepResourceKey(cloudID, region));
+      recordCloudOrphanSweepOwnership(candidate, ownershipLease);
+      if (config.deleteEnabled && ownershipLease) {
+        try {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
+          await this.provider("aws", region).deleteServer(machine.cloudID || String(machine.id));
+          candidate.action = "terminated";
+        } catch (error) {
+          candidate.action = "terminate_failed";
+          candidate.error = coordinatorErrorMessage(this.env, error);
+          console.warn(
+            `aws orphan sweep terminate failed region=${region} cloud=${machine.cloudID}: ${candidate.error}`,
+          );
+        }
+      }
+      candidates.push(candidate);
+    }
+    for (const { client, host, region } of macHostInventory) {
+      const candidate = awsMacHostSweepCandidate(
+        host,
+        activeAWSLeases,
+        region,
+        Math.max(config.graceSeconds, 3600),
+      );
+      if (!candidate) {
+        continue;
+      }
+      const ownershipLease = macHostOwnershipLeases.get(
+        cloudOrphanSweepResourceKey(host.id, region),
+      );
+      recordAWSMacHostSweepOwnership(candidate, ownershipLease);
+      if (config.deleteEnabled && ownershipLease) {
+        try {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the host.
+          await client.releaseMacHost(host.id);
+          candidate.action = "released";
+        } catch (error) {
+          candidate.action = "release_failed";
+          candidate.error = coordinatorErrorMessage(this.env, error);
+          console.warn(
+            `aws orphan sweep mac host release failed region=${region} host=${host.id}: ${candidate.error}`,
+          );
+        }
+      }
+      macHostCandidates.push(candidate);
     }
     const finishedAt = new Date().toISOString();
     const record: AWSOrphanSweepRecord = {
@@ -11957,8 +11964,11 @@ export class FleetCoordinator {
     };
   }
 
-  private async getLease(leaseID: string): Promise<LeaseRecord | undefined> {
-    return this.state.storage.get<LeaseRecord>(leaseKey(leaseID));
+  private async getLease(
+    leaseID: string,
+    options?: { noCache?: boolean },
+  ): Promise<LeaseRecord | undefined> {
+    return this.state.storage.get<LeaseRecord>(leaseKey(leaseID), options);
   }
 
   private async resolveLease(
@@ -12025,13 +12035,86 @@ export class FleetCoordinator {
     return [...leases.values()];
   }
 
-  private async visitLeaseRecords(visitor: (lease: LeaseRecord) => void): Promise<void> {
+  private async retainedMacHostLease(
+    owner: string,
+    org: string,
+    hostID: string,
+    serverType?: string,
+  ): Promise<LeaseRecord | undefined> {
+    let retained: LeaseRecord | undefined;
+    await this.visitLeaseRecords((lease) => {
+      if (
+        lease.state !== "released" ||
+        lease.releaseDeletesServer !== false ||
+        !lease.cloudID ||
+        lease.owner !== owner ||
+        lease.org !== org ||
+        lease.provider !== "aws" ||
+        lease.target !== "macos" ||
+        leaseHostID(lease) !== hostID ||
+        (serverType !== undefined && lease.serverType !== serverType) ||
+        (retained !== undefined && retained.updatedAt >= lease.updatedAt)
+      ) {
+        return;
+      }
+      retained = lease;
+    });
+    return retained;
+  }
+
+  private async leaseAdmissionState(
+    candidate: Pick<LeaseRecord, "owner" | "org">,
+    now: Date,
+    excludedLeaseID?: string,
+  ): Promise<{ accessLeases: LeaseRecord[]; costUsage: CostLimitUsage }> {
+    const providerAccessLeases = await this.providerAccessRecords();
+    const providerAccessByID = new Map(providerAccessLeases.map((lease) => [lease.id, lease]));
+    const accessLeases: LeaseRecord[] = [];
+    const costUsage = createCostLimitUsage(candidate, now);
+    const addLease = (lease: LeaseRecord) => {
+      if (lease.id !== excludedLeaseID) {
+        addLeaseToCostLimitUsage(costUsage, lease, now);
+      }
+      if (leaseIsLive(lease) || leaseOwnsAWSSSHAccess(lease)) {
+        accessLeases.push(lease);
+      }
+    };
+    await this.visitLeaseRecords((lease) => {
+      if (!providerAccessByID.has(lease.id)) {
+        addLease(lease);
+      }
+    });
+    for (const lease of providerAccessByID.values()) {
+      addLease(lease);
+    }
+    return { accessLeases, costUsage };
+  }
+
+  private async providerAccessLeaseRecords(): Promise<LeaseRecord[]> {
+    const providerAccessLeases = await this.providerAccessRecords();
+    const providerAccessByID = new Map(providerAccessLeases.map((lease) => [lease.id, lease]));
+    const accessLeases: LeaseRecord[] = [];
+    await this.visitLeaseRecords((lease) => {
+      if (
+        !providerAccessByID.has(lease.id) &&
+        (leaseIsLive(lease) || leaseOwnsAWSSSHAccess(lease))
+      ) {
+        accessLeases.push(lease);
+      }
+    });
+    accessLeases.push(...providerAccessByID.values());
+    return accessLeases;
+  }
+
+  private async visitLeaseRecords(
+    visitor: (lease: LeaseRecord) => Promise<boolean | void> | boolean | void,
+  ): Promise<void> {
     await this.visitStorageRecords("lease:", visitor);
   }
 
   private async visitStorageRecords<T>(
     prefix: string,
-    visitor: (record: T) => Promise<void> | void,
+    visitor: (record: T, key: string) => Promise<boolean | void> | boolean | void,
   ): Promise<void> {
     let startAfter: string | undefined;
     for (;;) {
@@ -12039,14 +12122,18 @@ export class FleetCoordinator {
       const page = await this.state.storage.list<T>({
         prefix,
         limit: storageRecordScanBatchSize,
+        noCache: true,
         ...(startAfter ? { startAfter } : {}),
       });
       if (page.size === 0) {
         break;
       }
-      for (const record of page.values()) {
+      for (const [key, record] of page) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- sequential visits bound legacy record hydration.
-        await visitor(record);
+        const shouldContinue = await visitor(record, key);
+        if (shouldContinue === false) {
+          return;
+        }
       }
       const nextStartAfter = [...page.keys()].at(-1);
       if (!nextStartAfter || nextStartAfter === startAfter) {
@@ -12060,20 +12147,15 @@ export class FleetCoordinator {
   }
 
   private async providerAccessRecords(): Promise<LeaseRecord[]> {
-    const records = await this.state.storage.list<LeaseRecord>({
-      prefix: providerAccessPrefix(),
-    });
     const now = Date.now();
     const active: LeaseRecord[] = [];
-    const staleKeys: string[] = [];
-    for (const [key, record] of records) {
+    await this.visitStorageRecords<LeaseRecord>(providerAccessPrefix(), async (record, key) => {
       if (leaseIsLive(record) && Date.parse(record.expiresAt) > now) {
         active.push(record);
-        continue;
+        return;
       }
-      staleKeys.push(key);
-    }
-    await Promise.all(staleKeys.map((key) => this.state.storage.delete(key)));
+      await this.state.storage.delete(key);
+    });
     return active;
   }
 
@@ -12511,8 +12593,8 @@ export class FleetCoordinator {
     );
   }
 
-  private async putLease(lease: LeaseRecord): Promise<void> {
-    await this.state.storage.put(leaseKey(lease.id), lease);
+  private async putLease(lease: LeaseRecord, options?: { noCache?: boolean }): Promise<void> {
+    await this.state.storage.put(leaseKey(lease.id), lease, options);
   }
 
   private async cancelLeaseReservation(reservation: LeaseRecord): Promise<void> {
@@ -16043,17 +16125,6 @@ function replaceProviderAccessState(leases: LeaseRecord[], lease: LeaseRecord): 
   return next;
 }
 
-function mergeProviderAccessState(
-  leases: LeaseRecord[],
-  providerAccessLeases: LeaseRecord[],
-): LeaseRecord[] {
-  const merged = new Map(leases.map((lease) => [lease.id, lease]));
-  for (const lease of providerAccessLeases) {
-    merged.set(lease.id, lease);
-  }
-  return [...merged.values()];
-}
-
 function finiteNumber(value: number | undefined): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
@@ -16758,7 +16829,10 @@ function nextLeaseAlarmTime(lease: LeaseRecord): number {
     return claimDeadline;
   }
   const cleanupRetryAt = Date.parse(lease.cleanupRetryAt ?? "");
-  if (Number.isFinite(cleanupRetryAt) && cleanupRetryAt > now) {
+  if (Number.isFinite(cleanupRetryAt) && cleanupRetryAt <= now) {
+    return now + 1;
+  }
+  if (Number.isFinite(cleanupRetryAt)) {
     if (Number.isFinite(expiresAt) && expiresAt <= now) {
       return cleanupRetryAt;
     }
@@ -17276,26 +17350,6 @@ function cloudOrphanSweepCandidate(
   return candidate;
 }
 
-function cloudOrphanSweepOwnershipLease(
-  machine: ProviderMachine,
-  leases: LeaseRecord[],
-  provider: "aws" | "azure",
-  region: string,
-  now: number,
-): LeaseRecord | undefined {
-  const cloudID = machine.cloudID || machine.name || String(machine.id);
-  return leases.find(
-    (lease) =>
-      lease.provider === provider &&
-      !isRegisteredLease(lease) &&
-      lease.cloudID === cloudID &&
-      lease.region === region &&
-      !lease.keep &&
-      lease.releaseDeletesServer !== false &&
-      !leaseOwnsCloudResourceDuringSweep(lease, now),
-  );
-}
-
 function cloudOrphanSweepResourceKey(cloudID: string, region: string): string {
   return JSON.stringify([region, cloudID]);
 }
@@ -17356,21 +17410,6 @@ function awsMacHostSweepCandidate(
     ownership: "provider-tags-only",
     action: "reported",
   };
-}
-
-function awsMacHostSweepOwnershipLease(
-  host: AWSMacHost,
-  leases: LeaseRecord[],
-  region: string,
-  now: number,
-): LeaseRecord | undefined {
-  return leases.find(
-    (lease) =>
-      leaseHostID(lease) === host.id &&
-      lease.region === region &&
-      !lease.keep &&
-      !leaseOwnsCloudResourceDuringSweep(lease, now),
-  );
 }
 
 function recordAWSMacHostSweepOwnership(
