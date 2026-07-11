@@ -53,6 +53,9 @@ function base64Encode(bytes: Uint8Array): string {
 }
 
 export function cloudInit(config: LeaseConfig): string {
+  if (config.awsPrivate) {
+    return privateAWSCloudInit(config);
+  }
   const portLines = sshPorts(config)
     .map((port) => `      Port ${port}`)
     .join("\n");
@@ -102,6 +105,7 @@ ${portLines}
       rsync --version >/dev/null
       curl --version >/dev/null
       jq --version >/dev/null
+      flock --version >/dev/null
       test -f /var/lib/crabbox/bootstrapped
       test -w ${config.workRoot}
 ${readyChecks}
@@ -137,6 +141,71 @@ ${bootstrap}
     systemctl daemon-reload
     systemctl enable crabbox-workspace-ready.service
     systemctl start --no-block crabbox-workspace-ready.service
+    touch /var/lib/crabbox/bootstrapped
+    crabbox-ready
+    BOOT
+`;
+}
+
+function privateAWSCloudInit(config: LeaseConfig): string {
+  return `#cloud-config
+package_update: false
+package_upgrade: false
+ssh_pwauth: false
+disable_root: true
+users:
+  - name: ${config.sshUser}
+    shell: /bin/bash
+    lock_passwd: true
+write_files:
+  - path: /usr/local/bin/crabbox-ready
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      git --version
+      curl --version >/dev/null
+      jq --version >/dev/null
+      test -d ${config.workRoot}/workspaces
+      test ! -L ${config.workRoot}
+      test ! -L ${config.workRoot}/workspaces
+      if systemctl list-unit-files amazon-ssm-agent.service >/dev/null 2>&1; then
+        systemctl is-active --quiet amazon-ssm-agent.service
+      else
+        systemctl is-active --quiet snap.amazon-ssm-agent.amazon-ssm-agent.service
+      fi
+      test -f /var/lib/crabbox/bootstrapped
+runcmd:
+  - |
+    bash -euxo pipefail <<'BOOT'
+    export DEBIAN_FRONTEND=noninteractive
+    if grep -RIl 'http://' /etc/apt 2>/dev/null | grep -q .; then
+      grep -RIl 'http://' /etc/apt | xargs -r sed -i 's|http://|https://|g'
+    fi
+    retry() {
+      n=1
+      until "$@"; do
+        if [ "$n" -ge 8 ]; then
+          return 1
+        fi
+        sleep $((n * 5))
+        n=$((n + 1))
+      done
+    }
+    systemctl disable --now ssh.service ssh.socket 2>/dev/null || true
+    systemctl mask ssh.service ssh.socket 2>/dev/null || true
+    if systemctl list-unit-files amazon-ssm-agent.service >/dev/null 2>&1; then
+      systemctl enable --now amazon-ssm-agent.service
+    elif systemctl list-unit-files snap.amazon-ssm-agent.amazon-ssm-agent.service >/dev/null 2>&1; then
+      systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service
+    else
+      echo 'stock AWS Ubuntu image is missing the preinstalled SSM Agent' >&2
+      exit 1
+    fi
+    retry apt-get update
+    retry apt-get install -y --no-install-recommends ca-certificates curl git jq util-linux
+    install -d -m 0755 -o root -g root ${config.workRoot} ${config.workRoot}/workspaces
+    install -d -m 0755 /var/lib/crabbox
     touch /var/lib/crabbox/bootstrapped
     crabbox-ready
     BOOT

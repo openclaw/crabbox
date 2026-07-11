@@ -20,15 +20,15 @@ Every provider registers a backend with one of three kinds:
 
 SSH-lease providers further differ by how they reach the cloud:
 
-- **Brokered cloud** — `aws`, `azure`, `gcp`, and `hetzner` can run through the
-  Crabbox coordinator on Cloudflare or Node/PostgreSQL. The coordinator owns
-  cloud credentials, cost state, cleanup scheduling, and lease accounting.
-  This is the normal shared-team path. Set with `config set-broker` and a
-  broker URL (`CRABBOX_COORDINATOR`).
-- **Direct cloud** — the same four providers without a configured broker, plus
+- **Brokered cloud** — `aws`, `azure`, `daytona`, `gcp`, and `hetzner` can run
+  through the Crabbox coordinator on Cloudflare or Node/PostgreSQL. The
+  coordinator owns cloud credentials, cost state, cleanup scheduling, and lease
+  accounting. This is the normal shared-team path. Set with `config set-broker`
+  and a broker URL (`CRABBOX_COORDINATOR`).
+- **Direct cloud** — the same five providers without a configured broker, plus
   cloud providers that never broker (e.g. `digitalocean`, `linode`, `vultr`,
   `proxmox`, `hostinger`, `runpod`, `namespace-devbox`, `namespace-instance`,
-  `semaphore`, `sprites`, `exe-dev`, `daytona`, `morph`). The CLI talks to the
+  `semaphore`, `sprites`, `exe-dev`, `morph`). The CLI talks to the
   provider API itself and cleans up best-effort via provider labels.
 - **Static SSH** — `ssh` connects to a preexisting machine you supply; no
   provisioning, no cleanup.

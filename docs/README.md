@@ -29,6 +29,11 @@ usage accounting, and cost guardrails so individual machines and CLIs never
 hold those. The coordinator runs either on Cloudflare Workers with a Durable
 Object or on Node.js with PostgreSQL.
 
+The Node runtime can also own a
+[dedicated private AWS workspace service](features/aws-private-workspaces.md):
+small allowlisted EC2 instances, no public address or SSH, task-role
+credentials, SSM bootstrap, and an authenticated create/status/delete API.
+
 ## How it fits together
 
 ```text
@@ -42,15 +47,17 @@ crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azu
 
 The CLI is a Go binary (`cmd/crabbox`, `internal/cli`). Shared coordinator
 behavior lives in `worker/src`; Cloudflare and Node/PostgreSQL provide runtime
-adapters. Lease lifecycle calls go through the coordinator over HTTPS, but the
-data plane — SSH, rsync, and command execution — goes **directly from the CLI to
-the runner host**. Runners hold no coordinator credentials; they are leaf nodes.
+adapters. For normal CLI leases, lifecycle calls go through the coordinator
+over HTTPS, but the data plane — SSH, rsync, and command execution — goes
+**directly from the CLI to the runner host**. The dedicated private AWS
+workspace API is the documented SSM-only exception. Runners hold no coordinator
+credentials; they are leaf nodes.
 
 Crabbox selects one of three execution modes per provider:
 
-- **Brokered** — for `aws`, `azure`, `gcp`, and `hetzner` when a broker URL is
-  configured (`CRABBOX_COORDINATOR`). The coordinator provisions and tracks
-  leases; the CLI still drives sync and command execution over SSH.
+- **Brokered** — for `aws`, `azure`, `daytona`, `gcp`, and `hetzner` when a
+  broker URL is configured (`CRABBOX_COORDINATOR`). The coordinator provisions
+  and tracks leases; the CLI still drives sync and command execution over SSH.
 - **Direct SSH** — the same SSH-lease providers without a broker, plus static
   hosts (`provider: ssh`) and self-hosted/local providers. The CLI talks to the
   cloud or host API itself.
@@ -193,8 +200,8 @@ Pick whichever matches your intent:
 
 Markdown in this directory is the user-facing documentation source.
 Implementation truth stays in code; the [Source Map](source-map.md) lists the
-files behind each documented behavior. The GitHub Pages site at
-<https://openclaw.github.io/crabbox/> is generated from these Markdown files by
+files behind each documented behavior. The documentation site at
+<https://crabbox.sh/> is generated from these Markdown files by
 `scripts/build-docs-site.mjs` and deployed by `.github/workflows/pages.yml`.
 Pages must be enabled on the repository or organization for the workflow to
 publish.
