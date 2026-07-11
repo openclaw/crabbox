@@ -157,9 +157,10 @@ function validateReleaseIdentity(release, expectedNames, expectedNotes, expected
 function validateWorkflowRun(run, workflow, state = "draft") {
   if (state !== "draft" && state !== "published") fail(`unsupported verifier state: ${state}`);
   const expectedTitle = `Verify ${state} ${metadata.releaseId} for ${metadata.tag} at ${metadata.verifierCommit}`;
+  const acceptedRunNames = new Set([metadata.workflowName, expectedTitle]);
   if (
     run.id !== metadata.verifierRunId ||
-    run.name !== metadata.workflowName ||
+    !acceptedRunNames.has(run.name) ||
     run.display_title !== expectedTitle ||
     run.path !== metadata.workflowPath ||
     run.event !== "workflow_dispatch" ||

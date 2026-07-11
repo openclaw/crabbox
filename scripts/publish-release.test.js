@@ -35,7 +35,7 @@ function git(root, ...args) {
   }).trim();
 }
 
-function prepareFixture({ publishable = true } = {}) {
+function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-publish-test-"));
   const checkout = path.join(root, "repo");
   const api = path.join(root, "api");
@@ -223,7 +223,9 @@ function prepareFixture({ publishable = true } = {}) {
   const workflowUrl = `https://api.github.com/repos/${repository}/actions/workflows/${workflowId}`;
   writeJson(path.join(api, "run.json"), {
     id: runId,
-    name: "Verify Release Assets",
+    name: dynamicRunName
+      ? `Verify draft ${releaseId} for ${tag} at ${verifierCommit}`
+      : "Verify Release Assets",
     display_title: `Verify draft ${releaseId} for ${tag} at ${verifierCommit}`,
     path: ".github/workflows/release-assets.yml",
     workflow_id: workflowId,
@@ -633,6 +635,14 @@ test("exact protected proof performs one draft-state PATCH and no other mutation
     const result = run("success");
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.match(result.stdout, /Published exact verified release v0\.37\.0/);
+    assert.deepEqual(mutations(), [`PATCH\trepos/${repository}/releases/${releaseId}`]);
+  });
+});
+
+test("static workflow name remains accepted for compatible run metadata", () => {
+  withFixture({ dynamicRunName: false }, ({ run, mutations }) => {
+    const result = run("success");
+    assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.deepEqual(mutations(), [`PATCH\trepos/${repository}/releases/${releaseId}`]);
   });
 });
