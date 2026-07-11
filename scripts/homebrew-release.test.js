@@ -712,6 +712,10 @@ test("blocked v0.37.0 record stops before the mocked brew executable", () => {
   const mockBrew = path.join(mockBin, "brew");
   fs.writeFileSync(mockBrew, `#!/bin/sh\nprintf ran >"${marker}"\nexit 99\n`);
   fs.chmodSync(mockBrew, 0o755);
+  writeExecutable(
+    path.join(mockBin, "uname"),
+    `#!/bin/sh\ncase "\${1:-}" in\n  -s) printf 'Darwin\\n' ;;\n  -m) printf 'arm64\\n' ;;\n  *) exit 64 ;;\nesac\n`,
+  );
   try {
     const tagObject = execFileSync("git", ["rev-parse", "refs/tags/v0.37.0"], {
       cwd: repoRoot,
