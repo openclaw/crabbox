@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Confined explicit JUnit result collection to final paths inside the remote workdir on POSIX and Windows while preserving safe in-workdir symlinks and absolute paths. Thanks @coygeek.
 - Verified Node.js release archives against published SHA-256 checksums before local Actions hydration installs or reuses them, preventing unverified setup-node downloads from reaching the workflow PATH. Thanks @coygeek.
 - Limited shared egress status to coarse active visibility unless the caller has manage access, keeping per-side host and client connection state private. Thanks @coygeek.
 - Counted live managed leases against monthly reserved-USD budgets after UTC month rollover until cleanup commits a terminal state, preventing overlapping reservations from bypassing configured cost caps. Thanks @coygeek.
