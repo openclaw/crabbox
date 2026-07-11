@@ -140,9 +140,12 @@ The stack explicitly denies Parameter Store reads on the workspace role so an
 untrusted workspace command cannot reuse its instance credentials to retrieve
 account parameters.
 
-The Node coordinator image pins AWS's global RDS trust bundle by checksum and
-loads it through `NODE_EXTRA_CA_CERTS`. Use `sslmode=verify-full` for RDS
-database URLs; do not disable certificate or hostname verification.
+The Node coordinator image pins AWS's global RDS trust bundle by checksum at
+`/etc/ssl/certs/aws-rds-global-bundle.pem`. Scope that trust to PostgreSQL by
+using both `sslmode=verify-full` and
+`sslrootcert=/etc/ssl/certs/aws-rds-global-bundle.pem` in RDS database URLs; do
+not disable certificate or hostname verification. The bundle is deliberately
+not loaded through process-wide `NODE_EXTRA_CA_CERTS`.
 
 ## Configuration
 

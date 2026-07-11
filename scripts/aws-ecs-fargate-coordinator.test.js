@@ -56,15 +56,12 @@ function resourceNames() {
   ].map((match) => match[1]);
 }
 
-test("Node coordinator image pins the AWS RDS trust bundle", () => {
+test("Node coordinator image pins the PostgreSQL-scoped AWS RDS trust bundle", () => {
   assert.match(
     nodeDockerfile,
     /ADD --checksum=sha256:e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3 https:\/\/truststore\.pki\.rds\.amazonaws\.com\/global\/global-bundle\.pem \/etc\/ssl\/certs\/aws-rds-global-bundle\.pem/,
   );
-  assert.match(
-    nodeDockerfile,
-    /NODE_EXTRA_CA_CERTS=\/etc\/ssl\/certs\/aws-rds-global-bundle\.pem/,
-  );
+  assert.doesNotMatch(nodeDockerfile, /NODE_EXTRA_CA_CERTS/);
 });
 
 test("Fargate coordinator template is generic and digest pinned", () => {

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   EC2SpotClient,
+  awsAutomaticProbesConfigured,
+  awsCredentialsConfigured,
   awsOrphanSweepCredentialsConfigured,
   awsPrivateWorkspaceConfig,
   awsRunInstancesParams,
@@ -20,6 +22,61 @@ afterEach(() => {
 });
 
 describe("private AWS workspaces", () => {
+  it("keeps explicit AWS operations on the default chain without enabling automatic probes", () => {
+    const defaultChain = { awsCredentialProvider: testAWSCredentialProvider };
+    expect(awsCredentialsConfigured(defaultChain)).toBe(true);
+    expect(awsAutomaticProbesConfigured(defaultChain)).toBe(false);
+    for (const explicitDefaultChain of [
+      { CRABBOX_AWS_CREDENTIAL_SOURCE: "default-chain" },
+      { AWS_PROFILE: "broker" },
+      { AWS_CONFIG_FILE: "/run/secrets/aws-config" },
+      { AWS_SHARED_CREDENTIALS_FILE: "/run/secrets/aws-credentials" },
+      { CRABBOX_AWS_REGION: region },
+      { AWS_REGION: region },
+      { AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/task" },
+      { AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://169.254.170.2/credentials" },
+    ]) {
+      expect(
+        awsAutomaticProbesConfigured({
+          awsCredentialProvider: testAWSCredentialProvider,
+          ...explicitDefaultChain,
+        }),
+      ).toBe(true);
+    }
+    expect(
+      awsAutomaticProbesConfigured({
+        awsCredentialProvider: testAWSCredentialProvider,
+        AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/broker",
+      }),
+    ).toBe(false);
+    expect(
+      awsAutomaticProbesConfigured({
+        awsCredentialProvider: testAWSCredentialProvider,
+        AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/broker",
+        AWS_WEB_IDENTITY_TOKEN_FILE: "/run/secrets/web-identity-token",
+      }),
+    ).toBe(true);
+    expect(
+      awsAutomaticProbesConfigured({
+        awsCredentialProvider: testAWSCredentialProvider,
+        CRABBOX_WORKSPACE_PROVIDER: "aws",
+      }),
+    ).toBe(true);
+    expect(
+      awsAutomaticProbesConfigured({
+        awsCredentialProvider: testAWSCredentialProvider,
+        CRABBOX_AWS_EXPECTED_ACCOUNT_ID: expectedAccountID,
+        CRABBOX_AWS_EXPECTED_REGION: region,
+      }),
+    ).toBe(true);
+    expect(
+      awsAutomaticProbesConfigured({
+        AWS_ACCESS_KEY_ID: "legacy-key",
+        AWS_SECRET_ACCESS_KEY: "legacy-secret",
+      }),
+    ).toBe(true);
+  });
+
   it("signs every request with freshly resolved task credentials", async () => {
     let generation = 0;
     const credentials = vi.fn<
