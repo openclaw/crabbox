@@ -1,11 +1,12 @@
 export interface CoordinatorStorage {
-  get<T>(key: string): Promise<T | undefined>;
-  put<T>(key: string, value: T): Promise<void>;
+  get<T>(key: string, options?: { noCache?: boolean }): Promise<T | undefined>;
+  put<T>(key: string, value: T, options?: { noCache?: boolean }): Promise<void>;
   delete(key: string): Promise<unknown>;
   list<T>(options?: {
     prefix?: string;
     limit?: number;
     startAfter?: string;
+    noCache?: boolean;
   }): Promise<Map<string, T>>;
 }
 
