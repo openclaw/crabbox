@@ -4,6 +4,7 @@
 
 ### Added
 
+- Redesigned the documentation site around first-class provider discovery, with complete provider navigation, multi-category filtering, responsive tables and mobile navigation, and accessibility improvements. Thanks @zozo123.
 - Added explicit GCP metadata-server authentication for brokered coordinators, with hardened token validation, bounded retries, source-aware readiness diagnostics, and preserved service-account-key defaults. Thanks @dani29.
 
 ### Fixed

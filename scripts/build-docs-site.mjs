@@ -300,10 +300,16 @@ function providerRowAttributes(row) {
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
-  return ` data-provider="${escapeAttr(name)}" data-provider-group="${escapeAttr(providerGroup(metadata.category))}" data-provider-search="${escapeAttr(search)}"`;
+  return ` data-provider="${escapeAttr(name)}" data-provider-groups="${escapeAttr(providerGroups(metadata).join(" "))}" data-provider-search="${escapeAttr(search)}"`;
 }
 
-function providerGroup(category) {
+function providerGroups(metadata) {
+  const groups = [primaryProviderGroup(metadata.category)];
+  if (metadata.coordinator === true && !groups.includes("team-cloud")) groups.push("team-cloud");
+  return groups;
+}
+
+function primaryProviderGroup(category) {
   if (category === "brokerable-cloud") return "team-cloud";
   if (category === "direct-cloud") return "managed-cloud";
   if (category === "delegated-sandbox") return "sandboxes";
@@ -858,7 +864,8 @@ if(providerFilter){
     const terms=(providerInput?.value.trim().toLowerCase()||'').split(/\s+/).filter(Boolean);
     let count=0;
     providerRows.forEach((row)=>{
-      const groupMatch=providerGroup==='all'||row.dataset.providerGroup===providerGroup;
+      const groups=(row.dataset.providerGroups||'').split(/\s+/);
+      const groupMatch=providerGroup==='all'||groups.includes(providerGroup);
       const search=row.dataset.providerSearch||row.textContent.toLowerCase();
       const textMatch=terms.every((term)=>search.includes(term));
       const match=groupMatch&&textMatch;

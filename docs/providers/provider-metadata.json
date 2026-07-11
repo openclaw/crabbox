@@ -268,6 +268,7 @@
   "daytona": {
     "status": "built-in",
     "category": "direct-cloud",
+    "coordinator": true,
     "substrate": "Daytona sandbox",
     "location": "provider-managed",
     "ssh": "crabbox-managed",

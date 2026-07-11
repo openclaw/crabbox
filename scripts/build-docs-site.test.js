@@ -64,7 +64,7 @@ generatedTest("provider index renders filterable rows in a scroll region", () =>
   const metadata = JSON.parse(fs.readFileSync(path.join(providersDir, "provider-metadata.json"), "utf8"));
   const filter = element(html, "div", /class="provider-filter"[^>]*data-provider-filter/);
   const matrixRegion = element(html, "div", /class="table-scroll"[^>]*role="region"/);
-  const rows = [...matrixRegion.matchAll(/<tr data-provider="([^"]+)"[^>]*data-provider-group="([^"]+)"[^>]*data-provider-search="[^"]+">/g)];
+  const rows = [...matrixRegion.matchAll(/<tr data-provider="([^"]+)"[^>]*data-provider-groups="([^"]+)"[^>]*data-provider-search="[^"]+">/g)];
 
   assert.match(filter, /<input id="provider-filter-input"[^>]*type="search"/);
   assert.match(filter, /<output[^>]*aria-live="polite"[^>]*data-provider-count>/);
@@ -78,6 +78,13 @@ generatedTest("provider index renders filterable rows in a scroll region", () =>
     "generated provider rows should match provider metadata",
   );
   assert.ok(rows.every((match) => match[2]), "every provider row should have a filter group");
+  const daytona = rows.find((match) => match[1] === "daytona");
+  assert.ok(daytona, "Daytona should be present in the provider matrix");
+  assert.deepEqual(
+    new Set(daytona[2].split(/\s+/)),
+    new Set(["managed-cloud", "team-cloud"]),
+    "Daytona should be discoverable as both a managed sandbox and coordinator-backed provider",
+  );
 });
 
 generatedTest("generated provider markup hides comments and preserves list structure", () => {
