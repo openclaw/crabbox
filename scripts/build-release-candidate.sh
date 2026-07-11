@@ -57,9 +57,15 @@ VERIFIER_COMMIT=$(git -C "$ROOT" rev-parse HEAD)
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-release-build.XXXXXX")
 stage=
+remove_tree() {
+  local path=$1
+  [[ -e "$path" ]] || return 0
+  chmod -R u+w "$path" 2>/dev/null || true
+  rm -rf "$path"
+}
 cleanup() {
-  rm -rf "$WORK"
-  [[ -z "$stage" ]] || rm -rf "$stage"
+  remove_tree "$WORK"
+  [[ -z "$stage" ]] || remove_tree "$stage"
 }
 trap cleanup EXIT
 SOURCE="$WORK/source"
