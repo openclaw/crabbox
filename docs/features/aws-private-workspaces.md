@@ -147,6 +147,10 @@ The stack explicitly denies Parameter Store reads on the workspace role so an
 untrusted workspace command cannot reuse its instance credentials to retrieve
 account parameters.
 
+The Node coordinator image pins AWS's global RDS trust bundle by checksum and
+loads it through `NODE_EXTRA_CA_CERTS`. Use `sslmode=verify-full` for RDS
+database URLs; do not disable certificate or hostname verification.
+
 ## Configuration
 
 The CloudFormation template sets the private-mode environment. For a manual

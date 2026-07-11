@@ -7,6 +7,10 @@ import test from "node:test";
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const templatePath = path.resolve(scriptDirectory, "../deploy/aws/ecs-fargate-coordinator.yaml");
 const template = await readFile(templatePath, "utf8");
+const nodeDockerfile = await readFile(
+  path.resolve(scriptDirectory, "../worker/Dockerfile.node"),
+  "utf8",
+);
 
 function resourceBlock(name) {
   const resources = template.indexOf("\nResources:\n");
@@ -51,6 +55,17 @@ function resourceNames() {
     ...template.slice(resourcesStart, outputsStart).matchAll(/^  ([A-Za-z][A-Za-z0-9]+):\n/gm),
   ].map((match) => match[1]);
 }
+
+test("Node coordinator image pins the AWS RDS trust bundle", () => {
+  assert.match(
+    nodeDockerfile,
+    /ADD --checksum=sha256:e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3 https:\/\/truststore\.pki\.rds\.amazonaws\.com\/global\/global-bundle\.pem \/etc\/ssl\/certs\/aws-rds-global-bundle\.pem/,
+  );
+  assert.match(
+    nodeDockerfile,
+    /NODE_EXTRA_CA_CERTS=\/etc\/ssl\/certs\/aws-rds-global-bundle\.pem/,
+  );
+});
 
 test("Fargate coordinator template is generic and digest pinned", () => {
   assert.doesNotMatch(template, /fakeco|openclaw/i);
