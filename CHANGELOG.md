@@ -1,10 +1,28 @@
 # Changelog
 
-## 0.37.0 - 2026-07-10
+## 0.37.2 - Unreleased
 
 ### Added
 
 - Added a dedicated ECS Fargate deployment for small private AWS workspaces with task-role credentials, exact account/Region and instance allowlist preflight, encrypted gp3 volumes, no public IP or SSH, IMDSv2, SSM bootstrap/log evidence, route-scoped workspace lifecycle, and idempotent cleanup.
+- Added explicit GCP metadata-server authentication for brokered coordinators, with hardened token validation, bounded retries, source-aware readiness diagnostics, and preserved service-account-key defaults. Thanks @dani29.
+
+## 0.37.1 - 2026-07-11
+
+### Added
+
+- Added Orgo Linux workspaces with API-key authentication, image and region selection, exact workspace-bound claims, WebVNC support, guarded cleanup, credential provenance checks, and a full live-smoke workflow. Thanks @zozo123.
+
+### Fixed
+
+- Preserved the Foundation Developer ID and notarization trust of the embedded Apple VM daemon at runtime instead of replacing its accepted signature with an ad-hoc one.
+- Rebuilt production releases as a local-produced, signed, notarized, draft-first pipeline with protected default-branch verification, exact source provenance, native execution proof, serialized publication, and separately verified Homebrew installation.
+- Authenticated the complete packaging-tool closure before exposing signing credentials, kept credential-free release builds read-only, and made signed-tag publication tests deterministic across Linux and macOS CI.
+
+## 0.37.0 - 2026-07-10
+
+### Added
+
 - Added Sealos DevBox Linux SSH leases through the Kubernetes CRD with exact provider/resource-bound claims, conflict-safe explicit `--reclaim` adoption, claim-locked release and cleanup, controller-owned Secret SSH routing, and guarded zero-residue lifecycle proof. Thanks @coygeek.
 - Added a Unikraft Cloud service-control provider for claimed OCI-image instances, with endpoint- and instance-bound ownership, guarded cleanup, and live create/status/list/stop verification. Thanks @zozo123.
 - Added capability-aware AWS image promotion and lease selection by minimum OS, SDK/runtime versions, browser, WebView2, and desktop support, with fail-before-lease rejection when no promoted image satisfies every requirement.

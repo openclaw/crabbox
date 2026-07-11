@@ -1,5 +1,7 @@
 bin/
 dist/
+dist-release/
+dist-release-unsigned/
 dist-cloudflare/
 /worker/dist-node/
 /worker/dist-cloudflare-dynamic-workers/
@@ -20,6 +22,7 @@ reports/mutation/
 
 # Local env files: never commit API keys, tokens, or user secrets.
 *.env
+!.mac-release.env
 api.env*
 
 # Local planning artifacts from $prepare-plans / $prepare-plans-goals.

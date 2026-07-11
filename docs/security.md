@@ -438,14 +438,60 @@ it to commands, print it, or store it in repo config.
 
 ## Release Integrity
 
-Production release publication accepts only a `repository_dispatch` release
-event, which GitHub runs from the default branch; version-tag pushes and
-ref-selectable workflow dispatches do not start the credentialed workflow. The
-workflow accepts only an existing exact `vMAJOR.MINOR.PATCH` tag in
-default-branch history and uses the GoReleaser configuration from the reviewed
-default-branch commit, never from the selected release tag. Re-releases may fail
-for historical tags that are incompatible with the current reviewed
-configuration rather than falling back to tag-controlled publishing behavior.
+Production releases use separate trust domains and serialized mutation gates;
+no tag push or repository event automatically publishes assets or changes the
+Homebrew tap. The source identity is an annotated `vMAJOR.MINOR.PATCH` tag whose
+signature verifies against the repository-pinned signer policy. Verification
+captures the exact tag-object and peeled commit IDs, confirms the remote tag has
+not moved, and requires the peeled commit to be an ancestor of protected
+`main`. Existing valid tags are preserved when release hardening lands later;
+they are never rewritten to point at verifier code.
+
+Release orchestration and verification come from the exact protected-default
+workflow commit, not from the tagged candidate. Trusted and candidate trees are
+separate, checkout never persists credentials, and candidate builds and
+execution do not receive GitHub, Actions runtime/OIDC, Homebrew, signing, or
+publication credentials. A narrowly scoped token may download the captured
+numeric draft and asset IDs, but it is removed before archive inspection,
+signature/notarization verification, or candidate execution.
+
+Every macOS executable archive member, plus the Apple VM helper's eventually
+executed embedded VMD, is signed as `Developer ID Application: OpenClaw
+Foundation (FWJYW4S8P8)` with the expected identifier and thin native
+architecture, hardened runtime, and secure timestamp. The VMD additionally
+requires the exact tracked entitlements. Notarization must be accepted before
+packaging. Raw command-line binaries cannot carry a stapled ticket, so Apple
+Silicon and Intel verification requires the online gate:
+
+```sh
+codesign --verify --strict --check-notarization -R=notarized <binary>
+```
+
+The private draft has an exact eight-asset inventory, immutable source and
+build provenance, and release notes byte-equal to the tagged changelog section.
+Both native macOS verifier jobs must bind their proof to the same tag object,
+source commit, protected workflow SHA, numeric release ID, asset IDs, sizes, and
+digests. Publication requires a separate authorization and changes only the
+verified draft state. A fresh public verification must finish after every
+release mutation before a separately authorized Homebrew update can begin.
+Homebrew proof re-fetches the current public record and exact successful public
+verifier run without credentials, authenticates both native proof ZIPs against
+GitHub's published artifact digests, requires the run to postdate publication
+and every release or asset update, binds formula URLs and checksums to that
+record, installs on a clean host, and re-verifies the installed binary and
+helper. It repeats the complete public metadata/proof comparison after the
+installed-candidate execution and fails if anything changed during the gate.
+
+Cancellation is fail-closed and non-destructive. Operators record the exact
+draft, public release, assets, and tap state, but never heuristically delete a
+partial release, replace assets, rewrite a tag, redispatch, publish, or change
+Homebrew while the gate is stopped. See [Release engineering](RELEASING.md) for
+the complete record and gate sequence.
+
+The preserved `v0.37.0` tag is explicitly publication-blocked in its protected
+release record because the tagged Apple VM helper ad-hoc re-signs the embedded
+VMD before execution. A new signed tag containing the byte-preserving runtime
+trust fix is required; the existing tag and source commit must not be moved.
 
 ## Managed Windows Artifact Integrity
 

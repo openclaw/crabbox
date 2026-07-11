@@ -73,6 +73,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = runDelete(args[1:], stdout, stderr)
 	case "vmd-info":
 		err = runVMDInfo(stdout)
+	case "vmd-export":
+		err = runVMDExport(stdout)
 	default:
 		fmt.Fprintf(stderr, "unknown subcommand %q\n", args[0])
 		return 2
@@ -526,15 +528,34 @@ func startedHelperIdentityMatches(inst Instance) (bool, error) {
 // runVMDInfo reports whether this helper build carries an embedded VM
 // daemon payload, so packaging checks can verify release builds.
 func runVMDInfo(stdout io.Writer) error {
-	payload := embeddedVMDPayload()
+	payload := embeddedVMDPayloadFunc()
+	releaseTrust := embeddedVMDReleaseFunc()
 	info := struct {
-		Embedded bool   `json:"embedded"`
-		SHA256   string `json:"sha256,omitempty"`
-	}{Embedded: len(payload) > 0}
+		Embedded           bool   `json:"embedded"`
+		SHA256             string `json:"sha256,omitempty"`
+		ReleaseTrust       bool   `json:"releaseTrust"`
+		TrustPolicyVersion int    `json:"trustPolicyVersion"`
+	}{Embedded: len(payload) > 0, ReleaseTrust: releaseTrust}
 	if info.Embedded {
 		info.SHA256 = sha256Hex(payload)
 	}
+	if info.ReleaseTrust {
+		info.TrustPolicyVersion = ReleaseVMDTrustPolicyVersion
+	}
 	return json.NewEncoder(stdout).Encode(info)
+}
+
+// runVMDExport is a hidden packaging/verifier interface. It writes the exact
+// embedded Mach-O bytes without installing, signing, or otherwise mutating them.
+func runVMDExport(stdout io.Writer) error {
+	payload := embeddedVMDPayloadFunc()
+	if len(payload) == 0 {
+		return fmt.Errorf("%s payload is not embedded", ManagedVMDName)
+	}
+	if _, err := io.Copy(stdout, bytes.NewReader(payload)); err != nil {
+		return fmt.Errorf("export embedded %s payload: %w", ManagedVMDName, err)
+	}
+	return nil
 }
 
 // runVMDProbe asks the entitlement-signed VMM daemon to build and validate a

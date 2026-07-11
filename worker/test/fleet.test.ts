@@ -5737,6 +5737,7 @@ describe("fleet lease identity and idle", () => {
         CRABBOX_GCP_SUBNET: "operator-subnet",
         CRABBOX_GCP_TAGS: "operator-runner",
         CRABBOX_GCP_SERVICE_ACCOUNT: "runner@operator-project.iam.gserviceaccount.com",
+        GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
       },
       body: { os: "ubuntu:24.04" },
     },
@@ -25011,6 +25012,112 @@ describe("fleet identity", () => {
         "AZURE_CLIENT_SECRET",
         "AZURE_SUBSCRIPTION_ID",
       ],
+    });
+
+    const gcpMissingProject = await fleet.fetch(request("GET", "/v1/providers/gcp/readiness"));
+    expect(gcpMissingProject.status).toBe(200);
+    await expect(gcpMissingProject.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["GCP_PROJECT_ID", "GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
+    });
+
+    const gcpProjectOnlyFleet = testFleet(
+      undefined,
+      {},
+      { CRABBOX_GCP_PROJECT: "example-project" },
+    );
+    const gcpProjectOnly = await gcpProjectOnlyFleet.fetch(
+      request("GET", "/v1/providers/gcp/readiness"),
+    );
+    await expect(gcpProjectOnly.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
+    });
+
+    const gcpDefaultKeyFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+        GCP_PRIVATE_KEY: "test-private-key",
+      },
+    );
+    const gcpDefaultKey = await gcpDefaultKeyFleet.fetch(
+      request("GET", "/v1/providers/gcp/readiness"),
+    );
+    await expect(gcpDefaultKey.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: true,
+      missing: [],
+    });
+
+    const gcpInvalidSourceFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+        GCP_PRIVATE_KEY: "test-private-key",
+        CRABBOX_GCP_CREDENTIAL_SOURCE: "workload-identity",
+      },
+    );
+    const gcpInvalidSource = await gcpInvalidSourceFleet.fetch(
+      request("GET", "/v1/providers/gcp/readiness"),
+    );
+    await expect(gcpInvalidSource.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["CRABBOX_GCP_CREDENTIAL_SOURCE"],
+    });
+
+    const gcpMetadataFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+      },
+    );
+    const gcpMetadata = await gcpMetadataFleet.fetch(request("GET", "/v1/providers/gcp/readiness"));
+    await expect(gcpMetadata.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: true,
+      missing: [],
+    });
+
+    const gcpPartialFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+      },
+    );
+    const gcpPartial = await gcpPartialFleet.fetch(request("GET", "/v1/providers/gcp/readiness"));
+    await expect(gcpPartial.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["GCP_PRIVATE_KEY"],
+    });
+
+    const gcpExplicitKeyFleet = testFleet(
+      undefined,
+      {},
+      {
+        CRABBOX_GCP_PROJECT: "example-project",
+        CRABBOX_GCP_CREDENTIAL_SOURCE: "service-account-key",
+      },
+    );
+    const gcpExplicitKey = await gcpExplicitKeyFleet.fetch(
+      request("GET", "/v1/providers/gcp/readiness"),
+    );
+    await expect(gcpExplicitKey.json()).resolves.toMatchObject({
+      provider: "gcp",
+      configured: false,
+      missing: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
     });
 
     const daytonaMissing = await fleet.fetch(request("GET", "/v1/providers/daytona/readiness"));

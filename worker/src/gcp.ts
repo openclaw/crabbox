@@ -19,9 +19,16 @@ import type { Env, ProviderImage, ProviderMachine, ProvisioningAttempt } from ".
 
 const computeBaseURL = "https://compute.googleapis.com/compute/v1";
 const tokenURL = "https://oauth2.googleapis.com/token";
+const metadataTokenURL =
+  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const defaultImage = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64";
 const firewallName = "crabbox-ssh";
 const firewallVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
+const metadataTokenBackoffMs = [1_000, 2_000, 4_000, 8_000, 16_000, 28_000];
+const metadataTokenDeadlineMs = 60_000;
+const metadataTokenRequestTimeoutMs = 5_000;
+const metadataTokenRefreshSkewSeconds = 300;
+const serviceAccountTokenRefreshSkewSeconds = 60;
 
 interface TokenCache {
   token: string;
@@ -38,6 +45,10 @@ class GCPHTTPError extends Error {
     super(`gcp ${method} ${path}: http ${status}: ${body}`);
   }
 }
+
+class GCPMetadataTokenRequestError extends Error {}
+
+class GCPMetadataTokenTrustError extends Error {}
 
 interface GCPInstance {
   id?: string;
@@ -112,8 +123,15 @@ export class GCPClient {
     this.rootGB = numberFromEnv(env.CRABBOX_GCP_ROOT_GB, 400);
     this.serviceAccount = env.CRABBOX_GCP_SERVICE_ACCOUNT?.trim() || "";
     if (!this.project) throw new Error("GCP_PROJECT_ID or CRABBOX_GCP_PROJECT secret is required");
-    if (!env.GCP_CLIENT_EMAIL) throw new Error("GCP_CLIENT_EMAIL secret is required");
-    if (!env.GCP_PRIVATE_KEY) throw new Error("GCP_PRIVATE_KEY secret is required");
+    if (hasPartialServiceAccountCredential(env)) {
+      throw new Error("GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY must be configured together");
+    }
+    const credentialSource = gcpCredentialSource(env);
+    if (credentialSource === "service-account-key" && !hasServiceAccountCredential(env)) {
+      throw new Error(
+        "GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY are required unless CRABBOX_GCP_CREDENTIAL_SOURCE=metadata",
+      );
+    }
   }
 
   async listCrabboxServers(): Promise<ProviderMachine[]> {
@@ -650,7 +668,17 @@ export class GCPClient {
 
   private async accessToken(): Promise<string> {
     const now = Math.trunc(Date.now() / 1000);
-    if (this.cache && this.cache.expiresAt - 60 > now) return this.cache.token;
+    const credentialSource = gcpCredentialSource(this.env);
+    const refreshSkewSeconds =
+      credentialSource === "metadata"
+        ? metadataTokenRefreshSkewSeconds
+        : serviceAccountTokenRefreshSkewSeconds;
+    if (this.cache && this.cache.expiresAt - refreshSkewSeconds > now) {
+      return this.cache.token;
+    }
+    if (credentialSource === "metadata") {
+      return this.metadataAccessToken();
+    }
     const assertion = await serviceAccountAssertion(this.env, now);
     const response = await this.fetcher(tokenURL, {
       method: "POST",
@@ -670,6 +698,106 @@ export class GCPClient {
     }
     this.cache = { token: data.access_token, expiresAt: now + (data.expires_in ?? 3600) };
     return data.access_token;
+  }
+
+  private async metadataAccessToken(): Promise<string> {
+    const deadline = Date.now() + metadataTokenDeadlineMs;
+    let lastFailure: Error | undefined;
+    for (let attempt = 0; ; attempt += 1) {
+      if (deadline - Date.now() <= 0) {
+        throw lastFailure ?? new Error("gcp metadata token: deadline exceeded");
+      }
+      let response: Response;
+      let text: string;
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
+        ({ response, text } = await this.metadataTokenResponse(deadline));
+      } catch (error) {
+        if (!(error instanceof GCPMetadataTokenRequestError)) throw error;
+        lastFailure = error;
+        // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
+        if (await sleepBeforeMetadataRetry(attempt, deadline)) {
+          // GKE metadata can refuse connections while the server starts; retry within the same bound.
+          continue;
+        }
+        throw lastFailure;
+      }
+      // Error responses from the metadata server are not guaranteed to be JSON.
+      const data = parseMetadataTokenResponse(text);
+      const token = typeof data?.access_token === "string" ? data.access_token.trim() : "";
+      if (response.ok && token) {
+        const expiresIn =
+          typeof data?.expires_in === "number" &&
+          Number.isFinite(data.expires_in) &&
+          data.expires_in > 0
+            ? data.expires_in
+            : 3600;
+        this.cache = {
+          token,
+          expiresAt: Math.trunc(Date.now() / 1000) + expiresIn,
+        };
+        return token;
+      }
+      const detail =
+        typeof data?.error === "string" && data.error.trim()
+          ? data.error.trim()
+          : response.statusText.trim();
+      lastFailure = !response.ok
+        ? new Error(`gcp metadata token: http ${response.status}${detail ? `: ${detail}` : ""}`)
+        : new Error("gcp metadata token: response missing access_token");
+      if (metadataTokenRetryStatus(response.status)) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- metadata retries are bounded and sequential.
+        if (await sleepBeforeMetadataRetry(attempt, deadline)) {
+          continue;
+        }
+        throw lastFailure;
+      }
+      if (!response.ok) {
+        throw lastFailure;
+      }
+      throw lastFailure;
+    }
+  }
+
+  private async metadataTokenResponse(
+    deadline: number,
+  ): Promise<{ response: Response; text: string }> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new GCPMetadataTokenRequestError("gcp metadata token: deadline exceeded");
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Math.max(1, Math.min(metadataTokenRequestTimeoutMs, remaining)),
+    );
+    try {
+      const response = await this.fetcher(metadataTokenURL, {
+        headers: { "Metadata-Flavor": "Google" },
+        redirect: "error",
+        signal: controller.signal,
+      });
+      if (response.headers.get("Metadata-Flavor") !== "Google") {
+        throw new GCPMetadataTokenTrustError(
+          "gcp metadata token: response missing Metadata-Flavor: Google",
+        );
+      }
+      const text = await response.text();
+      return { response, text };
+    } catch (error) {
+      if (error instanceof GCPMetadataTokenTrustError) throw error;
+      const detail = controller.signal.aborted
+        ? "request timed out"
+        : error instanceof Error
+          ? error.message.trim()
+          : String(error ?? "").trim();
+      throw new GCPMetadataTokenRequestError(
+        `gcp metadata token: request failed${detail ? `: ${detail}` : ""}`,
+        { cause: error },
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private async waitZoneOperation(op: GCPOperation): Promise<void> {
@@ -746,6 +874,47 @@ function pemToArrayBuffer(pem: string): ArrayBuffer {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes.buffer;
+}
+
+function hasServiceAccountCredential(env: Env): boolean {
+  return Boolean(env.GCP_CLIENT_EMAIL?.trim()) && Boolean(env.GCP_PRIVATE_KEY?.trim());
+}
+
+function hasPartialServiceAccountCredential(env: Env): boolean {
+  return Boolean(env.GCP_CLIENT_EMAIL?.trim()) !== Boolean(env.GCP_PRIVATE_KEY?.trim());
+}
+
+function gcpCredentialSource(env: Env): "metadata" | "service-account-key" {
+  const source = env.CRABBOX_GCP_CREDENTIAL_SOURCE?.trim() ?? "";
+  if (!source) return "service-account-key";
+  if (source === "metadata" || source === "service-account-key") return source;
+  throw new Error("CRABBOX_GCP_CREDENTIAL_SOURCE must be metadata or service-account-key");
+}
+
+function parseMetadataTokenResponse(
+  text: string,
+): { access_token?: unknown; expires_in?: unknown; error?: unknown } | undefined {
+  if (!text) return undefined;
+  try {
+    const value = JSON.parse(text) as unknown;
+    return value && typeof value === "object"
+      ? (value as { access_token?: unknown; expires_in?: unknown; error?: unknown })
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function metadataTokenRetryStatus(status: number): boolean {
+  return status === 429 || status === 499 || (status >= 500 && status <= 599);
+}
+
+async function sleepBeforeMetadataRetry(attempt: number, deadline: number): Promise<boolean> {
+  const delay = metadataTokenBackoffMs[attempt];
+  const remaining = deadline - Date.now();
+  if (delay === undefined || remaining <= 1) return false;
+  await sleep(Math.min(delay, remaining - 1));
+  return Date.now() < deadline;
 }
 
 function toMachine(instance: GCPInstance, zone: string): ProviderMachine {

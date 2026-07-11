@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 74 providers (42 SSH lease, 29 delegated run, 3 service control).
+Current built-in surface: 75 providers (42 SSH lease, 30 delegated run, 3 service control).
 
 Access terms:
 
@@ -120,6 +120,7 @@ Access terms:
 | [nvidia-brev](nvidia-brev.md) (`brev`, `nvidia`) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; NVIDIA Brev GPU workspace | `provider-managed`; GPU: yes | NVIDIA Brev CLI; delete by default; optional stop | Managed NVIDIA GPU workspace over SSH | Requires Brev CLI auth, quota, and available GPU capacity |
 | [opencomputer](opencomputer.md) (`oc`, `open-computer`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; OpenComputer Linux VM | `provider-managed`; GPU: unknown | OpenComputer; VM delete | Hosted delegated Linux VM execution | REST execution contract, not an SSH lease |
 | [opensandbox](opensandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; OpenSandbox sandbox | `provider-managed`; GPU: unknown | OpenSandbox; sandbox delete | Hosted delegated sandbox through an open SDK | Requires compatible OpenSandbox control and exec endpoints |
+| [orgo](orgo.md) (`orgo-ai`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: none | `linux`; Orgo cloud computer | `provider-managed`; GPU: unknown | Orgo; computer and temporary workspace delete | Managed Linux computer execution through an HTTP API | No normal SSH lease or Crabbox workspace sync |
 | [ovh](ovh.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; OVHcloud Public Cloud instance | `cloud`; GPU: optional | Crabbox; instance, key, and local claim delete | OVHcloud Public Cloud Linux VM | Direct-only; credentials use OVH signed requests and local claims |
 | [parallels](parallels.md) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `workspace-checkpoint`, `workspace-fork`, `workspace-restore`, `provider-snapshot` | `linux`, `macos`, `windows/normal`, `windows/wsl2`; Parallels linked-clone VM | `local`; GPU: no | Crabbox; clone delete | Local macOS, Linux, or Windows VM with snapshots | Requires prepared Parallels source VMs and SSH |
 | [phala](phala.md) (`phala-cloud`, `dstack`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Phala Cloud confidential Intel TDX CVM | `provider-managed`; GPU: no | Phala phala CLI; CVM delete | Short-lived confidential Linux compute over SSH | Requires the phala CLI and its stored auth; verifies Intel TDX attestation by default (needs outbound Intel PCS network; --phala-skip-attestation to opt out) |

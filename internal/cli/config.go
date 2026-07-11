@@ -187,6 +187,7 @@ type Config struct {
 	hostingerUserExplicit         bool
 	hostingerWorkRootExplicit     bool
 	Wandb                         WandbConfig
+	Orgo                          OrgoConfig
 	Islo                          IsloConfig
 	isloImageExplicit             bool
 	isloVCPUsExplicit             bool
@@ -748,6 +749,18 @@ type WandbConfig struct {
 	APIKey             string
 	DefaultImage       string
 	MaxLifetimeSeconds int
+}
+
+// OrgoConfig drives the Orgo delegated-run provider. The API key is resolved
+// from env/config only; it must not be passed on the command line.
+type OrgoConfig struct {
+	APIKey      string
+	APIBase     string
+	WorkspaceID string
+	RAMGB       int
+	CPUs        int
+	DiskGB      int
+	Resolution  string
 }
 
 type IsloConfig struct {
@@ -2842,6 +2855,13 @@ func baseConfig() Config {
 			WorkRoot:       "/tmp/crabbox",
 			WakeOnSSH:      true,
 		},
+		Orgo: OrgoConfig{
+			APIBase:    "https://www.orgo.ai/api",
+			RAMGB:      4,
+			CPUs:       1,
+			DiskGB:     8,
+			Resolution: "1280x720x24",
+		},
 		Daytona: DaytonaConfig{
 			APIURL:           "https://app.daytona.io/api",
 			User:             "daytona",
@@ -3234,6 +3254,7 @@ type fileConfig struct {
 	NvidiaBrev               *fileNvidiaBrevConfig               `yaml:"nvidiaBrev,omitempty"`
 	Hostinger                *fileHostingerConfig                `yaml:"hostinger,omitempty"`
 	Wandb                    *fileWandbConfig                    `yaml:"wandb,omitempty"`
+	Orgo                     *fileOrgoConfig                     `yaml:"orgo,omitempty"`
 	Islo                     *fileIsloConfig                     `yaml:"islo,omitempty"`
 	Freestyle                *fileFreestyleConfig                `yaml:"freestyle,omitempty"`
 	Tenki                    *fileTenkiConfig                    `yaml:"tenki,omitempty"`
@@ -3904,6 +3925,16 @@ type fileWandbConfig struct {
 	APIKey             string `yaml:"apiKey,omitempty"`
 	DefaultImage       string `yaml:"defaultImage,omitempty"`
 	MaxLifetimeSeconds int    `yaml:"maxLifetimeSeconds,omitempty"`
+}
+
+type fileOrgoConfig struct {
+	APIKey      string `yaml:"apiKey,omitempty"`
+	APIBase     string `yaml:"apiBase,omitempty"`
+	WorkspaceID string `yaml:"workspaceID,omitempty"`
+	RAMGB       int    `yaml:"ramGB,omitempty"`
+	CPUs        int    `yaml:"cpus,omitempty"`
+	DiskGB      int    `yaml:"diskGB,omitempty"`
+	Resolution  string `yaml:"resolution,omitempty"`
 }
 
 type fileIsloConfig struct {
@@ -6439,6 +6470,31 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Wandb.MaxLifetimeSeconds = file.Wandb.MaxLifetimeSeconds
 		}
 	}
+	if file.Orgo != nil {
+		if trusted && file.Orgo.APIKey != "" {
+			cfg.Orgo.APIKey = file.Orgo.APIKey
+			cfg.credentialProvenance.orgoAPIKey = credentialSource
+		}
+		if file.Orgo.APIBase != "" {
+			cfg.Orgo.APIBase = file.Orgo.APIBase
+			cfg.credentialProvenance.orgoAPIBase = credentialSource
+		}
+		if file.Orgo.WorkspaceID != "" {
+			cfg.Orgo.WorkspaceID = file.Orgo.WorkspaceID
+		}
+		if file.Orgo.RAMGB > 0 {
+			cfg.Orgo.RAMGB = file.Orgo.RAMGB
+		}
+		if file.Orgo.CPUs > 0 {
+			cfg.Orgo.CPUs = file.Orgo.CPUs
+		}
+		if file.Orgo.DiskGB > 0 {
+			cfg.Orgo.DiskGB = file.Orgo.DiskGB
+		}
+		if file.Orgo.Resolution != "" {
+			cfg.Orgo.Resolution = file.Orgo.Resolution
+		}
+	}
 	if file.Islo != nil {
 		if file.Islo.BaseURL != "" {
 			cfg.Islo.BaseURL = file.Islo.BaseURL
@@ -8569,6 +8625,24 @@ func applyEnv(cfg *Config) error {
 	cfg.Wandb.APIKey = getenv("CRABBOX_WANDB_API_KEY", cfg.Wandb.APIKey)
 	cfg.Wandb.DefaultImage = getenv("CRABBOX_WANDB_DEFAULT_IMAGE", getenv("WANDB_DEFAULT_IMAGE", cfg.Wandb.DefaultImage))
 	cfg.Wandb.MaxLifetimeSeconds = getenvInt("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", getenvInt("WANDB_MAX_LIFETIME_SECONDS", cfg.Wandb.MaxLifetimeSeconds))
+	if value := os.Getenv("CRABBOX_ORGO_API_KEY"); value != "" {
+		cfg.Orgo.APIKey = value
+		cfg.credentialProvenance.orgoAPIKey = credentialSourceEnvironment
+	} else if cfg.Orgo.APIKey == "" {
+		if value := os.Getenv("ORGO_API_KEY"); value != "" {
+			cfg.Orgo.APIKey = value
+			cfg.credentialProvenance.orgoAPIKey = credentialSourceEnvironment
+		}
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_API_BASE", "ORGO_API_BASE_URL"); ok {
+		cfg.Orgo.APIBase = value
+		cfg.credentialProvenance.orgoAPIBase = credentialSourceEnvironment
+	}
+	cfg.Orgo.WorkspaceID = getenv("CRABBOX_ORGO_WORKSPACE_ID", getenv("ORGO_WORKSPACE_ID", cfg.Orgo.WorkspaceID))
+	cfg.Orgo.RAMGB = getenvInt("CRABBOX_ORGO_RAM_GB", cfg.Orgo.RAMGB)
+	cfg.Orgo.CPUs = getenvInt("CRABBOX_ORGO_CPUS", cfg.Orgo.CPUs)
+	cfg.Orgo.DiskGB = getenvInt("CRABBOX_ORGO_DISK_GB", cfg.Orgo.DiskGB)
+	cfg.Orgo.Resolution = getenv("CRABBOX_ORGO_RESOLUTION", cfg.Orgo.Resolution)
 	if value, ok := firstNonEmptyEnv("CRABBOX_ISLO_API_KEY", "ISLO_API_KEY"); ok {
 		cfg.Islo.APIKey = value
 		cfg.credentialProvenance.isloAPIKey = credentialSourceEnvironment

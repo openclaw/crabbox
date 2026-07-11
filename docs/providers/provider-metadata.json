@@ -727,6 +727,20 @@
     "caveat": "Requires compatible OpenSandbox control and exec endpoints",
     "docs": "opensandbox.md"
   },
+  "orgo": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "Orgo cloud computer",
+    "location": "provider-managed",
+    "ssh": "no",
+    "sync": "provider-owned",
+    "gpu": "unknown",
+    "lifecycle": "Orgo",
+    "cleanup": "computer and temporary workspace delete",
+    "bestFit": "Managed Linux computer execution through an HTTP API",
+    "caveat": "No normal SSH lease or Crabbox workspace sync",
+    "docs": "orgo.md"
+  },
   "parallels": {
     "status": "built-in",
     "category": "local-vm",
