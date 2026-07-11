@@ -698,7 +698,10 @@ Cost is an estimate for compute leases, not an invoice. See [Cost and Usage](fea
 
 ## Release Checklist
 
-Before tagging a release:
+The authoritative serialized release contract is [Release engineering](RELEASING.md).
+No event automatically publishes a tag or updates Homebrew.
+
+Before creating or reusing a signed release tag:
 
 - Rebase release preparation on the current `main`, restore the full changelog from the latest tag if concurrent work regressed it, and verify every published version remains represented.
 - Reorder `CHANGELOG.md` with the user-facing changes first, date the release section, and keep contributor thanks / co-author notes intact.
@@ -714,6 +717,52 @@ Before tagging a release:
 - `git diff --check`
 - Live smoke at least one coordinator-backed `crabbox run`, then verify `crabbox attach`, `crabbox events`, `crabbox logs`, and lease cleanup.
 - Push, pull, and wait for CI green on the release commit.
-- Tag and push `vX.Y.Z`, then send the default-branch release event with that exact tag: `gh api --method POST repos/openclaw/crabbox/dispatches -f event_type=release -f 'client_payload[tag]=vX.Y.Z'`. Tag pushes and ref-selectable workflow dispatches do not publish. The workflow verifies that the tag is in default-branch history before loading release credentials, publishes GitHub release assets, copies the matching `CHANGELOG.md` section into the GitHub release body, and pushes the generated `Formula/crabbox.rb` update to `openclaw/homebrew-tap` with `HOMEBREW_TAP_GITHUB_TOKEN`; missing tap access is a release failure.
-- Verify the GitHub release assets and the Homebrew formula update.
-- `brew update`, install or upgrade `openclaw/tap/crabbox`, run `crabbox --version`, and run a short live smoke from the installed binary.
+
+Then advance exactly one gate at a time:
+
+1. **Tag trust.** Create or reuse an annotated signed `vX.Y.Z` tag. Verify it
+   against the repository-pinned signer policy, capture the tag-object and
+   peeled commit IDs, and require that commit to be an ancestor of the current
+   protected `main`. If a valid tag already exists, preserve it; never move or
+   recreate it merely because verifier hardening landed later.
+2. **Local candidate.** Build the exact eight-asset payload described in
+   [Release engineering](RELEASING.md#immutable-release-record). Ordinary builds
+   remain credential-free. The macOS producer uses the managed release keychain
+   to sign both native CLI architectures, the Apple Silicon helper, and its
+   embedded VMD as
+   `Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)`, with hardened
+   runtime and secure timestamps, then requires accepted notarization and
+   online `codesign --check-notarization` proof before packaging.
+3. **Private draft.** With separate explicit authorization, create exactly one
+   GitHub draft for the captured pre-existing signed tag. Its title, exact eight
+   assets, and body copied byte-for-byte from the tagged `CHANGELOG.md` section
+   are immutable candidate inputs.
+4. **Native draft verification.** Dispatch only the protected-default verifier
+   for that numeric draft ID and pinned tag identities. Its Apple Silicon and
+   Intel jobs download assets with narrowly scoped credentials, remove all API,
+   Actions, OIDC, and Homebrew credentials, then verify and execute the matching
+   candidates in a clean environment.
+5. **Publication.** Stop for an explicit publication gate. Re-read and compare
+   the unchanged draft, successful native proofs, tag, protected verifier SHA,
+   notes, asset IDs, sizes, and digests. Publication is a single draft-state
+   transition; it does not rebuild, replace, or delete anything.
+6. **Published verification.** Re-download the public assets by immutable asset
+   ID and repeat the exact metadata, checksum, signature, notarization, native
+   execution, and notes proof. The proof must be newer than publication and
+   every release or asset mutation.
+7. **Homebrew.** Only after published verification, grant a separate tap-update
+   gate. Bind every formula URL and SHA-256 to the frozen release record, then
+   run the documented downstream verifier on clean native Apple Silicon and
+   Intel hosts. The verifier re-fetches the current public release and run,
+   authenticates both supplied native proof ZIPs against GitHub artifact
+   digests, and requires that successful run to be newer than publication and
+   every release or asset update. It then performs `brew update`, a fresh install or reinstall,
+   `brew test`, archive-to-install byte comparison, signature/notarization
+   checks, exact `crabbox --version`, and the Apple Silicon helper's
+   non-mutating `vmd-info` check. Those checks are the bounded installed-binary
+   smoke; they do not create a provider lease or authorize another mutation.
+
+On cancellation or uncertainty, stop all release and tap writes. Inspect and
+record the exact draft/public release and tap state, but do not delete a partial
+draft or release, replace assets, rewrite the tag, redispatch, publish, or
+update Homebrew. Resume only from a newly authorized serialized gate.

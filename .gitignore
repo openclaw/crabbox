@@ -1,5 +1,7 @@
 bin/
 dist/
+dist-release/
+dist-release-unsigned/
 dist-cloudflare/
 /worker/dist-node/
 /worker/dist-cloudflare-dynamic-workers/

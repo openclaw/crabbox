@@ -1,0 +1,419 @@
+name: Verify Release Assets
+run-name: Verify ${{ inputs.draft && 'draft' || 'published' }} ${{ inputs.release_id }} for ${{ inputs.tag }} at ${{ inputs.verifier_commit }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: "Exact numeric draft release ID"
+        required: true
+        type: string
+      tag:
+        description: "Exact stable release tag"
+        required: true
+        type: string
+      tag_object:
+        description: "Pinned annotated tag object SHA"
+        required: true
+        type: string
+      tag_commit:
+        description: "Pinned peeled source commit SHA"
+        required: true
+        type: string
+      verifier_commit:
+        description: "Protected default-branch verifier commit SHA"
+        required: true
+        type: string
+      draft:
+        description: "Verify an unpublished draft instead of the public release"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  # GitHub keeps at most one pending member of a concurrency group. The
+  # serialized operator gate dispatches once; this key prevents overlap for
+  # that immutable numeric release without dropping a different release.
+  group: crabbox-release-${{ github.repository_id }}-${{ inputs.release_id }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: guard-protected-release-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      notes_bytes: ${{ steps.notes.outputs.bytes }}
+      notes_sha256: ${{ steps.notes.outputs.sha256 }}
+    steps:
+      - name: Guard exact default-branch workflow
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
+          [[ "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          expected_ref="refs/heads/$DEFAULT_BRANCH"
+          expected_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/release-assets.yml@$expected_ref"
+          [[ "$GITHUB_REF" == "$expected_ref" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$expected_workflow_ref" ]]
+          [[ "${{ github.workflow_sha }}" == "$VERIFIER_COMMIT" ]]
+
+      - name: Check out protected verifier tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+
+      - name: Verify live branch and stable-tag rulesets
+        shell: bash
+        env:
+          # Fine-grained token: this repository, Administration read-only.
+          # GitHub omits ruleset bypass actors from the normal GITHUB_TOKEN.
+          GH_TOKEN: ${{ secrets.CRABBOX_RULESET_READ_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/release-policy"
+          mkdir -m 700 "$work" "$work/details"
+          gh api --method GET "repos/$GITHUB_REPOSITORY" >"$work/repository.json"
+          gh api --method GET "repos/$GITHUB_REPOSITORY/rulesets?per_page=100" >"$work/list.json"
+          while IFS= read -r id; do
+            [[ "$id" =~ ^[1-9][0-9]*$ ]]
+            gh api --method GET "repos/$GITHUB_REPOSITORY/rulesets/$id" \
+              >"$work/details/$id.json"
+          done < <(jq -r '.[].id' "$work/list.json")
+          detail_count=$(find "$work/details" -type f -name '*.json' | wc -l | tr -d '[:space:]')
+          [[ "$detail_count" -gt 0 ]]
+          jq -s '.' "$work"/details/*.json >"$work/rulesets.json"
+          node scripts/verify-github-release-policy.mjs \
+            "$work/repository.json" "$work/rulesets.json" \
+            "$GITHUB_REPOSITORY" "$DEFAULT_BRANCH" "$RELEASE_TAG"
+
+      - name: Verify pinned signed source tag
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_TAG_COMMIT: ${{ inputs.tag_commit }}
+          EXPECTED_TAG_OBJECT: ${{ inputs.tag_object }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          TRUSTED_HEAD: ${{ inputs.verifier_commit }}
+          WORKFLOW_REF: ${{ github.ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          REQUIRE_PUBLISHABLE: "1"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$WORKFLOW_SHA"
+          git config gpg.format ssh
+          git config gpg.ssh.allowedSignersFile "$GITHUB_WORKSPACE/.github/release-allowed-signers"
+          scripts/verify-release-source.sh
+
+      - name: Pin exact release notes
+        id: notes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.tag_commit }}
+        run: |
+          set -euo pipefail
+          git show "$RELEASE_COMMIT:CHANGELOG.md" >"$RUNNER_TEMP/tagged-changelog.md"
+          scripts/extract-release-notes.sh "$RELEASE_TAG" \
+            <"$RUNNER_TEMP/tagged-changelog.md" >"$RUNNER_TEMP/expected-notes.md"
+          bytes=$(wc -c <"$RUNNER_TEMP/expected-notes.md" | tr -d '[:space:]')
+          sha256=$(shasum -a 256 "$RUNNER_TEMP/expected-notes.md" | awk '{print $1}')
+          [[ "$bytes" =~ ^[1-9][0-9]*$ && "$sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf 'bytes=%s\nsha256=%s\n' "$bytes" "$sha256" >>"$GITHUB_OUTPUT"
+
+  download-draft:
+    name: download-opaque-release-input
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The release-capable token exists only in this no-checkout,
+    # non-candidate job. Later jobs receive an immutable Actions artifact.
+    permissions:
+      contents: write
+    steps:
+      - name: Download exact numeric release without executing its bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.tag_commit }}
+          EXPECTED_DRAFT: ${{ inputs.draft }}
+          EXPECTED_NOTES_BYTES: ${{ needs.guard.outputs.notes_bytes }}
+          EXPECTED_NOTES_SHA256: ${{ needs.guard.outputs.notes_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          input="$RUNNER_TEMP/release-input"
+          mkdir -m 700 "$input" "$input/assets"
+          gh api --method GET "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            >"$input/release.json"
+          RELEASE_FILE="$input/release.json" node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_FILE, 'utf8'));
+          const version = process.env.RELEASE_TAG.slice(1);
+          const names = [
+            'crabbox_' + version + '_darwin_amd64.tar.gz',
+            'crabbox_' + version + '_darwin_arm64.tar.gz',
+            'crabbox_' + version + '_linux_amd64.tar.gz',
+            'crabbox_' + version + '_linux_arm64.tar.gz',
+            'crabbox_' + version + '_windows_amd64.zip',
+            'crabbox_' + version + '_windows_arm64.zip',
+            'checksums.txt',
+            'provenance.json',
+          ].sort();
+          const notes = Buffer.from(release.body ?? '', 'utf8');
+          const actualNames = release.assets.map((asset) => asset.name).sort();
+          const valid =
+            release.id === Number(process.env.RELEASE_ID) &&
+            release.tag_name === process.env.RELEASE_TAG &&
+            release.name === process.env.RELEASE_TAG &&
+            release.draft === (process.env.EXPECTED_DRAFT === 'true') &&
+            release.prerelease === false &&
+            (release.draft ? release.published_at === null : typeof release.published_at === 'string') &&
+            notes.length === Number(process.env.EXPECTED_NOTES_BYTES) &&
+            crypto.createHash('sha256').update(notes).digest('hex') === process.env.EXPECTED_NOTES_SHA256 &&
+            JSON.stringify(actualNames) === JSON.stringify(names) &&
+            new Set(release.assets.map((asset) => asset.id)).size === 8 &&
+            release.assets.every((asset) =>
+              Number.isSafeInteger(asset.id) && asset.id > 0 &&
+              Number.isSafeInteger(asset.size) && asset.size > 0 &&
+              asset.state === 'uploaded' &&
+              /^sha256:[0-9a-f]{64}$/.test(asset.digest ?? '') &&
+              asset.url === 'https://api.github.com/repos/' + process.env.GITHUB_REPOSITORY +
+                '/releases/assets/' + asset.id
+            );
+          if (!valid) throw new Error('numeric release does not match the exact immutable draft input');
+          NODE
+          while IFS=$'\t' read -r asset_id expected_size expected_digest; do
+            destination="$input/assets/$asset_id"
+            gh api --method GET --header 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"$destination"
+            actual_size=$(wc -c <"$destination" | tr -d '[:space:]')
+            actual_digest="sha256:$(shasum -a 256 "$destination" | awk '{print $1}')"
+            [[ "$actual_size" == "$expected_size" && "$actual_digest" == "$expected_digest" ]]
+          done < <(jq -r '.assets[] | [.id, .size, .digest] | @tsv' "$input/release.json")
+
+      - name: Freeze opaque candidate input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-input
+          path: ${{ runner.temp }}/release-input
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  verify-native:
+    name: verify-native-${{ matrix.arch }}
+    needs: [guard, download-draft]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - name: Check out protected verifier tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+      - name: Set up Go for build-info inspection
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Set up Node for protected release tooling
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+      - name: Download immutable opaque input
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-input
+          path: ${{ runner.temp }}/release-input
+      - name: Materialize exact candidate names
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_COMMIT: ${{ inputs.tag_commit }}
+          EXPECTED_DRAFT: ${{ inputs.draft }}
+        run: |
+          set -euo pipefail
+          scripts/materialize-release-input.sh \
+            "$RUNNER_TEMP/release-input" "$RUNNER_TEMP/release-assets" \
+            "$RELEASE_TAG" "$RELEASE_ID" "$RELEASE_COMMIT" "$EXPECTED_DRAFT"
+      - name: Statically verify with no release credentials
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG_OBJECT: ${{ inputs.tag_object }}
+          RELEASE_COMMIT: ${{ inputs.tag_commit }}
+          VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          VERIFY_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/verify-home"
+          env -i \
+            CRABBOX_VERIFY_EXEC_ARCH="$VERIFY_ARCH" \
+            CRABBOX_VERIFY_MODE=static \
+            HOME="$RUNNER_TEMP/verify-home" LANG=C LC_ALL=C \
+            PATH="$PATH" TMPDIR="$RUNNER_TEMP" \
+            scripts/verify-release.sh \
+              "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
+              "$RELEASE_TAG_OBJECT" "$RELEASE_COMMIT" "$VERIFIER_COMMIT"
+      - name: Freeze exact static proof before candidate execution
+        shell: bash
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG_OBJECT: ${{ inputs.tag_object }}
+          RELEASE_COMMIT: ${{ inputs.tag_commit }}
+          VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          VERIFY_ARCH: ${{ matrix.arch }}
+          EXPECTED_DRAFT: ${{ inputs.draft }}
+        run: |
+          set -euo pipefail
+          env -i \
+            EXPECTED_DRAFT="$EXPECTED_DRAFT" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            RELEASE_ASSET_DIR="$RUNNER_TEMP/release-assets" RELEASE_COMMIT="$RELEASE_COMMIT" \
+            RELEASE_ID="$RELEASE_ID" RELEASE_JSON="$RUNNER_TEMP/release-input/release.json" \
+            RELEASE_PROOF="$RUNNER_TEMP/verified-assets.json" RELEASE_TAG="$RELEASE_TAG" \
+            RELEASE_TAG_OBJECT="$RELEASE_TAG_OBJECT" VERIFIER_COMMIT="$VERIFIER_COMMIT" \
+            PATH="$PATH" VERIFY_ARCH="$VERIFY_ARCH" node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_JSON, 'utf8'));
+          const notes = Buffer.from(release.body ?? '', 'utf8');
+          const assets = release.assets.map((asset) => ({
+            id: asset.id,
+            name: asset.name,
+            size: asset.size,
+            sha256: crypto.createHash('sha256')
+              .update(fs.readFileSync(path.join(process.env.RELEASE_ASSET_DIR, asset.name))).digest('hex'),
+            updatedAt: asset.updated_at,
+          })).sort((a, b) => a.name.localeCompare(b.name));
+          const manifest = {
+            schemaVersion: 1,
+            state: process.env.EXPECTED_DRAFT === 'true' ? 'draft' : 'published',
+            repository: process.env.GITHUB_REPOSITORY,
+            releaseId: Number(process.env.RELEASE_ID),
+            tag: process.env.RELEASE_TAG,
+            tagObject: process.env.RELEASE_TAG_OBJECT,
+            sourceCommit: process.env.RELEASE_COMMIT,
+            verifierCommit: process.env.VERIFIER_COMMIT,
+            verifierArch: process.env.VERIFY_ARCH,
+            title: release.name,
+            targetCommitish: release.target_commitish,
+            notesBytes: notes.length,
+            notesSha256: crypto.createHash('sha256').update(notes).digest('hex'),
+            publishedAt: release.published_at,
+            releaseUpdatedAt: release.updated_at,
+            assets,
+          };
+          manifest.manifestSha256 = crypto.createHash('sha256')
+            .update(JSON.stringify({ ...manifest, manifestSha256: undefined })).digest('hex');
+          fs.writeFileSync(
+            process.env.RELEASE_PROOF,
+            JSON.stringify(manifest, null, 2) + '\n',
+            { flag: 'wx', mode: 0o600 },
+          );
+          NODE
+      - name: Preserve exact verified asset identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-assets-${{ matrix.arch }}
+          path: ${{ runner.temp }}/verified-assets.json
+          if-no-files-found: error
+          retention-days: 30
+
+  execute-native:
+    name: execute-native-${{ matrix.arch }}
+    needs: [guard, download-draft, verify-native]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - name: Check out protected verifier tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+      - name: Set up Go for build-info inspection
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Set up Node for protected release tooling
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+      - name: Download immutable opaque input
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-input
+          path: ${{ runner.temp }}/release-input
+      - name: Materialize exact candidate names
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_COMMIT: ${{ inputs.tag_commit }}
+          EXPECTED_DRAFT: ${{ inputs.draft }}
+        run: |
+          set -euo pipefail
+          scripts/materialize-release-input.sh \
+            "$RUNNER_TEMP/release-input" "$RUNNER_TEMP/release-assets" \
+            "$RELEASE_TAG" "$RELEASE_ID" "$RELEASE_COMMIT" "$EXPECTED_DRAFT"
+      - name: Execute candidate in isolated clean job without release credentials
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG_OBJECT: ${{ inputs.tag_object }}
+          RELEASE_COMMIT: ${{ inputs.tag_commit }}
+          VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          VERIFY_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/execute-home"
+          exec env -i \
+            CRABBOX_VERIFY_EXEC_ARCH="$VERIFY_ARCH" \
+            CRABBOX_VERIFY_MODE=execute \
+            HOME="$RUNNER_TEMP/execute-home" LANG=C LC_ALL=C \
+            PATH="$PATH" TMPDIR="$RUNNER_TEMP" \
+            scripts/verify-release.sh \
+              "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
+              "$RELEASE_TAG_OBJECT" "$RELEASE_COMMIT" "$VERIFIER_COMMIT"
