@@ -487,7 +487,10 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:RequestedRegion: !Ref ExpectedRegion
-                    ec2:Owner: "099720109477"
+                    # EC2 authorization exposes Canonical public AMIs through
+                    # the `amazon` owner alias. Runtime discovery still filters
+                    # the exact Canonical publisher account before this call.
+                    ec2:Owner: amazon
               - Sid: LaunchWorkspaceInstance
                 Effect: Allow
                 Action: ec2:RunInstances

@@ -56,12 +56,13 @@ test("Fargate coordinator template is generic and digest pinned", () => {
   assert.doesNotMatch(template, /fakeco|openclaw/i);
   assert.deepEqual(
     [...new Set(template.match(/\b[0-9]{12}\b/g) ?? [])],
-    ["099720109477"],
-    "the only literal account ID is Canonical's public Ubuntu publisher ID",
+    [],
+    "the template must not contain deployment-specific account IDs",
   );
   assert.doesNotMatch(template, /AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN/);
   assert.match(template, /AllowedPattern: "\^\.\+@sha256:\[0-9a-f\]\{64\}\$"/);
   assert.match(template, /DeploymentUsesCommercialAWSPartition:/);
+  assert.match(template, /LaunchFromCanonicalUbuntuImage(?:.|\n)*ec2:Owner: amazon/);
   assert.match(template, /ExpectedAccountMatchesDeployment:/);
   assert.match(template, /ExpectedRegionMatchesDeployment:/);
   assert.match(template, /CoordinatorIngressIsBounded:/);
@@ -281,7 +282,7 @@ test("workspace boundary is private, SSM-only, and IAM constrained", () => {
   const image = policyStatementBlock(role, "LaunchFromCanonicalUbuntuImage");
   assertAllMatches(image, [
     /Resource: !Sub arn:\$\{AWS::Partition\}:ec2:\$\{ExpectedRegion\}::image\/ami-\*/,
-    /ec2:Owner: "099720109477"/,
+    /ec2:Owner: amazon/,
   ]);
 
   const instance = policyStatementBlock(role, "LaunchWorkspaceInstance");
