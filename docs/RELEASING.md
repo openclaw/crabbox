@@ -219,14 +219,24 @@ test "$(shasum -a 256 scripts/package-release.sh | awk '{print $1}')" = \
   codesign-run --with-package-secrets -- \
   /bin/bash -c '
     set -euo pipefail
-    script=$1
-    expected=$2
-    shift 2
+    root=$1
+    verifier_commit=$2
+    script=$3
+    expected=$4
+    shift 4
+    git=(/usr/bin/git -c core.fsmonitor=false -c core.untrackedCache=false)
+    [[ "$("${git[@]}" -C "$root" rev-parse HEAD)" == "$verifier_commit" ]]
+    [[ -z "$("${git[@]}" -C "$root" status --porcelain --untracked-files=all)" ]]
+    [[ "$("${git[@]}" -C "$root" remote get-url origin)" == \
+      https://github.com/openclaw/crabbox ]]
+    [[ "$("${git[@]}" ls-remote https://github.com/openclaw/crabbox \
+      refs/heads/main | /usr/bin/awk "{print \$1}")" == "$verifier_commit" ]]
     actual=$(/usr/bin/shasum -a 256 "$script")
     actual=${actual%% *}
     [[ "$actual" == "$expected" ]]
     exec /bin/bash "$script" "$@"
   ' crabbox-protected-package \
+  "$PWD" "$VERIFIER_COMMIT" \
   "$PWD/scripts/package-release.sh" "$PACKAGE_SCRIPT_SHA256" \
   "$TAG" "$TAG_OBJECT" "$TAG_COMMIT" \
   "$CANDIDATE_MANIFEST_SHA256" \

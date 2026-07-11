@@ -497,6 +497,18 @@ test("release documentation forbids automatic publication, deletion, and Homebre
   assert.match(release, /Developer ID Application: OpenClaw Foundation \(FWJYW4S8P8\)/);
   assert.match(release, /PACKAGE_SCRIPT_SHA256/);
   assert.match(release, /mac-release[\s\S]*\/bin\/bash -c/);
+  const secretGateStart = release.indexOf("codesign-run --with-package-secrets --");
+  const secretGateEnd = release.indexOf("' crabbox-protected-package", secretGateStart);
+  assert.ok(secretGateStart >= 0 && secretGateEnd > secretGateStart);
+  const secretGate = release.slice(secretGateStart, secretGateEnd);
+  assert.match(secretGate, /core\.fsmonitor=false/);
+  assert.match(secretGate, /rev-parse HEAD/);
+  assert.match(secretGate, /status --porcelain --untracked-files=all/);
+  assert.match(secretGate, /remote get-url origin/);
+  assert.match(secretGate, /ls-remote https:\/\/github\.com\/openclaw\/crabbox/);
+  assert.match(secretGate, /awk "\{print \\\$1\}"/);
+  assert.doesNotMatch(secretGate, /awk "\{print \\\\\\$1\}"/);
+  assert.ok(secretGate.indexOf("status --porcelain") < secretGate.indexOf("exec /bin/bash"));
 });
 
 test("preserved v0.37.0 identity is pinned and publication-blocked without rewriting the tag", () => {
