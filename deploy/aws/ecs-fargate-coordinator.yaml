@@ -47,6 +47,15 @@ Metadata:
         Parameters:
           - LogRetentionDays
 
+Mappings:
+  CanonicalUbuntuPublisherAccounts:
+    aws:
+      AccountId: "099720109477"
+    aws-us-gov:
+      AccountId: "513442679011"
+    aws-cn:
+      AccountId: "837727238323"
+
 Parameters:
   ExpectedAccountId:
     Type: String
@@ -498,10 +507,10 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:RequestedRegion: !Ref ExpectedRegion
-                    # EC2 authorization exposes Canonical public AMIs through
-                    # the `amazon` owner alias. Runtime discovery still filters
-                    # the partition-specific Canonical publisher account.
-                    ec2:Owner: amazon
+                    ec2:Owner: !FindInMap
+                      - CanonicalUbuntuPublisherAccounts
+                      - !Ref AWS::Partition
+                      - AccountId
               - Sid: LaunchWorkspaceInstance
                 Effect: Allow
                 Action: ec2:RunInstances

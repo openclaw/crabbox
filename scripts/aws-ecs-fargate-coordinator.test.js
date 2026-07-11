@@ -66,8 +66,15 @@ test("Node coordinator image pins the PostgreSQL-scoped AWS RDS trust bundle", (
 
 test("Fargate coordinator template is generic and digest pinned", () => {
   assert.doesNotMatch(template, /fakeco|openclaw/i);
+  const canonicalPublisherAccounts = new Set([
+    "099720109477",
+    "513442679011",
+    "837727238323",
+  ]);
   assert.deepEqual(
-    [...new Set(template.match(/\b[0-9]{12}\b/g) ?? [])],
+    [...new Set(template.match(/\b[0-9]{12}\b/g) ?? [])].filter(
+      (accountID) => !canonicalPublisherAccounts.has(accountID),
+    ),
     [],
     "the template must not contain deployment-specific account IDs",
   );
@@ -298,8 +305,12 @@ test("workspace boundary is private, SSM-only, and IAM constrained", () => {
   const image = policyStatementBlock(role, "LaunchFromCanonicalUbuntuImage");
   assertAllMatches(image, [
     /Resource: !Sub arn:\$\{AWS::Partition\}:ec2:\$\{ExpectedRegion\}::image\/ami-\*/,
-    /ec2:Owner: amazon/,
+    /ec2:Owner: !FindInMap\s+- CanonicalUbuntuPublisherAccounts\s+- !Ref AWS::Partition\s+- AccountId/,
   ]);
+  assert.match(
+    template,
+    /CanonicalUbuntuPublisherAccounts:\s+aws:\s+AccountId: "099720109477"\s+aws-us-gov:\s+AccountId: "513442679011"\s+aws-cn:\s+AccountId: "837727238323"/,
+  );
 
   const instance = policyStatementBlock(role, "LaunchWorkspaceInstance");
   assertAllMatches(instance, [
