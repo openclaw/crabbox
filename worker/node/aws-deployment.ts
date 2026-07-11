@@ -35,12 +35,11 @@ export function nodeCoordinatorEnv(
   credentialProvider: AWSCredentialProvider = nodeAWSCredentialProvider(),
 ): Env {
   const useDefaultChain =
-    source.CRABBOX_WORKSPACE_PROVIDER?.trim() === "aws" ||
-    deploymentFlag(source.CRABBOX_AWS_REQUIRE_ECS_TASK, "CRABBOX_AWS_REQUIRE_ECS_TASK") ||
-    deploymentFlag(source.CRABBOX_WORKSPACE_AWS_PRIVATE, "CRABBOX_WORKSPACE_AWS_PRIVATE") ||
-    deploymentFlag(
-      source.CRABBOX_AWS_ORPHAN_SWEEP_ENABLED,
-      "CRABBOX_AWS_ORPHAN_SWEEP_ENABLED",
+    source["CRABBOX_WORKSPACE_PROVIDER"]?.trim() === "aws" ||
+    deploymentFlag(source["CRABBOX_AWS_REQUIRE_ECS_TASK"], "CRABBOX_AWS_REQUIRE_ECS_TASK") ||
+    deploymentFlag(source["CRABBOX_WORKSPACE_AWS_PRIVATE"], "CRABBOX_WORKSPACE_AWS_PRIVATE") ||
+    ["1", "true", "yes", "on"].includes(
+      (source["CRABBOX_AWS_ORPHAN_SWEEP_ENABLED"] ?? "").trim().toLowerCase(),
     );
   return {
     ...source,
