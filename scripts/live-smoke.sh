@@ -1382,6 +1382,10 @@ if has_provider hetzner; then
   provider_smoke hetzner --class "${CRABBOX_LIVE_HETZNER_CLASS:-standard}" --ttl 15m --idle-timeout 2m
 fi
 
+if has_provider azure; then
+  provider_smoke azure --type "${CRABBOX_LIVE_AZURE_TYPE:-Standard_D2s_v5}" --ttl 20m --idle-timeout 5m
+fi
+
 if has_provider scaleway; then
   "$root/scripts/live-scaleway-smoke.sh"
 fi
@@ -1478,6 +1482,10 @@ fi
 
 if has_provider phala || has_provider phala-cloud || has_provider dstack; then
   "$root/scripts/live-phala-smoke.sh"
+fi
+
+if has_provider unikraft-cloud || has_provider unikraftcloud || has_provider ukc; then
+  "$root/scripts/live-unikraft-cloud-smoke.sh"
 fi
 
 if has_provider semaphore; then

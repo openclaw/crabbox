@@ -448,11 +448,11 @@ func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost
 }
 
 func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) []string {
-	args := []string{
+	args := append(sshForwardingDenyArgs(),
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "UserKnownHostsFile=" + sshConfigFileValue(knownHostsFile(target)),
-		"-o", "ConnectTimeout=" + strconv.Itoa(int(vncTunnelSSHConnectTimeout/time.Second)),
+		"-o", "UserKnownHostsFile="+sshConfigFileValue(knownHostsFile(target)),
+		"-o", "ConnectTimeout="+strconv.Itoa(int(vncTunnelSSHConnectTimeout/time.Second)),
 		"-o", "ConnectionAttempts=1",
 		"-o", "ExitOnForwardFailure=yes",
 		"-o", "GatewayPorts=no",
@@ -463,7 +463,7 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
-	}
+	)
 	if target.Key != "" {
 		args = append([]string{"-i", target.Key, "-o", "IdentitiesOnly=yes"}, args...)
 	}

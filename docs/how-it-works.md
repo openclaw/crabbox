@@ -31,9 +31,9 @@ telemetry, screenshots, artifacts — stays with Crabbox, not on the box.
            │                                         │ provider API
            │                                         ▼
            │                          ┌──────────────────────────────┐
-           │ SSH (primary + fallback) │ Hetzner / AWS / Azure / GCP   │
+           │ SSH (primary + fallback) │ managed cloud or sandbox     │
            └────────── rsync ────────►│ runner host                   │
-                                      │ /work/crabbox/<lease>/<repo>  │
+                                      │ /work/crabbox/<lease>/<repo> │
                                       └──────────────────────────────┘
 ```
 

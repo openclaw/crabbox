@@ -400,18 +400,12 @@ func printFailureDigestResults(w io.Writer, results *TestResultSummary) {
 		limit = 5
 	}
 	for i := 0; i < limit; i++ {
-		failure := results.Failed[i]
-		name := failure.Name
-		if failure.Classname != "" {
-			name = failure.Classname + "." + name
-		}
-		location := firstNonBlank(failure.File, failure.Suite, "-")
-		message := strings.TrimSpace(firstLine(failure.Message))
-		if message != "" {
-			fmt.Fprintf(w, "  failed_test: %s %-8s %s - %s\n", location, failure.Kind, name, message)
+		display := terminalSafeTestFailure(results.Failed[i])
+		if display.message != "" {
+			fmt.Fprintf(w, "  failed_test: %s %-8s %s - %s\n", display.location, display.kind, display.name, display.message)
 			continue
 		}
-		fmt.Fprintf(w, "  failed_test: %s %-8s %s\n", location, failure.Kind, name)
+		fmt.Fprintf(w, "  failed_test: %s %-8s %s\n", display.location, display.kind, display.name)
 	}
 	if len(results.Failed) > limit {
 		fmt.Fprintf(w, "  failed_test: +%d more\n", len(results.Failed)-limit)

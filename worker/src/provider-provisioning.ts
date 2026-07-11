@@ -1,7 +1,7 @@
 import type { Provider } from "./types";
 
 export interface ProviderProvisioningCleanupClaim {
-  provider: Extract<Provider, "aws" | "azure" | "gcp">;
+  provider: Extract<Provider, "aws" | "azure" | "gcp" | "daytona">;
   cloudID: string;
   region?: string;
   providerProject?: string;
@@ -55,6 +55,8 @@ export function validatedProviderProvisioningCleanupClaim(
       return nonEmptyClaimValue(claim.region) && nonEmptyClaimValue(claim.providerProject)
         ? claim
         : undefined;
+    case "daytona":
+      return claim;
   }
 }
 

@@ -1803,6 +1803,25 @@ esac
   assert.doesNotMatch(crabboxCalls, /--provider morph/);
   assert.doesNotMatch(result.stderr, /CRABBOX_MORPH_API_KEY|MORPH_API_KEY|morph\.apiKey/);
 
+  const azureResult = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...env,
+      PATH: `${bin}${path.delimiter}${env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_FAKE_LOG: crabboxLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "azure",
+      CRABBOX_LIVE_AZURE_TYPE: "Standard_D4ads_v6",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+  assert.equal(azureResult.status, 0, azureResult.stdout + azureResult.stderr);
+  const azureCalls = fs.readFileSync(crabboxLog, "utf8");
+  assert.match(azureCalls, /warmup --provider azure --type Standard_D4ads_v6 --ttl 20m --idle-timeout 5m/);
+
   const failedAudit = spawnSync("bash", ["scripts/live-smoke.sh"], {
     cwd: repoRoot,
     env: {

@@ -12,6 +12,7 @@ import {
 import { codeOriginForLease } from "../src/code-origin";
 import { prepareCoordinatorRequest } from "../src/coordinator-entry";
 import { errorMessage, json, redactDiagnosticSecrets, requestOwner } from "../src/http";
+import { MISSING_ORG_KEY, requestOrg, requestOrgLabel } from "../src/org-identity";
 import type { Env } from "../src/types";
 
 function proxyIdentityRequest(secret?: string): Request {
@@ -28,6 +29,152 @@ const allowGitHubMembership = {
 };
 
 describe("coordinator auth", () => {
+  it("keeps colliding org labels distinct after coordinator authentication", async () => {
+    const sharedEnv = {
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SHARED_OWNER: "automation@example.com",
+      CRABBOX_DEFAULT_ORG: "science team",
+    } as Env;
+    const proxyEnv = {
+      CRABBOX_TRUSTED_USER_HEADER: "X-Authenticated-User",
+      CRABBOX_TRUSTED_USER_ORG: "science_team",
+    } as Env;
+    const shared = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/whoami", {
+        headers: { authorization: "Bearer shared" },
+      }),
+      sharedEnv,
+    );
+    const proxy = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/whoami", {
+        headers: { "x-authenticated-user": "alice@example.com" },
+      }),
+      proxyEnv,
+      { trustedProxy: true },
+    );
+    if ("response" in shared || "response" in proxy) {
+      throw new Error("expected authenticated coordinator requests");
+    }
+
+    expect(requestOrgLabel(shared.request, sharedEnv)).toBe("science team");
+    expect(requestOrgLabel(proxy.request, proxyEnv)).toBe("science_team");
+    expect(requestOrg(shared.request, sharedEnv)).not.toBe(requestOrg(proxy.request, proxyEnv));
+  });
+
+  it("keeps a missing authenticated org distinct from the literal unknown org", async () => {
+    const missingEnv = {
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SHARED_OWNER: "automation@example.com",
+    } as Env;
+    const unknownEnv = { ...missingEnv, CRABBOX_DEFAULT_ORG: "unknown" } as Env;
+    const githubEnv = { CRABBOX_SESSION_SECRET: "session-secret" } as Env;
+    const githubToken = await issueUserToken(githubEnv, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "unknown",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const [missingShared, missingProxy, configuredUnknown, signedUnknown] = await Promise.all([
+      prepareCoordinatorRequest(
+        new Request("https://example.test/v1/whoami", {
+          headers: { authorization: "Bearer shared" },
+        }),
+        missingEnv,
+      ),
+      prepareCoordinatorRequest(
+        proxyIdentityRequest(),
+        { CRABBOX_TRUSTED_USER_HEADER: "X-Authenticated-User" } as Env,
+        { trustedProxy: true },
+      ),
+      prepareCoordinatorRequest(
+        new Request("https://example.test/v1/whoami", {
+          headers: { authorization: "Bearer shared" },
+        }),
+        unknownEnv,
+      ),
+      prepareCoordinatorRequest(
+        new Request("https://example.test/v1/whoami", {
+          headers: { authorization: `Bearer ${githubToken}` },
+        }),
+        githubEnv,
+        allowGitHubMembership,
+      ),
+    ]);
+    if (
+      "response" in missingShared ||
+      "response" in missingProxy ||
+      "response" in configuredUnknown ||
+      "response" in signedUnknown
+    ) {
+      throw new Error("expected authenticated coordinator requests");
+    }
+
+    expect(missingShared.request.headers.get("x-crabbox-org")).toBe("");
+    expect(missingProxy.request.headers.get("x-crabbox-org")).toBe("");
+    expect(configuredUnknown.request.headers.get("x-crabbox-org")).toBe("unknown");
+    expect(signedUnknown.request.headers.get("x-crabbox-org")).toBe("unknown");
+    expect(requestOrg(missingShared.request, unknownEnv)).toBe(MISSING_ORG_KEY);
+    expect(requestOrg(missingProxy.request, unknownEnv)).toBe(MISSING_ORG_KEY);
+    const configuredUnknownKey = requestOrg(configuredUnknown.request, unknownEnv);
+    expect(configuredUnknownKey).not.toBe(MISSING_ORG_KEY);
+    expect(requestOrg(signedUnknown.request, unknownEnv)).toBe(configuredUnknownKey);
+    expect(
+      [missingShared, missingProxy, configuredUnknown, signedUnknown].map((prepared) =>
+        requestOrgLabel(prepared.request, unknownEnv),
+      ),
+    ).toEqual(["unknown", "unknown", "unknown", "unknown"]);
+  });
+
+  it("rejects invalid authenticated org configuration before coordinator forwarding", async () => {
+    const invalidOrg = " science_team";
+    const [shared, runtimeAdapter, trustedProxy] = await Promise.all([
+      prepareCoordinatorRequest(
+        new Request("https://example.test/v1/whoami", {
+          headers: { authorization: "Bearer shared" },
+        }),
+        {
+          CRABBOX_SHARED_TOKEN: "shared",
+          CRABBOX_DEFAULT_ORG: invalidOrg,
+        } as Env,
+      ),
+      prepareCoordinatorRequest(
+        new Request("https://example.test/v1/workspaces", {
+          method: "POST",
+          headers: { authorization: "Bearer runtime-adapter" },
+        }),
+        {
+          CRABBOX_RUNTIME_ADAPTER_TOKEN: "runtime-adapter",
+          CRABBOX_DEFAULT_ORG: invalidOrg,
+        } as Env,
+      ),
+      prepareCoordinatorRequest(
+        proxyIdentityRequest(),
+        {
+          CRABBOX_TRUSTED_USER_HEADER: "X-Authenticated-User",
+          CRABBOX_TRUSTED_USER_ORG: invalidOrg,
+        } as Env,
+        { trustedProxy: true },
+      ),
+    ]);
+
+    const responses = [shared, runtimeAdapter, trustedProxy].map((prepared) => {
+      expect(prepared).toMatchObject({ authenticated: false, response: { status: 503 } });
+      if (!("response" in prepared)) throw new Error("invalid org reached the coordinator");
+      return prepared.response;
+    });
+    const expectedError = {
+      error: "invalid_org_identity",
+      message:
+        "organization must be 1-63 printable ASCII characters without leading or trailing spaces",
+    };
+    await expect(Promise.all(responses.map((response) => response.json()))).resolves.toEqual([
+      expectedError,
+      expectedError,
+      expectedError,
+    ]);
+  });
+
   it("requires same-origin intent for portal-cookie mutations and viewer sockets", async () => {
     const env = {
       CRABBOX_SESSION_SECRET: "session-secret",
@@ -1233,10 +1380,22 @@ describe("http responses", () => {
       "standalone Bearer :\r\n spaced-folded-colon-standalone-secret",
       "standalone Bearer [redacted]",
       "Proxy-Authorization=Basic basic-secret",
+      "refresh_token=refresh-assignment-value",
+      "api-secret=api-assignment-value",
+      "refreshToken=refresh-camel-assignment-value",
+      "idToken=id-camel-assignment-value",
+      "secretAccessKey=aws-camel-assignment-value",
+      "apiSecret=api-camel-assignment-value",
+      "Authorization: Token token-scheme-secret",
+      "Proxy-Authorization: Digest digest-scheme-secret",
+      'Authorization: Digest username="digest-user", response="digest-response"',
+      "Authorization: 1custom digit-scheme-secret",
       "X-API-Key=header-secret",
       "client_secret=plain-secret",
-      '{"token":"json-secret\\\"escaped-tail-leak","clientSecret":"client-secret","x-api-key":"json-api-secret"}',
-      "https://alice:password@example.test/path?api_key=query-secret&X-Amz-Signature=signed-secret",
+      '{"token":"json-secret\\\"escaped-tail-leak","clientSecret":"client-secret","x-api-key":"json-api-secret","accessToken":"access-json-value","refresh_token":"refresh-snake-value\\\"refresh-escaped-tail","refreshToken":"refresh-camel-value","refresh-token":"refresh-kebab-value","id_token":"id-snake-value","idToken":"id-camel-value","id-token":"id-kebab-value","secretAccessKey":"aws-camel-value","secret_access_key":"aws-snake-value","secret-access-key":"aws-kebab-value","apiSecret":"api-camel-value","api_secret":"api-snake-value","api-secret":"api-kebab-value","nextToken":"page-2","token_type":"Bearer"}',
+      "https://alice:password@example.test/path?api_key=query-secret&refresh_token=query-refresh-token&id_token=query-id-token&secret_access_key=query-aws-secret&api_secret=query-api-secret&x-api-key=query-api-key&authorization=query-authorization&proxy-authorization=query-proxy-authorization&session_token=query-session-token&X-Amz-Signature=signed-secret&X-Goog-Credential=gcp-credential&X-Goog-Signature=gcp-signature&X-Goog-Security-Token=gcp-security-token&region=eu",
+      "https://single-userinfo-token@other.example.test/path",
+      "https://first-userinfo-value@second-userinfo-value@multi.example.test/path",
       "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
       "safe suffix",
     ].join("\n");
@@ -1257,16 +1416,55 @@ describe("http responses", () => {
       "folded-colon-standalone-secret",
       "spaced-folded-colon-standalone-secret",
       "basic-secret",
+      "refresh-assignment-value",
+      "api-assignment-value",
+      "refresh-camel-assignment-value",
+      "id-camel-assignment-value",
+      "aws-camel-assignment-value",
+      "api-camel-assignment-value",
+      "token-scheme-secret",
+      "digest-scheme-secret",
+      "digest-user",
+      "digest-response",
+      "digit-scheme-secret",
       "header-secret",
       "plain-secret",
       "json-secret",
       "escaped-tail-leak",
       "client-secret",
       "json-api-secret",
+      "access-json-value",
+      "refresh-snake-value",
+      "refresh-escaped-tail",
+      "refresh-camel-value",
+      "refresh-kebab-value",
+      "id-snake-value",
+      "id-camel-value",
+      "id-kebab-value",
+      "aws-camel-value",
+      "aws-snake-value",
+      "aws-kebab-value",
+      "api-camel-value",
+      "api-snake-value",
+      "api-kebab-value",
       "alice",
       "password",
+      "single-userinfo-token",
+      "first-userinfo-value",
+      "second-userinfo-value",
       "query-secret",
+      "query-refresh-token",
+      "query-id-token",
+      "query-aws-secret",
+      "query-api-secret",
+      "query-api-key",
+      "query-authorization",
+      "query-proxy-authorization",
+      "query-session-token",
       "signed-secret",
+      "gcp-credential",
+      "gcp-signature",
+      "gcp-security-token",
       "PRIVATE KEY",
       "private-key-body",
     ]) {
@@ -1274,7 +1472,89 @@ describe("http responses", () => {
     }
     expect(redacted).toContain("[redacted]");
     expect(redacted).toContain("standalone Bearer [redacted]");
+    expect(redacted).toContain("region=eu");
+    expect(redacted).toContain('"nextToken":"page-2"');
+    expect(redacted).toContain('"token_type":"Bearer"');
+    expect(redacted).toContain("multi.example.test/path");
     expect(redacted).toContain("safe suffix");
+    expect(redactDiagnosticSecrets(redacted, secrets)).toBe(redacted);
+  });
+
+  it("preserves already-redacted and non-userinfo URL at-signs", () => {
+    const value =
+      "http://<redacted>@broker.example.test https://[redacted]@api.example.test https://host.example.test?email=alice@example.test https://host.example.test#realm@tenant";
+    expect(redactDiagnosticSecrets(value, ["redacted"])).toBe(value);
+  });
+
+  it("removes whole exact secrets that contain structured credentials", () => {
+    for (const [value, secret, expected] of [
+      ["prefix Bearer opaque-suffix", "prefix Bearer opaque-suffix", "[redacted]"],
+      ["abc?token=xyz", "abc?token=xyz", "[redacted]"],
+      ["?token=xyz&supersecretSuffix", "token=xyz&supersecretSuffix", "?[redacted]"],
+    ]) {
+      expect(redactDiagnosticSecrets(value, [secret])).toBe(expected);
+    }
+  });
+
+  it("stabilizes structural boundaries created by exact redaction", () => {
+    const secrets = ["refresh_token"];
+    const redacted = redactDiagnosticSecrets('refresh_tokenBearer b?token=""', secrets);
+    expect(redacted).not.toContain("Bearer b");
+    expect(redactDiagnosticSecrets(redacted, secrets)).toBe(redacted);
+  });
+
+  it("redacts structured values before overlapping exact secrets", () => {
+    const redacted = redactDiagnosticSecrets(
+      '{"refresh_token":"upstream-minted-value","region":"iad"}',
+      ["refresh_token"],
+    );
+    expect(redacted).not.toContain("upstream-minted-value");
+    expect(redacted).toContain("region");
+  });
+
+  it("redacts exact secrets that overlap an existing marker", () => {
+    for (const [value, secrets] of [
+      ["[redacted]suffix route=iad", ["[redacted]suffix"]],
+      ["prefix[redacted]suffix route=iad", ["redacted]suffix"]],
+      ["[redacted]suffix route=iad", ["redacted", "acted]suffix"]],
+      ["triggersuffix route=iad", ["trigger", "redacted]suffix"]],
+    ] as const) {
+      const redacted = redactDiagnosticSecrets(value, secrets);
+      expect(redacted).not.toContain("suffix");
+      expect(redacted).toContain("route=iad");
+      expect(redacted).not.toContain("[[redacted]");
+      expect(redacted).not.toContain("[red[redacted]");
+      expect(redactDiagnosticSecrets(redacted, secrets)).toBe(redacted);
+    }
+  });
+
+  it("fails closed when redaction does not converge within its pass limit", () => {
+    const value = "trigger" + "x".repeat(72);
+    expect(redactDiagnosticSecrets(value, ["trigger", "redacted]x"])).toBe("[redacted]");
+  });
+
+  it("redacts unterminated secret JSON values", () => {
+    for (const diagnostic of [
+      '{"refresh_token":"unterminated-refresh-value',
+      ['{"refresh_token":"dangling-backslash-refresh-value', "\\"].join(""),
+    ]) {
+      expect(redactDiagnosticSecrets(diagnostic)).not.toContain("refresh-value");
+    }
+  });
+
+  it("redacts punctuation-bearing credential suffixes while preserving context", () => {
+    for (const separator of [",", ";", "'", "}", "&", "#", "?", '\\"']) {
+      const credential = `prefix${separator}secret-suffix`;
+      expect(redactDiagnosticSecrets(`Authorization: Bearer ${credential} route=iad`)).toBe(
+        "Authorization: [redacted] route=iad",
+      );
+      expect(redactDiagnosticSecrets(`upstream Bearer ${credential} request=retry`)).toBe(
+        "upstream Bearer [redacted] request=retry",
+      );
+    }
+    expect(redactDiagnosticSecrets("provider:Authorization: Bearer prefix}secret route=iad")).toBe(
+      "provider:Authorization: [redacted] route=iad",
+    );
   });
 });
 

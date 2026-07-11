@@ -11,8 +11,11 @@ import {
 } from "../src/coordinator-runtime";
 import { FleetCoordinator } from "../src/fleet";
 import { githubAuthRoute } from "../src/oauth";
+import { orgKeyForLabel } from "../src/org-identity";
 import { runtimeAdapterRelayFrameLimit } from "../src/runtime-adapter-relay";
 import type { Env, LeaseRecord } from "../src/types";
+
+const exampleOrgKey = orgKeyForLabel("example-org");
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -204,7 +207,7 @@ describe("coordinator runtimes", () => {
       target: "linux",
       cloudID: "external-shared-egress",
       owner: "owner@example.com",
-      org: "example-org",
+      org: exampleOrgKey,
       share: { users: { "manager@example.com": "manage" } },
       profile: "default",
       class: "default",
@@ -261,7 +264,7 @@ describe("coordinator runtimes", () => {
       leaseID: lease.id,
       sessionID: "egress_accepted",
       owner: "manager@example.com",
-      org: "example-org",
+      org: exampleOrgKey,
       admin: false,
     });
 
@@ -339,7 +342,7 @@ describe("coordinator runtimes", () => {
     const runtime = new MemoryRuntime();
     const env = {
       CRABBOX_DEFAULT_ORG: "example-org",
-      CRABBOX_GITHUB_ADMIN_LOGINS: "admin",
+      CRABBOX_ADMIN_TOKEN: "admin-token",
     } as Env;
     const coordinator = new FleetCoordinator(runtime, env);
     const currentGrantVersion = await adminGrantVersion(env);
@@ -351,7 +354,7 @@ describe("coordinator runtimes", () => {
       target: "linux",
       cloudID: "external-shared-bridges",
       owner: "owner@example.com",
-      org: "example-org",
+      org: exampleOrgKey,
       share: { users: { "manager@example.com": "manage" } },
       profile: "default",
       class: "default",
@@ -387,9 +390,9 @@ describe("coordinator runtimes", () => {
       "x-crabbox-owner": "admin@example.com",
       "x-crabbox-org": "example-org",
       "x-crabbox-admin": "true",
-      "x-crabbox-auth": "github",
-      "x-crabbox-github-login": "admin",
+      "x-crabbox-auth": "bearer",
       "x-crabbox-admin-grant-version": currentGrantVersion,
+      authorization: "Bearer admin-token",
     };
     const createTicket = async (
       kind: "webvnc" | "code",
@@ -419,14 +422,41 @@ describe("coordinator runtimes", () => {
     expect(runtime.acceptedAttachment).toMatchObject({
       kind: "webvnc-agent",
       leaseID: lease.id,
+      owner: "manager@example.com",
+      org: exampleOrgKey,
+      admin: false,
     });
 
     const acceptedCodeTicket = await createTicket("code");
     expect((await connect("code", acceptedCodeTicket)).status).toBe(200);
-    expect(runtime.acceptedAttachment).toEqual({ kind: "code-agent", leaseID: lease.id });
+    expect(runtime.acceptedAttachment).toEqual({
+      kind: "code-agent",
+      leaseID: lease.id,
+      owner: "manager@example.com",
+      org: exampleOrgKey,
+      admin: false,
+    });
 
     expect((await connect("webvnc", await createTicket("webvnc", adminHeaders))).status).toBe(200);
+    expect(runtime.acceptedAttachment).toMatchObject({
+      kind: "webvnc-agent",
+      leaseID: lease.id,
+      owner: "admin@example.com",
+      org: exampleOrgKey,
+      admin: true,
+      auth: "bearer",
+      adminGrantVersion: currentGrantVersion,
+    });
     expect((await connect("code", await createTicket("code", adminHeaders))).status).toBe(200);
+    expect(runtime.acceptedAttachment).toMatchObject({
+      kind: "code-agent",
+      leaseID: lease.id,
+      owner: "admin@example.com",
+      org: exampleOrgKey,
+      admin: true,
+      auth: "bearer",
+      adminGrantVersion: currentGrantVersion,
+    });
 
     const revokedWebVNCTicket = await createTicket("webvnc");
     const revokedCodeTicket = await createTicket("code");
@@ -524,6 +554,7 @@ describe("coordinator runtimes", () => {
       ["GET", "/v1/workspaces/fleet-is-101"],
       ["DELETE", "/v1/workspaces/fleet-is-101"],
       ["GET", "/v1/native-vnc/handoff"],
+      ["GET", "/v1/leases/cbx_abcdef123456"],
       ["GET", "/v1/adapters/applied-alice"],
       ["POST", "/v1/adapters/applied-alice/proxy/v1/workspaces"],
     ]) {
@@ -532,7 +563,7 @@ describe("coordinator runtimes", () => {
       ).toBe("direct");
     }
     expect(coordinatorRequestQueue(new Request("https://coordinator.test/portal/login"))).toBe(
-      "lifecycle",
+      "direct",
     );
     expect(
       coordinatorRequestQueue(
@@ -543,7 +574,7 @@ describe("coordinator runtimes", () => {
       coordinatorRequestQueue(
         new Request("https://coordinator.test/v1/auth/github/start", { method: "POST" }),
       ),
-    ).toBe("lifecycle");
+    ).toBe("direct");
     expect(
       coordinatorRequestQueue(
         new Request("https://coordinator.test/v1/adapters/applied-alice/ticket", {
@@ -563,20 +594,18 @@ describe("coordinator runtimes", () => {
       CRABBOX_SHARED_TOKEN: "shared",
       CRABBOX_SESSION_SECRET: "session-secret",
     } as Env;
-    const start = await runtime.runExclusive(() =>
-      githubAuthRoute(
-        new Request("https://coordinator.test/v1/auth/github/start", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            pollSecretHash: "0".repeat(64),
-            loopbackRedirectURI: `http://127.0.0.1:54321/crabbox/oauth/${"a".repeat(64)}`,
-          }),
+    const start = await githubAuthRoute(
+      new Request("https://coordinator.test/v1/auth/github/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pollSecretHash: "0".repeat(64),
+          loopbackRedirectURI: `http://127.0.0.1:54321/crabbox/oauth/${"a".repeat(64)}`,
         }),
-        "start",
-        runtime,
-        env,
-      ),
+      }),
+      "start",
+      runtime,
+      env,
     );
     const startBody = (await start.json()) as { url: string };
     const state = new URL(startBody.url).searchParams.get("state");

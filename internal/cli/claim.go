@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,10 +17,14 @@ import (
 )
 
 type leaseClaim struct {
-	LeaseID                             string            `json:"leaseID"`
-	Slug                                string            `json:"slug,omitempty"`
-	Provider                            string            `json:"provider,omitempty"`
-	CloudID                             string            `json:"cloudID,omitempty"`
+	LeaseID  string `json:"leaseID"`
+	Slug     string `json:"slug,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	CloudID  string `json:"cloudID,omitempty"`
+	// CloudNumericID binds providers whose CloudID is a reusable resource name.
+	CloudNumericID int64 `json:"cloudNumericID,omitempty"`
+	// CloudImmutableID binds providers whose immutable identity is a string.
+	CloudImmutableID                    string            `json:"cloudImmutableID,omitempty"`
 	ProviderScope                       string            `json:"providerScope,omitempty"`
 	StaticHost                          string            `json:"staticHost,omitempty"`
 	StaticUser                          string            `json:"staticUser,omitempty"`
@@ -42,6 +47,7 @@ type leaseClaim struct {
 	SSHHost                             string            `json:"sshHost,omitempty"`
 	SSHPort                             int               `json:"sshPort,omitempty"`
 	BridgeURL                           string            `json:"bridgeURL,omitempty"`
+	CoordinatorRegistrationURL          string            `json:"coordinatorRegistrationURL,omitempty"`
 	RuntimeAdapterRegistrationID        string            `json:"runtimeAdapterRegistrationID,omitempty"`
 	RuntimeAdapterPendingRegistrationID string            `json:"runtimeAdapterPendingRegistrationID,omitempty"`
 	CacheVolumes                        []string          `json:"cacheVolumes,omitempty"`
@@ -190,6 +196,7 @@ type claimMetadata struct {
 	result                *leaseClaim
 	allowProviderMetadata bool
 	allowEmptyRepoRoot    bool
+	durable               bool
 }
 
 func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
@@ -205,7 +212,11 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 		guard = endpointClaimGuard(leaseID, metadata.guard)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	return mutateLeaseClaimGuarded(leaseID, guard, func(existing *leaseClaim) error {
+	mutate := mutateLeaseClaimGuarded
+	if metadata.durable {
+		mutate = mutateLeaseClaimGuardedDurable
+	}
+	return mutate(leaseID, guard, func(existing *leaseClaim) error {
 		hadExisting := existing.LeaseID != ""
 		original := cloneLeaseClaim(*existing)
 		if metadata.setEndpoint && hadExisting {
@@ -316,14 +327,18 @@ func claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, 
 }
 
 func claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
-	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, false)
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, false, false)
+}
+
+func claimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, false, true)
 }
 
 func claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
-	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, true)
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, true, false)
 }
 
-func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists, replaceEndpoint bool) (leaseClaim, error) {
+func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists, replaceEndpoint, durable bool) (leaseClaim, error) {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
@@ -335,6 +350,7 @@ func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg
 		target:          target,
 		guard:           unchangedLeaseClaimGuard(leaseID, expected, expectedExists),
 		result:          &updated,
+		durable:         durable,
 	})
 	return updated, err
 }
@@ -543,6 +559,12 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget)
 	if server.CloudID != "" {
 		claim.CloudID = server.CloudID
 	}
+	if server.ID != 0 {
+		claim.CloudNumericID = server.ID
+	}
+	if server.ImmutableID != "" {
+		claim.CloudImmutableID = server.ImmutableID
+	}
 	if len(server.Labels) > 0 {
 		claim.Labels = cloneStringMap(server.Labels)
 	}
@@ -669,6 +691,32 @@ func mutateLeaseClaim(leaseID string, mutate func(*leaseClaim) error) error {
 }
 
 func mutateLeaseClaimGuarded(leaseID string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error) error {
+	return mutateLeaseClaimGuardedWithWrite(leaseID, guard, mutate, writeLeaseClaimAtomic)
+}
+
+func mutateLeaseClaimGuardedDurable(leaseID string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error) error {
+	return mutateLeaseClaimGuardedDurableWithSync(leaseID, guard, mutate, syncControllerDirectory)
+}
+
+func mutateLeaseClaimGuardedDurableWithSync(leaseID string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error, syncDirectory func(string) error) error {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	firstExistingDir, err := nearestExistingClaimDirectory(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return exit(2, "create claim directory: %v", err)
+	}
+	return mutateLeaseClaimPathGuardedWithWrite(leaseID, path, guard, mutate, func(path string, claim leaseClaim) error {
+		return writeLeaseClaimAtomicDurableWithSync(path, claim, firstExistingDir, syncDirectory)
+	})
+}
+
+func mutateLeaseClaimGuardedWithWrite(leaseID string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error, write func(string, leaseClaim) error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return err
@@ -676,6 +724,10 @@ func mutateLeaseClaimGuarded(leaseID string, guard func(leaseClaim, bool) error,
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return exit(2, "create claim directory: %v", err)
 	}
+	return mutateLeaseClaimPathGuardedWithWrite(leaseID, path, guard, mutate, write)
+}
+
+func mutateLeaseClaimPathGuardedWithWrite(leaseID, path string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error, write func(string, leaseClaim) error) error {
 	return withLeaseClaimLock(path, func() error {
 		claim, exists, err := readLeaseClaimPathWithPresence(path)
 		if err != nil {
@@ -695,7 +747,7 @@ func mutateLeaseClaimGuarded(leaseID string, guard func(leaseClaim, bool) error,
 		if claim.LeaseID == "" {
 			return nil
 		}
-		return writeLeaseClaimAtomic(path, claim)
+		return write(path, claim)
 	})
 }
 
@@ -730,6 +782,13 @@ func leaseClaimLockPath(path string) (string, error) {
 }
 
 func writeLeaseClaimAtomic(path string, claim leaseClaim) error {
+	return writeLeaseClaimAtomicWithSync(path, claim, func(dir string) error {
+		fsyncDir(dir)
+		return nil
+	})
+}
+
+func writeLeaseClaimAtomicWithSync(path string, claim leaseClaim, syncDirectory func(string) error) error {
 	data, err := json.MarshalIndent(claim, "", "  ")
 	if err != nil {
 		return err
@@ -767,8 +826,59 @@ func writeLeaseClaimAtomic(path string, claim leaseClaim) error {
 		return exit(2, "write claim %s: %v", path, err)
 	}
 	removeTemp = false
-	fsyncDir(dir)
+	if err := syncDirectory(dir); err != nil {
+		return exit(2, "sync claim directory %s: %v", dir, err)
+	}
 	return nil
+}
+
+func writeLeaseClaimAtomicDurable(path string, claim leaseClaim) error {
+	return writeLeaseClaimAtomicDurableWithSync(path, claim, filepath.Dir(path), syncControllerDirectory)
+}
+
+func writeLeaseClaimAtomicDurableWithSync(path string, claim leaseClaim, firstExistingDir string, syncDirectory func(string) error) error {
+	if err := writeLeaseClaimAtomicWithSync(path, claim, syncDirectory); err != nil {
+		return err
+	}
+	return syncCreatedClaimDirectoryParentsWithSync(filepath.Dir(path), firstExistingDir, syncDirectory)
+}
+
+func nearestExistingClaimDirectory(dir string) (string, error) {
+	dir = filepath.Clean(dir)
+	for current := dir; ; current = filepath.Dir(current) {
+		info, err := os.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				return "", exit(2, "create claim directory: %s is not a directory", current)
+			}
+			return current, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", exit(2, "inspect claim directory %s: %v", current, err)
+		}
+		if parent := filepath.Dir(current); parent == current {
+			return "", exit(2, "create claim directory: no existing ancestor for %s", dir)
+		}
+	}
+}
+
+func syncCreatedClaimDirectoryParentsWithSync(claimDir, firstExistingDir string, syncDirectory func(string) error) error {
+	claimDir = filepath.Clean(claimDir)
+	firstExistingDir = filepath.Clean(firstExistingDir)
+	if claimDir == firstExistingDir {
+		return nil
+	}
+	for current := filepath.Dir(claimDir); ; current = filepath.Dir(current) {
+		if err := syncDirectory(current); err != nil {
+			return exit(2, "sync claim namespace parent %s: %v", current, err)
+		}
+		if current == firstExistingDir {
+			return nil
+		}
+		if parent := filepath.Dir(current); parent == current {
+			return exit(2, "sync claim namespace: boundary %s is not an ancestor of %s", firstExistingDir, claimDir)
+		}
+	}
 }
 
 func fsyncDir(dir string) {
@@ -789,9 +899,19 @@ func canonicalClaimProvider(provider string) string {
 
 func providerClaimScope(provider string, cfg Config) string {
 	switch provider {
+	case "azure":
+		return azureLeaseClaimScope(cfg.AzureSubscription, cfg.AzureResourceGroup)
 	case "gcp":
 		if cfg.GCPProject != "" {
 			return "project:" + cfg.GCPProject
+		}
+	case "cubesandbox":
+		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.CubeSandbox.APIURL); endpoint != "" {
+			return "endpoint:" + endpoint
+		}
+	case "e2b":
+		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.E2B.APIURL); endpoint != "" {
+			return "endpoint:" + endpoint
 		}
 	case "namespace-instance":
 		parts := make([]string, 0, 3)
@@ -824,6 +944,43 @@ func providerClaimScope(provider string, cfg Config) string {
 		}
 	}
 	return ""
+}
+
+func normalizedCubeSandboxClaimEndpoint(raw string) string {
+	endpoint := strings.TrimSpace(routingSafeURL(raw))
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimRight(endpoint, "/")
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		parsed.Host = "[" + host + "]"
+	} else {
+		parsed.Host = host
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = ""
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func azureLeaseClaimScope(subscriptionID, resourceGroup string) string {
+	subscriptionID = strings.ToLower(strings.TrimSpace(subscriptionID))
+	resourceGroup = strings.ToLower(strings.TrimSpace(resourceGroup))
+	if subscriptionID == "" || resourceGroup == "" {
+		return ""
+	}
+	return "subscription:" + subscriptionID + "|resource-group:" + resourceGroup
 }
 
 func normalizedNamespaceClaimEndpoint(raw string) string {
@@ -946,7 +1103,31 @@ func resolveLeaseClaimForProviderWithExact(identifier, provider string) (leaseCl
 	return claim, ok, false, err
 }
 
+func resolveLeaseClaimForProviderScopeWithExact(identifier, provider, providerScope string) (leaseClaim, bool, bool, error) {
+	if identifier == "" {
+		return leaseClaim{}, false, false, nil
+	}
+	exact, exists, err := readLeaseClaimWithPresence(identifier)
+	if err != nil {
+		return leaseClaim{}, false, exists, err
+	}
+	if exists {
+		if exact.LeaseID == "" || canonicalClaimProvider(exact.Provider) != provider || exact.ProviderScope != providerScope {
+			return exact, false, true, nil
+		}
+		return exact, true, true, nil
+	}
+	claim, ok, err := findUniqueLeaseClaim(identifier, func(candidate leaseClaim) bool {
+		return canonicalClaimProvider(candidate.Provider) == provider && candidate.ProviderScope == providerScope
+	})
+	return claim, ok, false, err
+}
+
 func resolveLeaseClaimForProviderCloudID(cloudID, provider string) (leaseClaim, bool, error) {
+	return resolveLeaseClaimForProviderCloudIDScope(cloudID, provider, "")
+}
+
+func resolveLeaseClaimForProviderCloudIDScope(cloudID, provider, providerScope string) (leaseClaim, bool, error) {
 	if cloudID == "" || provider == "" {
 		return leaseClaim{}, false, nil
 	}
@@ -973,8 +1154,11 @@ func resolveLeaseClaimForProviderCloudID(cloudID, provider string) (leaseClaim, 
 		if canonicalClaimProvider(claim.Provider) != provider || claim.CloudID != cloudID {
 			continue
 		}
+		if providerScope != "" && claim.ProviderScope != providerScope {
+			continue
+		}
 		if match.LeaseID != "" {
-			return leaseClaim{}, false, exit(2, "multiple provider=%s claims match cloud id %s", provider, cloudID)
+			return leaseClaim{}, false, exit(2, "multiple provider=%s scope=%s claims match cloud id %s", provider, providerScope, cloudID)
 		}
 		match = claim
 	}
@@ -1022,6 +1206,42 @@ func findLeaseClaim(identifier string, match func(leaseClaim) bool) (leaseClaim,
 		}
 	}
 	return leaseClaim{}, false, nil
+}
+
+func findUniqueLeaseClaim(identifier string, match func(leaseClaim) bool) (leaseClaim, bool, error) {
+	if identifier == "" {
+		return leaseClaim{}, false, nil
+	}
+	dir, err := crabboxStateDir()
+	if err != nil {
+		return leaseClaim{}, false, err
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "claims"))
+	if errors.Is(err, os.ErrNotExist) {
+		return leaseClaim{}, false, nil
+	}
+	if err != nil {
+		return leaseClaim{}, false, exit(2, "read claims directory: %v", err)
+	}
+	slug := normalizeLeaseSlug(identifier)
+	var found leaseClaim
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		claim, err := readLeaseClaim(strings.TrimSuffix(entry.Name(), ".json"))
+		if err != nil {
+			return leaseClaim{}, false, err
+		}
+		if (claim.LeaseID != identifier && (slug == "" || normalizeLeaseSlug(claim.Slug) != slug)) || !match(claim) {
+			continue
+		}
+		if found.LeaseID != "" {
+			return leaseClaim{}, false, exit(2, "multiple claims match identifier %s", identifier)
+		}
+		found = claim
+	}
+	return found, found.LeaseID != "", nil
 }
 
 func removeLeaseClaim(leaseID string) {
@@ -1130,6 +1350,14 @@ func restoreLeaseClaimIfUnchanged(leaseID string, current, previous leaseClaim, 
 }
 
 func replaceLeaseClaimIfUnchanged(leaseID string, current, replacement leaseClaim) error {
+	return replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomic)
+}
+
+func replaceLeaseClaimIfUnchangedDurable(leaseID string, current, replacement leaseClaim) error {
+	return replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomicDurable)
+}
+
+func replaceLeaseClaimIfUnchangedWithWrite(leaseID string, current, replacement leaseClaim, write func(string, leaseClaim) error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return err
@@ -1145,7 +1373,7 @@ func replaceLeaseClaimIfUnchanged(leaseID string, current, replacement leaseClai
 		if err := unchangedLeaseClaimGuard(leaseID, current, true)(claim, exists); err != nil {
 			return err
 		}
-		return writeLeaseClaimAtomic(path, cloneLeaseClaim(replacement))
+		return write(path, cloneLeaseClaim(replacement))
 	})
 }
 

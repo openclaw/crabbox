@@ -38,6 +38,8 @@ var shardForbiddenRunFlags = map[string]bool{
 	"download":          true,
 	"emit-proof":        true,
 	"proof-template":    true,
+	"attest":            true,
+	"attest-key":        true,
 	"label":             true,
 	"id":                true,
 	"timing-json":       true,

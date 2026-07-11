@@ -251,6 +251,20 @@
     "caveat": "No SSH, env forwarding, artifacts, proof, downloads, or custom Dockerfile templates yet",
     "docs": "crownest.md"
   },
+  "cubesandbox": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "CubeSandbox KVM MicroVM",
+    "location": "self-hosted",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "unknown",
+    "lifecycle": "Crabbox and Cube API",
+    "cleanup": "claimed sandbox delete",
+    "bestFit": "Self-hosted E2B-compatible MicroVM command execution",
+    "caveat": "Requires a CubeSandbox deployment, ready template ID, and reachable CubeProxy data plane",
+    "docs": "cubesandbox.md"
+  },
   "daytona": {
     "status": "built-in",
     "category": "direct-cloud",
@@ -261,8 +275,8 @@
     "gpu": "unknown",
     "lifecycle": "Daytona",
     "cleanup": "sandbox delete",
-    "bestFit": "Managed development sandbox with delegated archive sync and execution",
-    "caveat": "SSH access is short-lived; run and sync use Daytona toolbox APIs",
+    "bestFit": "Managed development sandbox with direct toolbox execution or brokered SSH",
+    "caveat": "SSH access is short-lived; direct run uses Daytona toolbox APIs while brokered run uses SSH",
     "docs": "daytona.md"
   },
   "digitalocean": {
@@ -964,6 +978,20 @@
     "bestFit": "Hosted Firecracker-backed delegated execution",
     "caveat": "Does not expose raw Firecracker provisioning",
     "docs": "tensorlake.md"
+  },
+  "unikraft-cloud": {
+    "status": "built-in",
+    "category": "service-control",
+    "substrate": "Unikraft Cloud microVM service",
+    "location": "provider-managed",
+    "ssh": "no",
+    "sync": "none",
+    "gpu": "unknown",
+    "lifecycle": "Crabbox claim plus Unikraft Cloud instance",
+    "cleanup": "claimed instance stop and delete",
+    "bestFit": "Running a prebuilt OCI image as a cloud microVM service",
+    "caveat": "No SSH, workspace sync, or arbitrary command execution; package the app as an OCI image first",
+    "docs": "unikraft-cloud.md"
   },
   "upstash-box": {
     "status": "built-in",

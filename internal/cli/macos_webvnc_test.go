@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,32 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestResolveMacOSWebVNCCredentialsFallsBackToManagedPassword(t *testing.T) {
+	target := SSHTarget{TargetOS: targetMacOS, User: "steipete"}
+	var gotCommand string
+	credentials, err := resolveMacOSWebVNCCredentials(
+		context.Background(),
+		Config{Provider: parallelsProvider},
+		target,
+		func(_ context.Context, gotTarget SSHTarget, command string) (string, error) {
+			if gotTarget.TargetOS != target.TargetOS || gotTarget.User != target.User {
+				t.Fatalf("target = %#v, want %#v", gotTarget, target)
+			}
+			gotCommand = command
+			return "managed-secret\n", nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCommand != "sudo cat '/var/db/crabbox/vnc.password'" {
+		t.Fatalf("password command = %q", gotCommand)
+	}
+	if credentials.Username != "steipete" || credentials.Password != "managed-secret" {
+		t.Fatalf("credentials = %#v", credentials)
+	}
+}
 
 func TestCreateMacOSWebVNCHandoffKeepsTokenOutOfOpenURL(t *testing.T) {
 	session := macOSWebVNCSession{

@@ -118,6 +118,10 @@ recorded run, so a coordinator must be configured. It is distinct from
 [`crabbox logs`](history-logs.md): `results` is the structured pass/fail
 summary, `logs` is the retained command output.
 
+Human result lines, shard failure summaries, and failure digests visibly escape
+terminal controls and Unicode formatting characters in stored failure fields.
+Machine-readable JSON preserves the stored values unchanged.
+
 ## Supported formats
 
 - JUnit XML.

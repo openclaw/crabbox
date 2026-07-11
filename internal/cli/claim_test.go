@@ -46,6 +46,164 @@ func TestConfirmedAbsentClaimRemovalRequiresDirectorySyncAndRetriesAfterDeletion
 	}
 }
 
+func TestWriteLeaseClaimAtomicWithSyncPropagatesDirectorySyncFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_sync_failure"
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("directory sync unavailable")
+	err = writeLeaseClaimAtomicWithSync(path, leaseClaim{LeaseID: leaseID}, func(string) error { return syncErr })
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("write error=%v want %v", err, syncErr)
+	}
+}
+
+func TestWriteLeaseClaimAtomicDurableDoesNotSyncExistingAncestors(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_existing_namespace"
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var synced []string
+	err = writeLeaseClaimAtomicDurableWithSync(path, leaseClaim{LeaseID: leaseID}, filepath.Dir(path), func(dir string) error {
+		synced = append(synced, filepath.Clean(dir))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Clean(filepath.Dir(path))}
+	if !reflect.DeepEqual(synced, want) {
+		t.Fatalf("synced=%q want %q", synced, want)
+	}
+}
+
+func TestDurableGuardedClaimWriteSyncsOnlyCreatedNamespaceParents(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(base, "new-state-root"))
+	const leaseID = "cbx_bounded_namespace"
+	var synced []string
+	err := mutateLeaseClaimGuardedDurableWithSync(leaseID, unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false), func(claim *leaseClaim) error {
+		*claim = leaseClaim{LeaseID: leaseID, Slug: "bounded"}
+		return nil
+	}, func(dir string) error {
+		synced = append(synced, filepath.Clean(dir))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := filepath.Dir(filepath.Dir(path))
+	want := []string{
+		filepath.Clean(filepath.Dir(path)),
+		filepath.Clean(stateRoot),
+		filepath.Clean(filepath.Dir(stateRoot)),
+		filepath.Clean(base),
+	}
+	if !reflect.DeepEqual(synced, want) {
+		t.Fatalf("synced=%q want %q", synced, want)
+	}
+}
+
+func TestDurableGuardedClaimWritePropagatesRequiredBoundarySyncFailure(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(base, "new-state-root"))
+	const leaseID = "cbx_boundary_sync_failure"
+	syncErr := errors.New("required namespace sync unavailable")
+	var synced []string
+	err := mutateLeaseClaimGuardedDurableWithSync(leaseID, unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false), func(claim *leaseClaim) error {
+		*claim = leaseClaim{LeaseID: leaseID, Slug: "boundary"}
+		return nil
+	}, func(dir string) error {
+		dir = filepath.Clean(dir)
+		synced = append(synced, dir)
+		if dir == filepath.Clean(base) {
+			return syncErr
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("write error=%v want %v", err, syncErr)
+	}
+	path, pathErr := leaseClaimPath(leaseID)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("claim should be installed before required directory sync error: %v", statErr)
+	}
+	if got := synced[len(synced)-1]; got != filepath.Clean(base) {
+		t.Fatalf("last synced directory=%q want boundary %q", got, base)
+	}
+}
+
+func TestDurableGuardedClaimWriteHoldsLockThroughDirectorySync(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_durable_lock"
+	first := leaseClaim{LeaseID: leaseID, Slug: "first"}
+	second := leaseClaim{LeaseID: leaseID, Slug: "second"}
+	reachedSync := make(chan struct{})
+	releaseSync := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		var once sync.Once
+		firstDone <- mutateLeaseClaimGuardedWithWrite(leaseID, unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false), func(claim *leaseClaim) error {
+			*claim = first
+			return nil
+		}, func(path string, claim leaseClaim) error {
+			return writeLeaseClaimAtomicDurableWithSync(path, claim, filepath.Dir(path), func(string) error {
+				once.Do(func() {
+					close(reachedSync)
+					<-releaseSync
+				})
+				return nil
+			})
+		})
+	}()
+	select {
+	case <-reachedSync:
+	case <-time.After(2 * time.Second):
+		t.Fatal("durable write did not reach directory sync")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- replaceLeaseClaimIfUnchanged(leaseID, first, second)
+	}()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("competing mutation completed before durable sync: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseSync)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	stored, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Slug != second.Slug {
+		t.Fatalf("stored claim=%#v want second mutation", stored)
+	}
+}
+
 func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")
@@ -144,8 +302,10 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	server := Server{
-		Provider: "aws",
-		CloudID:  "i-1750645",
+		Provider:    "aws",
+		CloudID:     "i-1750645",
+		ID:          42,
+		ImmutableID: "vmid-1750645",
 		Labels: map[string]string{
 			"provider": "aws",
 			"slug":     "warm",
@@ -159,7 +319,7 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.RepoRoot != "" {
+	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.CloudNumericID != 42 || claim.CloudImmutableID != "vmid-1750645" || claim.RepoRoot != "" {
 		t.Fatalf("unexpected unattached provider claim: %#v", claim)
 	}
 
@@ -173,6 +333,19 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	}
 	if claim.RepoRoot != repoRoot {
 		t.Fatalf("provider claim was not attached to repo: %#v", claim)
+	}
+}
+
+func TestAzureProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
+	cfg := baseConfig()
+	cfg.AzureSubscription = " TEST-SUB "
+	cfg.AzureResourceGroup = " Production-RG "
+	if got, want := providerClaimScope("azure", cfg), "subscription:test-sub|resource-group:production-rg"; got != want {
+		t.Fatalf("providerClaimScope(azure)=%q, want %q", got, want)
+	}
+	cfg.AzureResourceGroup = ""
+	if got := providerClaimScope("azure", cfg); got != "" {
+		t.Fatalf("incomplete azure scope=%q, want empty", got)
 	}
 }
 
@@ -229,6 +402,28 @@ func TestRailwayProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
 	cfg.Railway.EnvironmentID = ""
 	if got := providerClaimScope("railway", cfg); got != "" {
 		t.Fatalf("incomplete railway scope=%q, want empty", got)
+	}
+}
+
+func TestCubeSandboxProviderClaimScopeBindsAPIEndpoint(t *testing.T) {
+	cfg := Config{CubeSandbox: CubeSandboxConfig{APIURL: "HTTPS://CUBE.EXAMPLE.TEST:443/root/"}}
+	if got, want := providerClaimScope("cubesandbox", cfg), "endpoint:https://cube.example.test/root"; got != want {
+		t.Fatalf("providerClaimScope(cubesandbox)=%q, want %q", got, want)
+	}
+	cfg.CubeSandbox.APIURL = ""
+	if got := providerClaimScope("cubesandbox", cfg); got != "" {
+		t.Fatalf("providerClaimScope(cubesandbox)=%q, want empty", got)
+	}
+}
+
+func TestE2BProviderClaimScopeBindsAPIEndpoint(t *testing.T) {
+	cfg := Config{E2B: E2BConfig{APIURL: "HTTPS://API.E2B.APP:443/v1/"}}
+	if got, want := providerClaimScope("e2b", cfg), "endpoint:https://api.e2b.app/v1"; got != want {
+		t.Fatalf("providerClaimScope(e2b)=%q, want %q", got, want)
+	}
+	cfg.E2B.APIURL = ""
+	if got := providerClaimScope("e2b", cfg); got != "" {
+		t.Fatalf("providerClaimScope(e2b)=%q, want empty", got)
 	}
 }
 
@@ -816,6 +1011,36 @@ func TestResolveLeaseClaimForProviderCloudIDRejectsDuplicates(t *testing.T) {
 	}
 	if _, ok, err := resolveLeaseClaimForProviderCloudID("i-duplicate", "aws"); err == nil || ok {
 		t.Fatalf("duplicate cloud id lookup ok=%t err=%v", ok, err)
+	}
+}
+
+func TestResolveLeaseClaimForProviderCloudIDScopeDistinguishesEndpoints(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, tc := range []struct {
+		leaseID string
+		apiURL  string
+	}{
+		{leaseID: "cbx_111111111111", apiURL: "https://cube-a.example.test"},
+		{leaseID: "cbx_222222222222", apiURL: "https://cube-b.example.test"},
+	} {
+		cfg := baseConfig()
+		cfg.Provider = "cubesandbox"
+		cfg.CubeSandbox.APIURL = tc.apiURL
+		server := Server{Provider: "cubesandbox", CloudID: "same-sandbox-id"}
+		if err := claimLeaseTargetForRepoConfig(tc.leaseID, "shared-slug", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		claim, ok, err := resolveLeaseClaimForProviderCloudIDScope("same-sandbox-id", "cubesandbox", providerClaimScope("cubesandbox", cfg))
+		if err != nil || !ok || claim.LeaseID != tc.leaseID {
+			t.Fatalf("apiURL=%s claim=%#v ok=%t err=%v", tc.apiURL, claim, ok, err)
+		}
+		claim, ok, exact, err := resolveLeaseClaimForProviderScopeWithExact("shared-slug", "cubesandbox", providerClaimScope("cubesandbox", cfg))
+		if err != nil || !ok || exact || claim.LeaseID != tc.leaseID {
+			t.Fatalf("apiURL=%s slug claim=%#v ok=%t exact=%t err=%v", tc.apiURL, claim, ok, exact, err)
+		}
+	}
+	if _, ok, err := resolveLeaseClaimForProviderCloudID("same-sandbox-id", "cubesandbox"); err == nil || ok {
+		t.Fatalf("unscoped duplicate lookup ok=%t err=%v", ok, err)
 	}
 }
 

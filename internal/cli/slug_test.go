@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -181,7 +182,7 @@ func TestAllocateClaimLeaseSlugAvoidsLocalClaimCollision(t *testing.T) {
 	}
 }
 
-func TestAllocateClaimLeaseSlugSkipsClaimScanForGeneratedSlug(t *testing.T) {
+func TestAllocateClaimLeaseSlugGeneratedIgnoresCorruptUnrelatedClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	path, err := leaseClaimPath("cbx_badbadbadbad")
 	if err != nil {
@@ -199,6 +200,78 @@ func TestAllocateClaimLeaseSlugSkipsClaimScanForGeneratedSlug(t *testing.T) {
 	}
 	if got != newLeaseSlug("cbx_000000000001") {
 		t.Fatalf("slug=%q", got)
+	}
+}
+
+func TestAllocateClaimLeaseSlugAvoidsGeneratedCollision(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	firstID := ""
+	secondID := ""
+	seen := map[string]string{}
+	for i := 0; i < 1000; i++ {
+		leaseID := fmt.Sprintf("cbx_%012x", i)
+		slug := newLeaseSlug(leaseID)
+		if prior := seen[slug]; prior != "" {
+			firstID = prior
+			secondID = leaseID
+			break
+		}
+		seen[slug] = leaseID
+	}
+	if firstID == "" {
+		t.Fatal("could not find deterministic generated slug collision")
+	}
+	base := newLeaseSlug(firstID)
+	if err := claimLeaseForRepoProvider(firstID, base, "cloudflare", "/repo-a", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := allocateClaimLeaseSlug(secondID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == base || !strings.HasPrefix(got, base+"-") {
+		t.Fatalf("generated collision slug=%q base=%q", got, base)
+	}
+}
+
+func TestAllocateClaimLeaseSlugRejectsOccupiedFallback(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_ffffffffffff"
+	base := "exhausted"
+	candidates := []string{base}
+	for attempt := 0; attempt < 19; attempt++ {
+		candidates = append(candidates, slugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt)))
+	}
+	candidates = append(candidates, slugWithCollisionSuffix(base, leaseID))
+	for i, slug := range candidates {
+		owner := fmt.Sprintf("cbx_%012x", i+1)
+		if err := claimLeaseForRepoProvider(owner, slug, "cloudflare", fmt.Sprintf("/repo-%d", i), time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := allocateClaimLeaseSlug(leaseID, base); err == nil {
+		t.Fatalf("slug=%q want exhaustion error", got)
+	}
+}
+
+func TestAllocateDirectLeaseSlugRejectsOccupiedFallback(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_eeeeeeeeeeee"
+	base := "exhausted-direct"
+	candidates := []string{base}
+	for attempt := 0; attempt < 19; attempt++ {
+		candidates = append(candidates, slugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt)))
+	}
+	candidates = append(candidates, slugWithCollisionSuffix(base, leaseID))
+	servers := make([]Server, 0, len(candidates))
+	for i, slug := range candidates {
+		servers = append(servers, Server{Labels: map[string]string{
+			"lease": fmt.Sprintf("cbx_%012x", i+1),
+			"slug":  slug,
+		}})
+	}
+	if got, err := allocateDirectLeaseSlug(leaseID, base, servers); err == nil {
+		t.Fatalf("slug=%q want exhaustion error", got)
 	}
 }
 

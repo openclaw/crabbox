@@ -33,8 +33,9 @@ persists once the box exists.
 
 While a command runs, the CLI heartbeats the active lease (`POST
 /v1/leases/{id}/heartbeat`). A heartbeat is a touch: it bumps `lastTouchedAt`,
-recomputes `expiresAt`, clears any pending cleanup metadata, and refreshes
-provider SSH access where the provider supports it.
+recomputes `expiresAt`, clears stale cleanup metadata, and refreshes provider SSH
+access where the provider supports it. Heartbeats at or after `expiresAt` are
+rejected so they cannot revive a lease once expiry cleanup owns it.
 
 Expiry is the minimum of two clocks (`leaseExpiresAt` in `worker/src/fleet.ts`):
 

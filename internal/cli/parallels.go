@@ -354,7 +354,7 @@ func (c *ParallelsClient) EnsureGuestReady(ctx context.Context, vmID string, cfg
 	if workRoot == "" {
 		workRoot = baseConfig().WorkRoot
 	}
-	desktop := cfg.Desktop && cfg.TargetOS == targetLinux
+	desktop := cfg.Desktop
 	result, err := c.prlctl(ctx, nil, "exec", vmID, "/bin/sh", "-lc", parallelsPOSIXEnsureReadyScript(user, workRoot, desktop))
 	if err != nil {
 		return commandOutputError("parallels guest prep", result, err)
@@ -554,7 +554,14 @@ user=%s
 work_root=%s
 desktop=%t
 if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1; then
-  if [ "$desktop" != true ] || { command -v websockify >/dev/null 2>&1 && command -v x11vnc >/dev/null 2>&1 && { [ -f /usr/share/novnc/vnc.html ] || [ -f /usr/share/novnc/core/vnc.html ] || [ -f /usr/share/novnc/html/vnc.html ]; } && systemctl is-active --quiet crabbox-x11vnc.service; }; then
+  if [ "$desktop" != true ]; then
+    exit 0
+  fi
+  if command -v sw_vers >/dev/null 2>&1; then
+    if [ -s /var/db/crabbox/vnc.password ] && [ -f /var/db/crabbox/vnc.console ] && nc -z 127.0.0.1 5900; then
+      exit 0
+    fi
+  elif command -v websockify >/dev/null 2>&1 && command -v x11vnc >/dev/null 2>&1 && { [ -f /usr/share/novnc/vnc.html ] || [ -f /usr/share/novnc/core/vnc.html ] || [ -f /usr/share/novnc/html/vnc.html ]; } && systemctl is-active --quiet crabbox-x11vnc.service; then
     exit 0
   fi
 fi
@@ -635,6 +642,48 @@ if command -v sw_vers >/dev/null 2>&1; then
     /bin/launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >>"$remote_login_log" 2>&1 || true
   /bin/launchctl enable system/com.openssh.sshd >>"$remote_login_log" 2>&1 || true
   /bin/launchctl kickstart -k system/com.openssh.sshd >>"$remote_login_log" 2>&1 || true
+  if [ "$desktop" = true ]; then
+    mkdir -p /var/db/crabbox
+    vnc_password=""
+    if [ -s /var/db/crabbox/vnc.password ]; then
+      vnc_password="$(tr -d '\r\n' </var/db/crabbox/vnc.password)"
+    fi
+    case "$vnc_password" in
+      ????????) ;;
+      *) vnc_password="$(/usr/bin/openssl rand -hex 4)" ;;
+    esac
+    case "$vnc_password" in
+      *[!A-Za-z0-9]*) echo "invalid generated VNC password" >&2; exit 1 ;;
+    esac
+    printf '%%s\n' "$vnc_password" >/var/db/crabbox/vnc.password
+    chmod 0600 /var/db/crabbox/vnc.password
+    mkdir -p /etc/sudoers.d
+    printf '%%s ALL=(root) NOPASSWD: /bin/cat /var/db/crabbox/vnc.password\n' "$user" >/etc/sudoers.d/crabbox-vnc-password
+    chmod 0440 /etc/sudoers.d/crabbox-vnc-password
+    /usr/sbin/visudo -cf /etc/sudoers.d/crabbox-vnc-password >/dev/null
+    kickstart=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+    [ -x "$kickstart" ]
+    /usr/bin/defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
+    "$kickstart" -activate -configure -allowAccessFor -specifiedUsers >/dev/null 2>&1
+    "$kickstart" -configure -access -on -users "$user" -privs -all >/dev/null 2>&1
+    "$kickstart" -configure -clientopts -setdirlogins -dirlogins no -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$vnc_password" >/dev/null 2>&1
+    "$kickstart" -restart -agent >/dev/null 2>&1
+    /bin/launchctl enable system/com.apple.screensharing >/dev/null 2>&1 || true
+    /bin/launchctl kickstart -k system/com.apple.screensharing >/dev/null 2>&1 || true
+    vnc_ready=false
+    for _ in $(jot 60 1); do
+      if nc -z 127.0.0.1 5900; then
+        vnc_ready=true
+        break
+      fi
+      sleep 1
+    done
+    if [ "$vnc_ready" != true ]; then
+      echo "macOS Screen Sharing did not start (no VNC listener on 127.0.0.1:5900)" >&2
+      exit 1
+    fi
+    touch /var/db/crabbox/vnc.console
+  fi
   cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/bin/sh
 set -eu

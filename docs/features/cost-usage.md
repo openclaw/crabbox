@@ -84,6 +84,9 @@ are quoted in EUR and converted to USD by multiplying with `CRABBOX_EUR_TO_USD`
 Budgets are enforced on lease creation. Exceeding any active-lease limit or monthly
 reserved-USD budget rejects the request with HTTP 429 (`cost_limit_exceeded`). All
 budgets default to `off` when their environment variable is unset or non-positive.
+Active limits keep counting a live managed lease after its heartbeat deadline until
+cleanup commits a terminal state, because its provider resource may still exist. The
+usage summary's active count uses the same definition.
 
 ```text
 CRABBOX_MAX_ACTIVE_LEASES            fleet-wide active lease cap
@@ -115,6 +118,8 @@ Leases are attributed to an owner and an org. The broker resolves them by token 
 - **Shared token** (`CRABBOX_SHARED_TOKEN`) — owner is a verified Access JWT email if present,
   else `CRABBOX_SHARED_OWNER`, else `unknown`; org is `CRABBOX_DEFAULT_ORG`, else `unknown`.
   The `X-Crabbox-Owner` / `X-Crabbox-Org` headers are not honored for shared-token requests.
+- A missing org displays as `unknown` but uses a distinct accounting identity from an org
+  explicitly configured with the label `unknown`.
 - Raw Cloudflare Access identity headers are ignored; only a verified Access JWT email
   (validated against `CRABBOX_ACCESS_TEAM_DOMAIN` / `CRABBOX_ACCESS_AUD`) can become the
   bearer-token owner.

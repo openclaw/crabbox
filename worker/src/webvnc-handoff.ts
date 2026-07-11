@@ -1,16 +1,21 @@
+import { sha256Hex } from "./auth";
 import type { CoordinatorRuntime } from "./coordinator-runtime";
 
 const ticketPrefix = "vnc_handoff_";
 const storagePrefix = "webvnc-credential-handoff:";
 const ttlSeconds = 5 * 60;
+const recordVersion = 1;
+const lookupContext = "crabbox-webvnc-handoff-lookup-v1";
+const sealContext = "crabbox-webvnc-handoff-seal-v1";
+const encoder = new TextEncoder();
+const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 
 interface WebVNCCredentialHandoffRecord {
-  ticket: string;
+  version: typeof recordVersion;
   leaseID: string;
-  username: string;
-  password: string;
-  createdAt: string;
   expiresAt: string;
+  iv: string;
+  ciphertext: string;
 }
 
 export type WebVNCCredentialHandoffResult =
@@ -26,20 +31,21 @@ export class WebVNCCredentialHandoffs {
   ): Promise<{ ticket: string; expiresAt: string }> {
     await this.cleanupExpired();
     const now = new Date();
+    const ticket = newTicket();
+    const expiresAt = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
     const record: WebVNCCredentialHandoffRecord = {
-      ticket: newTicket(),
+      version: recordVersion,
       leaseID,
-      ...credentials,
-      createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + ttlSeconds * 1000).toISOString(),
+      expiresAt,
+      ...(await sealCredentials(ticket, leaseID, expiresAt, credentials)),
     };
-    await this.runtime.storage.put(storageKey(leaseID, record.ticket), record);
-    const expiresAt = Date.parse(record.expiresAt);
+    await this.runtime.storage.put(await storageKey(leaseID, ticket), record);
+    const alarmAt = Date.parse(record.expiresAt);
     const currentAlarm = await this.runtime.getAlarm();
-    if (currentAlarm === undefined || expiresAt < currentAlarm) {
-      await this.runtime.scheduleAlarm(expiresAt);
+    if (currentAlarm === undefined || alarmAt < currentAlarm) {
+      await this.runtime.scheduleAlarm(alarmAt);
     }
-    return { ticket: record.ticket, expiresAt: record.expiresAt };
+    return { ticket, expiresAt: record.expiresAt };
   }
 
   async consume(leaseID: string, ticket: string): Promise<WebVNCCredentialHandoffResult> {
@@ -47,15 +53,16 @@ export class WebVNCCredentialHandoffs {
       return { status: "invalid" };
     }
     const record = await this.runtime.take<WebVNCCredentialHandoffRecord>(
-      storageKey(leaseID, ticket),
+      await storageKey(leaseID, ticket),
     );
-    if (!record || record.ticket !== ticket || record.leaseID !== leaseID) {
+    if (!validRecord(record, leaseID)) {
       return { status: "invalid" };
     }
     if (Date.parse(record.expiresAt) <= Date.now()) {
       return { status: "expired" };
     }
-    return { status: "accepted", username: record.username, password: record.password };
+    const credentials = await openCredentials(ticket, record);
+    return credentials ? { status: "accepted", ...credentials } : { status: "invalid" };
   }
 
   async cleanupExpired(now = Date.now()): Promise<void> {
@@ -88,6 +95,105 @@ function validTicket(value: string): boolean {
   return /^vnc_handoff_[a-f0-9]{32}$/.test(value);
 }
 
-function storageKey(leaseID: string, ticket: string): string {
-  return `${storagePrefix}${leaseID}:${ticket}`;
+async function storageKey(leaseID: string, ticket: string): Promise<string> {
+  // Keep lookup and sealing derivations distinct: storage readers know this digest.
+  const digest = await sha256Hex(`${lookupContext}\0${ticket}`);
+  return `${storagePrefix}${leaseID}:${digest}`;
+}
+
+async function sealCredentials(
+  ticket: string,
+  leaseID: string,
+  expiresAt: string,
+  credentials: { username: string; password: string },
+): Promise<Pick<WebVNCCredentialHandoffRecord, "iv" | "ciphertext">> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: recordAAD(leaseID, expiresAt) },
+    await credentialKey(ticket, ["encrypt"]),
+    encoder.encode(JSON.stringify(credentials)),
+  );
+  return { iv: encodeHex(iv), ciphertext: encodeHex(new Uint8Array(ciphertext)) };
+}
+
+async function openCredentials(
+  ticket: string,
+  record: WebVNCCredentialHandoffRecord,
+): Promise<{ username: string; password: string } | undefined> {
+  try {
+    const plaintext = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: decodeHex(record.iv),
+        additionalData: recordAAD(record.leaseID, record.expiresAt),
+      },
+      await credentialKey(ticket, ["decrypt"]),
+      decodeHex(record.ciphertext),
+    );
+    const credentials = JSON.parse(decoder.decode(plaintext)) as unknown;
+    if (!credentials || typeof credentials !== "object" || Array.isArray(credentials)) {
+      return undefined;
+    }
+    const { username, password } = credentials as Record<string, unknown>;
+    if (
+      typeof username !== "string" ||
+      typeof password !== "string" ||
+      (!username && !password) ||
+      username.length > 256 ||
+      password.length > 1024
+    ) {
+      return undefined;
+    }
+    return { username, password };
+  } catch {
+    return undefined;
+  }
+}
+
+async function credentialKey(
+  ticket: string,
+  usages: Array<"encrypt" | "decrypt">,
+): Promise<CryptoKey> {
+  const material = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(`${sealContext}\0${ticket}`),
+  );
+  return crypto.subtle.importKey("raw", material, "AES-GCM", false, usages);
+}
+
+function recordAAD(leaseID: string, expiresAt: string): Uint8Array {
+  return encoder.encode(JSON.stringify([recordVersion, leaseID, expiresAt]));
+}
+
+function validRecord(
+  record: WebVNCCredentialHandoffRecord | undefined,
+  leaseID: string,
+): record is WebVNCCredentialHandoffRecord {
+  return Boolean(
+    record &&
+    record.version === recordVersion &&
+    record.leaseID === leaseID &&
+    typeof record.expiresAt === "string" &&
+    Number.isFinite(Date.parse(record.expiresAt)) &&
+    validHex(record.iv, 24) &&
+    validHex(record.ciphertext) &&
+    record.ciphertext.length > 32,
+  );
+}
+
+function validHex(value: unknown, exactLength?: number): value is string {
+  return (
+    typeof value === "string" &&
+    (exactLength === undefined || value.length === exactLength) &&
+    value.length % 2 === 0 &&
+    /^[a-f0-9]+$/.test(value)
+  );
+}
+
+function encodeHex(value: Uint8Array): string {
+  return [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function decodeHex(value: string): Uint8Array {
+  return Uint8Array.from(value.match(/.{2}/g) ?? [], (byte) => Number.parseInt(byte, 16));
 }

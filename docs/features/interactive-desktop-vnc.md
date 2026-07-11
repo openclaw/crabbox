@@ -93,8 +93,8 @@ local-to-portal path.
   `crabbox webvnc` process keeps the SSH tunnel open, connects to the
   coordinator with a one-use bridge ticket, and the authenticated portal serves
   bundled noVNC. The portal never connects to the runner directly, so the local
-  bridge must keep running. `--open` preloads the VNC password into the local
-  browser fragment.
+  bridge must keep running. `--open` gives the browser a one-use credential
+  handoff ticket; usernames and passwords never enter the URL.
 - `crabbox vnc` is for a native VNC client: when WebVNC status or reset reports
   the portal path is unhealthy, or when you need a native client feature.
 
@@ -109,12 +109,13 @@ crabbox vnc --id blue-lobster --open
 ```
 
 WebVNC is available on coordinator-managed desktop leases and on direct desktop
-providers. Direct providers normally use a localhost viewer. With
-`broker.mode: registered`, direct leases instead use the outbound coordinator
-bridge, so KubeVirt, external, static SSH, local Docker, and other SSH desktop
-leases can appear in and be shared from the portal. Blacksmith remains
-unsupported. Native `crabbox vnc` works against every managed and host-managed
-desktop in the support matrix.
+providers. Authenticated direct macOS providers such as Tart and Parallels are
+registered automatically for the provider lease lifetime, so they use the same portal
+chrome and controls as Linux and Windows. Other direct providers can opt into
+the outbound coordinator bridge with `broker.mode: registered`; without that
+mode they keep their localhost viewer. Blacksmith remains unsupported. Native
+`crabbox vnc` works against every managed and host-managed desktop in the
+support matrix.
 
 For kept registered desktop leases, `broker.autoWebVNC: true` starts the bridge
 daemon automatically. The daemon heartbeats the registration while connected;
@@ -177,9 +178,10 @@ crabbox desktop launch --id blue-lobster --browser --url https://example.com --w
 For human demos, launched browsers stay windowed so the desktop panel, title
 bar, and surrounding session remain visible. Use `--fullscreen` only when you
 want browser-only video or capture output. `--webvnc` (and its `--open` /
-`--take-control` companions) bridges the launched desktop into the portal and
-requires a coordinator-backed Hetzner, AWS, or Azure lease. The local container
-provider uses local noVNC over SSH. `--egress` routes the launched browser
+`--take-control` companions) bridges the launched desktop into the portal.
+Authenticated Tart and Parallels macOS leases use the same portal as
+coordinator-managed leases; the local container provider uses local noVNC over
+SSH. `--egress` routes the launched browser
 through the lease-local egress proxy (default
 `127.0.0.1:3128`) and currently requires `--browser`; see
 [mediated egress](egress.md).

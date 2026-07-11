@@ -34,7 +34,7 @@ Object or on Node.js with PostgreSQL.
 ```text
 your laptop                 coordinator runtime              cloud provider
 -------------               -------------------              --------------
-crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azure / GCP
+crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azure / GCP / Daytona
    |                      or Node.js + PostgreSQL              |
    |                                                           |
    +------------- SSH + rsync to leased runner <---------------+
@@ -141,7 +141,8 @@ Pick whichever matches your intent:
   [Runtime adapter stack](features/runtime-adapter-stack.md),
   [Capabilities](features/capabilities.md),
   [Interactive desktop and VNC](features/interactive-desktop-vnc.md),
-  [Telemetry](features/telemetry.md), [Sync](features/sync.md).
+  [Telemetry](features/telemetry.md), [Sync](features/sync.md),
+  [Hermetic agent evidence](features/hermetic-agent-evidence.md).
 - **Pick or add a target:** [Provider reference](providers/README.md),
   [Providers feature overview](features/providers.md),
   [Provider selection](features/provider-selection.md),

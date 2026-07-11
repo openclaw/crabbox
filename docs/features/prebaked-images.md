@@ -27,6 +27,9 @@ Provider-owned image storage is always the source of truth for image bytes:
   `crabbox image promote` records the selected AMI as the default for matching
   brokered AWS leases. Promotion is scoped by target, architecture, and region,
   so a macOS AMI never replaces the Linux or Windows default.
+  Promotions may declare OS, SDK/runtime, browser, WebView2, and desktop
+  capabilities. Capability-aware leases select the newest matching AMI from the
+  scoped promotion catalog and fail before leasing when no image matches.
 - **Azure / GCP** — managed images and disk snapshots live in the cloud project.
   `crabbox image create` can capture them and `crabbox image delete` can remove
   them (`--provider azure|gcp`).
@@ -37,7 +40,7 @@ Provider-owned image storage is always the source of truth for image bytes:
 - **Delegated runners** (for example Blacksmith) — images are owned by the
   provider's runner infrastructure, not by Crabbox.
 
-The coordinator stores only the current provider image identifier, promotion
+The coordinator stores scoped provider image identifiers, promotion capability
 metadata, and enough tags to explain provenance. Do not store image bytes in
 git, release artifacts, or coordinator durable state.
 
@@ -117,6 +120,9 @@ guard scripts. At a high level, an AWS bake is:
    crabbox image promote ami-1234567890abcdef0 --json
    ```
 
+   Add declarations such as `--os-version 26.04 --runtime node=24.2
+   --browser --desktop` when future leases must select by baked capabilities.
+
 6. Run a normal brokered lease (no override) plus the relevant QA lane to confirm
    the promoted image is selected and healthy.
 7. Keep the previous known-good AMI until the new image has real QA proof.
@@ -134,7 +140,7 @@ provider-side artifacts.
   provider image from a lease (`--no-reboot` defaults to true on AWS).
 - `crabbox image promote <ami-id> [--target linux|macos|windows] [--region <r>]`
   — set the default brokered AWS image; supports `--fast-snapshot-restore` with
-  `--fsr-az <az>`.
+  `--fsr-az <az>` and capability declarations.
 - `crabbox image fsr-status <ami-id|snapshot-id>` — AWS Fast Snapshot Restore
   status.
 - `crabbox image delete <image-id> [--provider aws|azure|gcp]` — remove a

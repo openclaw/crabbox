@@ -90,6 +90,9 @@ Provider deep-dives that live here in `features/`:
 - [Station profiles](station-profiles.md): planned supervised workload records, agent profile, and model-access security gates.
 - [Agent runtime bridge](agent-runtime-bridge.md): contract for future
   harness-in-the-box HTTP/SSE bridge support under Station.
+- [Hermetic agent evidence](hermetic-agent-evidence.md): repo-local pattern for
+  separate code/test writer contexts, QA arbitration, required artifacts, and
+  Crabbox remote proof collection.
 - [Deterministic perf evidence](deterministic-perf-evidence.md): contract for
   future reproducible metric budgets and perf gate evidence.
 - [Actions hydration](actions-hydration.md): let GitHub Actions prepare a runner, then sync local work into that workspace.
@@ -140,6 +143,7 @@ Provider deep-dives that live here in `features/`:
 - [events](../commands/events.md) — show run events
 - [attach](../commands/attach.md) — attach to an active run
 - [results](../commands/results.md) — show test results
+- [verify](../commands/verify.md) — check a signed run receipt
 - [artifacts](../commands/artifacts.md) — manage run artifacts
 - [media](../commands/media.md) — capture screenshots/video
 

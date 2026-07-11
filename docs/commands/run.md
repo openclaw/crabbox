@@ -340,6 +340,14 @@ selected live console output, collected artifact paths, and the
 `--proof-template` or preset template. Keep proof templates in repo config so
 parser-sensitive PR wording stays project-owned.
 
+Use `--attest <path>` to write a signed run receipt after a successful run: a
+flat JSON record of the provider, lease, command, exit code, timing, and the
+SHA-256 of the combined live output stream, signed with a per-user Ed25519 key
+minted on first use under the user config dir. Check receipts later with
+[`crabbox verify`](verify.md), then compare the reported signer fingerprint
+through a trusted channel. Pass `--attest-key <path>` to sign with an existing
+PKCS8 PEM Ed25519 key instead of the default one.
+
 ## Artifacts and downloads
 
 Use repeatable `--artifact-glob <glob>` to collect matching remote files after a
@@ -503,6 +511,12 @@ lease-acting commands):
 --desktop-env xfce|wayland|gnome
 --browser
 --code
+--image-min-os <version>
+--image-sdk <name=version>     Repeatable.
+--image-runtime <name=version> Repeatable.
+--image-require-browser
+--image-require-webview2
+--image-require-desktop
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>         provider=ssh
@@ -553,6 +567,8 @@ Run-specific flags:
 --preset-var name=value      Repeatable or comma-separated.
 --emit-proof <path>
 --proof-template <name>
+--attest <path>
+--attest-key <path>
 --preflight
 --preflight-tools <comma-separated tool names>
 --junit <comma-separated remote XML paths>

@@ -125,8 +125,13 @@ renders Markdown with inline image/GIF links, writes that body to
 posts the body with `gh`.
 
 `--dir <bundle>` is required. Publishing rejects symlinks and other non-regular
-bundle entries before upload, manifest, or Markdown side effects. Storage
-backends (`--storage`):
+bundle entries before upload, manifest, or Markdown side effects. Uploads use a
+private snapshot of validated files, while local and dry-run manifests hash
+through rooted validated file handles without duplicating the bundle. Generated
+manifest/Markdown outputs use root-confined temporary files, so concurrent
+bundle path changes cannot redirect reads or writes outside the bundle.
+
+Storage backends (`--storage`):
 
 - `auto` (default): use brokered publishing when a coordinator with a token is
   configured, otherwise fall back to `local`.

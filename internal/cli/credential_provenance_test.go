@@ -1047,6 +1047,100 @@ func TestExternalCommandModeIgnoresUnusedConnectionProvenance(t *testing.T) {
 	}
 }
 
+func TestCubeSandboxRejectsRepositoryDataPlaneDestinationsWithoutAPIKey(t *testing.T) {
+	tests := []struct {
+		name string
+		file fileCubeSandboxConfig
+		want string
+	}{
+		{name: "API URL", file: fileCubeSandboxConfig{APIURL: "https://attacker.example.test"}, want: "cubeSandbox.apiUrl"},
+		{name: "domain", file: fileCubeSandboxConfig{Domain: "attacker.example.test"}, want: "cubeSandbox.domain"},
+		{name: "proxy node", file: fileCubeSandboxConfig{ProxyNodeIP: "attacker.example.test"}, want: "cubeSandbox.proxyNodeIp"},
+		{name: "proxy port", file: fileCubeSandboxConfig{ProxyPortHTTP: 8080}, want: "cubeSandbox.proxyPortHttp"},
+		{name: "proxy scheme", file: fileCubeSandboxConfig{ProxyScheme: "https"}, want: "cubeSandbox.proxyScheme"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "cubesandbox"
+			cfg.CubeSandbox.APIKey = ""
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{CubeSandbox: &tt.file}, false); err != nil {
+				t.Fatal(err)
+			}
+			err := validateProviderCredentialDestination(cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "ephemeral credentials and workspace data") {
+				t.Fatalf("err=%v, want repository destination rejection for %s", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestCubeSandboxEnvironmentApprovesRepositoryDataPlaneRoute(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "cubesandbox"
+	file := fileCubeSandboxConfig{
+		APIURL:        "https://repo-api.example.test",
+		Domain:        "repo.example.test",
+		ProxyNodeIP:   "repo-proxy.example.test",
+		ProxyPortHTTP: 8080,
+		ProxyScheme:   "http",
+	}
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{CubeSandbox: &file}, false); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CUBESANDBOX_DOMAIN", "approved.example.test")
+	t.Setenv("CRABBOX_CUBESANDBOX_API_URL", "https://approved-api.example.test")
+	t.Setenv("CRABBOX_CUBESANDBOX_PROXY_NODE_IP", "approved-proxy.example.test")
+	t.Setenv("CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP", "8443")
+	t.Setenv("CRABBOX_CUBESANDBOX_PROXY_SCHEME", "https")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("environment-approved data-plane route rejected: %v", err)
+	}
+}
+
+func TestCubeSandboxFlagsApproveRepositoryDataPlaneRoute(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "cubesandbox"
+	file := fileCubeSandboxConfig{
+		APIURL:        "https://repo-api.example.test",
+		Domain:        "repo.example.test",
+		ProxyNodeIP:   "repo-proxy.example.test",
+		ProxyPortHTTP: 8080,
+		ProxyScheme:   "http",
+	}
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{CubeSandbox: &file}, false); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFlagSet("test", io.Discard)
+	apiURL := fs.String("cubesandbox-api-url", cfg.CubeSandbox.APIURL, "")
+	domain := fs.String("cubesandbox-domain", cfg.CubeSandbox.Domain, "")
+	proxyNode := fs.String("cubesandbox-proxy-node-ip", cfg.CubeSandbox.ProxyNodeIP, "")
+	proxyPort := fs.Int("cubesandbox-proxy-port-http", cfg.CubeSandbox.ProxyPortHTTP, "")
+	proxyScheme := fs.String("cubesandbox-proxy-scheme", cfg.CubeSandbox.ProxyScheme, "")
+	args := []string{
+		"--cubesandbox-api-url", "https://approved-api.example.test",
+		"--cubesandbox-domain", "approved.example.test",
+		"--cubesandbox-proxy-node-ip", "approved-proxy.example.test",
+		"--cubesandbox-proxy-port-http", "8443",
+		"--cubesandbox-proxy-scheme", "https",
+	}
+	if err := parseFlags(fs, args); err != nil {
+		t.Fatal(err)
+	}
+	cfg.CubeSandbox.APIURL = *apiURL
+	cfg.CubeSandbox.Domain = *domain
+	cfg.CubeSandbox.ProxyNodeIP = *proxyNode
+	cfg.CubeSandbox.ProxyPortHTTP = *proxyPort
+	cfg.CubeSandbox.ProxyScheme = *proxyScheme
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("flag-approved data-plane route rejected: %v", err)
+	}
+}
+
 func externalLifecycleConfigForTest() ExternalLifecycleConfig {
 	return ExternalLifecycleConfig{Acquire: ExternalLifecycleOperation{Argv: []string{"provider-adapter"}}}
 }
@@ -1138,6 +1232,71 @@ func TestExternalRoutingLoaderPreservesConfiguredSource(t *testing.T) {
 	}
 }
 
+func TestExternalRoutingCredentialVersionProtectsConfigArgv(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	lifecycle := ExternalLifecycleConfig{
+		Acquire: ExternalLifecycleOperation{
+			Argv:            []string{"adapter", "create", "{{config.region}}"},
+			AllowConfigArgv: true,
+		},
+	}
+	external := ExternalConfig{
+		Config:    map[string]any{"region": "test-region"},
+		Lifecycle: lifecycle,
+	}
+	legacyPath, err := persistExternalRouting("cbx_abcdef123456", external, externalRoutingCredentialVersion-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacyClaim := Config{Provider: "external"}
+	if err := loadExternalRoutingConfig(&legacyClaim, legacyPath, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(legacyClaim); err == nil || !strings.Contains(err.Error(), "allowConfigArgv") {
+		t.Fatalf("legacy routing config argv error=%v", err)
+	}
+
+	approvedLegacy := Config{Provider: "external"}
+	if err := applyFileConfigWithTrust(&approvedLegacy, fileConfig{External: &fileExternalConfig{
+		Config:    external.Config,
+		Lifecycle: &lifecycle,
+	}}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadExternalRoutingConfig(&approvedLegacy, legacyPath, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(approvedLegacy); err != nil {
+		t.Fatalf("legacy routing with exact current approval rejected: %v", err)
+	}
+
+	validatedPath, err := PersistValidatedExternalRouting("cbx_abcdef123457", external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositorySelected := Config{
+		Provider: "external",
+		credentialProvenance: credentialDestinationProvenance{
+			externalRouting: credentialSourceRepository,
+		},
+	}
+	if err := loadExternalRoutingConfig(&repositorySelected, validatedPath, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(repositorySelected); err == nil || !strings.Contains(err.Error(), "allowConfigArgv") {
+		t.Fatalf("repository-selected current routing config argv error=%v", err)
+	}
+
+	validatedClaim := Config{Provider: "external"}
+	if err := loadExternalRoutingConfig(&validatedClaim, validatedPath, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(validatedClaim); err != nil {
+		t.Fatalf("current validated routing state rejected: %v", err)
+	}
+}
+
 func TestExternalRoutingAllowEnvApprovalBindsResourceName(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	approved := ExternalConnectionConfig{
@@ -1169,6 +1328,292 @@ func TestExternalRoutingAllowEnvApprovalBindsResourceName(t *testing.T) {
 	if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "ssh.allowEnv") {
 		t.Fatalf("repository routing resource-name change error=%v", err)
 	}
+}
+
+func TestExternalLifecycleConfigArgvApproval(t *testing.T) {
+	trustedConfig := fileExternalConfig{Config: map[string]any{"token": "trusted-token"}}
+	applyTrustedConfig := func(t *testing.T, cfg *Config) {
+		t.Helper()
+		if err := applyFileConfigWithTrust(cfg, fileConfig{External: &trustedConfig}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	applyRepositoryLifecycle := func(t *testing.T, cfg *Config, lifecycle ExternalLifecycleConfig, connection *ExternalConnectionConfig) {
+		t.Helper()
+		if err := applyFileConfigWithTrust(cfg, fileConfig{External: &fileExternalConfig{
+			Lifecycle:  &lifecycle,
+			Connection: connection,
+		}}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("rejects inherited config in repository argv", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		applyTrustedConfig(t, &cfg)
+		applyRepositoryLifecycle(t, &cfg, ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{Argv: []string{"adapter", "--token", "{{config.token}}"}},
+		}, nil)
+
+		err := validateProviderCredentialDestination(cfg)
+		if err == nil || !strings.Contains(err.Error(), "external.lifecycle.acquire.argv") {
+			t.Fatalf("error=%v", err)
+		}
+		if strings.Contains(err.Error(), "trusted-token") {
+			t.Fatalf("error exposed config value: %v", err)
+		}
+	})
+
+	t.Run("rejects inherited config in repository steps", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		applyTrustedConfig(t, &cfg)
+		applyRepositoryLifecycle(t, &cfg, ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{Steps: [][]string{{"adapter", "prepare"}, {"adapter", "use", "{{config.token}}"}}},
+		}, nil)
+
+		err := validateProviderCredentialDestination(cfg)
+		if err == nil || !strings.Contains(err.Error(), "external.lifecycle.acquire.steps") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+
+	t.Run("rejects inherited config through repository resource name", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		applyTrustedConfig(t, &cfg)
+		connection := &ExternalConnectionConfig{ResourceName: "{{config.token}}"}
+		applyRepositoryLifecycle(t, &cfg, ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{Argv: []string{"adapter", "create", "{{resourceName}}"}},
+		}, connection)
+
+		err := validateProviderCredentialDestination(cfg)
+		if err == nil || !strings.Contains(err.Error(), "external.lifecycle.acquire.argv") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+
+	t.Run("rejects repository resource template feeding trusted lifecycle", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		lifecycle := ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{Argv: []string{"adapter", "create", "{{resourceName}}"}},
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{
+			Config:    map[string]any{"token": "trusted-token"},
+			Lifecycle: &lifecycle,
+		}}, true); err != nil {
+			t.Fatal(err)
+		}
+		connection := ExternalConnectionConfig{ResourceName: "{{config.token}}"}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &connection}}, false); err != nil {
+			t.Fatal(err)
+		}
+
+		err := validateProviderCredentialDestination(cfg)
+		if err == nil || !strings.Contains(err.Error(), "external.connection template feeding external.lifecycle.acquire.argv") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+
+	t.Run("rejects repository cloud id template feeding trusted lifecycle", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		lifecycle := ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{Argv: []string{"adapter", "create"}},
+			Release: ExternalLifecycleOperation{Argv: []string{"adapter", "release", "{{cloudId}}"}},
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{
+			Config:    map[string]any{"token": "trusted-token"},
+			Lifecycle: &lifecycle,
+		}}, true); err != nil {
+			t.Fatal(err)
+		}
+		connection := ExternalConnectionConfig{CloudID: "{{config.token}}"}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &connection}}, false); err != nil {
+			t.Fatal(err)
+		}
+
+		err := validateProviderCredentialDestination(cfg)
+		if err == nil || !strings.Contains(err.Error(), "external.connection template feeding external.lifecycle.release.argv") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+
+	t.Run("allows repository-owned config", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		lifecycle := ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{Argv: []string{"adapter", "--region", "{{config.region}}"}},
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{
+			Config:    map[string]any{"region": "test-region"},
+			Lifecycle: &lifecycle,
+		}}, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("repository-owned config rejected: %v", err)
+		}
+	})
+
+	t.Run("allows trusted lifecycle", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		lifecycle := ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{Argv: []string{"adapter", "--region", "{{config.region}}"}},
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{
+			Config:    map[string]any{"region": "test-region"},
+			Lifecycle: &lifecycle,
+		}}, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("trusted lifecycle rejected: %v", err)
+		}
+	})
+
+	t.Run("allows exact trusted non-secret contract", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		lifecycle := ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{
+				Argv:            []string{"adapter", "--region", "{{config.region}}"},
+				AllowConfigArgv: true,
+			},
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{
+			Config:    map[string]any{"region": "test-region"},
+			Lifecycle: &lifecycle,
+		}}, true); err != nil {
+			t.Fatal(err)
+		}
+		applyRepositoryLifecycle(t, &cfg, lifecycle, nil)
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("exact trusted lifecycle contract rejected: %v", err)
+		}
+	})
+
+	t.Run("repository cannot self approve", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		applyTrustedConfig(t, &cfg)
+		applyRepositoryLifecycle(t, &cfg, ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{
+				Argv:            []string{"adapter", "{{config.token}}"},
+				AllowConfigArgv: true,
+			},
+		}, nil)
+
+		err := validateProviderCredentialDestination(cfg)
+		if err == nil || !strings.Contains(err.Error(), "same lifecycle contract in trusted user config") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+
+	t.Run("trusted approval binds connection templates", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		lifecycle := ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{
+				Argv:            []string{"adapter", "create", "{{resourceName}}"},
+				AllowConfigArgv: true,
+			},
+		}
+		trustedConnection := ExternalConnectionConfig{ResourceName: "{{config.region}}"}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{
+			Config:     map[string]any{"region": "test-region", "token": "trusted-token"},
+			Lifecycle:  &lifecycle,
+			Connection: &trustedConnection,
+		}}, true); err != nil {
+			t.Fatal(err)
+		}
+		repositoryConnection := ExternalConnectionConfig{ResourceName: "{{config.token}}"}
+		applyRepositoryLifecycle(t, &cfg, lifecycle, &repositoryConnection)
+
+		if err := validateProviderCredentialDestination(cfg); err == nil {
+			t.Fatal("mutated connection template inherited trusted config")
+		}
+	})
+
+	t.Run("trusted approval is exact and operation bound", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		trusted := ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{
+				Argv:            []string{"approved-adapter", "{{config.token}}"},
+				AllowConfigArgv: true,
+			},
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{
+			Config:    map[string]any{"token": "trusted-token"},
+			Lifecycle: &trusted,
+		}}, true); err != nil {
+			t.Fatal(err)
+		}
+
+		changed := trusted
+		changed.Acquire.Argv = []string{"repository-adapter", "{{config.token}}"}
+		applyRepositoryLifecycle(t, &cfg, changed, nil)
+		if err := validateProviderCredentialDestination(cfg); err == nil {
+			t.Fatal("mutated lifecycle inherited trusted config")
+		}
+
+		wrongOperation := ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{Argv: []string{"approved-adapter", "{{config.token}}"}},
+			Release: ExternalLifecycleOperation{Argv: []string{"approved-adapter", "release"}, AllowConfigArgv: true},
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Lifecycle: &wrongOperation}}, true); err != nil {
+			t.Fatal(err)
+		}
+		applyRepositoryLifecycle(t, &cfg, wrongOperation, nil)
+		if err := validateProviderCredentialDestination(cfg); err == nil {
+			t.Fatal("approval on another operation authorized config argv")
+		}
+	})
+
+	t.Run("checks every config argv operation", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		lifecycle := ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{
+				Argv:            []string{"adapter", "create", "{{config.region}}"},
+				AllowConfigArgv: true,
+			},
+			Release: ExternalLifecycleOperation{
+				Argv: []string{"adapter", "release", "{{config.token}}"},
+			},
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{
+			Config:    map[string]any{"region": "test-region", "token": "trusted-token"},
+			Lifecycle: &lifecycle,
+		}}, true); err != nil {
+			t.Fatal(err)
+		}
+		applyRepositoryLifecycle(t, &cfg, lifecycle, nil)
+
+		err := validateProviderCredentialDestination(cfg)
+		if err == nil || !strings.Contains(err.Error(), "external.lifecycle.release.argv") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+
+	t.Run("allows inherited config in lifecycle env", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		applyTrustedConfig(t, &cfg)
+		applyRepositoryLifecycle(t, &cfg, ExternalLifecycleConfig{
+			Acquire: ExternalLifecycleOperation{
+				Argv: []string{"adapter", "create"},
+				Env:  map[string]string{"ADAPTER_TOKEN": "{{config.token}}"},
+			},
+		}, nil)
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("lifecycle env rejected: %v", err)
+		}
+	})
 }
 
 func TestRepositorySSHDestinationsRejectExternalSameSourceKeyPaths(t *testing.T) {

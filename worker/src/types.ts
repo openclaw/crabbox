@@ -53,6 +53,15 @@ export interface Env {
   CRABBOX_GCP_SSH_CIDRS?: string;
   CRABBOX_GCP_ROOT_GB?: string;
   CRABBOX_GCP_SERVICE_ACCOUNT?: string;
+  DAYTONA_CRABBOX_KEY?: string;
+  CRABBOX_DAYTONA_API_URL?: string;
+  CRABBOX_DAYTONA_ORGANIZATION_ID?: string;
+  CRABBOX_DAYTONA_SNAPSHOT?: string;
+  CRABBOX_DAYTONA_TARGET?: string;
+  CRABBOX_DAYTONA_USER?: string;
+  CRABBOX_DAYTONA_WORK_ROOT?: string;
+  CRABBOX_DAYTONA_SSH_GATEWAY_HOST?: string;
+  CRABBOX_DAYTONA_SSH_ACCESS_MINUTES?: string;
   CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_SHARED_OWNER?: string;
@@ -139,6 +148,7 @@ export interface LeaseRequest {
   desktop?: boolean;
   desktopEnv?: string;
   browser?: boolean;
+  imageRequirements?: ImageRequirements;
   code?: boolean;
   tailscale?: boolean;
   tailscaleTags?: string[];
@@ -199,6 +209,24 @@ export interface LeaseRequest {
   exposedPorts?: string[];
 }
 
+export interface ImageCapabilities {
+  osVersion?: string;
+  sdks?: Record<string, string>;
+  runtimes?: Record<string, string>;
+  browser?: boolean;
+  webview2?: boolean;
+  desktop?: boolean;
+}
+
+export interface ImageRequirements {
+  minOS?: string;
+  sdks?: Record<string, string>;
+  runtimes?: Record<string, string>;
+  browser?: boolean;
+  webview2?: boolean;
+  desktop?: boolean;
+}
+
 export interface LeaseRegistrationRequest {
   slug?: string;
   provider?: string;
@@ -256,6 +284,12 @@ export const coordinatorProviderRegistry = [
     provider: "gcp",
     label: "GCP",
     requiredSecrets: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
+    adminAudit: false,
+  },
+  {
+    provider: "daytona",
+    label: "Daytona",
+    requiredSecrets: ["DAYTONA_CRABBOX_KEY"],
     adminAudit: false,
   },
 ] as const satisfies readonly {
@@ -359,6 +393,7 @@ export interface LeaseRecord {
   sshUser: string;
   sshPort: string;
   sshFallbackPorts?: string[];
+  providerAccessExpiresAt?: string;
   workRoot: string;
   keep: boolean;
   ttlSeconds: number;
@@ -519,6 +554,7 @@ export interface ProviderImage {
   resourceID?: string;
   snapshots?: string[];
   fastSnapshotRestores?: ProviderFastSnapshotRestore[];
+  capabilities?: ImageCapabilities;
 }
 
 export interface ProviderFastSnapshotRestore {

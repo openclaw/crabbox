@@ -243,6 +243,9 @@ func instanceTypeForClass(class string) string {
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
+	if err := core.UseLeaseKnownHosts(&target.SSH, leaseID); err != nil {
+		return err
+	}
 	core.UseStoredTestboxKey(&target.SSH, leaseID)
 	return nil
 }
@@ -324,7 +327,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		recoveryLabels["recovery"] = recovery
 		recoveryLabels["state"] = "provisioning"
 		item := instance{ID: id, Name: phalaCVMName(leaseID), Labels: recoveryLabels}
-		lease := b.lease(item, cfg, leaseID)
+		lease, err := b.lease(item, cfg, leaseID)
+		if err != nil {
+			return err
+		}
 		if req.Repo.Root != "" {
 			return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim)
 		}
@@ -379,7 +385,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if slug != "" {
 		item.Labels["slug"] = slug
 	}
-	lease := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID)
+	if err != nil {
+		return core.LeaseTarget{}, rollback(err)
+	}
 	if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
@@ -433,7 +442,25 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	lease := b.lease(item, cfg, leaseID)
+	// Older claims passed gateway_host through the provider-label sanitizer,
+	// which clipped long DNS names at its 63-byte label limit. Refresh those
+	// claims once so reconnects use the complete TLS SNI host. A failed refresh
+	// drops the suspect cache and leaves the proxy's live lookup fallback intact.
+	if !req.ReleaseOnly && cachedGatewayHostNeedsRefresh(item.Labels["gateway_host"]) {
+		delete(item.Labels, "gateway_host")
+		if gatewayHost, refreshErr := b.resolveGatewayHost(ctx, item.cloudID()); refreshErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: could not refresh phala gateway host for phala_cvm=%s: %v\n", item.cloudID(), refreshErr)
+		} else if gatewayHost != "" {
+			if item.Labels == nil {
+				item.Labels = map[string]string{}
+			}
+			item.Labels["gateway_host"] = gatewayHost
+		}
+	}
+	lease, err := b.lease(item, cfg, leaseID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if req.ReleaseOnly || req.StatusOnly && !req.ReadyProbe {
 		return lease, nil
 	}
@@ -564,7 +591,13 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	cfg := b.configForRun()
 	now := b.now()
 	server := req.Lease.Server
+	gatewayHost := strings.TrimSpace(server.Labels["gateway_host"])
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, now)
+	// gateway_host is local connection metadata, not a provider label. Preserve
+	// its complete DNS value across the generic provider-label timestamp update.
+	if gatewayHost != "" {
+		server.Labels["gateway_host"] = gatewayHost
+	}
 	leaseID := strings.TrimSpace(req.Lease.LeaseID)
 	if leaseID != "" {
 		claim, ok, err := resolvePhalaClaim(leaseID, cfg)
@@ -1044,28 +1077,42 @@ func (b *backend) resolve(ctx context.Context, identifier string, cfg core.Confi
 	return instance{}, "", core.Exit(4, "Phala CVM lease not found: %s", identifier)
 }
 
-func (b *backend) lease(item instance, cfg core.Config, leaseID string) core.LeaseTarget {
+func (b *backend) lease(item instance, cfg core.Config, leaseID string) (core.LeaseTarget, error) {
 	target := core.SSHTarget{
-		User:                   "root",
-		Host:                   item.cloudID(),
-		Key:                    cfg.SSHKey,
-		Port:                   "22",
-		TargetOS:               core.TargetLinux,
-		ReadyCheck:             "command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
-		NoControlMaster:        true,
-		DisableHostKeyChecking: true,
-		NetworkKind:            "public",
-		SSHConfigProxy:         true,
-		ProxyCommand:           proxyCommand(cfg, item.cloudID(), item.Labels["gateway_host"]),
+		User:            "root",
+		Host:            item.cloudID(),
+		Key:             cfg.SSHKey,
+		Port:            "22",
+		TargetOS:        core.TargetLinux,
+		ReadyCheck:      "command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
+		NoControlMaster: true,
+		NetworkKind:     "public",
+		SSHConfigProxy:  true,
+		ProxyCommand:    proxyCommand(cfg, item.cloudID(), item.Labels["gateway_host"]),
 	}
 	if leaseID != "" {
+		if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
 		core.UseStoredTestboxKey(&target, leaseID)
 	}
 	server := b.server(item, cfg)
 	if claim, ok, _ := resolvePhalaClaim(leaseID, cfg); ok {
 		mergeClaimLabels(&server, claim)
 	}
-	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	// A freshly resolved full gateway host must win over legacy claim labels,
+	// which may contain the old 63-byte-truncated value.
+	if gatewayHost := strings.TrimSpace(item.Labels["gateway_host"]); gatewayHost != "" {
+		server.Labels["gateway_host"] = gatewayHost
+	}
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func cachedGatewayHostNeedsRefresh(host string) bool {
+	host = strings.TrimSpace(host)
+	// sanitizeProviderLabelValue caps values at exactly 63 bytes. Treat that
+	// boundary as suspect; refreshing a legitimately 63-byte hostname is safe.
+	return len(host) == 63
 }
 
 func (b *backend) prepareSSH(ctx context.Context, cfg core.Config, target *core.SSHTarget) error {

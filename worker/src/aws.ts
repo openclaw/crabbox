@@ -11,6 +11,7 @@ import {
   workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "./config";
+import { hasImageRequirements } from "./image-capabilities";
 import { osImageSpec } from "./os-image";
 import {
   leaseIDForProviderKey,
@@ -326,12 +327,13 @@ export class EC2SpotClient {
     await this.ensureSSHKey(config.providerKey, config.sshPublicKey, leaseID);
     let transientImageID = "";
     try {
+      const capabilityImageRequired = hasImageRequirements(config.imageRequirements);
       const defaultImageID = config.awsSnapshot
         ? await (async () => {
             transientImageID = await this.registerSnapshotImage(config.awsSnapshot, leaseID);
             return this.waitForImageAvailable(transientImageID);
           })()
-        : config.target === "macos"
+        : config.target === "macos" || capabilityImageRequired
           ? ""
           : await this.resolveAMI(config);
       const securityGroupID = await this.ensureSecurityGroup(config, options);
@@ -361,15 +363,20 @@ export class EC2SpotClient {
         if (defaultImageID) {
           return defaultImageID;
         }
-        if (candidateConfig.target !== "macos") {
-          return this.resolveAMI(candidateConfig);
-        }
         const promotedImageID =
           config.awsPromotedAMIs[
             awsPromotedAMIConfigKey(this.region, candidateConfig.serverType)
           ] ?? "";
         if (promotedImageID) {
           return promotedImageID;
+        }
+        if (capabilityImageRequired) {
+          throw new Error(
+            `no AWS AMI found in ${this.region} for ${candidateConfig.serverType} satisfying the requested image capabilities`,
+          );
+        }
+        if (candidateConfig.target !== "macos") {
+          return this.resolveAMI(candidateConfig);
         }
         if (pinnedMacOSImageID && candidateConfig.serverType === config.serverType) {
           return pinnedMacOSImageID;

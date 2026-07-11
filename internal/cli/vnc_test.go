@@ -221,7 +221,7 @@ func TestVNCTunnelDisablesSSHMultiplexing(t *testing.T) {
 	args := strings.Join(vncTunnelArgs(SSHTarget{
 		Port: "22", User: "crabbox", Host: "192.0.2.10",
 	}, "5907", "127.0.0.1", "5900"), "\n")
-	for _, want := range []string{"ExitOnForwardFailure=yes", "ControlMaster=no", "ControlPath=none", "ControlPersist=no", "ForkAfterAuthentication=no"} {
+	for _, want := range []string{"ForwardAgent=no", "ForwardX11=no", "ForwardX11Trusted=no", "ExitOnForwardFailure=yes", "ControlMaster=no", "ControlPath=none", "ControlPersist=no", "ForkAfterAuthentication=no"} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("dedicated tunnel missing %q: %s", want, args)
 		}
