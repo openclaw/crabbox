@@ -28,6 +28,8 @@ Metadata:
         Parameters:
           - DatabaseUrlSecretArn
           - AuthTokenSecretArn
+          - DatabaseUrlKmsKeyArn
+          - AuthTokenKmsKeyArn
           - RuntimeAdapterOwner
           - RuntimeAdapterOrg
       - Label:
@@ -98,6 +100,14 @@ Parameters:
     Type: String
     Description: Secrets Manager ARN whose value is the route-scoped workspace API token.
     AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+  DatabaseUrlKmsKeyArn:
+    Type: String
+    Description: Customer-managed KMS key ARN encrypting DatabaseUrlSecretArn.
+    AllowedPattern: "^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/[0-9a-fA-F-]{36}$"
+  AuthTokenKmsKeyArn:
+    Type: String
+    Description: Customer-managed KMS key ARN encrypting AuthTokenSecretArn.
+    AllowedPattern: "^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/[0-9a-fA-F-]{36}$"
   RuntimeAdapterOwner:
     Type: String
     Description: Stable owner identity assigned to route-scoped workspace requests.
@@ -436,6 +446,14 @@ Resources:
                 Resource:
                   - !Ref DatabaseUrlSecretArn
                   - !Ref AuthTokenSecretArn
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource:
+                  - !Ref DatabaseUrlKmsKeyArn
+                  - !Ref AuthTokenKmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub secretsmanager.${ExpectedRegion}.${AWS::URLSuffix}
       Tags:
         - Key: crabbox
           Value: coordinator-execution

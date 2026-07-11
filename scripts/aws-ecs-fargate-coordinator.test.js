@@ -193,6 +193,12 @@ test("stack-owned roles have scoped trust and workspace log access", () => {
     1,
     "execution managed policy must not be duplicated",
   );
+  assertAllMatches(executionRole, [
+    /Action: kms:Decrypt/,
+    /- !Ref DatabaseUrlKmsKeyArn/,
+    /- !Ref AuthTokenKmsKeyArn/,
+    /kms:ViaService: !Sub secretsmanager\.\$\{ExpectedRegion\}\.\$\{AWS::URLSuffix\}/,
+  ]);
 
   const workspaceRole = resourceBlock("WorkspaceInstanceRole");
   assertAllMatches(workspaceRole, [

@@ -306,6 +306,7 @@ export function awsOrphanSweepCredentialsConfigured(
     | "awsCredentialProvider"
     | "AWS_ACCESS_KEY_ID"
     | "AWS_SECRET_ACCESS_KEY"
+    | "CRABBOX_AWS_CREDENTIAL_SOURCE"
     | "CRABBOX_AWS_ORPHAN_SWEEP_ENABLED"
     | "CRABBOX_WORKSPACE_PROVIDER"
   >,
@@ -315,6 +316,9 @@ export function awsOrphanSweepCredentialsConfigured(
   }
   if (!env.awsCredentialProvider) {
     return false;
+  }
+  if (env.CRABBOX_AWS_CREDENTIAL_SOURCE?.trim() === "default-chain") {
+    return true;
   }
   const sweepEnabled = ["1", "true", "yes", "on"].includes(
     (env.CRABBOX_AWS_ORPHAN_SWEEP_ENABLED ?? "").trim().toLowerCase(),

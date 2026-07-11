@@ -80,6 +80,12 @@ describe("private AWS workspaces", () => {
     expect(
       awsOrphanSweepCredentialsConfigured({
         awsCredentialProvider: testAWSCredentialProvider,
+        CRABBOX_AWS_CREDENTIAL_SOURCE: "default-chain",
+      }),
+    ).toBe(true);
+    expect(
+      awsOrphanSweepCredentialsConfigured({
+        awsCredentialProvider: testAWSCredentialProvider,
         CRABBOX_WORKSPACE_PROVIDER: "aws",
       }),
     ).toBe(true);

@@ -14290,14 +14290,20 @@ function workspaceSSMBootstrapCommand(workspace: WorkspaceRecord): string {
     `  systemctl show --no-pager --property=ActiveState,SubState,Result,ExecMainStatus ${shellQuote(serviceName)}`,
     "  exit 0",
     "fi",
-    `install -d -m 0755 -o crabbox -g crabbox ${shellQuote(workspaceParent)}`,
+    `for workspace_ancestor in /work ${shellQuote(privateAWSWorkspaceWorkRoot)} ${shellQuote(workspaceParent)}; do`,
+    '  test -d "$workspace_ancestor"',
+    '  test ! -L "$workspace_ancestor"',
+    '  test "$(stat -c %U:%G "$workspace_ancestor")" = root:root',
+    "done",
+    `test ! -L ${shellQuote(workspaceRoot)}`,
   ];
   if (workspace.repo) {
     const repoURL = `https://github.com/${workspace.repo}.git`;
     const cloneTemplate = `${workspaceRoot}.clone.XXXXXX`;
     setup.push(
       `if ! runuser -u crabbox -- git -C ${shellQuote(workspaceRoot)} rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1; then`,
-      `  clone_root=$(runuser -u crabbox -- mktemp -d ${shellQuote(cloneTemplate)})`,
+      `  clone_root=$(mktemp -d ${shellQuote(cloneTemplate)})`,
+      '  chown crabbox:crabbox "$clone_root"',
       `  if ! runuser -u crabbox -- git clone --quiet --depth=1 --branch ${shellQuote(branch)} ${shellQuote(repoURL)} "$clone_root" >/dev/null 2>&1; then`,
       '    rm -rf "$clone_root"',
       "    exit 1",

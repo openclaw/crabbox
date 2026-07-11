@@ -289,7 +289,8 @@ Before GO, prepare and review these non-secret values:
 - VPC, load-balancer subnet, service subnet, and workspace subnet IDs;
 - approved ingress and database CIDRs;
 - certificate ARN and canonical URL;
-- database URL secret ARN and route-token secret ARN;
+- database URL secret ARN and route-token secret ARN, plus the customer-managed
+  KMS key ARN encrypting each secret;
 - explicit instance allowlist, resource ceilings, and log retention. The
   dedicated stack fixes the market to on-demand; it does not depend on the
   account-level EC2 Spot service-linked role.
@@ -324,6 +325,8 @@ aws cloudformation deploy \
     DatabasePort="$DATABASE_PORT" \
     DatabaseUrlSecretArn="$DATABASE_URL_SECRET_ARN" \
     AuthTokenSecretArn="$WORKSPACE_TOKEN_SECRET_ARN" \
+    DatabaseUrlKmsKeyArn="$DATABASE_URL_KMS_KEY_ARN" \
+    AuthTokenKmsKeyArn="$WORKSPACE_TOKEN_KMS_KEY_ARN" \
     RuntimeAdapterOwner="$RUNTIME_ADAPTER_OWNER" \
     RuntimeAdapterOrg="$RUNTIME_ADAPTER_ORG" \
     WorkspaceSubnetId="$WORKSPACE_SUBNET_ID" \

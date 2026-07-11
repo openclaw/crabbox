@@ -286,6 +286,15 @@ describe("private AWS workspaces", () => {
     );
     expect(requested?.awsSSMBootstrapCommand).not.toContain("journalctl");
     expect(requested?.awsSSMBootstrapCommand).toContain("flock -x -w 600 9");
+    expect(requested?.awsSSMBootstrapCommand).toContain(
+      'test "$(stat -c %U:%G "$workspace_ancestor")" = root:root',
+    );
+    expect(requested?.awsSSMBootstrapCommand).toContain(
+      "test ! -L '/work/crabbox/workspaces/private-gateway'",
+    );
+    expect(requested?.awsSSMBootstrapCommand).not.toContain(
+      "install -d -m 0755 -o crabbox -g crabbox /work/crabbox/workspaces",
+    );
     expect(requested?.awsSSMBootstrapCommand).not.toContain("authorized_keys");
     expect(requested?.awsSSMBootstrapCommand).not.toContain("/run/crabbox/workspace-ready");
 
