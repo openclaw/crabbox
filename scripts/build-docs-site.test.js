@@ -61,6 +61,17 @@ generatedTest("generated AWS page is active in Providers navigation and pager", 
   assert.match(pager, new RegExp(`href="\.\./providers/${escapeRegExp(next)}"`));
 });
 
+generatedTest("homepage primary CTA targets an indexed Start page", () => {
+  const home = readGenerated("index.html");
+  const startNav = navSection(home, "Start");
+  const gettingStarted = readGenerated("getting-started.html");
+
+  assert.match(home, /<a class="cta-primary" href="getting-started\.html">Get started<\/a>/);
+  assert.match(startNav, /href="getting-started\.html"[^>]*>Getting Started<\/a>/);
+  assert.match(gettingStarted, /<a class="nav-link active" href="getting-started\.html"[^>]*aria-current="page">Getting Started<\/a>/);
+  assert.match(gettingStarted, /<nav class="page-nav"/);
+});
+
 generatedTest("provider index renders filterable rows in a scroll region", () => {
   const html = readGenerated("providers/index.html");
   const metadata = JSON.parse(fs.readFileSync(path.join(providersDir, "provider-metadata.json"), "utf8"));

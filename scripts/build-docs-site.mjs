@@ -15,7 +15,7 @@ const providerMetadataByDocs = new Map(
 );
 
 const sections = [
-  ["Start", ["README.md", "how-it-works.md", "architecture.md", "orchestrator.md", "cli.md"]],
+  ["Start", ["README.md", "getting-started.md", "how-it-works.md", "architecture.md", "orchestrator.md", "cli.md"]],
   ["Providers", rels("providers")],
   ["Features", rels("features")],
   ["Commands", rels("commands")],
