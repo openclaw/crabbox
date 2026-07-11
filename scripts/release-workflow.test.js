@@ -57,6 +57,12 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
   );
 });
 
+test("script CI fetches signed release tags for publication fixtures", () => {
+  const ci = read(".github/workflows/ci.yml");
+  const scriptsJob = ci.slice(ci.indexOf("  scripts:"), ci.indexOf("  docs:"));
+  assert.match(scriptsJob, /uses: actions\/checkout@[^\n]+\n\s+with:\n\s+fetch-depth: 0/);
+});
+
 test("GoReleaser is credential-free build-only with exact binary archives", () => {
   const config = read(".goreleaser.yaml");
   assert.match(config, /release:\n\s+disable: true/);
