@@ -201,15 +201,6 @@ Rules:
                 - 0.0.0.0/0
         AssertDescription: DatabaseCidr must be narrower than the IPv4 internet.
 
-Mappings:
-  CanonicalUbuntuOwnerByPartition:
-    aws:
-      OwnerId: "099720109477"
-    aws-us-gov:
-      OwnerId: "513442679011"
-    aws-cn:
-      OwnerId: "837727238323"
-
 Resources:
   CoordinatorLogGroup:
     DeletionPolicy: Retain
@@ -507,10 +498,10 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:RequestedRegion: !Ref ExpectedRegion
-                    ec2:Owner: !FindInMap
-                      - CanonicalUbuntuOwnerByPartition
-                      - !Ref AWS::Partition
-                      - OwnerId
+                    # EC2 authorization exposes Canonical public AMIs through
+                    # the `amazon` owner alias. Runtime discovery still filters
+                    # the partition-specific Canonical publisher account.
+                    ec2:Owner: amazon
               - Sid: LaunchWorkspaceInstance
                 Effect: Allow
                 Action: ec2:RunInstances
