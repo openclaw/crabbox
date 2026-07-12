@@ -48,14 +48,23 @@ jobs:
       - name: Render desktop, dark, and mobile proofs
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p dist/ui-proof
           python3 -m http.server 4173 --directory dist/docs-site >/tmp/crabbox-docs-server.log 2>&1 &
           server_pid=$!
-          trap 'kill "$server_pid"' EXIT
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          ready=0
           for attempt in {1..30}; do
-            curl --fail --silent http://127.0.0.1:4173/features/ >/dev/null && break
+            if curl --fail --silent http://127.0.0.1:4173/features/ >/dev/null; then
+              ready=1
+              break
+            fi
             sleep 1
           done
+          if [ "$ready" -ne 1 ]; then
+            cat /tmp/crabbox-docs-server.log
+            exit 1
+          fi
           npx --yes playwright@1.55.0 screenshot \
             --browser chromium \
             --viewport-size "1440,1100" \
@@ -71,10 +80,13 @@ jobs:
             dist/ui-proof/features-desktop-dark.png
           npx --yes playwright@1.55.0 screenshot \
             --browser chromium \
-            --device "iPhone 13" \
+            --viewport-size "390,844" \
             --full-page \
             http://127.0.0.1:4173/features/ \
             dist/ui-proof/features-mobile.png
+          test -s dist/ui-proof/features-desktop-light.png
+          test -s dist/ui-proof/features-desktop-dark.png
+          test -s dist/ui-proof/features-mobile.png
           sha256sum dist/ui-proof/*.png > dist/ui-proof/SHA256SUMS
 
       - name: Upload reviewable proof artifact
