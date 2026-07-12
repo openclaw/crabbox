@@ -289,7 +289,7 @@ exit 0
 	if got, want := strings.Count(string(logData), "ssh\n"), 2; got != want {
 		t.Fatalf("credential-blocked ssh calls=%d want %d; log:\n%s", got, want, logData)
 	}
-	if !strings.Contains(stderr.String(), "origin URL contains embedded HTTP credentials") {
+	if !strings.Contains(stderr.String(), "origin URL contains embedded credentials") {
 		t.Fatalf("missing safe warning: %q", stderr.String())
 	}
 	if strings.Contains(stderr.String(), secret) || strings.Contains(stderr.String(), "example.test") {
@@ -1448,19 +1448,26 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 	}
 }
 
-func TestGitSeedCommandsRejectCredentialBearingHTTPRemote(t *testing.T) {
+func TestGitSeedCommandsRejectCredentialBearingRemote(t *testing.T) {
 	const secret = "do-not-forward"
-	remote := "https://runner:" + secret + "@example.test/repo.git"
-	for name, command := range map[string]string{
-		"linux":   remoteGitSeed("/work/repo", remote, "abc123"),
-		"windows": windowsGitSeed(`C:\crabbox\repo`, remote, "abc123"),
+	for remoteName, remote := range map[string]string{
+		"https":     "https://runner:" + secret + "@example.test/repo.git",
+		"ssh":       "ssh://runner:" + secret + "@example.test/repo.git",
+		"git+https": "git+https://runner:" + secret + "@example.test/repo.git",
 	} {
-		t.Run(name, func(t *testing.T) {
-			if strings.Contains(command, secret) || strings.Contains(command, "example.test") {
-				t.Fatalf("credential-bearing remote reached %s seed command: %q", name, command)
-			}
-			if strings.Contains(command, "git clone") {
-				t.Fatalf("%s seed command should be disabled: %q", name, command)
+		t.Run(remoteName, func(t *testing.T) {
+			for target, command := range map[string]string{
+				"linux":   remoteGitSeed("/work/repo", remote, "abc123"),
+				"windows": windowsGitSeed(`C:\crabbox\repo`, remote, "abc123"),
+			} {
+				t.Run(target, func(t *testing.T) {
+					if strings.Contains(command, secret) || strings.Contains(command, "example.test") {
+						t.Fatalf("credential-bearing remote reached %s seed command: %q", target, command)
+					}
+					if strings.Contains(command, "git clone") {
+						t.Fatalf("%s seed command should be disabled: %q", target, command)
+					}
+				})
 			}
 		})
 	}

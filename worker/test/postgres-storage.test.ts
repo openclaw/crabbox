@@ -71,6 +71,26 @@ describe("PostgresCoordinatorStorage", () => {
     expect(records).toEqual(new Map([["run:100%_x", { id: "100" }]]));
   });
 
+  it("pages prefix scans after the previous storage key", async () => {
+    const pool = fakePool([{ key: "lease:2", encoded_value: '{"id":"2"}' }]);
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+
+    const records = await storage.list<{ id: string }>({
+      prefix: "lease:",
+      startAfter: "lease:1",
+      limit: 128,
+      noCache: true,
+    });
+
+    expect(pool.query).toHaveBeenCalledWith(expect.stringContaining("and key > $2"), [
+      "lease:%",
+      "lease:1",
+      128,
+    ]);
+    expect(String(pool.query.mock.calls[0]?.[0])).toContain("limit $3");
+    expect(records).toEqual(new Map([["lease:2", { id: "2" }]]));
+  });
+
   it("atomically takes one stored value", async () => {
     const pool = fakePool([{ encoded_value: '{"ticket":"one-time"}' }]);
     const storage = new PostgresCoordinatorStorage("postgres://unused", pool);

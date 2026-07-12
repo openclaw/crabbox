@@ -2,8 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseJUnitResults(t *testing.T) {
@@ -284,5 +289,103 @@ func TestNormalizeResultPath(t *testing.T) {
 		if got := normalizeResultPath(tc.workdir, tc.name); got != tc.want {
 			t.Fatalf("normalizeResultPath(%q, %q)=%q, want %q", tc.workdir, tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestRemoteReadResultFilesConfinesResolvedPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell regression")
+	}
+	root := t.TempDir()
+	reports := filepath.Join(root, "reports")
+	outside := t.TempDir()
+	if err := os.Mkdir(reports, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(reports, "inside.xml"), "inside")
+	write(filepath.Join(outside, "outside.xml"), "outside")
+	links := map[string]string{
+		filepath.Join(root, "safe-leaf.xml"):   filepath.Join(reports, "inside.xml"),
+		filepath.Join(root, "safe-dir"):        reports,
+		filepath.Join(root, "escape-leaf.xml"): filepath.Join(outside, "outside.xml"),
+		filepath.Join(root, "escape-dir"):      outside,
+	}
+	for link, target := range links {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fifo := filepath.Join(root, "result.fifo")
+	if out, err := exec.Command("mkfifo", fifo).CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo: %v\n%s", err, out)
+	}
+	paths := []string{
+		"reports/inside.xml",
+		filepath.Join(reports, "inside.xml"),
+		"safe-leaf.xml",
+		"safe-dir/inside.xml",
+		"escape-leaf.xml",
+		"escape-dir/outside.xml",
+		filepath.Join(outside, "outside.xml"),
+		"result.fifo",
+	}
+	command := remoteReadResultFiles(root, paths)
+	for _, want := range []string{`exec 3<"$candidate"`, `/proc/self/fd/3`, `echo $PPID > "$1"`, `lsof -a -p "$pid" -d 3`, `cat <&3`, `sleep 5; kill "$reader"`} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("POSIX result reader missing descriptor-bound check %q:\n%s", want, command)
+		}
+	}
+	started := time.Now()
+	out, err := exec.Command("sh", "-c", command).CombinedOutput()
+	if err != nil {
+		t.Fatalf("remote result reader: %v\n%s", err, out)
+	}
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("non-regular result path blocked collection for %s", elapsed)
+	}
+	files := parseMarkedFiles(string(out))
+	for _, allowed := range paths[:4] {
+		if files[allowed] != "inside" {
+			t.Fatalf("allowed path %q missing: %#v", allowed, files)
+		}
+	}
+	for _, escaped := range paths[4:] {
+		if _, ok := files[escaped]; ok {
+			t.Fatalf("escaped path %q was collected: %#v", escaped, files)
+		}
+	}
+}
+
+func TestWindowsRemoteReadResultFilesUsesResolvedConfinement(t *testing.T) {
+	got := decodePowerShellCommand(t, windowsRemoteReadResultFiles(`C:\repo`, []string{`reports\junit.xml`}))
+	for _, want := range []string{
+		"GetFinalPathNameByHandle",
+		"CreateFile",
+		"$r=FinalPath $rh",
+		"$s.SafeFileHandle",
+		"$p.StartsWith($q,[StringComparison]::Ordinal)",
+		"$z.ReadToEnd()",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("windows result reader missing %q:\n%s", want, got)
+		}
+	}
+	command := windowsRemoteReadResultFiles(`C:\crabbox\cbx_123\crabbox`, []string{
+		`.crabbox\junit-proof\inside.xml`,
+		`C:\crabbox\cbx_123\crabbox\.crabbox\junit-proof\inside.xml`,
+		`.crabbox\junit-proof\safe-leaf.xml`,
+		`.crabbox\junit-proof\safe-dir\inside.xml`,
+		`.crabbox\junit-proof\escape-leaf.xml`,
+		`.crabbox\junit-proof\escape-dir\outside.xml`,
+		`C:\Windows\Temp\crabbox-junit-proof\outside.xml`,
+	})
+	if len(command) >= 7500 {
+		t.Fatalf("windows result reader exceeds cmd.exe command-line limit: %d bytes", len(command))
 	}
 }

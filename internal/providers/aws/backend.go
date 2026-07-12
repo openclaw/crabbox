@@ -121,7 +121,10 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		return LeaseTarget{}, fmt.Errorf("bind AWS caller account: %w", err)
 	}
 	server.Labels["aws_account_id"] = accountID
-	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+	if cfg.Network == core.NetworkTailscale && cfg.Tailscale.Enabled && strings.TrimSpace(cfg.Tailscale.Hostname) == "" {
+		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+	}
+	target := sshTargetForBootstrap(cfg, server.PublicNet.IPv4.IP, leaseID, slug)
 	if err := bootstrapAWSWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
 		return LeaseTarget{}, err
 	}
@@ -408,6 +411,27 @@ func providerKeyForLease(leaseID string) string          { return core.ProviderK
 func ensureAWSSSHCIDRs(ctx context.Context, cfg *Config) { core.EnsureAWSSSHCIDRs(ctx, cfg) }
 func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
+}
+
+// bootstrapSSHHost returns the address used for the acquisition readiness probe.
+// Strict Tailscale mode cannot fall back to the public address, which can be
+// unreachable from same-account EC2 operators even after cloud-init succeeds.
+func bootstrapSSHHost(cfg Config, publicIP, leaseID, slug string) string {
+	if cfg.Network != core.NetworkTailscale || !cfg.Tailscale.Enabled {
+		return publicIP
+	}
+	hostname := strings.TrimSpace(cfg.Tailscale.Hostname)
+	if hostname == "" {
+		hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+	}
+	if hostname == "" {
+		return publicIP
+	}
+	return hostname
+}
+
+func sshTargetForBootstrap(cfg Config, publicIP, leaseID, slug string) SSHTarget {
+	return sshTargetFromConfig(cfg, bootstrapSSHHost(cfg, publicIP, leaseID, slug))
 }
 
 var bootstrapAWSWindowsDesktop = core.BootstrapAWSWindowsDesktop

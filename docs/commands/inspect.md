@@ -59,6 +59,20 @@ key path, port, user, and host). Empty fields render as `-`.
 label map. Secrets such as broker tokens, provider keys, and VNC passwords are
 never included in either output mode.
 
+For coordinator leases whose provider can inject an SSH host key before first
+boot, JSON also includes `sshHostKey`. Its value is exactly the public host-key
+algorithm and base64 payload, without a hostname or comment:
+
+```json
+{
+  "sshHostKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."
+}
+```
+
+The key is the authoritative public half generated for provisioning, not a key
+learned later through `known_hosts` or `ssh-keyscan`. The field is omitted when
+the provider cannot inject a host key before boot.
+
 ## Flags
 
 ```text

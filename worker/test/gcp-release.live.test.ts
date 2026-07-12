@@ -13,14 +13,18 @@ live("GCP release ownership live", () => {
   it("creates, reads, denies a foreign claim, releases the owned instance, and leaves no disk", async () => {
     const project = requiredEnv("CRABBOX_GCP_PROJECT");
     const zone = process.env.CRABBOX_GCP_ZONE || "europe-west2-a";
-    const env = {
+    const credentialSource = process.env.CRABBOX_GCP_CREDENTIAL_SOURCE?.trim();
+    const env: Env = {
       FLEET: {} as DurableObjectNamespace,
-      GCP_CLIENT_EMAIL: requiredEnv("GCP_CLIENT_EMAIL"),
-      GCP_PRIVATE_KEY: requiredEnv("GCP_PRIVATE_KEY"),
       CRABBOX_GCP_PROJECT: project,
       CRABBOX_GCP_ZONE: zone,
       CRABBOX_GCP_ROOT_GB: "10",
-    } as Env;
+    };
+    if (credentialSource) env.CRABBOX_GCP_CREDENTIAL_SOURCE = credentialSource;
+    if (credentialSource !== "metadata") {
+      env.GCP_CLIENT_EMAIL = requiredEnv("GCP_CLIENT_EMAIL");
+      env.GCP_PRIVATE_KEY = requiredEnv("GCP_PRIVATE_KEY");
+    }
     const client = new GCPClient(env, zone, project);
     const provider = new GCPProvider(env, undefined, zone, project);
     const leaseID =

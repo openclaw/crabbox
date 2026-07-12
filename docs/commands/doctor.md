@@ -51,10 +51,11 @@ A missing tool prints `missing` and fails the run.
 Provider readiness validates the selected provider without creating a lease.
 
 - When a coordinator is configured for a brokered provider (`aws`, `azure`,
-  `gcp`, `hetzner`), doctor asks the broker for secret readiness. It reports
-  missing coordinator secret names such as `AZURE_TENANT_ID` without exposing secret
-  values. For AWS, broker readiness can also include non-mutating EC2 vCPU quota
-  checks; low quotas print advisory `warning` lines and do not fail the run.
+  `daytona`, `gcp`, `hetzner`), doctor asks the broker for secret readiness. It
+  reports missing coordinator secret names such as `AZURE_TENANT_ID` without
+  exposing secret values. For AWS, broker readiness can also include non-mutating
+  EC2 vCPU quota checks; low quotas print advisory `warning` lines and do not fail
+  the run.
 - Without a coordinator, providers that implement a direct doctor run their own
   non-mutating check (cheapest list or readiness API). These print stable fields
   such as `timeout=10s`, `api=list`, and `mutation=false` so scripts can tell

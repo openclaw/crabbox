@@ -5,6 +5,11 @@ project_name: crabbox
 changelog:
   disable: true
 
+# This configuration is build-only. Official publication is a later,
+# proof-gated operation on an already verified draft release.
+release:
+  disable: true
+
 before:
   hooks:
     # Build the Swift VM daemon so the helper build below can embed it.
@@ -16,6 +21,9 @@ builds:
     binary: crabbox
     env:
       - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w -X github.com/openclaw/crabbox/internal/cli.version={{ .Version }}
     targets:
@@ -31,7 +39,9 @@ builds:
     env:
       - CGO_ENABLED=0
     flags:
+      - -trimpath
       - -tags=vmdembed
+    mod_timestamp: "{{ .CommitTimestamp }}"
     targets:
       - darwin_arm64
 
@@ -48,28 +58,8 @@ archives:
       - goos: windows
         formats:
           - zip
+    files:
+      - none*
 
 checksum:
   name_template: checksums.txt
-
-brews:
-  - name: crabbox
-    ids:
-      - crabbox
-    repository:
-      owner: openclaw
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
-    commit_author:
-      name: openclaw-bot
-      email: bot@openclaw.ai
-    commit_msg_template: "brew: update crabbox to {{ .Tag }}"
-    homepage: https://github.com/openclaw/crabbox
-    description: Remote Linux test boxes for dirty worktrees and CI hydration
-    license: MIT
-    install: |
-      bin.install "crabbox"
-      bin.install "crabbox-apple-vm-helper" if OS.mac? && Hardware::CPU.arm?
-    test: |
-      system bin/"crabbox", "--version"

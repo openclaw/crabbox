@@ -77,14 +77,16 @@ func remoteReadResultFiles(workdir string, paths []string) string {
 	b.WriteString("cd ")
 	b.WriteString(shellQuote(workdir))
 	b.WriteString(" && ")
+	b.WriteString(`root=$(pwd -P) || exit 0; crabbox_resolve_file() { p=$1; hops=0; while [ "$hops" -lt 40 ]; do dir=${p%/*}; base=${p##*/}; [ -n "$dir" ] || dir=/; dir=$(cd -P "$dir" 2>/dev/null && pwd -P) || return 1; p=$dir/$base; if [ -L "$p" ]; then target=$(readlink "$p") || return 1; case "$target" in /*) p=$target;; *) p=$dir/$target;; esac; hops=$((hops + 1)); continue; fi; [ -f "$p" ] || return 1; printf '%s\n' "$p"; return 0; done; return 1; }; `)
+	b.WriteString(`crabbox_read_file() { f=$1; case "$f" in /*) candidate=$f;; *) candidate=$root/$f;; esac; [ -f "$candidate" ] || return; exec 3<"$candidate" 2>/dev/null || return; resolved=$(crabbox_resolve_file "$candidate") || return; if [ "$root" != / ]; then case "$resolved" in "$root"/*) ;; *) return;; esac; fi; if [ -e /proc/self/fd/3 ]; then opened=$(readlink /proc/self/fd/3); elif command -v lsof >/dev/null 2>&1; then pidfile=$(mktemp) || return; sh -c 'echo $PPID > "$1"' sh "$pidfile" || { rm -f "$pidfile"; return; }; pid=$(cat "$pidfile"); rm -f "$pidfile"; opened=$(lsof -a -p "$pid" -d 3 -Fn 2>/dev/null | sed -n 's/^n//p'); else return; fi; [ "$opened" = "$resolved" ] || return; printf '\n`)
+	b.WriteString(resultFileMarker)
+	b.WriteString(`%s\n' "$f"; cat <&3; }; `)
 	b.WriteString("for f in")
 	for _, path := range paths {
 		b.WriteByte(' ')
 		b.WriteString(shellQuote(path))
 	}
-	b.WriteString("; do if [ -f \"$f\" ]; then printf '\\n")
-	b.WriteString(resultFileMarker)
-	b.WriteString("%s\\n' \"$f\"; cat \"$f\"; fi; done")
+	b.WriteString(`; do crabbox_read_file "$f" & reader=$!; ( sleep 5; kill "$reader" 2>/dev/null ) >/dev/null 2>&1 & guard=$!; wait "$reader" 2>/dev/null || :; kill "$guard" 2>/dev/null || :; wait "$guard" 2>/dev/null || :; done`)
 	return b.String()
 }
 

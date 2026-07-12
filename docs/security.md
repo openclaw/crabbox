@@ -367,9 +367,15 @@ unclaimed, and stale-claim servers instead of turning provider inventory into
 ownership proof.
 
 Artifact publishing rejects symlinks, directories at reserved generated-output
-paths, and other non-regular bundle entries before upload side effects. Required
-artifact paths must resolve to regular files. Automatic remote failure bundles
-confine member names and link targets to their generated subtree and omit
+paths, and other non-regular bundle entries before upload side effects.
+Publishing copies validated file objects into a private snapshot before broker,
+S3, R2, or Cloudflare uploads, so later bundle path replacement cannot change
+uploaded bytes. Local and dry-run manifests hash through rooted validated file
+handles without duplicating the bundle. Generated manifest and Markdown files
+replace reserved outputs through root-confined temporary files without
+following symlinks. Required artifact paths must resolve to regular files.
+Automatic remote failure bundles confine member names and link targets to their
+generated subtree and omit
 escaping, rooted, empty, or special-file entries. These filesystem checks do
 not redact the contents of accepted regular files.
 
@@ -402,6 +408,11 @@ repo:
   unless `CRABBOX_ARTIFACTS_PUBLIC_READS=1` explicitly opts into non-expiring
   public links; public grants add an unguessable per-grant namespace.
 
+Set the non-secret `CRABBOX_RUNTIME_ADAPTER_OWNER` and
+`CRABBOX_RUNTIME_ADAPTER_ORG` to stable deployment identities when the
+route-scoped token is enabled. Callers cannot override that identity with
+request headers.
+
 Deployments that previously relied on `CRABBOX_SHARED_TOKEN` as the implicit
 user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
 `cbxu_` tokens from the old key stop authenticating, so users must run
@@ -427,14 +438,60 @@ it to commands, print it, or store it in repo config.
 
 ## Release Integrity
 
-Production release publication accepts only a `repository_dispatch` release
-event, which GitHub runs from the default branch; version-tag pushes and
-ref-selectable workflow dispatches do not start the credentialed workflow. The
-workflow accepts only an existing exact `vMAJOR.MINOR.PATCH` tag in
-default-branch history and uses the GoReleaser configuration from the reviewed
-default-branch commit, never from the selected release tag. Re-releases may fail
-for historical tags that are incompatible with the current reviewed
-configuration rather than falling back to tag-controlled publishing behavior.
+Production releases use separate trust domains and serialized mutation gates;
+no tag push or repository event automatically publishes assets or changes the
+Homebrew tap. The source identity is an annotated `vMAJOR.MINOR.PATCH` tag whose
+signature verifies against the repository-pinned signer policy. Verification
+captures the exact tag-object and peeled commit IDs, confirms the remote tag has
+not moved, and requires the peeled commit to be an ancestor of protected
+`main`. Existing valid tags are preserved when release hardening lands later;
+they are never rewritten to point at verifier code.
+
+Release orchestration and verification come from the exact protected-default
+workflow commit, not from the tagged candidate. Trusted and candidate trees are
+separate, checkout never persists credentials, and candidate builds and
+execution do not receive GitHub, Actions runtime/OIDC, Homebrew, signing, or
+publication credentials. A narrowly scoped token may download the captured
+numeric draft and asset IDs, but it is removed before archive inspection,
+signature/notarization verification, or candidate execution.
+
+Every macOS executable archive member, plus the Apple VM helper's eventually
+executed embedded VMD, is signed as `Developer ID Application: OpenClaw
+Foundation (FWJYW4S8P8)` with the expected identifier and thin native
+architecture, hardened runtime, and secure timestamp. The VMD additionally
+requires the exact tracked entitlements. Notarization must be accepted before
+packaging. Raw command-line binaries cannot carry a stapled ticket, so Apple
+Silicon and Intel verification requires the online gate:
+
+```sh
+codesign --verify --strict --check-notarization -R=notarized <binary>
+```
+
+The private draft has an exact eight-asset inventory, immutable source and
+build provenance, and release notes byte-equal to the tagged changelog section.
+Both native macOS verifier jobs must bind their proof to the same tag object,
+source commit, protected workflow SHA, numeric release ID, asset IDs, sizes, and
+digests. Publication requires a separate authorization and changes only the
+verified draft state. A fresh public verification must finish after every
+release mutation before a separately authorized Homebrew update can begin.
+Homebrew proof re-fetches the current public record and exact successful public
+verifier run without credentials, authenticates both native proof ZIPs against
+GitHub's published artifact digests, requires the run to postdate publication
+and every release or asset update, binds formula URLs and checksums to that
+record, installs on a clean host, and re-verifies the installed binary and
+helper. It repeats the complete public metadata/proof comparison after the
+installed-candidate execution and fails if anything changed during the gate.
+
+Cancellation is fail-closed and non-destructive. Operators record the exact
+draft, public release, assets, and tap state, but never heuristically delete a
+partial release, replace assets, rewrite a tag, redispatch, publish, or change
+Homebrew while the gate is stopped. See [Release engineering](RELEASING.md) for
+the complete record and gate sequence.
+
+The preserved `v0.37.0` tag is explicitly publication-blocked in its protected
+release record because the tagged Apple VM helper ad-hoc re-signs the embedded
+VMD before execution. A new signed tag containing the byte-preserving runtime
+trust fix is required; the existing tag and source commit must not be moved.
 
 ## Managed Windows Artifact Integrity
 
@@ -580,6 +637,35 @@ lease mappings.
 
 Release is idempotent, and delete tolerates already-deleted provider resources.
 
+### Dedicated private AWS workspaces
+
+The [private AWS workspace service](features/aws-private-workspaces.md) narrows
+the workspace boundary beyond the normal SSH lease path:
+
+- the ECS task uses refreshable task-role credentials through the AWS default
+  provider chain; the task definition contains no static AWS access keys;
+- startup verifies the exact account and Region through task metadata and STS,
+  then keeps readiness closed if placement or policy differs;
+- the stack owns a separate least-privilege workspace instance role/profile
+  and a retained SSM log group;
+- the workspace subnet has no public-address assignment or direct
+  internet-gateway default route;
+- EC2 receives no public IP or key pair, IMDSv2 is mandatory, the workspace
+  security group has no ingress, and every egress rule is TCP 443;
+- SSM is the only bootstrap/control path. `ready` follows SSM registration and
+  successful command completion, not merely EC2 running state;
+- the instance and volume carry exact lease and ownership tags, but cleanup
+  still requires the durable workspace/lease/resource binding;
+- SSM and coordinator logs are evidence, not secret stores. Bearers, AWS
+  credentials, database URLs, and signed requests must remain redacted.
+
+Keep the route-scoped workspace bearer separate from the database secret, ECS
+execution role, ECS task role, workspace instance role, human AWS identity, and
+any broader Crabbox shared/admin token. The client reaches this isolation
+boundary by using the dedicated service URL; a client-side label does not
+change placement. Live deployment and canary mutation require a separate AWS
+GO.
+
 ## AWS Account Guardrails
 
 For AWS accounts, apply low-cost default-deny guardrails rather than relying on
@@ -607,8 +693,10 @@ The coordinator stores only operational metadata:
 - the command string, unless disabled.
 
 The coordinator does **not** store unbounded logs, environment values, file
-contents, or SSH keys. Run records keep bounded stdout/stderr captures (chunked,
-with a stored cap) and optional structured JUnit summaries for debugging.
+contents, or SSH private keys. For supported leases it stores the authoritative
+public SSH host key injected before first boot as operational identity metadata.
+Run records keep bounded stdout/stderr captures (chunked, with a stored cap) and
+optional structured JUnit summaries for debugging.
 
 For binary or sensitive-by-format output, use `crabbox run --capture-stdout
 <path>` or `--capture-stderr <path>` so the stream is written to a local file

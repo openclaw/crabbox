@@ -99,9 +99,10 @@ coordinator, doctor falls through to the direct provider check below.
 Provider readiness validates the selected provider without creating a lease.
 
 **Brokered path (coordinator configured).** For providers whose coordinator
-support is `supported` (`aws`, `azure`, `gcp`, `hetzner`), doctor asks the broker
-for secret readiness. Missing coordinator secret names are reported without exposing
-values, for example `missing=AZURE_TENANT_ID,AZURE_SUBSCRIPTION_ID`. The broker
+support is `supported` (`aws`, `azure`, `daytona`, `gcp`, `hetzner`), doctor asks
+the broker for secret readiness. Missing coordinator secret names are reported
+without exposing values, for example
+`missing=AZURE_TENANT_ID,AZURE_SUBSCRIPTION_ID`. The broker
 may attach additional non-mutating checks; AWS broker readiness can include EC2
 vCPU quota checks via Service Quotas. Low quotas emit advisory `warning capacity`
 lines (quota code, applied limit, default type, required vCPUs, recommended

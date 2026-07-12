@@ -1819,7 +1819,7 @@ __crabbox_setup_node() {
       *) case "$actual" in "$want") corepack enable >/dev/null 2>&1 || true; return 0 ;; esac ;;
     esac
   fi
-  local arch version dir tmp selector
+  local arch version archive checksums expected actual dir marker tmp extract selector
   arch="$(__crabbox_arch)"
   case "$dots" in
     0) selector="v${major}." ;;
@@ -1831,17 +1831,48 @@ __crabbox_setup_node() {
     echo "unable to resolve Node $major" >&2
     return 2
   fi
-	  dir="$RUNNER_TOOL_CACHE/node-${version}-linux-${arch}"
-	  if [ ! -x "$dir/bin/node" ]; then
-	    tmp="$RUNNER_TEMP/node-${version}.tar.xz"
-	    mkdir -p "$RUNNER_TOOL_CACHE" "$RUNNER_TEMP"
-	    curl -fsSL -o "$tmp" "https://nodejs.org/dist/${version}/node-${version}-linux-${arch}.tar.xz"
-	    __crabbox_ensure_xz || { echo "xz is required to extract Node archives; install xz-utils or use a fuller local-container image" >&2; return 2; }
-	    tar -xJf "$tmp" -C "$RUNNER_TOOL_CACHE"
-	  fi
-	  rm -f "$RUNNER_TOOL_CACHE/node"
-	  ln -s "$dir" "$RUNNER_TOOL_CACHE/node"
-	  export PATH="$RUNNER_TOOL_CACHE/node/bin:$PATH"
+  archive="node-${version}-linux-${arch}.tar.xz"
+  dir="$RUNNER_TOOL_CACHE/node-${version}-linux-${arch}"
+  marker="$dir/.crabbox-node-sha256"
+  tmp="$RUNNER_TEMP/$archive"
+  checksums="$RUNNER_TEMP/node-${version}-SHASUMS256.txt"
+  mkdir -p "$RUNNER_TOOL_CACHE" "$RUNNER_TEMP"
+  curl -fsSL -o "$checksums" "https://nodejs.org/dist/${version}/SHASUMS256.txt"
+  expected="$(awk -v archive="$archive" '$2 == archive || $2 == "*" archive { print $1; exit }' "$checksums")"
+  case "$expected" in ''|*[!0-9a-fA-F]*) expected= ;; esac
+  if [ "${#expected}" -ne 64 ]; then
+    echo "Node release checksums did not contain a valid digest for $archive" >&2
+    return 2
+  fi
+  if [ ! -x "$dir/bin/node" ] || [ ! -f "$marker" ] || [ "$(cat "$marker" 2>/dev/null || true)" != "$expected" ]; then
+    curl -fsSL -o "$tmp" "https://nodejs.org/dist/${version}/${archive}"
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual="$(sha256sum "$tmp" | awk '{ print $1 }')"
+    elif command -v shasum >/dev/null 2>&1; then
+      actual="$(shasum -a 256 "$tmp" | awk '{ print $1 }')"
+    else
+      echo "sha256sum or shasum is required to verify Node archives" >&2
+      return 2
+    fi
+    actual="$(printf '%s' "$actual" | tr 'A-F' 'a-f')"
+    if [ "$actual" != "$expected" ]; then
+      echo "Node archive checksum mismatch for $archive" >&2
+      return 2
+    fi
+    __crabbox_ensure_xz || { echo "xz is required to extract Node archives; install xz-utils or use a fuller local-container image" >&2; return 2; }
+    extract="$RUNNER_TEMP/node-${version}-extract"
+    rm -rf "$extract"
+    mkdir -p "$extract"
+    tar -xJf "$tmp" -C "$extract"
+    [ -x "$extract/node-${version}-linux-${arch}/bin/node" ] || { echo "Node archive has an unexpected layout" >&2; return 2; }
+    rm -rf "$dir"
+    mv "$extract/node-${version}-linux-${arch}" "$dir"
+    printf '%s\n' "$expected" >"$marker"
+    rm -rf "$extract"
+  fi
+  rm -f "$RUNNER_TOOL_CACHE/node"
+  ln -s "$dir" "$RUNNER_TOOL_CACHE/node"
+  export PATH="$RUNNER_TOOL_CACHE/node/bin:$PATH"
   corepack enable >/dev/null 2>&1 || true
 }
 __crabbox_setup_go() {

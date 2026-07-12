@@ -1634,6 +1634,26 @@ func TestNativeVNCFallbackCommandCarriesNetworkOverride(t *testing.T) {
 	}
 }
 
+func TestResolvedWebVNCCommandConfigPrefersResolvedLeaseProvider(t *testing.T) {
+	cfg := resolvedWebVNCCommandConfig(
+		Config{Provider: "azure", TargetOS: targetLinux},
+		Server{Provider: "aws"},
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+	)
+	got := nativeVNCOpenCommand(cfg, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "cbx_1")
+	if got != "crabbox vnc --provider aws --target windows --windows-mode wsl2 --id cbx_1 --open" {
+		t.Fatalf("fallback=%q", got)
+	}
+
+	bridge := strings.Join(
+		webVNCBridgeArgs(cfg, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "cbx_1", true, false),
+		" ",
+	)
+	if bridge != "--provider aws --target windows --windows-mode wsl2 --id cbx_1 --open" {
+		t.Fatalf("bridge args=%q", bridge)
+	}
+}
+
 func TestWebVNCBridgeArgsCarriesNetworkOverride(t *testing.T) {
 	got := strings.Join(webVNCBridgeArgs(
 		Config{Provider: "aws", TargetOS: targetLinux, Network: NetworkTailscale},

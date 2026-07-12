@@ -18,6 +18,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function metadataResponse(body: BodyInit | null, init: ResponseInit = {}): Response {
+  const headers = new Headers(init.headers);
+  headers.set("Metadata-Flavor", "Google");
+  return new Response(body, { ...init, headers });
+}
+
+function metadataJSON(body: unknown, init: ResponseInit = {}): Response {
+  const headers = new Headers(init.headers);
+  headers.set("Content-Type", "application/json");
+  return metadataResponse(JSON.stringify(body), { ...init, headers });
+}
+
 describe("gcp provider", () => {
   const env: Env = {
     FLEET: {} as DurableObjectNamespace,
@@ -38,6 +50,299 @@ describe("gcp provider", () => {
   it("prefers per-request project over Worker defaults", () => {
     expect(new GCPClient(env).project).toBe("default-project");
     expect(new GCPClient(env, undefined, "request-project").project).toBe("request-project");
+  });
+
+  it("uses the metadata server when service account key credentials are omitted", async () => {
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_ZONE: "us-central1-a",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    const calls: Array<{ url: string; headers: Headers; redirect?: RequestRedirect }> = [];
+    client.fetcher = async (input, init) => {
+      const url = String(input);
+      calls.push({ url, headers: new Headers(init?.headers), redirect: init?.redirect });
+      if (url.includes("metadata.google.internal")) {
+        return metadataJSON({ access_token: "metadata-token", expires_in: 1200 });
+      }
+      if (url.includes("/aggregated/instances")) {
+        return Response.json({ items: {} });
+      }
+      throw new Error(`unexpected GCP request ${url}`);
+    };
+
+    await expect(client.listCrabboxServers()).resolves.toEqual([]);
+    expect(calls[0]?.url).toContain("metadata.google.internal");
+    expect(calls[0]?.headers.get("Metadata-Flavor")).toBe("Google");
+    expect(calls[0]?.redirect).toBe("error");
+    expect(calls[1]?.headers.get("Authorization")).toBe("Bearer metadata-token");
+  });
+
+  it("retries transient metadata token failures", async () => {
+    vi.useFakeTimers();
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    let metadataCalls = 0;
+    client.fetcher = async (input) => {
+      const url = String(input);
+      if (url.includes("metadata.google.internal")) {
+        metadataCalls += 1;
+        if (metadataCalls === 1) throw new TypeError("connection refused");
+        if (metadataCalls === 2) return metadataResponse("client closed", { status: 499 });
+        if (metadataCalls === 3)
+          return metadataResponse("control plane unavailable", { status: 500 });
+        if (metadataCalls === 4) return metadataResponse("bad gateway", { status: 502 });
+        if (metadataCalls === 5) return metadataResponse("busy", { status: 503 });
+        if (metadataCalls === 6) return metadataResponse("rate limited", { status: 429 });
+        return metadataJSON({ access_token: "metadata-token", expires_in: 1200 });
+      }
+      if (url.includes("/aggregated/instances")) return Response.json({ items: {} });
+      throw new Error(`unexpected GCP request ${url}`);
+    };
+
+    const result = client.listCrabboxServers();
+    await vi.runAllTimersAsync();
+    await expect(result).resolves.toEqual([]);
+    expect(metadataCalls).toBe(7);
+  });
+
+  it("keeps the HTTP status when metadata errors are not JSON", async () => {
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    client.fetcher = async () =>
+      metadataResponse("service account disabled", { status: 401, statusText: "Unauthorized" });
+
+    await expect(client.listCrabboxServers()).rejects.toThrow(
+      "gcp metadata token: http 401: Unauthorized",
+    );
+  });
+
+  it("bounds metadata retries", async () => {
+    vi.useFakeTimers();
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    let metadataCalls = 0;
+    client.fetcher = async () => {
+      metadataCalls += 1;
+      return metadataResponse("busy", { status: 503, statusText: "Service Unavailable" });
+    };
+
+    const result = client.listCrabboxServers().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("gcp metadata token: http 503: Service Unavailable");
+    expect(metadataCalls).toBe(7);
+  });
+
+  it("bounds metadata connection retries", async () => {
+    vi.useFakeTimers();
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    let metadataCalls = 0;
+    client.fetcher = async () => {
+      metadataCalls += 1;
+      throw new TypeError("connection refused");
+    };
+
+    const result = client.listCrabboxServers().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("gcp metadata token: request failed: connection refused");
+    expect(metadataCalls).toBe(7);
+  });
+
+  it("rejects token responses without the metadata server response marker", async () => {
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    client.fetcher = async () =>
+      Response.json({ access_token: "untrusted-token", expires_in: 1200 });
+
+    await expect(client.listCrabboxServers()).rejects.toThrow(
+      "gcp metadata token: response missing Metadata-Flavor: Google",
+    );
+  });
+
+  it("bounds stalled metadata requests with an overall deadline", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    let metadataCalls = 0;
+    client.fetcher = async (_input, init) => {
+      metadataCalls += 1;
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    };
+
+    const result = client.listCrabboxServers().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("gcp metadata token: request failed: request timed out");
+    expect(metadataCalls).toBeGreaterThan(1);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(60_000);
+  });
+
+  it("keeps the metadata timeout active while reading the response body", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    let metadataCalls = 0;
+    client.fetcher = async (_input, init) => {
+      metadataCalls += 1;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener(
+            "abort",
+            () => controller.error(new DOMException("aborted", "AbortError")),
+            { once: true },
+          );
+        },
+      });
+      return metadataResponse(body);
+    };
+
+    const result = client.listCrabboxServers().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("gcp metadata token: request failed: request timed out");
+    expect(metadataCalls).toBeGreaterThan(1);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(60_000);
+  });
+
+  it("refreshes metadata tokens at the five-minute cache boundary", async () => {
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    };
+    const client = new GCPClient(metadataEnv);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "expiring-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 300,
+    };
+    const authorizations: string[] = [];
+    let metadataCalls = 0;
+    client.fetcher = async (input, init) => {
+      if (String(input).includes("metadata.google.internal")) {
+        metadataCalls += 1;
+        return metadataJSON({ access_token: "fresh-token", expires_in: 3600 });
+      }
+      authorizations.push(new Headers(init?.headers).get("Authorization") ?? "");
+      return Response.json({ items: {} });
+    };
+
+    await expect(client.listCrabboxServers()).resolves.toEqual([]);
+    expect(metadataCalls).toBe(1);
+    expect(authorizations).toEqual(["Bearer fresh-token"]);
+  });
+
+  it("keeps service account key tokens until the one-minute cache boundary", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "cached-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 120,
+    };
+    const calls: Array<{ url: string; authorization: string }> = [];
+    client.fetcher = async (input, init) => {
+      calls.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get("Authorization") ?? "",
+      });
+      return Response.json({ items: {} });
+    };
+
+    await expect(client.listCrabboxServers()).resolves.toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toContain("/aggregated/instances");
+    expect(calls[0]?.authorization).toBe("Bearer cached-token");
+  });
+
+  it("rejects partial service account key credentials", () => {
+    expect(() => new GCPClient({ ...env, GCP_PRIVATE_KEY: "" })).toThrow(
+      "GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY must be configured together",
+    );
+    expect(() => new GCPClient({ ...env, GCP_CLIENT_EMAIL: "" })).toThrow(
+      "GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY must be configured together",
+    );
+  });
+
+  it("requires explicit metadata credential source when service account key credentials are omitted", () => {
+    const metadataEnv: Env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_ZONE: "us-central1-a",
+    };
+    expect(() => new GCPClient(metadataEnv)).toThrow(
+      "GCP_CLIENT_EMAIL and GCP_PRIVATE_KEY are required unless CRABBOX_GCP_CREDENTIAL_SOURCE=metadata",
+    );
+  });
+
+  it("rejects invalid configured GCP credential sources", () => {
+    expect(
+      () => new GCPClient({ ...env, CRABBOX_GCP_CREDENTIAL_SOURCE: "workload-identity" }),
+    ).toThrow("CRABBOX_GCP_CREDENTIAL_SOURCE must be metadata or service-account-key");
   });
 
   it("rejects invalid configured GCP SSH CIDRs", () => {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,59 @@ func TestCoordinatorStatusRedactsDaytonaSSHAccessToken(t *testing.T) {
 	}
 	if status.SSHUser != "<token>" {
 		t.Fatalf("sshUser=%q, want redacted token", status.SSHUser)
+	}
+}
+
+func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
+	const sshHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILocalAuthoritativeHostKey"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/leases/") {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		lease := CoordinatorLease{
+			ID:       strings.TrimPrefix(r.URL.Path, "/v1/leases/"),
+			Provider: "aws",
+			TargetOS: targetLinux,
+			State:    "provisioning",
+		}
+		if lease.ID == "cbx_with_key" {
+			lease.SSHHostKey = sshHostKey
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+	}))
+	defer server.Close()
+
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+	for _, test := range []struct {
+		id      string
+		wantKey bool
+	}{
+		{id: "cbx_with_key", wantKey: true},
+		{id: "cbx_without_key", wantKey: false},
+	} {
+		t.Run(test.id, func(t *testing.T) {
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+			if err := app.inspect(context.Background(), []string{"--provider", "aws", "--id", test.id, "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			value, ok := got["sshHostKey"]
+			if test.wantKey {
+				if !ok || value != sshHostKey {
+					t.Fatalf("sshHostKey=%#v present=%t, want %q", value, ok, sshHostKey)
+				}
+			} else if ok {
+				t.Fatalf("sshHostKey=%#v, want omitted", value)
+			}
+		})
 	}
 }
 
@@ -403,6 +457,7 @@ func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 		SSHUser:    "ec2-user",
 		SSHPort:    "22",
 		Host:       "203.0.113.10",
+		SSHHostKey: "ssh-ed25519 AAAAauthoritative",
 		WorkRoot:   defaultMacOSWorkRoot,
 		ServerType: "mac2.metal",
 		State:      "active",
@@ -413,6 +468,9 @@ func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 	}
 	if target.TargetOS != targetMacOS || target.User != "ec2-user" || target.Port != "22" {
 		t.Fatalf("target=%#v", target)
+	}
+	if target.SSHHostKey != "ssh-ed25519 AAAAauthoritative" {
+		t.Fatalf("ssh host key=%q", target.SSHHostKey)
 	}
 	if server.Labels["work_root"] != defaultMacOSWorkRoot {
 		t.Fatalf("work_root label=%q want %q", server.Labels["work_root"], defaultMacOSWorkRoot)

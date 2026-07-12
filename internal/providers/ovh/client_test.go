@@ -5,11 +5,146 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+func TestClientRefusesCrossOriginRedirectBeforeSignedHeaderReplay(t *testing.T) {
+	var sinkRequests atomic.Int32
+	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		sinkRequests.Add(1)
+	}))
+	defer sink.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, header := range []string{"X-Ovh-Application", "X-Ovh-Consumer", "X-Ovh-Timestamp", "X-Ovh-Signature"} {
+			if r.Header.Get(header) == "" {
+				t.Errorf("origin request missing %s", header)
+			}
+		}
+		http.Redirect(w, r, sink.URL+"/stolen?location-secret=value#fragment-secret", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	client := newTestClient(t, origin.URL)
+	_, err := client.ListProjects(context.Background())
+	if !errors.Is(err, errOVHCrossOriginRedirect) {
+		t.Fatalf("error=%v want cross-origin redirect refusal", err)
+	}
+	if got := sinkRequests.Load(); got != 0 {
+		t.Fatalf("redirect sink received %d requests", got)
+	}
+	for _, leaked := range []string{"location-secret", "fragment-secret", "/stolen"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("redirect error leaked %q: %v", leaked, err)
+		}
+	}
+}
+
+func TestClientFollowsSameOriginRedirectWithSignedHeaders(t *testing.T) {
+	var redirected atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/cloud/project":
+			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+		case "/redirected":
+			redirected.Store(true)
+			for _, header := range []string{"X-Ovh-Application", "X-Ovh-Consumer", "X-Ovh-Timestamp", "X-Ovh-Signature"} {
+				if r.Header.Get(header) == "" {
+					t.Errorf("redirected request missing %s", header)
+				}
+			}
+			_ = json.NewEncoder(w).Encode([]string{"project-test"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	projects, err := client.ListProjects(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !redirected.Load() || len(projects) != 1 || projects[0].Key() != "project-test" {
+		t.Fatalf("redirected=%t projects=%v", redirected.Load(), projects)
+	}
+}
+
+func TestClientPreservesCallerRedirectPolicy(t *testing.T) {
+	wantErr := errors.New("caller stopped redirect")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	source := server.Client()
+	source.CheckRedirect = func(*http.Request, []*http.Request) error { return wantErr }
+
+	client := newTestClientWithHTTP(t, server.URL, source)
+	_, err := client.ListProjects(context.Background())
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error=%v want caller redirect policy", err)
+	}
+}
+
+func TestClientSanitizesRedirectLimit(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hop := requests.Add(1)
+		http.Redirect(w, r, fmt.Sprintf("/redirect/%d?limit-secret=value#limit-fragment", hop), http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.ListProjects(context.Background())
+	if !errors.Is(err, errOVHRedirectLimit) {
+		t.Fatalf("error=%v want redirect limit", err)
+	}
+	for _, leaked := range []string{"limit-secret", "limit-fragment", "/redirect/"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("redirect limit error leaked %q: %v", leaked, err)
+		}
+	}
+}
+
+func TestClientSanitizesMalformedRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "http://redirect.example.test/%zz?location-secret=value")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.ListProjects(context.Background())
+	if !errors.Is(err, errOVHInvalidRedirect) {
+		t.Fatalf("error=%v want invalid redirect refusal", err)
+	}
+	if strings.Contains(err.Error(), "location-secret") || strings.Contains(err.Error(), "%zz") {
+		t.Fatalf("invalid redirect error leaked Location details: %v", err)
+	}
+}
+
+func TestClientRedirectGuardUsesEffectiveOrigin(t *testing.T) {
+	base, _ := url.Parse("https://api.ovh.example.test")
+	same, _ := url.Parse("https://api.ovh.example.test:443/redirected")
+	otherPort, _ := url.Parse("https://api.ovh.example.test:444/redirected")
+	otherScheme, _ := url.Parse("http://api.ovh.example.test:443/redirected")
+	if !sameOVHOrigin(base, same) {
+		t.Fatal("default HTTPS port should share origin")
+	}
+	if sameOVHOrigin(base, otherPort) {
+		t.Fatal("different effective port should be refused")
+	}
+	if sameOVHOrigin(base, otherScheme) {
+		t.Fatal("different scheme should be refused")
+	}
+}
 
 func TestClientSignsReadOnlyRequests(t *testing.T) {
 	var gotMethod, gotPath, gotQuery, gotApplication, gotConsumer, gotTimestamp, gotSignature string
@@ -401,12 +536,17 @@ func TestClientAcceptsOVHEndpointAliasesAndHosts(t *testing.T) {
 }
 
 func newTestClient(t *testing.T, endpoint string) *Client {
+	return newTestClientWithHTTP(t, endpoint, nil)
+}
+
+func newTestClientWithHTTP(t *testing.T, endpoint string, httpClient *http.Client) *Client {
 	t.Helper()
 	client, err := newClientWithConfig(clientConfig{
 		Endpoint:          endpoint,
 		ApplicationKey:    "app-key",
 		ApplicationSecret: "app-secret",
 		ConsumerKey:       "consumer-key",
+		HTTP:              httpClient,
 		AllowTestEndpoint: true,
 	})
 	if err != nil {

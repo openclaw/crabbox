@@ -167,19 +167,50 @@ execution, and release/delete without syncing a repository.
 
 ## Brokered auth
 
-Brokered mode uses coordinator-side service-account credentials, so developer
-machines do not need Google credentials when the coordinator owns provisioning.
-The coordinator uses Compute REST calls with the configured service account and lists
-pool state through aggregated instance listing with partial success enabled, so
-one unhealthy zone does not hide healthy Crabbox VMs elsewhere.
+Brokered mode uses coordinator-side Google credentials, so developer machines
+do not need Google credentials when the coordinator owns provisioning. The
+coordinator uses Compute REST calls and lists pool state through aggregated
+instance listing with partial success enabled, so one unhealthy zone does not
+hide healthy Crabbox VMs elsewhere.
 
-Required coordinator secrets:
+The coordinator always needs a project:
 
 ```text
 GCP_PROJECT_ID   (or CRABBOX_GCP_PROJECT)
+```
+
+For a coordinator running on Google Cloud infrastructure, prefer the attached
+service account identity. GKE Workload Identity, Compute Engine, and similar
+Google-hosted runtimes can provide short-lived tokens through the metadata
+server, so no service-account private key is required in the coordinator
+environment. Enable this credential source explicitly:
+
+```text
+CRABBOX_GCP_CREDENTIAL_SOURCE=metadata
+```
+
+The attached service account still needs the IAM permissions used by the
+coordinator. On Compute Engine, configure the VM with the
+`https://www.googleapis.com/auth/cloud-platform` access scope; VM access scopes
+cap the permissions available to metadata-issued tokens even when IAM grants
+the service account broader roles.
+
+For portable coordinator deployments without metadata server credentials, set
+both service-account key variables:
+
+```text
 GCP_CLIENT_EMAIL
 GCP_PRIVATE_KEY
 ```
+
+If either `GCP_CLIENT_EMAIL` or `GCP_PRIVATE_KEY` is set, both must be set.
+When `CRABBOX_GCP_CREDENTIAL_SOURCE` is unset, brokered GCP uses the
+service-account-key path. `CRABBOX_GCP_CREDENTIAL_SOURCE=service-account-key`
+is accepted as an explicit spelling of the same default. Metadata token requests
+reject redirects and responses without Google's metadata marker, refresh before
+the metadata server's five-minute token-cache boundary, and retry
+connection/startup failures plus transient `429`, `499`, and `5xx` responses
+with bounded exponential backoff and a one-minute overall deadline.
 
 Optional coordinator defaults (same names as the direct-mode environment):
 
@@ -190,6 +221,7 @@ CRABBOX_GCP_NETWORK
 CRABBOX_GCP_TAGS
 CRABBOX_GCP_ROOT_GB
 CRABBOX_GCP_SERVICE_ACCOUNT
+CRABBOX_GCP_CREDENTIAL_SOURCE
 ```
 
 Explicit broker requests for `gcp.project`, `gcp.image`, `gcp.network`,
@@ -204,15 +236,16 @@ crabbox doctor --provider gcp
 ```
 
 Maintainers can exercise the coordinator's exact ownership boundary against a
-disposable `e2-micro`: set the three required secrets above plus
-`LIVE_SSH_PUBLIC_KEY`, then run
+disposable `e2-micro`: set the project plus either coordinator credential path
+above, then set `LIVE_SSH_PUBLIC_KEY`, then run
 `CRABBOX_GCP_RELEASE_LIVE=1 npm test --prefix worker -- --run test/gcp-release.live.test.ts`.
 The smoke proves a foreign owner claim is denied, the exact owner claim is
 deleted, and neither the instance nor its boot disk remains.
 
-The readiness check reports missing secret names without exposing values. Lease
-creation fails with `provider_not_configured` until the Worker has the
-service-account credentials.
+The readiness check reports missing configuration names without exposing values.
+Lease creation fails with `provider_not_configured` until the coordinator has a
+project plus either a complete service-account key pair or
+`CRABBOX_GCP_CREDENTIAL_SOURCE=metadata`.
 
 ## Lifecycle
 
