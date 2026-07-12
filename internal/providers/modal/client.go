@@ -27,6 +27,8 @@ type modalCreateSandboxRequest struct {
 	Name           string            `json:"name,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds"`
 	Tags           map[string]string `json:"tags"`
+	Environment    string            `json:"environment,omitempty"`
+	Secrets        []string          `json:"secrets,omitempty"`
 }
 
 type modalExecRequest struct {
@@ -310,7 +312,10 @@ const modalCreateScript = modalPythonPrelude + `
 try:
     req = load_payload()
     import modal
-    app = modal.App.lookup(req["app"], create_if_missing=True)
+    app_kwargs = {"create_if_missing": True}
+    if req.get("environment"):
+        app_kwargs["environment_name"] = req["environment"]
+    app = modal.App.lookup(req["app"], **app_kwargs)
     image_name = req.get("image") or "python:3.13-slim"
     image = modal.Image.from_registry(image_name)
     kwargs = {
@@ -322,6 +327,13 @@ try:
         kwargs["workdir"] = req["workdir"]
     if req.get("name"):
         kwargs["name"] = req["name"]
+    if req.get("environment"):
+        kwargs["environment_name"] = req["environment"]
+    if req.get("secrets"):
+        kwargs["secrets"] = [
+            modal.Secret.from_name(name, environment_name=req.get("environment") or None)
+            for name in req["secrets"]
+        ]
     sb = modal.Sandbox.create(**kwargs)
     tags = req.get("tags") or {}
     if tags:

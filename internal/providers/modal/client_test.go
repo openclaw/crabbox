@@ -35,6 +35,14 @@ func TestModalExecPreservesRemoteExit125(t *testing.T) {
 	}
 }
 
+func TestModalCreateScriptUsesNamedSecrets(t *testing.T) {
+	for _, want := range []string{"environment_name", "modal.Secret.from_name", `"secrets"`} {
+		if !strings.Contains(modalCreateScript, want) {
+			t.Fatalf("modal create script missing %q", want)
+		}
+	}
+}
+
 func TestModalExecReportsTransportExit125(t *testing.T) {
 	runner := &modalClientRunner{result: core.LocalCommandResult{ExitCode: modalTransportExitCode}}
 	client := &modalPythonClient{cfg: newTestConfig(), rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
