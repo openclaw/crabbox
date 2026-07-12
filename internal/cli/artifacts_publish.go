@@ -739,10 +739,6 @@ func uploadArtifactCloudflare(ctx context.Context, opts artifactPublishOptions, 
 	return artifactCloudflareURL(opts, key), nil
 }
 
-func commandOutputWithInput(ctx context.Context, input io.Reader, name string, args ...string) (string, error) {
-	return commandOutputWithEnvAndInput(ctx, nil, input, name, args...)
-}
-
 func commandOutputWithEnvAndInput(ctx context.Context, env []string, input io.Reader, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if env != nil {
