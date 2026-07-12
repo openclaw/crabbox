@@ -248,5 +248,5 @@ fields from diagnostic output.
 
 - [Provider reference](README.md)
 - [Provider backends](../provider-backends.md)
-- [Provider feature overview](../features/providers.md)
+- [Provider Reference](README.md)
 - [Operations](../operations.md)

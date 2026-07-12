@@ -756,5 +756,5 @@ Before landing a new backend:
 ## See also
 
 - [Authoring a provider](features/provider-authoring.md): step-by-step guide.
-- [Providers overview](features/providers.md): the full provider catalog.
+- [Provider Reference](providers/README.md): the full provider catalog.
 - [Concepts](concepts.md): how providers fit the lease/run model.

@@ -319,4 +319,4 @@ aliases.
 - [Windows VNC](../features/vnc-windows.md)
 - [macOS VNC](../features/vnc-macos.md)
 - [Tailscale](../features/tailscale.md)
-- [Providers](../features/providers.md)
+- [Providers](../providers/README.md)

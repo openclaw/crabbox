@@ -14,6 +14,17 @@ test("builds the polished feature explorer", () => {
   assert.match(out, /data-fx-filter="foundations"/);
   assert.match(out, /Choose a provider/);
   assert.match(out, /Open command reference/);
+  assert.match(out, /name="feature-search"/);
+  assert.match(out, /URLSearchParams\(location\.search\)/);
+  assert.match(out, /history\.replaceState/);
+  assert.match(out, /grid-template-columns:repeat\(auto-fit,minmax\(min\(280px,100%\),1fr\)\)/);
+  assert.match(out, /\.fx-boundary aside>a\{/);
+  assert.doesNotMatch(out, /\.fx-boundary a\{/);
+  assert.match(out, /grid-template-columns:40px minmax\(0,1fr\) 20px/);
+  assert.match(out, /\.fx-search input:focus-visible/);
+  assert.match(out, /transition:transform \.16s,border-color \.16s,box-shadow \.16s/);
+  assert.match(out, /font-size:clamp\(2\.15rem,10vw,3\.2rem\)/);
+  assert.match(out, /\.fx-console\{display:none\}/);
   assert.match(out, /Press <kbd>\/</);
   assert.equal((out.match(/data-fx-card(?:\s|>)/g) || []).length, 3);
   assert.match(out, /3 capabilities/);

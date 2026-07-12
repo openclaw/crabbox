@@ -237,7 +237,7 @@ Use repo YAML when:
 
 ## Related docs
 
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)
 - [Actions hydration](actions-hydration.md)
 - [Interactive desktop and VNC](interactive-desktop-vnc.md)
 - [run command](../commands/run.md)

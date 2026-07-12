@@ -151,7 +151,7 @@ Pick whichever matches your intent:
   [Telemetry](features/telemetry.md), [Sync](features/sync.md),
   [Hermetic agent evidence](features/hermetic-agent-evidence.md).
 - **Pick or add a target:** [Provider reference](providers/README.md),
-  [Providers feature overview](features/providers.md),
+  [Provider Reference](providers/README.md),
   [Provider selection](features/provider-selection.md),
   [Provider landscape](features/provider-landscape.md),
   [Provider live smoke](features/provider-live-smoke.md),

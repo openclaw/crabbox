@@ -113,5 +113,5 @@ crabbox stop --provider sprites <slug>
 ## Related docs
 
 - [Provider: Sprites](../providers/sprites.md)
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)
 - [Provider backends](../provider-backends.md)

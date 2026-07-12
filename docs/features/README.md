@@ -1,13 +1,16 @@
 # Features
 
-Crabbox features are the reusable capabilities that connect the local edit loop
-to a remote, observable, reviewable run. Use this page to find the contract for
-configuration, fleet control, runner access, synchronization, execution, and
-evidence.
+Crabbox features are reusable capability contracts for configuration, fleet
+control, runner access, synchronization, execution, and evidence. Use this page
+to understand what Crabbox can do after a provider has supplied the execution
+target.
 
-Provider choice and adapter-specific behavior live in the
-[Provider Reference](../providers/README.md). Exact command syntax and flags live
-in the [Command Reference](../commands/README.md).
+Provider choice, direct/coordinator routing, API-key and credential expectations,
+sandbox/provider behavior, adapter-specific caveats, and the generated provider
+matrix live in the [Provider Reference](../providers/README.md). Use
+`crabbox providers` and `crabbox providers recommend` to inspect the provider
+capabilities compiled into your current binary. Exact command syntax and flags
+live in the [Command Reference](../commands/README.md).
 
 ## Foundations
 
@@ -64,7 +67,9 @@ in the [Command Reference](../commands/README.md).
 - [Checkpoints](checkpoints.md): save, restore, and fork reusable remote workspaces.
 - [Interactive desktop and VNC](interactive-desktop-vnc.md): VNC hub, support matrix, tunnel model, and QA boundaries.
 - [Artifacts](artifacts.md): screenshots, video, trimmed GIFs, logs, metadata, templates, and PR publishing.
-- [Linux VNC](vnc-linux.md), [Windows VNC](vnc-windows.md), [macOS VNC](vnc-macos.md): OS-specific desktop setup and troubleshooting.
+- [Linux VNC](vnc-linux.md): Linux desktop setup and troubleshooting.
+- [Windows VNC](vnc-windows.md): Windows desktop setup and troubleshooting.
+- [macOS VNC](vnc-macos.md): macOS desktop setup and troubleshooting.
 - [Test results](test-results.md): JUnit summaries attached to recorded runs.
 - [Cache controls](cache.md): inspect, purge, and warm remote package/build caches.
 - [Cache volumes](cache-volumes.md): provider-backed persistent cache mounts for rebuildable speed state.
@@ -72,4 +77,3 @@ in the [Command Reference](../commands/README.md).
 ## Integrations
 
 - [Repository onboarding](repository-onboarding.md): `crabbox init`, repo config, workflow stub, and agent skill.
-- [Source map](../source-map.md): implementation files behind documented behavior.

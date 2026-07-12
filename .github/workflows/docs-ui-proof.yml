@@ -7,6 +7,9 @@ on:
       - "scripts/build-docs-site.mjs"
       - "scripts/enhance-docs-site.mjs"
       - "scripts/enhance-docs-site.test.mjs"
+      - "scripts/docs-ui-proof.mjs"
+      - "scripts/package.json"
+      - "scripts/package-lock.json"
       - ".github/workflows/docs-ui-proof.yml"
   workflow_dispatch:
 
@@ -28,6 +31,9 @@ jobs:
         with:
           node-version: 24
 
+      - name: Install locked proof dependencies
+        run: npm ci --prefix scripts
+
       - name: Build exact deployed docs output
         run: |
           node scripts/build-docs-site.mjs
@@ -43,57 +49,17 @@ jobs:
           grep -q 'Open command reference' "$page"
 
       - name: Install pinned browser
-        run: npx --yes playwright@1.55.0 install --with-deps chromium
+        run: ./scripts/node_modules/.bin/playwright install --with-deps chromium
 
-      - name: Render desktop, dark, and mobile proofs
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist/ui-proof
-          python3 -m http.server 4173 --directory dist/docs-site >/tmp/crabbox-docs-server.log 2>&1 &
-          server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          ready=0
-          for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:4173/features/ >/dev/null; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$ready" -ne 1 ]; then
-            cat /tmp/crabbox-docs-server.log
-            exit 1
-          fi
-          npx --yes playwright@1.55.0 screenshot \
-            --browser chromium \
-            --viewport-size "1440,1100" \
-            --full-page \
-            http://127.0.0.1:4173/features/ \
-            dist/ui-proof/features-desktop-light.png
-          npx --yes playwright@1.55.0 screenshot \
-            --browser chromium \
-            --color-scheme dark \
-            --viewport-size "1440,1100" \
-            --full-page \
-            http://127.0.0.1:4173/features/ \
-            dist/ui-proof/features-desktop-dark.png
-          npx --yes playwright@1.55.0 screenshot \
-            --browser chromium \
-            --viewport-size "390,844" \
-            --full-page \
-            http://127.0.0.1:4173/features/ \
-            dist/ui-proof/features-mobile.png
-          test -s dist/ui-proof/features-desktop-light.png
-          test -s dist/ui-proof/features-desktop-dark.png
-          test -s dist/ui-proof/features-mobile.png
-          sha256sum dist/ui-proof/*.png > dist/ui-proof/SHA256SUMS
+      - name: Render and exercise browser proof
+        run: node scripts/docs-ui-proof.mjs
 
       - name: Upload reviewable proof artifact
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: features-ui-proof-${{ github.event.pull_request.head.sha || github.sha }}
           path: dist/ui-proof
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
           compression-level: 6
