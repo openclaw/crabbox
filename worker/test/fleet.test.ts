@@ -1921,6 +1921,50 @@ describe("runtime adapter relay", () => {
     expect(storage.value(`webvnc-viewer-session:${sessionID}`)).toBeUndefined();
   });
 
+  it("paginates WebVNC viewer auth cleanup and alarm discovery", async () => {
+    const storage = new ObservedMemoryStorage();
+    const now = Date.now();
+    const expiredAt = new Date(now - 1_000).toISOString();
+    const futureAt = new Date(now + 60_000).toISOString();
+    for (let index = 0; index < 129; index += 1) {
+      const suffix = index.toString().padStart(3, "0");
+      storage.seed(`webvnc-viewer-session:webvnc_session_${suffix}`, {
+        expiresAt: index === 128 ? futureAt : expiredAt,
+      });
+    }
+    const fleet = testFleet(storage);
+    const internal = fleet as unknown as {
+      cleanupExpiredWebVNCPortalViewerAuth(now: number): Promise<void>;
+      webVNCPortalViewerAlarmTimes(now: number): Promise<number[]>;
+    };
+
+    await internal.cleanupExpiredWebVNCPortalViewerAuth(now);
+    expect(storage.value("webvnc-viewer-session:webvnc_session_000")).toBeUndefined();
+    expect(storage.value("webvnc-viewer-session:webvnc_session_127")).toBeUndefined();
+    expect(storage.value("webvnc-viewer-session:webvnc_session_128")).toBeDefined();
+    expect(
+      storage.listOptions.some(
+        (options) =>
+          options.prefix === "webvnc-viewer-session:" && options.startAfter !== undefined,
+      ),
+    ).toBe(true);
+
+    storage.resetListOptions();
+    for (let index = 0; index < 129; index += 1) {
+      const suffix = index.toString().padStart(3, "0");
+      storage.seed(`webvnc-viewer-ticket:webvnc_view_${suffix}`, { expiresAt: futureAt });
+    }
+    const alarmTimes = await internal.webVNCPortalViewerAlarmTimes(now);
+
+    expect(alarmTimes).toHaveLength(130);
+    expect(alarmTimes.every((time) => time === Date.parse(futureAt))).toBe(true);
+    expect(
+      storage.listOptions.some(
+        (options) => options.prefix === "webvnc-viewer-ticket:" && options.startAfter !== undefined,
+      ),
+    ).toBe(true);
+  });
+
   it("rejects restored shared-token bridges after credential rotation", async () => {
     const storage = new MemoryStorage();
     const lease = testLease({

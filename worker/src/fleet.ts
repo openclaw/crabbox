@@ -9353,28 +9353,30 @@ export class FleetCoordinator {
   ): Promise<void> {
     await Promise.all(
       prefixes.map(async (prefix) => {
-        const records = await this.state.storage.list<{ expiresAt: string }>({ prefix });
-        await Promise.all(
-          [...records.entries()]
-            .filter(([, record]) => Date.parse(record.expiresAt) <= now)
-            .map(([key]) => this.state.storage.delete(key)),
-        );
+        await this.visitStorageRecords<{ expiresAt: string }>(prefix, async (record, key) => {
+          if (Date.parse(record.expiresAt) <= now) {
+            await this.state.storage.delete(key);
+          }
+        });
       }),
     );
   }
 
   private async webVNCPortalViewerAlarmTimes(now = Date.now()): Promise<number[]> {
-    const records = await Promise.all(
-      [webVNCPortalViewerTicketPrefix(), webVNCPortalViewerSessionPrefix()].map((prefix) =>
-        this.state.storage.list<WebVNCPortalViewerTicketRecord | WebVNCPortalViewerSessionRecord>({
-          prefix,
-        }),
-      ),
+    const alarmTimes: number[] = [];
+    await Promise.all(
+      [webVNCPortalViewerTicketPrefix(), webVNCPortalViewerSessionPrefix()].map(async (prefix) => {
+        await this.visitStorageRecords<
+          WebVNCPortalViewerTicketRecord | WebVNCPortalViewerSessionRecord
+        >(prefix, (record) => {
+          const time = Date.parse(record.expiresAt);
+          if (Number.isFinite(time) && time > now) {
+            alarmTimes.push(time);
+          }
+        });
+      }),
     );
-    return records
-      .flatMap((entries) => [...entries.values()])
-      .map((record) => Date.parse(record.expiresAt))
-      .filter((time) => Number.isFinite(time) && time > now);
+    return alarmTimes;
   }
 
   private async portalLogout(request: Request): Promise<Response> {

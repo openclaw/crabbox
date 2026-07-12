@@ -18,6 +18,13 @@ type Provider struct{}
 
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return []string{"exec-provider"} }
+func (Provider) DiagnosticSecrets(cfg core.Config) []string {
+	passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
+	if password, ok := core.LookupExternalDesktopPassword(cfg, passwordEnv); ok {
+		return []string{password}
+	}
+	return nil
+}
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:        providerName,
