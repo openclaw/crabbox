@@ -1,8 +1,11 @@
 # Features
 
-Feature docs explain what Crabbox can do and how the pieces fit together. They cover the
-capability-level contract — what a feature is, when it applies, and how the parts interact.
-Command syntax and per-flag reference live in [../commands/README.md](../commands/README.md).
+Feature docs explain what Crabbox can do and how the pieces fit together. They
+cover capability-level contracts: what a feature is, when it applies, and how
+the parts interact. Provider choice, adapter implementation, and per-provider
+behavior belong in the [Provider Reference](../providers/README.md), not this
+index. Command syntax and per-flag reference live in
+[../commands/README.md](../commands/README.md).
 
 Read when:
 
@@ -38,41 +41,6 @@ Read when:
 - [Cost and usage](cost-usage.md): guardrails, provider-backed pricing, and reporting.
 - [Marketplace credits gateway](marketplace-credits.md): one customer credit balance and smart routing across brokered providers.
 - [Lifecycle cleanup](lifecycle-cleanup.md): release, expiry, keep mode, and direct cleanup.
-
-## Providers
-
-- [Providers](providers.md): provider overview, target matrix, classes, and fallback.
-- [Provider selection](provider-selection.md): choose a provider, compare adjacent
-  systems, and decide when not to add a first-class adapter.
-- [Provider landscape](provider-landscape.md): competitor map, support stance,
-  and provider capability roadmap.
-- [Provider live smoke](provider-live-smoke.md): opt-in validation contract for
-  providers that need credentials, quota, local runtimes, or private control
-  planes.
-- [Provider reference](../providers/README.md): per-adapter pages for every registered provider.
-- [Capacity and fallback](capacity-fallback.md): class chains, market spot/on-demand, and region/AZ routing.
-- [Provider backends](../provider-backends.md): contract reference for backend interfaces and registration.
-- [Authoring a provider](provider-authoring.md): step-by-step guide to writing a new provider.
-- [Delegated runner contract](delegated-runner-contract.md): portable runner schema and proof bar for non-SSH providers.
-- [XCP-ng](../providers/xcp-ng.md): direct XCP-ng provider on dedicated x86_64 pool hardware. XCP-ng itself can host Linux, Windows, and BSD guests; Crabbox normal leases use Linux templates, with separate Windows x86_64/x64 ISO E2E coverage.
-- [Incus local E2E testbed](../providers/incus.md): local Apple Silicon runbook and smoke contract for the future `incus` adapter.
-- [Slurm academic sandboxes](slurm-academic-sandboxes.md): planning contract for academic Slurm allocations through `provider: external`.
-
-Provider deep-dives that live here in `features/`:
-
-- [AWS](aws.md): EC2 Linux, Windows, WSL2, EC2 Mac, capacity, AMIs, and security groups.
-- [Private AWS workspaces](aws-private-workspaces.md): exact-account/Region, small-instance, private-network workspace API deployment.
-- [Azure](azure.md): Azure Linux, Windows, WSL2, shared infra, capacity, and cleanup.
-- [Hetzner](hetzner.md): Linux-only managed Hetzner behavior, classes, and cleanup.
-- [Blacksmith Testbox](blacksmith-testbox.md): delegated Testbox runner behavior.
-- [Namespace Devbox](namespace-devbox.md): Namespace Devbox SSH leases with Crabbox sync/run.
-- [Namespace Devbox setup](namespace-devbox-setup.md): CLI install, browser authentication, and live checks.
-- [Namespace Compute Instance](../providers/namespace-instance.md): disposable Linux Compute leases through `nsc`.
-- [Semaphore](semaphore.md): Semaphore CI job leases with Crabbox SSH sync/run.
-- [Sprites](sprites.md): Sprites microVM SSH leases through `sprite proxy`.
-- [Daytona](daytona.md): Daytona SDK/toolbox sandbox leases with optional short-lived SSH access.
-- [Islo](islo.md): delegated Islo sandbox runs using the Islo Go SDK.
-- [E2B](e2b.md): delegated E2B sandbox runs using the E2B sandbox APIs.
 
 ## Runners and reachability
 
