@@ -84,6 +84,7 @@ type CoordinatorLease struct {
 	Host                  string                `json:"host"`
 	SSHUser               string                `json:"sshUser"`
 	SSHPort               string                `json:"sshPort"`
+	SSHHostKey            string                `json:"sshHostKey,omitempty"`
 	SSHFallbackPorts      []string              `json:"sshFallbackPorts,omitempty"`
 	WorkRoot              string                `json:"workRoot"`
 	Keep                  bool                  `json:"keep"`
@@ -396,11 +397,12 @@ type CoordinatorEgressTicket struct {
 type CoordinatorEgressStatus struct {
 	LeaseID         string   `json:"leaseID"`
 	Slug            string   `json:"slug,omitempty"`
+	Active          bool     `json:"active"`
 	SessionID       string   `json:"sessionID,omitempty"`
 	Profile         string   `json:"profile,omitempty"`
 	Allow           []string `json:"allow,omitempty"`
-	HostConnected   bool     `json:"hostConnected"`
-	ClientConnected bool     `json:"clientConnected"`
+	HostConnected   *bool    `json:"hostConnected,omitempty"`
+	ClientConnected *bool    `json:"clientConnected,omitempty"`
 	CreatedAt       string   `json:"createdAt,omitempty"`
 	UpdatedAt       string   `json:"updatedAt,omitempty"`
 }
@@ -2159,6 +2161,7 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 		cfg.WindowsMode = lease.WindowsMode
 	}
 	target := sshTargetForLease(cfg, lease.Host, lease.SSHUser, lease.SSHPort)
+	target.SSHHostKey = lease.SSHHostKey
 	if server.Provider == "daytona" {
 		target.Key = ""
 		target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"

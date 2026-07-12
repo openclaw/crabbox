@@ -37,11 +37,11 @@ logged in broker=https://broker.example.com provider=aws user=alice@example.com 
 ## Flags
 
 ```text
---url <url>                       broker URL (falls back to the configured broker)
---provider hetzner|aws|azure|gcp  default brokered provider to store with the broker
---no-browser                      print the same-device GitHub login URL instead of opening it
---token-stdin                     read a broker token from stdin (operator automation)
---json                            print machine-readable JSON
+--url <url>                              broker URL (falls back to the configured broker)
+--provider aws|azure|daytona|gcp|hetzner default managed provider to store with the broker
+--no-browser                             print the same-device GitHub login URL instead of opening it
+--token-stdin                            read a broker token from stdin (operator automation)
+--json                                   print machine-readable JSON
 ```
 
 When `--url` is omitted, the configured broker URL is used; `--provider` likewise

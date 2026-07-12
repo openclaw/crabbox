@@ -140,13 +140,33 @@ describe("daytona coordinator client", () => {
     expect(accessMinutes).toEqual(["120"]);
   });
 
-  it("redacts the Worker key from provider errors", async () => {
+  it("redacts credentials from provider error diagnostics", async () => {
     const client = new DaytonaClient(baseEnv);
-    client.fetcher = async () => new Response('{"token":"daytona-test-key"}', { status: 401 });
+    client.fetcher = async () =>
+      new Response(
+        'route=iad https://passwordless-url-token@provider.example/path {"access_token":"access-value","refresh_token":"refresh-value","refreshToken":"refresh-camel-value","id_token":"id-value","idToken":"id-camel-value","secretAccessKey":"aws-camel-value","secret_access_key":"aws-snake-value","apiSecret":"api-value","workerKey":"daytona-test-key"}',
+        { status: 401 },
+      );
 
     const error = await client.listCrabboxServers().catch((caught: unknown) => caught);
-    expect(String(error)).not.toContain("daytona-test-key");
-    expect(String(error)).toContain("[redacted]");
+    const diagnostic = String(error);
+    for (const secret of [
+      "passwordless-url-token",
+      "access-value",
+      "refresh-value",
+      "refresh-camel-value",
+      "id-value",
+      "id-camel-value",
+      "aws-camel-value",
+      "aws-snake-value",
+      "api-value",
+      "daytona-test-key",
+    ]) {
+      expect(diagnostic).not.toContain(secret);
+    }
+    expect(diagnostic).toContain("[redacted]");
+    expect(diagnostic).toContain("provider.example/path");
+    expect(diagnostic).toContain("route=iad");
   });
 
   it.each(["started", "running", "ready", "active", " Active "])(

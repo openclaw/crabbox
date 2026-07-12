@@ -64,7 +64,7 @@ type artifactPulledFile struct {
 	SHA256      string `json:"sha256,omitempty"`
 }
 
-func writeArtifactManifest(opts artifactPublishOptions, files []artifactFile) (string, error) {
+func writeArtifactManifest(root *os.Root, opts artifactPublishOptions, files []artifactFile) (string, []byte, error) {
 	manifest := artifactManifest{
 		SchemaVersion: 1,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339Nano),
@@ -77,13 +77,8 @@ func writeArtifactManifest(opts artifactPublishOptions, files []artifactFile) (s
 		Files: make([]artifactManifestFile, 0, len(files)),
 	}
 	for _, file := range files {
-		info, err := os.Stat(file.Path)
-		if err != nil {
-			return "", exit(2, "stat artifact %s: %v", file.Name, err)
-		}
-		hash, err := fileSHA256(file.Path)
-		if err != nil {
-			return "", err
+		if err := requireArtifactValidation(file); err != nil {
+			return "", nil, err
 		}
 		manifest.Files = append(manifest.Files, artifactManifestFile{
 			Kind:         file.Kind,
@@ -92,8 +87,8 @@ func writeArtifactManifest(opts artifactPublishOptions, files []artifactFile) (s
 			URL:          file.URL,
 			Key:          file.Key,
 			ContentType:  artifactContentType(file.Path),
-			Size:         info.Size(),
-			SHA256:       hash,
+			Size:         file.snapshotSize,
+			SHA256:       file.snapshotHash,
 			ExpiresAt:    artifactURLExpiresAt(file.URL),
 			AccessPolicy: artifactAccessPolicy(file.URL, opts.Storage),
 		})
@@ -101,12 +96,13 @@ func writeArtifactManifest(opts artifactPublishOptions, files []artifactFile) (s
 	path := filepath.Join(opts.Directory, artifactManifestFilename)
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return "", exit(2, "encode artifact manifest: %v", err)
+		return "", nil, exit(2, "encode artifact manifest: %v", err)
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
-		return "", exit(2, "write artifact manifest: %v", err)
+	data = append(data, '\n')
+	if err := writeArtifactBundleFile(root, artifactManifestFilename, data, 0o644); err != nil {
+		return "", nil, err
 	}
-	return path, nil
+	return path, data, nil
 }
 
 func readArtifactManifestRef(ctx context.Context, ref string) (artifactManifest, string, error) {

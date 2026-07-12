@@ -210,6 +210,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		Network:          resolved.Network,
 		Tailscale:        tailscale,
 		SSHHost:          target.Host,
+		SSHHostKey:       target.SSHHostKey,
 		SSHUser:          redactedSSHUser(cfg, server, target),
 		SSHPort:          target.Port,
 		SSHFallbackPorts: target.FallbackPorts,
@@ -245,6 +246,7 @@ type StatusView struct {
 	Network          NetworkMode        `json:"network"`
 	Tailscale        *TailscaleMetadata `json:"tailscale,omitempty"`
 	SSHHost          string             `json:"sshHost"`
+	SSHHostKey       string             `json:"sshHostKey,omitempty"`
 	SSHUser          string             `json:"sshUser"`
 	SSHPort          string             `json:"sshPort"`
 	SSHFallbackPorts []string           `json:"sshFallbackPorts,omitempty"`

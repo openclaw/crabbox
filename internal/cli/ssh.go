@@ -24,6 +24,7 @@ import (
 type SSHTarget struct {
 	User                   string
 	Host                   string
+	SSHHostKey             string
 	Key                    string
 	CertificateFile        string
 	KnownHostsFile         string

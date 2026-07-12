@@ -1087,3 +1087,72 @@ func awsTestServer(id, leaseID, slug, region string) Server {
 	server.PublicNet.IPv4.IP = "203.0.113.20"
 	return server
 }
+
+func TestBootstrapSSHHostRespectsNetworkMode(t *testing.T) {
+	t.Parallel()
+	base := Config{Provider: "aws"}
+	base.Tailscale.Enabled = true
+	base.Tailscale.HostnameTemplate = "crabbox-{slug}"
+	for _, test := range []struct {
+		name    string
+		network core.NetworkMode
+		enabled bool
+		want    string
+	}{
+		{name: "auto", network: core.NetworkAuto, enabled: true, want: "203.0.113.10"},
+		{name: "public", network: core.NetworkPublic, enabled: true, want: "203.0.113.10"},
+		{name: "strict tailscale", network: core.NetworkTailscale, enabled: true, want: "crabbox-blue"},
+		{name: "tailscale not provisioned", network: core.NetworkTailscale, enabled: false, want: "203.0.113.10"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := base
+			cfg.Network = test.network
+			cfg.Tailscale.Enabled = test.enabled
+			if got := bootstrapSSHHost(cfg, "203.0.113.10", "cbx_testlease", "blue"); got != test.want {
+				t.Fatalf("got %q want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAWSAcquireUsesTailscaleHostnameOnlyForStrictMode(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		network core.NetworkMode
+		want    string
+	}{
+		{name: "auto", network: core.NetworkAuto, want: "203.0.113.20"},
+		{name: "public", network: core.NetworkPublic, want: "203.0.113.20"},
+		{name: "tailscale", network: core.NetworkTailscale, want: "crabbox-bootstrap"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			fake := &fakeAWSClient{}
+			oldClient := newAWSClient
+			newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+			oldBootstrap := bootstrapAWSWindowsDesktop
+			var bootstrapHost string
+			bootstrapAWSWindowsDesktop = func(_ context.Context, _ Config, target *SSHTarget, _ string, _ io.Writer) error {
+				bootstrapHost = target.Host
+				return nil
+			}
+			t.Cleanup(func() {
+				newAWSClient = oldClient
+				bootstrapAWSWindowsDesktop = oldBootstrap
+			})
+
+			cfg := Config{Provider: "aws", TargetOS: "linux", AWSRegion: "us-east-1", Network: test.network}
+			cfg.Tailscale.Enabled = true
+			cfg.Tailscale.AuthKey = "test-auth-key"
+			cfg.Tailscale.HostnameTemplate = "crabbox-{slug}"
+			backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+			if _, err := backend.acquireOnce(context.Background(), false, "bootstrap"); err != nil {
+				t.Fatal(err)
+			}
+			if bootstrapHost != test.want {
+				t.Fatalf("bootstrap host=%q, want %q", bootstrapHost, test.want)
+			}
+		})
+	}
+}

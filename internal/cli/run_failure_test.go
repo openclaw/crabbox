@@ -344,22 +344,24 @@ func TestPrintRunFailureDigestIncludesStructuredTestFailures(t *testing.T) {
 			Tests:    2,
 			Failures: 1,
 			Failed: []TestFailure{{
-				File:    "src/example.test.ts",
-				Name:    "renders",
-				Kind:    "failure",
-				Message: "expected true",
+				File:      "src/example.test.ts\x1b]0;file\x07",
+				Classname: "ui\u202e",
+				Name:      "renders\bhidden",
+				Kind:      "failure\u0085",
+				Message:   "expected true\rspoofed",
 			}},
 		},
 	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
 	out := buf.String()
 	for _, want := range []string{
 		"test_results: files=1 tests=2 failures=1 errors=0 skipped=0",
-		"failed_test: src/example.test.ts failure  renders - expected true",
+		`failed_test: src/example.test.ts\u001B]0;file\u0007 failure\u0085 ui\u202E.renders\u0008hidden - expected true\u000Dspoofed`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("digest missing %q:\n%s", want, out)
 		}
 	}
+	assertTerminalSafe(t, out)
 }
 
 func TestFailureDigestSuppressesScriptRetryCommand(t *testing.T) {

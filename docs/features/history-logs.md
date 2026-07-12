@@ -7,11 +7,11 @@ Read when:
 - deciding what belongs in coordinator-stored run history.
 
 History and logs are a **brokered-mode** feature. When `crabbox run` executes
-against a brokered provider (`aws`, `azure`, `gcp`, `hetzner` with a coordinator
-configured), the CLI mirrors the run into coordinator storage as a durable,
-queryable record. Direct-provider runs and delegated runs do not
-produce central history — there you have only the live terminal output and any
-local captures you ask for.
+against a brokered provider (`aws`, `azure`, `daytona`, `gcp`, `hetzner` with a
+coordinator configured), the CLI mirrors the run into coordinator storage as a
+durable, queryable record. Direct-provider runs and delegated runs do not produce
+central history — there you have only the live terminal output and any local
+captures you ask for.
 
 ## What a recorded run contains
 

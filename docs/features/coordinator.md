@@ -17,9 +17,9 @@ and runs through either:
 - the Node.js service with PostgreSQL and pg-boss (`worker/node`).
 
 The default `broker.mode: managed` lets brokerable providers (`aws`, `azure`,
-`gcp`, and `hetzner`) transfer lifecycle operations to the coordinator. Every
-other adapter runs direct from the CLI. A brokerable provider also runs direct
-unless a broker URL is configured (`CRABBOX_COORDINATOR`, or
+`daytona`, `gcp`, and `hetzner`) transfer lifecycle operations to the coordinator.
+Every other adapter runs direct from the CLI. A brokerable provider also runs
+direct unless a broker URL is configured (`CRABBOX_COORDINATOR`, or
 `config set-broker --url`).
 
 `broker.mode: registered` is provider-neutral. Provisioning, SSH, touch, and
@@ -33,12 +33,14 @@ the portal then confirms provider deletion through that adapter before removing
 the registration. Registered records remain excluded from provider access
 reconciliation, ready pools, image operations, orphan sweeps, and cost totals.
 
-The coordinator brokers the **control plane**, not the data plane. Lease
-lifecycle, run recording, usage, and bridges flow through the coordinator over
-HTTP. SSH readiness, rsync, command execution, and output streaming always
-happen directly from the CLI to the runner host and never traverse the
-coordinator. See
-[Architecture](../architecture.md) for the full topology.
+For normal CLI leases, the coordinator brokers the **control plane**, not the
+data plane. Lease lifecycle, run recording, usage, and bridges flow through the
+coordinator over HTTP. SSH readiness, rsync, command execution, and output
+streaming happen directly from the CLI to the runner host and never traverse
+the coordinator. The dedicated
+[private AWS workspace service](aws-private-workspaces.md) is a separate
+SSM-only workspace API path. See [Architecture](../architecture.md) for the full
+topology.
 
 ## Responsibilities
 

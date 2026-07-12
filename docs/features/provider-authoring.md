@@ -200,10 +200,10 @@ Rules:
     creates a sandbox. This is a create-time attachment contract, not a generic
     Crabbox MCP host.
 - `Coordinator` is `CoordinatorSupported` only when the shared coordinator
-  provider adapter can provision your runners. Today that is `aws`, `azure`, `gcp`, and
-  `hetzner`. Everything else — all delegated run backends and Static SSH —
-  sets `CoordinatorNever`. Even a `CoordinatorSupported` provider runs direct
-  from the CLI unless a broker URL is configured (see
+  provider adapter can provision your runners. Today that is `aws`, `azure`,
+  `daytona`, `gcp`, and `hetzner`. Everything else — all delegated run backends
+  and Static SSH — sets `CoordinatorNever`. Even a `CoordinatorSupported`
+  provider runs direct from the CLI unless a broker URL is configured (see
   [Coordinator](coordinator.md)).
 
 Actions runner hydration is not a feature flag. Core checks for an SSH lease

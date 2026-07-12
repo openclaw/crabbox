@@ -444,21 +444,11 @@ func mediaCommandOutput(ctx context.Context, childEnvDenylist []string, name str
 	if len(childEnvDenylist) == 0 {
 		return commandOutput(ctx, name, args...)
 	}
-	return commandOutputWithEnv(ctx, childEnvironmentWithout(os.Environ(), childEnvDenylist...), name, args...)
+	return commandOutputWithEnvAndInput(ctx, childEnvironmentWithout(os.Environ(), childEnvDenylist...), nil, name, args...)
 }
 
 func commandOutput(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	err := cmd.Run()
-	return out.String(), err
-}
-
-func commandOutputWithEnv(ctx context.Context, env []string, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = env
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out

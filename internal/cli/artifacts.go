@@ -20,6 +20,21 @@ type artifactFile struct {
 	Path string `json:"path"`
 	URL  string `json:"url,omitempty"`
 	Key  string `json:"key,omitempty"`
+
+	rootName       string
+	sourceInfo     os.FileInfo
+	bundleDirInfos []os.FileInfo
+	bundleOutputs  []artifactBundleOutput
+	snapshotFile   *os.File
+	snapshotOffset int64
+	snapshotSize   int64
+	snapshotHash   string
+	snapshotValid  bool
+}
+
+type artifactBundleOutput struct {
+	rootName string
+	info     os.FileInfo
 }
 
 type artifactBundleMetadata struct {
@@ -573,38 +588,92 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 		}
 	}
 	ensureArtifactPublishPrefix(&opts)
-	files, err := listArtifactBundleFiles(opts.Directory)
+	absDirectory, err := filepath.Abs(opts.Directory)
+	if err != nil {
+		return nil, "", "", exit(2, "resolve artifact directory: %v", err)
+	}
+	bundleRoot, err := os.OpenRoot(opts.Directory)
+	if err != nil {
+		return nil, "", "", exit(2, "read artifact directory: %v", err)
+	}
+	defer bundleRoot.Close()
+	resolvedDirectory, rootInfo, err := validateArtifactBundleRoot(bundleRoot, absDirectory)
+	if err != nil {
+		return nil, "", "", err
+	}
+	var summaryBinding *artifactSummaryBinding
+	if strings.TrimSpace(opts.SummaryFile) != "" {
+		summaryBinding, err = bindArtifactSummaryFile(opts.SummaryFile)
+		if err != nil {
+			return nil, "", "", err
+		}
+		defer summaryBinding.file.Close()
+	}
+	files, err := listArtifactBundleRoot(bundleRoot, opts.Directory)
 	if err != nil {
 		return nil, "", "", err
 	}
 	if len(files) == 0 {
 		return nil, "", "", exit(2, "artifact directory has no files: %s", opts.Directory)
 	}
-	summary, err := summaryText(opts.Summary, opts.SummaryFile)
+	publishFiles := files
+	cleanupSnapshots := func() {}
+	needsSnapshots := opts.Storage != "local" && !opts.DryRun
+	if needsSnapshots {
+		publishFiles, cleanupSnapshots, err = snapshotArtifactFiles(bundleRoot, files)
+		if err != nil {
+			return nil, "", "", err
+		}
+	} else if !opts.NoManifest || opts.Storage == "broker" {
+		publishFiles, err = hashValidatedArtifactFiles(bundleRoot, files)
+		if err != nil {
+			return nil, "", "", err
+		}
+	}
+	defer cleanupSnapshots()
+	summary, cleanupSummarySnapshot, err := artifactPublishSummaryText(
+		opts.Summary,
+		summaryBinding,
+		artifactSummaryInsideBundle(absDirectory, resolvedDirectory, rootInfo, summaryBinding, files),
+		bundleRoot,
+		publishFiles,
+	)
 	if err != nil {
 		return nil, "", "", err
 	}
+	defer cleanupSummarySnapshot()
 	var published []artifactFile
 	if opts.Storage == "broker" {
-		published, err = publishArtifactFilesBroker(ctx, coord, opts, files)
+		published, err = publishArtifactFilesBroker(ctx, coord, opts, publishFiles)
 	} else {
-		published, err = publishArtifactFiles(ctx, opts, files)
+		published, err = publishArtifactFiles(ctx, opts, publishFiles)
 	}
 	if err != nil {
 		return nil, "", "", err
 	}
 	manifestPath := ""
 	if !opts.NoManifest {
-		manifestPath, err = writeArtifactManifest(opts, published)
+		var manifestData []byte
+		manifestPath, manifestData, err = writeArtifactManifest(bundleRoot, opts, published)
 		if err != nil {
 			return nil, "", "", err
 		}
-		manifestFile := artifactFile{Kind: "manifest", Name: artifactManifestFilename, Path: manifestPath}
+		manifestFiles := []artifactFile{{Kind: "manifest", Name: artifactManifestFilename, Path: manifestPath}}
+		cleanupManifestSnapshot := func() {}
+		if opts.Storage != "local" && !opts.DryRun {
+			manifestFiles, cleanupManifestSnapshot, err = snapshotArtifactData(bundleRoot, manifestFiles[0], manifestData)
+			if err != nil {
+				return nil, "", "", err
+			}
+		} else {
+			manifestFiles[0] = validatedArtifactData(manifestFiles[0], manifestData)
+		}
+		defer cleanupManifestSnapshot()
 		var manifestPublished []artifactFile
 		if opts.Storage == "broker" {
-			manifestPublished, err = publishArtifactFilesBroker(ctx, coord, opts, []artifactFile{manifestFile})
+			manifestPublished, err = publishArtifactFilesBroker(ctx, coord, opts, manifestFiles)
 		} else {
-			manifestPublished, err = publishArtifactFiles(ctx, opts, []artifactFile{manifestFile})
+			manifestPublished, err = publishArtifactFiles(ctx, opts, manifestFiles)
 		}
 		if err != nil {
 			return nil, "", "", err
@@ -613,8 +682,8 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 	}
 	body := artifactTemplateMarkdown(opts.Template, summary, "", "", published)
 	bodyPath := filepath.Join(opts.Directory, "published-artifacts.md")
-	if err := os.WriteFile(bodyPath, []byte(body), 0o644); err != nil {
-		return nil, "", "", exit(2, "write publish markdown: %v", err)
+	if err := writeArtifactBundleFile(bundleRoot, "published-artifacts.md", []byte(body), 0o644); err != nil {
+		return nil, "", "", err
 	}
 	if opts.PR > 0 && !opts.NoComment {
 		if opts.Storage == "local" && opts.BaseURL == "" {
@@ -622,7 +691,7 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 		}
 		if opts.DryRun {
 			fmt.Fprintf(a.Stdout, "dry-run comment: gh issue comment %d --body-file %s\n", opts.PR, bodyPath)
-		} else if err := postGitHubPRComment(ctx, opts, bodyPath); err != nil {
+		} else if err := postGitHubPRComment(ctx, opts, []byte(body)); err != nil {
 			return nil, "", "", err
 		}
 	}

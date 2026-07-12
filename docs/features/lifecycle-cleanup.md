@@ -14,9 +14,9 @@ through a coordinator.
 
 ## Brokered lifecycle
 
-When a provider is brokered (only `aws`, `azure`, `gcp`, and `hetzner`, and only
-when a coordinator URL is configured), the coordinator owns the lease record
-and its lifecycle. A brokered lease record moves through four states
+When a provider is brokered (only `aws`, `azure`, `daytona`, `gcp`, and
+`hetzner`, and only when a coordinator URL is configured), the coordinator owns
+the lease record and its lifecycle. A brokered lease record moves through four states
 (`worker/src/types.ts`):
 
 ```text
@@ -33,8 +33,9 @@ persists once the box exists.
 
 While a command runs, the CLI heartbeats the active lease (`POST
 /v1/leases/{id}/heartbeat`). A heartbeat is a touch: it bumps `lastTouchedAt`,
-recomputes `expiresAt`, clears any pending cleanup metadata, and refreshes
-provider SSH access where the provider supports it.
+recomputes `expiresAt`, clears stale cleanup metadata, and refreshes provider SSH
+access where the provider supports it. Heartbeats at or after `expiresAt` are
+rejected so they cannot revive a lease once expiry cleanup owns it.
 
 Expiry is the minimum of two clocks (`leaseExpiresAt` in `worker/src/fleet.ts`):
 

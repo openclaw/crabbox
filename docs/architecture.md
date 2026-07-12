@@ -29,10 +29,13 @@ Crabbox has three parts:
   delegated sandboxes that actually run commands. See the
   [provider reference](features/providers.md).
 
-The coordinator manages leases. The CLI executes work. Runners do not call back
-to the coordinator for ordinary command execution; lease bridges (WebVNC,
-code-server, egress) are the only on-demand paths that route runner traffic
-through it.
+For normal CLI leases, the coordinator manages leases and the CLI executes
+work. Runners do not call back to the coordinator for ordinary command
+execution; lease bridges (WebVNC, code-server, egress) are the only on-demand
+paths that route runner traffic through it. The dedicated
+[private AWS workspace service](features/aws-private-workspaces.md) is a
+separate route-scoped API deployment that bootstraps an SSM-only workspace from
+the coordinator and exposes no SSH path.
 
 ```text
 developer machine
@@ -162,8 +165,9 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
   run-event subscriptions and lease heartbeats. Cloudflare can hibernate
   sockets; Node keeps them in process and clients reconnect after restarts.
 - **Provider operations** — per-provider adapters (`aws.ts`, `azure.ts`,
-  `gcp.ts`, `hetzner.ts`) handle provision/release/images/identity/capacity. The
-  core stays provider-neutral through hooks such as `prepareLeaseCreate`,
+  `daytona.ts`, `gcp.ts`, `hetzner.ts`) handle provision/release and their
+  supported image, identity, and capacity hooks. The core stays provider-neutral
+  through hooks such as `prepareLeaseCreate`,
   `createServerWithFallback`, `finalizeLeaseCreate`, and `hourlyPriceUSD`.
 
 Runtime-specific persistence and scheduling stay behind `CoordinatorRuntime`:

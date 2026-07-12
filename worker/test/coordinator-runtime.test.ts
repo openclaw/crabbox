@@ -25,12 +25,12 @@ class MemoryStorage implements CoordinatorStorage {
   private readonly values = new Map<string, unknown>();
   beforeGet?: (key: string) => Promise<void>;
 
-  async get<T>(key: string): Promise<T | undefined> {
+  async get<T>(key: string, _options?: { noCache?: boolean }): Promise<T | undefined> {
     await this.beforeGet?.(key);
     return this.values.get(key) as T | undefined;
   }
 
-  async put<T>(key: string, value: T): Promise<void> {
+  async put<T>(key: string, value: T, _options?: { noCache?: boolean }): Promise<void> {
     this.values.set(key, value);
   }
 
@@ -46,6 +46,7 @@ class MemoryStorage implements CoordinatorStorage {
     prefix?: string;
     limit?: number;
     startAfter?: string;
+    noCache?: boolean;
   } = {}): Promise<Map<string, T>> {
     const entries = [...this.values]
       .toSorted(([left], [right]) => left.localeCompare(right))

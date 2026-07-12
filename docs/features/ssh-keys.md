@@ -6,9 +6,9 @@ Read when:
 - debugging SSH authentication or host-key trust;
 - changing how provider key pairs are imported or cleaned up.
 
-Crabbox generates a fresh SSH key per lease by default. This keeps a long-lived
-personal key out of every runner and gives the provider layer a predictable,
-per-lease resource name it can import and later delete.
+Crabbox generates a fresh SSH client authentication key per lease by default.
+This keeps a long-lived personal key out of every runner and gives the provider
+layer a predictable, per-lease resource name it can import and later delete.
 
 ## Per-lease key generation
 
@@ -28,6 +28,21 @@ Linux:   ~/.config/crabbox/testboxes/<lease>/id_ed25519
 The matching `<lease>/id_ed25519.pub` sits beside it. The key directory is
 created with `0700` permissions.
 
+## Provisioned host identity
+
+For supported coordinator-backed Linux leases, the coordinator also generates
+a separate Ed25519 server host-key pair and injects it before the machine's
+first boot. It stores only the public half on the lease record; the private half
+is sent only in the provider bootstrap payload. `crabbox inspect --json`
+exposes the public identity as `sshHostKey` in exact `algorithm base64` form for
+automation that pins the server identity before connecting.
+
+This pre-boot path is available for Hetzner, GCP, and non-private AWS Linux
+leases, and for Azure Linux leases not created from a snapshot. The field is
+omitted for private AWS workspaces, Windows, macOS, Daytona, Azure snapshot,
+registered, and direct-provider leases, where Crabbox cannot authoritatively
+inject a host key before boot.
+
 ## Host-key trust and connection reuse
 
 A per-lease `known_hosts` file lives next to the key
@@ -44,6 +59,9 @@ A per-lease `known_hosts` file lives next to the key
 Because host keys are scoped to the lease's own file, a reused provider IP from
 a previous lease never poisons the user's global `~/.ssh/known_hosts`, and two
 leases sharing an address do not cross host-key state.
+
+The coordinator host-key metadata does not change this interactive trust path:
+`crabbox ssh` continues to use per-lease TOFU with `accept-new`.
 
 On macOS and Linux, connection multiplexing is enabled
 (`ControlMaster=auto`, `ControlPersist=10m`) with a `ControlPath` scoped by the
