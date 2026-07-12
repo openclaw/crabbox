@@ -1,0 +1,15 @@
+# Protected release workflow and trust policy.
+/.github/CODEOWNERS @openclaw/openclaw-secops
+/.github/release-allowed-signers @openclaw/openclaw-secops
+/.github/workflows/release-assets.yml @openclaw/openclaw-secops
+/.mac-release.env @openclaw/openclaw-secops
+/.goreleaser.yaml @openclaw/openclaw-secops
+/release/records/ @openclaw/openclaw-secops
+/scripts/*release* @openclaw/openclaw-secops
+/scripts/*publish* @openclaw/openclaw-secops
+/scripts/codesign-* @openclaw/openclaw-secops
+/scripts/render-homebrew-formula.mjs @openclaw/openclaw-secops
+/scripts/verify-macos-* @openclaw/openclaw-secops
+
+# Every eventually executed Apple VM Mach-O shares this boundary.
+/internal/applevmhelper/ @openclaw/openclaw-secops

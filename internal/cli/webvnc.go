@@ -874,6 +874,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	if err := validateWebVNCResolvedProviderIdentity(cfg, server, target, leaseID, expectedIdentity); err != nil {
 		return err
 	}
+	commandCfg := resolvedWebVNCCommandConfig(cfg, server, target)
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
@@ -898,7 +899,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 		}
 	}
 	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=%s\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider), blank(target.TargetOS, cfg.TargetOS))
-	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
+	rescueCtx := rescueContext{Cfg: commandCfg, Target: target, LeaseID: leaseID}
 	if daemonErr != nil {
 		fmt.Fprintf(a.Stdout, "webvnc daemon: error=%v\n", daemonErr)
 	} else {
@@ -951,7 +952,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 			fmt.Fprintf(a.Stdout, "username: %s\n", strings.TrimSpace(username))
 		}
 	}
-	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(cfg, target, leaseID))
+	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(commandCfg, target, leaseID))
 	if statusErr == nil && !status.BridgeConnected {
 		printRescue(a.Stdout, rescueVNCBridgeNotRunning, "portal has no active WebVNC bridge for this lease", webVNCDaemonStartRescueCommand(rescueCtx), webVNCResetRescueCommand(rescueCtx))
 	} else if statusErr == nil && webVNCObserverSlotsExhausted(status) {
@@ -1015,6 +1016,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
+	commandCfg := resolvedWebVNCCommandConfig(cfg, server, target)
 	if automaticMacOSPortal {
 		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, false); err != nil {
 			return err
@@ -1032,7 +1034,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if _, err := a.stopWebVNCDaemonIfRunning(leaseID); err != nil {
 		return err
 	}
-	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
+	rescueCtx := rescueContext{Cfg: commandCfg, Target: target, LeaseID: leaseID}
 	if out, err := runSSHCombinedOutput(ctx, target, webVNCResetRemoteCommand(target)); err != nil {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx))
 		return exit(5, "reset target WebVNC/input stack: %v", err)
@@ -1051,7 +1053,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	daemonArgs := webVNCBridgeArgs(cfg, target, leaseID, *openPortal, *takeControl)
+	daemonArgs := webVNCBridgeArgs(commandCfg, target, leaseID, *openPortal, *takeControl)
 	daemonName := *id
 	if strings.TrimSpace(daemonName) == "" {
 		daemonName = leaseID
@@ -1064,7 +1066,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if strings.TrimSpace(password) != "" {
 		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
 	}
-	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(cfg, target, leaseID))
+	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(commandCfg, target, leaseID))
 	return nil
 }
 
@@ -2084,6 +2086,19 @@ func nativeVNCOpenCommand(cfg Config, target SSHTarget, leaseID string) string {
 	args = append(args, providerCommandRoutingArgs(cfg, leaseID)...)
 	args = append(args, "--id", leaseID, "--open")
 	return strings.Join(readableShellWords(args), " ")
+}
+
+func resolvedWebVNCCommandConfig(cfg Config, server Server, target SSHTarget) Config {
+	if provider := strings.TrimSpace(server.Provider); provider != "" {
+		cfg.Provider = provider
+	}
+	if targetOS := strings.TrimSpace(target.TargetOS); targetOS != "" {
+		cfg.TargetOS = targetOS
+	}
+	if windowsMode := strings.TrimSpace(target.WindowsMode); windowsMode != "" {
+		cfg.WindowsMode = windowsMode
+	}
+	return cfg
 }
 
 func stripLegacyWebVNCDaemonFlags(args []string) []string {

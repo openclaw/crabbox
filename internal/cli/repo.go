@@ -177,7 +177,7 @@ func syncGitSeedDecision(cfg Config, repo Repo) (enabled, credentialBlocked bool
 }
 
 func warnCredentialBearingGitSeed(w io.Writer) {
-	fmt.Fprintln(w, "warning: git seed disabled because origin URL contains embedded HTTP credentials; continuing with file sync without forwarding the remote URL")
+	fmt.Fprintln(w, "warning: git seed disabled because origin URL contains embedded credentials; continuing with file sync without forwarding the remote URL")
 }
 
 func SyncExcludes(root string, cfg Config) ([]string, error) {
@@ -270,24 +270,30 @@ func remoteGitSeedSourceCandidate(repo Repo) bool {
 
 func gitRemoteURLHasCredentials(remoteURL string) bool {
 	raw := strings.TrimSpace(remoteURL)
-	lower := strings.ToLower(raw)
-	schemeEnd := 0
-	switch {
-	case strings.HasPrefix(lower, "https://"):
-		schemeEnd = len("https://")
-	case strings.HasPrefix(lower, "http://"):
-		schemeEnd = len("http://")
-	default:
+	schemeEnd := strings.Index(raw, "://")
+	if schemeEnd <= 0 {
 		return false
 	}
+	scheme := strings.ToLower(raw[:schemeEnd])
 	if parsed, err := url.Parse(raw); err == nil && parsed.User != nil {
-		return true
+		if scheme == "http" || scheme == "https" {
+			return true
+		}
+		_, hasPassword := parsed.User.Password()
+		return hasPassword
 	}
-	authority := raw[schemeEnd:]
+	authority := raw[schemeEnd+len("://"):]
 	if end := strings.IndexAny(authority, "/?#"); end >= 0 {
 		authority = authority[:end]
 	}
-	return strings.Contains(authority, "@")
+	userinfoEnd := strings.LastIndex(authority, "@")
+	if userinfoEnd < 0 {
+		return false
+	}
+	if scheme == "http" || scheme == "https" {
+		return true
+	}
+	return strings.Contains(authority[:userinfoEnd], ":")
 }
 
 func defaultBaseRef(root string) string {

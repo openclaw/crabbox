@@ -22,7 +22,7 @@ Crabbox has three implementation surfaces:
 - **Coordinator** — TypeScript, under `worker/src` and `worker/node`. Shared
   `FleetCoordinator` behavior runs either in a Cloudflare Worker plus one
   Durable Object or in Node.js backed by PostgreSQL and pg-boss. Only `aws`,
-  `azure`, `gcp`, and `hetzner` can transfer provider lifecycle to it;
+  `azure`, `daytona`, `gcp`, and `hetzner` can transfer provider lifecycle to it;
   everything else runs direct or delegated from the CLI.
 
 ## CLI Surface
@@ -140,8 +140,9 @@ Shared and registration:
 Coordinator-side provider operations (brokered providers only):
 
 - Hetzner: `worker/src/hetzner.ts`
-- AWS EC2 (provision, capacity fallback, Mac hosts, orphan sweep): `worker/src/aws.ts`
+- AWS EC2 (provision, capacity fallback, private SSM workspaces, Mac hosts, orphan sweep): `worker/src/aws.ts`
 - Azure / GCP provision and image routes: `worker/src/azure.ts`, `worker/src/gcp.ts`
+- Daytona sandbox lifecycle and rotating SSH access: `worker/src/daytona.ts`
 - Image create/read/delete/promote routing: `worker/src/fleet.ts`, `worker/src/os-image.ts`
 
 Bootstrap:
@@ -213,13 +214,13 @@ Provider docs:
 - GitHub OAuth login flow and user-token issuance: `worker/src/oauth.ts`
 - Shared fleet routes and behavior: `worker/src/fleet.ts`
 - Cloudflare runtime adapter: `worker/src/coordinator-runtime.ts`
-- Node.js/PostgreSQL runtime, HTTP/WebSocket server, and durable jobs: `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts`, `worker/node/server.ts`
+- Node.js/PostgreSQL runtime, HTTP/WebSocket server, default-chain AWS credentials, private AWS deployment guard, and durable jobs: `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts`, `worker/node/server.ts`, `worker/node/aws-credentials.ts`, `worker/node/aws-deployment.ts`
 - Node request limits, trusted proxy handling, and graceful shutdown: `worker/node/server-support.ts`, `worker/node/server.ts`
 - Direct-provider coordinator registration and automatic WebVNC bridge startup: `internal/cli/coordinator_registration.go`, `internal/cli/coordinator.go`, `internal/cli/webvnc.go`
 - Browser portal lease detail, bridge status, and run log/event pages: `worker/src/portal.ts`, `worker/src/fleet.ts`
 - Usage aggregation, pricing fallback, owner/org limits, and cost guardrails: `worker/src/usage.ts`
 - Worker package scripts and dependencies: `worker/package.json`
-- Coordinator deployment config: `worker/wrangler.jsonc`, `worker/wrangler.cloudflare.jsonc`, `worker/Dockerfile.node`
+- Coordinator deployment config: `worker/wrangler.jsonc`, `worker/wrangler.cloudflare.jsonc`, `worker/Dockerfile.node`, `deploy/aws/ecs-fargate-coordinator.yaml`
 
 ## Cross-cutting Feature Docs
 
@@ -247,8 +248,9 @@ Provider docs:
 - Go module and toolchain version: `go.mod`
 - Go core coverage gate: `scripts/check-go-coverage.sh`
 - CI gate: `.github/workflows/ci.yml`
-- Release workflow and Homebrew tap fallback: `.github/workflows/release.yml`
-- GoReleaser archives and Homebrew formula config: `.goreleaser.yaml`
+- Protected native release verifier: `.github/workflows/release-assets.yml`
+- Credential-free GoReleaser archive config: `.goreleaser.yaml`
+- Local signing, draft, publication, and downstream proof contract: `docs/RELEASING.md`, `scripts/package-release.sh`, `scripts/create-release-draft.sh`, `scripts/publish-release.sh`, `scripts/verify-homebrew-release.sh`
 - Docs command-surface check, link check, site builder, and Pages deploy: `scripts/check-command-docs.mjs`, `scripts/check-docs-links.mjs`, `scripts/build-docs-site.mjs`, `.github/workflows/pages.yml`
 - Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-github-codespaces-smoke.sh`, `scripts/live-vultr-smoke.sh`, `scripts/live-vast-smoke.sh`, and `scripts/live-superserve-smoke.sh`
 - Live coordinator auth smoke coverage: `scripts/live-auth-smoke.sh`

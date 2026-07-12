@@ -15,7 +15,7 @@ privilege levels:
 | **Shared bearer token** | `crabbox login --token-stdin` or `config set-broker --token-stdin` | All non-admin routes, acting as one shared identity |
 | **Admin token** | `config set-broker --admin-token-stdin` or `CRABBOX_COORDINATOR_ADMIN_TOKEN` | Fleet-wide admin routes |
 
-The broker only authorizes brokered providers (`aws`, `azure`, `gcp`,
+The broker only authorizes brokered providers (`aws`, `azure`, `daytona`, `gcp`,
 `hetzner`); all other providers run direct from the CLI and never see these
 tokens. For the route and Cloudflare Access model, see
 [Broker Auth And Routing](broker-auth-routing.md).

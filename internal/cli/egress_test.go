@@ -17,6 +17,42 @@ import (
 	"nhooyr.io/websocket"
 )
 
+func TestFormatEgressStatusPreservesDetailedAndCoarseState(t *testing.T) {
+	connected := true
+	disconnected := false
+	tests := []struct {
+		name   string
+		status CoordinatorEgressStatus
+		want   string
+	}{
+		{
+			name: "manager detail",
+			status: CoordinatorEgressStatus{
+				LeaseID:         "cbx_123",
+				Active:          true,
+				SessionID:       "egress_123",
+				Profile:         "custom",
+				Allow:           []string{"example.com"},
+				HostConnected:   &connected,
+				ClientConnected: &disconnected,
+			},
+			want: "egress: lease=cbx_123 session=egress_123 profile=custom host=true client=false allow=example.com",
+		},
+		{
+			name:   "shared coarse state",
+			status: CoordinatorEgressStatus{LeaseID: "cbx_123", Active: true},
+			want:   "egress: lease=cbx_123 active=true",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := formatEgressStatus(test.status); got != test.want {
+				t.Fatalf("formatEgressStatus()=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestEgressHostAllowedMatchesExactAndWildcards(t *testing.T) {
 	allow := []string{"discord.com", "*.discordcdn.com"}
 	for _, host := range []string{"discord.com", "cdn.discordcdn.com", "media.cdn.discordcdn.com"} {

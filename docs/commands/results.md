@@ -83,6 +83,8 @@ failed:
 `--failed-only` drops the totals line and prints just the failing cases. When
 no failures are recorded it prints `no failed test cases recorded`. If the run
 has no results at all, plain output is `no test results recorded for <run-id>`.
+Human-readable failure fields visibly escape terminal controls and Unicode
+formatting characters so stored JUnit text cannot affect the local terminal.
 
 `--json` prints the stored summary. The `failed` array carries each failing
 case; file entries are plain paths.
@@ -112,7 +114,8 @@ case; file entries are plain paths.
 ```
 
 With `--json --failed-only`, only the `failed` array is printed (an empty array
-when there are no failures or no results).
+when there are no failures or no results). JSON preserves the stored field
+values unchanged; display escaping applies only to human-readable output.
 
 ## Storage limits
 

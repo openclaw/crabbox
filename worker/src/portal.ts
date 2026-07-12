@@ -588,7 +588,7 @@ export function portalLeaseDetail(
           <div class="bridge-grid">
             ${bridgeRow("WebVNC", active && lease.desktop === true, bridgeStatus.webVNCBridgeConnected, bridgeStatus.webVNCViewerConnected, vncAction)}
             ${bridgeRow("code", active && lease.code === true, bridgeStatus.codeBridgeConnected, false, codeAction)}
-            ${bridgeRow("egress", active && Boolean(bridgeStatus.egress), bridgeStatus.egress?.hostConnected ?? false, bridgeStatus.egress?.clientConnected ?? false, egressAction, "host", "client")}
+            ${bridgeRow("egress", active && Boolean(bridgeStatus.egress), bridgeStatus.egress?.hostConnected ?? false, bridgeStatus.egress?.clientConnected ?? false, egressAction, "host", "client", !canManage)}
           </div>
           <div class="access-commands">${commands}</div>
         </div>
@@ -3098,18 +3098,23 @@ function bridgeRow(
   action: string,
   bridgeLabel = "bridge",
   viewerLabel = "viewer",
+  coarse = false,
 ): string {
-  const status = enabled
-    ? bridgeConnected
-      ? viewerConnected
-        ? `${viewerLabel} active`
-        : `${bridgeLabel} ready`
-      : `waiting for ${bridgeLabel}`
-    : "unavailable";
-  const tone = enabled ? (bridgeConnected ? "ok" : "warn") : "";
+  const status = coarse
+    ? enabled
+      ? "active"
+      : "unavailable"
+    : enabled
+      ? bridgeConnected
+        ? viewerConnected
+          ? `${viewerLabel} active`
+          : `${bridgeLabel} ready`
+        : `waiting for ${bridgeLabel}`
+      : "unavailable";
+  const tone = enabled ? (coarse || bridgeConnected ? "ok" : "warn") : "";
   return `<div class="bridge-row">
     <div><strong>${escapeHTML(label)}</strong><small>${escapeHTML(status)}</small></div>
-    <span class="pill" data-tone="${tone}">${escapeHTML(enabled ? (bridgeConnected ? "connected" : "waiting") : "off")}</span>
+    <span class="pill" data-tone="${tone}">${escapeHTML(enabled ? (coarse ? "active" : bridgeConnected ? "connected" : "waiting") : "off")}</span>
     ${action}
   </div>`;
 }

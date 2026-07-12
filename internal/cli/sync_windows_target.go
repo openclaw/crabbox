@@ -267,12 +267,19 @@ New-Item -ItemType Directory -Force -Path $workdir | Out-Null
 
 func windowsRemoteReadResultFiles(workdir string, paths []string) string {
 	var b bytes.Buffer
-	b.WriteString(`$ErrorActionPreference = "SilentlyContinue"` + "\n")
+	b.WriteString(`$ErrorActionPreference = "Stop"` + "\n")
 	b.WriteString(`Set-Location -LiteralPath ` + psQuote(workdir) + "\n")
-	for _, path := range paths {
-		b.WriteString(`$f = ` + psQuote(path) + "\n")
-		b.WriteString(`if (Test-Path -LiteralPath $f) { Write-Output "` + resultFileMarker + `${f}"; Get-Content -Raw -LiteralPath $f }` + "\n")
+	b.WriteString(`Add-Type -Name N -Namespace Cbx -MemberDefinition '[DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]public static extern uint GetFinalPathNameByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle h,System.Text.StringBuilder p,uint n,uint f);[DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]public static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(string p,uint a,System.IO.FileShare s,System.IntPtr z,System.IO.FileMode m,uint f,System.IntPtr t);'
+function FinalPath($h){$b=New-Object Text.StringBuilder 32768;if(-not[Cbx.N]::GetFinalPathNameByHandle($h,$b,$b.Capacity,0)){throw 'final path failed'};$p=$b.ToString();if($p.StartsWith('\\?\UNC\')){return '\\'+$p.Substring(8)};if($p.StartsWith('\\?\')){return $p.Substring(4)};return $p}
+$rh=[Cbx.N]::CreateFile($pwd.Path,0,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete),[IntPtr]::Zero,[IO.FileMode]::Open,0x02000000,[IntPtr]::Zero);if($rh.IsInvalid){throw 'workdir open failed'};try{$r=FinalPath $rh}finally{$rh.Dispose()};$q=$r.TrimEnd('\')+'\'
+@(`)
+	for i, path := range paths {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(psQuote(path))
 	}
+	b.WriteString(`)|ForEach-Object{$f=$_;$s=$null;try{if([IO.Path]::IsPathRooted($f)){$o=$f}else{$o=Join-Path $pwd.Path $f};$s=[IO.File]::Open($o,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$p=FinalPath $s.SafeFileHandle;if($p.StartsWith($q,[StringComparison]::Ordinal)){$z=New-Object IO.StreamReader($s,[Text.Encoding]::UTF8,$true,4096,$true);try{$v=$z.ReadToEnd()}finally{$z.Dispose()};Write-Output "` + resultFileMarker + `${f}";Write-Output $v}}catch{}finally{if($s){$s.Dispose()}}}`)
 	return powershellCommand(b.String())
 }
 
