@@ -3060,7 +3060,9 @@ func waitForServerIP(ctx context.Context, client *HetznerClient, id int64) (Serv
 		if time.Now().After(deadline) {
 			return Server{}, exit(5, "timed out waiting for server IP")
 		}
-		time.Sleep(3 * time.Second)
+		if err := sleepContext(ctx, 3*time.Second); err != nil {
+			return Server{}, err
+		}
 	}
 }
 

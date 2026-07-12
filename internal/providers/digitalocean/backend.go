@@ -1160,7 +1160,20 @@ func (b *digitalOceanLeaseBackend) waitForDropletIP(ctx context.Context, client 
 		if time.Now().After(deadline) {
 			return droplet{}, core.Exit(5, "timed out waiting for DigitalOcean Droplet IP")
 		}
-		time.Sleep(3 * time.Second)
+		if err := sleepContext(ctx, 3*time.Second); err != nil {
+			return droplet{}, err
+		}
+	}
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

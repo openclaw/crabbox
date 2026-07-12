@@ -686,7 +686,9 @@ func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, err
 		if time.Now().After(deadline) {
 			return Server{}, exit(5, "timed out waiting for AWS instance public IP")
 		}
-		time.Sleep(5 * time.Second)
+		if err := sleepContext(ctx, 5*time.Second); err != nil {
+			return Server{}, err
+		}
 	}
 }
 

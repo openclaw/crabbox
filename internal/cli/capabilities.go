@@ -361,6 +361,9 @@ func resolveVNCEndpoint(ctx context.Context, cfg Config, target *SSHTarget) (vnc
 func waitForLoopbackVNC(ctx context.Context, target *SSHTarget) error {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 			probe := *target
 			probe.Port = port
@@ -370,7 +373,9 @@ func waitForLoopbackVNC(ctx context.Context, target *SSHTarget) error {
 				return nil
 			}
 		}
-		time.Sleep(2 * time.Second)
+		if err := sleepContext(ctx, 2*time.Second); err != nil {
+			return err
+		}
 	}
 	return exit(5, "target does not expose VNC on 127.0.0.1:5900")
 }
