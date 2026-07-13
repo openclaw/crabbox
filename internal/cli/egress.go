@@ -943,20 +943,15 @@ func egressClientBinaryForTarget(ctx context.Context, target SSHTarget) (string,
 }
 
 func scpBaseArgs(target SSHTarget) []string {
-	args := sshForwardingDenyArgs()
+	args := sshBaseArgs(target)
 	if target.TargetOS == targetWindows && target.WindowsMode != windowsModeWSL2 {
-		args = append(args, "-O")
+		args = append([]string{"-O"}, args...)
 	}
-	args = append(args,
-		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "UserKnownHostsFile="+sshConfigFileValue(knownHostsFile(target)),
-		"-o", "ConnectTimeout=10",
-		"-o", "ConnectionAttempts=3",
-		"-P", target.Port,
-	)
-	if target.Key != "" {
-		args = append([]string{"-i", target.Key, "-o", "IdentitiesOnly=yes"}, args...)
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-p" {
+			args[i] = "-P"
+			break
+		}
 	}
 	return args
 }

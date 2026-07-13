@@ -30,6 +30,8 @@ delete the machine for you.
 ```sh
 crabbox run --provider ssh --static-host buildbox.local -- pnpm test
 crabbox ssh --provider ssh --id buildbox.local
+crabbox cp --provider ssh --id buildbox.local ./input.json SANDBOX:/tmp/input.json
+crabbox tunnel --provider ssh --id buildbox.local --port 3000
 crabbox run --provider static-ssh --target windows --static-host win-dev.local \
   -- pwsh -NoProfile -Command '$PSVersionTable'
 ```
@@ -181,6 +183,8 @@ path.
 | Capability | Support |
 | --- | --- |
 | SSH | yes |
+| File copy | regular files through `scp` |
+| Loopback tunnel | yes |
 | Crabbox sync | yes |
 | Desktop / browser / code | host-dependent (requires the tooling installed on the host) |
 | Actions hydration | Linux hosts only |
@@ -202,3 +206,5 @@ path.
 - [Provider backends](../provider-backends.md)
 - [Sync](../features/sync.md)
 - [SSH keys](../features/ssh-keys.md)
+- [Copy command](../commands/cp.md)
+- [Tunnel command](../commands/tunnel.md)
