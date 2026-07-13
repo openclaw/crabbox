@@ -73,6 +73,21 @@ The key is the authoritative public half generated for provisioning, not a key
 learned later through `known_hosts` or `ssh-keyscan`. The field is omitted when
 the provider cannot inject a host key before boot.
 
+Direct AWS leases also include authoritative provider metadata sourced from
+EC2 `DescribeInstances`:
+
+```json
+{
+  "providerMetadata": {
+    "instanceProfileAttached": false
+  }
+}
+```
+
+Consumers can use this boolean to fail closed when a workload must not receive
+an IAM instance profile. The field is omitted when the backend cannot attest
+the association state.
+
 ## Flags
 
 ```text

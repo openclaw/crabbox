@@ -1228,6 +1228,9 @@ func awsInstanceToServer(instance types.Instance) Server {
 		Name:     name,
 		Status:   string(instance.State.Name),
 		Labels:   labels,
+		ProviderMetadata: map[string]any{
+			"instanceProfileAttached": instance.IamInstanceProfile != nil,
+		},
 	}
 	if instance.Placement != nil {
 		server.HostID = aws.ToString(instance.Placement.HostId)

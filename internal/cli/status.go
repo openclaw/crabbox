@@ -196,10 +196,11 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 	if meta.Enabled {
 		tailscale = &meta
 	}
+	provider := blank(server.Provider, cfg.Provider)
 	return statusView{
 		ID:               lease.LeaseID,
 		Slug:             serverSlug(server),
-		Provider:         blank(server.Provider, cfg.Provider),
+		Provider:         provider,
 		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
 		WindowsMode:      blank(server.Labels["windows_mode"], cfg.WindowsMode),
 		State:            state,
@@ -220,9 +221,21 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		IdleTimeout:      leaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
 		ExpiresAt:        blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
 		Labels:           server.Labels,
+		ProviderMetadata: inspectProviderMetadata(provider, server.ProviderMetadata),
 		HasHost:          hasHost,
 		Ready:            ready,
 	}, nil
+}
+
+func inspectProviderMetadata(provider string, metadata map[string]any) map[string]any {
+	if provider != "aws" {
+		return nil
+	}
+	attached, ok := metadata["instanceProfileAttached"].(bool)
+	if !ok {
+		return nil
+	}
+	return map[string]any{"instanceProfileAttached": attached}
 }
 
 func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
@@ -256,6 +269,7 @@ type StatusView struct {
 	IdleTimeout      string             `json:"idleTimeout,omitempty"`
 	ExpiresAt        string             `json:"expiresAt,omitempty"`
 	Labels           map[string]string  `json:"labels,omitempty"`
+	ProviderMetadata map[string]any     `json:"providerMetadata,omitempty"`
 	HasHost          bool               `json:"hasHost"`
 	Ready            bool               `json:"ready"`
 	Telemetry        *LeaseTelemetry    `json:"telemetry,omitempty"`

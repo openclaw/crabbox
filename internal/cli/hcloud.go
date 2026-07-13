@@ -76,6 +76,7 @@ type Server struct {
 	Name                string            `json:"name"`
 	Status              string            `json:"status"`
 	Labels              map[string]string `json:"labels"`
+	ProviderMetadata    map[string]any    `json:"provider_metadata,omitempty"`
 	PublicNet           struct {
 		IPv4 struct {
 			IP string `json:"ip"`
