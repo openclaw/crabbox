@@ -38,6 +38,18 @@ safety scanner. Keep required artifacts bounded and scrubbed, such as manifests,
 summaries, screenshots, or QA reports. Do not use run artifacts for raw datasets,
 secrets, credentials, signed URLs, or unredacted customer rows.
 
+`--require-artifact-schema remote=schema.json` goes one step further than the
+existence guard: after command success it fetches the named JSON artifact from
+the lease and validates its content against a local schema file, failing the run
+with `exit 7` when the artifact is missing, unparseable, or does not match. The
+schema is a small dependency-free subset of JSON Schema (`type`, `required`,
+`properties`, `items`, `enum`); unknown keywords are ignored, so a full JSON
+Schema document works and richer keywords can be added later. A malformed schema
+file fails fast at preflight with `exit 2`. Each result is recorded on the timing
+report under `schemaValidations`. The flag is repeatable and, in this first
+phase, is supported on SSH-backed providers only; delegated-run providers reject
+it until they expose an explicit capability.
+
 Delegated providers reject run artifact collection until they grow an explicit
 bounded artifact capability. Archive-capable adapters may validate and collect
 required artifacts and artifact globs. Download-capable adapters may materialize
