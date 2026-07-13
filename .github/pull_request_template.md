@@ -1,7 +1,9 @@
 <!--
 Optional linked context:
-Add a visible `Closes #<issue-number>` or `Related: #<issue-number>` line
-below this comment.
+Add a visible
+`Closes https://github.com/openclaw/crabbox/issues/<issue-number>` or
+`Related: https://github.com/openclaw/crabbox/issues/<issue-number>` line below
+this comment.
 
 Required PR title:
 type: user-facing description
