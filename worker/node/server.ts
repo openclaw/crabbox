@@ -21,6 +21,7 @@ import {
   fleetRequestQueue,
   isReadinessRequestMethod,
   isTrustedProxySource,
+  nodeResponseHeaders,
   nodeRequestAbortSignal,
   readNodeRequestBody,
   requestSourceIP,
@@ -284,7 +285,9 @@ async function writeResponse(
   closeConnection = false,
 ): Promise<void> {
   response.statusCode = result.status;
-  result.headers.forEach((value, name) => response.setHeader(name, value));
+  for (const [name, value] of nodeResponseHeaders(result.headers)) {
+    response.setHeader(name, value);
+  }
   if (closeConnection) {
     response.setHeader("connection", "close");
   }
@@ -302,7 +305,11 @@ async function writeUpgradeResponse(socket: Duplex, response: Response): Promise
   headers.set("content-length", String(body.byteLength));
   const statusText = STATUS_CODES[response.status] || "Error";
   const lines = [`HTTP/1.1 ${response.status} ${statusText}`];
-  headers.forEach((value, name) => lines.push(`${name}: ${value}`));
+  for (const [name, value] of nodeResponseHeaders(headers)) {
+    for (const item of Array.isArray(value) ? value : [value]) {
+      lines.push(`${name}: ${item}`);
+    }
+  }
   socket.end(`${lines.join("\r\n")}\r\n\r\n${body.toString()}`);
 }
 

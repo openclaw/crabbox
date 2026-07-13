@@ -50,7 +50,12 @@ import {
   type LeaseConfig,
   type LeaseConfigDefaults,
 } from "./config";
-import { cookieValue } from "./cookies";
+import {
+  codeViewerSessionCookieName,
+  cookieValue,
+  legacyCodeViewerSessionCookieName,
+  portalSessionCookieName,
+} from "./cookies";
 import {
   CloudflareCoordinatorRuntime,
   bufferCoordinatorRequestBody,
@@ -8762,17 +8767,20 @@ export class FleetCoordinator {
       expiresAt: new Date(expiresAt).toISOString(),
     };
     await this.state.storage.put(codeViewerSessionKey(session.session), session);
+    const headers = new Headers({
+      "cache-control": "no-store",
+      location: ticket.returnTo,
+      "referrer-policy": "no-referrer",
+    });
+    for (const cookie of codeViewerSessionCookies(
+      session,
+      Math.max(0, Math.floor((expiresAt - now.getTime()) / 1000)),
+    )) {
+      headers.append("set-cookie", cookie);
+    }
     return new Response(null, {
       status: 303,
-      headers: {
-        "cache-control": "no-store",
-        location: ticket.returnTo,
-        "referrer-policy": "no-referrer",
-        "set-cookie": codeViewerSessionCookie(
-          session,
-          Math.max(0, Math.floor((expiresAt - now.getTime()) / 1000)),
-        ),
-      },
+      headers,
     });
   }
 
@@ -8780,7 +8788,7 @@ export class FleetCoordinator {
     request: Request,
     leaseID: string,
   ): Promise<CodeViewerSessionRecord | undefined> {
-    const value = cookieValue(request.headers.get("cookie") ?? "", "crabbox_code_session");
+    const value = cookieValue(request.headers.get("cookie") ?? "", codeViewerSessionCookieName);
     if (!validCodeViewerSession(value)) {
       return undefined;
     }
@@ -8889,7 +8897,7 @@ export class FleetCoordinator {
 
   private async portalLogout(request: Request): Promise<Response> {
     await this.cleanupExpiredCodeViewerAuth();
-    const token = cookieValue(request.headers.get("cookie") ?? "", "crabbox_session");
+    const token = cookieValue(request.headers.get("cookie") ?? "", portalSessionCookieName);
     if (token) {
       const verifiedTokenExpiresAt = await verifiedUserTokenExpiresAtForRevocation(token, this.env);
       if (verifiedTokenExpiresAt) {
@@ -15543,15 +15551,25 @@ function isolatedCodeRequestOriginAllowed(request: Request): boolean {
   );
 }
 
-function codeViewerSessionCookie(session: CodeViewerSessionRecord, maxAgeSeconds: number): string {
+function codeViewerSessionCookies(
+  session: CodeViewerSessionRecord,
+  maxAgeSeconds: number,
+): string[] {
+  const attributes = ["HttpOnly", "Secure", "SameSite=Lax"];
   return [
-    `crabbox_code_session=${encodeURIComponent(session.session)}`,
-    `Path=/portal/leases/${encodeURIComponent(session.leaseID)}/code/`,
-    "HttpOnly",
-    "Secure",
-    "SameSite=Lax",
-    `Max-Age=${Math.max(0, Math.trunc(maxAgeSeconds))}`,
-  ].join("; ");
+    [
+      `${codeViewerSessionCookieName}=${encodeURIComponent(session.session)}`,
+      "Path=/",
+      ...attributes,
+      `Max-Age=${Math.max(0, Math.trunc(maxAgeSeconds))}`,
+    ].join("; "),
+    [
+      `${legacyCodeViewerSessionCookieName}=`,
+      `Path=/portal/leases/${encodeURIComponent(session.leaseID)}/code/`,
+      ...attributes,
+      "Max-Age=0",
+    ].join("; "),
+  ];
 }
 
 export function bridgeTicketFromRequest(

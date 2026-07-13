@@ -2,6 +2,10 @@
 
 ## 0.38.1 - Unreleased
 
+### Fixed
+
+- Protected portal and isolated Code sessions with browser-enforced host-only cookies, rejected duplicate session cookies, and retired legacy cookie names to prevent sibling-origin shadowing. Thanks @coygeek.
+
 ## 0.38.0 - 2026-07-11
 
 ### Added

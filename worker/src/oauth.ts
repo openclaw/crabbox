@@ -4,6 +4,7 @@ import {
   userTokenExpiresAt,
   userTokenSigningConfigurationError,
 } from "./auth";
+import { legacyPortalSessionCookieName, portalSessionCookieName } from "./cookies";
 import type { CoordinatorRuntime, CoordinatorStorage } from "./coordinator-runtime";
 import {
   githubUserIsRevoked,
@@ -103,7 +104,11 @@ export async function githubPortalLogin(
     return html("Crabbox login busy", "Too many pending GitHub logins. Try again shortly.", 429);
   }
 
-  return redirect(githubAuthorizeURLFor(clientID, pending.state, pending.redirectURI), 302);
+  return redirect(
+    githubAuthorizeURLFor(clientID, pending.state, pending.redirectURI),
+    302,
+    legacyPortalSessionCookieHeaders(),
+  );
 }
 
 export function githubPortalLogout(): Response {
@@ -111,9 +116,7 @@ export function githubPortalLogout(): Response {
     "Crabbox logged out",
     "Your Crabbox portal session has ended.",
     200,
-    {
-      "set-cookie": portalSessionCookie("", 0),
-    },
+    portalSessionCookieHeaders("", 0),
     `<p><a href="/portal/login">Log in again</a></p>`,
   );
 }
@@ -341,9 +344,11 @@ async function githubAuthCallback(
     }
     if (completed.mode === "portal") {
       await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, completed));
-      return redirect(completed.returnTo || "/portal", 302, {
-        "set-cookie": portalSessionCookie(token, ttlSeconds),
-      });
+      return redirect(
+        completed.returnTo || "/portal",
+        302,
+        portalSessionCookieHeaders(token, ttlSeconds),
+      );
     }
     if (!completed.loopbackRedirectURI) {
       await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, completed));
@@ -690,37 +695,49 @@ function html(
   title: string,
   message: string,
   status = 200,
-  headers: Record<string, string> = {},
+  headers: HeadersInit = {},
   extraBody = "",
 ): Response {
   const escapedTitle = escapeHTML(title);
   const escapedMessage = escapeHTML(message);
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set("content-type", "text/html; charset=utf-8");
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><title>${escapedTitle}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:42rem;margin:5rem auto;padding:0 1rem;line-height:1.5;color:#111}code{background:#f4f4f5;padding:.15rem .3rem;border-radius:4px}</style></head><body><h1>${escapedTitle}</h1><p>${escapedMessage}</p>${extraBody}</body></html>`,
-    { status, headers: { "content-type": "text/html; charset=utf-8", ...headers } },
+    { status, headers: responseHeaders },
   );
 }
 
-function redirect(location: string, status = 302, headers: Record<string, string> = {}): Response {
+function redirect(location: string, status = 302, headers: HeadersInit = {}): Response {
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set("location", location);
   return new Response(null, {
     status,
-    headers: {
-      location,
-      ...headers,
-    },
+    headers: responseHeaders,
   });
 }
 
-function portalSessionCookie(value: string, maxAgeSeconds: number): string {
-  const attrs = [
-    `crabbox_session=${encodeURIComponent(value)}`,
+function portalSessionCookieHeaders(value: string, maxAgeSeconds: number): Headers {
+  const headers = legacyPortalSessionCookieHeaders();
+  headers.append("set-cookie", sessionCookie(portalSessionCookieName, value, maxAgeSeconds));
+  return headers;
+}
+
+function legacyPortalSessionCookieHeaders(): Headers {
+  const headers = new Headers();
+  headers.append("set-cookie", sessionCookie(legacyPortalSessionCookieName, "", 0));
+  return headers;
+}
+
+function sessionCookie(name: string, value: string, maxAgeSeconds: number): string {
+  return [
+    `${name}=${encodeURIComponent(value)}`,
     "Path=/",
     "HttpOnly",
     "Secure",
     "SameSite=Lax",
     `Max-Age=${Math.max(0, Math.trunc(maxAgeSeconds))}`,
-  ];
-  return attrs.join("; ");
+  ].join("; ");
 }
 
 function safePortalReturnTo(value: string | null): string {

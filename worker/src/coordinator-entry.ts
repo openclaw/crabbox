@@ -8,7 +8,7 @@ import {
   type AuthRequestContext,
 } from "./auth";
 import { codeProxyRequestBodyBytes, isIsolatedCodeRequest } from "./code-origin";
-import { cookieValue } from "./cookies";
+import { cookieValue, portalSessionCookieName } from "./cookies";
 import { bearerToken, json, pathParts } from "./http";
 import { InvalidOrgLabelError, orgKeyForLabel } from "./org-identity";
 import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
@@ -120,7 +120,7 @@ export async function prepareCoordinatorRequest(
     request.method === "POST" &&
     url.pathname === "/portal/logout" &&
     !request.headers.has("authorization")
-      ? cookieValue(request.headers.get("cookie") ?? "", "crabbox_session")
+      ? cookieValue(request.headers.get("cookie") ?? "", portalSessionCookieName)
       : undefined;
   const auth = portalLogoutToken
     ? await authenticateUserTokenForRevocation(portalLogoutToken, env)
@@ -171,7 +171,7 @@ async function authenticatedCoordinatorRequest(
 
 function portalCookieRequestIntentAllowed(request: Request, env: Env, url: URL): boolean {
   if (request.headers.get("authorization")) return true;
-  if (!cookieValue(request.headers.get("cookie") ?? "", "crabbox_session")) return true;
+  if (!cookieValue(request.headers.get("cookie") ?? "", portalSessionCookieName)) return true;
   const method = request.method.toUpperCase();
   const websocket =
     method === "GET" && request.headers.get("upgrade")?.toLowerCase() === "websocket";
@@ -280,7 +280,7 @@ function requestWithPortalCookie(request: Request): Request {
   if (request.headers.get("authorization")) {
     return request;
   }
-  const token = cookieValue(request.headers.get("cookie") ?? "", "crabbox_session");
+  const token = cookieValue(request.headers.get("cookie") ?? "", portalSessionCookieName);
   if (!token) {
     return request;
   }
