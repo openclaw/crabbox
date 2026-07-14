@@ -35,6 +35,10 @@ CODESIGN_IDENTITY=${CODESIGN_IDENTITY:-${MAC_RELEASE_CODESIGN_IDENTITY:-}}
   echo "NOTARYTOOL_KEYCHAIN_PROFILE is required for official macOS releases" >&2
   exit 1
 }
+[[ -n "${MAC_RELEASE_CODESIGN_KEYCHAIN:-}" ]] || {
+  echo "MAC_RELEASE_CODESIGN_KEYCHAIN is required for official macOS releases" >&2
+  exit 1
+}
 
 for tool in codesign csreq ditto lipo node plutil xcrun; do
   command -v "$tool" >/dev/null || {
@@ -120,6 +124,7 @@ fi
 ditto -c -k --keepParent "$BINARY" "$NOTARY_ARCHIVE"
 if ! xcrun notarytool submit "$NOTARY_ARCHIVE" \
   --keychain-profile "$NOTARYTOOL_KEYCHAIN_PROFILE" \
+  --keychain "$MAC_RELEASE_CODESIGN_KEYCHAIN" \
   --no-s3-acceleration \
   --wait \
   --output-format json >"$NOTARY_RESULT"; then

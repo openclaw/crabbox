@@ -102,6 +102,11 @@ timestamp. Submit each raw binary with `notarytool --wait`, require an
 `Accepted` result and distinct valid submission ID, then perform the online
 raw-binary check before creating the archive:
 
+The notary profile must live in the same managed, passwordless release
+keychain as the Foundation signing identity. The signer passes that keychain
+explicitly so headless release hosts never fall back to a locked login
+keychain.
+
 ```sh
 codesign --verify --strict --check-notarization -R=notarized <binary>
 ```
