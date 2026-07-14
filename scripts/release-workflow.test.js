@@ -57,6 +57,16 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
   );
 });
 
+test("Homebrew verifier keeps downloaded proof inputs outside the protected checkout", () => {
+  const workflow = read(".github/workflows/verify-homebrew.yml");
+  assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);
+  assert.match(workflow, /proofs_dir="\$RUNNER_TEMP\/public-proofs"/);
+  assert.match(workflow, /"\$RUNNER_TEMP\/release-assets"/);
+  assert.match(workflow, /"\$RUNNER_TEMP\/public-proofs"/);
+  assert.doesNotMatch(workflow, /"\$PWD\/(?:release-assets|public-proofs)"/);
+  assert.doesNotMatch(workflow, /mkdir -m 700 (?:release-assets|public-proofs)/);
+});
+
 test("script CI fetches signed release tags for publication fixtures", () => {
   const ci = read(".github/workflows/ci.yml");
   const scriptsJob = ci.slice(ci.indexOf("  scripts:"), ci.indexOf("  docs:"));

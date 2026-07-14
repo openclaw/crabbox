@@ -132,10 +132,11 @@ jobs:
             "crabbox_${version}_windows_amd64.zip"
             "crabbox_${version}_windows_arm64.zip"
           )
-          mkdir -m 700 release-assets
+          assets_dir="$RUNNER_TEMP/release-assets"
+          mkdir -m 700 "$assets_dir"
           for asset in "${assets[@]}"; do
             curl --fail --location --retry 3 --silent --show-error \
-              --output "release-assets/$asset" \
+              --output "$assets_dir/$asset" \
               "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$asset"
           done
 
@@ -146,7 +147,8 @@ jobs:
           PUBLIC_VERIFIER_RUN_ID: ${{ inputs.public_verifier_run_id }}
         run: |
           set -euo pipefail
-          mkdir -m 700 public-proofs
+          proofs_dir="$RUNNER_TEMP/public-proofs"
+          mkdir -m 700 "$proofs_dir"
           metadata="$RUNNER_TEMP/public-proof-artifacts.json"
           gh api --method GET \
             "repos/$GITHUB_REPOSITORY/actions/runs/$PUBLIC_VERIFIER_RUN_ID/artifacts?per_page=100" \
@@ -158,7 +160,7 @@ jobs:
             ' "$metadata")
             gh api --method GET --header 'Accept: application/octet-stream' \
               "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
-              >"public-proofs/verified-assets-$arch.zip"
+              >"$proofs_dir/verified-assets-$arch.zip"
           done
 
       - name: Verify public Homebrew install without credentials
@@ -175,6 +177,6 @@ jobs:
           unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN
           unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN
           scripts/verify-homebrew-release.sh \
-            "$RELEASE_TAG" "$PWD/release-assets" \
+            "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
             "$TAG_OBJECT" "$SOURCE_COMMIT" "$VERIFIER_COMMIT" \
-            "$RELEASE_ID" "$PUBLIC_VERIFIER_RUN_ID" "$PWD/public-proofs"
+            "$RELEASE_ID" "$PUBLIC_VERIFIER_RUN_ID" "$RUNNER_TEMP/public-proofs"
