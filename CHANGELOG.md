@@ -18,6 +18,10 @@
 
 ## 0.38.3 - 2026-07-14
 
+### Added
+
+- Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
+
 ### Fixed
 
 - Made provider IP and loopback VNC waits return promptly when their context is cancelled. Thanks @SebTardif.
