@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -216,6 +220,103 @@ func TestLoadRequireArtifactSchemas(t *testing.T) {
 	t.Run("duplicate remote is exit 2", func(t *testing.T) {
 		_, err := loadRequireArtifactSchemas([]string{"out.json=" + good, "out.json=" + good})
 		assertExitCode(t, err, 2)
+	})
+}
+
+func TestParseArtifactSchemaFailsClosedOnUnsupportedKeywords(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+	}{
+		{"pattern", `{"type":"string","pattern":"^x"}`},
+		{"minimum", `{"type":"number","minimum":0}`},
+		{"additionalProperties", `{"type":"object","additionalProperties":false}`},
+		{"anyOf", `{"anyOf":[{"type":"string"}]}`},
+		{"ref", `{"$ref":"#/definitions/x"}`},
+		{"nested unsupported keyword", `{"type":"object","properties":{"x":{"type":"string","maxLength":3}}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseArtifactSchema([]byte(tc.schema)); err == nil {
+				t.Fatalf("expected %s schema to be rejected fail-closed", tc.name)
+			}
+		})
+	}
+}
+
+func TestParseArtifactSchemaAcceptsAnnotationKeywords(t *testing.T) {
+	data := []byte(`{"$schema":"x","$id":"y","title":"t","description":"d","$comment":"c","examples":[1],"default":1,"deprecated":false,"type":"object","required":["a"]}`)
+	if _, err := parseArtifactSchema(data); err != nil {
+		t.Fatalf("annotation keywords should be accepted, got: %v", err)
+	}
+}
+
+func TestDecodeBoundedBase64(t *testing.T) {
+	data, err := decodeBoundedBase64(base64.StdEncoding.EncodeToString([]byte("hello")), 1024)
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("decode within limit: data=%q err=%v", data, err)
+	}
+	oversized := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("a"), 11))
+	if _, err := decodeBoundedBase64(oversized, 10); err == nil {
+		t.Fatalf("expected oversized payload to be rejected")
+	}
+}
+
+func TestRemoteBoundedReadBase64CommandBoundsBytes(t *testing.T) {
+	cmd := remoteBoundedReadBase64Command(SSHTarget{}, "/work", "out.json", 10)
+	if !strings.Contains(cmd, "head -c 11 ") {
+		t.Fatalf("expected bounded `head -c 11` in command, got: %s", cmd)
+	}
+}
+
+func TestValidateArtifactSchemasWithReaderBehaviour(t *testing.T) {
+	schema, err := parseArtifactSchema([]byte(`{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}}`))
+	if err != nil {
+		t.Fatalf("schema parse: %v", err)
+	}
+	load := []loadedArtifactSchema{{remote: "out.json", schemaPath: "s.json", schema: schema}}
+
+	t.Run("valid artifact passes with no failure", func(t *testing.T) {
+		reader := func(_ context.Context, _ SSHTarget, _, _ string, _ int) ([]byte, error) {
+			return []byte(`{"ok":true}`), nil
+		}
+		results, _, err := validateArtifactSchemasWithReader(context.Background(), SSHTarget{}, "/work", load, reader)
+		if err != nil {
+			t.Fatalf("expected no gate failure, got %v", err)
+		}
+		if len(results) != 1 || !results[0].Valid {
+			t.Fatalf("expected one valid result, got %+v", results)
+		}
+	})
+
+	t.Run("invalid content fails exit 7 with violations", func(t *testing.T) {
+		reader := func(_ context.Context, _ SSHTarget, _, _ string, _ int) ([]byte, error) {
+			return []byte(`{"ok":"nope"}`), nil
+		}
+		results, _, err := validateArtifactSchemasWithReader(context.Background(), SSHTarget{}, "/work", load, reader)
+		assertExitCode(t, err, 7)
+		if len(results) != 1 || results[0].Valid || len(results[0].Violations) == 0 {
+			t.Fatalf("expected one invalid result with violations, got %+v", results)
+		}
+	})
+
+	t.Run("fetch error fails exit 7", func(t *testing.T) {
+		reader := func(_ context.Context, _ SSHTarget, _, _ string, _ int) ([]byte, error) {
+			return nil, errors.New("connection refused")
+		}
+		results, _, err := validateArtifactSchemasWithReader(context.Background(), SSHTarget{}, "/work", load, reader)
+		assertExitCode(t, err, 7)
+		if len(results) != 1 || results[0].Error == "" {
+			t.Fatalf("expected one result recording the fetch error, got %+v", results)
+		}
+	})
+
+	t.Run("oversized artifact fails exit 7", func(t *testing.T) {
+		reader := func(_ context.Context, _ SSHTarget, _, _ string, maxBytes int) ([]byte, error) {
+			return decodeBoundedBase64(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("a"), maxBytes+1)), maxBytes)
+		}
+		_, _, err := validateArtifactSchemasWithReader(context.Background(), SSHTarget{}, "/work", load, reader)
+		assertExitCode(t, err, 7)
 	})
 }
 
