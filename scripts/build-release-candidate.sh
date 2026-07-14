@@ -94,6 +94,12 @@ producer_arch=$(uname -m)
   echo "could not capture the Swift/Xcode producer toolchain" >&2
   exit 1
 }
+if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+  [[ "$DEVELOPER_DIR" == /* && -d "$DEVELOPER_DIR" ]] || {
+    echo "DEVELOPER_DIR must be an absolute existing directory" >&2
+    exit 1
+  }
+fi
 git clone --quiet --no-local --no-checkout "$ROOT" "$SOURCE"
 git -C "$SOURCE" checkout --quiet --detach "$TAG_COMMIT"
 [[ "$(git -C "$SOURCE" rev-parse "refs/tags/$TAG")" == "$TAG_OBJECT" ]]
@@ -102,17 +108,24 @@ git -C "$SOURCE" checkout --quiet --detach "$TAG_COMMIT"
 
 (
   cd "$SOURCE"
-  env -i \
-    GOCACHE="$WORK/gocache" \
-    GOMODCACHE="$WORK/gomodcache" \
-    GOPROXY=https://proxy.golang.org \
-    GOSUMDB=sum.golang.org \
-    GOTOOLCHAIN="$CRABBOX_RELEASE_GO_VERSION" \
-    GOWORK=off \
-    HOME="$BUILD_HOME" \
-    PATH="$PATH" \
-    TMPDIR="$BUILD_TMP" \
-    goreleaser release --clean --skip=publish --parallelism 1 --config "$ROOT/.goreleaser.yaml"
+  run_goreleaser() {
+    env -i "$@" \
+      GOCACHE="$WORK/gocache" \
+      GOMODCACHE="$WORK/gomodcache" \
+      GOPROXY=https://proxy.golang.org \
+      GOSUMDB=sum.golang.org \
+      GOTOOLCHAIN="$CRABBOX_RELEASE_GO_VERSION" \
+      GOWORK=off \
+      HOME="$BUILD_HOME" \
+      PATH="$PATH" \
+      TMPDIR="$BUILD_TMP" \
+      goreleaser release --clean --skip=publish --parallelism 1 --config "$ROOT/.goreleaser.yaml"
+  }
+  if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+    run_goreleaser "DEVELOPER_DIR=$DEVELOPER_DIR"
+  else
+    run_goreleaser
+  fi
 )
 
 version=${TAG#v}

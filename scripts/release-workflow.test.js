@@ -76,6 +76,9 @@ test("GoReleaser is credential-free build-only with exact binary archives", () =
   assert.match(build, /env -i[\s\S]*goreleaser release --clean --skip=publish/);
   assert.match(build, /git clone --quiet --no-local --no-checkout/);
   assert.match(build, /git -C "\$SOURCE" checkout --quiet --detach "\$TAG_COMMIT"/);
+  assert.match(build, /run_goreleaser\(\) \{[\s\S]*env -i "\$@"/);
+  assert.match(build, /run_goreleaser "DEVELOPER_DIR=\$DEVELOPER_DIR"/);
+  assert.match(build, /else\s+run_goreleaser\s+fi/);
   assert.match(build, /chmod -R u\+w "\$path"[\s\S]*rm -rf "\$path"/);
   assert.doesNotMatch(build, /gh release|HOMEBREW_TAP_GITHUB_TOKEN=.*\$\{/);
 });
