@@ -49,6 +49,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           PUBLIC_VERIFIER_RUN_ID: ${{ inputs.public_verifier_run_id }}
           VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
@@ -60,6 +61,7 @@ jobs:
           [[ "$REF_PROTECTED" == true ]]
           [[ "$GITHUB_REF" == "$expected_ref" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$expected_workflow_ref" ]]
+          [[ "$WORKFLOW_SHA" == "$VERIFIER_COMMIT" ]]
 
           work="$RUNNER_TEMP/homebrew-guard"
           mkdir -m 700 "$work"

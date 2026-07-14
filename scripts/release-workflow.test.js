@@ -59,6 +59,8 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
 
 test("Homebrew verifier keeps downloaded proof inputs outside the protected checkout", () => {
   const workflow = read(".github/workflows/verify-homebrew.yml");
+  assert.match(workflow, /WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
+  assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$VERIFIER_COMMIT" \]\]/);
   assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);
   assert.match(workflow, /proofs_dir="\$RUNNER_TEMP\/public-proofs"/);
   assert.match(workflow, /"\$RUNNER_TEMP\/release-assets"/);
