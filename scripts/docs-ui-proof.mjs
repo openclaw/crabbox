@@ -63,7 +63,13 @@ const server = http.createServer((request, response) => {
 
 const baseURL = await listen(server, preferredPort, explicitPort);
 const proof = {
-  subject: "PR1062 features explorer browser proof",
+  subject: "Features explorer browser proof",
+  source: {
+    commit: process.env.GITHUB_SHA || null,
+    ref: process.env.GITHUB_REF || null,
+    event: process.env.GITHUB_EVENT_NAME || null,
+    runId: process.env.GITHUB_RUN_ID || null,
+  },
   url: `${baseURL}/features/`,
   siteDir: path.relative(process.cwd(), siteDir) || ".",
   outDir: path.relative(process.cwd(), outDir) || ".",

@@ -26,6 +26,10 @@
 
 ## 0.38.3 - 2026-07-14
 
+### Added
+
+- Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
+
 ### Fixed
 
 - Made provider IP and loopback VNC waits return promptly when their context is cancelled. Thanks @SebTardif.
