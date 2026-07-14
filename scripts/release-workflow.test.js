@@ -553,6 +553,14 @@ test("v0.38.0 is pinned to the corrected signed source and ready for publication
   assert.equal(record.publicationStatus, "ready");
 });
 
+test("v0.38.1 is pinned to the signed admission-metadata source and ready for publication", () => {
+  const record = JSON.parse(read("release/records/v0.38.1.json"));
+  assert.equal(record.tag, "v0.38.1");
+  assert.equal(record.tagObject, "b9c14e1943ec4a2ca394689a63e8a9c5318ff48c");
+  assert.equal(record.sourceCommit, "72cd4d60c99068b229550bbca9f5a1302663fa72");
+  assert.equal(record.publicationStatus, "ready");
+});
+
 test("managed Foundation signing and notary configuration is repository-owned and secret-free", () => {
   const manifest = read(".mac-release.env");
   const codeowners = read(".github/CODEOWNERS");

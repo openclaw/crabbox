@@ -205,6 +205,20 @@ export async function writeNodeResponseBody(stream: Writable, body: Buffer): Pro
   await completion;
 }
 
+export function nodeResponseHeaders(headers: Headers): Array<[string, string | string[]]> {
+  const result: Array<[string, string | string[]]> = [];
+  for (const [name, value] of headers) {
+    if (name.toLowerCase() !== "set-cookie") {
+      result.push([name, value]);
+    }
+  }
+  const setCookies = headers.getSetCookie();
+  if (setCookies.length > 0) {
+    result.push(["set-cookie", setCookies]);
+  }
+  return result;
+}
+
 export function fleetRequestQueue(request: Request): FleetRequestQueue {
   return coordinatorRequestQueue(request);
 }

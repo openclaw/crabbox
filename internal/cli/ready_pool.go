@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -411,12 +412,37 @@ func validateReadyPoolRunReturnPolicy(policy string) error {
 	}
 }
 
-func readyPoolRunReturnResult(policy string, runFailure error) string {
+func readyPoolRunNeedsTrustedRemote(policy string) bool {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "drain", "release":
+		return false
+	default:
+		return true
+	}
+}
+
+func readyPoolRunShouldScrub(policy string, runFailure error, ordinaryCommandFailure bool) bool {
 	switch strings.TrimSpace(policy) {
-	case "ready", "drain", "release":
+	case "drain", "release":
+		return false
+	case "ready", "", "auto":
+		return runFailure == nil || ordinaryCommandFailure
+	default:
+		return false
+	}
+}
+
+func readyPoolRunReturnResult(policy string, runFailure error, ordinaryCommandFailure bool, scrubErr error, metadataCompatible bool) string {
+	switch strings.TrimSpace(policy) {
+	case "drain", "release":
 		return strings.TrimSpace(policy)
+	case "ready":
+		if readyPoolRunShouldScrub(policy, runFailure, ordinaryCommandFailure) && scrubErr == nil && metadataCompatible {
+			return "ready"
+		}
+		return "drain"
 	case "", "auto":
-		if runFailure == nil {
+		if readyPoolRunShouldScrub(policy, runFailure, ordinaryCommandFailure) && scrubErr == nil && metadataCompatible {
 			return "ready"
 		}
 		return "drain"
@@ -425,15 +451,45 @@ func readyPoolRunReturnResult(policy string, runFailure error) string {
 	}
 }
 
+func readyPoolOrdinaryRemoteCommandFailure(code int, streamErr, contextErr error) bool {
+	var exitErr *exec.ExitError
+	return contextErr == nil &&
+		asExitError(streamErr, &exitErr) &&
+		exitErr.ProcessState != nil &&
+		exitErr.ProcessState.ExitCode() >= 0 &&
+		code > 0 && code < 255
+}
+
+func readyPoolPreparedCommitMatches(recordedCommit, preparedCommit string) bool {
+	recordedCommit = strings.TrimSpace(recordedCommit)
+	return recordedCommit == "" || strings.EqualFold(recordedCommit, strings.TrimSpace(preparedCommit))
+}
+
 func readyPoolReturnNeedsHydrationStop(result string) bool {
 	return result == "drain" || result == "release"
 }
 
-func readyPoolRunReturnReason(runFailure error) string {
-	if runFailure == nil {
-		return "run succeeded"
+func readyPoolRunReturnReason(runFailure error, result, preparedCommit string, scrubErr error, metadataCompatible bool) string {
+	if result == "ready" {
+		outcome := "run succeeded"
+		if runFailure != nil {
+			outcome = "run failed"
+		}
+		if preparedCommit != "" {
+			return outcome + "; scrubbed for reuse at " + preparedCommit
+		}
+		return outcome + "; scrubbed for reuse"
 	}
-	return "run failed"
+	if scrubErr != nil {
+		return "pool scrub failed"
+	}
+	if !metadataCompatible {
+		return "pool branch advanced beyond recorded commit"
+	}
+	if runFailure != nil {
+		return "run lifecycle failed"
+	}
+	return "pool drain requested"
 }
 
 func applyReadyPoolEndpoint(target SSHTarget, entry CoordinatorReadyPoolEntry) SSHTarget {

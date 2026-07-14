@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { createServer, get, type IncomingMessage, type ServerResponse } from "node:http";
 import { Writable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
@@ -8,11 +8,13 @@ import {
   AsyncMutex,
   AsyncOperationTracker,
   RequestBodyTooLargeError,
+  closeServer,
   drainAndStop,
   authenticatedRequestBodyBytes,
   fleetRequestQueue,
   isReadinessRequestMethod,
   isTrustedProxySource,
+  nodeResponseHeaders,
   nodeRequestAbortSignal,
   readNodeRequestBody,
   requestBodyLimit,
@@ -224,6 +226,47 @@ describe("Node server support", () => {
     await expect(writeNodeResponseBody(response, Buffer.from("payload"))).rejects.toThrow(
       "Premature close",
     );
+  });
+
+  it("emits separate Set-Cookie fields through Node HTTP", async () => {
+    const headers = new Headers({ "x-test": "ok" });
+    headers.append("set-cookie", "legacy=; Path=/; Max-Age=0");
+    headers.append("set-cookie", "__Host-current=value; Path=/; Secure");
+    expect(nodeResponseHeaders(headers)).toContainEqual([
+      "set-cookie",
+      ["legacy=; Path=/; Max-Age=0", "__Host-current=value; Path=/; Secure"],
+    ]);
+
+    const server = createServer((_request, response) => {
+      for (const [name, value] of nodeResponseHeaders(headers)) {
+        response.setHeader(name, value);
+      }
+      response.end();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("missing Node test address");
+      const setCookies = await new Promise<string[]>((resolve, reject) => {
+        const request = get(
+          { hostname: "127.0.0.1", port: address.port, path: "/" },
+          (response) => {
+            response.resume();
+            response.once("end", () => resolve(response.headers["set-cookie"] ?? []));
+          },
+        );
+        request.once("error", reject);
+      });
+      expect(setCookies).toEqual([
+        "legacy=; Path=/; Max-Age=0",
+        "__Host-current=value; Path=/; Secure",
+      ]);
+    } finally {
+      await closeServer(server);
+    }
   });
 
   it("bounds shutdown waits", async () => {

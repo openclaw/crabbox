@@ -442,6 +442,37 @@ func TestAWSInstanceToServerPreservesHostID(t *testing.T) {
 	}
 }
 
+func TestAWSInstanceToServerReportsInstanceProfileAttachment(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		profile  *types.IamInstanceProfile
+		attached bool
+	}{
+		{name: "absent", attached: false},
+		{
+			name:     "attached",
+			profile:  &types.IamInstanceProfile{Arn: aws.String("arn:aws:iam::123456789012:instance-profile/worker")},
+			attached: true,
+		},
+		{
+			name:     "attached with incomplete metadata",
+			profile:  &types.IamInstanceProfile{},
+			attached: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := awsInstanceToServer(types.Instance{
+				InstanceId:         aws.String("i-1234567890abcdef0"),
+				IamInstanceProfile: tc.profile,
+				State:              &types.InstanceState{Name: types.InstanceStateNameRunning},
+			})
+			if got := server.ProviderMetadata["instanceProfileAttached"]; got != tc.attached {
+				t.Fatalf("instanceProfileAttached=%v, want %v", got, tc.attached)
+			}
+		})
+	}
+}
+
 func TestRetryableAWSSnapshotDeleteError(t *testing.T) {
 	for _, message := range []string{
 		"InvalidSnapshot.InUse: snapshot is currently in use by ami-123",

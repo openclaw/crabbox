@@ -188,7 +188,7 @@ describe("coordinator auth", () => {
       login: "alice",
       githubAccessToken: "github-access-token",
     });
-    const cookie = `crabbox_session=${encodeURIComponent(token)}`;
+    const cookie = `__Host-crabbox_session=${encodeURIComponent(token)}`;
     const mutationURL = "https://broker.example.test/portal/leases/blue-lobster/share";
     const viewerURL = "https://broker.example.test/portal/leases/blue-lobster/vnc/viewer";
 
@@ -274,7 +274,7 @@ describe("coordinator auth", () => {
       githubAccessToken: "github-access-token",
     });
     const headers = {
-      cookie: `crabbox_session=${encodeURIComponent(token)}`,
+      cookie: `__Host-crabbox_session=${encodeURIComponent(token)}`,
       origin: "https://broker.example.test",
     };
     const membershipUnavailable = {
@@ -337,7 +337,7 @@ describe("coordinator auth", () => {
       CRABBOX_SESSION_SECRET: "session-secret",
       CRABBOX_PUBLIC_URL: "https://broker.example.test",
     } as Env;
-    const cookie = "crabbox_session=%ZZ";
+    const cookie = "__Host-crabbox_session=%ZZ";
 
     const portalGet = await prepareCoordinatorRequest(
       new Request("https://broker.example.test/portal?provider=aws", { headers: { cookie } }),
@@ -367,6 +367,43 @@ describe("coordinator auth", () => {
     );
   });
 
+  it("ignores legacy portal cookies and rejects duplicate host-prefixed sessions", async () => {
+    const env = {
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_PUBLIC_URL: "https://broker.example.test",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      ownerSource: "github-verified-email",
+      org: "example-org",
+      login: "alice",
+      githubAccessToken: "github-access-token",
+    });
+    const url = "https://broker.example.test/portal/leases/blue-lobster";
+    const prepare = async (cookie: string) =>
+      await prepareCoordinatorRequest(
+        new Request(url, { headers: { cookie } }),
+        env,
+        allowGitHubMembership,
+      );
+
+    const hostOnly = await prepare(
+      `crabbox_session=attacker; __Host-crabbox_session=${encodeURIComponent(token)}`,
+    );
+    expect(hostOnly).toMatchObject({ authenticated: true });
+
+    const rejected = await Promise.all(
+      [
+        `crabbox_session=${encodeURIComponent(token)}`,
+        `__Host-crabbox_session=${encodeURIComponent(token)}; __Host-crabbox_session=${encodeURIComponent(token)}`,
+      ].map(prepare),
+    );
+    for (const prepared of rejected) {
+      expect(prepared).toMatchObject({ authenticated: false, response: { status: 302 } });
+    }
+  });
+
   it("routes only the exact per-lease Code origin without portal-cookie authority", async () => {
     const env = {
       CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
@@ -376,7 +413,7 @@ describe("coordinator auth", () => {
     const origin = await codeOriginForLease(env, leaseID);
     const isolated = await prepareCoordinatorRequest(
       new Request(`${origin}/portal/leases/${leaseID}/code/static/app.js`, {
-        headers: { cookie: "crabbox_session=must-not-authorize-code-origin" },
+        headers: { cookie: "__Host-crabbox_session=must-not-authorize-code-origin" },
       }),
       env,
     );

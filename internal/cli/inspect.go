@@ -26,7 +26,11 @@ func (a App) inspect(ctx context.Context, args []string) error {
 	if err := requireLeaseID(*id, "crabbox inspect --id <lease-id-or-slug>", cfg); err != nil {
 		return err
 	}
-	state, err := a.leaseStatus(ctx, cfg, *id)
+	state, err := a.leaseStatusWithRequest(ctx, cfg, StatusRequest{
+		Options:                       leaseOptionsFromConfig(cfg),
+		ID:                            *id,
+		AuthoritativeProviderMetadata: *jsonOut,
+	})
 	if err != nil {
 		return err
 	}

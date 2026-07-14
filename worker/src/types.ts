@@ -831,6 +831,7 @@ export interface ProviderMachine {
   awsKeyName?: string;
   awsSubnetID?: string;
   awsSecurityGroupIDs?: string[];
+  awsInstanceProfileAttached?: boolean;
   awsInstanceProfileARN?: string;
   awsMetadataHttpEndpoint?: string;
   awsMetadataHttpTokens?: string;
