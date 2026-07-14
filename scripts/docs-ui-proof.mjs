@@ -65,7 +65,8 @@ const baseURL = await listen(server, preferredPort, explicitPort);
 const proof = {
   subject: "Features explorer browser proof",
   source: {
-    commit: process.env.GITHUB_SHA || null,
+    commit: process.env.CRABBOX_DOCS_PROOF_COMMIT || process.env.GITHUB_SHA || null,
+    workflowCommit: process.env.GITHUB_SHA || null,
     ref: process.env.GITHUB_REF || null,
     event: process.env.GITHUB_EVENT_NAME || null,
     runId: process.env.GITHUB_RUN_ID || null,

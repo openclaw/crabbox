@@ -53,6 +53,8 @@ jobs:
 
       - name: Render and exercise browser proof
         run: node scripts/docs-ui-proof.mjs
+        env:
+          CRABBOX_DOCS_PROOF_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Upload reviewable proof artifact
         if: always()
