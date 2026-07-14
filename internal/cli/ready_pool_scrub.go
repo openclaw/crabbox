@@ -67,15 +67,16 @@ func (a App) scrubReadyPoolLease(ctx context.Context, target SSHTarget, entry Co
 	if strings.TrimSpace(workdir) == "" {
 		return "", exit(7, "ready-pool scrub has no remote workdir")
 	}
-	if strings.TrimSpace(entry.Ref) == "" {
+	branch, err := readyPoolScrubBranch(entry.Ref)
+	if err != nil {
 		return "", exit(7, "ready-pool scrub requires a branch ref")
 	}
 	if strings.TrimSpace(trustedRemoteURL) == "" {
 		return "", exit(7, "ready-pool scrub has no trusted Git origin")
 	}
-	command := remoteReadyPoolScrub(workdir, entry.Ref, trustedRemoteURL)
+	command := remoteReadyPoolScrub(workdir, branch, trustedRemoteURL)
 	if isWindowsNativeTarget(target) {
-		command = windowsRemoteReadyPoolScrub(workdir, entry.Ref, trustedRemoteURL)
+		command = windowsRemoteReadyPoolScrub(workdir, branch, trustedRemoteURL)
 	}
 	out, err := runSSHOutput(ctx, target, command)
 	if err != nil {
@@ -95,6 +96,20 @@ func (a App) scrubReadyPoolLease(ctx context.Context, target SSHTarget, entry Co
 		}
 	}
 	return preparedCommit, nil
+}
+
+func readyPoolScrubBranch(ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if strings.HasPrefix(ref, "refs/heads/") {
+		ref = strings.TrimPrefix(ref, "refs/heads/")
+		if ref != "" {
+			return ref, nil
+		}
+	}
+	if ref == "" || strings.HasPrefix(ref, "refs/") || isGitCommitSHA(ref) {
+		return "", fmt.Errorf("ready-pool scrub requires a branch ref")
+	}
+	return ref, nil
 }
 
 func remoteReadyPoolScrub(workdir, ref, trustedRemoteURL string) string {
@@ -144,6 +159,18 @@ clean_args=(-ffdx --quiet)
 for cache_path in node_modules .pnpm-store .yarn/cache .yarn/unplugged; do
   if [ -e "$cache_path" ]; then
     if safe_git check-ignore -q -- "$cache_path"; then
+      if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then
+        echo "ready-pool cache root must be a real directory" >&2
+        exit 1
+      fi
+      resolved_cache="$(cd -P -- "$cache_path" && pwd -P)"
+      case "$resolved_cache/" in
+        "$workdir"/*) ;;
+        *)
+          echo "ready-pool cache root escapes the workspace" >&2
+          exit 1
+          ;;
+      esac
       clean_args+=(-e "$cache_path/")
     elif [ "$?" -ne 1 ]; then
       echo "ready-pool cache ignore check failed" >&2
@@ -250,6 +277,15 @@ foreach ($cachePath in @('node_modules', '.pnpm-store', '.yarn/cache', '.yarn/un
   if (Test-Path -LiteralPath $cachePath) {
     & $git check-ignore -q -- $cachePath
     if ($LASTEXITCODE -eq 0) {
+      $cacheCursor = $workdir
+      foreach ($segment in ($cachePath -split '/')) {
+        $cacheCursor = Join-Path $cacheCursor $segment
+        $cacheItem = Get-Item -LiteralPath $cacheCursor -Force
+        if ($cacheItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+          throw "ready-pool cache root must not contain reparse points"
+        }
+      }
+      if (-not $cacheItem.PSIsContainer) { throw "ready-pool cache root must be a real directory" }
       $cleanArgs += @('-e', "$cachePath/")
     } elseif ($LASTEXITCODE -ne 1) {
       throw "ready-pool cache ignore check failed"

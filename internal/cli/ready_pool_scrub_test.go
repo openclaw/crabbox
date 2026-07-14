@@ -150,6 +150,8 @@ func TestWindowsRemoteReadyPoolScrubBuildsVerifiedReset(t *testing.T) {
 		"ready-pool scrub does not reuse submodule worktrees",
 		"$cleanArgs = @('clean', '-ffdx', '--quiet')",
 		"& $git check-ignore -q -- $cachePath",
+		"$cachePath -split '/'",
+		"ready-pool cache root must not contain reparse points",
 		"[System.IO.FileAttributes]::ReparsePoint",
 		"ready-pool .crabbox root must be a real directory",
 		"ready-pool workspace root must be a real directory",
@@ -192,6 +194,8 @@ func TestRemoteReadyPoolScrubUsesIsolatedTrustedGitMetadata(t *testing.T) {
 		"safe_git -C \"$tmp\" fetch",
 		"ready-pool scrub does not reuse submodule worktrees",
 		"safe_git check-ignore -q -- \"$cache_path\"",
+		"ready-pool cache root must be a real directory",
+		"ready-pool cache root escapes the workspace",
 		"safe_git clean \"${clean_args[@]}\"",
 		"rm -rf -- .git",
 		"safe_git remote set-url origin",
@@ -257,6 +261,64 @@ func TestRemoteReadyPoolScrubRejectsCrabboxSymlink(t *testing.T) {
 	}
 	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "keep\n" {
 		t.Fatalf("outside sentinel changed: data=%q err=%v", data, err)
+	}
+}
+
+func TestRemoteReadyPoolScrubRejectsIgnoredCacheSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlink integration")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "init")
+	runGit(t, source, "config", "user.email", "test@example.com")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "branch", "-M", "main")
+	mustWriteTestFile(t, filepath.Join(source, ".gitignore"), "node_modules\n")
+	mustWriteTestFile(t, filepath.Join(source, "proof.txt"), "base\n")
+	runGit(t, source, "add", ".")
+	runGit(t, source, "commit", "-m", "base")
+
+	origin := filepath.Join(root, "origin.git")
+	cloneBare := exec.Command("git", "clone", "--bare", source, origin)
+	if out, err := cloneBare.CombinedOutput(); err != nil {
+		t.Fatalf("create bare origin: %v\n%s", err, out)
+	}
+	workdir := filepath.Join(root, "workdir")
+	clone := exec.Command("git", "clone", origin, workdir)
+	if out, err := clone.CombinedOutput(); err != nil {
+		t.Fatalf("clone workdir: %v\n%s", err, out)
+	}
+	outside := filepath.Join(root, "outside")
+	mustWriteTestFile(t, filepath.Join(outside, "sentinel.txt"), "keep\n")
+	if err := os.Symlink(outside, filepath.Join(workdir, "node_modules")); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "-lc", remoteReadyPoolScrub(workdir, "main", origin))
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("symlinked ignored cache was accepted: %s", out)
+	}
+	if data, err := os.ReadFile(filepath.Join(outside, "sentinel.txt")); err != nil || string(data) != "keep\n" {
+		t.Fatalf("outside sentinel changed: data=%q err=%v", data, err)
+	}
+}
+
+func TestReadyPoolScrubBranchNormalizesFullHeadRef(t *testing.T) {
+	if got, err := readyPoolScrubBranch("refs/heads/main"); err != nil || got != "main" {
+		t.Fatalf("full branch ref normalized to %q, err=%v", got, err)
+	}
+	shaLikeBranch := strings.Repeat("a", 40)
+	if got, err := readyPoolScrubBranch("refs/heads/" + shaLikeBranch); err != nil || got != shaLikeBranch {
+		t.Fatalf("explicit SHA-like branch normalized to %q, err=%v", got, err)
+	}
+	for _, ref := range []string{"", "refs/tags/v1.0.0", strings.Repeat("a", 40)} {
+		if got, err := readyPoolScrubBranch(ref); err == nil {
+			t.Fatalf("non-branch ref %q normalized to %q", ref, got)
+		}
 	}
 }
 
