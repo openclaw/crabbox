@@ -7020,10 +7020,10 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Modal.Python != "" {
 			cfg.Modal.Python = file.Modal.Python
 		}
-		if file.Modal.Environment != "" {
+		if trusted && file.Modal.Environment != "" {
 			cfg.Modal.Environment = file.Modal.Environment
 		}
-		if file.Modal.Secrets != nil {
+		if trusted && file.Modal.Secrets != nil {
 			cfg.Modal.Secrets = append([]string(nil), file.Modal.Secrets...)
 		}
 	}

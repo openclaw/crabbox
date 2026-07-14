@@ -138,8 +138,9 @@ func (c *modalPythonClient) GetSandbox(ctx context.Context, sandboxID string) (m
 
 func (c *modalPythonClient) ListSandboxes(ctx context.Context, tags map[string]string) ([]modalSandbox, error) {
 	payload := map[string]any{
-		"app":  c.app(),
-		"tags": tags,
+		"app":         c.app(),
+		"environment": strings.TrimSpace(c.cfg.Modal.Environment),
+		"tags":        tags,
 	}
 	var sandboxes []modalSandbox
 	if err := c.runJSON(ctx, modalListScript, payload, &sandboxes); err != nil {
@@ -327,8 +328,6 @@ try:
         kwargs["workdir"] = req["workdir"]
     if req.get("name"):
         kwargs["name"] = req["name"]
-    if req.get("environment"):
-        kwargs["environment_name"] = req["environment"]
     if req.get("secrets"):
         kwargs["secrets"] = [
             modal.Secret.from_name(name, environment_name=req.get("environment") or None)
@@ -410,7 +409,10 @@ const modalListScript = modalPythonPrelude + `
 try:
     req = load_payload()
     import modal
-    app = modal.App.lookup(req["app"], create_if_missing=True)
+    app_kwargs = {"create_if_missing": True}
+    if req.get("environment"):
+        app_kwargs["environment_name"] = req["environment"]
+    app = modal.App.lookup(req["app"], **app_kwargs)
     items = []
     for sb in modal.Sandbox.list(app_id=app.app_id, tags=req.get("tags") or {}):
         items.append(sandbox_json(sb))

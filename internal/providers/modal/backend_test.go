@@ -135,8 +135,8 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 	fake := &fakeModalAPI{}
 	withFakeModalAPI(t, fake)
 	cfg := newTestConfig()
-	cfg.Modal.Environment = "dev"
-	cfg.Modal.Secrets = []string{"mapaperasse-dev", "shared-dev"}
+	cfg.Modal.Environment = "my-app-dev"
+	cfg.Modal.Secrets = []string{"example", "sample"}
 	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
 	req := RunRequest{
 		Repo:    Repo{Name: "repo", Root: t.TempDir()},
@@ -153,7 +153,7 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 	if fake.createReq.App != "crabbox" || fake.createReq.Image != "python:3.13-slim" {
 		t.Fatalf("create req=%#v", fake.createReq)
 	}
-	if fake.createReq.Environment != "dev" || !reflect.DeepEqual(fake.createReq.Secrets, []string{"mapaperasse-dev", "shared-dev"}) {
+	if fake.createReq.Environment != "my-app-dev" || !reflect.DeepEqual(fake.createReq.Secrets, []string{"example", "sample"}) {
 		t.Fatalf("modal environment/secrets=%#v/%#v", fake.createReq.Environment, fake.createReq.Secrets)
 	}
 	if fake.createReq.Tags["provider"] != "modal" || fake.createReq.Tags["crabbox"] != "true" || fake.createReq.Tags["repo"] != "repo" {

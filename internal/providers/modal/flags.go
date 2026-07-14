@@ -14,22 +14,29 @@ type modalFlagValues struct {
 	Secrets     *modalSecretList
 }
 
-type modalSecretList []string
+type modalSecretList struct {
+	values []string
+	set    bool
+}
 
-func (s *modalSecretList) String() string { return strings.Join(*s, ",") }
+func (s *modalSecretList) String() string { return strings.Join(s.values, ",") }
 
 func (s *modalSecretList) Set(value string) error {
+	if !s.set {
+		s.values = nil
+		s.set = true
+	}
 	for _, item := range strings.Split(value, ",") {
 		item = strings.TrimSpace(item)
 		if item != "" {
-			*s = append(*s, item)
+			s.values = append(s.values, item)
 		}
 	}
 	return nil
 }
 
 func RegisterModalProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	secrets := modalSecretList(append([]string(nil), defaults.Modal.Secrets...))
+	secrets := modalSecretList{values: append([]string(nil), defaults.Modal.Secrets...)}
 	fs.Var(&secrets, "modal-secret", "named Modal Secret to inject into the sandbox; repeatable or comma-separated")
 	return modalFlagValues{
 		App:         fs.String("modal-app", defaults.Modal.App, "Modal app name for Crabbox sandboxes"),
@@ -70,7 +77,7 @@ func ApplyModalProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 		cfg.Modal.Environment = *v.Environment
 	}
 	if flagWasSet(fs, "modal-secret") {
-		cfg.Modal.Secrets = append([]string(nil), (*v.Secrets)...)
+		cfg.Modal.Secrets = append([]string(nil), v.Secrets.values...)
 	}
 	return nil
 }
