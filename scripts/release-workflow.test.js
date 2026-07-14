@@ -63,6 +63,8 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$VERIFIER_COMMIT" \]\]/);
   assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);
   assert.match(workflow, /proofs_dir="\$RUNNER_TEMP\/public-proofs"/);
+  assert.match(workflow, /Accept: application\/vnd\.github\+json/);
+  assert.doesNotMatch(workflow, /actions\/artifacts[\s\S]{0,200}application\/octet-stream/);
   assert.match(workflow, /"\$RUNNER_TEMP\/release-assets"/);
   assert.match(workflow, /"\$RUNNER_TEMP\/public-proofs"/);
   assert.doesNotMatch(workflow, /"\$PWD\/(?:release-assets|public-proofs)"/);
