@@ -586,6 +586,14 @@ test("v0.38.2 is pinned and publication-blocked after its immutable tag failed p
   assert.match(record.blocker, /tag annotation does not exactly equal v0\.38\.2/);
 });
 
+test("v0.38.3 is pinned to the cancellation-fix source and ready for publication", () => {
+  const record = JSON.parse(read("release/records/v0.38.3.json"));
+  assert.equal(record.tag, "v0.38.3");
+  assert.equal(record.tagObject, "2c4bee30c6af3039bae986c1a6784d9a2f4ee15c");
+  assert.equal(record.sourceCommit, "9c3df396c94fef304975e221d5f0dc26e65d9860");
+  assert.equal(record.publicationStatus, "ready");
+});
+
 test("managed Foundation signing and notary configuration is repository-owned and secret-free", () => {
   const manifest = read(".mac-release.env");
   const codeowners = read(".github/CODEOWNERS");
