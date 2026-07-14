@@ -94,6 +94,14 @@ producer_arch=$(uname -m)
   echo "could not capture the Swift/Xcode producer toolchain" >&2
   exit 1
 }
+developer_env=()
+if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+  [[ "$DEVELOPER_DIR" == /* && -d "$DEVELOPER_DIR" ]] || {
+    echo "DEVELOPER_DIR must be an absolute existing directory" >&2
+    exit 1
+  }
+  developer_env=(DEVELOPER_DIR="$DEVELOPER_DIR")
+fi
 git clone --quiet --no-local --no-checkout "$ROOT" "$SOURCE"
 git -C "$SOURCE" checkout --quiet --detach "$TAG_COMMIT"
 [[ "$(git -C "$SOURCE" rev-parse "refs/tags/$TAG")" == "$TAG_OBJECT" ]]
@@ -103,6 +111,7 @@ git -C "$SOURCE" checkout --quiet --detach "$TAG_COMMIT"
 (
   cd "$SOURCE"
   env -i \
+    "${developer_env[@]}" \
     GOCACHE="$WORK/gocache" \
     GOMODCACHE="$WORK/gomodcache" \
     GOPROXY=https://proxy.golang.org \
