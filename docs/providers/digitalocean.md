@@ -229,5 +229,4 @@ in `crabbox list --provider digitalocean --json` or the DigitalOcean console.
 
 - [Provider reference](README.md)
 - [Provider backends](../provider-backends.md)
-- [Provider Reference](README.md)
 - [Operations](../operations.md)

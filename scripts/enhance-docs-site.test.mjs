@@ -17,6 +17,7 @@ test("builds the polished feature explorer", () => {
   assert.match(out, /Open command reference/);
   assert.match(out, /name="feature-search"/);
   assert.match(out, /URLSearchParams\(location\.search\)/);
+  assert.match(out, /location\.protocol==='file:'/);
   assert.match(out, /history\.replaceState/);
   assert.match(out, /grid-template-columns:repeat\(auto-fit,minmax\(min\(280px,100%\),1fr\)\)/);
   assert.match(out, /\.fx-boundary aside>a\{/);

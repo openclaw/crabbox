@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
 
 const siteDir = path.resolve(process.argv[2] || "dist/docs-site");
@@ -130,6 +131,13 @@ try {
   await assertNoPageErrors(mobile);
   await mobile.context.close();
   activeProofPage = undefined;
+
+  const filePreview = await openFilePreview(browser);
+  activeProofPage = filePreview;
+  await proveFilePreview(filePreview.page);
+  await assertNoPageErrors(filePreview);
+  await filePreview.context.close();
+  activeProofPage = undefined;
 } catch (error) {
   failure = error;
   proof.failure = {
@@ -236,6 +244,25 @@ async function openProofPage(browser, options) {
   await page.waitForTimeout(50);
 
   return { context, page, errors, name: options.name };
+}
+
+async function openFilePreview(browser) {
+  const context = await browser.newContext({ colorScheme: "light", viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.setDefaultTimeout(7000);
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(pathToFileURL(featuresPage).href, { waitUntil: "domcontentloaded" });
+  await page.locator("[data-feature-explorer]").waitFor({ state: "visible" });
+  return { context, page, errors, name: "direct file preview" };
+}
+
+async function proveFilePreview(page) {
+  const initialURL = page.url();
+  await page.locator("#fx-search").fill("desktop");
+  const visibleCards = await page.locator("[data-fx-card]:visible").count();
+  assert(visibleCards > 0, "direct file preview search remains interactive", { visibleCards });
+  assert(page.url() === initialURL, "direct file preview avoids unsupported History API writes", { url: page.url() });
 }
 
 async function assertFeatureShell(page) {
