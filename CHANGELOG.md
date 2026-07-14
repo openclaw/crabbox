@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.38.2 - Unreleased
+
+### Fixed
+
+- Made provider IP and loopback VNC waits return promptly when their context is cancelled. Thanks @SebTardif.
+
 ## 0.38.1 - 2026-07-13
 
 ### Added

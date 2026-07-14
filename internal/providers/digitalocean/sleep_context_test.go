@@ -7,16 +7,18 @@ import (
 	"time"
 )
 
-func TestSleepContextHonorsCancellation(t *testing.T) {
+func TestWaitForDropletIPHonorsCancellation(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	err := sleepContext(ctx, time.Hour)
+	backend := &digitalOceanLeaseBackend{}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{{ID: 42}}}
+	_, err := backend.waitForDropletIP(ctx, api, 42)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("sleepContext returned %v, want context.Canceled", err)
+		t.Fatalf("waitForDropletIP returned %v, want context.Canceled", err)
 	}
 	if time.Since(start) > time.Second {
-		t.Fatalf("sleepContext took %v; expected immediate return on cancel", time.Since(start))
+		t.Fatalf("waitForDropletIP took %v; expected immediate return on cancel", time.Since(start))
 	}
 }
