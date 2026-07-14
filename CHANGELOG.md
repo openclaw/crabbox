@@ -10,6 +10,10 @@
 
 - Protected portal and isolated Code sessions with browser-enforced host-only cookies, rejected duplicate session cookies, and retired legacy cookie names to prevent sibling-origin shadowing. Thanks @coygeek.
 
+### Fixed
+
+- Scrubbed successful ready-pool workspaces through credential-free branch recovery and commit-bound Actions hydration, while draining failed or unverifiable leases before return.
+
 ## 0.38.0 - 2026-07-11
 
 ### Added

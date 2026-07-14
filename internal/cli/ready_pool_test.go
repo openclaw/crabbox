@@ -2,8 +2,6 @@ package cli
 
 import (
 	"errors"
-	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -100,58 +98,30 @@ func TestReadyPoolRunReturnDispositionRequiresScrubProof(t *testing.T) {
 		name            string
 		policy          string
 		runFailure      error
-		ordinaryFailure bool
 		scrubErr        error
 		wantScrub       bool
 		wantResult      string
 		metadataMatches bool
 	}{
 		{name: "success returns after scrub", policy: "auto", wantScrub: true, wantResult: "ready", metadataMatches: true},
-		{name: "command failure returns after scrub", policy: "auto", runFailure: runErr, ordinaryFailure: true, wantScrub: true, wantResult: "ready", metadataMatches: true},
-		{name: "command failure drains when scrub fails", policy: "auto", runFailure: runErr, ordinaryFailure: true, scrubErr: scrubErr, wantScrub: true, wantResult: "drain", metadataMatches: true},
-		{name: "advanced exact entry drains", policy: "auto", ordinaryFailure: true, wantScrub: true, wantResult: "drain"},
+		{name: "command failure drains without scrub", policy: "auto", runFailure: runErr, wantResult: "drain", metadataMatches: true},
+		{name: "advanced exact entry drains", policy: "auto", wantScrub: true, wantResult: "drain"},
 		{name: "transport failure drains", policy: "auto", runFailure: runErr, wantResult: "drain", metadataMatches: true},
 		{name: "lifecycle failure drains", policy: "auto", runFailure: runErr, wantResult: "drain", metadataMatches: true},
 		{name: "forced ready cannot override lifecycle failure", policy: "ready", runFailure: runErr, wantResult: "drain", metadataMatches: true},
-		{name: "forced ready still requires scrub", policy: "ready", runFailure: runErr, ordinaryFailure: true, scrubErr: scrubErr, wantScrub: true, wantResult: "drain", metadataMatches: true},
+		{name: "forced ready cannot reuse failed command", policy: "ready", runFailure: runErr, scrubErr: scrubErr, wantResult: "drain", metadataMatches: true},
 		{name: "explicit drain skips scrub", policy: "drain", wantResult: "drain", metadataMatches: true},
 		{name: "explicit release skips scrub", policy: "release", wantResult: "release", metadataMatches: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := readyPoolRunShouldScrub(tc.policy, tc.runFailure, tc.ordinaryFailure); got != tc.wantScrub {
+			if got := readyPoolRunShouldScrub(tc.policy, tc.runFailure); got != tc.wantScrub {
 				t.Fatalf("readyPoolRunShouldScrub()=%v, want %v", got, tc.wantScrub)
 			}
-			if got := readyPoolRunReturnResult(tc.policy, tc.runFailure, tc.ordinaryFailure, tc.scrubErr, tc.metadataMatches); got != tc.wantResult {
+			if got := readyPoolRunReturnResult(tc.policy, tc.runFailure, tc.scrubErr, tc.metadataMatches); got != tc.wantResult {
 				t.Fatalf("readyPoolRunReturnResult()=%q, want %q", got, tc.wantResult)
 			}
 		})
-	}
-}
-
-func TestReadyPoolOrdinaryRemoteCommandFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix process exit semantics")
-	}
-	exitErr := exec.Command("sh", "-c", "exit 1").Run()
-	if !readyPoolOrdinaryRemoteCommandFailure(1, exitErr, nil) {
-		t.Fatal("ordinary remote exit was treated as lifecycle failure")
-	}
-	if readyPoolOrdinaryRemoteCommandFailure(255, exitErr, nil) {
-		t.Fatal("SSH transport exit was treated as ordinary command failure")
-	}
-	if readyPoolOrdinaryRemoteCommandFailure(1, exitErr, errors.New("context canceled")) {
-		t.Fatal("canceled command was treated as ordinary command failure")
-	}
-	if readyPoolOrdinaryRemoteCommandFailure(0, nil, nil) {
-		t.Fatal("successful command was treated as ordinary command failure")
-	}
-	if readyPoolOrdinaryRemoteCommandFailure(1, errors.New("ssh executable missing"), nil) {
-		t.Fatal("SSH process failure was treated as ordinary command failure")
-	}
-	signaledErr := exec.Command("sh", "-c", "kill -TERM $$").Run()
-	if readyPoolOrdinaryRemoteCommandFailure(1, signaledErr, nil) {
-		t.Fatal("signaled SSH process was treated as ordinary command failure")
 	}
 }
 
@@ -163,7 +133,7 @@ func TestReadyPoolRunReturnReasonPreservesCommandOutcome(t *testing.T) {
 	if got := readyPoolRunReturnReason(nil, "drain", "", errors.New("scrub failed"), true); got != "pool scrub failed" {
 		t.Fatalf("scrub failure reason=%q", got)
 	}
-	if got := readyPoolRunReturnReason(nil, "drain", "", nil, false); got != "pool branch advanced beyond recorded commit" {
+	if got := readyPoolRunReturnReason(nil, "drain", "", nil, false); got != "pool hydration or recorded commit is stale" {
 		t.Fatalf("advanced commit reason=%q", got)
 	}
 }
@@ -177,5 +147,17 @@ func TestReadyPoolPreparedCommitMatches(t *testing.T) {
 	}
 	if readyPoolPreparedCommitMatches("old", "new") {
 		t.Fatal("advanced exact-commit entry remained reusable")
+	}
+}
+
+func TestReadyPoolEntryRequiresHydrationForRefOnlyEntries(t *testing.T) {
+	if !readyPoolEntryRequiresHydration(CoordinatorReadyPoolEntry{Ref: "main"}) {
+		t.Fatal("ref-only entry skipped hydration proof")
+	}
+	if readyPoolEntryRequiresHydration(CoordinatorReadyPoolEntry{Ref: "main", Commit: strings.Repeat("a", 40)}) {
+		t.Fatal("exact-commit entry unexpectedly required Actions hydration")
+	}
+	if !readyPoolRunRequiresHydrationProof(CoordinatorReadyPoolEntry{Ref: "main", Commit: strings.Repeat("a", 40)}, true) {
+		t.Fatal("exact-commit Actions run skipped hydration proof")
 	}
 }

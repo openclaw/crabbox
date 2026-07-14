@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -421,48 +420,47 @@ func readyPoolRunNeedsTrustedRemote(policy string) bool {
 	}
 }
 
-func readyPoolRunShouldScrub(policy string, runFailure error, ordinaryCommandFailure bool) bool {
+func readyPoolRunShouldScrub(policy string, runFailure error) bool {
 	switch strings.TrimSpace(policy) {
 	case "drain", "release":
 		return false
 	case "ready", "", "auto":
-		return runFailure == nil || ordinaryCommandFailure
+		return runFailure == nil
 	default:
 		return false
 	}
 }
 
-func readyPoolRunReturnResult(policy string, runFailure error, ordinaryCommandFailure bool, scrubErr error, metadataCompatible bool) string {
+func readyPoolRunReturnResult(policy string, runFailure error, scrubErr error, metadataCompatible bool) string {
 	switch strings.TrimSpace(policy) {
 	case "drain", "release":
 		return strings.TrimSpace(policy)
 	case "ready":
-		if readyPoolRunShouldScrub(policy, runFailure, ordinaryCommandFailure) && scrubErr == nil && metadataCompatible {
+		if readyPoolRunShouldScrub(policy, runFailure) && scrubErr == nil && metadataCompatible {
 			return "ready"
 		}
 		return "drain"
 	case "", "auto":
-		if readyPoolRunShouldScrub(policy, runFailure, ordinaryCommandFailure) && scrubErr == nil && metadataCompatible {
+		if readyPoolRunShouldScrub(policy, runFailure) && scrubErr == nil && metadataCompatible {
 			return "ready"
 		}
 		return "drain"
 	default:
 		return "drain"
 	}
-}
-
-func readyPoolOrdinaryRemoteCommandFailure(code int, streamErr, contextErr error) bool {
-	var exitErr *exec.ExitError
-	return contextErr == nil &&
-		asExitError(streamErr, &exitErr) &&
-		exitErr.ProcessState != nil &&
-		exitErr.ProcessState.ExitCode() >= 0 &&
-		code > 0 && code < 255
 }
 
 func readyPoolPreparedCommitMatches(recordedCommit, preparedCommit string) bool {
 	recordedCommit = strings.TrimSpace(recordedCommit)
 	return recordedCommit == "" || strings.EqualFold(recordedCommit, strings.TrimSpace(preparedCommit))
+}
+
+func readyPoolEntryRequiresHydration(entry CoordinatorReadyPoolEntry) bool {
+	return strings.TrimSpace(entry.Commit) == ""
+}
+
+func readyPoolRunRequiresHydrationProof(entry CoordinatorReadyPoolEntry, hydratedByActions bool) bool {
+	return hydratedByActions || readyPoolEntryRequiresHydration(entry)
 }
 
 func readyPoolReturnNeedsHydrationStop(result string) bool {
@@ -484,7 +482,7 @@ func readyPoolRunReturnReason(runFailure error, result, preparedCommit string, s
 		return "pool scrub failed"
 	}
 	if !metadataCompatible {
-		return "pool branch advanced beyond recorded commit"
+		return "pool hydration or recorded commit is stale"
 	}
 	if runFailure != nil {
 		return "run lifecycle failed"

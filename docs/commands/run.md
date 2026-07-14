@@ -44,20 +44,26 @@ With `--pool <key>`, Crabbox borrows one hydrated broker ready-pool lease,
 uses the pool-recorded SSH endpoint, runs the command, and returns the lease.
 Before a reusable return, Crabbox resets the checkout to the pool's recorded
 branch, fetches its latest remote commit, removes run-local state, and verifies
-the normal Git worktree is clean. The default `--pool-return auto` returns the
-lease after that scrub even when the user command fails; lifecycle or scrub
-failures drain the lease so a bad machine is not reused. Ignored task state is
-removed; explicitly ignored dependency caches such as `node_modules` remain
-warm. Submodule worktrees drain instead of being reused. Reuse
+the normal Git worktree is clean. The default `--pool-return auto` scrubs and
+returns successful runs; command, lifecycle, or scrub failures drain the lease
+so a bad or de-hydrated machine is not reused. Ignored task state is removed.
+Successful runs may retain explicitly ignored dependency install trees.
+Actions-hydrated leases drain if
+their recorded hydration commit no longer matches the prepared branch commit.
+Submodule worktrees drain instead of being reused. Reuse
 requires a canonical HTTPS origin that succeeds
 through a credential-free fetch preflight before the lease is borrowed. SSH,
-local/file, and private credential-backed origins are rejected; use a forced
+local/file, query/fragment-bearing, and private credential-backed origins are rejected; use a forced
 `drain` or `release` return policy for those repositories. Use
 `--pool-return ready|drain|release` to override the
 lifecycle policy for one run; `ready` still requires a successful scrub. See
 [Broker ready pools](../spec/broker.md).
-Pooled runs reject `--full-resync`/`--fresh-sync`. With `--no-sync`, pooled
-borrows require an exact commit match. Pooled runs also reject `--keep` and
+Pooled runs reject `--full-resync`/`--fresh-sync`. Reusable pooled runs require
+a branch ref. With `--no-sync`, pooled borrows also require an exact commit
+match. Use a forced `drain` or `release` policy for exact SHA or tag refs.
+Reusable pooled runs also reject `--fresh-pr`; use a forced drain or release
+for one-shot PR work.
+Pooled runs also reject `--keep` and
 `--keep-on-failure`; use `--pool-return ready|drain|release` for lifecycle.
 
 On coordinator-backed one-shot runs, if SSH becomes unavailable after a

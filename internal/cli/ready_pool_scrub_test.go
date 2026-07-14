@@ -244,7 +244,7 @@ func TestRemoteReadyPoolScrubUsesIsolatedTrustedGitMetadata(t *testing.T) {
 }
 
 func TestTrustedReadyPoolRemoteURL(t *testing.T) {
-	for _, value := range []string{"", "https://user@example.com/org/repo.git", "ssh://git@example.com/org/repo.git"} {
+	for _, value := range []string{"", "https://user@example.com/org/repo.git", "https://example.com/org/repo.git?access_token=secret", "https://example.com/org/repo.git#token", "ssh://git@example.com/org/repo.git"} {
 		if _, err := trustedReadyPoolRemoteURL(value); err == nil {
 			t.Fatalf("unsafe origin %q was accepted", value)
 		}
@@ -433,14 +433,19 @@ func TestPreflightReadyPoolRemoteRequiresAnonymousFetch(t *testing.T) {
 	if out, err := clone.CombinedOutput(); err != nil {
 		t.Fatalf("create bare origin: %v\n%s", err, out)
 	}
-	if err := preflightReadyPoolRemote(context.Background(), origin); err != nil {
+	if err := preflightReadyPoolRemote(context.Background(), origin, "main"); err != nil {
 		t.Fatalf("anonymous local origin rejected: %v", err)
 	}
 	runGit(t, origin, "symbolic-ref", "HEAD", "refs/heads/missing")
-	if err := preflightReadyPoolRemote(context.Background(), origin); err != nil {
+	if err := preflightReadyPoolRemote(context.Background(), origin, "main"); err != nil {
 		t.Fatalf("anonymous origin without advertised HEAD rejected: %v", err)
 	}
-	if err := preflightReadyPoolRemote(context.Background(), filepath.Join(root, "missing.git")); err == nil {
+	runGit(t, source, "tag", "--no-sign", "v1.0.0")
+	runGit(t, source, "push", origin, "refs/tags/v1.0.0")
+	if err := preflightReadyPoolRemote(context.Background(), origin, "v1.0.0"); err == nil {
+		t.Fatal("tag-only ref passed reusable branch preflight")
+	}
+	if err := preflightReadyPoolRemote(context.Background(), filepath.Join(root, "missing.git"), "main"); err == nil {
 		t.Fatal("missing origin passed anonymous fetch preflight")
 	}
 }
