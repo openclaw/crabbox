@@ -133,18 +133,37 @@ their current borrow or idle window.
 
 `crabbox run --pool` defaults to `--pool-return auto`:
 
-- command success: return `ready`
-- command failure, SSH failure, failed sync, failed hydration marker read, or
-  failed preflight: return `drain`
-- explicit `--pool-return ready`: force reuse
+- command success: scrub the checkout, then return `ready`
+- ordinary nonzero command exit: preserve the command failure, scrub the
+  checkout, then return `ready`
+- transport, cancellation, stream/capture, artifact, or other lifecycle
+  failure, failed scrub, SSH failure during scrub, or failed hydration marker
+  verification: return `drain`
+- explicit `--pool-return ready`: request reuse, still gated by the scrub
 - explicit `--pool-return drain`: release backing lease after the run
 - explicit `--pool-return release`: release backing lease immediately
 
-Successful returns keep the lease active and borrowable. Drained returns are no
+Before borrow, Crabbox captures a canonical origin from the local checkout and
+proves its HTTPS origin supports a credential-free fetch. Reusable pools reject
+SSH, local/file, and private credential-backed origins; forced `drain` and
+`release` policies do not need that contract. The scrub replaces task-mutable
+remote Git metadata from the trusted origin, fetches the pool entry's recorded
+branch, resets tracked and non-ignored untracked files, removes Crabbox
+run-local state, and clears stale sync metadata before verifying the prepared
+commit and clean worktree. Ignored task state is removed; only explicit cache
+paths that the repository itself ignores remain available. Submodule worktrees
+drain instead of being reused. Ready-pool reuse is for trusted workloads; this
+scrub prevents task-state confusion, not cross-tenant isolation or a hermetic
+host reset. Every entry advances to the latest remote branch
+commit. If that moves an exact-commit
+entry beyond its recorded commit, Crabbox drains the entry after the scrub so a
+later exact `--no-sync` borrow cannot use stale metadata.
+
+Reusable returns keep the lease active and borrowable. Drained returns are no
 longer borrowable and release the cloud machine to avoid poisoning the pool.
 Pooled runs reject full resync because that can replace the hydrated workspace.
-Pooled `--no-sync` runs require an exact commit match and do not borrow
-ref-only entries.
+Pooled `--no-sync` runs require an exact commit match and do not borrow ref-only
+entries.
 
 ## Provider contract
 
