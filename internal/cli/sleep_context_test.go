@@ -46,3 +46,17 @@ func TestWaitForLoopbackVNCHonorsCancellation(t *testing.T) {
 		t.Fatalf("waitForLoopbackVNC took %v; expected immediate return on cancel", time.Since(start))
 	}
 }
+
+func TestResolveVNCEndpointStaticHonorsCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	_, err := resolveVNCEndpoint(ctx, Config{Provider: staticProvider}, &SSHTarget{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveVNCEndpoint returned %v, want context.Canceled", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("resolveVNCEndpoint took %v; expected immediate return on cancel", time.Since(start))
+	}
+}

@@ -347,6 +347,9 @@ func resolveVNCEndpoint(ctx context.Context, cfg Config, target *SSHTarget) (vnc
 		if err := waitForLoopbackVNC(ctx, target); err == nil {
 			return vncEndpoint{Host: "127.0.0.1", Port: managedVNCPort}, nil
 		}
+		if err := ctx.Err(); err != nil {
+			return vncEndpoint{}, err
+		}
 		if tcpReachable(ctx, target.Host, managedVNCPort, 2*time.Second) {
 			return vncEndpoint{Direct: true, Host: target.Host, Port: managedVNCPort}, nil
 		}
