@@ -279,6 +279,14 @@ type StatusView struct {
 type statusView = StatusView
 
 func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView, error) {
+	return a.leaseStatusWithRequest(ctx, cfg, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: id})
+}
+
+func (a App) leaseStatusWithRequest(
+	ctx context.Context,
+	cfg Config,
+	req StatusRequest,
+) (statusView, error) {
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return statusView{}, err
@@ -286,16 +294,16 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 	if statusBackend, ok := backend.(interface {
 		Status(context.Context, StatusRequest) (statusView, error)
 	}); ok {
-		return statusBackend.Status(ctx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: id})
+		return statusBackend.Status(ctx, req)
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
-		return delegated.Status(ctx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: id})
+		return delegated.Status(ctx, req)
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
 		return statusView{}, exit(2, "provider=%s does not support status", backend.Spec().Name)
 	}
-	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: id, StatusOnly: true, NoLocalStateMutations: true})
+	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: req.Options, ID: req.ID, StatusOnly: true, NoLocalStateMutations: true})
 	if err != nil {
 		return statusView{}, err
 	}

@@ -25749,6 +25749,161 @@ describe("fleet identity", () => {
   });
 });
 
+describe("authoritative lease provider metadata", () => {
+  const headers = {
+    "x-crabbox-owner": "peter@example.com",
+    "x-crabbox-org": "openclaw",
+  };
+
+  it.each([
+    { attached: false, id: "cbx_0000000000a1" },
+    { attached: true, id: "cbx_0000000000a2" },
+  ])("freshly attests AWS instance-profile state: $attached", async ({ attached, id }) => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id,
+      provider: "aws",
+      cloudID: `i-${id.slice(4)}`,
+      region: "eu-west-1",
+      serverType: "c7a.8xlarge",
+    });
+    storage.seed(`lease:${id}`, lease);
+    const getServer = vi.fn<() => ProviderMachine>(() => ({
+      provider: "aws" as const,
+      id: 0,
+      cloudID: lease.cloudID,
+      name: lease.serverName,
+      status: "running",
+      serverType: lease.serverType,
+      host: lease.host,
+      awsInstanceProfileAttached: attached,
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        lease: lease.id,
+        owner: "peter_example.com",
+        provider: "aws",
+        slug: lease.slug ?? "",
+      },
+    }));
+    const fleet = testFleet(
+      storage,
+      { aws: fakeProvider(undefined, { provider: "aws" }, undefined, getServer) },
+      { CRABBOX_DEFAULT_ORG: "openclaw" },
+    );
+
+    const ordinary = await fleet.fetch(request("GET", `/v1/leases/${id}`, { headers }));
+    await expect(ordinary.json()).resolves.not.toHaveProperty("lease.providerMetadata");
+    expect(getServer).not.toHaveBeenCalled();
+
+    const attested = await fleet.fetch(
+      request("GET", `/v1/leases/${id}?providerMetadata=authoritative`, { headers }),
+    );
+    await expect(attested.json()).resolves.toMatchObject({
+      lease: { providerMetadata: { instanceProfileAttached: attached } },
+    });
+    expect(getServer).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when the fresh AWS instance does not match lease ownership", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_0000000000a3",
+      provider: "aws",
+      cloudID: "i-0000000000a3",
+      region: "eu-west-1",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, { provider: "aws" }, undefined, () => ({
+          provider: "aws",
+          id: 0,
+          cloudID: lease.cloudID,
+          name: lease.serverName,
+          status: "running",
+          serverType: lease.serverType,
+          host: lease.host,
+          awsInstanceProfileAttached: false,
+          labels: {},
+        })),
+      },
+      { CRABBOX_DEFAULT_ORG: "openclaw" },
+    );
+
+    const response = await fleet.fetch(
+      request("GET", `/v1/leases/${lease.id}?providerMetadata=authoritative`, { headers }),
+    );
+    expect(response.status).toBe(500);
+  });
+
+  it("fails closed when AWS omits authoritative instance-profile state", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_0000000000a4",
+      provider: "aws",
+      cloudID: "i-0000000000a4",
+      region: "eu-west-1",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, { provider: "aws" }, undefined, () => ({
+          provider: "aws",
+          id: 0,
+          cloudID: lease.cloudID,
+          name: lease.serverName,
+          status: "running",
+          serverType: lease.serverType,
+          host: lease.host,
+          labels: {
+            crabbox: "true",
+            created_by: "crabbox",
+            lease: lease.id,
+            owner: "peter_example.com",
+            provider: "aws",
+            slug: lease.slug ?? "",
+          },
+        })),
+      },
+      { CRABBOX_DEFAULT_ORG: "openclaw" },
+    );
+
+    const response = await fleet.fetch(
+      request("GET", `/v1/leases/${lease.id}?providerMetadata=authoritative`, { headers }),
+    );
+    expect(response.status).toBe(500);
+  });
+
+  it("omits authoritative metadata for terminal AWS leases without a provider lookup", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_0000000000a5",
+      provider: "aws",
+      cloudID: "i-0000000000a5",
+      region: "eu-west-1",
+      state: "released",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const getServer = vi.fn<() => ProviderMachine>(() => {
+      throw new Error("terminal lease must not query AWS");
+    });
+    const fleet = testFleet(
+      storage,
+      { aws: fakeProvider(undefined, { provider: "aws" }, undefined, getServer) },
+      { CRABBOX_DEFAULT_ORG: "openclaw" },
+    );
+
+    const response = await fleet.fetch(
+      request("GET", `/v1/leases/${lease.id}?providerMetadata=authoritative`, { headers }),
+    );
+    await expect(response.json()).resolves.not.toHaveProperty("lease.providerMetadata");
+    expect(getServer).not.toHaveBeenCalled();
+  });
+});
+
 async function startGitHubLogin(env: Partial<Env> = {}): Promise<{
   fleet: FleetDurableObject;
   loginID: string;

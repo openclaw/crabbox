@@ -5098,9 +5098,17 @@ export class FleetCoordinator {
         lease && this.leaseProviderAccessVisibleToRequest(lease, request, admin)
           ? await this.refreshLeaseAccessForResolution(lease)
           : lease;
-      return refreshed
-        ? json({ lease: this.leaseForRequest(refreshed, request, admin) })
-        : notFound();
+      if (!refreshed) {
+        return notFound();
+      }
+      const visible = this.leaseForRequest(refreshed, request, admin);
+      if (new URL(request.url).searchParams.get("providerMetadata") !== "authoritative") {
+        return json({ lease: visible });
+      }
+      const providerMetadata = await this.authoritativeLeaseProviderMetadata(refreshed);
+      return json({
+        lease: providerMetadata ? { ...visible, providerMetadata } : visible,
+      });
     }
     if (method === "POST" && action === "heartbeat") {
       return this.heartbeatLease(request, leaseID);
@@ -12713,6 +12721,26 @@ export class FleetCoordinator {
       visible.sshUser = "<token>";
     }
     return visible;
+  }
+
+  private async authoritativeLeaseProviderMetadata(
+    lease: LeaseRecord,
+  ): Promise<{ instanceProfileAttached: boolean } | undefined> {
+    if (!leaseIsLive(lease) || managedLeaseProvider(lease) !== "aws" || !lease.cloudID) {
+      return undefined;
+    }
+    const provider = this.provider("aws", lease.region, lease.providerProject);
+    if (!provider.getServer) {
+      throw new Error("AWS provider cannot attest instance metadata");
+    }
+    const server = await provider.getServer(lease.cloudID);
+    if (!providerMachineOwnedByLease(server, lease, "aws")) {
+      throw new Error("AWS instance metadata does not match the lease owner");
+    }
+    if (typeof server.awsInstanceProfileAttached !== "boolean") {
+      throw new Error("AWS provider returned incomplete instance-profile metadata");
+    }
+    return { instanceProfileAttached: server.awsInstanceProfileAttached };
   }
 
   private runtimeAdapterDeletePendingResponse(

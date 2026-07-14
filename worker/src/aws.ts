@@ -2651,6 +2651,8 @@ function instanceToMachine(input: unknown): ProviderMachine {
     ...(asString(instance["keyName"]) ? { awsKeyName: asString(instance["keyName"]) } : {}),
     ...(asString(instance["subnetId"]) ? { awsSubnetID: asString(instance["subnetId"]) } : {}),
     ...(securityGroupIDs.length > 0 ? { awsSecurityGroupIDs: securityGroupIDs } : {}),
+    awsInstanceProfileAttached:
+      Object.hasOwn(instance, "iamInstanceProfile") && instance["iamInstanceProfile"] != null,
     ...(asString(record(instance["iamInstanceProfile"])["arn"])
       ? { awsInstanceProfileARN: asString(record(instance["iamInstanceProfile"])["arn"]) }
       : {}),

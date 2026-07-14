@@ -73,8 +73,9 @@ The key is the authoritative public half generated for provisioning, not a key
 learned later through `known_hosts` or `ssh-keyscan`. The field is omitted when
 the provider cannot inject a host key before boot.
 
-Direct AWS leases also include authoritative provider metadata sourced from
-EC2 `DescribeInstances`:
+AWS leases also include authoritative provider metadata sourced from EC2
+`DescribeInstances`. Brokered inspection requests a fresh coordinator-side
+lookup; direct inspection uses the local AWS client:
 
 ```json
 {

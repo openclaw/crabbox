@@ -4,7 +4,7 @@
 
 ### Added
 
-- Exposed authoritative direct-AWS instance-profile attachment state in `inspect --json` provider metadata for admission-policy enforcement.
+- Exposed authoritative AWS instance-profile attachment state in `inspect --json` provider metadata for admission-policy enforcement across direct and brokered leases.
 
 ### Fixed
 
