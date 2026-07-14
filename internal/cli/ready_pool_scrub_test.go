@@ -163,9 +163,13 @@ func TestRemoteReadyPoolScrubResetsLatestBranchAndPreservesIgnoredCaches(t *test
 func TestWindowsRemoteReadyPoolScrubBuildsVerifiedReset(t *testing.T) {
 	decoded := decodePowerShellCommand(t, windowsRemoteReadyPoolScrub(`C:\crabbox\repo`, "main", "https://example.com/org/repo.git"))
 	for _, want := range []string{
-		"Get-ChildItem Env:GIT_*",
-		"Remove-Item -ErrorAction Stop",
-		"Join-Path $env:ProgramFiles 'Git\\cmd\\git.exe'",
+		"[Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)",
+		"[Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)",
+		"Get-ChildItem Env:",
+		"Remove-Item -LiteralPath (\"Env:\" + $_.Name) -ErrorAction Stop",
+		"$env:PATH = ((Split-Path -Parent $git), $systemDirectory) -join ';'",
+		"$env:XDG_CONFIG_HOME = $safeHome",
+		"$env:GCM_INTERACTIVE = 'Never'",
 		"& $git -C $tmp fetch --quiet --prune --tags origin",
 		"& $git -C $tmp read-tree $targetCommit",
 		"& $git -C $tmp ls-files -- ':(top)**' ':(top,exclude,attr:!filter)**' ':(top,exclude,attr:-filter)**'",
@@ -431,6 +435,10 @@ func TestPreflightReadyPoolRemoteRequiresAnonymousFetch(t *testing.T) {
 	}
 	if err := preflightReadyPoolRemote(context.Background(), origin); err != nil {
 		t.Fatalf("anonymous local origin rejected: %v", err)
+	}
+	runGit(t, origin, "symbolic-ref", "HEAD", "refs/heads/missing")
+	if err := preflightReadyPoolRemote(context.Background(), origin); err != nil {
+		t.Fatalf("anonymous origin without advertised HEAD rejected: %v", err)
 	}
 	if err := preflightReadyPoolRemote(context.Background(), filepath.Join(root, "missing.git")); err == nil {
 		t.Fatal("missing origin passed anonymous fetch preflight")

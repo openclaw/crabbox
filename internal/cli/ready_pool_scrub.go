@@ -45,7 +45,7 @@ func preflightReadyPoolRemote(ctx context.Context, remoteURL string) error {
 	if runtime.GOOS == "windows" {
 		configNull = "NUL"
 	}
-	cmd := exec.CommandContext(preflightCtx, "git", "-c", "credential.helper=", "ls-remote", "--exit-code", remoteURL, "HEAD")
+	cmd := exec.CommandContext(preflightCtx, "git", "-c", "credential.helper=", "ls-remote", remoteURL)
 	cmd.Dir = workdir
 	cmd.Env = []string{
 		"HOME=" + workdir,
@@ -217,21 +217,16 @@ func windowsRemoteReadyPoolScrub(workdir, ref, trustedRemoteURL string) string {
 $workdir = ` + psQuote(workdir) + `
 $ref = ` + psQuote(strings.TrimSpace(ref)) + `
 $trustedRemote = ` + psQuote(strings.TrimSpace(trustedRemoteURL)) + `
-# Borrowed commands may persist user-scoped Git variables. Clear the complete
-# inherited Git surface before installing the scrub's small trusted set.
-Get-ChildItem Env:GIT_* -ErrorAction SilentlyContinue | Remove-Item -ErrorAction Stop
-$env:GIT_CONFIG_NOSYSTEM = '1'
-$env:GIT_CONFIG_GLOBAL = 'NUL'
-$env:GIT_CONFIG_SYSTEM = 'NUL'
-$env:GIT_TERMINAL_PROMPT = '0'
 $gitCandidates = @()
-if ($env:ProgramFiles) {
-  $gitCandidates += (Join-Path $env:ProgramFiles 'Git\cmd\git.exe')
-  $gitCandidates += (Join-Path $env:ProgramFiles 'Git\bin\git.exe')
+$programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+$programFilesX86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+if ($programFiles) {
+  $gitCandidates += (Join-Path $programFiles 'Git\cmd\git.exe')
+  $gitCandidates += (Join-Path $programFiles 'Git\bin\git.exe')
 }
-if (${env:ProgramFiles(x86)}) {
-  $gitCandidates += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd\git.exe')
-  $gitCandidates += (Join-Path ${env:ProgramFiles(x86)} 'Git\bin\git.exe')
+if ($programFilesX86) {
+  $gitCandidates += (Join-Path $programFilesX86 'Git\cmd\git.exe')
+  $gitCandidates += (Join-Path $programFilesX86 'Git\bin\git.exe')
 }
 $gitCandidates = $gitCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
 $git = $gitCandidates | Select-Object -First 1
@@ -244,15 +239,34 @@ $resolvedWorkdir = $workdirItem.FullName
 $workdir = $resolvedWorkdir
 Set-Location -LiteralPath $resolvedWorkdir
 if (-not (Test-Path -LiteralPath (Join-Path $workdir '.git') -PathType Container)) { throw "ready-pool workspace has no replaceable Git metadata" }
-& $git check-ref-format --branch $ref | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "invalid ready-pool branch ref" }
 $parent = Split-Path -Parent $workdir
 $tmp = Join-Path $parent ('.crabbox-scrub-' + [System.Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $safeHome = Join-Path $tmp 'home'
 New-Item -ItemType Directory -Force -Path $safeHome | Out-Null
+$windowsRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+$systemDirectory = [Environment]::SystemDirectory
+$comSpec = Join-Path $systemDirectory 'cmd.exe'
+# Borrowed commands can persist user-level transport and config variables.
+# Replace the whole inherited environment before the first Git invocation.
+Get-ChildItem Env: | ForEach-Object { Remove-Item -LiteralPath ("Env:" + $_.Name) -ErrorAction Stop }
+$env:SystemRoot = $windowsRoot
+$env:WINDIR = $windowsRoot
+$env:ComSpec = $comSpec
+$env:PATH = ((Split-Path -Parent $git), $systemDirectory) -join ';'
+$env:PATHEXT = '.COM;.EXE;.BAT;.CMD'
+$env:TEMP = $safeHome
+$env:TMP = $safeHome
 $env:HOME = $safeHome
 $env:USERPROFILE = $safeHome
+$env:XDG_CONFIG_HOME = $safeHome
+$env:GIT_CONFIG_NOSYSTEM = '1'
+$env:GIT_CONFIG_GLOBAL = 'NUL'
+$env:GIT_CONFIG_SYSTEM = 'NUL'
+$env:GIT_TERMINAL_PROMPT = '0'
+$env:GCM_INTERACTIVE = 'Never'
+& $git check-ref-format --branch $ref | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "invalid ready-pool branch ref" }
 & $git init --quiet $tmp
 if ($LASTEXITCODE -ne 0) { throw "ready-pool temporary Git init failed" }
 & $git -C $tmp remote add origin $trustedRemote
