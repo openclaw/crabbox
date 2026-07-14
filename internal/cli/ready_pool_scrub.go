@@ -137,11 +137,18 @@ test -x /usr/bin/git
 safe_git check-ref-format --branch "$ref" >/dev/null
 safe_git init --quiet "$tmp"
 safe_git -C "$tmp" remote add origin "$trusted_remote"
-refspec="+refs/heads/$ref:refs/remotes/origin/$ref"
-safe_git -C "$tmp" fetch --quiet --depth=1 origin "$refspec"
+safe_git -C "$tmp" fetch --quiet --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
 remote_ref="refs/remotes/origin/$ref"
 remote_commit="$(safe_git -C "$tmp" rev-parse --verify "$remote_ref^{commit}")"
 target_commit="$remote_commit"
+safe_git -C "$tmp" read-tree "$target_commit"
+filter_paths="$tmp/filter-paths"
+safe_git -C "$tmp" ls-files -z -- ':(top)**' ':(top,exclude,attr:!filter)**' ':(top,exclude,attr:-filter)**' > "$filter_paths"
+if [ -s "$filter_paths" ]; then
+  echo "ready-pool scrub does not reuse Git filter-managed worktrees" >&2
+  exit 1
+fi
+rm -f -- "$filter_paths"
 rm -rf -- .git
 mv -- "$tmp/.git" .git
 rm -rf -- "$safe_home"
@@ -151,6 +158,7 @@ safe_git remote set-url origin "$trusted_remote"
 test "$(safe_git remote get-url origin)" = "$trusted_remote"
 safe_git checkout --quiet -f -B "$ref" "$target_commit"
 safe_git reset --hard --quiet "$target_commit"
+safe_git branch --set-upstream-to="$remote_ref" "$ref" >/dev/null
 if safe_git ls-files --stage | awk '$1 == "160000" { found=1 } END { exit !found }'; then
   echo "ready-pool scrub does not reuse submodule worktrees" >&2
   exit 1
@@ -249,13 +257,17 @@ $env:USERPROFILE = $safeHome
 if ($LASTEXITCODE -ne 0) { throw "ready-pool temporary Git init failed" }
 & $git -C $tmp remote add origin $trustedRemote
 if ($LASTEXITCODE -ne 0) { throw "ready-pool trusted origin setup failed" }
-$refspec = "+refs/heads/${ref}:refs/remotes/origin/${ref}"
-& $git -C $tmp fetch --quiet --depth=1 origin $refspec
+& $git -C $tmp fetch --quiet --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
 if ($LASTEXITCODE -ne 0) { throw "ready-pool branch fetch failed" }
 $remoteRef = "refs/remotes/origin/$ref"
 $remoteCommit = (& $git -C $tmp rev-parse --verify "${remoteRef}^{commit}").Trim()
 if ($LASTEXITCODE -ne 0 -or -not $remoteCommit) { throw "ready-pool remote branch is missing" }
 $targetCommit = $remoteCommit
+& $git -C $tmp read-tree $targetCommit
+if ($LASTEXITCODE -ne 0) { throw "ready-pool target tree inspection failed" }
+$filterPaths = @(& $git -C $tmp ls-files -- ':(top)**' ':(top,exclude,attr:!filter)**' ':(top,exclude,attr:-filter)**')
+if ($LASTEXITCODE -ne 0) { throw "ready-pool Git filter inspection failed" }
+if ($filterPaths.Count -ne 0) { throw "ready-pool scrub does not reuse Git filter-managed worktrees" }
 $oldGit = Join-Path $workdir '.git'
 Remove-Item -LiteralPath $oldGit -Recurse -Force -ErrorAction Stop
 if (Test-Path -LiteralPath $oldGit) { throw "ready-pool old Git metadata was not removed" }
@@ -269,6 +281,8 @@ if ($LASTEXITCODE -ne 0 -or $actualRemote -ne $trustedRemote) { throw "ready-poo
 if ($LASTEXITCODE -ne 0) { throw "ready-pool branch checkout failed" }
 & $git reset --hard --quiet $targetCommit
 if ($LASTEXITCODE -ne 0) { throw "ready-pool branch reset failed" }
+& $git branch --set-upstream-to=$remoteRef $ref | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "ready-pool branch upstream setup failed" }
 $gitlinks = @(& $git ls-files --stage | Where-Object { $_ -match '^160000 ' })
 if ($LASTEXITCODE -ne 0) { throw "ready-pool gitlink inspection failed" }
 if ($gitlinks.Count -ne 0) { throw "ready-pool scrub does not reuse submodule worktrees" }

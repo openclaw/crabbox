@@ -27,6 +27,9 @@ func TestRemoteReadyPoolScrubResetsLatestBranchAndPreservesIgnoredCaches(t *test
 	mustWriteTestFile(t, filepath.Join(source, "proof.txt"), "base\n")
 	runGit(t, source, "add", ".")
 	runGit(t, source, "commit", "-m", "base")
+	baseCommit := gitOutput(source, "rev-parse", "HEAD")
+	runGit(t, source, "branch", "maintenance")
+	runGit(t, source, "-c", "tag.gpgSign=false", "tag", "v-test")
 
 	origin := filepath.Join(root, "origin.git")
 	cloneBare := exec.Command("git", "clone", "--bare", source, origin)
@@ -97,6 +100,24 @@ func TestRemoteReadyPoolScrubResetsLatestBranchAndPreservesIgnoredCaches(t *test
 	if got := gitOutput(workdir, "remote", "get-url", "origin"); got != origin {
 		t.Fatalf("origin=%q, want trusted %q", got, origin)
 	}
+	if got := gitOutput(workdir, "rev-parse", "HEAD^"); got != baseCommit {
+		t.Fatalf("HEAD parent=%q, want full-history parent %q", got, baseCommit)
+	}
+	if got := gitOutput(workdir, "rev-parse", "--is-shallow-repository"); got != "false" {
+		t.Fatalf("is-shallow-repository=%q, want false", got)
+	}
+	if got := gitOutput(workdir, "rev-parse", "refs/remotes/origin/maintenance"); got != baseCommit {
+		t.Fatalf("maintenance ref=%q, want %q", got, baseCommit)
+	}
+	if got := gitOutput(workdir, "rev-parse", "refs/tags/v-test"); got != baseCommit {
+		t.Fatalf("tag=%q, want %q", got, baseCommit)
+	}
+	if got := gitOutput(workdir, "config", "--get", "branch.main.remote"); got != "origin" {
+		t.Fatalf("branch remote=%q, want origin", got)
+	}
+	if got := gitOutput(workdir, "config", "--get", "branch.main.merge"); got != "refs/heads/main" {
+		t.Fatalf("branch merge ref=%q, want refs/heads/main", got)
+	}
 	if got := gitOutput(workdir, "status", "--porcelain", "--untracked-files=normal"); got != "" {
 		t.Fatalf("worktree not clean: %q", got)
 	}
@@ -145,8 +166,12 @@ func TestWindowsRemoteReadyPoolScrubBuildsVerifiedReset(t *testing.T) {
 		"Get-ChildItem Env:GIT_*",
 		"Remove-Item -ErrorAction Stop",
 		"Join-Path $env:ProgramFiles 'Git\\cmd\\git.exe'",
-		"& $git -C $tmp fetch --quiet --depth=1 origin",
+		"& $git -C $tmp fetch --quiet --prune --tags origin",
+		"& $git -C $tmp read-tree $targetCommit",
+		"& $git -C $tmp ls-files -- ':(top)**' ':(top,exclude,attr:!filter)**' ':(top,exclude,attr:-filter)**'",
+		"ready-pool scrub does not reuse Git filter-managed worktrees",
 		"& $git checkout --quiet -f -B $ref $targetCommit",
+		"& $git branch --set-upstream-to=$remoteRef $ref",
 		"ready-pool scrub does not reuse submodule worktrees",
 		"$cleanArgs = @('clean', '-ffdx', '--quiet')",
 		"& $git check-ignore -q -- $cachePath",
@@ -192,6 +217,12 @@ func TestRemoteReadyPoolScrubUsesIsolatedTrustedGitMetadata(t *testing.T) {
 		"if [ -L \"$workdir\" ]",
 		"HOME=\"$safe_home\"",
 		"safe_git -C \"$tmp\" fetch",
+		"safe_git -C \"$tmp\" read-tree",
+		"safe_git -C \"$tmp\" ls-files -z --",
+		":(top,exclude,attr:!filter)**",
+		":(top,exclude,attr:-filter)**",
+		"ready-pool scrub does not reuse Git filter-managed worktrees",
+		"safe_git branch --set-upstream-to=\"$remote_ref\" \"$ref\"",
 		"ready-pool scrub does not reuse submodule worktrees",
 		"safe_git check-ignore -q -- \"$cache_path\"",
 		"ready-pool cache root must be a real directory",
@@ -319,6 +350,63 @@ func TestReadyPoolScrubBranchNormalizesFullHeadRef(t *testing.T) {
 		if got, err := readyPoolScrubBranch(ref); err == nil {
 			t.Fatalf("non-branch ref %q normalized to %q", ref, got)
 		}
+	}
+}
+
+func TestRemoteReadyPoolScrubRejectsGitFilterManagedWorktree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX scrub integration")
+	}
+	for _, filterValue := range []string{"lfs", "unset", "unspecified"} {
+		t.Run(filterValue, func(t *testing.T) {
+			testRemoteReadyPoolScrubRejectsGitFilter(t, filterValue)
+		})
+	}
+}
+
+func testRemoteReadyPoolScrubRejectsGitFilter(t *testing.T, filterValue string) {
+	t.Helper()
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "init")
+	runGit(t, source, "config", "user.email", "test@example.com")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "branch", "-M", "main")
+	mustWriteTestFile(t, filepath.Join(source, "proof.txt"), "base\n")
+	runGit(t, source, "add", ".")
+	runGit(t, source, "commit", "-m", "base")
+
+	origin := filepath.Join(root, "origin.git")
+	cloneBare := exec.Command("git", "clone", "--bare", source, origin)
+	if out, err := cloneBare.CombinedOutput(); err != nil {
+		t.Fatalf("create bare origin: %v\n%s", err, out)
+	}
+	runGit(t, source, "remote", "add", "origin", origin)
+	workdir := filepath.Join(root, "workdir")
+	clone := exec.Command("git", "clone", origin, workdir)
+	if out, err := clone.CombinedOutput(); err != nil {
+		t.Fatalf("clone workdir: %v\n%s", err, out)
+	}
+
+	mustWriteTestFile(t, filepath.Join(source, ".gitattributes"), "*.bin filter="+filterValue+" -text\n")
+	mustWriteTestFile(t, filepath.Join(source, "asset.bin"), "payload\n")
+	runGit(t, source, "-c", "filter."+filterValue+".process=", "-c", "filter."+filterValue+".clean=cat", "-c", "filter."+filterValue+".required=false", "add", ".")
+	runGit(t, source, "commit", "-m", "add filtered asset")
+	runGit(t, source, "push", "origin", "main")
+
+	cmd := exec.Command("bash", "-lc", remoteReadyPoolScrub(workdir, "main", origin))
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("Git filter-managed worktree was accepted: %s", out)
+	}
+	if !strings.Contains(string(out), "does not reuse Git filter-managed worktrees") {
+		t.Fatalf("unexpected scrub error: %v\n%s", err, out)
+	}
+	if got := gitOutput(workdir, "rev-parse", "HEAD"); got != gitOutput(workdir, "rev-parse", "refs/remotes/origin/main") {
+		t.Fatalf("rejected scrub changed existing checkout HEAD=%q", got)
 	}
 }
 
