@@ -458,11 +458,15 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	trustedPoolRemoteURL := ""
 	if strings.TrimSpace(*readyPool) != "" && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
+		poolBranch, branchErr := readyPoolScrubBranch(firstNonBlank(cfg.Actions.Ref, repo.BaseRef))
+		if branchErr != nil {
+			return exit(2, "reusable ready-pool runs require a branch ref; use --pool-return drain or release for exact SHA and tag refs")
+		}
 		trustedPoolRemoteURL, err = trustedReadyPoolRemoteURL(repo.RemoteURL)
 		if err != nil {
 			return err
 		}
-		if err := preflightReadyPoolRemote(ctx, trustedPoolRemoteURL); err != nil {
+		if err := preflightReadyPoolRemote(ctx, trustedPoolRemoteURL, poolBranch); err != nil {
 			return err
 		}
 	}
@@ -472,6 +476,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return err
 	}
 	if !freshPR.Empty() {
+		if strings.TrimSpace(*readyPool) != "" && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
+			return exit(2, "reusable ready-pool runs cannot use --fresh-pr; use --pool-return drain or release")
+		}
 		if *noSync {
 			return exit(2, "--fresh-pr cannot be combined with --no-sync")
 		}
@@ -540,7 +547,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var runFailure error
 	var workdir string
 	var hydratedByActions bool
-	var poolOrdinaryCommandFailure bool
 	defer func() {
 		if borrowedPool == nil {
 			return
@@ -552,9 +558,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		var preparedCommit string
 		var scrubErr error
 		metadataCompatible := true
-		if readyPoolRunShouldScrub(*readyPoolReturn, failure, poolOrdinaryCommandFailure) {
+		if readyPoolRunShouldScrub(*readyPoolReturn, failure) {
 			scrubCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-			preparedCommit, scrubErr = a.scrubReadyPoolLease(scrubCtx, target, borrowedPool.Entry, workdir, trustedPoolRemoteURL, hydratedByActions)
+			var hydrationCompatible bool
+			preparedCommit, hydrationCompatible, scrubErr = a.scrubReadyPoolLease(scrubCtx, target, borrowedPool.Entry, workdir, trustedPoolRemoteURL, readyPoolRunRequiresHydrationProof(borrowedPool.Entry, hydratedByActions))
 			cancel()
 			if scrubErr != nil {
 				fmt.Fprintf(a.Stderr, "warning: ready-pool scrub failed for %s: %v\n", borrowedPool.Entry.LeaseID, scrubErr)
@@ -562,14 +569,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 					err = readyPoolScrubLifecycleError(borrowedPool.Entry.LeaseID, scrubErr)
 				}
 			} else {
-				metadataCompatible = readyPoolPreparedCommitMatches(borrowedPool.Entry.Commit, preparedCommit)
+				metadataCompatible = hydrationCompatible && readyPoolPreparedCommitMatches(borrowedPool.Entry.Commit, preparedCommit)
 				fmt.Fprintf(a.Stderr, "scrubbed pool=%s lease=%s ref=%s commit=%s\n", borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, borrowedPool.Entry.Ref, preparedCommit)
 				if !metadataCompatible {
-					fmt.Fprintf(a.Stderr, "pool=%s lease=%s recorded_commit=%s advanced; draining stale exact-commit entry\n", borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, borrowedPool.Entry.Commit)
+					fmt.Fprintf(a.Stderr, "pool=%s lease=%s recorded_commit=%s hydration or commit metadata stale; draining entry\n", borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, borrowedPool.Entry.Commit)
 				}
 			}
 		}
-		result := readyPoolRunReturnResult(*readyPoolReturn, failure, poolOrdinaryCommandFailure, scrubErr, metadataCompatible)
+		result := readyPoolRunReturnResult(*readyPoolReturn, failure, scrubErr, metadataCompatible)
 		reason := readyPoolRunReturnReason(failure, result, preparedCommit, scrubErr, metadataCompatible)
 		coord, coordErr := readyPoolCoordinatorFromConfig(cfg)
 		if coordErr != nil {
@@ -932,18 +939,24 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	autoHydrateActions := shouldAutoHydrateActions(cfg, *noHydrate, *noSync, freshPR, *syncOnly)
 	if !freshPR.Empty() {
 		workdir = remoteJoin(cfg, leaseID, freshPR.WorkdirName())
-	} else if state, err := readActionsHydrationState(ctx, target, leaseID); err == nil && state.Workspace != "" {
-		workdir = state.Workspace
-		actionsEnvFile = state.EnvFile
-		if state.RunID != "" {
-			if ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo); err == nil {
-				actionsURL = actionsRunURL(ghRepo, state.RunID)
-			}
+	} else {
+		state, stateErr := readActionsHydrationState(ctx, target, leaseID)
+		if stateErr != nil && borrowedPool != nil && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
+			return recordFailure(exit(7, "verify ready-pool Actions hydration marker: %v", stateErr))
 		}
-		hydratedByActions = true
-		fmt.Fprintf(a.Stderr, "using Actions workspace %s\n", workdir)
-	} else if commandNeedsHydrationHint(command, *shellMode) && cfg.Actions.Workflow != "" && !autoHydrateActions {
-		fmt.Fprintf(a.Stderr, "warning: no Actions hydration marker found for %s; JS package commands may fail on a raw box. Run \"crabbox actions hydrate --id %s\" first, omit --no-hydrate, or include runtime setup in the command.\n", leaseID, leaseID)
+		if stateErr == nil && state.Workspace != "" {
+			workdir = state.Workspace
+			actionsEnvFile = state.EnvFile
+			if state.RunID != "" {
+				if ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo); err == nil {
+					actionsURL = actionsRunURL(ghRepo, state.RunID)
+				}
+			}
+			hydratedByActions = true
+			fmt.Fprintf(a.Stderr, "using Actions workspace %s\n", workdir)
+		} else if commandNeedsHydrationHint(command, *shellMode) && cfg.Actions.Workflow != "" && !autoHydrateActions {
+			fmt.Fprintf(a.Stderr, "warning: no Actions hydration marker found for %s; JS package commands may fail on a raw box. Run \"crabbox actions hydrate --id %s\" first, omit --no-hydrate, or include runtime setup in the command.\n", leaseID, leaseID)
+		}
 	}
 	contextPrinted := false
 	preflightPrinted := false
@@ -1577,7 +1590,6 @@ afterSync:
 		}
 	}
 	code, streamErr := runSSHStreamResult(ctx, target, remote, stdout, stderr)
-	ordinaryRemoteCommandFailure := readyPoolOrdinaryRemoteCommandFailure(code, streamErr, ctx.Err())
 	if err := streamCaptures.closeAfterStream(streamErr, code, a.Stderr); err != nil {
 		return recordFailure(err)
 	}
@@ -1776,10 +1788,8 @@ afterSync:
 			return recordFailure(artifactFailure)
 		}
 		if testResultsFailure != nil {
-			poolOrdinaryCommandFailure = ordinaryRemoteCommandFailure
 			return recordFailure(testResultsFailure)
 		}
-		poolOrdinaryCommandFailure = ordinaryRemoteCommandFailure
 		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
 	}
 	return nil

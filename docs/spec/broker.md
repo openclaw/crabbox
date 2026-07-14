@@ -123,6 +123,11 @@ Images are the base layer: operating system, runner user, SSH, language
 toolchains, package managers, Docker, and heavy system packages. Actions
 hydration is the repo layer: checkout, dependency install, generated caches,
 and project-specific setup from the same workflow that CI uses.
+The hydration marker records the checked-out commit so return-time scrub can
+drain a lease whose branch advanced beyond its prepared dependency state.
+Legacy or custom markers without the commit field drain on return; regenerate
+the workflow with `crabbox init --force` or add the checked-out `COMMIT` field
+before replenishing the pool.
 
 When the repository's main ref moves, new pool entries should hydrate the new
 commit. Existing ready entries with older commits can serve only requests that
@@ -134,8 +139,8 @@ their current borrow or idle window.
 `crabbox run --pool` defaults to `--pool-return auto`:
 
 - command success: scrub the checkout, then return `ready`
-- ordinary nonzero command exit: preserve the command failure, scrub the
-  checkout, then return `ready`
+- ordinary nonzero command exit: preserve the command failure and return
+  `drain`
 - transport, cancellation, stream/capture, artifact, or other lifecycle
   failure, failed scrub, SSH failure during scrub, or failed hydration marker
   verification: return `drain`
@@ -145,14 +150,16 @@ their current borrow or idle window.
 
 Before borrow, Crabbox captures a canonical origin from the local checkout and
 proves its HTTPS origin supports a credential-free fetch. Reusable pools reject
-SSH, local/file, and private credential-backed origins; forced `drain` and
+SSH, local/file, query/fragment-bearing, and private credential-backed origins; forced `drain` and
 `release` policies do not need that contract. The scrub replaces task-mutable
 remote Git metadata from the trusted origin, fetches the pool entry's recorded
 branch, resets tracked and non-ignored untracked files, removes Crabbox
 run-local state, and clears stale sync metadata before verifying the prepared
-commit and clean worktree. Ignored task state is removed; only explicit cache
-paths that the repository itself ignores remain available. Submodule worktrees
-drain instead of being reused. Ready-pool reuse is for trusted workloads; this
+commit and clean worktree. Ignored task state is removed, while successful
+commands may retain explicitly ignored dependency install trees. An
+Actions-hydrated entry remains reusable only while its recorded hydration
+commit matches the prepared branch commit. Submodule worktrees drain instead
+of being reused. Ready-pool reuse is for trusted workloads; this
 scrub prevents task-state confusion, not cross-tenant isolation or a hermetic
 host reset. Every entry advances to the latest remote branch
 commit. If that moves an exact-commit
@@ -162,8 +169,9 @@ later exact `--no-sync` borrow cannot use stale metadata.
 Reusable returns keep the lease active and borrowable. Drained returns are no
 longer borrowable and release the cloud machine to avoid poisoning the pool.
 Pooled runs reject full resync because that can replace the hydrated workspace.
-Pooled `--no-sync` runs require an exact commit match and do not borrow ref-only
-entries.
+Reusable pooled runs require a branch ref. Pooled `--no-sync` runs also require
+an exact commit match and do not borrow ref-only entries. Exact SHA and tag refs
+require a forced `drain` or `release` policy.
 
 ## Provider contract
 

@@ -2,6 +2,10 @@
 
 ## 0.38.1 - Unreleased
 
+### Fixed
+
+- Scrubbed successful ready-pool workspaces through credential-free branch recovery and commit-bound Actions hydration, while draining failed or unverifiable leases before return.
+
 ## 0.38.0 - 2026-07-11
 
 ### Added

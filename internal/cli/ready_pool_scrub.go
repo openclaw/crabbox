@@ -27,13 +27,13 @@ func trustedReadyPoolRemoteURL(remoteURL string) (string, error) {
 		return "", exit(7, "ready-pool reuse could not normalize the local Git origin")
 	}
 	parsed, err := url.Parse(canonical)
-	if err != nil || parsed.User != nil || parsed.Scheme != "https" || parsed.Host == "" {
+	if err != nil || parsed.User != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
 		return "", exit(7, "ready-pool reuse requires an anonymously fetchable HTTPS Git origin")
 	}
 	return canonical, nil
 }
 
-func preflightReadyPoolRemote(ctx context.Context, remoteURL string) error {
+func preflightReadyPoolRemote(ctx context.Context, remoteURL, branch string) error {
 	preflightCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	workdir, err := os.MkdirTemp("", "crabbox-ready-pool-preflight-")
@@ -45,7 +45,7 @@ func preflightReadyPoolRemote(ctx context.Context, remoteURL string) error {
 	if runtime.GOOS == "windows" {
 		configNull = "NUL"
 	}
-	cmd := exec.CommandContext(preflightCtx, "git", "-c", "credential.helper=", "ls-remote", remoteURL)
+	cmd := exec.CommandContext(preflightCtx, "git", "-c", "credential.helper=", "ls-remote", "--exit-code", remoteURL, "refs/heads/"+branch)
 	cmd.Dir = workdir
 	cmd.Env = []string{
 		"HOME=" + workdir,
@@ -63,16 +63,16 @@ func preflightReadyPoolRemote(ctx context.Context, remoteURL string) error {
 	return nil
 }
 
-func (a App) scrubReadyPoolLease(ctx context.Context, target SSHTarget, entry CoordinatorReadyPoolEntry, workdir, trustedRemoteURL string, requireActionsHydration bool) (string, error) {
+func (a App) scrubReadyPoolLease(ctx context.Context, target SSHTarget, entry CoordinatorReadyPoolEntry, workdir, trustedRemoteURL string, requireActionsHydration bool) (string, bool, error) {
 	if strings.TrimSpace(workdir) == "" {
-		return "", exit(7, "ready-pool scrub has no remote workdir")
+		return "", false, exit(7, "ready-pool scrub has no remote workdir")
 	}
 	branch, err := readyPoolScrubBranch(entry.Ref)
 	if err != nil {
-		return "", exit(7, "ready-pool scrub requires a branch ref")
+		return "", false, exit(7, "ready-pool scrub requires a branch ref")
 	}
 	if strings.TrimSpace(trustedRemoteURL) == "" {
-		return "", exit(7, "ready-pool scrub has no trusted Git origin")
+		return "", false, exit(7, "ready-pool scrub has no trusted Git origin")
 	}
 	command := remoteReadyPoolScrub(workdir, branch, trustedRemoteURL)
 	if isWindowsNativeTarget(target) {
@@ -80,22 +80,26 @@ func (a App) scrubReadyPoolLease(ctx context.Context, target SSHTarget, entry Co
 	}
 	out, err := runSSHOutput(ctx, target, command)
 	if err != nil {
-		return "", exit(7, "ready-pool scrub failed on %s: %v", target.Host, err)
+		return "", false, exit(7, "ready-pool scrub failed on %s: %v", target.Host, err)
 	}
 	preparedCommit := strings.TrimSpace(out)
 	if !isGitCommitSHA(preparedCommit) {
-		return "", exit(7, "ready-pool scrub did not report one valid prepared commit")
+		return "", false, exit(7, "ready-pool scrub did not report one valid prepared commit")
 	}
-	if requireActionsHydration {
-		state, err := readActionsHydrationState(ctx, target, entry.LeaseID)
-		if err != nil {
-			return "", exit(7, "read ready-pool Actions hydration marker: %v", err)
-		}
-		if strings.TrimSpace(state.Workspace) == "" || strings.TrimSpace(state.Workspace) != strings.TrimSpace(workdir) {
-			return "", exit(7, "ready-pool Actions hydration marker no longer owns the prepared workspace")
-		}
+	hydrationCompatible := true
+	state, err := readActionsHydrationState(ctx, target, entry.LeaseID)
+	if err != nil {
+		return "", false, exit(7, "read ready-pool Actions hydration marker: %v", err)
 	}
-	return preparedCommit, nil
+	if strings.TrimSpace(state.Workspace) != "" {
+		if strings.TrimSpace(state.Workspace) != strings.TrimSpace(workdir) {
+			return "", false, exit(7, "ready-pool Actions hydration marker no longer owns the prepared workspace")
+		}
+		hydrationCompatible = isGitCommitSHA(state.Commit) && strings.EqualFold(state.Commit, preparedCommit)
+	} else if requireActionsHydration {
+		return "", false, exit(7, "ready-pool entry requires an Actions hydration marker")
+	}
+	return preparedCommit, hydrationCompatible, nil
 }
 
 func readyPoolScrubBranch(ref string) (string, error) {

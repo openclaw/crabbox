@@ -75,6 +75,7 @@ jobs:
           } > "$env_file"
           {
             echo "WORKSPACE=${GITHUB_WORKSPACE}"
+            echo "COMMIT=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
             echo "RUN_ID=${GITHUB_RUN_ID}"
             echo "JOB=${CRABBOX_JOB}"
             echo "ENV_FILE=${env_file}"
