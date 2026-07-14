@@ -1,0 +1,184 @@
+name: Verify Homebrew Release
+run-name: Verify Homebrew ${{ inputs.tag }} from published run ${{ inputs.public_verifier_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Signed stable release tag
+        required: true
+        type: string
+      tag_object:
+        description: Signed annotated tag object SHA
+        required: true
+        type: string
+      source_commit:
+        description: Peeled release source commit SHA
+        required: true
+        type: string
+      verifier_commit:
+        description: Protected release verifier commit SHA
+        required: true
+        type: string
+      release_id:
+        description: Published GitHub release ID
+        required: true
+        type: string
+      public_verifier_run_id:
+        description: Successful published-asset verifier run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  guard:
+    name: guard-protected-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Guard published release and protected verifier run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          PUBLIC_VERIFIER_RUN_ID: ${{ inputs.public_verifier_run_id }}
+          VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
+          [[ "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PUBLIC_VERIFIER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          expected_ref="refs/heads/$DEFAULT_BRANCH"
+          expected_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/verify-homebrew.yml@$expected_ref"
+          [[ "$REF_PROTECTED" == true ]]
+          [[ "$GITHUB_REF" == "$expected_ref" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$expected_workflow_ref" ]]
+          [[ "$WORKFLOW_SHA" == "$VERIFIER_COMMIT" ]]
+
+          work="$RUNNER_TEMP/homebrew-guard"
+          mkdir -m 700 "$work"
+          gh api --method GET "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" >"$work/release.json"
+          gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$PUBLIC_VERIFIER_RUN_ID" \
+            >"$work/run.json"
+          workflow_id=$(jq -er '.workflow_id | select(type == "number" and . > 0)' "$work/run.json")
+          gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id" \
+            >"$work/workflow.json"
+          jq -e \
+            --argjson id "$RELEASE_ID" \
+            --arg tag "$RELEASE_TAG" '
+              .id == $id and .tag_name == $tag and .name == $tag and
+              .draft == false and .prerelease == false and
+              .immutable == true and
+              (.published_at | type == "string")
+            ' "$work/release.json" >/dev/null
+          jq -e \
+            --argjson id "$PUBLIC_VERIFIER_RUN_ID" \
+            --arg branch "$DEFAULT_BRANCH" \
+            --arg sha "$VERIFIER_COMMIT" '
+              .id == $id and .event == "workflow_dispatch" and
+              .status == "completed" and .conclusion == "success" and
+              .head_branch == $branch and .head_sha == $sha and
+              .repository.full_name == env.GITHUB_REPOSITORY and
+              .head_repository.full_name == env.GITHUB_REPOSITORY
+            ' "$work/run.json" >/dev/null
+          jq -e '
+            .path == ".github/workflows/release-assets.yml" and .state == "active"
+          ' "$work/workflow.json" >/dev/null
+
+  verify:
+    name: verify-${{ matrix.arch }}
+    needs: guard
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+
+      - name: Check out protected release verifier
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.verifier_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download frozen public release assets
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$VERIFIER_COMMIT"
+          version=${RELEASE_TAG#v}
+          assets=(
+            checksums.txt
+            provenance.json
+            "crabbox_${version}_darwin_amd64.tar.gz"
+            "crabbox_${version}_darwin_arm64.tar.gz"
+            "crabbox_${version}_linux_amd64.tar.gz"
+            "crabbox_${version}_linux_arm64.tar.gz"
+            "crabbox_${version}_windows_amd64.zip"
+            "crabbox_${version}_windows_arm64.zip"
+          )
+          assets_dir="$RUNNER_TEMP/release-assets"
+          mkdir -m 700 "$assets_dir"
+          for asset in "${assets[@]}"; do
+            curl --fail --location --retry 3 --silent --show-error \
+              --output "$assets_dir/$asset" \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$asset"
+          done
+
+      - name: Download immutable native proof ZIPs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLIC_VERIFIER_RUN_ID: ${{ inputs.public_verifier_run_id }}
+        run: |
+          set -euo pipefail
+          proofs_dir="$RUNNER_TEMP/public-proofs"
+          mkdir -m 700 "$proofs_dir"
+          metadata="$RUNNER_TEMP/public-proof-artifacts.json"
+          gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$PUBLIC_VERIFIER_RUN_ID/artifacts?per_page=100" \
+            >"$metadata"
+          for arch in arm64 x86_64; do
+            artifact_id=$(jq -er --arg name "verified-assets-$arch" '
+              [.artifacts[] | select(.name == $name)] |
+              if length == 1 then .[0].id else error("ambiguous proof artifact") end
+            ' "$metadata")
+            gh api --method GET --header 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
+              >"$proofs_dir/verified-assets-$arch.zip"
+          done
+
+      - name: Verify public Homebrew install without credentials
+        shell: bash
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          TAG_OBJECT: ${{ inputs.tag_object }}
+          PUBLIC_VERIFIER_RUN_ID: ${{ inputs.public_verifier_run_id }}
+          VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+        run: |
+          set -euo pipefail
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN
+          unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN
+          scripts/verify-homebrew-release.sh \
+            "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
+            "$TAG_OBJECT" "$SOURCE_COMMIT" "$VERIFIER_COMMIT" \
+            "$RELEASE_ID" "$PUBLIC_VERIFIER_RUN_ID" "$RUNNER_TEMP/public-proofs"
