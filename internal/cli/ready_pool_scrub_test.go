@@ -25,6 +25,8 @@ func TestRemoteReadyPoolScrubResetsLatestBranchAndPreservesIgnoredCaches(t *test
 	runGit(t, source, "branch", "-M", "main")
 	mustWriteTestFile(t, filepath.Join(source, ".gitignore"), "node_modules/\n*.ignored\n")
 	mustWriteTestFile(t, filepath.Join(source, "proof.txt"), "base\n")
+	mustWriteTestFile(t, filepath.Join(source, "worker", "README.md"), "worker\n")
+	mustWriteTestFile(t, filepath.Join(source, "packages", "app[1]", "README.md"), "app\n")
 	runGit(t, source, "add", ".")
 	runGit(t, source, "commit", "-m", "base")
 	baseCommit := gitOutput(source, "rev-parse", "HEAD")
@@ -49,6 +51,8 @@ func TestRemoteReadyPoolScrubResetsLatestBranchAndPreservesIgnoredCaches(t *test
 	mustWriteTestFile(t, filepath.Join(workdir, "proof.txt"), "dirty feature\n")
 	mustWriteTestFile(t, filepath.Join(workdir, "untracked.txt"), "remove me\n")
 	mustWriteTestFile(t, filepath.Join(workdir, "node_modules", "cache.txt"), "keep me\n")
+	mustWriteTestFile(t, filepath.Join(workdir, "worker", "node_modules", "cache.txt"), "keep nested\n")
+	mustWriteTestFile(t, filepath.Join(workdir, "packages", "app[1]", "node_modules", "cache.txt"), "keep metachar\n")
 	mustWriteTestFile(t, filepath.Join(workdir, ".pnpm-store", "cache.txt"), "remove unless ignored\n")
 	mustWriteTestFile(t, filepath.Join(workdir, "task-state.ignored"), "remove me\n")
 	for _, name := range []string{"sync-fingerprint", "sync-manifest", "sync-manifest.new", "sync-deleted.new"} {
@@ -135,6 +139,14 @@ func TestRemoteReadyPoolScrubResetsLatestBranchAndPreservesIgnoredCaches(t *test
 	if string(cache) != "keep me\n" {
 		t.Fatalf("cache=%q", cache)
 	}
+	nestedCache, err := os.ReadFile(filepath.Join(workdir, "worker", "node_modules", "cache.txt"))
+	if err != nil || string(nestedCache) != "keep nested\n" {
+		t.Fatalf("nested ignored dependency cache was not preserved: data=%q err=%v", nestedCache, err)
+	}
+	metacharCache, err := os.ReadFile(filepath.Join(workdir, "packages", "app[1]", "node_modules", "cache.txt"))
+	if err != nil || string(metacharCache) != "keep metachar\n" {
+		t.Fatalf("metachar ignored dependency cache was not preserved: data=%q err=%v", metacharCache, err)
+	}
 	if _, err := os.Stat(filepath.Join(workdir, "task-state.ignored")); !os.IsNotExist(err) {
 		t.Fatalf("ignored task state remains: %v", err)
 	}
@@ -179,6 +191,9 @@ func TestWindowsRemoteReadyPoolScrubBuildsVerifiedReset(t *testing.T) {
 		"ready-pool scrub does not reuse submodule worktrees",
 		"$cleanArgs = @('clean', '-ffdx', '--quiet')",
 		"& $git check-ignore -q -- $cachePath",
+		"System.Collections.Generic.Stack[System.IO.DirectoryInfo]",
+		"$normalized.EndsWith('/node_modules', [System.StringComparison]::OrdinalIgnoreCase)",
+		"$cachePath.Replace('\\', '\\\\').Replace('*', '\\*')",
 		"$cachePath -split '/'",
 		"ready-pool cache root must not contain reparse points",
 		"[System.IO.FileAttributes]::ReparsePoint",
@@ -229,6 +244,11 @@ func TestRemoteReadyPoolScrubUsesIsolatedTrustedGitMetadata(t *testing.T) {
 		"safe_git branch --set-upstream-to=\"$remote_ref\" \"$ref\"",
 		"ready-pool scrub does not reuse submodule worktrees",
 		"safe_git check-ignore -q -- \"$cache_path\"",
+		"/usr/bin/find -P .",
+		"-iname node_modules",
+		"ready-pool cache discovery failed",
+		"*/.yarn/cache",
+		"cache_pattern=\"${cache_path//\\\\/\\\\\\\\}\"",
 		"ready-pool cache root must be a real directory",
 		"ready-pool cache root escapes the workspace",
 		"safe_git clean \"${clean_args[@]}\"",
