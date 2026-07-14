@@ -168,28 +168,42 @@ if safe_git ls-files --stage | awk '$1 == "160000" { found=1 } END { exit !found
   exit 1
 fi
 clean_args=(-ffdx --quiet)
-for cache_path in node_modules .pnpm-store .yarn/cache .yarn/unplugged; do
-  if [ -e "$cache_path" ]; then
-    if safe_git check-ignore -q -- "$cache_path"; then
-      if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then
-        echo "ready-pool cache root must be a real directory" >&2
-        exit 1
-      fi
-      resolved_cache="$(cd -P -- "$cache_path" && pwd -P)"
-      case "$resolved_cache/" in
-        "$workdir"/*) ;;
-        *)
-          echo "ready-pool cache root escapes the workspace" >&2
-          exit 1
-          ;;
-      esac
-      clean_args+=(-e "$cache_path/")
-    elif [ "$?" -ne 1 ]; then
-      echo "ready-pool cache ignore check failed" >&2
+cache_paths=".git/crabbox-cache-paths.$$"
+trap 'rm -f -- "$cache_paths"' EXIT
+if ! /usr/bin/find -P . \( -ipath './.git' -o -ipath './.crabbox' \) -prune -o \( -type d -o -type l \) \( -iname node_modules -o -iname .pnpm-store -o -ipath '*/.yarn/cache' -o -ipath '*/.yarn/unplugged' \) -print0 -prune > "$cache_paths"; then
+  echo "ready-pool cache discovery failed" >&2
+  exit 1
+fi
+while IFS= read -r -d '' cache_path; do
+  cache_path="${cache_path#./}"
+  if safe_git check-ignore -q -- "$cache_path"; then
+    if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then
+      echo "ready-pool cache root must be a real directory" >&2
       exit 1
     fi
+    resolved_cache="$(cd -P -- "$cache_path" && pwd -P)"
+    case "$resolved_cache/" in
+      "$workdir"/*) ;;
+      *)
+        echo "ready-pool cache root escapes the workspace" >&2
+        exit 1
+        ;;
+    esac
+    cache_pattern="${cache_path//\\/\\\\}"
+    cache_pattern="${cache_pattern//\*/\\*}"
+    cache_pattern="${cache_pattern//\?/\\?}"
+    cache_pattern="${cache_pattern//\[/\\[}"
+    cache_pattern="${cache_pattern//\]/\\]}"
+    cache_pattern="${cache_pattern//!/\\!}"
+    cache_pattern="${cache_pattern//#/\\#}"
+    clean_args+=(-e "$cache_pattern/")
+  elif [ "$?" -ne 1 ]; then
+    echo "ready-pool cache ignore check failed" >&2
+    exit 1
   fi
-done
+done < "$cache_paths"
+rm -f -- "$cache_paths"
+trap - EXIT
 safe_git clean "${clean_args[@]}"
 if [ -L .crabbox ]; then
   echo "ready-pool .crabbox root must not be a symlink" >&2
@@ -305,23 +319,44 @@ $gitlinks = @(& $git ls-files --stage | Where-Object { $_ -match '^160000 ' })
 if ($LASTEXITCODE -ne 0) { throw "ready-pool gitlink inspection failed" }
 if ($gitlinks.Count -ne 0) { throw "ready-pool scrub does not reuse submodule worktrees" }
 $cleanArgs = @('clean', '-ffdx', '--quiet')
-foreach ($cachePath in @('node_modules', '.pnpm-store', '.yarn/cache', '.yarn/unplugged')) {
-  if (Test-Path -LiteralPath $cachePath) {
-    & $git check-ignore -q -- $cachePath
-    if ($LASTEXITCODE -eq 0) {
-      $cacheCursor = $workdir
-      foreach ($segment in ($cachePath -split '/')) {
-        $cacheCursor = Join-Path $cacheCursor $segment
-        $cacheItem = Get-Item -LiteralPath $cacheCursor -Force
-        if ($cacheItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-          throw "ready-pool cache root must not contain reparse points"
-        }
-      }
-      if (-not $cacheItem.PSIsContainer) { throw "ready-pool cache root must be a real directory" }
-      $cleanArgs += @('-e', "$cachePath/")
-    } elseif ($LASTEXITCODE -ne 1) {
-      throw "ready-pool cache ignore check failed"
+$pendingDirectories = New-Object 'System.Collections.Generic.Stack[System.IO.DirectoryInfo]'
+$cacheCandidates = New-Object 'System.Collections.Generic.List[string]'
+$pendingDirectories.Push((Get-Item -LiteralPath $workdir -Force))
+while ($pendingDirectories.Count -ne 0) {
+  $directory = $pendingDirectories.Pop()
+  foreach ($item in $directory.EnumerateFileSystemInfos()) {
+    $relative = $item.FullName.Substring($workdir.Length).TrimStart([char[]]@('\', '/'))
+    $normalized = $relative.Replace('\', '/')
+    if ($normalized -ieq '.git' -or $normalized -ieq '.crabbox') { continue }
+    $isCache = ($normalized -ieq 'node_modules' -or $normalized.EndsWith('/node_modules', [System.StringComparison]::OrdinalIgnoreCase) -or
+      $normalized -ieq '.pnpm-store' -or $normalized.EndsWith('/.pnpm-store', [System.StringComparison]::OrdinalIgnoreCase) -or
+      $normalized -ieq '.yarn/cache' -or $normalized.EndsWith('/.yarn/cache', [System.StringComparison]::OrdinalIgnoreCase) -or
+      $normalized -ieq '.yarn/unplugged' -or $normalized.EndsWith('/.yarn/unplugged', [System.StringComparison]::OrdinalIgnoreCase))
+    if ($isCache) {
+      $cacheCandidates.Add($normalized)
+      continue
     }
+    if ($item -is [System.IO.DirectoryInfo] -and -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+      $pendingDirectories.Push($item)
+    }
+  }
+}
+foreach ($cachePath in $cacheCandidates) {
+  & $git check-ignore -q -- $cachePath
+  if ($LASTEXITCODE -eq 0) {
+    $cacheCursor = $workdir
+    foreach ($segment in ($cachePath -split '/')) {
+      $cacheCursor = Join-Path $cacheCursor $segment
+      $cacheItem = Get-Item -LiteralPath $cacheCursor -Force
+      if ($cacheItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "ready-pool cache root must not contain reparse points"
+      }
+    }
+    if (-not $cacheItem.PSIsContainer) { throw "ready-pool cache root must be a real directory" }
+    $cachePattern = $cachePath.Replace('\', '\\').Replace('*', '\*').Replace('?', '\?').Replace('[', '\[').Replace(']', '\]').Replace('!', '\!').Replace('#', '\#')
+    $cleanArgs += @('-e', "$cachePattern/")
+  } elseif ($LASTEXITCODE -ne 1) {
+    throw "ready-pool cache ignore check failed"
   }
 }
 & $git @cleanArgs
