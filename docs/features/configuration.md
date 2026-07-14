@@ -1090,7 +1090,7 @@ the list when the first candidate cannot be provisioned.
 | `large` | memory-heavy or many-process workloads |
 | `beast` | maximum capacity within the provider's burstable family |
 
-Class-to-type mappings live in [Provider Reference](../providers/README.md). When you set
+Class-to-type mappings live in [Machine classes](providers.md#machine-classes). When you set
 `serverType:` (or `--type`), that exact provider type wins and the class is
 ignored. The `serverType:` and `--type` paths intentionally do not fall back;
 they fail loud if the provider rejects the type.
