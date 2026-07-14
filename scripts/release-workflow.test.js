@@ -480,6 +480,7 @@ test("signing and verification enforce Foundation identity, runtime, timestamp, 
   assert.match(signer, /--options runtime/);
   assert.match(signer, /--timestamp/);
   assert.match(signer, /notarytool submit/);
+  assert.match(signer, /--keychain "\$MAC_RELEASE_CODESIGN_KEYCHAIN"/);
   assert.match(signer, /NOTARY_STATUS.*Accepted/);
   for (const script of [signer, verifier]) {
     assert.match(script, /--verify --strict --check-notarization -R=notarized/);
