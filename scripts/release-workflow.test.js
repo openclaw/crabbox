@@ -553,11 +553,11 @@ test("v0.38.0 is pinned to the corrected signed source and ready for publication
   assert.equal(record.publicationStatus, "ready");
 });
 
-test("v0.38.1 is pinned to the signed admission-metadata source and ready for publication", () => {
+test("v0.38.1 is pinned to the signed ready-pool source and ready for publication", () => {
   const record = JSON.parse(read("release/records/v0.38.1.json"));
   assert.equal(record.tag, "v0.38.1");
-  assert.equal(record.tagObject, "b9c14e1943ec4a2ca394689a63e8a9c5318ff48c");
-  assert.equal(record.sourceCommit, "72cd4d60c99068b229550bbca9f5a1302663fa72");
+  assert.equal(record.tagObject, "326b5fa1e4f9543b11bde0583635f37d00f13f0a");
+  assert.equal(record.sourceCommit, "3f83f4c58a65d2546620a8b31257f53375fabab2");
   assert.equal(record.publicationStatus, "ready");
 });
 
