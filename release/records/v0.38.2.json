@@ -4,5 +4,6 @@
   "tag": "v0.38.2",
   "tagObject": "b11d63f5a3353ed8117bbfbc92fca0bc2512d1f9",
   "sourceCommit": "d009660c442c7f072d3058097d1c2a86067c47c1",
-  "publicationStatus": "ready"
+  "publicationStatus": "blocked",
+  "blocker": "Signed tag annotation does not exactly equal v0.38.2; protected tag is immutable and cannot be published."
 }

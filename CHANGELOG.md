@@ -1,10 +1,14 @@
 # Changelog
 
-## 0.38.2 - 2026-07-14
+## 0.38.3 - 2026-07-14
 
 ### Fixed
 
 - Made provider IP and loopback VNC waits return promptly when their context is cancelled. Thanks @SebTardif.
+
+## 0.38.2 - Unpublished
+
+- Publication blocked because the protected signed tag annotation did not satisfy release policy.
 
 ## 0.38.1 - 2026-07-13
 

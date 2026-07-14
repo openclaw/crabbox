@@ -577,12 +577,13 @@ test("v0.38.1 is pinned to the signed ready-pool source and ready for publicatio
   assert.equal(record.publicationStatus, "ready");
 });
 
-test("v0.38.2 is pinned to the cancellation-fix source and ready for publication", () => {
+test("v0.38.2 is pinned and publication-blocked after its immutable tag failed policy", () => {
   const record = JSON.parse(read("release/records/v0.38.2.json"));
   assert.equal(record.tag, "v0.38.2");
   assert.equal(record.tagObject, "b11d63f5a3353ed8117bbfbc92fca0bc2512d1f9");
   assert.equal(record.sourceCommit, "d009660c442c7f072d3058097d1c2a86067c47c1");
-  assert.equal(record.publicationStatus, "ready");
+  assert.equal(record.publicationStatus, "blocked");
+  assert.match(record.blocker, /tag annotation does not exactly equal v0\.38\.2/);
 });
 
 test("managed Foundation signing and notary configuration is repository-owned and secret-free", () => {
