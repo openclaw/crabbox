@@ -40,6 +40,8 @@ func (a App) Run(ctx context.Context, args []string) error {
 		return a.namespaceInstanceProxy(ctx, args[1:])
 	case "__phala-proxy":
 		return a.phalaProxy(ctx, args[1:])
+	case "__herdr-plugin":
+		return a.herdrPlugin(ctx, args[1:])
 	case "-h", "--help":
 		a.printHelp()
 		return nil

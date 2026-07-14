@@ -1,0 +1,81 @@
+id = "crabbox"
+name = "Crabbox"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Warm remote test boxes, inspect leases, connect, and run repository jobs without leaving Herdr."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["sh", "build.sh"]
+
+[[panes]]
+id = "boxes"
+title = "Crabbox boxes"
+placement = "overlay"
+command = ["sh", "bin/pane.sh", "boxes"]
+
+[[panes]]
+id = "warmup"
+title = "Crabbox warmup"
+placement = "split"
+command = ["sh", "bin/pane.sh", "warmup"]
+
+[[panes]]
+id = "prewarm"
+title = "Crabbox prewarm"
+placement = "split"
+command = ["sh", "bin/pane.sh", "prewarm"]
+
+[[panes]]
+id = "connect"
+title = "Crabbox connect"
+placement = "tab"
+command = ["sh", "bin/pane.sh", "connect"]
+
+[[panes]]
+id = "run-job"
+title = "Crabbox job"
+placement = "tab"
+command = ["sh", "bin/pane.sh", "job"]
+
+[[panes]]
+id = "doctor"
+title = "Crabbox doctor"
+placement = "split"
+command = ["sh", "bin/pane.sh", "doctor"]
+
+[[actions]]
+id = "boxes"
+title = "Crabbox: boxes overlay"
+contexts = ["workspace"]
+command = ["sh", "bin/open-pane.sh", "boxes", "overlay"]
+
+[[actions]]
+id = "warmup"
+title = "Crabbox: warm a box"
+contexts = ["workspace"]
+command = ["sh", "bin/open-pane.sh", "warmup", "split"]
+
+[[actions]]
+id = "prewarm"
+title = "Crabbox: prewarm a test box"
+contexts = ["workspace"]
+command = ["sh", "bin/open-pane.sh", "prewarm", "split"]
+
+[[actions]]
+id = "connect"
+title = "Crabbox: connect to a box"
+contexts = ["workspace"]
+command = ["sh", "bin/open-pane.sh", "connect", "tab"]
+
+[[actions]]
+id = "run-job"
+title = "Crabbox: run a repository job"
+contexts = ["workspace"]
+command = ["sh", "bin/open-pane.sh", "run-job", "tab"]
+
+[[actions]]
+id = "doctor"
+title = "Crabbox: doctor"
+contexts = ["workspace"]
+command = ["sh", "bin/open-pane.sh", "doctor", "split"]
