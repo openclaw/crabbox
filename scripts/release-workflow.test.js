@@ -76,6 +76,9 @@ test("GoReleaser is credential-free build-only with exact binary archives", () =
   assert.match(build, /env -i[\s\S]*goreleaser release --clean --skip=publish/);
   assert.match(build, /git clone --quiet --no-local --no-checkout/);
   assert.match(build, /git -C "\$SOURCE" checkout --quiet --detach "\$TAG_COMMIT"/);
+  assert.match(build, /run_goreleaser\(\) \{[\s\S]*env -i "\$@"/);
+  assert.match(build, /run_goreleaser "DEVELOPER_DIR=\$DEVELOPER_DIR"/);
+  assert.match(build, /else\s+run_goreleaser\s+fi/);
   assert.match(build, /chmod -R u\+w "\$path"[\s\S]*rm -rf "\$path"/);
   assert.doesNotMatch(build, /gh release|HOMEBREW_TAP_GITHUB_TOKEN=.*\$\{/);
 });
@@ -477,6 +480,7 @@ test("signing and verification enforce Foundation identity, runtime, timestamp, 
   assert.match(signer, /--options runtime/);
   assert.match(signer, /--timestamp/);
   assert.match(signer, /notarytool submit/);
+  assert.match(signer, /--keychain "\$MAC_RELEASE_CODESIGN_KEYCHAIN"/);
   assert.match(signer, /NOTARY_STATUS.*Accepted/);
   for (const script of [signer, verifier]) {
     assert.match(script, /--verify --strict --check-notarization -R=notarized/);
@@ -550,6 +554,14 @@ test("v0.38.0 is pinned to the corrected signed source and ready for publication
   assert.equal(record.tag, "v0.38.0");
   assert.equal(record.tagObject, "22f47502e0eafe876ed02b684bf17f951cc2238f");
   assert.equal(record.sourceCommit, "ae1f6b46117c5e067f1370f413e1e6fdf1538d25");
+  assert.equal(record.publicationStatus, "ready");
+});
+
+test("v0.38.1 is pinned to the signed ready-pool source and ready for publication", () => {
+  const record = JSON.parse(read("release/records/v0.38.1.json"));
+  assert.equal(record.tag, "v0.38.1");
+  assert.equal(record.tagObject, "326b5fa1e4f9543b11bde0583635f37d00f13f0a");
+  assert.equal(record.sourceCommit, "3f83f4c58a65d2546620a8b31257f53375fabab2");
   assert.equal(record.publicationStatus, "ready");
 });
 

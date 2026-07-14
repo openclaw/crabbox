@@ -1266,8 +1266,8 @@ func TestLocalActionsRuntimeValidatesGoAndPythonVersions(t *testing.T) {
 }
 
 func TestParseActionsHydrationState(t *testing.T) {
-	got := parseActionsHydrationState("WORKSPACE=/home/runner/work/repo/repo\nRUN_ID=123\nJOB=hydrate\nENV_FILE=/home/runner/.crabbox/actions/cbx-123.env.sh\nSERVICES_FILE=/home/runner/.crabbox/actions/cbx-123.services\nREADY_AT=2026-05-01T00:00:00Z\n")
-	if got.Workspace != "/home/runner/work/repo/repo" || got.RunID != "123" || got.Job != "hydrate" || got.EnvFile == "" || got.ServicesFile == "" || got.ReadyAt == "" {
+	got := parseActionsHydrationState("WORKSPACE=/home/runner/work/repo/repo\nCOMMIT=0123456789abcdef0123456789abcdef01234567\nRUN_ID=123\nJOB=hydrate\nENV_FILE=/home/runner/.crabbox/actions/cbx-123.env.sh\nSERVICES_FILE=/home/runner/.crabbox/actions/cbx-123.services\nREADY_AT=2026-05-01T00:00:00Z\n")
+	if got.Workspace != "/home/runner/work/repo/repo" || got.Commit != "0123456789abcdef0123456789abcdef01234567" || got.RunID != "123" || got.Job != "hydrate" || got.EnvFile == "" || got.ServicesFile == "" || got.ReadyAt == "" {
 		t.Fatalf("unexpected hydration state: %#v", got)
 	}
 }

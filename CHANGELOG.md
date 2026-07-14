@@ -1,6 +1,24 @@
 # Changelog
 
-## 0.38.1 - Unreleased
+## 0.38.2 - Unreleased
+
+### Fixed
+
+- Made provider IP and loopback VNC waits return promptly when their context is cancelled. Thanks @SebTardif.
+
+## 0.38.1 - 2026-07-13
+
+### Added
+
+- Exposed authoritative AWS instance-profile attachment state in `inspect --json` provider metadata for admission-policy enforcement across direct and brokered leases.
+
+### Fixed
+
+- Protected portal and isolated Code sessions with browser-enforced host-only cookies, rejected duplicate session cookies, and retired legacy cookie names to prevent sibling-origin shadowing. Thanks @coygeek.
+
+### Fixed
+
+- Scrubbed successful ready-pool workspaces through credential-free branch recovery and commit-bound Actions hydration, while draining failed or unverifiable leases before return.
 
 ## 0.38.0 - 2026-07-11
 

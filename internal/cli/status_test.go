@@ -81,6 +81,50 @@ func TestLeaseStatusStateCanBeReadyRejectsTerminalStates(t *testing.T) {
 	}
 }
 
+func TestStatusViewIncludesProviderMetadata(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.Network = NetworkPublic
+	metadata := map[string]any{
+		"instanceProfileAttached": false,
+		"internal":                "must-not-leak",
+	}
+	view, err := statusViewFromLeaseTarget(context.Background(), cfg, LeaseTarget{
+		LeaseID: "cbx_status",
+		Server: Server{
+			Provider:         "aws",
+			Status:           "running",
+			Labels:           map[string]string{},
+			ProviderMetadata: metadata,
+		},
+	})
+	if err != nil {
+		t.Fatalf("statusViewFromLeaseTarget returned error: %v", err)
+	}
+	if got := view.ProviderMetadata["instanceProfileAttached"]; got != false {
+		t.Fatalf("instanceProfileAttached=%v, want false", got)
+	}
+	if _, ok := view.ProviderMetadata["internal"]; ok {
+		t.Fatal("providerMetadata unexpectedly exposed an internal field")
+	}
+	metadata["instanceProfileAttached"] = "false"
+	view, err = statusViewFromLeaseTarget(context.Background(), cfg, LeaseTarget{
+		LeaseID: "cbx_status_invalid",
+		Server: Server{
+			Provider:         "aws",
+			Status:           "running",
+			Labels:           map[string]string{},
+			ProviderMetadata: metadata,
+		},
+	})
+	if err != nil {
+		t.Fatalf("statusViewFromLeaseTarget returned error: %v", err)
+	}
+	if view.ProviderMetadata != nil {
+		t.Fatalf("providerMetadata=%v, want omitted invalid metadata", view.ProviderMetadata)
+	}
+}
+
 func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))

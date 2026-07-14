@@ -196,10 +196,11 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 	if meta.Enabled {
 		tailscale = &meta
 	}
+	provider := blank(server.Provider, cfg.Provider)
 	return statusView{
 		ID:               lease.LeaseID,
 		Slug:             serverSlug(server),
-		Provider:         blank(server.Provider, cfg.Provider),
+		Provider:         provider,
 		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
 		WindowsMode:      blank(server.Labels["windows_mode"], cfg.WindowsMode),
 		State:            state,
@@ -220,9 +221,21 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		IdleTimeout:      leaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
 		ExpiresAt:        blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
 		Labels:           server.Labels,
+		ProviderMetadata: inspectProviderMetadata(provider, server.ProviderMetadata),
 		HasHost:          hasHost,
 		Ready:            ready,
 	}, nil
+}
+
+func inspectProviderMetadata(provider string, metadata map[string]any) map[string]any {
+	if provider != "aws" {
+		return nil
+	}
+	attached, ok := metadata["instanceProfileAttached"].(bool)
+	if !ok {
+		return nil
+	}
+	return map[string]any{"instanceProfileAttached": attached}
 }
 
 func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
@@ -256,6 +269,7 @@ type StatusView struct {
 	IdleTimeout      string             `json:"idleTimeout,omitempty"`
 	ExpiresAt        string             `json:"expiresAt,omitempty"`
 	Labels           map[string]string  `json:"labels,omitempty"`
+	ProviderMetadata map[string]any     `json:"providerMetadata,omitempty"`
 	HasHost          bool               `json:"hasHost"`
 	Ready            bool               `json:"ready"`
 	Telemetry        *LeaseTelemetry    `json:"telemetry,omitempty"`
@@ -265,6 +279,14 @@ type StatusView struct {
 type statusView = StatusView
 
 func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView, error) {
+	return a.leaseStatusWithRequest(ctx, cfg, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: id})
+}
+
+func (a App) leaseStatusWithRequest(
+	ctx context.Context,
+	cfg Config,
+	req StatusRequest,
+) (statusView, error) {
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return statusView{}, err
@@ -272,16 +294,16 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 	if statusBackend, ok := backend.(interface {
 		Status(context.Context, StatusRequest) (statusView, error)
 	}); ok {
-		return statusBackend.Status(ctx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: id})
+		return statusBackend.Status(ctx, req)
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
-		return delegated.Status(ctx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: id})
+		return delegated.Status(ctx, req)
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
 		return statusView{}, exit(2, "provider=%s does not support status", backend.Spec().Name)
 	}
-	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: id, StatusOnly: true, NoLocalStateMutations: true})
+	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: req.Options, ID: req.ID, StatusOnly: true, NoLocalStateMutations: true})
 	if err != nil {
 		return statusView{}, err
 	}

@@ -135,7 +135,8 @@ the OAuth credential encrypted under the session secret so request authenticatio
 can periodically revalidate current org/team membership. An optional Cloudflare
 Access JWT (`cf-access-jwt-assertion`) can supply the owner identity. The
 coordinator injects `x-crabbox-auth`, `-admin`, `-owner`, `-org`, and `-github-login`
-headers. The portal converts a `crabbox_session` cookie into a Bearer token.
+headers. The portal converts one unique `__Host-crabbox_session` host-only
+cookie into a Bearer token and rejects duplicate session cookies.
 
 ## Fleet Coordinator And Runtime Adapters
 

@@ -18593,10 +18593,14 @@ describe("fleet lease identity and idle", () => {
       `/portal/leases/${leaseID}/code/?folder=%2Fwork%2Frepo`,
     );
     const cookie = bootstrap.headers.get("set-cookie") || "";
-    expect(cookie).toContain("crabbox_code_session=code_session_");
+    expect(cookie).toContain("__Host-crabbox_code_session=code_session_");
+    expect(cookie).toContain("Path=/");
+    expect(cookie).toContain("crabbox_code_session=;");
     expect(cookie).toContain(`Path=/portal/leases/${leaseID}/code/`);
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("Secure");
+    expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).not.toContain("Domain=");
     const maxAge = Number.parseInt(/Max-Age=(\d+)/.exec(cookie)?.[1] || "", 10);
     expect(maxAge).toBeGreaterThanOrEqual(295);
     expect(maxAge).toBeLessThanOrEqual(300);
@@ -18613,6 +18617,27 @@ describe("fleet lease identity and idle", () => {
     expect(await page.text()).toContain("crabbox code --id blue-lobster --open");
 
     const sessionCookie = cookie.split(";", 1)[0] || "";
+    const legacySession = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}${bootstrap.headers.get("location")}`, {
+        headers: { cookie: sessionCookie.replace("__Host-", "") },
+      }),
+    );
+    expect(legacySession.status).toBe(302);
+
+    const duplicateSession = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}${bootstrap.headers.get("location")}`, {
+        headers: { cookie: `${sessionCookie}; ${sessionCookie}` },
+      }),
+    );
+    expect(duplicateSession.status).toBe(302);
+
+    const shadowedSession = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}${bootstrap.headers.get("location")}`, {
+        headers: { cookie: `crabbox_code_session=attacker; ${sessionCookie}` },
+      }),
+    );
+    expect(shadowedSession.status).toBe(200);
+
     const crossOriginPost = await fleet.fetch(
       new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/api/save`, {
         method: "POST",
@@ -18661,7 +18686,7 @@ describe("fleet lease identity and idle", () => {
 
     const malformedSession = await fleet.fetch(
       new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/health`, {
-        headers: { cookie: "crabbox_code_session=%ZZ" },
+        headers: { cookie: "__Host-crabbox_code_session=%ZZ" },
       }),
     );
     expect(malformedSession.status).toBe(302);
@@ -18707,7 +18732,7 @@ describe("fleet lease identity and idle", () => {
 
     const staleSession = await fleet.fetch(
       new Request(`${isolatedOrigin}/portal/leases/${leaseID}/code/health`, {
-        headers: { cookie: `crabbox_code_session=${session}` },
+        headers: { cookie: `__Host-crabbox_code_session=${session}` },
       }),
     );
     expect(staleSession.status).toBe(404);
@@ -18727,7 +18752,7 @@ describe("fleet lease identity and idle", () => {
       ),
     );
     expect(bootstrap.status).toBe(303);
-    const issuedSession = /crabbox_code_session=([^;]+)/.exec(
+    const issuedSession = /__Host-crabbox_code_session=([^;]+)/.exec(
       bootstrap.headers.get("set-cookie") ?? "",
     )?.[1];
     expect(issuedSession).toMatch(/^code_session_[a-f0-9]{32}$/);
@@ -18774,7 +18799,7 @@ describe("fleet lease identity and idle", () => {
         }),
     );
     vi.stubGlobal("fetch", githubFetch);
-    const portalCookie = `crabbox_session=${encodeURIComponent(token)}`;
+    const portalCookie = `__Host-crabbox_session=${encodeURIComponent(token)}`;
     const throughCoordinator = async (input: Request): Promise<Response> =>
       await routeCoordinatorRequest(input, env, async (prepared) => await fleet.fetch(prepared), {
         githubMembership: async (): Promise<void> => {},
@@ -18963,7 +18988,8 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(logout.status).toBe(200);
-    expect(logout.headers.get("set-cookie")).toContain("crabbox_session=");
+    expect(logout.headers.get("set-cookie")).toContain("__Host-crabbox_session=");
+    expect(logout.headers.get("set-cookie")).toContain("crabbox_session=;");
     expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
     expect(storage.value(expiredRevocationKey)).toBeUndefined();
     expect(activeViewer.closeCode).toBe(1008);
@@ -19014,7 +19040,7 @@ describe("fleet lease identity and idle", () => {
 
     const suffixedPortalSession = await throughCoordinator(
       new Request(codeEntry, {
-        headers: { cookie: `crabbox_session=${encodeURIComponent(`${token}.ignored`)}` },
+        headers: { cookie: `__Host-crabbox_session=${encodeURIComponent(`${token}.ignored`)}` },
       }),
     );
     expect(suffixedPortalSession.status).toBe(302);
@@ -19481,7 +19507,7 @@ describe("fleet lease identity and idle", () => {
     const response = await fleet.fetch(
       new Request(`${isolatedOrigin}/portal/leases/${leaseID}/code/api/status`, {
         headers: {
-          cookie: `crabbox_code_session=${session}`,
+          cookie: `__Host-crabbox_code_session=${session}`,
           "x-client-trace": "trace-1",
           origin: isolatedOrigin || "",
         },
@@ -19544,7 +19570,7 @@ describe("fleet lease identity and idle", () => {
     const response = await fleet.fetch(
       new Request(`${isolatedOrigin}/portal/leases/${leaseID}/code/api/status`, {
         headers: {
-          cookie: `crabbox_code_session=${session}`,
+          cookie: `__Host-crabbox_code_session=${session}`,
           origin: isolatedOrigin || "",
         },
       }),
@@ -25052,6 +25078,8 @@ describe("fleet identity", () => {
       request("GET", "/portal/login?returnTo=/portal/leases/cbx_000000000001/vnc"),
     );
     expect(start.status).toBe(302);
+    expect(start.headers.get("set-cookie")).toContain("crabbox_session=;");
+    expect(start.headers.get("set-cookie")).toContain("Max-Age=0");
     const location = start.headers.get("location") ?? "";
     const state = new URL(location).searchParams.get("state");
     expect(state).toBeTruthy();
@@ -25062,7 +25090,14 @@ describe("fleet identity", () => {
     );
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/portal/leases/cbx_000000000001/vnc");
-    expect(callback.headers.get("set-cookie")).toContain("crabbox_session=cbxu_");
+    const cookie = callback.headers.get("set-cookie") ?? "";
+    expect(cookie).toContain("__Host-crabbox_session=cbxu_");
+    expect(cookie).toContain("crabbox_session=;");
+    expect(cookie).toContain("Path=/");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("Secure");
+    expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).not.toContain("Domain=");
   });
 
   it.each([
@@ -25096,7 +25131,7 @@ describe("fleet identity", () => {
     );
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/portal");
-    expect(callback.headers.get("set-cookie")).toContain("crabbox_session=cbxu_");
+    expect(callback.headers.get("set-cookie")).toContain("__Host-crabbox_session=cbxu_");
   });
 
   it("requires a POST before clearing the portal session", async () => {
@@ -25114,7 +25149,8 @@ describe("fleet identity", () => {
     const logout = await fleet.fetch(request("POST", "/portal/logout"));
     expect(logout.status).toBe(200);
     expect(logout.headers.get("location")).toBeNull();
-    expect(logout.headers.get("set-cookie")).toContain("crabbox_session=");
+    expect(logout.headers.get("set-cookie")).toContain("__Host-crabbox_session=");
+    expect(logout.headers.get("set-cookie")).toContain("crabbox_session=;");
     expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
     const body = await logout.text();
     expect(body).toContain("Crabbox logged out");
@@ -25710,6 +25746,161 @@ describe("fleet identity", () => {
       provider: "daytona",
       missing: ["DAYTONA_CRABBOX_KEY"],
     });
+  });
+});
+
+describe("authoritative lease provider metadata", () => {
+  const headers = {
+    "x-crabbox-owner": "peter@example.com",
+    "x-crabbox-org": "openclaw",
+  };
+
+  it.each([
+    { attached: false, id: "cbx_0000000000a1" },
+    { attached: true, id: "cbx_0000000000a2" },
+  ])("freshly attests AWS instance-profile state: $attached", async ({ attached, id }) => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id,
+      provider: "aws",
+      cloudID: `i-${id.slice(4)}`,
+      region: "eu-west-1",
+      serverType: "c7a.8xlarge",
+    });
+    storage.seed(`lease:${id}`, lease);
+    const getServer = vi.fn<() => ProviderMachine>(() => ({
+      provider: "aws" as const,
+      id: 0,
+      cloudID: lease.cloudID,
+      name: lease.serverName,
+      status: "running",
+      serverType: lease.serverType,
+      host: lease.host,
+      awsInstanceProfileAttached: attached,
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        lease: lease.id,
+        owner: "peter_example.com",
+        provider: "aws",
+        slug: lease.slug ?? "",
+      },
+    }));
+    const fleet = testFleet(
+      storage,
+      { aws: fakeProvider(undefined, { provider: "aws" }, undefined, getServer) },
+      { CRABBOX_DEFAULT_ORG: "openclaw" },
+    );
+
+    const ordinary = await fleet.fetch(request("GET", `/v1/leases/${id}`, { headers }));
+    await expect(ordinary.json()).resolves.not.toHaveProperty("lease.providerMetadata");
+    expect(getServer).not.toHaveBeenCalled();
+
+    const attested = await fleet.fetch(
+      request("GET", `/v1/leases/${id}?providerMetadata=authoritative`, { headers }),
+    );
+    await expect(attested.json()).resolves.toMatchObject({
+      lease: { providerMetadata: { instanceProfileAttached: attached } },
+    });
+    expect(getServer).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when the fresh AWS instance does not match lease ownership", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_0000000000a3",
+      provider: "aws",
+      cloudID: "i-0000000000a3",
+      region: "eu-west-1",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, { provider: "aws" }, undefined, () => ({
+          provider: "aws",
+          id: 0,
+          cloudID: lease.cloudID,
+          name: lease.serverName,
+          status: "running",
+          serverType: lease.serverType,
+          host: lease.host,
+          awsInstanceProfileAttached: false,
+          labels: {},
+        })),
+      },
+      { CRABBOX_DEFAULT_ORG: "openclaw" },
+    );
+
+    const response = await fleet.fetch(
+      request("GET", `/v1/leases/${lease.id}?providerMetadata=authoritative`, { headers }),
+    );
+    expect(response.status).toBe(500);
+  });
+
+  it("fails closed when AWS omits authoritative instance-profile state", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_0000000000a4",
+      provider: "aws",
+      cloudID: "i-0000000000a4",
+      region: "eu-west-1",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, { provider: "aws" }, undefined, () => ({
+          provider: "aws",
+          id: 0,
+          cloudID: lease.cloudID,
+          name: lease.serverName,
+          status: "running",
+          serverType: lease.serverType,
+          host: lease.host,
+          labels: {
+            crabbox: "true",
+            created_by: "crabbox",
+            lease: lease.id,
+            owner: "peter_example.com",
+            provider: "aws",
+            slug: lease.slug ?? "",
+          },
+        })),
+      },
+      { CRABBOX_DEFAULT_ORG: "openclaw" },
+    );
+
+    const response = await fleet.fetch(
+      request("GET", `/v1/leases/${lease.id}?providerMetadata=authoritative`, { headers }),
+    );
+    expect(response.status).toBe(500);
+  });
+
+  it("omits authoritative metadata for terminal AWS leases without a provider lookup", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_0000000000a5",
+      provider: "aws",
+      cloudID: "i-0000000000a5",
+      region: "eu-west-1",
+      state: "released",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const getServer = vi.fn<() => ProviderMachine>(() => {
+      throw new Error("terminal lease must not query AWS");
+    });
+    const fleet = testFleet(
+      storage,
+      { aws: fakeProvider(undefined, { provider: "aws" }, undefined, getServer) },
+      { CRABBOX_DEFAULT_ORG: "openclaw" },
+    );
+
+    const response = await fleet.fetch(
+      request("GET", `/v1/leases/${lease.id}?providerMetadata=authoritative`, { headers }),
+    );
+    await expect(response.json()).resolves.not.toHaveProperty("lease.providerMetadata");
+    expect(getServer).not.toHaveBeenCalled();
   });
 });
 
