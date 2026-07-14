@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -734,6 +735,50 @@ exit 0
 	}
 	if string(ports) != "2222\n22\n" {
 		t.Fatalf("ports=%q want fallback sequence", string(ports))
+	}
+}
+
+func TestWaitForSSHReadyHonorsCancellationDuringBackoff(t *testing.T) {
+	// Prove cancel is observed during the inter-attempt backoff, not only at
+	// the top of the loop. Fake ssh always fails so wait enters the sleep.
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+exit 255
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "22",
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- waitForSSHReady(ctx, &target, io.Discard, "test", time.Minute)
+	}()
+
+	// Let the first failed probe complete and enter the 10s backoff.
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waitForSSHReady returned %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("waitForSSHReady did not return within 3s after cancel; still blocked on bare sleep")
 	}
 }
 
