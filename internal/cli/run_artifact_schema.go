@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -18,6 +19,14 @@ type artifactSchema struct {
 	Properties map[string]artifactSchema `json:"properties"`
 	Items      *artifactSchema           `json:"items"`
 	Enum       []interface{}             `json:"enum"`
+	AnnotationSchema      json.RawMessage `json:"$schema,omitempty"`
+	AnnotationID          json.RawMessage `json:"$id,omitempty"`
+	AnnotationComment     json.RawMessage `json:"$comment,omitempty"`
+	AnnotationTitle       json.RawMessage `json:"title,omitempty"`
+	AnnotationDescription json.RawMessage `json:"description,omitempty"`
+	AnnotationExamples    json.RawMessage `json:"examples,omitempty"`
+	AnnotationDefault     json.RawMessage `json:"default,omitempty"`
+	AnnotationDeprecated  json.RawMessage `json:"deprecated,omitempty"`
 }
 
 type schemaViolation struct {
@@ -53,9 +62,11 @@ var knownSchemaTypes = map[string]bool{
 }
 
 func parseArtifactSchema(data []byte) (artifactSchema, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
 	var s artifactSchema
-	if err := json.Unmarshal(data, &s); err != nil {
-		return artifactSchema{}, fmt.Errorf("invalid JSON: %w", err)
+	if err := decoder.Decode(&s); err != nil {
+		return artifactSchema{}, fmt.Errorf("%w (supported keywords: type, required, properties, items, enum)", err)
 	}
 	if err := validateSchemaShape(s, ""); err != nil {
 		return artifactSchema{}, err
@@ -262,13 +273,21 @@ func loadRequireArtifactSchemas(values []string) ([]loadedArtifactSchema, error)
 	return out, nil
 }
 
+const maxSchemaArtifactBytes = 5 * 1024 * 1024
+
+type remoteArtifactReader func(ctx context.Context, target SSHTarget, workdir, remote string, maxBytes int) ([]byte, error)
+
 func validateRemoteArtifactSchemas(ctx context.Context, target SSHTarget, workdir string, schemas []loadedArtifactSchema) ([]SchemaValidationResult, string, error) {
+	return validateArtifactSchemasWithReader(ctx, target, workdir, schemas, readRemoteArtifactBytes)
+}
+
+func validateArtifactSchemasWithReader(ctx context.Context, target SSHTarget, workdir string, schemas []loadedArtifactSchema, read remoteArtifactReader) ([]SchemaValidationResult, string, error) {
 	results := make([]SchemaValidationResult, 0, len(schemas))
 	var lines []string
 	var firstFailure error
 	for _, s := range schemas {
 		result := SchemaValidationResult{Artifact: s.remote, Schema: s.schemaPath}
-		data, err := readRemoteArtifactBytes(ctx, target, workdir, s.remote)
+		data, err := read(ctx, target, workdir, s.remote, maxSchemaArtifactBytes)
 		if err != nil {
 			result.Valid = false
 			result.Error = "fetch failed"
@@ -301,14 +320,38 @@ func validateRemoteArtifactSchemas(ctx context.Context, target SSHTarget, workdi
 	return results, strings.Join(lines, "\n"), firstFailure
 }
 
-func readRemoteArtifactBytes(ctx context.Context, target SSHTarget, workdir, remote string) ([]byte, error) {
-	encoded, err := runSSHOutput(ctx, target, remoteDownloadBase64Command(target, workdir, remote))
+func readRemoteArtifactBytes(ctx context.Context, target SSHTarget, workdir, remote string, maxBytes int) ([]byte, error) {
+	encoded, err := runSSHOutput(ctx, target, remoteBoundedReadBase64Command(target, workdir, remote, maxBytes))
 	if err != nil {
 		return nil, err
 	}
+	return decodeBoundedBase64(encoded, maxBytes)
+}
+
+func decodeBoundedBase64(encoded string, maxBytes int) ([]byte, error) {
 	data, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(encoded), ""))
 	if err != nil {
 		return nil, fmt.Errorf("decode base64: %w", err)
 	}
+	if len(data) > maxBytes {
+		return nil, fmt.Errorf("artifact exceeds the %d-byte validation limit", maxBytes)
+	}
 	return data, nil
+}
+
+func remoteBoundedReadBase64Command(target SSHTarget, workdir, remotePath string, maxBytes int) string {
+	limit := maxBytes + 1
+	if isWindowsNativeTarget(target) {
+		return powershellCommand(`$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath ` + psQuote(workdir) + `
+$path = ` + psQuote(remotePath) + `
+if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "artifact not found: $path" }
+$stream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $path).Path)
+try {
+  $buffer = New-Object byte[] ` + fmt.Sprint(limit) + `
+  $read = $stream.Read($buffer, 0, $buffer.Length)
+  [Convert]::ToBase64String($buffer, 0, $read)
+} finally { $stream.Dispose() }`)
+	}
+	return fmt.Sprintf("cd %s && test -f %s && head -c %d %s | base64", shellQuote(workdir), shellQuote(remotePath), limit, shellQuote(remotePath))
 }
