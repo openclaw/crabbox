@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.38.4 - Unreleased
+
+### Fixed
+
+- Preserved WebVNC reconnect attempt state across consecutive connection failures so retry delays increase instead of repeatedly hammering the coordinator. Thanks @anagnorisis2peripeteia.
+
 ## 0.38.3 - 2026-07-14
 
 ### Fixed
