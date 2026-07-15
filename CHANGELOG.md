@@ -1,11 +1,5 @@
 # Changelog
 
-## 0.38.4 - Unreleased
-
-### Fixed
-
-- Restored native Homebrew verification by using the supported GitHub Actions artifact archive media type.
-
 ## 0.38.3 - 2026-07-14
 
 ### Fixed
