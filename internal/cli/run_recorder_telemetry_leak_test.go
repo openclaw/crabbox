@@ -35,7 +35,7 @@ func TestFailedStopsTelemetrySampler(t *testing.T) {
 	}))
 	defer server.Close()
 
-	coord := &CoordinatorClient{BaseURL: server.URL, Token: "test-token", Client: server.Client()}
+	coord := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
 	rec := &runRecorder{coord: coord, runID: "run-leak-repro", stderr: io.Discard}
 
 	// Models the long-lived CLI / bench-loop context (bench.go repeat loop),

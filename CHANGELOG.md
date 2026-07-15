@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.38.4 - Unreleased
+
+### Fixed
+
+- Stopped failed runs' telemetry samplers promptly so long-lived CLI processes do not retain ticker goroutines or continue probing released leases. Thanks @anagnorisis2peripeteia.
+
 ## 0.38.3 - 2026-07-14
 
 ### Fixed
