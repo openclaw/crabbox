@@ -198,6 +198,10 @@ func (r *runRecorder) Failed(err error) {
 	}
 	r.waitForOutputEvents(runEventOutputPostWait)
 	r.finished = true
+	// Stop the telemetry sampler on the failure path too — Finish does this
+	// (run_recorder.go), but without it the sampler goroutine and its ticker
+	// leak on every failed run, continuing to SSH-probe the released lease.
+	r.stopTelemetrySampler()
 	r.appendEvent("run.failed", CoordinatorRunEventInput{
 		Type:    "run.failed",
 		Phase:   "failed",
