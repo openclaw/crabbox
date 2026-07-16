@@ -151,6 +151,7 @@ Provider deep-dives that live here in `features/`:
 
 ### Interactive access
 - [ssh](../commands/ssh.md) — SSH to a lease
+- [zed](../commands/zed.md) — prepare a lease for Zed Remote Projects
 - [desktop](../commands/desktop.md) — desktop/input commands
 - [vnc](../commands/vnc.md) — native VNC access
 - [webvnc](../commands/webvnc.md) — browser-based VNC
