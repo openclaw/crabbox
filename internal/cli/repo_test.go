@@ -57,6 +57,18 @@ func TestRepoNameFromRootAndRemoteFallsBackToRemoteBasename(t *testing.T) {
 	}
 }
 
+func TestIsSparseGitCheckout(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	if IsSparseGitCheckout(dir) {
+		t.Fatal("normal checkout reported sparse")
+	}
+	runGit(t, dir, "config", "core.sparseCheckout", "true")
+	if !IsSparseGitCheckout(dir) {
+		t.Fatal("sparse checkout was not detected")
+	}
+}
+
 func TestSyncManifestUsesGitFilesAndIgnoresIgnoredJunk(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")

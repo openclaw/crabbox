@@ -23,6 +23,19 @@ type Repo struct {
 	BaseRef   string
 }
 
+// IsSparseGitCheckout reports whether Git intentionally omits tracked paths
+// from the working tree. Delegated sync tools must not treat those omissions as
+// deletions from a complete checkout.
+func IsSparseGitCheckout(root string) bool {
+	if strings.TrimSpace(root) == "" {
+		return false
+	}
+	return strings.EqualFold(
+		strings.TrimSpace(gitOutput(root, "config", "--bool", "core.sparseCheckout")),
+		"true",
+	)
+}
+
 func findRepo() (Repo, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
