@@ -1,10 +1,18 @@
 # Changelog
 
-## 0.38.4 - Unreleased
+## 0.38.5 - Unreleased
 
 ### Fixed
 
 - Preserved WebVNC reconnect attempt state across consecutive connection failures so retry delays increase instead of repeatedly hammering the coordinator. Thanks @anagnorisis2peripeteia.
+
+## 0.38.4 - 2026-07-16
+
+### Fixed
+
+- Restored native Homebrew verification by using the supported GitHub Actions artifact archive media type.
+- Made SSH readiness retries return promptly when cancelled while preserving the original cancellation cause.
+- Rejected Blacksmith delegated runs when Git hides omitted tracked paths, before those paths could be misread as remote deletions.
 
 ## 0.38.3 - 2026-07-14
 

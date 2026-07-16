@@ -359,7 +359,7 @@ for arch in arm64 x86_64; do
     if length == 1 then .[0].id else error("ambiguous proof artifact") end
   ' "$PUBLIC_ARTIFACTS")
   gh api --method GET \
-    --header 'Accept: application/octet-stream' \
+    --header 'Accept: application/vnd.github+json' \
     "repos/openclaw/crabbox/actions/artifacts/$ARTIFACT_ID/zip" \
     >"$PUBLIC_PROOFS/verified-assets-$arch.zip"
 done

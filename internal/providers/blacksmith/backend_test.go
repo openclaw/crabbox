@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -215,6 +216,52 @@ func TestBlacksmithRunRejectsEnvForwardingBeforeWarmup(t *testing.T) {
 	}
 	if strings.Contains(out, "secret-token-value") {
 		t.Fatalf("stderr leaked env value: %q", out)
+	}
+}
+
+func TestBlacksmithRunRejectsSparseCheckoutBeforeWarmup(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, output)
+		}
+	}
+	git("init")
+	git("config", "user.email", "test@example.com")
+	git("config", "user.name", "Test")
+	for path, contents := range map[string]string{
+		"included/keep.txt": "keep\n",
+		"omitted/drop.txt":  "drop\n",
+	} {
+		fullPath := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("add", ".")
+	git("commit", "-m", "init")
+	git("sparse-checkout", "set", "included")
+
+	runner := &blacksmithFuncRunner{}
+	backend := newTestBlacksmithBackend(baseConfig(), runner)
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: dir},
+		Command: []string{"true"},
+	})
+	var exitErr ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("Run error=%v, want exit 2", err)
+	}
+	if !strings.Contains(err.Error(), "materialized full checkout") {
+		t.Fatalf("Run error=%q missing remediation", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner was called before sparse-checkout validation: %#v", runner.calls)
 	}
 }
 
