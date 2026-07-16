@@ -272,6 +272,14 @@ func (a App) prepareEgressClientCutover(ctx context.Context, coord *CoordinatorC
 		return CoordinatorEgressTicket{}, err
 	}
 	if daemon {
+		// Stop the old host daemon before the new session activates (the remote
+		// client start in egressStart). The coordinator keeps one active egress
+		// session per lease, and the old supervisor restarts its host on any
+		// non-fatal exit, so a still-running old daemon would reconnect its
+		// prior session and clobber the replacement mid-cutover. The brief
+		// no-daemon window until the new host starts is the accepted tradeoff;
+		// the stop stays after ticket minting so preflight failures preserve
+		// the working daemon.
 		if stopped, err := a.stopEgressHostDaemonLocked(leaseID); err != nil {
 			return CoordinatorEgressTicket{}, err
 		} else if stopped {
