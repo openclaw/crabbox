@@ -78,10 +78,15 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   );
   assert.match(workflow, /go-version-file: go\.mod/);
   assert.match(workflow, /go-version-file: go\.mod\n\s+cache: false/);
-  assert.match(workflow, /name: Preserve pinned Go in the frozen verifier path/);
+  assert.match(workflow, /name: Preserve pinned tools for the frozen verifier/);
   assert.match(workflow, /tools="\$RUNNER_TEMP\/release-tools"/);
   assert.match(workflow, /brew_path=\$\(command -v brew\)/);
-  assert.match(workflow, /exec \\\"\$brew_path\\\" \\\"\\\$@\\\"/);
+  assert.match(
+    workflow,
+    /if \[\[ "\\\$\{1:-\}" == cat && "\\\$\{2:-\}" == openclaw\/tap\/crabbox \]\]; then/,
+  );
+  assert.match(workflow, /"\$brew_path" tap openclaw\/tap/);
+  assert.match(workflow, /exec "\$brew_path" "\\\$@"/);
   assert.match(workflow, /chmod 700 "\$tools\/brew"/);
   assert.match(workflow, /ln -s "\$\(command -v go\)" "\$tools\/go"/);
   assert.match(workflow, /printf '%s\\n' "\$tools" >>"\$GITHUB_PATH"/);

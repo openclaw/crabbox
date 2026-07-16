@@ -282,9 +282,12 @@ function runMockedHomebrewPhase({
     path.join(mockBin, "brew"),
     `#!/bin/sh
 printf 'brew:%s\\n' "$*" >>${shellQuote(log)}
-case "\${1:-}" in
+	case "\${1:-}" in
   update)
     [ "\${2:-}" = --force ] || exit 81
+    ;;
+  tap)
+    [ "\${2:-}" = openclaw/tap ] || exit 91
     ;;
   cat)
     [ "\${2:-}" = openclaw/tap/crabbox ] || exit 82
@@ -379,7 +382,8 @@ test("Homebrew verifier is publishability-gated, native, token-free, and read-on
   const main = source.slice(source.indexOf("main() {"));
   const phase = source.slice(source.indexOf("homebrew_phase() {"), source.indexOf("main() {"));
 
-  assert.match(source, /^FORMULA=openclaw\/tap\/crabbox$/m);
+  assert.match(source, /^TAP=openclaw\/tap$/m);
+  assert.match(source, /^FORMULA="\$TAP\/crabbox"$/m);
   assert.match(source, /REQUIRE_PUBLISHABLE=1/);
   assert.match(source, /validate-release-publication\.mjs" public-proof/);
   assert.match(source, /public-verifier-run-id/);
@@ -403,13 +407,15 @@ test("Homebrew verifier is publishability-gated, native, token-free, and read-on
   for (const credential of forbiddenCredentials) {
     assert.match(credentialGuards, new RegExp(`\\b${credential}\\b`));
   }
-  assert.doesNotMatch(source, /\bgh(?:\s|$)|brew tap|workflow run|update-formula|git push/);
+  assert.doesNotMatch(source, /\bgh(?:\s|$)|workflow run|update-formula|git push/);
   assert.doesNotMatch(source, /== --homebrew-phase/);
 
   assert.ok(main.indexOf("require_publishable_source") < main.indexOf("/usr/bin/env -i"));
   assert.ok(phase.indexOf("require_publishable_source") < phase.indexOf('"$brew_bin" update'));
   assert.ok(phase.indexOf("scripts/verify-release.sh") < phase.indexOf('"$brew_bin" update'));
   assert.ok(phase.indexOf('"$brew_bin" update --force') < phase.indexOf('"$brew_bin" cat'));
+  assert.ok(phase.indexOf('"$brew_bin" update --force') < phase.indexOf('"$brew_bin" tap'));
+  assert.ok(phase.indexOf('"$brew_bin" tap "$TAP"') < phase.indexOf('"$brew_bin" cat'));
   assert.ok(phase.indexOf("verify_homebrew_formula") < phase.indexOf('"$brew_bin" reinstall'));
   assert.ok(phase.indexOf("verify_homebrew_formula") < phase.indexOf('"$brew_bin" fetch'));
   assert.ok(phase.indexOf('"$brew_bin" fetch --force --formula') < phase.indexOf('"$brew_bin" install'));
@@ -593,6 +599,7 @@ test("mocked Homebrew phase proves fresh fetch, frozen bytes, trust, and final e
   assert.match(result.calls, /^verify-source:v1\.2\.3 /m);
   assert.match(result.calls, /^verify-release:v1\.2\.3 /m);
   assert.match(result.calls, /^brew:update --force$/m);
+  assert.match(result.calls, /^brew:tap openclaw\/tap$/m);
   assert.match(result.calls, /^brew:fetch --force --formula openclaw\/tap\/crabbox$/m);
   assert.match(result.calls, /^brew:install openclaw\/tap\/crabbox$/m);
   assert.match(result.calls, /^verify-macos:org\.openclaw\.crabbox arm64 /m);
@@ -601,6 +608,8 @@ test("mocked Homebrew phase proves fresh fetch, frozen bytes, trust, and final e
     /^verify-macos:org\.openclaw\.crabbox\.apple-vm-helper arm64 /m,
   );
   assert.match(result.calls, /^brew:test openclaw\/tap\/crabbox$/m);
+  assert.ok(result.calls.indexOf("brew:update") < result.calls.indexOf("brew:tap"));
+  assert.ok(result.calls.indexOf("brew:tap") < result.calls.indexOf("brew:fetch"));
   assert.ok(result.calls.indexOf("brew:fetch") < result.calls.indexOf("brew:install"));
   assert.ok(result.calls.indexOf("verify-macos:") < result.calls.indexOf("brew:test"));
 });

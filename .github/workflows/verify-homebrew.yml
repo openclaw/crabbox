@@ -122,14 +122,21 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Preserve pinned Go in the frozen verifier path
+      - name: Preserve pinned tools for the frozen verifier
         shell: bash
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/release-tools"
           mkdir -m 700 "$tools"
           brew_path=$(command -v brew)
-          printf '%s\n' '#!/bin/bash' "exec \"$brew_path\" \"\$@\"" >"$tools/brew"
+          cat >"$tools/brew" <<EOF
+          #!/bin/bash
+          set -euo pipefail
+          if [[ "\${1:-}" == cat && "\${2:-}" == openclaw/tap/crabbox ]]; then
+            "$brew_path" tap openclaw/tap
+          fi
+          exec "$brew_path" "\$@"
+          EOF
           chmod 700 "$tools/brew"
           ln -s "$(command -v go)" "$tools/go"
           printf '%s\n' "$tools" >>"$GITHUB_PATH"

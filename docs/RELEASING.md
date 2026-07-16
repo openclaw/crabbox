@@ -385,11 +385,12 @@ The last command first re-fetches the current public release, workflow run,
 workflow, and artifact metadata without authentication. It binds the successful
 post-publication run, both digest-pinned native proof ZIPs, their current release
 and asset timestamps, and the supplied public bytes before it changes local
-Homebrew state. It then performs `brew update`, a fresh install or reinstall,
+Homebrew state. It then performs `brew update`, ensures the public
+`openclaw/tap` is present without credentials, performs a fresh install or reinstall,
 `brew test`, exact installed-byte and architecture comparison, Foundation
 signature and online notarization checks, exact version execution, and Apple
 Silicon `vmd-info`, then repeats the unauthenticated public-record and proof
-comparison to close the verification window. It does not update the tap. The
+comparison to close the verification window. It does not publish or write to the tap. The
 tap formula must be byte-for-byte output from the protected
 `scripts/render-homebrew-formula.mjs`; any additional Ruby, interpolation, or
 format drift is rejected before Homebrew evaluates it. Protected downstream

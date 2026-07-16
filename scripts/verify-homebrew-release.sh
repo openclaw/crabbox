@@ -5,7 +5,8 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=scripts/release-config.sh
 source "$ROOT/scripts/release-config.sh"
 
-FORMULA=openclaw/tap/crabbox
+TAP=openclaw/tap
+FORMULA="$TAP/crabbox"
 SCRIPT_PATH="$ROOT/scripts/verify-homebrew-release.sh"
 PROTECTED_HOMEBREW_TOOLING=(
   .github/release-allowed-signers
@@ -479,6 +480,7 @@ homebrew_phase() {
 
   local formula_file="$work/crabbox.rb"
   "$brew_bin" update --force
+  "$brew_bin" tap "$TAP"
   "$brew_bin" cat "$FORMULA" >"$formula_file"
   verify_homebrew_formula \
     "$node_bin" "$formula_file" "$tag" \
