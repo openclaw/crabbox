@@ -229,7 +229,23 @@ func TestBlacksmithRunRejectsSparseCheckoutBeforeWarmup(t *testing.T) {
 		}
 	}
 	git("init")
-	git("config", "core.sparseCheckout", "true")
+	git("config", "user.email", "test@example.com")
+	git("config", "user.name", "Test")
+	for path, contents := range map[string]string{
+		"included/keep.txt": "keep\n",
+		"omitted/drop.txt":  "drop\n",
+	} {
+		fullPath := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("add", ".")
+	git("commit", "-m", "init")
+	git("sparse-checkout", "set", "included")
 
 	runner := &blacksmithFuncRunner{}
 	backend := newTestBlacksmithBackend(baseConfig(), runner)

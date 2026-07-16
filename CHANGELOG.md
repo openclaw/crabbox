@@ -5,6 +5,7 @@
 ### Fixed
 
 - Restored native Homebrew verification by using the supported GitHub Actions artifact archive media type.
+- Rejected Blacksmith delegated runs when Git hides omitted tracked paths, before those paths could be misread as remote deletions.
 
 ## 0.38.3 - 2026-07-14
 

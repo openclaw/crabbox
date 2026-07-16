@@ -23,17 +23,113 @@ type Repo struct {
 	BaseRef   string
 }
 
-// IsSparseGitCheckout reports whether Git intentionally omits tracked paths
-// from the working tree. Delegated sync tools must not treat those omissions as
-// deletions from a complete checkout.
-func IsSparseGitCheckout(root string) bool {
+// GitCheckoutHasHiddenOmissions reports whether sparse rules or skip-worktree
+// index state leave tracked paths absent. Delegated sync tools must not treat
+// them as deletions from a complete checkout.
+func GitCheckoutHasHiddenOmissions(root string) (bool, error) {
 	if strings.TrimSpace(root) == "" {
-		return false
+		return false, nil
 	}
-	return strings.EqualFold(
+	sparseEnabled := strings.EqualFold(
 		strings.TrimSpace(gitOutput(root, "config", "--bool", "core.sparseCheckout")),
 		"true",
 	)
+	if !sparseEnabled && gitOutput(root, "rev-parse", "--is-inside-work-tree") != "true" {
+		return false, nil
+	}
+	trackedCmd := exec.Command("git", "ls-files", "-t", "-z")
+	trackedCmd.Dir = root
+	tagged, err := trackedCmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("list tracked paths: %w", err)
+	}
+	if len(tagged) == 0 {
+		return false, nil
+	}
+	type trackedPath struct {
+		name         string
+		skipWorktree bool
+	}
+	tracked := make([]trackedPath, 0, bytes.Count(tagged, []byte{0}))
+	for _, entry := range bytes.Split(tagged, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		if len(entry) < 3 || entry[1] != ' ' {
+			return false, fmt.Errorf("parse tracked path metadata")
+		}
+		path := string(entry[2:])
+		tracked = append(tracked, trackedPath{name: path, skipWorktree: entry[0] == 'S'})
+	}
+	includedPaths := make(map[string]struct{})
+	if sparseEnabled {
+		included, err := sparseCheckoutIncludedPaths(root)
+		if err != nil {
+			return false, err
+		}
+		for _, path := range bytes.Split(included, []byte{0}) {
+			if len(path) > 0 {
+				includedPaths[string(path)] = struct{}{}
+			}
+		}
+	}
+	for _, path := range tracked {
+		hiddenCandidate := path.skipWorktree
+		if sparseEnabled {
+			_, ruleIncludesPath := includedPaths[path.name]
+			hiddenCandidate = hiddenCandidate || !ruleIncludesPath
+		}
+		if !hiddenCandidate {
+			continue
+		}
+		exists, statErr := trackedPathExistsWithoutSymlinkAncestor(root, path.name)
+		if statErr != nil {
+			return false, fmt.Errorf("inspect tracked path %q: %w", path.name, statErr)
+		}
+		if exists {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func trackedPathExistsWithoutSymlinkAncestor(root, gitPath string) (bool, error) {
+	parts := strings.Split(filepath.FromSlash(gitPath), string(filepath.Separator))
+	current := root
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if i < len(parts)-1 && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func sparseCheckoutIncludedPaths(root string) ([]byte, error) {
+	rulesPath := gitOutput(root, "rev-parse", "--git-path", "info/sparse-checkout")
+	if rulesPath == "" {
+		return nil, fmt.Errorf("locate sparse-checkout rules")
+	}
+	if !filepath.IsAbs(rulesPath) {
+		rulesPath = filepath.Join(root, filepath.FromSlash(rulesPath))
+	}
+	// Sparse-checkout rules use Git's exclude-pattern engine with inverted
+	// product meaning: matching tracked paths are the materialized set.
+	cmd := exec.Command("git", "ls-files", "-ci", "-z", "--exclude-from="+rulesPath)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("evaluate sparse-checkout rules: %w", err)
+	}
+	return out, nil
 }
 
 func findRepo() (Repo, error) {
