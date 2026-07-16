@@ -63,12 +63,19 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   const proofDownloadEnd = workflow.indexOf(
     "      - name: Verify public Homebrew install without credentials",
   );
+  const toolsStepStart = workflow.indexOf(
+    "      - name: Preserve pinned release tools in the frozen verifier path",
+  );
+  const toolsStepEnd = workflow.indexOf("      - name: Download frozen public release assets");
   assert.notEqual(proofDownloadStart, -1);
   assert.notEqual(proofDownloadEnd, -1);
+  assert.notEqual(toolsStepStart, -1);
+  assert.notEqual(toolsStepEnd, -1);
   const proofDownloadStep = workflow.slice(
     proofDownloadStart,
     proofDownloadEnd,
   );
+  const toolsStep = workflow.slice(toolsStepStart, toolsStepEnd);
   const verifyStart = workflow.indexOf(
     "      - name: Verify public Homebrew install without credentials",
   );
@@ -82,11 +89,21 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   );
   assert.match(workflow, /go-version-file: go\.mod/);
   assert.match(workflow, /go-version-file: go\.mod\n\s+cache: false/);
-  assert.match(workflow, /name: Preserve pinned Go in the frozen verifier path/);
+  assert.match(workflow, /name: Preserve pinned release tools in the frozen verifier path/);
   assert.match(workflow, /tools="\$RUNNER_TEMP\/release-tools"/);
   assert.match(workflow, /brew_path=\$\(command -v brew\)/);
+  assert.match(workflow, /curl_path=\$\(command -v curl\)/);
   assert.match(workflow, /exec \\\"\$brew_path\\\" \\\"\\\$@\\\"/);
-  assert.match(workflow, /chmod 700 "\$tools\/brew"/);
+  assert.match(
+    workflow,
+    /retry=\(--retry-all-errors --retry 60 --retry-delay 15 --retry-max-time 900\)/,
+  );
+  assert.match(workflow, /-o\|--output\|--output=\*\) exec "\$curl_bin" "\$@" "\$\{retry\[@\]\}"/);
+  assert.match(workflow, /output=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/crabbox-curl\.XXXXXX"\)/);
+  assert.match(workflow, /"\$curl_bin" "\$@" "\$\{retry\[@\]\}" --output "\$output"/);
+  assert.match(workflow, /cat "\$output"/);
+  assert.doesNotMatch(toolsStep, /Authorization|GH_TOKEN|GITHUB_TOKEN/);
+  assert.match(workflow, /chmod 700 "\$tools\/brew" "\$tools\/curl"/);
   assert.match(workflow, /ln -s "\$\(command -v go\)" "\$tools\/go"/);
   assert.match(workflow, /printf '%s\\n' "\$tools" >>"\$GITHUB_PATH"/);
   assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);

@@ -122,15 +122,35 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Preserve pinned Go in the frozen verifier path
+      - name: Preserve pinned release tools in the frozen verifier path
         shell: bash
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/release-tools"
           mkdir -m 700 "$tools"
           brew_path=$(command -v brew)
+          curl_path=$(command -v curl)
           printf '%s\n' '#!/bin/bash' "exec \"$brew_path\" \"\$@\"" >"$tools/brew"
-          chmod 700 "$tools/brew"
+          # Frozen verifier traffic is public GET-only. Retry shared-runner
+          # throttling without adding credentials or weakening either read.
+          # Stage stdout so a retry cannot append to redirected partial JSON.
+          {
+            printf '%s\n' '#!/bin/bash' 'set -euo pipefail'
+            printf 'curl_bin=%q\n' "$curl_path"
+            cat <<'CURL_WRAPPER'
+          retry=(--retry-all-errors --retry 60 --retry-delay 15 --retry-max-time 900)
+          for arg in "$@"; do
+            case "$arg" in
+              -o|--output|--output=*) exec "$curl_bin" "$@" "${retry[@]}" ;;
+            esac
+          done
+          output=$(mktemp "${TMPDIR:-/tmp}/crabbox-curl.XXXXXX")
+          trap 'rm -f "$output"' EXIT
+          "$curl_bin" "$@" "${retry[@]}" --output "$output"
+          cat "$output"
+          CURL_WRAPPER
+          } >"$tools/curl"
+          chmod 700 "$tools/brew" "$tools/curl"
           ln -s "$(command -v go)" "$tools/go"
           printf '%s\n' "$tools" >>"$GITHUB_PATH"
 

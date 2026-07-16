@@ -380,6 +380,13 @@ The launcher captures absolute Homebrew, Node, and Go executable paths before
 scrubbing the environment, then preserves only those tool directories plus the
 macOS system paths in the child `PATH`.
 
+Hosted native runners also place a credential-free `curl` retry wrapper in that
+trusted tool directory. It keeps the frozen verifier's public GitHub API reads
+bounded to 15 minutes while tolerating transient shared-runner 403/rate-limit
+responses. Stdout responses are staged in a curl-owned temporary file and
+emitted only after success, so retries cannot append to partial JSON. The wrapper
+never adds an authorization header or skips a pre/postflight read.
+
 ```sh
 
 scripts/verify-homebrew-release.sh \
