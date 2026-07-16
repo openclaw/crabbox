@@ -220,14 +220,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	if err := installRemoteEgressClient(ctx, target); err != nil {
 		return err
 	}
-	if *daemon {
-		if stopped, err := a.stopEgressHostDaemonLocked(leaseID); err != nil {
-			return err
-		} else if stopped {
-			fmt.Fprintln(a.Stdout, "egress host daemon: replacing previous daemon")
-		}
-	}
-	clientTicket, err := coord.CreateEgressTicket(ctx, leaseID, "client", sessionID, *profile, allow)
+	clientTicket, err := a.prepareEgressClientCutover(ctx, coord, leaseID, sessionID, *profile, allow, *daemon)
 	if err != nil {
 		return err
 	}
@@ -261,6 +254,21 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	}
 	hostArgs = append(hostArgs, "--ticket", hostTicket.Ticket)
 	return a.egressHost(ctx, hostArgs)
+}
+
+func (a App) prepareEgressClientCutover(ctx context.Context, coord *CoordinatorClient, leaseID, sessionID, profile string, allow []string, daemon bool) (CoordinatorEgressTicket, error) {
+	clientTicket, err := coord.CreateEgressTicket(ctx, leaseID, "client", sessionID, profile, allow)
+	if err != nil {
+		return CoordinatorEgressTicket{}, err
+	}
+	if daemon {
+		if stopped, err := a.stopEgressHostDaemonLocked(leaseID); err != nil {
+			return CoordinatorEgressTicket{}, err
+		} else if stopped {
+			fmt.Fprintln(a.Stdout, "egress host daemon: replacing previous daemon")
+		}
+	}
+	return clientTicket, nil
 }
 
 func (a App) egressStatus(ctx context.Context, args []string) error {

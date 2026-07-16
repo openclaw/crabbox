@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -197,6 +199,47 @@ func TestEgressDaemonStopUsesLeaseLock(t *testing.T) {
 	}
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 		t.Fatalf("pid file still exists after locked stop: %v", err)
+	}
+}
+
+func TestPrepareEgressClientCutoverPreservesDaemonWhenTicketCreationFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_EGRESS_DAEMON_TESTCHILD", "1")
+	leaseID := "ticket-failure"
+	var output bytes.Buffer
+	app := App{Stdout: &output, Stderr: &output}
+	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}); err != nil {
+		t.Fatalf("start egress daemon: %v (output: %s)", err, strings.TrimSpace(output.String()))
+	}
+	pid := egressDaemonTestPID(t, &output)
+	t.Cleanup(func() { killEgressDaemonTestGroup(pid) })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/"+leaseID+"/egress/ticket" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		http.Error(w, "temporary coordinator failure", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	coord := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+
+	_, err := app.prepareEgressClientCutover(context.Background(), coord, leaseID, "egress_test", "", []string{"example.com"}, true)
+	if err == nil {
+		t.Fatal("expected ticket creation failure")
+	}
+	if !egressDaemonTestAlive(pid) {
+		t.Fatalf("daemon pid %d stopped before ticket creation succeeded", pid)
+	}
+	_, pidPath, err := egressDaemonPaths(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(recorded)); got != strconv.Itoa(pid) {
+		t.Fatalf("pid file changed after ticket failure: got %q want %d", got, pid)
 	}
 }
 
