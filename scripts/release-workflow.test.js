@@ -96,8 +96,12 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   assert.match(workflow, /exec \\\"\$brew_path\\\" \\\"\\\$@\\\"/);
   assert.match(
     workflow,
-    /exec \\\"\$curl_path\\\" \\\"\\\$@\\\" --retry-all-errors --retry 60 --retry-delay 15 --retry-max-time 900/,
+    /retry=\(--retry-all-errors --retry 60 --retry-delay 15 --retry-max-time 900\)/,
   );
+  assert.match(workflow, /-o\|--output\|--output=\*\) exec "\$curl_bin" "\$@" "\$\{retry\[@\]\}"/);
+  assert.match(workflow, /output=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/crabbox-curl\.XXXXXX"\)/);
+  assert.match(workflow, /"\$curl_bin" "\$@" "\$\{retry\[@\]\}" --output "\$output"/);
+  assert.match(workflow, /cat "\$output"/);
   assert.doesNotMatch(toolsStep, /Authorization|GH_TOKEN|GITHUB_TOKEN/);
   assert.match(workflow, /chmod 700 "\$tools\/brew" "\$tools\/curl"/);
   assert.match(workflow, /ln -s "\$\(command -v go\)" "\$tools\/go"/);
