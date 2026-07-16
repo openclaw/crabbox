@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -456,6 +457,83 @@ func TestConnectEgressBridgeSendsTicketInDedicatedHeader(t *testing.T) {
 	case <-agentConnected:
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
+	}
+}
+
+func TestEgressHostConnectHookRunsAfterHandshake(t *testing.T) {
+	clearConfigEnv(t)
+	isolateRunTestUserDirs(t, t.TempDir())
+	accepted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/leases/cbx_abcdef123456/egress/host" {
+			http.NotFound(w, r)
+			return
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("websocket accept: %v", err)
+			return
+		}
+		close(accepted)
+		_, _, _ = conn.Read(context.Background())
+		_ = conn.Close(websocket.StatusNormalClosure, "test done")
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	hookFired := make(chan struct{})
+	result := make(chan error, 1)
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	go func() {
+		result <- app.egressHostWithConnectHook(ctx, []string{
+			"--id", "cbx_abcdef123456",
+			"--coordinator", server.URL,
+			"--ticket", "egress_abcdef1234567890abcdef1234567890",
+			"--session", "egress_session",
+			"--allow", "example.com",
+		}, func() { close(hookFired) })
+	}()
+
+	select {
+	case <-accepted:
+	case err := <-result:
+		t.Fatalf("egress host returned before handshake: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	select {
+	case <-hookFired:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	cancel()
+	select {
+	case <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("egress host did not return after shutdown")
+	}
+}
+
+func TestEgressHostConnectHookSkippedOnConnectFailure(t *testing.T) {
+	clearConfigEnv(t)
+	isolateRunTestUserDirs(t, t.TempDir())
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	hookFired := false
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).egressHostWithConnectHook(context.Background(), []string{
+		"--id", "cbx_abcdef123456",
+		"--coordinator", server.URL,
+		"--ticket", "egress_abcdef1234567890abcdef1234567890",
+		"--session", "egress_session",
+		"--allow", "example.com",
+	}, func() { hookFired = true })
+	if err == nil {
+		t.Fatal("expected egress host connect failure")
+	}
+	if hookFired {
+		t.Fatal("connect hook fired after failed handshake")
 	}
 }
 

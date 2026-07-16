@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -223,7 +224,7 @@ func TestPrepareEgressClientCutoverPreservesDaemonWhenTicketCreationFails(t *tes
 	defer server.Close()
 	coord := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
 
-	_, err := app.prepareEgressClientCutover(context.Background(), coord, leaseID, "egress_test", "", []string{"example.com"}, true)
+	_, err := app.prepareEgressClientCutover(context.Background(), coord, leaseID, "egress_test", "", []string{"example.com"})
 	if err == nil {
 		t.Fatal("expected ticket creation failure")
 	}
@@ -240,6 +241,54 @@ func TestPrepareEgressClientCutoverPreservesDaemonWhenTicketCreationFails(t *tes
 	}
 	if got := strings.TrimSpace(string(recorded)); got != strconv.Itoa(pid) {
 		t.Fatalf("pid file changed after ticket failure: got %q want %d", got, pid)
+	}
+}
+
+func TestPrepareEgressClientCutoverStopsDaemonForForegroundStart(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_EGRESS_DAEMON_TESTCHILD", "1")
+	leaseID := "foreground-cutover"
+	var output bytes.Buffer
+	app := App{Stdout: &output, Stderr: &output}
+	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}); err != nil {
+		t.Fatalf("start egress daemon: %v (output: %s)", err, strings.TrimSpace(output.String()))
+	}
+	pid := egressDaemonTestPID(t, &output)
+	t.Cleanup(func() { killEgressDaemonTestGroup(pid) })
+	_, pidPath, err := egressDaemonPaths(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/"+leaseID+"/egress/ticket" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorEgressTicket{
+			Ticket:    "egress_ticket",
+			LeaseID:   leaseID,
+			Role:      "client",
+			SessionID: "egress_foreground",
+			ExpiresAt: "2026-07-16T00:00:00Z",
+		})
+	}))
+	defer server.Close()
+	coord := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+
+	if _, err := app.prepareEgressClientCutover(context.Background(), coord, leaseID, "egress_foreground", "", []string{"example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if egressDaemonTestAlive(pid) {
+		t.Fatalf("daemon pid %d remained alive after foreground cutover", pid)
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("pid file still exists after foreground cutover: %v", err)
+	}
+	if !strings.Contains(output.String(), "egress host daemon: replacing previous daemon") {
+		t.Fatalf("foreground cutover did not report daemon replacement (output: %s)", strings.TrimSpace(output.String()))
 	}
 }
 

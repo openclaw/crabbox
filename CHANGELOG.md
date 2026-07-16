@@ -9,6 +9,8 @@
 ### Fixed
 
 - Preserved foreground container-runner output buffered behind slow HTTP clients when the detached-descendant drain cap expires.
+- Stopped a previously started egress host daemon during non-daemon egress starts so it cannot clobber the new foreground session, and held the per-lease lock until the foreground host joins so concurrent replacement starts cannot interleave.
+- Fixed non-daemon egress start to actually run the foreground host bridge; it previously exited with a usage error right after starting the remote client.
 - Delivered server-first mediated-egress bytes after the local proxy handshake without letting one slow stream block unrelated connections. Thanks @anagnorisis2peripeteia.
 - Serialized complete per-lease egress host-daemon starts and stops and atomically replaced the remote client, preventing concurrent lifecycle commands and ordinary restarts from leaving untracked or stale processes. Thanks @anagnorisis2peripeteia.
 - Closed code-server WebSockets whose upstream dial completes after bridge shutdown, preventing orphaned connections and reader goroutines. Thanks @anagnorisis2peripeteia.
