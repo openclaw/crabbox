@@ -597,7 +597,14 @@ func (b *egressBridge) clientReadLoop(ctx context.Context) error {
 		}
 		switch msg.Type {
 		case "open_ok":
-			b.finishOpen(msg.ID, nil)
+			if !b.finishOpen(msg.ID, nil) {
+				// Late open_ok for an open we already abandoned (timed out or
+				// canceled): the host registered the destination conn and its
+				// copy goroutine, so tell it to close, or they leak for the life
+				// of the bridge. Async — a synchronous host write here would
+				// stall the single read loop (and every stream) on a full socket.
+				go b.closeHostConn(msg.ID)
+			}
 		case "error":
 			b.finishOpen(msg.ID, errors.New(msg.Error))
 			b.closeConn(msg.ID)
@@ -659,6 +666,7 @@ func (b *egressBridge) openRemote(ctx context.Context, id, host, port string) er
 	b.pending[id] = ch
 	b.mu.Unlock()
 	if err := b.writeJSON(ctx, egressProxyMessage{Type: "open", ID: id, Host: host, Port: port}); err != nil {
+		b.abandonOpen(id)
 		return err
 	}
 	timer := time.NewTimer(egressOpenTimeout)
@@ -667,20 +675,69 @@ func (b *egressBridge) openRemote(ctx context.Context, id, host, port string) er
 	case result := <-ch:
 		return result.err
 	case <-timer.C:
+		b.settleAbandonedOpen(id, ch)
 		return errors.New("egress open timed out")
 	case <-ctx.Done():
+		b.settleAbandonedOpen(id, ch)
 		return context.Cause(ctx)
 	}
 }
 
-func (b *egressBridge) finishOpen(id string, err error) {
+// settleAbandonedOpen cleans up an open the caller gives up on (timeout/cancel)
+// so it does not leak on the long-lived client bridge. If finishOpen won the
+// race and already resolved the pending entry, a result is buffered on ch; a
+// successful open there means the host opened a destination conn we must tell it
+// to close, or it and its copy goroutine leak. A reply that lands after this
+// returns is instead handled by clientReadLoop's open_ok branch.
+func (b *egressBridge) settleAbandonedOpen(id string, ch chan egressOpenResult) {
+	if b.abandonOpen(id) {
+		return // we removed the pending entry before any host reply landed
+	}
+	// finishOpen won the race and will deliver a result on ch. Drain it and, on a
+	// successful open, close the orphaned host conn — in the background so the
+	// caller (openRemote) returns immediately on cancel and never blocks on the
+	// network write.
+	go func() {
+		if result := <-ch; result.err == nil {
+			b.closeHostConn(id)
+		}
+	}()
+}
+
+// closeHostConn tells the host to drop a conn, using a detached, time-bounded
+// context so it works even when the caller's context is already canceled. It is
+// a synchronous write, so callers that must not block (the single clientReadLoop
+// goroutine, or a canceling openRemote) invoke it via `go`.
+func (b *egressBridge) closeHostConn(id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), egressDialTimeout)
+	defer cancel()
+	_ = b.writeJSON(ctx, egressProxyMessage{Type: "close", ID: id})
+}
+
+// abandonOpen removes the pending entry for id and reports whether it existed
+// (false means finishOpen already resolved it and is delivering a result on the
+// open's channel).
+func (b *egressBridge) abandonOpen(id string) bool {
+	b.mu.Lock()
+	_, ok := b.pending[id]
+	delete(b.pending, id)
+	b.mu.Unlock()
+	return ok
+}
+
+// finishOpen resolves a pending open with the given result and reports whether a
+// pending open existed. false means the open was already abandoned (timed out or
+// canceled), so the caller can tell the host to close the orphaned conn.
+func (b *egressBridge) finishOpen(id string, err error) bool {
 	b.mu.Lock()
 	ch := b.pending[id]
 	delete(b.pending, id)
 	b.mu.Unlock()
 	if ch != nil {
 		ch <- egressOpenResult{err: err}
+		return true
 	}
+	return false
 }
 
 func (b *egressBridge) copyConnToBridge(ctx context.Context, id string, conn net.Conn) {
