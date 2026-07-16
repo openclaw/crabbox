@@ -70,7 +70,21 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
     proofDownloadEnd,
   );
   assert.match(workflow, /WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
-  assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$VERIFIER_COMMIT" \]\]/);
+  assert.match(workflow, /RUN_SHA: \$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$RUN_SHA" \]\]/);
+  assert.match(
+    workflow,
+    /name: Set up Go for build-info inspection\n\s+uses: actions\/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16/,
+  );
+  assert.match(workflow, /go-version-file: go\.mod/);
+  assert.match(workflow, /go-version-file: go\.mod\n\s+cache: false/);
+  assert.match(workflow, /name: Preserve pinned Go in the frozen verifier path/);
+  assert.match(workflow, /tools="\$RUNNER_TEMP\/release-tools"/);
+  assert.match(workflow, /brew_path=\$\(command -v brew\)/);
+  assert.match(workflow, /exec \\\"\$brew_path\\\" \\\"\\\$@\\\"/);
+  assert.match(workflow, /chmod 700 "\$tools\/brew"/);
+  assert.match(workflow, /ln -s "\$\(command -v go\)" "\$tools\/go"/);
+  assert.match(workflow, /printf '%s\\n' "\$tools" >>"\$GITHUB_PATH"/);
   assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);
   assert.match(workflow, /proofs_dir="\$RUNNER_TEMP\/public-proofs"/);
   assert.match(
@@ -610,6 +624,14 @@ test("v0.38.3 is pinned to the cancellation-fix source and ready for publication
   assert.equal(record.tag, "v0.38.3");
   assert.equal(record.tagObject, "2c4bee30c6af3039bae986c1a6784d9a2f4ee15c");
   assert.equal(record.sourceCommit, "9c3df396c94fef304975e221d5f0dc26e65d9860");
+  assert.equal(record.publicationStatus, "ready");
+});
+
+test("v0.38.4 is pinned to the sparse-sync source and ready for publication", () => {
+  const record = JSON.parse(read("release/records/v0.38.4.json"));
+  assert.equal(record.tag, "v0.38.4");
+  assert.equal(record.tagObject, "dd6aa78ed373393c1e9887e9354dd24b449b2f8b");
+  assert.equal(record.sourceCommit, "b288e613bd8267ea365c0098da7494b143242d8e");
   assert.equal(record.publicationStatus, "ready");
 });
 

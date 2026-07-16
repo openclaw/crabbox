@@ -48,6 +48,7 @@ jobs:
           RELEASE_ID: ${{ inputs.release_id }}
           RELEASE_TAG: ${{ inputs.tag }}
           PUBLIC_VERIFIER_RUN_ID: ${{ inputs.public_verifier_run_id }}
+          RUN_SHA: ${{ github.sha }}
           VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
@@ -61,7 +62,7 @@ jobs:
           [[ "$REF_PROTECTED" == true ]]
           [[ "$GITHUB_REF" == "$expected_ref" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$expected_workflow_ref" ]]
-          [[ "$WORKFLOW_SHA" == "$VERIFIER_COMMIT" ]]
+          [[ "$WORKFLOW_SHA" == "$RUN_SHA" ]]
 
           work="$RUNNER_TEMP/homebrew-guard"
           mkdir -m 700 "$work"
@@ -114,6 +115,24 @@ jobs:
           ref: ${{ inputs.verifier_commit }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Set up Go for build-info inspection
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Preserve pinned Go in the frozen verifier path
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/release-tools"
+          mkdir -m 700 "$tools"
+          brew_path=$(command -v brew)
+          printf '%s\n' '#!/bin/bash' "exec \"$brew_path\" \"\$@\"" >"$tools/brew"
+          chmod 700 "$tools/brew"
+          ln -s "$(command -v go)" "$tools/go"
+          printf '%s\n' "$tools" >>"$GITHUB_PATH"
 
       - name: Download frozen public release assets
         shell: bash
