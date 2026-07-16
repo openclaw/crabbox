@@ -594,7 +594,7 @@ main() {
   [[ $# -eq 8 ]] || usage
   local tag=$1 asset_dir=$2 tag_object=$3 source_commit=$4 verifier_commit=$5
   local release_id=$6 public_run_id=$7 proof_dir=$8
-  local native_arch brew_bin node_bin work clean_path user_name homebrew_home homebrew_cache source_asset_dir
+  local native_arch brew_bin node_bin go_bin work clean_path user_name homebrew_home homebrew_cache source_asset_dir
   validate_release_identity "$tag" "$tag_object" "$source_commit" "$verifier_commit"
   assert_no_downstream_credentials
   [[ "$(uname -s)" == Darwin ]] || {
@@ -622,8 +622,10 @@ main() {
 
   brew_bin=$(command -v brew)
   node_bin=$(command -v node)
-  [[ "$brew_bin" == /* && "$node_bin" == /* && -x "$brew_bin" && -x "$node_bin" ]] || {
-    echo "absolute Homebrew and Node executables are required" >&2
+  go_bin=$(command -v go)
+  [[ "$brew_bin" == /* && "$node_bin" == /* && "$go_bin" == /* &&
+    -x "$brew_bin" && -x "$node_bin" && -x "$go_bin" ]] || {
+    echo "absolute Homebrew, Node, and Go executables are required" >&2
     exit 1
   }
   work=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-homebrew-verify.XXXXXX")
@@ -637,7 +639,7 @@ main() {
     "$tag" "$asset_dir" "$tag_object" "$source_commit" "$verifier_commit" \
     "$release_id" "$public_run_id" "$proof_dir" "$work/public-preflight" "$node_bin"
   asset_dir="$work/public-preflight/public-assets"
-  clean_path="${brew_bin%/*}:${node_bin%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
+  clean_path="${brew_bin%/*}:${node_bin%/*}:${go_bin%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
   user_name=$(id -un)
 
   # shellcheck disable=SC2016 # Expanded by the credential-free child shell.
