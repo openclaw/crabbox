@@ -72,8 +72,14 @@ func TestGitCheckoutHasHiddenOmissions(t *testing.T) {
 	}
 
 	runGit(t, dir, "sparse-checkout", "set", "included")
+	rulesUnavailable := func(string, []gitTrackedPath) (map[string]struct{}, error) {
+		return nil, fmt.Errorf("check-rules unsupported")
+	}
 	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || !omitted {
 		t.Fatal("sparse-checkout omission was not detected")
+	}
+	if omitted, err := gitCheckoutHasHiddenOmissions(dir, rulesUnavailable); err != nil || !omitted {
+		t.Fatal("old Git missed definite skip-worktree omission")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "omitted", "drop.txt")); !os.IsNotExist(err) {
 		t.Fatalf("omitted path still materialized: %v", err)
@@ -81,7 +87,11 @@ func TestGitCheckoutHasHiddenOmissions(t *testing.T) {
 	// The sparse rules remain authoritative even if another Git operation
 	// loses the index's skip-worktree bit for an excluded path.
 	runGit(t, dir, "update-index", "--no-skip-worktree", "omitted/drop.txt")
-	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || !omitted {
+	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil {
+		if !strings.Contains(err.Error(), "Git 2.41") {
+			t.Fatal(err)
+		}
+	} else if !omitted {
 		t.Fatal("sparse rule omission was missed after clearing skip-worktree")
 	}
 
@@ -93,13 +103,23 @@ func TestGitCheckoutHasHiddenOmissions(t *testing.T) {
 	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || omitted {
 		t.Fatal("fully materialized sparse checkout reported omissions")
 	}
+	if omitted, err := gitCheckoutHasHiddenOmissions(dir, rulesUnavailable); err != nil || omitted {
+		t.Fatal("old Git rejected fully materialized sparse checkout")
+	}
 	// An ordinary deletion of an included path is intentional sync input, not
 	// a sparse omission.
 	if err := os.Remove(filepath.Join(dir, "omitted", "drop.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || omitted {
+	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil {
+		if !strings.Contains(err.Error(), "Git 2.41") {
+			t.Fatal(err)
+		}
+	} else if omitted {
 		t.Fatal("intentional deletion in fully included sparse checkout was rejected")
+	}
+	if omitted, err := gitCheckoutHasHiddenOmissions(dir, rulesUnavailable); omitted || err == nil || !strings.Contains(err.Error(), "Git 2.41") {
+		t.Fatalf("old Git ambiguity omission=%v err=%v", omitted, err)
 	}
 	writeFile(t, filepath.Join(dir, "omitted", "drop.txt"), "drop\n")
 	// Actual absence remains unsafe even when the sparse rules include the path.
@@ -147,6 +167,33 @@ func TestGitCheckoutHasHiddenOmissionsInLinkedWorktree(t *testing.T) {
 
 	if omitted, err := GitCheckoutHasHiddenOmissions(worktree); err != nil || !omitted {
 		t.Fatalf("linked sparse worktree omission=%v err=%v", omitted, err)
+	}
+}
+
+func TestGitCheckoutHasHiddenOmissionsInNestedCone(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	for path, contents := range map[string]string{
+		"root.txt":     "root\n",
+		"a/parent.txt": "parent\n",
+		"a/b/x.txt":    "included\n",
+		"a/c/y.txt":    "omitted\n",
+	} {
+		writeFile(t, filepath.Join(dir, path), contents)
+	}
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "sparse-checkout", "set", "a/b")
+	runGit(t, dir, "update-index", "--no-skip-worktree", "a/c/y.txt")
+
+	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil {
+		if !strings.Contains(err.Error(), "Git 2.41") {
+			t.Fatal(err)
+		}
+	} else if !omitted {
+		t.Fatal("nested cone omission was missed")
 	}
 }
 

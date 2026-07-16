@@ -52,6 +52,9 @@ sparse rules or `skip-worktree` index state leave tracked paths absent because
 those paths can otherwise be misread as deletions during a later full sync. A
 sparse configuration that materializes every tracked path remains supported.
 Materialize a temporary full checkout when the source workspace must stay sparse.
+Git 2.41 or newer is required only to distinguish an intentional deletion from
+a hidden path after sparse index metadata becomes ambiguous; older Git fails
+closed in that state with the same full-checkout remediation.
 
 Keep a Testbox between runs via a JSON session handle:
 
