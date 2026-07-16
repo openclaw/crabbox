@@ -89,11 +89,15 @@ break need an explicit product decision and migration path.
 
 Crabbox targets a single trusted user running on their own machine, so most
 findings are ordinary bugs rather than exploitable vulnerabilities against the
-boundaries above. The most useful thing you can do is open a normal GitHub
-issue — or, better, send a pull request with the fix. This project does not run
-a separate private-disclosure process.
+boundaries above. This project does not run a separate private-disclosure
+process.
 
-A helpful report identifies which supported boundary is crossed (see the
-sections above), the attacker access it requires, and the affected code path,
-with a reproduction where practical. Please don't paste live credentials or
-private infrastructure details into a public issue.
+If you find a security-relevant issue, the most useful thing you can do is send
+a pull request with the fix — that way the fix and the report arrive together
+and nothing sits publicly described but unpatched. For non-sensitive hardening,
+reliability, or expected-behavior questions, a normal GitHub issue is fine.
+
+A helpful report or PR identifies which supported boundary is crossed (see the
+sections above), the attacker access it requires, and the affected code path.
+Please don't paste live credentials or private infrastructure details into a
+public issue.
