@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -23,6 +24,37 @@ import (
 const minStreamLifetime = 75 * time.Millisecond
 const finalStreamFlushDelay = 100 * time.Millisecond
 const streamHeartbeatInterval = 15 * time.Second
+
+// After the direct child is reaped, a background descendant may have
+// inherited a stdout/stderr write-end (e.g. `sleep 30 & echo done`) and still
+// hold it open, so the owned read-ends never reach a natural EOF on their own.
+// runCommand handles that with an IDLE-AWARE DRAIN, not a single fixed grace:
+//
+//   - pipeDrainIdle is how long the drain waits for a lull with NO new bytes
+//     copied before concluding the child's real output is fully flushed and
+//     only a quiet (or absent) descendant remains. Once idle elapses with no
+//     progress, we close the read-ends ourselves to unblock the copiers. A
+//     descendant that keeps writing (even slowly) keeps resetting this timer,
+//     so genuine trailing output is never cut short.
+//   - pipeDrainPoll is the polling interval used to sample the shared `copied`
+//     byte counter and decide whether progress was made since the last check.
+//   - pipeDrainGrace is an ABSOLUTE CAP on the whole drain phase, in case a
+//     descendant writes continuously (e.g. `(while true; do echo x; done) &`)
+//     and so never goes idle: once this cap elapses (even mid-progress) we
+//     close the read-ends and return anyway. It is the same 5s constant the
+//     bounded-select design used, now acting as a backstop rather than the
+//     primary timer.
+//
+// None of this bounds the foreground command's own runtime: runCommand owns
+// the pipe read-ends, so cmd.Wait never closes them, and a long-running
+// foreground command is fully drained however long it takes — the drain phase
+// (and these three timers) only start once cmd.Wait has already returned. All
+// three are vars so tests can lower them.
+var (
+	pipeDrainIdle  = 300 * time.Millisecond
+	pipeDrainPoll  = 100 * time.Millisecond
+	pipeDrainGrace = 5 * time.Second
+)
 
 type execRequest struct {
 	Command   string            `json:"command"`
@@ -174,17 +206,57 @@ func runCommand(ctx context.Context, req execRequest, cwd string, writer *eventW
 	cmd.Env = commandEnv(req.Env)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	stdout, err := cmd.StdoutPipe()
+	// Own the stdout/stderr pipes instead of using cmd.StdoutPipe/StderrPipe.
+	//
+	// os/exec documents that cmd.Wait closes the parent read-ends of
+	// Stdout/StderrPipe as soon as the child is reaped: "it is incorrect to call
+	// Wait before all reads from the pipe have completed". Any design that must
+	// call cmd.Wait while a copier is still reading those read-ends therefore
+	// races the copier and silently truncates buffered output — including a
+	// legitimate foreground command that simply runs long and writes its result
+	// right before exiting.
+	//
+	// By creating the pipes ourselves and reading OUR OWN read-ends, cmd.Wait
+	// leaves them untouched. We can reap the child first, however long it runs,
+	// and the copiers keep delivering every byte with no truncation. We drop the
+	// parent's write-end copies right after Start so the child (and any
+	// descendants it forks) are the only writers, letting the read-ends reach a
+	// clean EOF once they all exit.
+	rOut, wOut, err := os.Pipe()
 	if err != nil {
 		return 0, err
 	}
-	stderr, err := cmd.StderrPipe()
+	rErr, wErr, err := os.Pipe()
 	if err != nil {
+		_ = rOut.Close()
+		_ = wOut.Close()
 		return 0, err
 	}
+	cmd.Stdout = wOut
+	cmd.Stderr = wErr
+
 	if err := cmd.Start(); err != nil {
+		_ = rOut.Close()
+		_ = wOut.Close()
+		_ = rErr.Close()
+		_ = wErr.Close()
 		return 0, err
 	}
+	// The child now holds the only write-ends; drop the parent's copies so the
+	// read-ends can reach EOF once the child (and any descendants) exit.
+	_ = wOut.Close()
+	_ = wErr.Close()
+
+	// Close the read-ends exactly once, whichever drain path we take, to force
+	// any blocked copyPipe Read to return and to avoid leaking file descriptors.
+	var closeReadersOnce sync.Once
+	closeReaders := func() {
+		closeReadersOnce.Do(func() {
+			_ = rOut.Close()
+			_ = rErr.Close()
+		})
+	}
+	defer closeReaders()
 
 	done := make(chan struct{})
 	defer close(done)
@@ -196,13 +268,69 @@ func runCommand(ctx context.Context, req execRequest, cwd string, writer *eventW
 		}
 	}()
 
+	var copied atomic.Int64
+	// writesInFlight counts copiers currently blocked in a response write. A
+	// slow write (downstream backpressure) freezes `copied`, so without this the
+	// drain loop below could mistake an actively-flushing copier for an idle
+	// pipe and close the read-ends mid-write, truncating buffered output.
+	var writesInFlight atomic.Int64
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go copyPipe(&wg, stdout, "stdout", writer)
-	go copyPipe(&wg, stderr, "stderr", writer)
+	go copyPipe(&wg, rOut, "stdout", writer, &copied, &writesInFlight)
+	go copyPipe(&wg, rErr, "stderr", writer, &copied, &writesInFlight)
 
+	// Reap the child first. Because we own rOut/rErr, cmd.Wait does NOT close
+	// them, so the copiers keep delivering the child's output for the ENTIRE
+	// lifetime of the command. A foreground command that runs arbitrarily long
+	// is fully drained with no truncation — none of the drain timers below
+	// bound the command's runtime, only what happens to a lingering descendant
+	// after the direct child has already exited.
 	waitErr := cmd.Wait()
-	wg.Wait()
+
+	// The direct child is reaped, but a background descendant may have
+	// inherited a write-end (e.g. `sleep 30 & echo done`) and still hold the
+	// pipe open, so the copiers won't reach EOF on their own. Drain
+	// idle-aware: keep waiting as long as bytes keep arriving (a live
+	// descendant still flushing real output), and only close the read-ends
+	// once EITHER the copiers hit a genuine EOF, OR `copied` has made no
+	// progress for pipeDrainIdle (a quiet/absent descendant — nothing left to
+	// lose), OR the absolute pipeDrainGrace cap elapses (a descendant writing
+	// continuously, e.g. `(while true; do echo x; done) &`, which would
+	// otherwise keep resetting the idle timer forever). Closing the read-ends
+	// forces the blocked copyPipe Reads to return (os.ErrClosed, treated as
+	// benign) so wg.Wait() completes.
+	drained := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(drained)
+	}()
+
+	ticker := time.NewTicker(pipeDrainPoll)
+	defer ticker.Stop()
+	deadline := time.Now().Add(pipeDrainGrace)
+	idleDeadline := time.Now().Add(pipeDrainIdle)
+	lastCopied := copied.Load()
+drainLoop:
+	for {
+		select {
+		case <-drained:
+			break drainLoop
+		case now := <-ticker.C:
+			// A copier blocked in a slow response write is NOT idle: an in-flight
+			// write counts as progress so the idle timer never fires mid-flush.
+			// Only the absolute pipeDrainGrace cap can end the drain during a
+			// persistently blocked write.
+			if cur := copied.Load(); cur != lastCopied || writesInFlight.Load() > 0 {
+				lastCopied = cur
+				idleDeadline = now.Add(pipeDrainIdle)
+			}
+			if now.After(idleDeadline) || now.After(deadline) {
+				closeReaders()
+				<-drained
+				break drainLoop
+			}
+		}
+	}
 	if ctx.Err() != nil {
 		return 124, ctx.Err()
 	}
@@ -252,13 +380,22 @@ func commandExitCode(exitErr *exec.ExitError) int {
 	return 1
 }
 
-func copyPipe(wg *sync.WaitGroup, reader io.Reader, eventType string, writer *eventWriter) {
+// copyPipe reads reader until EOF (or a benign close), forwarding each chunk
+// as a stream event and adding its length to copied so the idle-aware drain
+// in runCommand can detect whether a background descendant is still
+// producing real output after the direct child has exited.
+func copyPipe(wg *sync.WaitGroup, reader io.Reader, eventType string, writer *eventWriter, copied, writesInFlight *atomic.Int64) {
 	defer wg.Done()
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
+			// Mark the write in flight for the whole (potentially blocking)
+			// write so the drain loop never treats a slow flush as an idle pipe.
+			writesInFlight.Add(1)
 			writer.write(streamEvent{Type: eventType, Data: string(buf[:n])})
+			writesInFlight.Add(-1)
+			copied.Add(int64(n))
 		}
 		if err != nil {
 			if !benignPipeReadError(err) {
