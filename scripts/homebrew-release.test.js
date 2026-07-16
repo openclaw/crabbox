@@ -393,6 +393,12 @@ test("Homebrew verifier is publishability-gated, native, token-free, and read-on
   assert.match(source, /homebrew_cache="\$work\/cache"/);
   assert.match(source, /HOME="\$homebrew_home"/);
   assert.match(source, /HOMEBREW_CACHE="\$homebrew_cache"/);
+  assert.match(source, /go_bin=\$\(command -v go\)/);
+  assert.match(
+    source,
+    /clean_path="\$\{brew_bin%\/\*\}:\$\{node_bin%\/\*\}:\$\{go_bin%\/\*\}:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin"/,
+  );
+  assert.ok(main.indexOf("go_bin=$(command -v go)") < main.indexOf("/usr/bin/env -i"));
   assert.doesNotMatch(source, /^\s*HOME="\$HOME"/m);
   for (const credential of forbiddenCredentials) {
     assert.match(credentialGuards, new RegExp(`\\b${credential}\\b`));
