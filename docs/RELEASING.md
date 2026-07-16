@@ -369,6 +369,10 @@ Remove every GitHub, Actions, Homebrew, signing, notary, and secret-store
 credential from the environment. Then run the downstream verifier in a new
 credential-free shell:
 
+The launcher captures absolute Homebrew, Node, and Go executable paths before
+scrubbing the environment, then preserves only those tool directories plus the
+macOS system paths in the child `PATH`.
+
 ```sh
 
 scripts/verify-homebrew-release.sh \
