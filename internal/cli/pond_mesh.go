@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -80,6 +81,20 @@ type pondMeshHandle interface {
 	Process() processSignaler
 	PID() int
 	String() string
+	// WasTerminatedByOurCancel reports whether THIS process's Wait error is
+	// attributable solely to our own teardown rather than a genuine failure.
+	// Teardown is exec.CommandContext's DEFAULT cancellation — SIGKILL on Unix,
+	// TerminateProcess on Windows — recorded per-forward by the ctx watchdog's
+	// Cancel hook. The connect loop never infers intent from the shared context,
+	// which under a race can misattribute one forward's genuine failure to
+	// another forward's cancellation. On Unix our SIGKILL is uncatchable, so our
+	// kill is always ProcessState.Signaled() while a peer that reached its own
+	// nonzero exit code is Exited() — unambiguous. On Windows there are no
+	// signals, so the provenance flag governs, except that a process our kill
+	// found already gone died on its own and is treated as a genuine exit. A
+	// genuine failure therefore returns false even when the shared context was
+	// cancelled first.
+	WasTerminatedByOurCancel() bool
 }
 
 // processSignaler is the subset of *os.Process that the connect loop touches
@@ -96,7 +111,21 @@ type processSignaler interface {
 type pondMeshExecRunner struct{}
 
 func (pondMeshExecRunner) Command(ctx context.Context, name string, args ...string) pondMeshHandle {
-	return &pondMeshExecHandle{cmd: exec.CommandContext(ctx, name, args...)}
+	h := &pondMeshExecHandle{cmd: exec.CommandContext(ctx, name, args...)}
+	// Keep exec.CommandContext's DEFAULT cancellation — SIGKILL on Unix,
+	// TerminateProcess on Windows — the long-standing Crabbox SSH teardown
+	// behaviour. We override Cancel ONLY to record provenance: mark that WE
+	// initiated this process's teardown (before the kill lands, so a concurrent
+	// Wait observes the flag) and, on Windows, note whether the kill found the
+	// process had already exited on its own. We deliberately do NOT send a
+	// graceful, catchable signal first: an ssh that trapped SIGINT and exited
+	// non-zero would report ProcessState.Exited(), indistinguishable from a
+	// genuine tunnel failure. SIGKILL cannot be caught, so on Unix our own
+	// teardown is always Signaled() — letting WasTerminatedByOurCancel suppress
+	// it without ever consulting the shared context, so a different forward's
+	// genuine failure is never misclassified as our cancellation.
+	h.cmd.Cancel = h.cancelAndKill
+	return h
 }
 
 // pondMeshDaemonRunner creates SSH tunnel processes that survive the parent
@@ -114,6 +143,17 @@ func (pondMeshDaemonRunner) Command(_ context.Context, name string, args ...stri
 
 type pondMeshExecHandle struct {
 	cmd *exec.Cmd
+	// cancelled records that our own teardown (the ctx watchdog's Cancel hook)
+	// is terminating this process. It is set before the kill is delivered so a
+	// concurrent Wait always observes it.
+	cancelled atomic.Bool
+	// killFoundExited records that our kill found the process had ALREADY exited
+	// on its own. It is only meaningful on Windows, where our TerminateProcess
+	// is otherwise indistinguishable from a genuine exit: a process that died
+	// before our kill landed is a genuine result, not our teardown. On Unix the
+	// terminal ProcessState (Signaled vs Exited) is authoritative and this flag
+	// is ignored.
+	killFoundExited atomic.Bool
 }
 
 func (h *pondMeshExecHandle) Start() error   { return h.cmd.Start() }
@@ -130,6 +170,39 @@ func (h *pondMeshExecHandle) Process() processSignaler {
 		return nil
 	}
 	return h.cmd.Process
+}
+
+// cancelAndKill is the exec.CommandContext Cancel hook. It records that OUR
+// teardown initiated this process's termination, then performs the platform
+// default kill (SIGKILL on Unix, TerminateProcess on Windows via os.Process.Kill).
+// An os.ErrProcessDone from the kill means the process finished on its own
+// before our kill landed; we note that so the Windows classifier can treat the
+// exit as genuine. The cancelled flag is stored before the kill so a concurrent
+// Wait observes it.
+func (h *pondMeshExecHandle) cancelAndKill() error {
+	h.cancelled.Store(true)
+	p := h.cmd.Process
+	if p == nil {
+		return nil
+	}
+	if err := p.Kill(); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			h.killFoundExited.Store(true)
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (h *pondMeshExecHandle) WasTerminatedByOurCancel() bool {
+	if !h.cancelled.Load() {
+		// We never touched this process, so any Wait error is a genuine
+		// failure regardless of whether the shared context was cancelled by a
+		// sibling forward or the caller.
+		return false
+	}
+	return killAttributableToCancel(h.cmd.ProcessState, h.killFoundExited.Load())
 }
 
 // pondMeshDefaultRunner is overridden in tests via the package-level pointer
@@ -998,18 +1071,28 @@ func runPondMeshForwards(ctx context.Context, opts pondConnectOptions, members [
 		go func(rf runningForward) {
 			defer wg.Done()
 			err := rf.handle.Wait()
-			if err != nil && !errors.Is(err, context.Canceled) {
+			// Classify by PER-FORWARD provenance, never the shared context.
+			// Reading ctx.Err() here is unsafe under a race: if a sibling
+			// forward or the caller cancels first, ctx.Err() is non-nil by the
+			// time THIS forward's genuine failure is classified, and its error
+			// would be silently discarded. Instead we suppress a Wait error
+			// only when OUR teardown terminated THIS specific process (portable
+			// across SIGINT/SIGKILL on Unix and TerminateProcess on Windows).
+			// A genuine non-zero exit the peer reached on its own is still
+			// recorded even when the shared context was already cancelled.
+			if err != nil && !rf.handle.WasTerminatedByOurCancel() {
 				firstErrOnce.Do(func() { firstErr = err })
 			}
 			cancel()
 		}(rf)
 	}
 	<-ctx.Done()
-	for _, rf := range running {
-		if proc := rf.handle.Process(); proc != nil {
-			_ = proc.Signal(os.Interrupt)
-		}
-	}
+	// Teardown is exec.CommandContext's DEFAULT cancellation: cancelling the
+	// derived ctx above fires each handle's Cancel hook, which records
+	// provenance and delivers the platform kill (SIGKILL on Unix,
+	// TerminateProcess on Windows). We intentionally send no catchable signal
+	// of our own — an ssh that trapped SIGINT and exited non-zero would look
+	// like a genuine failure. Just wait for every waiter to finish reaping.
 	wg.Wait()
 	return firstErr
 }

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -22,12 +23,14 @@ import (
 // the argv at Start() and blocks Wait() on the signal channel so the orchestration
 // loop can be terminated deterministically without real ssh processes.
 type pondMeshRecordingHandle struct {
-	name    string
-	args    []string
-	pid     int
-	started bool
-	signal  chan struct{}
-	mu      sync.Mutex
+	name      string
+	args      []string
+	pid       int
+	started   bool
+	signal    chan struct{}
+	ctx       context.Context
+	cancelled atomic.Bool
+	mu        sync.Mutex
 }
 
 func (h *pondMeshRecordingHandle) Start() error {
@@ -38,7 +41,15 @@ func (h *pondMeshRecordingHandle) Start() error {
 }
 
 func (h *pondMeshRecordingHandle) Wait() error {
-	<-h.signal
+	// Mirror the production handle: a healthy tunnel blocks until it is either
+	// explicitly signalled or the ctx watchdog would kill it (ctx cancelled).
+	// On ctx cancellation we record provenance exactly as the real Cancel hook
+	// does, then return nil — a healthy tunnel torn down by our own teardown.
+	select {
+	case <-h.signal:
+	case <-h.ctx.Done():
+		h.cancelled.Store(true)
+	}
 	return nil
 }
 
@@ -49,6 +60,11 @@ func (h *pondMeshRecordingHandle) String() string {
 func (h *pondMeshRecordingHandle) PID() int { return h.pid }
 
 func (h *pondMeshRecordingHandle) Process() processSignaler { return testProcessSignaler{h.signal} }
+
+// WasTerminatedByOurCancel mirrors the production classifier for the recording
+// double: this stub's Wait() only returns nil (a healthy tunnel torn down by
+// the connect loop), so a set cancelled flag always denotes our teardown.
+func (h *pondMeshRecordingHandle) WasTerminatedByOurCancel() bool { return h.cancelled.Load() }
 
 // testProcessSignaler closes the underlying channel on the first signal so
 // the handle's Wait() returns.
@@ -78,11 +94,11 @@ type pondMeshRecordingRunner struct {
 	handles []*pondMeshRecordingHandle
 }
 
-func (r *pondMeshRecordingRunner) Command(_ context.Context, name string, args ...string) pondMeshHandle {
+func (r *pondMeshRecordingRunner) Command(ctx context.Context, name string, args ...string) pondMeshHandle {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, append([]string{name}, args...))
-	h := &pondMeshRecordingHandle{name: name, args: append([]string{}, args...), pid: 1000 + len(r.handles), signal: make(chan struct{})}
+	h := &pondMeshRecordingHandle{name: name, args: append([]string{}, args...), pid: 1000 + len(r.handles), signal: make(chan struct{}), ctx: ctx}
 	r.handles = append(r.handles, h)
 	return h
 }
