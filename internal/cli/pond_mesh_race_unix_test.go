@@ -17,8 +17,8 @@ import (
 )
 
 // TestRunPondMeshForwardsGenuineExitSurvivesSiblingCancel is the regression for
-// the race steipete flagged as "not safe to land": a genuine per-forward
-// failure must be surfaced even while a SIBLING forward is being torn down —
+// the race steipete flagged as "not safe to land": a genuine per-member-process
+// failure must be surfaced even while a SIBLING member is being torn down —
 // classifying by anything shared (the ctx, or a "some cancel happened" flag)
 // discards it.
 //
@@ -38,7 +38,7 @@ import (
 // exiting on its own — which is exactly what makes the Exited-vs-Signaled
 // provenance split unambiguous. A classifier that suppressed every error once
 // any cancel occurred would drop A's exit 7 and return nil; the per-forward
-// provenance redesign returns the genuine *exec.ExitError.
+// process provenance redesign returns the genuine *exec.ExitError.
 func TestRunPondMeshForwardsGenuineExitSurvivesSiblingCancel(t *testing.T) {
 	if os.PathSeparator != '/' {
 		t.Skip("fake ssh shell script requires a unix-like OS")

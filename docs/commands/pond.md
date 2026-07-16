@@ -129,7 +129,7 @@ availability against `127.0.0.1`.
 
 Without `--export`, the command starts the forwards, prints the export lines and
 the paths of the rendered files, then blocks until interrupted (Ctrl-C), keeping
-all tunnels alive:
+all tunnels alive. Ports for the same member share one owned SSH process:
 
 ```text
 pond "alpha" SSH-mesh ready (2 forwards)
@@ -139,13 +139,17 @@ wrote /Users/alice/.crabbox/pond/alpha/hosts
 wrote /Users/alice/.crabbox/pond/alpha/env
 ```
 
+Ctrl-Z is treated as teardown rather than suspension, so a stopped CLI cannot
+leave active forwarding processes behind.
+
 ### Export (daemon) mode
 
-With `--export`, the command starts each forward as a daemon process that
-survives the CLI exit, verifies none exit immediately (wrong key, host
-unreachable, …), records the PIDs in `~/.crabbox/pond/<name>/daemon.json`, prints
-the `export` lines to stdout, and exits. Daemon mode runs on macOS and Linux
-operator hosts only; on Windows, run `pond connect` without `--export`.
+With `--export`, the command starts one daemon process per member containing all
+of that member's forwards. The processes survive the CLI exit; Crabbox verifies
+none exit immediately (wrong key, host unreachable, …), records the PIDs in
+`~/.crabbox/pond/<name>/daemon.json`, prints the `export` lines to stdout, and
+exits. Daemon mode runs on macOS and Linux operator hosts only; on Windows, run
+`pond connect` without `--export`.
 
 ```bash
 eval $(crabbox pond connect alpha --export)

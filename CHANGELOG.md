@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Kept pond SSH forwards process-owned and grouped each member's ports into one connection, so terminal teardown reaps tunnels and helpers without hiding genuine failures or multiplying handshakes. Thanks @anagnorisis2peripeteia.
 - Preserved foreground container-runner output buffered behind slow HTTP clients when the detached-descendant drain cap expires.
 - Delivered server-first mediated-egress bytes after the local proxy handshake without letting one slow stream block unrelated connections. Thanks @anagnorisis2peripeteia.
 - Serialized complete per-lease egress host-daemon starts and stops and atomically replaced the remote client, preventing concurrent lifecycle commands and ordinary restarts from leaving untracked or stale processes. Thanks @anagnorisis2peripeteia.
