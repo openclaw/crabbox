@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
 - Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
 
 ### Fixed
@@ -25,10 +26,6 @@
 - Rejected Blacksmith delegated runs when Git hides omitted tracked paths, before those paths could be misread as remote deletions.
 
 ## 0.38.3 - 2026-07-14
-
-### Added
-
-- Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
 
 ### Fixed
 
