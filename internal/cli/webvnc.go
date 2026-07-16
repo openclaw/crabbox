@@ -1896,13 +1896,13 @@ func acquireWebVNCDaemonLock(leaseID string) (func(), error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return acquireWebVNCDaemonFileLock(pidPath + ".lock")
+	return acquireDaemonFileLock(pidPath + ".lock")
 }
 
-func acquireWebVNCDaemonFileLock(lockPath string) (func(), error) {
+func acquireDaemonFileLock(lockPath string) (func(), error) {
 	if info, err := os.Lstat(lockPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("WebVNC daemon lock must be a regular file")
+			return nil, fmt.Errorf("daemon lock must be a regular file")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -1920,7 +1920,7 @@ func acquireWebVNCDaemonFileLock(lockPath string) (func(), error) {
 		return closeWithError(err)
 	}
 	if !info.Mode().IsRegular() {
-		return closeWithError(fmt.Errorf("WebVNC daemon lock must be a regular file"))
+		return closeWithError(fmt.Errorf("daemon lock must be a regular file"))
 	}
 	if err := file.Chmod(0o600); err != nil {
 		return closeWithError(err)
