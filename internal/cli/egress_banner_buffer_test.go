@@ -73,6 +73,108 @@ func TestEgressServerFirstBannerFollowsProxyHandshake(t *testing.T) {
 	b.closeConn(id)
 }
 
+func TestEgressImmediateUpstreamCloseFollowsProxyHandshake(t *testing.T) {
+	openID := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		_, data, err := conn.Read(context.Background())
+		if err != nil {
+			t.Errorf("read open: %v", err)
+			return
+		}
+		var open egressProxyMessage
+		if err := json.Unmarshal(data, &open); err != nil {
+			t.Errorf("decode open: %v", err)
+			return
+		}
+		for _, msg := range []egressProxyMessage{
+			{Type: "open_ok", ID: open.ID},
+			{Type: "close", ID: open.ID},
+		} {
+			encoded, err := json.Marshal(msg)
+			if err != nil {
+				t.Errorf("encode %s: %v", msg.Type, err)
+				return
+			}
+			if err := conn.Write(context.Background(), websocket.MessageText, encoded); err != nil {
+				t.Errorf("write %s: %v", msg.Type, err)
+				return
+			}
+		}
+		openID <- open.ID
+		_, _, _ = conn.Read(context.Background())
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws, _, err := websocket.Dial(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newTestEgressClientBridge()
+	b.ws = ws
+	loopDone := make(chan error, 1)
+	go func() { loopDone <- b.clientReadLoop(ctx) }()
+
+	client, proxy := net.Pipe()
+	defer client.Close()
+	proxyDone := make(chan struct{})
+	go func() {
+		b.handleProxyConn(ctx, proxy)
+		close(proxyDone)
+	}()
+	requestDone := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(client, "CONNECT closing.example:443 HTTP/1.1\r\nHost: closing.example:443\r\n\r\n")
+		requestDone <- err
+	}()
+	if err := <-requestDone; err != nil {
+		t.Fatal(err)
+	}
+	id := <-openID
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		b.mu.Lock()
+		stream, exists := b.clientConns[id]
+		closeQueued := exists && stream.closeAfterDrain
+		b.mu.Unlock()
+		if closeQueued || !exists {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("upstream close was not processed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	const response = "HTTP/1.1 200 Connection Established\r\nProxy-Agent: crabbox\r\n\r\n"
+	if got := string(readEgressBytes(t, client, len(response))); got != response {
+		t.Fatalf("proxy response = %q, want CONNECT handshake", got)
+	}
+	if _, err := client.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("terminal read error = %v, want closed stream", err)
+	}
+
+	select {
+	case <-proxyDone:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	b.close()
+	select {
+	case <-loopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client read loop did not stop")
+	}
+}
+
 func TestEgressSlowClientStreamDoesNotBlockSharedReadLoop(t *testing.T) {
 	serverConn := make(chan *websocket.Conn, 1)
 	serverDone := make(chan struct{})

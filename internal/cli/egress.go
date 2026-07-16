@@ -966,6 +966,8 @@ func (b *egressBridge) closeClientConnAfterDrain(id string) bool {
 		return false
 	}
 	client.closeAfterDrain = true
+	// A close can immediately follow open_ok. Keep an unready stream alive so
+	// handleProxyConn can write the CONNECT response before applying the close.
 	closeNow := client.ready && len(client.queue) == 0 && !client.draining
 	if closeNow {
 		delete(b.clientConns, id)
