@@ -613,6 +613,14 @@ test("v0.38.3 is pinned to the cancellation-fix source and ready for publication
   assert.equal(record.publicationStatus, "ready");
 });
 
+test("v0.38.4 is pinned to the sparse-sync source and ready for publication", () => {
+  const record = JSON.parse(read("release/records/v0.38.4.json"));
+  assert.equal(record.tag, "v0.38.4");
+  assert.equal(record.tagObject, "dd6aa78ed373393c1e9887e9354dd24b449b2f8b");
+  assert.equal(record.sourceCommit, "b288e613bd8267ea365c0098da7494b143242d8e");
+  assert.equal(record.publicationStatus, "ready");
+});
+
 test("managed Foundation signing and notary configuration is repository-owned and secret-free", () => {
   const manifest = read(".mac-release.env");
   const codeowners = read(".github/CODEOWNERS");
