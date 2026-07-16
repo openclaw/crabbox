@@ -122,15 +122,21 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Preserve pinned Go in the frozen verifier path
+      - name: Preserve pinned release tools in the frozen verifier path
         shell: bash
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/release-tools"
           mkdir -m 700 "$tools"
           brew_path=$(command -v brew)
+          curl_path=$(command -v curl)
           printf '%s\n' '#!/bin/bash' "exec \"$brew_path\" \"\$@\"" >"$tools/brew"
-          chmod 700 "$tools/brew"
+          # Frozen verifier traffic is public GET-only. Retry shared-runner
+          # throttling without adding credentials or weakening either read.
+          printf '%s\n' '#!/bin/bash' \
+            "exec \"$curl_path\" \"\$@\" --retry-all-errors --retry 60 --retry-delay 15 --retry-max-time 900" \
+            >"$tools/curl"
+          chmod 700 "$tools/brew" "$tools/curl"
           ln -s "$(command -v go)" "$tools/go"
           printf '%s\n' "$tools" >>"$GITHUB_PATH"
 
