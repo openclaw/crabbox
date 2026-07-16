@@ -467,10 +467,8 @@ func serveWebVNCBridgeSlot(ctx context.Context, cfg webVNCBridgePoolConfig, slot
 	for {
 		bridge, err := connectWebVNCBridge(ctx, cfg.Coord, cfg.LeaseID, cfg.Host, cfg.Port, cfg.RescueCtx.Target, cfg.Log)
 		if err != nil {
-			// Assign to the loop's attempt counter, not a new one: `:=` here
-			// shadowed it, so consecutive failures never incremented attempt and
-			// the reconnect backoff stayed pinned at its first-attempt value.
 			var kind string
+			// Keep attempt outside this block so consecutive failures increase the retry delay.
 			attempt, kind = nextWebVNCBridgeFailure(connectedOnce, attempt)
 			events <- webVNCBridgePoolEvent{Kind: kind, Slot: slot, Attempt: attempt, Err: err}
 			if err := waitWebVNCReconnect(ctx, webVNCReconnectDelay(attempt)); err != nil {
