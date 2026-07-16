@@ -32,6 +32,7 @@ const (
 	egressRemoteLog         = "/tmp/crabbox-egress-client.log"
 	egressMaxMessageBytes   = 2 * 1024 * 1024
 	egressCopyChunkBytes    = 32 * 1024
+	egressClientQueueBytes  = 8 * egressCopyChunkBytes
 	egressOpenTimeout       = 20 * time.Second
 	egressDialTimeout       = 15 * time.Second
 	egressRemoteReadyWait   = 5 * time.Second
@@ -50,6 +51,15 @@ type egressProxyMessage struct {
 
 type egressOpenResult struct {
 	err error
+}
+
+type egressClientConn struct {
+	conn            net.Conn
+	ready           bool
+	queue           [][]byte
+	queuedBytes     int
+	draining        bool
+	closeAfterDrain bool
 }
 
 func (a App) egress(ctx context.Context, args []string) error {
@@ -387,12 +397,13 @@ func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinato
 }
 
 type egressBridge struct {
-	ws        *websocket.Conn
-	sessionID string
-	writeMu   sync.Mutex
-	mu        sync.Mutex
-	conns     map[string]net.Conn
-	pending   map[string]chan egressOpenResult
+	ws          *websocket.Conn
+	sessionID   string
+	writeMu     sync.Mutex
+	mu          sync.Mutex
+	conns       map[string]net.Conn
+	clientConns map[string]*egressClientConn
+	pending     map[string]chan egressOpenResult
 }
 
 func connectEgressBridge(ctx context.Context, coord *CoordinatorClient, leaseID, role, ticket, sessionID, profile string, allow []string) (*egressBridge, error) {
@@ -428,10 +439,11 @@ func connectEgressBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 	}
 	ws.SetReadLimit(egressMaxMessageBytes)
 	return &egressBridge{
-		ws:        ws,
-		sessionID: sessionID,
-		conns:     map[string]net.Conn{},
-		pending:   map[string]chan egressOpenResult{},
+		ws:          ws,
+		sessionID:   sessionID,
+		conns:       map[string]net.Conn{},
+		clientConns: map[string]*egressClientConn{},
+		pending:     map[string]chan egressOpenResult{},
 	}, nil
 }
 
@@ -494,7 +506,7 @@ func (b *egressBridge) hostOpen(ctx context.Context, msg egressProxyMessage, all
 		_ = conn.Close()
 		return
 	}
-	go b.copyConnToBridge(ctx, msg.ID, conn)
+	go b.relayConnToBridge(ctx, msg.ID, conn)
 }
 
 func dialPublicEgressHost(ctx context.Context, host, port string) (net.Conn, error) {
@@ -649,12 +661,13 @@ func (b *egressBridge) clientReadLoop(ctx context.Context) error {
 				go b.closeHostConn(msg.ID)
 			}
 		case "error":
-			b.finishOpen(msg.ID, errors.New(msg.Error))
-			b.closeConn(msg.ID)
+			b.rejectOpen(msg.ID, errors.New(msg.Error))
 		case "data":
-			b.writeConn(msg)
+			b.enqueueClientConn(msg)
 		case "close":
-			b.closeConn(msg.ID)
+			if !b.closeClientConnAfterDrain(msg.ID) {
+				b.closeConn(msg.ID)
+			}
 		}
 	}
 }
@@ -672,16 +685,23 @@ func (b *egressBridge) handleProxyConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 	id := newLocalEgressConnID()
+	b.registerClientConn(id, conn)
 	if err := b.openRemote(ctx, id, host, port); err != nil {
+		b.discardClientConn(id)
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
-	b.mu.Lock()
-	b.conns[id] = conn
-	b.mu.Unlock()
-	defer b.closeConn(id)
+	cleanupBeforeRelay := true
+	defer func() {
+		if cleanupBeforeRelay {
+			b.closeConn(id)
+			go b.closeHostConn(id)
+		}
+	}()
 	if req.Method == http.MethodConnect {
-		_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\nProxy-Agent: crabbox\r\n\r\n")
+		if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\nProxy-Agent: crabbox\r\n\r\n"); err != nil {
+			return
+		}
 	} else {
 		var buf bytes.Buffer
 		req.RequestURI = ""
@@ -694,13 +714,15 @@ func (b *egressBridge) handleProxyConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 	}
+	b.markClientConnReady(id)
 	if reader.Buffered() > 0 {
 		buffered, _ := reader.Peek(reader.Buffered())
 		if len(buffered) > 0 {
 			_ = b.writeJSON(ctx, egressProxyMessage{Type: "data", ID: id, Body: base64.StdEncoding.EncodeToString(buffered)})
 		}
 	}
-	b.copyConnToBridge(ctx, id, conn)
+	cleanupBeforeRelay = false
+	b.relayConnToBridge(ctx, id, conn)
 }
 
 func (b *egressBridge) openRemote(ctx context.Context, id, host, port string) error {
@@ -752,6 +774,9 @@ func (b *egressBridge) settleAbandonedOpen(id string, ch chan egressOpenResult) 
 // a synchronous write, so callers that must not block (the single clientReadLoop
 // goroutine, or a canceling openRemote) invoke it via `go`.
 func (b *egressBridge) closeHostConn(id string) {
+	if b.ws == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), egressDialTimeout)
 	defer cancel()
 	_ = b.writeJSON(ctx, egressProxyMessage{Type: "close", ID: id})
@@ -783,7 +808,16 @@ func (b *egressBridge) finishOpen(id string, err error) bool {
 	return false
 }
 
-func (b *egressBridge) copyConnToBridge(ctx context.Context, id string, conn net.Conn) {
+// rejectOpen leaves the local proxy socket owned by handleProxyConn long
+// enough to return its HTTP 502 response.
+func (b *egressBridge) rejectOpen(id string, err error) {
+	b.discardClientConn(id)
+	b.finishOpen(id, err)
+}
+
+func (b *egressBridge) relayConnToBridge(ctx context.Context, id string, conn net.Conn) {
+	defer b.closeConn(id)
+	defer b.closeHostConn(id)
 	buf := make([]byte, egressCopyChunkBytes)
 	for {
 		n, err := conn.Read(buf)
@@ -797,8 +831,6 @@ func (b *egressBridge) copyConnToBridge(ctx context.Context, id string, conn net
 			}
 		}
 		if err != nil {
-			_ = b.writeJSON(ctx, egressProxyMessage{Type: "close", ID: id})
-			b.closeConn(id)
 			return
 		}
 	}
@@ -817,14 +849,175 @@ func (b *egressBridge) writeConn(msg egressProxyMessage) {
 	}
 }
 
+func (b *egressBridge) registerClientConn(id string, conn net.Conn) {
+	b.mu.Lock()
+	if b.clientConns == nil {
+		b.clientConns = map[string]*egressClientConn{}
+	}
+	b.clientConns[id] = &egressClientConn{conn: conn}
+	b.mu.Unlock()
+}
+
+// enqueueClientConn keeps the shared WebSocket reader independent of local
+// socket speed. Each client stream gets an ordered, bounded queue; a stream
+// that cannot keep up is closed without stalling unrelated streams.
+func (b *egressBridge) enqueueClientConn(msg egressProxyMessage) {
+	data, err := base64.StdEncoding.DecodeString(msg.Body)
+	if err != nil {
+		return
+	}
+	b.mu.Lock()
+	client := b.clientConns[msg.ID]
+	if client == nil {
+		b.mu.Unlock()
+		return
+	}
+	if len(data) > egressClientQueueBytes-client.queuedBytes {
+		delete(b.clientConns, msg.ID)
+		b.mu.Unlock()
+		_ = client.conn.Close()
+		go b.closeHostConn(msg.ID)
+		return
+	}
+	client.queue = append(client.queue, data)
+	client.queuedBytes += len(data)
+	startDrain := client.ready && !client.draining
+	if startDrain {
+		client.draining = true
+	}
+	b.mu.Unlock()
+	if startDrain {
+		go b.drainClientConn(msg.ID, client)
+	}
+}
+
+func (b *egressBridge) markClientConnReady(id string) {
+	b.mu.Lock()
+	client := b.clientConns[id]
+	if client == nil {
+		b.mu.Unlock()
+		return
+	}
+	client.ready = true
+	startDrain := len(client.queue) > 0 && !client.draining
+	closeNow := client.closeAfterDrain && len(client.queue) == 0 && !client.draining
+	if closeNow {
+		delete(b.clientConns, id)
+	}
+	if startDrain {
+		client.draining = true
+	}
+	b.mu.Unlock()
+	if closeNow {
+		_ = client.conn.Close()
+		return
+	}
+	if startDrain {
+		go b.drainClientConn(id, client)
+	}
+}
+
+func (b *egressBridge) drainClientConn(id string, client *egressClientConn) {
+	for {
+		b.mu.Lock()
+		if b.clientConns[id] != client || len(client.queue) == 0 {
+			closeNow := false
+			if b.clientConns[id] == client {
+				client.draining = false
+				if client.closeAfterDrain {
+					delete(b.clientConns, id)
+					closeNow = true
+				}
+			}
+			b.mu.Unlock()
+			if closeNow {
+				_ = client.conn.Close()
+			}
+			return
+		}
+		data := client.queue[0]
+		client.queue[0] = nil
+		client.queue = client.queue[1:]
+		client.queuedBytes -= len(data)
+		b.mu.Unlock()
+
+		if err := writeFull(client.conn, data); err != nil {
+			b.failClientConn(id, client)
+			return
+		}
+	}
+}
+
+// closeClientConnAfterDrain preserves WebSocket frame order: a terminal close
+// is applied only after all preceding data frames reach the local socket.
+func (b *egressBridge) closeClientConnAfterDrain(id string) bool {
+	b.mu.Lock()
+	client := b.clientConns[id]
+	if client == nil {
+		b.mu.Unlock()
+		return false
+	}
+	client.closeAfterDrain = true
+	closeNow := client.ready && len(client.queue) == 0 && !client.draining
+	if closeNow {
+		delete(b.clientConns, id)
+	}
+	b.mu.Unlock()
+	if closeNow {
+		_ = client.conn.Close()
+	}
+	return true
+}
+
+func writeFull(conn net.Conn, data []byte) error {
+	for len(data) > 0 {
+		n, err := conn.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func (b *egressBridge) failClientConn(id string, client *egressClientConn) {
+	b.mu.Lock()
+	if b.clientConns[id] != client {
+		b.mu.Unlock()
+		return
+	}
+	delete(b.clientConns, id)
+	b.mu.Unlock()
+	_ = client.conn.Close()
+	go b.closeHostConn(id)
+}
+
+func (b *egressBridge) discardClientConn(id string) {
+	b.mu.Lock()
+	delete(b.clientConns, id)
+	b.mu.Unlock()
+}
+
 func (b *egressBridge) closeConn(id string) {
 	b.mu.Lock()
 	conn := b.conns[id]
+	client := b.clientConns[id]
+	pending := b.pending[id]
 	delete(b.conns, id)
+	delete(b.clientConns, id)
 	delete(b.pending, id)
 	b.mu.Unlock()
 	if conn != nil {
 		_ = conn.Close()
+	}
+	if client != nil {
+		_ = client.conn.Close()
+	}
+	if pending != nil {
+		pending <- egressOpenResult{err: errors.New("egress connection closed")}
 	}
 }
 
@@ -850,16 +1043,26 @@ func (b *egressBridge) close() {
 	if b == nil {
 		return
 	}
-	_ = b.ws.Close(websocket.StatusNormalClosure, "egress stopped")
+	if b.ws != nil {
+		_ = b.ws.Close(websocket.StatusNormalClosure, "egress stopped")
+	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	var closeConns []net.Conn
 	for id, conn := range b.conns {
-		_ = conn.Close()
+		closeConns = append(closeConns, conn)
 		delete(b.conns, id)
+	}
+	for id, client := range b.clientConns {
+		closeConns = append(closeConns, client.conn)
+		delete(b.clientConns, id)
 	}
 	for id, ch := range b.pending {
 		ch <- egressOpenResult{err: errors.New("egress bridge stopped")}
 		delete(b.pending, id)
+	}
+	b.mu.Unlock()
+	for _, conn := range closeConns {
+		_ = conn.Close()
 	}
 }
 
