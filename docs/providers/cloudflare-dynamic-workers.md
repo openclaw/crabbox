@@ -278,7 +278,7 @@ mode-0600 temporary secrets file and removes the file during cleanup.
 ## Related docs
 
 - [Cloudflare Containers provider](cloudflare.md)
-- [Provider feature overview](../features/providers.md)
+- [Provider Reference](README.md)
 - [Configuration](../features/configuration.md)
 - [run](../commands/run.md)
 - [doctor](../commands/doctor.md)

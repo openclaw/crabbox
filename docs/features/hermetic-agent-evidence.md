@@ -212,6 +212,6 @@ Before sharing a hermetic-agent run, verify:
 - Downloaded proof files contain no secrets or raw customer data.
 
 For artifact semantics and storage limits, see [Artifacts](artifacts.md). For
-provider capability details, see [Providers](providers.md),
+provider capability details, see [Provider Reference](../providers/README.md),
 [Provider backends](../provider-backends.md), and any selected per-provider
 page.

@@ -7,6 +7,7 @@ on:
     paths:
       - "docs/**"
       - "scripts/build-docs-site.mjs"
+      - "scripts/enhance-docs-site.mjs"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -34,7 +35,9 @@ jobs:
           node-version: 24
 
       - name: Build site
-        run: node scripts/build-docs-site.mjs
+        run: |
+          node scripts/build-docs-site.mjs
+          node scripts/enhance-docs-site.mjs
 
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0

@@ -231,5 +231,4 @@ instance in `crabbox list --provider vultr --json` or the Vultr console.
 
 - [Provider reference](README.md)
 - [Provider backends](../provider-backends.md)
-- [Provider feature overview](../features/providers.md)
 - [Operations](../operations.md)

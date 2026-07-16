@@ -288,6 +288,6 @@ crabbox run --provider aws --class beast -- pnpm test
 - [Commands](commands/README.md) - one page per command.
 - [Features](features/README.md) - one page per feature.
 - [Configuration](features/configuration.md) - YAML schema and precedence.
-- [Providers](features/providers.md) - which provider to pick.
+- [Providers](providers/README.md) - which provider to pick.
 - [Provider authoring](features/provider-authoring.md) - add a new provider.
 - [Troubleshooting](troubleshooting.md) - what to do when a step fails.

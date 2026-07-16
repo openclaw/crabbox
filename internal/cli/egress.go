@@ -101,6 +101,10 @@ bridges; the host agent opens the real outbound TCP connections.`)
 }
 
 func (a App) egressHost(ctx context.Context, args []string) error {
+	return a.egressHostWithConnectHook(ctx, args, nil)
+}
+
+func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onConnected func()) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("egress host", a.Stderr)
 	provider := fs.String("provider", defaults.Provider, "provider: hetzner or aws")
@@ -133,6 +137,9 @@ func (a App) egressHost(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "egress host: connected lease=%s session=%s profile=%s allow=%s\n", leaseID, bridge.sessionID, blank(*profile, "-"), strings.Join(allow, ","))
+	if onConnected != nil {
+		onConnected()
+	}
 	return bridge.serveHost(ctx, allow)
 }
 
@@ -218,19 +225,23 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	var unlockDaemon func()
-	if *daemon {
-		unlockDaemon, err = acquireEgressDaemonLock(leaseID)
-		if err != nil {
-			return exit(2, "acquire egress daemon lock: %v", err)
-		}
-		defer unlockDaemon()
+	unlockDaemon, err := acquireEgressDaemonLock(leaseID)
+	if err != nil {
+		return exit(2, "acquire egress daemon lock: %v", err)
 	}
+	daemonLockHeld := true
+	releaseDaemonLock := func() {
+		if daemonLockHeld {
+			daemonLockHeld = false
+			unlockDaemon()
+		}
+	}
+	defer releaseDaemonLock()
 	sessionID := newLocalEgressSessionID()
 	if err := installRemoteEgressClient(ctx, target); err != nil {
 		return err
 	}
-	clientTicket, err := a.prepareEgressClientCutover(ctx, coord, leaseID, sessionID, *profile, allow, *daemon)
+	clientTicket, err := a.prepareEgressClientCutover(ctx, coord, leaseID, sessionID, *profile, allow)
 	if err != nil {
 		return err
 	}
@@ -243,7 +254,6 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "egress client: lease=%s listen=%s log=%s\n", leaseID, *listen, egressRemoteLog)
 	hostArgs := []string{
-		"host",
 		"--provider", cfg.Provider,
 		"--id", leaseID,
 		"--coordinator", coord.BaseURL,
@@ -256,35 +266,40 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 		hostArgs = append(hostArgs, "--allow", strings.Join(allow, ","))
 	}
 	if *daemon {
-		return a.startEgressHostDaemonLocked(leaseID, hostArgs)
+		// The supervisor re-invokes `crabbox egress <args>`, so it needs the
+		// subcommand token; the in-process foreground call below must not get
+		// it because flag parsing stops at the first non-flag argument.
+		return a.startEgressHostDaemonLocked(leaseID, append([]string{"host"}, hostArgs...))
 	}
 	hostTicket, err := coord.CreateEgressTicket(ctx, leaseID, "host", sessionID, *profile, allow)
 	if err != nil {
 		return err
 	}
 	hostArgs = append(hostArgs, "--ticket", hostTicket.Ticket)
-	return a.egressHost(ctx, hostArgs)
+	// Hold the daemon lock until the foreground host has joined the session so a
+	// concurrent replacement start cannot interleave with its pending connect.
+	// Release it before the long-running serve loop so egress stop and replacement
+	// starts do not block until the session ends.
+	return a.egressHostWithConnectHook(ctx, hostArgs, releaseDaemonLock)
 }
 
-func (a App) prepareEgressClientCutover(ctx context.Context, coord *CoordinatorClient, leaseID, sessionID, profile string, allow []string, daemon bool) (CoordinatorEgressTicket, error) {
+func (a App) prepareEgressClientCutover(ctx context.Context, coord *CoordinatorClient, leaseID, sessionID, profile string, allow []string) (CoordinatorEgressTicket, error) {
 	clientTicket, err := coord.CreateEgressTicket(ctx, leaseID, "client", sessionID, profile, allow)
 	if err != nil {
 		return CoordinatorEgressTicket{}, err
 	}
-	if daemon {
-		// Stop the old host daemon before the new session activates (the remote
-		// client start in egressStart). The coordinator keeps one active egress
-		// session per lease, and the old supervisor restarts its host on any
-		// non-fatal exit, so a still-running old daemon would reconnect its
-		// prior session and clobber the replacement mid-cutover. The brief
-		// no-daemon window until the new host starts is the accepted tradeoff;
-		// the stop stays after ticket minting so preflight failures preserve
-		// the working daemon.
-		if stopped, err := a.stopEgressHostDaemonLocked(leaseID); err != nil {
-			return CoordinatorEgressTicket{}, err
-		} else if stopped {
-			fmt.Fprintln(a.Stdout, "egress host daemon: replacing previous daemon")
-		}
+	// Stop the old host daemon before the new daemon or foreground session
+	// activates (the remote client start in egressStart). The coordinator keeps
+	// one active egress session per lease, and the old supervisor restarts its
+	// host on any non-fatal exit, so a still-running old daemon would reconnect
+	// its prior session and clobber the replacement mid-cutover. The brief
+	// no-daemon window until the new host starts is the accepted tradeoff; the
+	// stop stays after ticket minting so preflight failures preserve the working
+	// daemon.
+	if stopped, err := a.stopEgressHostDaemonLocked(leaseID); err != nil {
+		return CoordinatorEgressTicket{}, err
+	} else if stopped {
+		fmt.Fprintln(a.Stdout, "egress host daemon: replacing previous daemon")
 	}
 	return clientTicket, nil
 }

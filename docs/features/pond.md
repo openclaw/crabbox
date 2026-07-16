@@ -65,7 +65,7 @@ macOS and Windows peer reachability are not covered by any plane yet.
 
 Capabilities are derived from each provider's `FeatureSet`, not from a static
 table — a provider opts into a plane by declaring the feature. See
-[providers.md](providers.md) for the full capability matrix and
+[Provider Reference](../providers/README.md) for the full capability matrix and
 [tailscale.md](tailscale.md) for the Tailscale transport.
 
 ## Commands
@@ -304,7 +304,7 @@ Legacy `acls` shape:
 
 ## See also
 
-- [providers.md](providers.md) — provider capability matrix.
+- [Provider Reference](../providers/README.md) — provider capability matrix.
 - [tailscale.md](tailscale.md) — the Tailscale transport and tags.
 - [doctor.md](doctor.md) — readiness checks, including the pond ACL check.
 - [identifiers.md](identifiers.md) — lease IDs and slugs.

@@ -34,7 +34,7 @@ Core never reaches into provider internals. It passes generic context and lets t
 - provider-neutral lease metadata
 - capability hooks for defaults, access, provisioning, native images, release, cleanup, and diagnostics
 
-The capability hooks are the seam. On the coordinator side, the lease-create path calls `prepareLeaseConfig`, `prepareLeaseCreate`, `createServerWithFallback`, `finalizeLeaseCreate`, `refreshLeaseAccess`, and `hourlyPriceUSD` on the provider module rather than branching on the provider name (`worker/src/fleet.ts`). On the CLI side, providers declare a [`ProviderSpec`](features/providers.md) with a feature set (`ssh`, `crabbox-sync`, `desktop`, `workspace-checkpoint`, ...), and core dispatches by feature, not by identity (`internal/cli/provider_backend.go`).
+The capability hooks are the seam. On the coordinator side, the lease-create path calls `prepareLeaseConfig`, `prepareLeaseCreate`, `createServerWithFallback`, `finalizeLeaseCreate`, `refreshLeaseAccess`, and `hourlyPriceUSD` on the provider module rather than branching on the provider name (`worker/src/fleet.ts`). On the CLI side, providers declare a [`ProviderSpec`](providers/README.md) with a feature set (`ssh`, `crabbox-sync`, `desktop`, `workspace-checkpoint`, ...), and core dispatches by feature, not by identity (`internal/cli/provider_backend.go`).
 
 ### Example: AWS SSH access
 
@@ -63,5 +63,5 @@ The line is drawn at *behavior*. Once code decides how a cloud resource is named
 ## Related reading
 
 - [Architecture](architecture.md) — the CLI ⇄ broker ⇄ runner topology.
-- [Provider backends](provider-backends.md) and [features/providers.md](features/providers.md) — the adapter contract and capability map.
+- [Provider backends](provider-backends.md) and [Provider Reference](providers/README.md) — the adapter contract and capability map.
 - [features/provider-authoring.md](features/provider-authoring.md) — how to add a new adapter without leaking specifics into core.

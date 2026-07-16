@@ -13,6 +13,28 @@ const providerMetadata = JSON.parse(
 const providerMetadataByDocs = new Map(
   Object.entries(providerMetadata).map(([name, metadata]) => [metadata.docs, { name, metadata }]),
 );
+const legacyProviderFeatureNotes = new Set([
+  "aws.md",
+  "azure.md",
+  "aws-private-workspaces.md",
+  "blacksmith-testbox.md",
+  "capacity-fallback.md",
+  "daytona.md",
+  "delegated-runner-contract.md",
+  "e2b.md",
+  "hetzner.md",
+  "islo.md",
+  "namespace-devbox.md",
+  "namespace-devbox-setup.md",
+  "provider-authoring.md",
+  "provider-landscape.md",
+  "provider-live-smoke.md",
+  "provider-selection.md",
+  "providers.md",
+  "semaphore.md",
+  "slurm-academic-sandboxes.md",
+  "sprites.md",
+]);
 
 const sections = [
   ["Start", ["README.md", "getting-started.md", "how-it-works.md", "architecture.md", "orchestrator.md", "cli.md"]],
@@ -130,7 +152,7 @@ function rels(dir) {
   if (!fs.existsSync(full)) return [];
   return fs
     .readdirSync(full)
-    .filter((name) => name.endsWith(".md"))
+    .filter((name) => name.endsWith(".md") && !(dir === "features" && legacyProviderFeatureNotes.has(name)))
     .sort((a, b) => (a === "README.md" ? -1 : b === "README.md" ? 1 : a.localeCompare(b)))
     .map((name) => `${dir}/${name}`);
 }
