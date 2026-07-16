@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -734,6 +736,68 @@ exit 0
 	}
 	if string(ports) != "2222\n22\n" {
 		t.Fatalf("ports=%q want fallback sequence", string(ports))
+	}
+}
+
+type sshWaitProgressSignal struct {
+	once  sync.Once
+	ready chan struct{}
+}
+
+func (w *sshWaitProgressSignal) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.ready) })
+	return len(p), nil
+}
+
+func TestWaitForSSHReadyPreservesCancellationCauseDuringBackoff(t *testing.T) {
+	// Prove cancel is observed during the inter-attempt backoff, not only at
+	// the top of the loop. Fake ssh always fails so wait enters the sleep.
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+exit 255
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "22",
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+
+	cause := errors.New("lease disappeared during SSH readiness")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	progress := &sshWaitProgressSignal{ready: make(chan struct{})}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- waitForSSHReady(ctx, &target, progress, "test", time.Minute)
+	}()
+
+	select {
+	case <-progress.ready:
+		// Progress is written after the failed probe and immediately before backoff.
+	case err := <-errCh:
+		t.Fatalf("waitForSSHReady returned before backoff: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("waitForSSHReady did not reach the backoff")
+	}
+	cancel(cause)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, cause) {
+			t.Fatalf("waitForSSHReady returned %v, want cancellation cause %v", err, cause)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("waitForSSHReady did not return within 3s after cancel; still blocked on bare sleep")
 	}
 }
 
