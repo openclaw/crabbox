@@ -70,7 +70,13 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
     proofDownloadEnd,
   );
   assert.match(workflow, /WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
-  assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$VERIFIER_COMMIT" \]\]/);
+  assert.match(workflow, /RUN_SHA: \$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$RUN_SHA" \]\]/);
+  assert.match(
+    workflow,
+    /name: Set up Go for build-info inspection\n\s+uses: actions\/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16/,
+  );
+  assert.match(workflow, /go-version-file: go\.mod/);
   assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);
   assert.match(workflow, /proofs_dir="\$RUNNER_TEMP\/public-proofs"/);
   assert.match(

@@ -491,6 +491,11 @@ notarization checks. Apple Silicon also runs the helper's non-mutating info path
 This bounded verifier is the installed-binary smoke; it does not create a lease.
 Only both native proofs complete the Homebrew gate.
 
+The Homebrew workflow itself runs from the current protected `main` commit,
+while its verification checkout remains pinned to the release record's
+protected verifier commit. This keeps published provenance immutable while
+allowing a protected workflow-only repair to restore the downstream proof.
+
 ## Cancellation And Recovery
 
 Cancellation stops all publication and tap actions immediately. Inspect the
