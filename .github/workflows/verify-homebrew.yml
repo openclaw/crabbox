@@ -94,9 +94,43 @@ jobs:
             .path == ".github/workflows/release-assets.yml" and .state == "active"
           ' "$work/workflow.json" >/dev/null
 
+  public-witness-preflight:
+    name: freeze-anonymous-public-witness
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out protected Homebrew workflow tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Freeze anonymous public metadata before native execution
+        shell: bash
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          PUBLIC_VERIFIER_RUN_ID: ${{ inputs.public_verifier_run_id }}
+        run: |
+          set -euo pipefail
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN
+          unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN
+          scripts/fetch-public-release-witness.sh \
+            "$GITHUB_REPOSITORY" "$RELEASE_ID" "$PUBLIC_VERIFIER_RUN_ID" \
+            "$RUNNER_TEMP/public-witness"
+
+      - name: Freeze public witness for native jobs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: homebrew-public-witness-${{ github.run_id }}
+          path: ${{ runner.temp }}/public-witness
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
   verify:
     name: verify-${{ matrix.arch }}
-    needs: guard
+    needs: public-witness-preflight
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -122,6 +156,12 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Download frozen anonymous public witness
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: homebrew-public-witness-${{ github.run_id }}
+          path: ${{ runner.temp }}/public-witness
+
       - name: Preserve pinned release tools in the frozen verifier path
         shell: bash
         run: |
@@ -131,23 +171,37 @@ jobs:
           brew_path=$(command -v brew)
           curl_path=$(command -v curl)
           printf '%s\n' '#!/bin/bash' "exec \"$brew_path\" \"\$@\"" >"$tools/brew"
-          # Frozen verifier traffic is public GET-only. Retry shared-runner
-          # throttling without adding credentials or weakening either read.
-          # Stage stdout so a retry cannot append to redirected partial JSON.
+          # Native verification consumes this witness before any candidate
+          # execution. A separate clean job owns every post-candidate read.
           {
             printf '%s\n' '#!/bin/bash' 'set -euo pipefail'
             printf 'curl_bin=%q\n' "$curl_path"
             cat <<'CURL_WRAPPER'
-          retry=(--retry-all-errors --retry 60 --retry-delay 15 --retry-max-time 900)
+          public_url=
           for arg in "$@"; do
             case "$arg" in
-              -o|--output|--output=*) exec "$curl_bin" "$@" "${retry[@]}" ;;
+              https://api.github.com/*) public_url=$arg ;;
             esac
           done
-          output=$(mktemp "${TMPDIR:-/tmp}/crabbox-curl.XXXXXX")
-          trap 'rm -f "$output"' EXIT
-          "$curl_bin" "$@" "${retry[@]}" --output "$output"
-          cat "$output"
+          if [[ -n "$public_url" && -n "${CRABBOX_PUBLIC_WITNESS_DIR:-}" ]]; then
+            witness=$CRABBOX_PUBLIC_WITNESS_DIR
+            [[ -d "$witness" && ! -L "$witness" ]]
+            (cd "$witness" && shasum -a 256 -c manifest.sha256 >/dev/null)
+            workflow_id=$(jq -er '.workflow_id | select(type == "number" and . > 0)' \
+              "$witness/run.json")
+            base="https://api.github.com/repos/$GITHUB_REPOSITORY"
+            case "$public_url" in
+              "$base/releases/$RELEASE_ID") witness_file=release.json ;;
+              "$base/actions/runs/$PUBLIC_VERIFIER_RUN_ID") witness_file=run.json ;;
+              "$base/actions/workflows/$workflow_id") witness_file=workflow.json ;;
+              "$base/actions/runs/$PUBLIC_VERIFIER_RUN_ID/artifacts?per_page=100") \
+                witness_file=artifacts.json ;;
+              *) echo "unexpected public witness URL: $public_url" >&2; exit 1 ;;
+            esac
+            cat "$witness/$witness_file"
+            exit 0
+          fi
+          exec "$curl_bin" "$@"
           CURL_WRAPPER
           } >"$tools/curl"
           chmod 700 "$tools/brew" "$tools/curl"
@@ -207,6 +261,8 @@ jobs:
       - name: Verify public Homebrew install without credentials
         shell: bash
         env:
+          CRABBOX_HOMEBREW_EXTERNAL_PUBLIC_POSTFLIGHT: "1"
+          CRABBOX_PUBLIC_WITNESS_DIR: ${{ runner.temp }}/public-witness
           RELEASE_ID: ${{ inputs.release_id }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
@@ -222,3 +278,38 @@ jobs:
             "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
             "$TAG_OBJECT" "$SOURCE_COMMIT" "$VERIFIER_COMMIT" \
             "$RELEASE_ID" "$PUBLIC_VERIFIER_RUN_ID" "$RUNNER_TEMP/public-proofs"
+
+  public-witness-postflight:
+    name: confirm-anonymous-public-witness
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out protected Homebrew workflow tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Download preflight public witness
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: homebrew-public-witness-${{ github.run_id }}
+          path: ${{ runner.temp }}/public-witness-preflight
+
+      - name: Confirm anonymous public metadata after native execution
+        shell: bash
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          PUBLIC_VERIFIER_RUN_ID: ${{ inputs.public_verifier_run_id }}
+        run: |
+          set -euo pipefail
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN
+          unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN
+          scripts/fetch-public-release-witness.sh \
+            "$GITHUB_REPOSITORY" "$RELEASE_ID" "$PUBLIC_VERIFIER_RUN_ID" \
+            "$RUNNER_TEMP/public-witness-postflight"
+          for name in artifacts.json release.json run.json workflow.json manifest.sha256; do
+            cmp "$RUNNER_TEMP/public-witness-preflight/$name" \
+              "$RUNNER_TEMP/public-witness-postflight/$name"
+          done
