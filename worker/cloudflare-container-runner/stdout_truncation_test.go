@@ -540,3 +540,66 @@ func TestRunCommandNoTruncationUnderSlowResponseWrite(t *testing.T) {
 			got, totalBytes, totalBytes-got)
 	}
 }
+
+// TestRunCommandDrainCapPreservesBufferedForegroundOutput proves the absolute
+// descendant cap cannot discard foreground bytes that were already buffered
+// in the pipe when the direct child exited.
+func TestRunCommandDrainCapPreservesBufferedForegroundOutput(t *testing.T) {
+	origIdle := pipeDrainIdle
+	origPoll := pipeDrainPoll
+	origGrace := pipeDrainGrace
+	pipeDrainIdle = 50 * time.Millisecond
+	pipeDrainPoll = 5 * time.Millisecond
+	pipeDrainGrace = 75 * time.Millisecond
+	defer func() {
+		pipeDrainIdle = origIdle
+		pipeDrainPoll = origPoll
+		pipeDrainGrace = origGrace
+	}()
+
+	const totalBytes = 512 * 1024
+	rec := &slowResponseWriter{delay: 200 * time.Millisecond}
+	writer := &eventWriter{w: rec}
+	req := execRequest{
+		Command: fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'x'", totalBytes),
+	}
+
+	code, err := runCommand(context.Background(), req, t.TempDir(), writer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	var got int
+	var errEvents []string
+	scanner := bufio.NewScanner(bytes.NewBufferString(rec.body()))
+	scanner.Buffer(make([]byte, 0, 1<<20), 1<<21)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var ev streamEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			t.Fatalf("unmarshal event %q: %v", line, err)
+		}
+		switch ev.Type {
+		case "stdout":
+			got += len(ev.Data)
+		case "error":
+			errEvents = append(errEvents, ev.Error)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(errEvents) > 0 {
+		t.Fatalf("unexpected error events: %v", errEvents)
+	}
+	if got != totalBytes {
+		t.Fatalf("stdout bytes delivered = %d, want %d (lost %d bytes: drain cap closed the pipe while buffered foreground output remained)",
+			got, totalBytes, totalBytes-got)
+	}
+}

@@ -24,6 +24,7 @@ import (
 const minStreamLifetime = 75 * time.Millisecond
 const finalStreamFlushDelay = 100 * time.Millisecond
 const streamHeartbeatInterval = 15 * time.Second
+const pipeReadPoll = 10 * time.Millisecond
 
 // After the direct child is reaped, a background descendant may have
 // inherited a stdout/stderr write-end (e.g. `sleep 30 & echo done`) and still
@@ -38,12 +39,12 @@ const streamHeartbeatInterval = 15 * time.Second
 //     so genuine trailing output is never cut short.
 //   - pipeDrainPoll is the polling interval used to sample the shared `copied`
 //     byte counter and decide whether progress was made since the last check.
-//   - pipeDrainGrace is an ABSOLUTE CAP on the whole drain phase, in case a
+//   - pipeDrainGrace is an ABSOLUTE CAP on descendant output, in case a
 //     descendant writes continuously (e.g. `(while true; do echo x; done) &`)
-//     and so never goes idle: once this cap elapses (even mid-progress) we
-//     close the read-ends and return anyway. It is the same 5s constant the
-//     bounded-select design used, now acting as a backstop rather than the
-//     primary timer.
+//     and so never goes idle. Before starting the cap, each copier snapshots
+//     and delivers every byte already buffered when it observes the direct
+//     child's exit. The cap can therefore stop new descendant writes without
+//     discarding buffered foreground output.
 //
 // None of this bounds the foreground command's own runtime: runCommand owns
 // the pipe read-ends, so cmd.Wait never closes them, and a long-running
@@ -232,6 +233,22 @@ func runCommand(ctx context.Context, req execRequest, cwd string, writer *eventW
 		_ = wOut.Close()
 		return 0, err
 	}
+	rOutFD := int(rOut.Fd())
+	rErrFD := int(rErr.Fd())
+	if err := syscall.SetNonblock(rOutFD, true); err != nil {
+		_ = rOut.Close()
+		_ = wOut.Close()
+		_ = rErr.Close()
+		_ = wErr.Close()
+		return 0, err
+	}
+	if err := syscall.SetNonblock(rErrFD, true); err != nil {
+		_ = rOut.Close()
+		_ = wOut.Close()
+		_ = rErr.Close()
+		_ = wErr.Close()
+		return 0, err
+	}
 	cmd.Stdout = wOut
 	cmd.Stderr = wErr
 
@@ -275,9 +292,10 @@ func runCommand(ctx context.Context, req execRequest, cwd string, writer *eventW
 	// pipe and close the read-ends mid-write, truncating buffered output.
 	var writesInFlight atomic.Int64
 	var wg sync.WaitGroup
+	foregroundDone := make(chan struct{})
 	wg.Add(2)
-	go copyPipe(&wg, rOut, "stdout", writer, &copied, &writesInFlight)
-	go copyPipe(&wg, rErr, "stderr", writer, &copied, &writesInFlight)
+	go copyPipe(&wg, &interruptiblePipeReader{fd: rOutFD, stop: foregroundDone}, "stdout", writer, &copied, &writesInFlight)
+	go copyPipe(&wg, &interruptiblePipeReader{fd: rErrFD, stop: foregroundDone}, "stderr", writer, &copied, &writesInFlight)
 
 	// Reap the child first. Because we own rOut/rErr, cmd.Wait does NOT close
 	// them, so the copiers keep delivering the child's output for the ENTIRE
@@ -286,6 +304,29 @@ func runCommand(ctx context.Context, req execRequest, cwd string, writer *eventW
 	// bound the command's runtime, only what happens to a lingering descendant
 	// after the direct child has already exited.
 	waitErr := cmd.Wait()
+
+	// Stop the foreground copiers without closing the read-ends. Each copier
+	// finishes any in-flight HTTP write before observing the signal, leaving all
+	// unread bytes intact in the owned kernel pipe.
+	close(foregroundDone)
+	wg.Wait()
+
+	// Snapshot and deliver the bytes buffered at this foreground/descendant
+	// boundary before any absolute timer starts. New descendant writes may land
+	// behind the snapshot, but the finite prefix containing all foreground output
+	// is guaranteed to reach the client.
+	buf := make([]byte, 32*1024)
+	if err := drainBufferedPipe(rOutFD, buf, "stdout", writer, &copied, &writesInFlight); err != nil {
+		return 1, err
+	}
+	if err := drainBufferedPipe(rErrFD, buf, "stderr", writer, &copied, &writesInFlight); err != nil {
+		return 1, err
+	}
+
+	descendantDone := make(chan struct{})
+	wg.Add(2)
+	go copyPipe(&wg, &interruptiblePipeReader{fd: rOutFD, stop: descendantDone}, "stdout", writer, &copied, &writesInFlight)
+	go copyPipe(&wg, &interruptiblePipeReader{fd: rErrFD, stop: descendantDone}, "stderr", writer, &copied, &writesInFlight)
 
 	// The direct child is reaped, but a background descendant may have
 	// inherited a write-end (e.g. `sleep 30 & echo done`) and still hold the
@@ -296,9 +337,9 @@ func runCommand(ctx context.Context, req execRequest, cwd string, writer *eventW
 	// progress for pipeDrainIdle (a quiet/absent descendant — nothing left to
 	// lose), OR the absolute pipeDrainGrace cap elapses (a descendant writing
 	// continuously, e.g. `(while true; do echo x; done) &`, which would
-	// otherwise keep resetting the idle timer forever). Closing the read-ends
-	// forces the blocked copyPipe Reads to return (os.ErrClosed, treated as
-	// benign) so wg.Wait() completes.
+	// otherwise keep resetting the idle timer forever). The copiers use
+	// nonblocking reads, so signaling them first and joining them before closing
+	// the read-ends avoids any read racing a reused file descriptor.
 	drained := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -325,8 +366,9 @@ drainLoop:
 				idleDeadline = now.Add(pipeDrainIdle)
 			}
 			if now.After(idleDeadline) || now.After(deadline) {
-				closeReaders()
+				close(descendantDone)
 				<-drained
+				closeReaders()
 				break drainLoop
 			}
 		}
@@ -390,12 +432,7 @@ func copyPipe(wg *sync.WaitGroup, reader io.Reader, eventType string, writer *ev
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
-			// Mark the write in flight for the whole (potentially blocking)
-			// write so the drain loop never treats a slow flush as an idle pipe.
-			writesInFlight.Add(1)
-			writer.write(streamEvent{Type: eventType, Data: string(buf[:n])})
-			writesInFlight.Add(-1)
-			copied.Add(int64(n))
+			writePipeChunk(buf[:n], eventType, writer, copied, writesInFlight)
 		}
 		if err != nil {
 			if !benignPipeReadError(err) {
@@ -406,8 +443,75 @@ func copyPipe(wg *sync.WaitGroup, reader io.Reader, eventType string, writer *ev
 	}
 }
 
+var errForegroundDrained = errors.New("foreground pipe drain boundary")
+
+type interruptiblePipeReader struct {
+	fd   int
+	stop <-chan struct{}
+}
+
+func (r *interruptiblePipeReader) Read(buf []byte) (int, error) {
+	for {
+		if r.stop != nil {
+			select {
+			case <-r.stop:
+				return 0, errForegroundDrained
+			default:
+			}
+		}
+
+		n, err := syscall.Read(r.fd, buf)
+		if n == 0 && err == nil {
+			return 0, io.EOF
+		}
+		if !errors.Is(err, syscall.EAGAIN) {
+			return n, err
+		}
+		if r.stop == nil {
+			time.Sleep(pipeReadPoll)
+			continue
+		}
+		select {
+		case <-r.stop:
+			return 0, errForegroundDrained
+		case <-time.After(pipeReadPoll):
+		}
+	}
+}
+
+func drainBufferedPipe(fd int, buf []byte, eventType string, writer *eventWriter, copied, writesInFlight *atomic.Int64) error {
+	remaining, err := pipeBufferedBytes(fd)
+	if err != nil {
+		return fmt.Errorf("inspect buffered %s: %w", eventType, err)
+	}
+	for remaining > 0 {
+		chunkSize := min(remaining, len(buf))
+		n, readErr := syscall.Read(fd, buf[:chunkSize])
+		if n > 0 {
+			writePipeChunk(buf[:n], eventType, writer, copied, writesInFlight)
+			remaining -= n
+		}
+		if readErr != nil {
+			return readErr
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	return nil
+}
+
+func writePipeChunk(chunk []byte, eventType string, writer *eventWriter, copied, writesInFlight *atomic.Int64) {
+	// Mark the write in flight for the whole (potentially blocking) write so
+	// the drain loop never treats a slow flush as an idle pipe.
+	writesInFlight.Add(1)
+	writer.write(streamEvent{Type: eventType, Data: string(chunk)})
+	writesInFlight.Add(-1)
+	copied.Add(int64(len(chunk)))
+}
+
 func benignPipeReadError(err error) bool {
-	return errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed)
+	return errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) || errors.Is(err, errForegroundDrained)
 }
 
 type eventWriter struct {
