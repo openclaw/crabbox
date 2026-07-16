@@ -294,6 +294,12 @@ cmp "$WORK/predownload-state.json" "$WORK/postdownload-state.json"
 # freeze is the serialization boundary; no local command intervenes after the
 # final comparison except the exact draft=false PATCH.
 printf '{"draft":false}\n' >"$WORK/publish.json"
+api_get "repos/$REPOSITORY/immutable-releases" >"$WORK/immutable-releases.json"
+jq -e '.enabled == true and .enforced_by_owner == true' \
+  "$WORK/immutable-releases.json" >/dev/null || {
+  echo "organization-enforced release immutability is required before publication" >&2
+  exit 1
+}
 verify_protected_source final
 api_get "repos/$REPOSITORY/releases/$RELEASE_ID" >"$WORK/final-draft.json"
 publication_environment node "$ROOT/scripts/validate-release-publication.mjs" state \

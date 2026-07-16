@@ -57,6 +57,33 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
   );
 });
 
+test("Homebrew verifier keeps downloaded proof inputs outside the protected checkout", () => {
+  const workflow = read(".github/workflows/verify-homebrew.yml");
+  const proofDownloadStart = workflow.indexOf("      - name: Download immutable native proof ZIPs");
+  const proofDownloadEnd = workflow.indexOf(
+    "      - name: Verify public Homebrew install without credentials",
+  );
+  assert.notEqual(proofDownloadStart, -1);
+  assert.notEqual(proofDownloadEnd, -1);
+  const proofDownloadStep = workflow.slice(
+    proofDownloadStart,
+    proofDownloadEnd,
+  );
+  assert.match(workflow, /WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
+  assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$VERIFIER_COMMIT" \]\]/);
+  assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);
+  assert.match(workflow, /proofs_dir="\$RUNNER_TEMP\/public-proofs"/);
+  assert.match(
+    proofDownloadStep,
+    /gh api --method GET --header 'Accept: application\/vnd\.github\+json' \\\s+"repos\/\$GITHUB_REPOSITORY\/actions\/artifacts\/\$artifact_id\/zip"/,
+  );
+  assert.doesNotMatch(proofDownloadStep, /application\/octet-stream/);
+  assert.match(workflow, /"\$RUNNER_TEMP\/release-assets"/);
+  assert.match(workflow, /"\$RUNNER_TEMP\/public-proofs"/);
+  assert.doesNotMatch(workflow, /"\$PWD\/(?:release-assets|public-proofs)"/);
+  assert.doesNotMatch(workflow, /mkdir -m 700 (?:release-assets|public-proofs)/);
+});
+
 test("script CI fetches signed release tags for publication fixtures", () => {
   const ci = read(".github/workflows/ci.yml");
   const scriptsJob = ci.slice(ci.indexOf("  scripts:"), ci.indexOf("  docs:"));
@@ -504,6 +531,10 @@ test("release documentation forbids automatic publication, deletion, and Homebre
   assert.match(release, /Never delete a partial draft or release/);
   assert.match(release, /Publish with one draft-state transition/);
   assert.match(release, /Update and prove Homebrew/);
+  assert.match(
+    release,
+    /gh api --method GET \\\s+--header 'Accept: application\/vnd\.github\+json' \\\s+"repos\/openclaw\/crabbox\/actions\/artifacts\/\$ARTIFACT_ID\/zip"/,
+  );
   assert.match(release, /Developer ID Application: OpenClaw Foundation \(FWJYW4S8P8\)/);
   assert.match(release, /PACKAGE_SCRIPT_SHA256/);
   assert.match(
@@ -562,6 +593,23 @@ test("v0.38.1 is pinned to the signed ready-pool source and ready for publicatio
   assert.equal(record.tag, "v0.38.1");
   assert.equal(record.tagObject, "326b5fa1e4f9543b11bde0583635f37d00f13f0a");
   assert.equal(record.sourceCommit, "3f83f4c58a65d2546620a8b31257f53375fabab2");
+  assert.equal(record.publicationStatus, "ready");
+});
+
+test("v0.38.2 is pinned and publication-blocked after its immutable tag failed policy", () => {
+  const record = JSON.parse(read("release/records/v0.38.2.json"));
+  assert.equal(record.tag, "v0.38.2");
+  assert.equal(record.tagObject, "b11d63f5a3353ed8117bbfbc92fca0bc2512d1f9");
+  assert.equal(record.sourceCommit, "d009660c442c7f072d3058097d1c2a86067c47c1");
+  assert.equal(record.publicationStatus, "blocked");
+  assert.match(record.blocker, /tag annotation does not exactly equal v0\.38\.2/);
+});
+
+test("v0.38.3 is pinned to the cancellation-fix source and ready for publication", () => {
+  const record = JSON.parse(read("release/records/v0.38.3.json"));
+  assert.equal(record.tag, "v0.38.3");
+  assert.equal(record.tagObject, "2c4bee30c6af3039bae986c1a6784d9a2f4ee15c");
+  assert.equal(record.sourceCommit, "9c3df396c94fef304975e221d5f0dc26e65d9860");
   assert.equal(record.publicationStatus, "ready");
 });
 

@@ -131,6 +131,7 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
     name: tag,
     body: notes,
     draft: true,
+    immutable: false,
     prerelease: false,
     created_at: "2026-07-10T09:50:00Z",
     updated_at: releaseUpdatedAt,
@@ -395,6 +396,7 @@ if (method === "PATCH") {
   fs.writeFileSync(path.join(api, "published"), "yes\\n");
   const value = json("release.json");
   value.draft = false;
+  value.immutable = true;
   value.updated_at = "2026-07-10T10:10:00Z";
   value.published_at = "2026-07-10T10:10:00Z";
   outputJson(value);
@@ -419,6 +421,12 @@ else if (endpoint === "repos/${repository}/rulesets/702") {
 else if (endpoint === "repos/${repository}/git/ref/tags/${tag}") outputFile("tag-ref.json");
 else if (endpoint === "repos/${repository}/git/tags/${tagObject}") outputFile("tag-object.json");
 else if (endpoint === "repos/${repository}/actions/runs/${runId}") outputFile("run.json");
+else if (endpoint === "repos/${repository}/immutable-releases") {
+  outputJson({
+    enabled: process.env.MOCK_MODE !== "immutable-disabled",
+    enforced_by_owner: process.env.MOCK_MODE !== "immutable-repository-only",
+  });
+}
 else if (endpoint === "repos/${repository}/actions/workflows/${workflowId}") outputFile("workflow.json");
 else if (endpoint === "repos/${repository}/actions/runs/${runId}/artifacts?per_page=100") {
   outputFile(
@@ -447,6 +455,7 @@ else if (endpoint === "repos/${repository}/releases/${releaseId}") {
   const value = json("release.json");
   if (published) {
     value.draft = false;
+    value.immutable = true;
     value.updated_at = "2026-07-10T10:10:00Z";
     value.published_at = "2026-07-10T10:10:00Z";
   } else if (process.env.MOCK_MODE === "drift" && count >= 2) {
@@ -586,6 +595,24 @@ test("final immediately pre-PATCH draft drift fails before any mutation", () => 
     const result = run("prepatch-drift");
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /asset identity drifted|digest/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("disabled release immutability fails before publication", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("immutable-disabled");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /organization-enforced release immutability is required/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("repository-only release immutability fails before publication", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("immutable-repository-only");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /organization-enforced release immutability is required/);
     assert.deepEqual(mutations(), []);
   });
 });

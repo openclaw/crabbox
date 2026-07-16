@@ -1,10 +1,22 @@
 # Changelog
 
-## 0.38.2 - Unreleased
+## 0.38.4 - 2026-07-16
+
+### Fixed
+
+- Restored native Homebrew verification by using the supported GitHub Actions artifact archive media type.
+- Made SSH readiness retries return promptly when cancelled while preserving the original cancellation cause.
+- Rejected Blacksmith delegated runs when Git hides omitted tracked paths, before those paths could be misread as remote deletions.
+
+## 0.38.3 - 2026-07-14
 
 ### Fixed
 
 - Made provider IP and loopback VNC waits return promptly when their context is cancelled. Thanks @SebTardif.
+
+## 0.38.2 - Unpublished
+
+- Publication blocked because the protected signed tag annotation did not satisfy release policy.
 
 ## 0.38.1 - 2026-07-13
 

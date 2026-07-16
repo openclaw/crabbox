@@ -462,6 +462,7 @@ test("public Homebrew proof binds the current release, successful run, both nati
     name: "v1.2.3",
     body: notes,
     draft: false,
+    immutable: true,
     prerelease: false,
     created_at: "2026-07-10T09:00:00Z",
     updated_at: "2026-07-10T10:05:00Z",

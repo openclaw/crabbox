@@ -359,7 +359,7 @@ for arch in arm64 x86_64; do
     if length == 1 then .[0].id else error("ambiguous proof artifact") end
   ' "$PUBLIC_ARTIFACTS")
   gh api --method GET \
-    --header 'Accept: application/octet-stream' \
+    --header 'Accept: application/vnd.github+json' \
     "repos/openclaw/crabbox/actions/artifacts/$ARTIFACT_ID/zip" \
     >"$PUBLIC_PROOFS/verified-assets-$arch.zip"
 done
@@ -439,6 +439,12 @@ Immediately before mutation, fetch the remote tag, protected workflow head,
 draft metadata, notes, and every asset record again. Require byte-for-byte
 equality with the frozen proof and require the successful native markers to
 refer to that exact state.
+
+Enable organization-enforced release immutability for this repository before
+the publication gate. The publisher checks the live setting before its sole
+PATCH, and the publication response plus every public verifier must report
+`immutable=true`. A repository-only or disabled setting blocks publication
+before mutation.
 
 The protected native verifier uses a non-cancelling concurrency key scoped to
 the immutable numeric release. GitHub Actions retains at most one pending run
