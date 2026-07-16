@@ -43,6 +43,26 @@ omitted for private AWS workspaces, Windows, macOS, Daytona, Azure snapshot,
 registered, and direct-provider leases, where Crabbox cannot authoritatively
 inject a host key before boot.
 
+### Trust model
+
+To pin the exact SSH host identity before the first connection, including
+coordinator terminal and native-VNC connections, the coordinator generates the
+host key pair and delivers it to the instance through provider launch data: AWS
+and Hetzner user-data, Azure `customData`, or GCP metadata. This avoids a
+trust-on-first-use gap for those connections.
+
+The launch data contains the host private key. Principals with provider-side
+read access to that data, or root access on the instance, can read the private
+key and impersonate that host. On providers that expose launch data through an
+in-guest metadata service, any guest process able to query that service can also
+read the key without root access. Treat provider launch-data readers, guest
+workloads with metadata access, and root on the instance as trusted
+infrastructure. Tighten provider-side IAM permissions, such as
+`ec2:DescribeInstanceAttribute` and `compute.instances.get`, restrict in-guest
+metadata access where the provider supports it, and do not log launch-data
+request bodies. This Low/P3 residual risk is accepted to preserve pre-connection
+host-identity pinning.
+
 ## Host-key trust and connection reuse
 
 A per-lease `known_hosts` file lives next to the key

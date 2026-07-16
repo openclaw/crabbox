@@ -528,6 +528,15 @@ Omit `CRABBOX_ARTIFACTS_PUBLIC_READS` to return expiring signed read URLs even
 when a base URL is configured. Enable it only when the artifact origin is
 intentionally public; each public grant receives a random capability namespace.
 
+**Security consideration:** Artifact object paths embed the authenticated
+organization and owner as reversible base64url values, not hashes or encrypted
+values. This applies to both expiring signed URLs and public URLs. The owner can
+be a non-public GitHub verified email, and `crabbox artifacts publish --pr` can
+place the resulting URLs in public pull-request comments. The random capability
+namespace makes a public URL difficult to guess but does not conceal identity
+from someone who has the URL. Weigh that disclosure before enabling public
+reads. This identity disclosure is an accepted Low/P3 residual risk.
+
 Deploy the matching access key id and secret access key as coordinator secrets,
 not local CLI defaults. End users run `crabbox artifacts publish` without
 holding any S3/R2 credentials.
