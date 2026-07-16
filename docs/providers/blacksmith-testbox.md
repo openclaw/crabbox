@@ -47,10 +47,11 @@ crabbox status --provider blacksmith-testbox --id tbx_123
 crabbox stop --provider blacksmith-testbox tbx_123
 ```
 
-Run delegated sync from a full Git checkout. Crabbox rejects sparse checkouts
-before invoking Blacksmith because paths intentionally omitted by sparse checkout
-can otherwise be misread as deletions during a later full sync. Materialize a
-temporary full checkout when the source workspace must stay sparse.
+Run delegated sync from a full Git checkout. Crabbox rejects a checkout when
+sparse rules or `skip-worktree` index state leave tracked paths absent because
+those paths can otherwise be misread as deletions during a later full sync. A
+sparse configuration that materializes every tracked path remains supported.
+Materialize a temporary full checkout when the source workspace must stay sparse.
 
 Keep a Testbox between runs via a JSON session handle:
 

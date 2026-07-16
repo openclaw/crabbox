@@ -108,10 +108,19 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		fmt.Fprintf(b.rt.Stderr, "env forwarding note=blacksmith-testbox delegates execution to the Blacksmith CLI; configure secrets in the Testbox workflow instead\n")
 		return RunResult{}, core.Exit(2, "env forwarding is unsupported for provider=%s; configure secrets in the provider workflow or use an SSH-backed provider", blacksmithTestboxProvider)
 	}
-	if core.IsSparseGitCheckout(req.Repo.Root) {
+	hiddenOmissions, sparseErr := core.GitCheckoutHasHiddenOmissions(req.Repo.Root)
+	if sparseErr != nil {
 		return RunResult{}, core.Exit(
 			2,
-			"provider=%s cannot safely delegate sync from a sparse Git checkout; run from a materialized full checkout",
+			"provider=%s cannot verify sparse-checkout safety: %v; run from a materialized full checkout",
+			blacksmithTestboxProvider,
+			sparseErr,
+		)
+	}
+	if hiddenOmissions {
+		return RunResult{}, core.Exit(
+			2,
+			"provider=%s cannot safely delegate sync while Git omits tracked paths from the working tree; run from a materialized full checkout",
 			blacksmithTestboxProvider,
 		)
 	}
