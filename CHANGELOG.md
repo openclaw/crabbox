@@ -2,6 +2,10 @@
 
 ## 0.38.5 - Unreleased
 
+### Added
+
+- Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
+
 ### Fixed
 
 - Closed code-server WebSockets whose upstream dial completes after bridge shutdown, preventing orphaned connections and reader goroutines. Thanks @anagnorisis2peripeteia.

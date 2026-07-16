@@ -7393,3 +7393,27 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 		t.Fatalf("command/sync fields not applied: %#v", job)
 	}
 }
+
+func TestModalSecretConfigRequiresTrustedFile(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Modal.Environment = "trusted-env"
+	cfg.Modal.Secrets = []string{"sample"}
+	file := fileConfig{Modal: &fileModalConfig{
+		Environment: "repo-env",
+		Secrets:     []string{"example"},
+	}}
+
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Modal.Environment != "trusted-env" || !reflect.DeepEqual(cfg.Modal.Secrets, []string{"sample"}) {
+		t.Fatalf("untrusted Modal secret selection applied: %#v", cfg.Modal)
+	}
+
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Modal.Environment != "repo-env" || !reflect.DeepEqual(cfg.Modal.Secrets, []string{"example"}) {
+		t.Fatalf("trusted Modal secret selection not applied: %#v", cfg.Modal)
+	}
+}

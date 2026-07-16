@@ -69,6 +69,10 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
     proofDownloadStart,
     proofDownloadEnd,
   );
+  const verifyStart = workflow.indexOf(
+    "      - name: Verify public Homebrew install without credentials",
+  );
+  const verifyStep = workflow.slice(verifyStart);
   assert.match(workflow, /WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
   assert.match(workflow, /RUN_SHA: \$\{\{ github\.sha \}\}/);
   assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$RUN_SHA" \]\]/);
@@ -96,6 +100,17 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   assert.match(workflow, /"\$RUNNER_TEMP\/public-proofs"/);
   assert.doesNotMatch(workflow, /"\$PWD\/(?:release-assets|public-proofs)"/);
   assert.doesNotMatch(workflow, /mkdir -m 700 (?:release-assets|public-proofs)/);
+  assert.match(verifyStep, /unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN/);
+  assert.match(verifyStep, /unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN/);
+  assert.match(verifyStep, /HOMEBREW_NO_AUTO_UPDATE=1 brew tap openclaw\/tap/);
+  assert.ok(
+    verifyStep.indexOf("unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN") <
+      verifyStep.indexOf("HOMEBREW_NO_AUTO_UPDATE=1 brew tap openclaw/tap"),
+  );
+  assert.ok(
+    verifyStep.indexOf("HOMEBREW_NO_AUTO_UPDATE=1 brew tap openclaw/tap") <
+      verifyStep.indexOf("scripts/verify-homebrew-release.sh"),
+  );
 });
 
 test("script CI fetches signed release tags for publication fixtures", () => {

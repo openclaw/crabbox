@@ -197,6 +197,7 @@ jobs:
           set -euo pipefail
           unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN
           unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN
+          HOMEBREW_NO_AUTO_UPDATE=1 brew tap openclaw/tap
           scripts/verify-homebrew-release.sh \
             "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
             "$TAG_OBJECT" "$SOURCE_COMMIT" "$VERIFIER_COMMIT" \
