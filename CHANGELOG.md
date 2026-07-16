@@ -4,7 +4,9 @@
 
 ### Fixed
 
+- Restored native Homebrew verification by using the supported GitHub Actions artifact archive media type.
 - Stopped failed runs' telemetry samplers promptly so long-lived CLI processes do not retain ticker goroutines or continue probing released leases. Thanks @anagnorisis2peripeteia.
+- Rejected Blacksmith delegated runs when Git hides omitted tracked paths, before those paths could be misread as remote deletions.
 
 ## 0.38.3 - 2026-07-14
 

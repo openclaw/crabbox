@@ -59,10 +59,25 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
 
 test("Homebrew verifier keeps downloaded proof inputs outside the protected checkout", () => {
   const workflow = read(".github/workflows/verify-homebrew.yml");
+  const proofDownloadStart = workflow.indexOf("      - name: Download immutable native proof ZIPs");
+  const proofDownloadEnd = workflow.indexOf(
+    "      - name: Verify public Homebrew install without credentials",
+  );
+  assert.notEqual(proofDownloadStart, -1);
+  assert.notEqual(proofDownloadEnd, -1);
+  const proofDownloadStep = workflow.slice(
+    proofDownloadStart,
+    proofDownloadEnd,
+  );
   assert.match(workflow, /WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
   assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$VERIFIER_COMMIT" \]\]/);
   assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);
   assert.match(workflow, /proofs_dir="\$RUNNER_TEMP\/public-proofs"/);
+  assert.match(
+    proofDownloadStep,
+    /gh api --method GET --header 'Accept: application\/vnd\.github\+json' \\\s+"repos\/\$GITHUB_REPOSITORY\/actions\/artifacts\/\$artifact_id\/zip"/,
+  );
+  assert.doesNotMatch(proofDownloadStep, /application\/octet-stream/);
   assert.match(workflow, /"\$RUNNER_TEMP\/release-assets"/);
   assert.match(workflow, /"\$RUNNER_TEMP\/public-proofs"/);
   assert.doesNotMatch(workflow, /"\$PWD\/(?:release-assets|public-proofs)"/);
@@ -516,6 +531,10 @@ test("release documentation forbids automatic publication, deletion, and Homebre
   assert.match(release, /Never delete a partial draft or release/);
   assert.match(release, /Publish with one draft-state transition/);
   assert.match(release, /Update and prove Homebrew/);
+  assert.match(
+    release,
+    /gh api --method GET \\\s+--header 'Accept: application\/vnd\.github\+json' \\\s+"repos\/openclaw\/crabbox\/actions\/artifacts\/\$ARTIFACT_ID\/zip"/,
+  );
   assert.match(release, /Developer ID Application: OpenClaw Foundation \(FWJYW4S8P8\)/);
   assert.match(release, /PACKAGE_SCRIPT_SHA256/);
   assert.match(

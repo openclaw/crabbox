@@ -160,7 +160,7 @@ jobs:
               [.artifacts[] | select(.name == $name)] |
               if length == 1 then .[0].id else error("ambiguous proof artifact") end
             ' "$metadata")
-            gh api --method GET --header 'Accept: application/octet-stream' \
+            gh api --method GET --header 'Accept: application/vnd.github+json' \
               "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
               >"$proofs_dir/verified-assets-$arch.zip"
           done
