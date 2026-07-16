@@ -415,6 +415,18 @@ lower-level `codesign-macos.sh`, `extract-release-notes.sh`,
 operator commands above and must not be reordered or invoked as substitute
 gates.
 
+The hosted `Verify Homebrew Release` workflow preserves the same anonymous
+public-record boundary without depending on a rate-limited native-runner IP. A
+credential-free Linux preflight freezes the public release, verifier run,
+workflow, and artifact metadata before either native job starts. Each native
+job validates that digest-pinned witness before any candidate execution, then
+performs no post-candidate read from its candidate-writable filesystem. A
+separate credential-free Linux postflight owns the post-candidate boundary: it
+repeats the anonymous reads after both native jobs and requires byte-for-byte
+equality of the security-relevant record with the preflight witness. Mutable
+download telemetry is excluded because verification itself downloads every
+asset.
+
 ## Serialized Gates
 
 ### 1. Create the private draft
