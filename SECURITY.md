@@ -87,12 +87,13 @@ break need an explicit product decision and migration path.
 
 ## Reporting
 
-Use [GitHub private vulnerability reporting](https://github.com/openclaw/crabbox/security/advisories/new)
-for a suspected vulnerability. Use a normal GitHub issue for non-sensitive
-hardening, reliability, documentation, or expected-behavior discussions.
+Crabbox targets a single trusted user running on their own machine, so most
+findings are ordinary bugs rather than exploitable vulnerabilities against the
+boundaries above. The most useful thing you can do is open a normal GitHub
+issue — or, better, send a pull request with the fix. This project does not run
+a separate private-disclosure process.
 
-Do not publish live credentials, private infrastructure details, or an
-exploit-ready report containing sensitive deployment information. Reports
-should identify the supported boundary crossed, required attacker access,
-affected code path, and a reproduction where practical. CVSS scoring is useful
-only after the report is accepted as a vulnerability.
+A helpful report identifies which supported boundary is crossed (see the
+sections above), the attacker access it requires, and the affected code path,
+with a reproduction where practical. Please don't paste live credentials or
+private infrastructure details into a public issue.
