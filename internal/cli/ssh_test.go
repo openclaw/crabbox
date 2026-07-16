@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -738,7 +739,17 @@ exit 0
 	}
 }
 
-func TestWaitForSSHReadyHonorsCancellationDuringBackoff(t *testing.T) {
+type sshWaitProgressSignal struct {
+	once  sync.Once
+	ready chan struct{}
+}
+
+func (w *sshWaitProgressSignal) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.ready) })
+	return len(p), nil
+}
+
+func TestWaitForSSHReadyPreservesCancellationCauseDuringBackoff(t *testing.T) {
 	// Prove cancel is observed during the inter-attempt backoff, not only at
 	// the top of the loop. Fake ssh always fails so wait enters the sleep.
 	dir := t.TempDir()
@@ -760,22 +771,30 @@ exit 255
 		ReadyCheck:     "true",
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	cause := errors.New("lease disappeared during SSH readiness")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	progress := &sshWaitProgressSignal{ready: make(chan struct{})}
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- waitForSSHReady(ctx, &target, io.Discard, "test", time.Minute)
+		errCh <- waitForSSHReady(ctx, &target, progress, "test", time.Minute)
 	}()
 
-	// Let the first failed probe complete and enter the 10s backoff.
-	time.Sleep(200 * time.Millisecond)
-	cancel()
+	select {
+	case <-progress.ready:
+		// Progress is written after the failed probe and immediately before backoff.
+	case err := <-errCh:
+		t.Fatalf("waitForSSHReady returned before backoff: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("waitForSSHReady did not reach the backoff")
+	}
+	cancel(cause)
 
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("waitForSSHReady returned %v, want context.Canceled", err)
+		if !errors.Is(err, cause) {
+			t.Fatalf("waitForSSHReady returned %v, want cancellation cause %v", err, cause)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("waitForSSHReady did not return within 3s after cancel; still blocked on bare sleep")
