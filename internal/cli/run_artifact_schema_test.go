@@ -86,6 +86,9 @@ func TestParseArtifactSchemaRejectsInvalidKeywordShapes(t *testing.T) {
 		{"null enum", `{"enum":null}`},
 		{"duplicate numeric enum", `{"enum":[1,1.0]}`},
 		{"duplicate object enum", `{"enum":[{"x":1,"y":2},{"y":2.0,"x":1.0}]}`},
+		{"duplicate root keyword", `{"type":"object","type":"string"}`},
+		{"duplicate nested keyword", `{"properties":{"x":{"required":["a"],"required":[]}}}`},
+		{"duplicate property schema", `{"properties":{"x":{"type":"string"},"x":{"type":"number"}}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -257,6 +260,25 @@ func TestValidateJSONAgainstSchemaEnumDiagnosticDoesNotIncludeValue(t *testing.T
 	}
 }
 
+func TestValidateJSONAgainstSchemaBoundsViolations(t *testing.T) {
+	schema, err := parseArtifactSchema([]byte(`{"type":"array","items":{"type":"string"}}`))
+	if err != nil {
+		t.Fatalf("schema parse failed: %v", err)
+	}
+	doc := "[" + strings.Repeat("0,", maxSchemaViolations+20) + "0]"
+	violations := validateJSONAgainstSchema([]byte(doc), schema)
+	if len(violations) != maxSchemaViolations+1 {
+		t.Fatalf("violations=%d, want %d retained plus truncation marker", len(violations), maxSchemaViolations)
+	}
+	last := violations[len(violations)-1]
+	if last.Keyword != "truncated" || !strings.Contains(last.Message, "additional violations omitted") {
+		t.Fatalf("missing truncation marker: %v", last)
+	}
+	if got := schemaViolationSummary(violations); got != "at least 101 checks" {
+		t.Fatalf("summary=%q, want bounded count", got)
+	}
+}
+
 func TestParseRequireArtifactSchemaSpec(t *testing.T) {
 	t.Run("valid spec", func(t *testing.T) {
 		remote, schema, err := parseRequireArtifactSchemaSpec("reports/out.json=schema.json")
@@ -286,7 +308,7 @@ func TestParseRequireArtifactSchemaSpec(t *testing.T) {
 	})
 
 	t.Run("glob and Windows absolute paths are rejected", func(t *testing.T) {
-		for _, spec := range []string{"reports/*.json=schema.json", "reports/out?.json=schema.json", "reports/[0-9].json=schema.json", "C:/secrets.json=schema.json"} {
+		for _, spec := range []string{"reports/*.json=schema.json", "reports/out?.json=schema.json", "reports/[0-9].json=schema.json", "C:/secrets.json=schema.json", "-report.json=schema.json"} {
 			if _, _, err := parseRequireArtifactSchemaSpec(spec); err == nil {
 				t.Fatalf("expected exact relative path requirement for %q", spec)
 			}

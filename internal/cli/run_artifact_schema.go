@@ -48,6 +48,38 @@ type schemaViolation struct {
 	Message string
 }
 
+const maxSchemaViolations = 100
+
+type schemaViolationAccumulator struct {
+	violations []schemaViolation
+	truncated  bool
+}
+
+func (a *schemaViolationAccumulator) add(violation schemaViolation) {
+	if a.truncated {
+		return
+	}
+	if len(a.violations) >= maxSchemaViolations {
+		a.truncated = true
+		return
+	}
+	a.violations = append(a.violations, violation)
+}
+
+func (a *schemaViolationAccumulator) full() bool {
+	return a.truncated
+}
+
+func (a *schemaViolationAccumulator) result() []schemaViolation {
+	if a.truncated {
+		a.violations = append(a.violations, schemaViolation{
+			Keyword: "truncated",
+			Message: fmt.Sprintf("additional violations omitted after the first %d", maxSchemaViolations),
+		})
+	}
+	return a.violations
+}
+
 func (v schemaViolation) String() string {
 	loc := v.Path
 	if loc == "" {
@@ -75,6 +107,9 @@ var knownSchemaTypes = map[string]bool{
 }
 
 func parseArtifactSchema(data []byte) (artifactSchema, error) {
+	if err := rejectDuplicateJSONNames(data); err != nil {
+		return artifactSchema{}, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var s artifactSchema
@@ -154,6 +189,57 @@ func (s *artifactSchema) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func rejectDuplicateJSONNames(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := scanJSONValue(decoder); err != nil {
+		return err
+	}
+	return requireJSONDecoderEOF(decoder)
+}
+
+func scanJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]bool)
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("schema object contains a non-string key")
+			}
+			if seen[key] {
+				return fmt.Errorf("schema contains duplicate object name %q", key)
+			}
+			seen[key] = true
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+	case '[':
+		for decoder.More() {
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func decodeSchemaKeyword(keyword string, raw json.RawMessage, dst interface{}, useNumber bool) error {
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return fmt.Errorf("schema keyword %q must not be null", keyword)
@@ -219,14 +305,14 @@ func validateJSONAgainstSchema(doc []byte, schema artifactSchema) []schemaViolat
 	if err := requireJSONDecoderEOF(decoder); err != nil {
 		return []schemaViolation{{Keyword: "json", Message: fmt.Sprintf("artifact is not valid JSON: %v", err)}}
 	}
-	var out []schemaViolation
+	var out schemaViolationAccumulator
 	validateSchemaValue(value, schema, "", &out)
-	return out
+	return out.result()
 }
 
-func validateSchemaValue(value interface{}, schema artifactSchema, path string, out *[]schemaViolation) {
+func validateSchemaValue(value interface{}, schema artifactSchema, path string, out *schemaViolationAccumulator) {
 	if schema.hasType && !schemaTypeMatches(schema.Type, value) {
-		*out = append(*out, schemaViolation{
+		out.add(schemaViolation{
 			Path:    path,
 			Keyword: "type",
 			Message: fmt.Sprintf("expected type %s, got %s", schema.Type, schemaTypeName(value)),
@@ -234,7 +320,7 @@ func validateSchemaValue(value interface{}, schema artifactSchema, path string, 
 		return
 	}
 	if schema.hasEnum && !schemaEnumContains(schema.enumKeys, value) {
-		*out = append(*out, schemaViolation{
+		out.add(schemaViolation{
 			Path:    path,
 			Keyword: "enum",
 			Message: "value is not one of the allowed values",
@@ -244,8 +330,11 @@ func validateSchemaValue(value interface{}, schema artifactSchema, path string, 
 	switch v := value.(type) {
 	case map[string]interface{}:
 		for _, req := range schema.Required {
+			if out.full() {
+				return
+			}
 			if _, ok := v[req]; !ok {
-				*out = append(*out, schemaViolation{
+				out.add(schemaViolation{
 					Path:    schemaJoinPath(path, req),
 					Keyword: "required",
 					Message: fmt.Sprintf("missing required property %q", req),
@@ -253,6 +342,9 @@ func validateSchemaValue(value interface{}, schema artifactSchema, path string, 
 			}
 		}
 		for _, key := range sortedSchemaKeys(schema.Properties) {
+			if out.full() {
+				return
+			}
 			if child, ok := v[key]; ok {
 				validateSchemaValue(child, schema.Properties[key], schemaJoinPath(path, key), out)
 			}
@@ -260,6 +352,9 @@ func validateSchemaValue(value interface{}, schema artifactSchema, path string, 
 	case []interface{}:
 		if schema.Items != nil {
 			for i, item := range v {
+				if out.full() {
+					return
+				}
 				validateSchemaValue(item, *schema.Items, fmt.Sprintf("%s[%d]", path, i), out)
 			}
 		}
@@ -535,15 +630,23 @@ func validateArtifactSchemasWithReader(ctx context.Context, target SSHTarget, wo
 			result.Violations = append(result.Violations, v.String())
 		}
 		results = append(results, result)
-		lines = append(lines, fmt.Sprintf("schema %s: failed %d check(s) against %s:", s.remote, len(violations), s.schemaPath))
+		violationSummary := schemaViolationSummary(violations)
+		lines = append(lines, fmt.Sprintf("schema %s: failed %s against %s:", s.remote, violationSummary, s.schemaPath))
 		for _, v := range violations {
 			lines = append(lines, "  - "+v.String())
 		}
 		if firstFailure == nil {
-			firstFailure = exit(7, "artifact schema validation failed: %s (%d violation(s))", s.remote, len(violations))
+			firstFailure = exit(7, "artifact schema validation failed: %s (%s)", s.remote, violationSummary)
 		}
 	}
 	return results, strings.Join(lines, "\n"), firstFailure
+}
+
+func schemaViolationSummary(violations []schemaViolation) string {
+	if len(violations) > 0 && violations[len(violations)-1].Keyword == "truncated" {
+		return fmt.Sprintf("at least %d checks", maxSchemaViolations+1)
+	}
+	return fmt.Sprintf("%d check(s)", len(violations))
 }
 
 func readRemoteArtifactBytes(ctx context.Context, target SSHTarget, workdir, remote string, maxBytes int) ([]byte, error) {
