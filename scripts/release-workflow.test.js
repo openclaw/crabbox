@@ -59,14 +59,207 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
 
 test("Homebrew verifier keeps downloaded proof inputs outside the protected checkout", () => {
   const workflow = read(".github/workflows/verify-homebrew.yml");
+  const proofDownloadStart = workflow.indexOf("      - name: Download immutable native proof ZIPs");
+  const proofDownloadEnd = workflow.indexOf(
+    "      - name: Verify public Homebrew install without credentials",
+  );
+  const toolsStepStart = workflow.indexOf(
+    "      - name: Preserve pinned release tools in the frozen verifier path",
+  );
+  const toolsStepEnd = workflow.indexOf("      - name: Download frozen public release assets");
+  assert.notEqual(proofDownloadStart, -1);
+  assert.notEqual(proofDownloadEnd, -1);
+  assert.notEqual(toolsStepStart, -1);
+  assert.notEqual(toolsStepEnd, -1);
+  const proofDownloadStep = workflow.slice(
+    proofDownloadStart,
+    proofDownloadEnd,
+  );
+  const toolsStep = workflow.slice(toolsStepStart, toolsStepEnd);
+  const verifyStart = workflow.indexOf(
+    "      - name: Verify public Homebrew install without credentials",
+  );
+  const verifyStep = workflow.slice(verifyStart);
   assert.match(workflow, /WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
-  assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$VERIFIER_COMMIT" \]\]/);
+  assert.match(workflow, /RUN_SHA: \$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$RUN_SHA" \]\]/);
+  assert.match(
+    workflow,
+    /name: Set up Go for build-info inspection\n\s+uses: actions\/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16/,
+  );
+  assert.match(workflow, /go-version-file: go\.mod/);
+  assert.match(workflow, /go-version-file: go\.mod\n\s+cache: false/);
+  assert.match(workflow, /name: Preserve pinned release tools in the frozen verifier path/);
+  assert.match(workflow, /tools="\$RUNNER_TEMP\/release-tools"/);
+  assert.match(workflow, /brew_path=\$\(command -v brew\)/);
+  assert.match(workflow, /curl_path=\$\(command -v curl\)/);
+  assert.match(workflow, /exec \\\"\$brew_path\\\" \\\"\\\$@\\\"/);
+  assert.match(workflow, /name: freeze-anonymous-public-witness/);
+  assert.match(workflow, /name: confirm-anonymous-public-witness/);
+  assert.match(workflow, /public-witness-preflight:[\s\S]*needs: guard/);
+  assert.match(workflow, /verify:[\s\S]*needs: public-witness-preflight/);
+  assert.match(workflow, /public-witness-postflight:[\s\S]*needs: verify/);
+  assert.match(workflow, /scripts\/fetch-public-release-witness\.sh/g);
+  assert.match(workflow, /homebrew-public-witness-\$\{\{ github\.run_id \}\}/);
+  assert.match(workflow, /CRABBOX_PUBLIC_WITNESS_DIR: \$\{\{ runner\.temp \}\}\/public-witness/);
+  assert.match(workflow, /CRABBOX_HOMEBREW_EXTERNAL_PUBLIC_POSTFLIGHT: "1"/);
+  assert.match(workflow, /shasum -a 256 -c manifest\.sha256/);
+  assert.match(workflow, /unexpected public witness URL/);
+  assert.match(workflow, /exec "\$curl_bin" "\$@"/);
+  assert.doesNotMatch(toolsStep, /Authorization|GH_TOKEN|GITHUB_TOKEN/);
+  assert.match(workflow, /chmod 700 "\$tools\/brew" "\$tools\/curl"/);
+  assert.match(workflow, /ln -s "\$\(command -v go\)" "\$tools\/go"/);
+  assert.match(workflow, /printf '%s\\n' "\$tools" >>"\$GITHUB_PATH"/);
   assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);
   assert.match(workflow, /proofs_dir="\$RUNNER_TEMP\/public-proofs"/);
+  assert.match(
+    proofDownloadStep,
+    /gh api --method GET --header 'Accept: application\/vnd\.github\+json' \\\s+"repos\/\$GITHUB_REPOSITORY\/actions\/artifacts\/\$artifact_id\/zip"/,
+  );
+  assert.doesNotMatch(proofDownloadStep, /application\/octet-stream/);
   assert.match(workflow, /"\$RUNNER_TEMP\/release-assets"/);
   assert.match(workflow, /"\$RUNNER_TEMP\/public-proofs"/);
   assert.doesNotMatch(workflow, /"\$PWD\/(?:release-assets|public-proofs)"/);
   assert.doesNotMatch(workflow, /mkdir -m 700 (?:release-assets|public-proofs)/);
+  assert.match(verifyStep, /unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN/);
+  assert.match(verifyStep, /unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN/);
+  assert.equal(
+    (workflow.match(/unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN/g) ?? [])
+      .length,
+    3,
+  );
+  assert.match(
+    workflow,
+    /for name in artifacts\.json release\.json run\.json workflow\.json manifest\.sha256; do[\s\S]*cmp/,
+  );
+  const homebrewVerifier = read("scripts/verify-homebrew-release.sh");
+  assert.match(homebrewVerifier, /external public postflight requires the protected Homebrew workflow/);
+  assert.equal(
+    (homebrewVerifier.match(/freeze_public_release \\\n/g) ?? []).length,
+    2,
+    "local verification must retain independent public preflight and postflight reads",
+  );
+  assert.match(
+    homebrewVerifier,
+    /if \[\[ "\$\{CRABBOX_HOMEBREW_EXTERNAL_PUBLIC_POSTFLIGHT:-\}" == 1 \]\]; then[\s\S]*Never re-read candidate-writable witness files after candidate execution[\s\S]*return 0/,
+  );
+  assert.doesNotMatch(read("scripts/fetch-public-release-witness.sh"), /Authorization|GH_TOKEN=/);
+  assert.notEqual(
+    fs.statSync(path.join(repoRoot, "scripts/fetch-public-release-witness.sh")).mode & 0o111,
+    0,
+    "public witness fetcher must be executable",
+  );
+  assert.match(verifyStep, /HOMEBREW_NO_AUTO_UPDATE=1 brew tap openclaw\/tap/);
+  assert.ok(
+    verifyStep.indexOf("unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN") <
+      verifyStep.indexOf("HOMEBREW_NO_AUTO_UPDATE=1 brew tap openclaw/tap"),
+  );
+  assert.ok(
+    verifyStep.indexOf("HOMEBREW_NO_AUTO_UPDATE=1 brew tap openclaw/tap") <
+      verifyStep.indexOf("scripts/verify-homebrew-release.sh"),
+  );
+});
+
+test("public witness fetcher freezes canonical metadata without API credentials", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-public-witness-"));
+  try {
+    const bin = path.join(root, "bin");
+    const witness = path.join(root, "witness");
+    fs.mkdirSync(bin);
+    const curl = path.join(bin, "curl");
+    fs.writeFileSync(
+      curl,
+      `#!/usr/bin/env bash
+set -euo pipefail
+output=
+url=
+while ((\$#)); do
+  case \$1 in
+    --output) output=\$2; shift 2 ;;
+    https://*) url=\$1; shift ;;
+    *) shift ;;
+  esac
+done
+case \$url in
+  */releases/355) body='{"tag_name":"v0.38.4","id":355,"reactions":{"total_count":2},"assets":[{"id":1,"name":"checksums.txt","download_count":9}]}' ;;
+  */actions/runs/44) body='{"workflow_id":77,"id":44}' ;;
+  */actions/workflows/77) body='{"path":".github/workflows/release-assets.yml","id":77}' ;;
+  */actions/runs/44/artifacts?per_page=100) body='{"total_count":0,"artifacts":[]}' ;;
+  *) exit 64 ;;
+esac
+printf '%s\\n' "\$body" >"\$output"
+`,
+    );
+    fs.chmodSync(curl, 0o755);
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+    for (const name of [
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "HOMEBREW_GITHUB_API_TOKEN",
+      "HOMEBREW_TAP_GITHUB_TOKEN",
+    ]) {
+      delete env[name];
+    }
+    const script = path.join(repoRoot, "scripts/fetch-public-release-witness.sh");
+    const result = spawnSync(
+      "bash",
+      [script, "openclaw/crabbox", "355", "44", witness],
+      { cwd: repoRoot, env, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const release = JSON.parse(fs.readFileSync(path.join(witness, "release.json")));
+    assert.equal(release.id, 355);
+    assert.equal(release.tag_name, "v0.38.4");
+    assert.equal(release.assets[0].id, 1);
+    assert.equal(release.assets[0].name, "checksums.txt");
+    assert.equal("download_count" in release.assets[0], false);
+    assert.equal("reactions" in release, false);
+    const run = JSON.parse(fs.readFileSync(path.join(witness, "run.json")));
+    assert.equal(run.id, 44);
+    assert.equal(run.workflow_id, 77);
+    execFileSync("shasum", ["-a", "256", "-c", "manifest.sha256"], {
+      cwd: witness,
+      stdio: "ignore",
+    });
+
+    const credentialed = spawnSync(
+      "bash",
+      [script, "openclaw/crabbox", "355", "44", path.join(root, "credentialed")],
+      { cwd: repoRoot, env: { ...env, GITHUB_TOKEN: "present" }, encoding: "utf8" },
+    );
+    assert.notEqual(credentialed.status, 0);
+    assert.match(credentialed.stderr, /must not receive GITHUB_TOKEN/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("external Homebrew postflight mode is bound to the protected workflow", () => {
+  const result = spawnSync(
+    "bash",
+    [
+      path.join(repoRoot, "scripts/verify-homebrew-release.sh"),
+      "v1.2.3",
+      os.tmpdir(),
+      "a".repeat(40),
+      "b".repeat(40),
+      "c".repeat(40),
+      "1",
+      "2",
+      os.tmpdir(),
+    ],
+    {
+      cwd: repoRoot,
+      env: {
+        HOME: process.env.HOME,
+        PATH: process.env.PATH,
+        CRABBOX_HOMEBREW_EXTERNAL_PUBLIC_POSTFLIGHT: "1",
+      },
+      encoding: "utf8",
+    },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /external public postflight requires the protected Homebrew workflow/);
 });
 
 test("script CI fetches signed release tags for publication fixtures", () => {
@@ -516,6 +709,10 @@ test("release documentation forbids automatic publication, deletion, and Homebre
   assert.match(release, /Never delete a partial draft or release/);
   assert.match(release, /Publish with one draft-state transition/);
   assert.match(release, /Update and prove Homebrew/);
+  assert.match(
+    release,
+    /gh api --method GET \\\s+--header 'Accept: application\/vnd\.github\+json' \\\s+"repos\/openclaw\/crabbox\/actions\/artifacts\/\$ARTIFACT_ID\/zip"/,
+  );
   assert.match(release, /Developer ID Application: OpenClaw Foundation \(FWJYW4S8P8\)/);
   assert.match(release, /PACKAGE_SCRIPT_SHA256/);
   assert.match(
@@ -591,6 +788,14 @@ test("v0.38.3 is pinned to the cancellation-fix source and ready for publication
   assert.equal(record.tag, "v0.38.3");
   assert.equal(record.tagObject, "2c4bee30c6af3039bae986c1a6784d9a2f4ee15c");
   assert.equal(record.sourceCommit, "9c3df396c94fef304975e221d5f0dc26e65d9860");
+  assert.equal(record.publicationStatus, "ready");
+});
+
+test("v0.38.4 is pinned to the sparse-sync source and ready for publication", () => {
+  const record = JSON.parse(read("release/records/v0.38.4.json"));
+  assert.equal(record.tag, "v0.38.4");
+  assert.equal(record.tagObject, "dd6aa78ed373393c1e9887e9354dd24b449b2f8b");
+  assert.equal(record.sourceCommit, "b288e613bd8267ea365c0098da7494b143242d8e");
   assert.equal(record.publicationStatus, "ready");
 });
 

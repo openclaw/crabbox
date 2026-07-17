@@ -403,10 +403,12 @@ repo:
   and optional `CRABBOX_ARTIFACTS_SESSION_TOKEN` — brokered artifact publishing.
   Scope these to the artifact bucket/prefix and use them only to sign
   short-lived upload/read URLs. New grants encode the exact authenticated
-  owner/org identity in an opaque versioned namespace; existing object URLs are
-  not rewritten or resolved through a legacy lookup path. Reads remain signed
-  unless `CRABBOX_ARTIFACTS_PUBLIC_READS=1` explicitly opts into non-expiring
-  public links; public grants add an unguessable per-grant namespace.
+  owner/org identity as reversible base64url values, not hashes or encrypted
+  values; this is visible in both signed and public object URLs. Existing object
+  URLs are not rewritten or resolved through a legacy lookup path. Reads remain
+  signed unless `CRABBOX_ARTIFACTS_PUBLIC_READS=1` explicitly opts into
+  non-expiring public links; public grants add an unguessable per-grant
+  namespace.
 
 Set the non-secret `CRABBOX_RUNTIME_ADAPTER_OWNER` and
 `CRABBOX_RUNTIME_ADAPTER_ORG` to stable deployment identities when the

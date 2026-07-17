@@ -18,7 +18,7 @@ Every provider registers a backend with one of three kinds:
 - **Service control** — Crabbox can inspect or stop a provider-owned service,
   but cannot execute arbitrary commands there.
 
-SSH-lease providers further differ by how they reach the cloud:
+Providers also differ by control plane and reachability:
 
 - **Brokered cloud** — `aws`, `azure`, `daytona`, `gcp`, and `hetzner` can run
   through the Crabbox coordinator on Cloudflare or Node/PostgreSQL. The
@@ -51,6 +51,30 @@ Select a provider per command with `--provider <name>` (env `CRABBOX_PROVIDER`),
 or set `provider: <name>` in config. Provider flags are registered before
 command parsing, so provider-specific flags work even when that provider is not
 the default. Most names accept aliases (listed below).
+
+## Credential and auth discovery
+
+Provider auth belongs here, not in the Feature Reference. Use the matrix search
+box with terms such as `API key`, `token`, `broker`, `CLI login`, `SDK
+credentials`, or a concrete environment variable name to find compatible
+providers.
+
+Remote providers with environment API-key or bearer-token auth include
+`digitalocean`, `linode`, `vultr`, `lambda`, `runpod`, `vast`,
+`opencomputer`, `e2b`, `blaxel`, `codesandbox`, `cloudflare`,
+`cloudflare-sandbox`, `cloudflare-dynamic-workers`, `crownest`, `freestyle`,
+`islo`, `morph`, `opensandbox`, `orgo`, `smolvm`, `sprites`, `superserve`,
+`tensorlake`, `upstash-box`, `vercel-sandbox`, `wandb`, and service-control
+providers such as `railway`, `fastapi-cloud`, and `unikraft-cloud`.
+
+Brokerable providers (`aws`, `azure`, `daytona`, `gcp`, `hetzner`) can run with
+coordinator-owned credentials, so normal users do not need local cloud secrets.
+When those providers run direct, the CLI uses the provider's documented SDK,
+CLI, or token source.
+
+Keep provider tokens out of repository config and command-line arguments. Prefer
+environment variables, provider CLI login stores, OS keychains, or the Crabbox
+coordinator credential boundary.
 
 <!-- BEGIN GENERATED PROVIDER MATRIX -->
 
@@ -211,9 +235,11 @@ Access terms:
   against each provider's declared feature set. Among the SSH-lease providers,
   desktop/browser/code surfaces are richest on `aws`, `azure`, `hetzner`,
   `parallels`, `ssh`, and `local-container`; `multipass` exposes local VM SSH
-  and sync only in its first implementation, `apple-vm` does the same through a
-  local helper and host-local SSH proxy, and most direct sandbox/delegated
-  providers expose `ssh` and Crabbox sync only.
+  and sync only in its first implementation, and `apple-vm` does the same
+  through a local helper and host-local SSH proxy. Most other SSH-lease providers
+  expose only SSH and Crabbox sync. Delegated-run providers generally do not
+  expose Crabbox-managed SSH or rsync and support only their declared run/session
+  features.
 - Actions runner hydration requires a normal SSH lease on Linux. Use a
   Linux-capable SSH-lease provider for that path.
 
@@ -242,5 +268,5 @@ Related docs:
 
 - [Provider selection](../features/provider-selection.md)
 - [Provider backends](../provider-backends.md)
-- [Feature overview](../features/providers.md)
+- [Feature reference](../features/README.md)
 - [Source map](../source-map.md)

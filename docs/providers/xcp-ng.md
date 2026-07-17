@@ -116,9 +116,10 @@ crabbox cleanup --provider xcp-ng --dry-run
 
 Keep `CRABBOX_XCP_NG_API_URL` on an administrator-only management network or
 VPN, and prefer trusted certificates. Set `CRABBOX_XCP_NG_INSECURE_TLS=1` or
-pass `--xcp-ng-insecure-tls` only for private lab pools where you control the
-network and certificate issuance. That only disables certificate verification;
-the API URL must still use HTTPS.
+pass `--xcp-ng-insecure-tls` only on a trusted management network in a fully
+trusted private lab. Keep TLS verification enabled, as it is by default, in all
+other environments. Disabling verification does not permit plain HTTP; the API
+URL must still use HTTPS.
 
 ## Configuration
 
@@ -157,6 +158,16 @@ or VPN when possible. Prefer trusted certificates. `insecureTLS` is a
 private-lab escape hatch, not a general deployment mode. If `apiUrl` points at
 a pool member that returns XAPI `HOST_IS_SLAVE` during login, Crabbox retries
 login once against the master address reported by XAPI.
+
+**Security consideration:** Following the master address and re-authenticating
+there is required for legitimate pool-master failover. The re-authentication
+includes the configured XAPI password. When `--xcp-ng-insecure-tls` is enabled,
+an on-path attacker who can tamper with the XAPI response could replace the
+reported master address and redirect that password-bearing re-authentication to
+a host of their choosing. Keep TLS verification enabled in any environment that
+is not a fully trusted private lab, and use insecure TLS only on a trusted
+management network. This Low/P3 residual risk is accepted to preserve
+pool-master failover.
 
 Repository-local `crabbox.yaml` and `.crabbox.yaml` files cannot override
 `apiUrl` or `insecureTLS`, so a checkout cannot redirect inherited credentials.

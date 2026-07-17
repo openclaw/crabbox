@@ -994,10 +994,12 @@ type AnthropicSRTConfig struct {
 }
 
 type ModalConfig struct {
-	App     string
-	Image   string
-	Workdir string
-	Python  string
+	App         string
+	Image       string
+	Workdir     string
+	Python      string
+	Environment string
+	Secrets     []string
 }
 
 type UpstashBoxConfig struct {
@@ -4121,10 +4123,12 @@ type fileAnthropicSRTConfig struct {
 }
 
 type fileModalConfig struct {
-	App     string `yaml:"app,omitempty"`
-	Image   string `yaml:"image,omitempty"`
-	Workdir string `yaml:"workdir,omitempty"`
-	Python  string `yaml:"python,omitempty"`
+	App         string   `yaml:"app,omitempty"`
+	Image       string   `yaml:"image,omitempty"`
+	Workdir     string   `yaml:"workdir,omitempty"`
+	Python      string   `yaml:"python,omitempty"`
+	Environment string   `yaml:"environment,omitempty"`
+	Secrets     []string `yaml:"secrets,omitempty"`
 }
 
 type fileUpstashBoxConfig struct {
@@ -7016,6 +7020,12 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Modal.Python != "" {
 			cfg.Modal.Python = file.Modal.Python
 		}
+		if trusted && file.Modal.Environment != "" {
+			cfg.Modal.Environment = file.Modal.Environment
+		}
+		if trusted && file.Modal.Secrets != nil {
+			cfg.Modal.Secrets = append([]string(nil), file.Modal.Secrets...)
+		}
 	}
 	if file.UpstashBox != nil {
 		if file.UpstashBox.BaseURL != "" {
@@ -8932,6 +8942,10 @@ func applyEnv(cfg *Config) error {
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
 	cfg.Modal.Workdir = getenv("CRABBOX_MODAL_WORKDIR", cfg.Modal.Workdir)
 	cfg.Modal.Python = getenv("CRABBOX_MODAL_PYTHON", cfg.Modal.Python)
+	cfg.Modal.Environment = getenv("CRABBOX_MODAL_ENVIRONMENT", cfg.Modal.Environment)
+	if values, ok := getenvList("CRABBOX_MODAL_SECRETS"); ok {
+		cfg.Modal.Secrets = values
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_API_KEY", "UPSTASH_BOX_API_KEY"); ok {
 		cfg.UpstashBox.APIKey = value
 		cfg.credentialProvenance.upstashBoxAPIKey = credentialSourceEnvironment

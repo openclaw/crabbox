@@ -104,4 +104,4 @@ Related docs:
 
 - [Namespace Devbox](namespace-devbox.md)
 - [Provider: Namespace Devbox](../providers/namespace-devbox.md)
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)

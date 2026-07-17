@@ -446,7 +446,6 @@ temporary `CRABBOX_CONFIG` without broker settings for direct cleanup.
 ## Related docs
 
 - [Provider reference](README.md)
-- [Provider overview](../features/providers.md)
 - [Provider backends](../provider-backends.md)
 - [Capacity and fallback](../features/capacity-fallback.md)
 - [Tailscale](../features/tailscale.md)

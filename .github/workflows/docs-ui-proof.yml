@@ -1,0 +1,67 @@
+name: Docs UI Proof
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "scripts/build-docs-site.mjs"
+      - "scripts/enhance-docs-site.mjs"
+      - "scripts/enhance-docs-site.test.mjs"
+      - "scripts/docs-ui-proof.mjs"
+      - "scripts/package.json"
+      - "scripts/package-lock.json"
+      - ".github/workflows/docs-ui-proof.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    name: Render visual proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Install locked proof dependencies
+        run: npm ci --prefix scripts
+
+      - name: Build exact deployed docs output
+        run: |
+          node scripts/build-docs-site.mjs
+          node scripts/enhance-docs-site.mjs
+          node --test scripts/enhance-docs-site.test.mjs
+
+      - name: Assert information architecture
+        run: |
+          page=dist/docs-site/features/index.html
+          grep -q 'data-feature-explorer' "$page"
+          grep -q 'Build locally' "$page"
+          grep -q 'Choose a provider' "$page"
+          grep -q 'Open command reference' "$page"
+
+      - name: Install pinned browser
+        run: ./scripts/node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Render and exercise browser proof
+        run: node scripts/docs-ui-proof.mjs
+        env:
+          CRABBOX_DOCS_PROOF_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Upload reviewable proof artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: features-ui-proof-${{ github.event.pull_request.head.sha || github.sha }}
+          path: dist/ui-proof
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 6

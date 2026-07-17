@@ -132,5 +132,5 @@ crabbox stop --provider semaphore <slug>
 Related docs:
 
 - [Provider: Semaphore](../providers/semaphore.md)
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)
 - [Provider backends](../provider-backends.md)

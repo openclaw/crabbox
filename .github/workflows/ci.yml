@@ -66,6 +66,24 @@ jobs:
       - name: Build
         run: go build -trimpath -o /tmp/crabbox ./cmd/crabbox
 
+  windows-pond-mesh-cancellation:
+    name: Windows Pond Mesh Cancellation
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Test pond mesh cancellation
+        run: go test ./internal/cli/ -run PondMeshCancel -count=1 -v
+
   connector-lifecycles:
     name: Connector Lifecycles
     runs-on: ubuntu-latest

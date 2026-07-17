@@ -227,5 +227,4 @@ in `crabbox list --provider linode --json` or the Linode console.
 
 - [Provider reference](README.md)
 - [Provider backends](../provider-backends.md)
-- [Provider feature overview](../features/providers.md)
 - [Operations](../operations.md)

@@ -420,4 +420,3 @@ SSH into a kept lease if available, or check the Proxmox task and guest logs.
 
 - [Provider reference](README.md)
 - [Provider backends](../provider-backends.md)
-- [Providers overview](../features/providers.md)

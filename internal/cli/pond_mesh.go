@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,10 @@ const pondMeshLocalPortStart = 51820
 // generous (a few thousand ports) so a single operator can connect to many
 // large ponds simultaneously without exhausting it.
 const pondMeshLocalPortEnd = 52819
+
+// pondMeshCancelWaitDelay bounds the exec.CommandContext fallback when a
+// platform teardown API reports an error before the SSH root has exited.
+const pondMeshCancelWaitDelay = 5 * time.Second
 
 // pondMeshHostsRoot is the per-user state directory under HOME where
 // `pond connect` writes the rendered hosts and env files. The structure
@@ -80,6 +85,19 @@ type pondMeshHandle interface {
 	Process() processSignaler
 	PID() int
 	String() string
+	// WasTerminatedByOurCancel reports whether THIS process's Wait error is
+	// attributable solely to our own teardown rather than a genuine failure.
+	// Teardown is a hard kill of the isolated process group/tree, recorded
+	// per-member process by the ctx watchdog's Cancel hook. The connect loop never
+	// infers intent from the shared context,
+	// which under a race can misattribute one member's genuine failure to
+	// another member's cancellation. On Unix our SIGKILL is uncatchable, so our
+	// kill is always ProcessState.Signaled() while a peer that reached its own
+	// nonzero exit code is Exited() — unambiguous. On Windows there are no
+	// signals, so the Job Object's cancellation-only exit code provides the
+	// terminal provenance. A genuine failure therefore returns false even when
+	// the shared context was cancelled first.
+	WasTerminatedByOurCancel() bool
 }
 
 // processSignaler is the subset of *os.Process that the connect loop touches
@@ -96,7 +114,22 @@ type processSignaler interface {
 type pondMeshExecRunner struct{}
 
 func (pondMeshExecRunner) Command(ctx context.Context, name string, args ...string) pondMeshHandle {
-	return &pondMeshExecHandle{cmd: exec.CommandContext(ctx, name, args...)}
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = pondMeshCancelWaitDelay
+	h := &pondMeshExecHandle{cmd: cmd, managed: true}
+	// Keep exec.CommandContext's hard-cancel semantics, but terminate the full
+	// isolated process group/tree so ProxyCommand and wrapper descendants cannot
+	// survive their SSH leader. We override Cancel to record provenance: mark
+	// that WE initiated this process's teardown before the kill lands, so a
+	// concurrent Wait observes the flag. We deliberately do NOT send a graceful,
+	// catchable signal first: an ssh that trapped SIGINT and exited
+	// non-zero would report ProcessState.Exited(), indistinguishable from a
+	// genuine tunnel failure. SIGKILL cannot be caught, so on Unix our own
+	// teardown is always Signaled() — letting WasTerminatedByOurCancel suppress
+	// it without ever consulting the shared context, so a different member's
+	// genuine failure is never misclassified as our cancellation.
+	h.cmd.Cancel = h.cancelAndKill
+	return h
 }
 
 // pondMeshDaemonRunner creates SSH tunnel processes that survive the parent
@@ -113,11 +146,20 @@ func (pondMeshDaemonRunner) Command(_ context.Context, name string, args ...stri
 }
 
 type pondMeshExecHandle struct {
-	cmd *exec.Cmd
+	cmd      *exec.Cmd
+	managed  bool
+	platform pondMeshPlatformState
+	// cancelled records that our own teardown (the ctx watchdog's Cancel hook)
+	// is terminating this process. It is set before the kill is delivered so a
+	// concurrent Wait always observes it.
+	cancelled atomic.Bool
+	// cancelFailed makes cleanup/inventory failures observable instead of
+	// suppressing them as an ordinary operator cancellation.
+	cancelFailed atomic.Bool
+	cancelErrMu  sync.Mutex
+	cancelErr    error
 }
 
-func (h *pondMeshExecHandle) Start() error   { return h.cmd.Start() }
-func (h *pondMeshExecHandle) Wait() error    { return h.cmd.Wait() }
 func (h *pondMeshExecHandle) String() string { return h.cmd.String() }
 func (h *pondMeshExecHandle) PID() int {
 	if h.cmd.Process == nil {
@@ -130,6 +172,54 @@ func (h *pondMeshExecHandle) Process() processSignaler {
 		return nil
 	}
 	return h.cmd.Process
+}
+
+// cancelAndKill is the exec.CommandContext Cancel hook. It records that OUR
+// teardown initiated this process's termination, then hard-kills its complete
+// isolated process group/tree.
+// An os.ErrProcessDone from the kill means the process finished on its own
+// before our kill landed. The cancelled flag is stored before the kill so a
+// concurrent Wait observes it.
+func (h *pondMeshExecHandle) cancelAndKill() error {
+	h.cancelled.Store(true)
+	if h.cmd.Process == nil {
+		return nil
+	}
+	if err := terminatePondMeshForwardProcess(h); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			return os.ErrProcessDone
+		}
+		h.cancelFailed.Store(true)
+		h.cancelErrMu.Lock()
+		h.cancelErr = err
+		h.cancelErrMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (h *pondMeshExecHandle) joinCancellationError(err error) error {
+	h.cancelErrMu.Lock()
+	defer h.cancelErrMu.Unlock()
+	if h.cancelErr == nil || errors.Is(err, h.cancelErr) {
+		return err
+	}
+	return errors.Join(err, h.cancelErr)
+}
+
+func (h *pondMeshExecHandle) WasTerminatedByOurCancel() bool {
+	if !h.cancelled.Load() {
+		// We never touched this process, so any Wait error is a genuine
+		// failure regardless of whether the shared context was cancelled by a
+		// sibling member or the caller.
+		return false
+	}
+	if h.cancelFailed.Load() {
+		// Cleanup itself failed. Surface that error instead of disguising a
+		// possible surviving process tree as clean cancellation.
+		return false
+	}
+	return killAttributableToCancel(h.cmd.ProcessState)
 }
 
 // pondMeshDefaultRunner is overridden in tests via the package-level pointer
@@ -347,35 +437,36 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 			return err
 		}
 		daemonRunner := pondMeshDaemonRunner{}
-		peerTarget := pondSSHTargetsByLease(members)
+		groups, err := pondMeshForwardGroups(members, summary.Forwards)
+		if err != nil {
+			return err
+		}
 		var started []pondMeshHandle
-		for _, fwd := range summary.Forwards {
-			target, ok := peerTarget[fwd.LeaseID]
-			if !ok {
-				stopDaemonHandles(started)
-				return exit(7, "no SSH target resolved for pond peer %q", fwd.Peer)
-			}
-			args := pondMeshSSHArgsForForward(target, fwd)
+		var startedGroups []pondMeshForwardGroup
+		for _, group := range groups {
+			args := pondMeshSSHArgsForForwards(group.Target, group.Forwards)
 			handle := daemonRunner.Command(context.Background(), "ssh", args...)
 			if err := handle.Start(); err != nil {
 				stopDaemonHandles(started)
-				return fmt.Errorf("start ssh -L %d:%d for %s: %w", fwd.LocalPort, fwd.RemotePort, fwd.Peer, err)
+				return fmt.Errorf("start ssh forwards for %s: %w", pondMeshForwardGroupLabel(group.Forwards), err)
 			}
 			started = append(started, handle)
-			fmt.Fprintf(opts.Stderr, "  -L 127.0.0.1:%d -> %s:%d\n", fwd.LocalPort, fwd.Peer, fwd.RemotePort)
+			startedGroups = append(startedGroups, group)
+			for _, fwd := range group.Forwards {
+				fmt.Fprintf(opts.Stderr, "  -L 127.0.0.1:%d -> %s:%d\n", fwd.LocalPort, fwd.Peer, fwd.RemotePort)
+			}
 		}
 		// Give tunnels a brief window to complete authentication and forward
 		// setup, then verify none exited immediately (wrong key, host unreachable, ...).
 		waitCh := make(chan error, len(started))
 		for i, h := range started {
-			go func(i int, h pondMeshHandle) {
+			go func(group pondMeshForwardGroup, h pondMeshHandle) {
 				err := h.Wait()
-				label := fmt.Sprintf("%s:%d", summary.Forwards[i].Peer, summary.Forwards[i].RemotePort)
 				select {
-				case waitCh <- fmt.Errorf("ssh -L for %s exited immediately: %w", label, err):
+				case waitCh <- fmt.Errorf("ssh forwards for %s exited immediately: %w", pondMeshForwardGroupLabel(group.Forwards), err):
 				default:
 				}
-			}(i, h)
+			}(startedGroups[i], h)
 		}
 		select {
 		case err := <-waitCh:
@@ -383,7 +474,7 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 			return err
 		case <-time.After(200 * time.Millisecond):
 		}
-		if err := writePondMeshDaemonState(opts.HomeDir, pond, summary, started); err != nil {
+		if err := writePondMeshDaemonState(opts.HomeDir, pond, summary, startedGroups, started); err != nil {
 			stopDaemonHandles(started)
 			return err
 		}
@@ -802,7 +893,7 @@ func stopDaemonHandles(handles []pondMeshHandle) {
 	}
 }
 
-func writePondMeshDaemonState(home, pond string, summary pondMeshSummary, handles []pondMeshHandle) error {
+func writePondMeshDaemonState(home, pond string, summary pondMeshSummary, groups []pondMeshForwardGroup, handles []pondMeshHandle) error {
 	path, err := pondMeshDaemonStatePath(home, pond, true)
 	if err != nil {
 		return err
@@ -813,8 +904,8 @@ func writePondMeshDaemonState(home, pond string, summary pondMeshSummary, handle
 		if pid := handle.PID(); pid > 0 {
 			pids = append(pids, pid)
 			process := pondMeshDaemonProcess{PID: pid, Command: handle.String()}
-			if i < len(summary.Forwards) {
-				process.Forward = summary.Forwards[i]
+			if i < len(groups) && len(groups[i].Forwards) > 0 {
+				process.Forward = groups[i].Forwards[0]
 			}
 			processes = append(processes, process)
 		}
@@ -943,73 +1034,163 @@ func pondResolveIDForServer(server Server) string {
 	return serverSlug(server)
 }
 
-// pondMeshSSHArgsForForward builds the `ssh -L ...` argument vector for one
-// forward. It re-uses the same SSH options as the rest of the CLI.
-func pondMeshSSHArgsForForward(target SSHTarget, fwd pondMeshForward) []string {
+type pondMeshForwardGroup struct {
+	Target   SSHTarget
+	Forwards []pondMeshForward
+}
+
+func pondMeshForwardGroups(members []pondMember, forwards []pondMeshForward) ([]pondMeshForwardGroup, error) {
+	peerTarget := pondSSHTargetsByLease(members)
+	groupIndex := make(map[string]int, len(peerTarget))
+	groups := make([]pondMeshForwardGroup, 0, len(peerTarget))
+	for _, fwd := range forwards {
+		target, ok := peerTarget[fwd.LeaseID]
+		if !ok {
+			return nil, exit(7, "no SSH target resolved for pond peer %q", fwd.Peer)
+		}
+		index, ok := groupIndex[fwd.LeaseID]
+		if !ok {
+			index = len(groups)
+			groupIndex[fwd.LeaseID] = index
+			groups = append(groups, pondMeshForwardGroup{Target: target})
+		}
+		groups[index].Forwards = append(groups[index].Forwards, fwd)
+	}
+	return groups, nil
+}
+
+func pondMeshForwardGroupLabel(forwards []pondMeshForward) string {
+	if len(forwards) == 0 {
+		return "unknown peer"
+	}
+	ports := make([]string, 0, len(forwards))
+	for _, fwd := range forwards {
+		ports = append(ports, strconv.Itoa(fwd.RemotePort))
+	}
+	return fmt.Sprintf("%s:%s", forwards[0].Peer, strings.Join(ports, ","))
+}
+
+// pondMeshSSHArgsForForwards builds one owned `ssh` argument vector containing
+// every `-L` for a member. One connection per member avoids both multiplexed
+// background masters and concurrent per-port handshakes.
+func pondMeshSSHArgsForForwards(target SSHTarget, forwards []pondMeshForward) []string {
+	// A pond member tunnel must remain the process owned by its exec.Cmd. Reusing a
+	// persistent master lets the short-lived mux client exit while the master
+	// retains the listener, so cancellation cannot reap or classify the tunnel.
+	target.NoControlMaster = true
 	args := append([]string{}, sshBaseArgs(target)...)
-	forward := fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", fwd.LocalPort, fwd.RemotePort)
 	args = append(args,
+		"-o", "ControlPath=none",
+		"-o", "ControlPersist=no",
 		"-N",
 		"-o", "ExitOnForwardFailure=yes",
-		"-L", forward,
-		target.User+"@"+target.Host,
 	)
+	for _, fwd := range forwards {
+		forward := fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", fwd.LocalPort, fwd.RemotePort)
+		args = append(args, "-L", forward)
+	}
+	args = append(args, target.User+"@"+target.Host)
 	return args
 }
 
-// runPondMeshForwards spawns one ssh -L per forward in the summary, waits for
-// ctx cancellation or any process exit, and tears the rest down. The
-// orchestration is deliberately simple: ControlMaster + ControlPersist (from
-// sshBaseArgs) reuses a single underlying TCP connection per peer so the
-// fan-out is cheap.
+// runPondMeshForwards spawns one SSH process per member, with all that member's
+// -L specifications, then waits for ctx cancellation or any process exit and
+// tears the rest down. Each member owns one non-multiplexed SSH process so
+// cancellation owns its complete lifetime and process tree.
 func runPondMeshForwards(ctx context.Context, opts pondConnectOptions, members []pondMember, summary pondMeshSummary) error {
+	terminationCtx, stopTerminationSignals := pondMeshTerminationContext(ctx)
+	defer stopTerminationSignals()
 	runner := opts.Runner
 	if runner == nil {
 		runner = pondMeshDefaultRunner
 	}
-	peerTarget := pondSSHTargetsByLease(members)
-	type runningForward struct {
-		fwd    pondMeshForward
+	groups, err := pondMeshForwardGroups(members, summary.Forwards)
+	if err != nil {
+		return err
+	}
+	type runningForwardGroup struct {
+		group  pondMeshForwardGroup
 		handle pondMeshHandle
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(terminationCtx)
 	defer cancel()
-	running := []runningForward{}
-	for _, fwd := range summary.Forwards {
-		target, ok := peerTarget[fwd.LeaseID]
-		if !ok {
-			cancel()
-			return exit(7, "no SSH target resolved for pond peer %q", fwd.Peer)
+	running := []runningForwardGroup{}
+	reapStarted := func() error {
+		var wg sync.WaitGroup
+		waitErrs := make([]error, len(running))
+		terminatedByCancel := make([]bool, len(running))
+		for i, rf := range running {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				waitErrs[i] = rf.handle.Wait()
+				terminatedByCancel[i] = rf.handle.WasTerminatedByOurCancel()
+			}()
 		}
-		args := pondMeshSSHArgsForForward(target, fwd)
+		wg.Wait()
+		for i, rf := range running {
+			if waitErrs[i] == nil && !terminatedByCancel[i] {
+				return fmt.Errorf("ssh forwards for %s exited unexpectedly", pondMeshForwardGroupLabel(rf.group.Forwards))
+			}
+			if waitErrs[i] != nil && !terminatedByCancel[i] {
+				return waitErrs[i]
+			}
+		}
+		return nil
+	}
+	for _, group := range groups {
+		args := pondMeshSSHArgsForForwards(group.Target, group.Forwards)
 		handle := runner.Command(ctx, "ssh", args...)
 		if err := handle.Start(); err != nil {
+			parentErr := terminationCtx.Err()
 			cancel()
-			return fmt.Errorf("start ssh -L %d:%d for %s: %w", fwd.LocalPort, fwd.RemotePort, fwd.Peer, err)
+			if reapErr := reapStarted(); reapErr != nil {
+				return reapErr
+			}
+			if parentErr != nil && errors.Is(err, parentErr) {
+				return nil
+			}
+			return fmt.Errorf("start ssh forwards for %s: %w", pondMeshForwardGroupLabel(group.Forwards), err)
 		}
-		running = append(running, runningForward{fwd: fwd, handle: handle})
-		fmt.Fprintf(opts.Stderr, "  -L 127.0.0.1:%d -> %s:%d\n", fwd.LocalPort, fwd.Peer, fwd.RemotePort)
+		running = append(running, runningForwardGroup{group: group, handle: handle})
+		for _, fwd := range group.Forwards {
+			fmt.Fprintf(opts.Stderr, "  -L 127.0.0.1:%d -> %s:%d\n", fwd.LocalPort, fwd.Peer, fwd.RemotePort)
+		}
 	}
 	var wg sync.WaitGroup
 	var firstErr error
 	var firstErrOnce sync.Once
 	for _, rf := range running {
 		wg.Add(1)
-		go func(rf runningForward) {
+		go func(rf runningForwardGroup) {
 			defer wg.Done()
 			err := rf.handle.Wait()
-			if err != nil && !errors.Is(err, context.Canceled) {
+			// Classify by PER-MEMBER-PROCESS provenance, never the shared context.
+			// Reading ctx.Err() here is unsafe under a race: if a sibling
+			// forward or the caller cancels first, ctx.Err() is non-nil by the
+			// time THIS forward's genuine failure is classified, and its error
+			// would be silently discarded. Instead we suppress a Wait error
+			// only when OUR teardown terminated THIS specific process with the
+			// platform's hard process-group/tree kill.
+			// A genuine non-zero exit the peer reached on its own is still
+			// recorded even when the shared context was already cancelled.
+			terminatedByCancel := rf.handle.WasTerminatedByOurCancel()
+			if err == nil && !terminatedByCancel {
+				firstErrOnce.Do(func() {
+					firstErr = fmt.Errorf("ssh forwards for %s exited unexpectedly", pondMeshForwardGroupLabel(rf.group.Forwards))
+				})
+			} else if err != nil && !terminatedByCancel {
 				firstErrOnce.Do(func() { firstErr = err })
 			}
 			cancel()
 		}(rf)
 	}
 	<-ctx.Done()
-	for _, rf := range running {
-		if proc := rf.handle.Process(); proc != nil {
-			_ = proc.Signal(os.Interrupt)
-		}
-	}
+	// Cancelling the derived context fires each handle's Cancel hook, which
+	// records provenance and hard-kills the complete platform process group/tree.
+	// We intentionally send no catchable signal
+	// of our own — an ssh that trapped SIGINT and exited non-zero would look
+	// like a genuine failure. Just wait for every waiter to finish reaping.
 	wg.Wait()
 	return firstErr
 }
