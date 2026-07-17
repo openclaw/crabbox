@@ -26,23 +26,10 @@ The configured base must be a stopped Lume VM. Its guest account must:
 - include the bundled first-boot hook that rotates SSH host keys, installs the
   per-lease key, and disables SSH password authentication for the lease user.
 
-Lume's unattended installer currently creates `lume`/`lume`, but Crabbox never
-uses that password. Before starting a clone, Crabbox creates a fresh `0700`
-host directory containing a random challenge and the lease public key, then
-passes it only to that `lume run` process with `--shared-dir`. The first-boot
-hook installs that key as the sole `authorized_keys` entry and requires public
-key authentication for the lease user before Crabbox makes any network SSH
-connection.
-
-Installing the image hook also places sshd in a deny-all bootstrap state on the
-golden image (`AuthorizedKeysFile none`, with password methods disabled). This
-intentionally prevents SSH access to the stopped-image template after setup.
-Each clone remains locked while its VirtioFS share mounts; only a valid
-challenge switches sshd to the configured lease user and key.
-Later reboots with the same VM identity preserve that lease SSH configuration.
-The hook disables alternate key-command, principal, host-based, GSSAPI, and
-trusted-CA sources and verifies sshd's effective per-user policy before it
-publishes readiness.
+Crabbox never uses Lume's unattended-install password. It passes a random
+challenge and lease public key through a private `0700` VirtioFS share. The
+golden image denies all SSH login until the hook installs that key, disables
+alternate authentication sources, and verifies the effective sshd policy.
 
 Install the bundled image hooks before stopping a reusable base. The SSH
 identity hook is mandatory; when Cua Driver is already installed, the same
@@ -100,24 +87,13 @@ Environment variables: `CRABBOX_LUME_CLI`, `CRABBOX_LUME_BASE`,
 
 ## Lifecycle
 
-1. `lume clone <base> <lease-vm>` creates an APFS copy-on-write clone.
-2. Crabbox starts `lume run <lease-vm> --no-display` as a detached VM-owner
-   process and records a private lifecycle log in Crabbox's state directory.
-3. Crabbox waits until Lume reports a running guest and IP. It does not trust
-   Lume 0.3.16's `sshAvailable` bit because that release can report a false
-   negative for an open SSH port.
-4. The first-boot hook reads the random challenge, lease user, and public key
-   from the private VirtioFS share. It installs only that key, disables SSH
-   password and keyboard-interactive authentication for the user, and returns
-   the rotated host key through the same share.
-5. Crabbox verifies the challenge, writes the returned key to the per-lease
-   `known_hosts`, and makes its first network SSH connection with the lease key
-   and strict host verification.
-6. Normal Crabbox SSH host verification, sync, and execution take over.
-7. Release runs guarded remote cleanup while SSH is still available, asks Lume
-   to stop the VM, verifies both `stopped` and termination of the recorded
-   `lume run` owner process, signals the identity-fenced owner when Lume 0.3.16
-   fails to stop it, then deletes the VM and confirms inventory absence.
+1. Clone the stopped base and start `lume run <lease-vm> --no-display` under a
+   recorded, identity-fenced owner process.
+2. Wait for a running guest and IP, then authenticate the first-boot challenge
+   and pin the returned host key before the first SSH connection.
+3. Use normal Crabbox SSH verification, sync, and command execution.
+4. Run guarded remote cleanup, stop the VM and owner process, delete the exact
+   claimed VM, and confirm inventory absence.
 
 Every lease gets a different VM, IP address, work directory, key, and macOS
 machine identity. Multiple sessions are separate VMs, not multiple users in one
