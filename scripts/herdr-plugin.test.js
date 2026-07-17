@@ -43,7 +43,7 @@ test("Herdr plugin shell entrypoints pass syntax checks", () => {
   }
 });
 
-test("Herdr result panes wait for acknowledgement and preserve exit status", () => {
+test("Herdr result panes and failed connections wait and preserve exit status", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-herdr-pane-result-"));
   const installedPlugin = path.join(dir, "plugin");
   fs.cpSync(pluginRoot, installedPlugin, { recursive: true });
@@ -55,14 +55,16 @@ exit 7
 `,
   );
 
-  const result = spawnSync("sh", [path.join(installedPlugin, "bin", "pane.sh"), "doctor"], {
-    cwd: installedPlugin,
-    input: "\n",
-    encoding: "utf8",
-  });
-  assert.equal(result.status, 7, result.stdout + result.stderr);
-  assert.match(result.stdout, /<__herdr-plugin>\n<doctor>/);
-  assert.match(result.stdout, /Command exited with status 7\. Press Enter to close\./);
+  for (const command of ["doctor", "connect"]) {
+    const result = spawnSync("sh", [path.join(installedPlugin, "bin", "pane.sh"), command], {
+      cwd: installedPlugin,
+      input: "\n",
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 7, result.stdout + result.stderr);
+    assert.match(result.stdout, new RegExp(`<__herdr-plugin>\\n<${command}>`));
+    assert.match(result.stdout, /Command exited with status 7\. Press Enter to close\./);
+  }
 });
 
 test("Herdr long-lived panes close with their Crabbox process", () => {

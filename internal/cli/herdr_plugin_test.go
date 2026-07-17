@@ -34,6 +34,11 @@ func TestHerdrPluginContextCWD(t *testing.T) {
 			raw:  `{"focused_pane_cwd":"/repo/a \"quoted\" dir"}`,
 			want: `/repo/a "quoted" dir`,
 		},
+		{
+			name: "boundary whitespace",
+			raw:  `{"focused_pane_cwd":" /repo/with boundary whitespace "}`,
+			want: ` /repo/with boundary whitespace `,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -224,17 +229,22 @@ func TestHerdrPluginJobCanCancelBeforeProvisioning(t *testing.T) {
 }
 
 func TestHerdrPluginJobPreservesNameWithSpaces(t *testing.T) {
-	dir := prepareHerdrPluginTestWorkspace(t)
-	configPath := filepath.Join(dir, ".crabbox.yaml")
-	if err := os.WriteFile(configPath, []byte("jobs:\n  smoke test: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CRABBOX_CONFIG", configPath)
-	var stdout, stderr bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("1\n")}
-	err := app.herdrPlugin(context.Background(), []string{"job"})
-	if err == nil || !strings.Contains(err.Error(), `job "smoke test" requires command or syncOnly`) {
-		t.Fatalf("err=%v, want selected full job name\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	for _, name := range []string{"smoke test", "-smoke"} {
+		t.Run(name, func(t *testing.T) {
+			dir := prepareHerdrPluginTestWorkspace(t)
+			configPath := filepath.Join(dir, ".crabbox.yaml")
+			if err := os.WriteFile(configPath, []byte(fmt.Sprintf("jobs:\n  %s: {}\n", name)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			var stdout, stderr bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("1\n")}
+			err := app.herdrPlugin(context.Background(), []string{"job"})
+			want := fmt.Sprintf(`job %q requires command or syncOnly`, name)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("err=%v, want selected full job name\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 

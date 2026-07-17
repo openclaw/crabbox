@@ -92,8 +92,8 @@ func herdrPluginContextCWD(raw string) (string, error) {
 		invocation.FocusedPaneCWD,
 		invocation.WorkspaceCWD,
 	} {
-		if cwd := strings.TrimSpace(candidate); cwd != "" {
-			return cwd, nil
+		if strings.TrimSpace(candidate) != "" {
+			return candidate, nil
 		}
 	}
 	return "", exit(2, "Herdr plugin context has no focused pane or workspace cwd")
@@ -231,7 +231,7 @@ func (a App) herdrPluginJob(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.jobRun(ctx, []string{selected})
+	return a.jobRun(ctx, []string{"--", selected})
 }
 
 func (a App) herdrPluginCaptureLines(ctx context.Context, label string, run func(App) error) ([]string, error) {

@@ -15,8 +15,15 @@ if [ ! -x "$shim" ]; then
 fi
 
 case "$command" in
-  boxes | connect)
+  boxes)
     exec "$shim" __herdr-plugin "$command"
+    ;;
+  connect)
+    if "$shim" __herdr-plugin "$command"; then
+      exit 0
+    else
+      command_status=$?
+    fi
     ;;
   doctor | job | prewarm | warmup)
     if "$shim" __herdr-plugin "$command"; then
@@ -24,12 +31,13 @@ case "$command" in
     else
       command_status=$?
     fi
-    printf '\nCommand exited with status %d. Press Enter to close.\n' "$command_status"
-    IFS= read -r _ || true
-    exit "$command_status"
     ;;
   *)
     echo "unsupported Crabbox plugin pane command: $command" >&2
     exit 2
     ;;
 esac
+
+printf '\nCommand exited with status %d. Press Enter to close.\n' "$command_status"
+IFS= read -r _ || true
+exit "$command_status"
