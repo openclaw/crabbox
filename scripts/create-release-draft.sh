@@ -144,6 +144,7 @@ if (
   release.name !== process.env.RELEASE_TAG ||
   release.body !== notes ||
   release.draft !== true ||
+  release.immutable !== false ||
   release.prerelease !== false ||
   release.published_at !== null ||
   JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets) ||

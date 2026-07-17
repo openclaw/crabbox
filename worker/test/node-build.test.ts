@@ -30,18 +30,32 @@ describe("Node production bundle", () => {
       expect(result.code).not.toBe(0);
       expect(result.stderr).toContain("DATABASE_URL is required");
       expect(result.stderr).not.toContain("Named export");
+
+      const invalidProxy = await runNode(outfile, {
+        CRABBOX_TRUSTED_PROXY_CIDRS: "127.0.0.1,bad-cidr,10.0.0.0/8",
+        DATABASE_URL: "postgres://coordinator.test/crabbox",
+      });
+      expect(invalidProxy.code).not.toBe(0);
+      expect(invalidProxy.stderr).toContain(
+        'CRABBOX_TRUSTED_PROXY_CIDRS contains invalid entry "bad-cidr"',
+      );
     } finally {
       await rm(outputDirectory, { recursive: true, force: true });
     }
   });
 });
 
-async function runNode(entrypoint: string): Promise<{
+async function runNode(
+  entrypoint: string,
+  overrides: Record<string, string> = {},
+): Promise<{
   code: number | null;
   stderr: string;
 }> {
   const env = { ...process.env };
   delete env.DATABASE_URL;
+  delete env.CRABBOX_TRUSTED_PROXY_CIDRS;
+  Object.assign(env, overrides);
 
   return await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [entrypoint], { env });

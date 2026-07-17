@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { createServer, get, type IncomingMessage, type ServerResponse } from "node:http";
 import { Writable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
@@ -8,11 +8,14 @@ import {
   AsyncMutex,
   AsyncOperationTracker,
   RequestBodyTooLargeError,
+  closeServer,
+  createUntrustedForwardingDiagnostic,
   drainAndStop,
   authenticatedRequestBodyBytes,
   fleetRequestQueue,
   isReadinessRequestMethod,
   isTrustedProxySource,
+  nodeResponseHeaders,
   nodeRequestAbortSignal,
   readNodeRequestBody,
   requestBodyLimit,
@@ -21,6 +24,7 @@ import {
   settlesWithin,
   shouldReadUnauthenticatedRequestBody,
   unauthenticatedRequestBodyBytes,
+  validateTrustedProxyCIDRs,
   writeNodeResponseBody,
 } from "../node/server-support";
 import { runtimeAdapterRelayBodyLimit } from "../src/runtime-adapter-relay";
@@ -192,6 +196,60 @@ describe("Node server support", () => {
     expect(isTrustedProxySource("10.4.5.6", "invalid,10.0.0.0/8")).toBe(false);
   });
 
+  it("fails startup validation on the exact invalid trusted-proxy entry", () => {
+    expect(() => validateTrustedProxyCIDRs("127.0.0.1,broken,10.0.0.0/8")).toThrow(
+      'CRABBOX_TRUSTED_PROXY_CIDRS contains invalid entry "broken"',
+    );
+    expect(() => validateTrustedProxyCIDRs("10.0.0.0/33")).toThrow(
+      'CRABBOX_TRUSTED_PROXY_CIDRS contains invalid entry "10.0.0.0/33"',
+    );
+    expect(() => validateTrustedProxyCIDRs("127.0.0.1,,10.0.0.0/8")).toThrow(
+      'CRABBOX_TRUSTED_PROXY_CIDRS contains invalid entry "<empty>"',
+    );
+    for (const entry of ["10.0.0.1/", "10.0.0.1/0x0", "2001:db8::1/"]) {
+      expect(() => validateTrustedProxyCIDRs(entry)).toThrow(
+        `CRABBOX_TRUSTED_PROXY_CIDRS contains invalid entry ${JSON.stringify(entry)}`,
+      );
+    }
+  });
+
+  it("accepts valid trusted-proxy addresses and CIDRs at startup", () => {
+    expect(() => validateTrustedProxyCIDRs("127.0.0.1,10.0.0.0/8,2001:db8::/32")).not.toThrow();
+    expect(() => validateTrustedProxyCIDRs(undefined)).not.toThrow();
+    expect(() => validateTrustedProxyCIDRs("")).not.toThrow();
+    expect(() => validateTrustedProxyCIDRs("   ")).not.toThrow();
+  });
+
+  it("rate-limits untrusted forwarded-header diagnostics", () => {
+    let now = 1_000;
+    const warn = vi.fn<(message: string) => void>();
+    const diagnose = createUntrustedForwardingDiagnostic({
+      now: () => now,
+      warningIntervalMs: 60_000,
+      warn,
+    });
+
+    expect(diagnose("192.0.2.10", "198.51.100.8", false)).toBe(true);
+    expect(diagnose("192.0.2.10", "198.51.100.9", false)).toBe(false);
+    now += 59_999;
+    expect(diagnose("192.0.2.11", "198.51.100.10", false)).toBe(false);
+    now += 1;
+    expect(diagnose("192.0.2.11", "198.51.100.10", false)).toBe(true);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(
+      "crabbox coordinator received X-Forwarded-For from untrusted peer 192.0.2.10; reverse proxy trust may be misconfigured; configure CRABBOX_TRUSTED_PROXY_CIDRS",
+    );
+  });
+
+  it("keeps trusted peers and requests without forwarding evidence silent", () => {
+    const warn = vi.fn<(message: string) => void>();
+    const diagnose = createUntrustedForwardingDiagnostic({ warn });
+
+    expect(diagnose("10.0.0.2", "198.51.100.8", true)).toBe(false);
+    expect(diagnose("192.0.2.10", undefined, false)).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it("derives caller IPs from sockets and trusted proxy chains", () => {
     const ranges = "10.0.0.0/8,fd00::/8";
     expect(requestSourceIP("198.51.100.8", "203.0.113.9", ranges)).toBe("198.51.100.8");
@@ -224,6 +282,47 @@ describe("Node server support", () => {
     await expect(writeNodeResponseBody(response, Buffer.from("payload"))).rejects.toThrow(
       "Premature close",
     );
+  });
+
+  it("emits separate Set-Cookie fields through Node HTTP", async () => {
+    const headers = new Headers({ "x-test": "ok" });
+    headers.append("set-cookie", "legacy=; Path=/; Max-Age=0");
+    headers.append("set-cookie", "__Host-current=value; Path=/; Secure");
+    expect(nodeResponseHeaders(headers)).toContainEqual([
+      "set-cookie",
+      ["legacy=; Path=/; Max-Age=0", "__Host-current=value; Path=/; Secure"],
+    ]);
+
+    const server = createServer((_request, response) => {
+      for (const [name, value] of nodeResponseHeaders(headers)) {
+        response.setHeader(name, value);
+      }
+      response.end();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("missing Node test address");
+      const setCookies = await new Promise<string[]>((resolve, reject) => {
+        const request = get(
+          { hostname: "127.0.0.1", port: address.port, path: "/" },
+          (response) => {
+            response.resume();
+            response.once("end", () => resolve(response.headers["set-cookie"] ?? []));
+          },
+        );
+        request.once("error", reject);
+      });
+      expect(setCookies).toEqual([
+        "legacy=; Path=/; Max-Age=0",
+        "__Host-current=value; Path=/; Secure",
+      ]);
+    } finally {
+      await closeServer(server);
+    }
   });
 
   it("bounds shutdown waits", async () => {

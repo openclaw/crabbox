@@ -256,6 +256,6 @@ pull requests, or chats.
 Related docs:
 
 - [Provider backends](../provider-backends.md)
-- [Provider model](../features/providers.md)
+- [Provider model](README.md)
 - [run](../commands/run.md)
 - [cleanup](../commands/cleanup.md)

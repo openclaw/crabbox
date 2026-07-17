@@ -122,12 +122,13 @@ function validateReleaseIdentity(release, expectedNames, expectedNotes, expected
   if (snapshot && createdAt !== snapshot.createdAt) fail("release creation timestamp drifted");
 
   if (expectedState === "draft") {
-    if (release.draft !== true || release.published_at !== null)
+    if (release.draft !== true || release.immutable !== false || release.published_at !== null)
       fail("release is not the exact unpublished draft");
     if (snapshot && updatedAt !== snapshot.releaseUpdatedAt)
       fail("draft release timestamp drifted after verification");
   } else if (expectedState === "published") {
-    if (release.draft !== false) fail("release publication response is still a draft");
+    if (release.draft !== false || release.immutable !== true)
+      fail("release publication response is not immutable");
     timestamp(release.published_at, "release published_at");
     if (snapshot && Date.parse(updatedAt) < Date.parse(snapshot.releaseUpdatedAt)) {
       fail("published release timestamp predates the verified draft");
@@ -146,6 +147,7 @@ function validateReleaseIdentity(release, expectedNames, expectedNotes, expected
     title: release.name,
     bodySha256: sha256(Buffer.from(release.body, "utf8")),
     draft: release.draft,
+    immutable: release.immutable,
     prerelease: release.prerelease,
     createdAt,
     updatedAt,

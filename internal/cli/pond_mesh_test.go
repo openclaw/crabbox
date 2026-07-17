@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -22,15 +23,24 @@ import (
 // the argv at Start() and blocks Wait() on the signal channel so the orchestration
 // loop can be terminated deterministically without real ssh processes.
 type pondMeshRecordingHandle struct {
-	name    string
-	args    []string
-	pid     int
-	started bool
-	signal  chan struct{}
-	mu      sync.Mutex
+	name      string
+	args      []string
+	pid       int
+	started   bool
+	signal    chan struct{}
+	ctx       context.Context
+	startHook func() error
+	waitErr   error
+	cancelled atomic.Bool
+	mu        sync.Mutex
 }
 
 func (h *pondMeshRecordingHandle) Start() error {
+	if h.startHook != nil {
+		if err := h.startHook(); err != nil {
+			return err
+		}
+	}
 	h.mu.Lock()
 	h.started = true
 	h.mu.Unlock()
@@ -38,7 +48,18 @@ func (h *pondMeshRecordingHandle) Start() error {
 }
 
 func (h *pondMeshRecordingHandle) Wait() error {
-	<-h.signal
+	if h.waitErr != nil {
+		return h.waitErr
+	}
+	// Mirror the production handle: a healthy tunnel blocks until it is either
+	// explicitly signalled or the ctx watchdog would kill it (ctx cancelled).
+	// On ctx cancellation we record provenance exactly as the real Cancel hook
+	// does, then return nil — a healthy tunnel torn down by our own teardown.
+	select {
+	case <-h.signal:
+	case <-h.ctx.Done():
+		h.cancelled.Store(true)
+	}
 	return nil
 }
 
@@ -49,6 +70,11 @@ func (h *pondMeshRecordingHandle) String() string {
 func (h *pondMeshRecordingHandle) PID() int { return h.pid }
 
 func (h *pondMeshRecordingHandle) Process() processSignaler { return testProcessSignaler{h.signal} }
+
+// WasTerminatedByOurCancel mirrors the production classifier for the recording
+// double: this stub's Wait() only returns nil (a healthy tunnel torn down by
+// the connect loop), so a set cancelled flag always denotes our teardown.
+func (h *pondMeshRecordingHandle) WasTerminatedByOurCancel() bool { return h.cancelled.Load() }
 
 // testProcessSignaler closes the underlying channel on the first signal so
 // the handle's Wait() returns.
@@ -73,16 +99,25 @@ func (p testProcessSignaler) Kill() error {
 // every (name, args) invocation it sees so tests can assert on the full SSH
 // argument vector without spawning processes.
 type pondMeshRecordingRunner struct {
-	mu      sync.Mutex
-	calls   [][]string
-	handles []*pondMeshRecordingHandle
+	mu        sync.Mutex
+	calls     [][]string
+	handles   []*pondMeshRecordingHandle
+	startHook func(index int, ctx context.Context) error
+	waitErrs  map[int]error
 }
 
-func (r *pondMeshRecordingRunner) Command(_ context.Context, name string, args ...string) pondMeshHandle {
+func (r *pondMeshRecordingRunner) Command(ctx context.Context, name string, args ...string) pondMeshHandle {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, append([]string{name}, args...))
-	h := &pondMeshRecordingHandle{name: name, args: append([]string{}, args...), pid: 1000 + len(r.handles), signal: make(chan struct{})}
+	index := len(r.handles)
+	h := &pondMeshRecordingHandle{name: name, args: append([]string{}, args...), pid: 1000 + index, signal: make(chan struct{}), ctx: ctx}
+	if r.startHook != nil {
+		h.startHook = func() error { return r.startHook(index, ctx) }
+	}
+	if r.waitErrs != nil {
+		h.waitErr = r.waitErrs[index]
+	}
 	r.handles = append(r.handles, h)
 	return h
 }
@@ -324,13 +359,21 @@ func TestPreparePondMeshSummarySkipsMembersWithoutPorts(t *testing.T) {
 	}
 }
 
-func TestPondMeshSSHArgsBuildsLocalForward(t *testing.T) {
+func TestPondMeshSSHArgsGroupsMemberForwards(t *testing.T) {
 	target := SSHTarget{User: "ubuntu", Host: "lease.example", Port: "22", Key: "/tmp/test-key"}
-	fwd := pondMeshForward{Peer: "web", RemotePort: 8080, LocalPort: 51900, LeaseID: "cbx_x"}
-	args := pondMeshSSHArgsForForward(target, fwd)
+	forwards := []pondMeshForward{
+		{Peer: "web", RemotePort: 8080, LocalPort: 51900, LeaseID: "cbx_x"},
+		{Peer: "web", RemotePort: 9090, LocalPort: 51901, LeaseID: "cbx_x"},
+	}
+	args := pondMeshSSHArgsForForwards(target, forwards)
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "-L 127.0.0.1:51900:127.0.0.1:8080") {
-		t.Fatalf("args missing -L spec: %v", args)
+	for _, spec := range []string{
+		"-L 127.0.0.1:51900:127.0.0.1:8080",
+		"-L 127.0.0.1:51901:127.0.0.1:9090",
+	} {
+		if !strings.Contains(joined, spec) {
+			t.Fatalf("args missing %q: %v", spec, args)
+		}
 	}
 	if !strings.Contains(joined, "ubuntu@lease.example") {
 		t.Fatalf("args missing user@host: %v", args)
@@ -341,12 +384,19 @@ func TestPondMeshSSHArgsBuildsLocalForward(t *testing.T) {
 	if !strings.Contains(joined, "ExitOnForwardFailure=yes") {
 		t.Fatalf("args missing ExitOnForwardFailure option: %v", args)
 	}
-	if !strings.Contains(joined, "ControlMaster=auto") && !strings.Contains(joined, "ControlMaster=no") {
-		t.Fatalf("args missing ControlMaster option: %v", args)
+	for _, required := range []string{"ControlMaster=no", "ControlPath=none", "ControlPersist=no"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("args missing %q: %v", required, args)
+		}
+	}
+	for _, unwanted := range []string{"ControlMaster=auto"} {
+		if strings.Contains(joined, unwanted) {
+			t.Fatalf("args contain persistent multiplexing option %q: %v", unwanted, args)
+		}
 	}
 }
 
-func TestRunPondMeshForwardsLaunchesPerForwardAndTearsDown(t *testing.T) {
+func TestRunPondMeshForwardsLaunchesPerMemberAndTearsDown(t *testing.T) {
 	runner := &pondMeshRecordingRunner{}
 	members := []pondMember{
 		{Name: "web", Lease: "cbx_web", SSH: SSHTarget{User: "ubuntu", Host: "lease-web.example", Port: "22"}, Ports: []int{8080}},
@@ -367,7 +417,7 @@ func TestRunPondMeshForwardsLaunchesPerForwardAndTearsDown(t *testing.T) {
 		runner.mu.Lock()
 		count := len(runner.handles)
 		runner.mu.Unlock()
-		if count >= 3 {
+		if count >= 2 {
 			break
 		}
 		select {
@@ -385,10 +435,10 @@ func TestRunPondMeshForwardsLaunchesPerForwardAndTearsDown(t *testing.T) {
 			t.Fatalf("runPondMeshForwards: %v", err)
 		}
 	}
-	if got := len(runner.calls); got != 3 {
-		t.Fatalf("expected 3 ssh invocations, got %d (%v)", got, runner.calls)
+	if got := len(runner.calls); got != 2 {
+		t.Fatalf("expected 2 ssh invocations (one per member), got %d (%v)", got, runner.calls)
 	}
-	// Verify each ssh invocation carries the right -L spec.
+	// Verify the worker's two ports share one owned SSH invocation.
 	wantSpecs := []string{
 		"127.0.0.1:60000:127.0.0.1:8080",
 		"127.0.0.1:60001:127.0.0.1:3000",
@@ -417,6 +467,124 @@ func TestRunPondMeshForwardsLaunchesPerForwardAndTearsDown(t *testing.T) {
 	}
 	if gotTargetsBySpec["127.0.0.1:60001:127.0.0.1:3000"] != "ubuntu@lease-worker.example" {
 		t.Fatalf("worker forward target=%q", gotTargetsBySpec["127.0.0.1:60001:127.0.0.1:3000"])
+	}
+	workerCalls := 0
+	for _, call := range runner.calls {
+		if call[len(call)-1] == "ubuntu@lease-worker.example" {
+			workerCalls++
+			forwardCount := 0
+			for _, arg := range call {
+				if arg == "-L" {
+					forwardCount++
+				}
+			}
+			if forwardCount != 2 {
+				t.Fatalf("worker SSH invocation has %d forwards, want 2: %v", forwardCount, call)
+			}
+		}
+	}
+	if workerCalls != 1 {
+		t.Fatalf("worker SSH invocations=%d want 1", workerCalls)
+	}
+}
+
+func TestRunPondMeshForwardsReapsStartupFailures(t *testing.T) {
+	members := []pondMember{
+		{Name: "web", Lease: "cbx_web", SSH: SSHTarget{User: "ubuntu", Host: "lease-web.example", Port: "22"}},
+		{Name: "worker", Lease: "cbx_worker", SSH: SSHTarget{User: "ubuntu", Host: "lease-worker.example", Port: "22"}},
+	}
+	summary := pondMeshSummary{Forwards: []pondMeshForward{
+		{Peer: "web", RemotePort: 8080, LocalPort: 60000, LeaseID: "cbx_web"},
+		{Peer: "worker", RemotePort: 3000, LocalPort: 60001, LeaseID: "cbx_worker"},
+	}}
+
+	t.Run("operator cancellation is clean", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		runner := &pondMeshRecordingRunner{}
+		runner.startHook = func(index int, commandCtx context.Context) error {
+			if index != 1 {
+				return nil
+			}
+			cancel()
+			<-commandCtx.Done()
+			return commandCtx.Err()
+		}
+		err := runPondMeshForwards(ctx, pondConnectOptions{Stdout: io.Discard, Stderr: io.Discard, Runner: runner}, members, summary)
+		if err != nil {
+			t.Fatalf("operator cancellation during startup = %v", err)
+		}
+		if !runner.handles[0].cancelled.Load() {
+			t.Fatal("already-started member was not reaped after operator cancellation")
+		}
+	})
+
+	t.Run("genuine startup failure is reported", func(t *testing.T) {
+		runner := &pondMeshRecordingRunner{}
+		startErr := errors.New("ssh executable failed")
+		runner.startHook = func(index int, _ context.Context) error {
+			if index == 1 {
+				return startErr
+			}
+			return nil
+		}
+		err := runPondMeshForwards(context.Background(), pondConnectOptions{Stdout: io.Discard, Stderr: io.Discard, Runner: runner}, members, summary)
+		if !errors.Is(err, startErr) {
+			t.Fatalf("genuine startup failure = %v, want %v", err, startErr)
+		}
+		if !runner.handles[0].cancelled.Load() {
+			t.Fatal("already-started member was not reaped after genuine startup failure")
+		}
+	})
+
+	t.Run("cancellation does not hide earlier tunnel failure", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		forwardErr := errors.New("earlier ssh authentication failed")
+		runner := &pondMeshRecordingRunner{waitErrs: map[int]error{0: forwardErr}}
+		runner.startHook = func(index int, commandCtx context.Context) error {
+			if index != 1 {
+				return nil
+			}
+			cancel()
+			<-commandCtx.Done()
+			return commandCtx.Err()
+		}
+		err := runPondMeshForwards(ctx, pondConnectOptions{Stdout: io.Discard, Stderr: io.Discard, Runner: runner}, members, summary)
+		if !errors.Is(err, forwardErr) {
+			t.Fatalf("startup cancellation hid earlier tunnel failure: got %v, want %v", err, forwardErr)
+		}
+	})
+}
+
+func TestRunPondMeshForwardsReportsUnexpectedCleanExit(t *testing.T) {
+	runner := &pondMeshRecordingRunner{}
+	members := []pondMember{{
+		Name: "web", Lease: "cbx_web", SSH: SSHTarget{User: "ubuntu", Host: "lease-web.example", Port: "22"}, Ports: []int{8080},
+	}}
+	summary := pondMeshSummary{Forwards: []pondMeshForward{{
+		Peer: "web", RemotePort: 8080, LocalPort: 60000, LeaseID: "cbx_web",
+	}}}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runPondMeshForwards(context.Background(), pondConnectOptions{Stdout: io.Discard, Stderr: io.Discard, Runner: runner}, members, summary)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		runner.mu.Lock()
+		if len(runner.handles) == 1 {
+			handle := runner.handles[0]
+			runner.mu.Unlock()
+			_ = handle.Process().Signal(os.Interrupt)
+			break
+		}
+		runner.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("forward did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	err := <-errCh
+	if err == nil || !strings.Contains(err.Error(), "ssh forwards for web:8080 exited unexpectedly") {
+		t.Fatalf("unexpected clean exit = %v", err)
 	}
 }
 

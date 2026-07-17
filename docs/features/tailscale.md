@@ -262,7 +262,7 @@ Crabbox does not install or join Tailscale on the host.
 ## Related docs
 
 - [Network modes](network.md)
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)
 - [Runner bootstrap](runner-bootstrap.md)
 - [Interactive desktop and VNC](interactive-desktop-vnc.md)
 - [Security](../security.md)

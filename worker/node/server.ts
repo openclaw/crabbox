@@ -17,10 +17,12 @@ import {
   AsyncOperationTracker,
   RequestBodyTooLargeError,
   closeServer,
+  createUntrustedForwardingDiagnostic,
   drainAndStop,
   fleetRequestQueue,
   isReadinessRequestMethod,
   isTrustedProxySource,
+  nodeResponseHeaders,
   nodeRequestAbortSignal,
   readNodeRequestBody,
   requestSourceIP,
@@ -28,13 +30,15 @@ import {
   settlesWithin,
   shouldReadUnauthenticatedRequestBody,
   unauthenticatedRequestBodyBytes,
+  validateTrustedProxyCIDRs,
   writeNodeResponseBody,
 } from "./server-support";
 
+const env = nodeCoordinatorEnv(process.env);
+validateTrustedProxyCIDRs(env.CRABBOX_TRUSTED_PROXY_CIDRS);
 const databaseURL = requiredEnv("DATABASE_URL");
 const port = positiveInt(process.env["PORT"], 8080);
 const shutdownTimeoutMs = positiveInt(process.env["CRABBOX_SHUTDOWN_TIMEOUT_MS"], 120_000);
-const env = nodeCoordinatorEnv(process.env);
 const awsDeployment = createAWSDeploymentGuard(env);
 const runtime = new NodeCoordinatorRuntime(databaseURL);
 const coordinator = new FleetCoordinator(runtime, env);
@@ -42,6 +46,7 @@ const lifecycleMutex = new AsyncMutex();
 const activeRequests = new AsyncOperationTracker();
 const publicDirectory = resolve(fileURLToPath(new NodeURL("../public", import.meta.url)));
 let shutdownPromise: Promise<void> | undefined;
+const diagnoseUntrustedForwarding = createUntrustedForwardingDiagnostic();
 
 runtime.setOperationRunner((callback) => lifecycleMutex.run(callback));
 await awsDeployment.start();
@@ -230,13 +235,12 @@ interface NodeRequestContext {
 function nodeRequestContext(request: IncomingMessage): NodeRequestContext {
   const configuredCIDRs = env.CRABBOX_TRUSTED_PROXY_CIDRS;
   const peerAddress = request.socket.remoteAddress;
+  const forwardedFor = joinedHeader(request.headers["x-forwarded-for"]);
+  const trustedProxy = isTrustedProxySource(peerAddress, configuredCIDRs);
+  diagnoseUntrustedForwarding(peerAddress, forwardedFor, trustedProxy);
   return {
-    sourceIP: requestSourceIP(
-      peerAddress,
-      joinedHeader(request.headers["x-forwarded-for"]),
-      configuredCIDRs,
-    ),
-    trustedProxy: isTrustedProxySource(peerAddress, configuredCIDRs),
+    sourceIP: requestSourceIP(peerAddress, forwardedFor, configuredCIDRs),
+    trustedProxy,
   };
 }
 
@@ -284,7 +288,9 @@ async function writeResponse(
   closeConnection = false,
 ): Promise<void> {
   response.statusCode = result.status;
-  result.headers.forEach((value, name) => response.setHeader(name, value));
+  for (const [name, value] of nodeResponseHeaders(result.headers)) {
+    response.setHeader(name, value);
+  }
   if (closeConnection) {
     response.setHeader("connection", "close");
   }
@@ -302,7 +308,11 @@ async function writeUpgradeResponse(socket: Duplex, response: Response): Promise
   headers.set("content-length", String(body.byteLength));
   const statusText = STATUS_CODES[response.status] || "Error";
   const lines = [`HTTP/1.1 ${response.status} ${statusText}`];
-  headers.forEach((value, name) => lines.push(`${name}: ${value}`));
+  for (const [name, value] of nodeResponseHeaders(headers)) {
+    for (const item of Array.isArray(value) ? value : [value]) {
+      lines.push(`${name}: ${item}`);
+    }
+  }
   socket.end(`${lines.join("\r\n")}\r\n\r\n${body.toString()}`);
 }
 

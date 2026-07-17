@@ -109,7 +109,7 @@ direct-provider servers and skips machines that were kept.
 
 ## Related docs
 
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)
 - [Capabilities](capabilities.md)
 - [Linux VNC](vnc-linux.md)
 - [Tailscale](tailscale.md)

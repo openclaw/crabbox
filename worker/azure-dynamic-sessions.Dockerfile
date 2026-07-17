@@ -3,7 +3,7 @@ FROM --platform=$BUILDPLATFORM mcr.microsoft.com/devcontainers/go:1.26-bookworm@
 ARG TARGETOS=linux
 ARG TARGETARCH
 WORKDIR /src
-COPY cloudflare-container-runner/go.mod cloudflare-container-runner/main.go ./
+COPY cloudflare-container-runner/go.mod cloudflare-container-runner/*.go ./
 RUN target_arch="${TARGETARCH:-$(go env GOARCH)}" \
   && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH="$target_arch" go build -trimpath -ldflags="-s -w" -o /out/crabbox-container-runner .
 

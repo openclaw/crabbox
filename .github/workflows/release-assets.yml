@@ -183,6 +183,7 @@ jobs:
             release.tag_name === process.env.RELEASE_TAG &&
             release.name === process.env.RELEASE_TAG &&
             release.draft === (process.env.EXPECTED_DRAFT === 'true') &&
+            release.immutable === (process.env.EXPECTED_DRAFT !== 'true') &&
             release.prerelease === false &&
             (release.draft ? release.published_at === null : typeof release.published_at === 'string') &&
             notes.length === Number(process.env.EXPECTED_NOTES_BYTES) &&
