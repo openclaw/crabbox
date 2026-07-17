@@ -487,6 +487,7 @@ func updateLeaseClaimEndpointIfUnchangedAction(
 			return err
 		}
 		if action == nil {
+			updated = cloneLeaseClaim(claim)
 			return nil
 		}
 		var shouldUpdate bool
@@ -959,6 +960,11 @@ func canonicalClaimProvider(provider string) string {
 }
 
 func providerClaimScope(provider string, cfg Config) string {
+	if resolved, err := ProviderFor(provider); err == nil {
+		if scoper, ok := resolved.(ProviderClaimScoper); ok {
+			return strings.TrimSpace(scoper.ClaimScope(cfg))
+		}
+	}
 	switch provider {
 	case "azure":
 		return azureLeaseClaimScope(cfg.AzureSubscription, cfg.AzureResourceGroup)
@@ -970,15 +976,6 @@ func providerClaimScope(provider string, cfg Config) string {
 		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.CubeSandbox.APIURL); endpoint != "" {
 			return "endpoint:" + endpoint
 		}
-	case "github-codespaces":
-		parts := make([]string, 0, 2)
-		if endpoint := normalizedNamespaceClaimEndpoint(cfg.GitHubCodespaces.APIURL); endpoint != "" {
-			parts = append(parts, "endpoint:"+endpoint)
-		}
-		if repo := strings.ToLower(strings.TrimSpace(cfg.GitHubCodespaces.Repo)); repo != "" {
-			parts = append(parts, "repo:"+repo)
-		}
-		return strings.Join(parts, "|")
 	case "e2b":
 		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.E2B.APIURL); endpoint != "" {
 			return "endpoint:" + endpoint

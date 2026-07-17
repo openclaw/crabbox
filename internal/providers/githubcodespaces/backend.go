@@ -181,7 +181,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	created, createErr := api.createCodespace(ctx, createCodespaceRequest{
 		Repo:             repo,
 		Ref:              strings.TrimSpace(b.cfg.GitHubCodespaces.Ref),
-		Machine:          strings.TrimSpace(b.cfg.GitHubCodespaces.Machine),
+		Machine:          b.effectiveMachine(),
 		DevcontainerPath: strings.TrimSpace(b.cfg.GitHubCodespaces.DevcontainerPath),
 		WorkingDirectory: strings.TrimSpace(b.cfg.GitHubCodespaces.WorkingDirectory),
 		Geo:              strings.TrimSpace(b.cfg.GitHubCodespaces.Geo),
@@ -403,6 +403,16 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		}
 		if codespaceTerminal(item.State) {
 			return Server{}, SSHTarget{}, false, exit(5, "github-codespaces codespace %s entered terminal state=%s", item.Name, item.State)
+		}
+		if !codespaceAvailable(item.State) {
+			item, err = b.waitForAvailable(ctx, api, item.Name)
+			if err != nil {
+				return Server{}, SSHTarget{}, false, err
+			}
+			if err := validateResolvedItem(item); err != nil {
+				return Server{}, SSHTarget{}, false, err
+			}
+			server = b.mergeLiveServer(server, item)
 		}
 		repo := firstNonEmpty(server.Labels[labelRepository], item.Repository.FullName)
 		cfg := b.repoConfig(repo)
@@ -739,6 +749,32 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
+	seen := make(map[string]string, len(servers))
+	for _, server := range servers {
+		seen[strings.ToLower(strings.TrimSpace(server.CloudID))] = server.Labels["lease"]
+	}
+	claims, err := listLeaseClaims()
+	if err != nil {
+		return err
+	}
+	for _, claim := range claims {
+		if claim.Provider != providerName || strings.TrimSpace(claim.CloudID) != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
+			continue
+		}
+		item, found, err := b.findPendingClaimInInventory(claim, user, live)
+		if err != nil {
+			return err
+		}
+		if !found {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(item.Name))
+		if otherLease, ok := seen[key]; ok {
+			return exit(3, "multiple github-codespaces claims bind recovery resource %s: leases=%s,%s", item.Name, otherLease, claim.LeaseID)
+		}
+		seen[key] = claim.LeaseID
+		servers = append(servers, b.mergeLiveServer(serverFromClaim(claim), item))
+	}
 	now := b.now().UTC()
 	for _, listedServer := range servers {
 		err := func() error {
@@ -760,11 +796,29 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				return exit(3, "refusing to cleanup github-codespaces codespace=%s without local claim", listedServer.DisplayID())
 			}
 			server := serverFromClaim(claim)
-			if listedServer.CloudID != "" && listedServer.CloudID != server.CloudID {
+			pending := strings.TrimSpace(claim.CloudID) == "" && claim.Labels[labelRecovery] == recoveryPreCreate
+			pendingItem := codespace{}
+			if pending {
+				var found bool
+				pendingItem, found, err = b.findPendingClaimInInventory(claim, user, live)
+				if err != nil {
+					return err
+				}
+				if !found {
+					fmt.Fprintf(b.stderr(), "skip lease=%s reason=create-recovery-pending\n", leaseID)
+					return nil
+				}
+				if listedServer.CloudID != "" && listedServer.CloudID != pendingItem.Name {
+					return exit(2, "github-codespaces pending claim %s resource changed during cleanup; retry", leaseID)
+				}
+				server = b.mergeLiveServer(server, pendingItem)
+			} else if listedServer.CloudID != "" && listedServer.CloudID != server.CloudID {
 				return exit(2, "github-codespaces claim %s resource changed during cleanup; retry", leaseID)
 			}
-			if err := b.validateClaimForServer(claim, server, user); err != nil {
-				return err
+			if !pending {
+				if err := b.validateClaimForServer(claim, server, user); err != nil {
+					return err
+				}
 			}
 			shouldDelete, reason := shouldCleanupServer(server, now)
 			if !shouldDelete {
@@ -774,6 +828,16 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.stderr(), "delete codespace=%s lease=%s dry_run=%t\n", server.DisplayID(), claim.LeaseID, req.DryRun)
 			if req.DryRun {
 				return nil
+			}
+			if pending {
+				claim, pendingItem, err = b.bindCreatedClaim(claim, pendingItem)
+				if err != nil {
+					return err
+				}
+				server = b.mergeLiveServer(serverFromClaim(claim), pendingItem)
+				if err := b.validateClaimForServer(claim, server, user); err != nil {
+					return err
+				}
 			}
 			item, getErr := api.getCodespace(ctx, server.CloudID)
 			if getErr != nil && !isGitHubNotFound(getErr) {
@@ -1026,6 +1090,13 @@ func (b *backend) githubIdleTimeout() time.Duration {
 	return time.Duration(defaultIdleTimeoutMinutes) * time.Minute
 }
 
+func (b *backend) effectiveMachine() string {
+	if b.cfg.ServerTypeExplicit && strings.TrimSpace(b.cfg.ServerType) != "" {
+		return strings.TrimSpace(b.cfg.ServerType)
+	}
+	return firstNonEmpty(strings.TrimSpace(b.cfg.GitHubCodespaces.Machine), defaultCodespaceMachine)
+}
+
 func (b *backend) effectiveWorkRoot(repo string) string {
 	workRoot := strings.TrimSpace(b.cfg.GitHubCodespaces.WorkRoot)
 	if workRootExplicit(&b.cfg) && strings.TrimSpace(b.cfg.WorkRoot) != "" && (workRoot == "" || workRoot == defaultWorkRoot) {
@@ -1106,7 +1177,7 @@ func (b *backend) labelsFor(leaseID, slug, repo, login string, keep bool, releas
 	}
 	labels[labelRepository] = firstNonEmpty(item.Repository.FullName, repo)
 	labels[labelRef] = strings.TrimSpace(b.cfg.GitHubCodespaces.Ref)
-	labels[labelMachine] = firstNonEmpty(item.Machine.Name, b.cfg.GitHubCodespaces.Machine)
+	labels[labelMachine] = firstNonEmpty(item.Machine.Name, b.effectiveMachine())
 	labels[labelLogin] = strings.TrimSpace(user.Login)
 	if user.ID > 0 {
 		labels[labelUserID] = strconv.FormatInt(user.ID, 10)
@@ -1123,7 +1194,7 @@ func (b *backend) serverFromCodespace(item codespace, labels map[string]string) 
 		Status:   item.State,
 		Labels:   cloneLabels(labels),
 	}
-	server.ServerType.Name = firstNonEmpty(item.Machine.Name, b.cfg.GitHubCodespaces.Machine)
+	server.ServerType.Name = firstNonEmpty(item.Machine.Name, b.effectiveMachine())
 	return server
 }
 

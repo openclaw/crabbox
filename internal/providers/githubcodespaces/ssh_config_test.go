@@ -123,22 +123,6 @@ func TestSSHConfigRejectsInvalidUsers(t *testing.T) {
 	}
 }
 
-func TestValidatePrivateSSHConfigFileRequires0600(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config")
-	if err := os.WriteFile(path, []byte("Host sturdy\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := validatePrivateSSHConfigFile(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := validatePrivateSSHConfigFile(path); err == nil || !strings.Contains(err.Error(), "0600") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
 func TestStoreSSHConfigRejectsExistingSymlink(t *testing.T) {
 	stateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)

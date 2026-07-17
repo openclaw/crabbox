@@ -5,9 +5,37 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
+
+func githubCodespacesClaimScope(cfg Config) string {
+	endpoint := strings.TrimSpace(cfg.GitHubCodespaces.APIURL)
+	if endpoint != "" {
+		parsed, err := url.Parse(endpoint)
+		if err == nil && parsed.Host != "" {
+			parsed.User = nil
+			parsed.RawQuery = ""
+			parsed.Fragment = ""
+			parsed.Scheme = strings.ToLower(parsed.Scheme)
+			parsed.Host = strings.ToLower(parsed.Host)
+			parsed.Path = strings.TrimRight(parsed.Path, "/")
+			parsed.RawPath = ""
+			endpoint = parsed.String()
+		} else {
+			endpoint = strings.TrimRight(endpoint, "/")
+		}
+	}
+	parts := make([]string, 0, 2)
+	if endpoint != "" && !strings.EqualFold(endpoint, defaultAPIURL) {
+		parts = append(parts, "endpoint:"+endpoint)
+	}
+	if repo := strings.ToLower(strings.TrimSpace(cfg.GitHubCodespaces.Repo)); repo != "" {
+		parts = append(parts, "repo:"+repo)
+	}
+	return strings.Join(parts, "|")
+}
 
 func (b *backend) claimConfig(repo string) Config {
 	cfg := b.repoConfig(repo)
@@ -107,21 +135,32 @@ func (b *backend) recoverPendingClaimFromInventory(claim LeaseClaim, user github
 }
 
 func (b *backend) matchPendingClaimFromInventory(claim LeaseClaim, user githubUser, items []codespace) (codespace, error) {
-	if err := b.validateClaimScope(claim, user); err != nil {
+	item, found, err := b.findPendingClaimInInventory(claim, user, items)
+	if err != nil {
 		return codespace{}, err
 	}
+	if !found {
+		return codespace{}, exit(4, "github-codespaces create recovery is still pending for lease=%s; claim retained", claim.LeaseID)
+	}
+	return item, nil
+}
+
+func (b *backend) findPendingClaimInInventory(claim LeaseClaim, user githubUser, items []codespace) (codespace, bool, error) {
+	if err := b.validateClaimScope(claim, user); err != nil {
+		return codespace{}, false, err
+	}
 	if claim.Labels[labelRecovery] != recoveryPreCreate || strings.TrimSpace(claim.CloudID) != "" {
-		return codespace{}, exit(4, "github-codespaces claim %s has no valid pending-create recovery state", claim.LeaseID)
+		return codespace{}, false, exit(4, "github-codespaces claim %s has no valid pending-create recovery state", claim.LeaseID)
 	}
 	displayName := strings.TrimSpace(claim.Labels[labelDisplayName])
 	repo := strings.TrimSpace(claim.Labels[labelRepository])
 	recoveryNonce := strings.TrimSpace(claim.Labels[labelRecoveryNonce])
 	if recoveryNonce == "" {
-		return codespace{}, exit(4, "github-codespaces legacy pending claim %s has no recovery nonce; manual recovery required; claim retained", claim.LeaseID)
+		return codespace{}, false, exit(4, "github-codespaces legacy pending claim %s has no recovery nonce; manual recovery required; claim retained", claim.LeaseID)
 	}
 	expectedDisplayName := githubCodespacesDisplayName(claim.LeaseID, claim.Slug, recoveryNonce)
 	if displayName == "" || repo == "" || displayName != expectedDisplayName {
-		return codespace{}, exit(4, "github-codespaces claim %s has incomplete or inconsistent recovery identity; claim retained", claim.LeaseID)
+		return codespace{}, false, exit(4, "github-codespaces claim %s has incomplete or inconsistent recovery identity; claim retained", claim.LeaseID)
 	}
 	matches := make([]codespace, 0, 2)
 	for _, item := range items {
@@ -131,14 +170,15 @@ func (b *backend) matchPendingClaimFromInventory(claim LeaseClaim, user githubUs
 	}
 	switch len(matches) {
 	case 0:
-		return codespace{}, exit(4, "github-codespaces create recovery is still pending for lease=%s; claim retained", claim.LeaseID)
+		return codespace{}, false, nil
 	case 1:
 		if strings.TrimSpace(matches[0].Name) == "" {
-			return codespace{}, exit(4, "matched github-codespaces recovery result has no resource identity; claim retained")
+			return codespace{}, false, exit(4, "matched github-codespaces recovery result has no resource identity; claim retained")
 		}
-		return validateCreatedCodespaceIdentity(claim, matches[0])
+		item, err := validateCreatedCodespaceIdentity(claim, matches[0])
+		return item, err == nil, err
 	default:
-		return codespace{}, exit(4, "multiple github-codespaces resources match recovery display name %q repo %q; claim retained", displayName, repo)
+		return codespace{}, false, exit(4, "multiple github-codespaces resources match recovery display name %q repo %q; claim retained", displayName, repo)
 	}
 }
 

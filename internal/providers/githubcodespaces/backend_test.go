@@ -67,6 +67,22 @@ func TestAcquireCreatesClaimGeneratesSSHConfigAndWaitsReady(t *testing.T) {
 	}
 }
 
+func TestAcquireUsesExplicitGenericServerType(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.getSeq["cs-1"] = []codespace{fakeCodespace("cs-1", "Available")}
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	b.cfg.ServerType = "premiumLinux"
+	b.cfg.ServerTypeExplicit = true
+
+	if _, err := b.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir(), Name: "my-app"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.creates) != 1 || fc.creates[0].Machine != "premiumLinux" {
+		t.Fatalf("creates=%#v", fc.creates)
+	}
+}
+
 func TestAcquirePersistsRecoveryClaimBeforeCreate(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -79,7 +95,7 @@ func TestAcquirePersistsRecoveryClaimBeforeCreate(t *testing.T) {
 		if err != nil || !ok {
 			t.Fatalf("pre-create claim ok=%t err=%v", ok, err)
 		}
-		if claim.CloudID != "" || claim.ProviderScope != "endpoint:https://api.github.com|repo:example-org/my-app" {
+		if claim.CloudID != "" || claim.ProviderScope != "repo:example-org/my-app" {
 			t.Fatalf("pre-create claim=%#v", claim)
 		}
 		if claim.Labels[labelRecovery] != recoveryPreCreate || claim.Labels[labelDisplayName] != req.DisplayName || claim.Labels[labelRepository] != req.Repo || claim.Labels[labelLogin] != "alice" {
@@ -631,6 +647,32 @@ func TestResolveStartsStoppedCodespaceAndRefreshesTarget(t *testing.T) {
 	}
 }
 
+func TestResolveWaitsForTransitionalCodespaceBeforeSSH(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-starting"] = fakeCodespace("cs-starting", "Starting")
+	fc.getSeq["cs-starting"] = []codespace{
+		fakeCodespace("cs-starting", "Starting"),
+		fakeCodespace("cs-starting", "Provisioning"),
+		fakeCodespace("cs-starting", "Available"),
+	}
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ae1"
+	server := b.serverFromCodespace(fc.items["cs-starting"], b.labelsFor(leaseID, "starting-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-starting"], "provisioning"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "starting-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReadyProbe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Status != "Available" || lease.SSH.Host != "cs.cs-starting.main" || len(fc.starts) != 0 || fg.configFor != "cs-starting" {
+		t.Fatalf("lease=%#v starts=%#v config=%q", lease, fc.starts, fg.configFor)
+	}
+}
+
 func TestResolveStatusOnlyReadyProbeDoesNotStartStoppedCodespace(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -1028,6 +1070,38 @@ func TestCleanupDryRunKeepsProviderNonMutating(t *testing.T) {
 	}
 	if strings.Join(fc.deletes, ",") != "cs-expired" {
 		t.Fatalf("deletes=%#v", fc.deletes)
+	}
+}
+
+func TestCleanupRecoversExpiredPendingCreateBeforeDelete(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ae2"
+	now := time.Now().UTC()
+	b.now = func() time.Time { return now.Add(-14 * time.Hour) }
+	claim, displayName := persistPendingRecoveryClaimForTest(t, b, leaseID, "pending-cleanup", "pending-cleanup-nonce", true)
+	b.now = func() time.Time { return now }
+	item := fakeCodespace("cs-pending-cleanup", "Available")
+	item.DisplayName = displayName
+	fc.items[item.Name] = item
+
+	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !ok || claim.CloudID != "" || len(fc.deletes) != 0 {
+		t.Fatalf("dry-run claim=%#v ok=%t err=%v deletes=%#v", claim, ok, err, fc.deletes)
+	}
+	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(fc.deletes, ",") != item.Name {
+		t.Fatalf("deletes=%#v", fc.deletes)
+	}
+	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || ok {
+		t.Fatalf("claim remained ok=%t err=%v", ok, err)
 	}
 }
 

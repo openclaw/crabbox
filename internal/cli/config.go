@@ -1669,6 +1669,15 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	applySingleProviderTargetDefault(cfg)
 	applyOSImageProviderDefaults(cfg, false)
+	if provider, err := ProviderFor(cfg.Provider); err == nil {
+		if defaulter, ok := provider.(ProviderConfigDefaulter); ok {
+			if err := defaulter.ApplyConfigDefaults(cfg); err != nil {
+				return err
+			}
+			normalizeTargetConfig(cfg)
+			return validateTargetConfig(*cfg)
+		}
+	}
 	if cfg.Provider == "digitalocean" {
 		if cfg.DigitalOcean.Region == "" {
 			cfg.DigitalOcean.Region = "nyc3"
@@ -1879,42 +1888,6 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.SSHPort = "22"
 		}
 		cfg.SSHFallbackPorts = nil
-		normalizeTargetConfig(cfg)
-		return validateTargetConfig(*cfg)
-	}
-	if cfg.Provider == "github-codespaces" {
-		if cfg.GitHubCodespaces.GHPath == "" {
-			cfg.GitHubCodespaces.GHPath = "gh"
-		}
-		if cfg.GitHubCodespaces.Machine == "" {
-			cfg.GitHubCodespaces.Machine = "basicLinux32gb"
-		}
-		if cfg.GitHubCodespaces.IdleTimeout == 0 {
-			cfg.GitHubCodespaces.IdleTimeout = 30 * time.Minute
-		}
-		if cfg.GitHubCodespaces.RetentionPeriod == 0 {
-			cfg.GitHubCodespaces.RetentionPeriod = 7 * 24 * time.Hour
-		}
-		if cfg.GitHubCodespaces.WorkRoot == "" {
-			cfg.GitHubCodespaces.WorkRoot = "/workspaces/crabbox"
-		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		cfg.SSHFallbackPorts = nil
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = cfg.GitHubCodespaces.WorkRoot
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = "22"
-		}
-		if !cfg.ServerTypeExplicit && cfg.GitHubCodespaces.Machine != "" {
-			cfg.ServerType = cfg.GitHubCodespaces.Machine
-		}
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}

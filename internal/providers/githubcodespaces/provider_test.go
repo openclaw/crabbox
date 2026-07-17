@@ -44,6 +44,77 @@ func TestServerTypeForConfigUsesMachineOrExplicitType(t *testing.T) {
 	}
 }
 
+func TestProviderConfigDefaults(t *testing.T) {
+	t.Run("provider defaults", func(t *testing.T) {
+		cfg := core.Config{
+			Provider:         providerName,
+			SSHFallbackPorts: []string{"2222"},
+		}
+		if err := (Provider{}).ApplyConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.GitHubCodespaces.GHPath != defaultGHPath ||
+			cfg.GitHubCodespaces.Machine != defaultCodespaceMachine ||
+			cfg.GitHubCodespaces.IdleTimeout != 30*time.Minute ||
+			cfg.GitHubCodespaces.RetentionPeriod != 7*24*time.Hour ||
+			cfg.GitHubCodespaces.WorkRoot != defaultWorkRoot {
+			t.Fatalf("provider defaults not applied: %#v", cfg.GitHubCodespaces)
+		}
+		if cfg.TargetOS != targetLinux || cfg.WorkRoot != defaultWorkRoot || cfg.SSHPort != defaultSSHPort || cfg.ServerType != defaultCodespaceMachine || cfg.SSHFallbackPorts != nil {
+			t.Fatalf("generic defaults not applied: %#v", cfg)
+		}
+	})
+
+	t.Run("explicit generic values", func(t *testing.T) {
+		cfg := core.Config{
+			Provider:           providerName,
+			TargetOS:           targetLinux,
+			WorkRoot:           "/workspaces/explicit",
+			SSHPort:            "2222",
+			ServerType:         "custom-machine",
+			ServerTypeExplicit: true,
+			GitHubCodespaces: core.GitHubCodespacesConfig{
+				GHPath:          "/opt/gh",
+				Machine:         "premiumLinux",
+				IdleTimeout:     time.Hour,
+				RetentionPeriod: 48 * time.Hour,
+				WorkRoot:        "/workspaces/provider",
+			},
+		}
+		core.MarkTargetExplicit(&cfg)
+		core.MarkWorkRootExplicit(&cfg)
+		core.MarkSSHPortExplicit(&cfg)
+		if err := (Provider{}).ApplyConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.WorkRoot != "/workspaces/explicit" || cfg.SSHPort != "2222" || cfg.ServerType != "custom-machine" || cfg.GitHubCodespaces.Machine != "custom-machine" || cfg.SSHFallbackPorts != nil {
+			t.Fatalf("explicit generic values not preserved: %#v", cfg)
+		}
+	})
+}
+
+func TestProviderClaimScope(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		apiURL string
+		want   string
+	}{
+		{name: "blank default endpoint", want: "repo:example-org/my-app"},
+		{name: "explicit default endpoint", apiURL: " https://API.GITHUB.COM/ ", want: "repo:example-org/my-app"},
+		{name: "enterprise endpoint", apiURL: " https://API.GITHUB.EXAMPLE/api/v3/ ", want: "endpoint:https://api.github.example/api/v3|repo:example-org/my-app"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := core.Config{GitHubCodespaces: core.GitHubCodespacesConfig{
+				APIURL: test.apiURL,
+				Repo:   " Example-Org/My-App ",
+			}}
+			if got := (Provider{}).ClaimScope(cfg); got != test.want {
+				t.Fatalf("ClaimScope=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestApplyFlagsSetsCodespacesConfigAndRejectsClass(t *testing.T) {
 	cfg := core.Config{Provider: providerName, TargetOS: core.TargetLinux}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)

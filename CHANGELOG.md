@@ -6,6 +6,7 @@
 
 - Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
 - Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
+- Added GitHub Codespaces direct Linux SSH leases with token-scope preflight, repository and machine selection, durable pre-create recovery, exact claim-bound ownership, generated OpenSSH configuration, and guarded lifecycle smoke coverage. Thanks @coygeek.
 
 ### Fixed
 
@@ -19,6 +20,7 @@
 - Closed code-server WebSockets whose upstream dial completes after bridge shutdown, preventing orphaned connections and reader goroutines. Thanks @anagnorisis2peripeteia.
 - Stopped failed runs' telemetry samplers promptly so long-lived CLI processes do not retain ticker goroutines or continue probing released leases. Thanks @anagnorisis2peripeteia.
 - Preserved WebVNC reconnect attempt state across consecutive connection failures so retry delays increase instead of repeatedly hammering the coordinator. Thanks @anagnorisis2peripeteia.
+- Prevented repository-local configuration from retaining billable GitHub Codespaces or overriding trusted lifetime and deletion policy. Thanks @coygeek.
 
 ## 0.38.4 - 2026-07-16
 
@@ -94,7 +96,6 @@
 - Added `sync-plan --json` with candidate and dirty-delta sizes, configured guardrail status, deleted-path counts, and ranked file and directory hotspots for automation. Thanks @zozo123.
 - Added a CubeSandbox delegated-run provider with E2B-compatible lifecycle and envd execution, archive sync, CubeProxy routing, exact API-endpoint/sandbox-bound ownership claims, conflict-safe explicit adoption, and guarded cleanup. Thanks @zozo123.
 - Added coordinator-managed Daytona Linux leases with a Worker-held API key, exact ownership cleanup, expiring SSH-token refresh, CLI secret redaction, and production Cloudflare configuration. Thanks @vincentkoc.
-- Added GitHub Codespaces direct Linux SSH leases with token-scope preflight, repository and machine selection, durable pre-create recovery, exact claim-bound ownership, generated OpenSSH configuration, and guarded lifecycle smoke coverage. Thanks @coygeek.
 
 ### Fixed
 
@@ -229,7 +230,6 @@
 - Required exact resource-bound local lease claims before Apple Container, local-container, or Apple VZ stop operations can delete provider resources; legacy unbound claims require explicit `--reclaim` adoption before stop. Thanks @coygeek.
 - Hardened Azure Windows snapshot forks to fail closed through credential rehydration and quarantine cleanup, reuse only writable NIC payloads, reject unknown differential disks, and retry in-use security-group cleanup. Thanks @fcoury-oai.
 - Rolled back brokered Hetzner servers when post-create readiness fails, deleting only lease-owned SSH keys created by the failed attempt after server cleanup succeeds while preserving explicit no-delete retention until a later delete. Thanks @coygeek.
-- Prevented repository-local configuration from retaining billable GitHub Codespaces or overriding trusted lifetime and deletion policy. Thanks @coygeek.
 
 ## 0.34.0 - 2026-07-02
 

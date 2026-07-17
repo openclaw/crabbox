@@ -416,16 +416,6 @@ func TestCubeSandboxProviderClaimScopeBindsAPIEndpoint(t *testing.T) {
 	}
 }
 
-func TestGitHubCodespacesProviderClaimScope(t *testing.T) {
-	cfg := baseConfig()
-	cfg.GitHubCodespaces.APIURL = " https://api.github.example/api/v3/ "
-	cfg.GitHubCodespaces.Repo = " Example-Org/My-App "
-	want := "endpoint:https://api.github.example/api/v3|repo:example-org/my-app"
-	if got := providerClaimScope("github-codespaces", cfg); got != want {
-		t.Fatalf("providerClaimScope(github-codespaces)=%q, want %q", got, want)
-	}
-}
-
 func TestE2BProviderClaimScopeBindsAPIEndpoint(t *testing.T) {
 	cfg := Config{E2B: E2BConfig{APIURL: "HTTPS://API.E2B.APP:443/v1/"}}
 	if got, want := providerClaimScope("e2b", cfg), "endpoint:https://api.e2b.app/v1"; got != want {
@@ -929,6 +919,13 @@ func TestConditionalClaimEndpointActionBuildsResultUnderLock(t *testing.T) {
 	}
 	if !actionCalled || gotServer.CloudID != ready.CloudID || gotTarget.Host != target.Host || updated.Labels["state"] != "ready" || updated.SSHHost != target.Host {
 		t.Fatalf("called=%t server=%#v target=%#v claim=%#v", actionCalled, gotServer, gotTarget, updated)
+	}
+	guarded, _, _, err := updateLeaseClaimEndpointIfUnchangedAction(leaseID, updated, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guarded.LeaseID != updated.LeaseID || guarded.CloudID != updated.CloudID || guarded.SSHHost != updated.SSHHost {
+		t.Fatalf("nil-action claim=%#v want=%#v", guarded, updated)
 	}
 
 	if err := updateLeaseClaimEndpoint(leaseID, Server{Provider: "aws", CloudID: "i-456"}, SSHTarget{}); err != nil {

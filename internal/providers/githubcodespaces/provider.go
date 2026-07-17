@@ -2,6 +2,8 @@ package githubcodespaces
 
 import (
 	"flag"
+	"strings"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -39,6 +41,45 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 
 func (Provider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	return ApplyGitHubCodespacesProviderFlags(cfg, fs, values)
+}
+
+func (Provider) ApplyConfigDefaults(cfg *Config) error {
+	c := &cfg.GitHubCodespaces
+	if strings.TrimSpace(c.GHPath) == "" {
+		c.GHPath = defaultGHPath
+	}
+	if strings.TrimSpace(c.Machine) == "" {
+		c.Machine = defaultCodespaceMachine
+	}
+	if c.IdleTimeout == 0 {
+		c.IdleTimeout = time.Duration(defaultIdleTimeoutMinutes) * time.Minute
+	}
+	if c.RetentionPeriod == 0 {
+		c.RetentionPeriod = time.Duration(defaultRetentionPeriodDays) * 24 * time.Hour
+	}
+	if strings.TrimSpace(c.WorkRoot) == "" {
+		c.WorkRoot = defaultWorkRoot
+	}
+	if !core.IsTargetExplicit(cfg) {
+		cfg.TargetOS = targetLinux
+	}
+	cfg.SSHFallbackPorts = nil
+	if !core.IsWorkRootExplicit(cfg) {
+		cfg.WorkRoot = c.WorkRoot
+	}
+	if !core.IsSSHPortExplicit(cfg) {
+		cfg.SSHPort = defaultSSHPort
+	}
+	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
+		c.Machine = strings.TrimSpace(cfg.ServerType)
+	} else {
+		cfg.ServerType = c.Machine
+	}
+	return ValidateGitHubCodespacesConfig(*cfg)
+}
+
+func (Provider) ClaimScope(cfg Config) string {
+	return githubCodespacesClaimScope(cfg)
 }
 
 func (Provider) ServerTypeForConfig(cfg Config) string {

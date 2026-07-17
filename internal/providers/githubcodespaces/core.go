@@ -104,7 +104,7 @@ func claimLeaseTargetForRepoConfigIfUnchangedDurable(leaseID, slug string, cfg C
 }
 
 func providerClaimScope(cfg Config) string {
-	return core.ProviderClaimScope(providerName, cfg)
+	return Provider{}.ClaimScope(cfg)
 }
 
 func resolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool, error) {

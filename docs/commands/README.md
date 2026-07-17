@@ -45,6 +45,7 @@ same order as the CLI help.
 - [checkpoint](checkpoint.md)
 - [ssh](ssh.md)
 - [connect](connect.md)
+- [open](open.md)
 - [ports](ports.md)
 - [cp](cp.md)
 - [vnc](vnc.md)

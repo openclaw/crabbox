@@ -27,6 +27,15 @@ type resolvedSSHCommandTarget struct {
 }
 
 func (a App) resolveSSHCommandTarget(ctx context.Context, command string, args []string, allowShowSecret bool) (resolvedSSHCommandTarget, error) {
+	return a.resolveSSHCommandTargetWithOptions(ctx, command, args, allowShowSecret, sshCommandResolveOptions{})
+}
+
+type sshCommandResolveOptions struct {
+	registerFlags func(*flag.FlagSet)
+	validateFlags func() error
+}
+
+func (a App) resolveSSHCommandTargetWithOptions(ctx context.Context, command string, args []string, allowShowSecret bool, opts sshCommandResolveOptions) (resolvedSSHCommandTarget, error) {
 	defaults := defaultConfig()
 	fs := newFlagSet(command, a.Stderr)
 	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
@@ -39,8 +48,16 @@ func (a App) resolveSSHCommandTarget(ctx context.Context, command string, args [
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if opts.registerFlags != nil {
+		opts.registerFlags(fs)
+	}
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return resolvedSSHCommandTarget{}, err
+	}
+	if opts.validateFlags != nil {
+		if err := opts.validateFlags(); err != nil {
+			return resolvedSSHCommandTarget{}, err
+		}
 	}
 	idFlagSet := flagWasSet(fs, "id")
 	setIDFromFirstArg(fs, id)
