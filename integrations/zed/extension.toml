@@ -6,7 +6,7 @@ authors = ["Yossi Eliaz <yossi.eliaz@incredibuild.com>", "OpenClaw contributors"
 description = "Control remote sandboxes, VMs, containers, and SSH runners from Zed through the Crabbox CLI."
 repository = "https://github.com/openclaw/crabbox"
 
-snippets = ["./snippets/yaml.json"]
+snippets = ["./snippets/crabbox.json"]
 
 [grammars.crabbox-yaml]
 repository = "https://github.com/tree-sitter-grammars/tree-sitter-yaml"
