@@ -196,6 +196,7 @@ type Config struct {
 	Freestyle                     FreestyleConfig
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
+	Cua                           CuaConfig
 	OpenComputer                  OpenComputerConfig
 	CodeSandbox                   CodeSandboxConfig
 	OpenSandbox                   OpenSandboxConfig
@@ -812,6 +813,28 @@ type TensorlakeConfig struct {
 	DiskMB         int
 	TimeoutSecs    int
 	NoInternet     bool
+}
+
+// CuaConfig configures the delegated CUA provider. API keys are intentionally
+// absent: later bridge code resolves CUA_API_KEY / credential-store auth at
+// runtime and must pass credentials only through environment or SDK stores.
+// APIURL is trusted local input only and is never loaded from repository YAML.
+type CuaConfig struct {
+	APIURL             string
+	Image              string
+	Kind               string
+	Region             string
+	Workdir            string
+	VCPUs              int
+	MemoryMB           int
+	DiskGB             int
+	StartupTimeoutSecs int
+	ExecTimeoutSecs    int
+	BridgeCommand      string
+	SDKPackage         string
+	SDKImport          string
+	SDKFallbackImport  string
+	ForgetMissing      bool
 }
 
 // OpenComputerConfig configures the delegated OpenComputer provider, which
@@ -2967,6 +2990,16 @@ func baseConfig() Config {
 			MemoryMB: 1024,
 			DiskMB:   10240,
 		},
+		Cua: CuaConfig{
+			Image:             "ubuntu:24.04",
+			Kind:              "container",
+			Workdir:           "/workspace/crabbox",
+			ExecTimeoutSecs:   600,
+			BridgeCommand:     "python3",
+			SDKPackage:        "cua",
+			SDKImport:         "cua",
+			SDKFallbackImport: "cua_sandbox",
+		},
 		OpenComputer: OpenComputerConfig{
 			// APIURL is intentionally unset here so the `oc` config file's
 			// api_url is honored before the built-in default; the provider
@@ -3261,6 +3294,7 @@ type fileConfig struct {
 	Freestyle                *fileFreestyleConfig                `yaml:"freestyle,omitempty"`
 	Tenki                    *fileTenkiConfig                    `yaml:"tenki,omitempty"`
 	Tensorlake               *fileTensorlakeConfig               `yaml:"tensorlake,omitempty"`
+	Cua                      *fileCuaConfig                      `yaml:"cua,omitempty"`
 	OpenComputer             *fileOpenComputerConfig             `yaml:"openComputer,omitempty"`
 	CodeSandbox              *fileCodeSandboxConfig              `yaml:"codeSandbox,omitempty"`
 	OpenSandbox              *fileOpenSandboxConfig              `yaml:"openSandbox,omitempty"`
@@ -3978,6 +4012,23 @@ type fileTensorlakeConfig struct {
 	DiskMB         int     `yaml:"diskMB,omitempty"`
 	TimeoutSecs    int     `yaml:"timeoutSecs,omitempty"`
 	NoInternet     *bool   `yaml:"noInternet,omitempty"`
+}
+
+type fileCuaConfig struct {
+	Image              *string `yaml:"image,omitempty"`
+	Kind               *string `yaml:"kind,omitempty"`
+	Region             *string `yaml:"region,omitempty"`
+	Workdir            *string `yaml:"workdir,omitempty"`
+	VCPUs              *int    `yaml:"vcpus,omitempty"`
+	MemoryMB           *int    `yaml:"memoryMB,omitempty"`
+	DiskGB             *int    `yaml:"diskGB,omitempty"`
+	StartupTimeoutSecs *int    `yaml:"startupTimeoutSecs,omitempty"`
+	ExecTimeoutSecs    *int    `yaml:"execTimeoutSecs,omitempty"`
+	BridgeCommand      *string `yaml:"bridgeCommand,omitempty"`
+	SDKPackage         *string `yaml:"sdkPackage,omitempty"`
+	SDKImport          *string `yaml:"sdkImport,omitempty"`
+	SDKFallbackImport  *string `yaml:"sdkFallbackImport,omitempty"`
+	ForgetMissing      *bool   `yaml:"forgetMissing,omitempty"`
 }
 
 type fileOpenComputerConfig struct {
@@ -6623,6 +6674,65 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Tensorlake.NoInternet = *file.Tensorlake.NoInternet
 		}
 	}
+	if file.Cua != nil {
+		if file.Cua.Image != nil {
+			cfg.Cua.Image = *file.Cua.Image
+		}
+		if file.Cua.Kind != nil {
+			cfg.Cua.Kind = *file.Cua.Kind
+		}
+		if file.Cua.Region != nil {
+			cfg.Cua.Region = *file.Cua.Region
+		}
+		if file.Cua.Workdir != nil {
+			cfg.Cua.Workdir = *file.Cua.Workdir
+		}
+		if file.Cua.VCPUs != nil {
+			if *file.Cua.VCPUs < 0 {
+				return exit(2, "cua vcpus must be non-negative")
+			}
+			cfg.Cua.VCPUs = *file.Cua.VCPUs
+		}
+		if file.Cua.MemoryMB != nil {
+			if *file.Cua.MemoryMB < 0 {
+				return exit(2, "cua memoryMB must be non-negative")
+			}
+			cfg.Cua.MemoryMB = *file.Cua.MemoryMB
+		}
+		if file.Cua.DiskGB != nil {
+			if *file.Cua.DiskGB < 0 {
+				return exit(2, "cua diskGB must be non-negative")
+			}
+			cfg.Cua.DiskGB = *file.Cua.DiskGB
+		}
+		if file.Cua.StartupTimeoutSecs != nil {
+			if *file.Cua.StartupTimeoutSecs < 0 {
+				return exit(2, "cua startupTimeoutSecs must be non-negative")
+			}
+			cfg.Cua.StartupTimeoutSecs = *file.Cua.StartupTimeoutSecs
+		}
+		if file.Cua.ExecTimeoutSecs != nil {
+			if *file.Cua.ExecTimeoutSecs < 0 {
+				return exit(2, "cua execTimeoutSecs must be non-negative")
+			}
+			cfg.Cua.ExecTimeoutSecs = *file.Cua.ExecTimeoutSecs
+		}
+		if trusted && file.Cua.BridgeCommand != nil {
+			cfg.Cua.BridgeCommand = *file.Cua.BridgeCommand
+		}
+		if trusted && file.Cua.SDKPackage != nil {
+			cfg.Cua.SDKPackage = *file.Cua.SDKPackage
+		}
+		if trusted && file.Cua.SDKImport != nil {
+			cfg.Cua.SDKImport = *file.Cua.SDKImport
+		}
+		if trusted && file.Cua.SDKFallbackImport != nil {
+			cfg.Cua.SDKFallbackImport = *file.Cua.SDKFallbackImport
+		}
+		if file.Cua.ForgetMissing != nil {
+			cfg.Cua.ForgetMissing = *file.Cua.ForgetMissing
+		}
+	}
 	if file.OpenComputer != nil {
 		if file.OpenComputer.Workdir != "" {
 			cfg.OpenComputer.Workdir = file.OpenComputer.Workdir
@@ -8730,6 +8840,39 @@ func applyEnv(cfg *Config) error {
 	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
 		cfg.Tensorlake.NoInternet = v
 	}
+	var err error
+	cfg.Cua.APIURL = getenv("CRABBOX_CUA_API_URL", getenv("CUA_BASE_URL", cfg.Cua.APIURL))
+	cfg.Cua.Image = getenv("CRABBOX_CUA_IMAGE", cfg.Cua.Image)
+	cfg.Cua.Kind = getenv("CRABBOX_CUA_KIND", cfg.Cua.Kind)
+	cfg.Cua.Region = getenv("CRABBOX_CUA_REGION", cfg.Cua.Region)
+	cfg.Cua.Workdir = getenv("CRABBOX_CUA_WORKDIR", cfg.Cua.Workdir)
+	cfg.Cua.VCPUs, err = getenvNonNegativeInt("CRABBOX_CUA_VCPUS", cfg.Cua.VCPUs)
+	if err != nil {
+		return err
+	}
+	cfg.Cua.MemoryMB, err = getenvNonNegativeInt("CRABBOX_CUA_MEMORY_MB", cfg.Cua.MemoryMB)
+	if err != nil {
+		return err
+	}
+	cfg.Cua.DiskGB, err = getenvNonNegativeInt("CRABBOX_CUA_DISK_GB", cfg.Cua.DiskGB)
+	if err != nil {
+		return err
+	}
+	cfg.Cua.StartupTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CUA_STARTUP_TIMEOUT_SECS", cfg.Cua.StartupTimeoutSecs)
+	if err != nil {
+		return err
+	}
+	cfg.Cua.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CUA_EXEC_TIMEOUT_SECS", cfg.Cua.ExecTimeoutSecs)
+	if err != nil {
+		return err
+	}
+	cfg.Cua.BridgeCommand = getenv("CRABBOX_CUA_BRIDGE_COMMAND", cfg.Cua.BridgeCommand)
+	cfg.Cua.SDKPackage = getenv("CRABBOX_CUA_SDK_PACKAGE", cfg.Cua.SDKPackage)
+	cfg.Cua.SDKImport = getenv("CRABBOX_CUA_SDK_IMPORT", cfg.Cua.SDKImport)
+	cfg.Cua.SDKFallbackImport = getenv("CRABBOX_CUA_SDK_FALLBACK_IMPORT", cfg.Cua.SDKFallbackImport)
+	if v, ok := getenvBool("CRABBOX_CUA_FORGET_MISSING"); ok {
+		cfg.Cua.ForgetMissing = v
+	}
 	cfg.OpenComputer.APIURL = getenv("CRABBOX_OPENCOMPUTER_API_URL", getenv("OPENCOMPUTER_API_URL", cfg.OpenComputer.APIURL))
 	cfg.OpenComputer.Workdir = getenv("CRABBOX_OPENCOMPUTER_WORKDIR", cfg.OpenComputer.Workdir)
 	cfg.OpenComputer.CPU = getenvInt("CRABBOX_OPENCOMPUTER_CPU", cfg.OpenComputer.CPU)
@@ -8739,7 +8882,6 @@ func applyEnv(cfg *Config) error {
 	if v, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
 		cfg.OpenComputer.Burst = v
 	}
-	var err error
 	cfg.CodeSandbox.TemplateID = getenv("CRABBOX_CODESANDBOX_TEMPLATE_ID", cfg.CodeSandbox.TemplateID)
 	cfg.CodeSandbox.Workdir = getenv("CRABBOX_CODESANDBOX_WORKDIR", cfg.CodeSandbox.Workdir)
 	cfg.CodeSandbox.VMTier = getenv("CRABBOX_CODESANDBOX_VM_TIER", cfg.CodeSandbox.VMTier)
