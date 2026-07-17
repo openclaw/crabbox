@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,74 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+const pondMeshWindowsCancelHelperEnv = "CRABBOX_POND_MESH_WINDOWS_CANCEL_HELPER"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(pondMeshWindowsCancelHelperEnv) == "1" {
+		if err := os.WriteFile(os.Getenv("CRABBOX_POND_MESH_WINDOWS_CANCEL_READY"), []byte("ready"), 0o600); err != nil {
+			os.Exit(2)
+		}
+		time.Sleep(10 * time.Minute)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func TestPondMeshCancelRunForwardsReturnsNoErrorOnWindows(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	fakeSSH := filepath.Join(binDir, "ssh.exe")
+	if err := os.WriteFile(fakeSSH, helper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(t.TempDir(), "ready")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(pondMeshWindowsCancelHelperEnv, "1")
+	t.Setenv("CRABBOX_POND_MESH_WINDOWS_CANCEL_READY", ready)
+
+	members := []pondMember{{
+		Name:  "peer-a",
+		Lease: "lease-a",
+		SSH: SSHTarget{
+			User:                   "crab",
+			Host:                   "127.0.0.1",
+			Port:                   "22",
+			DisableHostKeyChecking: true,
+			NoControlMaster:        true,
+		},
+	}}
+	summary := pondMeshSummary{Forwards: []pondMeshForward{{
+		Peer:       "peer-a",
+		RemotePort: 8080,
+		LocalPort:  18080,
+		LeaseID:    "lease-a",
+	}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runPondMeshForwards(ctx, pondConnectOptions{Stdout: io.Discard, Stderr: io.Discard}, members, summary)
+	}()
+
+	waitForPondMeshWindowsFile(t, ready, "fake ssh helper did not start")
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("context cancellation must not be reported as a tunnel failure: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runPondMeshForwards did not return promptly after context cancellation")
+	}
+}
 
 func TestPondMeshForwardStartsSuspendedInJob(t *testing.T) {
 	handle := pondMeshExecRunner{}.Command(context.Background(), "cmd.exe", "/c", "exit", "0")

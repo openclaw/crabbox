@@ -394,7 +394,9 @@ GitHub OAuth start routes remain unauthenticated so a new user can bootstrap log
 The coordinator limits active attempts to ten per caller source and 100 globally for
 both CLI and portal login, after removing expired attempts. Node deployments behind a
 reverse proxy must configure `CRABBOX_TRUSTED_PROXY_CIDRS`; otherwise caller limits use
-the direct peer address and ignore forwarded addresses.
+the direct peer address and ignore forwarded addresses. The Node runtime rejects malformed
+allowlist entries at startup and rate-limits warnings when an untrusted socket peer sends
+`X-Forwarded-For`, which usually means the reverse-proxy allowlist is missing or incomplete.
 
 For any portal that exposes browser Code, configure
 `CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com` and route the

@@ -17,6 +17,7 @@ import {
   AsyncOperationTracker,
   RequestBodyTooLargeError,
   closeServer,
+  createUntrustedForwardingDiagnostic,
   drainAndStop,
   fleetRequestQueue,
   isReadinessRequestMethod,
@@ -29,13 +30,15 @@ import {
   settlesWithin,
   shouldReadUnauthenticatedRequestBody,
   unauthenticatedRequestBodyBytes,
+  validateTrustedProxyCIDRs,
   writeNodeResponseBody,
 } from "./server-support";
 
+const env = nodeCoordinatorEnv(process.env);
+validateTrustedProxyCIDRs(env.CRABBOX_TRUSTED_PROXY_CIDRS);
 const databaseURL = requiredEnv("DATABASE_URL");
 const port = positiveInt(process.env["PORT"], 8080);
 const shutdownTimeoutMs = positiveInt(process.env["CRABBOX_SHUTDOWN_TIMEOUT_MS"], 120_000);
-const env = nodeCoordinatorEnv(process.env);
 const awsDeployment = createAWSDeploymentGuard(env);
 const runtime = new NodeCoordinatorRuntime(databaseURL);
 const coordinator = new FleetCoordinator(runtime, env);
@@ -43,6 +46,7 @@ const lifecycleMutex = new AsyncMutex();
 const activeRequests = new AsyncOperationTracker();
 const publicDirectory = resolve(fileURLToPath(new NodeURL("../public", import.meta.url)));
 let shutdownPromise: Promise<void> | undefined;
+const diagnoseUntrustedForwarding = createUntrustedForwardingDiagnostic();
 
 runtime.setOperationRunner((callback) => lifecycleMutex.run(callback));
 await awsDeployment.start();
@@ -132,7 +136,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       request.destroy();
       return;
     }
-    console.error("coordinator request failed", error);
+    // Provider failures can contain environment-backed credentials; keep only safe context here.
+    console.error("coordinator request failed");
     await writeResponse(response, Response.json({ error: "internal_error" }, { status: 500 }));
   } finally {
     cancellation.dispose();
@@ -164,8 +169,8 @@ async function handleUpgrade(
     if (!context.upgraded) {
       await writeUpgradeResponse(socket, response);
     }
-  } catch (error) {
-    console.error("coordinator websocket upgrade failed", error);
+  } catch {
+    console.error("coordinator websocket upgrade failed");
     if (!context.upgraded) {
       await writeUpgradeResponse(
         socket,
@@ -231,13 +236,12 @@ interface NodeRequestContext {
 function nodeRequestContext(request: IncomingMessage): NodeRequestContext {
   const configuredCIDRs = env.CRABBOX_TRUSTED_PROXY_CIDRS;
   const peerAddress = request.socket.remoteAddress;
+  const forwardedFor = joinedHeader(request.headers["x-forwarded-for"]);
+  const trustedProxy = isTrustedProxySource(peerAddress, configuredCIDRs);
+  diagnoseUntrustedForwarding(peerAddress, forwardedFor, trustedProxy);
   return {
-    sourceIP: requestSourceIP(
-      peerAddress,
-      joinedHeader(request.headers["x-forwarded-for"]),
-      configuredCIDRs,
-    ),
-    trustedProxy: isTrustedProxySource(peerAddress, configuredCIDRs),
+    sourceIP: requestSourceIP(peerAddress, forwardedFor, configuredCIDRs),
+    trustedProxy,
   };
 }
 
