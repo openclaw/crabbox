@@ -19,6 +19,7 @@ assert.match(manifest, /^name = "Crabbox"$/m);
 assert.match(manifest, /^version = "\d+\.\d+\.\d+"$/m);
 assert.match(manifest, /^schema_version = 1$/m);
 assert.match(manifest, /^repository = "https:\/\/github\.com\/openclaw\/crabbox"$/m);
+assert.match(manifest, /^snippets = \["\.\/snippets\/crabbox\.json"\]$/m);
 assert.match(manifest, /^rev = "[0-9a-f]{40}"$/m);
 assert.doesNotMatch(manifest, /context_servers|mcp/i);
 assert.match(read("LICENSE"), /^MIT License$/m);
@@ -60,7 +61,7 @@ for (const expected of [
   assert.ok(labels.has(expected), `missing task: ${expected}`);
 }
 
-const snippets = readJSON("snippets/yaml.json");
+const snippets = readJSON("snippets/crabbox.json");
 assert.ok(snippets["Crabbox project configuration"]);
 assert.ok(snippets["Crabbox job"]);
 
