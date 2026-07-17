@@ -50,7 +50,7 @@ func normalizeTargetConfig(cfg *Config) {
 			cfg.SSHUser = cfg.Static.User
 		}
 	}
-	if isDefaultWorkRoot(cfg.WorkRoot) {
+	if shouldDeriveTargetWorkRoot(cfg) {
 		cfg.WorkRoot = defaultWorkRootForTarget(cfg.TargetOS, cfg.WindowsMode)
 	}
 	if isStaticProvider(cfg.Provider) {
@@ -67,6 +67,21 @@ func normalizeTargetConfig(cfg *Config) {
 	if cfg.Provider == "sealos-devbox" && (IsSealosDevboxWorkRootExplicit(cfg) || (!IsWorkRootExplicit(cfg) && isDefaultWorkRoot(cfg.WorkRoot))) {
 		cfg.WorkRoot = EffectiveSealosDevboxWorkRoot(*cfg)
 	}
+}
+
+func shouldDeriveTargetWorkRoot(cfg *Config) bool {
+	if strings.TrimSpace(cfg.WorkRoot) == "" {
+		return true
+	}
+	if IsWorkRootExplicit(cfg) {
+		return false
+	}
+	// The external provider owns its work root. This also covers persisted
+	// routing state, whose root must survive target normalization verbatim.
+	if (cfg.Provider == "external" || cfg.Provider == "exec-provider") && strings.TrimSpace(cfg.External.WorkRoot) != "" && cfg.WorkRoot == cfg.External.WorkRoot {
+		return false
+	}
+	return isDefaultWorkRoot(cfg.WorkRoot)
 }
 
 func isDefaultWorkRoot(value string) bool {
@@ -148,13 +163,14 @@ func validateProviderTarget(cfg Config) error {
 		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
 	}
 	if machineTarget && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
-		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vm" && provider.Name() != "aws-lambda-microvm" {
-			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-vm, or provider=aws-lambda-microvm")
+		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vm" && provider.Name() != "aws-lambda-microvm" && provider.Name() != "external" {
+			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-vm, provider=aws-lambda-microvm, or provider=external")
 		}
 		if cfg.TargetOS != targetLinux &&
 			!(provider.Name() == "azure" && cfg.TargetOS == targetWindows) &&
-			!(provider.Name() == "tart" && cfg.TargetOS == targetMacOS) {
-			return exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, or provider=tart target=macos only")
+			!(provider.Name() == "tart" && cfg.TargetOS == targetMacOS) &&
+			!(provider.Name() == "external" && (cfg.TargetOS == targetMacOS || cfg.TargetOS == targetWindows)) {
+			return exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, provider=tart target=macos, or provider=external target=macos/windows only")
 		}
 		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
 			return exit(2, "provider=azure target=windows architecture=arm64 supports windows.mode=normal only; windows.mode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support")
@@ -316,13 +332,13 @@ func autoRouteExternalLease(cfg *Config, fs *flag.FlagSet, id string) error {
 		cfg,
 		id,
 		flagWasSet(fs, "external-routing-file"),
-		cfg.targetFlagExplicit,
-		cfg.windowsModeFlagExplicit,
+		IsExternalDesktopTargetExplicit(cfg),
+		IsExternalDesktopWindowsModeExplicit(cfg),
 	)
 }
 
 func autoRouteExternalLeaseForConfig(cfg *Config, id string) error {
-	return autoRouteExternalLeaseWithHints(cfg, id, false, cfg.targetFlagExplicit, cfg.windowsModeFlagExplicit)
+	return autoRouteExternalLeaseWithHints(cfg, id, false, IsExternalDesktopTargetExplicit(cfg), IsExternalDesktopWindowsModeExplicit(cfg))
 }
 
 func routeExternalLeaseClaim(cfg *Config, leaseID string) error {
@@ -394,7 +410,19 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 }
 
 func loadExternalRoutingConfig(cfg *Config, path string, claimBound bool) error {
-	routing, err := LoadExternalRouting(path)
+	return loadExternalRoutingConfigWithDigest(cfg, path, "", claimBound)
+}
+
+func loadExternalRoutingConfigWithDigest(cfg *Config, path, expectedDigest string, claimBound bool) error {
+	var (
+		routing ExternalConfig
+		err     error
+	)
+	if strings.TrimSpace(expectedDigest) == "" {
+		routing, err = LoadExternalRouting(path)
+	} else {
+		routing, err = LoadExternalRoutingWithDigest(path, expectedDigest)
+	}
 	if err != nil {
 		return err
 	}
@@ -404,8 +432,30 @@ func loadExternalRoutingConfig(cfg *Config, path string, claimBound bool) error 
 			cfg.credentialProvenance.externalRouting = credentialSourceTrustedFile
 		}
 	}
+	explicitTargetOS := cfg.TargetOS
+	explicitWindowsMode := cfg.WindowsMode
+	explicitTargetSource := cfg.credentialProvenance.externalDesktopTarget
+	explicitWindowsModeSource := cfg.credentialProvenance.externalDesktopMode
+	targetExplicit := IsExternalDesktopTargetExplicit(cfg)
+	windowsModeExplicit := IsExternalDesktopWindowsModeExplicit(cfg)
+	windowsModeDerivedFromTarget := targetExplicit && normalizeTargetOS(explicitTargetOS) != targetWindows && !windowsModeExplicit
+	PreserveExternalDesktopChildEnvironmentBoundary(cfg)
 	cfg.External = routing
+	cfg.TargetOS, cfg.WindowsMode = ExternalRoutingTarget(routing)
 	MarkExternalRoutingCredentialSources(cfg)
+	MarkExternalRoutingTargetRestored(cfg, !targetExplicit, !windowsModeExplicit && !windowsModeDerivedFromTarget)
+	ApplyExternalDesktopEnvironmentOverrides(cfg)
+	if targetExplicit {
+		cfg.TargetOS = explicitTargetOS
+		cfg.credentialProvenance.externalDesktopTarget = explicitTargetSource
+	}
+	if windowsModeExplicit {
+		cfg.WindowsMode = explicitWindowsMode
+		cfg.credentialProvenance.externalDesktopMode = explicitWindowsModeSource
+	} else if windowsModeDerivedFromTarget {
+		cfg.WindowsMode = windowsModeNormal
+		cfg.credentialProvenance.externalDesktopMode = explicitTargetSource
+	}
 	if strings.TrimSpace(routing.WorkRoot) != "" {
 		cfg.WorkRoot = routing.WorkRoot
 	}
@@ -418,11 +468,14 @@ func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit
 		cfg.WorkRoot = cfg.External.WorkRoot
 	}
 	if !targetExplicit {
-		cfg.TargetOS = targetLinux
+		cfg.TargetOS, _ = ExternalRoutingTarget(cfg.External)
 		cfg.inferredTargetProvider = ""
 	}
 	if !windowsModeExplicit {
 		cfg.WindowsMode = windowsModeNormal
+		if normalizeTargetOS(cfg.TargetOS) == targetWindows {
+			_, cfg.WindowsMode = ExternalRoutingTarget(cfg.External)
+		}
 	}
 	normalizeTargetConfig(cfg)
 	return validateTargetConfig(*cfg)
@@ -535,12 +588,14 @@ func applyResolvedLeaseConfig(cfg *Config, server Server, target *SSHTarget) {
 	} else if cfg.TargetOS != targetWindows {
 		cfg.WindowsMode = ""
 	}
-	if workRoot := strings.TrimSpace(server.Labels["work_root"]); workRoot != "" {
+	workRoot := strings.TrimSpace(server.Labels["work_root"])
+	normalizeTargetConfig(cfg)
+	if workRoot != "" {
 		cfg.WorkRoot = workRoot
 	}
-	normalizeTargetConfig(cfg)
 	target.TargetOS = cfg.TargetOS
 	target.WindowsMode = cfg.WindowsMode
+	ApplyTargetChildEnvironmentBoundary(*cfg, target)
 	if target.User == "" || target.User == configuredSSHUser {
 		target.User = cfg.SSHUser
 	}

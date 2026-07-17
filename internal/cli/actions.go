@@ -213,7 +213,7 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 	if err := clearActionsHydrationState(ctx, target, leaseID); err != nil {
 		return actionsHydrationState{}, err
 	}
-	if inputs, ok, err := githubWorkflowDispatchInputs(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref); err != nil {
+	if inputs, ok, err := githubWorkflowDispatchInputs(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, target.ChildEnvDenylist); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: inspect workflow inputs failed: %v\n", err)
 	} else if ok {
 		filtered, dropped := filterWorkflowInputs(fields, inputs)
@@ -231,12 +231,12 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 	if !workflowFieldsContain(fields, "crabbox_job") {
 		expectedJob = ""
 	}
-	if err := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields); err != nil {
+	if err := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields, target.ChildEnvDenylist); err != nil {
 		if expectedJob != "" && strings.Contains(err.Error(), "Unexpected input") {
 			fields = dropWorkflowField(fields, "crabbox_job")
 			expectedJob = ""
 			fmt.Fprintf(a.Stderr, "warning: retrying workflow dispatch without crabbox_job for compatibility\n")
-			if retryErr := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields); retryErr != nil {
+			if retryErr := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields, target.ChildEnvDenylist); retryErr != nil {
 				return actionsHydrationState{}, retryErr
 			}
 		} else {
@@ -341,7 +341,7 @@ func (a App) actionsDispatch(ctx context.Context, args []string) error {
 		return exit(2, "actions dispatch requires --workflow or actions.workflow")
 	}
 	ref := actionsRef(cfg, repo)
-	if err := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fieldFlags); err != nil {
+	if err := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fieldFlags, externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "dispatched workflow=%s repo=%s ref=%s\n", cfg.Actions.Workflow, ghRepo.Slug(), ref)
@@ -352,7 +352,7 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target
 	if !supportsGitHubActionsRunnerTarget(target) {
 		return exit(2, "actions runner registration currently supports Linux and Windows targets only")
 	}
-	token, err := githubActionsRegistrationToken(ctx, ghRepo)
+	token, err := githubActionsRegistrationToken(ctx, ghRepo, target.ChildEnvDenylist)
 	if err != nil {
 		return err
 	}
@@ -390,6 +390,7 @@ func targetWithConfigDefaults(target SSHTarget, cfg Config) SSHTarget {
 	if target.WindowsMode == "" {
 		target.WindowsMode = cfg.WindowsMode
 	}
+	ApplyTargetChildEnvironmentBoundary(cfg, &target)
 	return target
 }
 
@@ -412,7 +413,7 @@ func shouldSkipBlacksmithActionsHydrate(identifier, provider string) (bool, stri
 	return false, "", nil
 }
 
-func dispatchGitHubActionsWorkflow(ctx context.Context, dir string, repo GitHubRepo, workflow, ref string, fields []string) error {
+func dispatchGitHubActionsWorkflow(ctx context.Context, dir string, repo GitHubRepo, workflow, ref string, fields, childEnvDenylist []string) error {
 	cmdArgs := []string{"workflow", "run", workflow, "--repo", repo.Slug(), "--ref", ref}
 	if err := validateWorkflowInputFields(fields); err != nil {
 		return err
@@ -420,7 +421,7 @@ func dispatchGitHubActionsWorkflow(ctx context.Context, dir string, repo GitHubR
 	for _, field := range fields {
 		cmdArgs = append(cmdArgs, "-f", field)
 	}
-	return runGH(ctx, dir, cmdArgs...)
+	return runGHWithChildEnvironment(ctx, dir, childEnvDenylist, cmdArgs...)
 }
 
 func exitCodeForError(err error, fallback int) int {
@@ -1981,12 +1982,12 @@ func mergeWorkflowInputFields(base, override []string) []string {
 	return fields
 }
 
-func githubWorkflowDispatchInputs(ctx context.Context, dir string, repo GitHubRepo, workflow, ref string) (map[string]bool, bool, error) {
+func githubWorkflowDispatchInputs(ctx context.Context, dir string, repo GitHubRepo, workflow, ref string, childEnvDenylist []string) (map[string]bool, bool, error) {
 	workflow = strings.TrimPrefix(workflow, "/")
 	if !strings.HasPrefix(workflow, ".github/workflows/") {
 		return nil, false, nil
 	}
-	out, err := ghOutput(ctx, dir, "api", "repos/"+repo.Slug()+"/contents/"+workflow+"?ref="+url.QueryEscape(ref), "--jq", ".content")
+	out, err := ghOutputWithChildEnvironment(ctx, dir, childEnvDenylist, "api", "repos/"+repo.Slug()+"/contents/"+workflow+"?ref="+url.QueryEscape(ref), "--jq", ".content")
 	if err != nil {
 		return nil, false, err
 	}
@@ -2752,8 +2753,8 @@ if (Test-Path -LiteralPath $passwordPath) {
 `, psQuote(version), ephemeralArg)
 }
 
-func githubActionsRegistrationToken(ctx context.Context, repo GitHubRepo) (string, error) {
-	out, err := ghOutput(ctx, "", "api", "-X", "POST", "repos/"+repo.Slug()+"/actions/runners/registration-token", "--jq", ".token")
+func githubActionsRegistrationToken(ctx context.Context, repo GitHubRepo, childEnvDenylist []string) (string, error) {
+	out, err := ghOutputWithChildEnvironment(ctx, "", childEnvDenylist, "api", "-X", "POST", "repos/"+repo.Slug()+"/actions/runners/registration-token", "--jq", ".token")
 	if err != nil {
 		if isGitHubRunnerRegistrationPermissionError(err) {
 			return "", exit(3, "GitHub Actions runner registration for %s requires repository write access or fine-grained Self-hosted runners write permission. If this is a Blacksmith Testbox tbx_... id, skip actions hydrate and run with --provider blacksmith-testbox.", repo.Slug())
@@ -2839,8 +2840,11 @@ func sanitizeGitHubRunnerLabel(value string) string {
 	return out
 }
 
-func ghOutput(ctx context.Context, dir string, args ...string) (string, error) {
+func ghOutputWithChildEnvironment(ctx context.Context, dir string, childEnvDenylist []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "gh", args...)
+	if len(childEnvDenylist) > 0 {
+		cmd.Env = childEnvironmentWithout(os.Environ(), childEnvDenylist...)
+	}
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -2851,8 +2855,8 @@ func ghOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	return string(out), nil
 }
 
-func runGH(ctx context.Context, dir string, args ...string) error {
-	_, err := ghOutput(ctx, dir, args...)
+func runGHWithChildEnvironment(ctx context.Context, dir string, childEnvDenylist []string, args ...string) error {
+	_, err := ghOutputWithChildEnvironment(ctx, dir, childEnvDenylist, args...)
 	return err
 }
 

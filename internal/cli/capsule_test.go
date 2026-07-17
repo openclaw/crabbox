@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +17,99 @@ func TestParseActionsRunRefFromURL(t *testing.T) {
 	}
 	if ref.Repo.Slug() != "example-org/my-app" || ref.RunID != "123456" || ref.Attempt != 2 {
 		t.Fatalf("unexpected ref: %#v", ref)
+	}
+}
+
+func TestCapsuleFromActionsStripsConfiguredExternalDesktopSecretFromGitHubCLI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell gh fixture")
+	}
+	for _, name := range []string{
+		"CRABBOX_PROVIDER",
+		"CRABBOX_TARGET",
+		"CRABBOX_TARGET_OS",
+		"CRABBOX_EXTERNAL_COMMAND",
+		"CRABBOX_EXTERNAL_ROUTING_FILE",
+		"CRABBOX_EXTERNAL_DESKTOP_USERNAME",
+		"CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV",
+	} {
+		t.Setenv(name, "")
+	}
+
+	dir := t.TempDir()
+	gh := filepath.Join(dir, "gh")
+	script := `#!/bin/sh
+set -eu
+if [ "${TEST_CAPSULE_DESKTOP_SECRET+x}" = x ]; then echo leaked-desktop-secret >&2; exit 89; fi
+if [ "${GH_TOKEN:-}" != capsule-token ]; then echo missing-gh-token >&2; exit 90; fi
+if [ "${GH_CONFIG_DIR:-}" != capsule-gh-config ]; then echo missing-gh-config >&2; exit 91; fi
+if [ "${GH_HOST:-}" != github.example.test ]; then echo missing-gh-host >&2; exit 92; fi
+if [ "${TEST_CAPSULE_KEEP:-}" != preserved ]; then echo missing-unrelated-env >&2; exit 93; fi
+printf '%s\n' "$*" >> "$TEST_CAPSULE_GH_LOG"
+if [ "$1" = run ] && [ "$2" = view ]; then
+  case " $* " in
+    *" --log-failed "*) printf 'Go\tTest\tpanic: capsule fixture\n' ;;
+    *) printf '%s\n' '{"attempt":1,"conclusion":"failure","headBranch":"main","headSha":"abc123","jobs":[{"conclusion":"failure","name":"Go","status":"completed","steps":[{"conclusion":"failure","name":"Test","number":1,"status":"completed"}]}],"name":"CI","status":"completed","url":"https://github.com/example-org/my-app/actions/runs/123","workflowName":"CI"}' ;;
+  esac
+elif [ "$1" = api ]; then
+  case "$2" in
+    *'/artifacts?'*) printf '%s\n' '{"total_count":0,"artifacts":[]}' ;;
+    *) printf '%s\n' '{"path":".github/workflows/ci.yml"}' ;;
+  esac
+else
+  echo "unexpected gh args: $*" >&2
+  exit 94
+fi
+`
+	if err := os.WriteFile(gh, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := `provider: external
+target: macos
+external:
+  connection:
+    desktop:
+      username: screen-user
+      passwordEnv: TEST_CAPSULE_DESKTOP_SECRET
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "gh.log")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("TEST_CAPSULE_DESKTOP_SECRET", "must-not-reach-gh")
+	t.Setenv("GH_TOKEN", "capsule-token")
+	t.Setenv("GH_CONFIG_DIR", "capsule-gh-config")
+	t.Setenv("GH_HOST", "github.example.test")
+	t.Setenv("TEST_CAPSULE_KEEP", "preserved")
+	t.Setenv("TEST_CAPSULE_GH_LOG", logPath)
+
+	outputDir := filepath.Join(t.TempDir(), "capsule")
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	err := app.Run(context.Background(), []string{
+		"capsule", "from-actions",
+		"https://github.com/example-org/my-app/actions/runs/123",
+		"--replay", "go test ./...",
+		"--output", outputDir,
+	})
+	if err != nil {
+		t.Fatalf("capsule from-actions failed: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, capsuleManifestFileName)); err != nil {
+		t.Fatalf("capsule manifest: %v", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	for _, want := range []string{"--json", "api repos/example-org/my-app/actions/runs/123\n", "/artifacts?", "--log-failed"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("gh log missing %q:\n%s", want, log)
+		}
 	}
 }
 

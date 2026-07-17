@@ -204,6 +204,7 @@ func (a App) desktopCommandTarget(ctx context.Context, name string, args []strin
 	fs := newFlagSet(name, a.Stderr)
 	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
+	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if strings.HasSuffix(name, "click") {
@@ -235,6 +236,9 @@ func (a App) desktopCommandTarget(ctx context.Context, name string, args []strin
 	if err != nil {
 		return SSHTarget{}, Config{}, "", err
 	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
+		return SSHTarget{}, Config{}, "", err
+	}
 	if isBlacksmithProvider(cfg.Provider) {
 		return SSHTarget{}, Config{}, "", exit(2, "desktop helpers are not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
 	}
@@ -260,6 +264,7 @@ func desktopKeySequenceArg(args []string) (string, error) {
 	fs := newFlagSet("desktop key", io.Discard)
 	fs.String("provider", defaults.Provider, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
+	registerProviderFlags(fs, defaults)
 	registerTargetFlags(fs, defaults)
 	registerNetworkModeFlag(fs, defaults)
 	keys := fs.String("keys", "", "xdotool key sequence")

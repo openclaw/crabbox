@@ -12,8 +12,10 @@ and served by the host-side macOS WebVNC bridge (`crabbox webvnc --provider tart
   `worker/scripts/vendor-novnc.mjs`). It is upstream-minified, not authored here.
 - **`LICENSE.txt`** — noVNC's MPL-2.0 license, copied alongside the bundle.
 The host-side bridge builds a mode-0600 temporary HTML viewer around `rfb.js`
-for each session. The file contains only the ephemeral bridge token; the guest
-account password is fetched from the loopback bridge and kept in browser memory.
+for each session. The file contains only the ephemeral bridge token. Legacy VNC
+viewers fetch their password from the token-protected loopback bridge; macOS ARD
+authentication stays server-side and exposes no credential endpoint to the
+browser.
 
 ## Updating
 

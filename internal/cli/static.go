@@ -33,15 +33,18 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 		cfg.TargetOS = *values.Target
 		cfg.targetExplicit = true
 		cfg.targetFlagExplicit = true
+		cfg.credentialProvenance.externalDesktopTarget = credentialSourceFlag
 		if normalizeTargetOS(cfg.TargetOS) != targetWindows && !flagWasSet(fs, "windows-mode") {
 			cfg.WindowsMode = windowsModeNormal
 			cfg.explicitWindowsMode = ""
+			cfg.credentialProvenance.externalDesktopMode = credentialSourceFlag
 		}
 	}
 	if flagWasSet(fs, "windows-mode") {
 		cfg.WindowsMode = *values.WindowsMode
 		cfg.explicitWindowsMode = *values.WindowsMode
 		cfg.windowsModeFlagExplicit = true
+		cfg.credentialProvenance.externalDesktopMode = credentialSourceFlag
 	}
 	if flagWasSet(fs, "static-host") {
 		cfg.Static.Host = *values.StaticHost

@@ -31,6 +31,10 @@ func controllerVerifyDaemonOwnedListener(port string, supervisorPID int) error {
 	return nil
 }
 
+func controllerVerifyDaemonOwnedListenerWithEnvironment(port string, supervisorPID int, _ []string) error {
+	return controllerVerifyDaemonOwnedListener(port, supervisorPID)
+}
+
 func localWebVNCListenerIdentity(port string) (localWebVNCSourceIdentity, error) {
 	owners, err := controllerLinuxLoopbackListenerOwnerPIDs(port)
 	if err != nil {

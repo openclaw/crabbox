@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,18 +21,24 @@ import (
 )
 
 type execControllerRunnerOptions struct {
-	Binary    string
-	Config    string
-	Provider  string
-	WorkDir   string
-	StateFile string
-	AdapterID string
+	Binary                      string
+	Config                      string
+	Provider                    string
+	TargetOS                    string
+	ExternalDesktopPasswordEnv  string
+	ExternalDesktopPasswordEnvs []string
+	ResolveCredentialBoundary   bool
+	WorkDir                     string
+	StateFile                   string
+	AdapterID                   string
 }
 
 type execControllerWorkspaceRunner struct {
-	opts      execControllerRunnerOptions
-	stateMu   sync.RWMutex
-	stateFile string
+	opts               execControllerRunnerOptions
+	stateMu            sync.RWMutex
+	stateFile          string
+	credentialMu       sync.Mutex
+	credentialEnvNames map[string]string
 }
 
 const controllerChildIdentityVersion = 1
@@ -41,6 +48,182 @@ const controllerChildWaitDelay = 250 * time.Millisecond
 const controllerDesktopRollbackTimeout = 10 * time.Second
 
 const controllerProcessTreeOwnedEnv = "CRABBOX_CONTROLLER_PROCESS_TREE_OWNED"
+
+func loadControllerRunnerConfigState(configPath, provider, workDir string) (Config, error) {
+	cfg := baseConfig()
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		var err error
+		workDir, err = os.Getwd()
+		if err != nil {
+			return Config{}, err
+		}
+	}
+	workDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return Config{}, err
+	}
+	repositoryRoot := controllerWorkDirRepositoryRoot(workDir)
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		configPath = strings.TrimSpace(os.Getenv("CRABBOX_CONFIG"))
+	}
+	type configInput struct {
+		path  string
+		trust configPathTrust
+	}
+	inputs := []configInput{}
+	if configPath != "" {
+		if !filepath.IsAbs(configPath) {
+			configPath = filepath.Join(workDir, configPath)
+		}
+		configPath = filepath.Clean(configPath)
+		trust := configPathTrust{trusted: sameConfigPath(configPath, userConfigPath()) || !configPathWithinRoot(configPath, repositoryRoot), repositoryRoot: repositoryRoot}
+		inputs = append(inputs, configInput{path: configPath, trust: trust})
+	} else {
+		if path := userConfigPath(); path != "" {
+			inputs = append(inputs, configInput{path: path, trust: configPathTrust{trusted: true}})
+		}
+		for _, name := range []string{"crabbox.yaml", ".crabbox.yaml"} {
+			path := filepath.Join(workDir, name)
+			if _, statErr := os.Stat(path); statErr == nil {
+				inputs = append(inputs, configInput{path: path, trust: configPathTrust{repositoryRoot: repositoryRoot}})
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return Config{}, statErr
+			}
+		}
+	}
+	for _, input := range inputs {
+		freestyleAPIURL := cfg.Freestyle.APIURL
+		if err := applyConfigFile(&cfg, input.path, input.trust); err != nil {
+			return Config{}, err
+		}
+		if !input.trust.trusted {
+			cfg.Freestyle.APIURL = freestyleAPIURL
+		}
+	}
+	if err := applyEnv(&cfg); err != nil {
+		return Config{}, err
+	}
+	applyCloudflareDynamicWorkersRepositoryCaps(&cfg)
+	if provider = strings.TrimSpace(provider); provider != "" {
+		cfg.Provider = provider
+		cfg.brokerProvider = ""
+	}
+	if err := normalizeBrokerConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+	canonicalizeConfigProvider(&cfg)
+	if err := routeConfiguredProvider(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func validateControllerRunnerConfig(cfg Config) (Config, error) {
+	normalizeTargetConfig(&cfg)
+	if err := validateTargetConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateNetworkConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := ValidateProviderCredentialDestination(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateProviderConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func loadControllerRunnerConfig(configPath, provider, workDir string) (Config, error) {
+	cfg, err := loadControllerRunnerConfigState(configPath, provider, workDir)
+	if err != nil {
+		return Config{}, err
+	}
+	return validateControllerRunnerConfig(cfg)
+}
+
+type controllerExternalRoutingConfig struct {
+	Config                     Config
+	CurrentDesktopPasswordEnv  string
+	CurrentDesktopPasswordEnvs []string
+	CurrentTargetOS            string
+}
+
+func (r *execControllerWorkspaceRunner) resolvedExternalRoutingConfig(path, provider, expectedDigest string) (controllerExternalRoutingConfig, error) {
+	cfg, err := loadControllerRunnerConfigState(r.opts.Config, provider, r.opts.WorkDir)
+	if err != nil {
+		return controllerExternalRoutingConfig{}, err
+	}
+	resolved := controllerExternalRoutingConfig{
+		CurrentDesktopPasswordEnv:  strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv),
+		CurrentDesktopPasswordEnvs: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
+		CurrentTargetOS:            normalizeTargetOS(cfg.TargetOS),
+	}
+	if err := loadExternalRoutingConfigWithDigest(&cfg, path, expectedDigest, true); err != nil {
+		return controllerExternalRoutingConfig{}, err
+	}
+	cfg, err = validateControllerRunnerConfig(cfg)
+	if err != nil {
+		return controllerExternalRoutingConfig{}, err
+	}
+	resolved.Config = cfg
+	return resolved, nil
+}
+
+type controllerRunnerCredentialBoundaryConfig struct {
+	CurrentDesktopPasswordEnv string
+	DesktopPasswordEnvs       []string
+	Provider                  string
+	TargetOS                  string
+}
+
+func controllerRunnerCredentialBoundary(configPath, provider, workDir string) (controllerRunnerCredentialBoundaryConfig, error) {
+	cfg, err := loadControllerRunnerConfig(configPath, provider, workDir)
+	if err != nil {
+		return controllerRunnerCredentialBoundaryConfig{}, err
+	}
+	result := controllerRunnerCredentialBoundaryConfig{
+		DesktopPasswordEnvs: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
+		TargetOS:            normalizeTargetOS(cfg.TargetOS),
+	}
+	providerName := normalizeProviderName(cfg.Provider)
+	if registered, providerErr := ProviderFor(cfg.Provider); providerErr == nil {
+		providerName = registered.Name()
+	}
+	result.Provider = providerName
+	if providerName != "external" && providerName != "exec-provider" {
+		return result, nil
+	}
+	passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
+	if err := ValidateExternalDesktopPasswordEnvironmentName(passwordEnv); err != nil {
+		return controllerRunnerCredentialBoundaryConfig{}, err
+	}
+	result.CurrentDesktopPasswordEnv = passwordEnv
+	return result, nil
+}
+
+func controllerWorkDirRepositoryRoot(workDir string) string {
+	cmd := exec.Command("git", "-C", workDir, "rev-parse", "--show-toplevel")
+	cmd.Env = repositoryGitEnvironment()
+	out, err := cmd.Output()
+	if err != nil {
+		return workDir
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return workDir
+	}
+	if absolute, err := filepath.Abs(root); err == nil {
+		return absolute
+	}
+	return workDir
+}
 
 type controllerChildIdentity struct {
 	Version        int    `json:"version"`
@@ -278,7 +461,14 @@ func (r *execControllerWorkspaceRunner) DesktopConnection(ctx context.Context, i
 		live = false
 	}
 	if !live {
-		startArgs := r.appendProviderArg([]string{"webvnc", "daemon", "start", "--id", identifier}, request)
+		startArgs, err := r.appendPersistedProviderRoutingArgs([]string{"webvnc", "daemon", "start", "--id", identifier}, request)
+		if err != nil {
+			return "", err
+		}
+		startArgs, err = r.pinExternalDesktopCredentialOwnerArgs(startArgs, request)
+		if err != nil {
+			return "", err
+		}
 		startArgs = append(startArgs, "--controller-owned=true", "--controller-owner-id", ownerID)
 		startArgs = append(startArgs, expectedIdentityArgs...)
 		var startOutput controllerLimitedBuffer
@@ -537,17 +727,80 @@ func (r *execControllerWorkspaceRunner) appendPersistedProviderRoutingArgs(args 
 	if err != nil {
 		return nil, fmt.Errorf("resolve persisted external controller routing: %w", err)
 	}
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
+	routing, err := LoadExternalRouting(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			// Acquire persists routing only after its raw identity callback and
 			// lease validation. Before that point the persisted provider scope is
 			// still the exact routing guard, so inventory must remain available for
 			// late-create recovery instead of requiring a file that cannot exist yet.
 			return args, nil
 		}
-		return nil, fmt.Errorf("inspect persisted external controller routing: %w", err)
+		return nil, fmt.Errorf("load persisted external controller routing: %w", err)
 	}
-	return append(args, "--external-routing-file", path), nil
+	return append(
+		args,
+		"--external-routing-file", path,
+		"--external-routing-digest", ExternalRoutingDigest(routing),
+	), nil
+}
+
+func (r *execControllerWorkspaceRunner) pinExternalDesktopCredentialOwnerArgs(args []string, request controllerWorkspaceRequest) ([]string, error) {
+	provider := firstNonBlank(webVNCDaemonStringArg(args, "provider"), request.ProviderRoute, r.opts.Provider)
+	if strings.TrimSpace(provider) == "" && r.opts.ResolveCredentialBoundary {
+		boundary, err := controllerRunnerCredentialBoundary(r.opts.Config, "", r.opts.WorkDir)
+		if err != nil {
+			return nil, err
+		}
+		provider = boundary.Provider
+	}
+	if registered, err := ProviderFor(provider); err == nil {
+		provider = registered.Name()
+	} else {
+		provider = normalizeProviderName(provider)
+	}
+	if provider != "external" && provider != "exec-provider" {
+		return args, nil
+	}
+	routingPath := webVNCDaemonStringArg(args, "external-routing-file")
+	if routingPath == "" {
+		leaseID := firstNonBlank(request.ProviderLeaseID, request.ProviderAttemptLeaseID)
+		if leaseID == "" {
+			return nil, fmt.Errorf("external macOS WebVNC credential owner requires persisted routing")
+		}
+		var err error
+		routingPath, err = ExternalRoutingPath(leaseID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	resolved, err := r.resolvedExternalRoutingConfig(
+		routingPath,
+		provider,
+		webVNCDaemonStringArg(args, "external-routing-digest"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load external WebVNC credential route: %w", err)
+	}
+	targetOS := normalizeTargetOS(resolved.Config.TargetOS)
+	windowsMode := normalizeWindowsMode(resolved.Config.WindowsMode)
+	if targetOS == "" {
+		return nil, fmt.Errorf("external WebVNC credential route has no target")
+	}
+	passwordEnv := strings.TrimSpace(resolved.Config.External.Connection.Desktop.PasswordEnv)
+	username := strings.TrimSpace(resolved.Config.External.Connection.Desktop.Username)
+	if err := ValidateExternalDesktopPasswordEnvironmentName(passwordEnv); err != nil {
+		return nil, err
+	}
+	args = append(args, "--target", targetOS)
+	if targetOS == targetWindows && windowsMode != "" {
+		args = append(args, "--windows-mode", windowsMode)
+	}
+	args = append(args,
+		"--external-desktop-password-env", passwordEnv,
+		"--external-desktop-username", username,
+	)
+	return args, nil
 }
 
 func (r *execControllerWorkspaceRunner) workspaceAbsent(ctx context.Context, identifier string, request controllerWorkspaceRequest) (bool, error) {
@@ -776,8 +1029,18 @@ func (r *execControllerWorkspaceRunner) runWithStarted(ctx context.Context, requ
 }
 
 func (r *execControllerWorkspaceRunner) runWithStartedEnv(ctx context.Context, request controllerWorkspaceRequest, args []string, stdout io.Writer, onStarted func() error, extraEnv map[string]string) error {
+	policy, err := r.childCredentialPolicy(request, args)
+	if err != nil {
+		return fmt.Errorf("resolve crabbox %s child credential boundary: %w", args[0], err)
+	}
+	if policy.ownerName != "" {
+		if onStarted != nil {
+			return fmt.Errorf("credential-owning crabbox %s child cannot use a tracked launch callback", args[0])
+		}
+		return r.runWithStartedUntrackedEnvPolicy(ctx, request, args, stdout, nil, extraEnv, policy)
+	}
 	if strings.TrimSpace(r.controllerStatePath()) == "" {
-		return r.runWithStartedUntrackedEnv(ctx, request, args, stdout, onStarted, extraEnv)
+		return r.runWithStartedUntrackedEnvPolicy(ctx, request, args, stdout, onStarted, extraEnv, policy)
 	}
 	nonce, err := newWebVNCDaemonNonce()
 	if err != nil {
@@ -803,7 +1066,7 @@ func (r *execControllerWorkspaceRunner) runWithStartedEnv(ctx context.Context, r
 	cmd.Stdin = gateReader
 	cmd.Stdout = stdout
 	cmd.Stderr = io.Discard
-	cmd.Env = controllerChildEnvWithOverrides(os.Environ(), r.opts.Config, request, r.adapterChildEnv(extraEnv))
+	cmd.Env = r.childEnvironmentWithPolicy(os.Environ(), request, r.adapterChildEnv(extraEnv), policy)
 	cmd.WaitDelay = controllerChildWaitDelay
 	if err := cmd.Start(); err != nil {
 		_ = gateReader.Close()
@@ -872,7 +1135,30 @@ func (r *execControllerWorkspaceRunner) runWithStartedUntracked(ctx context.Cont
 }
 
 func (r *execControllerWorkspaceRunner) runWithStartedUntrackedEnv(ctx context.Context, request controllerWorkspaceRequest, args []string, stdout io.Writer, onStarted func() error, extraEnv map[string]string) error {
-	cmd := exec.CommandContext(ctx, r.opts.Binary, args...)
+	policy, err := r.childCredentialPolicy(request, args)
+	if err != nil {
+		return fmt.Errorf("resolve crabbox %s child credential boundary: %w", args[0], err)
+	}
+	return r.runWithStartedUntrackedEnvPolicy(ctx, request, args, stdout, onStarted, extraEnv, policy)
+}
+
+func (r *execControllerWorkspaceRunner) runWithStartedUntrackedEnvPolicy(ctx context.Context, request controllerWorkspaceRequest, args []string, stdout io.Writer, onStarted func() error, extraEnv map[string]string, policy controllerChildCredentialPolicy) error {
+	childArgs := append([]string(nil), args...)
+	credential := ""
+	if policy.ownerName != "" {
+		environment := controllerChildEnvWithOverrides(os.Environ(), r.opts.Config, request, r.adapterChildEnv(extraEnv))
+		var present bool
+		credential, present = childEnvironmentValue(environment, policy.ownerName)
+		if !present || strings.TrimSpace(credential) == "" {
+			return fmt.Errorf("credential-owning crabbox %s child requires %s", args[0], policy.ownerName)
+		}
+		if len(credential) > webVNCDaemonCredentialMaxBytes {
+			return fmt.Errorf("credential-owning crabbox %s child value exceeds %d bytes", args[0], webVNCDaemonCredentialMaxBytes)
+		}
+		flag := "--" + webVNCDaemonCredentialStdinFlag
+		childArgs = append(childArgs[:3], append([]string{flag}, childArgs[3:]...)...)
+	}
+	cmd := exec.CommandContext(ctx, r.opts.Binary, childArgs...)
 	configureControllerCommand(cmd)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -881,10 +1167,12 @@ func (r *execControllerWorkspaceRunner) runWithStartedUntrackedEnv(ctx context.C
 		return stopDaemonProcess(cmd.Process, cmd.Process.Pid)
 	}
 	cmd.Dir = r.opts.WorkDir
-	cmd.Stdin = nil
+	if policy.ownerName != "" {
+		cmd.Stdin = strings.NewReader(credential)
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = io.Discard
-	cmd.Env = controllerChildEnvWithOverrides(os.Environ(), r.opts.Config, request, r.adapterChildEnv(extraEnv))
+	cmd.Env = r.childEnvironmentWithPolicy(os.Environ(), request, r.adapterChildEnv(extraEnv), policy)
 	cmd.WaitDelay = controllerChildWaitDelay
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start crabbox %s: %w", args[0], err)
@@ -1050,22 +1338,23 @@ func (r *execControllerWorkspaceRunner) RecoverControllerChildren(ctx context.Co
 }
 
 func terminateControllerProcessGroup(processGroupID int) error {
-	if err := stopControllerProcessGroup(processGroupID); err != nil {
-		// Darwin can report EPERM after the group leader was reaped even when no
-		// non-zombie member remains. Verify the group before retaining the
-		// durable child handle.
-		if !controllerProcessGroupAlive(processGroupID) {
-			return nil
-		}
-		return err
+	stopErr := stopControllerProcessGroup(processGroupID)
+	if processGroupID <= 0 {
+		return stopErr
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for controllerProcessGroupAlive(processGroupID) {
+	return waitForControllerProcessGroupExit(processGroupID, stopErr, controllerProcessGroupAlive, time.Now().Add(5*time.Second))
+}
+
+func waitForControllerProcessGroupExit(processGroupID int, stopErr error, alive func(int) bool, deadline time.Time) error {
+	for alive(processGroupID) {
 		if time.Now().After(deadline) {
-			return fmt.Errorf("controller process group %d survived termination", processGroupID)
+			return errors.Join(stopErr, fmt.Errorf("controller process group %d survived termination", processGroupID))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	// Darwin can report EPERM after the group leader was reaped while a
+	// signaled descendant is still transitioning to a zombie. The durable
+	// child handle is safe to remove once no live member remains.
 	return nil
 }
 
@@ -1275,6 +1564,241 @@ func controllerChildEnvWithOverrides(base []string, config string, request contr
 		out = append(out, name+"="+value)
 	}
 	return out
+}
+
+type controllerChildCredentialPolicy struct {
+	denied    []string
+	ownerName string
+}
+
+func (r *execControllerWorkspaceRunner) childEnvironment(base []string, request controllerWorkspaceRequest, args []string, overrides map[string]string) ([]string, error) {
+	policy, err := r.childCredentialPolicy(request, args)
+	if err != nil {
+		return nil, err
+	}
+	return r.childEnvironmentWithPolicy(base, request, overrides, policy), nil
+}
+
+func (r *execControllerWorkspaceRunner) childEnvironmentWithPolicy(base []string, request controllerWorkspaceRequest, overrides map[string]string, policy controllerChildCredentialPolicy) []string {
+	environment := controllerChildEnvWithOverrides(base, r.opts.Config, request, overrides)
+	if len(policy.denied) > 0 {
+		environment = childEnvironmentWithout(environment, policy.denied...)
+	}
+	return environment
+}
+
+func (r *execControllerWorkspaceRunner) childCredentialPolicy(request controllerWorkspaceRequest, args []string) (controllerChildCredentialPolicy, error) {
+	policy := controllerChildCredentialPolicy{}
+	seen := map[string]struct{}{}
+	rememberDenied := func(name string) {
+		key := strings.ToUpper(name)
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			policy.denied = append(policy.denied, name)
+			r.rememberCredentialEnvironmentNames([]string{name})
+		}
+	}
+	addDenied := func(name string) error {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil
+		}
+		if err := ValidateExternalDesktopPasswordEnvironmentName(name); err != nil {
+			return err
+		}
+		rememberDenied(name)
+		return nil
+	}
+	addPersistedDenied := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if err := ValidateExternalDesktopPasswordEnvironmentName(name); err != nil {
+			return
+		}
+		rememberDenied(name)
+	}
+	for _, name := range r.opts.ExternalDesktopPasswordEnvs {
+		if err := addDenied(name); err != nil {
+			return policy, err
+		}
+	}
+	currentName := strings.TrimSpace(r.opts.ExternalDesktopPasswordEnv)
+	currentTarget := normalizeTargetOS(r.opts.TargetOS)
+	effectiveProvider := firstNonBlank(webVNCDaemonStringArg(args, "provider"), request.ProviderRoute, r.opts.Provider)
+	var boundary *controllerRunnerCredentialBoundaryConfig
+	if strings.TrimSpace(effectiveProvider) == "" && r.opts.ResolveCredentialBoundary {
+		resolved, resolveErr := controllerRunnerCredentialBoundary(r.opts.Config, "", r.opts.WorkDir)
+		if resolveErr != nil {
+			return policy, resolveErr
+		}
+		boundary = &resolved
+		effectiveProvider = resolved.Provider
+	}
+	provider := effectiveProvider
+	if registered, providerErr := ProviderFor(provider); providerErr == nil {
+		provider = registered.Name()
+	} else {
+		provider = normalizeProviderName(provider)
+	}
+	var routingPath string
+	var routed *controllerExternalRoutingConfig
+	if provider == "external" || provider == "exec-provider" {
+		routingPath = webVNCDaemonStringArg(args, "external-routing-file")
+	}
+	if (provider == "external" || provider == "exec-provider") && routingPath == "" {
+		leaseID := firstNonBlank(request.ProviderLeaseID, request.ProviderAttemptLeaseID)
+		if leaseID != "" {
+			var err error
+			routingPath, err = ExternalRoutingPath(leaseID)
+			if err != nil {
+				return policy, err
+			}
+			if _, statErr := os.Stat(routingPath); errors.Is(statErr, os.ErrNotExist) {
+				routingPath = ""
+			} else if statErr != nil {
+				return policy, fmt.Errorf("inspect external child credential route: %w", statErr)
+			}
+		}
+	}
+	if routingPath != "" {
+		resolved, resolveErr := r.resolvedExternalRoutingConfig(
+			routingPath,
+			provider,
+			webVNCDaemonStringArg(args, "external-routing-digest"),
+		)
+		if resolveErr != nil {
+			return policy, fmt.Errorf("load external child credential route: %w", resolveErr)
+		}
+		routed = &resolved
+		if r.opts.ResolveCredentialBoundary {
+			for _, name := range resolved.CurrentDesktopPasswordEnvs {
+				if err := addDenied(name); err != nil {
+					return policy, err
+				}
+			}
+			currentName = resolved.CurrentDesktopPasswordEnv
+			currentTarget = resolved.CurrentTargetOS
+		}
+	} else if r.opts.ResolveCredentialBoundary {
+		if boundary == nil {
+			resolved, resolveErr := controllerRunnerCredentialBoundary(r.opts.Config, effectiveProvider, r.opts.WorkDir)
+			if resolveErr != nil {
+				return policy, resolveErr
+			}
+			boundary = &resolved
+		}
+		for _, name := range boundary.DesktopPasswordEnvs {
+			if err := addDenied(name); err != nil {
+				return policy, err
+			}
+		}
+		currentName = boundary.CurrentDesktopPasswordEnv
+		currentTarget = boundary.TargetOS
+	}
+	if err := addDenied(currentName); err != nil {
+		return policy, err
+	}
+	persisted, err := controllerPersistedExternalDesktopPasswordEnvironments()
+	if err != nil {
+		return policy, err
+	}
+	for _, name := range persisted {
+		addPersistedDenied(name)
+	}
+
+	if provider != "external" && provider != "exec-provider" {
+		policy.denied = r.rememberCredentialEnvironmentNames(policy.denied)
+		return policy, nil
+	}
+
+	targetOS := normalizeTargetOS(firstNonBlank(webVNCDaemonStringArg(args, "target"), currentTarget))
+	selectedName := strings.TrimSpace(webVNCDaemonStringArg(args, "external-desktop-password-env"))
+	if routed != nil {
+		routedTarget := normalizeTargetOS(routed.Config.TargetOS)
+		routedName := strings.TrimSpace(routed.Config.External.Connection.Desktop.PasswordEnv)
+		if err := addDenied(routedName); err != nil {
+			return policy, err
+		}
+		if rawTarget := strings.TrimSpace(webVNCDaemonStringArg(args, "target")); rawTarget != "" {
+			if explicit := normalizeTargetOS(rawTarget); explicit != routedTarget {
+				return policy, fmt.Errorf("external child target %s does not match persisted route %s", explicit, routedTarget)
+			}
+		}
+		if webVNCDaemonHasStringArg(args, "external-desktop-password-env") {
+			if explicit := strings.TrimSpace(webVNCDaemonStringArg(args, "external-desktop-password-env")); !strings.EqualFold(explicit, routedName) {
+				return policy, fmt.Errorf("external child desktop password environment does not match persisted route")
+			}
+		}
+		if webVNCDaemonHasStringArg(args, "external-desktop-username") {
+			if explicit := strings.TrimSpace(webVNCDaemonStringArg(args, "external-desktop-username")); explicit != strings.TrimSpace(routed.Config.External.Connection.Desktop.Username) {
+				return policy, fmt.Errorf("external child desktop username does not match persisted route")
+			}
+		}
+		targetOS = routedTarget
+		selectedName = routedName
+	}
+	if selectedName == "" {
+		selectedName = currentName
+	}
+	if err := addDenied(selectedName); err != nil {
+		return policy, err
+	}
+	if len(args) >= 3 && args[0] == "webvnc" && args[1] == "daemon" && args[2] == "start" && targetOS == targetMacOS {
+		policy.ownerName = selectedName
+	}
+	policy.denied = r.rememberCredentialEnvironmentNames(policy.denied)
+	return policy, nil
+}
+
+func (r *execControllerWorkspaceRunner) rememberCredentialEnvironmentNames(names []string) []string {
+	r.credentialMu.Lock()
+	defer r.credentialMu.Unlock()
+	if r.credentialEnvNames == nil {
+		r.credentialEnvNames = map[string]string{}
+	}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			r.credentialEnvNames[strings.ToUpper(name)] = name
+		}
+	}
+	result := make([]string, 0, len(r.credentialEnvNames))
+	for _, name := range r.credentialEnvNames {
+		result = append(result, name)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func controllerPersistedExternalDesktopPasswordEnvironments() ([]string, error) {
+	root, err := externalRoutingConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(root, "crabbox", "external")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read external routing directory: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		routing, err := LoadExternalRouting(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("load persisted external routing %s: %w", entry.Name(), err)
+		}
+		if name := strings.TrimSpace(routing.Connection.Desktop.PasswordEnv); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 func (r *execControllerWorkspaceRunner) adapterChildEnv(overrides map[string]string) map[string]string {

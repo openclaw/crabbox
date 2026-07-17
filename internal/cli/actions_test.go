@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"encoding/base64"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +31,92 @@ func TestParseGitHubRepo(t *testing.T) {
 		if got.Slug() != want {
 			t.Fatalf("parseGitHubRepo(%q)=%q want %q", input, got.Slug(), want)
 		}
+	}
+}
+
+func TestExternalGHChildrenScrubDesktopPasswordAcrossTargets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell gh fixture")
+	}
+	dir := t.TempDir()
+	gh := filepath.Join(dir, "gh")
+	script := `#!/bin/sh
+if [ "${TEST_ARD_PASSWORD+x}" = x ]; then echo leaked >&2; exit 89; fi
+if [ "$GH_TOKEN" != github-token ]; then echo missing-token >&2; exit 90; fi
+if [ "$GH_CONFIG_DIR" != gh-config ]; then echo missing-config >&2; exit 91; fi
+if [ "$CRABBOX_TEST_KEEP" != preserved ]; then echo missing-unrelated >&2; exit 92; fi
+printf '[]'
+`
+	if err := os.WriteFile(gh, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-gh")
+	t.Setenv("GH_TOKEN", "github-token")
+	t.Setenv("GH_CONFIG_DIR", "gh-config")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+
+	for _, target := range []struct {
+		name        string
+		targetOS    string
+		windowsMode string
+	}{
+		{name: "Linux", targetOS: targetLinux},
+		{name: "native Windows", targetOS: targetWindows, windowsMode: windowsModeNormal},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "external"
+			cfg.TargetOS = target.targetOS
+			cfg.WindowsMode = target.windowsMode
+			cfg.External.Connection.Desktop.PasswordEnv = "TEST_ARD_PASSWORD"
+			resolvedTarget := targetWithConfigDefaults(SSHTarget{
+				TargetOS:    target.targetOS,
+				WindowsMode: target.windowsMode,
+			}, cfg)
+			if len(resolvedTarget.ChildEnvDenylist) != 1 || resolvedTarget.ChildEnvDenylist[0] != "TEST_ARD_PASSWORD" {
+				t.Fatalf("child environment denylist=%v", resolvedTarget.ChildEnvDenylist)
+			}
+			out, err := ghOutputWithChildEnvironment(context.Background(), "", resolvedTarget.ChildEnvDenylist, "version")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out != "[]" {
+				t.Fatalf("gh output=%q", out)
+			}
+			if _, err := externalRunnerGitHubRuns(context.Background(), cfg, GitHubRepo{Owner: "example-org", Name: "my-app"}, "hydrate.yml", "main"); err != nil {
+				t.Fatalf("pool gh child: %v", err)
+			}
+		})
+	}
+}
+
+func TestUntrustedExternalPasswordEnvCannotStripGitHubAuth(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell gh fixture")
+	}
+	dir := t.TempDir()
+	gh := filepath.Join(dir, "gh")
+	script := "#!/bin/sh\n[ \"$GH_TOKEN\" = github-token ] || exit 89\nprintf '[]'\n"
+	if err := os.WriteFile(gh, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GH_TOKEN", "github-token")
+
+	cfg := Config{Provider: "external", TargetOS: targetLinux}
+	cfg.External.Connection.Desktop.PasswordEnv = "GH_TOKEN"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceRepository
+	denied := externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)
+	if len(denied) != 0 {
+		t.Fatalf("untrusted desktop environment entered denylist: %v", denied)
+	}
+	out, err := ghOutputWithChildEnvironment(context.Background(), "", denied, "workflow", "run", "ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "[]" {
+		t.Fatalf("gh output=%q", out)
 	}
 }
 

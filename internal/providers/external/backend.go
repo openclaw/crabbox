@@ -585,6 +585,7 @@ func (b *leaseBackend) invokeProtocol(ctx context.Context, request protocolReque
 	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:                   strings.TrimSpace(b.cfg.External.Command),
 		Args:                   append([]string(nil), b.cfg.External.Args...),
+		Env:                    externalAdapterEnv(b.cfg, nil),
 		Stdin:                  &stdin,
 		Stderr:                 b.rt.Stderr,
 		MaxCapturedOutputBytes: externalProviderOutputMaxBytes,
@@ -625,6 +626,28 @@ func (b *leaseBackend) invokeProtocol(ctx context.Context, request protocolReque
 	return response, nil
 }
 
+func externalAdapterEnv(cfg core.Config, env []string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
+	passwordEnvs := core.ExternalDesktopChildEnvironmentDenylist(cfg)
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		blocked := false
+		for _, passwordEnv := range passwordEnvs {
+			if strings.EqualFold(name, passwordEnv) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
 func validateExternalCommandOutputSize(result core.LocalCommandResult) error {
 	for _, output := range []struct {
 		name  string
@@ -648,6 +671,9 @@ type externalClaimScopeData struct {
 	Capabilities *core.ExternalCapabilitiesConfig `json:"capabilities,omitempty"`
 	Lifecycle    *core.ExternalLifecycleConfig    `json:"lifecycle,omitempty"`
 	Connection   *core.ExternalConnectionConfig   `json:"connection,omitempty"`
+	TargetOS     string                           `json:"targetOS,omitempty"`
+	WindowsMode  string                           `json:"windowsMode,omitempty"`
+	Architecture string                           `json:"architecture,omitempty"`
 }
 
 func externalClaimScope(cfg core.Config) string {
@@ -656,14 +682,25 @@ func externalClaimScope(cfg core.Config) string {
 		return scope
 	}
 	data := []byte(strings.TrimSpace(cfg.External.Command) + "\x00" + strings.Join(cfg.External.Args, "\x00"))
+	targetOS, windowsMode, architecture := externalScopeTarget(cfg)
+	if targetOS != "" {
+		data = append(data, []byte("\x00crabbox-target\x00"+targetOS+"\x00"+windowsMode)...)
+	}
+	if architecture != "" {
+		data = append(data, []byte("\x00crabbox-architecture\x00"+architecture)...)
+	}
 	return externalScopeHash(data)
 }
 
 func externalControllerScope(cfg core.Config) (string, error) {
+	targetOS, windowsMode, architecture := externalScopeTarget(cfg)
 	scope := externalClaimScopeData{
-		Command: strings.TrimSpace(cfg.External.Command),
-		Args:    append([]string(nil), cfg.External.Args...),
-		Config:  cfg.External.Config,
+		Command:      strings.TrimSpace(cfg.External.Command),
+		Args:         append([]string(nil), cfg.External.Args...),
+		Config:       cfg.External.Config,
+		TargetOS:     targetOS,
+		WindowsMode:  windowsMode,
+		Architecture: architecture,
 	}
 	if cfg.External.Capabilities.IdempotentLeaseID {
 		capabilities := cfg.External.Capabilities
@@ -671,13 +708,33 @@ func externalControllerScope(cfg core.Config) (string, error) {
 	}
 	if lifecycleConfigured(cfg.External) {
 		scope.Lifecycle = &cfg.External.Lifecycle
-		scope.Connection = &cfg.External.Connection
+		connection := cfg.External.Connection
+		connection.Desktop = core.ExternalDesktopConfig{}
+		scope.Connection = &connection
 	}
 	data, err := json.Marshal(scope)
 	if err != nil {
 		return "", fmt.Errorf("encode external controller provider scope: %w", err)
 	}
 	return externalScopeHash(data), nil
+}
+
+func externalScopeTarget(cfg core.Config) (string, string, string) {
+	core.NormalizeTargetConfig(&cfg)
+	architecture := strings.ToLower(strings.TrimSpace(cfg.Architecture))
+	if normalized, err := core.NormalizeArchitecture(architecture); architecture != "" && err == nil {
+		architecture = normalized
+	}
+	if architecture == core.ArchitectureAMD64 {
+		architecture = ""
+	}
+	if cfg.TargetOS == core.TargetLinux && cfg.WindowsMode == core.WindowsModeNormal {
+		return "", "", architecture
+	}
+	if cfg.TargetOS != core.TargetWindows {
+		return cfg.TargetOS, "", architecture
+	}
+	return cfg.TargetOS, cfg.WindowsMode, architecture
 }
 
 func externalScopeHash(data []byte) string {

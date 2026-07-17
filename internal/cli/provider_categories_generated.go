@@ -21,6 +21,7 @@ var benchmarkProviderCategories = map[string]string{
 	"coder":                      "direct-cloud",
 	"codesandbox":                "delegated-sandbox",
 	"crownest":                   "delegated-sandbox",
+	"cua":                        "service-control",
 	"cubesandbox":                "delegated-sandbox",
 	"daytona":                    "direct-cloud",
 	"digitalocean":               "direct-cloud",

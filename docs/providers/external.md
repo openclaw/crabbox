@@ -41,6 +41,74 @@ the exact command, arguments, `external.config`, and connection inputs.
 Repository config cannot self-enable this contract, and changing the
 output-producing adapter contract invalidates an inherited approval.
 
+External SSH leases can target `linux`, `macos`, or `windows`. Keep `target:
+linux` for ordinary devboxes. Use `target: macos` when the external adapter
+returns an SSH-reachable Mac and you want Crabbox to drive native Screen Sharing
+or the WebVNC portal bridge.
+
+For macOS desktop access, Screen Sharing uses an operator-managed account on the
+host; Crabbox does not provision, generate, or rotate that account's password.
+Keep the password outside the config and store only an environment variable
+reference:
+
+```yaml
+provider: external
+target: macos
+external:
+  command: mac-provider-adapter
+  connection:
+    desktop:
+      passwordEnv: SCREEN_SHARING_PASSWORD
+  workRoot: /Users/developer/crabbox
+```
+
+`connection.desktop.username` is optional; Crabbox falls back to the resolved SSH
+user. `passwordEnv` must be a dedicated environment variable name outside the
+reserved `CRABBOX_*`, `CF_ACCESS_*`, `GIT_*`, `GH_*`, and `GITHUB_*`
+namespaces and must not reuse
+proxy, loader, or process-control variables such as `HTTPS_PROXY`, `LD_PRELOAD`,
+`DYLD_INSERT_LIBRARIES`, `MallocDebugReport`, `GOMEMLIMIT`, `PATH`, or `HOME`.
+The former documented name `CRABBOX_EXTERNAL_DESKTOP_PASSWORD` remains accepted
+for compatibility, but migrate it to a dedicated non-`CRABBOX_*` name.
+Treat the normalized target, Windows mode, desktop username, and password
+environment name as one
+credential-destination contract: define them together in trusted user config or
+select them with explicit flags or environment overrides. Repository config
+cannot redirect an inherited password reference to another target or account.
+
+Inject the secret into the Crabbox process from your normal secret store; do not
+put the password in YAML, argv, routing files, issue trackers, or logs. Crabbox
+reads the value itself and removes that environment variable from external
+adapter, declarative lifecycle, SSH, viewer, coordinator-helper, and local
+inspection child processes. It is also excluded from remote run/cache
+environment forwarding. Ordinary VNC output must not print this
+operator-managed password; WebVNC keeps it server-side. The explicit
+`crabbox vnc --native-handoff` machine-readable handoff contains the credential
+needed by the native client and must be handled as secret material.
+
+The adapter must provision native macOS Screen Sharing on target loopback
+`127.0.0.1:5900`, and the configured username/password must be a valid macOS
+account accepted by Apple Remote Desktop authentication—not only a legacy VNC
+password. Validate the complete route without opening a viewer first:
+
+```sh
+crabbox webvnc --provider external --target macos --id <lease> --preflight
+```
+
+For native Windows SSH hosts, select `target: windows`, keep `windows.mode:
+normal`, and use a drive-absolute dedicated work root such as
+`C:\crabbox`. Windows drive roots, protected system directories, device names,
+short-name aliases, alternate data streams, and ambiguous trailing dots or
+spaces are rejected. For WSL2 hosts, select `windows.mode: wsl2` and use a POSIX
+work root inside the distribution instead.
+
+Windows target support supplies routing, shell/path semantics, SSH execution,
+and lifecycle handling. Crabbox does not provision a desktop or VNC server on
+an External Windows host. External is statically classified as desktop-capable;
+there is no per-adapter desktop capability negotiation. A Windows adapter must
+separately provide a Crabbox-compatible loopback VNC service and managed
+credential file; otherwise use the target for SSH/run workflows only.
+
 `external.config` is arbitrary YAML passed as JSON to the executable. Keep
 secrets in the executable's normal credential store or environment rather than
 the Crabbox config file. Generated SSH, retry, and stop commands store resolved
@@ -64,9 +132,13 @@ opt-in before any lifecycle side effect. Declarative adapters must also use
 the command-attested identity contract described below.
 
 Local claims are scoped to a fingerprint of the selected protocol command or
-declarative lifecycle, connection templates, and `external.config`. This lets
-multiple external backends or namespaces reuse the same slug without cleanup
-for one configuration removing claims or routing files owned by another.
+declarative lifecycle, connection templates, `external.config`, normalized
+target, and normalized Windows mode. For backward compatibility, the normalized
+default Linux case adds no target fields to the encoded scope, preserving its
+legacy hash and ownership of existing claims and routing files. This lets
+multiple external backends, namespaces, targets, or Windows modes reuse the
+same slug without cleanup for one configuration removing claims or routing
+files owned by another.
 Legacy unscoped claims are not reconciled by cleanup; stop them directly by
 lease ID or with the generated routing file.
 
@@ -318,6 +390,8 @@ Flags:
 --external-idempotent-lease-id
 --external-work-root
 --external-routing-file
+--external-desktop-username
+--external-desktop-password-env
 ```
 
 Environment:
@@ -328,6 +402,8 @@ CRABBOX_EXTERNAL_ARG
 CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID
 CRABBOX_EXTERNAL_WORK_ROOT
 CRABBOX_EXTERNAL_ROUTING_FILE
+CRABBOX_EXTERNAL_DESKTOP_USERNAME
+CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV
 ```
 
 The repository live harness can exercise a configured external provider:
@@ -449,7 +525,8 @@ proxy-backed SSH even if `sshConfigProxy` is omitted.
 
 When `readyCheck` is omitted, Crabbox uses a generic Linux tool check for
 `bash`, `python3`, `git`, `rsync`, and `tar`. Return an explicit `readyCheck`
-when the external provider needs a stronger guest bootstrap signal.
+when the external provider needs a stronger guest bootstrap signal or targets a
+non-Linux host.
 
 `list` returns `{"protocolVersion":1,"leases":[...]}`. Protocol-command adapters
 that enable `idempotentLeaseId` must return a real array, including `[]` for an

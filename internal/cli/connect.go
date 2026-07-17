@@ -109,7 +109,7 @@ func probeConnectSSHTransport(ctx context.Context, target *SSHTarget, timeout ti
 
 func runInteractiveSSHOnce(ctx context.Context, target SSHTarget, stdin io.Reader, stdout, stderr io.Writer) error {
 	args := append(sshBaseArgs(target), target.User+"@"+target.Host)
-	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd := sshCommandContext(ctx, target, args...)
 	cmd.Stdin = stdin
 	err := runSSHCommand(cmd, stdout, stderr)
 	if err != nil {

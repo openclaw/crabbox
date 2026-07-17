@@ -43,6 +43,7 @@ type mediaPreviewOptions struct {
 	Input              string
 	Output             string
 	TrimmedVideoOutput string
+	ChildEnvDenylist   []string
 	Width              int
 	FPS                float64
 	TrimStatic         bool
@@ -57,11 +58,12 @@ type mediaPreviewOptions struct {
 }
 
 type mediaContactSheetOptions struct {
-	Input  string
-	Output string
-	Frames int
-	Cols   int
-	Width  int
+	Input            string
+	Output           string
+	ChildEnvDenylist []string
+	Frames           int
+	Cols             int
+	Width            int
 }
 
 type mediaInterval struct {
@@ -118,7 +120,15 @@ func (a App) mediaPreview(ctx context.Context, args []string) error {
 	if *noTrimStatic {
 		*trimStatic = false
 	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if err := ValidateProviderCredentialDestination(cfg); err != nil {
+		return err
+	}
 	opts := defaultMediaPreviewOptions(*input, *output, *trimmedVideoOutput)
+	opts.ChildEnvDenylist = externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)
 	opts.Width = *width
 	opts.FPS = *fps
 	opts.TrimStatic = *trimStatic
@@ -192,7 +202,7 @@ func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPre
 		return mediaPreviewResult{}, exit(2, "ffprobe is required for media preview: %v", err)
 	}
 
-	duration, err := probeMediaDuration(ctx, opts.Input)
+	duration, err := probeMediaDuration(ctx, opts.Input, opts.ChildEnvDenylist)
 	if err != nil {
 		return mediaPreviewResult{}, err
 	}
@@ -202,7 +212,7 @@ func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPre
 	trimmed := false
 	note := ""
 	if opts.TrimStatic && duration > 0 {
-		freezes, err := detectFreezeIntervals(ctx, opts.Input, duration, opts.FreezeNoise, opts.FreezeDuration)
+		freezes, err := detectFreezeIntervals(ctx, opts.Input, duration, opts.FreezeNoise, opts.FreezeDuration, opts.ChildEnvDenylist)
 		if err != nil {
 			return mediaPreviewResult{}, err
 		}
@@ -219,15 +229,15 @@ func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPre
 	}
 	palette := strings.TrimSuffix(opts.Output, filepath.Ext(opts.Output)) + ".palette.png"
 	defer os.Remove(palette)
-	if err := runMediaCommand(ctx, "ffmpeg", previewPaletteArgs(opts.Input, palette, opts.Width, opts.FPS, start, previewDuration)...); err != nil {
+	if err := runMediaCommand(ctx, opts.ChildEnvDenylist, "ffmpeg", previewPaletteArgs(opts.Input, palette, opts.Width, opts.FPS, start, previewDuration)...); err != nil {
 		return mediaPreviewResult{}, err
 	}
-	if err := runMediaCommand(ctx, "ffmpeg", previewGIFArgs(opts.Input, palette, opts.Output, opts.Width, opts.FPS, start, previewDuration)...); err != nil {
+	if err := runMediaCommand(ctx, opts.ChildEnvDenylist, "ffmpeg", previewGIFArgs(opts.Input, palette, opts.Output, opts.Width, opts.FPS, start, previewDuration)...); err != nil {
 		return mediaPreviewResult{}, err
 	}
 	optimized := false
 	if gifsicleMode != "off" {
-		optimized, err = optimizeGIF(ctx, opts.Output, opts.GifsicleLossy, opts.GifsicleGamma, gifsicleMode == "required")
+		optimized, err = optimizeGIF(ctx, opts.Output, opts.GifsicleLossy, opts.GifsicleGamma, gifsicleMode == "required", opts.ChildEnvDenylist)
 		if err != nil {
 			return mediaPreviewResult{}, err
 		}
@@ -236,7 +246,7 @@ func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPre
 		if err := os.MkdirAll(filepath.Dir(opts.TrimmedVideoOutput), 0o755); err != nil && filepath.Dir(opts.TrimmedVideoOutput) != "." {
 			return mediaPreviewResult{}, exit(2, "create trimmed video output directory: %v", err)
 		}
-		if err := runMediaCommand(ctx, "ffmpeg", trimmedVideoArgs(opts.Input, opts.TrimmedVideoOutput, start, previewDuration)...); err != nil {
+		if err := runMediaCommand(ctx, opts.ChildEnvDenylist, "ffmpeg", trimmedVideoArgs(opts.Input, opts.TrimmedVideoOutput, start, previewDuration)...); err != nil {
 			return mediaPreviewResult{}, err
 		}
 	}
@@ -279,7 +289,7 @@ func createMediaContactSheet(ctx context.Context, opts mediaContactSheetOptions)
 	if _, err := exec.LookPath("ffprobe"); err != nil {
 		return mediaContactSheetResult{}, exit(2, "ffprobe is required for media contact sheet: %v", err)
 	}
-	duration, err := probeMediaDuration(ctx, opts.Input)
+	duration, err := probeMediaDuration(ctx, opts.Input, opts.ChildEnvDenylist)
 	if err != nil {
 		return mediaContactSheetResult{}, err
 	}
@@ -287,7 +297,7 @@ func createMediaContactSheet(ctx context.Context, opts mediaContactSheetOptions)
 	if err := os.MkdirAll(filepath.Dir(opts.Output), 0o755); err != nil && filepath.Dir(opts.Output) != "." {
 		return mediaContactSheetResult{}, exit(2, "create contact sheet directory: %v", err)
 	}
-	if err := runMediaCommand(ctx, "ffmpeg", contactSheetArgs(opts.Input, opts.Output, opts.Frames, opts.Cols, rows, opts.Width, duration)...); err != nil {
+	if err := runMediaCommand(ctx, opts.ChildEnvDenylist, "ffmpeg", contactSheetArgs(opts.Input, opts.Output, opts.Frames, opts.Cols, rows, opts.Width, duration)...); err != nil {
 		return mediaContactSheetResult{}, err
 	}
 	return mediaContactSheetResult{
@@ -301,8 +311,8 @@ func createMediaContactSheet(ctx context.Context, opts mediaContactSheetOptions)
 	}, nil
 }
 
-func probeMediaDuration(ctx context.Context, input string) (float64, error) {
-	out, err := commandOutput(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input)
+func probeMediaDuration(ctx context.Context, input string, childEnvDenylist []string) (float64, error) {
+	out, err := mediaCommandOutput(ctx, childEnvDenylist, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input)
 	if err != nil {
 		return 0, exit(2, "ffprobe duration failed: %v: %s", err, strings.TrimSpace(out))
 	}
@@ -313,9 +323,9 @@ func probeMediaDuration(ctx context.Context, input string) (float64, error) {
 	return duration, nil
 }
 
-func detectFreezeIntervals(ctx context.Context, input string, duration float64, noise string, freezeDuration time.Duration) ([]mediaInterval, error) {
+func detectFreezeIntervals(ctx context.Context, input string, duration float64, noise string, freezeDuration time.Duration, childEnvDenylist []string) ([]mediaInterval, error) {
 	filter := fmt.Sprintf("freezedetect=n=%s:d=%.3f", noise, freezeDuration.Seconds())
-	out, err := commandOutput(ctx, "ffmpeg", "-hide_banner", "-i", input, "-vf", filter, "-an", "-f", "null", "-")
+	out, err := mediaCommandOutput(ctx, childEnvDenylist, "ffmpeg", "-hide_banner", "-i", input, "-vf", filter, "-an", "-f", "null", "-")
 	if err != nil {
 		return nil, exit(2, "ffmpeg freezedetect failed: %v: %s", err, tailForError(out))
 	}
@@ -357,7 +367,7 @@ func gifsicleOptimizeArgs(input, output string, lossy int, gamma float64) []stri
 	}
 }
 
-func optimizeGIF(ctx context.Context, output string, lossy int, gamma float64, required bool) (bool, error) {
+func optimizeGIF(ctx context.Context, output string, lossy int, gamma float64, required bool, childEnvDenylist []string) (bool, error) {
 	if _, err := exec.LookPath("gifsicle"); err != nil {
 		if required {
 			return false, exit(2, "gifsicle is required for media preview: %v", err)
@@ -366,7 +376,7 @@ func optimizeGIF(ctx context.Context, output string, lossy int, gamma float64, r
 	}
 	temp := strings.TrimSuffix(output, filepath.Ext(output)) + ".optimized.gif"
 	defer os.Remove(temp)
-	if err := runMediaCommand(ctx, "gifsicle", gifsicleOptimizeArgs(output, temp, lossy, gamma)...); err != nil {
+	if err := runMediaCommand(ctx, childEnvDenylist, "gifsicle", gifsicleOptimizeArgs(output, temp, lossy, gamma)...); err != nil {
 		return false, err
 	}
 	if err := os.Rename(temp, output); err != nil {
@@ -422,12 +432,19 @@ func appendTrimInputArgs(args []string, input string, start, duration float64) [
 	return append(args, "-i", input)
 }
 
-func runMediaCommand(ctx context.Context, name string, args ...string) error {
-	out, err := commandOutput(ctx, name, args...)
+func runMediaCommand(ctx context.Context, childEnvDenylist []string, name string, args ...string) error {
+	out, err := mediaCommandOutput(ctx, childEnvDenylist, name, args...)
 	if err != nil {
 		return exit(2, "%s failed: %v: %s", name, err, tailForError(out))
 	}
 	return nil
+}
+
+func mediaCommandOutput(ctx context.Context, childEnvDenylist []string, name string, args ...string) (string, error) {
+	if len(childEnvDenylist) == 0 {
+		return commandOutput(ctx, name, args...)
+	}
+	return commandOutputWithEnvAndInput(ctx, childEnvironmentWithout(os.Environ(), childEnvDenylist...), nil, name, args...)
 }
 
 func commandOutput(ctx context.Context, name string, args ...string) (string, error) {

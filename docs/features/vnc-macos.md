@@ -3,18 +3,25 @@
 Read this when you:
 
 - launch a managed AWS EC2 Mac desktop lease;
+- connect to a macOS desktop supplied by an External provider adapter;
 - prepare an existing Mac for Crabbox VNC over `provider: ssh`;
-- debug Screen Sharing credentials or EC2 Mac Dedicated Host requirements.
+- debug Screen Sharing credentials, adapter preflight, or EC2 Mac Dedicated
+  Host requirements.
 
-Crabbox reaches macOS desktops two ways:
+Crabbox reaches macOS desktops three ways:
 
 - **managed AWS EC2 Mac** leases, provisioned onto an operator-allocated
   Dedicated Host;
+- **External provider** leases whose adapter owns lifecycle and SSH discovery
+  while the operator owns the host's macOS account and Screen Sharing
+  credential;
 - **static Macs** you already own, reached through `provider: ssh`.
 
-Both expose the desktop over Screen Sharing (Apple's VNC service) on the box's
-loopback `127.0.0.1:5900`, and Crabbox tunnels that port to your machine over
-SSH. Nothing listens on a public VNC port.
+Crabbox reaches Screen Sharing through the target's loopback
+`127.0.0.1:5900` and tunnels that endpoint over SSH. On operator-managed
+External and static Macs, separately restrict the native Screen Sharing
+listener with host firewall or network policy when the service is reachable
+on other interfaces.
 
 ## Managed AWS EC2 Mac
 
@@ -84,6 +91,52 @@ Promoted AWS images are scoped by target, architecture, and region. Use
 `crabbox image promote <ami-id> --target macos --region <aws-region>` to promote
 a macOS AMI that was not created through `crabbox image create`.
 
+## External Adapter Mac
+
+An External provider adapter can supply a desktop-capable, SSH-reachable Mac
+without teaching Crabbox that platform's provisioning API. The adapter owns
+provisioning, release, and SSH connection discovery. The Mac must already run
+Screen Sharing on loopback, while the operator owns the existing macOS account
+and its password:
+
+```yaml
+provider: external
+target: macos
+external:
+  command: mac-provider-adapter
+  connection:
+    desktop:
+      username: developer
+      passwordEnv: SCREEN_SHARING_PASSWORD
+  workRoot: /Users/developer/crabbox
+```
+
+`username` is optional and falls back to the resolved SSH user. `passwordEnv`
+names the process environment variable that contains the account password; it
+does not contain the password itself. Use a dedicated name outside reserved
+application, identity, access, proxy, loader, and process-control namespaces; for
+example, `SCREEN_SHARING_PASSWORD` rather than a `CRABBOX_*` variable. Define
+the target, username, and password environment name as one trusted
+credential-destination contract, then inject the value into Crabbox from a
+secret manager. Crabbox removes that variable from target-facing child-process
+environments and remote command payloads.
+
+External macOS credentials use Apple Remote Desktop (ARD) authentication.
+Before opening a native viewer, starting WebVNC, taking a screenshot, or sending
+desktop input, validate the same credential and SSH-tunnel path:
+
+```sh
+crabbox webvnc --provider external --target macos --id <lease> --preflight
+```
+
+Success prints `preflight: macOS Screen Sharing RFB authentication ok`. Normal
+`crabbox vnc` output identifies the credential as operator-managed but does not
+print its password; the WebVNC relay authenticates server-side and does not hand
+ARD credentials to the browser. See the
+[External provider](../providers/external.md) and
+[webvnc preflight](../commands/webvnc.md#foreground-bridge) docs for the full
+routing, approval, and secret-handling contract.
+
 ## Static Mac
 
 A static Mac is an existing machine; Crabbox does not provision or manage it.
@@ -134,16 +187,20 @@ crabbox admin hosts list      --provider aws --target macos --region <region>
 ```
 
 **`target does not expose VNC on 127.0.0.1:5900`.** Screen Sharing is not
-listening on loopback yet. On a managed lease, wait for bootstrap to finish; on
-a static Mac, enable Screen Sharing and confirm it binds `127.0.0.1:5900`.
+listening on loopback yet. On an AWS lease, wait for bootstrap to finish. For an
+External lease, fix the adapter-managed host before retrying preflight. On a
+static Mac, enable Screen Sharing and confirm it binds `127.0.0.1:5900`.
 
 **VNC prompts for host credentials.** If the output shows `managed: false`, you
 opened a static Mac — use that host's own Screen Sharing credentials. Managed
-EC2 Mac leases print the generated `ec2-user` password.
+EC2 Mac leases print the generated `ec2-user` password. External Mac leases use
+the operator-managed account referenced by `external.connection.desktop` and
+intentionally do not print that password; verify it with `webvnc --preflight`.
 
 Related docs:
 
 - [Interactive desktop and VNC](interactive-desktop-vnc.md)
 - [AWS](aws.md)
+- [External provider](../providers/external.md)
 - [vnc command](../commands/vnc.md)
 - [screenshot command](../commands/screenshot.md)

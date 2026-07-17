@@ -23,6 +23,30 @@ type Repo struct {
 	BaseRef   string
 }
 
+// Repository inspection never needs provider or desktop credentials. Keep its
+// environment intentionally small because discovery runs before the complete
+// project configuration (and therefore its secret denylist) is known.
+func repositoryGitEnvironment() []string {
+	allowed := map[string]struct{}{
+		"PATH": {}, "HOME": {}, "USER": {}, "LOGNAME": {}, "SHELL": {},
+		"TMPDIR": {}, "TMP": {}, "TEMP": {}, "LANG": {}, "TZ": {},
+		"XDG_CONFIG_HOME": {}, "SYSTEMROOT": {}, "WINDIR": {}, "COMSPEC": {},
+		"PATHEXT": {}, "USERPROFILE": {}, "HOMEDRIVE": {}, "HOMEPATH": {},
+		"APPDATA": {}, "LOCALAPPDATA": {},
+		"GIT_DIR": {}, "GIT_WORK_TREE": {}, "GIT_CEILING_DIRECTORIES": {},
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM": {},
+	}
+	result := make([]string, 0, len(allowed)+4)
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(name)
+		if _, ok := allowed[upper]; ok || strings.HasPrefix(upper, "LC_") {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
 type gitTrackedPath struct {
 	name         string
 	skipWorktree bool
@@ -149,6 +173,7 @@ func nulPathSet(out []byte) map[string]struct{} {
 
 func findRepo() (Repo, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Env = repositoryGitEnvironment()
 	out, err := cmd.Output()
 	if err != nil {
 		wd, _ := os.Getwd()
@@ -374,6 +399,7 @@ func envAllowed(name string, allow []string) bool {
 func gitOutput(root string, args ...string) string {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -489,6 +515,7 @@ func syncManifest(root string, excludes []string) (SyncManifest, error) {
 func syncManifestFiltered(root string, excludes, includes []string) (SyncManifest, error) {
 	cmd := exec.Command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
 	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
 	out, err := cmd.Output()
 	if err != nil {
 		return SyncManifest{}, err
@@ -553,6 +580,7 @@ func syncDeletedPaths(root string, excludes, includes []string) ([]string, error
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = root
+		cmd.Env = repositoryGitEnvironment()
 		out, err := cmd.Output()
 		if err != nil {
 			return nil, err
@@ -784,6 +812,7 @@ func changedSyncPaths(root string, excludes, includes []string) ([]string, error
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = root
+		cmd.Env = repositoryGitEnvironment()
 		out, err := cmd.Output()
 		if err != nil {
 			return nil, err

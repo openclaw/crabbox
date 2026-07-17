@@ -30,6 +30,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 	egress := fs.String("egress", "", "egress profile; passes the active lease-local proxy to the browser")
 	egressProxy := fs.String("egress-proxy", defaultEgressListen, "lease-local egress proxy for --egress")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -51,6 +52,9 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 	}
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	cfg.Browser = *browser
@@ -214,6 +218,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 	contactFlags := registerContactSheetFlags(fs)
 	publishFlags := registerDesktopPublishFlags(fs)
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -238,6 +243,9 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 	}
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	if err := validateRequestedCapabilities(cfg); err != nil {
@@ -340,7 +348,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "video: %s\n", path)
-		if contactPath, err := writeContactSheetForVideo(ctx, path, contactFlags); err != nil {
+		if contactPath, err := writeContactSheetForVideo(ctx, path, contactFlags, target.ChildEnvDenylist); err != nil {
 			printContactSheetWarning(a.Stdout, err)
 		} else if contactPath != "" {
 			fmt.Fprintf(a.Stdout, "contact-sheet: %s\n", contactPath)
@@ -348,6 +356,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		if opts, ok, err := publishOptionsFromDesktopFlags(filepath.Dir(path), publishFlags); err != nil {
 			return err
 		} else if ok {
+			opts.ChildEnvDenylist = append([]string(nil), target.ChildEnvDenylist...)
 			if err := writeProofMetadata(filepath.Join(opts.Directory, "metadata.json"), desktopProofMetadata{
 				CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 				Version:        currentVersion(),
@@ -405,6 +414,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	contactFlags := registerContactSheetFlags(fs)
 	publishFlags := registerDesktopPublishFlags(fs)
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -427,6 +437,9 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	}
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	if err := validateRequestedCapabilities(cfg); err != nil {
@@ -543,7 +556,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "video: %s\n", videoPath)
-	if contactPath, err := writeContactSheetForVideo(ctx, videoPath, contactFlags); err != nil {
+	if contactPath, err := writeContactSheetForVideo(ctx, videoPath, contactFlags, target.ChildEnvDenylist); err != nil {
 		printContactSheetWarning(a.Stdout, err)
 	} else if contactPath != "" {
 		fmt.Fprintf(a.Stdout, "contact-sheet: %s\n", contactPath)
@@ -552,6 +565,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	if opts, ok, err := publishOptionsFromDesktopFlags(dir, publishFlags); err != nil {
 		return err
 	} else if ok {
+		opts.ChildEnvDenylist = append([]string(nil), target.ChildEnvDenylist...)
 		published, markdownPath, manifestPath, err := a.publishArtifactDirectory(ctx, opts)
 		if err != nil {
 			return err
@@ -714,6 +728,7 @@ func desktopLaunchWebVNCArgs(cfg Config, target SSHTarget, leaseID string, openP
 	if targetOS == targetWindows && windowsMode != "" {
 		args = append(args, "--windows-mode", windowsMode)
 	}
+	args = append(args, leaseCommandRoutingArgs(cfg, leaseID)...)
 	if openPortal {
 		args = append(args, "--open")
 	}

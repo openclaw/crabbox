@@ -60,6 +60,28 @@ func TestRemoteCacheWarmCommandSourcesHydrationEnvFile(t *testing.T) {
 	}
 }
 
+func TestAllowedRemoteEnvExcludesExternalDesktopPasswordForAnyTarget(t *testing.T) {
+	t.Setenv("SCREEN_SHARING_PASSWORD", "operator-secret")
+	t.Setenv("SCREEN_SAFE_VALUE", "preserved")
+	for _, targetOS := range []string{targetLinux, targetMacOS, targetWindows} {
+		t.Run(targetOS, func(t *testing.T) {
+			cfg := Config{Provider: "external", TargetOS: targetOS, EnvAllow: []string{"SCREEN_*"}}
+			cfg.External.Connection.Desktop.PasswordEnv = "SCREEN_SHARING_PASSWORD"
+			env := allowedRemoteEnv(cfg)
+			if _, found := env["SCREEN_SHARING_PASSWORD"]; found {
+				t.Fatalf("remote environment retained desktop password: %#v", env)
+			}
+			if env["SCREEN_SAFE_VALUE"] != "preserved" {
+				t.Fatalf("unrelated remote environment lost: %#v", env)
+			}
+			command := remoteCacheWarmCommand("/work/repo", env, "", []string{"true"})
+			if strings.Contains(command, "operator-secret") || strings.Contains(command, "SCREEN_SHARING_PASSWORD") {
+				t.Fatalf("cache command exposed desktop password: %s", command)
+			}
+		})
+	}
+}
+
 func TestParseCacheVolumeSpecs(t *testing.T) {
 	volumes, err := ParseCacheVolumeSpecs([]string{
 		"pnpm=repo-linux-node24-lock:/var/cache/crabbox/pnpm",
