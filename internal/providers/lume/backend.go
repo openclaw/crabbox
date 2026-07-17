@@ -747,7 +747,7 @@ type launchHandoff struct {
 func newLaunchToken() (string, error) {
 	value := make([]byte, 18)
 	if _, err := rand.Read(value); err != nil {
-		return "", exit(2, "generate Lume launch token: %v", err)
+		return "", exit(2, "generate Lume launch nonce: %v", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }
