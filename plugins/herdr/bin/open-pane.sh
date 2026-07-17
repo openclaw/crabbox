@@ -24,9 +24,6 @@ set -- plugin pane open \
 
 case "$placement" in
   overlay)
-    if [ -n "${HERDR_PANE_ID:-}" ]; then
-      set -- "$@" --target-pane "$HERDR_PANE_ID"
-    fi
     ;;
   split)
     if [ -n "${HERDR_PANE_ID:-}" ]; then

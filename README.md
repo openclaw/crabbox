@@ -152,7 +152,8 @@ Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 ### Herdr plugin
 
 Herdr users can add Crabbox lease controls and repository workflows to the
-Herdr action palette:
+Herdr action palette. Use a Crabbox build that already contains this
+integration; the plugin installation rejects older binaries:
 
 ```sh
 herdr plugin install openclaw/crabbox/plugins/herdr

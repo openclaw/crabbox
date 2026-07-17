@@ -24,7 +24,9 @@ press Enter so final lease identifiers, diagnostics, and failures remain visible
 
 ## Install
 
-Install Crabbox and Herdr first, then install the plugin from this repository:
+Install Herdr and a Crabbox build that already contains this integration first.
+The plugin installation rejects older Crabbox binaries before registering the
+plugin:
 
 ```sh
 brew install openclaw/tap/crabbox

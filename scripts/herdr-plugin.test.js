@@ -192,6 +192,5 @@ exit 2
   assert.doesNotMatch(tab, /<--target-pane>|<--direction>/);
 
   const overlay = invoke("boxes", "overlay");
-  assert.match(overlay, /<--target-pane>\n<workspace-1:pane-2>/);
-  assert.doesNotMatch(overlay, /<--workspace>|<--direction>/);
+  assert.doesNotMatch(overlay, /<--workspace>|<--target-pane>|<--direction>/);
 });
