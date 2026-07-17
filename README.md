@@ -149,6 +149,22 @@ the native `crabbox-apple-vm-helper` for the local Apple VZ provider.
 
 Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 
+### Herdr plugin
+
+Herdr users can add Crabbox lease controls and repository workflows to the
+Herdr action palette. Use a Crabbox build that already contains this
+integration; the plugin installation rejects older binaries:
+
+```sh
+herdr plugin install openclaw/crabbox/plugins/herdr
+```
+
+The plugin provides a live boxes overlay plus actions for `warmup`, `prewarm`,
+`connect`, repository jobs, and `doctor`. It does not add lifecycle hooks or
+keybindings; normal Crabbox job stop policies still apply. See
+[Crabbox for Herdr](plugins/herdr/README.md) for action details and optional
+keybindings.
+
 ## Quick start
 
 Broker access is deployment-specific. Use a coordinator URL from your team, use

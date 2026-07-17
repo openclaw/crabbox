@@ -768,6 +768,7 @@ func TestCubeSandboxTimeoutPreservesRequestedTTL(t *testing.T) {
 }
 
 func TestCubeSandboxCreateSandboxPreservesDefaultTTL(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // keep=true writes a lease claim; keep it out of the real state dir
 	client := &fakeCubeSandboxSyncClient{}
 	backend := &cubesandboxBackend{
 		cfg: Config{
