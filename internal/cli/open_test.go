@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -65,9 +66,9 @@ func TestOpenEditorZedHappyPathPrintsInstructions(t *testing.T) {
 	out := &cancelBuffer{cancel: cancel}
 	cfg := Config{WorkRoot: "/work", TargetOS: targetLinux}
 	target := SSHTarget{User: "alice", Host: "example.com", Port: "22", TargetOS: targetLinux}
-	resolved := resolvedSSHCommandTarget{Config: cfg, Lease: LeaseTarget{SSH: target}}
+	resolved := resolvedSSHCommandTarget{Config: cfg, Lease: LeaseTarget{LeaseID: "swift-crab", SSH: target}}
 
-	err := (App{Stdout: out, Stderr: &bytes.Buffer{}}).runEditorHandoff(ctx, "zed", editorHandoffSpecs["zed"], resolved)
+	err := (App{Stdout: out, Stderr: &bytes.Buffer{}}).runEditorHandoff(ctx, "zed", editorHandoffSpecs["zed"], resolved, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,17 +78,59 @@ func TestOpenEditorZedHappyPathPrintsInstructions(t *testing.T) {
 	}
 	folder := mappedRemoteCodeFolder(remoteJoin(cfg, repo.Name), repo)
 	for _, want := range []string{
-		"Zed Remote Projects",
-		"Connect New Server",
-		"Paste: ssh ",
+		"Zed Remote Projects is ready.",
+		"SSH command:",
+		"ssh ",
 		"'alice@example.com'",
-		"Open: " + folder,
-		"Keep this process running to maintain lease activity",
-		"press Ctrl-C",
+		"Remote folder:",
+		folder,
+		"Connect New Server",
+		"Paste the SSH command shown above",
+		"Lease activity: active while this process runs",
+		"Press Ctrl-C",
+		"Release command: crabbox stop swift-crab",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("instructions missing %q:\n%s", want, out.String())
 		}
+	}
+}
+
+func TestOpenEditorZedJSONHandoff(t *testing.T) {
+	fakeEditorSSH(t, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	out := &cancelBuffer{cancel: cancel}
+	cfg := Config{WorkRoot: "/work", TargetOS: targetLinux}
+	target := SSHTarget{User: "alice", Host: "example.com", Port: "22", TargetOS: targetLinux}
+	resolved := resolvedSSHCommandTarget{Config: cfg, Lease: LeaseTarget{LeaseID: "swift-crab", SSH: target}}
+
+	err := (App{Stdout: out, Stderr: &bytes.Buffer{}}).runEditorHandoff(ctx, "zed", editorHandoffSpecs["zed"], resolved, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got editorHandoffOutput
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode JSON handoff: %v\n%s", err, out.String())
+	}
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	folder := mappedRemoteCodeFolder(remoteJoin(cfg, repo.Name), repo)
+	if got.Schema != editorHandoffSchema || got.Editor != "zed" || got.DisplayName != "Zed Remote Projects" {
+		t.Fatalf("identity fields=%+v", got)
+	}
+	if got.LeaseID != "swift-crab" || got.RemoteFolder != folder || got.ReleaseCommand != "crabbox stop swift-crab" {
+		t.Fatalf("lease fields=%+v", got)
+	}
+	if !strings.HasPrefix(got.SSHCommand, "ssh ") || !strings.Contains(got.SSHCommand, "'alice@example.com'") {
+		t.Fatalf("sshCommand=%q", got.SSHCommand)
+	}
+	if got.HydratedByActions || got.LeaseActivity != "foreground" || !got.HardTTLApplies {
+		t.Fatalf("lifecycle fields=%+v", got)
+	}
+	if strings.Contains(out.String(), "Connect New Server") {
+		t.Fatalf("JSON output contains human instructions:\n%s", out.String())
 	}
 }
 
@@ -101,7 +144,7 @@ func TestOpenEditorZedMissingSyncedFolder(t *testing.T) {
 		},
 	}
 	err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).runEditorHandoff(
-		context.Background(), "zed", editorHandoffSpecs["zed"], resolved,
+		context.Background(), "zed", editorHandoffSpecs["zed"], resolved, false,
 	)
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 5 {
