@@ -13,6 +13,7 @@
 - Prevented apple-container orphan cleanup from deleting claims reclaimed during its resource snapshot, including same-value rewrites, while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
 - Prevented local-container orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
 - Prevented external-provider orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining routing state when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
+- Prevented apple-vm orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
 
 ## 0.39.0 - 2026-07-17
 
