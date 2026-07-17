@@ -20803,7 +20803,7 @@ describe("fleet lease identity and idle", () => {
       },
     };
     const reloadContext = createContext({
-      fetch: vi.fn(
+      fetch: vi.fn<() => Promise<Response>>(
         async () =>
           new Response(
             JSON.stringify({ username: "vnc-user", password: "generated-vnc-password" }),
