@@ -120,6 +120,7 @@ install_homebrew() {
     log "Homebrew installed but brew is not on PATH"
     return 1
   fi
+  brew analytics off >/dev/null 2>&1 || true
   log "homebrew: $(brew --prefix)"
 }
 
@@ -144,7 +145,7 @@ install_formula() {
   if brew list --formula "$formula" >/dev/null 2>&1; then
     return 0
   fi
-  HOMEBREW_NO_INSTALL_CLEANUP=1 brew install "$formula"
+  HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ASK=1 brew install --no-ask "$formula"
 }
 
 install_formulas() {
@@ -281,7 +282,7 @@ install_node_and_pnpm() {
 }
 
 link_common_tools() {
-  local brew_prefix python_bin
+  local brew_prefix python_bin zshenv_line
   brew_prefix="$(brew --prefix)"
   python_bin="$brew_prefix/opt/$python_formula/libexec/bin"
   if [[ ! -x "$python_bin/python3" ]]; then
@@ -300,6 +301,11 @@ link_common_tools() {
   link_tool shfmt "$brew_prefix/bin"
   link_tool python3 "$python_bin" "$brew_prefix/bin"
   export PATH="/usr/local/bin:$PATH"
+  zshenv_line='export PATH="/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"'
+  touch "$HOME/.zshenv"
+  if ! grep -qxF "$zshenv_line" "$HOME/.zshenv"; then
+    printf '%s\n' "$zshenv_line" >>"$HOME/.zshenv"
+  fi
   hash -r 2>/dev/null || true
 }
 
