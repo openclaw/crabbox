@@ -30,12 +30,14 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -91,18 +93,52 @@ func TestLiveAppleContainerCleanupGuardPreservesReclaimedClaim(t *testing.T) {
 	}
 
 	const (
-		lease = "cbx_livesmoke_guard"
-		slug  = "livesmoke-guard"
-		name  = "crabbox-livesmoke-guard"
+		lease     = "cbx_livesmoke_guard"
+		slug      = "livesmoke-guard"
+		name      = "crabbox-livesmoke-guard"
+		smokeMark = "applecontainer-cleanup-guard"
 	)
 
+	// Serialize the destructive live smoke across processes. Advisory locks are
+	// released by the kernel after a crash, while the fixed name and ownership
+	// label below let the next locked run safely remove only our stale container.
+	hostLock := flock.New(filepath.Join(os.TempDir(), "crabbox-applecontainer-cleanup-smoke.lock"), flock.SetPermissions(0o600))
+	locked, err := hostLock.TryLock()
+	if err != nil {
+		t.Fatalf("acquire live cleanup smoke lock: %v", err)
+	}
+	if !locked {
+		t.Skip("another apple-container cleanup smoke is running")
+	}
+	t.Cleanup(func() {
+		if err := hostLock.Unlock(); err != nil {
+			t.Errorf("release live cleanup smoke lock: %v", err)
+		}
+	})
+
 	// Safety precondition: refuse to run a real Cleanup pass while any other
-	// crabbox-labeled container exists, so the sweep can never touch one.
-	if before := realLs(); strings.Contains(before, `"crabbox"`) || strings.Contains(before, "crabbox-") {
-		if strings.Contains(before, name) {
-			_, _ = exec.Command(cli, "delete", "--force", name).CombinedOutput()
-		} else {
-			t.Skip("other crabbox containers present; skipping live cleanup smoke to avoid touching them")
+	// crabbox-labeled container exists, so the sweep can never touch one. A
+	// crashed prior run is the sole exception, proven by both fixed name and a
+	// dedicated ownership label while holding the host-wide lock.
+	containers, err := decodeInspect([]byte(realLs()))
+	if err != nil {
+		t.Fatalf("decode real %s ls: %v", cli, err)
+	}
+	staleSmoke := false
+	for _, container := range containers {
+		labels := container.labels()
+		if labels["crabbox"] != "true" {
+			continue
+		}
+		if container.id() == name && labels["crabbox-smoke"] == smokeMark {
+			staleSmoke = true
+			continue
+		}
+		t.Skip("other crabbox containers present; skipping live cleanup smoke to avoid touching them")
+	}
+	if staleSmoke {
+		if out, err := exec.Command(cli, "delete", "--force", name).CombinedOutput(); err != nil {
+			t.Fatalf("delete stale live-smoke container: %v\n%s", err, out)
 		}
 	}
 
@@ -118,6 +154,7 @@ func TestLiveAppleContainerCleanupGuardPreservesReclaimedClaim(t *testing.T) {
 	create := exec.Command(cli, "run", "-d", "--name", name,
 		"--label", "crabbox=true", "--label", "provider="+providerName,
 		"--label", "lease="+lease, "--label", "slug="+slug, "--label", "state=ready",
+		"--label", "crabbox-smoke="+smokeMark,
 		image, "sleep", "infinity")
 	if out, err := create.CombinedOutput(); err != nil {
 		t.Skipf("cannot create live container (runtime unavailable?): %v\n%s", err, out)
