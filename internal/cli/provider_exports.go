@@ -194,6 +194,18 @@ func ProviderClaimScope(provider string, cfg Config) string {
 	return providerClaimScope(canonicalClaimProvider(provider), cfg)
 }
 
+// NormalizeProviderClaimEndpoint canonicalizes a provider API endpoint for use
+// as non-secret local claim identity.
+func NormalizeProviderClaimEndpoint(raw string) string {
+	return normalizedProviderClaimEndpoint(raw)
+}
+
+// RoutingSafeURL removes URL userinfo before a provider routes configuration
+// through a generated command line.
+func RoutingSafeURL(raw string) string {
+	return routingSafeURL(raw)
+}
+
 func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
 }

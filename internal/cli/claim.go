@@ -907,6 +907,11 @@ func canonicalClaimProvider(provider string) string {
 }
 
 func providerClaimScope(provider string, cfg Config) string {
+	if resolved, err := ProviderFor(provider); err == nil {
+		if scoped, ok := resolved.(ProviderClaimScopeProvider); ok {
+			return scoped.ProviderClaimScope(cfg)
+		}
+	}
 	switch provider {
 	case "azure":
 		return azureLeaseClaimScope(cfg.AzureSubscription, cfg.AzureResourceGroup)
@@ -915,15 +920,11 @@ func providerClaimScope(provider string, cfg Config) string {
 			return "project:" + cfg.GCPProject
 		}
 	case "cubesandbox":
-		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.CubeSandbox.APIURL); endpoint != "" {
+		if endpoint := normalizedProviderClaimEndpoint(cfg.CubeSandbox.APIURL); endpoint != "" {
 			return "endpoint:" + endpoint
 		}
 	case "e2b":
-		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.E2B.APIURL); endpoint != "" {
-			return "endpoint:" + endpoint
-		}
-	case "fal":
-		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.Fal.APIURL); endpoint != "" {
+		if endpoint := normalizedProviderClaimEndpoint(cfg.E2B.APIURL); endpoint != "" {
 			return "endpoint:" + endpoint
 		}
 	case "namespace-instance":
@@ -959,7 +960,7 @@ func providerClaimScope(provider string, cfg Config) string {
 	return ""
 }
 
-func normalizedCubeSandboxClaimEndpoint(raw string) string {
+func normalizedProviderClaimEndpoint(raw string) string {
 	endpoint := strings.TrimSpace(routingSafeURL(raw))
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {

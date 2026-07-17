@@ -24,6 +24,22 @@ func (Provider) Name() string { return providerName }
 
 func (Provider) Aliases() []string { return []string{"fal-ai"} }
 
+func (Provider) ProviderClaimScope(cfg core.Config) string {
+	endpoint := core.NormalizeProviderClaimEndpoint(cfg.Fal.APIURL)
+	if endpoint == "" {
+		return ""
+	}
+	return "endpoint:" + endpoint
+}
+
+func (Provider) StopRoutingArgs(cfg core.Config, _ string) []string {
+	apiURL := strings.TrimSpace(cfg.Fal.APIURL)
+	if apiURL == "" {
+		return nil
+	}
+	return []string{"--fal-api-url", core.RoutingSafeURL(apiURL)}
+}
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:        providerName,

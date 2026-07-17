@@ -30,6 +30,20 @@ func TestProviderSpecAndAlias(t *testing.T) {
 	}
 }
 
+func TestProviderOwnsClaimScopeAndStopRouting(t *testing.T) {
+	p := Provider{}
+	cfg := core.BaseConfig()
+	cfg.Fal.APIURL = "https://user@API.EXAMPLE.TEST:443/v1/?region=west#section"
+
+	if got, want := p.ProviderClaimScope(cfg), "endpoint:https://api.example.test/v1"; got != want {
+		t.Fatalf("claim scope=%q, want %q", got, want)
+	}
+	args := p.StopRoutingArgs(cfg, "lease-1")
+	if got, want := strings.Join(args, " "), "--fal-api-url https://API.EXAMPLE.TEST:443/v1/?region=west#section"; got != want {
+		t.Fatalf("stop routing args=%q, want %q", got, want)
+	}
+}
+
 func TestPrepareLeaseClaimEndpointPreservesCredentialBinding(t *testing.T) {
 	existing := core.LeaseClaim{
 		LeaseID:  "cbx_abcdef123456",

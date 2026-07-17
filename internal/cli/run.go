@@ -2087,10 +2087,6 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if DeleteOnReleaseExplicit(cfg, "vast") {
 			args = append(args, "--vast-release-action", cfg.Vast.ReleaseAction)
 		}
-	case "fal", "fal-ai":
-		if apiURL := strings.TrimSpace(cfg.Fal.APIURL); apiURL != "" {
-			args = append(args, "--fal-api-url", routingSafeURL(apiURL))
-		}
 	case "nvidia-brev":
 		if cli := strings.TrimSpace(cfg.NvidiaBrev.CLI); cli != "" {
 			args = append(args, "--nvidia-brev-cli", cli)
@@ -2175,6 +2171,11 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 			if strings.TrimSpace(cfg.External.WorkRoot) != "" {
 				args = append(args, "--external-work-root", cfg.External.WorkRoot)
 			}
+		}
+	}
+	if provider, err := ProviderFor(cfg.Provider); err == nil {
+		if routed, ok := provider.(ProviderStopRoutingArgsProvider); ok {
+			args = append(args, routed.StopRoutingArgs(cfg, id)...)
 		}
 	}
 	return args

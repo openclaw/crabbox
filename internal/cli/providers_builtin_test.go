@@ -1143,6 +1143,20 @@ type testFalProvider struct{}
 
 func (testFalProvider) Name() string      { return "fal" }
 func (testFalProvider) Aliases() []string { return []string{"fal-ai"} }
+func (testFalProvider) ProviderClaimScope(cfg Config) string {
+	endpoint := normalizedProviderClaimEndpoint(cfg.Fal.APIURL)
+	if endpoint == "" {
+		return ""
+	}
+	return "endpoint:" + endpoint
+}
+func (testFalProvider) StopRoutingArgs(cfg Config, _ string) []string {
+	apiURL := strings.TrimSpace(cfg.Fal.APIURL)
+	if apiURL == "" {
+		return nil
+	}
+	return []string{"--fal-api-url", routingSafeURL(apiURL)}
+}
 func (testFalProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "fal",

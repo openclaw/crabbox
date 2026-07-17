@@ -62,6 +62,18 @@ type ProviderCommandRoutingArgs interface {
 	CommandRoutingArgs(cfg Config, leaseID string) []string
 }
 
+// ProviderClaimScopeProvider binds local claims to provider-owned routing
+// identity that core cannot interpret.
+type ProviderClaimScopeProvider interface {
+	ProviderClaimScope(cfg Config) string
+}
+
+// ProviderStopRoutingArgsProvider preserves provider-owned routing when core
+// constructs a detached cleanup command.
+type ProviderStopRoutingArgsProvider interface {
+	StopRoutingArgs(cfg Config, leaseID string) []string
+}
+
 type DesktopCredentials struct {
 	Username string
 	Password string
