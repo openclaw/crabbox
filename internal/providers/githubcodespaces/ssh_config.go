@@ -184,11 +184,18 @@ func rewriteProxyCommandGHPath(command, ghPath string) string {
 	if ghPath == "" || ghPath == defaultGHPath {
 		return command
 	}
-	fields := splitSSHConfigFields(command)
-	if len(fields) == 0 || fields[0] != defaultGHPath {
+	start := len(command) - len(strings.TrimLeftFunc(command, unicode.IsSpace))
+	if start == len(command) {
 		return command
 	}
-	return quoteSSHProxyExecutable(ghPath) + " " + strings.Join(fields[1:], " ")
+	end := start + strings.IndexFunc(command[start:], unicode.IsSpace)
+	if end < start {
+		end = len(command)
+	}
+	if unquoteSSHConfigValue(command[start:end]) != defaultGHPath {
+		return command
+	}
+	return command[:start] + quoteSSHProxyExecutable(ghPath) + command[end:]
 }
 
 func validatePrivateSSHConfigFile(path string) error {

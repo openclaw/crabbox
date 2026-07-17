@@ -87,6 +87,8 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 	}
 	if flagWasSet(fs, "github-codespaces-work-root") {
 		cfg.GitHubCodespaces.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+		markWorkRootExplicit(cfg)
 	}
 	return ValidateGitHubCodespacesConfig(*cfg)
 }

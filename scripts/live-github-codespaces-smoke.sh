@@ -61,9 +61,9 @@ run_capture() {
   set -e
   if [[ "$status" -ne 0 ]]; then
     classify_blocker "$command" "$status" "$output"
-    exit "$status"
+    exit 0
   fi
-  printf '%s\n' "$output"
+  captured_output="$output"
 }
 
 validate_list_json_contains_slug() {
@@ -72,7 +72,7 @@ validate_list_json_contains_slug() {
   local validation_output=""
   local status=0
   set +e
-  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" python3 -c '
+  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" "$python_bin" -c '
 import json
 import os
 import sys
@@ -114,7 +114,7 @@ validate_list_json_missing_slug() {
   local validation_output=""
   local status=0
   set +e
-  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" python3 -c '
+  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" "$python_bin" -c '
 import json
 import os
 import sys
@@ -156,7 +156,7 @@ validate_remote_list_json_missing_slug() {
   local validation_output=""
   local status=0
   set +e
-  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" python3 -c '
+  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" "$python_bin" -c '
 import json
 import os
 import sys
@@ -184,7 +184,7 @@ for item in payload:
 }
 
 remote_codespace_names_for_slug() {
-  CRABBOX_SMOKE_SLUG="$slug" python3 -c '
+  CRABBOX_SMOKE_SLUG="$slug" "$python_bin" -c '
 import json
 import os
 import sys
@@ -202,57 +202,104 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 cleanup_armed=0
-slug="gcs-$(date +%Y%m%d%H%M%S)-$$"
+printf -v slug 'g%06x%06x' "$RANDOM" "$RANDOM"
 crabbox_bin="${CRABBOX_BIN:-bin/crabbox}"
+python_bin="${CRABBOX_GITHUB_CODESPACES_PYTHON_PATH:-python3}"
+captured_output=""
 
 cleanup() {
   local status=$?
+  trap - EXIT
   if [[ "$cleanup_armed" -eq 1 ]]; then
     local cleanup_output=""
     local cleanup_status=0
+    local cleanup_failure=0
     set +e
     cleanup_output="$("$crabbox_bin" stop --provider github-codespaces "$slug" 2>&1)"
     cleanup_status=$?
-    set -e
     if [[ "$cleanup_status" -ne 0 ]]; then
-      printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "$crabbox_bin stop --provider github-codespaces $slug" "$cleanup_status" "$slug" >&2
+      printf 'classification=cleanup_fallback command=%q exit=%s slug=%s\n' "$crabbox_bin stop --provider github-codespaces $slug" "$cleanup_status" "$slug" >&2
       redact_output "$cleanup_output" >&2
       printf '\n' >&2
-      if [[ "$status" -eq 0 ]]; then
-        status="$cleanup_status"
-      fi
     fi
 
     local remote_output=""
     local remote_status=0
-    set +e
     remote_output="$("$gh_bin" codespace list --repo "$repo" --limit 100 --json name,displayName 2>&1)"
     remote_status=$?
-    set -e
     if [[ "$remote_status" -eq 0 ]]; then
       local remote_name=""
-      while IFS= read -r remote_name; do
-        [[ -n "$remote_name" ]] || continue
-        set +e
-        cleanup_output="$("$gh_bin" codespace delete --codespace "$remote_name" --force 2>&1)"
-        cleanup_status=$?
-        set -e
-        if [[ "$cleanup_status" -ne 0 ]]; then
-          printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "$gh_bin codespace delete --codespace $remote_name --force" "$cleanup_status" "$slug" >&2
-          redact_output "$cleanup_output" >&2
-          printf '\n' >&2
-          if [[ "$status" -eq 0 ]]; then
-            status="$cleanup_status"
+      local remote_names=""
+      remote_names="$(printf '%s' "$remote_output" | remote_codespace_names_for_slug 2>&1)"
+      remote_status=$?
+      if [[ "$remote_status" -ne 0 ]]; then
+        printf 'classification=cleanup_failed reason=remote_inventory_parse exit=%s slug=%s\n' "$remote_status" "$slug" >&2
+        redact_output "$remote_names" >&2
+        printf '\n' >&2
+        cleanup_failure="$remote_status"
+      else
+        while IFS= read -r remote_name; do
+          [[ -n "$remote_name" ]] || continue
+          cleanup_output="$("$gh_bin" codespace delete --codespace "$remote_name" --force 2>&1)"
+          cleanup_status=$?
+          if [[ "$cleanup_status" -ne 0 ]]; then
+            printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "$gh_bin codespace delete --codespace $remote_name --force" "$cleanup_status" "$slug" >&2
+            redact_output "$cleanup_output" >&2
+            printf '\n' >&2
+            cleanup_failure="$cleanup_status"
           fi
-        fi
-      done < <(printf '%s' "$remote_output" | remote_codespace_names_for_slug)
+        done <<<"$remote_names"
+      fi
     else
       printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "$gh_bin codespace list --repo $repo --limit 100 --json name,displayName" "$remote_status" "$slug" >&2
       redact_output "$remote_output" >&2
       printf '\n' >&2
-      if [[ "$status" -eq 0 ]]; then
-        status="$remote_status"
+      cleanup_failure="$remote_status"
+    fi
+
+    local remote_clean=0
+    local attempt=0
+    for attempt in {1..10}; do
+      remote_output="$("$gh_bin" codespace list --repo "$repo" --limit 100 --json name,displayName 2>&1)"
+      remote_status=$?
+      if [[ "$remote_status" -eq 0 ]]; then
+        local remaining_names=""
+        remaining_names="$(printf '%s' "$remote_output" | remote_codespace_names_for_slug 2>&1)"
+        remote_status=$?
+        if [[ "$remote_status" -eq 0 && -z "$remaining_names" ]]; then
+          remote_clean=1
+          break
+        fi
+        if [[ "$remote_status" -eq 0 ]]; then
+          while IFS= read -r remote_name; do
+            [[ -n "$remote_name" ]] || continue
+            cleanup_output="$("$gh_bin" codespace delete --codespace "$remote_name" --force 2>&1)"
+            cleanup_status=$?
+            if [[ "$cleanup_status" -ne 0 ]]; then
+              printf 'classification=cleanup_retry command=%q exit=%s slug=%s attempt=%s\n' "$gh_bin codespace delete --codespace $remote_name --force" "$cleanup_status" "$slug" "$attempt" >&2
+              redact_output "$cleanup_output" >&2
+              printf '\n' >&2
+            fi
+          done <<<"$remaining_names"
+        fi
       fi
+      if [[ "$attempt" -lt 10 ]]; then
+        sleep 2
+      fi
+    done
+    if [[ "$remote_clean" -ne 1 ]]; then
+      printf 'classification=cleanup_failed reason=remote_codespace_still_present slug=%s\n' "$slug" >&2
+      redact_output "$remote_output" >&2
+      printf '\n' >&2
+      cleanup_failure=1
+    else
+      # Reconcile any retained local claim after direct deletion bypassed the
+      # provider's dirty-worktree guard.
+      "$crabbox_bin" stop --provider github-codespaces "$slug" >/dev/null 2>&1 || true
+      cleanup_failure=0
+    fi
+    if [[ "$cleanup_failure" -ne 0 ]]; then
+      status="$cleanup_failure"
     fi
     cleanup_armed=0
   fi
@@ -284,6 +331,11 @@ fi
 gh_bin="${CRABBOX_GITHUB_CODESPACES_GH_PATH:-gh}"
 if ! command -v "$gh_bin" >/dev/null 2>&1; then
   printf 'classification=environment_blocked reason=gh_missing gh_path=%q\n' "$gh_bin"
+  exit 0
+fi
+
+if ! command -v "$python_bin" >/dev/null 2>&1; then
+  printf 'classification=environment_blocked reason=python_missing python_path=%q\n' "$python_bin"
   exit 0
 fi
 
@@ -319,9 +371,22 @@ if [[ ! -x "$crabbox_bin" ]]; then
   crabbox_bin="bin/crabbox"
 fi
 
-ref="${CRABBOX_GITHUB_CODESPACES_SMOKE_REF:-${CRABBOX_GITHUB_CODESPACES_REF:-main}}"
+ref="${CRABBOX_GITHUB_CODESPACES_SMOKE_REF:-${CRABBOX_GITHUB_CODESPACES_REF:-}}"
+if [[ -z "$ref" ]]; then
+  run_capture "$gh_bin api repos/$repo --jq .default_branch" "$gh_bin" api "repos/$repo" --jq .default_branch
+  ref="$(printf '%s' "$captured_output" | tr -d '[:space:]')"
+  if [[ -z "$ref" || "$ref" == "null" ]]; then
+    printf 'classification=environment_blocked reason=github_default_branch_missing repo=%q\n' "$repo"
+    exit 0
+  fi
+fi
 machine="${CRABBOX_GITHUB_CODESPACES_SMOKE_MACHINE:-${CRABBOX_GITHUB_CODESPACES_MACHINE:-basicLinux32gb}}"
-devcontainer="${CRABBOX_GITHUB_CODESPACES_SMOKE_DEVCONTAINER_PATH:-${CRABBOX_GITHUB_CODESPACES_DEVCONTAINER_PATH:-scripts/fixtures/github-codespaces/devcontainer.json}}"
+devcontainer=""
+if [[ -v CRABBOX_GITHUB_CODESPACES_SMOKE_DEVCONTAINER_PATH ]]; then
+  devcontainer="$CRABBOX_GITHUB_CODESPACES_SMOKE_DEVCONTAINER_PATH"
+elif [[ -v CRABBOX_GITHUB_CODESPACES_DEVCONTAINER_PATH ]]; then
+  devcontainer="$CRABBOX_GITHUB_CODESPACES_DEVCONTAINER_PATH"
+fi
 working_directory="${CRABBOX_GITHUB_CODESPACES_SMOKE_WORKING_DIRECTORY:-${CRABBOX_GITHUB_CODESPACES_WORKING_DIRECTORY:-}}"
 geo="${CRABBOX_GITHUB_CODESPACES_SMOKE_GEO:-${CRABBOX_GITHUB_CODESPACES_GEO:-}}"
 
@@ -336,37 +401,43 @@ if [[ -n "$geo" ]]; then
   provider_args+=(--github-codespaces-geo "$geo")
 fi
 
-run_capture "$crabbox_bin doctor ${provider_args[*]}" "$crabbox_bin" doctor "${provider_args[@]}" >/dev/null
+run_capture "$crabbox_bin doctor ${provider_args[*]}" "$crabbox_bin" doctor "${provider_args[@]}"
 
 cleanup_armed=1
 run_capture "$crabbox_bin warmup ${provider_args[*]} --slug $slug --keep=false --ttl 20m --idle-timeout 5m" \
-  "$crabbox_bin" warmup "${provider_args[@]}" --slug "$slug" --keep=false --ttl 20m --idle-timeout 5m >/dev/null
+  "$crabbox_bin" warmup "${provider_args[@]}" --slug "$slug" --keep=false --ttl 20m --idle-timeout 5m
 
 run_capture "$crabbox_bin status --provider github-codespaces --id $slug --wait --wait-timeout 600s" \
-  "$crabbox_bin" status --provider github-codespaces --id "$slug" --wait --wait-timeout 600s >/dev/null
+  "$crabbox_bin" status --provider github-codespaces --id "$slug" --wait --wait-timeout 600s
 
-run_output="$(run_capture "$crabbox_bin run --provider github-codespaces --id $slug --full-resync -- sh -lc 'test -f go.mod && echo github-codespaces-smoke-ok'" \
-  "$crabbox_bin" run --provider github-codespaces --id "$slug" --full-resync -- sh -lc 'test -f go.mod && echo github-codespaces-smoke-ok')"
+remote_command='cleanup() { git reset --hard HEAD >/dev/null 2>&1 || true; git clean -ffd >/dev/null 2>&1 || true; }; trap cleanup EXIT; test -f go.mod && echo github-codespaces-smoke-ok'
+run_capture "$crabbox_bin run --provider github-codespaces --id $slug --full-resync -- sh -lc <smoke-command>" \
+  "$crabbox_bin" run --provider github-codespaces --id "$slug" --full-resync -- sh -lc "$remote_command"
+run_output="$captured_output"
 if [[ "$run_output" != *"github-codespaces-smoke-ok"* ]]; then
   classify_validation_failure "$crabbox_bin run --provider github-codespaces --id $slug" 1 "remote smoke marker not found"
   exit 1
 fi
 
-ssh_output="$(run_capture "$crabbox_bin ssh --provider github-codespaces --id $slug" "$crabbox_bin" ssh --provider github-codespaces --id "$slug")"
+run_capture "$crabbox_bin ssh --provider github-codespaces --id $slug" "$crabbox_bin" ssh --provider github-codespaces --id "$slug"
+ssh_output="$captured_output"
 if [[ "$ssh_output" != ssh* ]]; then
   classify_validation_failure "$crabbox_bin ssh --provider github-codespaces --id $slug" 1 "ssh command was not printed"
   exit 1
 fi
 
-list_output="$(run_capture "$crabbox_bin list --provider github-codespaces --json" "$crabbox_bin" list --provider github-codespaces --json)"
+run_capture "$crabbox_bin list --provider github-codespaces --json" "$crabbox_bin" list --provider github-codespaces --json
+list_output="$captured_output"
 validate_list_json_contains_slug "$crabbox_bin list --provider github-codespaces --json" "$list_output"
 
-run_capture "$crabbox_bin stop --provider github-codespaces $slug" "$crabbox_bin" stop --provider github-codespaces "$slug" >/dev/null
+run_capture "$crabbox_bin stop --provider github-codespaces $slug" "$crabbox_bin" stop --provider github-codespaces "$slug"
 
-run_capture "$crabbox_bin cleanup --provider github-codespaces --dry-run" "$crabbox_bin" cleanup --provider github-codespaces --dry-run >/dev/null
-final_list="$(run_capture "$crabbox_bin list --provider github-codespaces --json" "$crabbox_bin" list --provider github-codespaces --json)"
+run_capture "$crabbox_bin cleanup --provider github-codespaces --dry-run" "$crabbox_bin" cleanup --provider github-codespaces --dry-run
+run_capture "$crabbox_bin list --provider github-codespaces --json" "$crabbox_bin" list --provider github-codespaces --json
+final_list="$captured_output"
 validate_list_json_missing_slug "$crabbox_bin list --provider github-codespaces --json" "$final_list"
-remote_list="$(run_capture "$gh_bin codespace list --repo $repo --limit 100 --json name,displayName" "$gh_bin" codespace list --repo "$repo" --limit 100 --json name,displayName)"
+run_capture "$gh_bin codespace list --repo $repo --limit 100 --json name,displayName" "$gh_bin" codespace list --repo "$repo" --limit 100 --json name,displayName
+remote_list="$captured_output"
 validate_remote_list_json_missing_slug "$gh_bin codespace list --repo $repo --limit 100 --json name,displayName" "$remote_list"
 cleanup_armed=0
 

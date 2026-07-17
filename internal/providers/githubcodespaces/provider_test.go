@@ -205,6 +205,47 @@ func TestApplyFlagsSetsCodespacesConfigAndRejectsClass(t *testing.T) {
 	}
 }
 
+func TestCodespacesWorkRootFlagControlsDefaultDerivation(t *testing.T) {
+	defaults := core.Config{GitHubCodespaces: core.GitHubCodespacesConfig{
+		GHPath:   defaultGHPath,
+		WorkRoot: defaultWorkRoot,
+	}}
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "unset derives repository root", want: "/workspaces/my-app"},
+		{name: "explicit default-looking value is honored", args: []string{"--github-codespaces-work-root", defaultWorkRoot}, want: defaultWorkRoot},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := defaults
+			cfg.Provider = providerName
+			cfg.TargetOS = targetLinux
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := RegisterGitHubCodespacesProviderFlags(fs, defaults)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			if err := fs.Parse(tt.args); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyGitHubCodespacesProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if err := (Provider{}).ApplyConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			backend := newBackend(Provider{}.Spec(), cfg, Runtime{})
+			if got := backend.effectiveWorkRoot("example-org/my-app"); got != tt.want {
+				t.Fatalf("work root=%q want %q", got, tt.want)
+			}
+			if len(tt.args) > 0 && !core.IsWorkRootExplicit(&cfg) {
+				t.Fatal("work root flag was not marked explicit")
+			}
+		})
+	}
+}
+
 func TestNoTokenFlagRegistered(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	RegisterGitHubCodespacesProviderFlags(fs, core.Config{})

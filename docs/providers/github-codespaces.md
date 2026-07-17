@@ -241,6 +241,8 @@ The repeatable live check is opt-in and local-only:
 CRABBOX_LIVE=1 \
 CRABBOX_LIVE_PROVIDERS=github-codespaces \
 CRABBOX_GITHUB_CODESPACES_SMOKE_REPO=example-org/my-app \
+CRABBOX_GITHUB_CODESPACES_SMOKE_REF=main \
+CRABBOX_GITHUB_CODESPACES_SMOKE_DEVCONTAINER_PATH=.devcontainer/devcontainer.json \
 GH_TOKEN=... \
 scripts/live-smoke.sh
 ```
@@ -251,6 +253,12 @@ is supplied, and GitHub credentials are explicitly available. It runs a read-onl
 doctor first, creates a short-lived Codespace lease, runs a command through the
 normal synced Crabbox path, prints the Crabbox SSH command, releases the lease,
 runs dry-run cleanup, and verifies the claim-owned inventory is empty.
+Python 3 is preflighted before creation because inventory validation uses it. If
+`CRABBOX_GITHUB_CODESPACES_SMOKE_REF` is omitted, the script detects the
+repository's default branch. A devcontainer path is passed only when
+`CRABBOX_GITHUB_CODESPACES_SMOKE_DEVCONTAINER_PATH` or
+`CRABBOX_GITHUB_CODESPACES_DEVCONTAINER_PATH` is explicitly set; otherwise
+Codespaces selects the repository default.
 `scripts/live-smoke.sh` delegates this provider to the standalone
 `scripts/live-github-codespaces-smoke.sh`, so the standalone script can also be
 run directly when isolating Codespaces smoke failures.

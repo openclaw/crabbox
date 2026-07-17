@@ -67,6 +67,10 @@ func workRootExplicit(cfg *Config) bool {
 	return core.IsWorkRootExplicit(cfg)
 }
 
+func markWorkRootExplicit(cfg *Config) {
+	core.MarkWorkRootExplicit(cfg)
+}
+
 func newLeaseID() string {
 	return core.NewLeaseID()
 }
