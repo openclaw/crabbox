@@ -623,11 +623,18 @@ func TestPrepareLeaseUsesPerLeaseKnownHosts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.SSH.DisableHostKeyChecking || filepath.Base(lease.SSH.KnownHostsFile) != "known_hosts" || !strings.Contains(lease.SSH.KnownHostsFile, leaseID) {
+	if lease.SSH.DisableHostKeyChecking || filepath.Base(lease.SSH.KnownHostsFile) != "known_hosts" || !strings.Contains(lease.SSH.KnownHostsFile, leaseID) || lease.SSH.HostKeyAlias != lumeHostKeyAlias("worker-1") {
 		t.Fatalf("known hosts not isolated: %#v", lease.SSH)
 	}
 	if !lease.SSH.SSHConfigProxy {
 		t.Fatal("SSHConfigProxy = false, want OpenSSH readiness for the local Lume guest")
+	}
+}
+
+func TestLumeHostKeyAliasEncodesUnsafeVMName(t *testing.T) {
+	alias := lumeHostKeyAlias("worker name,[host]:22")
+	if invalidLogName.MatchString(alias) || strings.ContainsAny(alias, " ,[]:") {
+		t.Fatalf("unsafe host-key alias=%q", alias)
 	}
 }
 
@@ -700,7 +707,7 @@ func TestWaitForGuestIdentityPinsKeyFromVirtioFSChallenge(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(data)
-	if !strings.Contains(got, "192.0.2.10,[192.0.2.10]:22 ssh-ed25519 "+hostKey) {
+	if !strings.Contains(got, lumeHostKeyAlias("worker-1")+" ssh-ed25519 "+hostKey) || strings.Contains(got, "192.0.2.10") {
 		t.Fatalf("known_hosts=%q", got)
 	}
 }

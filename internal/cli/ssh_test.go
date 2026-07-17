@@ -722,6 +722,14 @@ func TestSSHArgsOverrideAmbientForwardingConfig(t *testing.T) {
 	}
 }
 
+func TestSSHArgsUseStableHostKeyAlias(t *testing.T) {
+	target := SSHTarget{User: "lume", Host: "192.0.2.20", Port: "22", HostKeyAlias: "crabbox-lume-worker-1"}
+	got := strings.Join(sshBaseArgs(target), " ")
+	if !strings.Contains(got, "HostKeyAlias=crabbox-lume-worker-1") {
+		t.Fatalf("ssh args=%q", got)
+	}
+}
+
 func TestSSHArgsNoInputAddsNativeStdinRedirect(t *testing.T) {
 	target := SSHTarget{User: "crabbox", Host: "203.0.113.10", Port: "22"}
 	if got := strings.Join(sshArgsNoInput(target, "true"), " "); !strings.Contains(" "+got+" ", " -n ") {

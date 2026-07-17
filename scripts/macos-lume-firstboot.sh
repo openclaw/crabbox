@@ -49,7 +49,7 @@ if [[ -r "$challenge_path" ]]; then
     exit 1
   fi
   if [[ "$(/usr/bin/wc -l <"$authorized_key_path" | /usr/bin/tr -d ' ')" != "1" ]] ||
-    ! /usr/bin/awk '$1 == "ssh-ed25519" && $2 ~ /^[A-Za-z0-9+\/=]+$/ { valid=1 } END { exit !valid }' "$authorized_key_path"; then
+    ! /usr/bin/awk '$1 ~ /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)$/ && $2 ~ /^[A-Za-z0-9+\/=]+$/ { valid=1 } END { exit !valid }' "$authorized_key_path"; then
     echo "invalid Crabbox bootstrap SSH public key" >&2
     exit 1
   fi

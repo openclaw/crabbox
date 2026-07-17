@@ -58,6 +58,7 @@ test("first boot returns the rotated host key through the challenged VirtioFS sh
   assert.match(text, /\/bin\/rm -f "\$challenge_path"/);
   assert.match(text, /dscl \. -read "\/Users\/\$ssh_user" NFSHomeDirectory/);
   assert.match(text, /authorized_key_path" "\$ssh_home\/\.ssh\/authorized_keys"/);
+  assert.match(text, /ssh-rsa\|ecdsa-sha2-nistp/);
   assert.match(text, /AuthenticationMethods publickey/);
   assert.match(text, /PasswordAuthentication no/);
   assert.match(text, /AuthorizedKeysFile none/);

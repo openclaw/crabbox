@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -869,7 +871,7 @@ func removeBootstrapTrust(trust bootstrapTrust) {
 	}
 }
 
-func pinBootstrapHostKey(host string, trust bootstrapTrust, knownHostsFile string) error {
+func pinBootstrapHostKey(host, hostKeyAlias string, trust bootstrapTrust, knownHostsFile string) error {
 	if net.ParseIP(host) == nil {
 		return fmt.Errorf("Lume returned invalid guest IP address %q", host)
 	}
@@ -899,7 +901,7 @@ func pinBootstrapHostKey(host string, trust bootstrapTrust, knownHostsFile strin
 	if err != nil || len(decodedKey) == 0 {
 		return fmt.Errorf("Lume bootstrap identity has invalid ED25519 host key")
 	}
-	entry := host + ",[" + host + "]:" + sshPort + " " + fields[2] + " " + fields[3] + "\n"
+	entry := hostKeyAlias + " " + fields[2] + " " + fields[3] + "\n"
 	tmp, err := os.CreateTemp(filepath.Dir(knownHostsFile), ".lume-known-hosts-*")
 	if err != nil {
 		return fmt.Errorf("create temporary Lume known_hosts: %w", err)
@@ -970,7 +972,7 @@ func (b *backend) waitForGuestIdentity(ctx context.Context, name, host string, t
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		lastErr = pinBootstrapHostKey(host, trust, knownHostsFile)
+		lastErr = pinBootstrapHostKey(host, lumeHostKeyAlias(name), trust, knownHostsFile)
 		if lastErr == nil {
 			return nil
 		}
@@ -1381,6 +1383,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst lumeVM, cla
 		}
 	}
 	target := sshTargetFromConfig(cfg, inst.IPAddress)
+	target.HostKeyAlias = lumeHostKeyAlias(inst.Name)
 	target.Port = sshPort
 	target.FallbackPorts = nil
 	target.TargetOS = targetMacOS
@@ -1402,6 +1405,11 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst lumeVM, cla
 		server.Labels["state"] = "ready"
 	}
 	return LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}, nil
+}
+
+func lumeHostKeyAlias(name string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(name)))
+	return "crabbox-lume-" + hex.EncodeToString(sum[:16])
 }
 
 func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg Config) Server {
