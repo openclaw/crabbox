@@ -104,7 +104,15 @@ func (a App) runEditorHandoff(ctx context.Context, editorName string, editor edi
 
 	stopLeaseActivity := a.startInteractiveSSHLeaseActivity(ctx, resolved.Config, resolved.Lease)
 	defer stopLeaseActivity()
-	handoff := newEditorHandoffOutput(editorName, editor, resolved.Lease.LeaseID, resolved.Lease.SSH, folder, hydratedByActions)
+	handoff := newEditorHandoffOutput(
+		editorName,
+		editor,
+		resolved.Lease.LeaseID,
+		resolved.Lease.SSH,
+		folder,
+		hydratedByActions,
+		editorHandoffHardTTLApplies(resolved.Config, resolved.Lease),
+	)
 	if jsonOut {
 		if err := json.NewEncoder(a.Stdout).Encode(handoff); err != nil {
 			return err
@@ -117,7 +125,7 @@ func (a App) runEditorHandoff(ctx context.Context, editorName string, editor edi
 	return nil
 }
 
-func newEditorHandoffOutput(editorName string, editor editorHandoffSpec, leaseID string, target SSHTarget, folder string, hydratedByActions bool) editorHandoffOutput {
+func newEditorHandoffOutput(editorName string, editor editorHandoffSpec, leaseID string, target SSHTarget, folder string, hydratedByActions, hardTTLApplies bool) editorHandoffOutput {
 	releaseCommand := ""
 	if leaseID = strings.TrimSpace(leaseID); leaseID != "" {
 		releaseCommand = "crabbox stop " + leaseID
@@ -131,9 +139,18 @@ func newEditorHandoffOutput(editorName string, editor editorHandoffSpec, leaseID
 		RemoteFolder:      folder,
 		HydratedByActions: hydratedByActions,
 		LeaseActivity:     "foreground",
-		HardTTLApplies:    true,
+		HardTTLApplies:    hardTTLApplies,
 		ReleaseCommand:    releaseCommand,
 	}
+}
+
+func editorHandoffHardTTLApplies(cfg Config, lease LeaseTarget) bool {
+	provider := firstNonBlank(lease.Server.Provider, cfg.Provider)
+	if isStaticProvider(provider) {
+		return false
+	}
+	_, ok := parseLeaseLabelTime(lease.Server.Labels["expires_at"])
+	return ok
 }
 
 func validateEditorTarget(editorName string, editor editorHandoffSpec, cfg Config, target SSHTarget) error {
@@ -160,7 +177,11 @@ func writeEditorInstructions(out io.Writer, editor editorHandoffSpec, handoff ed
 	fmt.Fprintln(out, "Next:")
 	fmt.Fprint(out, editor.connectInstructions)
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Lease activity: active while this process runs; the hard TTL still applies.")
+	if handoff.HardTTLApplies {
+		fmt.Fprintln(out, "Lease activity: active while this process runs; the hard TTL still applies.")
+	} else {
+		fmt.Fprintln(out, "Lease activity: active while this process runs.")
+	}
 	fmt.Fprintln(out, "Press Ctrl-C when the editor session is finished.")
 	if handoff.ReleaseCommand != "" {
 		fmt.Fprintf(out, "Release command: %s\n", handoff.ReleaseCommand)

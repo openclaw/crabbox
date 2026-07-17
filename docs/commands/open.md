@@ -47,7 +47,8 @@ running, Crabbox keeps coordinator-backed leases heartbeating and marks
 direct-provider leases running or ready where the provider supports lease
 touches.
 
-The lease's configured hard TTL still applies while the command is running.
+Managed leases with a resolved expiry keep their configured hard TTL while the
+command is running. Static SSH targets have no Crabbox-enforced hard TTL.
 
 Stopping `crabbox open` does not release the lease. Use the printed release
 command or `crabbox stop <id-or-slug>` when the workspace is no longer needed.

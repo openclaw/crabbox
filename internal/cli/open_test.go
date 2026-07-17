@@ -66,7 +66,14 @@ func TestOpenEditorZedHappyPathPrintsInstructions(t *testing.T) {
 	out := &cancelBuffer{cancel: cancel}
 	cfg := Config{WorkRoot: "/work", TargetOS: targetLinux}
 	target := SSHTarget{User: "alice", Host: "example.com", Port: "22", TargetOS: targetLinux}
-	resolved := resolvedSSHCommandTarget{Config: cfg, Lease: LeaseTarget{LeaseID: "swift-crab", SSH: target}}
+	resolved := resolvedSSHCommandTarget{
+		Config: cfg,
+		Lease: LeaseTarget{
+			Server:  Server{Provider: "hetzner", Labels: map[string]string{"expires_at": "2030-01-01T00:00:00Z"}},
+			LeaseID: "swift-crab",
+			SSH:     target,
+		},
+	}
 
 	err := (App{Stdout: out, Stderr: &bytes.Buffer{}}).runEditorHandoff(ctx, "zed", editorHandoffSpecs["zed"], resolved, false)
 	if err != nil {
@@ -102,7 +109,14 @@ func TestOpenEditorZedJSONHandoff(t *testing.T) {
 	out := &cancelBuffer{cancel: cancel}
 	cfg := Config{WorkRoot: "/work", TargetOS: targetLinux}
 	target := SSHTarget{User: "alice", Host: "example.com", Port: "22", TargetOS: targetLinux}
-	resolved := resolvedSSHCommandTarget{Config: cfg, Lease: LeaseTarget{LeaseID: "swift-crab", SSH: target}}
+	resolved := resolvedSSHCommandTarget{
+		Config: cfg,
+		Lease: LeaseTarget{
+			Server:  Server{Provider: "hetzner", Labels: map[string]string{"expires_at": "2030-01-01T00:00:00Z"}},
+			LeaseID: "swift-crab",
+			SSH:     target,
+		},
+	}
 
 	err := (App{Stdout: out, Stderr: &bytes.Buffer{}}).runEditorHandoff(ctx, "zed", editorHandoffSpecs["zed"], resolved, true)
 	if err != nil {
@@ -131,6 +145,52 @@ func TestOpenEditorZedJSONHandoff(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "Connect New Server") {
 		t.Fatalf("JSON output contains human instructions:\n%s", out.String())
+	}
+}
+
+func TestEditorHandoffHardTTLAppliesOnlyToExpiringManagedLeases(t *testing.T) {
+	tests := []struct {
+		name  string
+		cfg   Config
+		lease LeaseTarget
+		want  bool
+	}{
+		{
+			name:  "managed expiry",
+			cfg:   Config{Provider: "hetzner"},
+			lease: LeaseTarget{Server: Server{Provider: "hetzner", Labels: map[string]string{"expires_at": "2030-01-01T00:00:00Z"}}},
+			want:  true,
+		},
+		{
+			name:  "managed missing expiry",
+			cfg:   Config{Provider: "hetzner"},
+			lease: LeaseTarget{Server: Server{Provider: "hetzner"}},
+			want:  false,
+		},
+		{
+			name:  "static ignores stale expiry",
+			cfg:   Config{Provider: "ssh"},
+			lease: LeaseTarget{Server: Server{Provider: "ssh", Labels: map[string]string{"expires_at": "2030-01-01T00:00:00Z"}}},
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := editorHandoffHardTTLApplies(tt.cfg, tt.lease); got != tt.want {
+				t.Fatalf("editorHandoffHardTTLApplies()=%v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteEditorInstructionsOmitsHardTTLWithoutExpiry(t *testing.T) {
+	var out bytes.Buffer
+	writeEditorInstructions(&out, editorHandoffSpecs["zed"], editorHandoffOutput{
+		SSHCommand:   "ssh alice@example.com",
+		RemoteFolder: "/work/example",
+	})
+	if strings.Contains(out.String(), "hard TTL") {
+		t.Fatalf("instructions claim a hard TTL without an expiry:\n%s", out.String())
 	}
 }
 
