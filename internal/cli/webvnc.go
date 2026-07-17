@@ -578,7 +578,9 @@ func serveWebVNCBridgeSlot(ctx context.Context, cfg webVNCBridgePoolConfig, slot
 	for {
 		bridge, err := connectWebVNCBridgeWithDial(ctx, cfg.Coord, cfg.LeaseID, cfg.Host, cfg.Port, cfg.RescueCtx.Target, cfg.Credentials, cfg.AuthenticationMode, cfg.Log, cfg.DialVNC)
 		if err != nil {
-			attempt, kind := nextWebVNCBridgeFailure(connectedOnce, attempt)
+			var kind string
+			// Keep attempt outside this block so consecutive failures increase the retry delay.
+			attempt, kind = nextWebVNCBridgeFailure(connectedOnce, attempt)
 			events <- webVNCBridgePoolEvent{Kind: kind, Slot: slot, Attempt: attempt, Err: err}
 			if err := waitWebVNCReconnect(ctx, webVNCReconnectDelay(attempt)); err != nil {
 				events <- webVNCBridgePoolEvent{Kind: "fatal", Slot: slot, Err: err}
@@ -2237,13 +2239,13 @@ func acquireWebVNCDaemonLock(leaseID string) (func(), error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return acquireWebVNCDaemonFileLock(pidPath + ".lock")
+	return acquireDaemonFileLock(pidPath + ".lock")
 }
 
-func acquireWebVNCDaemonFileLock(lockPath string) (func(), error) {
+func acquireDaemonFileLock(lockPath string) (func(), error) {
 	if info, err := os.Lstat(lockPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("WebVNC daemon lock must be a regular file")
+			return nil, fmt.Errorf("daemon lock must be a regular file")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -2261,7 +2263,7 @@ func acquireWebVNCDaemonFileLock(lockPath string) (func(), error) {
 		return closeWithError(err)
 	}
 	if !info.Mode().IsRegular() {
-		return closeWithError(fmt.Errorf("WebVNC daemon lock must be a regular file"))
+		return closeWithError(fmt.Errorf("daemon lock must be a regular file"))
 	}
 	if err := file.Chmod(0o600); err != nil {
 		return closeWithError(err)

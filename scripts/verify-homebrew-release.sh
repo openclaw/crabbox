@@ -594,9 +594,23 @@ main() {
   [[ $# -eq 8 ]] || usage
   local tag=$1 asset_dir=$2 tag_object=$3 source_commit=$4 verifier_commit=$5
   local release_id=$6 public_run_id=$7 proof_dir=$8
-  local native_arch brew_bin node_bin work clean_path user_name homebrew_home homebrew_cache source_asset_dir
+  local native_arch brew_bin node_bin go_bin work clean_path user_name homebrew_home homebrew_cache source_asset_dir
   validate_release_identity "$tag" "$tag_object" "$source_commit" "$verifier_commit"
   assert_no_downstream_credentials
+  case "${CRABBOX_HOMEBREW_EXTERNAL_PUBLIC_POSTFLIGHT:-}" in
+    "") ;;
+    1)
+      [[ "${GITHUB_ACTIONS:-}" == true &&
+        "${GITHUB_WORKFLOW_REF:-}" == "$CRABBOX_RELEASE_REPOSITORY/.github/workflows/verify-homebrew.yml@refs/heads/$CRABBOX_RELEASE_DEFAULT_BRANCH" ]] || {
+        echo "external public postflight requires the protected Homebrew workflow" >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "invalid external public postflight mode" >&2
+      exit 1
+      ;;
+  esac
   [[ "$(uname -s)" == Darwin ]] || {
     echo "downstream Homebrew verification must run natively on macOS" >&2
     exit 1
@@ -622,8 +636,10 @@ main() {
 
   brew_bin=$(command -v brew)
   node_bin=$(command -v node)
-  [[ "$brew_bin" == /* && "$node_bin" == /* && -x "$brew_bin" && -x "$node_bin" ]] || {
-    echo "absolute Homebrew and Node executables are required" >&2
+  go_bin=$(command -v go)
+  [[ "$brew_bin" == /* && "$node_bin" == /* && "$go_bin" == /* &&
+    -x "$brew_bin" && -x "$node_bin" && -x "$go_bin" ]] || {
+    echo "absolute Homebrew, Node, and Go executables are required" >&2
     exit 1
   }
   work=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-homebrew-verify.XXXXXX")
@@ -637,7 +653,7 @@ main() {
     "$tag" "$asset_dir" "$tag_object" "$source_commit" "$verifier_commit" \
     "$release_id" "$public_run_id" "$proof_dir" "$work/public-preflight" "$node_bin"
   asset_dir="$work/public-preflight/public-assets"
-  clean_path="${brew_bin%/*}:${node_bin%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
+  clean_path="${brew_bin%/*}:${node_bin%/*}:${go_bin%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
   user_name=$(id -un)
 
   # shellcheck disable=SC2016 # Expanded by the credential-free child shell.
@@ -660,10 +676,16 @@ main() {
       "$tag" "$asset_dir" "$tag_object" "$source_commit" "$verifier_commit" \
       "$native_arch" "$brew_bin" "$node_bin" "$work"
 
+  require_protected_homebrew_tooling "$verifier_commit" "$tag"
+  if [[ "${CRABBOX_HOMEBREW_EXTERNAL_PUBLIC_POSTFLIGHT:-}" == 1 ]]; then
+    # The protected hosted workflow closes this boundary in a clean Linux job.
+    # Never re-read candidate-writable witness files after candidate execution.
+    return 0
+  fi
+
   # Close the downstream verification window with a fresh unauthenticated read.
   # A concurrent release, run, artifact, proof, or public-byte change is an
   # incident and must invalidate this host's proof rather than silently pass.
-  require_protected_homebrew_tooling "$verifier_commit" "$tag"
   mkdir -m 700 "$work/public-postflight"
   freeze_public_release \
     "$tag" "$source_asset_dir" "$tag_object" "$source_commit" "$verifier_commit" \

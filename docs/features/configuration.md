@@ -913,7 +913,7 @@ layout. The authenticated `sprite` CLI must also be on `PATH`.
 Other delegated and SSH-lease providers (RunPod, Tensorlake, Upstash, Islo,
 W&B, Railway, Parallels) follow the same shape: a top-level section named after
 the provider, with credentials sourced from provider-native env vars rather
-than YAML. See [Providers](providers.md) for the per-provider reference.
+than YAML. See [Provider Reference](../providers/README.md) for the per-provider reference.
 
 ### Sync
 
@@ -1090,7 +1090,7 @@ the list when the first candidate cannot be provisioned.
 | `large` | memory-heavy or many-process workloads |
 | `beast` | maximum capacity within the provider's burstable family |
 
-Class-to-type mappings live in [Providers](providers.md). When you set
+Class-to-type mappings live in [Machine classes](providers.md#machine-classes). When you set
 `serverType:` (or `--type`), that exact provider type wins and the class is
 ignored. The `serverType:` and `--type` paths intentionally do not fall back;
 they fail loud if the provider rejects the type.
@@ -1184,6 +1184,6 @@ Related docs:
 - [config command](../commands/config.md)
 - [doctor command](../commands/doctor.md)
 - [Sync](sync.md)
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)
 - [Capacity and fallback](capacity-fallback.md)
 - [Network and reachability](network.md)

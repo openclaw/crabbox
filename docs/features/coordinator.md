@@ -85,8 +85,9 @@ owner email for admin and shared-token requests.
 After auth, the coordinator strips inbound Access headers and injects a trusted
 context for the fleet implementation: `x-crabbox-auth`, `x-crabbox-admin`,
 `x-crabbox-owner`, `x-crabbox-org`, and `x-crabbox-github-login`. The portal
-converts a `crabbox_session` cookie into a Bearer token so browser sessions reuse
-the same auth path.
+converts one unique `__Host-crabbox_session` host-only cookie into a Bearer token
+so browser sessions reuse the same auth path. Duplicate session cookies fail
+closed.
 
 GitHub user tokens are scoped to their owner/org for lease, run, log, and usage
 routes. Admin scope (admin token, or shared token where allowed) is required for
@@ -219,9 +220,9 @@ GET    /v1/images/{id}/fast-snapshot-restore
 
 The portal is the authenticated browser UI served by the same coordinator
 (`worker/src/portal.ts`). Login is unauthenticated; everything else uses the
-`crabbox_session` cookie. Logout confirmation is read-only, while logout itself
-requires a same-origin `POST` and closes WebVNC, Code, and mediated-egress
-bridges bound to that portal session.
+host-only `__Host-crabbox_session` cookie. Logout confirmation is read-only,
+while logout itself requires a same-origin `POST` and closes WebVNC, Code, and
+mediated-egress bridges bound to that portal session.
 
 ```text
 GET    /portal

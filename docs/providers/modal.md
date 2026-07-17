@@ -74,6 +74,9 @@ modal:
   image: python:3.13-slim
   workdir: /workspace/crabbox/work
   python: python3
+  environment: my-app-dev
+  secrets:
+    - example
 ```
 
 Provider flags:
@@ -83,6 +86,8 @@ Provider flags:
 --modal-image
 --modal-workdir
 --modal-python
+--modal-environment
+--modal-secret NAME  # repeatable or comma-separated
 ```
 
 Environment overrides:
@@ -92,10 +97,18 @@ CRABBOX_MODAL_APP
 CRABBOX_MODAL_IMAGE
 CRABBOX_MODAL_WORKDIR
 CRABBOX_MODAL_PYTHON
+CRABBOX_MODAL_ENVIRONMENT
+CRABBOX_MODAL_SECRETS     # comma-separated Modal Secret names
 ```
 
 Defaults: app `crabbox`, image `python:3.13-slim`, workdir
 `/workspace/crabbox`, Python binary `python3`.
+
+`modal.secrets` contains Modal Secret names, not secret values. Crabbox resolves
+those names inside Modal when creating the sandbox. Use `modal.environment` (or
+`--modal-environment`) when the secrets belong to a named Modal environment.
+Set these fields in the user config or pass the corresponding flags or environment
+variables; repository-local config cannot select a Modal environment or Secret.
 
 ## Lifecycle
 

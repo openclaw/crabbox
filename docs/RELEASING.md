@@ -102,6 +102,11 @@ timestamp. Submit each raw binary with `notarytool --wait`, require an
 `Accepted` result and distinct valid submission ID, then perform the online
 raw-binary check before creating the archive:
 
+The notary profile must live in the same managed, passwordless release
+keychain as the Foundation signing identity. The signer passes that keychain
+explicitly so headless release hosts never fall back to a locked login
+keychain.
+
 ```sh
 codesign --verify --strict --check-notarization -R=notarized <binary>
 ```
@@ -354,7 +359,7 @@ for arch in arm64 x86_64; do
     if length == 1 then .[0].id else error("ambiguous proof artifact") end
   ' "$PUBLIC_ARTIFACTS")
   gh api --method GET \
-    --header 'Accept: application/octet-stream' \
+    --header 'Accept: application/vnd.github+json' \
     "repos/openclaw/crabbox/actions/artifacts/$ARTIFACT_ID/zip" \
     >"$PUBLIC_PROOFS/verified-assets-$arch.zip"
 done
@@ -363,6 +368,24 @@ done
 Remove every GitHub, Actions, Homebrew, signing, notary, and secret-store
 credential from the environment. Then run the downstream verifier in a new
 credential-free shell:
+
+On an ephemeral runner, materialize the public tap after removing credentials
+and before starting the verifier:
+
+```sh
+HOMEBREW_NO_AUTO_UPDATE=1 brew tap openclaw/tap
+```
+
+The launcher captures absolute Homebrew, Node, and Go executable paths before
+scrubbing the environment, then preserves only those tool directories plus the
+macOS system paths in the child `PATH`.
+
+Hosted native runners also place a credential-free `curl` retry wrapper in that
+trusted tool directory. It keeps the frozen verifier's public GitHub API reads
+bounded to 15 minutes while tolerating transient shared-runner 403/rate-limit
+responses. Stdout responses are staged in a curl-owned temporary file and
+emitted only after success, so retries cannot append to partial JSON. The wrapper
+never adds an authorization header or skips a pre/postflight read.
 
 ```sh
 
@@ -391,6 +414,18 @@ lower-level `codesign-macos.sh`, `extract-release-notes.sh`,
 `verify-go-release-binary.mjs`, and `verify-macos-binary.sh` are internal to the
 operator commands above and must not be reordered or invoked as substitute
 gates.
+
+The hosted `Verify Homebrew Release` workflow preserves the same anonymous
+public-record boundary without depending on a rate-limited native-runner IP. A
+credential-free Linux preflight freezes the public release, verifier run,
+workflow, and artifact metadata before either native job starts. Each native
+job validates that digest-pinned witness before any candidate execution, then
+performs no post-candidate read from its candidate-writable filesystem. A
+separate credential-free Linux postflight owns the post-candidate boundary: it
+repeats the anonymous reads after both native jobs and requires byte-for-byte
+equality of the security-relevant record with the preflight witness. Mutable
+download telemetry is excluded because verification itself downloads every
+asset.
 
 ## Serialized Gates
 
@@ -434,6 +469,12 @@ Immediately before mutation, fetch the remote tag, protected workflow head,
 draft metadata, notes, and every asset record again. Require byte-for-byte
 equality with the frozen proof and require the successful native markers to
 refer to that exact state.
+
+Enable organization-enforced release immutability for this repository before
+the publication gate. The publisher checks the live setting before its sole
+PATCH, and the publication response plus every public verifier must report
+`immutable=true`. A repository-only or disabled setting blocks publication
+before mutation.
 
 The protected native verifier uses a non-cancelling concurrency key scoped to
 the immutable numeric release. GitHub Actions retains at most one pending run
@@ -479,6 +520,11 @@ authority, Team ID, identifier, hardened-runtime, timestamp, and online
 notarization checks. Apple Silicon also runs the helper's non-mutating info path.
 This bounded verifier is the installed-binary smoke; it does not create a lease.
 Only both native proofs complete the Homebrew gate.
+
+The Homebrew workflow itself runs from the current protected `main` commit,
+while its verification checkout remains pinned to the release record's
+protected verifier commit. This keeps published provenance immutable while
+allowing a protected workflow-only repair to restore the downstream proof.
 
 ## Cancellation And Recovery
 

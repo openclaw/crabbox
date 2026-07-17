@@ -81,6 +81,7 @@
     "cleanup": "provider delete",
     "bestFit": "Managed Linux box over SSH",
     "caveat": "Requires the ASCII Box CLI and account",
+    "auth": "API key via ASCII_BOX_API_KEY or CRABBOX_ASCII_BOX_API_KEY; Box CLI config; direct remote SSH lease",
     "docs": "ascii-box.md"
   },
   "aws": {
@@ -95,6 +96,7 @@
     "cleanup": "instance termination",
     "bestFit": "Broad Linux, Windows, WSL2, and macOS cloud coverage",
     "caveat": "Largest configuration, quota, and cost surface",
+    "auth": "Broker-owned credentials through coordinator, or AWS SDK credential chain in direct mode; AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN",
     "docs": "aws.md"
   },
   "aws-lambda-microvm": {
@@ -109,6 +111,7 @@
     "cleanup": "MicroVM termination",
     "bestFit": "Isolated stateful ARM64 command execution",
     "caveat": "Requires a compatible Crabbox runner image; launch Regions and lifetime are limited",
+    "auth": "AWS SDK credential chain plus short-lived MicroVM auth token; delegated remote sandbox",
     "docs": "aws-lambda-microvm.md"
   },
   "azure": {
@@ -123,6 +126,7 @@
     "cleanup": "VM and owned resource delete",
     "bestFit": "Linux or Windows workloads in Azure",
     "caveat": "Shared resource and identity setup is substantial",
+    "auth": "Broker-owned credentials through coordinator, or Azure DefaultAzureCredential, az login, service principal env credentials",
     "docs": "azure.md"
   },
   "azure-dynamic-sessions": {
@@ -137,6 +141,7 @@
     "cleanup": "provider session expiry",
     "bestFit": "Short delegated container sessions in Azure",
     "caveat": "No Crabbox-managed SSH lease",
+    "auth": "Bearer token via CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN or az account get-access-token; delegated remote sandbox",
     "docs": "azure-dynamic-sessions.md"
   },
   "blaxel": {
@@ -151,6 +156,7 @@
     "cleanup": "owned sandbox delete",
     "bestFit": "Managed delegated Linux sandbox execution",
     "caveat": "Requires Blaxel API credentials and workspace access",
+    "auth": "API key via CRABBOX_BLAXEL_API_KEY or BL_API_KEY; env-only remote sandbox auth",
     "docs": "blaxel.md"
   },
   "blacksmith-testbox": {
@@ -179,6 +185,7 @@
     "cleanup": "container delete",
     "bestFit": "Fast delegated Linux container execution",
     "caveat": "Requires Worker deployment and container availability",
+    "auth": "Runner bearer token via CRABBOX_CLOUDFLARE_RUNNER_TOKEN plus runner URL; delegated remote container",
     "docs": "cloudflare.md"
   },
   "cloudflare-dynamic-workers": {
@@ -193,6 +200,7 @@
     "cleanup": "terminal metadata and local claim removal",
     "bestFit": "Hosted Worker module execution",
     "caveat": "No shell, SSH, or filesystem sync; Dynamic Workers must be enabled",
+    "auth": "Loader bearer token via CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN; Wrangler or CLOUDFLARE_API_TOKEN for deployment",
     "docs": "cloudflare-dynamic-workers.md"
   },
   "cloudflare-sandbox": {
@@ -207,6 +215,7 @@
     "cleanup": "sandbox delete",
     "bestFit": "Cloudflare Sandbox Linux command execution through a bridge",
     "caveat": "Requires a configured bridge URL; no SSH, browser, Tailscale, URL sessions, mounts, or checkpoints",
+    "auth": "Bridge bearer token via CRABBOX_CLOUDFLARE_SANDBOX_TOKEN plus bridge URL; delegated remote sandbox",
     "docs": "cloudflare-sandbox.md"
   },
   "codesandbox": {
@@ -221,6 +230,7 @@
     "cleanup": "sandbox delete",
     "bestFit": "Managed CodeSandbox Linux development environments",
     "caveat": "Requires env-only SDK auth and a local Node bridge",
+    "auth": "API key via CRABBOX_CODESANDBOX_API_KEY or CodeSandbox env auth; env-only remote sandbox auth",
     "docs": "codesandbox.md"
   },
   "coder": {
@@ -249,6 +259,7 @@
     "cleanup": "sandbox delete",
     "bestFit": "Hosted agent-ready Workspace Runs with archive sync and durable evidence",
     "caveat": "No SSH, env forwarding, artifacts, proof, downloads, or custom Dockerfile templates yet",
+    "auth": "API key via CRABBOX_CROWNEST_API_KEY or CROWNEST_API_KEY; bearer token remote sandbox auth",
     "docs": "crownest.md"
   },
   "cubesandbox": {
@@ -263,6 +274,7 @@
     "cleanup": "claimed sandbox delete",
     "bestFit": "Self-hosted E2B-compatible MicroVM command execution",
     "caveat": "Requires a CubeSandbox deployment, ready template ID, and reachable CubeProxy data plane",
+    "auth": "API key via CUBE_API_KEY plus Cube API endpoint; self-hosted remote delegated sandbox",
     "docs": "cubesandbox.md"
   },
   "daytona": {
@@ -278,6 +290,7 @@
     "cleanup": "sandbox delete",
     "bestFit": "Managed development sandbox with direct toolbox execution or brokered SSH",
     "caveat": "SSH access is short-lived; direct run uses Daytona toolbox APIs while brokered run uses SSH",
+    "auth": "Broker-owned API key through coordinator, or DAYTONA_API_KEY / DAYTONA_JWT_TOKEN in direct mode",
     "docs": "daytona.md"
   },
   "digitalocean": {
@@ -292,6 +305,7 @@
     "cleanup": "Droplet and key delete",
     "bestFit": "Simple direct Linux VM",
     "caveat": "Direct-only; no coordinator scheduling",
+    "auth": "API token via DIGITALOCEAN_TOKEN; direct remote Linux Droplet provider",
     "docs": "digitalocean.md"
   },
   "docker-sandbox": {
@@ -320,6 +334,7 @@
     "cleanup": "sandbox kill or expiry",
     "bestFit": "Hosted ephemeral code sandbox",
     "caveat": "URL bridge is provider-specific; no normal SSH lease",
+    "auth": "API key via E2B_API_KEY; delegated remote sandbox auth",
     "docs": "e2b.md"
   },
   "exe-dev": {
@@ -362,6 +377,7 @@
     "cleanup": "not exposed",
     "bestFit": "Inspecting FastAPI Cloud app deployment readiness",
     "caveat": "Cannot execute arbitrary Crabbox run commands or stop apps",
+    "auth": "Bearer token via FASTAPI_CLOUD_TOKEN; service-control auth",
     "docs": "fastapi-cloud.md"
   },
   "firecracker": {
@@ -390,6 +406,7 @@
     "cleanup": "provider VM cleanup",
     "bestFit": "Hosted delegated Linux VM execution",
     "caveat": "No Crabbox-managed SSH path",
+    "auth": "API key via FREESTYLE_API_KEY; delegated remote VM auth",
     "docs": "freestyle.md"
   },
   "gcp": {
@@ -404,6 +421,7 @@
     "cleanup": "instance and firewall cleanup",
     "bestFit": "Linux compute with broad machine selection",
     "caveat": "Project, IAM, quota, and firewall setup required",
+    "auth": "Broker-owned credentials through coordinator, or Google ADC / gcloud / GOOGLE_APPLICATION_CREDENTIALS in direct mode",
     "docs": "gcp.md"
   },
   "hetzner": {
@@ -418,6 +436,7 @@
     "cleanup": "server delete",
     "bestFit": "Cost-effective high-CPU Linux VM",
     "caveat": "Linux-only and capacity varies by location",
+    "auth": "Broker-owned API token through coordinator, or HCLOUD_TOKEN in direct mode",
     "docs": "hetzner.md"
   },
   "hostinger": {
@@ -432,6 +451,7 @@
     "cleanup": "stop only",
     "bestFit": "Direct Linux VPS with persistent subscription",
     "caveat": "Purchase needs opt-in and release does not cancel billing",
+    "auth": "API token via CRABBOX_HOSTINGER_API_TOKEN or HOSTINGER_API_TOKEN; direct remote VPS provider",
     "docs": "hostinger.md"
   },
   "hyperv": {
@@ -474,6 +494,7 @@
     "cleanup": "sandbox delete",
     "bestFit": "Hosted delegated execution with keep, pause, and SSH helper",
     "caveat": "SSH feature is not Crabbox-managed sync/run",
+    "auth": "API key via ISLO_API_KEY; provider-specific SSH helper and delegated remote auth",
     "docs": "islo.md"
   },
   "kubevirt": {
@@ -502,6 +523,7 @@
     "cleanup": "instance and key termination",
     "bestFit": "Direct GPU-backed Linux workload over SSH",
     "caveat": "Direct-only; billing, quota, and capacity are account-owned",
+    "auth": "API key via LAMBDA_API_KEY; direct remote GPU cloud provider",
     "docs": "lambda.md"
   },
   "linode": {
@@ -516,6 +538,7 @@
     "cleanup": "instance and key delete",
     "bestFit": "Straightforward direct Linux VM",
     "caveat": "Direct-only; optional firewall must already exist",
+    "auth": "API token via LINODE_TOKEN; direct remote Linux instance provider",
     "docs": "linode.md"
   },
   "vultr": {
@@ -530,6 +553,7 @@
     "cleanup": "instance and key delete",
     "bestFit": "Direct Linux VM on Vultr",
     "caveat": "Direct-only; firewall groups and VPCs must already exist",
+    "auth": "API key via VULTR_API_KEY; direct remote Linux instance provider",
     "docs": "vultr.md"
   },
   "vast": {
@@ -544,6 +568,7 @@
     "cleanup": "destroy by default; optional stop or keep",
     "bestFit": "Direct Linux GPU lease from the Vast.ai offer market",
     "caveat": "Direct-only and billable; capacity, quota, and offer availability vary",
+    "auth": "API key via CRABBOX_VAST_API_KEY or VAST_API_KEY; direct remote GPU instance provider",
     "docs": "vast.md"
   },
   "ovh": {
@@ -558,6 +583,7 @@
     "cleanup": "instance, key, and local claim delete",
     "bestFit": "OVHcloud Public Cloud Linux VM",
     "caveat": "Direct-only; credentials use OVH signed requests and local claims",
+    "auth": "OVH signed request credentials via OVH_APPLICATION_KEY, OVH_APPLICATION_SECRET, OVH_CONSUMER_KEY; direct remote cloud provider",
     "docs": "ovh.md"
   },
   "local-container": {
@@ -586,6 +612,7 @@
     "cleanup": "sandbox termination",
     "bestFit": "Hosted Python or GPU-oriented delegated workloads",
     "caveat": "Provider owns execution; no normal SSH lease",
+    "auth": "Modal token via MODAL_TOKEN_ID and MODAL_TOKEN_SECRET, or modal CLI login; delegated remote sandbox",
     "docs": "modal.md"
   },
   "morph": {
@@ -600,6 +627,7 @@
     "cleanup": "pause by default; optional delete",
     "bestFit": "Managed Linux VM over SSH",
     "caveat": "Release retains the paused instance unless deleteOnRelease is enabled",
+    "auth": "API key via MORPH_API_KEY or CRABBOX_MORPH_API_KEY; direct remote VM provider",
     "docs": "morph.md"
   },
   "multipass": {
@@ -656,6 +684,7 @@
     "cleanup": "owned VM delete",
     "bestFit": "Direct Linux VM lease with optional GPU selection",
     "caveat": "Requires Nebius CLI auth, project/subnet setup, quota, and public SSH",
+    "auth": "Nebius CLI auth and project/subnet config; direct remote cloud provider; secrets stay in CLI store",
     "docs": "nebius.md"
   },
   "namespace-devbox": {
@@ -698,6 +727,7 @@
     "cleanup": "owned job deregister",
     "bestFit": "Self-hosted delegated Linux execution on an existing Nomad cluster",
     "caveat": "Requires Nomad HTTP API access, allocation exec privileges, and an env-only token when ACLs are enabled",
+    "auth": "Nomad HTTP API token via NOMAD_TOKEN when ACLs are enabled; self-hosted delegated remote execution",
     "docs": "nomad.md"
   },
   "opencomputer": {
@@ -712,6 +742,7 @@
     "cleanup": "VM delete",
     "bestFit": "Hosted delegated Linux VM execution",
     "caveat": "REST execution contract, not an SSH lease",
+    "auth": "API key via CRABBOX_OPENCOMPUTER_API_KEY, OPENCOMPUTER_API_KEY, or oc CLI config; sent only as X-API-Key",
     "docs": "opencomputer.md"
   },
   "opensandbox": {
@@ -726,6 +757,7 @@
     "cleanup": "sandbox delete",
     "bestFit": "Hosted delegated sandbox through an open SDK",
     "caveat": "Requires compatible OpenSandbox control and exec endpoints",
+    "auth": "API key via CRABBOX_OPENSANDBOX_API_KEY plus CRABBOX_OPENSANDBOX_API_URL; remote sandbox auth",
     "docs": "opensandbox.md"
   },
   "orgo": {
@@ -740,6 +772,7 @@
     "cleanup": "computer and temporary workspace delete",
     "bestFit": "Managed Linux computer execution through an HTTP API",
     "caveat": "No normal SSH lease or Crabbox workspace sync",
+    "auth": "API key via CRABBOX_ORGO_API_KEY or ORGO_API_KEY; delegated remote computer auth",
     "docs": "orgo.md"
   },
   "parallels": {
@@ -768,6 +801,7 @@
     "cleanup": "CVM delete",
     "bestFit": "Short-lived confidential Linux compute over SSH",
     "caveat": "Requires the phala CLI and its stored auth; verifies Intel TDX attestation by default (needs outbound Intel PCS network; --phala-skip-attestation to opt out)",
+    "auth": "Phala CLI auth or PHALA_CLOUD_API_KEY; direct remote confidential VM provider",
     "docs": "phala.md"
   },
   "proxmox": {
@@ -796,6 +830,7 @@
     "cleanup": "service stop only",
     "bestFit": "Inspecting or stopping an existing Railway service",
     "caveat": "Cannot execute arbitrary Crabbox run commands",
+    "auth": "API token via RAILWAY_API_TOKEN; service-control auth",
     "docs": "railway.md"
   },
   "runpod": {
@@ -810,6 +845,7 @@
     "cleanup": "pod release",
     "bestFit": "GPU-backed Linux workload over public SSH",
     "caveat": "Capacity, GPU pricing, and public SSH vary",
+    "auth": "API key via RUNPOD_API_KEY; direct remote GPU pod provider",
     "docs": "runpod.md"
   },
   "scaleway": {
@@ -824,6 +860,7 @@
     "cleanup": "instance and managed key delete",
     "bestFit": "Direct Linux VM on Scaleway Instances",
     "caveat": "Direct-only; security groups must already allow SSH",
+    "auth": "Scaleway SDK credentials and project/zone config; direct remote cloud provider",
     "docs": "scaleway.md"
   },
   "semaphore": {
@@ -838,6 +875,7 @@
     "cleanup": "job stop",
     "bestFit": "Debugging in the same image and secret plane as CI",
     "caveat": "Depends on debug SSH metadata from the job",
+    "auth": "API token via CRABBOX_SEMAPHORE_TOKEN or SEMAPHORE_API_TOKEN; CI remote proof runner",
     "docs": "semaphore.md"
   },
   "sealos-devbox": {
@@ -866,6 +904,7 @@
     "cleanup": "microVM delete",
     "bestFit": "Lightweight hosted microVM execution",
     "caveat": "Delegated execution through smolfleet",
+    "auth": "API key via SMOLMACHINES_API_KEY, CRABBOX_SMOLVM_API_KEY, or SMK_API_KEY; delegated remote microVM auth",
     "docs": "smolvm.md"
   },
   "sprites": {
@@ -880,6 +919,7 @@
     "cleanup": "sprite delete",
     "bestFit": "Fast Linux microVM over provider SSH proxy",
     "caveat": "SSH transport depends on sprite proxy",
+    "auth": "API token via CRABBOX_SPRITES_TOKEN, SPRITES_TOKEN, SPRITE_TOKEN, or SETUP_SPRITE_TOKEN; direct remote microVM provider",
     "docs": "sprites.md"
   },
   "ssh": {
@@ -908,6 +948,7 @@
     "cleanup": "sandbox delete",
     "bestFit": "Hosted delegated Linux sandbox",
     "caveat": "Requires both control-plane and data-plane access",
+    "auth": "API key via CRABBOX_SUPERSERVE_API_KEY or SUPERSERVE_API_KEY; delegated remote sandbox auth",
     "docs": "superserve.md"
   },
   "vercel-sandbox": {
@@ -922,6 +963,7 @@
     "cleanup": "sandbox delete",
     "bestFit": "Hosted delegated Linux microVM execution",
     "caveat": "Requires SDK bridge support and Vercel Sandbox auth",
+    "auth": "OIDC or access token via VERCEL_OIDC_TOKEN, VERCEL_TOKEN, VERCEL_AUTH_TOKEN, or CRABBOX_VERCEL_SANDBOX_* vars; delegated remote sandbox",
     "docs": "vercel-sandbox.md"
   },
   "tart": {
@@ -950,6 +992,7 @@
     "cleanup": "instance termination",
     "bestFit": "Linux SSH leases on Tencent Cloud CVM",
     "caveat": "Direct-only; requires CVM image, VPC/subnet/security-group planning, and Tencent Cloud API credentials",
+    "auth": "Tencent Cloud API credentials; direct remote CVM provider",
     "docs": "tencentcloud.md"
   },
   "tenki": {
@@ -964,6 +1007,7 @@
     "cleanup": "sandbox release",
     "bestFit": "Managed Linux sandbox with SSH proxy",
     "caveat": "Gateway auth uses Tenki-managed key and certificate files",
+    "auth": "Tenki CLI browser auth and Tenki-managed SSH key/cert files; managed remote sandbox provider",
     "docs": "tenki.md"
   },
   "tensorlake": {
@@ -978,6 +1022,7 @@
     "cleanup": "provider sandbox cleanup",
     "bestFit": "Hosted Firecracker-backed delegated execution",
     "caveat": "Does not expose raw Firecracker provisioning",
+    "auth": "API key via TENSORLAKE_API_KEY; delegated remote Firecracker sandbox auth",
     "docs": "tensorlake.md"
   },
   "unikraft-cloud": {
@@ -992,6 +1037,7 @@
     "cleanup": "claimed instance stop and delete",
     "bestFit": "Running a prebuilt OCI image as a cloud microVM service",
     "caveat": "No SSH, workspace sync, or arbitrary command execution; package the app as an OCI image first",
+    "auth": "API key via CRABBOX_UNIKRAFT_CLOUD_API_KEY, UNIKRAFT_CLOUD_API_KEY, UKC_API_KEY, or UKC_TOKEN; remote service-control auth",
     "docs": "unikraft-cloud.md"
   },
   "upstash-box": {
@@ -1006,6 +1052,7 @@
     "cleanup": "sandbox cleanup",
     "bestFit": "Hosted short-lived delegated sandbox",
     "caveat": "No normal SSH access or coordinator routing",
+    "auth": "API key via UPSTASH_BOX_API_KEY or CRABBOX_UPSTASH_BOX_API_KEY; delegated remote sandbox auth",
     "docs": "upstash-box.md"
   },
   "wandb": {
@@ -1020,6 +1067,7 @@
     "cleanup": "run termination",
     "bestFit": "Delegated ML or GPU run environment",
     "caveat": "Execution follows the W&B run contract",
+    "auth": "API key via CRABBOX_WANDB_API_KEY or WANDB_API_KEY; delegated remote GPU/ML run auth",
     "docs": "wandb.md"
   },
   "windows-sandbox": {

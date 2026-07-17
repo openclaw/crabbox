@@ -224,6 +224,7 @@ type codeBridge struct {
 	upstream       map[string]*websocket.Conn
 	pending        map[string][]codeProxyMessage
 	incomingFrames map[string]codePendingWebSocketFrame
+	closed         bool
 	chunkSeq       atomic.Uint64
 }
 
@@ -307,6 +308,7 @@ func (b *codeBridge) Close(code websocket.StatusCode, reason string) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.closed = true
 	for id, conn := range b.upstream {
 		_ = conn.Close(websocket.StatusNormalClosure, "bridge stopped")
 		delete(b.upstream, id)
@@ -415,6 +417,14 @@ func (b *codeBridge) openUpstreamWebSocket(ctx context.Context, msg codeProxyMes
 	}
 	conn.SetReadLimit(maxCodeBridgeReadBytes)
 	b.mu.Lock()
+	if b.closed {
+		// Close ran while we were dialing: registering now would leak this conn
+		// and its reader goroutine, since Close has already swept b.upstream and
+		// will not run again. Drop it instead.
+		b.mu.Unlock()
+		_ = conn.Close(websocket.StatusGoingAway, "bridge closed")
+		return
+	}
 	b.upstream[msg.ID] = conn
 	pending := append([]codeProxyMessage(nil), b.pending[msg.ID]...)
 	delete(b.pending, msg.ID)

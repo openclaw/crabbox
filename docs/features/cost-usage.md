@@ -130,4 +130,4 @@ Leases are attributed to an owner and an org. The broker resolves them by token 
 
 - [usage command](../commands/usage.md)
 - [Orchestrator](../orchestrator.md)
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)

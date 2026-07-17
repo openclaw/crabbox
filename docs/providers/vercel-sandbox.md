@@ -324,4 +324,4 @@ is `diagnostic_only`.
 ## Related Docs
 
 - [Provider backends](../provider-backends.md)
-- [Provider feature overview](../features/providers.md)
+- [Provider Reference](README.md)

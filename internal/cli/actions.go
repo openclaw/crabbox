@@ -2164,6 +2164,7 @@ func githubActionsLeaseLabel(leaseID string) string {
 
 type actionsHydrationState struct {
 	Workspace    string
+	Commit       string
 	RunID        string
 	ReadyAt      string
 	Job          string
@@ -2291,6 +2292,8 @@ func parseActionsHydrationState(value string) actionsHydrationState {
 		switch key {
 		case "WORKSPACE":
 			state.Workspace = strings.TrimSpace(val)
+		case "COMMIT":
+			state.Commit = strings.TrimSpace(val)
 		case "RUN_ID":
 			state.RunID = strings.TrimSpace(val)
 		case "READY_AT":

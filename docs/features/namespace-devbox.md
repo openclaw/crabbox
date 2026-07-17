@@ -87,4 +87,4 @@ Related docs:
 
 - [Provider: Namespace Devbox](../providers/namespace-devbox.md)
 - [Namespace Devbox setup](namespace-devbox-setup.md)
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)

@@ -300,7 +300,7 @@ The same values are available as `aws.*` keys (`region`, `ami`,
 
 Related docs:
 
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)
 - [Capacity and fallback](capacity-fallback.md)
 - [Linux VNC](vnc-linux.md)
 - [Windows VNC](vnc-windows.md)

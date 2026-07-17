@@ -45,6 +45,130 @@ func repositoryGitEnvironment() []string {
 	return result
 }
 
+type gitTrackedPath struct {
+	name         string
+	skipWorktree bool
+}
+
+// GitCheckoutHasHiddenOmissions reports whether sparse rules or skip-worktree
+// index state leave tracked paths absent. Delegated sync tools must not treat
+// them as deletions from a complete checkout.
+func GitCheckoutHasHiddenOmissions(root string) (bool, error) {
+	return gitCheckoutHasHiddenOmissions(root, sparseCheckoutIncludedPaths)
+}
+
+func gitCheckoutHasHiddenOmissions(root string, resolveSparseRules func(string, []gitTrackedPath) (map[string]struct{}, error)) (bool, error) {
+	if strings.TrimSpace(root) == "" {
+		return false, nil
+	}
+	sparseEnabled := strings.EqualFold(
+		strings.TrimSpace(gitOutput(root, "config", "--bool", "core.sparseCheckout")),
+		"true",
+	)
+	if !sparseEnabled && gitOutput(root, "rev-parse", "--is-inside-work-tree") != "true" {
+		return false, nil
+	}
+	trackedCmd := exec.Command("git", "ls-files", "-t", "-z")
+	trackedCmd.Dir = root
+	tagged, err := trackedCmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("list tracked paths: %w", err)
+	}
+	if len(tagged) == 0 {
+		return false, nil
+	}
+	tracked := make([]gitTrackedPath, 0, bytes.Count(tagged, []byte{0}))
+	for _, entry := range bytes.Split(tagged, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		if len(entry) < 3 || entry[1] != ' ' {
+			return false, fmt.Errorf("parse tracked path metadata")
+		}
+		path := string(entry[2:])
+		tracked = append(tracked, gitTrackedPath{name: path, skipWorktree: entry[0] == 'S'})
+	}
+	includedPaths := make(map[string]struct{})
+	var sparseRulesErr error
+	if sparseEnabled {
+		includedPaths, sparseRulesErr = resolveSparseRules(root, tracked)
+	}
+	for _, path := range tracked {
+		if sparseEnabled && sparseRulesErr != nil && !path.skipWorktree {
+			exists, statErr := trackedPathExistsWithoutSymlinkAncestor(root, path.name)
+			if statErr != nil {
+				return false, fmt.Errorf("inspect tracked path %q: %w", path.name, statErr)
+			}
+			if !exists {
+				return false, fmt.Errorf("classify missing tracked path %q without git sparse-checkout check-rules (requires Git 2.41 or newer): %w", path.name, sparseRulesErr)
+			}
+			continue
+		}
+		hiddenCandidate := path.skipWorktree
+		if sparseEnabled && sparseRulesErr == nil {
+			_, ruleIncludesPath := includedPaths[path.name]
+			hiddenCandidate = hiddenCandidate || !ruleIncludesPath
+		}
+		if !hiddenCandidate {
+			continue
+		}
+		exists, statErr := trackedPathExistsWithoutSymlinkAncestor(root, path.name)
+		if statErr != nil {
+			return false, fmt.Errorf("inspect tracked path %q: %w", path.name, statErr)
+		}
+		if exists {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func trackedPathExistsWithoutSymlinkAncestor(root, gitPath string) (bool, error) {
+	parts := strings.Split(filepath.FromSlash(gitPath), string(filepath.Separator))
+	current := root
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if i < len(parts)-1 && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func sparseCheckoutIncludedPaths(root string, tracked []gitTrackedPath) (map[string]struct{}, error) {
+	var paths bytes.Buffer
+	for _, trackedPath := range tracked {
+		paths.WriteString(trackedPath.name)
+		paths.WriteByte(0)
+	}
+	cmd := exec.Command("git", "sparse-checkout", "check-rules", "-z")
+	cmd.Dir = root
+	cmd.Stdin = bytes.NewReader(paths.Bytes())
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git sparse-checkout check-rules unavailable: %w", err)
+	}
+	return nulPathSet(out), nil
+}
+
+func nulPathSet(out []byte) map[string]struct{} {
+	paths := make(map[string]struct{})
+	for _, item := range bytes.Split(out, []byte{0}) {
+		if len(item) > 0 {
+			paths[string(item)] = struct{}{}
+		}
+	}
+	return paths
+}
+
 func findRepo() (Repo, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	cmd.Env = repositoryGitEnvironment()

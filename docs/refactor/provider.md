@@ -104,7 +104,7 @@ The provider seam has shipped for the full provider set.
 
 For the up-to-date provider/capability matrix, run `crabbox providers` or
 `crabbox providers --json`; the user-facing inventory lives in
-[Providers](../features/providers.md).
+[Providers](../providers/README.md).
 
 ## Non-Goals
 
@@ -954,7 +954,7 @@ Representative coverage that any provider change should preserve:
   mapping; SSE parser handles stdout/stderr/exit events; run streams output and
   propagates exit code; status wait polls and times out; stop removes the local
   claim.
-- **Docs** — provider docs link from [Providers](../features/providers.md);
+- **Docs** — provider docs link from [Providers](../providers/README.md);
   [`docs/source-map.md`](../source-map.md) lists provider implementation files.
 
 ## Acceptance Criteria

@@ -105,6 +105,70 @@ generatedTest("provider index renders filterable rows in a scroll region", () =>
   );
 });
 
+generatedTest("provider search includes credential and API-key metadata", () => {
+  const html = readGenerated("providers/index.html");
+  const matrixRegion = element(html, "div", /class="table-scroll"[^>]*role="region"/);
+  const searchByProvider = new Map(
+    [...matrixRegion.matchAll(/<tr data-provider="([^"]+)"[^>]*data-provider-search="([^"]*)">/g)]
+      .map((match) => [match[1], match[2]]),
+  );
+
+  for (const [provider, terms] of [
+    ["opencomputer", ["api key", "x-api-key", "crabbox opencomputer api key"]],
+    ["digitalocean", ["api token", "digitalocean token"]],
+    ["linode", ["api token", "linode token"]],
+    ["vultr", ["api key", "vultr api key"]],
+    ["runpod", ["api key", "runpod api key"]],
+    ["vast", ["api key", "crabbox vast api key"]],
+    ["wandb", ["api key", "crabbox wandb api key"]],
+  ]) {
+    const search = searchByProvider.get(provider);
+    assert.ok(search, `${provider} should be indexed in provider search`);
+    for (const term of terms) {
+      assert.match(search, new RegExp(escapeRegExp(term)), `${provider} search should include ${term}`);
+    }
+  }
+
+  assert.match(searchByProvider.get("aws"), /broker-owned credentials/);
+  assert.match(searchByProvider.get("azure"), /defaultazurecredential/);
+  assert.match(searchByProvider.get("gcp"), /google adc/);
+});
+
+generatedTest("generated Features navigation stays capability-focused", () => {
+  const html = readGenerated("features/index.html");
+  const featuresNav = navSection(html, "Features");
+
+  for (const legacy of [
+    "aws",
+    "azure",
+    "aws-private-workspaces",
+    "blacksmith-testbox",
+    "capacity-fallback",
+    "daytona",
+    "delegated-runner-contract",
+    "e2b",
+    "hetzner",
+    "islo",
+    "namespace-devbox",
+    "namespace-devbox-setup",
+    "provider-authoring",
+    "provider-landscape",
+    "provider-live-smoke",
+    "provider-selection",
+    "providers",
+    "semaphore",
+    "slurm-academic-sandboxes",
+    "sprites",
+  ]) {
+    assert.doesNotMatch(featuresNav, new RegExp(`href="\\.\\./features/${legacy}\\.html"`));
+    assert.ok(fs.existsSync(path.join(siteDir, "features", `${legacy}.html`)), `${legacy} legacy page should still build`);
+  }
+
+  assert.match(featuresNav, /href="\.\.\/features\/configuration\.html"/);
+  assert.match(featuresNav, /href="\.\.\/features\/sync\.html"/);
+  assert.match(featuresNav, /href="\.\.\/features\/artifacts\.html"/);
+});
+
 generatedTest("generated provider markup hides comments and preserves list structure", () => {
   const indexHtml = readGenerated("providers/index.html");
   const awsHtml = readGenerated("providers/aws.html");

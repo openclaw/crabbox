@@ -244,8 +244,10 @@ jobs:
           } > "${services_file}.tmp"
           mv "${services_file}.tmp" "$services_file"
           tmp="${state}.tmp"
+          commit="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
           {
             echo "WORKSPACE=${GITHUB_WORKSPACE}"
+            echo "COMMIT=${commit}"
             echo "RUN_ID=${GITHUB_RUN_ID}"
             echo "JOB=${job}"
             echo "ENV_FILE=${env_file}"

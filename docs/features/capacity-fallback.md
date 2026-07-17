@@ -225,7 +225,7 @@ brokered runs — the `provisioningAttempts` you can inspect with `crabbox histo
 
 Related docs:
 
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)
 - [AWS](../providers/aws.md)
 - [Hetzner](../providers/hetzner.md)
 - [Cost and usage](cost-usage.md)

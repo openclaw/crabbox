@@ -290,7 +290,13 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 }
 
 func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
-	lease, err := b.coord.GetLease(ctx, req.ID)
+	var lease CoordinatorLease
+	var err error
+	if req.AuthoritativeProviderMetadata {
+		lease, err = b.coord.GetLeaseWithAuthoritativeProviderMetadata(ctx, req.ID)
+	} else {
+		lease, err = b.coord.GetLease(ctx, req.ID)
+	}
 	if err != nil {
 		return statusView{}, err
 	}
@@ -329,6 +335,10 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		Ready:            ready,
 		Telemetry:        lease.Telemetry,
 		TelemetryHistory: lease.TelemetryHistory,
+		ProviderMetadata: inspectProviderMetadata(
+			blank(lease.Provider, b.cfg.Provider),
+			lease.ProviderMetadata,
+		),
 	}, nil
 }
 

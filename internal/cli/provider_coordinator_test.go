@@ -173,6 +173,9 @@ func TestCoordinatorStatusRedactsDaytonaSSHAccessToken(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_123" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
+		if r.URL.RawQuery != "" {
+			t.Fatalf("ordinary status unexpectedly requested provider metadata: %s", r.URL.RawQuery)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
 			ID:       "cbx_123",
 			Provider: "daytona",
@@ -211,11 +214,15 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/leases/") {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
+		if got := r.URL.Query().Get("providerMetadata"); got != "authoritative" {
+			t.Fatalf("providerMetadata=%q, want authoritative", got)
+		}
 		lease := CoordinatorLease{
-			ID:       strings.TrimPrefix(r.URL.Path, "/v1/leases/"),
-			Provider: "aws",
-			TargetOS: targetLinux,
-			State:    "provisioning",
+			ID:               strings.TrimPrefix(r.URL.Path, "/v1/leases/"),
+			Provider:         "aws",
+			TargetOS:         targetLinux,
+			State:            "provisioning",
+			ProviderMetadata: map[string]any{"instanceProfileAttached": false},
 		}
 		if lease.ID == "cbx_with_key" {
 			lease.SSHHostKey = sshHostKey
@@ -230,16 +237,17 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
 
 	for _, test := range []struct {
-		id      string
-		wantKey bool
+		id             string
+		configuredWith string
+		wantKey        bool
 	}{
-		{id: "cbx_with_key", wantKey: true},
-		{id: "cbx_without_key", wantKey: false},
+		{id: "cbx_with_key", configuredWith: "aws", wantKey: true},
+		{id: "cbx_without_key", configuredWith: "daytona", wantKey: false},
 	} {
 		t.Run(test.id, func(t *testing.T) {
 			var stdout bytes.Buffer
 			app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-			if err := app.inspect(context.Background(), []string{"--provider", "aws", "--id", test.id, "--json"}); err != nil {
+			if err := app.inspect(context.Background(), []string{"--provider", test.configuredWith, "--id", test.id, "--json"}); err != nil {
 				t.Fatal(err)
 			}
 			var got map[string]any
@@ -253,6 +261,10 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 				}
 			} else if ok {
 				t.Fatalf("sshHostKey=%#v, want omitted", value)
+			}
+			metadata, ok := got["providerMetadata"].(map[string]any)
+			if !ok || metadata["instanceProfileAttached"] != false {
+				t.Fatalf("providerMetadata=%#v, want authoritative false", got["providerMetadata"])
 			}
 		})
 	}

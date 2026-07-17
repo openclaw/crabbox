@@ -249,9 +249,17 @@ signing grants. When `--prefix` is omitted for hosted publishing, the CLI
 derives a unique prefix from the PR number, bundle directory, and current time
 so later QA comments do not overwrite earlier evidence.
 
-The coordinator scopes each new grant under opaque encodings of the exact
-authenticated organization and owner. Caller prefixes cannot cross or replace
-that authorization namespace.
+The coordinator scopes each new grant under versioned base64url encodings of
+the exact authenticated organization and owner. These values are reversible,
+not hashed or encrypted, and appear in object paths for both public and signed
+URLs. The owner can be a non-public GitHub verified email. Caller prefixes
+cannot cross or replace that authorization namespace.
+
+`artifacts publish --pr` can place these URLs in public pull-request comments.
+Operators should weigh that identity disclosure before enabling
+`CRABBOX_ARTIFACTS_PUBLIC_READS`; the random capability namespace on public
+grants prevents easy guessing but does not hide the encoded identity from a URL
+recipient. This identity disclosure is an accepted Low/P3 residual risk.
 
 ## Manifest, list, and pull
 

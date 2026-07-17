@@ -320,5 +320,4 @@ crabbox cleanup --provider nebius --dry-run
 ## Related Docs
 
 - [Provider reference](README.md)
-- [Provider feature guide](../features/providers.md)
 - [Operations guide](../operations.md)
