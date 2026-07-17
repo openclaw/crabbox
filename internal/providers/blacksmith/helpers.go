@@ -19,9 +19,6 @@ var (
 	blacksmithSyncStartPattern = regexp.MustCompile(`(?i)^\s*Syncing(?:\.\.\.| from repo root:)`)
 	blacksmithSyncDonePattern  = regexp.MustCompile(`(?i)^\s*(Changes synced in|No changes to sync|Sync complete)\b`)
 	blacksmithStatusPollDelay  = 5 * time.Second
-	blacksmithCleanupAttempts  = 36
-	blacksmithCleanupDelay     = 5 * time.Second
-	blacksmithCleanupQuiet     = 12
 )
 
 type blacksmithFlagValues struct {
