@@ -538,6 +538,13 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 	if req.DryRun {
 		return nil
 	}
+	// Snapshot orphan-candidate claims before the list call so a claim registered
+	// by a concurrent Acquire cannot be compared against an older list snapshot and
+	// swept as missing. Only claims that predate our list view can be orphans.
+	orphanCandidates, err := core.ListLeaseClaims()
+	if err != nil {
+		return err
+	}
 	response, err := b.invoke(ctx, protocolRequest{
 		Operation: "list", All: true, Refresh: true, SkipSSHOutputValidation: true,
 	})
@@ -552,18 +559,29 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 		}
 		live[leaseID] = struct{}{}
 	}
-	claims, err := core.ListLeaseClaims()
-	if err != nil {
-		return err
-	}
-	for _, claim := range claims {
+	for _, claim := range orphanCandidates {
 		if claim.Provider != providerName || strings.TrimSpace(claim.ProviderScope) != b.claimScope() {
 			continue
 		}
-		if _, ok := live[claim.LeaseID]; !ok {
-			core.RemoveLeaseClaim(claim.LeaseID)
-			core.RemoveExternalRouting(claim.LeaseID)
+		if _, ok := live[claim.LeaseID]; ok {
+			continue
 		}
+		// Remove the orphan claim only if it is unchanged since our pre-list
+		// snapshot; a concurrent Acquire/Touch that (re)bound this lease makes it no
+		// longer an orphan, so the guard declines and the live lease survives.
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			continue
+		}
+		// Retain the external routing rather than deleting it in the sweep. A
+		// concurrent Acquire persists this lease's routing (PersistValidatedExternalRouting,
+		// early in Acquire) BEFORE it publishes the replacement claim (claimLeaseForRepo),
+		// so the old claim can still match our pre-list snapshot at the instant the routing
+		// already belongs to a live reacquisition. Deleting it here would leave that live
+		// lease unroutable. Mirrors the merged tart fix
+		// (https://github.com/openclaw/crabbox/pull/1124), which retains per-lease state
+		// for this reason; the apple-container (https://github.com/openclaw/crabbox/pull/1146)
+		// and local-container (https://github.com/openclaw/crabbox/pull/1147) siblings apply
+		// the same retention. A genuinely dead lease's routing is a harmless small residue.
 	}
 	return nil
 }

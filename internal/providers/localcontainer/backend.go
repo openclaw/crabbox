@@ -408,6 +408,14 @@ func isExitCode(err error, code int) bool {
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
+	// Snapshot orphan-candidate claims before listing containers so a claim
+	// registered by a concurrent Acquire cannot be compared against an older
+	// container view and misclassified as a "missing container" orphan. Only
+	// claims that predate our container view can be genuine orphans.
+	orphanCandidates, err := core.ListLeaseClaims()
+	if err != nil {
+		return err
+	}
 	containers, err := b.listContainers(ctx)
 	if err != nil {
 		return err
@@ -467,11 +475,11 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		removed++
 	}
 	claimsRemoved := 0
-	for leaseID, claim := range claimsByLease {
-		if leaseID == "" {
+	for _, claim := range orphanCandidates {
+		if claim.Provider != providerName || claim.LeaseID == "" {
 			continue
 		}
-		if _, ok := liveLeases[leaseID]; ok {
+		if _, ok := liveLeases[claim.LeaseID]; ok {
 			continue
 		}
 		if !localContainerClaimMatchesScope(claim, claimScope, now) {
@@ -479,12 +487,32 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		reason := "missing container"
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", leaseID, blank(claim.Slug, "-"), reason)
+			if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
+				continue
+			}
+			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", leaseID, blank(claim.Slug, "-"), reason)
-		core.RemoveLeaseClaim(leaseID)
-		core.RemoveStoredTestboxKey(leaseID)
+		// Remove the orphan claim only if it is unchanged since our pre-container
+		// snapshot; a concurrent Acquire/Touch that (re)bound this lease makes it no
+		// longer an orphan, so the guard declines and the live lease survives.
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
+			continue
+		}
+		// Retain the stored testbox key rather than deleting it in the sweep. A
+		// concurrent Acquire/reclaim prepares or reuses this lease's key (via
+		// EnsureTestboxKeyForConfig) BEFORE it publishes the replacement claim, so the
+		// claim can still match our pre-container snapshot at the instant the key
+		// already belongs to a live reacquisition. Deleting it here would leave that
+		// live container unreachable over SSH. Mirrors the merged tart fix
+		// (https://github.com/openclaw/crabbox/pull/1124), which retains per-lease
+		// state for this reason; the apple-container sibling
+		// (https://github.com/openclaw/crabbox/pull/1146) applies the same key
+		// retention. A genuinely dead lease's key is a harmless small residue in the
+		// state dir.
+		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
 		claimsRemoved++
 	}
 	if !req.DryRun {

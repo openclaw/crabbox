@@ -6,6 +6,14 @@
 
 - Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
 - Added native local macOS SSH leases through Lume, cloning a stopped golden VM per lease with isolated SSH identity and verified stop-before-delete lifecycle handling. Thanks @madhavajay.
+- Added a local Zed task-launcher extension for Crabbox lifecycle and remote execution workflows. Thanks @zozo123.
+
+### Fixed
+
+- Enforced explicitly declared zero-byte artifact sizes during pull while preserving legacy manifests that omit size.
+- Prevented apple-container orphan cleanup from deleting claims reclaimed during its resource snapshot, including same-value rewrites, while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
+- Prevented local-container orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
+- Prevented external-provider orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining routing state when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
 
 ## 0.39.0 - 2026-07-17
 
@@ -20,6 +28,7 @@
 
 ### Fixed
 
+- Prevented Apple-container cleanup from force-deleting stopped containers without an exact resource-bound local claim. Thanks @coygeek.
 - Limited failed Blacksmith warmup cleanup to Testbox IDs emitted by that invocation, preventing config-matched concurrent Testboxes from being stopped. Thanks @anagnorisis2peripeteia.
 - Prevented Tart cleanup from deleting lease claims and stored SSH keys created or rebound by concurrent acquisitions. Thanks @anagnorisis2peripeteia.
 - Failed Node coordinator startup on malformed trusted-proxy CIDRs, warned on untrusted forwarded client headers, and kept environment-backed provider failures out of top-level request logs.

@@ -1,0 +1,50 @@
+{
+  "Crabbox project configuration": {
+    "prefix": "crabbox-config",
+    "body": [
+      "profile: ${1:project}-check",
+      "class: ${2:beast}",
+      "capacity:",
+      "  market: ${3:spot}",
+      "  strategy: most-available",
+      "  fallback: on-demand-after-120s",
+      "sync:",
+      "  delete: true",
+      "  gitSeed: true",
+      "  fingerprint: true",
+      "  timeout: 15m",
+      "  exclude:",
+      "    - node_modules",
+      "    - dist",
+      "env:",
+      "  allow:",
+      "    - CI",
+      "ssh:",
+      "  user: crabbox",
+      "  port: \"2222\"",
+      "  fallbackPorts:",
+      "    - \"22\"",
+      "$0"
+    ],
+    "description": "Create a practical .crabbox.yaml starting point"
+  },
+  "Crabbox job": {
+    "prefix": "crabbox-job",
+    "body": [
+      "${1:check}:",
+      "  shell: true",
+      "  command: ${2:go test ./...}",
+      "  stop: ${3:auto}"
+    ],
+    "description": "Add a Crabbox job entry under jobs"
+  },
+  "Crabbox cache volume": {
+    "prefix": "crabbox-cache",
+    "body": [
+      "- name: ${1:build-cache}",
+      "  key: ${2:project-build}",
+      "  path: ${3:/var/cache/project}"
+    ],
+    "description": "Add a provider-backed cache volume"
+  }
+}

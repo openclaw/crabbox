@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
@@ -18,6 +20,7 @@ import (
 
 type leaseClaim struct {
 	LeaseID  string `json:"leaseID"`
+	Revision string `json:"revision,omitempty"`
 	Slug     string `json:"slug,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	CloudID  string `json:"cloudID,omitempty"`
@@ -434,6 +437,9 @@ func updateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected leaseClai
 				return err
 			}
 		}
+		if err := refreshLeaseClaimRevision(&claim); err != nil {
+			return err
+		}
 		provider := firstNonBlank(server.Labels["provider"], server.Provider)
 		prepared, err := prepareLeaseClaimEndpoint(claim, provider, server.Labels["slug"], server, false)
 		if err != nil {
@@ -520,6 +526,9 @@ func updateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected leaseClaim,
 				return err
 			}
 		}
+		if err := refreshLeaseClaimRevision(&claim); err != nil {
+			return err
+		}
 		claim.Labels = cloneStringMap(labels)
 		updated = cloneLeaseClaim(claim)
 		return writeLeaseClaimAtomic(path, claim)
@@ -532,6 +541,15 @@ func cloneLeaseClaim(claim leaseClaim) leaseClaim {
 	claim.TailscaleTags = append([]string(nil), claim.TailscaleTags...)
 	claim.CacheVolumes = append([]string(nil), claim.CacheVolumes...)
 	return claim
+}
+
+func refreshLeaseClaimRevision(claim *leaseClaim) error {
+	var revision [16]byte
+	if _, err := rand.Read(revision[:]); err != nil {
+		return exit(2, "generate lease claim revision: %v", err)
+	}
+	claim.Revision = hex.EncodeToString(revision[:])
+	return nil
 }
 
 func unchangedLeaseClaimGuard(leaseID string, expected leaseClaim, expectedExists bool) func(leaseClaim, bool) error {
@@ -740,6 +758,9 @@ func mutateLeaseClaimPathGuardedWithWrite(leaseID, path string, guard func(lease
 			if err := guard(claim, exists); err != nil {
 				return err
 			}
+		}
+		if err := refreshLeaseClaimRevision(&claim); err != nil {
+			return err
 		}
 		if err := mutate(&claim); err != nil {
 			return err
@@ -1345,24 +1366,30 @@ func restoreLeaseClaimIfUnchanged(leaseID string, current, previous leaseClaim, 
 		if err := unchangedLeaseClaimGuard(leaseID, current, true)(claim, exists); err != nil {
 			return err
 		}
-		return writeLeaseClaimAtomic(path, cloneLeaseClaim(previous))
+		replacement := cloneLeaseClaim(previous)
+		if err := refreshLeaseClaimRevision(&replacement); err != nil {
+			return err
+		}
+		return writeLeaseClaimAtomic(path, replacement)
 	})
 }
 
 func replaceLeaseClaimIfUnchanged(leaseID string, current, replacement leaseClaim) error {
-	return replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomic)
+	_, err := replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomic)
+	return err
 }
 
-func replaceLeaseClaimIfUnchangedDurable(leaseID string, current, replacement leaseClaim) error {
+func replaceLeaseClaimIfUnchangedDurableReturning(leaseID string, current, replacement leaseClaim) (leaseClaim, error) {
 	return replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomicDurable)
 }
 
-func replaceLeaseClaimIfUnchangedWithWrite(leaseID string, current, replacement leaseClaim, write func(string, leaseClaim) error) error {
+func replaceLeaseClaimIfUnchangedWithWrite(leaseID string, current, replacement leaseClaim, write func(string, leaseClaim) error) (leaseClaim, error) {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
-		return err
+		return leaseClaim{}, err
 	}
-	return withLeaseClaimLock(path, func() error {
+	var written leaseClaim
+	err = withLeaseClaimLock(path, func() error {
 		claim, exists, err := readLeaseClaimPathWithPresence(path)
 		if err != nil {
 			return err
@@ -1373,8 +1400,17 @@ func replaceLeaseClaimIfUnchangedWithWrite(leaseID string, current, replacement 
 		if err := unchangedLeaseClaimGuard(leaseID, current, true)(claim, exists); err != nil {
 			return err
 		}
-		return write(path, cloneLeaseClaim(replacement))
+		replacement = cloneLeaseClaim(replacement)
+		if err := refreshLeaseClaimRevision(&replacement); err != nil {
+			return err
+		}
+		written = cloneLeaseClaim(replacement)
+		if err := write(path, replacement); err != nil {
+			return err
+		}
+		return nil
 	})
+	return written, err
 }
 
 func listLeaseClaims() ([]leaseClaim, error) {

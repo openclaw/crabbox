@@ -323,6 +323,14 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err := requireMacOS(); err != nil {
 		return err
 	}
+	// Snapshot orphan-candidate claims before listing containers so a claim
+	// registered by a concurrent Acquire cannot be compared against an older
+	// container view and misclassified as a "missing container" orphan. Only
+	// claims that predate our container view can be genuine orphans.
+	orphanCandidates, err := core.ListLeaseClaims()
+	if err != nil {
+		return err
+	}
 	containers, err := b.listContainers(ctx)
 	if err != nil {
 		return err
@@ -367,20 +375,33 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		removed++
 	}
 	claimsRemoved := 0
-	for leaseID := range claimsByLease {
-		if leaseID == "" {
+	for _, claim := range orphanCandidates {
+		if claim.Provider != providerName || claim.LeaseID == "" {
 			continue
 		}
-		if _, ok := liveLeases[leaseID]; ok {
+		if _, ok := liveLeases[claim.LeaseID]; ok {
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=missing container\n", leaseID)
+			if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, err)
+				continue
+			}
+			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=missing container\n", claim.LeaseID)
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s reason=missing container\n", leaseID)
-		core.RemoveLeaseClaim(leaseID)
-		core.RemoveStoredTestboxKey(leaseID)
+		// Remove only if the claim is unchanged since our pre-container snapshot;
+		// a concurrent Acquire/Touch that (re)bound this lease makes it no longer
+		// an orphan, so RemoveLeaseClaimIfUnchanged declines and the live lease
+		// survives. Intentionally retain the stored testbox key: Acquire creates or
+		// reuses it before publishing its claim, outside this claim CAS. Until keys
+		// have their own generation/ownership fence, deleting one here can break the
+		// concurrent live lease; fail closed by retaining inert local key material.
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, err)
+			continue
+		}
+		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s reason=missing container\n", claim.LeaseID)
 		claimsRemoved++
 	}
 	if !req.DryRun {
@@ -865,24 +886,29 @@ func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now
 	if strings.EqualFold(labels["keep"], "true") {
 		return false, "keep=true"
 	}
+	if !hasClaim {
+		return false, "missing claim"
+	}
+	leaseID := strings.TrimSpace(labels["lease"])
+	containerID := strings.TrimSpace(server.CloudID)
+	if claim.Provider != providerName || claim.LeaseID != leaseID || leaseID == "" || strings.TrimSpace(claim.CloudID) != containerID || containerID == "" {
+		return false, "claim mismatch"
+	}
 	if !strings.EqualFold(server.Status, "running") && server.Status != "ready" {
 		return true, "container state=" + blank(server.Status, "unknown")
 	}
-	if hasClaim {
-		lastUsed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
-		if err != nil || lastUsed.IsZero() {
-			return false, "claim active"
-		}
-		idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-		if idle <= 0 {
-			return false, "claim active"
-		}
-		if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
-			return true, "claim expired"
-		}
+	lastUsed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
+	if err != nil || lastUsed.IsZero() {
 		return false, "claim active"
 	}
-	return false, "missing claim"
+	idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
+	if idle <= 0 {
+		return false, "claim active"
+	}
+	if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
+		return true, "claim expired"
+	}
+	return false, "claim active"
 }
 
 func readyCheck(cfg core.Config) string {

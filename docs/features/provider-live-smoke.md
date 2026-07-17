@@ -155,13 +155,13 @@ hermetic lifecycle tests, `scripts/live-smoke.sh`, dedicated live runners, and
 `//go:build smoke` tests. Regenerate it with
 `node scripts/generate-provider-matrix.mjs`; docs CI rejects drift.
 
-Current coverage: 77 providers; 4 with convention-named hermetic lifecycle tests, 57 with a live runner, 4 with tagged Go smoke tests, and 19 with none of those lifecycle surfaces.
+Current coverage: 77 providers; 4 with convention-named hermetic lifecycle tests, 57 with a live runner, 7 with tagged Go smoke tests, and 19 with none of those lifecycle surfaces.
 
 | Provider | Hermetic lifecycle | Live runner | Tagged Go smoke |
 | --- | --- | --- | --- |
 | [agent-sandbox](../providers/agent-sandbox.md) | — | dedicated + matrix | — |
 | [anthropic-sandbox-runtime](../providers/anthropic-sandbox-runtime.md) | — | dedicated + matrix | — |
-| [apple-container](../providers/apple-container.md) | — | matrix | — |
+| [apple-container](../providers/apple-container.md) | — | matrix | yes |
 | [apple-machine](../providers/apple-machine.md) | — | — | — |
 | [apple-vm](../providers/apple-vm.md) | — | matrix | — |
 | [ascii-box](../providers/ascii-box.md) | — | — | — |
@@ -184,7 +184,7 @@ Current coverage: 77 providers; 4 with convention-named hermetic lifecycle tests
 | [docker-sandbox](../providers/docker-sandbox.md) | — | dedicated + matrix | — |
 | [e2b](../providers/e2b.md) | — | matrix | — |
 | [exe-dev](../providers/exe-dev.md) | — | — | — |
-| [external](../providers/external.md) | — | matrix | — |
+| [external](../providers/external.md) | — | matrix | yes |
 | [fastapi-cloud](../providers/fastapi-cloud.md) | — | — | — |
 | [firecracker](../providers/firecracker.md) | yes (`firecracker`) | dedicated | — |
 | [freestyle](../providers/freestyle.md) | — | — | — |
@@ -197,7 +197,7 @@ Current coverage: 77 providers; 4 with convention-named hermetic lifecycle tests
 | [kubevirt](../providers/kubevirt.md) | — | matrix | — |
 | [lambda](../providers/lambda.md) | — | dedicated | — |
 | [linode](../providers/linode.md) | — | dedicated + matrix | — |
-| [local-container](../providers/local-container.md) | — | matrix | — |
+| [local-container](../providers/local-container.md) | — | matrix | yes |
 | [lume](../providers/lume.md) | — | matrix | — |
 | [modal](../providers/modal.md) | — | matrix | — |
 | [morph](../providers/morph.md) | — | matrix | yes |
