@@ -16,10 +16,12 @@ function readJSON(relativePath) {
 const manifest = read("extension.toml");
 assert.match(manifest, /^id = "crabbox"$/m);
 assert.match(manifest, /^name = "Crabbox"$/m);
+assert.match(manifest, /^version = "\d+\.\d+\.\d+"$/m);
 assert.match(manifest, /^schema_version = 1$/m);
 assert.match(manifest, /^repository = "https:\/\/github\.com\/openclaw\/crabbox"$/m);
 assert.match(manifest, /^rev = "[0-9a-f]{40}"$/m);
 assert.doesNotMatch(manifest, /context_servers|mcp/i);
+assert.match(read("LICENSE"), /^MIT License$/m);
 
 const languageConfig = read("languages/crabbox/config.toml");
 assert.match(languageConfig, /^name = "Crabbox"$/m);
@@ -47,10 +49,12 @@ for (const expected of [
   "Crabbox: Doctor",
   "Crabbox: Spawn reusable box",
   "Crabbox: Run selected command",
+  "Crabbox: Run detected project job",
   "Crabbox: List boxes",
   "Crabbox: Status of box…",
   "Crabbox: Run command on box…",
   "Crabbox: SSH into box…",
+  "Crabbox: Inspect box…",
   "Crabbox: Stop box…",
 ]) {
   assert.ok(labels.has(expected), `missing task: ${expected}`);
@@ -60,4 +64,4 @@ const snippets = readJSON("snippets/yaml.json");
 assert.ok(snippets["Crabbox project configuration"]);
 assert.ok(snippets["Crabbox job"]);
 
-console.log(`validated Crabbox Zed extension: ${languageTasks.length} tasks, ${Object.keys(snippets).length} snippets`);
+console.log(`validated registry-ready Crabbox Zed extension: ${languageTasks.length} tasks, ${Object.keys(snippets).length} snippets`);
