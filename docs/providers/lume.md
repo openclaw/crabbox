@@ -1,12 +1,5 @@
 # Lume Provider
 
-Read this when you:
-
-- choose `provider: lume` (aliases `local-lume`, `lume-macos`);
-- want isolated local macOS leases on an Apple silicon Mac;
-- maintain a stopped Lume golden VM for repeatable development sessions;
-- change `internal/providers/lume`.
-
 Lume is a local SSH-lease provider. Crabbox clones a stopped macOS VM with
 Lume, starts the clone headless with a private bootstrap share, installs a
 unique Crabbox SSH public key through that local share, syncs the checkout over
@@ -59,39 +52,15 @@ installer also loads its optional LaunchAgent:
 scripts/install-macos-lume-image-hooks.sh
 ```
 
-The first-boot hook records the base VM's platform identity, then regenerates
-OpenSSH host keys whenever a clone boots with a new identity. It returns the
-new ED25519 host key and platform identity through the challenge-bound VirtioFS
-share only after sshd serves that key. Crabbox pins that exact key before its
-first SSH connection; the VM network is never trusted for first-use host-key
-discovery:
-
-```sh
-sudo install -d -o root -g wheel -m 0755 /usr/local/libexec
-sudo install -o root -g wheel -m 0755 \
-  scripts/macos-lume-firstboot.sh \
-  /usr/local/libexec/crabbox-lume-firstboot
-sudo install -o root -g wheel -m 0644 \
-  scripts/macos-lume-firstboot-launchdaemon.plist \
-  /Library/LaunchDaemons/dev.crabbox.lume-firstboot.plist
-sudo launchctl bootstrap system \
-  /Library/LaunchDaemons/dev.crabbox.lume-firstboot.plist
-```
+The hook rotates clone host keys and returns the new ED25519 key plus platform
+identity through the challenge-bound share only after sshd serves that key.
+Crabbox pins it before the first network SSH connection.
 
 Keep reusable layers credential-free. It is safe to preinstall signed tools
 such as Xcode, Homebrew, Tailscale, or Cua Driver, but leave GitHub and Tailscale
 logged out and do not bake API tokens, SSH private keys, signing identities, or
 personal keychains into the base. Add credentials only to a disposable clone
 after it boots.
-
-A useful local layering model is:
-
-```text
-macOS + Xcode/CLT + Homebrew
-  -> language/tooling layer
-    -> Crabbox/Cua Driver control layer
-      -> one disposable clone per Crabbox lease
-```
 
 Lume uses APFS copy-on-write cloning, so stopped layers and per-lease clones are
 fast and initially share unchanged disk blocks.
@@ -163,24 +132,10 @@ CRABBOX_LUME_BASE=crabbox-macos-golden \
 scripts/live-smoke.sh
 ```
 
-## Cua Driver and credentials
+## Credentials
 
-Cua Driver can be installed in a control-layer image and granted macOS
-Accessibility, Screen & System Audio Recording, and Automation consent before
-that layer is stopped. A controller can then invoke its CLI or MCP transport
-through the lease's authenticated SSH connection. Do not expose an unauthenticated
-driver service on the guest network.
-
-`scripts/macos-cua-driver-launchagent.plist` is the corresponding per-user
-LaunchAgent template. Install it in `~/Library/LaunchAgents/` for the prepared
-GUI account and bootstrap it in that user's `gui/<uid>` launchd domain after
-the signed `/Applications/CuaDriver.app` bundle is installed.
-
-Session credentials should be injected after clone boot through the existing
-Crabbox environment/SSH workflow or another short-lived secret channel. For
-Tailscale, keep the base logged out and authenticate each clone with a separate
-ephemeral or tagged auth key; revoke or log it out during guarded remote
-cleanup.
+Inject session credentials only after clone boot. Keep reusable images logged
+out of GitHub and Tailscale; use separate short-lived credentials per clone.
 
 ## Not yet supported
 
