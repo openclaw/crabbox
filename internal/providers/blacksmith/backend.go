@@ -803,11 +803,12 @@ func (b *blacksmithBackend) warmupLease(ctx context.Context, repo Repo, reclaim 
 	if err != nil {
 		return "", "", err
 	}
-	beforeWarmup := b.listIDsBestEffort(ctx)
 	result, err := b.runCommand(ctx, args, b.rt.Stdout, b.rt.Stderr)
 	output := result.Stdout + result.Stderr
 	if err != nil {
-		b.cleanupFailedWarmup(ctx, beforeWarmup, output)
+		if leaseID := parseBlacksmithID(output); leaseID != "" {
+			_ = b.Stop(ctx, StopRequest{ID: leaseID})
+		}
 		return "", "", exit(result.ExitCode, "blacksmith testbox warmup failed: %v; if the delegated queue is unavailable, rerun with a coordinator-backed provider such as --provider aws", err)
 	}
 	leaseID := parseBlacksmithID(output)
@@ -1031,61 +1032,6 @@ func minBlacksmithDuration(left, right time.Duration) time.Duration {
 		return left
 	}
 	return right
-}
-
-func (b *blacksmithBackend) listIDsBestEffort(ctx context.Context) map[string]bool {
-	out, err := b.commandOutput(ctx, blacksmithListAllArgs(b.cfg))
-	if err != nil {
-		return map[string]bool{}
-	}
-	ids := map[string]bool{}
-	for _, item := range parseBlacksmithList(out) {
-		ids[item.ID] = true
-	}
-	return ids
-}
-
-func (b *blacksmithBackend) cleanupFailedWarmup(ctx context.Context, before map[string]bool, output string) {
-	if leaseID := parseBlacksmithID(output); leaseID != "" {
-		if err := b.Stop(ctx, StopRequest{ID: leaseID}); err == nil {
-			before[leaseID] = true
-		}
-	}
-	stoppedAny := false
-	quietAttempts := 0
-	for attempt := 0; attempt < blacksmithCleanupAttempts; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(blacksmithCleanupDelay):
-			}
-		}
-		list, err := b.commandOutput(ctx, blacksmithListAllArgs(b.cfg))
-		if err != nil {
-			return
-		}
-		stopped := false
-		for _, item := range parseBlacksmithList(list) {
-			if before[item.ID] || !blacksmithMatchesConfig(item, b.cfg) {
-				continue
-			}
-			_ = b.Stop(ctx, StopRequest{ID: item.ID})
-			before[item.ID] = true
-			stopped = true
-		}
-		if stopped {
-			stoppedAny = true
-			quietAttempts = 0
-			continue
-		}
-		if stoppedAny {
-			quietAttempts++
-			if quietAttempts >= blacksmithCleanupQuiet {
-				return
-			}
-		}
-	}
 }
 
 func (b *blacksmithBackend) blacksmithStatusView(ctx context.Context, leaseID string) (statusView, error) {

@@ -64,6 +64,7 @@ func (b *prewarmCleanupTestBackend) Touch(context.Context, TouchRequest) (Server
 }
 
 func TestPrewarmPostWarmupFailuresReleaseSSHLease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // lease cleanup stops egress daemons; keep lock files out of the real state dir
 	for _, stage := range []string{"actions hydration", "probe", "pool registration"} {
 		t.Run(stage, func(t *testing.T) {
 			backend := &prewarmCleanupTestBackend{}
@@ -131,6 +132,7 @@ func TestPrewarmGuardedCleanupUsesAcquiredLeaseFence(t *testing.T) {
 }
 
 func TestPrewarmCleanupFailurePrintsStopCommand(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for _, tc := range []struct {
 		name    string
 		backend *prewarmCleanupTestBackend
@@ -172,6 +174,7 @@ func TestPrewarmFailureDoesNotReleaseDelegatedProvider(t *testing.T) {
 }
 
 func TestPrewarmCoordinatorCleanupReleasesByIDWhenResolveFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	released := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

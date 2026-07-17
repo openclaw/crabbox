@@ -99,6 +99,7 @@ See [history](commands/history.md), [logs](commands/logs.md),
 ```text
 crabbox connect <id>                          open an interactive SSH session
 crabbox ssh --id <id>                          print the SSH command
+crabbox open --editor=zed --id <id>             prepare an editor handoff
 crabbox vnc --id <id> [--open]                 print/open SSH-tunneled VNC details
 crabbox webvnc --id <id> [--open]              bridge a desktop lease into the web portal
 crabbox code --id <id> [--open]                bridge a code lease into the web portal
@@ -108,8 +109,8 @@ crabbox screenshot --id <id> [--output <png>]  capture a PNG from a desktop leas
 crabbox desktop launch|terminal|record|proof|doctor|click|paste|type|key
 ```
 
-See [connect](commands/connect.md), [ssh](commands/ssh.md), [vnc](commands/vnc.md),
-[webvnc](commands/webvnc.md), [code](commands/code.md),
+See [connect](commands/connect.md), [ssh](commands/ssh.md), [open](commands/open.md),
+[vnc](commands/vnc.md), [webvnc](commands/webvnc.md), [code](commands/code.md),
 [egress](commands/egress.md), [ports](commands/ports.md),
 [screenshot](commands/screenshot.md), [desktop](commands/desktop.md).
 

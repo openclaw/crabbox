@@ -19,9 +19,6 @@ var (
 	blacksmithSyncStartPattern = regexp.MustCompile(`(?i)^\s*Syncing(?:\.\.\.| from repo root:)`)
 	blacksmithSyncDonePattern  = regexp.MustCompile(`(?i)^\s*(Changes synced in|No changes to sync|Sync complete)\b`)
 	blacksmithStatusPollDelay  = 5 * time.Second
-	blacksmithCleanupAttempts  = 36
-	blacksmithCleanupDelay     = 5 * time.Second
-	blacksmithCleanupQuiet     = 12
 )
 
 type blacksmithFlagValues struct {
@@ -113,19 +110,6 @@ func blacksmithListArgs(cfg Config) []string {
 
 func blacksmithListAllArgs(cfg Config) []string {
 	return append(blacksmithListArgs(cfg), "--all")
-}
-
-func blacksmithMatchesConfig(item blacksmithListItem, cfg Config) bool {
-	if workflow := blacksmithWorkflow(cfg); workflow != "" && item.Workflow != workflow {
-		return false
-	}
-	if job := blacksmithJob(cfg); job != "" && item.Job != job {
-		return false
-	}
-	if ref := blacksmithRef(cfg); ref != "" && item.Ref != ref {
-		return false
-	}
-	return true
 }
 
 func parseBlacksmithList(output string) []blacksmithListItem {

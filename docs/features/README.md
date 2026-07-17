@@ -65,6 +65,7 @@ live in the [Command Reference](../commands/README.md).
 - [Actions hydration](actions-hydration.md): let GitHub Actions prepare a runner, then sync local work into that workspace.
 - [Capsules](capsules.md): local-first replay manifests for GitHub Actions failures.
 - [Checkpoints](checkpoints.md): save, restore, and fork reusable remote workspaces.
+- [Editor handoff](../commands/open.md): prepare a synced lease for an external editor and keep its activity alive.
 - [Interactive desktop and VNC](interactive-desktop-vnc.md): VNC hub, support matrix, tunnel model, and QA boundaries.
 - [Artifacts](artifacts.md): screenshots, video, trimmed GIFs, logs, metadata, templates, and PR publishing.
 - [Linux VNC](vnc-linux.md): Linux desktop setup and troubleshooting.

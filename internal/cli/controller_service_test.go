@@ -2075,14 +2075,17 @@ func TestControllerRestartDoesNotTreatUnreadyInspectionAsReady(t *testing.T) {
 	defer cancel()
 	service, err := newControllerService(ctx, controllerServiceOptions{
 		StateFile: path, MaxConcurrent: 1, Profile: request.Profile,
-		CreateTimeout: time.Second, InspectTimeout: time.Second, StopTimeout: time.Second,
+		// CreateTimeout also bounds provisioning staleness (provisioningExpired);
+		// keep it far above race-detector scheduling latency so the unready
+		// inspection is judged inside the provisioning window.
+		CreateTimeout: time.Hour, InspectTimeout: time.Second, StopTimeout: time.Second,
 		ConnectionTimeout: time.Second,
 	}, runner, "token", &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	service.startReconciliation()
-	time.Sleep(100 * time.Millisecond)
+	waitControllerWorkspaceStatusMessage(t, service, request.ID, "provisioning", "workspace provisioning; waiting for provider")
 	warmups, _, _ := runner.counts()
 	if warmups != 0 {
 		t.Fatalf("unready inspection started duplicate warmup; calls=%d", warmups)

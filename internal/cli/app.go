@@ -40,6 +40,8 @@ func (a App) Run(ctx context.Context, args []string) error {
 		return a.namespaceInstanceProxy(ctx, args[1:])
 	case "__phala-proxy":
 		return a.phalaProxy(ctx, args[1:])
+	case "__herdr-plugin":
+		return a.herdrPlugin(ctx, args[1:])
 	case "-h", "--help":
 		a.printHelp()
 		return nil
@@ -111,6 +113,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.ssh(ctx, helpArgs), true
 	case "connect":
 		return a.connect(ctx, helpArgs), true
+	case "open":
+		return a.open(ctx, helpArgs), true
 	case "ports":
 		return a.ports(ctx, helpArgs), true
 	case "cp":
@@ -211,6 +215,7 @@ Commands:
   checkpoint  Create, restore, and fork workspace checkpoints
   ssh         Print the SSH command for a lease
   connect     Open an interactive SSH session to a lease
+  open        Prepare an editor handoff for a lease
   ports       Publish, list, or unpublish provider-native ports
   cp          Copy files between host and a delegated sandbox
   vnc         Print or open VNC connection details for a desktop lease
@@ -240,6 +245,7 @@ Common Flows:
   crabbox bench report --since 7d
   crabbox connect blue-lobster
   crabbox ssh --id blue-lobster
+  crabbox open --editor=zed --id blue-lobster
   crabbox ports --id blue-lobster --publish 8080
   crabbox cp --id blue-lobster ./coverage.xml SANDBOX:/tmp/coverage.xml
   crabbox vnc --id blue-lobster --open

@@ -310,6 +310,12 @@ func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	cfg := b.configForRun()
+	// Snapshot candidates before instances so newer claims cannot be compared
+	// against an older instance view and misclassified as orphans.
+	orphanCandidates, err := listLeaseClaims()
+	if err != nil {
+		return err
+	}
 	instances, err := b.listInstances(ctx)
 	if err != nil {
 		return err
@@ -351,11 +357,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		removed++
 	}
 	claimsRemoved := 0
-	allClaims, claimErr := listLeaseClaims()
-	if claimErr != nil {
-		return claimErr
-	}
-	for _, claim := range allClaims {
+	for _, claim := range orphanCandidates {
 		if claim.Provider != providerName || claim.LeaseID == "" {
 			continue
 		}
@@ -370,9 +372,13 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
 			continue
 		}
+		// Acquisition creates or reuses the key before publishing its claim, so
+		// missing-instance cleanup cannot safely delete that key without a wider fence.
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
+			continue
+		}
 		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
-		removeLeaseClaim(claim.LeaseID)
-		removeStoredTestboxKey(claim.LeaseID)
 		claimsRemoved++
 	}
 	if !req.DryRun {

@@ -740,6 +740,7 @@ func TestRunTimingJSONUsesClaimSlugForReusedSandbox(t *testing.T) {
 }
 
 func TestKeepOnFailureRetainsSandboxAndPrintsHint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // keep-on-failure writes a lease claim (and lock); keep both out of the real state dir
 	sandboxID := "failkeep" + randomSuffix() + randomSuffix()
 	defer removeLeaseClaim(leasePrefix + sandboxID)
 	runner := newRunner(
@@ -841,6 +842,7 @@ func TestRunSkipsSyncWithNoSync(t *testing.T) {
 }
 
 func TestKeepRetainsSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // Keep writes a lease claim; keep it out of the real state dir
 	runner := newRunner(map[string]scriptedReply{
 		"sbx create": {stdout: "keepid01234567890ab\n"},
 		"sbx exec":   {stdout: "hi\n"},
@@ -952,6 +954,7 @@ func TestStopRejectsUnclaimedID(t *testing.T) {
 }
 
 func TestCreateInvocationCarriesSizingFlags(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // Keep writes a lease claim; keep it out of the real state dir
 	runner := newRunner(map[string]scriptedReply{
 		"sbx create": {stdout: "sizingid01234567890\n"},
 		"sbx exec":   {stdout: "ok\n"},
