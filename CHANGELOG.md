@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Prevented Tart cleanup from deleting lease claims and stored SSH keys created or rebound by concurrent acquisitions. Thanks @anagnorisis2peripeteia.
 - Failed Node coordinator startup on malformed trusted-proxy CIDRs, warned on untrusted forwarded client headers, and kept environment-backed provider failures out of top-level request logs.
 - Kept pond SSH forwards process-owned and grouped each member's ports into one connection, so terminal teardown reaps tunnels and helpers without hiding genuine failures or multiplying handshakes. Thanks @anagnorisis2peripeteia.
 - Preserved foreground container-runner output buffered behind slow HTTP clients when the detached-descendant drain cap expires.
