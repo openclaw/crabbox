@@ -2332,8 +2332,11 @@ func TestCleanupRemovesClaimWithoutContainer(t *testing.T) {
 	} else if claim.LeaseID != "" {
 		t.Fatalf("claim still exists after cleanup: %#v", claim)
 	}
-	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
-		t.Fatalf("stored key still exists after cleanup: %v", err)
+	// The orphan-claim sweep RETAINS the stored key (a concurrent Acquire/reclaim
+	// may have prepared it before publishing a replacement claim); deleting it here
+	// would strand a live lease. See the retention note in (*backend).Cleanup.
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key should be retained after orphan-claim cleanup, got: %v", err)
 	}
 }
 
@@ -2419,8 +2422,13 @@ func TestCleanupRemovesStaleLegacyUnscopedClaimWithoutContainer(t *testing.T) {
 	} else if claim.LeaseID != "" {
 		t.Fatalf("stale legacy claim still exists after cleanup: %#v", claim)
 	}
-	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
-		t.Fatalf("stale legacy stored key still exists after cleanup: %v", err)
+	// The stored key is intentionally RETAINED (not deleted) by the sweep: a
+	// concurrent Acquire/reclaim can prepare this lease's key before publishing a
+	// replacement claim, so deleting it in cleanup would risk a live lease losing
+	// its SSH credentials. See the retention note in (*backend).Cleanup. A genuinely
+	// dead lease's key is a harmless small residue.
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key should be retained after cleanup, got: %v", err)
 	}
 }
 
