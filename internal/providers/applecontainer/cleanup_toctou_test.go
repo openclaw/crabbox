@@ -217,3 +217,77 @@ func TestCleanupOrphanSweepGuardDeclinesReclaimedCandidate(t *testing.T) {
 		t.Fatalf("orphan sweep removed the reclaimed lease instead of declining:\n%s", out.String())
 	}
 }
+
+func TestCleanupDryRunDoesNotPlanReclaimedCandidateRemoval(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container Cleanup requires macOS on Apple silicon")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+
+	const (
+		orphanContainer = "crabbox-dryrun-orphan-01"
+		orphanLease     = "cbx_acdryrun67890"
+	)
+	origServer := core.Server{
+		CloudID:  orphanContainer,
+		Provider: providerName,
+		Name:     orphanContainer,
+		Status:   "idle",
+		Labels: map[string]string{
+			"crabbox":  "true",
+			"provider": providerName,
+			"lease":    orphanLease,
+			"slug":     "dryrun-orphan-slug",
+			"state":    "idle",
+		},
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+		orphanLease, "dryrun-orphan-slug", providerName, "", "", repoRoot,
+		30*time.Minute, false, origServer, core.SSHTarget{},
+	); err != nil {
+		t.Fatalf("setup dry-run orphan-candidate claim: %v", err)
+	}
+
+	reclaim := func() {
+		rebound := origServer
+		rebound.Status = "ready"
+		rebound.Labels = map[string]string{
+			"crabbox":  "true",
+			"provider": providerName,
+			"lease":    orphanLease,
+			"slug":     "dryrun-orphan-slug",
+			"state":    "ready",
+		}
+		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+			orphanLease, "dryrun-orphan-slug", providerName, "", "", repoRoot,
+			30*time.Minute, false, rebound, core.SSHTarget{},
+		); err != nil {
+			t.Errorf("concurrent dry-run reclaim registration failed: %v", err)
+		}
+	}
+
+	runner := &cleanupTOCTOURunner{lsJSON: "[]", duringList: reclaim}
+	var out bytes.Buffer
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.AppleContainer = core.AppleContainerConfig{
+		CLIPath:  "container",
+		Image:    "debian:bookworm",
+		User:     "runner",
+		WorkRoot: "/work/crabbox",
+		CPUs:     4,
+		Memory:   "8g",
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: &out, Exec: runner}).(*backend)
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+		t.Fatalf("Cleanup dry-run: %v", err)
+	}
+	if strings.Contains(out.String(), "would remove claim lease="+orphanLease) {
+		t.Fatalf("dry-run planned removal of a claim reclaimed during Cleanup:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "skip claim lease="+orphanLease+" reason=changed-during-cleanup") {
+		t.Fatalf("dry-run did not report the reclaimed claim as skipped:\n%s", out.String())
+	}
+}

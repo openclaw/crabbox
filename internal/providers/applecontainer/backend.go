@@ -383,15 +383,20 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
+			if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, err)
+				continue
+			}
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=missing container\n", claim.LeaseID)
 			continue
 		}
 		// Remove only if the claim is unchanged since our pre-container snapshot;
 		// a concurrent Acquire/Touch that (re)bound this lease makes it no longer
 		// an orphan, so RemoveLeaseClaimIfUnchanged declines and the live lease
-		// survives. Leave the stored testbox key in place: Acquire creates or
-		// reuses the key before publishing its claim, so a missing-container sweep
-		// cannot safely delete it.
+		// survives. Intentionally retain the stored testbox key: Acquire creates or
+		// reuses it before publishing its claim, outside this claim CAS. Until keys
+		// have their own generation/ownership fence, deleting one here can break the
+		// concurrent live lease; fail closed by retaining inert local key material.
 		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, err)
 			continue
