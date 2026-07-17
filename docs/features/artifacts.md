@@ -43,18 +43,48 @@ existence guard: after command success it fetches the named JSON artifact from
 the lease and validates its content against a local schema file. The remote
 artifact must be an exact safe relative path, not a glob. Validation fails the run
 with `exit 7` when the artifact is missing, unparseable, oversized, or does not
-match. The schema is a small dependency-free subset of JSON Schema (`type`,
-`required`, `properties`, `items`, `enum`) and is **fail-closed**: a schema
-containing any other validation keyword (`pattern`, `minimum`,
-`additionalProperties`, `anyOf`, `$ref`, …) is rejected at preflight with
-`exit 2`, so a passing gate always means the supplied constraints were actually
-enforced — never silently skipped. Only annotation keywords (`$schema`, `$id`,
-`title`, `description`, `$comment`, `examples`, `default`, `deprecated`) are
-accepted and ignored. A malformed or unreadable schema file also fails fast at
-preflight with `exit 2`. The fetched artifact is bounded (5 MiB); a larger
-artifact fails the gate instead of being read into memory. Each result is
-recorded on the timing report under `schemaValidations`. The flag is repeatable
-and, in this first phase, is supported on SSH-backed providers only;
+match. Schemas use standard JSON Schema: draft 2020-12 when `$schema` is absent,
+or draft 4, 6, 7, 2019-09, or 2020-12 when declared. Standard constraints such
+as `pattern`, `minimum`, `additionalProperties`, composition keywords, and local
+static acyclic `$ref`/`$defs` references are enforced. Reference cycles,
+external schema references, and
+runtime-rebound `$dynamicRef`/`$recursiveRef` references are rejected at
+preflight so validation never performs an implicit fetch or escapes the static
+work bound.
+Schema files are bounded to 1 MiB, 4,096 JSON values, and 128 bytes per object
+name; malformed, unreadable,
+oversized, or invalid schemas fail fast at preflight with `exit 2`. A schema may
+contain up to 2,048 subschemas across the raw and referenced compiled graph;
+cardinality constraints may be at most
+2,147,483,647. Schema resource IDs, reference keywords, and resolved URLs are
+capped at 2 KiB each and 1 MiB in aggregate. The fetched artifact is bounded to 5 MiB; a larger artifact fails
+the gate instead of being read into memory. Schemas and artifacts are capped at
+64 levels of JSON nesting. JSON artifacts are also capped at 100,000 values, and
+the product of artifact values and expanded compiled-schema validation weight
+(including reference fanout, subschemas, required fields, dependencies, and
+`uniqueItems` equality candidates) is capped at 100,000 work units. Repeated
+schema work over artifact string values and object names is separately capped at
+16 MiB of byte-work. JSON Schema regular expressions use a fail-closed,
+linear-time ECMA-262 subset with translated dot, anchor, whitespace, control,
+and Unicode-escape semantics; backreferences, lookarounds, inline options,
+Unicode property escapes, and empty character classes are rejected. Sources are
+capped at 64 KiB, compiled
+programs at 100,000 work units each, and schema-wide compilation at 1,000,000
+work units. The asserted `regex` format in drafts 4, 6, and 7 is rejected because
+it would compile artifact-controlled expressions during validation; modern
+format-annotation behavior remains available. Required/dependency names and
+equality-candidate strings are charged by byte length. `uniqueItems` also charges worst-case structural, string, and numeric
+comparison work for the largest artifact array. Numeric magnitude and
+big-rational constraint work is capped at 16 MiB of numeric work, including
+schema compilation. JSON numbers are capped at 1,024 characters and an absolute
+exponent of 10,000. These limits bound compilation and validation before either
+can build unbounded work. Failure diagnostics expose only JSON Pointer locations
+and schema constraint locations, not rejected values; the empty root pointer is
+displayed as `(root)`. Locations stop at 1 KiB,
+the complete diagnostic set stops at 32 KiB, and at most 100 violations are
+retained; control, line/paragraph separator, and bidirectional formatting characters are escaped. Each result is recorded on the timing report under
+`schemaValidations`. The flag
+is repeatable and, in this first phase, is supported on SSH-backed providers only;
 delegated-run providers reject it until they expose an explicit capability.
 
 Delegated providers reject run artifact collection until they grow an explicit
