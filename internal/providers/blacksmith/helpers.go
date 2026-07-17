@@ -112,19 +112,6 @@ func blacksmithListAllArgs(cfg Config) []string {
 	return append(blacksmithListArgs(cfg), "--all")
 }
 
-func blacksmithMatchesConfig(item blacksmithListItem, cfg Config) bool {
-	if workflow := blacksmithWorkflow(cfg); workflow != "" && item.Workflow != workflow {
-		return false
-	}
-	if job := blacksmithJob(cfg); job != "" && item.Job != job {
-		return false
-	}
-	if ref := blacksmithRef(cfg); ref != "" && item.Ref != ref {
-		return false
-	}
-	return true
-}
-
 func parseBlacksmithList(output string) []blacksmithListItem {
 	items := []blacksmithListItem{}
 	for _, line := range strings.Split(output, "\n") {
