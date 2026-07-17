@@ -78,6 +78,7 @@ func TestInspectMachineDecodesAppleJSON(t *testing.T) {
 }
 
 func TestRunUsesHomeMountedRepoAndEnv(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // claims (and their lock files) must stay out of the real state dir
 	originalGOOS, originalGOARCH := hostGOOS, hostGOARCH
 	hostGOOS, hostGOARCH = "darwin", "arm64"
 	t.Cleanup(func() { hostGOOS, hostGOARCH = originalGOOS, originalGOARCH })
@@ -132,6 +133,7 @@ func TestRunUsesHomeMountedRepoAndEnv(t *testing.T) {
 }
 
 func TestRunTimingJSONClassifiesCommandFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	originalGOOS, originalGOARCH := hostGOOS, hostGOARCH
 	hostGOOS, hostGOARCH = "darwin", "arm64"
 	t.Cleanup(func() { hostGOOS, hostGOARCH = originalGOOS, originalGOARCH })
@@ -173,6 +175,7 @@ func TestRunTimingJSONClassifiesCommandFailure(t *testing.T) {
 }
 
 func TestRunDeletesOneShotMachineSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // one-shot Run claims a generated lease id; keep the claim lock out of the real state dir
 	originalGOOS, originalGOARCH := hostGOOS, hostGOARCH
 	hostGOOS, hostGOARCH = "darwin", "arm64"
 	t.Cleanup(func() { hostGOOS, hostGOARCH = originalGOOS, originalGOARCH })
