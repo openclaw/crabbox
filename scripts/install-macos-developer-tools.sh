@@ -304,6 +304,9 @@ link_common_tools() {
   zshenv_line='export PATH="/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"'
   touch "$HOME/.zshenv"
   if ! grep -qxF "$zshenv_line" "$HOME/.zshenv"; then
+    if [[ -s "$HOME/.zshenv" && -n "$(tail -c 1 "$HOME/.zshenv")" ]]; then
+      printf '\n' >>"$HOME/.zshenv"
+    fi
     printf '%s\n' "$zshenv_line" >>"$HOME/.zshenv"
   fi
   hash -r 2>/dev/null || true

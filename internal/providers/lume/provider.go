@@ -45,6 +45,10 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
 		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; connect to the Lume host through `crabbox adapter connect` or SSH", providerName)
 	}
+	applyDefaults(&cfg)
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
+	}
 	return newBackend(p.Spec(), cfg, rt), nil
 }
 

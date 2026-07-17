@@ -86,8 +86,10 @@ func applyDefaults(cfg *Config) {
 	if strings.TrimSpace(cfg.Lume.User) == "" {
 		cfg.Lume.User = "lume"
 	}
-	if strings.TrimSpace(cfg.Lume.WorkRoot) == "" || (cfg.Lume.User != "lume" && cfg.Lume.WorkRoot == "/Users/lume/crabbox") {
-		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
+	lumeWorkRootIsDefault := strings.TrimSpace(cfg.Lume.WorkRoot) == "" || (cfg.Lume.User != "lume" && cfg.Lume.WorkRoot == "/Users/lume/crabbox")
+	genericWorkRootIsDefault := strings.TrimSpace(cfg.WorkRoot) == "" || core.IsDefaultWorkRoot(cfg.WorkRoot) || cfg.WorkRoot == "/Users/lume/crabbox"
+	if lumeWorkRootIsDefault {
+		if !genericWorkRootIsDefault {
 			cfg.Lume.WorkRoot = cfg.WorkRoot
 		} else {
 			cfg.Lume.WorkRoot = "/Users/" + cfg.Lume.User + "/crabbox"
@@ -136,6 +138,9 @@ func configForClaim(cfg Config, claim core.LeaseClaim) Config {
 
 func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	cfg := b.configForRun()
+	if isDirectStoragePath(cfg.Lume.Storage) {
+		return LeaseTarget{}, exit(2, "Lume storage path %q is supported only for existing lease lifecycle; use a registered storage name for new leases", cfg.Lume.Storage)
+	}
 	unlockCapacity, err := lockLumeCapacity(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -195,6 +200,10 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}()
 	cfg.SSHKey = keyPath
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s base=%s storage=%s keep=%v\n", providerName, leaseID, slug, cfg.Lume.Base, blank(cfg.Lume.Storage, "home"), req.Keep)
+	launchToken, err := newLaunchToken()
+	if err != nil {
+		return LeaseTarget{}, err
+	}
 
 	owner := lumeRunOwner{}
 	labels := directLeaseLabels(cfg, leaseID, slug, req.Keep, time.Now().UTC())
@@ -204,6 +213,9 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	labels["ssh_user"] = cfg.Lume.User
 	labels["ssh_port"] = sshPort
 	labels["work_root"] = cfg.Lume.WorkRoot
+	labels["run_owner_expected"] = "true"
+	labels["run_owner_pending"] = "true"
+	labels["run_launch_token"] = launchToken
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
 	persistedClaim := core.LeaseClaim{}
 	cleanupUnclaimedVM := func(cause error) error {
@@ -243,7 +255,10 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return cause
 	}
 	if err := b.cloneVM(ctx, cfg, name); err != nil {
-		return LeaseTarget{}, cleanupUnclaimedVM(err)
+		// A clone error does not prove that Lume created the destination. It may
+		// instead report a destination created concurrently outside Crabbox.
+		// Never delete an unclaimed VM after this ambiguous result.
+		return LeaseTarget{}, errors.Join(exit(5, "Lume clone result for %q is ambiguous; inspect the destination before removing it", name), err)
 	}
 	if req.OnAcquired != nil {
 		acquired := LeaseTarget{Server: b.serverFromInstance(lumeVM{Name: name, Status: "stopped"}, claim, cfg), LeaseID: leaseID}
@@ -261,7 +276,9 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
 	defer removeBootstrapTrust(trust)
-	runOwner, err := b.startVM(ctx, cfg, name, trust, func(started lumeRunOwner) error {
+	runOwner, err := b.startVM(ctx, cfg, name, trust, launchToken, func(started lumeRunOwner) error {
+		labels["state"] = "starting"
+		labels["run_owner_pending"] = "false"
 		labels["run_owner_pid"] = strconv.Itoa(started.PID)
 		labels["run_owner_started_at"] = started.StartedAt.UTC().Format(time.RFC3339Nano)
 		labels["run_owner_start_identity"] = started.StartIdentity
@@ -288,7 +305,10 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if err := b.waitForGuestIdentity(ctx, name, inst.IPAddress, trust, target.KnownHostsFile); err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
-	lease, err := b.prepareLease(ctx, cfg, inst, claim, true)
+	readyClaim := persistedClaim
+	readyClaim.Labels = cloneLabels(persistedClaim.Labels)
+	readyClaim.Labels["state"] = "ready"
+	lease, err := b.prepareLease(ctx, cfg, inst, readyClaim, true)
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
@@ -401,6 +421,12 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	unlockCapacity, err := lockLumeCapacity(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlockCapacity()
+
 	lease := req.Lease
 	if lease.LeaseID == "" {
 		lease.LeaseID = strings.TrimSpace(lease.Server.Labels["lease"])
@@ -428,6 +454,10 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	}
 	if !ok || instanceNameFromClaim(claim) != name {
 		return exit(4, "refusing to delete unclaimed Lume VM %q", name)
+	}
+	owner, err := ownerForDestruction(claim)
+	if err != nil {
+		return err
 	}
 	cfg := configForClaim(b.configForRun(), claim)
 	instances, err := b.listInstancesForConfig(ctx, cfg)
@@ -457,11 +487,12 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		break
 	}
 	if err := core.RemoveLeaseClaimIfUnchangedAfter(lease.LeaseID, claim, func() error {
-		return b.removeClaimedVM(ctx, cfg, name, ownerFromClaim(claim))
+		return b.removeClaimedVM(ctx, cfg, name, owner)
 	}); err != nil {
 		return err
 	}
 	removeStoredTestboxKey(lease.LeaseID)
+	removeLaunchHandoff(claim)
 	return nil
 }
 
@@ -470,6 +501,12 @@ func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
+	unlockCapacity, err := lockLumeCapacity(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlockCapacity()
+
 	cfg := b.configForRun()
 	claims, err := providerClaims()
 	if err != nil {
@@ -487,6 +524,10 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		claimCfg := configForClaim(cfg, claim)
+		owner, ownerErr := ownerForDestruction(claim)
+		if ownerErr != nil {
+			return ownerErr
+		}
 		inst, _, resolveErr := b.resolveClaimedInstance(ctx, claim)
 		if resolveErr != nil {
 			return resolveErr
@@ -513,10 +554,10 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 				if !stillMissing {
 					return exit(4, "refusing to remove Lume claim %s after VM %q reappeared in state %s", claim.LeaseID, name, blank(state, "unknown"))
 				}
-				if owner := ownerFromClaim(claim); ownerProcessMatches(owner) {
+				if ownerProcessMatches(owner) {
 					return exit(5, "refusing to remove missing Lume claim %s while owner pid %d is still running", claim.LeaseID, owner.PID)
 				}
-				return b.deleteVM(ctx, claimCfg, name, ownerFromClaim(claim))
+				return b.deleteVM(ctx, claimCfg, name, owner)
 			}
 			live, _, resolveErr := b.resolveClaimedInstance(ctx, claim)
 			if resolveErr != nil {
@@ -528,12 +569,13 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 					return exit(4, "Lume lease %s is no longer eligible for cleanup", claim.LeaseID)
 				}
 			}
-			return b.removeClaimedVM(ctx, claimCfg, name, ownerFromClaim(claim))
+			return b.removeClaimedVM(ctx, claimCfg, name, owner)
 		}
 		if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action); err != nil {
 			return err
 		}
 		removeStoredTestboxKey(claim.LeaseID)
+		removeLaunchHandoff(claim)
 		removed++
 	}
 	if !req.DryRun {
@@ -549,7 +591,7 @@ func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	}
 	original := server.Labels
 	server.Labels = touchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"base", "storage", "instance", "ssh_user", "ssh_port", "work_root", "run_owner_pid", "run_owner_started_at", "run_owner_start_identity", "run_owner_boot_identity", "run_log"} {
+	for _, key := range []string{"base", "storage", "instance", "ssh_user", "ssh_port", "work_root", "run_owner_expected", "run_owner_pending", "run_launch_token", "run_owner_pid", "run_owner_started_at", "run_owner_start_identity", "run_owner_boot_identity", "run_log"} {
 		if value := strings.TrimSpace(original[key]); value != "" {
 			server.Labels[key] = value
 		}
@@ -569,7 +611,7 @@ func (b *backend) cloneVM(ctx context.Context, cfg Config, name string) error {
 	return nil
 }
 
-func (b *backend) startVM(ctx context.Context, cfg Config, name string, trust bootstrapTrust, onStarted ...func(lumeRunOwner) error) (lumeRunOwner, error) {
+func (b *backend) startVM(ctx context.Context, cfg Config, name string, trust bootstrapTrust, launchToken string, onStarted ...func(lumeRunOwner) error) (lumeRunOwner, error) {
 	args := []string{"run", name, "--no-display"}
 	if trust.Dir != "" {
 		args = append(args, "--shared-dir", trust.Dir+":rw")
@@ -580,6 +622,18 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, trust bo
 	if err := ctx.Err(); err != nil {
 		return lumeRunOwner{}, exit(2, "lume run %s: context already cancelled", name)
 	}
+	if launchToken == "" {
+		var err error
+		launchToken, err = newLaunchToken()
+		if err != nil {
+			return lumeRunOwner{}, err
+		}
+	}
+	handoff, err := prepareLaunchHandoff(launchToken)
+	if err != nil {
+		return lumeRunOwner{}, err
+	}
+	defer os.RemoveAll(handoff.Dir)
 	logPath, err := lumeRunLogPath(name)
 	if err != nil {
 		return lumeRunOwner{}, err
@@ -593,7 +647,20 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, trust bo
 	if err != nil {
 		return lumeRunOwner{}, errors.Join(exit(2, "lume run %s: open null device: %v", name, err), detachedStderr.Close())
 	}
-	cmd := exec.Command(cfg.Lume.CLIPath, args...)
+	const launchScript = `set -eu
+tmp="$1.tmp.$$"
+printf '%s\n' "$$" >"$tmp"
+mv "$tmp" "$1"
+while [ ! -e "$2" ]; do
+  [ -d "$(dirname "$1")" ] || exit 0
+  sleep 0.05
+done
+printf 'ready\n' >"$3"
+shift 3
+exec "$@"`
+	commandArgs := []string{"-c", launchScript, "crabbox-lume-launch-" + launchToken, handoff.OwnerPath, handoff.GatePath, handoff.AckPath, cfg.Lume.CLIPath}
+	commandArgs = append(commandArgs, args...)
+	cmd := exec.Command("/bin/sh", commandArgs...)
 	detachCommand(cmd)
 	cmd.Stdin = devNull
 	cmd.Stdout = devNull
@@ -628,11 +695,23 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, trust bo
 	}
 	exitCh := make(chan error, 1)
 	go func() { exitCh <- cmd.Wait() }()
+	if err := waitForLaunchHandoff(ctx, handoff.OwnerPath, strconv.Itoa(owner.PID), exitCh); err != nil {
+		_ = cmd.Process.Kill()
+		return owner, exit(2, "lume run %s: establish launch handoff: %v", name, err)
+	}
 	if len(onStarted) > 0 && onStarted[0] != nil {
 		if err := onStarted[0](owner); err != nil {
-			_ = cmd.Process.Signal(os.Interrupt)
+			_ = cmd.Process.Kill()
 			return owner, exit(2, "lume run %s: persist owner identity: %v", name, err)
 		}
+	}
+	if err := os.WriteFile(handoff.GatePath, []byte("start\n"), 0o600); err != nil {
+		_ = cmd.Process.Kill()
+		return owner, exit(2, "lume run %s: release launch gate: %v", name, err)
+	}
+	if err := waitForLaunchHandoff(ctx, handoff.AckPath, "ready", exitCh); err != nil {
+		_ = cmd.Process.Kill()
+		return owner, exit(2, "lume run %s: confirm launch gate: %v", name, err)
 	}
 	select {
 	case <-ctx.Done():
@@ -653,6 +732,68 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, trust bo
 		return owner, exit(2, "lume run %s exited unexpectedly during startup", name)
 	case <-time.After(b.startupObserveTimeout):
 		return owner, nil
+	}
+}
+
+type launchHandoff struct {
+	Dir       string
+	OwnerPath string
+	GatePath  string
+	AckPath   string
+}
+
+func newLaunchToken() (string, error) {
+	value := make([]byte, 18)
+	if _, err := rand.Read(value); err != nil {
+		return "", exit(2, "generate Lume launch token: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func launchHandoffForToken(token string) (launchHandoff, error) {
+	if token == "" || invalidLogName.MatchString(token) {
+		return launchHandoff{}, exit(2, "invalid Lume launch token")
+	}
+	stateDir, err := core.CrabboxStateDir()
+	if err != nil {
+		return launchHandoff{}, exit(2, "resolve Crabbox state directory for Lume launch: %v", err)
+	}
+	dir := filepath.Join(stateDir, "lume", "launch", token)
+	return launchHandoff{Dir: dir, OwnerPath: filepath.Join(dir, "owner"), GatePath: filepath.Join(dir, "gate"), AckPath: filepath.Join(dir, "ack")}, nil
+}
+
+func prepareLaunchHandoff(token string) (launchHandoff, error) {
+	handoff, err := launchHandoffForToken(token)
+	if err != nil {
+		return launchHandoff{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(handoff.Dir), 0o700); err != nil {
+		return launchHandoff{}, exit(2, "create Lume launch directory: %v", err)
+	}
+	if err := os.Mkdir(handoff.Dir, 0o700); err != nil {
+		return launchHandoff{}, exit(2, "create Lume launch handoff: %v", err)
+	}
+	return handoff, nil
+}
+
+func waitForLaunchHandoff(ctx context.Context, path, expected string, exitCh <-chan error) error {
+	deadline := time.NewTimer(2 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	for {
+		if data, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(data)) == expected {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-exitCh:
+			return fmt.Errorf("launcher exited before handoff: %v", err)
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for %s", filepath.Base(path))
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -934,6 +1075,9 @@ func (b *backend) listInstances(ctx context.Context) ([]lumeVM, error) {
 }
 
 func (b *backend) listInstancesForConfig(ctx context.Context, cfg Config) ([]lumeVM, error) {
+	if isDirectStoragePath(cfg.Lume.Storage) {
+		return b.listClaimedInstancesAtStoragePath(ctx, cfg)
+	}
 	args := []string{"ls", "--format", "json"}
 	if storage := strings.TrimSpace(cfg.Lume.Storage); storage != "" {
 		args = append(args, "--storage", storage)
@@ -949,6 +1093,41 @@ func (b *backend) listInstancesForConfig(ctx context.Context, cfg Config) ([]lum
 	return instances, nil
 }
 
+func (b *backend) listClaimedInstancesAtStoragePath(ctx context.Context, cfg Config) ([]lumeVM, error) {
+	names := map[string]struct{}{cfg.Lume.Base: {}}
+	claims, err := providerClaims()
+	if err != nil {
+		return nil, err
+	}
+	for name, claim := range claims {
+		if strings.TrimSpace(claim.Labels["storage"]) == strings.TrimSpace(cfg.Lume.Storage) {
+			names[name] = struct{}{}
+		}
+	}
+	instances := make([]lumeVM, 0, len(names))
+	for name := range names {
+		inst, getErr := b.getInstance(ctx, cfg, name)
+		if getErr == nil {
+			instances = append(instances, inst)
+			continue
+		}
+		if !isLumeNotFoundError(getErr) {
+			return nil, getErr
+		}
+	}
+	return instances, nil
+}
+
+func isDirectStoragePath(storage string) bool {
+	storage = strings.TrimSpace(storage)
+	return strings.EqualFold(storage, "ephemeral") || strings.ContainsAny(storage, `/\\`)
+}
+
+func isLumeNotFoundError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "virtual machine not found:")
+}
+
 func (b *backend) activeMacOSGuestCount(ctx context.Context, cfg Config) (int, error) {
 	// An unfiltered Lume inventory spans configured storage locations; capacity
 	// is host-wide rather than scoped to the destination storage for this lease.
@@ -958,7 +1137,9 @@ func (b *backend) activeMacOSGuestCount(ctx context.Context, cfg Config) (int, e
 		return 0, err
 	}
 	active := 0
+	seen := make(map[string]struct{}, len(instances))
 	for _, inst := range instances {
+		seen[lumeStorageIdentity(inst, "")] = struct{}{}
 		if !strings.EqualFold(strings.TrimSpace(inst.OS), targetMacOS) {
 			continue
 		}
@@ -967,7 +1148,41 @@ func (b *backend) activeMacOSGuestCount(ctx context.Context, cfg Config) (int, e
 			active++
 		}
 	}
+	claims, err := providerClaims()
+	if err != nil {
+		return 0, err
+	}
+	for name, claim := range claims {
+		if !isDirectStoragePath(claim.Labels["storage"]) {
+			continue
+		}
+		claimCfg := configForClaim(cfg, claim)
+		inst, getErr := b.getInstance(ctx, claimCfg, name)
+		if getErr != nil {
+			if isLumeNotFoundError(getErr) {
+				continue
+			}
+			return 0, getErr
+		}
+		if _, ok := seen[lumeStorageIdentity(inst, claimCfg.Lume.Storage)]; ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(inst.OS), targetMacOS) {
+			state := normalizedState(inst.Status)
+			if state != "stopped" && state != "missing" {
+				active++
+			}
+		}
+	}
 	return active, nil
+}
+
+func lumeStorageIdentity(inst lumeVM, fallbackStorage string) string {
+	storage := strings.TrimSpace(inst.LocationName)
+	if storage == "" {
+		storage = strings.TrimSpace(fallbackStorage)
+	}
+	return inst.Name + "\x00" + storage
 }
 
 func (b *backend) waitForStoppedOrMissingVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) (bool, string, error) {
@@ -1271,6 +1486,84 @@ func ownerFromClaim(claim core.LeaseClaim) lumeRunOwner {
 		BootIdentity:  strings.TrimSpace(claim.Labels["run_owner_boot_identity"]),
 		LogPath:       strings.TrimSpace(claim.Labels["run_log"]),
 	}
+}
+
+func ownerForDestruction(claim core.LeaseClaim) (lumeRunOwner, error) {
+	owner := ownerFromClaim(claim)
+	if !strings.EqualFold(strings.TrimSpace(claim.Labels["run_owner_expected"]), "true") {
+		return owner, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(claim.Labels["run_owner_pending"]), "true") {
+		return recoverPendingLaunchOwner(claim)
+	}
+	if owner.PID <= 0 || strings.TrimSpace(owner.StartIdentity) == "" || (core.LocalProcessBootIdentityRequired() && strings.TrimSpace(owner.BootIdentity) == "") {
+		return lumeRunOwner{}, exit(5, "refusing to remove Lume lease %s without complete launch owner metadata", claim.LeaseID)
+	}
+	return owner, nil
+}
+
+func recoverPendingLaunchOwner(claim core.LeaseClaim) (lumeRunOwner, error) {
+	token := strings.TrimSpace(claim.Labels["run_launch_token"])
+	handoff, err := launchHandoffForToken(token)
+	if err != nil {
+		return lumeRunOwner{}, exit(5, "refusing to remove Lume lease %s with invalid pending launch metadata", claim.LeaseID)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, readErr := os.ReadFile(handoff.OwnerPath)
+		if readErr == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if parseErr != nil || pid <= 0 {
+				return lumeRunOwner{}, exit(5, "refusing to remove Lume lease %s with invalid pending launch owner", claim.LeaseID)
+			}
+			startBefore, startBeforeErr := core.LocalProcessStartIdentity(pid)
+			command, alive := core.LocalProcessCommand(pid)
+			if !alive {
+				return lumeRunOwner{}, nil
+			}
+			marker := "crabbox-lume-launch-" + token
+			if !strings.Contains(command, marker) {
+				// The recorded PID was recycled. The pending gate was never
+				// released, so this unrelated process is not touched and no Lume
+				// run command can have started from this handoff.
+				return lumeRunOwner{}, nil
+			}
+			startAfter, startAfterErr := core.LocalProcessStartIdentity(pid)
+			if startBeforeErr != nil || startAfterErr != nil || strings.TrimSpace(startBefore) == "" || startBefore != startAfter {
+				// The process disappeared or changed during inspection. The launch
+				// gate is still closed, so do not signal the uncertain PID.
+				return lumeRunOwner{}, nil
+			}
+			bootIdentity, bootErr := core.LocalProcessBootIdentity()
+			if core.LocalProcessBootIdentityRequired() && (bootErr != nil || strings.TrimSpace(bootIdentity) == "") {
+				return lumeRunOwner{}, exit(5, "refusing to remove Lume lease %s without pending launch boot identity", claim.LeaseID)
+			}
+			return lumeRunOwner{PID: pid, StartIdentity: startBefore, BootIdentity: bootIdentity}, nil
+		}
+		if !errors.Is(readErr, os.ErrNotExist) {
+			return lumeRunOwner{}, exit(5, "inspect pending Lume launch owner for lease %s: %v", claim.LeaseID, readErr)
+		}
+		if time.Now().After(deadline) {
+			// The gate is created only after owner metadata is committed. With no
+			// owner handoff and a still-pending claim, Lume was never allowed to run.
+			return lumeRunOwner{}, nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func removeLaunchHandoff(claim core.LeaseClaim) {
+	if handoff, err := launchHandoffForToken(strings.TrimSpace(claim.Labels["run_launch_token"])); err == nil {
+		_ = os.RemoveAll(handoff.Dir)
+	}
+}
+
+func cloneLabels(labels map[string]string) map[string]string {
+	cloned := make(map[string]string, len(labels))
+	for key, value := range labels {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func ownerProcessMatches(owner lumeRunOwner) bool {

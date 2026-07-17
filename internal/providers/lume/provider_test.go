@@ -89,9 +89,21 @@ func TestApplyDefaultsDerivesWorkRootFromOverriddenUser(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Lume.User = "builder"
 	cfg.Lume.WorkRoot = "/Users/lume/crabbox"
+	cfg.WorkRoot = "/Users/lume/crabbox"
 	applyDefaults(&cfg)
 	if cfg.Lume.WorkRoot != "/Users/builder/crabbox" || cfg.WorkRoot != "/Users/builder/crabbox" {
 		t.Fatalf("work roots=%q %q want overridden user's home", cfg.Lume.WorkRoot, cfg.WorkRoot)
+	}
+}
+
+func TestApplyDefaultsPreservesExplicitDefaultUserWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Lume.User = "lume"
+	cfg.Lume.WorkRoot = "/Users/lume/crabbox"
+	cfg.WorkRoot = "/Users/lume/other"
+	applyDefaults(&cfg)
+	if cfg.Lume.WorkRoot != "/Users/lume/crabbox" || cfg.WorkRoot != "/Users/lume/crabbox" {
+		t.Fatalf("work roots=%q %q want provider-specific root", cfg.Lume.WorkRoot, cfg.WorkRoot)
 	}
 }
 
@@ -220,7 +232,7 @@ func TestAcquireRejectsThirdMacOSGuestBeforeClone(t *testing.T) {
 	}
 }
 
-func TestAcquireRollsBackPartialCloneFailure(t *testing.T) {
+func TestAcquireRefusesDestructiveRollbackAfterAmbiguousCloneFailure(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -250,7 +262,7 @@ func TestAcquireRollsBackPartialCloneFailure(t *testing.T) {
 			if vmExists {
 				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
 			}
-			return core.LocalCommandResult{ExitCode: 1, Stderr: "not found"}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
 		case "delete":
 			deleteCalled = true
 			vmExists = false
@@ -267,11 +279,15 @@ func TestAcquireRollsBackPartialCloneFailure(t *testing.T) {
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "clonefail",
 	})
-	if err == nil || !strings.Contains(err.Error(), "partial clone failure") {
+	if err == nil || !strings.Contains(err.Error(), "partial clone failure") || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("Acquire error=%v", err)
 	}
-	if vmExists || !deleteCalled {
-		t.Fatalf("partial clone residue vmExists=%v deleteCalled=%v calls=%#v", vmExists, deleteCalled, runner.calls)
+	var exitErr core.ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 5 {
+		t.Fatalf("ambiguous clone exit=%#v", exitErr)
+	}
+	if !vmExists || deleteCalled {
+		t.Fatalf("ambiguous clone was destructively rolled back vmExists=%v deleteCalled=%v calls=%#v", vmExists, deleteCalled, runner.calls)
 	}
 	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || ok {
 		t.Fatalf("claim residue ok=%v err=%v", ok, claimErr)
@@ -282,66 +298,6 @@ func TestAcquireRollsBackPartialCloneFailure(t *testing.T) {
 	}
 	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("lease key residue: %v", statErr)
-	}
-}
-
-func TestAcquirePreservesRecoveryClaimWhenPartialCloneRollbackFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	const leaseID = "cbx_clone_recovery"
-	vmExists := false
-	name := ""
-	runner := &recordingRunner{}
-	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
-		if len(req.Args) == 0 {
-			return core.LocalCommandResult{}, nil, false
-		}
-		switch req.Args[0] {
-		case "ls":
-			if vmExists {
-				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"running"}]`, name)}, nil, true
-			}
-			return core.LocalCommandResult{Stdout: `[]`}, nil, true
-		case "clone":
-			name = req.Args[2]
-			vmExists = true
-			return core.LocalCommandResult{ExitCode: 1, Stderr: "partial clone failure"}, errors.New("exit status 1"), true
-		case "stop":
-			return core.LocalCommandResult{ExitCode: 1, Stderr: "stop unavailable"}, errors.New("exit status 1"), true
-		case "get":
-			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"running"}]`, name)}, nil, true
-		default:
-			return core.LocalCommandResult{}, nil, false
-		}
-	}
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	b.stopObserveTimeout = 15 * time.Millisecond
-	b.stopPollInterval = time.Millisecond
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
-		Repo:             core.Repo{Root: t.TempDir()},
-		RequestedLeaseID: leaseID,
-		RequestedSlug:    "clone-recovery",
-	})
-	if err == nil || !strings.Contains(err.Error(), "rollback could not stop") {
-		t.Fatalf("Acquire error=%v", err)
-	}
-	claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID)
-	if claimErr != nil || !ok {
-		t.Fatalf("recovery claim ok=%v err=%v", ok, claimErr)
-	}
-	if claim.Labels["recovery"] != "rollback-failed" || claim.Labels["state"] != "error" {
-		t.Fatalf("recovery claim labels=%#v", claim.Labels)
-	}
-	keyPath, keyErr := testboxKeyPath(leaseID)
-	if keyErr != nil {
-		t.Fatal(keyErr)
-	}
-	if _, statErr := os.Stat(keyPath); statErr != nil {
-		t.Fatalf("recovery key missing: %v", statErr)
 	}
 }
 
@@ -368,6 +324,137 @@ func TestFlagsRejectWorkRootTraversal(t *testing.T) {
 	}
 	if err := applyFlags(&cfg, fs, values); err == nil || !strings.Contains(err.Error(), "must be beneath /Users/lume") {
 		t.Fatalf("traversal error=%v", err)
+	}
+}
+
+func TestFlagsPreserveStoragePathForExistingLeaseLifecycle(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--lume-storage", "/Volumes/VMs"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lume.Storage != "/Volumes/VMs" {
+		t.Fatalf("storage=%q", cfg.Lume.Storage)
+	}
+}
+
+func TestConfigurePreservesStoragePathFromConfig(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Lume.Storage = "/Volumes/VMs"
+	configured, err := (Provider{}).Configure(cfg, core.Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.(*backend).cfg.Lume.Storage != "/Volumes/VMs" {
+		t.Fatalf("storage=%q", configured.(*backend).cfg.Lume.Storage)
+	}
+}
+
+func TestAcquireRejectsStoragePathBeforeLumeMutation(t *testing.T) {
+	for _, storage := range []string{"/Volumes/VMs", "ephemeral"} {
+		cfg := core.BaseConfig()
+		cfg.Provider = providerName
+		cfg.Lume.Storage = storage
+		runner := &recordingRunner{}
+		b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+		_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedLeaseID: "cbx_path_storage"})
+		if err == nil || !strings.Contains(err.Error(), "existing lease lifecycle") {
+			t.Fatalf("storage=%q Acquire error=%v", storage, err)
+		}
+		if len(runner.calls) != 0 {
+			t.Fatalf("Lume called for path-backed storage=%q acquire: %#v", storage, runner.calls)
+		}
+	}
+}
+
+func TestStoragePathInventoryUsesExactGetForLifecycle(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Lume.Storage = "/Volumes/VMs"
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		"get\x00crabbox-macos-golden\x00--format\x00json\x00--storage\x00/Volumes/VMs": {
+			Stdout: `[{"name":"crabbox-macos-golden","os":"macOS","status":"stopped"}]`,
+		},
+	}}
+	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	instances, err := b.listInstancesForConfig(context.Background(), b.configForRun())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 || instances[0].Name != "crabbox-macos-golden" {
+		t.Fatalf("instances=%#v", instances)
+	}
+	for _, call := range runner.calls {
+		if len(call.Args) > 0 && call.Args[0] == "ls" {
+			t.Fatalf("path lifecycle used unsupported list filter: %#v", runner.calls)
+		}
+	}
+}
+
+func TestStorageIdentityDistinguishesSameNameAcrossLocations(t *testing.T) {
+	registered := lumeStorageIdentity(lumeVM{Name: "worker", LocationName: "fast"}, "")
+	direct := lumeStorageIdentity(lumeVM{Name: "worker", LocationName: "/Volumes/VMs"}, "/Volumes/VMs")
+	if registered == direct {
+		t.Fatalf("storage identities collided: %q", registered)
+	}
+}
+
+func TestLumeNotFoundClassificationIsSpecific(t *testing.T) {
+	if !isLumeNotFoundError(errors.New("lume get failed: Error: Virtual machine not found: worker")) {
+		t.Fatal("exact Lume VM-not-found error was not classified")
+	}
+	if isLumeNotFoundError(errors.New("exec: lume: executable file not found in $PATH")) {
+		t.Fatal("missing CLI was classified as a missing VM")
+	}
+}
+
+func TestOwnerForDestructionRejectsUnresolvedLaunch(t *testing.T) {
+	claim := core.LeaseClaim{LeaseID: "cbx_pending", Labels: map[string]string{
+		"run_owner_expected": "true",
+		"run_owner_pending":  "true",
+	}}
+	if _, err := ownerForDestruction(claim); err == nil || !strings.Contains(err.Error(), "invalid pending launch metadata") {
+		t.Fatalf("pending owner error=%v", err)
+	}
+	claim.Labels["run_owner_pending"] = "false"
+	if _, err := ownerForDestruction(claim); err == nil || !strings.Contains(err.Error(), "without complete launch owner metadata") {
+		t.Fatalf("missing owner error=%v", err)
+	}
+}
+
+func TestOwnerForDestructionRecoversStalePendingLaunch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	token, err := newLaunchToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := prepareLaunchHandoff(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(handoff.Dir) })
+	if err := os.WriteFile(handoff.OwnerPath, []byte("99999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claim := core.LeaseClaim{LeaseID: "cbx_stale_pending", Labels: map[string]string{
+		"run_owner_expected": "true",
+		"run_owner_pending":  "true",
+		"run_launch_token":   token,
+	}}
+	owner, err := ownerForDestruction(claim)
+	if err != nil || owner.PID != 0 {
+		t.Fatalf("stale pending owner=%#v err=%v", owner, err)
 	}
 }
 
@@ -478,7 +565,7 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 			if vmExists {
 				return core.LocalCommandResult{Stdout: `[{"name":"crabbox-release-1234","os":"macOS","status":"stopped","locationName":"home"}]`}, nil, true
 			}
-			return core.LocalCommandResult{ExitCode: 1, Stderr: "not found"}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: crabbox-release-1234"}, errors.New("exit status 1"), true
 		case "delete":
 			vmExists = false
 			return core.LocalCommandResult{}, nil, true

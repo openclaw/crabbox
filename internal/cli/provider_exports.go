@@ -474,6 +474,10 @@ func LocalProcessStartIdentity(pid int) (string, error) {
 	return webVNCDaemonProcessStartIdentity(pid)
 }
 
+func LocalProcessCommand(pid int) (string, bool) {
+	return webVNCDaemonProcessCommand(pid)
+}
+
 func LocalProcessBootIdentity() (string, error) {
 	return processBootIdentity()
 }

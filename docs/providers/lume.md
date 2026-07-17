@@ -104,7 +104,7 @@ CLI flags:
 | --- | --- | --- |
 | `--lume-cli` | `lume` | Path to the Lume CLI |
 | `--lume-base` | `crabbox-macos-golden` | Stopped VM cloned for every lease |
-| `--lume-storage` | home storage | Optional Lume storage name or path |
+| `--lume-storage` | home storage | Registered persistent Lume storage name. Direct paths and `ephemeral` remain supported for resolving and removing existing leases, but not new leases. |
 | `--lume-user` | `lume` | Prepared guest SSH account |
 | `--lume-work-root` | `/Users/lume/crabbox` | Guest work root below the user's home |
 
