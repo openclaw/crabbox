@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Failed Node coordinator startup on malformed trusted-proxy CIDRs and warned on untrusted forwarded client headers so reverse-proxy source-bucket collapse is visible without changing OAuth admission limits.
+- Failed Node coordinator startup on malformed trusted-proxy CIDRs, warned on untrusted forwarded client headers, and kept environment-backed provider failures out of top-level request logs.
 - Kept pond SSH forwards process-owned and grouped each member's ports into one connection, so terminal teardown reaps tunnels and helpers without hiding genuine failures or multiplying handshakes. Thanks @anagnorisis2peripeteia.
 - Preserved foreground container-runner output buffered behind slow HTTP clients when the detached-descendant drain cap expires.
 - Stopped a previously started egress host daemon during non-daemon egress starts so it cannot clobber the new foreground session, and held the per-lease lock until the foreground host joins so concurrent replacement starts cannot interleave.
