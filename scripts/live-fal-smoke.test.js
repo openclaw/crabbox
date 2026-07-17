@@ -22,6 +22,20 @@ function prepareSmokeRepo(dir) {
   return { tempRoot, smokeScript };
 }
 
+function isolatedEnv(dir) {
+  const home = path.join(dir, "home");
+  const configHome = path.join(dir, "config");
+  const stateHome = path.join(dir, "state");
+  fs.mkdirSync(home, { recursive: true });
+  return {
+    ...process.env,
+    HOME: home,
+    XDG_CONFIG_HOME: configHome,
+    XDG_STATE_HOME: stateHome,
+    CRABBOX_LIVE_FAL_TEST_ONLY_SHORT_RECOVERY: "1",
+  };
+}
+
 function writeGoStub(binDir, scriptBody) {
   writeExecutable(
     path.join(binDir, "go"),
@@ -50,7 +64,7 @@ test("live fal smoke skips unless opted in", () => {
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
-    env: { ...process.env, CRABBOX_LIVE: "", CRABBOX_FAL_KEY: "", FAL_KEY: "" },
+    env: { ...isolatedEnv(dir), CRABBOX_LIVE: "", CRABBOX_FAL_KEY: "", FAL_KEY: "" },
     encoding: "utf8",
   });
   assert.equal(result.status, 0, result.stderr);
@@ -63,7 +77,7 @@ test("live fal smoke skips unless provider filter selects fal", () => {
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
-      ...process.env,
+      ...isolatedEnv(dir),
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "aws,digitalocean",
       CRABBOX_FAL_KEY: "test-secret-token",
@@ -84,7 +98,7 @@ test("live fal smoke requires token before building", () => {
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
-      ...process.env,
+      ...isolatedEnv(dir),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "fal",
@@ -121,7 +135,7 @@ exit 99
     const result = spawnSync("bash", [smokeScript], {
       cwd: tempRoot,
       env: {
-        ...process.env,
+        ...isolatedEnv(dir),
         PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
         CRABBOX_LIVE: "1",
         CRABBOX_LIVE_PROVIDERS: "fal",
@@ -193,7 +207,7 @@ esac
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
-      ...process.env,
+      ...isolatedEnv(dir),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "fal",
@@ -210,7 +224,7 @@ esac
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen[0], "doctor --provider fal");
   assert.equal(seen[1], "list --provider fal --json");
-  assert.match(seen[2], /^warmup --provider fal --slug fal-smoke-\d{14}-\d+ --keep --fal-instance-type gpu_1x_h100_sxm5 --ttl 20m --idle-timeout 5m$/);
+  assert.match(seen[2], /^warmup --provider fal --slug fal-smoke-\d{14}-\d+ --keep=false --fal-instance-type gpu_1x_h100_sxm5 --ttl 20m --idle-timeout 5m$/);
   assert.match(seen[3], /^status --provider fal --id fal-smoke-\d{14}-\d+ --wait --wait-timeout 600s$/);
   assert.match(seen[4], /^run --provider fal --id fal-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
   assert.equal(seen[5], "list --provider fal --json");
@@ -275,7 +289,7 @@ esac
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
-      ...process.env,
+      ...isolatedEnv(dir),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "fal",
@@ -344,7 +358,7 @@ esac
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
-      ...process.env,
+      ...isolatedEnv(dir),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "fal",
@@ -399,7 +413,7 @@ exit 99
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
-      ...process.env,
+      ...isolatedEnv(dir),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "fal",
@@ -455,12 +469,13 @@ esac
     const result = spawnSync("bash", [smokeScript], {
       cwd: tempRoot,
       env: {
-        ...process.env,
+        ...isolatedEnv(dir),
         PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
         CRABBOX_LIVE: "1",
         CRABBOX_LIVE_PROVIDERS: "fal",
         CRABBOX_FAL_KEY: "test-secret-token",
         FAL_KEY: "",
+        CRABBOX_LIVE_FAL_AMBIGUOUS_BASELINE_OBSERVATIONS: "1",
       },
       encoding: "utf8",
     });
@@ -509,7 +524,7 @@ esac
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
-      ...process.env,
+      ...isolatedEnv(dir),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "fal",
@@ -517,6 +532,7 @@ esac
       FAL_KEY: "",
       CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS: "1",
       CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS: "0",
+      CRABBOX_LIVE_FAL_AMBIGUOUS_BASELINE_OBSERVATIONS: "1",
     },
     encoding: "utf8",
   });
@@ -526,6 +542,27 @@ esac
   assert.match(result.stderr, /credit balance/);
   assert.doesNotMatch(result.stderr, /classification=cleanup_failed/);
   assert.equal(fs.readFileSync(doctorCalls, "utf8"), "doctor\ndoctor\n");
+
+  const productionWindowResult = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...isolatedEnv(dir),
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "fal",
+      CRABBOX_FAL_KEY: "test-secret-token",
+      FAL_KEY: "",
+      CRABBOX_LIVE_FAL_TEST_ONLY_SHORT_RECOVERY: "",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS: "1",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS: "0",
+      CRABBOX_LIVE_FAL_AMBIGUOUS_BASELINE_OBSERVATIONS: "1",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(productionWindowResult.status, 1, productionWindowResult.stdout + productionWindowResult.stderr);
+  assert.match(productionWindowResult.stderr, /classification=billing_blocked/);
+  assert.match(productionWindowResult.stderr, /classification=cleanup_failed/);
 });
 
 test("live fal smoke fails cleanup when provider inventory changed after an unclaimed create", () => {
@@ -570,7 +607,7 @@ esac
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
-      ...process.env,
+      ...isolatedEnv(dir),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "fal",
@@ -578,6 +615,7 @@ esac
       FAL_KEY: "",
       CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS: "1",
       CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS: "0",
+      CRABBOX_LIVE_FAL_AMBIGUOUS_BASELINE_OBSERVATIONS: "1",
     },
     encoding: "utf8",
   });
@@ -586,6 +624,128 @@ esac
   assert.match(result.stderr, /classification=billing_blocked/);
   assert.match(result.stderr, /classification=cleanup_failed/);
   assert.match(result.stderr, /manual reconciliation required/);
+});
+
+test("live fal smoke does not accept a transient baseline after an ambiguous create", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-delayed-create-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const doctorCalls = path.join(dir, "doctor-calls.log");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor)
+    count="$(wc -l <"${doctorCalls}" 2>/dev/null || printf 0)"
+    printf 'doctor\n' >>"${doctorCalls}"
+    if [[ "$count" -le 1 ]]; then
+      printf 'auth=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n'
+    else
+      printf 'auth=ready inventory_count=1 inventory_fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    fi
+    ;;
+  list)
+    printf '[]\n'
+    ;;
+  warmup)
+    printf 'compute credit balance required after ambiguous create\n' >&2
+    exit 37
+    ;;
+  stop)
+    printf 'lease/fal instance not found or not locally claimed\n' >&2
+    exit 4
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...isolatedEnv(dir),
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "fal",
+      CRABBOX_FAL_KEY: "test-secret-token",
+      FAL_KEY: "",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS: "3",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS: "0",
+      CRABBOX_LIVE_FAL_AMBIGUOUS_BASELINE_OBSERVATIONS: "3",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=cleanup_failed/);
+  assert.match(result.stderr, /provider and local state do not prove zero residue/);
+  assert.equal(fs.readFileSync(doctorCalls, "utf8"), "doctor\ndoctor\ndoctor\ndoctor\n");
+});
+
+test("live fal smoke retains recovery state when local key cleanup is incomplete", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-fal-local-residue-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const keyStore =
+    process.platform === "darwin"
+      ? path.join(dir, "home", "Library", "Application Support", "crabbox", "testboxes")
+      : path.join(dir, "config", "crabbox", "testboxes");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor)
+    printf 'auth=ready inventory_count=0 inventory_fingerprint=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n'
+    ;;
+  list)
+    printf '[]\n'
+    ;;
+  warmup)
+    mkdir -p "$CRABBOX_TEST_KEY_STORE/cbx_fixture"
+    printf fixture >"$CRABBOX_TEST_KEY_STORE/cbx_fixture/id_ed25519"
+    printf 'capacity unavailable after partial create\n' >&2
+    exit 37
+    ;;
+  stop)
+    exit 0
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...isolatedEnv(dir),
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "fal",
+      CRABBOX_FAL_KEY: "test-secret-token",
+      FAL_KEY: "",
+      XDG_CONFIG_HOME: path.join(dir, "config"),
+      XDG_STATE_HOME: path.join(dir, "state"),
+      CRABBOX_TEST_KEY_STORE: keyStore,
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS: "1",
+      CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS: "0",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=cleanup_failed/);
+  assert.match(result.stderr, /local fal lifecycle changed the per-lease key inventory/);
+  assert.equal(fs.existsSync(path.join(keyStore, "cbx_fixture", "id_ed25519")), true);
 });
 
 test("live fal smoke treats post-create lifecycle failure as validation", () => {
@@ -627,7 +787,7 @@ esac
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
-      ...process.env,
+      ...isolatedEnv(dir),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "fal",
@@ -684,7 +844,7 @@ esac
   const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
-      ...process.env,
+      ...isolatedEnv(dir),
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "fal",

@@ -153,11 +153,14 @@ crabbox cleanup --provider fal
 ```
 
 `cleanup --dry-run` prints what would be deleted without mutating fal or local
-claims. Because fal does not expose an account identity for binding the current
-API key, an instance `404` is not sufficient proof that the resource is absent
-from the account that created it; Crabbox retains the local claim for manual
-reconciliation and shows it in `crabbox list` as
-`provider-absence-unverified`. A per-lease process and filesystem lock keeps
+claims. Crabbox binds each claim to the creating credential. With that binding
+intact, repeated instance absence around a complete workspace inventory proves
+provider deletion and finalizes the claim and SSH key. After key rotation,
+Crabbox rebinds only when the replacement credential can read the exact claimed
+instance and see it in the workspace inventory; otherwise it retains the claim
+for manual reconciliation. Identityless create recovery still requires the
+original credential, so keep that credential active until every pending lease
+has been stopped. A per-lease process and filesystem lock keeps
 recovery-pending claims intact while their acquisition is still live. After an
 acquiring process exits, non-kept `create-intent` claims are removed locally,
 non-kept provisioning instances are deleted, and non-kept ambiguous creates are
@@ -170,8 +173,7 @@ the acquisition-lifetime lock are also retained conservatively, because a
 missing new-format lock cannot prove that an older acquisition process has
 exited. Durable rollback and deletion markers still complete, while ordinary
 ready claims retain normal keep, TTL, and idle cleanup behavior. If credentials
-or the control plane are unavailable, claimed
-instances remain visible as
+or the control plane are unavailable, claimed instances remain visible as
 `provider-verification-unavailable` instead of being mistaken for an empty
 inventory.
 
@@ -193,10 +195,14 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=fal scripts/live-fal-smoke.sh
 ```
 
 The script builds `bin/crabbox`, reads `CRABBOX_FAL_KEY` or `FAL_KEY` from the
-environment, requires an empty Crabbox-owned fal inventory, creates a kept
+environment, requires an empty Crabbox-owned fal inventory, creates a
 short-lived Compute lease, waits for readiness, runs `echo ok`, verifies
-`list --json`, stops the lease, runs dry-run cleanup, and verifies the local fal
-inventory is empty afterward.
+`list --json`, stops the lease, runs dry-run cleanup, and verifies the provider
+inventory, local claim store, and per-lease key store are empty afterward. The
+lease is not kept, so TTL and idle cleanup remain available if the runner dies.
+If create returns without a recoverable claim, the script requires a sustained
+pre-create inventory baseline for at least nine minutes before it accepts zero
+residue. Production timing overrides cannot shorten that recovery window.
 
 Optional live-smoke overrides:
 
@@ -204,6 +210,9 @@ Optional live-smoke overrides:
 CRABBOX_LIVE_FAL_INSTANCE_TYPE   Instance type for the smoke, default gpu_1x_h100_sxm5
 CRABBOX_LIVE_FAL_SECTOR          Sector for the smoke; unset by default
 CRABBOX_LIVE_FAL_API_URL         API URL for the smoke, default https://api.fal.ai/v1
+CRABBOX_LIVE_FAL_INVENTORY_POLL_ATTEMPTS                 Maximum ordinary inventory polls, default 65
+CRABBOX_LIVE_FAL_INVENTORY_POLL_SECONDS                  Delay between inventory polls, default 2
+CRABBOX_LIVE_FAL_AMBIGUOUS_BASELINE_OBSERVATIONS         Consecutive baseline checks after an unclaimed create; values below 271 are clamped
 ```
 
 Final classifications include:

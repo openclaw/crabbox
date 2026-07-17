@@ -165,11 +165,17 @@ func persistFalCreateRecoveryClaim(t *testing.T, b *backend, leaseID, slug, reas
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err = markFalAcquireLifetimeClaim(claim)
-	if err != nil {
-		t.Fatal(err)
-	}
 	return claim, req
+}
+
+func markFalAcquireLifetimeClaimForTest(claim core.LeaseClaim) (core.LeaseClaim, error) {
+	marked := claim
+	marked.Labels = cloneLabels(claim.Labels)
+	marked.Labels[falAcquireLifetimeLabel] = falAcquireLifetimeVersion
+	if err := core.ReplaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, marked); err != nil {
+		return claim, err
+	}
+	return marked, nil
 }
 
 func TestFalAcquireCreatesInstanceWaitsAndClaimsLease(t *testing.T) {
@@ -228,7 +234,7 @@ func TestFalAcquirePersistsReplayIntentBeforeProviderMutation(t *testing.T) {
 		if err := json.Unmarshal(data, &claim); err != nil {
 			t.Fatalf("decode pre-create claim: %v", err)
 		}
-		if claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create-inflight" || claim.Labels["create_started_at"] == "" {
+		if claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create-inflight" || claim.Labels["create_started_at"] == "" || claim.Labels[falAcquireLifetimeLabel] != falAcquireLifetimeVersion || claim.Labels[falCredentialBindingLabel] != falCredentialBinding(b.cfg) {
 			t.Fatalf("pre-create claim=%#v", claim)
 		}
 		observed = true
@@ -250,6 +256,61 @@ func TestFalAcquirePersistsReplayIntentBeforeProviderMutation(t *testing.T) {
 	}
 	if lease.Server.Labels[falAcquireLifetimeLabel] != "" {
 		t.Fatalf("internal lifetime marker leaked to server labels: %#v", lease.Server.Labels)
+	}
+}
+
+func TestFalAmbiguousCreateReplayRejectsCredentialRotation(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	const leaseID = "cbx_replay_credential"
+	claim, _ := persistFalCreateRecoveryClaim(t, b, leaseID, "replay-credential", "ambiguous-create", false, b.now())
+	keyPath, keyErr := core.TestboxKeyPath(leaseID)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	originalBinding := claim.Labels[falCredentialBindingLabel]
+	b.cfg.Fal.APIKey = "rotated-test-key"
+
+	_, err := b.recoverAmbiguousCreateForRelease(context.Background(), api, claim, b.configForRun())
+	if err == nil || !strings.Contains(err.Error(), "credential identity") {
+		t.Fatalf("recovery err=%v", err)
+	}
+	if len(api.createRequests) != 0 || len(api.deletedIDs) != 0 {
+		t.Fatalf("credential mismatch mutated provider create=%d delete=%#v", len(api.createRequests), api.deletedIDs)
+	}
+	retained, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID)
+	if readErr != nil || !exists || retained.Labels[falCredentialBindingLabel] != originalBinding {
+		t.Fatalf("claim=%#v exists=%t err=%v", retained, exists, readErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("credential mismatch removed recovery key: %v", statErr)
+	}
+}
+
+func TestFalCreateIntentReplayAtomicallyAddsAcquireLifetimeMarker(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	const leaseID = "cbx_replay_lifetime"
+	claim, request := persistFalCreateRecoveryClaim(t, b, leaseID, "replay-lifetime", "create-intent", false, b.now())
+	unmarked := claim
+	unmarked.Labels = cloneLabels(claim.Labels)
+	delete(unmarked.Labels, falAcquireLifetimeLabel)
+	if err := core.ReplaceLeaseClaimIfUnchangedDurable(leaseID, claim, unmarked); err != nil {
+		t.Fatal(err)
+	}
+	api.beforeCreateHook = func(string) {
+		current, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil || !exists || current.Labels[falAcquireLifetimeLabel] != falAcquireLifetimeVersion {
+			t.Fatalf("inflight claim=%#v exists=%t err=%v", current, exists, err)
+		}
+	}
+
+	created, updated, ambiguous, err := b.replayFalCreateWithClaim(context.Background(), api, request, unmarked, b.configForRun(), "provisioning", false)
+	if err != nil || ambiguous || created.ID == "" || updated.CloudID != created.ID || updated.Labels[falAcquireLifetimeLabel] != falAcquireLifetimeVersion {
+		t.Fatalf("created=%#v updated=%#v ambiguous=%t err=%v", created, updated, ambiguous, err)
+	}
+	if err := b.deleteClaimedFalInstance(context.Background(), api, updated, b.configForRun(), created.ID); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -470,7 +531,7 @@ func TestFalAcquireFinalPublishRetainsOwnershipWhenGetAbsenceConflictsWithInvent
 	}
 }
 
-func TestFalAcquireFailureDoesNotResurrectCompletedConcurrentDeletion(t *testing.T) {
+func TestFalAcquireFailureRejectsConcurrentStopAndRollsBack(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
 	b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
@@ -479,17 +540,24 @@ func TestFalAcquireFailureDoesNotResurrectCompletedConcurrentDeletion(t *testing
 			return fmt.Errorf("claims=%d err=%w", len(claims), err)
 		}
 		claim := claims[0]
-		if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		stopErr := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
 			LeaseID: claim.LeaseID,
 			Server:  core.Server{CloudID: claim.CloudID, Provider: providerName, Labels: map[string]string{"lease": claim.LeaseID}},
-		}}); err != nil {
-			return err
+		}})
+		if stopErr == nil || !strings.Contains(stopErr.Error(), "acquisition is still in progress") {
+			return fmt.Errorf("concurrent stop err=%v", stopErr)
 		}
-		return errors.New("ssh failed after concurrent stop")
+		if len(api.deletedIDs) != 0 {
+			return fmt.Errorf("concurrent stop deleted provider instance: %#v", api.deletedIDs)
+		}
+		if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+			return fmt.Errorf("concurrent stop changed in-flight claim: %w", err)
+		}
+		return errors.New("ssh readiness failed after rejected concurrent stop")
 	}
 
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "failure-stop-race"})
-	if err == nil || !strings.Contains(err.Error(), "ssh failed after concurrent stop") || !errors.Is(err, errFalClaimMutationSuperseded) {
+	if err == nil || errors.Is(err, errFalClaimMutationSuperseded) || !strings.Contains(err.Error(), "ssh readiness failed after rejected concurrent stop") {
 		t.Fatalf("acquire err=%v", err)
 	}
 	if len(api.deletedIDs) != 1 || api.deletedIDs[0] != "inst_created" {
@@ -498,6 +566,59 @@ func TestFalAcquireFailureDoesNotResurrectCompletedConcurrentDeletion(t *testing
 	claims, readErr := core.ListLeaseClaimsWithPrefix("cbx_")
 	if readErr != nil || len(claims) != 0 {
 		t.Fatalf("claims=%#v err=%v", claims, readErr)
+	}
+	if len(api.idempotency) != 1 {
+		t.Fatalf("idempotency=%#v", api.idempotency)
+	}
+	keyPath, keyErr := core.TestboxKeyPath(api.idempotency[0])
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("rollback key still exists: %v", statErr)
+	}
+}
+
+func TestFalAcquireRejectsCredentialRebindingResolveAndRollsBack(t *testing.T) {
+	api := &fakeFalAPI{}
+	b := newFalTestBackend(t, api)
+	b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		claims, err := core.ListLeaseClaimsWithPrefix("cbx_")
+		if err != nil || len(claims) != 1 {
+			return fmt.Errorf("claims=%d err=%w", len(claims), err)
+		}
+		claim := claims[0]
+		b.cfg.Fal.APIKey = "rotated-test-key"
+		_, resolveErr := b.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID})
+		if resolveErr == nil || !strings.Contains(resolveErr.Error(), "acquisition is still in progress") {
+			return fmt.Errorf("credential-rebinding resolve err=%v", resolveErr)
+		}
+		if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+			return fmt.Errorf("credential-rebinding resolve changed in-flight claim: %w", err)
+		}
+		return errors.New("ssh readiness failed after rejected credential rebinding")
+	}
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "rebind-resolve-race"})
+	if err == nil || errors.Is(err, errFalClaimMutationSuperseded) || !strings.Contains(err.Error(), "ssh readiness failed after rejected credential rebinding") {
+		t.Fatalf("acquire err=%v", err)
+	}
+	if len(api.deletedIDs) != 1 || api.deletedIDs[0] != "inst_created" {
+		t.Fatalf("deletedIDs=%#v", api.deletedIDs)
+	}
+	claims, readErr := core.ListLeaseClaimsWithPrefix("cbx_")
+	if readErr != nil || len(claims) != 0 {
+		t.Fatalf("claims=%#v err=%v", claims, readErr)
+	}
+	if len(api.idempotency) != 1 {
+		t.Fatalf("idempotency=%#v", api.idempotency)
+	}
+	keyPath, keyErr := core.TestboxKeyPath(api.idempotency[0])
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("rollback key still exists: %v", statErr)
 	}
 }
 
@@ -1669,7 +1790,7 @@ func TestFalCleanupImmediatelyRetriesRollbackClaim(t *testing.T) {
 	}
 }
 
-func TestFalRollbackRetainsRecreatedClaimWhenProviderAbsenceIsUnproven(t *testing.T) {
+func TestFalRollbackFinalizesRecreatedClaimAfterProviderConfirmedAbsence(t *testing.T) {
 	api := &fakeFalAPI{}
 	b := newFalTestBackend(t, api)
 	claim, err := b.persistRecoveryClaimAtIfUnchanged(
@@ -1690,21 +1811,35 @@ func TestFalRollbackRetainsRecreatedClaimWhenProviderAbsenceIsUnproven(t *testin
 	if _, _, err := core.EnsureTestboxKey(claim.LeaseID); err != nil {
 		t.Fatal(err)
 	}
+	seededKeyPath, err := core.TestboxKeyPath(claim.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(seededKeyPath); err != nil {
+		t.Fatalf("seed rollback key: %v", err)
+	}
 	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 		t.Fatal(err)
 	}
 
 	cause := errors.New("ready transition lost race")
 	rollbackErr := b.rollbackClaimedAcquire("inst_created", claim.LeaseID, claim.Slug, b.configForRun(), "", "rollback-cleanup", cause)
-	if !errors.Is(rollbackErr, cause) || !strings.Contains(rollbackErr.Error(), errFalProviderAbsenceNotAccountBound.Error()) {
+	if !errors.Is(rollbackErr, cause) || strings.Contains(rollbackErr.Error(), errFalProviderAbsenceNotAccountBound.Error()) {
 		t.Fatalf("rollback err=%v", rollbackErr)
 	}
 	if len(api.deletedIDs) != 0 {
 		t.Fatalf("rollback issued a second delete after concurrent cleanup: %#v", api.deletedIDs)
 	}
-	recovered, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
-	if readErr != nil || !exists || recovered.CloudID != "inst_created" || recovered.Labels["recovery"] != "rollback-cleanup" {
-		t.Fatalf("claim=%#v exists=%v err=%v", recovered, exists, readErr)
+	_, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+	if readErr != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, readErr)
+	}
+	keyPath, keyErr := core.TestboxKeyPath(claim.LeaseID)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("key residue after provider-confirmed absence: %v", err)
 	}
 }
 
@@ -1987,7 +2122,7 @@ func TestFalResolveListAndReleaseRequireLocalClaim(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("ready claim exists=%t err=%v", exists, err)
 	}
-	if _, err := markFalAcquireLifetimeClaim(claim); err != nil {
+	if _, err := markFalAcquireLifetimeClaimForTest(claim); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2175,7 +2310,7 @@ func TestFalReleaseRetainsClaimUntilDeletionIsConfirmed(t *testing.T) {
 		t.Fatalf("deletedIDs=%#v", api.deletedIDs)
 	}
 	claim, ok, readErr := core.ReadLeaseClaimWithPresence("cbx_delete_pending")
-	if readErr != nil || !ok || claim.CloudID != "inst_owned" || !falDeleteStateMatches(claim, falDeleteAcceptedLabel, "inst_owned") {
+	if readErr != nil || !ok || claim.CloudID != "inst_owned" || !falDeleteStateMatches(claim, falDeleteAcceptedLabel, "inst_owned") || falDeleteConfirmed(claim, "inst_owned") {
 		t.Fatalf("claim=%#v exists=%t err=%v", claim, ok, readErr)
 	}
 	stale := original
@@ -2208,6 +2343,149 @@ func TestFalReleaseRetainsClaimUntilDeletionIsConfirmed(t *testing.T) {
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+}
+
+func TestFalReleaseFinalizesConfirmedDeletionAfterCredentialRotation(t *testing.T) {
+	api := &fakeFalAPI{getErr: errors.New("provider access must not be required")}
+	b := newFalTestBackend(t, api)
+	const leaseID = "cbx_delete_confirmed"
+	claimFalLease(t, b.cfg, leaseID, "delete-confirmed", "inst_owned", "203.0.113.10", false)
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(b.cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+	confirmed, err := persistFalDeleteState(claim, falDeleteConfirmedLabel, "inst_owned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unbound := confirmed
+	unbound.CloudID = ""
+	if err := core.ReplaceLeaseClaimIfUnchangedDurable(leaseID, confirmed, unbound); err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Fal.APIKey = "rotated-test-key"
+
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: leaseID,
+		Server:  core.Server{CloudID: "inst_owned", Provider: providerName, Labels: map[string]string{"lease": leaseID}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confirmed deletion key residue: %v", err)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("confirmed deletion contacted delete API: %#v", api.deletedIDs)
+	}
+}
+
+func TestFalReleaseRetainsUnconfirmedDeletionAfterCredentialRotation(t *testing.T) {
+	for _, state := range []struct {
+		name  string
+		label string
+	}{
+		{name: "attempted", label: falDeleteAttemptLabel},
+		{name: "accepted", label: falDeleteAcceptedLabel},
+	} {
+		t.Run(state.name, func(t *testing.T) {
+			for _, visible := range []bool{true, false} {
+				name := "absent"
+				instances := map[string]ComputeInstance{}
+				if visible {
+					name = "visible"
+					instances["inst_owned"] = readyFalInstance("inst_owned", "203.0.113.10")
+				}
+				t.Run(name, func(t *testing.T) {
+					api := &fakeFalAPI{instances: instances}
+					b := newFalTestBackend(t, api)
+					const leaseID = "cbx_delete_accepted"
+					claimFalLease(t, b.cfg, leaseID, "delete-accepted", "inst_owned", "203.0.113.10", false)
+					keyPath, _, err := core.EnsureTestboxKeyForConfig(b.cfg, leaseID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+					if err != nil || !exists {
+						t.Fatalf("claim exists=%t err=%v", exists, err)
+					}
+					accepted, err := persistFalDeleteState(claim, state.label, "inst_owned")
+					if err != nil {
+						t.Fatal(err)
+					}
+					originalBinding := accepted.Labels[falCredentialBindingLabel]
+					b.cfg.Fal.APIKey = "rotated-test-key"
+
+					releaseErr := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+						LeaseID: leaseID,
+						Server:  core.Server{CloudID: "inst_owned", Provider: providerName, Labels: map[string]string{"lease": leaseID}},
+					}})
+					if releaseErr == nil || !strings.Contains(releaseErr.Error(), "credential rotation") {
+						t.Fatalf("release err=%v", releaseErr)
+					}
+					retained, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+					if err != nil || !exists || !falDeleteStateMatches(retained, state.label, "inst_owned") || falDeleteConfirmed(retained, "inst_owned") {
+						t.Fatalf("claim exists=%t err=%v", exists, err)
+					}
+					if got := retained.Labels[falCredentialBindingLabel]; got != originalBinding {
+						t.Fatalf("accepted deletion binding changed from %q to %q", originalBinding, got)
+					}
+					if _, err := os.Stat(keyPath); err != nil {
+						t.Fatalf("accepted deletion key missing: %v", err)
+					}
+					if len(api.deletedIDs) != 0 {
+						t.Fatalf("accepted absent deletion was reissued: %#v", api.deletedIDs)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestFalReleaseSerializesReadyClaimWithAcquireLifetime(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{
+		"inst_owned": readyFalInstance("inst_owned", "203.0.113.10"),
+	}}
+	b := newFalTestBackend(t, api)
+	const leaseID = "cbx_ready_acquiring"
+	claimFalLease(t, b.cfg, leaseID, "ready-acquiring", "inst_owned", "203.0.113.10", false)
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+	marked := claim
+	marked.Labels = cloneLabels(claim.Labels)
+	marked.Labels[falAcquireLifetimeLabel] = falAcquireLifetimeVersion
+	if err := core.ReplaceLeaseClaimIfUnchangedDurable(leaseID, claim, marked); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockFalAcquireLifetime(context.Background(), leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "acquisition is still in progress") {
+		t.Fatalf("resolve err=%v", err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: leaseID,
+		Server:  core.Server{CloudID: "inst_owned", Provider: providerName, Labels: map[string]string{"lease": leaseID}},
+	}}); err == nil || !strings.Contains(err.Error(), "acquisition is still in progress") {
+		t.Fatalf("release err=%v", err)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("active acquire instance deleted: %#v", api.deletedIDs)
+	}
+	if err := core.VerifyLeaseClaimUnchanged(leaseID, marked); err != nil {
+		t.Fatalf("active acquire claim changed: %v", err)
 	}
 }
 
@@ -2888,7 +3166,7 @@ func TestFalCleanupSkipsLiveProvisioningAcquireAndCleansAfterExit(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err = markFalAcquireLifetimeClaim(claim)
+	claim, err = markFalAcquireLifetimeClaimForTest(claim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2952,7 +3230,7 @@ func TestFalCleanupProvisioningCASRejectsConcurrentReadyPublication(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err = markFalAcquireLifetimeClaim(claim)
+	claim, err = markFalAcquireLifetimeClaimForTest(claim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3037,6 +3315,7 @@ func TestFalCleanupSkipsOtherCredentialClaimsWithoutBlockingMatches(t *testing.T
 	secondCfg.Fal.APIKey = "second-test-key"
 	claimFalLease(t, firstCfg, "cbx_first123456", "first", "inst_first", "203.0.113.20", true)
 	claimFalLease(t, secondCfg, "cbx_second12345", "second", "inst_second", "203.0.113.21", true)
+	delete(api.instances, "inst_second")
 
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
@@ -3049,11 +3328,48 @@ func TestFalCleanupSkipsOtherCredentialClaimsWithoutBlockingMatches(t *testing.T
 	}
 
 	b.cfg.Fal.APIKey = secondCfg.Fal.APIKey
+	api.instances["inst_second"] = readyFalInstance("inst_second", "203.0.113.21")
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.deletedIDs) != 2 || api.deletedIDs[1] != "inst_second" {
 		t.Fatalf("second credential deletedIDs=%#v", api.deletedIDs)
+	}
+}
+
+func TestFalCleanupWithoutCredentialStillFinalizesConfirmedDeletion(t *testing.T) {
+	b := newFalTestBackend(t, &fakeFalAPI{})
+	const retainedLeaseID = "cbx_a_missing_key"
+	const confirmedLeaseID = "cbx_z_confirmed"
+	claimFalLease(t, b.cfg, retainedLeaseID, "missing-key", "inst_missing_key", "203.0.113.20", true)
+	claimFalLease(t, b.cfg, confirmedLeaseID, "confirmed", "inst_confirmed", "203.0.113.21", false)
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(b.cfg, confirmedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(confirmedLeaseID)
+	if err != nil || !exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+	if _, err := persistFalDeleteState(claim, falDeleteConfirmedLabel, "inst_confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Fal.APIKey = ""
+	b.clientFactory = func(Config, Runtime) (computeAPI, error) {
+		return nil, errors.New("provider client must not be constructed")
+	}
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(retainedLeaseID); err != nil || !exists {
+		t.Fatalf("unverified claim exists=%t err=%v", exists, err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(confirmedLeaseID); err != nil || exists {
+		t.Fatalf("confirmed claim exists=%t err=%v", exists, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confirmed deletion key residue: %v", err)
 	}
 }
 
@@ -3135,23 +3451,120 @@ func TestFalListShowsClaimsWhenProviderVerificationIsUnavailable(t *testing.T) {
 	}
 }
 
-func TestFalReleaseRetainsClaimWhenAbsenceIsNotAccountBound(t *testing.T) {
+func TestFalReleaseFinalizesProviderConfirmedAbsence(t *testing.T) {
 	api := &fakeFalAPI{instances: map[string]ComputeInstance{}}
 	b := newFalTestBackend(t, api)
 	claimFalLease(t, b.cfg, "cbx_absent12345", "absent", "inst_absent", "203.0.113.31", false)
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(b.cfg, "cbx_absent12345")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
 		LeaseID: "cbx_absent12345",
 		Server:  core.Server{CloudID: "inst_absent", Provider: providerName, Labels: map[string]string{"lease": "cbx_absent12345"}},
 	}})
-	if err == nil || !strings.Contains(err.Error(), "absence is not account-bound") {
+	if err != nil {
 		t.Fatalf("release err=%v", err)
 	}
 	if len(api.deletedIDs) != 0 {
 		t.Fatalf("delete issued after unverified absence: %#v", api.deletedIDs)
 	}
-	if _, ok, err := core.ResolveLeaseClaimForProvider("absent", providerName); err != nil || !ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("absent", providerName); err != nil || ok {
 		t.Fatalf("claim retained=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("key residue after provider-confirmed absence: %v", err)
+	}
+}
+
+func TestFalResolveRebindsRotatedCredentialAfterProviderProof(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{
+		"inst_rotated": readyFalInstance("inst_rotated", "203.0.113.33"),
+	}}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_rotated1234", "rotated", "inst_rotated", "203.0.113.33", false)
+	b.cfg.Fal.APIKey = "rotated-test-key"
+
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "rotated", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !ok {
+		t.Fatalf("claim exists=%t err=%v", ok, err)
+	}
+	if got, want := claim.Labels[falCredentialBindingLabel], falCredentialBinding(b.cfg); got != want {
+		t.Fatalf("credential binding=%q want %q", got, want)
+	}
+}
+
+func TestFalCleanupDryRunDoesNotPersistCredentialRebinding(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{
+		"inst_rotated_dry_run": readyFalInstance("inst_rotated_dry_run", "203.0.113.35"),
+	}}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_rotateddry1", "rotated-dry-run", "inst_rotated_dry_run", "203.0.113.35", true)
+	original, ok, err := core.ResolveLeaseClaimForProvider("rotated-dry-run", providerName)
+	if err != nil || !ok {
+		t.Fatalf("original claim retained=%v err=%v", ok, err)
+	}
+	originalBinding := original.Labels[falCredentialBindingLabel]
+	b.cfg.Fal.APIKey = "rotated-test-key"
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	retained, ok, err := core.ResolveLeaseClaimForProvider("rotated-dry-run", providerName)
+	if err != nil || !ok {
+		t.Fatalf("claim retained=%v err=%v", ok, err)
+	}
+	if got := retained.Labels[falCredentialBindingLabel]; got != originalBinding {
+		t.Fatalf("dry-run changed credential binding from %q to %q", originalBinding, got)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("dry-run deleted=%#v", api.deletedIDs)
+	}
+}
+
+func TestFalCleanupPropagatesCredentialRebindingVerificationFailure(t *testing.T) {
+	api := &fakeFalAPI{getErr: errors.New("control plane unavailable")}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_rebindfailure", "rebind-failure", "inst_rebind_failure", "203.0.113.36", true)
+	b.cfg.Fal.APIKey = "rotated-test-key"
+
+	err := b.Cleanup(context.Background(), core.CleanupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "control plane unavailable") {
+		t.Fatalf("cleanup err=%v", err)
+	}
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence("cbx_rebindfailure"); readErr != nil || !exists {
+		t.Fatalf("claim exists=%t err=%v", exists, readErr)
+	}
+	if len(api.deletedIDs) != 0 {
+		t.Fatalf("verification failure deleted=%#v", api.deletedIDs)
+	}
+}
+
+func TestFalResolveRejectsRotatedCredentialWithoutProviderProof(t *testing.T) {
+	api := &fakeFalAPI{instances: map[string]ComputeInstance{}}
+	b := newFalTestBackend(t, api)
+	claimFalLease(t, b.cfg, "cbx_otherworkspace", "other-workspace", "inst_other", "203.0.113.34", false)
+	original, ok, err := core.ResolveLeaseClaimForProvider("other-workspace", providerName)
+	if err != nil || !ok {
+		t.Fatalf("original claim retained=%v err=%v", ok, err)
+	}
+	originalBinding := original.Labels[falCredentialBindingLabel]
+	b.cfg.Fal.APIKey = "other-workspace-key"
+
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "other-workspace", ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "credential rotation") {
+		t.Fatalf("resolve err=%v", err)
+	}
+	retained, ok, err := core.ResolveLeaseClaimForProvider("other-workspace", providerName)
+	if err != nil || !ok {
+		t.Fatalf("claim retained=%v err=%v", ok, err)
+	}
+	if got := retained.Labels[falCredentialBindingLabel]; got != originalBinding {
+		t.Fatalf("failed credential proof changed binding from %q to %q", originalBinding, got)
 	}
 }
 

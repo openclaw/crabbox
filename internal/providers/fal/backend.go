@@ -27,12 +27,14 @@ const (
 	falCreateRejectedRecovery    = "create-rejected"
 	falDeleteAttemptLabel        = "fal_delete_attempt"
 	falDeleteAcceptedLabel       = "fal_delete_accepted"
+	falDeleteConfirmedLabel      = "fal_delete_confirmed"
 	falAcquireLifetimeLabel      = "fal_acquire_lifetime"
 	falAcquireLifetimeVersion    = "1"
 )
 
 var (
 	errFalProviderAbsenceNotAccountBound = errors.New("fal provider absence is not account-bound")
+	errFalCredentialBindingMismatch      = errors.New("fal credential binding mismatch")
 	errFalRecoveryClaimRemoved           = errors.New("fal recovery claim was removed by concurrent cleanup")
 	errFalClaimMutationSuperseded        = errors.New("fal claim mutation was superseded")
 )
@@ -393,10 +395,6 @@ func (b *backend) replayFalCreateWithClaim(ctx context.Context, client computeAP
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
-	client, err := b.api()
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
 	claim, ok, err := resolveFalClaim(req.ID, falClaimScope(cfg))
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -404,7 +402,34 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if !ok {
 		return core.LeaseTarget{}, exit(4, "lease/fal instance not found or not locally claimed: %s", strings.TrimSpace(req.ID))
 	}
-	if err := verifyFalClaimCredential(claim, cfg); err != nil {
+	confirmedDeletionID := falConfirmedDeletionInstanceID(claim)
+	if confirmedDeletionID != "" {
+		if req.ReleaseOnly {
+			return leaseTargetFromClaim(claim, cfg, false)
+		}
+		return core.LeaseTarget{}, exit(4, "fal lease %s deletion is confirmed; retry stop to finish local cleanup", claim.LeaseID)
+	}
+	client, err := b.api()
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	rebindMayPersist := !req.NoLocalStateMutations && claim.CloudID != "" && verifyFalClaimCredential(claim, cfg) != nil
+	needsAcquireSerialization := req.ReleaseOnly && falClaimMayBeAcquiring(claim) || rebindMayPersist
+	if needsAcquireSerialization && !falDeletionInProgress(claim) {
+		unlockAcquire, inactive, lockErr := tryLockFalAcquireLifetime(ctx, claim.LeaseID)
+		if lockErr != nil {
+			return core.LeaseTarget{}, lockErr
+		}
+		if !inactive {
+			return core.LeaseTarget{}, exit(4, "fal lease %s acquisition is still in progress; retry after acquisition completes", claim.LeaseID)
+		}
+		defer unlockAcquire()
+		if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
+	claim, err = b.ensureFalClaimCredential(ctx, client, claim, cfg, !req.NoLocalStateMutations)
+	if err != nil {
 		return core.LeaseTarget{}, err
 	}
 	if falDeletionInProgress(claim) {
@@ -607,8 +632,39 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if claim.ProviderScope != falClaimScope(cfg) {
 		return exit(2, "fal lease %s belongs to a different API endpoint; refusing to delete provider resources", leaseID)
 	}
+	confirmedDeletionID := falConfirmedDeletionInstanceID(claim)
+	if confirmedDeletionID != "" {
+		if req.Lease.Server.CloudID != "" && confirmedDeletionID != req.Lease.Server.CloudID {
+			return exit(2, "refusing to finalize fal instance %s from stale local claim", req.Lease.Server.CloudID)
+		}
+		return b.finalizeAcceptedFalDeletion(claim, confirmedDeletionID)
+	}
+	if falClaimMayBeAcquiring(claim) && !falDeletionInProgress(claim) {
+		unlockAcquire, inactive, err := tryLockFalAcquireLifetime(ctx, leaseID)
+		if err != nil {
+			return err
+		}
+		if !inactive {
+			return exit(4, "fal lease %s acquisition is still in progress; retry stop after acquisition completes", leaseID)
+		}
+		defer unlockAcquire()
+		if err := core.VerifyLeaseClaimUnchanged(leaseID, claim); err != nil {
+			return err
+		}
+	}
+	var client computeAPI
 	if err := verifyFalClaimCredential(claim, cfg); err != nil {
-		return err
+		if claim.CloudID == "" {
+			return err
+		}
+		client, err = b.api()
+		if err != nil {
+			return err
+		}
+		claim, err = b.ensureFalClaimCredential(ctx, client, claim, cfg, true)
+		if err != nil {
+			return err
+		}
 	}
 	if claim.CloudID == "" {
 		if claim.Labels["recovery"] == "create-intent" || claim.Labels["recovery"] == falCreateRejectedRecovery {
@@ -625,9 +681,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return exit(2, "refusing to release fal instance %s from stale local claim", req.Lease.Server.CloudID)
 	}
 	instanceID := claim.CloudID
-	client, err := b.api()
-	if err != nil {
-		return err
+	if client == nil {
+		client, err = b.api()
+		if err != nil {
+			return err
+		}
 	}
 	return b.deleteClaimedFalInstance(ctx, client, claim, cfg, instanceID)
 }
@@ -638,15 +696,6 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	matchingClaims := make([]core.LeaseClaim, 0, len(claims))
-	for _, claim := range claims {
-		if err := verifyFalClaimCredential(claim, cfg); err != nil {
-			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=credential_binding_mismatch\n", firstNonBlank(claim.CloudID, claim.LeaseID), firstNonBlank(claim.Slug, claim.LeaseID))
-			continue
-		}
-		matchingClaims = append(matchingClaims, claim)
-	}
-	claims = matchingClaims
 	if len(claims) == 0 {
 		return nil
 	}
@@ -709,6 +758,41 @@ func (b *backend) cleanupFalClaim(ctx context.Context, req core.CleanupRequest, 
 	}
 	if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
 		return err
+	}
+	confirmedDeletionID := falConfirmedDeletionInstanceID(claim)
+	if confirmedDeletionID != "" {
+		if req.DryRun {
+			fmt.Fprintf(b.rt.Stderr, "delete server id=%s name=%s reason=deletion-confirmed\n", server.DisplayID(), server.Name)
+			return nil
+		}
+		if err := b.finalizeAcceptedFalDeletion(claim, confirmedDeletionID); err != nil {
+			return err
+		}
+		fmt.Fprintf(b.rt.Stderr, "delete server id=%s name=%s reason=deletion-confirmed\n", server.DisplayID(), server.Name)
+		return nil
+	}
+	if err := verifyFalClaimCredential(claim, cfg); err != nil {
+		if claim.CloudID == "" {
+			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=credential_binding_mismatch\n", firstNonBlank(claim.CloudID, claim.LeaseID), firstNonBlank(claim.Slug, claim.LeaseID))
+			return nil
+		}
+		if falCredentialBinding(cfg) == "" {
+			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=credential_binding_mismatch\n", firstNonBlank(claim.CloudID, claim.LeaseID), firstNonBlank(claim.Slug, claim.LeaseID))
+			return nil
+		}
+		client, clientErr := cleanupClient()
+		if clientErr != nil {
+			return clientErr
+		}
+		updatedClaim, ensureErr := b.ensureFalClaimCredential(ctx, client, claim, cfg, !req.DryRun)
+		if ensureErr != nil {
+			if errors.Is(ensureErr, errFalCredentialBindingMismatch) {
+				fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=credential_binding_mismatch\n", firstNonBlank(claim.CloudID, claim.LeaseID), firstNonBlank(claim.Slug, claim.LeaseID))
+				return nil
+			}
+			return ensureErr
+		}
+		claim = updatedClaim
 	}
 
 	if claim.CloudID == "" {
@@ -872,6 +956,9 @@ func (b *backend) deleteClaimedFalInstance(ctx context.Context, client computeAP
 	if expected.CloudID == "" && !falUnboundCleanupClaim(expected) {
 		return exit(2, "fal lease %s has no durable create-attempt ownership for instance %s", expected.LeaseID, instanceID)
 	}
+	if falDeleteConfirmed(expected, instanceID) {
+		return b.finalizeAcceptedFalDeletion(expected, instanceID)
+	}
 	if err := verifyFalClaimCredential(expected, cfg); err != nil {
 		return err
 	}
@@ -881,19 +968,30 @@ func (b *backend) deleteClaimedFalInstance(ctx context.Context, client computeAP
 			if err := b.confirmFalInstanceDeletion(ctx, client, instanceID); err != nil {
 				return err
 			}
-			return b.finalizeAcceptedFalDeletion(expected, instanceID)
-		}
-		if falDeleteStateMatches(expected, falDeleteAttemptLabel, instanceID) {
-			if err := b.confirmFalInstanceDeletion(ctx, client, instanceID); err != nil {
-				return errors.Join(fmt.Errorf("%w: %s", errFalProviderAbsenceNotAccountBound, instanceID), err)
-			}
-			confirmed, stateErr := persistFalDeleteState(expected, falDeleteAcceptedLabel, instanceID)
+			confirmed, stateErr := persistFalDeleteState(expected, falDeleteConfirmedLabel, instanceID)
 			if stateErr != nil {
 				return stateErr
 			}
 			return b.finalizeAcceptedFalDeletion(confirmed, instanceID)
 		}
-		return fmt.Errorf("%w: %s", errFalProviderAbsenceNotAccountBound, instanceID)
+		if falDeleteStateMatches(expected, falDeleteAttemptLabel, instanceID) {
+			if err := b.confirmFalInstanceDeletion(ctx, client, instanceID); err != nil {
+				return errors.Join(fmt.Errorf("%w: %s", errFalProviderAbsenceNotAccountBound, instanceID), err)
+			}
+			confirmed, stateErr := persistFalDeleteState(expected, falDeleteConfirmedLabel, instanceID)
+			if stateErr != nil {
+				return stateErr
+			}
+			return b.finalizeAcceptedFalDeletion(confirmed, instanceID)
+		}
+		if err := b.confirmFalInstanceDeletion(ctx, client, instanceID); err != nil {
+			return errors.Join(fmt.Errorf("%w: %s", errFalProviderAbsenceNotAccountBound, instanceID), err)
+		}
+		accepted, stateErr := persistFalDeleteState(expected, falDeleteConfirmedLabel, instanceID)
+		if stateErr != nil {
+			return stateErr
+		}
+		return b.finalizeAcceptedFalDeletion(accepted, instanceID)
 	}
 	if err != nil {
 		return err
@@ -916,7 +1014,7 @@ func (b *backend) deleteClaimedFalInstance(ctx context.Context, client computeAP
 		if err := b.confirmFalInstanceDeletion(ctx, client, instanceID); err != nil {
 			return err
 		}
-		accepted, err := persistFalDeleteState(attempted, falDeleteAcceptedLabel, instanceID)
+		accepted, err := persistFalDeleteState(attempted, falDeleteConfirmedLabel, instanceID)
 		if err != nil {
 			return err
 		}
@@ -933,7 +1031,11 @@ func (b *backend) confirmAndFinalizeFalDeletion(ctx context.Context, client comp
 	if err := b.confirmFalInstanceDeletion(ctx, client, instanceID); err != nil {
 		return err
 	}
-	return b.finalizeAcceptedFalDeletion(accepted, instanceID)
+	confirmed, err := persistFalDeleteState(accepted, falDeleteConfirmedLabel, instanceID)
+	if err != nil {
+		return err
+	}
+	return b.finalizeAcceptedFalDeletion(confirmed, instanceID)
 }
 
 func (b *backend) confirmFalInstanceDeletion(ctx context.Context, client computeAPI, instanceID string) error {
@@ -958,6 +1060,11 @@ func persistFalDeleteState(expected core.LeaseClaim, label, instanceID string) (
 	updated.Labels[falDeleteAttemptLabel] = instanceID
 	if label == falDeleteAcceptedLabel {
 		updated.Labels[falDeleteAcceptedLabel] = instanceID
+	}
+	if label == falDeleteConfirmedLabel {
+		updated.Labels[falDeleteAttemptLabel] = instanceID
+		updated.Labels[falDeleteAcceptedLabel] = instanceID
+		updated.Labels[falDeleteConfirmedLabel] = instanceID
 	}
 	return replaceFalClaimDurably(expected, updated)
 }
@@ -987,9 +1094,25 @@ func falDeleteAccepted(claim core.LeaseClaim, instanceID string) bool {
 		falDeleteStateMatches(claim, falDeleteAcceptedLabel, instanceID)
 }
 
+func falDeleteConfirmed(claim core.LeaseClaim, instanceID string) bool {
+	return falDeleteAccepted(claim, instanceID) && falDeleteStateMatches(claim, falDeleteConfirmedLabel, instanceID)
+}
+
+func falConfirmedDeletionInstanceID(claim core.LeaseClaim) string {
+	instanceID := strings.TrimSpace(claim.Labels[falDeleteConfirmedLabel])
+	if falDeleteConfirmed(claim, instanceID) {
+		return instanceID
+	}
+	return ""
+}
+
+func falClaimMayBeAcquiring(claim core.LeaseClaim) bool {
+	return claim.Labels[falAcquireLifetimeLabel] == falAcquireLifetimeVersion || falRecoveryNeedsAcquireLifetime(claim.Labels["recovery"])
+}
+
 func (b *backend) finalizeAcceptedFalDeletion(claim core.LeaseClaim, instanceID string) error {
-	if !falDeleteAccepted(claim, instanceID) {
-		return exit(2, "fal lease %s deletion is not durably accepted", claim.LeaseID)
+	if !falDeleteConfirmed(claim, instanceID) {
+		return exit(2, "fal lease %s deletion is not durably confirmed", claim.LeaseID)
 	}
 	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
 		return b.removeFalLeaseKey(claim.LeaseID)
@@ -1239,7 +1362,7 @@ func (b *backend) persistInitialFalCreateIntent(leaseID, slug string, cfg Config
 	if b.persistCreateIntent != nil {
 		return b.persistCreateIntent(leaseID, slug, cfg, repoRoot, keep, createStarted, req)
 	}
-	claim, err := b.persistRecoveryClaimAtIfUnchanged(
+	return b.persistRecoveryClaimAtIfUnchanged(
 		leaseID,
 		slug,
 		cfg,
@@ -1252,20 +1375,6 @@ func (b *backend) persistInitialFalCreateIntent(leaseID, slug string, cfg Config
 		false,
 		req,
 	)
-	if err != nil {
-		return claim, err
-	}
-	return markFalAcquireLifetimeClaim(claim)
-}
-
-func markFalAcquireLifetimeClaim(claim core.LeaseClaim) (core.LeaseClaim, error) {
-	marked := claim
-	marked.Labels = cloneLabels(claim.Labels)
-	marked.Labels[falAcquireLifetimeLabel] = falAcquireLifetimeVersion
-	if err := core.ReplaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, marked); err != nil {
-		return claim, err
-	}
-	return marked, nil
 }
 
 func preserveFalAcquireLifetimeLabel(labels map[string]string, current core.LeaseClaim) {
@@ -1309,6 +1418,9 @@ func falRecoveryClaimReplacement(current core.LeaseClaim, cfg Config, instanceID
 	}
 	labels := falLabels(cfg, current.LeaseID, current.Slug, keep, createStarted)
 	preserveFalAcquireLifetimeLabel(labels, current)
+	if current.Labels["recovery"] == "create-intent" {
+		labels[falAcquireLifetimeLabel] = falAcquireLifetimeVersion
+	}
 	binding := falCredentialBinding(cfg)
 	if binding == "" {
 		return core.LeaseClaim{}, exit(2, "provider=%s requires fal credentials to persist recovery ownership", providerName)
@@ -1680,8 +1792,14 @@ func (b *backend) persistRecoveryClaimAtIfUnchanged(leaseID, slug string, cfg Co
 		createStarted = b.now()
 	}
 	labels := falLabels(cfg, leaseID, slug, keep, createStarted)
+	if !expectedExists && falRecoveryNeedsAcquireLifetime(reason) {
+		labels[falAcquireLifetimeLabel] = falAcquireLifetimeVersion
+	}
 	if expectedExists {
 		preserveFalAcquireLifetimeLabel(labels, expected)
+		if expected.Labels["recovery"] == "create-intent" {
+			labels[falAcquireLifetimeLabel] = falAcquireLifetimeVersion
+		}
 	}
 	binding := falCredentialBinding(cfg)
 	if binding == "" {
@@ -1771,15 +1889,67 @@ func verifyFalClaimCredential(claim core.LeaseClaim, cfg Config) error {
 	expected := strings.TrimSpace(claim.Labels[falCredentialBindingLabel])
 	actual := falCredentialBinding(cfg)
 	if expected == "" {
-		return exit(2, "fal lease %s has no credential binding; refusing provider access", claim.LeaseID)
+		return errors.Join(errFalCredentialBindingMismatch, exit(2, "fal lease %s has no credential binding; refusing provider access", claim.LeaseID))
 	}
 	if actual == "" {
-		return exit(2, "fal lease %s requires the credential that created it; refusing provider access", claim.LeaseID)
+		return errors.Join(errFalCredentialBindingMismatch, exit(2, "fal lease %s requires the credential that created it; refusing provider access", claim.LeaseID))
 	}
 	if expected != actual {
-		return exit(2, "fal lease %s belongs to a different credential identity; refusing provider access", claim.LeaseID)
+		return errors.Join(errFalCredentialBindingMismatch, exit(2, "fal lease %s belongs to a different credential identity; refusing provider access", claim.LeaseID))
 	}
 	return nil
+}
+
+func (b *backend) ensureFalClaimCredential(ctx context.Context, client computeAPI, claim core.LeaseClaim, cfg Config, persist bool) (core.LeaseClaim, error) {
+	if err := verifyFalClaimCredential(claim, cfg); err == nil {
+		return claim, nil
+	}
+	actual := falCredentialBinding(cfg)
+	instanceID := strings.TrimSpace(claim.CloudID)
+	if actual == "" || instanceID == "" {
+		return core.LeaseClaim{}, verifyFalClaimCredential(claim, cfg)
+	}
+	if falDeleteStateMatches(claim, falDeleteAttemptLabel, instanceID) && !falDeleteConfirmed(claim, instanceID) {
+		return core.LeaseClaim{}, errors.Join(errFalCredentialBindingMismatch, exit(2, "fal lease %s has an attempted but unconfirmed deletion; credential rotation is unsafe until the original credential confirms deletion", claim.LeaseID))
+	}
+	if claim.Provider != providerName || claim.ProviderScope != falClaimScope(cfg) {
+		return core.LeaseClaim{}, errors.Join(errFalCredentialBindingMismatch, exit(2, "fal lease %s belongs to a different provider route; refusing credential rebinding", claim.LeaseID))
+	}
+	live, err := client.GetInstance(ctx, instanceID)
+	if isFalNotFound(err) {
+		return core.LeaseClaim{}, errors.Join(errFalCredentialBindingMismatch, exit(2, "fal credential rotation cannot prove ownership of instance %s; refusing rebinding", instanceID))
+	}
+	if err != nil {
+		return core.LeaseClaim{}, fmt.Errorf("verify fal credential rotation against instance %s: %w", instanceID, err)
+	}
+	if strings.TrimSpace(live.ID) != instanceID {
+		return core.LeaseClaim{}, errors.Join(errFalCredentialBindingMismatch, exit(2, "fal credential rotation returned changed instance identity for %s", instanceID))
+	}
+	ids, err := falInventoryIDs(ctx, client)
+	if err != nil {
+		return core.LeaseClaim{}, fmt.Errorf("verify fal credential rotation inventory: %w", err)
+	}
+	found := false
+	for _, id := range ids {
+		if id == instanceID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return core.LeaseClaim{}, errors.Join(errFalCredentialBindingMismatch, exit(2, "fal credential rotation inventory omitted instance %s; refusing rebinding", instanceID))
+	}
+	updated := claim
+	updated.Labels = cloneLabels(claim.Labels)
+	updated.Labels[falCredentialBindingLabel] = actual
+	if !persist {
+		return updated, nil
+	}
+	updated, err = replaceFalClaimDurably(claim, updated)
+	if err != nil {
+		return core.LeaseClaim{}, fmt.Errorf("persist fal credential rotation for lease %s: %w", claim.LeaseID, err)
+	}
+	return updated, nil
 }
 
 func falClaimServer(server core.Server, cfg Config) (core.Server, error) {
@@ -1858,6 +2028,7 @@ func serverFromClaim(claim core.LeaseClaim, cfg Config) (core.Server, error) {
 	delete(labels, falCredentialBindingLabel)
 	delete(labels, falDeleteAttemptLabel)
 	delete(labels, falDeleteAcceptedLabel)
+	delete(labels, falDeleteConfirmedLabel)
 	delete(labels, falAcquireLifetimeLabel)
 	server := core.Server{
 		CloudID:  claim.CloudID,
@@ -1987,6 +2158,7 @@ func mergeFalClaimLabels(live, claim map[string]string) map[string]string {
 	delete(out, falCredentialBindingLabel)
 	delete(out, falDeleteAttemptLabel)
 	delete(out, falDeleteAcceptedLabel)
+	delete(out, falDeleteConfirmedLabel)
 	delete(out, falAcquireLifetimeLabel)
 	for _, key := range []string{"creator_user_nickname", "fal_instance_id", "region", "sector", "server_type", "state"} {
 		if value := strings.TrimSpace(live[key]); value != "" {
