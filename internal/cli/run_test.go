@@ -63,6 +63,7 @@ func (b *warmupFailureReleaseBackend) Touch(context.Context, TouchRequest) (Serv
 }
 
 func TestWarmupFailureLeavesAcknowledgedLeaseForControllerReleaseGate(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // standalone cleanup stops egress daemons; keep lock files out of the real state dir
 	backend := &warmupFailureReleaseBackend{}
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
 	lease := LeaseTarget{LeaseID: "cbx_abcdef123456"}
@@ -80,6 +81,7 @@ func TestWarmupFailureLeavesAcknowledgedLeaseForControllerReleaseGate(t *testing
 }
 
 func TestReleaseBackendLeaseStopsBeforeCleanupAfterOwnershipChange(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // same release path; only the ownership-change early return keeps it off the state dir
 	base := &warmupFailureReleaseBackend{}
 	backend := &ownershipChangedReleaseBackend{warmupFailureReleaseBackend: base}
 	lease := LeaseTarget{LeaseID: "cbx_abcdef123456", SSH: SSHTarget{Host: "192.0.2.70"}}
