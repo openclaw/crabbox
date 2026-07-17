@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type artifactSchema struct {
@@ -106,7 +107,26 @@ var knownSchemaTypes = map[string]bool{
 	"null":    true,
 }
 
+var knownArtifactSchemaKeywords = map[string]bool{
+	"type":        true,
+	"required":    true,
+	"properties":  true,
+	"items":       true,
+	"enum":        true,
+	"$schema":     true,
+	"$id":         true,
+	"$comment":    true,
+	"title":       true,
+	"description": true,
+	"examples":    true,
+	"default":     true,
+	"deprecated":  true,
+}
+
 func parseArtifactSchema(data []byte) (artifactSchema, error) {
+	if !utf8.Valid(data) {
+		return artifactSchema{}, fmt.Errorf("schema is not valid UTF-8")
+	}
 	if err := rejectDuplicateJSONNames(data); err != nil {
 		return artifactSchema{}, err
 	}
@@ -129,6 +149,15 @@ func (s *artifactSchema) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return fmt.Errorf("schema must be a JSON object")
+	}
+	var keywords map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keywords); err != nil {
+		return err
+	}
+	for keyword := range keywords {
+		if !knownArtifactSchemaKeywords[keyword] {
+			return fmt.Errorf("unsupported schema keyword %q", keyword)
+		}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -296,6 +325,9 @@ func validateSchemaShape(s artifactSchema, path string) error {
 }
 
 func validateJSONAgainstSchema(doc []byte, schema artifactSchema) []schemaViolation {
+	if !utf8.Valid(doc) {
+		return []schemaViolation{{Keyword: "json", Message: "artifact is not valid UTF-8"}}
+	}
 	var value interface{}
 	decoder := json.NewDecoder(bytes.NewReader(doc))
 	decoder.UseNumber()

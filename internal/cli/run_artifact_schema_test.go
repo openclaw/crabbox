@@ -89,6 +89,7 @@ func TestParseArtifactSchemaRejectsInvalidKeywordShapes(t *testing.T) {
 		{"duplicate root keyword", `{"type":"object","type":"string"}`},
 		{"duplicate nested keyword", `{"properties":{"x":{"required":["a"],"required":[]}}}`},
 		{"duplicate property schema", `{"properties":{"x":{"type":"string"},"x":{"type":"number"}}}`},
+		{"mis-cased required cannot override required", `{"type":"object","required":["proof"],"REQUIRED":[]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -326,6 +327,10 @@ func TestLoadRequireArtifactSchemas(t *testing.T) {
 	if err := os.WriteFile(bad, []byte(`{"type":`), 0o600); err != nil {
 		t.Fatalf("write schema: %v", err)
 	}
+	invalidUTF8 := filepath.Join(dir, "invalid-utf8.schema.json")
+	if err := os.WriteFile(invalidUTF8, []byte{'{', '"', 't', 'i', 't', 'l', 'e', '"', ':', '"', 0xff, '"', '}'}, 0o600); err != nil {
+		t.Fatalf("write invalid UTF-8 schema: %v", err)
+	}
 
 	t.Run("loads valid schema", func(t *testing.T) {
 		loaded, err := loadRequireArtifactSchemas([]string{"out.json=" + good})
@@ -344,6 +349,11 @@ func TestLoadRequireArtifactSchemas(t *testing.T) {
 
 	t.Run("malformed schema file is exit 2", func(t *testing.T) {
 		_, err := loadRequireArtifactSchemas([]string{"out.json=" + bad})
+		assertExitCode(t, err, 2)
+	})
+
+	t.Run("invalid UTF-8 schema file is exit 2", func(t *testing.T) {
+		_, err := loadRequireArtifactSchemas([]string{"out.json=" + invalidUTF8})
 		assertExitCode(t, err, 2)
 	})
 
@@ -442,6 +452,17 @@ func TestValidateArtifactSchemasWithReaderBehaviour(t *testing.T) {
 		assertExitCode(t, err, 7)
 		if len(results) != 1 || results[0].Valid || len(results[0].Violations) == 0 {
 			t.Fatalf("expected one invalid result with violations, got %+v", results)
+		}
+	})
+
+	t.Run("invalid UTF-8 artifact fails exit 7", func(t *testing.T) {
+		reader := func(_ context.Context, _ SSHTarget, _, _ string, _ int) ([]byte, error) {
+			return []byte{'{', '"', 'o', 'k', '"', ':', 't', 'r', 'u', 'e', ',', '"', 'n', 'o', 't', 'e', '"', ':', '"', 0xff, '"', '}'}, nil
+		}
+		results, _, err := validateArtifactSchemasWithReader(context.Background(), SSHTarget{}, "/work", load, reader)
+		assertExitCode(t, err, 7)
+		if len(results) != 1 || results[0].Valid || len(results[0].Violations) == 0 {
+			t.Fatalf("expected invalid UTF-8 artifact violation, got %+v", results)
 		}
 	})
 
