@@ -270,8 +270,13 @@ func bridgeWorkingDir() (string, error) {
 }
 
 func bridgeEnv(cfg Config, home string) []string {
-	env := make([]string, 0, 12)
-	for _, key := range []string{"PATH", "TMPDIR", "TEMP", "TMP", "SystemRoot", "SYSTEMROOT", "COMSPEC", "PATHEXT"} {
+	env := make([]string, 0, 28)
+	for _, key := range []string{
+		"PATH", "TMPDIR", "TEMP", "TMP", "SystemRoot", "SYSTEMROOT", "COMSPEC", "PATHEXT",
+		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+		"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+		"SSL_CERT_FILE", "SSL_CERT_DIR",
+	} {
 		if value := os.Getenv(key); value != "" {
 			env = upsertEnv(env, key, value)
 		}
@@ -336,7 +341,11 @@ func redactBridgeResponse(resp bridgeResponse) bridgeResponse {
 
 func redactSecrets(value string) string {
 	out := value
-	for _, secret := range []string{os.Getenv("CRABBOX_CUA_API_KEY"), os.Getenv("CUA_API_KEY")} {
+	for _, secret := range []string{
+		os.Getenv("CRABBOX_CUA_API_KEY"), os.Getenv("CUA_API_KEY"),
+		os.Getenv("HTTP_PROXY"), os.Getenv("HTTPS_PROXY"), os.Getenv("ALL_PROXY"),
+		os.Getenv("http_proxy"), os.Getenv("https_proxy"), os.Getenv("all_proxy"),
+	} {
 		if secret = strings.TrimSpace(secret); secret != "" {
 			out = strings.ReplaceAll(out, secret, "[redacted]")
 		}

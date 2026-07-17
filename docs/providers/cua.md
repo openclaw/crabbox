@@ -45,7 +45,9 @@ CUA credentials are passed to the SDK through environment only. Set either
 exist. Crabbox does not store either value in config or accept it on argv. The
 SDK bridge uses an isolated home directory, so it does not consume credentials
 from `~/.cua/credentials`. It also sets `CUA_TELEMETRY_ENABLED=false` for every
-diagnostic subprocess.
+diagnostic subprocess. Standard HTTP proxy, no-proxy, and SSL certificate-store
+environment settings are forwarded to the isolated subprocess; unrelated
+ambient variables remain excluded.
 
 The API URL is trusted local input only. It can come from `--cua-api-url`,
 `CRABBOX_CUA_API_URL`, or SDK-compatible `CUA_BASE_URL`. Repository YAML cannot
