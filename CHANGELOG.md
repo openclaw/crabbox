@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.39.1 - Unreleased
+
+### Added
+
+- Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
+
 ## 0.39.0 - 2026-07-17
 
 ### Added

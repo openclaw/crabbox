@@ -9,3 +9,4 @@ node scripts/test-zed-extension-e2e.mjs
 node scripts/build-docs-site.mjs
 node --test scripts/build-docs-site.test.js scripts/enhance-docs-site.test.mjs
 node scripts/enhance-docs-site.mjs
+node scripts/normalize-provider-counts.mjs

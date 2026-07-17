@@ -8,6 +8,7 @@ on:
       - "docs/**"
       - "scripts/build-docs-site.mjs"
       - "scripts/enhance-docs-site.mjs"
+      - "scripts/normalize-provider-counts.mjs"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -38,6 +39,7 @@ jobs:
         run: |
           node scripts/build-docs-site.mjs
           node scripts/enhance-docs-site.mjs
+          node scripts/normalize-provider-counts.mjs
 
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
