@@ -2293,6 +2293,7 @@ func TestArtifactsPullRejectsHashMismatch(t *testing.T) {
 		Files: []artifactManifestFile{{
 			Name:   "screenshot.png",
 			URL:    server.URL,
+			Size:   int64(len("changed")),
 			SHA256: strings.Repeat("0", 64),
 		}},
 	}
