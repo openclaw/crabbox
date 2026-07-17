@@ -31,9 +31,7 @@ challenge and lease public key through a private `0700` VirtioFS share. The
 golden image denies all SSH login until the hook installs that key, disables
 alternate authentication sources, and verifies the effective sshd policy.
 
-Install the bundled image hooks before stopping a reusable base. The SSH
-identity hook is mandatory; when Cua Driver is already installed, the same
-installer also loads its optional LaunchAgent:
+Install the bundled image hooks before stopping a reusable base:
 
 ```sh
 scripts/install-macos-lume-image-hooks.sh
@@ -43,14 +41,9 @@ The hook rotates clone host keys and returns the new ED25519 key plus platform
 identity through the challenge-bound share only after sshd serves that key.
 Crabbox pins it before the first network SSH connection.
 
-Keep reusable layers credential-free. It is safe to preinstall signed tools
-such as Xcode, Homebrew, Tailscale, or Cua Driver, but leave GitHub and Tailscale
-logged out and do not bake API tokens, SSH private keys, signing identities, or
-personal keychains into the base. Add credentials only to a disposable clone
-after it boots.
-
-Lume uses APFS copy-on-write cloning, so stopped layers and per-lease clones are
-fast and initially share unchanged disk blocks.
+Keep reusable layers credential-free. Preinstalled tools are fine; accounts,
+tokens, private keys, signing identities, and personal keychains are not. Add
+credentials only to a disposable clone after boot.
 
 ## Configuration
 
@@ -108,17 +101,9 @@ CRABBOX_LUME_BASE=crabbox-macos-golden \
 scripts/live-smoke.sh
 ```
 
-## Credentials
-
-Inject session credentials only after clone boot. Keep reusable images logged
-out of GitHub and Tailscale; use separate short-lived credentials per clone.
-
 ## Not yet supported
 
-- Crabbox `--desktop`, `webvnc`, and screenshot features. Lume creates a VNC
-  endpoint even with `--no-display`, but its listener and generated credential
-  need an explicit loopback/tunnel security design before Crabbox advertises it.
-- Crabbox-managed Tailscale enrollment. The provider currently rejects
-  `--tailscale`; manual post-boot enrollment is separate from the provider.
-- Windows or Linux guests. This provider intentionally exposes Lume's macOS
-  path only; use Crabbox's Windows and Linux providers for those targets.
+- Desktop, web VNC, and screenshots; Lume's generated VNC endpoint needs a
+  loopback/tunnel security design before Crabbox can advertise it.
+- Crabbox-managed Tailscale enrollment; `--tailscale` is rejected.
+- Windows or Linux guests; this provider exposes only Lume's macOS path.
