@@ -24,6 +24,7 @@ require (
 	github.com/containernetworking/cni v1.0.1
 	github.com/daytonaio/daytona/libs/api-client-go v0.183.0
 	github.com/daytonaio/daytona/libs/sdk-go v0.183.0
+	github.com/dlclark/regexp2 v1.12.0
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/gofrs/flock v0.13.0
 	github.com/google/go-tdx-guest v0.3.1
@@ -46,6 +47,10 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	nhooyr.io/websocket v1.8.17
 )
+
+require github.com/santhosh-tekuri/jsonschema/v6 v6.0.3-0.20260218184449-befd2c18b2f0
+
+replace github.com/santhosh-tekuri/jsonschema/v6 => github.com/steipete/jsonschema/v6 v6.0.3-0.20260717053323-7235d3ee9642
 
 require (
 	cloud.google.com/go/auth v0.20.0 // indirect
