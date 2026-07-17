@@ -310,13 +310,8 @@ func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	cfg := b.configForRun()
-	// Snapshot orphan-candidate claims BEFORE listing instances. A claim
-	// registered by a concurrent Acquire after this point (while Cleanup dwells
-	// in a slow stopVM/deleteVM below) is absent here and therefore protected
-	// from the orphan sweep, which would otherwise read the newer claim against
-	// this older instance view as a "missing instance" and destroy a healthy,
-	// running VM's lease. Only claims that predate our instance view can be
-	// genuine orphans.
+	// Snapshot candidates before instances so newer claims cannot be compared
+	// against an older instance view and misclassified as orphans.
 	orphanCandidates, err := listLeaseClaims()
 	if err != nil {
 		return err
@@ -377,16 +372,15 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
 			continue
 		}
-		// Remove only if the claim is still exactly as snapshotted. A concurrent
-		// Acquire/Touch that (re)bound this lease between the snapshot and now
-		// makes it no longer an orphan, so RemoveLeaseClaimIfUnchanged declines
-		// the deletion and we leave the live lease intact.
-		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		// Keep the claim and its key when another process changed the candidate.
+		if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+			removeStoredTestboxKey(claim.LeaseID)
+			return nil
+		}); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
 			continue
 		}
 		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
-		removeStoredTestboxKey(claim.LeaseID)
 		claimsRemoved++
 	}
 	if !req.DryRun {
