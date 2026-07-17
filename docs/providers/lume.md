@@ -88,10 +88,6 @@ Environment variables: `CRABBOX_LUME_CLI`, `CRABBOX_LUME_BASE`,
 4. Run guarded remote cleanup, stop the VM and owner process, delete the exact
    claimed VM, and confirm inventory absence.
 
-Every lease gets a different VM, IP address, work directory, key, and macOS
-machine identity. Multiple sessions are separate VMs, not multiple users in one
-VM. Two sessions can run concurrently when host memory permits.
-
 Run the guarded local smoke after preparing a stopped base:
 
 ```sh
