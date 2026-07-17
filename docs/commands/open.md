@@ -39,6 +39,9 @@ The versioned `crabbox/editor-handoff/v1` object includes:
 - `hardTTLApplies`
 - `releaseCommand`, when the lease has an id
 
+`releaseCommand` carries the effective non-secret provider and routing flags,
+so it remains usable when the handoff overrides repository configuration.
+
 ## Why the command stays running
 
 External editors open their own SSH processes after a connection is added.

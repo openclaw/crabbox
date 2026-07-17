@@ -107,11 +107,10 @@ func (a App) runEditorHandoff(ctx context.Context, editorName string, editor edi
 	handoff := newEditorHandoffOutput(
 		editorName,
 		editor,
-		resolved.Lease.LeaseID,
-		resolved.Lease.SSH,
+		resolved.Config,
+		resolved.Lease,
 		folder,
 		hydratedByActions,
-		editorHandoffHardTTLApplies(resolved.Config, resolved.Lease),
 	)
 	if jsonOut {
 		if err := json.NewEncoder(a.Stdout).Encode(handoff); err != nil {
@@ -125,21 +124,22 @@ func (a App) runEditorHandoff(ctx context.Context, editorName string, editor edi
 	return nil
 }
 
-func newEditorHandoffOutput(editorName string, editor editorHandoffSpec, leaseID string, target SSHTarget, folder string, hydratedByActions, hardTTLApplies bool) editorHandoffOutput {
+func newEditorHandoffOutput(editorName string, editor editorHandoffSpec, cfg Config, lease LeaseTarget, folder string, hydratedByActions bool) editorHandoffOutput {
+	leaseID := strings.TrimSpace(lease.LeaseID)
 	releaseCommand := ""
-	if leaseID = strings.TrimSpace(leaseID); leaseID != "" {
-		releaseCommand = "crabbox stop " + leaseID
+	if leaseID != "" {
+		releaseCommand = runStopCommand(cfg, leaseID)
 	}
 	return editorHandoffOutput{
 		Schema:            editorHandoffSchema,
 		Editor:            editorName,
 		DisplayName:       editor.displayName,
 		LeaseID:           leaseID,
-		SSHCommand:        editorSSHCommandLine(target),
+		SSHCommand:        editorSSHCommandLine(lease.SSH),
 		RemoteFolder:      folder,
 		HydratedByActions: hydratedByActions,
 		LeaseActivity:     "foreground",
-		HardTTLApplies:    hardTTLApplies,
+		HardTTLApplies:    editorHandoffHardTTLApplies(cfg, lease),
 		ReleaseCommand:    releaseCommand,
 	}
 }

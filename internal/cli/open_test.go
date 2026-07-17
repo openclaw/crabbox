@@ -64,12 +64,22 @@ func TestOpenEditorZedHappyPathPrintsInstructions(t *testing.T) {
 	fakeEditorSSH(t, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	out := &cancelBuffer{cancel: cancel}
-	cfg := Config{WorkRoot: "/work", TargetOS: targetLinux}
+	cfg := Config{
+		Provider: "ssh",
+		WorkRoot: "/work",
+		TargetOS: targetLinux,
+		Static: StaticConfig{
+			Host:     "example.com",
+			User:     "alice",
+			Port:     "22",
+			WorkRoot: "/work",
+		},
+	}
 	target := SSHTarget{User: "alice", Host: "example.com", Port: "22", TargetOS: targetLinux}
 	resolved := resolvedSSHCommandTarget{
 		Config: cfg,
 		Lease: LeaseTarget{
-			Server:  Server{Provider: "hetzner", Labels: map[string]string{"expires_at": "2030-01-01T00:00:00Z"}},
+			Server:  Server{Provider: "ssh"},
 			LeaseID: "swift-crab",
 			SSH:     target,
 		},
@@ -95,7 +105,7 @@ func TestOpenEditorZedHappyPathPrintsInstructions(t *testing.T) {
 		"Paste the SSH command shown above",
 		"Lease activity: active while this process runs",
 		"Press Ctrl-C",
-		"Release command: crabbox stop swift-crab",
+		"Release command: crabbox stop --provider ssh --target linux --static-host example.com --static-user alice --static-port 22 --static-work-root /work --id swift-crab",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("instructions missing %q:\n%s", want, out.String())
@@ -107,12 +117,22 @@ func TestOpenEditorZedJSONHandoff(t *testing.T) {
 	fakeEditorSSH(t, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	out := &cancelBuffer{cancel: cancel}
-	cfg := Config{WorkRoot: "/work", TargetOS: targetLinux}
+	cfg := Config{
+		Provider: "ssh",
+		WorkRoot: "/work",
+		TargetOS: targetLinux,
+		Static: StaticConfig{
+			Host:     "example.com",
+			User:     "alice",
+			Port:     "22",
+			WorkRoot: "/work",
+		},
+	}
 	target := SSHTarget{User: "alice", Host: "example.com", Port: "22", TargetOS: targetLinux}
 	resolved := resolvedSSHCommandTarget{
 		Config: cfg,
 		Lease: LeaseTarget{
-			Server:  Server{Provider: "hetzner", Labels: map[string]string{"expires_at": "2030-01-01T00:00:00Z"}},
+			Server:  Server{Provider: "ssh"},
 			LeaseID: "swift-crab",
 			SSH:     target,
 		},
@@ -134,13 +154,13 @@ func TestOpenEditorZedJSONHandoff(t *testing.T) {
 	if got.Schema != editorHandoffSchema || got.Editor != "zed" || got.DisplayName != "Zed Remote Projects" {
 		t.Fatalf("identity fields=%+v", got)
 	}
-	if got.LeaseID != "swift-crab" || got.RemoteFolder != folder || got.ReleaseCommand != "crabbox stop swift-crab" {
+	if got.LeaseID != "swift-crab" || got.RemoteFolder != folder || got.ReleaseCommand != "crabbox stop --provider ssh --target linux --static-host example.com --static-user alice --static-port 22 --static-work-root /work --id swift-crab" {
 		t.Fatalf("lease fields=%+v", got)
 	}
 	if !strings.HasPrefix(got.SSHCommand, "ssh ") || !strings.Contains(got.SSHCommand, "'alice@example.com'") {
 		t.Fatalf("sshCommand=%q", got.SSHCommand)
 	}
-	if got.HydratedByActions || got.LeaseActivity != "foreground" || !got.HardTTLApplies {
+	if got.HydratedByActions || got.LeaseActivity != "foreground" || got.HardTTLApplies {
 		t.Fatalf("lifecycle fields=%+v", got)
 	}
 	if strings.Contains(out.String(), "Connect New Server") {
