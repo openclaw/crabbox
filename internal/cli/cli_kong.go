@@ -51,6 +51,7 @@ type crabboxKongCLI struct {
 	Checkpoint  checkpointKongCmd  `cmd:"" help:"Create, restore, and fork VM or workspace checkpoints."`
 	Ssh         sshKongCmd         `cmd:"" name:"ssh" passthrough:"" help:"Print the SSH command for a lease."`
 	Connect     connectKongCmd     `cmd:"" passthrough:"" help:"Open an interactive SSH session to a lease."`
+	Open        openKongCmd        `cmd:"" passthrough:"" help:"Prepare an editor handoff for a lease."`
 	Vnc         vncKongCmd         `cmd:"" name:"vnc" passthrough:"" help:"Print or open VNC connection details for a desktop lease."`
 	Webvnc      webvncKongCmd      `cmd:"" name:"webvnc" passthrough:"" help:"Open a desktop lease or local VNC tunnel in a browser."`
 	Code        codeKongCmd        `cmd:"" passthrough:"" help:"Bridge a code lease into the authenticated web portal."`
@@ -250,6 +251,9 @@ type sshKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type connectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type openKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type vncKongCmd struct {
@@ -650,6 +654,7 @@ func (c *marketplaceQuoteKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *sshKongCmd) Run(ctx context.Context, app App) error     { return app.ssh(ctx, c.Args) }
 func (c *connectKongCmd) Run(ctx context.Context, app App) error { return app.connect(ctx, c.Args) }
+func (c *openKongCmd) Run(ctx context.Context, app App) error    { return app.open(ctx, c.Args) }
 func (c *vncKongCmd) Run(ctx context.Context, app App) error     { return app.vnc(ctx, c.Args) }
 func (c *webvncKongCmd) Run(ctx context.Context, app App) error  { return app.webvnc(ctx, c.Args) }
 func (c *codeKongCmd) Run(ctx context.Context, app App) error    { return app.webCode(ctx, c.Args) }

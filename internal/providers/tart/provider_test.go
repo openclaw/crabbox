@@ -1587,14 +1587,28 @@ func TestCleanupDeleteError(t *testing.T) {
 	}
 }
 
-func TestCleanupRemovesOrphanedClaims(t *testing.T) {
+func TestCleanupRemovesOrphanedClaimsWithoutDeletingStoredKey(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateDir)
+	configHome := t.TempDir()
+	t.Setenv("HOME", configHome)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	const leaseID = "cbx_orphan"
 	err := core.ClaimLeaseForRepoProviderScopePond(
-		"cbx_orphan", "orphan-slug", providerName, "instance:crabbox-gone-9999", "", t.TempDir(), 30*time.Minute, false,
+		leaseID, "orphan-slug", providerName, "instance:crabbox-gone-9999", "", t.TempDir(), 30*time.Minute, false,
 	)
 	if err != nil {
 		t.Fatalf("setup orphan claim: %v", err)
+	}
+	keyPath, err := testboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatalf("testbox key path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatalf("create testbox key directory: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte("test key"), 0o600); err != nil {
+		t.Fatalf("write testbox key: %v", err)
 	}
 	listJSON := `[]`
 	runner := &recordingRunner{
@@ -1617,6 +1631,14 @@ func TestCleanupRemovesOrphanedClaims(t *testing.T) {
 	}
 	if !strings.Contains(output, "claims_removed=1") {
 		t.Fatalf("should report claims_removed=1: %q", output)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil {
+		t.Fatalf("resolve removed claim: %v", err)
+	} else if ok {
+		t.Fatalf("orphan claim %s still exists", leaseID)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key removed without an acquisition fence: %v", err)
 	}
 }
 

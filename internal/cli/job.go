@@ -20,11 +20,7 @@ func (a App) jobList(_ context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	names := make([]string, 0, len(cfg.Jobs))
-	for name := range cfg.Jobs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := configuredJobNames(cfg)
 	if len(names) == 0 {
 		fmt.Fprintln(a.Stdout, "no jobs configured")
 		return nil
@@ -34,6 +30,15 @@ func (a App) jobList(_ context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "%s provider=%s target=%s hydrate_actions=%t stop=%s\n", name, blank(job.Provider, "-"), blank(job.Target, "-"), job.Hydrate.Actions, blank(job.Stop, "auto"))
 	}
 	return nil
+}
+
+func configuredJobNames(cfg Config) []string {
+	names := make([]string, 0, len(cfg.Jobs))
+	for name := range cfg.Jobs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (a App) jobRun(ctx context.Context, args []string) (err error) {

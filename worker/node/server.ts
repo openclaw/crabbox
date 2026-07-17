@@ -136,7 +136,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       request.destroy();
       return;
     }
-    console.error("coordinator request failed", error);
+    // Provider failures can contain environment-backed credentials; keep only safe context here.
+    console.error("coordinator request failed");
     await writeResponse(response, Response.json({ error: "internal_error" }, { status: 500 }));
   } finally {
     cancellation.dispose();
@@ -168,8 +169,8 @@ async function handleUpgrade(
     if (!context.upgraded) {
       await writeUpgradeResponse(socket, response);
     }
-  } catch (error) {
-    console.error("coordinator websocket upgrade failed", error);
+  } catch {
+    console.error("coordinator websocket upgrade failed");
     if (!context.upgraded) {
       await writeUpgradeResponse(
         socket,

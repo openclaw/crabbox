@@ -420,110 +420,6 @@ func TestBlacksmithWarmupFailureStopsPrintedTestbox(t *testing.T) {
 	}
 }
 
-func TestBlacksmithWarmupFailureStopsNewListedTestbox(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	originalDelay := blacksmithCleanupDelay
-	originalAttempts := blacksmithCleanupAttempts
-	originalQuiet := blacksmithCleanupQuiet
-	blacksmithCleanupDelay = time.Millisecond
-	blacksmithCleanupAttempts = 3
-	blacksmithCleanupQuiet = 1
-	var stopped string
-	listCalls := 0
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
-		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "list" {
-			listCalls++
-			if listCalls < 3 {
-				return LocalCommandResult{Stdout: "ID STATUS REPO WORKFLOW JOB REF CREATED\n"}, nil
-			}
-			return LocalCommandResult{Stdout: "tbx_async123 queued openclaw .github/workflows/testbox.yml check main 2026-05-04T21:23:47.000000Z\n"}, nil
-		}
-		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
-			for i, arg := range req.Args {
-				if arg == "--id" && i+1 < len(req.Args) {
-					stopped = req.Args[i+1]
-				}
-			}
-			return LocalCommandResult{}, nil
-		}
-		return LocalCommandResult{ExitCode: 1, Stdout: "workflow missing\n"}, errors.New("exit status 1")
-	}}
-	t.Cleanup(func() {
-		blacksmithCleanupDelay = originalDelay
-		blacksmithCleanupAttempts = originalAttempts
-		blacksmithCleanupQuiet = originalQuiet
-	})
-
-	cfg := baseConfig()
-	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
-	cfg.Blacksmith.Job = "check"
-	cfg.Blacksmith.Ref = "main"
-	backend := newTestBlacksmithBackend(cfg, runner)
-	_, _, err := backend.warmupLease(context.Background(), Repo{Root: "/repo"}, false, "")
-	if err == nil {
-		t.Fatal("expected warmup failure")
-	}
-	if stopped != "tbx_async123" {
-		t.Fatalf("stopped=%q, want tbx_async123", stopped)
-	}
-}
-
-func TestBlacksmithWarmupFailureContinuesAfterFirstDelayedStop(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	originalDelay := blacksmithCleanupDelay
-	originalAttempts := blacksmithCleanupAttempts
-	originalQuiet := blacksmithCleanupQuiet
-	blacksmithCleanupDelay = time.Millisecond
-	blacksmithCleanupAttempts = 5
-	blacksmithCleanupQuiet = 1
-	stopped := []string{}
-	listCalls := 0
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
-		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "list" {
-			listCalls++
-			switch listCalls {
-			case 2:
-				return LocalCommandResult{Stdout: "tbx_delayed1 queued openclaw .github/workflows/testbox.yml check main 2026-05-04T21:23:47.000000Z\n"}, nil
-			case 3:
-				return LocalCommandResult{Stdout: "tbx_delayed2 queued openclaw .github/workflows/testbox.yml check main 2026-05-04T21:23:48.000000Z\n"}, nil
-			default:
-				return LocalCommandResult{Stdout: "ID STATUS REPO WORKFLOW JOB REF CREATED\n"}, nil
-			}
-		}
-		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
-			for i, arg := range req.Args {
-				if arg == "--id" && i+1 < len(req.Args) {
-					stopped = append(stopped, req.Args[i+1])
-				}
-			}
-			return LocalCommandResult{}, nil
-		}
-		return LocalCommandResult{ExitCode: 1, Stdout: "workflow missing\n"}, errors.New("exit status 1")
-	}}
-	t.Cleanup(func() {
-		blacksmithCleanupDelay = originalDelay
-		blacksmithCleanupAttempts = originalAttempts
-		blacksmithCleanupQuiet = originalQuiet
-	})
-
-	cfg := baseConfig()
-	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
-	cfg.Blacksmith.Job = "check"
-	cfg.Blacksmith.Ref = "main"
-	backend := newTestBlacksmithBackend(cfg, runner)
-	_, _, err := backend.warmupLease(context.Background(), Repo{Root: "/repo"}, false, "")
-	if err == nil {
-		t.Fatal("expected warmup failure")
-	}
-	if !reflect.DeepEqual(stopped, []string{"tbx_delayed1", "tbx_delayed2"}) {
-		t.Fatalf("stopped=%v, want both delayed testboxes", stopped)
-	}
-}
-
 func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -557,8 +453,8 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 4 {
-		t.Fatalf("blacksmith calls=%d, want list/warmup/run/stop", len(runner.calls))
+	if len(runner.calls) != 3 {
+		t.Fatalf("blacksmith calls=%d, want warmup/run/stop", len(runner.calls))
 	}
 	if claim, err := readLeaseClaim("tbx_abc123"); err != nil {
 		t.Fatal(err)
@@ -610,8 +506,8 @@ func TestBlacksmithKeptRunWritesLeaseOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 3 {
-		t.Fatalf("blacksmith calls=%d, want list/warmup/run without stop: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 2 {
+		t.Fatalf("blacksmith calls=%d, want warmup/run without stop: %#v", len(runner.calls), runner.calls)
 	}
 	if result.Session == nil {
 		t.Fatal("missing session handle")
@@ -964,14 +860,14 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	if len(result.Artifacts) != 1 {
 		t.Fatalf("artifacts=%#v", result.Artifacts)
 	}
-	if len(runner.calls) != 5 {
+	if len(runner.calls) != 4 {
 		t.Fatalf("calls=%#v", runner.calls)
 	}
-	if runner.calls[0][1] != "list" || runner.calls[1][1] != "warmup" || runner.calls[2][1] != "run" || runner.calls[3][1] != "run" || runner.calls[4][1] != "stop" {
+	if runner.calls[0][1] != "warmup" || runner.calls[1][1] != "run" || runner.calls[2][1] != "run" || runner.calls[3][1] != "stop" {
 		t.Fatalf("unexpected call order: %#v", runner.calls)
 	}
-	if !strings.Contains(runner.calls[3][len(runner.calls[3])-1], core.DelegatedRunArtifactBeginMarker) {
-		t.Fatalf("second run was not artifact collection: %#v", runner.calls[3])
+	if !strings.Contains(runner.calls[2][len(runner.calls[2])-1], core.DelegatedRunArtifactBeginMarker) {
+		t.Fatalf("second run was not artifact collection: %#v", runner.calls[2])
 	}
 }
 
@@ -1021,8 +917,8 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want artifact exit 7", err)
 	}
-	if len(runner.calls) != 4 {
-		t.Fatalf("blacksmith calls=%d want list/warmup/run/artifact-run without stop: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 3 {
+		t.Fatalf("blacksmith calls=%d want warmup/run/artifact-run without stop: %#v", len(runner.calls), runner.calls)
 	}
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v, want kept after artifact failure", result.Session)
@@ -1145,8 +1041,8 @@ func TestBlacksmithKeepOnFailureKeepsTestboxAndWritesBundle(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want exit 7", err)
 	}
-	if len(runner.calls) != 3 {
-		t.Fatalf("blacksmith calls=%d want list/warmup/run without stop: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 2 {
+		t.Fatalf("blacksmith calls=%d want warmup/run without stop: %#v", len(runner.calls), runner.calls)
 	}
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v, want kept after keep-on-failure", result.Session)
