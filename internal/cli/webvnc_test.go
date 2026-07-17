@@ -257,20 +257,6 @@ func TestOpenWebVNCPortalUsesBearerBootstrapWithoutOpeningCoordinatorURL(t *test
 		nil,
 		func(target string, _ ...string) error {
 			opened = target
-			parsed, err := url.Parse(target)
-			if err != nil {
-				return err
-			}
-			if parsed.Scheme != "file" {
-				return fmt.Errorf("browser handoff scheme=%q want file", parsed.Scheme)
-			}
-			body, err := os.ReadFile(testFileURLPath(parsed))
-			if err != nil {
-				return err
-			}
-			if !strings.Contains(string(body), bootstrapTicket) {
-				return errors.New("browser handoff omitted bootstrap ticket")
-			}
 			return nil
 		},
 		webVNCPortalOptions{TakeControl: true},
@@ -280,6 +266,20 @@ func TestOpenWebVNCPortalUsesBearerBootstrapWithoutOpeningCoordinatorURL(t *test
 	}
 	if portal != "" || !bootstrap {
 		t.Fatalf("portal=%q bootstrap=%t", portal, bootstrap)
+	}
+	parsed, err := url.Parse(opened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Scheme != "file" {
+		t.Fatalf("browser handoff scheme=%q want file", parsed.Scheme)
+	}
+	body, err := os.ReadFile(testFileURLPath(parsed))
+	if err != nil {
+		t.Fatalf("browser handoff disappeared after opener returned: %v", err)
+	}
+	if !strings.Contains(string(body), bootstrapTicket) {
+		t.Fatal("browser handoff omitted bootstrap ticket")
 	}
 	if strings.Contains(opened, bootstrapTicket) ||
 		strings.Contains(opened, handoffTicket) ||
@@ -451,6 +451,7 @@ func TestWebVNCCredentialOutputDefaultsToRedacted(t *testing.T) {
 func TestWebVNCPortalCredentialsOmitMacOSARDAccount(t *testing.T) {
 	username, password := webVNCPortalCredentials(
 		SSHTarget{TargetOS: targetMacOS},
+		vncEndpoint{Managed: true},
 		"screen-user",
 		"screen-secret",
 	)
@@ -458,12 +459,76 @@ func TestWebVNCPortalCredentialsOmitMacOSARDAccount(t *testing.T) {
 		t.Fatalf("macOS portal credentials=(%q,%q)", username, password)
 	}
 	username, password = webVNCPortalCredentials(
+		SSHTarget{TargetOS: targetMacOS},
+		vncEndpoint{},
+		"screen-user",
+		"screen-secret",
+	)
+	if username != "screen-user" || password != "screen-secret" {
+		t.Fatalf("unmanaged macOS portal credentials=(%q,%q)", username, password)
+	}
+	username, password = webVNCPortalCredentials(
 		SSHTarget{TargetOS: targetLinux},
+		vncEndpoint{},
 		"vnc-user",
 		"vnc-secret",
 	)
 	if username != "vnc-user" || password != "vnc-secret" {
 		t.Fatalf("Linux portal credentials=(%q,%q)", username, password)
+	}
+}
+
+func TestWebVNCPortalCredentialsForDaemonHandlesLegacyMacOSBridge(t *testing.T) {
+	target := SSHTarget{TargetOS: targetMacOS}
+	endpoint := vncEndpoint{Managed: true}
+	for _, test := range []struct {
+		name     string
+		provider string
+		daemon   localWebVNCDaemon
+		wantUser string
+		wantPass string
+	}{
+		{name: "external legacy remains local", provider: "external"},
+		{name: "new daemon authenticates upstream", provider: "static", daemon: localWebVNCDaemon{AuthenticatesUpstreamVNC: true}},
+		{name: "legacy non-external daemon", provider: "static", wantUser: "screen-user", wantPass: "screen-secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			username, password := webVNCPortalCredentialsForDaemon(test.provider, target, endpoint, test.daemon, "screen-user", "screen-secret")
+			if username != test.wantUser || password != test.wantPass {
+				t.Fatalf("portal credentials=(%q,%q), want (%q,%q)", username, password, test.wantUser, test.wantPass)
+			}
+		})
+	}
+}
+
+func TestValidateWebVNCResetCredentialsRejectsMissingManagedMacOSCredential(t *testing.T) {
+	err := validateWebVNCResetCredentials(
+		SSHTarget{TargetOS: targetMacOS},
+		vncEndpoint{Managed: true},
+		rfbCredentials{Username: "screen-user"},
+		localWebVNCAuthARD,
+	)
+	if err == nil || !strings.Contains(err.Error(), "credentials are required") {
+		t.Fatalf("reset credential validation error=%v", err)
+	}
+	if err := validateWebVNCResetCredentials(SSHTarget{TargetOS: targetLinux}, vncEndpoint{Managed: true}, rfbCredentials{}, localWebVNCAuthAuto); err != nil {
+		t.Fatalf("Linux reset credentials rejected: %v", err)
+	}
+}
+
+func TestWebVNCDaemonUpstreamAuthenticationCapability(t *testing.T) {
+	if !webVNCDaemonAuthenticatesUpstreamVNC([]string{"--target", "macos"}) {
+		t.Fatal("macOS daemon did not advertise upstream authentication")
+	}
+	if webVNCDaemonAuthenticatesUpstreamVNC([]string{"--target", "linux"}) {
+		t.Fatal("Linux daemon advertised macOS upstream authentication")
+	}
+	var legacy webVNCDaemonIdentity
+	if err := json.Unmarshal([]byte(`{"version":1}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.AuthenticatesUpstreamVNC {
+		t.Fatal("legacy identity unexpectedly advertised upstream authentication")
 	}
 }
 
@@ -2123,6 +2188,31 @@ func TestResolvedWebVNCCommandConfigPrefersResolvedLeaseProvider(t *testing.T) {
 	)
 	if bridge != "--provider aws --target windows --windows-mode wsl2 --id cbx_1 --open" {
 		t.Fatalf("bridge args=%q", bridge)
+	}
+
+	legacyMac := resolvedWebVNCCommandConfig(Config{Provider: "external"}, Server{Provider: "static"}, SSHTarget{TargetOS: targetMacOS})
+	username, password := webVNCPortalCredentialsForDaemon(
+		legacyMac.Provider,
+		SSHTarget{TargetOS: targetMacOS},
+		vncEndpoint{Managed: true},
+		localWebVNCDaemon{},
+		"screen-user",
+		"screen-secret",
+	)
+	if username != "screen-user" || password != "screen-secret" {
+		t.Fatalf("persisted static provider lost legacy portal credentials=(%q,%q)", username, password)
+	}
+	externalMac := resolvedWebVNCCommandConfig(Config{Provider: "static"}, Server{Provider: "external"}, SSHTarget{TargetOS: targetMacOS})
+	username, password = webVNCPortalCredentialsForDaemon(
+		externalMac.Provider,
+		SSHTarget{TargetOS: targetMacOS},
+		vncEndpoint{Managed: true},
+		localWebVNCDaemon{},
+		"screen-user",
+		"screen-secret",
+	)
+	if username != "" || password != "" {
+		t.Fatalf("persisted external provider promoted portal credentials=(%q,%q)", username, password)
 	}
 }
 

@@ -17,9 +17,11 @@ Crabbox reaches macOS desktops three ways:
   credential;
 - **static Macs** you already own, reached through `provider: ssh`.
 
-All three expose the desktop over Screen Sharing (Apple's VNC service) on the
-box's loopback `127.0.0.1:5900`, and Crabbox tunnels that port to your machine
-over SSH. Nothing listens on a public VNC port.
+Crabbox reaches Screen Sharing through the target's loopback
+`127.0.0.1:5900` and tunnels that endpoint over SSH. On operator-managed
+External and static Macs, separately restrict the native Screen Sharing
+listener with host firewall or network policy when the service is reachable
+on other interfaces.
 
 ## Managed AWS EC2 Mac
 

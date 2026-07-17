@@ -202,6 +202,36 @@ func TestControllerChildEnvironmentScrubsDesktopPasswordIncludingMacOSOwner(t *t
 	}
 }
 
+func TestControllerChildCredentialPolicyUsesConfigOnlyExternalProvider(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "trusted.yaml")
+	if err := os.WriteFile(configPath, []byte(`provider: external
+target: macos
+external:
+  connection:
+    desktop:
+      username: route-user
+      passwordEnv: CONFIG_ONLY_ARD_PASSWORD
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
+		Config: configPath, WorkDir: workDir, ResolveCredentialBoundary: true,
+	}}
+	policy, err := runner.childCredentialPolicy(controllerWorkspaceRequest{}, []string{"webvnc", "daemon", "start"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.ownerName != "CONFIG_ONLY_ARD_PASSWORD" {
+		t.Fatalf("config-only external credential owner=%q", policy.ownerName)
+	}
+}
+
 func TestControllerChildEnvironmentUsesPersistedMacOSRouteAndScrubsCurrentName(t *testing.T) {
 	root := privateExternalRoutingTempDir(t)
 	t.Setenv("XDG_CONFIG_HOME", root)

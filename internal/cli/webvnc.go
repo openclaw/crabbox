@@ -404,7 +404,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		OnReady: func() error {
 			portalUsername, portalPassword := "", ""
 			if *openPortal || !*redactCredentials {
-				portalUsername, portalPassword = webVNCPortalCredentials(target, username, password)
+				portalUsername, portalPassword = webVNCPortalCredentials(target, endpoint, username, password)
 			}
 			portal := ""
 			var err error
@@ -835,13 +835,38 @@ func webVNCOutputIsURL(value string) bool {
 	return err == nil && parsed.IsAbs() && parsed.Host != ""
 }
 
-func webVNCPortalCredentials(target SSHTarget, username, password string) (string, string) {
+func webVNCPortalCredentials(target SSHTarget, endpoint vncEndpoint, username, password string) (string, string) {
 	// The macOS bridge authenticates to ARD itself and exposes an
 	// already-authenticated RFB stream to the portal viewer.
-	if target.TargetOS == targetMacOS {
+	if managedMacOSWebVNC(target, endpoint) {
 		return "", ""
 	}
 	return username, password
+}
+
+func externalProviderRoute(provider string) bool {
+	if registered, err := ProviderFor(provider); err == nil {
+		provider = registered.Name()
+	} else {
+		provider = normalizeProviderName(provider)
+	}
+	return provider == "external" || provider == "exec-provider"
+}
+
+func webVNCPortalCredentialsForDaemon(provider string, target SSHTarget, endpoint vncEndpoint, daemon localWebVNCDaemon, username, password string) (string, string) {
+	if managedMacOSWebVNC(target, endpoint) {
+		if externalProviderRoute(provider) || daemon.AuthenticatesUpstreamVNC {
+			return "", ""
+		}
+	}
+	return username, password
+}
+
+func validateWebVNCResetCredentials(target SSHTarget, endpoint vncEndpoint, credentials rfbCredentials, authMode localWebVNCAuthenticationMode) error {
+	if !managedMacOSWebVNC(target, endpoint) {
+		return nil
+	}
+	return requireMacOSWebVNCCredentials(credentials, authMode)
 }
 
 func (a App) webVNCDaemonStatusCommand(args []string) error {
@@ -1010,9 +1035,17 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 		*localPort = availableLocalVNCPort()
 	}
 	endpoint, endpointErr := resolveVNCEndpoint(ctx, cfg, &target)
+	daemon, daemonErr := localWebVNCDaemonStatus(leaseID)
+	if daemonErr == nil && leaseID != *id {
+		if aliasDaemon, err := localWebVNCDaemonStatus(*id); err == nil && !aliasDaemon.Missing {
+			daemon = aliasDaemon
+		}
+	}
 	credentials := rfbCredentials{}
-	if endpointErr == nil && !*redactCredentials && target.TargetOS != targetMacOS {
-		credentials, _, err = resolveWebVNCPortalCredentials(ctx, cfg, target, endpoint, runSSHOutput)
+	managedMacOS := endpointErr == nil && managedMacOSWebVNC(target, endpoint)
+	legacyPortalAuthentication := managedMacOS && !externalProviderRoute(commandCfg.Provider) && !daemon.AuthenticatesUpstreamVNC
+	if endpointErr == nil && !*redactCredentials && (!managedMacOS || legacyPortalAuthentication) {
+		credentials, _, err = resolveWebVNCPortalCredentials(ctx, commandCfg, target, endpoint, runSSHOutput)
 		if err != nil {
 			return err
 		}
@@ -1020,12 +1053,6 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	username := credentials.Username
 	password := credentials.Password
 	status, statusErr := coord.WebVNCStatus(ctx, leaseID)
-	daemon, daemonErr := localWebVNCDaemonStatus(leaseID)
-	if daemonErr == nil && leaseID != *id {
-		if aliasDaemon, err := localWebVNCDaemonStatus(*id); err == nil && !aliasDaemon.Missing {
-			daemon = aliasDaemon
-		}
-	}
 	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=%s\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider), blank(target.TargetOS, cfg.TargetOS))
 	rescueCtx := rescueContext{Cfg: commandCfg, Target: target, LeaseID: leaseID}
 	if daemonErr != nil {
@@ -1067,7 +1094,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	}
 	portalUsername, portalPassword := "", ""
 	if !*redactCredentials {
-		portalUsername, portalPassword = webVNCPortalCredentials(target, username, password)
+		portalUsername, portalPassword = webVNCPortalCredentialsForDaemon(commandCfg.Provider, target, endpoint, daemon, username, password)
 	}
 	portal, err := createWebVNCPortalURL(ctx, coord, leaseID, portalUsername, portalPassword)
 	if err != nil {
@@ -1144,13 +1171,17 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
+	commandCfg := resolvedWebVNCCommandConfig(cfg, server, target)
 	// Resolve credentials before any portal, daemon, or remote reset mutation.
 	// A missing External desktop secret must not tear down a working bridge.
-	credentials, _, err := resolveWebVNCPortalCredentials(ctx, cfg, target, vncEndpoint{Managed: true}, runSSHOutput)
+	resetEndpoint := vncEndpoint{Managed: true}
+	credentials, authMode, err := resolveWebVNCPortalCredentials(ctx, commandCfg, target, resetEndpoint, runSSHOutput)
 	if err != nil {
 		return err
 	}
-	commandCfg := resolvedWebVNCCommandConfig(cfg, server, target)
+	if err := validateWebVNCResetCredentials(target, resetEndpoint, credentials, authMode); err != nil {
+		return err
+	}
 	if automaticMacOSPortal {
 		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, false); err != nil {
 			return err
@@ -1177,7 +1208,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	password := credentials.Password
 	portalUsername, portalPassword := "", ""
 	if *openPortal || !*redactCredentials {
-		portalUsername, portalPassword = webVNCPortalCredentials(target, username, password)
+		portalUsername, portalPassword = webVNCPortalCredentials(target, vncEndpoint{Managed: true}, username, password)
 	}
 	portal := ""
 	if !*openPortal {
@@ -1348,16 +1379,17 @@ func (a App) startWebVNCDaemon(args []string, leaseID string, controllerOwned bo
 		return failStartedDaemon(exit(5, "identify WebVNC daemon boot: %v", err), false)
 	}
 	identity := webVNCDaemonIdentity{
-		Version:               webVNCDaemonIdentityVersion,
-		WorkspaceID:           leaseID,
-		PID:                   pid,
-		LocalPort:             localPort,
-		ProcessStarted:        started,
-		BootID:                bootID,
-		Nonce:                 nonce,
-		ControllerOwned:       controllerOwned,
-		NoProviderSideEffects: controllerOwned,
-		ControllerOwnerID:     controllerOwnerID,
+		Version:                  webVNCDaemonIdentityVersion,
+		WorkspaceID:              leaseID,
+		PID:                      pid,
+		LocalPort:                localPort,
+		ProcessStarted:           started,
+		BootID:                   bootID,
+		Nonce:                    nonce,
+		ControllerOwned:          controllerOwned,
+		NoProviderSideEffects:    controllerOwned,
+		ControllerOwnerID:        controllerOwnerID,
+		AuthenticatesUpstreamVNC: webVNCDaemonAuthenticatesUpstreamVNC(args),
 	}
 	command, alive := webVNCDaemonProcessCommand(pid)
 	if !alive || !webVNCDaemonIdentityMatchesProcess(identity, command, started) {
@@ -1845,6 +1877,10 @@ func webVNCDaemonCredentialName(args []string) string {
 	return credentialName
 }
 
+func webVNCDaemonAuthenticatesUpstreamVNC(args []string) bool {
+	return normalizeTargetOS(webVNCDaemonStringArg(args, "target")) == targetMacOS
+}
+
 func writeWebVNCDaemonSupervisorGate(w io.Writer, credential string) error {
 	if len(credential) > webVNCDaemonCredentialMaxBytes {
 		return fmt.Errorf("credential exceeds %d bytes", webVNCDaemonCredentialMaxBytes)
@@ -1996,34 +2032,36 @@ func (a App) webVNCDaemonStatus(leaseID, expectedOwnerID string) error {
 }
 
 type localWebVNCDaemon struct {
-	LeaseID               string
-	LogPath               string
-	PIDPath               string
-	PID                   int
-	LocalPort             string
-	Command               string
-	ControllerOwned       bool
-	NoProviderSideEffects bool
-	ControllerOwnerID     string
-	Alive                 bool
-	Stale                 bool
-	Missing               bool
+	LeaseID                  string
+	LogPath                  string
+	PIDPath                  string
+	PID                      int
+	LocalPort                string
+	Command                  string
+	ControllerOwned          bool
+	NoProviderSideEffects    bool
+	ControllerOwnerID        string
+	AuthenticatesUpstreamVNC bool
+	Alive                    bool
+	Stale                    bool
+	Missing                  bool
 }
 
 const webVNCDaemonIdentityVersion = 1
 
 type webVNCDaemonIdentity struct {
-	Version               int    `json:"version"`
-	WorkspaceID           string `json:"workspaceId"`
-	PID                   int    `json:"pid"`
-	LocalPort             string `json:"localPort,omitempty"`
-	ProcessStarted        string `json:"processStarted"`
-	BootID                string `json:"bootId,omitempty"`
-	Nonce                 string `json:"nonce"`
-	ControllerOwned       bool   `json:"controllerOwned,omitempty"`
-	NoProviderSideEffects bool   `json:"noProviderSideEffects,omitempty"`
-	ControllerOwnerID     string `json:"controllerOwnerId,omitempty"`
-	LegacyOwnerToken      string `json:"controllerOwnerToken,omitempty"`
+	Version                  int    `json:"version"`
+	WorkspaceID              string `json:"workspaceId"`
+	PID                      int    `json:"pid"`
+	LocalPort                string `json:"localPort,omitempty"`
+	ProcessStarted           string `json:"processStarted"`
+	BootID                   string `json:"bootId,omitempty"`
+	Nonce                    string `json:"nonce"`
+	ControllerOwned          bool   `json:"controllerOwned,omitempty"`
+	NoProviderSideEffects    bool   `json:"noProviderSideEffects,omitempty"`
+	ControllerOwnerID        string `json:"controllerOwnerId,omitempty"`
+	AuthenticatesUpstreamVNC bool   `json:"authenticatesUpstreamVnc,omitempty"`
+	LegacyOwnerToken         string `json:"controllerOwnerToken,omitempty"`
 }
 
 func localWebVNCDaemonStatus(leaseID string) (localWebVNCDaemon, error) {
@@ -2054,6 +2092,7 @@ func localWebVNCDaemonStatusLocked(leaseID string) (localWebVNCDaemon, error) {
 	status.ControllerOwned = identity.ControllerOwned
 	status.NoProviderSideEffects = identity.NoProviderSideEffects
 	status.ControllerOwnerID = identity.ControllerOwnerID
+	status.AuthenticatesUpstreamVNC = identity.AuthenticatesUpstreamVNC
 	command, alive := webVNCDaemonProcessCommand(identity.PID)
 	status.Command = strings.TrimSpace(command)
 	status.Alive = alive

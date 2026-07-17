@@ -149,6 +149,10 @@ func TestBrowserOpenerEnvironmentUsesMinimalAllowlist(t *testing.T) {
 		"LANG=en_US.UTF-8",
 		"LC_CTYPE=en_US.UTF-8",
 		"DISPLAY=:99",
+		"XAUTHORITY=/run/user/1000/xauthority",
+		"WAYLAND_DISPLAY=wayland-0",
+		"XDG_RUNTIME_DIR=/run/user/1000",
+		"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
 		"XDG_CONFIG_HOME=/tmp/config",
 		"XDG_CONFIG_DIRS=/etc/xdg",
 		"XDG_DATA_HOME=/tmp/data",
@@ -178,12 +182,16 @@ func TestBrowserOpenerEnvironmentUsesMinimalAllowlist(t *testing.T) {
 	}
 	if runtime.GOOS == "linux" {
 		for name, value := range map[string]string{
-			"DISPLAY":         ":99",
-			"XDG_CONFIG_HOME": "/tmp/config",
-			"XDG_CONFIG_DIRS": "/etc/xdg",
-			"XDG_DATA_HOME":   "/tmp/data",
-			"XDG_DATA_DIRS":   "/usr/local/share:/usr/share",
-			"BROWSER":         "example-browser",
+			"DISPLAY":                  ":99",
+			"XAUTHORITY":               "/run/user/1000/xauthority",
+			"WAYLAND_DISPLAY":          "wayland-0",
+			"XDG_RUNTIME_DIR":          "/run/user/1000",
+			"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+			"XDG_CONFIG_HOME":          "/tmp/config",
+			"XDG_CONFIG_DIRS":          "/etc/xdg",
+			"XDG_DATA_HOME":            "/tmp/data",
+			"XDG_DATA_DIRS":            "/usr/local/share:/usr/share",
+			"BROWSER":                  "example-browser",
 		} {
 			if got[name] != value {
 				t.Fatalf("%s=%q want %q", name, got[name], value)

@@ -175,6 +175,22 @@ func TestExternalLeaseCommandRoutingArgsSafeFlagFallback(t *testing.T) {
 	}
 }
 
+func TestExternalLeaseCommandRoutingArgsDoNotPromoteRepositoryDesktopCredentials(t *testing.T) {
+	cfg := Config{Provider: "external"}
+	cfg.External.Command = "/usr/local/bin/provider"
+	cfg.External.WorkRoot = "/work/crabbox"
+	cfg.External.Connection.Desktop.Username = "repository-user"
+	cfg.External.Connection.Desktop.PasswordEnv = "GH_TOKEN"
+	cfg.credentialProvenance.externalDesktopUser = credentialSourceRepository
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceRepository
+
+	got := externalLeaseCommandRoutingArgs(cfg, "cbx_abcdef123456")
+	joined := strings.Join(got, " ")
+	if strings.Contains(joined, "--external-desktop-username") || strings.Contains(joined, "--external-desktop-password-env") {
+		t.Fatalf("repository desktop routing was promoted to trusted flags: %#v", got)
+	}
+}
+
 func TestExternalLeaseCommandRoutingArgsKeepComplexStateOffArgv(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	const leaseID = "cbx_abcdef123456"

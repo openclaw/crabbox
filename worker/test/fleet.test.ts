@@ -42,7 +42,7 @@ import {
 } from "../src/fleet";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
-import { portalCode, portalVNC } from "../src/portal";
+import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
 import {
   ProviderProvisioningCleanupError,
   providerProvisioningCleanupClaim,
@@ -20730,11 +20730,30 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).not.toContain('<button id="vnc-share"');
     expect(pageBody).not.toContain('id="vnc-bridge-cmd"');
     expect(pageBody).toContain("const sessionCredentialHandoff = true");
+    expect(pageBody).toContain('const credentialStorageID = "webvnc_credential_');
+    expect(pageBody).toContain("restoreWebVNCCredentials(window.history.state");
+    expect(pageBody).toContain("window.history.replaceState(historyState");
     expect(pageBody).toContain("const takeControlOnConnect = true");
     expect(pageBody).toContain('type: "session-offer"');
     expect(pageBody).toContain('type: "session-grant"');
     expect(pageBody).toContain('nextURL.hash = ""');
     expect(pageBody).toContain("window.location.replace(nextURL)");
+
+    const viewerSessionKey = `webvnc-viewer-session:${sessionValue}`;
+    const currentSession = storage.value<Record<string, unknown>>(viewerSessionKey);
+    if (!currentSession) throw new Error("viewer session was not persisted");
+    const legacySession = { ...currentSession };
+    delete legacySession.credentialStorageID;
+    await storage.put(viewerSessionKey, legacySession);
+    const legacyPage = await throughCoordinator(
+      new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc", {
+        headers: { cookie: sessionCookie },
+      }),
+    );
+    const legacyPageBody = await legacyPage.text();
+    expect(legacyPageBody).toContain("const sessionCredentialHandoff = true");
+    expect(legacyPageBody).toContain('const credentialStorageID = ""');
+    await storage.put(viewerSessionKey, currentSession);
 
     const credentials = await throughCoordinator(
       new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc/handoff", {
@@ -20749,6 +20768,80 @@ describe("fleet lease identity and idle", () => {
     );
     expect(credentials.status).toBe(200);
     await expect(credentials.json()).resolves.toEqual({
+      username: "vnc-user",
+      password: "generated-vnc-password",
+    });
+
+    const reloadedPage = await throughCoordinator(
+      new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc", {
+        headers: { cookie: sessionCookie },
+      }),
+    );
+    expect(reloadedPage.status).toBe(200);
+    const reloadedPageBody = await reloadedPage.text();
+    expect(reloadedPageBody).toContain("const sessionCredentialHandoff = true");
+    expect(reloadedPageBody).toContain("restoreWebVNCCredentials(window.history.state");
+    expect(reloadedPageBody).not.toContain("vnc-user");
+    expect(reloadedPageBody).not.toContain("generated-vnc-password");
+
+    const storageID = /const credentialStorageID = "(webvnc_credential_[a-f0-9]+)"/.exec(
+      pageBody,
+    )?.[1];
+    const reloadedStorageID = /const credentialStorageID = "(webvnc_credential_[a-f0-9]+)"/.exec(
+      reloadedPageBody,
+    )?.[1];
+    expect(storageID).toBeTruthy();
+    expect(reloadedStorageID).toBe(storageID);
+    const loadHandoffCredentialsSource = emittedFunction(
+      pageBody,
+      "async function loadHandoffCredentials()",
+    );
+    const history = {
+      state: null as unknown,
+      replaceState(state: unknown): void {
+        this.state = state;
+      },
+    };
+    const reloadContext = createContext({
+      fetch: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ username: "vnc-user", password: "generated-vnc-password" }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+      history,
+      Response,
+      URL,
+      URLSearchParams,
+    });
+    new Script(`
+      let credentialsReady = false;
+      let username = "";
+      let password = "";
+      const handoffTicket = "${handoffBody.ticket}";
+      const credentialStorageID = "${storageID}";
+      const handoffURL = new URL("https://crabbox.test/portal/leases/cbx_000000000001/vnc/handoff");
+      const window = {
+        history,
+        location: {
+          hash: "#handoff=${handoffBody.ticket}",
+          href: "https://crabbox.test/portal/leases/cbx_000000000001/vnc#handoff=${handoffBody.ticket}",
+        },
+      };
+      ${loadHandoffCredentialsSource}
+      globalThis.result = loadHandoffCredentials().then(() => ({ username, password, state: window.history.state }));
+    `).runInContext(reloadContext);
+    const persisted = (await reloadContext.result) as {
+      username: string;
+      password: string;
+      state: unknown;
+    };
+    expect(persisted).toMatchObject({
+      username: "vnc-user",
+      password: "generated-vnc-password",
+    });
+    expect(webVNCCredentialsFromHistoryState(persisted.state, storageID ?? "")).toEqual({
       username: "vnc-user",
       password: "generated-vnc-password",
     });

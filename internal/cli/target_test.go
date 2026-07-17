@@ -484,16 +484,20 @@ func TestNormalizeTargetConfigPreservesExplicitPlatformDefaultWorkRoot(t *testin
 }
 
 func TestNormalizeTargetConfigPreservesExternalWorkRoot(t *testing.T) {
-	cfg := baseConfig()
-	cfg.Provider = "external"
-	cfg.TargetOS = targetMacOS
-	cfg.External.WorkRoot = defaultPOSIXWorkRoot
-	cfg.WorkRoot = cfg.External.WorkRoot
+	for _, provider := range []string{"external", "exec-provider"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = provider
+			cfg.TargetOS = targetMacOS
+			cfg.External.WorkRoot = defaultPOSIXWorkRoot
+			cfg.WorkRoot = cfg.External.WorkRoot
 
-	normalizeTargetConfig(&cfg)
+			normalizeTargetConfig(&cfg)
 
-	if cfg.WorkRoot != defaultPOSIXWorkRoot {
-		t.Fatalf("WorkRoot=%q want external root %q", cfg.WorkRoot, defaultPOSIXWorkRoot)
+			if cfg.WorkRoot != defaultPOSIXWorkRoot {
+				t.Fatalf("WorkRoot=%q want external root %q", cfg.WorkRoot, defaultPOSIXWorkRoot)
+			}
+		})
 	}
 }
 

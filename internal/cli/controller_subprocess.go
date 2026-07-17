@@ -179,6 +179,7 @@ func (r *execControllerWorkspaceRunner) resolvedExternalRoutingConfig(path, prov
 type controllerRunnerCredentialBoundaryConfig struct {
 	CurrentDesktopPasswordEnv string
 	DesktopPasswordEnvs       []string
+	Provider                  string
 	TargetOS                  string
 }
 
@@ -195,6 +196,7 @@ func controllerRunnerCredentialBoundary(configPath, provider, workDir string) (c
 	if registered, providerErr := ProviderFor(cfg.Provider); providerErr == nil {
 		providerName = registered.Name()
 	}
+	result.Provider = providerName
 	if providerName != "external" && providerName != "exec-provider" {
 		return result, nil
 	}
@@ -745,6 +747,13 @@ func (r *execControllerWorkspaceRunner) appendPersistedProviderRoutingArgs(args 
 
 func (r *execControllerWorkspaceRunner) pinExternalDesktopCredentialOwnerArgs(args []string, request controllerWorkspaceRequest) ([]string, error) {
 	provider := firstNonBlank(webVNCDaemonStringArg(args, "provider"), request.ProviderRoute, r.opts.Provider)
+	if strings.TrimSpace(provider) == "" && r.opts.ResolveCredentialBoundary {
+		boundary, err := controllerRunnerCredentialBoundary(r.opts.Config, "", r.opts.WorkDir)
+		if err != nil {
+			return nil, err
+		}
+		provider = boundary.Provider
+	}
 	if registered, err := ProviderFor(provider); err == nil {
 		provider = registered.Name()
 	} else {
@@ -1618,6 +1627,15 @@ func (r *execControllerWorkspaceRunner) childCredentialPolicy(request controller
 	currentName := strings.TrimSpace(r.opts.ExternalDesktopPasswordEnv)
 	currentTarget := normalizeTargetOS(r.opts.TargetOS)
 	effectiveProvider := firstNonBlank(webVNCDaemonStringArg(args, "provider"), request.ProviderRoute, r.opts.Provider)
+	var boundary *controllerRunnerCredentialBoundaryConfig
+	if strings.TrimSpace(effectiveProvider) == "" && r.opts.ResolveCredentialBoundary {
+		resolved, resolveErr := controllerRunnerCredentialBoundary(r.opts.Config, "", r.opts.WorkDir)
+		if resolveErr != nil {
+			return policy, resolveErr
+		}
+		boundary = &resolved
+		effectiveProvider = resolved.Provider
+	}
 	provider := effectiveProvider
 	if registered, providerErr := ProviderFor(provider); providerErr == nil {
 		provider = registered.Name()
@@ -1664,17 +1682,20 @@ func (r *execControllerWorkspaceRunner) childCredentialPolicy(request controller
 			currentTarget = resolved.CurrentTargetOS
 		}
 	} else if r.opts.ResolveCredentialBoundary {
-		resolved, resolveErr := controllerRunnerCredentialBoundary(r.opts.Config, effectiveProvider, r.opts.WorkDir)
-		if resolveErr != nil {
-			return policy, resolveErr
+		if boundary == nil {
+			resolved, resolveErr := controllerRunnerCredentialBoundary(r.opts.Config, effectiveProvider, r.opts.WorkDir)
+			if resolveErr != nil {
+				return policy, resolveErr
+			}
+			boundary = &resolved
 		}
-		for _, name := range resolved.DesktopPasswordEnvs {
+		for _, name := range boundary.DesktopPasswordEnvs {
 			if err := addDenied(name); err != nil {
 				return policy, err
 			}
 		}
-		currentName = resolved.CurrentDesktopPasswordEnv
-		currentTarget = resolved.TargetOS
+		currentName = boundary.CurrentDesktopPasswordEnv
+		currentTarget = boundary.TargetOS
 	}
 	if err := addDenied(currentName); err != nil {
 		return policy, err

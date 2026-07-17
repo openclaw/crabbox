@@ -1010,12 +1010,31 @@ export function portalRunDetail(
   );
 }
 
+export function webVNCCredentialsFromHistoryState(
+  state: unknown,
+  storageID: string,
+): { username: string; password: string } | undefined {
+  if (!storageID || !state || typeof state !== "object") return undefined;
+  const value = (state as Record<string, unknown>)["crabboxWebVNCCredentials"];
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    record["id"] !== storageID ||
+    typeof record["username"] !== "string" ||
+    typeof record["password"] !== "string"
+  ) {
+    return undefined;
+  }
+  return { username: record["username"], password: record["password"] };
+}
+
 export function portalVNC(
   lease: LeaseRecord,
   options: {
     canManage?: boolean;
     viewerOnly?: boolean;
     sessionCredentialHandoff?: boolean;
+    sessionCredentialStorageID?: string;
     takeControl?: boolean;
   } = {},
 ): Response {
@@ -1157,7 +1176,17 @@ export function portalVNC(
       const handoffTicket = fragment.get("handoff") || "";
       const sessionCredentialHandoff = ${JSON.stringify(options.sessionCredentialHandoff === true)};
       const viewerBootstrapSession = ${JSON.stringify(viewerOnly)};
+      const credentialStorageID = ${JSON.stringify(options.sessionCredentialStorageID ?? "")};
+      const restoreWebVNCCredentials = ${webVNCCredentialsFromHistoryState.toString()};
       let credentialsReady = !handoffTicket && !sessionCredentialHandoff;
+      if (credentialStorageID && !handoffTicket) {
+        const stored = restoreWebVNCCredentials(window.history.state, credentialStorageID);
+        if (stored) {
+          username = stored.username;
+          password = stored.password;
+          credentialsReady = true;
+        }
+      }
       const takeControlOnConnect = ${JSON.stringify(options.takeControl === true)} || fragment.get("control") === "take";
       const reuseWindowName = "crabbox-webvnc-" + ${JSON.stringify(lease.id)};
       const reuseChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(reuseWindowName) : null;
@@ -1187,7 +1216,11 @@ export function portalVNC(
         cleanFragment.delete("handoff");
         const cleanURL = new URL(window.location.href);
         cleanURL.hash = cleanFragment.toString();
-        window.history.replaceState(null, "", cleanURL);
+        const historyState = window.history.state && typeof window.history.state === "object" ? { ...window.history.state } : {};
+        if (credentialStorageID) {
+          historyState.crabboxWebVNCCredentials = { id: credentialStorageID, username, password };
+        }
+        window.history.replaceState(historyState, "", cleanURL);
       }
       function setStatus(value, tone = "") {
         status.textContent = value;
@@ -1595,6 +1628,12 @@ export function portalVNC(
           });
           rfb.addEventListener("securityfailure", () => {
             authenticationFailed = true;
+            const historyState = window.history.state;
+            if (historyState && typeof historyState === "object" && historyState.crabboxWebVNCCredentials?.id === credentialStorageID) {
+              const nextHistoryState = { ...historyState };
+              delete nextHistoryState.crabboxWebVNCCredentials;
+              window.history.replaceState(nextHistoryState, "", window.location.href);
+            }
             stopPolling(failedVNCCredentialMessage);
           });
         } catch (error) {

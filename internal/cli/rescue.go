@@ -210,10 +210,14 @@ func externalRoutingHasSafeFlagFallback(cfg ExternalConfig) bool {
 
 func appendExternalDesktopRoutingArgs(args []string, cfg Config) []string {
 	if username := strings.TrimSpace(cfg.External.Connection.Desktop.Username); username != "" || IsExternalDesktopUsernameExplicit(&cfg) {
-		args = append(args, "--external-desktop-username", username)
+		if cfg.credentialProvenance.externalDesktopUser != credentialSourceRepository {
+			args = append(args, "--external-desktop-username", username)
+		}
 	}
 	if passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); passwordEnv != "" || IsExternalDesktopPasswordEnvExplicit(&cfg) {
-		args = append(args, "--external-desktop-password-env", passwordEnv)
+		if cfg.credentialProvenance.externalDesktopEnv != credentialSourceRepository {
+			args = append(args, "--external-desktop-password-env", passwordEnv)
+		}
 	}
 	return args
 }

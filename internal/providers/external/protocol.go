@@ -146,6 +146,11 @@ func (p protocolLease) target(cfg core.Config, keep bool) core.LeaseTarget {
 	// stale or hostile adapter labels before the lease reaches core resolution.
 	labels["target"] = cfg.TargetOS
 	labels["work_root"] = cfg.WorkRoot
+	if cfg.Architecture != "" {
+		labels["architecture"] = cfg.Architecture
+	} else {
+		delete(labels, "architecture")
+	}
 	if cfg.TargetOS == core.TargetWindows {
 		labels["windows_mode"] = cfg.WindowsMode
 	} else {

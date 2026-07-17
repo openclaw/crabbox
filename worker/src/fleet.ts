@@ -399,6 +399,7 @@ interface WebVNCPortalViewerTicketRecord extends PortalViewerTicketRecord {
 
 interface WebVNCPortalViewerSessionRecord extends PortalViewerSessionRecord {
   credentialHandoffTicket?: string;
+  credentialStorageID?: string;
   takeControl?: boolean;
 }
 
@@ -6365,7 +6366,12 @@ export class FleetCoordinator {
           !webVNCViewerSession &&
           this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
         viewerOnly: Boolean(webVNCViewerSession),
-        sessionCredentialHandoff: Boolean(webVNCViewerSession?.credentialHandoffTicket),
+        sessionCredentialHandoff: Boolean(
+          webVNCViewerSession?.credentialHandoffTicket || webVNCViewerSession?.credentialStorageID,
+        ),
+        ...(webVNCViewerSession?.credentialStorageID
+          ? { sessionCredentialStorageID: webVNCViewerSession.credentialStorageID }
+          : {}),
         takeControl: webVNCViewerSession?.takeControl === true,
       });
     }
@@ -8448,7 +8454,10 @@ export class FleetCoordinator {
       org: ticket.org,
       ...copyBridgeGrant(ticket),
       ...(ticket.credentialHandoffTicket
-        ? { credentialHandoffTicket: ticket.credentialHandoffTicket }
+        ? {
+            credentialHandoffTicket: ticket.credentialHandoffTicket,
+            credentialStorageID: randomHexToken("webvnc_credential_"),
+          }
         : {}),
       ...(ticket.takeControl ? { takeControl: true } : {}),
       createdAt: now.toISOString(),

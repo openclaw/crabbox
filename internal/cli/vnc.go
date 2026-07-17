@@ -535,6 +535,7 @@ func browserOpenerEnvironment(environment []string, denied ...string) []string {
 	case "linux":
 		for _, name := range []string{
 			"DISPLAY",
+			"XAUTHORITY",
 			"WAYLAND_DISPLAY",
 			"XDG_RUNTIME_DIR",
 			"XDG_CONFIG_HOME",

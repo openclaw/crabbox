@@ -924,8 +924,12 @@ func TestConfigurePreservesExplicitTopLevelWorkRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := backend.(*leaseBackend).cfg.WorkRoot; got != "/workspace/top-level" {
+	configured := backend.(*leaseBackend).cfg
+	if got := configured.WorkRoot; got != "/workspace/top-level" {
 		t.Fatalf("work root=%q", got)
+	}
+	if got := configured.External.WorkRoot; got != configured.WorkRoot {
+		t.Fatalf("persisted work root=%q, want effective %q", got, configured.WorkRoot)
 	}
 }
 
@@ -3053,12 +3057,13 @@ func TestProtocolLeaseDefaultsReadyCheck(t *testing.T) {
 func TestProtocolMacOSLeaseCarriesNativeDesktopCapability(t *testing.T) {
 	cfg := testConfig()
 	cfg.TargetOS = core.TargetMacOS
+	cfg.Architecture = core.ArchitectureARM64
 	cfg.WorkRoot = "/safe/external-work"
 	lease := protocolLease{
 		LeaseID: "cbx_abcdef123456",
 		Slug:    "test",
 		Name:    "devbox-test",
-		Labels:  map[string]string{"target": core.TargetLinux, "windows_mode": core.WindowsModeWSL2, "work_root": "/"},
+		Labels:  map[string]string{"target": core.TargetLinux, "windows_mode": core.WindowsModeWSL2, "work_root": "/", "architecture": core.ArchitectureAMD64},
 		SSH: &protocolSSH{
 			User: "tester",
 			Host: "devbox-test",
@@ -3069,6 +3074,9 @@ func TestProtocolMacOSLeaseCarriesNativeDesktopCapability(t *testing.T) {
 	}
 	if lease.Server.Labels["work_root"] != cfg.WorkRoot {
 		t.Fatalf("work_root=%q, want operator value %q", lease.Server.Labels["work_root"], cfg.WorkRoot)
+	}
+	if lease.Server.Labels["architecture"] != cfg.Architecture {
+		t.Fatalf("architecture=%q, want routed value %q", lease.Server.Labels["architecture"], cfg.Architecture)
 	}
 }
 

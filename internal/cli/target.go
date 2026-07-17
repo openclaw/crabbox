@@ -78,7 +78,7 @@ func shouldDeriveTargetWorkRoot(cfg *Config) bool {
 	}
 	// The external provider owns its work root. This also covers persisted
 	// routing state, whose root must survive target normalization verbatim.
-	if cfg.Provider == "external" && strings.TrimSpace(cfg.External.WorkRoot) != "" && cfg.WorkRoot == cfg.External.WorkRoot {
+	if (cfg.Provider == "external" || cfg.Provider == "exec-provider") && strings.TrimSpace(cfg.External.WorkRoot) != "" && cfg.WorkRoot == cfg.External.WorkRoot {
 		return false
 	}
 	return isDefaultWorkRoot(cfg.WorkRoot)
