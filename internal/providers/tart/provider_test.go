@@ -1587,9 +1587,12 @@ func TestCleanupDeleteError(t *testing.T) {
 	}
 }
 
-func TestCleanupRemovesOrphanedClaims(t *testing.T) {
+func TestCleanupRemovesOrphanedClaimsWithoutDeletingStoredKey(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateDir)
+	configHome := t.TempDir()
+	t.Setenv("HOME", configHome)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
 	const leaseID = "cbx_orphan"
 	err := core.ClaimLeaseForRepoProviderScopePond(
 		leaseID, "orphan-slug", providerName, "instance:crabbox-gone-9999", "", t.TempDir(), 30*time.Minute, false,
@@ -1634,8 +1637,8 @@ func TestCleanupRemovesOrphanedClaims(t *testing.T) {
 	} else if ok {
 		t.Fatalf("orphan claim %s still exists", leaseID)
 	}
-	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
-		t.Fatalf("orphan key %s still exists: %v", keyPath, err)
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key removed without an acquisition fence: %v", err)
 	}
 }
 

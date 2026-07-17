@@ -372,11 +372,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
 			continue
 		}
-		// Keep the claim and its key when another process changed the candidate.
-		if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
-			removeStoredTestboxKey(claim.LeaseID)
-			return nil
-		}); err != nil {
+		// Acquisition creates or reuses the key before publishing its claim, so
+		// missing-instance cleanup cannot safely delete that key without a wider fence.
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
 			continue
 		}
