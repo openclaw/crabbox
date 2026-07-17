@@ -235,10 +235,16 @@ func TestCleanupOrphanSweepGuardDeclinesReclaimedCandidate(t *testing.T) {
 // replacement claim. If Cleanup removes the still-stale orphan claim AND deletes
 // the key, the concurrent Acquire then publishes a live claim whose container is
 // unreachable over SSH because its key is gone. The sweep must therefore RETAIN
-// the key even when it removes a genuine orphan claim — matching apple-container
-// and the merged tart fix (https://github.com/openclaw/crabbox/pull/1124).
+// the key even when it removes a genuine orphan claim — matching the merged tart
+// fix (https://github.com/openclaw/crabbox/pull/1124); the apple-container sibling
+// (https://github.com/openclaw/crabbox/pull/1146) applies the same retention.
 func TestCleanupRetainsKeyPreparedByConcurrentAcquire(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	// Isolate the stored-key location (core.TestboxKeyPath uses os.UserConfigDir,
+	// which is HOME-based on macOS and XDG_CONFIG_HOME-based on Linux) so the test
+	// never writes a key into the developer's real config.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("DOCKER_HOST", "")
 	repoRoot := t.TempDir()
 

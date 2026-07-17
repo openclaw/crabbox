@@ -502,10 +502,12 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		// EnsureTestboxKeyForConfig) BEFORE it publishes the replacement claim, so the
 		// claim can still match our pre-container snapshot at the instant the key
 		// already belongs to a live reacquisition. Deleting it here would leave that
-		// live container unreachable over SSH. Mirrors the apple-container sweep and
-		// the merged tart fix (https://github.com/openclaw/crabbox/pull/1124), which
-		// retain the key for exactly this reason. A genuinely dead lease's key is a
-		// harmless small residue in the state dir.
+		// live container unreachable over SSH. Mirrors the merged tart fix
+		// (https://github.com/openclaw/crabbox/pull/1124), which retains per-lease
+		// state for this reason; the apple-container sibling
+		// (https://github.com/openclaw/crabbox/pull/1146) applies the same key
+		// retention. A genuinely dead lease's key is a harmless small residue in the
+		// state dir.
 		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
 		claimsRemoved++
 	}
