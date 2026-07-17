@@ -1448,6 +1448,11 @@ func TestResolveRestoresOwnedClaimWhenRefreshFails(t *testing.T) {
 		t.Fatalf("Resolve err=%v", err)
 	}
 	restored, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if restored.Revision == previous.Revision {
+		t.Fatalf("restored claim kept revision %q", previous.Revision)
+	}
+	restored.Revision = ""
+	previous.Revision = ""
 	if claimErr != nil || !ok || !reflect.DeepEqual(restored, previous) {
 		t.Fatalf("restored=%#v previous=%#v ok=%v err=%v", restored, previous, ok, claimErr)
 	}

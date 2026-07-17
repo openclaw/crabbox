@@ -87,20 +87,25 @@ func transitionUnikraftCloudCreateState(claim LeaseClaim, state string) (LeaseCl
 	updated := claim
 	updated.Labels = cloneLabels(claim.Labels)
 	updated.Labels["state"] = state
-	if err := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, updated); err != nil {
+	written, err := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, updated)
+	if err != nil {
+		if written.Revision == "" {
+			return LeaseClaim{}, err
+		}
 		current, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID)
 		if readErr != nil {
 			return LeaseClaim{}, errors.Join(err, readErr)
 		}
-		if !exists || !reflect.DeepEqual(current, updated) {
+		if !exists || !reflect.DeepEqual(current, written) {
 			return LeaseClaim{}, err
 		}
-		if retryErr := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, current, current); retryErr != nil {
+		retryWritten, retryErr := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, current, current)
+		if retryErr != nil {
 			return LeaseClaim{}, errors.Join(err, retryErr)
 		}
-		return current, nil
+		return retryWritten, nil
 	}
-	return updated, nil
+	return written, nil
 }
 
 func sameUnikraftCloudCreateIdentity(left, right LeaseClaim) bool {
@@ -155,7 +160,7 @@ func quarantineRejectedUnikraftCloudCreateClaim(expected LeaseClaim, cause error
 		return errors.Join(cause, fmt.Errorf("%s rejected create recovery claim %s changed; refusing cleanup", providerName, expected.LeaseID))
 	}
 	if current.Labels["state"] == ukcStateCreateConflict {
-		if err := replaceLeaseClaimIfUnchangedDurable(current.LeaseID, current, current); err != nil {
+		if _, err := replaceLeaseClaimIfUnchangedDurable(current.LeaseID, current, current); err != nil {
 			return errors.Join(cause, err)
 		}
 		return cause
@@ -232,10 +237,11 @@ func (b *backend) reconcileReadyClaimWrite(intent LeaseClaim, instance ukcInstan
 		if err := validateUnikraftCloudReadyClaimReadback(intent, current, instance); err != nil {
 			return LeaseClaim{}, errors.Join(writeErr, err)
 		}
-		if err := replaceLeaseClaimIfUnchangedDurable(intent.LeaseID, current, current); err != nil {
+		written, err := replaceLeaseClaimIfUnchangedDurable(intent.LeaseID, current, current)
+		if err != nil {
 			return LeaseClaim{}, errors.Join(writeErr, err)
 		}
-		return current, nil
+		return written, nil
 	}
 	unlockSlug, lockErr := lockUnikraftCloudSlugAllocation(context.Background())
 	if lockErr != nil {
@@ -516,10 +522,11 @@ func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAP
 			labels["state"] = ukcStateDeleteAttempt
 			updated := claim
 			updated.Labels = labels
-			if err := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, updated); err != nil {
+			written, err := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, updated)
+			if err != nil {
 				return false, err
 			}
-			claim = updated
+			claim = written
 		}
 		deleted, deleteErr := api.DeleteInstance(ctx, instanceID)
 		if deleteErr != nil {
@@ -536,10 +543,11 @@ func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAP
 		labels[ukcLabelProviderState] = normalizedInstanceState(deleted.State)
 		updated := claim
 		updated.Labels = labels
-		if err := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, updated); err != nil {
+		written, err := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, updated)
+		if err != nil {
 			return false, err
 		}
-		claim = updated
+		claim = written
 	}
 	if err := b.proveInstanceAbsent(ctx, api, instanceID, resourceName); err != nil {
 		return false, fmt.Errorf("%s deletion accepted for instance %s but absence is unconfirmed; claim retained: %w", providerName, instanceID, err)
