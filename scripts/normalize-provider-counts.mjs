@@ -3,19 +3,31 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export function normalizeProviderCounts(source, providerCount) {
+export function normalizeNavigationCounts(source, providerCount) {
   if (!Number.isInteger(providerCount) || providerCount < 0) {
     throw new TypeError("providerCount must be a non-negative integer");
   }
 
-  // Provider metadata is the canonical registry; the navigation also contains
-  // providers/README.md, which is an index page rather than another provider.
-  return source
-    .replace(/Browse \d+ providers/g, `Browse ${providerCount} providers`)
-    .replace(
-      /(<summary><h2>Providers<\/h2><span class="nav-count">)\d+(<\/span>)/g,
-      `$1${providerCount}$2`,
-    );
+  const withCanonicalProviderCta = source.replace(
+    /Browse \d+ providers/g,
+    `Browse ${providerCount} providers`,
+  );
+
+  return withCanonicalProviderCta.replace(
+    /<details class="nav-section"[^>]*>[\s\S]*?<\/details>/g,
+    (section) => {
+      const links = [...section.matchAll(/<a class="nav-link(?: active)?" href="([^"]+)"/g)];
+      const itemCount = links.filter(([, href]) => {
+        const pathname = href.split(/[?#]/, 1)[0];
+        return path.posix.basename(pathname) !== "index.html";
+      }).length;
+
+      return section.replace(
+        /(<span class="nav-count">)\d+(<\/span>)/,
+        `$1${itemCount}$2`,
+      );
+    },
+  );
 }
 
 export function normalizeProviderCountFiles({
@@ -29,7 +41,7 @@ export function normalizeProviderCountFiles({
 
   for (const file of htmlFiles(siteDir)) {
     const source = fs.readFileSync(file, "utf8");
-    const normalized = normalizeProviderCounts(source, providerCount);
+    const normalized = normalizeNavigationCounts(source, providerCount);
     if (normalized === source) continue;
     fs.writeFileSync(file, normalized, "utf8");
     changed += 1;
@@ -51,5 +63,5 @@ function htmlFiles(dir) {
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   const result = normalizeProviderCountFiles();
-  console.log(`normalized provider count to ${result.providerCount} across ${result.changed} pages`);
+  console.log(`normalized navigation counts across ${result.changed} pages; ${result.providerCount} providers`);
 }
