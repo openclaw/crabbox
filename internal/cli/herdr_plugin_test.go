@@ -30,16 +30,6 @@ func TestHerdrPluginContextCWD(t *testing.T) {
 			want: "/repo",
 		},
 		{
-			name: "legacy pane",
-			raw:  `{"pane":{"cwd":"/repo/legacy-pane"},"workspace":{"cwd":"/repo/legacy"}}`,
-			want: "/repo/legacy-pane",
-		},
-		{
-			name: "legacy workspace fallback",
-			raw:  `{"workspace":{"cwd":"/repo/legacy"}}`,
-			want: "/repo/legacy",
-		},
-		{
 			name: "json escaped path",
 			raw:  `{"focused_pane_cwd":"/repo/a \"quoted\" dir"}`,
 			want: `/repo/a "quoted" dir`,
@@ -59,7 +49,7 @@ func TestHerdrPluginContextCWD(t *testing.T) {
 }
 
 func TestHerdrPluginContextCWDRejectsMissingOrInvalidContext(t *testing.T) {
-	for _, raw := range []string{"", "{", `{}`} {
+	for _, raw := range []string{"", "{", `{}`, `{"pane":{"cwd":"/repo/unsupported"}}`} {
 		if cwd, err := herdrPluginContextCWD(raw); err == nil {
 			t.Fatalf("raw=%q cwd=%q, want error", raw, cwd)
 		}
@@ -228,8 +218,23 @@ func TestHerdrPluginJobCanCancelBeforeProvisioning(t *testing.T) {
 	if err := app.herdrPlugin(context.Background(), []string{"job"}); err != nil {
 		t.Fatalf("cancel job failed: %v\nstderr=%s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "smoke provider=") {
+	if !strings.Contains(stdout.String(), "1) smoke") {
 		t.Fatalf("missing job picker:\n%s", stdout.String())
+	}
+}
+
+func TestHerdrPluginJobPreservesNameWithSpaces(t *testing.T) {
+	dir := prepareHerdrPluginTestWorkspace(t)
+	configPath := filepath.Join(dir, ".crabbox.yaml")
+	if err := os.WriteFile(configPath, []byte("jobs:\n  smoke test: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("1\n")}
+	err := app.herdrPlugin(context.Background(), []string{"job"})
+	if err == nil || !strings.Contains(err.Error(), `job "smoke test" requires command or syncOnly`) {
+		t.Fatalf("err=%v, want selected full job name\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 	}
 }
 

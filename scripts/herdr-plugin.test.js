@@ -46,7 +46,8 @@ test("Herdr plugin shell entrypoints pass syntax checks", () => {
 test("Herdr plugin build pins and preserves the Crabbox executable path", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-herdr-plugin-"));
   const installedPlugin = path.join(dir, "plugin");
-  const fakeBin = path.join(dir, "bin with ' quote");
+  const fakeBinName = "bin with ' quote";
+  const fakeBin = path.join(installedPlugin, fakeBinName);
   const fakeCrabbox = path.join(fakeBin, "crabbox");
   fs.cpSync(pluginRoot, installedPlugin, { recursive: true });
   fs.mkdirSync(fakeBin);
@@ -65,7 +66,7 @@ printf '<%s>\\n' "$@"
     cwd: installedPlugin,
     env: {
       ...process.env,
-      PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
+      PATH: `${fakeBinName}${path.delimiter}${process.env.PATH ?? ""}`,
     },
     encoding: "utf8",
   });
@@ -75,7 +76,7 @@ printf '<%s>\\n' "$@"
   const shim = path.join(installedPlugin, "crabbox-shim.sh");
   assert.equal(fs.statSync(shim).mode & 0o111, 0o111);
   const invoke = spawnSync(shim, ["alpha", "two words"], {
-    cwd: installedPlugin,
+    cwd: dir,
     encoding: "utf8",
   });
   assert.equal(invoke.status, 0, invoke.stdout + invoke.stderr);
@@ -151,5 +152,6 @@ exit 2
   assert.doesNotMatch(tab, /<--target-pane>|<--direction>/);
 
   const overlay = invoke("boxes", "overlay");
-  assert.doesNotMatch(overlay, /<--workspace>|<--target-pane>|<--direction>/);
+  assert.match(overlay, /<--target-pane>\n<workspace-1:pane-2>/);
+  assert.doesNotMatch(overlay, /<--workspace>|<--direction>/);
 });

@@ -5,6 +5,16 @@ plugin_root=${CRABBOX_HERDR_PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")" &&
 shim="$plugin_root/crabbox-shim.sh"
 crabbox_bin=$(command -v crabbox || true)
 
+if [ -n "$crabbox_bin" ]; then
+  case "$crabbox_bin" in
+    /*) ;;
+    *)
+      crabbox_dir=$(CDPATH= cd -- "$(dirname -- "$crabbox_bin")" && pwd)
+      crabbox_bin="$crabbox_dir/${crabbox_bin##*/}"
+      ;;
+  esac
+fi
+
 if [ -n "$crabbox_bin" ] &&
   probe=$(HERDR_PLUGIN_CONTEXT_JSON='{"workspace_cwd":"/"}' "$crabbox_bin" __herdr-plugin context-cwd 2>/dev/null) &&
   [ "$probe" = / ]; then

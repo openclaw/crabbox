@@ -22,19 +22,12 @@ const (
 
 var errHerdrPluginSelectionCancelled = errors.New("selection cancelled")
 
-// herdrInvocationContext accepts both Herdr's current flat context fields and
-// the nested pane/workspace fields used by early 0.7 plugin examples. Keeping
-// the compatibility shape here lets the plugin remain useful across Herdr
-// point releases without asking shell scripts to parse JSON.
+// herdrInvocationContext contains the workspace paths in Herdr's v0.7 plugin
+// invocation contract. Keep this deliberately narrow so unsupported context
+// shapes fail clearly instead of becoming an accidental compatibility surface.
 type herdrInvocationContext struct {
 	FocusedPaneCWD string `json:"focused_pane_cwd"`
 	WorkspaceCWD   string `json:"workspace_cwd"`
-	Pane           struct {
-		CWD string `json:"cwd"`
-	} `json:"pane"`
-	Workspace struct {
-		CWD string `json:"cwd"`
-	} `json:"workspace"`
 }
 
 func (a App) herdrPlugin(ctx context.Context, args []string) error {
@@ -97,9 +90,7 @@ func herdrPluginContextCWD(raw string) (string, error) {
 	}
 	for _, candidate := range []string{
 		invocation.FocusedPaneCWD,
-		invocation.Pane.CWD,
 		invocation.WorkspaceCWD,
-		invocation.Workspace.CWD,
 	} {
 		if cwd := strings.TrimSpace(candidate); cwd != "" {
 			return cwd, nil
@@ -225,27 +216,22 @@ func (a App) herdrPluginJob(ctx context.Context, args []string) error {
 	if err := chdirHerdrPluginWorkspace(); err != nil {
 		return err
 	}
-	lines, err := a.herdrPluginCaptureLines(ctx, "jobs", func(app App) error {
-		return app.jobList(ctx, nil)
-	})
+	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	if len(lines) == 1 && lines[0] == "no jobs configured" {
+	names := configuredJobNames(cfg)
+	if len(names) == 0 {
 		return exit(2, "no Crabbox jobs are configured in this workspace")
 	}
-	selected, err := herdrPluginPick(a.input(), a.Stdout, "job", lines)
+	selected, err := herdrPluginPick(a.input(), a.Stdout, "job", names)
 	if errors.Is(err, errHerdrPluginSelectionCancelled) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	fields := strings.Fields(selected)
-	if len(fields) == 0 {
-		return exit(2, "could not read a job name from %q", selected)
-	}
-	return a.jobRun(ctx, []string{fields[0]})
+	return a.jobRun(ctx, []string{selected})
 }
 
 func (a App) herdrPluginCaptureLines(ctx context.Context, label string, run func(App) error) ([]string, error) {

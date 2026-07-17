@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a Herdr plugin for Crabbox lease controls and repository workflows, with workspace-aware actions and managed panes. Thanks @zozo123.
 - Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
 - Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
 
