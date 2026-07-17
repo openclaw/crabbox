@@ -2147,6 +2147,89 @@ func TestArtifactsPullDistinguishesZeroFromOmittedManifestSize(t *testing.T) {
 	}
 }
 
+func TestArtifactsListJSONPreservesManifestSizePresence(t *testing.T) {
+	tests := []struct {
+		name          string
+		sizeField     string
+		wantSize      bool
+		wantSizeValue float64
+		wantPullError string
+	}{
+		{
+			name: "omitted",
+		},
+		{
+			name:          "explicit zero",
+			sizeField:     `,"size":0`,
+			wantSize:      true,
+			wantPullError: "artifact size mismatch for artifact.txt: got 15, want 0",
+		},
+		{
+			name:          "positive",
+			sizeField:     `,"size":15`,
+			wantSize:      true,
+			wantSizeValue: 15,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, "artifact.txt"), "legacy artifact")
+			manifest := fmt.Sprintf(`{"schemaVersion":1,"generatedAt":"2026-07-17T00:00:00Z","storage":{"backend":"local"},"files":[{"name":"artifact.txt","path":"artifact.txt"%s}]}`, test.sizeField)
+			manifestPath := filepath.Join(dir, artifactManifestFilename)
+			if err := os.WriteFile(manifestPath, []byte(manifest), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var normalized bytes.Buffer
+			app := App{Stdout: &normalized, Stderr: io.Discard}
+			if err := app.artifactsList(context.Background(), []string{"--json", manifestPath}); err != nil {
+				t.Fatal(err)
+			}
+			var encoded struct {
+				Files []map[string]any `json:"files"`
+			}
+			if err := json.Unmarshal(normalized.Bytes(), &encoded); err != nil {
+				t.Fatal(err)
+			}
+			if len(encoded.Files) != 1 {
+				t.Fatalf("files=%#v, want one entry", encoded.Files)
+			}
+			gotSize, hasSize := encoded.Files[0]["size"]
+			if hasSize != test.wantSize {
+				t.Fatalf("normalized size presence=%t value=%v, want presence=%t\n%s", hasSize, gotSize, test.wantSize, normalized.String())
+			}
+			if hasSize && gotSize != test.wantSizeValue {
+				t.Fatalf("normalized size=%v, want %v", gotSize, test.wantSizeValue)
+			}
+
+			normalizedPath := filepath.Join(dir, "normalized.json")
+			if err := os.WriteFile(normalizedPath, normalized.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			output := filepath.Join(dir, "pull")
+			_, err := pullArtifactManifest(context.Background(), normalizedPath, output, false)
+			if test.wantPullError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantPullError) {
+					t.Fatalf("err=%v, want %q", err, test.wantPullError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join(output, "artifact.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != "legacy artifact" {
+				t.Fatalf("payload=%q, want legacy artifact", got)
+			}
+		})
+	}
+}
+
 func TestDownloadArtifactURLHonorsDeclaredZeroSize(t *testing.T) {
 	for _, flushHeaders := range []bool{false, true} {
 		t.Run(fmt.Sprintf("flushHeaders=%t", flushHeaders), func(t *testing.T) {
