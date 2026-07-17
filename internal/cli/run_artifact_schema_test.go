@@ -84,7 +84,6 @@ func TestParseArtifactSchemaRejectsInvalidKeywordShapes(t *testing.T) {
 		{"duplicate root keyword", `{"type":"object","type":"string"}`},
 		{"duplicate nested keyword", `{"properties":{"x":{"required":["a"],"required":[]}}}`},
 		{"duplicate property schema", `{"properties":{"x":{"type":"string"},"x":{"type":"number"}}}`},
-		{"mis-cased required cannot override required", `{"type":"object","required":["proof"],"REQUIRED":[]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -92,6 +91,16 @@ func TestParseArtifactSchemaRejectsInvalidKeywordShapes(t *testing.T) {
 				t.Fatalf("expected invalid schema keyword shape to be rejected: %s", tc.schema)
 			}
 		})
+	}
+}
+
+func TestParseArtifactSchemaMisCasedKeywordCannotOverrideRequired(t *testing.T) {
+	schema, err := parseArtifactSchema([]byte(`{"type":"object","required":["proof"],"REQUIRED":[]}`))
+	if err != nil {
+		t.Fatalf("standard JSON Schema extension keyword should compile: %v", err)
+	}
+	if violations := validateJSONAgainstSchema([]byte(`{}`), schema); len(violations) == 0 {
+		t.Fatal("mis-cased extension keyword unexpectedly disabled required validation")
 	}
 }
 

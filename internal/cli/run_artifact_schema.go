@@ -105,6 +105,9 @@ func (rejectingSchemaLoader) Load(rawURL string) (any, error) {
 }
 
 func parseArtifactSchema(data []byte) (*artifactSchema, error) {
+	if !utf8.Valid(data) {
+		return nil, fmt.Errorf("schema is not valid UTF-8")
+	}
 	schemaStats, err := scanJSONDocument(data, maxSchemaDefinitionValues, maxSchemaJSONDepth)
 	if err != nil {
 		return nil, err
@@ -1437,6 +1440,9 @@ func requireJSONDecoderEOF(decoder *json.Decoder) error {
 }
 
 func validateJSONAgainstSchema(doc []byte, schema *artifactSchema) []schemaViolation {
+	if !utf8.Valid(doc) {
+		return []schemaViolation{{Keyword: "json", Message: "artifact is not valid UTF-8"}}
+	}
 	stats, err := validateArtifactJSONShape(doc)
 	if err != nil {
 		message := "artifact is not valid unambiguous JSON"
