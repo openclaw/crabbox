@@ -33,8 +33,11 @@ type TimingReport struct {
 	BlockedStage  string        `json:"blockedStage,omitempty"`
 	RetryLikely   string        `json:"retryLikely,omitempty"`
 	Artifacts     []runArtifact `json:"artifacts,omitempty"`
-	LeaseStopped  *bool         `json:"leaseStopped,omitempty"`
-	LeaseStopErr  string        `json:"leaseStopError,omitempty"`
+
+	SchemaValidations []SchemaValidationResult `json:"schemaValidations,omitempty"`
+
+	LeaseStopped *bool  `json:"leaseStopped,omitempty"`
+	LeaseStopErr string `json:"leaseStopError,omitempty"`
 }
 
 type TimingPhase struct {
