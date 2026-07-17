@@ -126,6 +126,7 @@ func leaseForProtocol(lease core.LeaseTarget) *protocolLease {
 }
 
 func (p protocolLease) target(cfg core.Config, keep bool) core.LeaseTarget {
+	core.NormalizeTargetConfig(&cfg)
 	leaseID := p.LeaseID
 	slug := core.NormalizeLeaseSlug(p.Slug)
 	if slug == "" {
@@ -141,6 +142,25 @@ func (p protocolLease) target(cfg core.Config, keep bool) core.LeaseTarget {
 			labels[key] = value
 		}
 	}
+	// Target routing is operator-owned, never adapter-owned. Overwrite any
+	// stale or hostile adapter labels before the lease reaches core resolution.
+	labels["target"] = cfg.TargetOS
+	labels["work_root"] = cfg.WorkRoot
+	if cfg.Architecture != "" {
+		labels["architecture"] = cfg.Architecture
+	} else {
+		delete(labels, "architecture")
+	}
+	if cfg.TargetOS == core.TargetWindows {
+		labels["windows_mode"] = cfg.WindowsMode
+	} else {
+		delete(labels, "windows_mode")
+	}
+	if cfg.TargetOS == core.TargetMacOS {
+		// External macOS desktops use the host's native Screen Sharing service;
+		// there is no separate Crabbox desktop provisioning label to echo.
+		labels["desktop"] = "true"
+	}
 	status := core.Blank(p.Status, "ready")
 	labels["name"] = p.Name
 	labels["state"] = core.Blank(labels["state"], status)
@@ -152,21 +172,30 @@ func (p protocolLease) target(cfg core.Config, keep bool) core.LeaseTarget {
 		Labels:   labels,
 	}
 	server.ServerType.Name = core.Blank(p.ServerType, "external")
-	target := core.SSHTarget{TargetOS: core.TargetLinux, NetworkKind: core.NetworkPublic}
+	target := core.SSHTarget{TargetOS: core.Blank(cfg.TargetOS, core.TargetLinux), WindowsMode: cfg.WindowsMode, NetworkKind: core.NetworkPublic}
 	if p.SSH != nil {
 		target.User = p.SSH.User
 		target.Host = p.SSH.Host
 		target.Key = p.SSH.Key
 		target.Port = core.Blank(p.SSH.Port, "22")
 		target.FallbackPorts = p.SSH.FallbackPorts
-		target.ReadyCheck = core.Blank(p.SSH.ReadyCheck, externalDefaultReadyCheck)
+		target.ReadyCheck = core.Blank(p.SSH.ReadyCheck, externalDefaultReadyCheckForTarget(cfg.TargetOS, cfg.WindowsMode))
 		target.AuthSecret = p.SSH.AuthSecret
 		target.NoControlMaster = p.SSH.NoControlMaster
 		target.ProxyCommand = p.SSH.ProxyCommand
 		target.SSHConfigProxy = p.SSH.SSHConfigProxy || strings.TrimSpace(target.ProxyCommand) != ""
 		server.PublicNet.IPv4.IP = target.Host
 	}
+	core.ApplyTargetChildEnvironmentBoundary(cfg, &target)
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
 }
 
 const externalDefaultReadyCheck = "command -v bash >/dev/null && command -v python3 >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
+
+func externalDefaultReadyCheckForTarget(targetOS, windowsMode string) string {
+	if targetOS == core.TargetWindows && windowsMode == core.WindowsModeNormal {
+		// An empty override lets core use its native PowerShell readiness probe.
+		return ""
+	}
+	return externalDefaultReadyCheck
+}

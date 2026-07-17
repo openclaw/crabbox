@@ -39,6 +39,7 @@ type SSHTarget struct {
 	NetworkKind            NetworkMode
 	SSHConfigProxy         bool
 	ProxyCommand           string
+	ChildEnvDenylist       []string
 }
 
 func isLocalMacTarget(target SSHTarget) bool {
@@ -78,14 +79,117 @@ func sshTargetForLease(cfg Config, host, user, port string) SSHTarget {
 		port = cfg.SSHPort
 	}
 	return SSHTarget{
-		User:          user,
-		Host:          host,
-		Key:           cfg.SSHKey,
-		Port:          port,
-		FallbackPorts: cfg.SSHFallbackPorts,
-		TargetOS:      cfg.TargetOS,
-		WindowsMode:   cfg.WindowsMode,
+		User:             user,
+		Host:             host,
+		Key:              cfg.SSHKey,
+		Port:             port,
+		FallbackPorts:    cfg.SSHFallbackPorts,
+		TargetOS:         cfg.TargetOS,
+		WindowsMode:      cfg.WindowsMode,
+		ChildEnvDenylist: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
 	}
+}
+
+// PreserveExternalDesktopChildEnvironmentBoundary records a valid, trusted or
+// programmatic desktop password environment name before an override replaces
+// it. Repository-selected and reserved names cannot influence a later child's
+// environment. The retained names are intentionally monotonic for the lifetime
+// of this Config value: an old operator secret must not become visible merely
+// because a routed lease or explicit override selects a new name.
+func PreserveExternalDesktopChildEnvironmentBoundary(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	name := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
+	if name == "" || cfg.credentialProvenance.externalDesktopEnv == credentialSourceRepository {
+		return
+	}
+	if ValidateExternalDesktopPasswordEnvironmentName(name) != nil {
+		return
+	}
+	cfg.externalDesktopEnvDenylist = appendUniqueStrings(
+		cfg.externalDesktopEnvDenylist,
+		name,
+	)
+}
+
+// ExternalDesktopChildEnvironmentDenylist returns retained historical names
+// plus this External config's current effective name. The returned slice is a
+// copy and is safe for callers to extend without mutating Config.
+func ExternalDesktopChildEnvironmentDenylist(cfg Config) []string {
+	return appendUniqueStrings(
+		cfg.externalDesktopEnvDenylist,
+		cfg.External.Connection.Desktop.PasswordEnv,
+	)
+}
+
+func externalDesktopChildEnvDenylist(cfg Config, _ string) []string {
+	// Standalone helpers may run before provider validation. Reuse the same
+	// capture policy so repository-selected or reserved current names cannot
+	// suppress unrelated child credentials such as GH_TOKEN or PATH. Trusted
+	// External secret names remain denied even if repository config switches
+	// the active provider.
+	safe := cfg
+	PreserveExternalDesktopChildEnvironmentBoundary(&safe)
+	return appendUniqueStrings(nil, safe.externalDesktopEnvDenylist...)
+}
+
+// ApplyTargetChildEnvironmentBoundary prevents operator-owned desktop secrets
+// from reaching target-facing local child processes such as ssh, ProxyCommand,
+// rsync, scp, and viewer launchers.
+func ApplyTargetChildEnvironmentBoundary(cfg Config, target *SSHTarget) {
+	if target != nil {
+		target.ChildEnvDenylist = appendUniqueStrings(
+			target.ChildEnvDenylist,
+			externalDesktopChildEnvDenylist(cfg, target.TargetOS)...,
+		)
+	}
+}
+
+func childEnvironmentWithout(env []string, denied ...string) []string {
+	if len(denied) == 0 {
+		return nil
+	}
+	blocked := make(map[string]struct{}, len(denied))
+	for _, name := range denied {
+		if name = strings.TrimSpace(name); name != "" {
+			blocked[strings.ToUpper(name)] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		if _, remove := blocked[strings.ToUpper(name)]; !remove {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
+func systemInspectionEnvironment() []string {
+	return []string{"LC_ALL=C"}
+}
+
+func systemInspectionCommand(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.Env = systemInspectionEnvironment()
+	return cmd
+}
+
+func applyTargetChildEnvironment(cmd *exec.Cmd, target SSHTarget) {
+	if cmd != nil && len(target.ChildEnvDenylist) > 0 {
+		env := cmd.Env
+		if env == nil {
+			env = os.Environ()
+		}
+		cmd.Env = childEnvironmentWithout(env, target.ChildEnvDenylist...)
+	}
+}
+
+func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	applyTargetChildEnvironment(cmd, target)
+	return cmd
 }
 
 func waitForSSH(ctx context.Context, target *SSHTarget, stderr io.Writer) error {
@@ -327,7 +431,7 @@ func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, r
 		probe := *target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
-		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
+		cmd := sshCommandContext(ctx, probe, sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
 		err := runSSHCommand(cmd, io.Discard, io.Discard)
 		if err == nil {
 			target.Port = probe.Port
@@ -348,7 +452,7 @@ func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, rem
 		probe := target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
-		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
+		cmd := sshCommandContext(ctx, probe, sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
 		err := runSSHCommand(cmd, io.Discard, io.Discard)
 		if err == nil {
 			return nil
@@ -368,7 +472,7 @@ func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (string,
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
-		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInput(probe, remote)...)
+		cmd := sshCommandContext(ctx, probe, sshArgsNoInput(probe, remote)...)
 		var out bytes.Buffer
 		err := runSSHCommand(cmd, &out, io.Discard)
 		if err == nil {
@@ -391,7 +495,7 @@ func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, re
 		probe := target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
-		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
+		cmd := sshCommandContext(ctx, probe, sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
 		var out bytes.Buffer
 		err := runSSHCommand(cmd, &out, io.Discard)
 		if err == nil {
@@ -416,7 +520,7 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 		// Crabbox's SSH helpers intentionally execute commands assembled by
 		// typed remote-command builders. Callers must shell-quote user data
 		// before it reaches this boundary; see remoteCommand/shellQuote tests.
-		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInput(probe, remote)...)
+		cmd := sshCommandContext(ctx, probe, sshArgsNoInput(probe, remote)...)
 		var out synchronizedBuffer
 		err := runSSHCommand(cmd, &out, &out)
 		if err == nil {
@@ -439,7 +543,7 @@ func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, r
 		probe := target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
-		cmd := exec.CommandContext(ctx, "ssh", sshArgsWithOptions(probe, command, connectTimeout, connectionAttempts)...)
+		cmd := sshCommandContext(ctx, probe, sshArgsWithOptions(probe, command, connectTimeout, connectionAttempts)...)
 		cmd.Stdin = strings.NewReader(remote)
 		var out synchronizedBuffer
 		err := runSSHCommand(cmd, &out, &out)
@@ -472,7 +576,7 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
-		cmd := exec.CommandContext(ctx, "ssh", sshArgs(probe, remote)...)
+		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
 		cmd.Stdin = bytes.NewReader(data)
 		err := runSSHCommand(cmd, stdout, stderr)
 		if err == nil {
@@ -498,7 +602,7 @@ func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, inp
 		}
 		probe := target
 		probe.Port = port
-		cmd := exec.CommandContext(ctx, "ssh", sshArgs(probe, remote)...)
+		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
 		cmd.Stdin = input
 		err := runSSHCommand(cmd, stdout, stderr)
 		if err == nil {
@@ -524,7 +628,7 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
-		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInput(probe, remote)...)
+		cmd := sshCommandContext(ctx, probe, sshArgsNoInput(probe, remote)...)
 		err := runSSHCommand(cmd, stdout, stderr)
 		if err == nil {
 			return 0, nil
@@ -753,6 +857,7 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	} else {
 		cmd = exec.CommandContext(ctx, "rsync", args...)
 	}
+	applyTargetChildEnvironment(cmd, target)
 	if opts.UseFilesFrom {
 		cmd.Stdin = bytes.NewReader(opts.FilesFrom)
 	}
@@ -930,10 +1035,10 @@ func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *
 		wslExe, err = exec.LookPath("wsl")
 	}
 	// Fall back to native rsync when WSL is absent or lacks native tools.
-	if err != nil || !windowsWSLHasNativeRsyncSSH(ctx, wslExe) {
+	if err != nil || !windowsWSLHasNativeRsyncSSH(ctx, target, wslExe) {
 		return windowsNativeRsyncCommand(ctx, args)
 	}
-	mountRoot := windowsWSLMountRoot(ctx, wslExe)
+	mountRoot := windowsWSLMountRoot(ctx, target, wslExe)
 
 	// Prepare WSL key: copy with correct permissions.
 	wslKey := ""
@@ -948,6 +1053,7 @@ func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *
 					shellQuote(wslKey),
 					shellQuote(wslKey)))
 			cpCmd.Stdin = bytes.NewReader(keyData)
+			applyTargetChildEnvironment(cpCmd, target)
 			if err := cpCmd.Run(); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: copy SSH key into WSL for rsync failed: %v\n", err)
 				return windowsNativeRsyncCommand(ctx, args)
@@ -963,6 +1069,7 @@ func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *
 					shellQuote(wslKnownHosts),
 					shellQuote(wslKnownHosts)))
 			cpKnownHostsCmd.Stdin = bytes.NewReader(knownHostsData)
+			applyTargetChildEnvironment(cpKnownHostsCmd, target)
 			if err := cpKnownHostsCmd.Run(); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: copy known_hosts into WSL for rsync failed: %v\n", err)
 				wslKnownHosts = ""
@@ -1005,11 +1112,13 @@ func windowsHostPath(path string) string {
 	return path
 }
 
-func windowsWSLHasNativeRsyncSSH(ctx context.Context, wslExe string) bool {
+func windowsWSLHasNativeRsyncSSH(ctx context.Context, target SSHTarget, wslExe string) bool {
 	if strings.TrimSpace(wslExe) == "" {
 		return false
 	}
-	out, err := exec.CommandContext(ctx, wslExe, "sh", "-c", "rsync_path=$(command -v rsync) || exit 1; ssh_path=$(command -v ssh) || exit 1; printf '%s\\n%s\\n' \"$rsync_path\" \"$ssh_path\"").Output()
+	cmd := exec.CommandContext(ctx, wslExe, "sh", "-c", "rsync_path=$(command -v rsync) || exit 1; ssh_path=$(command -v ssh) || exit 1; printf '%s\\n%s\\n' \"$rsync_path\" \"$ssh_path\"")
+	applyTargetChildEnvironment(cmd, target)
+	out, err := cmd.Output()
 	return err == nil && windowsWSLNativeToolPaths(string(out))
 }
 
@@ -1101,11 +1210,13 @@ func windowsToWSLPathWithRoot(s, mountRoot string) string {
 	return s
 }
 
-func windowsWSLMountRoot(ctx context.Context, wslExe string) string {
+func windowsWSLMountRoot(ctx context.Context, target SSHTarget, wslExe string) string {
 	if runtime.GOOS != "windows" {
 		return "/mnt"
 	}
-	out, err := exec.CommandContext(ctx, wslExe, "sh", "-c", "if [ -d /mnt/host/c ]; then printf /mnt/host; else printf /mnt; fi").Output()
+	cmd := exec.CommandContext(ctx, wslExe, "sh", "-c", "if [ -d /mnt/host/c ]; then printf /mnt/host; else printf /mnt; fi")
+	applyTargetChildEnvironment(cmd, target)
+	out, err := cmd.Output()
 	if err == nil {
 		if value := strings.TrimSpace(string(out)); value != "" {
 			return value

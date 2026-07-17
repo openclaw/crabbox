@@ -63,6 +63,10 @@ func controllerVerifyDaemonOwnedListener(port string, expectedPID int) error {
 	return nil
 }
 
+func controllerVerifyDaemonOwnedListenerWithEnvironment(port string, expectedPID int, _ []string) error {
+	return controllerVerifyDaemonOwnedListener(port, expectedPID)
+}
+
 func controllerWindowsTCPListenerTable() ([]byte, error) {
 	if err := windowsGetExtendedTCPTable.Find(); err != nil {
 		return nil, fmt.Errorf("load GetExtendedTcpTable: %w", err)

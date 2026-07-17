@@ -260,6 +260,74 @@ describe("coordinator auth", () => {
     }
   });
 
+  it("admits only the WebVNC viewer bootstrap and scoped session routes without portal OAuth", async () => {
+    const env = {
+      CRABBOX_PUBLIC_URL: "https://broker.example.test",
+    } as Env;
+    const sessionCookie = "crabbox_webvnc_session=webvnc_session_0123456789abcdef0123456789abcdef";
+
+    const bootstrap = await prepareCoordinatorRequest(
+      new Request("https://broker.example.test/portal/leases/cbx_000000000001/vnc/bootstrap", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "x-crabbox-admin-grant-version": "f".repeat(64),
+          "x-crabbox-owner": "forged@example.test",
+        },
+        body: "ticket=webvnc_view_0123456789abcdef0123456789abcdef",
+      }),
+      env,
+    );
+    expect(bootstrap).toMatchObject({ authenticated: false });
+    if ("response" in bootstrap) {
+      throw new Error("WebVNC viewer bootstrap did not reach the coordinator");
+    }
+    expect(bootstrap.request.headers.get("x-crabbox-admin-grant-version")).toBe(
+      await adminGrantVersion(env),
+    );
+    expect(bootstrap.request.headers.has("x-crabbox-owner")).toBe(false);
+    expect(bootstrap.request.headers.has("x-crabbox-auth")).toBe(false);
+
+    const page = await prepareCoordinatorRequest(
+      new Request("https://broker.example.test/portal/leases/cbx_000000000001/vnc", {
+        headers: { cookie: `crabbox_session=existing-github-session; ${sessionCookie}` },
+      }),
+      env,
+    );
+    expect(page).toMatchObject({ authenticated: false });
+    expect("response" in page).toBe(false);
+
+    const missingOrigin = await prepareCoordinatorRequest(
+      new Request("https://broker.example.test/portal/leases/cbx_000000000001/vnc/control", {
+        method: "POST",
+        headers: { cookie: sessionCookie },
+      }),
+      env,
+    );
+    expect(missingOrigin).toMatchObject({ authenticated: false, response: { status: 403 } });
+
+    const sameOrigin = await prepareCoordinatorRequest(
+      new Request("https://broker.example.test/portal/leases/cbx_000000000001/vnc/control", {
+        method: "POST",
+        headers: {
+          cookie: sessionCookie,
+          origin: "https://broker.example.test",
+        },
+      }),
+      env,
+    );
+    expect(sameOrigin).toMatchObject({ authenticated: false });
+    expect("response" in sameOrigin).toBe(false);
+
+    const outsideViewerScope = await prepareCoordinatorRequest(
+      new Request("https://broker.example.test/portal/leases/cbx_000000000001/share", {
+        headers: { cookie: sessionCookie },
+      }),
+      env,
+    );
+    expect(outsideViewerScope).toMatchObject({ authenticated: false, response: { status: 302 } });
+  });
+
   it("allows a verified same-origin portal logout without GitHub membership", async () => {
     const env = {
       CRABBOX_SESSION_SECRET: "session-secret",
@@ -1392,6 +1460,32 @@ describe("coordinator auth", () => {
     );
     expect(logout.status).toBe(302);
     expect(logout.headers.get("location")).toBe("https://broker.example.com/portal/logout");
+
+    const bootstrap = await coordinator.fetch(
+      new Request(
+        "https://crabbox-coordinator.steipete.workers.dev/portal/leases/cbx_1/vnc/bootstrap",
+        {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: "ticket=webvnc_view_0123456789abcdef0123456789abcdef",
+        },
+      ),
+      env,
+    );
+    expect(bootstrap.status).toBe(200);
+    expect(bootstrap.headers.get("location")).toBeNull();
+    expect(bootstrap.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(bootstrap.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(bootstrap.headers.get("content-security-policy")).toContain(
+      "form-action https://broker.example.com",
+    );
+    expect(bootstrap.headers.get("cache-control")).toBe("no-store");
+    const bootstrapBody = await bootstrap.text();
+    expect(bootstrapBody).toContain(
+      'action="https://broker.example.com/portal/leases/cbx_1/vnc/bootstrap"',
+    );
+    expect(bootstrapBody).toContain('value="webvnc_view_0123456789abcdef0123456789abcdef"');
+    expect(bootstrapBody).toContain('document.getElementById("webvnc-bootstrap").requestSubmit()');
     expect(fleetCalled).toBe(false);
   });
 });
@@ -1464,7 +1558,7 @@ describe("http responses", () => {
       "https://alice:password@example.test/path?api_key=query-secret&refresh_token=query-refresh-token&id_token=query-id-token&secret_access_key=query-aws-secret&api_secret=query-api-secret&x-api-key=query-api-key&authorization=query-authorization&proxy-authorization=query-proxy-authorization&session_token=query-session-token&X-Amz-Signature=signed-secret&X-Goog-Credential=gcp-credential&X-Goog-Signature=gcp-signature&X-Goog-Security-Token=gcp-security-token&region=eu",
       "https://single-userinfo-token@other.example.test/path",
       "https://first-userinfo-value@second-userinfo-value@multi.example.test/path",
-      "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
+      ["-----BEGIN", "PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----"].join(" "),
       "safe suffix",
     ].join("\n");
 

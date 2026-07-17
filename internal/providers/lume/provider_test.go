@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -104,6 +105,27 @@ func TestConfigureRejectsExplicitNonMacOS(t *testing.T) {
 	}
 }
 
+func TestFlagsPreserveExplicitNonMacOSTargetForValidation(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	core.MarkTargetExplicit(&cfg)
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != core.TargetLinux {
+		t.Fatalf("target=%q want explicit Linux target preserved", cfg.TargetOS)
+	}
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil || !strings.Contains(err.Error(), "supports target=macos only") {
+		t.Fatalf("Configure error=%v", err)
+	}
+}
+
 func TestFlagsApplyLumeConfiguration(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -195,6 +217,71 @@ func TestAcquireRejectsThirdMacOSGuestBeforeClone(t *testing.T) {
 		if len(call.Args) > 0 && call.Args[0] == "clone" {
 			t.Fatalf("clone ran after host capacity was exhausted: %#v", runner.calls)
 		}
+	}
+}
+
+func TestAcquireRollsBackPartialCloneFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	const leaseID = "cbx_clonefail1234"
+	vmExists := false
+	deleteCalled := false
+	name := ""
+	runner := &recordingRunner{}
+	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if len(req.Args) == 0 {
+			return core.LocalCommandResult{}, nil, false
+		}
+		switch req.Args[0] {
+		case "ls":
+			if vmExists {
+				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
+			}
+			return core.LocalCommandResult{Stdout: `[]`}, nil, true
+		case "clone":
+			name = req.Args[2]
+			vmExists = true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "partial clone failure"}, errors.New("exit status 1"), true
+		case "stop":
+			return core.LocalCommandResult{}, nil, true
+		case "get":
+			if vmExists {
+				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
+			}
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "not found"}, errors.New("exit status 1"), true
+		case "delete":
+			deleteCalled = true
+			vmExists = false
+			return core.LocalCommandResult{}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir()},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "clonefail",
+	})
+	if err == nil || !strings.Contains(err.Error(), "partial clone failure") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	if vmExists || !deleteCalled {
+		t.Fatalf("partial clone residue vmExists=%v deleteCalled=%v calls=%#v", vmExists, deleteCalled, runner.calls)
+	}
+	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || ok {
+		t.Fatalf("claim residue ok=%v err=%v", ok, claimErr)
+	}
+	keyPath, keyErr := testboxKeyPath(leaseID)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("lease key residue: %v", statErr)
 	}
 }
 

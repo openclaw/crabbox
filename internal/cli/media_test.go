@@ -1,6 +1,11 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -133,6 +138,183 @@ func TestContactSheetPathForVideo(t *testing.T) {
 	for input, want := range tests {
 		if got := contactSheetPathForVideo(input); got != want {
 			t.Fatalf("contactSheetPathForVideo(%q)=%q want %q", input, got, want)
+		}
+	}
+}
+
+func TestMediaContactSheetStripsTargetDeniedEnvironment(t *testing.T) {
+	input, logPath := installFakeMediaTools(t)
+	output := filepath.Join(t.TempDir(), "contact.png")
+	if _, err := createMediaContactSheet(context.Background(), mediaContactSheetOptions{
+		Input:            input,
+		Output:           output,
+		ChildEnvDenylist: []string{"TEST_MEDIA_DESKTOP_SECRET"},
+		Frames:           2,
+		Cols:             2,
+		Width:            160,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("contact sheet output: %v", err)
+	}
+	assertFakeMediaToolLog(t, logPath, "ffprobe", "ffmpeg")
+}
+
+func TestMediaGIFStripsTargetDeniedEnvironment(t *testing.T) {
+	input, logPath := installFakeMediaTools(t)
+	output := filepath.Join(t.TempDir(), "preview.gif")
+	opts := defaultMediaPreviewOptions(input, output, "")
+	opts.ChildEnvDenylist = []string{"test_media_desktop_secret"}
+	opts.TrimStatic = false
+	opts.GifsicleMode = "required"
+	result, err := createMediaPreview(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.GifsicleOptimized {
+		t.Fatal("expected fake gifsicle optimization")
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("GIF output: %v", err)
+	}
+	assertFakeMediaToolLog(t, logPath, "ffprobe", "ffmpeg", "gifsicle")
+}
+
+func TestStandaloneMediaGIFCommandsStripConfiguredExternalDesktopSecret(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(App, context.Context, []string) error
+	}{
+		{
+			name: "media-preview",
+			run: func(app App, ctx context.Context, args []string) error {
+				return app.mediaPreview(ctx, args)
+			},
+		},
+		{
+			name: "artifacts-gif",
+			run: func(app App, ctx context.Context, args []string) error {
+				return app.artifactsGif(ctx, args)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, name := range []string{
+				"CRABBOX_PROVIDER",
+				"CRABBOX_TARGET",
+				"CRABBOX_TARGET_OS",
+				"CRABBOX_EXTERNAL_COMMAND",
+				"CRABBOX_EXTERNAL_ROUTING_FILE",
+				"CRABBOX_EXTERNAL_DESKTOP_USERNAME",
+				"CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV",
+			} {
+				t.Setenv(name, "")
+			}
+			input, logPath := installFakeMediaTools(t)
+			output := filepath.Join(t.TempDir(), "preview.gif")
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			config := `provider: external
+target: macos
+external:
+  connection:
+    desktop:
+      username: screen-user
+      passwordEnv: TEST_MEDIA_DESKTOP_SECRET
+`
+			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", configPath)
+
+			var stdout, stderr bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &stderr}
+			err := test.run(app, context.Background(), []string{
+				"--input", input,
+				"--output", output,
+				"--no-trim-static",
+				"--gifsicle", "required",
+			})
+			if err != nil {
+				t.Fatalf("command failed: %v\nstderr: %s", err, stderr.String())
+			}
+			if _, err := os.Stat(output); err != nil {
+				t.Fatalf("GIF output: %v", err)
+			}
+			assertFakeMediaToolLog(t, logPath, "ffprobe", "ffmpeg", "gifsicle")
+		})
+	}
+}
+
+func installFakeMediaTools(t *testing.T) (string, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake media tools use POSIX shell")
+	}
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+set -eu
+if [ "${TEST_MEDIA_DESKTOP_SECRET+x}" = x ]; then
+  echo "desktop secret leaked to $(basename "$0")" >&2
+  exit 91
+fi
+if [ "${CRABBOX_TEST_MEDIA_KEEP:-}" != keep ]; then
+  echo "unrelated environment missing from $(basename "$0")" >&2
+  exit 92
+fi
+tool=$(basename "$0")
+printf '%s\n' "$tool" >> "$CRABBOX_TEST_MEDIA_LOG"
+case "$tool" in
+  ffprobe)
+    printf '2.000\n'
+    ;;
+  ffmpeg)
+    output=
+    for value do output=$value; done
+    if [ -n "$output" ] && [ "$output" != - ]; then : > "$output"; fi
+    ;;
+  gifsicle)
+    output=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -o ]; then shift; output=$1; break; fi
+      shift
+    done
+    [ -n "$output" ]
+    : > "$output"
+    ;;
+esac
+`
+	for _, name := range []string{"ffprobe", "ffmpeg", "gifsicle"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(dir, "tools.log")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TEST_MEDIA_DESKTOP_SECRET", "do-not-inherit")
+	t.Setenv("CRABBOX_TEST_MEDIA_KEEP", "keep")
+	t.Setenv("CRABBOX_TEST_MEDIA_LOG", logPath)
+	input := filepath.Join(dir, "input.mp4")
+	if err := os.WriteFile(input, []byte("fake video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return input, logPath
+}
+
+func assertFakeMediaToolLog(t *testing.T, path string, tools ...string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	for _, tool := range tools {
+		if !strings.Contains(log, tool+"\n") {
+			t.Fatalf("tool log missing %s:\n%s", tool, log)
 		}
 	}
 }

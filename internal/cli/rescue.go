@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
+	"reflect"
 	"strings"
 )
 
@@ -109,7 +111,114 @@ func crabboxLeaseCommandArgs(ctx rescueContext, command ...string) []string {
 	if targetOS == targetWindows && windowsMode != "" {
 		args = append(args, "--windows-mode", windowsMode)
 	}
+	args = append(args, leaseCommandRoutingArgs(ctx.Cfg, ctx.LeaseID)...)
 	args = append(args, "--id", ctx.LeaseID)
+	return args
+}
+
+func leaseCommandRoutingArgs(cfg Config, leaseID string) []string {
+	provider := normalizeProviderName(cfg.Provider)
+	if provider == "external" || provider == "exec-provider" {
+		return externalLeaseCommandRoutingArgs(cfg, leaseID)
+	}
+	return providerCommandRoutingArgs(cfg, leaseID)
+}
+
+// externalLeaseCommandRoutingArgs keeps generated follow-up commands bound to
+// the resolved External lease. Private routing state is the complete contract;
+// the flag fallback is deliberately limited to fields that cannot contain
+// provider arguments or config secrets.
+func externalLeaseCommandRoutingArgs(cfg Config, leaseID string) []string {
+	provider := normalizeProviderName(cfg.Provider)
+	if provider != "external" && provider != "exec-provider" {
+		return nil
+	}
+
+	routingPath := strings.TrimSpace(cfg.External.RoutingFile)
+	if routingPath != "" {
+		return externalPersistedRoutingArgs(routingPath, cfg)
+	}
+	canonicalPath, pathErr := ExternalRoutingPath(leaseID)
+	if pathErr == nil {
+		_, statErr := os.Stat(expandUserPath(canonicalPath))
+		if statErr == nil || !os.IsNotExist(statErr) {
+			return externalPersistedRoutingArgs(canonicalPath, cfg)
+		}
+	}
+
+	if !externalRoutingHasSafeFlagFallback(cfg.External) {
+		// Keep complex External state fail-closed. Re-emitting adapter arguments,
+		// config, lifecycle templates, or connection data could put secrets on
+		// argv or silently address a different resource.
+		if pathErr == nil {
+			return externalPersistedRoutingArgs(canonicalPath, cfg)
+		}
+		return appendExternalDesktopRoutingArgs(nil, cfg)
+	}
+
+	args := []string{"--external-command", strings.TrimSpace(cfg.External.Command)}
+	if workRoot := strings.TrimSpace(cfg.External.WorkRoot); workRoot != "" {
+		args = append(args, "--external-work-root", workRoot)
+	}
+	args = append(args, fmt.Sprintf("--external-idempotent-lease-id=%t", cfg.External.Capabilities.IdempotentLeaseID))
+	return appendExternalDesktopRoutingArgs(args, cfg)
+}
+
+func externalPersistedRoutingArgs(path string, overrides Config) []string {
+	routing := overrides.External
+	if ExternalRoutingDigest(routing) == "" {
+		loaded, err := LoadExternalRouting(path)
+		if err != nil {
+			return []string{"--external-routing-file", path, "--external-routing-digest", ""}
+		}
+		routing = loaded
+	}
+	routed := Config{External: routing}
+	if IsExternalDesktopUsernameExplicit(&overrides) {
+		routed.External.Connection.Desktop.Username = overrides.External.Connection.Desktop.Username
+		MarkExternalDesktopUsernameExplicit(&routed)
+	}
+	if IsExternalDesktopPasswordEnvExplicit(&overrides) {
+		routed.External.Connection.Desktop.PasswordEnv = overrides.External.Connection.Desktop.PasswordEnv
+		MarkExternalDesktopPasswordEnvExplicit(&routed)
+	}
+	return appendExternalDesktopRoutingArgs(externalRoutingFileArgs(path, routing), routed)
+}
+
+func externalRoutingFileArgs(path string, cfg ExternalConfig) []string {
+	digest := ExternalRoutingDigest(cfg)
+	if digest == "" {
+		if routing, err := LoadExternalRouting(path); err == nil {
+			digest = ExternalRoutingDigest(routing)
+		}
+	}
+	// Always emit the binding flag. An unreadable/missing route therefore
+	// produces an invalid empty digest and the generated child fails closed;
+	// it can never accept a later path replacement as an unbound route.
+	return []string{"--external-routing-file", path, "--external-routing-digest", digest}
+}
+
+func externalRoutingHasSafeFlagFallback(cfg ExternalConfig) bool {
+	connection := cfg.Connection
+	connection.Desktop = ExternalDesktopConfig{}
+	return strings.TrimSpace(cfg.Command) != "" &&
+		len(cfg.Args) == 0 &&
+		len(cfg.Config) == 0 &&
+		reflect.DeepEqual(cfg.Lifecycle, ExternalLifecycleConfig{}) &&
+		reflect.DeepEqual(connection, ExternalConnectionConfig{})
+}
+
+func appendExternalDesktopRoutingArgs(args []string, cfg Config) []string {
+	if username := strings.TrimSpace(cfg.External.Connection.Desktop.Username); username != "" || IsExternalDesktopUsernameExplicit(&cfg) {
+		if cfg.credentialProvenance.externalDesktopUser != credentialSourceRepository {
+			args = append(args, "--external-desktop-username", username)
+		}
+	}
+	if passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); passwordEnv != "" || IsExternalDesktopPasswordEnvExplicit(&cfg) {
+		if cfg.credentialProvenance.externalDesktopEnv != credentialSourceRepository {
+			args = append(args, "--external-desktop-password-env", passwordEnv)
+		}
+	}
 	return args
 }
 

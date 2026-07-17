@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -193,6 +194,81 @@ func TestArtifactCollectNeedsDesktop(t *testing.T) {
 	}
 }
 
+func TestWriteArtifactRunLogsUsesRoutedCoordinatorAndScrubsDesktopCredentials(t *testing.T) {
+	t.Setenv("CRABBOX_ARTIFACT_RUN_TOKEN_HELPER", "1")
+	t.Setenv("ARTIFACT_CURRENT_DESKTOP_PASSWORD", "current-secret")
+	t.Setenv("ARTIFACT_ROUTED_DESKTOP_PASSWORD", "routed-secret")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		if got := r.Header.Get("Authorization"); got != "Bearer artifact-token" {
+			t.Errorf("Authorization=%q", got)
+		}
+		switch r.URL.Path {
+		case "/v1/runs/run_routed/logs":
+			_, _ = io.WriteString(w, "routed logs")
+		case "/v1/runs/run_routed":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"run":{"id":"run_routed","state":"passed"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Coordinator:       server.URL,
+		CoordTokenCommand: []string{os.Args[0], "-test.run=^TestArtifactRunLogCoordinatorTokenHelper$"},
+		Provider:          "external",
+		TargetOS:          targetMacOS,
+	}
+	cfg.External.Connection.Desktop.PasswordEnv = "ARTIFACT_ROUTED_DESKTOP_PASSWORD"
+	// A base-config reload would ignore the routed coordinator above.
+	t.Setenv("CRABBOX_COORDINATOR", "http://127.0.0.1:1")
+
+	dir := t.TempDir()
+	logPath, runPath, err := writeArtifactRunLogs(
+		context.Background(),
+		cfg,
+		[]string{"ARTIFACT_CURRENT_DESKTOP_PASSWORD"},
+		"run_routed",
+		dir,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&requests); got != 2 {
+		t.Fatalf("requests=%d", got)
+	}
+	if data, err := os.ReadFile(logPath); err != nil || string(data) != "routed logs" {
+		t.Fatalf("logs=%q err=%v", data, err)
+	}
+	var run CoordinatorRun
+	if data, err := os.ReadFile(runPath); err != nil {
+		t.Fatal(err)
+	} else if err := json.Unmarshal(data, &run); err != nil || run.ID != "run_routed" {
+		t.Fatalf("run=%#v err=%v", run, err)
+	}
+}
+
+func TestArtifactRunLogCoordinatorTokenHelper(t *testing.T) {
+	if os.Getenv("CRABBOX_ARTIFACT_RUN_TOKEN_HELPER") != "1" {
+		return
+	}
+	for _, name := range []string{"ARTIFACT_CURRENT_DESKTOP_PASSWORD", "ARTIFACT_ROUTED_DESKTOP_PASSWORD"} {
+		if _, ok := os.LookupEnv(name); ok {
+			os.Exit(89)
+		}
+	}
+	if os.Getenv("CRABBOX_TEST_KEEP") != "preserved" {
+		os.Exit(90)
+	}
+	_, _ = fmt.Fprintln(os.Stdout, "artifact-token")
+	os.Exit(0)
+}
+
 func TestArtifactCloudflareEnvUsesGenericCredentials(t *testing.T) {
 	t.Setenv("CLOUDFLARE_API_TOKEN", "generic-token")
 	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "generic-account")
@@ -222,6 +298,234 @@ func TestArtifactCloudflareEnvArtifactCredentialsWin(t *testing.T) {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env missing %q in %s", want, env)
 		}
+	}
+}
+
+func TestArtifactPublisherCommandsScrubTargetEnvironmentAndPreserveToolAuth(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell publisher fixtures")
+	}
+	for _, tc := range []struct {
+		name      string
+		command   string
+		authSetup func(*testing.T)
+		authCheck string
+		publish   func(*testing.T, context.Context, artifactPublishOptions, string) error
+	}{
+		{
+			name:    "aws",
+			command: "aws",
+			authSetup: func(t *testing.T) {
+				t.Setenv("AWS_ACCESS_KEY_ID", "publisher-access")
+				t.Setenv("AWS_SECRET_ACCESS_KEY", "publisher-secret")
+			},
+			authCheck: "[ \"$AWS_ACCESS_KEY_ID\" = publisher-access ] && [ \"$AWS_SECRET_ACCESS_KEY\" = publisher-secret ] || exit 91\n",
+			publish: func(t *testing.T, ctx context.Context, opts artifactPublishOptions, dir string) error {
+				opts.Bucket = "qa"
+				file, cleanup := artifactPublisherTestFile(t, dir)
+				defer cleanup()
+				_, err := uploadArtifactS3(ctx, opts, file, "proof.png", "image/png")
+				return err
+			},
+		},
+		{
+			name:    "wrangler",
+			command: "wrangler",
+			authSetup: func(t *testing.T) {
+				t.Setenv("CRABBOX_ARTIFACTS_CLOUDFLARE_API_TOKEN", "")
+				t.Setenv("CRABBOX_ARTIFACTS_CLOUDFLARE_ACCOUNT_ID", "")
+				t.Setenv("CLOUDFLARE_API_TOKEN", "publisher-token")
+				t.Setenv("CLOUDFLARE_ACCOUNT_ID", "publisher-account")
+			},
+			authCheck: "[ \"$CLOUDFLARE_API_TOKEN\" = publisher-token ] && [ \"$CLOUDFLARE_ACCOUNT_ID\" = publisher-account ] || exit 92\n",
+			publish: func(t *testing.T, ctx context.Context, opts artifactPublishOptions, dir string) error {
+				opts.Bucket = "qa"
+				opts.BaseURL = "https://assets.example.test"
+				file, cleanup := artifactPublisherTestFile(t, dir)
+				defer cleanup()
+				_, err := uploadArtifactCloudflare(ctx, opts, file, "proof.png", "image/png")
+				return err
+			},
+		},
+		{
+			name:    "gh",
+			command: "gh",
+			authSetup: func(t *testing.T) {
+				t.Setenv("GH_TOKEN", "publisher-token")
+				t.Setenv("GH_CONFIG_DIR", t.TempDir())
+			},
+			authCheck: "[ \"$GH_TOKEN\" = publisher-token ] && [ -n \"$GH_CONFIG_DIR\" ] || exit 93\n",
+			publish: func(_ *testing.T, ctx context.Context, opts artifactPublishOptions, _ string) error {
+				opts.PR = 42
+				opts.Repo = "example-org/my-app"
+				return postGitHubPRComment(ctx, opts, []byte("proof"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			script := "#!/bin/sh\n" +
+				"if [ \"${TEST_ARD_PASSWORD+x}\" = x ]; then exit 89; fi\n" +
+				"[ \"$CRABBOX_TEST_KEEP\" = preserved ] || exit 90\n" +
+				tc.authCheck +
+				"printf ok\n"
+			if err := os.WriteFile(filepath.Join(dir, tc.command), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-publisher")
+			t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+			tc.authSetup(t)
+			opts := artifactPublishOptions{ChildEnvDenylist: []string{"test_ard_password"}}
+			if err := tc.publish(t, context.Background(), opts, dir); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func artifactPublisherTestFile(t *testing.T, dir string) (artifactFile, func()) {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, cleanup, err := snapshotArtifactData(root, artifactFile{
+		Kind: artifactKindForPath("proof.png"),
+		Name: "proof.png",
+		Path: filepath.Join(dir, "proof.png"),
+	}, []byte("proof"))
+	if err != nil {
+		_ = root.Close()
+		t.Fatal(err)
+	}
+	return files[0], func() {
+		cleanup()
+		_ = root.Close()
+	}
+}
+
+func TestArtifactsPublishScrubsConfiguredExternalDesktopPasswordEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell publisher fixtures")
+	}
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	config := `provider: external
+target: macos
+external:
+  connection:
+    desktop:
+      username: screen-user
+      passwordEnv: TEST_ARTIFACTS_DESKTOP_PASSWORD
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(root, "bin")
+	if err := os.Mkdir(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "publisher.log")
+	script := "#!/bin/sh\n" +
+		"if [ \"${TEST_ARTIFACTS_DESKTOP_PASSWORD+x}\" = x ]; then exit 89; fi\n" +
+		"[ \"$CRABBOX_TEST_KEEP\" = preserved ] || exit 90\n" +
+		"printf '%s\\n' \"${0##*/}\" >> \"$CRABBOX_TEST_ARTIFACT_PUBLISH_LOG\"\n"
+	for _, name := range []string{"aws", "gh"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bundleDir := filepath.Join(root, "bundle")
+	if err := os.Mkdir(bundleDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(bundleDir, "proof.png"), "png")
+
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", "")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TEST_ARTIFACTS_DESKTOP_PASSWORD", "must-not-reach-publisher")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+	t.Setenv("CRABBOX_TEST_ARTIFACT_PUBLISH_LOG", logPath)
+
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).artifactsPublish(context.Background(), []string{
+		"--dir", bundleDir,
+		"--storage", "s3",
+		"--bucket", "qa",
+		"--skip-manifest",
+		"--pr", "42",
+		"--repo", "example-org/my-app",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logData)
+	for _, name := range []string{"aws\n", "gh\n"} {
+		if !strings.Contains(logText, name) {
+			t.Fatalf("publisher log missing %q: %q", name, logText)
+		}
+	}
+}
+
+func TestArtifactsPublishRejectsInvalidExternalDesktopPasswordEnvironmentBeforePublisher(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell publisher fixture")
+	}
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	config := `provider: external
+target: macos
+external:
+  command: provider-adapter
+  connection:
+    desktop:
+      username: screen-user
+      passwordEnv: PATH
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(root, "bin")
+	if err := os.Mkdir(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	invokedPath := filepath.Join(root, "publisher-invoked")
+	script := "#!/bin/sh\nprintf invoked > \"$CRABBOX_TEST_ARTIFACT_PUBLISH_INVOKED\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "aws"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bundleDir := filepath.Join(root, "bundle")
+	if err := os.Mkdir(bundleDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(bundleDir, "proof.png"), "png")
+
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", "")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TEST_ARTIFACT_PUBLISH_INVOKED", invokedPath)
+
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).artifactsPublish(context.Background(), []string{
+		"--dir", bundleDir,
+		"--storage", "s3",
+		"--bucket", "qa",
+		"--skip-manifest",
+		"--no-comment",
+	})
+	if err == nil || !strings.Contains(err.Error(), "passwordEnv PATH is reserved") {
+		t.Fatalf("error=%v", err)
+	}
+	if _, statErr := os.Stat(invokedPath); !os.IsNotExist(statErr) {
+		t.Fatalf("publisher invoked before config rejection: %v", statErr)
 	}
 }
 
@@ -318,6 +622,29 @@ func TestWindowsDesktopVideoRemoteCommandCapturesInteractiveFrames(t *testing.T)
 		if !strings.Contains(got, want) {
 			t.Fatalf("windows video command missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestWindowsDesktopVideoEncoderScrubsTargetChildEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ffmpeg fixture")
+	}
+	dir := t.TempDir()
+	ffmpeg := filepath.Join(dir, "ffmpeg")
+	script := "#!/bin/sh\nif [ \"${TEST_ARD_PASSWORD+x}\" = x ]; then echo leaked >&2; exit 89; fi\nif [ \"$CRABBOX_TEST_KEEP\" != preserved ]; then echo missing >&2; exit 90; fi\nprintf encoded\n"
+	if err := os.WriteFile(ffmpeg, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-ffmpeg")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+	target := SSHTarget{ChildEnvDenylist: []string{"TEST_ARD_PASSWORD"}}
+	out, err := windowsDesktopVideoEncoderCommand(context.Background(), target, "-version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("fake ffmpeg: %v: %s", err, out)
+	}
+	if string(out) != "encoded" {
+		t.Fatalf("fake ffmpeg output=%q", out)
 	}
 }
 

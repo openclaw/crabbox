@@ -188,6 +188,14 @@ func ProviderClaimScope(provider string, cfg Config) string {
 	return providerClaimScope(canonicalClaimProvider(provider), cfg)
 }
 
+func IsArchitectureExplicit(cfg Config) bool {
+	return cfg.architectureExplicit
+}
+
+func NormalizeArchitecture(value string) (string, error) {
+	return normalizeArchitecture(value)
+}
+
 func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
 }

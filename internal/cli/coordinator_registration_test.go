@@ -53,6 +53,48 @@ type recreatingClaimResolveBackend struct {
 	repo  string
 }
 
+func TestRegisteredWebVNCDaemonCredentialInputUsesTransientConfig(t *testing.T) {
+	const passwordEnv = "TEST_REGISTERED_ARD_PASSWORD"
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.TargetOS = targetMacOS
+	cfg.External.Connection.Desktop.PasswordEnv = passwordEnv
+	if err := setExternalDesktopTransientCredential(&cfg, passwordEnv, "operator-secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{
+		"--provider", "external",
+		"--target", targetMacOS,
+		"--external-desktop-password-env", passwordEnv,
+		"--id", "cbx_abcdef123456",
+	}
+	credential := registeredWebVNCDaemonCredentialInput(cfg, args)
+	if credential == nil || *credential != "operator-secret" {
+		t.Fatalf("credential=%v args=%#v", credential, args)
+	}
+	if environment := strings.Join(webVNCDaemonChildEnvironment([]string{
+		"PATH=/bin",
+		passwordEnv + "=operator-secret",
+	}, args, passwordEnv), "\n"); strings.Contains(environment, passwordEnv) || strings.Contains(environment, "operator-secret") {
+		t.Fatalf("daemon environment retained desktop credential: %q", environment)
+	}
+	environmentCfg := cfg
+	environmentCfg.externalDesktopCredentialName = ""
+	environmentCfg.externalDesktopCredential = nil
+	t.Setenv(passwordEnv, "environment-secret")
+	credential = registeredWebVNCDaemonCredentialInput(environmentCfg, args)
+	if credential == nil || *credential != "environment-secret" {
+		t.Fatalf("environment credential=%v args=%#v", credential, args)
+	}
+
+	linuxArgs := append([]string(nil), args...)
+	linuxArgs[3] = targetLinux
+	if credential := registeredWebVNCDaemonCredentialInput(cfg, linuxArgs); credential != nil {
+		t.Fatalf("non-macOS bridge received desktop credential: %q", *credential)
+	}
+}
+
 func (b resolveResultBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
 	return b.lease, nil
 }

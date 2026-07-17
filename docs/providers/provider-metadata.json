@@ -233,6 +233,20 @@
     "auth": "API key via CRABBOX_CODESANDBOX_API_KEY or CodeSandbox env auth; env-only remote sandbox auth",
     "docs": "codesandbox.md"
   },
+  "cua": {
+    "status": "built-in",
+    "category": "service-control",
+    "substrate": "CUA cloud sandbox inventory",
+    "location": "provider-managed",
+    "ssh": "no",
+    "sync": "none",
+    "gpu": "unknown",
+    "lifecycle": "CUA read-only inventory",
+    "cleanup": "not exposed",
+    "bestFit": "Experimental CUA diagnostics and existing-sandbox inspection",
+    "caveat": "Experimental and read-only; all remote lifecycle mutations fail closed until upstream exposes safe creation and deletion ownership primitives",
+    "docs": "cua.md"
+  },
   "coder": {
     "status": "built-in",
     "category": "direct-cloud",

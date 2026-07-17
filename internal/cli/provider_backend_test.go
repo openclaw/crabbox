@@ -26,6 +26,51 @@ func testRuntimeWithRunner(r CommandRunner) Runtime {
 	return Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: realClock{}, Exec: r}
 }
 
+func TestLoadBackendScrubsTrustedExternalDesktopPasswordFromNonExternalCommands(t *testing.T) {
+	t.Setenv(controllerProviderScopeEnv, "")
+	t.Setenv("TRUSTED_DESKTOP_PASSWORD", "ambient-secret")
+	t.Setenv("CRABBOX_TEST_CHILD_KEEP", "ambient-value")
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Coordinator = "https://coordinator.example"
+	cfg.External.Connection.Desktop.PasswordEnv = "TRUSTED_DESKTOP_PASSWORD"
+	MarkExternalDesktopPasswordEnvExplicit(&cfg)
+
+	recorder := &recordingCommandRunner{}
+	backend, err := loadBackend(cfg, testRuntimeWithRunner(recorder))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, ok := backend.(*coordinatorLeaseBackend)
+	if !ok {
+		t.Fatalf("backend=%T, want coordinatorLeaseBackend", backend)
+	}
+	for _, request := range []LocalCommandRequest{
+		{Env: []string{"trusted_desktop_password=explicit-secret", "KEEP=explicit-value"}},
+		{},
+	} {
+		if _, err := coordinator.rt.Exec.Run(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(recorder.calls) != 2 {
+		t.Fatalf("command calls=%d", len(recorder.calls))
+	}
+	for index, call := range recorder.calls {
+		for _, entry := range call.Env {
+			if strings.EqualFold(strings.SplitN(entry, "=", 2)[0], "TRUSTED_DESKTOP_PASSWORD") {
+				t.Fatalf("call %d retained desktop credential variable", index)
+			}
+		}
+	}
+	if !strings.Contains(strings.Join(recorder.calls[0].Env, "\n"), "KEEP=explicit-value") {
+		t.Fatal("explicit environment lost unrelated marker")
+	}
+	if !strings.Contains(strings.Join(recorder.calls[1].Env, "\n"), "CRABBOX_TEST_CHILD_KEEP=ambient-value") {
+		t.Fatal("ambient environment lost unrelated marker")
+	}
+}
+
 func TestFinalizeRunResultClassifiesStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -643,6 +688,20 @@ func TestLeaseCreateFlagsApplySelectedProviderFlags(t *testing.T) {
 	}
 	if cfg.Blacksmith.Org != "openclaw" || cfg.Blacksmith.Workflow != ".github/workflows/testbox.yml" || cfg.Blacksmith.Job != "test" || cfg.Blacksmith.Ref != "feature" {
 		t.Fatalf("blacksmith flags not applied through provider registry: %#v", cfg.Blacksmith)
+	}
+}
+
+func TestLeaseCreateFlagsRejectLumeLinuxTarget(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "lume", "--target", "linux"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	err := applyLeaseCreateFlags(&cfg, fs, values)
+	if err == nil || !strings.Contains(err.Error(), "provider=lume supports target=macos only") {
+		t.Fatalf("err=%v, want explicit Linux target rejection", err)
 	}
 }
 

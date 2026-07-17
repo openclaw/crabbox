@@ -11,8 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 )
@@ -138,7 +136,7 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 	}
 	if noBrowser {
 		fmt.Fprintf(a.Stderr, "open this GitHub login URL in a browser on this device:\n%s\n", start.URL)
-	} else if err := openBrowser(start.URL); err != nil {
+	} else if err := openLoginBrowser(start.URL, cfg); err != nil {
 		fmt.Fprintf(a.Stderr, "could not open browser: %v\nopen this GitHub login URL in a browser on this device:\n%s\n", err, start.URL)
 	} else {
 		fmt.Fprintln(a.Stderr, "opened GitHub login in your browser")
@@ -408,15 +406,11 @@ func normalizedBrokerURL(value string) string {
 	return strings.TrimRight(u.String(), "/")
 }
 
-func openBrowser(target string) error {
-	switch runtime.GOOS {
-	case "darwin":
-		return exec.Command("open", target).Start()
-	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", target).Start()
-	default:
-		return exec.Command("xdg-open", target).Start()
+func openLoginBrowser(target string, cfg Config) error {
+	if err := ValidateProviderCredentialDestination(cfg); err != nil {
+		return err
 	}
+	return openLocalURLWithEnvironment(target, externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)...)
 }
 
 func randomHex(size int) (string, error) {

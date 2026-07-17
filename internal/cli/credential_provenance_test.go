@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -8,6 +10,37 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestExternalDesktopTransientCredentialIsExactAndRedacted(t *testing.T) {
+	const name = "TRANSIENT_SCREEN_PASSWORD"
+	const secret = "operator\nsecret\n"
+	t.Setenv(name, "temporary")
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Provider: "external"}
+	if err := setExternalDesktopTransientCredential(&cfg, name, secret); err != nil {
+		t.Fatal(err)
+	}
+	value, ok := LookupExternalDesktopPassword(cfg, name)
+	if !ok || value != secret {
+		t.Fatalf("value=%q ok=%t", value, ok)
+	}
+	if _, ok := LookupExternalDesktopPassword(cfg, strings.ToLower(name)); ok {
+		t.Fatal("transient credential matched a different environment name")
+	}
+	formatted := fmt.Sprintf("%+v", cfg)
+	if strings.Contains(formatted, secret) || strings.Contains(formatted, "operator") {
+		t.Fatalf("formatted config exposed transient credential: %s", formatted)
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "operator") || strings.Contains(string(encoded), "TRANSIENT_SCREEN_PASSWORD") {
+		t.Fatalf("serialized config exposed transient credential metadata: %s", encoded)
+	}
+}
 
 func TestRepositoryCredentialDestinationsRejectInheritedCredentials(t *testing.T) {
 	tests := []struct {
@@ -978,6 +1011,19 @@ func TestRepositorySSHDestinationsRejectInheritedOrAmbientAuthentication(t *test
 			},
 			want: "external.connection.ssh.allowEnv",
 		},
+		{
+			name: "external repository desktop password environment",
+			cfg: Config{
+				Provider: "external",
+				External: ExternalConfig{Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+					PasswordEnv: "INHERITED_SECRET",
+				}}},
+				credentialProvenance: credentialDestinationProvenance{
+					externalDesktopEnv: credentialSourceRepository,
+				},
+			},
+			want: "external.connection.desktop.passwordEnv",
+		},
 	}
 
 	for _, test := range tests {
@@ -1229,6 +1275,209 @@ func TestExternalRoutingLoaderPreservesConfiguredSource(t *testing.T) {
 	}
 	if err := validateProviderCredentialDestination(validatedClaim); err != nil {
 		t.Fatalf("validated claim-bound routing state rejected: %v", err)
+	}
+}
+
+func TestValidatedExternalDesktopRoutingRestoresApprovedTarget(t *testing.T) {
+	tests := []struct {
+		name        string
+		targetOS    string
+		windowsMode string
+	}{
+		{name: "macOS", targetOS: targetMacOS, windowsMode: windowsModeNormal},
+		{name: "Windows WSL2", targetOS: targetWindows, windowsMode: windowsModeWSL2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			external := ExternalConfig{
+				Lifecycle: externalLifecycleConfigForTest(),
+				Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+					Username:    "screen-user",
+					PasswordEnv: "SCREEN_PASSWORD",
+				}},
+			}
+			SetExternalRoutingTarget(&external, test.targetOS, test.windowsMode)
+			path, err := PersistValidatedExternalRouting("cbx_abcdef123456", external)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := baseConfig()
+			cfg.Provider = "external"
+			if err := loadExternalRoutingConfig(&cfg, path, true); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TargetOS != test.targetOS || cfg.WindowsMode != test.windowsMode {
+				t.Fatalf("target=%q windows-mode=%q", cfg.TargetOS, cfg.WindowsMode)
+			}
+			if cfg.credentialProvenance.externalDesktopTarget != credentialSourceTrustedFile ||
+				cfg.credentialProvenance.externalDesktopMode != credentialSourceTrustedFile {
+				t.Fatalf("routing target provenance=%#v", cfg.credentialProvenance)
+			}
+			if err := validateProviderCredentialDestination(cfg); err != nil {
+				t.Fatalf("validated routing desktop contract rejected: %v", err)
+			}
+			if test.targetOS == targetMacOS {
+				cfg.TargetOS = targetWindows
+			} else {
+				cfg.WindowsMode = windowsModeNormal
+			}
+			if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external desktop target/account contract") {
+				t.Fatalf("stale environment provenance authorized a changed target tuple error=%v", err)
+			}
+		})
+	}
+}
+
+func TestExternalAutoRoutingReplacesEnvironmentDesktopTarget(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("CRABBOX_TARGET", targetWindows)
+	t.Setenv("CRABBOX_WINDOWS_MODE", windowsModeWSL2)
+	external := ExternalConfig{
+		Lifecycle: externalLifecycleConfigForTest(),
+		Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+			Username:    "screen-user",
+			PasswordEnv: "SCREEN_PASSWORD",
+		}},
+	}
+	SetExternalRoutingTarget(&external, targetMacOS, windowsModeNormal)
+	path, err := PersistValidatedExternalRouting("cbx_abcdef123456", external)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadExternalRoutingConfig(&cfg, path, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetMacOS || cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("target=%q windows-mode=%q", cfg.TargetOS, cfg.WindowsMode)
+	}
+	if cfg.credentialProvenance.externalDesktopTarget != credentialSourceTrustedFile ||
+		cfg.credentialProvenance.externalDesktopMode != credentialSourceTrustedFile {
+		t.Fatalf("routing did not replace environment target provenance: %#v", cfg.credentialProvenance)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("persisted routing target rejected: %v", err)
+	}
+}
+
+func TestExternalRoutingApprovesUsernameWithoutPersistedPasswordReference(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "RUNTIME_SCREEN_PASSWORD")
+	external := ExternalConfig{
+		Lifecycle: externalLifecycleConfigForTest(),
+		Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+			Username: "screen-user",
+		}},
+	}
+	SetExternalRoutingTarget(&external, targetMacOS, windowsModeNormal)
+	path, err := PersistValidatedExternalRouting("cbx_abcdef123456", external)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	if err := loadExternalRoutingConfig(&cfg, path, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Connection.Desktop.Username != "screen-user" ||
+		cfg.External.Connection.Desktop.PasswordEnv != "RUNTIME_SCREEN_PASSWORD" {
+		t.Fatalf("desktop=%#v", cfg.External.Connection.Desktop)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("routed username plus explicit password reference rejected: %v", err)
+	}
+}
+
+func TestExternalAutoRoutingReplacesAmbientFileDesktopTarget(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	external := ExternalConfig{
+		Lifecycle: externalLifecycleConfigForTest(),
+		Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+			Username:    "screen-user",
+			PasswordEnv: "SCREEN_PASSWORD",
+		}},
+	}
+	SetExternalRoutingTarget(&external, targetMacOS, windowsModeNormal)
+	path, err := PersistValidatedExternalRouting("cbx_abcdef123456", external)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{
+		Target:  targetWindows,
+		Windows: &fileWindowsConfig{Mode: windowsModeWSL2},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadExternalRoutingConfig(&cfg, path, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetMacOS || cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("ambient file target overrode routing: target=%q windows-mode=%q", cfg.TargetOS, cfg.WindowsMode)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("persisted routing target rejected: %v", err)
+	}
+}
+
+func TestRoutingApprovalPreservesSameExplicitDesktopTuple(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.TargetOS = targetMacOS
+	cfg.WindowsMode = windowsModeNormal
+	cfg.External.Connection.Desktop = ExternalDesktopConfig{
+		Username:    "screen-user",
+		PasswordEnv: "SCREEN_PASSWORD",
+	}
+	SetExternalRoutingTarget(&cfg.External, targetMacOS, windowsModeNormal)
+	cfg.credentialProvenance.externalDesktopTarget = credentialSourceFlag
+	cfg.credentialProvenance.externalDesktopMode = credentialSourceFlag
+	MarkExternalRoutingCredentialSources(&cfg)
+	if cfg.credentialProvenance.externalDesktopTarget != credentialSourceFlag ||
+		cfg.credentialProvenance.externalDesktopMode != credentialSourceFlag {
+		t.Fatalf("same explicit tuple lost provenance: %#v", cfg.credentialProvenance)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("same explicit target tuple rejected: %v", err)
+	}
+}
+
+func TestExplicitRoutingTargetReplacementClearsEnvironmentProvenance(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.TargetOS = targetMacOS
+	cfg.WindowsMode = windowsModeNormal
+	cfg.External.Connection.Desktop = ExternalDesktopConfig{
+		Username:    "screen-user",
+		PasswordEnv: "SCREEN_PASSWORD",
+	}
+	SetExternalRoutingTarget(&cfg.External, targetMacOS, windowsModeNormal)
+	cfg.credentialProvenance.externalRouting = credentialSourceFlag
+	cfg.credentialProvenance.externalDesktopTarget = credentialSourceEnvironment
+	cfg.credentialProvenance.externalDesktopMode = credentialSourceEnvironment
+	MarkExternalRoutingCredentialSources(&cfg)
+	MarkExternalRoutingTargetRestored(&cfg, true, true)
+	if cfg.credentialProvenance.externalDesktopTarget != credentialSourceTrustedFile ||
+		cfg.credentialProvenance.externalDesktopMode != credentialSourceTrustedFile {
+		t.Fatalf("explicit routing file retained ambient provenance: %#v", cfg.credentialProvenance)
+	}
+	cfg.TargetOS = targetWindows
+	if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external desktop target/account contract") {
+		t.Fatalf("routing-file provenance authorized a later target change error=%v", err)
 	}
 }
 
@@ -1944,6 +2193,52 @@ func TestConfigMergeTracksSSHDestinationSources(t *testing.T) {
 		}
 	})
 
+	t.Run("desktop overrides do not widen provider output approval", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		cfg.TargetOS = targetMacOS
+		trustedConnection := ExternalConnectionConfig{
+			ResourceName: "approved-resource",
+			SSH:          ExternalSSHConnectionConfig{TrustProviderOutput: true},
+			Desktop: ExternalDesktopConfig{
+				Username:    "approved-screen-user",
+				PasswordEnv: "APPROVED_DESKTOP_PASSWORD",
+			},
+		}
+		trusted := fileExternalConfig{
+			Command:    "approved-provider",
+			Connection: &trustedConnection,
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &trusted}, true); err != nil {
+			t.Fatal(err)
+		}
+
+		repositoryConnection := trustedConnection
+		repositoryConnection.Desktop.Username = "repository-screen-user"
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{
+			Connection: &repositoryConnection,
+		}}, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateExternalProviderSSHOutput(cfg); err != nil {
+			t.Fatalf("desktop-only change invalidated SSH provider-output approval: %v", err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external.connection.desktop.username") {
+			t.Fatalf("unapproved repository desktop account error=%v", err)
+		}
+
+		MarkExternalDesktopUsernameExplicit(&cfg)
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("explicit desktop account override rejected: %v", err)
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{Target: targetWindows}, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external desktop target/account contract") {
+			t.Fatalf("explicit account incorrectly approved repository target error=%v", err)
+		}
+	})
+
 	t.Run("repository cannot self-enable external provider output", func(t *testing.T) {
 		cfg := baseConfig()
 		cfg.Provider = "external"
@@ -2070,6 +2365,146 @@ func TestConfigMergeTracksSSHDestinationSources(t *testing.T) {
 					t.Fatalf("repository %s template input error=%v", name, err)
 				}
 			})
+		}
+	})
+}
+
+func TestExternalDesktopPasswordEnvRequiresTrustedApproval(t *testing.T) {
+	clearConfigEnv(t)
+	connection := ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+		Username: "approved-screen-user", PasswordEnv: "APPROVED_DESKTOP_PASSWORD",
+	}}
+	approvedConfig := func() Config {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &connection}}, true); err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	cfg := approvedConfig()
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &connection}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("exact trusted desktop password reference rejected: %v", err)
+	}
+
+	cfg = approvedConfig()
+	repositoryConnection := connection
+	repositoryConnection.Desktop.Username = "other-screen-user"
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &repositoryConnection}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external.connection.desktop.username") {
+		t.Fatalf("repository desktop account error=%v", err)
+	}
+
+	cfg = approvedConfig()
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{Target: "macos"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external desktop target/account contract") {
+		t.Fatalf("repository desktop target error=%v", err)
+	}
+	t.Setenv("CRABBOX_TARGET", "macos")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("explicit desktop target override rejected: %v", err)
+	}
+	t.Setenv("CRABBOX_TARGET", "")
+
+	cfg = approvedConfig()
+	repositoryConnection = connection
+	repositoryConnection.Desktop.PasswordEnv = "OTHER_INHERITED_SECRET"
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &repositoryConnection}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external.connection.desktop.passwordEnv") {
+		t.Fatalf("repository desktop secret reference error=%v", err)
+	}
+
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "EXPLICIT_DESKTOP_PASSWORD")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("explicit desktop password environment override rejected: %v", err)
+	}
+
+	t.Run("explicit username does not approve password environment", func(t *testing.T) {
+		cfg := approvedConfig()
+		repositoryConnection := connection
+		repositoryConnection.Desktop.Username = "explicit-screen-user"
+		repositoryConnection.Desktop.PasswordEnv = "REPOSITORY_DESKTOP_PASSWORD"
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &repositoryConnection}}, false); err != nil {
+			t.Fatal(err)
+		}
+		MarkExternalDesktopUsernameExplicit(&cfg)
+		if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external.connection.desktop.passwordEnv") {
+			t.Fatalf("explicit username incorrectly approved password environment error=%v", err)
+		}
+	})
+
+	t.Run("explicit password environment does not approve username", func(t *testing.T) {
+		cfg := approvedConfig()
+		repositoryConnection := connection
+		repositoryConnection.Desktop.Username = "repository-screen-user"
+		repositoryConnection.Desktop.PasswordEnv = "EXPLICIT_DESKTOP_PASSWORD"
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &repositoryConnection}}, false); err != nil {
+			t.Fatal(err)
+		}
+		MarkExternalDesktopPasswordEnvExplicit(&cfg)
+		if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external.connection.desktop.username") {
+			t.Fatalf("explicit password environment incorrectly approved username error=%v", err)
+		}
+	})
+
+	t.Run("explicit target does not approve Windows mode", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		cfg.TargetOS = targetWindows
+		cfg.WindowsMode = windowsModeNormal
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &connection}}, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{Windows: &fileWindowsConfig{Mode: windowsModeWSL2}}, false); err != nil {
+			t.Fatal(err)
+		}
+		cfg.credentialProvenance.externalDesktopTarget = credentialSourceFlag
+		if err := validateProviderCredentialDestination(cfg); err == nil || !strings.Contains(err.Error(), "external desktop target/account contract") {
+			t.Fatalf("explicit target incorrectly approved Windows mode error=%v", err)
+		}
+		cfg.credentialProvenance.externalDesktopMode = credentialSourceFlag
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("independently explicit target and Windows mode rejected: %v", err)
+		}
+	})
+
+	t.Run("non-Windows target flag authorizes normalized mode", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		cfg.TargetOS = targetWindows
+		cfg.WindowsMode = windowsModeWSL2
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{External: &fileExternalConfig{Connection: &connection}}, true); err != nil {
+			t.Fatal(err)
+		}
+		fs := newFlagSet("test", io.Discard)
+		values := registerTargetFlags(fs, cfg)
+		if err := parseFlags(fs, []string{"--target", targetLinux}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyTargetFlagOverrides(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.WindowsMode != windowsModeNormal || cfg.credentialProvenance.externalDesktopMode != credentialSourceFlag {
+			t.Fatalf("target=%q mode=%q provenance=%#v", cfg.TargetOS, cfg.WindowsMode, cfg.credentialProvenance)
+		}
+		if err := validateProviderCredentialDestination(cfg); err != nil {
+			t.Fatalf("explicit non-Windows target rejected: %v", err)
 		}
 	})
 }

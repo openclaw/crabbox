@@ -122,6 +122,29 @@ func (r *pondMeshRecordingRunner) Command(ctx context.Context, name string, args
 	return h
 }
 
+func TestPondMeshProductionRunnersScrubTargetEnvironment(t *testing.T) {
+	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-pond-ssh")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+	target := SSHTarget{ChildEnvDenylist: []string{"TEST_ARD_PASSWORD"}}
+	for name, runner := range map[string]pondMeshRunner{
+		"foreground": pondMeshExecRunner{},
+		"daemon":     pondMeshDaemonRunner{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			handle := pondMeshRunnerCommand(context.Background(), runner, target, "ssh", "example.test")
+			execHandle := handle.(*pondMeshExecHandle)
+			cmd := execHandle.cmd
+			env := strings.Join(cmd.Env, "\n")
+			if strings.Contains(env, "TEST_ARD_PASSWORD=") || !strings.Contains(env, "CRABBOX_TEST_KEEP=preserved") {
+				t.Fatalf("child environment=%q", env)
+			}
+			if name == "foreground" && (!execHandle.managed || cmd.Cancel == nil || cmd.WaitDelay != pondMeshCancelWaitDelay) {
+				t.Fatalf("environment-aware foreground runner lost managed cancellation: managed=%v cancel=%v waitDelay=%v", execHandle.managed, cmd.Cancel != nil, cmd.WaitDelay)
+			}
+		})
+	}
+}
+
 func TestRequestedExposedPortsAcceptsValidPorts(t *testing.T) {
 	got, err := requestedExposedPorts([]string{"8080", "9090", "9090", "80,443"})
 	if err != nil {

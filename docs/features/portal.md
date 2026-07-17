@@ -24,6 +24,7 @@ GET  /portal/leases/{id-or-slug}                lease detail
 GET  /portal/leases/{id-or-slug}/share          share page
 POST /portal/leases/{id-or-slug}/share          add/remove user, set org, clear
 POST /portal/leases/{id-or-slug}/release        stop, delete via adapter, or remove registration
+POST /portal/leases/{id-or-slug}/vnc/bootstrap  consume an Agent viewer ticket
 GET  /portal/leases/{id-or-slug}/vnc            WebVNC viewer page
 GET  /portal/leases/{id-or-slug}/code/...       code-server bridge (HTTP/WS proxy)
 GET  /portal/runs/{run-id}                       run detail
@@ -39,7 +40,8 @@ POST /portal/logout                              end the portal and its live bri
 
 The WebVNC viewer page also drives a small set of bridge sub-routes that the
 browser calls directly: `/vnc/viewer` (the noVNC WebSocket), `/vnc/status`,
-`/vnc/control` (take control), and `/vnc/theme` (sync the desktop theme).
+`/vnc/control` (take control), `/vnc/theme` (sync the desktop theme), and
+`/vnc/handoff` (consume a server-bound credential handoff).
 Static assets, including the noVNC client at `/portal/assets/novnc/rfb.js`,
 are served from the coordinator's bundled assets.
 
@@ -97,6 +99,25 @@ Upgrading retires the legacy `crabbox_session` and `crabbox_code_session`
 cookies. Existing portal sessions must sign in once; active browser Code
 sessions rebootstrap through their normal portal entrypoint.
 
+Agent/CLI WebVNC `--open` has a narrower non-OAuth entrypoint. An authenticated
+shared/admin bearer request can mint a 120-second, one-use opaque viewer ticket
+for one visible desktop lease. The CLI writes a private temporary HTML file and
+opens its random `file:` URL; that file-origin page submits the ticket to
+`/vnc/bootstrap` in a POST body. Consumption binds a non-persistent
+`crabbox_webvnc_session` cookie to that lease's `/vnc` path and a server-side
+lifetime of at most 30 minutes. The stored principal uses the same owner/org,
+shared-token or admin-grant version, grant revocation, and lease ACL checks as
+existing Portal and bridge sessions.
+
+The scoped WebVNC cookie is not a Portal login. It can reach only the viewer
+page, viewer WebSocket, status, control, theme, and its one-use server-bound
+credential handoff for the ticket's lease. It cannot reach the Portal index,
+share or release routes, logout, bridge commands, or any other lease. The
+viewer page suppresses those controls, and server authorization independently
+enforces the same restriction. Expiry, ticket replay, lease mismatch, principal
+mismatch, shared/admin token rotation, and grant revocation all fail closed.
+Existing GitHub Portal sessions remain unchanged.
+
 ```text
 session  authenticated GitHub user (owner / org embedded in the token)
 admin    sessions whose token carries the admin role
@@ -111,7 +132,10 @@ admin    sessions whose token carries the admin role
   session can access the lease.
 
 Tokens for `/v1/...` API calls are separate from the portal cookie. The
-portal never echoes a bearer token or a bridge ticket back to the browser.
+Portal never turns a bearer token into a cookie or echoes it to the browser.
+The Agent bootstrap sends only its short-lived opaque ticket in a POST body;
+the browser address, fragment, and long-lived storage contain neither bearer
+nor bootstrap ticket.
 Raw Cloudflare Access headers are not trusted on their own: only a verified
 Access JWT email can become the portal owner.
 

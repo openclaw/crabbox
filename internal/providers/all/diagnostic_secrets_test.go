@@ -35,6 +35,7 @@ func TestRuntimeOnlyProviderDiagnosticSecrets(t *testing.T) {
 		"CROWNEST_API_KEY":             "crownest-fallback-secret",
 		"CRABBOX_WANDB_API_KEY":        "wandb-primary-secret",
 		"WANDB_API_KEY":                "wandb-fallback-secret",
+		"EXTERNAL_DESKTOP_PASSWORD":    "external-desktop-secret",
 	}
 	for name, value := range environment {
 		t.Setenv(name, value)
@@ -50,8 +51,16 @@ func TestRuntimeOnlyProviderDiagnosticSecrets(t *testing.T) {
 		{"superserve", []string{environment["CRABBOX_SUPERSERVE_API_KEY"], environment["SUPERSERVE_API_KEY"]}},
 		{"crownest", []string{environment["CRABBOX_CROWNEST_API_KEY"], environment["CROWNEST_API_KEY"]}},
 		{"wandb", []string{environment["CRABBOX_WANDB_API_KEY"], "wandb-config-secret", environment["WANDB_API_KEY"], "wandb-netrc-secret"}},
+		{"external", []string{environment["EXTERNAL_DESKTOP_PASSWORD"]}},
 	}
-	cfg := core.Config{Wandb: core.WandbConfig{APIKey: "wandb-config-secret"}}
+	cfg := core.Config{
+		Wandb: core.WandbConfig{APIKey: "wandb-config-secret"},
+		External: core.ExternalConfig{
+			Connection: core.ExternalConnectionConfig{
+				Desktop: core.ExternalDesktopConfig{PasswordEnv: "EXTERNAL_DESKTOP_PASSWORD"},
+			},
+		},
+	}
 	for _, test := range tests {
 		t.Run(test.provider, func(t *testing.T) {
 			provider, err := core.ProviderFor(test.provider)

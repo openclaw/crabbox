@@ -63,7 +63,9 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 
 func applyDefaults(cfg *Config) {
 	cfg.Provider = providerName
-	cfg.TargetOS = targetMacOS
+	if !core.IsTargetExplicit(cfg) {
+		cfg.TargetOS = targetMacOS
+	}
 	cfg.WindowsMode = ""
 	cfg.SSHFallbackPorts = nil
 	if strings.TrimSpace(cfg.Lume.CLIPath) == "" {
@@ -185,9 +187,6 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	cfg.SSHKey = keyPath
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s base=%s storage=%s keep=%v\n", providerName, leaseID, slug, cfg.Lume.Base, blank(cfg.Lume.Storage, "home"), req.Keep)
 
-	if err := b.cloneVM(ctx, cfg, name); err != nil {
-		return LeaseTarget{}, err
-	}
 	owner := lumeRunOwner{}
 	cleanupUnclaimedVM := func(cause error) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -199,6 +198,9 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 			return errors.Join(cause, fmt.Errorf("Lume rollback could not delete VM %s: %w", name, deleteErr))
 		}
 		return cause
+	}
+	if err := b.cloneVM(ctx, cfg, name); err != nil {
+		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
 	labels := directLeaseLabels(cfg, leaseID, slug, req.Keep, time.Now().UTC())
 	labels["instance"] = name

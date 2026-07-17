@@ -1430,6 +1430,10 @@ if has_provider opensandbox; then
   "$root/scripts/live-opensandbox-smoke.sh"
 fi
 
+if has_provider cua; then
+  "$root/scripts/live-cua-smoke.sh"
+fi
+
 if has_provider proxmox; then
   "$root/scripts/proxmox-live-smoke.sh"
 fi
