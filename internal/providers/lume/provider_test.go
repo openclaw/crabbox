@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +21,18 @@ type recordingRunner struct {
 	responses map[string]core.LocalCommandResult
 	errors    map[string]error
 	hook      func(core.LocalCommandRequest) (core.LocalCommandResult, error, bool)
+}
+
+func writeLumeVMConfig(t *testing.T, home, name, machineIdentifier string) {
+	t.Helper()
+	dir := filepath.Join(home, ".lume", name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf(`{"machineIdentifier":%q}`, machineIdentifier)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
@@ -485,6 +498,11 @@ func TestConfigForClaimTreatsHomeAndLegacyUnknownAsDefaultStorage(t *testing.T) 
 			t.Fatalf("storage label %q resolved to %q, want home storage", label, got.Lume.Storage)
 		}
 	}
+	cfg := core.BaseConfig()
+	got := configForClaim(cfg, core.LeaseClaim{Labels: map[string]string{"storage": "Home"}})
+	if got.Lume.Storage != "Home" {
+		t.Fatalf("case-sensitive storage location resolved to %q", got.Lume.Storage)
+	}
 }
 
 func TestTouchPreservesLifecycleRoutingLabels(t *testing.T) {
@@ -549,6 +567,8 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	const leaseID = "cbx_release123456"
 	const name = "crabbox-release-1234"
+	const originalMachineID = "bHVtZS1tYWNoaW5lLW9yaWdpbmFs"
+	writeLumeVMConfig(t, home, name, originalMachineID)
 	vmExists := true
 	runner := &recordingRunner{}
 	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
@@ -583,6 +603,11 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 			"ssh_user": "lume", "work_root": "/Users/lume/crabbox",
 		}},
 	}
+	immutableID, err := lumeVMImmutableID(b.configForRun(), lumeVM{Name: name, LocationName: "home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Server.ImmutableID = immutableID
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "unclaimed") {
 		t.Fatalf("unclaimed release error=%v", err)
 	}
@@ -592,6 +617,17 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "release", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, lease.Server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
+	writeLumeVMConfig(t, home, name, "bHVtZS1tYWNoaW5lLXJlcGxhY2VtZW50")
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("replacement release error=%v", err)
+	}
+	if !vmExists {
+		t.Fatal("replacement VM was deleted")
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || !ok {
+		t.Fatalf("claim after replacement refusal ok=%v err=%v", ok, err)
+	}
+	writeLumeVMConfig(t, home, name, originalMachineID)
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatalf("claimed release: %v", err)
 	}
@@ -628,6 +664,126 @@ func TestPrepareLeaseUsesPerLeaseKnownHosts(t *testing.T) {
 	}
 	if !lease.SSH.SSHConfigProxy {
 		t.Fatal("SSHConfigProxy = false, want OpenSSH readiness for the local Lume guest")
+	}
+}
+
+func TestRebindResolvedLeaseTargetRestoresHostKeyAlias(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	target := core.LeaseTarget{Server: core.Server{CloudID: "worker-1"}}
+	b := &backend{}
+	if err := b.RebindResolvedLeaseTarget(&target, "cbx_rebind123456"); err != nil {
+		t.Fatal(err)
+	}
+	if target.SSH.HostKeyAlias != lumeHostKeyAlias("worker-1") {
+		t.Fatalf("host key alias=%q", target.SSH.HostKeyAlias)
+	}
+}
+
+func TestLumeVMImmutableIDChangesWithMachineIdentity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	const name = "worker-identity"
+	writeLumeVMConfig(t, home, name, "bHVtZS1tYWNoaW5lLW9uZQ==")
+	cfg := core.BaseConfig()
+	first, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: "home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeLumeVMConfig(t, home, name, "bHVtZS1tYWNoaW5lLXR3bw==")
+	second, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: "home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || !strings.HasPrefix(first, "lume-machine-") || !strings.HasPrefix(second, "lume-machine-") {
+		t.Fatalf("immutable IDs first=%q second=%q", first, second)
+	}
+}
+
+func TestLumeVMImmutableIDUsesConfiguredStorageLocation(t *testing.T) {
+	home := t.TempDir()
+	configHome := filepath.Join(home, ".config")
+	storageRoot := filepath.Join(home, "lume-fast")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	if err := os.MkdirAll(filepath.Join(configHome, "lume"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := fmt.Sprintf("defaultLocationName: fast\nvmLocations:\n  - name: fast\n    path: %q\n", storageRoot)
+	if err := os.WriteFile(filepath.Join(configHome, "lume", "config.yaml"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const name = "worker-fast"
+	if err := os.MkdirAll(filepath.Join(storageRoot, name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storageRoot, name, "config.json"), []byte(`{"machineIdentifier":"bHVtZS1mYXN0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lumeVMImmutableID(core.BaseConfig(), lumeVM{Name: name, LocationName: "fast"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLumeVMImmutableIDDefaultsMissingLocationsToHome(t *testing.T) {
+	home := t.TempDir()
+	configHome := filepath.Join(home, ".config")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	if err := os.MkdirAll(filepath.Join(configHome, "lume"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configHome, "lume", "config.yaml"), []byte("telemetryEnabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const name = "worker-home-default"
+	writeLumeVMConfig(t, home, name, "bHVtZS1ob21lLWRlZmF1bHQ=")
+	if _, err := lumeVMImmutableID(core.BaseConfig(), lumeVM{Name: name, LocationName: "home"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLumeStorageKeywordsAndLocationsAreCaseSensitive(t *testing.T) {
+	home := t.TempDir()
+	configHome := filepath.Join(home, ".config")
+	storageRoot := filepath.Join(home, "capital-ephemeral")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	if err := os.MkdirAll(filepath.Join(configHome, "lume"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := fmt.Sprintf("defaultLocationName: Ephemeral\nvmLocations:\n  - name: Ephemeral\n    path: %q\n", storageRoot)
+	if err := os.WriteFile(filepath.Join(configHome, "lume", "config.yaml"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const name = "worker-capital-ephemeral"
+	if err := os.MkdirAll(filepath.Join(storageRoot, name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storageRoot, name, "config.json"), []byte(`{"machineIdentifier":"bHVtZS1jYXNl"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Lume.Storage = "Ephemeral"
+	if isDirectStoragePath(cfg.Lume.Storage) {
+		t.Fatal("configured location Ephemeral treated as ephemeral storage keyword")
+	}
+	if _, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: "Ephemeral"}); err != nil {
+		t.Fatal(err)
+	}
+	if !isDirectStoragePath("ephemeral") {
+		t.Fatal("lowercase ephemeral storage keyword not recognized")
+	}
+}
+
+func TestExpandLumePathSupportsNamedUserHome(t *testing.T) {
+	account, err := osuser.Current()
+	if err != nil {
+		t.Skipf("current user unavailable: %v", err)
+	}
+	got := expandLumePath("~" + account.Username + "/lume-vms")
+	want := filepath.Join(account.HomeDir, "lume-vms")
+	if got != want {
+		t.Fatalf("expanded path=%q want %q", got, want)
 	}
 }
 
@@ -699,8 +855,12 @@ func TestWaitForGuestIdentityPinsKeyFromVirtioFSChallenge(t *testing.T) {
 	}
 	knownHosts := filepath.Join(dir, "known_hosts")
 	b := &backend{}
-	if err := b.waitForGuestIdentity(context.Background(), "worker-1", "192.0.2.10", trust, knownHosts); err != nil {
+	platformUUID, err := b.waitForGuestIdentity(context.Background(), "worker-1", "192.0.2.10", trust, knownHosts)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if platformUUID != "00112233-4455-6677-8899-AABBCCDDEEFF" {
+		t.Fatalf("platform UUID=%q", platformUUID)
 	}
 	data, err := os.ReadFile(knownHosts)
 	if err != nil {

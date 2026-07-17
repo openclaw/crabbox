@@ -107,7 +107,15 @@ func (b *backend) Spec() ProviderSpec { return b.spec }
 
 func (b *backend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
 	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return core.UseLeaseKnownHosts(&target.SSH, leaseID)
+	if err := core.UseLeaseKnownHosts(&target.SSH, leaseID); err != nil {
+		return err
+	}
+	name := strings.TrimSpace(firstNonBlank(target.Server.CloudID, target.Server.Labels["instance"]))
+	if name == "" {
+		return exit(5, "Lume lease %s has no VM identity for SSH host-key binding", leaseID)
+	}
+	target.SSH.HostKeyAlias = lumeHostKeyAlias(name)
+	return nil
 }
 
 func (b *backend) configForRun() Config {
@@ -121,7 +129,7 @@ func configForClaim(cfg Config, claim core.LeaseClaim) Config {
 		cfg.Lume.Base = value
 	}
 	if value, ok := claim.Labels["storage"]; ok {
-		switch strings.ToLower(strings.TrimSpace(value)) {
+		switch strings.TrimSpace(value) {
 		case "", "home", "unknown":
 			cfg.Lume.Storage = ""
 		default:
@@ -224,11 +232,15 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		cleanup := func() error {
-			if stopErr := b.stopVM(cleanupCtx, cfg, name, owner); stopErr != nil {
-				return fmt.Errorf("Lume rollback could not stop VM %s: %w", name, stopErr)
+			destroyClaim := claim
+			if persistedClaim.LeaseID != "" {
+				destroyClaim = persistedClaim
 			}
-			if deleteErr := b.deleteVM(cleanupCtx, cfg, name, owner); deleteErr != nil {
-				return fmt.Errorf("Lume rollback could not delete VM %s: %w", name, deleteErr)
+			if strings.TrimSpace(destroyClaim.CloudImmutableID) == "" {
+				return exit(5, "Lume rollback cannot safely remove VM %s without its immutable machine identity", name)
+			}
+			if removeErr := b.removeClaimedVM(cleanupCtx, cfg, name, destroyClaim, owner); removeErr != nil {
+				return fmt.Errorf("Lume rollback could not remove VM %s: %w", name, removeErr)
 			}
 			return nil
 		}
@@ -262,13 +274,23 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		// Never delete an unclaimed VM after this ambiguous result.
 		return LeaseTarget{}, errors.Join(exit(5, "Lume clone result for %q is ambiguous; inspect the destination before removing it", name), err)
 	}
+	cloneInst, err := b.getInstance(ctx, cfg, name)
+	if err != nil {
+		return LeaseTarget{}, cleanupUnclaimedVM(err)
+	}
+	immutableID, err := lumeVMImmutableID(cfg, cloneInst)
+	if err != nil {
+		return LeaseTarget{}, cleanupUnclaimedVM(err)
+	}
+	claim.CloudImmutableID = immutableID
 	if req.OnAcquired != nil {
-		acquired := LeaseTarget{Server: b.serverFromInstance(lumeVM{Name: name, Status: "stopped"}, claim, cfg), LeaseID: leaseID}
+		acquired := LeaseTarget{Server: b.serverFromInstance(cloneInst, claim, cfg), LeaseID: leaseID}
 		if err := req.OnAcquired(acquired); err != nil {
 			return LeaseTarget{}, cleanupUnclaimedVM(err)
 		}
 	}
-	provisional := LeaseTarget{Server: b.serverFromInstance(lumeVM{Name: name, Status: "starting"}, claim, cfg), LeaseID: leaseID}
+	cloneInst.Status = "starting"
+	provisional := LeaseTarget{Server: b.serverFromInstance(cloneInst, claim, cfg), LeaseID: leaseID}
 	persistedClaim, err = core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, instanceScope(name), provisional.Server, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
@@ -304,7 +326,13 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
-	if err := b.waitForGuestIdentity(ctx, name, inst.IPAddress, trust, target.KnownHostsFile); err != nil {
+	platformUUID, err := b.waitForGuestIdentity(ctx, name, inst.IPAddress, trust, target.KnownHostsFile)
+	if err != nil {
+		return LeaseTarget{}, cleanupUnclaimedVM(err)
+	}
+	labels["platform_uuid"] = platformUUID
+	persistedClaim, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, persistedClaim, labels)
+	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
 	readyClaim := persistedClaim
@@ -470,6 +498,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		if inst.Name != name {
 			continue
 		}
+		if err := b.verifyClaimedVMIdentity(cfg, inst, claim); err != nil {
+			return err
+		}
 		if instanceRunning(inst.Status) && req.GuardedRemoteCleanup != nil {
 			cleanupLease, prepareErr := b.prepareLease(ctx, cfg, inst, claim, false)
 			if prepareErr != nil {
@@ -489,7 +520,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		break
 	}
 	if err := core.RemoveLeaseClaimIfUnchangedAfter(lease.LeaseID, claim, func() error {
-		return b.removeClaimedVM(ctx, cfg, name, owner)
+		return b.removeClaimedVM(ctx, cfg, name, claim, owner)
 	}); err != nil {
 		return err
 	}
@@ -559,7 +590,8 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 				if ownerProcessMatches(owner) {
 					return exit(5, "refusing to remove missing Lume claim %s while owner pid %d is still running", claim.LeaseID, owner.PID)
 				}
-				return b.deleteVM(ctx, claimCfg, name, owner)
+				removeLumeRunLog(name)
+				return nil
 			}
 			live, _, resolveErr := b.resolveClaimedInstance(ctx, claim)
 			if resolveErr != nil {
@@ -571,7 +603,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 					return exit(4, "Lume lease %s is no longer eligible for cleanup", claim.LeaseID)
 				}
 			}
-			return b.removeClaimedVM(ctx, claimCfg, name, owner)
+			return b.removeClaimedVM(ctx, claimCfg, name, claim, owner)
 		}
 		if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action); err != nil {
 			return err
@@ -871,62 +903,62 @@ func removeBootstrapTrust(trust bootstrapTrust) {
 	}
 }
 
-func pinBootstrapHostKey(host, hostKeyAlias string, trust bootstrapTrust, knownHostsFile string) error {
+func pinBootstrapHostKey(host, hostKeyAlias string, trust bootstrapTrust, knownHostsFile string) (string, error) {
 	if net.ParseIP(host) == nil {
-		return fmt.Errorf("Lume returned invalid guest IP address %q", host)
+		return "", fmt.Errorf("Lume returned invalid guest IP address %q", host)
 	}
 	identityPath := filepath.Join(trust.Dir, "identity")
 	info, err := os.Lstat(identityPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !info.Mode().IsRegular() || info.Size() > 4096 {
-		return fmt.Errorf("Lume bootstrap identity is not a small regular file")
+		return "", fmt.Errorf("Lume bootstrap identity is not a small regular file")
 	}
 	data, err := os.ReadFile(identityPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	fields := strings.Fields(string(data))
 	if len(fields) != 4 || fields[0] != trust.Challenge {
-		return fmt.Errorf("Lume bootstrap identity challenge mismatch")
+		return "", fmt.Errorf("Lume bootstrap identity challenge mismatch")
 	}
 	if !validPlatformUUID.MatchString(fields[1]) {
-		return fmt.Errorf("Lume bootstrap identity has invalid platform UUID")
+		return "", fmt.Errorf("Lume bootstrap identity has invalid platform UUID")
 	}
 	if fields[2] != "ssh-ed25519" {
-		return fmt.Errorf("Lume bootstrap identity has unsupported host key type %q", fields[2])
+		return "", fmt.Errorf("Lume bootstrap identity has unsupported host key type %q", fields[2])
 	}
 	decodedKey, err := base64.StdEncoding.DecodeString(fields[3])
 	if err != nil || len(decodedKey) == 0 {
-		return fmt.Errorf("Lume bootstrap identity has invalid ED25519 host key")
+		return "", fmt.Errorf("Lume bootstrap identity has invalid ED25519 host key")
 	}
 	entry := hostKeyAlias + " " + fields[2] + " " + fields[3] + "\n"
 	tmp, err := os.CreateTemp(filepath.Dir(knownHostsFile), ".lume-known-hosts-*")
 	if err != nil {
-		return fmt.Errorf("create temporary Lume known_hosts: %w", err)
+		return "", fmt.Errorf("create temporary Lume known_hosts: %w", err)
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("secure temporary Lume known_hosts: %w", err)
+		return "", fmt.Errorf("secure temporary Lume known_hosts: %w", err)
 	}
 	if _, err := io.WriteString(tmp, entry); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("write temporary Lume known_hosts: %w", err)
+		return "", fmt.Errorf("write temporary Lume known_hosts: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("sync temporary Lume known_hosts: %w", err)
+		return "", fmt.Errorf("sync temporary Lume known_hosts: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temporary Lume known_hosts: %w", err)
+		return "", fmt.Errorf("close temporary Lume known_hosts: %w", err)
 	}
 	if err := os.Rename(tmpPath, knownHostsFile); err != nil {
-		return fmt.Errorf("install authenticated Lume known_hosts: %w", err)
+		return "", fmt.Errorf("install authenticated Lume known_hosts: %w", err)
 	}
-	return nil
+	return fields[1], nil
 }
 
 func (b *backend) waitForRunningVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) (lumeVM, error) {
@@ -965,22 +997,23 @@ func (b *backend) waitForRunningVM(ctx context.Context, cfg Config, name string,
 	}
 }
 
-func (b *backend) waitForGuestIdentity(ctx context.Context, name, host string, trust bootstrapTrust, knownHostsFile string) error {
+func (b *backend) waitForGuestIdentity(ctx context.Context, name, host string, trust bootstrapTrust, knownHostsFile string) (string, error) {
 	deadline := time.NewTimer(defaultGuestIdentityTimeout)
 	ticker := time.NewTicker(time.Second)
 	defer deadline.Stop()
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		lastErr = pinBootstrapHostKey(host, lumeHostKeyAlias(name), trust, knownHostsFile)
+		platformUUID, pinErr := pinBootstrapHostKey(host, lumeHostKeyAlias(name), trust, knownHostsFile)
+		lastErr = pinErr
 		if lastErr == nil {
-			return nil
+			return platformUUID, nil
 		}
 		select {
 		case <-ctx.Done():
-			return exit(2, "wait for Lume VM %s first-boot identity: context cancelled", name)
+			return "", exit(2, "wait for Lume VM %s first-boot identity: context cancelled", name)
 		case <-deadline.C:
-			return exit(2, "wait for Lume VM %s authenticated first-boot identity: %v", name, lastErr)
+			return "", exit(2, "wait for Lume VM %s authenticated first-boot identity: %v", name, lastErr)
 		case <-ticker.C:
 		}
 	}
@@ -1024,17 +1057,61 @@ func (b *backend) stopVM(ctx context.Context, cfg Config, name string, owner lum
 	return errors.Join(signalErr, exit(5, "Lume VM %s remained %s after two stop attempts", name, blank(state, "unknown")))
 }
 
-func (b *backend) removeClaimedVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) error {
-	state, missing, err := b.observeVMState(ctx, cfg, name)
-	if err != nil {
+func (b *backend) removeClaimedVM(ctx context.Context, cfg Config, name string, claim core.LeaseClaim, owner lumeRunOwner) error {
+	inst, err := b.getInstance(ctx, cfg, name)
+	missing := err != nil && isLumeNotFoundError(err)
+	if err != nil && !missing {
 		return err
+	}
+	state := normalizedState(inst.Status)
+	if !missing {
+		if err := b.verifyClaimedVMIdentity(cfg, inst, claim); err != nil {
+			return err
+		}
 	}
 	if (!missing && state != "stopped") || ownerProcessMatches(owner) {
 		if err := b.stopVM(ctx, cfg, name, owner); err != nil {
 			return err
 		}
 	}
+	if missing {
+		removeLumeRunLog(name)
+		return nil
+	}
+	if !missing {
+		stopped, getErr := b.getInstance(ctx, cfg, name)
+		if getErr != nil {
+			if !isLumeNotFoundError(getErr) {
+				return getErr
+			}
+			removeLumeRunLog(name)
+			return nil
+		} else if err := b.verifyClaimedVMIdentity(cfg, stopped, claim); err != nil {
+			return err
+		}
+	}
 	return b.deleteVM(ctx, cfg, name, owner)
+}
+
+func (b *backend) verifyClaimedVMIdentity(cfg Config, inst lumeVM, claim core.LeaseClaim) error {
+	expected := strings.TrimSpace(claim.CloudImmutableID)
+	if expected == "" {
+		return exit(5, "refusing to mutate claimed Lume VM %q without an immutable machine identity", inst.Name)
+	}
+	actual, err := lumeVMImmutableID(cfg, inst)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return exit(4, "refusing to mutate Lume VM %q after its immutable machine identity changed", inst.Name)
+	}
+	return nil
+}
+
+func removeLumeRunLog(name string) {
+	if logPath, err := lumeRunLogPath(name); err == nil {
+		_ = os.Remove(logPath)
+	}
 }
 
 func (b *backend) deleteVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) error {
@@ -1049,9 +1126,7 @@ func (b *backend) deleteVM(ctx context.Context, cfg Config, name string, owner l
 		return exit(5, "refusing to delete Lume VM %s while owner pid %d is still running", name, owner.PID)
 	}
 	if state == "missing" {
-		if logPath, pathErr := lumeRunLogPath(name); pathErr == nil {
-			_ = os.Remove(logPath)
-		}
+		removeLumeRunLog(name)
 		return nil
 	}
 	args := []string{"delete", name, "--force"}
@@ -1065,9 +1140,7 @@ func (b *backend) deleteVM(ctx context.Context, cfg Config, name string, owner l
 	if err := b.waitForMissingVM(ctx, cfg, name); err != nil {
 		return err
 	}
-	if logPath, pathErr := lumeRunLogPath(name); pathErr == nil {
-		_ = os.Remove(logPath)
-	}
+	removeLumeRunLog(name)
 	return nil
 }
 
@@ -1122,7 +1195,7 @@ func (b *backend) listClaimedInstancesAtStoragePath(ctx context.Context, cfg Con
 
 func isDirectStoragePath(storage string) bool {
 	storage = strings.TrimSpace(storage)
-	return strings.EqualFold(storage, "ephemeral") || strings.ContainsAny(storage, `/\\`)
+	return storage == "ephemeral" || strings.ContainsAny(storage, `/\\`)
 }
 
 func isLumeNotFoundError(err error) bool {
@@ -1452,7 +1525,7 @@ func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg Con
 	if instanceRunning(inst.Status) && labels["state"] == "ready" {
 		status = "ready"
 	}
-	server := Server{CloudID: inst.Name, Provider: providerName, Name: inst.Name, Status: status, Labels: labels}
+	server := Server{CloudID: inst.Name, ImmutableID: claim.CloudImmutableID, Provider: providerName, Name: inst.Name, Status: status, Labels: labels}
 	server.ServerType.Name = cfg.Lume.Base
 	return server
 }
