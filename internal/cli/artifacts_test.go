@@ -2089,6 +2089,188 @@ func TestArtifactsPullRejectsNegativeManifestSize(t *testing.T) {
 	}
 }
 
+func TestArtifactsPullDistinguishesZeroFromOmittedManifestSize(t *testing.T) {
+	tests := []struct {
+		name      string
+		payload   string
+		sizeField string
+		wantError string
+	}{
+		{
+			name:      "declared zero accepts empty artifact",
+			sizeField: `,"size":0`,
+		},
+		{
+			name:      "declared zero rejects non-empty artifact",
+			payload:   "not empty",
+			sizeField: `,"size":0`,
+			wantError: "artifact size mismatch for artifact.txt: got 9, want 0",
+		},
+		{
+			name:    "omitted size remains optional",
+			payload: "legacy artifact",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, "artifact.txt"), test.payload)
+			manifest := fmt.Sprintf(`{"schemaVersion":1,"generatedAt":"2026-07-17T00:00:00Z","storage":{"backend":"local"},"files":[{"name":"artifact.txt","path":"artifact.txt"%s}]}`, test.sizeField)
+			manifestPath := filepath.Join(dir, artifactManifestFilename)
+			if err := os.WriteFile(manifestPath, []byte(manifest), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			output := filepath.Join(dir, "pull")
+			_, err := pullArtifactManifest(context.Background(), manifestPath, output, false)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("err=%v, want %q", err, test.wantError)
+				}
+				if _, statErr := os.Stat(filepath.Join(output, "artifact.txt")); !os.IsNotExist(statErr) {
+					t.Fatalf("mismatched artifact was installed: %v", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join(output, "artifact.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != test.payload {
+				t.Fatalf("payload=%q, want %q", got, test.payload)
+			}
+		})
+	}
+}
+
+func TestArtifactsListJSONPreservesManifestSizePresence(t *testing.T) {
+	tests := []struct {
+		name          string
+		sizeField     string
+		wantSize      bool
+		wantSizeValue float64
+		wantPullError string
+	}{
+		{
+			name: "omitted",
+		},
+		{
+			name:          "explicit zero",
+			sizeField:     `,"size":0`,
+			wantSize:      true,
+			wantPullError: "artifact size mismatch for artifact.txt: got 15, want 0",
+		},
+		{
+			name:          "positive",
+			sizeField:     `,"size":15`,
+			wantSize:      true,
+			wantSizeValue: 15,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, "artifact.txt"), "legacy artifact")
+			manifest := fmt.Sprintf(`{"schemaVersion":1,"generatedAt":"2026-07-17T00:00:00Z","storage":{"backend":"local"},"files":[{"name":"artifact.txt","path":"artifact.txt"%s}]}`, test.sizeField)
+			manifestPath := filepath.Join(dir, artifactManifestFilename)
+			if err := os.WriteFile(manifestPath, []byte(manifest), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var normalized bytes.Buffer
+			app := App{Stdout: &normalized, Stderr: io.Discard}
+			if err := app.artifactsList(context.Background(), []string{"--json", manifestPath}); err != nil {
+				t.Fatal(err)
+			}
+			var encoded struct {
+				Files []map[string]any `json:"files"`
+			}
+			if err := json.Unmarshal(normalized.Bytes(), &encoded); err != nil {
+				t.Fatal(err)
+			}
+			if len(encoded.Files) != 1 {
+				t.Fatalf("files=%#v, want one entry", encoded.Files)
+			}
+			gotSize, hasSize := encoded.Files[0]["size"]
+			if hasSize != test.wantSize {
+				t.Fatalf("normalized size presence=%t value=%v, want presence=%t\n%s", hasSize, gotSize, test.wantSize, normalized.String())
+			}
+			if hasSize && gotSize != test.wantSizeValue {
+				t.Fatalf("normalized size=%v, want %v", gotSize, test.wantSizeValue)
+			}
+
+			normalizedPath := filepath.Join(dir, "normalized.json")
+			if err := os.WriteFile(normalizedPath, normalized.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			output := filepath.Join(dir, "pull")
+			_, err := pullArtifactManifest(context.Background(), normalizedPath, output, false)
+			if test.wantPullError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantPullError) {
+					t.Fatalf("err=%v, want %q", err, test.wantPullError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join(output, "artifact.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != "legacy artifact" {
+				t.Fatalf("payload=%q, want legacy artifact", got)
+			}
+		})
+	}
+}
+
+func TestDownloadArtifactURLHonorsDeclaredZeroSize(t *testing.T) {
+	for _, flushHeaders := range []bool{false, true} {
+		t.Run(fmt.Sprintf("flushHeaders=%t", flushHeaders), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if flushHeaders {
+					w.WriteHeader(http.StatusOK)
+					w.(http.Flusher).Flush()
+				}
+				_, _ = io.WriteString(w, "unexpected")
+			}))
+			defer server.Close()
+
+			data, err := json.Marshal(map[string]any{
+				"schemaVersion": 1,
+				"files": []map[string]any{{
+					"name": "artifact.txt",
+					"url":  server.URL,
+					"size": 0,
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := decodeArtifactManifest(data, "test manifest")
+			if err != nil {
+				t.Fatal(err)
+			}
+			outPath := filepath.Join(t.TempDir(), "artifact.txt")
+			_, _, _, err = downloadArtifactURL(context.Background(), manifest.Files[0], outPath)
+			if err == nil || !strings.Contains(err.Error(), "exceeds limit 0") {
+				t.Fatalf("err=%v, want zero-size limit rejection", err)
+			}
+			if info, statErr := os.Stat(outPath); statErr == nil && info.Size() != 0 {
+				t.Fatalf("downloaded artifact size=%d, want no bytes", info.Size())
+			} else if statErr != nil && !os.IsNotExist(statErr) {
+				t.Fatal(statErr)
+			}
+		})
+	}
+}
+
 func TestArtifactsPullAllowsOutputAfterManifestRef(t *testing.T) {
 	dir := t.TempDir()
 	payload := []byte("png-data")
@@ -2194,6 +2376,7 @@ func TestArtifactsPullRejectsHashMismatch(t *testing.T) {
 		Files: []artifactManifestFile{{
 			Name:   "screenshot.png",
 			URL:    server.URL,
+			Size:   int64(len("changed")),
 			SHA256: strings.Repeat("0", 64),
 		}},
 	}

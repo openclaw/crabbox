@@ -7,6 +7,10 @@
 - Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
 - Added a local Zed task-launcher extension for Crabbox lifecycle and remote execution workflows. Thanks @zozo123.
 
+### Fixed
+
+- Enforced explicitly declared zero-byte artifact sizes during pull while preserving legacy manifests that omit size.
+
 ## 0.39.0 - 2026-07-17
 
 ### Added

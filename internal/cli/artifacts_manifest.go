@@ -48,6 +48,43 @@ type artifactManifestFile struct {
 	SHA256       string `json:"sha256,omitempty"`
 	ExpiresAt    string `json:"expiresAt,omitempty"`
 	AccessPolicy string `json:"accessPolicy,omitempty"`
+	sizeDeclared bool
+}
+
+func (file artifactManifestFile) MarshalJSON() ([]byte, error) {
+	type manifestFile artifactManifestFile
+	var size *int64
+	if file.declaresSize() {
+		size = &file.Size
+	}
+	return json.Marshal(struct {
+		manifestFile
+		Size *int64 `json:"size,omitempty"`
+	}{
+		manifestFile: manifestFile(file),
+		Size:         size,
+	})
+}
+
+func (file *artifactManifestFile) UnmarshalJSON(data []byte) error {
+	type manifestFile artifactManifestFile
+	var decoded struct {
+		manifestFile
+		Size *int64 `json:"size"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*file = artifactManifestFile(decoded.manifestFile)
+	if decoded.Size != nil {
+		file.Size = *decoded.Size
+		file.sizeDeclared = true
+	}
+	return nil
+}
+
+func (file artifactManifestFile) declaresSize() bool {
+	return file.sizeDeclared || file.Size != 0
 }
 
 type artifactPullResult struct {
@@ -91,6 +128,7 @@ func writeArtifactManifest(root *os.Root, opts artifactPublishOptions, files []a
 			SHA256:       file.snapshotHash,
 			ExpiresAt:    artifactURLExpiresAt(file.URL),
 			AccessPolicy: artifactAccessPolicy(file.URL, opts.Storage),
+			sizeDeclared: true,
 		})
 	}
 	path := filepath.Join(opts.Directory, artifactManifestFilename)
@@ -197,7 +235,7 @@ func pullArtifactManifest(ctx context.Context, ref, output string, overwrite boo
 			_ = os.Remove(tempPath)
 			return artifactPullResult{}, exit(2, "artifact hash mismatch for %s: got %s, want %s", file.Name, hash, file.SHA256)
 		}
-		if file.Size > 0 && file.Size != size {
+		if file.declaresSize() && file.Size != size {
 			_ = os.Remove(tempPath)
 			return artifactPullResult{}, exit(2, "artifact size mismatch for %s: got %d, want %d", file.Name, size, file.Size)
 		}
@@ -375,7 +413,7 @@ func artifactRequestError(err error) error {
 }
 
 func artifactDownloadLimit(file artifactManifestFile) int64 {
-	if file.Size > 0 && file.Size < maxPulledArtifactBytes {
+	if file.declaresSize() && file.Size >= 0 && file.Size < maxPulledArtifactBytes {
 		return file.Size
 	}
 	return maxPulledArtifactBytes
