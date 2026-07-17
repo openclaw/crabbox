@@ -23,7 +23,6 @@ type flagValues struct {
 	SDKPackage         *string
 	SDKImport          *string
 	SDKFallbackImport  *string
-	ForgetMissing      *bool
 }
 
 func RegisterProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -43,7 +42,6 @@ func RegisterProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		SDKPackage:         fs.String("cua-sdk-package", cfg.SDKPackage, "trusted local Python package name for CUA SDK diagnostics"),
 		SDKImport:          fs.String("cua-sdk-import", cfg.SDKImport, "trusted local Python import path for CUA SDK diagnostics"),
 		SDKFallbackImport:  fs.String("cua-sdk-fallback-import", cfg.SDKFallbackImport, "trusted local fallback import path for CUA SDK diagnostics"),
-		ForgetMissing:      fs.Bool("cua-forget-missing", cfg.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
 	}
 }
 
@@ -101,9 +99,6 @@ func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "cua-sdk-fallback-import") {
 		cfg.Cua.SDKFallbackImport = *v.SDKFallbackImport
-	}
-	if flagWasSet(fs, "cua-forget-missing") {
-		cfg.Cua.ForgetMissing = *v.ForgetMissing
 	}
 	return validateProviderConfig(*cfg)
 }

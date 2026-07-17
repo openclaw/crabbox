@@ -121,7 +121,7 @@ Delegated-run providers (no SSH lease):
 - Crownest Workspace Runs delegated lifecycle, archive-transfer upload, SSE
   event streaming, and local claims: `internal/providers/crownest`
 - CUA experimental diagnostics, read-only inventory, Python SDK bridge,
-  claim-bound cleanup, and non-mutating smoke: `internal/providers/cua`,
+  fail-closed lifecycle guards, and non-mutating smoke: `internal/providers/cua`,
   `docs/providers/cua.md`, `scripts/live-cua-smoke.sh`
 - Anthropic Sandbox Runtime live local enforcement smoke: `scripts/live-anthropic-sandbox-runtime-smoke.sh`
 - Azure Container Apps dynamic sessions (shares the `azure` family, but

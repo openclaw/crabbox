@@ -815,7 +815,7 @@ type TensorlakeConfig struct {
 	NoInternet     bool
 }
 
-// CuaConfig configures the delegated CUA provider. API keys are intentionally
+// CuaConfig configures the read-only CUA diagnostics provider. API keys are intentionally
 // absent: later bridge code resolves CUA_API_KEY / credential-store auth at
 // runtime and must pass credentials only through environment or SDK stores.
 // APIURL is trusted local input only and is never loaded from repository YAML.
@@ -834,7 +834,6 @@ type CuaConfig struct {
 	SDKPackage         string
 	SDKImport          string
 	SDKFallbackImport  string
-	ForgetMissing      bool
 }
 
 // OpenComputerConfig configures the delegated OpenComputer provider, which
@@ -4028,7 +4027,6 @@ type fileCuaConfig struct {
 	SDKPackage         *string `yaml:"sdkPackage,omitempty"`
 	SDKImport          *string `yaml:"sdkImport,omitempty"`
 	SDKFallbackImport  *string `yaml:"sdkFallbackImport,omitempty"`
-	ForgetMissing      *bool   `yaml:"forgetMissing,omitempty"`
 }
 
 type fileOpenComputerConfig struct {
@@ -6729,9 +6727,6 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if trusted && file.Cua.SDKFallbackImport != nil {
 			cfg.Cua.SDKFallbackImport = *file.Cua.SDKFallbackImport
 		}
-		if file.Cua.ForgetMissing != nil {
-			cfg.Cua.ForgetMissing = *file.Cua.ForgetMissing
-		}
 	}
 	if file.OpenComputer != nil {
 		if file.OpenComputer.Workdir != "" {
@@ -8870,9 +8865,6 @@ func applyEnv(cfg *Config) error {
 	cfg.Cua.SDKPackage = getenv("CRABBOX_CUA_SDK_PACKAGE", cfg.Cua.SDKPackage)
 	cfg.Cua.SDKImport = getenv("CRABBOX_CUA_SDK_IMPORT", cfg.Cua.SDKImport)
 	cfg.Cua.SDKFallbackImport = getenv("CRABBOX_CUA_SDK_FALLBACK_IMPORT", cfg.Cua.SDKFallbackImport)
-	if v, ok := getenvBool("CRABBOX_CUA_FORGET_MISSING"); ok {
-		cfg.Cua.ForgetMissing = v
-	}
 	cfg.OpenComputer.APIURL = getenv("CRABBOX_OPENCOMPUTER_API_URL", getenv("OPENCOMPUTER_API_URL", cfg.OpenComputer.APIURL))
 	cfg.OpenComputer.Workdir = getenv("CRABBOX_OPENCOMPUTER_WORKDIR", cfg.OpenComputer.Workdir)
 	cfg.OpenComputer.CPU = getenvInt("CRABBOX_OPENCOMPUTER_CPU", cfg.OpenComputer.CPU)

@@ -90,7 +90,6 @@ cua:
   sdkPackage: cua
   sdkImport: cua
   sdkFallbackImport: cua_sandbox
-  forgetMissing: false
 ```
 
 Image, kind, region, and sizing settings are retained for configuration
@@ -114,7 +113,6 @@ Provider flags:
 --cua-sdk-package
 --cua-sdk-import
 --cua-sdk-fallback-import
---cua-forget-missing
 ```
 
 Environment overrides use the matching `CRABBOX_CUA_*` names. `CUA_BASE_URL`

@@ -350,7 +350,6 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_CUA_SDK_PACKAGE",
 		"CRABBOX_CUA_SDK_IMPORT",
 		"CRABBOX_CUA_SDK_FALLBACK_IMPORT",
-		"CRABBOX_CUA_FORGET_MISSING",
 		"CRABBOX_DOCKER_SANDBOX_CLI",
 		"CRABBOX_DOCKER_SANDBOX_AGENT",
 		"CRABBOX_DOCKER_SANDBOX_TEMPLATE",
@@ -5406,7 +5405,6 @@ cua:
   sdkPackage: cua
   sdkImport: cua
   sdkFallbackImport: cua_sandbox
-  forgetMissing: true
 openComputer:
   apiUrl: https://opencomputer.example.test
   workdir: /workspace/oc-test
@@ -5630,7 +5628,7 @@ ssh:
 	if cfg.Tensorlake.APIURL != "https://api.tensorlake.example.test" || cfg.Tensorlake.CLIPath != "/usr/local/bin/tl" || cfg.Tensorlake.Image != "ubuntu-22.04" || cfg.Tensorlake.Snapshot != "snap-tl" || cfg.Tensorlake.OrganizationID != "org-tl" || cfg.Tensorlake.ProjectID != "proj-tl" || cfg.Tensorlake.Namespace != "ns-tl" || cfg.Tensorlake.Workdir != "/workspace/crabbox-test" || cfg.Tensorlake.CPUs != 4 || cfg.Tensorlake.MemoryMB != 8192 || cfg.Tensorlake.DiskMB != 30000 || cfg.Tensorlake.TimeoutSecs != 1800 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("tensorlake config not loaded: %#v", cfg.Tensorlake)
 	}
-	if cfg.Cua.APIURL != "" || cfg.Cua.Image != "ubuntu:cua-file" || cfg.Cua.Kind != "vm" || cfg.Cua.Region != "us-west" || cfg.Cua.Workdir != "/workspace/cua-test" || cfg.Cua.VCPUs != 4 || cfg.Cua.MemoryMB != 8192 || cfg.Cua.DiskGB != 40 || cfg.Cua.StartupTimeoutSecs != 300 || cfg.Cua.ExecTimeoutSecs != 900 || cfg.Cua.BridgeCommand != "python3.12" || cfg.Cua.SDKPackage != "cua" || cfg.Cua.SDKImport != "cua" || cfg.Cua.SDKFallbackImport != "cua_sandbox" || !cfg.Cua.ForgetMissing {
+	if cfg.Cua.APIURL != "" || cfg.Cua.Image != "ubuntu:cua-file" || cfg.Cua.Kind != "vm" || cfg.Cua.Region != "us-west" || cfg.Cua.Workdir != "/workspace/cua-test" || cfg.Cua.VCPUs != 4 || cfg.Cua.MemoryMB != 8192 || cfg.Cua.DiskGB != 40 || cfg.Cua.StartupTimeoutSecs != 300 || cfg.Cua.ExecTimeoutSecs != 900 || cfg.Cua.BridgeCommand != "python3.12" || cfg.Cua.SDKPackage != "cua" || cfg.Cua.SDKImport != "cua" || cfg.Cua.SDKFallbackImport != "cua_sandbox" {
 		t.Fatalf("cua config not loaded safely: %#v", cfg.Cua)
 	}
 	if cfg.OpenComputer.APIURL != "" || cfg.OpenComputer.Workdir != "/workspace/oc-test" || cfg.OpenComputer.CPU != 8 || cfg.OpenComputer.MemoryMB != 16384 || cfg.OpenComputer.TimeoutSecs != 600 || cfg.OpenComputer.ExecTimeoutSecs != 7200 {
@@ -6038,7 +6036,6 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_CUA_SDK_PACKAGE", "cua")
 	t.Setenv("CRABBOX_CUA_SDK_IMPORT", "cua")
 	t.Setenv("CRABBOX_CUA_SDK_FALLBACK_IMPORT", "cua_sandbox")
-	t.Setenv("CRABBOX_CUA_FORGET_MISSING", "true")
 	t.Setenv("OPENCOMPUTER_API_URL", "https://oc-file.example")
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_URL", "https://oc-env.example")
 	t.Setenv("CRABBOX_OPENCOMPUTER_WORKDIR", "/workspace/oc-env")
@@ -6260,7 +6257,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.Tensorlake.APIKey != "tl-api-env" || cfg.Tensorlake.APIURL != "https://api.tl-env.example" || cfg.Tensorlake.CLIPath != "/opt/tl/bin/tensorlake" || cfg.Tensorlake.Image != "ubuntu:tl-env" || cfg.Tensorlake.Snapshot != "snap-tl-env" || cfg.Tensorlake.OrganizationID != "org-tl-env" || cfg.Tensorlake.ProjectID != "proj-tl-env" || cfg.Tensorlake.Namespace != "ns-tl-env" || cfg.Tensorlake.Workdir != "/workspace/tl-env" || cfg.Tensorlake.CPUs != 2.5 || cfg.Tensorlake.MemoryMB != 4096 || cfg.Tensorlake.DiskMB != 20480 || cfg.Tensorlake.TimeoutSecs != 900 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("unexpected tensorlake env: %#v", cfg.Tensorlake)
 	}
-	if cfg.Cua.APIURL != "https://cua-env.example" || cfg.Cua.Image != "ubuntu:cua-env" || cfg.Cua.Kind != "vm" || cfg.Cua.Region != "us-central" || cfg.Cua.Workdir != "/workspace/cua-env" || cfg.Cua.VCPUs != 6 || cfg.Cua.MemoryMB != 12288 || cfg.Cua.DiskGB != 80 || cfg.Cua.StartupTimeoutSecs != 240 || cfg.Cua.ExecTimeoutSecs != 1200 || cfg.Cua.BridgeCommand != "python3.12" || cfg.Cua.SDKPackage != "cua" || cfg.Cua.SDKImport != "cua" || cfg.Cua.SDKFallbackImport != "cua_sandbox" || !cfg.Cua.ForgetMissing {
+	if cfg.Cua.APIURL != "https://cua-env.example" || cfg.Cua.Image != "ubuntu:cua-env" || cfg.Cua.Kind != "vm" || cfg.Cua.Region != "us-central" || cfg.Cua.Workdir != "/workspace/cua-env" || cfg.Cua.VCPUs != 6 || cfg.Cua.MemoryMB != 12288 || cfg.Cua.DiskGB != 80 || cfg.Cua.StartupTimeoutSecs != 240 || cfg.Cua.ExecTimeoutSecs != 1200 || cfg.Cua.BridgeCommand != "python3.12" || cfg.Cua.SDKPackage != "cua" || cfg.Cua.SDKImport != "cua" || cfg.Cua.SDKFallbackImport != "cua_sandbox" {
 		t.Fatalf("unexpected cua env: %#v", cfg.Cua)
 	}
 	if cfg.OpenComputer.APIURL != "https://oc-env.example" || cfg.OpenComputer.Workdir != "/workspace/oc-env" || cfg.OpenComputer.CPU != 6 || cfg.OpenComputer.MemoryMB != 12288 || cfg.OpenComputer.TimeoutSecs != 1200 || cfg.OpenComputer.ExecTimeoutSecs != 2400 {

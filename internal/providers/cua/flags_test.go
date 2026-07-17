@@ -37,7 +37,6 @@ func TestProviderFlagsApplyAndValidate(t *testing.T) {
 		"--cua-sdk-package", "cua",
 		"--cua-sdk-import", "cua",
 		"--cua-sdk-fallback-import", "cua_sandbox",
-		"--cua-forget-missing",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -57,8 +56,7 @@ func TestProviderFlagsApplyAndValidate(t *testing.T) {
 		cfg.Cua.BridgeCommand != "python3.12" ||
 		cfg.Cua.SDKPackage != "cua" ||
 		cfg.Cua.SDKImport != "cua" ||
-		cfg.Cua.SDKFallbackImport != "cua_sandbox" ||
-		!cfg.Cua.ForgetMissing {
+		cfg.Cua.SDKFallbackImport != "cua_sandbox" {
 		t.Fatalf("cfg.Cua=%#v", cfg.Cua)
 	}
 }
