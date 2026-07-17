@@ -6,6 +6,7 @@
 
 - Added a Herdr plugin for Crabbox lease controls and repository workflows, with workspace-aware actions and managed panes. Thanks @zozo123.
 - Added a single `open --editor=<name>` lease handoff for external editors, starting with Zed Remote Projects and preserving lease activity while the editor is connected. Thanks @zozo123.
+- Added experimental read-only CUA diagnostics and existing-sandbox inventory while failing all remote lifecycle mutations closed until upstream exposes safe creation and deletion ownership primitives. Thanks @coygeek.
 - Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
 - Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
 
