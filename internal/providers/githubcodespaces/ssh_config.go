@@ -108,7 +108,10 @@ func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 	}
 	if proxy != "" {
 		target.SSHConfigProxy = true
-		target.ProxyCommand = rewriteProxyCommandGHPath(proxy, cfg.GitHubCodespaces.GHPath)
+		target.ProxyCommand = rewriteProxyCommandIdentityFile(
+			rewriteProxyCommandGHPath(proxy, cfg.GitHubCodespaces.GHPath),
+			entry.IdentityFile,
+		)
 	}
 	return target, nil
 }
@@ -181,21 +184,71 @@ func proxyCommandReferencesCodespace(command, name string) bool {
 
 func rewriteProxyCommandGHPath(command, ghPath string) string {
 	ghPath = strings.TrimSpace(ghPath)
-	if ghPath == "" || ghPath == defaultGHPath {
-		return command
-	}
 	start := len(command) - len(strings.TrimLeftFunc(command, unicode.IsSpace))
 	if start == len(command) {
 		return command
 	}
-	end := start + strings.IndexFunc(command[start:], unicode.IsSpace)
-	if end < start {
-		end = len(command)
-	}
-	if unquoteSSHConfigValue(command[start:end]) != defaultGHPath {
+	body := command[start:]
+	executableEnd := proxyCommandGHExecutableEnd(body, ghPath)
+	if executableEnd < 0 {
 		return command
 	}
-	return command[:start] + quoteSSHProxyExecutable(ghPath) + command[end:]
+	executable := unquoteSSHConfigValue(strings.TrimSpace(body[:executableEnd]))
+	if executable == defaultGHPath {
+		if ghPath == "" || ghPath == defaultGHPath {
+			return command
+		}
+		executable = ghPath
+	}
+	if executable == "" {
+		return command
+	}
+	return command[:start] + quoteSSHProxyExecutable(executable) + body[executableEnd:]
+}
+
+func proxyCommandGHExecutableEnd(command, ghPath string) int {
+	markers := []string{" cs ssh ", " codespace ssh "}
+	if ghPath = strings.TrimSpace(ghPath); ghPath != "" && ghPath != defaultGHPath && strings.HasPrefix(command, ghPath) {
+		for _, marker := range markers {
+			if strings.HasPrefix(command[len(ghPath):], marker) {
+				return len(ghPath)
+			}
+		}
+	}
+	executableEnd := -1
+	for _, marker := range markers {
+		searchFrom := 0
+		for {
+			index := strings.Index(command[searchFrom:], marker)
+			if index < 0 {
+				break
+			}
+			index += searchFrom
+			tail := command[index+len(marker):]
+			if strings.HasPrefix(tail, "-c ") || strings.HasPrefix(tail, "--codespace ") {
+				if executableEnd < 0 || index < executableEnd {
+					executableEnd = index
+				}
+				break
+			}
+			searchFrom = index + len(marker)
+		}
+	}
+	return executableEnd
+}
+
+func rewriteProxyCommandIdentityFile(command, identityFile string) string {
+	identityFile = strings.TrimSpace(identityFile)
+	const marker = " -- -i "
+	index := strings.LastIndex(command, marker)
+	if identityFile == "" || index < 0 {
+		return command
+	}
+	valueStart := index + len(marker)
+	if unquoteSSHConfigValue(command[valueStart:]) != identityFile {
+		return command
+	}
+	return command[:valueStart] + quoteSSHProxyExecutable(identityFile)
 }
 
 func validatePrivateSSHConfigFile(path string) error {

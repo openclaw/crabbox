@@ -36,16 +36,20 @@ func TestRewriteProxyCommandPreservesSpaceContainingArgument(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command := `gh codespace ssh -c sturdy --stdio --work-root "/workspaces/my app"`
-	rewritten := rewriteProxyCommandGHPath(command, ghPath)
-	if !strings.HasPrefix(rewritten, shellQuote(ghPath)+" ") || !strings.Contains(rewritten, `"/workspaces/my app"`) {
+	identityFile := filepath.Join(t.TempDir(), "my codespace ssh key", "codespaces.auto")
+	command := ghPath + ` cs ssh -c sturdy --stdio -- -i ` + identityFile
+	rewritten := rewriteProxyCommandIdentityFile(
+		rewriteProxyCommandGHPath(command, defaultGHPath),
+		identityFile,
+	)
+	if !strings.HasPrefix(rewritten, shellQuote(ghPath)+" ") || !strings.HasSuffix(rewritten, shellQuote(identityFile)) {
 		t.Fatalf("proxy=%q", rewritten)
 	}
 	out, err := exec.Command("sh", "-c", rewritten).CombinedOutput()
 	if err != nil {
 		t.Fatalf("run proxy: %v: %s", err, out)
 	}
-	want := "codespace\nssh\n-c\nsturdy\n--stdio\n--work-root\n/workspaces/my app\n"
+	want := "cs\nssh\n-c\nsturdy\n--stdio\n--\n-i\n" + identityFile + "\n"
 	if string(out) != want {
 		t.Fatalf("args=%q want %q", out, want)
 	}

@@ -293,3 +293,14 @@ func TestValidateGitHubCodespacesConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestValidRepoAllowsDotGitHubRepository(t *testing.T) {
+	if !validRepo("example-org/.github") {
+		t.Fatal("expected .github repository to be valid")
+	}
+	for _, repo := range []string{".example/repo", "example./repo", "example-org/.", "example-org/.."} {
+		if validRepo(repo) {
+			t.Fatalf("repo=%q should be invalid", repo)
+		}
+	}
+}

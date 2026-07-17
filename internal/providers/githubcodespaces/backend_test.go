@@ -1302,6 +1302,14 @@ func TestEffectiveWorkRootHonorsExplicitGenericWorkRoot(t *testing.T) {
 	}
 }
 
+func TestRepoConfigReadyCheckUsesEffectiveWorkRoot(t *testing.T) {
+	b := newBackend(Provider{}.Spec(), Config{GitHubCodespaces: GitHubCodespacesConfig{WorkRoot: defaultWorkRoot}}, Runtime{})
+	check := githubCodespacesReadyCheck(b.repoConfig("example-org/my-app"))
+	if !strings.Contains(check, "'/workspaces/my-app'") || strings.Contains(check, "'/workspaces/crabbox'") {
+		t.Fatalf("ready check=%q", check)
+	}
+}
+
 func TestLabelsCarryEffectiveWorkRoot(t *testing.T) {
 	fc := newFakeCodespacesClient()
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}

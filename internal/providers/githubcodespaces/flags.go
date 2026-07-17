@@ -120,7 +120,7 @@ func ValidateGitHubCodespacesConfig(cfg Config) error {
 
 func validRepo(repo string) bool {
 	owner, name, ok := strings.Cut(strings.TrimSpace(repo), "/")
-	return ok && validRepoPart(owner) && validRepoPart(name)
+	return ok && validRepoOwner(owner) && validRepoName(name)
 }
 
 func isGitHubCodespacesProviderName(provider string) bool {
@@ -132,9 +132,19 @@ func isGitHubCodespacesProviderName(provider string) bool {
 	}
 }
 
+func validRepoOwner(value string) bool {
+	value = strings.TrimSpace(value)
+	return validRepoPart(value) && !strings.HasPrefix(value, ".") && !strings.HasSuffix(value, ".")
+}
+
+func validRepoName(value string) bool {
+	value = strings.TrimSpace(value)
+	return validRepoPart(value) && value != "." && value != ".."
+}
+
 func validRepoPart(value string) bool {
 	value = strings.TrimSpace(value)
-	if value == "" || strings.Contains(value, "/") || strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") {
+	if value == "" || strings.Contains(value, "/") {
 		return false
 	}
 	for _, r := range value {
