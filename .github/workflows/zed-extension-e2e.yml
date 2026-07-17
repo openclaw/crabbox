@@ -14,6 +14,7 @@ permissions:
 
 env:
   ZED_EXTENSION_CLI_SHA: 9ee3c503a4bbbc6b4a0f8a789acca4871d773223
+  ZED_EXTENSION_CLI_SHA256: a6fca5ef11ff23f0ef8b03bd2453270591c9fc6c03700c3c92017e5082ada757
 
 jobs:
   extension:
@@ -42,6 +43,7 @@ jobs:
       - name: Package with Zed's official extension compiler
         run: |
           wget --quiet "https://zed-extension-cli.nyc3.digitaloceanspaces.com/$ZED_EXTENSION_CLI_SHA/x86_64-unknown-linux-gnu/zed-extension"
+          printf '%s  %s\n' "$ZED_EXTENSION_CLI_SHA256" zed-extension | sha256sum --check --strict -
           chmod +x zed-extension
           package_root="$RUNNER_TEMP/crabbox-zed-extension"
           mkdir -p "$package_root/output" "$package_root/scratch"
