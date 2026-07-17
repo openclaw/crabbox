@@ -8,4 +8,6 @@ repository = "https://github.com/openclaw/crabbox"
 
 snippets = ["./snippets/yaml.json"]
 
-[grammars.cr
+[grammars.crabbox-yaml]
+repository = "https://github.com/tree-sitter-grammars/tree-sitter-yaml"
+rev = "a1c4812a73ec5e089de8e441fdea3a921e8d5079"
