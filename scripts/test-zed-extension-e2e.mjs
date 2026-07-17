@@ -13,7 +13,7 @@ const calls = path.join(temp, "calls.log");
 fs.mkdirSync(bin, { recursive: true });
 fs.writeFileSync(
   path.join(bin, "crabbox"),
-  `#!/usr/bin/env bash\nset -euo pipefail\nprintf '%q ' "$@" >> "${calls}"\nprintf '\\n' >> "${calls}"\nif [ "${1-}" = list ]; then printf 'swift-crab ready\\n'; fi\n`,
+  `#!/usr/bin/env bash\nset -euo pipefail\nprintf '%q ' "$@" >> "${calls}"\nprintf '\\n' >> "${calls}"\nif [ "\${1-}" = list ]; then printf 'swift-crab ready\\n'; fi\n`,
   { mode: 0o755 },
 );
 
