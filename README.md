@@ -178,6 +178,7 @@ crabbox prewarm                                      # lease + Actions hydration
 crabbox run --id blue-lobster -- pnpm test:changed
 crabbox connect blue-lobster                         # open an interactive SSH session
 crabbox ssh --id blue-lobster
+crabbox open --editor=zed --id blue-lobster          # prepare a Zed Remote Projects session
 crabbox stop blue-lobster
 ```
 

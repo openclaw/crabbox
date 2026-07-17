@@ -258,6 +258,16 @@ crabbox warmup --code
 crabbox code --id swift-crab --open
 ```
 
+Open the synced checkout in Zed Remote Projects:
+
+```sh
+crabbox run --id swift-crab --sync-only
+crabbox open --editor=zed --id swift-crab
+```
+
+Paste the printed SSH command into Zed's **Connect New Server** dialog, open the
+printed folder, and keep `crabbox open` running while you work.
+
 Use a Mac you already own (static SSH, no provisioning):
 
 ```yaml
