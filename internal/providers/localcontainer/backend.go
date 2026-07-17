@@ -487,6 +487,10 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		reason := "missing container"
 		if req.DryRun {
+			if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
+				continue
+			}
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
 			continue
 		}

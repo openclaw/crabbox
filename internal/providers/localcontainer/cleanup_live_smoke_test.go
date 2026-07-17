@@ -56,11 +56,19 @@ func (r *liveDockerRunner) Run(ctx context.Context, req core.LocalCommandRequest
 	if len(req.Args) > 0 && req.Args[0] == "ps" && r.duringList != nil {
 		r.once.Do(r.duringList)
 	}
+	args := append([]string(nil), req.Args...)
+	if len(args) > 0 && args[0] == "ps" {
+		// Production Cleanup lists every crabbox container in the selected Docker
+		// context. Restrict that inventory at the command boundary, not merely with
+		// a point-in-time preflight, so a real container created while this smoke is
+		// running can never enter the destructive test's resource view.
+		args = append(args, "--filter", "label="+smokeTestLabel)
+	}
 	bin := req.Name
 	if bin == "" {
 		bin = r.runtime
 	}
-	cmd := exec.CommandContext(ctx, bin, req.Args...)
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = append(os.Environ(), req.Env...)
 	if req.Dir != "" {
 		cmd.Dir = req.Dir
@@ -74,7 +82,7 @@ func (r *liveDockerRunner) Run(ctx context.Context, req core.LocalCommandRequest
 		// failed docker command as success would report a false pass. Propagate with
 		// command context so a broken runtime fails the test loudly.
 		res.ExitCode = exit.ExitCode()
-		return res, fmt.Errorf("%s %s: exit %d: %s", bin, strings.Join(req.Args, " "), exit.ExitCode(), strings.TrimSpace(stderr.String()))
+		return res, fmt.Errorf("%s %s: exit %d: %s", bin, strings.Join(args, " "), exit.ExitCode(), strings.TrimSpace(stderr.String()))
 	}
 	return res, err
 }

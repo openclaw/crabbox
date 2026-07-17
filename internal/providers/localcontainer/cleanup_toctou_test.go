@@ -229,6 +229,76 @@ func TestCleanupOrphanSweepGuardDeclinesReclaimedCandidate(t *testing.T) {
 	}
 }
 
+func TestCleanupDryRunDoesNotPlanReclaimedCandidateRemoval(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("DOCKER_HOST", "")
+	repoRoot := t.TempDir()
+
+	const (
+		orphanContainer = "cbxdryruncontainer01"
+		orphanLease     = "cbx_lcdryrun67890"
+	)
+
+	var out bytes.Buffer
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.LocalContainer = core.LocalContainerConfig{
+		Runtime: "docker", Image: "ubuntu:24.04", User: "runner",
+		WorkRoot: "/workspace/crabbox", CPUs: 4, Memory: "8g", Network: "bridge",
+	}
+	runner := &recordingRunner{}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: &out, Exec: runner}).(*backend)
+
+	var scope string
+	var once sync.Once
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		switch {
+		case len(req.Args) >= 2 && req.Args[0] == "context" && req.Args[1] == "show":
+			return core.LocalCommandResult{Stdout: "test-context\n"}, nil
+		case len(req.Args) > 0 && req.Args[0] == "ps":
+			once.Do(func() {
+				rebound := core.Server{
+					CloudID: orphanContainer, Provider: providerName, Name: orphanContainer, Status: "ready",
+					Labels: map[string]string{"crabbox": "true", "provider": providerName, "lease": orphanLease, "slug": "dryrun-slug", "state": "ready"},
+				}
+				if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+					orphanLease, "dryrun-slug", providerName, scope, "", repoRoot,
+					30*time.Minute, false, rebound, core.SSHTarget{},
+				); err != nil {
+					t.Errorf("concurrent dry-run reclaim registration failed: %v", err)
+				}
+			})
+			return core.LocalCommandResult{Stdout: ""}, nil
+		default:
+			return core.LocalCommandResult{}, nil
+		}
+	}
+	scope = b.claimScope(context.Background())
+	if scope == "" {
+		t.Fatalf("test setup: claimScope resolved empty")
+	}
+	original := core.Server{
+		CloudID: orphanContainer, Provider: providerName, Name: orphanContainer, Status: "idle",
+		Labels: map[string]string{"crabbox": "true", "provider": providerName, "lease": orphanLease, "slug": "dryrun-slug", "state": "idle"},
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+		orphanLease, "dryrun-slug", providerName, scope, "", repoRoot,
+		30*time.Minute, false, original, core.SSHTarget{},
+	); err != nil {
+		t.Fatalf("setup dry-run orphan-candidate claim: %v", err)
+	}
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+		t.Fatalf("Cleanup dry-run: %v", err)
+	}
+	if strings.Contains(out.String(), "would remove claim lease="+orphanLease) {
+		t.Fatalf("dry-run planned removal of a claim reclaimed during Cleanup:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "skip claim lease="+orphanLease+" ") || !strings.Contains(out.String(), "changed-during-cleanup") {
+		t.Fatalf("dry-run did not report the reclaimed claim as skipped:\n%s", out.String())
+	}
+}
+
 // TestCleanupRetainsKeyPreparedByConcurrentAcquire covers the availability side of
 // the fix. A concurrent Acquire/reclaim of the same lease prepares or reuses that
 // lease's stored testbox key (EnsureTestboxKeyForConfig) BEFORE it publishes its
