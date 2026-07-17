@@ -22,7 +22,6 @@ const (
 	labelWorkdir     = "cua.workdir"
 	labelTTLSeconds  = "cua.ttl-seconds"
 	labelMissing     = "cua.missing"
-	labelState       = "state"
 )
 
 func newCUALeaseID() string {
@@ -78,17 +77,6 @@ func claimSandboxName(claim LeaseClaim) string {
 		return strings.TrimSpace(claim.Labels[labelSandboxName])
 	}
 	return ""
-}
-
-func resolveClaim(identifier string, cfg Config) (LeaseClaim, bool, error) {
-	identifier = strings.TrimSpace(identifier)
-	if identifier == "" {
-		return LeaseClaim{}, false, exit(2, "provider=cua requires a Crabbox-created sandbox slug or %s lease id", leasePrefix)
-	}
-	if claim, ok, err := resolveCUALeaseClaim(identifier, cfg); err != nil || ok {
-		return claim, ok, err
-	}
-	return LeaseClaim{}, false, exit(4, "CUA sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s lease id", identifier, leasePrefix)
 }
 
 func resolveCUALeaseClaim(identifier string, cfg Config) (LeaseClaim, bool, error) {
@@ -163,8 +151,4 @@ func validateSandboxOwnership(claim LeaseClaim, sandbox bridgeSandboxSummary, ex
 
 func claimIsMissing(claim LeaseClaim) bool {
 	return claim.Labels != nil && claim.Labels[labelMissing] == "true"
-}
-
-func claimCleanupInProgress(claim LeaseClaim) bool {
-	return claim.Labels != nil && strings.EqualFold(strings.TrimSpace(claim.Labels[labelState]), "cleanup")
 }
