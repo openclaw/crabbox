@@ -8,6 +8,8 @@ export function normalizeProviderCounts(source, providerCount) {
     throw new TypeError("providerCount must be a non-negative integer");
   }
 
+  // Provider metadata is the canonical registry; the navigation also contains
+  // providers/README.md, which is an index page rather than another provider.
   return source
     .replace(/Browse \d+ providers/g, `Browse ${providerCount} providers`)
     .replace(
