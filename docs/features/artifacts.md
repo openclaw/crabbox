@@ -40,7 +40,8 @@ secrets, credentials, signed URLs, or unredacted customer rows.
 
 `--require-artifact-schema remote=schema.json` goes one step further than the
 existence guard: after command success it fetches the named JSON artifact from
-the lease and validates its content against a local schema file, failing the run
+the lease and validates its content against a local schema file. The remote
+artifact must be an exact safe relative path, not a glob. Validation fails the run
 with `exit 7` when the artifact is missing, unparseable, oversized, or does not
 match. The schema is a small dependency-free subset of JSON Schema (`type`,
 `required`, `properties`, `items`, `enum`) and is **fail-closed**: a schema
