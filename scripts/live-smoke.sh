@@ -1548,6 +1548,10 @@ if has_provider tart || has_provider local-tart || has_provider macos-vm; then
   provider_smoke tart --ttl 30m --idle-timeout 5m
 fi
 
+if has_provider lume || has_provider local-lume || has_provider lume-macos; then
+  provider_smoke lume --ttl 30m --idle-timeout 5m
+fi
+
 if has_provider apple-vm || has_provider applevm; then
   apple_vm_args=(--ttl 15m --idle-timeout 5m)
   apple_vm_helper=""

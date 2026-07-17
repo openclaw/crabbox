@@ -52,6 +52,7 @@ func init() {
 	RegisterProvider(testDockerSandboxProvider{})
 	RegisterProvider(testMultipassProvider{})
 	RegisterProvider(testTartProvider{})
+	RegisterProvider(testLumeProvider{})
 	RegisterProvider(testHyperVProvider{})
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
@@ -2181,6 +2182,69 @@ func (testTartProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	return nil
 }
 func (p testTartProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testLumeProvider struct{}
+
+func (testLumeProvider) Name() string { return "lume" }
+func (testLumeProvider) Aliases() []string {
+	return []string{"local-lume", "lume-macos"}
+}
+func (testLumeProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "lume",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetMacOS}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testLumeFlagValues struct {
+	CLIPath  *string
+	Base     *string
+	Storage  *string
+	User     *string
+	WorkRoot *string
+}
+
+func (testLumeProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testLumeFlagValues{
+		CLIPath:  fs.String("lume-cli", defaults.Lume.CLIPath, "path to the Lume CLI"),
+		Base:     fs.String("lume-base", defaults.Lume.Base, "stopped Lume VM to clone"),
+		Storage:  fs.String("lume-storage", defaults.Lume.Storage, "Lume storage location"),
+		User:     fs.String("lume-user", defaults.Lume.User, "guest SSH user"),
+		WorkRoot: fs.String("lume-work-root", defaults.Lume.WorkRoot, "guest work root"),
+	}
+}
+func (testLumeProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testLumeFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "lume-cli") {
+		cfg.Lume.CLIPath = *v.CLIPath
+	}
+	if flagWasSet(fs, "lume-base") {
+		cfg.Lume.Base = *v.Base
+	}
+	if flagWasSet(fs, "lume-storage") {
+		cfg.Lume.Storage = *v.Storage
+	}
+	if flagWasSet(fs, "lume-user") {
+		cfg.Lume.User = *v.User
+	}
+	if flagWasSet(fs, "lume-work-root") {
+		cfg.Lume.WorkRoot = *v.WorkRoot
+	}
+	if cfg.Provider == "local-lume" || cfg.Provider == "lume-macos" {
+		cfg.Provider = "lume"
+	}
+	return nil
+}
+func (p testLumeProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

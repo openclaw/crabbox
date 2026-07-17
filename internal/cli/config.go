@@ -235,6 +235,7 @@ type Config struct {
 	tartDiskExplicit              bool
 	tartCPUsExplicit              bool
 	tartMemoryExplicit            bool
+	Lume                          LumeConfig
 	HyperV                        HyperVConfig
 	WindowsSandbox                WindowsSandboxConfig
 	Tailscale                     TailscaleConfig
@@ -1259,6 +1260,14 @@ type TartConfig struct {
 	Disk     int
 }
 
+type LumeConfig struct {
+	CLIPath  string
+	Base     string
+	Storage  string
+	User     string
+	WorkRoot string
+}
+
 type HyperVConfig struct {
 	Image         string
 	User          string
@@ -2116,6 +2125,25 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		if !cfg.ServerTypeExplicit && cfg.Tart.Image != "" {
 			cfg.ServerType = cfg.Tart.Image
+		}
+		return nil
+	}
+	if cfg.Provider == "lume" || cfg.Provider == "local-lume" || cfg.Provider == "lume-macos" {
+		if cfg.Lume.User != "" {
+			cfg.SSHUser = cfg.Lume.User
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.Lume.WorkRoot != "" {
+			cfg.WorkRoot = cfg.Lume.WorkRoot
+		}
+		if !IsTargetExplicit(cfg) && (cfg.TargetOS == "" || cfg.TargetOS == targetLinux) {
+			cfg.TargetOS = targetMacOS
+		}
+		if !cfg.ServerTypeExplicit && cfg.Lume.Base != "" {
+			cfg.ServerType = cfg.Lume.Base
 		}
 		return nil
 	}
@@ -3158,6 +3186,12 @@ func baseConfig() Config {
 			CPUs:     4,
 			Memory:   8192,
 		},
+		Lume: LumeConfig{
+			CLIPath:  "lume",
+			Base:     "crabbox-macos-golden",
+			User:     "lume",
+			WorkRoot: "/Users/lume/crabbox",
+		},
 		HyperV: HyperVConfig{
 			User:     "crabbox",
 			WorkRoot: defaultWindowsWorkRoot,
@@ -3287,6 +3321,7 @@ type fileConfig struct {
 	MXC                      *fileMXCConfig                      `yaml:"mxc,omitempty"`
 	Multipass                *fileMultipassConfig                `yaml:"multipass,omitempty"`
 	Tart                     *fileTartConfig                     `yaml:"tart,omitempty"`
+	Lume                     *fileLumeConfig                     `yaml:"lume,omitempty"`
 	HyperV                   *fileHyperVConfig                   `yaml:"hyperv,omitempty"`
 	WindowsSandbox           *fileWindowsSandboxConfig           `yaml:"windowsSandbox,omitempty"`
 	Tailscale                *fileTailscaleConfig                `yaml:"tailscale,omitempty"`
@@ -4411,6 +4446,14 @@ type fileTartConfig struct {
 	CPUs     *int   `yaml:"cpus,omitempty"`
 	Memory   *int   `yaml:"memory,omitempty"`
 	Disk     *int   `yaml:"disk,omitempty"`
+}
+
+type fileLumeConfig struct {
+	CLIPath  string `yaml:"cliPath,omitempty"`
+	Base     string `yaml:"base,omitempty"`
+	Storage  string `yaml:"storage,omitempty"`
+	User     string `yaml:"user,omitempty"`
+	WorkRoot string `yaml:"workRoot,omitempty"`
 }
 
 type fileHyperVConfig struct {
@@ -7300,6 +7343,25 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.tartDiskExplicit = true
 		}
 	}
+	if file.Lume != nil {
+		if trusted {
+			if file.Lume.CLIPath != "" {
+				cfg.Lume.CLIPath = file.Lume.CLIPath
+			}
+			if file.Lume.Base != "" {
+				cfg.Lume.Base = file.Lume.Base
+			}
+			if file.Lume.Storage != "" {
+				cfg.Lume.Storage = file.Lume.Storage
+			}
+		}
+		if file.Lume.User != "" {
+			cfg.Lume.User = file.Lume.User
+		}
+		if file.Lume.WorkRoot != "" {
+			cfg.Lume.WorkRoot = file.Lume.WorkRoot
+		}
+	}
 	if file.HyperV != nil {
 		if file.HyperV.Image != "" {
 			cfg.HyperV.Image = file.HyperV.Image
@@ -9176,6 +9238,11 @@ func applyEnv(cfg *Config) error {
 		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
 		cfg.tartDiskExplicit = cfg.Tart.Disk > 0
 	}
+	cfg.Lume.CLIPath = getenv("CRABBOX_LUME_CLI", cfg.Lume.CLIPath)
+	cfg.Lume.Base = getenv("CRABBOX_LUME_BASE", cfg.Lume.Base)
+	cfg.Lume.Storage = getenv("CRABBOX_LUME_STORAGE", cfg.Lume.Storage)
+	cfg.Lume.User = getenv("CRABBOX_LUME_USER", cfg.Lume.User)
+	cfg.Lume.WorkRoot = getenv("CRABBOX_LUME_WORK_ROOT", cfg.Lume.WorkRoot)
 	cfg.HyperV.Image = getenv("CRABBOX_HYPERV_IMAGE", cfg.HyperV.Image)
 	cfg.HyperV.User = getenv("CRABBOX_HYPERV_USER", cfg.HyperV.User)
 	cfg.HyperV.WorkRoot = getenv("CRABBOX_HYPERV_WORK_ROOT", cfg.HyperV.WorkRoot)

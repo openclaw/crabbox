@@ -600,6 +600,20 @@
     "caveat": "Isolation follows the local container runtime",
     "docs": "local-container.md"
   },
+  "lume": {
+    "status": "built-in",
+    "category": "local-vm",
+    "substrate": "Lume Apple silicon macOS VM",
+    "location": "local",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "Crabbox",
+    "cleanup": "verified VM stop and delete",
+    "bestFit": "Layered local macOS VM development sessions",
+    "caveat": "Apple silicon host, stopped prepared base, and Lume bootstrap account required",
+    "docs": "lume.md"
+  },
   "modal": {
     "status": "built-in",
     "category": "delegated-sandbox",

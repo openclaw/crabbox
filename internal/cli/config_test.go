@@ -7417,3 +7417,33 @@ func TestModalSecretConfigRequiresTrustedFile(t *testing.T) {
 		t.Fatalf("trusted Modal secret selection not applied: %#v", cfg.Modal)
 	}
 }
+
+func TestLumeHostLifecycleConfigRequiresTrustedFile(t *testing.T) {
+	cfg := baseConfig()
+	trusted := fileConfig{Lume: &fileLumeConfig{
+		CLIPath:  "/opt/homebrew/bin/lume",
+		Base:     "trusted-golden",
+		Storage:  "trusted-storage",
+		User:     "trusted-user",
+		WorkRoot: "/Users/trusted-user/work",
+	}}
+	if err := applyFileConfigWithTrust(&cfg, trusted, true); err != nil {
+		t.Fatal(err)
+	}
+	untrusted := fileConfig{Lume: &fileLumeConfig{
+		CLIPath:  "./run-me",
+		Base:     "credentialed-personal-vm",
+		Storage:  "other-storage",
+		User:     "repo-user",
+		WorkRoot: "/Users/repo-user/work",
+	}}
+	if err := applyFileConfigWithTrust(&cfg, untrusted, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lume.CLIPath != "/opt/homebrew/bin/lume" || cfg.Lume.Base != "trusted-golden" || cfg.Lume.Storage != "trusted-storage" {
+		t.Fatalf("untrusted repo config changed host lifecycle selection: %#v", cfg.Lume)
+	}
+	if cfg.Lume.User != "repo-user" || cfg.Lume.WorkRoot != "/Users/repo-user/work" {
+		t.Fatalf("safe guest settings were not applied: %#v", cfg.Lume)
+	}
+}

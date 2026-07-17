@@ -8,6 +8,7 @@
 - Added a single `open --editor=<name>` lease handoff for external editors, starting with Zed Remote Projects and preserving lease activity while the editor is connected. Thanks @zozo123.
 - Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
 - Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
+- Added native local macOS SSH leases through Lume, cloning a stopped golden VM per lease with isolated SSH identity and verified stop-before-delete lifecycle handling.
 
 ### Fixed
 
