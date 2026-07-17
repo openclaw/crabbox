@@ -583,6 +583,9 @@ func TestRemoveContainerUsesDeleteForce(t *testing.T) {
 }
 
 func TestCleanupPreservesUnclaimedStoppedAppleContainer(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container cleanup only runs on macOS/Apple silicon")
+	}
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		commandKey([]string{"ls", "--all", "--format", "json"}): {Stdout: `[{
@@ -604,6 +607,9 @@ func TestCleanupPreservesUnclaimedStoppedAppleContainer(t *testing.T) {
 }
 
 func TestCleanupDeletesStoppedAppleContainerWithExactClaim(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container cleanup only runs on macOS/Apple silicon")
+	}
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_claimed_cleanup"
 	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
