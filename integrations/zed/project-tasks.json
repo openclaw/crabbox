@@ -18,7 +18,7 @@
   {
     "label": "Crabbox: Run selected command",
     "command": "crabbox",
-    "args": ["run", "--", "sh", "-lc", "$ZED_SELECTED_TEXT"],
+    "args": ["run", "--shell", "--", "$ZED_SELECTED_TEXT"],
     "cwd": "$ZED_WORKTREE_ROOT",
     "save": "all",
     "reveal": "always"
@@ -48,7 +48,7 @@
   {
     "label": "Crabbox: Run command on box…",
     "command": "bash",
-    "args": ["-c", "crabbox list; printf '\nLease id or slug: '; read -r id; test -n \"$id\" || exit 2; printf 'Remote command: '; read -r command; test -n \"$command\" && exec crabbox run --id \"$id\" -- sh -lc \"$command\""],
+    "args": ["-c", "crabbox list; printf '\nLease id or slug: '; read -r id; test -n \"$id\" || exit 2; printf 'Remote command: '; read -r command; test -n \"$command\" && exec crabbox run --id \"$id\" --shell -- \"$command\""],
     "cwd": "$ZED_WORKTREE_ROOT",
     "save": "all",
     "reveal": "always"

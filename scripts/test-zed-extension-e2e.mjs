@@ -58,11 +58,11 @@ const recorded = fs.readFileSync(calls, "utf8");
 for (const expected of [
   "doctor",
   "warmup",
-  "run -- sh -lc printf\\ selected-ok",
+  "run --shell -- printf\\ selected-ok",
   "job run detected",
   "list",
   "status --id swift-crab --wait",
-  "run --id swift-crab -- sh -lc printf\\ remote-ok",
+  "run --id swift-crab --shell -- printf\\ remote-ok",
   "connect swift-crab",
   "inspect --id swift-crab",
   "stop swift-crab",
