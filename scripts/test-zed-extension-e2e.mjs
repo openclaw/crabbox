@@ -24,6 +24,13 @@ const env = {
   ZED_SELECTED_TEXT: "printf selected-ok",
 };
 
+function resolveZedVariables(value) {
+  return value.replace(/\$\{(ZED_[A-Z_]+)(?::([^}]*))?\}|\$(ZED_[A-Z_]+)/g, (_match, braced, fallback, plain) => {
+    const name = braced ?? plain;
+    return env[name] ?? fallback ?? "";
+  });
+}
+
 function inputFor(label) {
   if (label === "Crabbox: Run command on box…") return "swift-crab\nprintf remote-ok\n";
   if (label.includes("box…")) return "swift-crab\n";
@@ -31,8 +38,11 @@ function inputFor(label) {
 }
 
 for (const task of tasks) {
-  const result = spawnSync(task.command, task.args ?? [], {
-    cwd: temp,
+  const command = resolveZedVariables(task.command);
+  const args = (task.args ?? []).map(resolveZedVariables);
+  const cwd = resolveZedVariables(task.cwd ?? "$ZED_WORKTREE_ROOT");
+  const result = spawnSync(command, args, {
+    cwd,
     env,
     input: inputFor(task.label),
     encoding: "utf8",
