@@ -232,7 +232,7 @@ are unavailable or partly restricted, and sync timing is reported as `delegated`
 Examples include `blacksmith-testbox`, `azure-dynamic-sessions`, `e2b`, `modal`,
 `islo`, `cloudflare`, `cloudflare-dynamic-workers`, `crownest`, `upstash-box`,
 `tensorlake`, and `wandb`. See
-[providers](features/providers.md) for the full adapter list and which surface
+[providers](providers/README.md) for the full adapter list and which surface
 each one supports.
 
 Module-runtime delegated providers such as `cloudflare-dynamic-workers` run
@@ -645,4 +645,4 @@ No progress bars when stdout is not a TTY.
 - [Getting started](getting-started.md) — first run walkthrough.
 - [How it works](how-it-works.md) and [Architecture](architecture.md) — the
   CLI / broker / runner split.
-- [Providers](features/providers.md) — adapter list and per-provider surface.
+- [Providers](providers/README.md) — adapter list and per-provider surface.

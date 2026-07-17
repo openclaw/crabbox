@@ -103,7 +103,7 @@ provide a Linux shell. Delegated artifact features such as `--artifact-glob`,
 `--require-artifact`, and `--download` are accepted only by delegated adapters
 that explicitly advertise the matching bounded artifact capability.
 `--keep-on-failure` is supported for one-shot delegated runs. See the
-per-provider docs under [providers](../features/providers.md) for how `--id`
+per-provider docs under [providers](../providers/README.md) for how `--id`
 resolves and any extra sync limitations.
 
 Vercel Sandbox forwards non-auth command environment values through the SDK
@@ -552,7 +552,7 @@ Provider-specific flags are registered by each adapter and only apply to that
 provider (for example `--azure-backend`, `--azure-os-disk`, the
 `--blacksmith-*`, `--exe-dev-*`, `--namespace-*`, `--semaphore-*`,
 `--sprites-*`, `--e2b-*`, and `--azure-dynamic-sessions-*` families). See the
-per-provider docs under [providers](../features/providers.md).
+per-provider docs under [providers](../providers/README.md).
 
 Run-specific flags:
 

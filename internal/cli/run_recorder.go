@@ -198,6 +198,7 @@ func (r *runRecorder) Failed(err error) {
 	}
 	r.waitForOutputEvents(runEventOutputPostWait)
 	r.finished = true
+	r.stopTelemetrySampler()
 	r.appendEvent("run.failed", CoordinatorRunEventInput{
 		Type:    "run.failed",
 		Phase:   "failed",

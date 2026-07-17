@@ -284,4 +284,3 @@ successful live proof when the current host cannot run Firecracker.
 - [providers](../commands/providers.md)
 - [doctor](../commands/doctor.md)
 - [Provider backends](../provider-backends.md)
-- [Provider feature overview](../features/providers.md)

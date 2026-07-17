@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -183,7 +184,9 @@ func TestCopyPipeTreatsClosedPipeAsEOF(t *testing.T) {
 	writer := &eventWriter{w: rec, flusher: rec}
 
 	wg.Add(1)
-	copyPipe(&wg, closedPipeReader{}, "stdout", writer)
+	var copied atomic.Int64
+	var writesInFlight atomic.Int64
+	copyPipe(&wg, closedPipeReader{}, "stdout", writer, &copied, &writesInFlight)
 
 	if body := rec.Body.String(); body != "" {
 		t.Fatalf("copyPipe emitted %q for closed pipe", body)

@@ -345,4 +345,4 @@ Before real payment code lands, maintainers need explicit decisions for:
 - [marketplace command](../commands/marketplace.md)
 - [Cost and usage](cost-usage.md)
 - [Capacity and fallback](capacity-fallback.md)
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)

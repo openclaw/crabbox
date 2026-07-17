@@ -27,7 +27,7 @@ Crabbox has three parts:
   `worker/node`).
 - **Runners** — managed cloud machines, self-hosted VMs, BYO SSH hosts, or
   delegated sandboxes that actually run commands. See the
-  [provider reference](features/providers.md).
+  [provider reference](providers/README.md).
 
 For normal CLI leases, the coordinator manages leases and the CLI executes
 work. Runners do not call back to the coordinator for ordinary command

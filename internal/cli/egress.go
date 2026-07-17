@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ const (
 	egressRemoteLog         = "/tmp/crabbox-egress-client.log"
 	egressMaxMessageBytes   = 2 * 1024 * 1024
 	egressCopyChunkBytes    = 32 * 1024
+	egressClientQueueBytes  = 8 * egressCopyChunkBytes
 	egressOpenTimeout       = 20 * time.Second
 	egressDialTimeout       = 15 * time.Second
 	egressRemoteReadyWait   = 5 * time.Second
@@ -49,6 +51,15 @@ type egressProxyMessage struct {
 
 type egressOpenResult struct {
 	err error
+}
+
+type egressClientConn struct {
+	conn            net.Conn
+	ready           bool
+	queue           [][]byte
+	queuedBytes     int
+	draining        bool
+	closeAfterDrain bool
 }
 
 func (a App) egress(ctx context.Context, args []string) error {
@@ -90,6 +101,10 @@ bridges; the host agent opens the real outbound TCP connections.`)
 }
 
 func (a App) egressHost(ctx context.Context, args []string) error {
+	return a.egressHostWithConnectHook(ctx, args, nil)
+}
+
+func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onConnected func()) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("egress host", a.Stderr)
 	provider := fs.String("provider", defaults.Provider, "provider: hetzner or aws")
@@ -122,6 +137,9 @@ func (a App) egressHost(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "egress host: connected lease=%s session=%s profile=%s allow=%s\n", leaseID, bridge.sessionID, blank(*profile, "-"), strings.Join(allow, ","))
+	if onConnected != nil {
+		onConnected()
+	}
 	return bridge.serveHost(ctx, allow)
 }
 
@@ -207,11 +225,23 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
+	unlockDaemon, err := acquireEgressDaemonLock(leaseID)
+	if err != nil {
+		return exit(2, "acquire egress daemon lock: %v", err)
+	}
+	daemonLockHeld := true
+	releaseDaemonLock := func() {
+		if daemonLockHeld {
+			daemonLockHeld = false
+			unlockDaemon()
+		}
+	}
+	defer releaseDaemonLock()
 	sessionID := newLocalEgressSessionID()
 	if err := installRemoteEgressClient(ctx, target); err != nil {
 		return err
 	}
-	clientTicket, err := coord.CreateEgressTicket(ctx, leaseID, "client", sessionID, *profile, allow)
+	clientTicket, err := a.prepareEgressClientCutover(ctx, coord, leaseID, sessionID, *profile, allow)
 	if err != nil {
 		return err
 	}
@@ -224,7 +254,6 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "egress client: lease=%s listen=%s log=%s\n", leaseID, *listen, egressRemoteLog)
 	hostArgs := []string{
-		"host",
 		"--provider", cfg.Provider,
 		"--id", leaseID,
 		"--coordinator", coord.BaseURL,
@@ -237,14 +266,42 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 		hostArgs = append(hostArgs, "--allow", strings.Join(allow, ","))
 	}
 	if *daemon {
-		return a.startEgressHostDaemon(leaseID, hostArgs)
+		// The supervisor re-invokes `crabbox egress <args>`, so it needs the
+		// subcommand token; the in-process foreground call below must not get
+		// it because flag parsing stops at the first non-flag argument.
+		return a.startEgressHostDaemonLocked(leaseID, append([]string{"host"}, hostArgs...))
 	}
 	hostTicket, err := coord.CreateEgressTicket(ctx, leaseID, "host", sessionID, *profile, allow)
 	if err != nil {
 		return err
 	}
 	hostArgs = append(hostArgs, "--ticket", hostTicket.Ticket)
-	return a.egressHost(ctx, hostArgs)
+	// Hold the daemon lock until the foreground host has joined the session so a
+	// concurrent replacement start cannot interleave with its pending connect.
+	// Release it before the long-running serve loop so egress stop and replacement
+	// starts do not block until the session ends.
+	return a.egressHostWithConnectHook(ctx, hostArgs, releaseDaemonLock)
+}
+
+func (a App) prepareEgressClientCutover(ctx context.Context, coord *CoordinatorClient, leaseID, sessionID, profile string, allow []string) (CoordinatorEgressTicket, error) {
+	clientTicket, err := coord.CreateEgressTicket(ctx, leaseID, "client", sessionID, profile, allow)
+	if err != nil {
+		return CoordinatorEgressTicket{}, err
+	}
+	// Stop the old host daemon before the new daemon or foreground session
+	// activates (the remote client start in egressStart). The coordinator keeps
+	// one active egress session per lease, and the old supervisor restarts its
+	// host on any non-fatal exit, so a still-running old daemon would reconnect
+	// its prior session and clobber the replacement mid-cutover. The brief
+	// no-daemon window until the new host starts is the accepted tradeoff; the
+	// stop stays after ticket minting so preflight failures preserve the working
+	// daemon.
+	if stopped, err := a.stopEgressHostDaemonLocked(leaseID); err != nil {
+		return CoordinatorEgressTicket{}, err
+	} else if stopped {
+		fmt.Fprintln(a.Stdout, "egress host daemon: replacing previous daemon")
+	}
+	return clientTicket, nil
 }
 
 func (a App) egressStatus(ctx context.Context, args []string) error {
@@ -293,19 +350,38 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 	if *id == "" {
 		return exit(2, "usage: crabbox egress stop --id <lease-id-or-slug>")
 	}
-	stoppedLocal, err := a.stopEgressHostDaemon(*id)
-	if err != nil {
-		return err
-	}
 	cfg, cfgErr := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+	leaseID := *id
+	var target SSHTarget
+	resolved := false
 	if cfgErr == nil {
-		if _, target, leaseID, resolveErr := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false); resolveErr == nil {
-			_ = runSSHQuiet(ctx, target, remoteStopEgressClientCommand())
-			if leaseID != *id && !stoppedLocal {
-				stoppedLocal, _ = a.stopEgressHostDaemon(leaseID)
-			}
-			fmt.Fprintf(a.Stdout, "egress remote client: stopped lease=%s\n", leaseID)
+		if _, resolvedTarget, resolvedLeaseID, resolveErr := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false); resolveErr == nil {
+			target = resolvedTarget
+			leaseID = resolvedLeaseID
+			resolved = true
 		}
+	}
+	unlock, err := acquireEgressDaemonLocks(*id, leaseID)
+	if err != nil {
+		return exit(2, "acquire egress daemon locks: %v", err)
+	}
+	defer unlock()
+	stoppedLocal := false
+	seen := map[string]bool{}
+	for _, daemonID := range []string{*id, leaseID} {
+		if seen[daemonID] {
+			continue
+		}
+		seen[daemonID] = true
+		stopped, stopErr := a.stopEgressHostDaemonLocked(daemonID)
+		if stopErr != nil {
+			return stopErr
+		}
+		stoppedLocal = stoppedLocal || stopped
+	}
+	if resolved {
+		_ = runSSHQuiet(ctx, target, remoteStopEgressClientCommand())
+		fmt.Fprintf(a.Stdout, "egress remote client: stopped lease=%s\n", leaseID)
 	}
 	if !stoppedLocal {
 		fmt.Fprintf(a.Stdout, "egress host daemon: no local daemon for %s\n", *id)
@@ -344,12 +420,13 @@ func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinato
 }
 
 type egressBridge struct {
-	ws        *websocket.Conn
-	sessionID string
-	writeMu   sync.Mutex
-	mu        sync.Mutex
-	conns     map[string]net.Conn
-	pending   map[string]chan egressOpenResult
+	ws          *websocket.Conn
+	sessionID   string
+	writeMu     sync.Mutex
+	mu          sync.Mutex
+	conns       map[string]net.Conn
+	clientConns map[string]*egressClientConn
+	pending     map[string]chan egressOpenResult
 }
 
 func connectEgressBridge(ctx context.Context, coord *CoordinatorClient, leaseID, role, ticket, sessionID, profile string, allow []string) (*egressBridge, error) {
@@ -385,10 +462,11 @@ func connectEgressBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 	}
 	ws.SetReadLimit(egressMaxMessageBytes)
 	return &egressBridge{
-		ws:        ws,
-		sessionID: sessionID,
-		conns:     map[string]net.Conn{},
-		pending:   map[string]chan egressOpenResult{},
+		ws:          ws,
+		sessionID:   sessionID,
+		conns:       map[string]net.Conn{},
+		clientConns: map[string]*egressClientConn{},
+		pending:     map[string]chan egressOpenResult{},
 	}, nil
 }
 
@@ -451,7 +529,7 @@ func (b *egressBridge) hostOpen(ctx context.Context, msg egressProxyMessage, all
 		_ = conn.Close()
 		return
 	}
-	go b.copyConnToBridge(ctx, msg.ID, conn)
+	go b.relayConnToBridge(ctx, msg.ID, conn)
 }
 
 func dialPublicEgressHost(ctx context.Context, host, port string) (net.Conn, error) {
@@ -597,14 +675,22 @@ func (b *egressBridge) clientReadLoop(ctx context.Context) error {
 		}
 		switch msg.Type {
 		case "open_ok":
-			b.finishOpen(msg.ID, nil)
+			if !b.finishOpen(msg.ID, nil) {
+				// Late open_ok for an open we already abandoned (timed out or
+				// canceled): the host registered the destination conn and its
+				// copy goroutine, so tell it to close, or they leak for the life
+				// of the bridge. Async — a synchronous host write here would
+				// stall the single read loop (and every stream) on a full socket.
+				go b.closeHostConn(msg.ID)
+			}
 		case "error":
-			b.finishOpen(msg.ID, errors.New(msg.Error))
-			b.closeConn(msg.ID)
+			b.rejectOpen(msg.ID, errors.New(msg.Error))
 		case "data":
-			b.writeConn(msg)
+			b.enqueueClientConn(msg)
 		case "close":
-			b.closeConn(msg.ID)
+			if !b.closeClientConnAfterDrain(msg.ID) {
+				b.closeConn(msg.ID)
+			}
 		}
 	}
 }
@@ -622,16 +708,23 @@ func (b *egressBridge) handleProxyConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 	id := newLocalEgressConnID()
+	b.registerClientConn(id, conn)
 	if err := b.openRemote(ctx, id, host, port); err != nil {
+		b.discardClientConn(id)
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
-	b.mu.Lock()
-	b.conns[id] = conn
-	b.mu.Unlock()
-	defer b.closeConn(id)
+	cleanupBeforeRelay := true
+	defer func() {
+		if cleanupBeforeRelay {
+			b.closeConn(id)
+			go b.closeHostConn(id)
+		}
+	}()
 	if req.Method == http.MethodConnect {
-		_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\nProxy-Agent: crabbox\r\n\r\n")
+		if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\nProxy-Agent: crabbox\r\n\r\n"); err != nil {
+			return
+		}
 	} else {
 		var buf bytes.Buffer
 		req.RequestURI = ""
@@ -644,13 +737,15 @@ func (b *egressBridge) handleProxyConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 	}
+	b.markClientConnReady(id)
 	if reader.Buffered() > 0 {
 		buffered, _ := reader.Peek(reader.Buffered())
 		if len(buffered) > 0 {
 			_ = b.writeJSON(ctx, egressProxyMessage{Type: "data", ID: id, Body: base64.StdEncoding.EncodeToString(buffered)})
 		}
 	}
-	b.copyConnToBridge(ctx, id, conn)
+	cleanupBeforeRelay = false
+	b.relayConnToBridge(ctx, id, conn)
 }
 
 func (b *egressBridge) openRemote(ctx context.Context, id, host, port string) error {
@@ -659,6 +754,7 @@ func (b *egressBridge) openRemote(ctx context.Context, id, host, port string) er
 	b.pending[id] = ch
 	b.mu.Unlock()
 	if err := b.writeJSON(ctx, egressProxyMessage{Type: "open", ID: id, Host: host, Port: port}); err != nil {
+		b.abandonOpen(id)
 		return err
 	}
 	timer := time.NewTimer(egressOpenTimeout)
@@ -667,23 +763,84 @@ func (b *egressBridge) openRemote(ctx context.Context, id, host, port string) er
 	case result := <-ch:
 		return result.err
 	case <-timer.C:
+		b.settleAbandonedOpen(id, ch)
 		return errors.New("egress open timed out")
 	case <-ctx.Done():
+		b.settleAbandonedOpen(id, ch)
 		return context.Cause(ctx)
 	}
 }
 
-func (b *egressBridge) finishOpen(id string, err error) {
+// settleAbandonedOpen cleans up an open the caller gives up on (timeout/cancel)
+// so it does not leak on the long-lived client bridge. If finishOpen won the
+// race and already resolved the pending entry, a result is buffered on ch; a
+// successful open there means the host opened a destination conn we must tell it
+// to close, or it and its copy goroutine leak. A reply that lands after this
+// returns is instead handled by clientReadLoop's open_ok branch.
+func (b *egressBridge) settleAbandonedOpen(id string, ch chan egressOpenResult) {
+	if b.abandonOpen(id) {
+		return // we removed the pending entry before any host reply landed
+	}
+	// finishOpen won the race and will deliver a result on ch. Drain it and, on a
+	// successful open, close the orphaned host conn — in the background so the
+	// caller (openRemote) returns immediately on cancel and never blocks on the
+	// network write.
+	go func() {
+		if result := <-ch; result.err == nil {
+			b.closeHostConn(id)
+		}
+	}()
+}
+
+// closeHostConn tells the host to drop a conn, using a detached, time-bounded
+// context so it works even when the caller's context is already canceled. It is
+// a synchronous write, so callers that must not block (the single clientReadLoop
+// goroutine, or a canceling openRemote) invoke it via `go`.
+func (b *egressBridge) closeHostConn(id string) {
+	if b.ws == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), egressDialTimeout)
+	defer cancel()
+	_ = b.writeJSON(ctx, egressProxyMessage{Type: "close", ID: id})
+}
+
+// abandonOpen removes the pending entry for id and reports whether it existed
+// (false means finishOpen already resolved it and is delivering a result on the
+// open's channel).
+func (b *egressBridge) abandonOpen(id string) bool {
+	b.mu.Lock()
+	_, ok := b.pending[id]
+	delete(b.pending, id)
+	b.mu.Unlock()
+	return ok
+}
+
+// finishOpen resolves a pending open with the given result and reports whether a
+// pending open existed. false means the open was already abandoned (timed out or
+// canceled), so the caller can tell the host to close the orphaned conn.
+func (b *egressBridge) finishOpen(id string, err error) bool {
 	b.mu.Lock()
 	ch := b.pending[id]
 	delete(b.pending, id)
 	b.mu.Unlock()
 	if ch != nil {
 		ch <- egressOpenResult{err: err}
+		return true
 	}
+	return false
 }
 
-func (b *egressBridge) copyConnToBridge(ctx context.Context, id string, conn net.Conn) {
+// rejectOpen leaves the local proxy socket owned by handleProxyConn long
+// enough to return its HTTP 502 response.
+func (b *egressBridge) rejectOpen(id string, err error) {
+	b.discardClientConn(id)
+	b.finishOpen(id, err)
+}
+
+func (b *egressBridge) relayConnToBridge(ctx context.Context, id string, conn net.Conn) {
+	defer b.closeConn(id)
+	defer b.closeHostConn(id)
 	buf := make([]byte, egressCopyChunkBytes)
 	for {
 		n, err := conn.Read(buf)
@@ -697,8 +854,6 @@ func (b *egressBridge) copyConnToBridge(ctx context.Context, id string, conn net
 			}
 		}
 		if err != nil {
-			_ = b.writeJSON(ctx, egressProxyMessage{Type: "close", ID: id})
-			b.closeConn(id)
 			return
 		}
 	}
@@ -717,14 +872,175 @@ func (b *egressBridge) writeConn(msg egressProxyMessage) {
 	}
 }
 
+func (b *egressBridge) registerClientConn(id string, conn net.Conn) {
+	b.mu.Lock()
+	if b.clientConns == nil {
+		b.clientConns = map[string]*egressClientConn{}
+	}
+	b.clientConns[id] = &egressClientConn{conn: conn}
+	b.mu.Unlock()
+}
+
+// enqueueClientConn keeps the shared WebSocket reader independent of local
+// socket speed. Each client stream gets an ordered, bounded queue; a stream
+// that cannot keep up is closed without stalling unrelated streams.
+func (b *egressBridge) enqueueClientConn(msg egressProxyMessage) {
+	data, err := base64.StdEncoding.DecodeString(msg.Body)
+	if err != nil {
+		return
+	}
+	b.mu.Lock()
+	client := b.clientConns[msg.ID]
+	if client == nil {
+		b.mu.Unlock()
+		return
+	}
+	if len(data) > egressClientQueueBytes-client.queuedBytes {
+		delete(b.clientConns, msg.ID)
+		b.mu.Unlock()
+		_ = client.conn.Close()
+		go b.closeHostConn(msg.ID)
+		return
+	}
+	client.queue = append(client.queue, data)
+	client.queuedBytes += len(data)
+	startDrain := client.ready && !client.draining
+	if startDrain {
+		client.draining = true
+	}
+	b.mu.Unlock()
+	if startDrain {
+		go b.drainClientConn(msg.ID, client)
+	}
+}
+
+func (b *egressBridge) markClientConnReady(id string) {
+	b.mu.Lock()
+	client := b.clientConns[id]
+	if client == nil {
+		b.mu.Unlock()
+		return
+	}
+	client.ready = true
+	startDrain := len(client.queue) > 0 && !client.draining
+	closeNow := client.closeAfterDrain && len(client.queue) == 0 && !client.draining
+	if closeNow {
+		delete(b.clientConns, id)
+	}
+	if startDrain {
+		client.draining = true
+	}
+	b.mu.Unlock()
+	if closeNow {
+		_ = client.conn.Close()
+		return
+	}
+	if startDrain {
+		go b.drainClientConn(id, client)
+	}
+}
+
+func (b *egressBridge) drainClientConn(id string, client *egressClientConn) {
+	for {
+		b.mu.Lock()
+		if b.clientConns[id] != client || len(client.queue) == 0 {
+			closeNow := false
+			if b.clientConns[id] == client {
+				client.draining = false
+				if client.closeAfterDrain {
+					delete(b.clientConns, id)
+					closeNow = true
+				}
+			}
+			b.mu.Unlock()
+			if closeNow {
+				_ = client.conn.Close()
+			}
+			return
+		}
+		data := client.queue[0]
+		client.queue[0] = nil
+		client.queue = client.queue[1:]
+		client.queuedBytes -= len(data)
+		b.mu.Unlock()
+
+		if err := writeFull(client.conn, data); err != nil {
+			b.failClientConn(id, client)
+			return
+		}
+	}
+}
+
+// closeClientConnAfterDrain preserves WebSocket frame order: a terminal close
+// is applied only after all preceding data frames reach the local socket.
+func (b *egressBridge) closeClientConnAfterDrain(id string) bool {
+	b.mu.Lock()
+	client := b.clientConns[id]
+	if client == nil {
+		b.mu.Unlock()
+		return false
+	}
+	client.closeAfterDrain = true
+	closeNow := client.ready && len(client.queue) == 0 && !client.draining
+	if closeNow {
+		delete(b.clientConns, id)
+	}
+	b.mu.Unlock()
+	if closeNow {
+		_ = client.conn.Close()
+	}
+	return true
+}
+
+func writeFull(conn net.Conn, data []byte) error {
+	for len(data) > 0 {
+		n, err := conn.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func (b *egressBridge) failClientConn(id string, client *egressClientConn) {
+	b.mu.Lock()
+	if b.clientConns[id] != client {
+		b.mu.Unlock()
+		return
+	}
+	delete(b.clientConns, id)
+	b.mu.Unlock()
+	_ = client.conn.Close()
+	go b.closeHostConn(id)
+}
+
+func (b *egressBridge) discardClientConn(id string) {
+	b.mu.Lock()
+	delete(b.clientConns, id)
+	b.mu.Unlock()
+}
+
 func (b *egressBridge) closeConn(id string) {
 	b.mu.Lock()
 	conn := b.conns[id]
+	client := b.clientConns[id]
+	pending := b.pending[id]
 	delete(b.conns, id)
+	delete(b.clientConns, id)
 	delete(b.pending, id)
 	b.mu.Unlock()
 	if conn != nil {
 		_ = conn.Close()
+	}
+	if client != nil {
+		_ = client.conn.Close()
+	}
+	if pending != nil {
+		pending <- egressOpenResult{err: errors.New("egress connection closed")}
 	}
 }
 
@@ -750,16 +1066,26 @@ func (b *egressBridge) close() {
 	if b == nil {
 		return
 	}
-	_ = b.ws.Close(websocket.StatusNormalClosure, "egress stopped")
+	if b.ws != nil {
+		_ = b.ws.Close(websocket.StatusNormalClosure, "egress stopped")
+	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	var closeConns []net.Conn
 	for id, conn := range b.conns {
-		_ = conn.Close()
+		closeConns = append(closeConns, conn)
 		delete(b.conns, id)
+	}
+	for id, client := range b.clientConns {
+		closeConns = append(closeConns, client.conn)
+		delete(b.clientConns, id)
 	}
 	for id, ch := range b.pending {
 		ch <- egressOpenResult{err: errors.New("egress bridge stopped")}
 		delete(b.pending, id)
+	}
+	b.mu.Unlock()
+	for _, conn := range closeConns {
+		_ = conn.Close()
 	}
 }
 
@@ -909,12 +1235,30 @@ func installRemoteEgressClient(ctx context.Context, target SSHTarget) error {
 		return err
 	}
 	defer cleanup()
-	args := append(scpBaseArgs(target), exe, target.User+"@"+target.Host+":"+egressRemoteBinary)
+	uploadNonce, err := randomHex(8)
+	if err != nil {
+		return exit(2, "create egress client upload path: %v", err)
+	}
+	uploadPath := egressRemoteBinary + ".tmp-" + uploadNonce
+	promoted := false
+	defer func() {
+		if promoted {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = runSSHQuiet(cleanupCtx, target, "rm -f "+shellQuote(uploadPath))
+	}()
+	args := append(scpBaseArgs(target), exe, target.User+"@"+target.Host+":"+uploadPath)
 	cmd := exec.CommandContext(ctx, "scp", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return exit(5, "copy egress client: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	return runSSHQuiet(ctx, target, "chmod 700 "+shellQuote(egressRemoteBinary))
+	if err := runSSHQuiet(ctx, target, "chmod 700 "+shellQuote(uploadPath)+" && mv -f "+shellQuote(uploadPath)+" "+shellQuote(egressRemoteBinary)); err != nil {
+		return exit(5, "install egress client: %v", err)
+	}
+	promoted = true
+	return nil
 }
 
 func egressClientBinaryForTarget(ctx context.Context, target SSHTarget) (string, func(), error) {
@@ -1011,12 +1355,69 @@ func egressRemoteProbeCommand(host, port string) string {
 	return "if command -v nc >/dev/null 2>&1; then nc -z " + shellQuote(host) + " " + shellQuote(port) + " >/dev/null 2>&1; else timeout 1 bash -lc " + shellQuote("</dev/tcp/"+host+"/"+port) + " >/dev/null 2>&1; fi"
 }
 
+// acquireEgressDaemonLock serializes every local egress daemon lifecycle
+// operation for a lease. It is keyed on the egress pid path, so it does not
+// contend with the WebVNC daemon lock for the same lease.
+func acquireEgressDaemonLock(leaseID string) (func(), error) {
+	_, pidPath, err := egressDaemonPaths(leaseID)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(pidPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, err
+	}
+	return acquireDaemonFileLock(pidPath + ".lock")
+}
+
+func acquireEgressDaemonLocks(leaseIDs ...string) (func(), error) {
+	unique := map[string]bool{}
+	ids := make([]string, 0, len(leaseIDs))
+	for _, leaseID := range leaseIDs {
+		leaseID = strings.TrimSpace(leaseID)
+		if leaseID == "" || unique[leaseID] {
+			continue
+		}
+		unique[leaseID] = true
+		ids = append(ids, leaseID)
+	}
+	sort.Strings(ids)
+	unlocks := make([]func(), 0, len(ids))
+	for _, leaseID := range ids {
+		unlock, err := acquireEgressDaemonLock(leaseID)
+		if err != nil {
+			for i := len(unlocks) - 1; i >= 0; i-- {
+				unlocks[i]()
+			}
+			return nil, err
+		}
+		unlocks = append(unlocks, unlock)
+	}
+	return func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}, nil
+}
+
 func (a App) startEgressHostDaemon(leaseID string, args []string) error {
+	unlock, err := acquireEgressDaemonLock(leaseID)
+	if err != nil {
+		return exit(2, "acquire egress daemon lock: %v", err)
+	}
+	defer unlock()
+	return a.startEgressHostDaemonLocked(leaseID, args)
+}
+
+func (a App) startEgressHostDaemonLocked(leaseID string, args []string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return exit(2, "resolve crabbox executable: %v", err)
 	}
-	if stopped, err := a.stopEgressHostDaemon(leaseID); err != nil {
+	if stopped, err := a.stopEgressHostDaemonLocked(leaseID); err != nil {
 		return err
 	} else if stopped {
 		fmt.Fprintln(a.Stdout, "egress host daemon: replacing previous daemon")
@@ -1057,6 +1458,15 @@ func (a App) startEgressHostDaemon(leaseID string, args []string) error {
 }
 
 func (a App) stopEgressHostDaemon(leaseID string) (bool, error) {
+	unlock, err := acquireEgressDaemonLock(leaseID)
+	if err != nil {
+		return false, exit(2, "acquire egress daemon lock: %v", err)
+	}
+	defer unlock()
+	return a.stopEgressHostDaemonLocked(leaseID)
+}
+
+func (a App) stopEgressHostDaemonLocked(leaseID string) (bool, error) {
 	_, pidPath, err := egressDaemonPaths(leaseID)
 	if err != nil {
 		return false, err
