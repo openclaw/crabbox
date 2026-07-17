@@ -436,7 +436,19 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if err := b.releaseStateRecord(ctx, cfg, record, true); err != nil {
 			return err
 		}
-		core.RemoveLeaseClaim(record.LeaseID)
+		// Guard the claim removal against a concurrent Resolve/Touch that
+		// reclaimed this lease after our cleanup snapshot: RemoveLeaseClaimIfUnchanged
+		// declines to delete a claim rewritten in the check->destroy window,
+		// leaving the reclaiming process's live lease intact. (namespaceinstance
+		// backend.go:455,473 uses the same guard.)
+		if claim := claims[record.LeaseID]; claim.LeaseID != "" {
+			if err := core.RemoveLeaseClaimIfUnchanged(record.LeaseID, claim); err != nil {
+				fmt.Fprintf(b.rt.Stderr, "skip firecracker claim removal lease=%s reason=reclaimed-during-cleanup err=%v\n", record.LeaseID, err)
+				continue
+			}
+		} else {
+			core.RemoveLeaseClaim(record.LeaseID)
+		}
 		removeTestboxKey(record.LeaseID)
 	}
 	for leaseID, claim := range claims {
@@ -448,7 +460,12 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			continue
 		}
 		fmt.Fprintf(b.rt.Stdout, "remove firecracker claim lease=%s slug=%s reason=missing_state\n", leaseID, blankIfEmpty(claim.Slug))
-		core.RemoveLeaseClaim(leaseID)
+		// A claim with no state record is only a genuine orphan if it is
+		// unchanged since our snapshot; a concurrent reclaim makes it live again.
+		if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip firecracker claim removal lease=%s reason=reclaimed-during-cleanup err=%v\n", leaseID, err)
+			continue
+		}
 		removeTestboxKey(leaseID)
 	}
 	return nil
