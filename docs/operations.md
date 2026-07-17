@@ -402,7 +402,9 @@ GitHub OAuth start routes remain unauthenticated so a new user can bootstrap log
 The coordinator limits active attempts to ten per caller source and 100 globally for
 both CLI and portal login, after removing expired attempts. Node deployments behind a
 reverse proxy must configure `CRABBOX_TRUSTED_PROXY_CIDRS`; otherwise caller limits use
-the direct peer address and ignore forwarded addresses.
+the direct peer address and ignore forwarded addresses. The Node runtime rejects malformed
+allowlist entries at startup and rate-limits warnings when an untrusted socket peer sends
+`X-Forwarded-For`, which usually means the reverse-proxy allowlist is missing or incomplete.
 
 For any portal that exposes browser Code, configure
 `CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com` and route the
@@ -535,6 +537,15 @@ CRABBOX_ARTIFACTS_ENDPOINT_URL=<account>.r2.cloudflarestorage.com
 Omit `CRABBOX_ARTIFACTS_PUBLIC_READS` to return expiring signed read URLs even
 when a base URL is configured. Enable it only when the artifact origin is
 intentionally public; each public grant receives a random capability namespace.
+
+**Security consideration:** Artifact object paths embed the authenticated
+organization and owner as reversible base64url values, not hashes or encrypted
+values. This applies to both expiring signed URLs and public URLs. The owner can
+be a non-public GitHub verified email, and `crabbox artifacts publish --pr` can
+place the resulting URLs in public pull-request comments. The random capability
+namespace makes a public URL difficult to guess but does not conceal identity
+from someone who has the URL. Weigh that disclosure before enabling public
+reads. This identity disclosure is an accepted Low/P3 residual risk.
 
 Deploy the matching access key id and secret access key as coordinator secrets,
 not local CLI defaults. End users run `crabbox artifacts publish` without

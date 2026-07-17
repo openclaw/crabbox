@@ -21,7 +21,7 @@ keeping Windows classes smaller than the large Linux-focused classes.
 
 This page covers the `azure` VM backend. Azure Container Apps dynamic sessions
 are a separate, delegated-run backend selected with `--azure-backend
-dynamic-sessions`; see the [providers overview](providers.md).
+dynamic-sessions`; see the [Provider Reference](../providers/README.md).
 
 ## Targets
 
@@ -270,7 +270,7 @@ vnet, subnet, and NSG are preserved.
 
 ## Related docs
 
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)
 - [Capacity fallback](capacity-fallback.md)
 - [Linux VNC](vnc-linux.md)
 - [Windows VNC](vnc-windows.md)

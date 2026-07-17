@@ -63,9 +63,10 @@ content from the coordinator and from other leases by setting
 `/portal/leases/{id-or-slug}/code/` URL remains the entrypoint: after normal
 portal authorization it redirects through a one-use, short-lived viewer ticket
 to an opaque per-lease hostname. That hostname receives only an HttpOnly,
-path-scoped Code viewer session; it never receives `crabbox_session` and cannot
-use the Code session on other portal routes or lease origins. The ingress must
-provide wildcard TLS and WebSocket routing for the template.
+browser-enforced host-only `__Host-crabbox_code_session`; it never receives
+`__Host-crabbox_session` and cannot use the Code session on other portal routes
+or lease origins. The ingress must provide wildcard TLS and WebSocket routing
+for the template.
 Proxied responses may set only code-server's `vscode-tkn` cookie; Crabbox removes
 domain scope and confines it to that lease's Code path.
 Crabbox also replaces upstream Content Security Policy headers and limits
@@ -83,13 +84,18 @@ browser HTTP and WebSocket traffic fails closed with `409 Code origin required`.
 
 ## Authentication and scope
 
-Portal pages use a browser session cookie (`crabbox_session`) minted after a
-successful GitHub login through the same OAuth flow as `crabbox login`. The
-Worker converts the cookie to a `Bearer` token internally; an unauthenticated
-GET request to a portal page is redirected to `/portal/login` with a
-`returnTo` parameter. The session carries owner/org claims, and the Worker
-rejects altered or suffixed spellings of its signed session tokens. The session
-scopes every page to that identity.
+Portal pages use a browser-enforced host-only session cookie
+(`__Host-crabbox_session`) minted after a successful GitHub login through the
+same OAuth flow as `crabbox login`. The Worker converts the cookie to a `Bearer`
+token internally; an unauthenticated GET request to a portal page is redirected
+to `/portal/login` with a `returnTo` parameter. The session carries owner/org
+claims, and the Worker rejects altered or suffixed spellings of its signed
+session tokens. Duplicate session cookies fail closed. The session scopes every
+page to that identity.
+
+Upgrading retires the legacy `crabbox_session` and `crabbox_code_session`
+cookies. Existing portal sessions must sign in once; active browser Code
+sessions rebootstrap through their normal portal entrypoint.
 
 ```text
 session  authenticated GitHub user (owner / org embedded in the token)

@@ -302,6 +302,8 @@ func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo 
 		Workdir:        workspace,
 		TimeoutSeconds: timeoutSeconds,
 		Tags:           labels,
+		Environment:    cfg.Modal.Environment,
+		Secrets:        append([]string(nil), cfg.Modal.Secrets...),
 	})
 	if err != nil {
 		return "", modalSandbox{}, "", modalError("create sandbox", err)

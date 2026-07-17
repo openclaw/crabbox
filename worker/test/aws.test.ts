@@ -517,6 +517,38 @@ describe("aws provider", () => {
     await expect(client.findServer("i-abcdef123456")).rejects.toThrow("AuthFailure");
   });
 
+  it.each([
+    { attached: false, profileXML: "" },
+    {
+      attached: true,
+      profileXML:
+        "<iamInstanceProfile><arn>arn:aws:iam::123456789012:instance-profile/worker</arn></iamInstanceProfile>",
+    },
+  ])(
+    "maps authoritative instance-profile presence: $attached",
+    async ({ attached, profileXML }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          ec2XMLResponse(`<DescribeInstancesResponse><reservationSet><item><instancesSet><item>
+          <instanceId>i-abcdef123456</instanceId>
+          <instanceState><name>running</name></instanceState>
+          <instanceType>c7a.8xlarge</instanceType>
+          ${profileXML}
+        </item></instancesSet></item></reservationSet></DescribeInstancesResponse>`),
+        ),
+      );
+      const client = new EC2SpotClient(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+        "us-east-1",
+      );
+
+      await expect(client.getServer("i-abcdef123456")).resolves.toMatchObject({
+        awsInstanceProfileAttached: attached,
+      });
+    },
+  );
+
   it("rejects invalid configured AWS SSH CIDRs before changing ingress", async () => {
     const calls: string[] = [];
     vi.stubGlobal(

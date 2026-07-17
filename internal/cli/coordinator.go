@@ -96,6 +96,7 @@ type CoordinatorLease struct {
 	ExpiresAt             string                `json:"expiresAt"`
 	Telemetry             *LeaseTelemetry       `json:"telemetry,omitempty"`
 	TelemetryHistory      []*LeaseTelemetry     `json:"telemetryHistory,omitempty"`
+	ProviderMetadata      map[string]any        `json:"providerMetadata,omitempty"`
 }
 
 type CoordinatorLeaseRegistration struct {
@@ -949,10 +950,22 @@ func (c *CoordinatorClient) UpdateLeaseTailscale(ctx context.Context, id string,
 }
 
 func (c *CoordinatorClient) GetLease(ctx context.Context, id string) (CoordinatorLease, error) {
+	return c.getLease(ctx, id, false)
+}
+
+func (c *CoordinatorClient) GetLeaseWithAuthoritativeProviderMetadata(ctx context.Context, id string) (CoordinatorLease, error) {
+	return c.getLease(ctx, id, true)
+}
+
+func (c *CoordinatorClient) getLease(ctx context.Context, id string, providerMetadata bool) (CoordinatorLease, error) {
 	var res struct {
 		Lease CoordinatorLease `json:"lease"`
 	}
-	err := c.do(ctx, http.MethodGet, "/v1/leases/"+url.PathEscape(id), nil, &res)
+	path := "/v1/leases/" + url.PathEscape(id)
+	if providerMetadata {
+		path += "?providerMetadata=authoritative"
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &res)
 	return res.Lease, err
 }
 

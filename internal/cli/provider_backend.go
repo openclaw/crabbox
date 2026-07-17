@@ -817,10 +817,11 @@ type WarmupRequest struct {
 }
 
 type StatusRequest struct {
-	Options     LeaseOptions
-	ID          string
-	Wait        bool
-	WaitTimeout time.Duration
+	Options                       LeaseOptions
+	ID                            string
+	Wait                          bool
+	WaitTimeout                   time.Duration
+	AuthoritativeProviderMetadata bool
 }
 
 type StopRequest struct {

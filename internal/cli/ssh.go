@@ -163,7 +163,9 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			lastPorts = strings.Join(probes, ",")
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, reachablePort, transportPort, lastPorts, time.Since(start), time.Until(deadline)))
 		}
-		time.Sleep(10 * time.Second)
+		if err := sleepContext(ctx, 10*time.Second); err != nil {
+			return context.Cause(ctx)
+		}
 	}
 }
 

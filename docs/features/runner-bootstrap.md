@@ -118,7 +118,7 @@ When a lease also carries a `--pond` label, the Tailscale bootstrap installs a
 `/etc/hosts` so pond peers resolve as `<slug>.cbx`. Peers are discovered from
 the box-local `tailscale status` filtered by the pond ACL tag, so the broker
 never sees a Tailscale credential. See [Tailscale](tailscale.md) and the pond
-notes in [Providers](providers.md).
+notes in [Provider Reference](../providers/README.md).
 
 ## Other targets
 
@@ -167,7 +167,7 @@ slow cloud-init while preserving the same readiness contract.
 
 ## Related docs
 
-- [Providers](providers.md)
+- [Provider Reference](../providers/README.md)
 - [Prebaked runner images](prebaked-images.md)
 - [Interactive desktop and VNC](interactive-desktop-vnc.md)
 - [Tailscale](tailscale.md)
