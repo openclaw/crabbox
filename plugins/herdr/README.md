@@ -19,7 +19,8 @@ only provides the actions and terminal panes.
 The plugin does not install lifecycle hooks, stop leases when panes close, or
 install keybindings. `run-job` follows the job's normal Crabbox stop policy.
 Provisioning actions have the same cost and credential implications as running
-the corresponding Crabbox commands directly.
+the corresponding Crabbox commands directly. Result panes stay open until you
+press Enter so final lease identifiers, diagnostics, and failures remain visible.
 
 ## Install
 

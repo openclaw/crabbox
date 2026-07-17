@@ -43,6 +43,44 @@ test("Herdr plugin shell entrypoints pass syntax checks", () => {
   }
 });
 
+test("Herdr result panes wait for acknowledgement and preserve exit status", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-herdr-pane-result-"));
+  const installedPlugin = path.join(dir, "plugin");
+  fs.cpSync(pluginRoot, installedPlugin, { recursive: true });
+  writeExecutable(
+    path.join(installedPlugin, "crabbox-shim.sh"),
+    `#!/bin/sh
+printf '<%s>\\n' "$@"
+exit 7
+`,
+  );
+
+  const result = spawnSync("sh", [path.join(installedPlugin, "bin", "pane.sh"), "doctor"], {
+    cwd: installedPlugin,
+    input: "\n",
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 7, result.stdout + result.stderr);
+  assert.match(result.stdout, /<__herdr-plugin>\n<doctor>/);
+  assert.match(result.stdout, /Command exited with status 7\. Press Enter to close\./);
+});
+
+test("Herdr long-lived panes close with their Crabbox process", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-herdr-pane-live-"));
+  const installedPlugin = path.join(dir, "plugin");
+  fs.cpSync(pluginRoot, installedPlugin, { recursive: true });
+  writeExecutable(path.join(installedPlugin, "crabbox-shim.sh"), "#!/bin/sh\nexit 0\n");
+
+  for (const command of ["boxes", "connect"]) {
+    const result = spawnSync("sh", [path.join(installedPlugin, "bin", "pane.sh"), command], {
+      cwd: installedPlugin,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /Press Enter to close/);
+  }
+});
+
 test("Herdr plugin build pins and preserves the Crabbox executable path", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-herdr-plugin-"));
   const installedPlugin = path.join(dir, "plugin");
