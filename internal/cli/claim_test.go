@@ -529,6 +529,50 @@ func TestVerifyLeaseClaimUnchanged(t *testing.T) {
 	}
 }
 
+func TestRemoveLeaseClaimIfUnchangedRejectsSameValueRewrite(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_same_value_rewrite"
+	cfg := Config{Provider: "external"}
+	server := Server{Provider: "external", CloudID: "resource-1"}
+	if err := claimLeaseTargetForConfig(leaseID, "same-value", cfg, server, SSHTarget{}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Revision == "" {
+		t.Fatal("initial claim revision is empty")
+	}
+	if err := mutateLeaseClaim(leaseID, func(*leaseClaim) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewritten.Revision == snapshot.Revision {
+		t.Fatalf("same-value rewrite kept revision %q", snapshot.Revision)
+	}
+	withoutRevision := func(claim leaseClaim) leaseClaim {
+		claim.Revision = ""
+		return claim
+	}
+	if !reflect.DeepEqual(withoutRevision(rewritten), withoutRevision(snapshot)) {
+		t.Fatalf("rewrite changed claim data beyond revision:\nbefore: %#v\nafter:  %#v", snapshot, rewritten)
+	}
+
+	err = removeLeaseClaimIfUnchanged(leaseID, snapshot)
+	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("same-value rewrite guard err=%v", err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil {
+		t.Fatal(err)
+	} else if !exists {
+		t.Fatal("same-value rewrite was removed")
+	}
+}
+
 func TestConditionalRepoClaimCanBeRestored(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_transaction123"
@@ -569,6 +613,11 @@ func TestConditionalRepoClaimCanBeRestored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if restored.Revision == previous.Revision {
+		t.Fatalf("restored claim kept revision %q", previous.Revision)
+	}
+	restored.Revision = ""
+	previous.Revision = ""
 	if !reflect.DeepEqual(restored, previous) {
 		t.Fatalf("restored=%#v want %#v", restored, previous)
 	}

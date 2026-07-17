@@ -38,6 +38,15 @@ Name Go tests `*_test.go` beside the code they cover. Name Worker tests `*.test.
 
 History uses Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and `ci:`. Keep commits focused and mention user-visible behavior changes. Pull requests should include a clear summary, verification commands, config or secret implications, and screenshots only for generated docs or UI changes. Issue/PR references: always use full GitHub URLs, every time.
 
+## Releasing
+
+Follow `docs/RELEASING.md` exactly; the flow is gated and mostly irreversible. Pitfalls that have broken past releases:
+
+- The signed tag annotation must be exactly the bare version (`git tag -s v0.39.0 -m "v0.39.0"`), never a descriptive message. `scripts/verify-release-source.sh` requires the tag subject to equal the version, and the protected tag ruleset blocks deleting or recreating a wrong tag.
+- Bump every version-carrying file, not just the changelog: the `CHANGELOG.md` section heading plus `worker/package.json` and both root entries in `worker/package-lock.json`. See the Release Checklist in `docs/operations.md`.
+- The producer requires a merged authorize-source record at `release/records/vX.Y.Z.json` (binding the tag object and source commit) on `main` before `scripts/build-release-candidate.sh` will build; if the tag is recreated, update the record's `tagObject`.
+- The producer is credential-free and refuses to run if any release credential is present; unset every variable in the check at the top of `scripts/build-release-candidate.sh` (the GitHub, Homebrew-tap, and Actions tokens plus the codesign identity and notary profile), not just `GH_TOKEN`/`GITHUB_TOKEN`.
+
 ## Security & Configuration Tips
 
 Keep provider and broker tokens out of the repository. Do not pass secrets as command-line arguments. Local config belongs in `~/.config/crabbox/config.yaml`, `~/Library/Application Support/crabbox/config.yaml`, `crabbox.yaml`, or `.crabbox.yaml` as documented.
