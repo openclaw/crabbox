@@ -84,9 +84,24 @@ func stripExternalDesktopPasswordFromRunEnv(cfg Config, selection *runEnvSelecti
 	removeEnvironmentKeys(selection.Effective, denied...)
 }
 
+func stripTargetCredentialsFromRunEnv(selection *runEnvSelection, target SSHTarget) {
+	if selection == nil {
+		return
+	}
+	removeEnvironmentKeys(selection.Profile, target.ChildEnvDenylist...)
+	removeEnvironmentKeys(selection.Inline, target.ChildEnvDenylist...)
+	removeEnvironmentKeys(selection.Effective, target.ChildEnvDenylist...)
+}
+
 func allowedRemoteEnv(cfg Config) map[string]string {
 	values := allowedEnv(cfg.EnvAllow)
 	removeEnvironmentKeys(values, externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)...)
+	return values
+}
+
+func allowedRemoteEnvForTarget(cfg Config, target SSHTarget) map[string]string {
+	values := allowedRemoteEnv(cfg)
+	removeEnvironmentKeys(values, target.ChildEnvDenylist...)
 	return values
 }
 

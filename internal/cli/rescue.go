@@ -136,13 +136,13 @@ func externalLeaseCommandRoutingArgs(cfg Config, leaseID string) []string {
 
 	routingPath := strings.TrimSpace(cfg.External.RoutingFile)
 	if routingPath != "" {
-		return appendExternalDesktopRoutingArgs(externalRoutingFileArgs(routingPath, cfg.External), cfg)
+		return externalPersistedRoutingArgs(routingPath, cfg)
 	}
 	canonicalPath, pathErr := ExternalRoutingPath(leaseID)
 	if pathErr == nil {
 		_, statErr := os.Stat(expandUserPath(canonicalPath))
 		if statErr == nil || !os.IsNotExist(statErr) {
-			return appendExternalDesktopRoutingArgs(externalRoutingFileArgs(canonicalPath, cfg.External), cfg)
+			return externalPersistedRoutingArgs(canonicalPath, cfg)
 		}
 	}
 
@@ -151,7 +151,7 @@ func externalLeaseCommandRoutingArgs(cfg Config, leaseID string) []string {
 		// config, lifecycle templates, or connection data could put secrets on
 		// argv or silently address a different resource.
 		if pathErr == nil {
-			return appendExternalDesktopRoutingArgs(externalRoutingFileArgs(canonicalPath, cfg.External), cfg)
+			return externalPersistedRoutingArgs(canonicalPath, cfg)
 		}
 		return appendExternalDesktopRoutingArgs(nil, cfg)
 	}
@@ -162,6 +162,27 @@ func externalLeaseCommandRoutingArgs(cfg Config, leaseID string) []string {
 	}
 	args = append(args, fmt.Sprintf("--external-idempotent-lease-id=%t", cfg.External.Capabilities.IdempotentLeaseID))
 	return appendExternalDesktopRoutingArgs(args, cfg)
+}
+
+func externalPersistedRoutingArgs(path string, overrides Config) []string {
+	routing := overrides.External
+	if ExternalRoutingDigest(routing) == "" {
+		loaded, err := LoadExternalRouting(path)
+		if err != nil {
+			return []string{"--external-routing-file", path, "--external-routing-digest", ""}
+		}
+		routing = loaded
+	}
+	routed := Config{External: routing}
+	if IsExternalDesktopUsernameExplicit(&overrides) {
+		routed.External.Connection.Desktop.Username = overrides.External.Connection.Desktop.Username
+		MarkExternalDesktopUsernameExplicit(&routed)
+	}
+	if IsExternalDesktopPasswordEnvExplicit(&overrides) {
+		routed.External.Connection.Desktop.PasswordEnv = overrides.External.Connection.Desktop.PasswordEnv
+		MarkExternalDesktopPasswordEnvExplicit(&routed)
+	}
+	return appendExternalDesktopRoutingArgs(externalRoutingFileArgs(path, routing), routed)
 }
 
 func externalRoutingFileArgs(path string, cfg ExternalConfig) []string {

@@ -1221,7 +1221,9 @@ export function portalVNC(
             recipientID: viewerID,
           });
           window.focus();
-          window.location.reload();
+          const nextURL = new URL(window.location.href);
+          nextURL.hash = "";
+          window.location.replace(nextURL);
           return;
         }
         if (message.type !== "handoff-grant" || message.recipientID !== viewerID) return;

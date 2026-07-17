@@ -149,6 +149,11 @@ func TestBrowserOpenerEnvironmentUsesMinimalAllowlist(t *testing.T) {
 		"LANG=en_US.UTF-8",
 		"LC_CTYPE=en_US.UTF-8",
 		"DISPLAY=:99",
+		"XDG_CONFIG_HOME=/tmp/config",
+		"XDG_CONFIG_DIRS=/etc/xdg",
+		"XDG_DATA_HOME=/tmp/data",
+		"XDG_DATA_DIRS=/usr/local/share:/usr/share",
+		"BROWSER=example-browser",
 		"SSH_AUTH_SOCK=/tmp/agent.sock",
 		"CRABBOX_COORDINATOR_TOKEN=coordinator-secret",
 		"GH_TOKEN=github-secret",
@@ -172,11 +177,24 @@ func TestBrowserOpenerEnvironmentUsesMinimalAllowlist(t *testing.T) {
 		}
 	}
 	if runtime.GOOS == "linux" {
-		if got["DISPLAY"] != ":99" {
-			t.Fatalf("DISPLAY=%q want :99", got["DISPLAY"])
+		for name, value := range map[string]string{
+			"DISPLAY":         ":99",
+			"XDG_CONFIG_HOME": "/tmp/config",
+			"XDG_CONFIG_DIRS": "/etc/xdg",
+			"XDG_DATA_HOME":   "/tmp/data",
+			"XDG_DATA_DIRS":   "/usr/local/share:/usr/share",
+			"BROWSER":         "example-browser",
+		} {
+			if got[name] != value {
+				t.Fatalf("%s=%q want %q", name, got[name], value)
+			}
 		}
-	} else if _, ok := got["DISPLAY"]; ok {
-		t.Fatalf("DISPLAY unexpectedly preserved on %s", runtime.GOOS)
+	} else {
+		for _, name := range []string{"DISPLAY", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "XDG_DATA_HOME", "XDG_DATA_DIRS", "BROWSER"} {
+			if _, ok := got[name]; ok {
+				t.Fatalf("%s unexpectedly preserved on %s", name, runtime.GOOS)
+			}
+		}
 	}
 	for _, name := range []string{
 		"SSH_AUTH_SOCK",

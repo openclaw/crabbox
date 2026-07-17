@@ -39,6 +39,29 @@ func TestResolveMacOSWebVNCCredentialsFallsBackToManagedPassword(t *testing.T) {
 	}
 }
 
+func TestDesktopConfigUsesResolvedProviderIdentity(t *testing.T) {
+	cfg := desktopConfigForResolvedLease(
+		Config{Provider: "auto", TargetOS: targetLinux},
+		Server{Provider: parallelsProvider},
+		SSHTarget{TargetOS: targetMacOS},
+	)
+	if cfg.Provider != parallelsProvider || cfg.TargetOS != targetMacOS {
+		t.Fatalf("resolved desktop config=%#v", cfg)
+	}
+	_, authMode, err := resolveMacOSWebVNCCredentials(
+		context.Background(),
+		cfg,
+		SSHTarget{TargetOS: targetMacOS, User: "lease-user"},
+		func(context.Context, SSHTarget, string) (string, error) { return "managed-secret", nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authMode != localWebVNCAuthVNC {
+		t.Fatalf("resolved provider auth mode=%d, want VNC", authMode)
+	}
+}
+
 func TestResolveMacOSWebVNCCredentialsUsesProviderARDAccount(t *testing.T) {
 	target := SSHTarget{TargetOS: targetMacOS, User: "lease-user"}
 	credentials, authMode, err := resolveMacOSWebVNCCredentials(

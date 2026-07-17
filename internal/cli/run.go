@@ -828,6 +828,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		timingRecordColdRun = &coldRun
 	}
 	applyResolvedServerConfig(&cfg, server)
+	stripTargetCredentialsFromRunEnv(&envSelection, target)
 	if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
 		cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
 	}
@@ -1102,6 +1103,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		useCoordinator = coord != nil
 		recorder.UseCoordinator(coord)
 		applyResolvedServerConfig(&cfg, server)
+		removeEnvironmentKeys(runReq.Env, target.ChildEnvDenylist...)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 			return true, err
 		}

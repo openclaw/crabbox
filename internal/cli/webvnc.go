@@ -4809,7 +4809,10 @@ func stopProcess(tunnel *vncForegroundTunnel) {
 	if tunnel == nil || tunnel.cmd == nil || tunnel.cmd.Process == nil {
 		return
 	}
-	_ = terminateWebVNCDaemonProcessTree(tunnel.cmd.Process.Pid)
+	pid := tunnel.cmd.Process.Pid
+	if err := terminateWebVNCDaemonProcessTree(pid); err != nil {
+		_ = stopDaemonProcess(tunnel.cmd.Process, pid)
+	}
 	select {
 	case <-tunnel.Done():
 	case <-time.After(2 * time.Second):

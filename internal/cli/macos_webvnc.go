@@ -114,6 +114,7 @@ func (a App) resolveMacOSWebVNCBridgeTarget(ctx context.Context, cfg Config, id 
 			return macOSWebVNCBridgeTarget{}, err
 		}
 	}
+	cfg = desktopConfigForResolvedLease(cfg, server, target)
 	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {
 		return macOSWebVNCBridgeTarget{}, err
 	}
@@ -128,6 +129,19 @@ func (a App) resolveMacOSWebVNCBridgeTarget(ctx context.Context, cfg Config, id 
 		server: server, target: target, leaseID: leaseID,
 		credentials: credentials, authMode: authMode,
 	}, nil
+}
+
+func desktopConfigForResolvedLease(cfg Config, server Server, target SSHTarget) Config {
+	if provider := strings.TrimSpace(server.Provider); provider != "" {
+		cfg.Provider = provider
+	}
+	if targetOS := strings.TrimSpace(target.TargetOS); targetOS != "" {
+		cfg.TargetOS = targetOS
+	}
+	if windowsMode := strings.TrimSpace(target.WindowsMode); windowsMode != "" {
+		cfg.WindowsMode = windowsMode
+	}
+	return cfg
 }
 
 func (a App) macOSWebVNCPreflight(ctx context.Context, cfg Config, id string, reclaim, noProviderSideEffects bool, expected webVNCExpectedProviderIdentity) error {

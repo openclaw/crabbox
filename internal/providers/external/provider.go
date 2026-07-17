@@ -93,20 +93,31 @@ func (Provider) CommandRoutingArgs(cfg core.Config, leaseID string) []string {
 		}
 	}
 	args := []string{"--external-routing-file", path}
-	digest := core.ExternalRoutingDigest(cfg.External)
+	routing := cfg.External
+	digest := core.ExternalRoutingDigest(routing)
 	if digest == "" {
-		if routing, err := core.LoadExternalRouting(path); err == nil {
-			digest = core.ExternalRoutingDigest(routing)
+		loaded, err := core.LoadExternalRouting(path)
+		if err == nil {
+			routing = loaded
+			digest = core.ExternalRoutingDigest(loaded)
 		}
 	}
 	// Keep generated children fail-closed if the route cannot be read now.
 	// The explicit empty digest is invalid and cannot become an unbound load if
 	// another process later replaces the deterministic path.
 	args = append(args, "--external-routing-digest", digest)
-	if username := strings.TrimSpace(cfg.External.Connection.Desktop.Username); username != "" || core.IsExternalDesktopUsernameExplicit(&cfg) {
+	username := strings.TrimSpace(routing.Connection.Desktop.Username)
+	if core.IsExternalDesktopUsernameExplicit(&cfg) {
+		username = strings.TrimSpace(cfg.External.Connection.Desktop.Username)
+	}
+	if username != "" || core.IsExternalDesktopUsernameExplicit(&cfg) {
 		args = append(args, "--external-desktop-username", username)
 	}
-	if passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); passwordEnv != "" || core.IsExternalDesktopPasswordEnvExplicit(&cfg) {
+	passwordEnv := strings.TrimSpace(routing.Connection.Desktop.PasswordEnv)
+	if core.IsExternalDesktopPasswordEnvExplicit(&cfg) {
+		passwordEnv = strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
+	}
+	if passwordEnv != "" || core.IsExternalDesktopPasswordEnvExplicit(&cfg) {
 		args = append(args, "--external-desktop-password-env", passwordEnv)
 	}
 	return args
@@ -182,6 +193,11 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 				cfg.WindowsMode = windowsMode
 			}
 		}
+		if !core.IsArchitectureExplicit(cfg) {
+			if architecture := core.ExternalRoutingArchitecture(cfg.External); architecture != "" {
+				cfg.Architecture = architecture
+			}
+		}
 	}
 	if err := core.ValidateProviderCredentialDestination(cfg); err != nil {
 		return nil, err
@@ -199,6 +215,7 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	cfg.SSHFallbackPorts = nil
 	cfg.WorkRoot = externalWorkRoot(cfg)
 	core.SetExternalRoutingTarget(&cfg.External, cfg.TargetOS, cfg.WindowsMode)
+	core.SetExternalRoutingArchitecture(&cfg.External, cfg.Architecture)
 	return &leaseBackend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
 }
 

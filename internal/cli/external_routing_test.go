@@ -397,6 +397,7 @@ func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 		WorkRoot:     "/workspaces/crabbox",
 	}
 	SetExternalRoutingTarget(&cfg, targetMacOS, windowsModeNormal)
+	SetExternalRoutingArchitecture(&cfg, ArchitectureARM64)
 	path, err := PersistExternalRouting("../unsafe/lease", cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -418,6 +419,9 @@ func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 	}
 	if targetOS, windowsMode := ExternalRoutingTarget(loaded); targetOS != targetMacOS || windowsMode != windowsModeNormal {
 		t.Fatalf("routing target=%s windows-mode=%s", targetOS, windowsMode)
+	}
+	if architecture := ExternalRoutingArchitecture(loaded); architecture != ArchitectureARM64 {
+		t.Fatalf("routing architecture=%s", architecture)
 	}
 	RemoveExternalRouting("../unsafe/lease")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {

@@ -59,15 +59,15 @@ func TestLoadBackendScrubsTrustedExternalDesktopPasswordFromNonExternalCommands(
 	for index, call := range recorder.calls {
 		for _, entry := range call.Env {
 			if strings.EqualFold(strings.SplitN(entry, "=", 2)[0], "TRUSTED_DESKTOP_PASSWORD") {
-				t.Fatalf("call %d retained desktop credential: %q", index, call.Env)
+				t.Fatalf("call %d retained desktop credential variable", index)
 			}
 		}
 	}
 	if !strings.Contains(strings.Join(recorder.calls[0].Env, "\n"), "KEEP=explicit-value") {
-		t.Fatalf("explicit environment lost unrelated value: %q", recorder.calls[0].Env)
+		t.Fatal("explicit environment lost unrelated marker")
 	}
 	if !strings.Contains(strings.Join(recorder.calls[1].Env, "\n"), "CRABBOX_TEST_CHILD_KEEP=ambient-value") {
-		t.Fatalf("ambient environment lost unrelated value: %q", recorder.calls[1].Env)
+		t.Fatal("ambient environment lost unrelated marker")
 	}
 }
 

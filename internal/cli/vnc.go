@@ -83,6 +83,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, *reclaim); err != nil {
 		return err
 	}
+	cfg = desktopConfigForResolvedLease(cfg, server, target)
 	endpoint, err := resolveVNCEndpoint(ctx, cfg, &target)
 	if err != nil {
 		return err
@@ -536,9 +537,14 @@ func browserOpenerEnvironment(environment []string, denied ...string) []string {
 			"DISPLAY",
 			"WAYLAND_DISPLAY",
 			"XDG_RUNTIME_DIR",
+			"XDG_CONFIG_HOME",
+			"XDG_CONFIG_DIRS",
+			"XDG_DATA_HOME",
+			"XDG_DATA_DIRS",
 			"DBUS_SESSION_BUS_ADDRESS",
 			"XDG_CURRENT_DESKTOP",
 			"DESKTOP_SESSION",
+			"BROWSER",
 		} {
 			allowed[name] = struct{}{}
 		}

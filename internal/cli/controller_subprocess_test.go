@@ -164,21 +164,29 @@ func TestControllerChildEnvironmentScrubsDesktopPasswordIncludingMacOSOwner(t *t
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	base := []string{"PATH=/bin", "TEST_ARD_PASSWORD=operator-secret", "KEEP=value"}
 	for _, test := range []struct {
-		name     string
-		targetOS string
-		args     []string
+		name      string
+		targetOS  string
+		args      []string
+		ownerName string
 	}{
 		{name: "linux daemon start", targetOS: targetLinux, args: []string{"webvnc", "daemon", "start", "--provider", "external"}},
 		{name: "windows daemon start", targetOS: targetWindows, args: []string{"webvnc", "daemon", "start", "--provider", "external"}},
 		{name: "mac status", targetOS: targetMacOS, args: []string{"webvnc", "status", "--provider", "external"}},
 		{name: "mac near match", targetOS: targetMacOS, args: []string{"webvnc", "daemon", "status", "--provider", "external"}},
-		{name: "mac owner", targetOS: targetMacOS, args: []string{"webvnc", "daemon", "start", "--provider", "external"}},
-		{name: "mac legacy alias owner", targetOS: targetMacOS, args: []string{"webvnc", "daemon", "start", "--provider", "exec-provider"}},
+		{name: "mac owner", targetOS: targetMacOS, args: []string{"webvnc", "daemon", "start", "--provider", "external"}, ownerName: "TEST_ARD_PASSWORD"},
+		{name: "mac legacy alias owner", targetOS: targetMacOS, args: []string{"webvnc", "daemon", "start", "--provider", "exec-provider"}, ownerName: "TEST_ARD_PASSWORD"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
 				Provider: "external", TargetOS: test.targetOS, ExternalDesktopPasswordEnv: "TEST_ARD_PASSWORD",
 			}}
+			policy, err := runner.childCredentialPolicy(controllerWorkspaceRequest{}, test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if policy.ownerName != test.ownerName {
+				t.Fatalf("credential owner=%q, want %q", policy.ownerName, test.ownerName)
+			}
 			env, err := runner.childEnvironment(base, controllerWorkspaceRequest{}, test.args, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -230,7 +238,11 @@ func TestControllerChildEnvironmentUsesPersistedMacOSRouteAndScrubsCurrentName(t
 		t.Fatalf("routed owner environment retained credential=%q", env)
 	}
 
-	statusEnv, err := runner.childEnvironment(env, request, []string{"webvnc", "status", "--provider", "external", "--external-routing-file", routingPath}, nil)
+	statusEnv, err := runner.childEnvironment([]string{
+		"CURRENT_ARD_PASSWORD=current-secret",
+		"ROUTED_ARD_PASSWORD=routed-secret",
+		"KEEP=value",
+	}, request, []string{"webvnc", "status", "--provider", "external", "--external-routing-file", routingPath}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,13 +515,18 @@ func TestControllerCredentialOwnerRejectsTrackedCallbackBeforeSpawn(t *testing.T
 		t.Skip("controller host is unsupported on Windows")
 	}
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	marker := filepath.Join(t.TempDir(), "spawned")
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "spawned")
+	binary := filepath.Join(dir, "crabbox")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf spawned >"+shellQuote(marker)+"\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
-		Binary: "/usr/bin/touch", Provider: "external", TargetOS: targetMacOS,
+		Binary: binary, Provider: "external", TargetOS: targetMacOS,
 		ExternalDesktopPasswordEnv: "TEST_ARD_PASSWORD", StateFile: filepath.Join(t.TempDir(), "state.json"),
 	}}
 	err := runner.runWithStarted(context.Background(), controllerWorkspaceRequest{}, []string{
-		"webvnc", "daemon", "start", "--provider", "external", marker,
+		"webvnc", "daemon", "start", "--provider", "external",
 	}, io.Discard, func() error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "cannot use a tracked launch callback") {
 		t.Fatalf("error=%v", err)

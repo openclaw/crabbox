@@ -146,7 +146,7 @@ func (a App) cacheWarm(ctx context.Context, args []string) error {
 		actionsEnvFile = state.EnvFile
 		fmt.Fprintf(a.Stderr, "using GitHub Actions workspace %s\n", workdir)
 	}
-	remoteEnv := allowedRemoteEnv(cfg)
+	remoteEnv := allowedRemoteEnvForTarget(cfg, target)
 	remote := remoteCacheWarmCommand(workdir, remoteEnv, actionsEnvFile, command)
 	if isWindowsNativeTarget(target) {
 		remote = windowsRemoteCommandWithEnvFile(workdir, remoteEnv, actionsEnvFile, command)

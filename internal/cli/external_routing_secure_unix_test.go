@@ -53,6 +53,9 @@ func TestLoadExternalRoutingRejectsNonPrivateParent(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "route.json")
 	if err := os.WriteFile(path, []byte(`{"command":"provider"}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -77,7 +80,7 @@ func TestLoadExternalRoutingRejectsNonRegularFileWithoutBlocking(t *testing.T) {
 }
 
 func TestLoadExternalRoutingAllowsPrivateRouteBelowStickyTempRoot(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "crabbox-routing-")
+	dir, err := os.MkdirTemp(canonicalUnixTempRoot(t), "crabbox-routing-")
 	if err != nil {
 		t.Skipf("create Linux-style temp route: %v", err)
 	}
@@ -95,7 +98,7 @@ func TestLoadExternalRoutingAllowsPrivateRouteBelowStickyTempRoot(t *testing.T) 
 }
 
 func TestLoadExternalRoutingRejectsBroadIntermediateDirectory(t *testing.T) {
-	root, err := os.MkdirTemp("/tmp", "crabbox-routing-broad-")
+	root, err := os.MkdirTemp(canonicalUnixTempRoot(t), "crabbox-routing-broad-")
 	if err != nil {
 		t.Skipf("create Linux-style temp route: %v", err)
 	}
@@ -114,4 +117,13 @@ func TestLoadExternalRoutingRejectsBroadIntermediateDirectory(t *testing.T) {
 	if _, err := LoadExternalRouting(path); err == nil || !strings.Contains(err.Error(), "must not be writable") {
 		t.Fatalf("err=%v", err)
 	}
+}
+
+func canonicalUnixTempRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Skipf("resolve system temporary directory: %v", err)
+	}
+	return root
 }

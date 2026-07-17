@@ -8568,12 +8568,14 @@ export class FleetCoordinator {
   private webVNCPortalViewerAuthenticationRequired(request: Request): Response {
     const websocket = request.headers.get("upgrade")?.toLowerCase() === "websocket";
     const url = new URL(request.url);
+    const cookie = request.headers.get("cookie") ?? "";
     const clearCookie = clearWebVNCPortalViewerSessionCookie(request);
     if (
       !websocket &&
       request.method.toUpperCase() === "GET" &&
       /^\/portal\/leases\/[^/]+\/vnc$/.test(url.pathname) &&
-      cookieValue(request.headers.get("cookie") ?? "", "crabbox_session")
+      cookieValue(cookie, portalSessionCookieName) &&
+      cookieValue(cookie, "crabbox_webvnc_session")
     ) {
       return new Response(null, {
         status: 302,

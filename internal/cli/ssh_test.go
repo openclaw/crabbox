@@ -202,12 +202,18 @@ func TestExternalDesktopChildEnvDenylistPreservesTrustedSecretAcrossProviderSwit
 
 func TestSystemInspectionEnvironmentExcludesAmbientSecrets(t *testing.T) {
 	t.Setenv("SCREEN_SHARING_PASSWORD", "operator-secret")
-	env := strings.Join(systemInspectionEnvironment(), "\n")
+	entries := systemInspectionEnvironment()
+	env := strings.Join(entries, "\n")
 	if strings.Contains(env, "SCREEN_SHARING_PASSWORD=") {
-		t.Fatalf("inspection environment exposed ambient secret: %q", env)
+		t.Fatal("inspection environment exposed ambient secret variable")
 	}
 	if env != "LC_ALL=C" {
-		t.Fatalf("inspection environment=%q", env)
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			name, _, _ := strings.Cut(entry, "=")
+			names = append(names, name)
+		}
+		t.Fatalf("inspection environment names=%q", names)
 	}
 }
 

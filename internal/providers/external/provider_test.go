@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -324,12 +325,43 @@ func TestCommandRoutingArgsUsesPrivateLeaseState(t *testing.T) {
 	}
 }
 
+func TestConfigureRestoresPersistedArchitecture(t *testing.T) {
+	isolateCrabboxState(t)
+	const leaseID = "cbx_arch_route_123456"
+	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetMacOS, core.WindowsModeNormal)
+	core.SetExternalRoutingArchitecture(&saved.External, core.ArchitectureARM64)
+	path, err := core.PersistValidatedExternalRouting(leaseID, saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = "external"
+	cfg.External.RoutingFile = path
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.(*leaseBackend).cfg.Architecture; got != core.ArchitectureARM64 {
+		t.Fatalf("architecture=%q", got)
+	}
+}
+
 func TestCommandRoutingArgsCarryDesktopCredentialOverrides(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateCrabboxState(t)
+	const leaseID = "cbx_abcdef123456"
 	cfg := testConfig()
 	cfg.External.Connection.Desktop.Username = "screen-user"
 	cfg.External.Connection.Desktop.PasswordEnv = "SCREEN_SHARING_PASSWORD"
-	args := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), " ")
+	path, err := core.PersistExternalRouting(leaseID, cfg.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.External, err = core.LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join((Provider{}).CommandRoutingArgs(cfg, leaseID), " ")
 	for _, want := range []string{
 		"--external-desktop-username screen-user",
 		"--external-desktop-password-env SCREEN_SHARING_PASSWORD",
@@ -363,6 +395,10 @@ func TestCommandRoutingArgsBindChildToExactRouteDigest(t *testing.T) {
 	if _, err := core.PersistValidatedExternalRouting(leaseID, replacement.External); err != nil {
 		t.Fatal(err)
 	}
+	args = (Provider{}).CommandRoutingArgs(first, leaseID)
+	if args[3] != core.ExternalRoutingDigest(loaded) {
+		t.Fatalf("routing args lost loaded route binding: %#v", args)
+	}
 	child := core.BaseConfig()
 	fs := flag.NewFlagSet("external-digest-child", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -372,6 +408,25 @@ func TestCommandRoutingArgsBindChildToExactRouteDigest(t *testing.T) {
 	}
 	if err := applyFlags(&child, fs, values); err == nil || !strings.Contains(err.Error(), "generation changed") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCommandRoutingArgsLoadsPersistedRouteWhenConfigIsUnbound(t *testing.T) {
+	isolateCrabboxState(t)
+	const leaseID = "cbx_unbound_route_123456"
+	saved := testConfig()
+	path, err := core.PersistValidatedExternalRouting(leaseID, saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := core.LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	args := (Provider{}).CommandRoutingArgs(cfg, leaseID)
+	if len(args) < 4 || args[3] != core.ExternalRoutingDigest(loaded) {
+		t.Fatalf("routing args=%#v", args)
 	}
 }
 
@@ -709,6 +764,17 @@ func TestProtocolClaimScopeBindsNormalizedTargetAndWindowsMode(t *testing.T) {
 	macAlias.WindowsMode = ""
 	if got := externalClaimScope(macAlias); got != macScope {
 		t.Fatalf("normalized macOS scope=%s, want %s", got, macScope)
+	}
+	macARM := mac
+	macARM.Architecture = core.ArchitectureARM64
+	macARMScope := externalClaimScope(macARM)
+	if macARMScope == macScope {
+		t.Fatal("external claim scope must bind ARM64 architecture")
+	}
+	macARMAlias := mac
+	macARMAlias.Architecture = "aarch64"
+	if got := externalClaimScope(macARMAlias); got != macARMScope {
+		t.Fatalf("normalized ARM64 scope=%s, want %s", got, macARMScope)
 	}
 
 	windows := cfg
@@ -1915,6 +1981,9 @@ func TestInvokeDeclarativeLifecyclePassesSecretEnvWithoutArgvExposure(t *testing
 }
 
 func TestExternalAdapterStripsDesktopPasswordEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-backed adapter fixture")
+	}
 	const passwordEnv = "EXTERNAL_TEST_DESKTOP_PASSWORD"
 	t.Setenv(passwordEnv, "operator-screen-sharing-secret")
 

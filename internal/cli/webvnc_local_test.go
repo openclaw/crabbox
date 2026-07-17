@@ -654,6 +654,19 @@ func TestForceRFBMacOSAuthenticationHandlesUpstreamNoneResultByVersion(t *testin
 				if !bytes.Equal(result, test.serverResult) {
 					t.Fatalf("browser security result=%v, want %v", result, test.serverResult)
 				}
+			} else {
+				if err := browser.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+					t.Fatal(err)
+				}
+				probe := make([]byte, 1)
+				n, readErr := browser.Read(probe)
+				var netErr net.Error
+				if n != 0 || !errors.As(readErr, &netErr) || !netErr.Timeout() {
+					t.Fatalf("RFB 3.7 browser received unexpected security result: n=%d err=%v", n, readErr)
+				}
+				if err := browser.SetReadDeadline(time.Time{}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := <-serverErr; err != nil {
 				t.Fatal(err)

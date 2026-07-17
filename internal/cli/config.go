@@ -479,6 +479,7 @@ type ExternalConfig struct {
 	routingGeneration        string
 	routingTargetOS          string
 	routingWindowsMode       string
+	routingArchitecture      string
 }
 
 type ExternalCapabilitiesConfig struct {

@@ -20733,6 +20733,8 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).toContain("const takeControlOnConnect = true");
     expect(pageBody).toContain('type: "session-offer"');
     expect(pageBody).toContain('type: "session-grant"');
+    expect(pageBody).toContain('nextURL.hash = ""');
+    expect(pageBody).toContain("window.location.replace(nextURL)");
 
     const credentials = await throughCoordinator(
       new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc/handoff", {
@@ -20782,10 +20784,22 @@ describe("fleet lease identity and idle", () => {
     });
     const expiredSession = await throughCoordinator(
       new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc", {
-        headers: { cookie: sessionCookie },
+        headers: { cookie: `${sessionCookie}; __Host-crabbox_session=portal-session` },
       }),
     );
-    expect(expiredSession.status).toBe(401);
+    expect(expiredSession.status).toBe(302);
+    expect(expiredSession.headers.get("location")).toBe("/portal/leases/cbx_000000000001/vnc");
+    expect(expiredSession.headers.get("set-cookie")).toContain("crabbox_webvnc_session=;");
+
+    const retryWithoutViewerCookie = await throughCoordinator(
+      new Request("https://crabbox.test/portal/leases/cbx_000000000001/vnc", {
+        headers: { cookie: "__Host-crabbox_session=portal-session" },
+      }),
+    );
+    expect([302, 401]).toContain(retryWithoutViewerCookie.status);
+    expect(retryWithoutViewerCookie.headers.get("location")).not.toBe(
+      "/portal/leases/cbx_000000000001/vnc",
+    );
     expect(storage.value(sessionKey)).toBeUndefined();
   });
 

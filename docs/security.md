@@ -258,7 +258,8 @@ There is no central project secret store. Remote command environment values
 stay on the operator's machine unless explicitly allowed for forwarding.
 Local helper processes, including External provider lifecycle commands, inherit
 the Crabbox process environment unless their own runtime provides stronger
-isolation.
+isolation. The selected External desktop-password variable is an explicit
+exception: Crabbox removes it from every child environment.
 
 Handling rules:
 

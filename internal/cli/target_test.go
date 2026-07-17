@@ -498,6 +498,7 @@ func TestNormalizeTargetConfigPreservesExternalWorkRoot(t *testing.T) {
 }
 
 func TestLoadConfigPreservesExternalWorkRootFromEnvironment(t *testing.T) {
+	clearConfigEnv(t)
 	home := t.TempDir()
 	configPath := filepath.Join(home, "config.yaml")
 	if err := os.WriteFile(configPath, nil, 0o600); err != nil {

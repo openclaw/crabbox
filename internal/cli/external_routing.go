@@ -29,6 +29,7 @@ type externalRoutingState struct {
 	WorkRoot                  string                     `json:"workRoot,omitempty"`
 	TargetOS                  string                     `json:"targetOS,omitempty"`
 	WindowsMode               string                     `json:"windowsMode,omitempty"`
+	Architecture              string                     `json:"architecture,omitempty"`
 	CredentialBoundaryVersion int                        `json:"credentialBoundaryVersion,omitempty"`
 	Generation                string                     `json:"generation,omitempty"`
 }
@@ -47,6 +48,7 @@ func externalRoutingStateForConfig(cfg ExternalConfig, credentialVersion int) ex
 		WorkRoot:                  cfg.WorkRoot,
 		TargetOS:                  targetOS,
 		WindowsMode:               windowsMode,
+		Architecture:              cfg.routingArchitecture,
 		CredentialBoundaryVersion: credentialVersion,
 		Generation:                cfg.routingGeneration,
 	}
@@ -67,6 +69,26 @@ func ExternalRoutingTarget(cfg ExternalConfig) (string, string) {
 		windowsMode = windowsModeNormal
 	}
 	return targetOS, windowsMode
+}
+
+func SetExternalRoutingArchitecture(cfg *ExternalConfig, architecture string) {
+	if cfg != nil {
+		architecture = strings.ToLower(strings.TrimSpace(architecture))
+		if architecture != "" {
+			if normalized, err := normalizeArchitecture(architecture); err == nil {
+				architecture = normalized
+			}
+		}
+		cfg.routingArchitecture = architecture
+	}
+}
+
+func ExternalRoutingArchitecture(cfg ExternalConfig) string {
+	architecture := strings.ToLower(strings.TrimSpace(cfg.routingArchitecture))
+	if normalized, err := normalizeArchitecture(architecture); architecture != "" && err == nil {
+		return normalized
+	}
+	return architecture
 }
 
 func ExternalRoutingPath(leaseID string) (string, error) {
@@ -283,6 +305,7 @@ func loadExternalRouting(path, expectedDigest string) (ExternalConfig, error) {
 		routingGeneration:        state.Generation,
 	}
 	SetExternalRoutingTarget(&result, state.TargetOS, state.WindowsMode)
+	SetExternalRoutingArchitecture(&result, state.Architecture)
 	return result, nil
 }
 

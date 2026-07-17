@@ -673,6 +673,7 @@ type externalClaimScopeData struct {
 	Connection   *core.ExternalConnectionConfig   `json:"connection,omitempty"`
 	TargetOS     string                           `json:"targetOS,omitempty"`
 	WindowsMode  string                           `json:"windowsMode,omitempty"`
+	Architecture string                           `json:"architecture,omitempty"`
 }
 
 func externalClaimScope(cfg core.Config) string {
@@ -681,21 +682,25 @@ func externalClaimScope(cfg core.Config) string {
 		return scope
 	}
 	data := []byte(strings.TrimSpace(cfg.External.Command) + "\x00" + strings.Join(cfg.External.Args, "\x00"))
-	targetOS, windowsMode := externalScopeTarget(cfg)
+	targetOS, windowsMode, architecture := externalScopeTarget(cfg)
 	if targetOS != "" {
 		data = append(data, []byte("\x00crabbox-target\x00"+targetOS+"\x00"+windowsMode)...)
+	}
+	if architecture != "" {
+		data = append(data, []byte("\x00crabbox-architecture\x00"+architecture)...)
 	}
 	return externalScopeHash(data)
 }
 
 func externalControllerScope(cfg core.Config) (string, error) {
-	targetOS, windowsMode := externalScopeTarget(cfg)
+	targetOS, windowsMode, architecture := externalScopeTarget(cfg)
 	scope := externalClaimScopeData{
-		Command:     strings.TrimSpace(cfg.External.Command),
-		Args:        append([]string(nil), cfg.External.Args...),
-		Config:      cfg.External.Config,
-		TargetOS:    targetOS,
-		WindowsMode: windowsMode,
+		Command:      strings.TrimSpace(cfg.External.Command),
+		Args:         append([]string(nil), cfg.External.Args...),
+		Config:       cfg.External.Config,
+		TargetOS:     targetOS,
+		WindowsMode:  windowsMode,
+		Architecture: architecture,
 	}
 	if cfg.External.Capabilities.IdempotentLeaseID {
 		capabilities := cfg.External.Capabilities
@@ -714,15 +719,22 @@ func externalControllerScope(cfg core.Config) (string, error) {
 	return externalScopeHash(data), nil
 }
 
-func externalScopeTarget(cfg core.Config) (string, string) {
+func externalScopeTarget(cfg core.Config) (string, string, string) {
 	core.NormalizeTargetConfig(&cfg)
+	architecture := strings.ToLower(strings.TrimSpace(cfg.Architecture))
+	if normalized, err := core.NormalizeArchitecture(architecture); architecture != "" && err == nil {
+		architecture = normalized
+	}
+	if architecture == core.ArchitectureAMD64 {
+		architecture = ""
+	}
 	if cfg.TargetOS == core.TargetLinux && cfg.WindowsMode == core.WindowsModeNormal {
-		return "", ""
+		return "", "", architecture
 	}
 	if cfg.TargetOS != core.TargetWindows {
-		return cfg.TargetOS, ""
+		return cfg.TargetOS, "", architecture
 	}
-	return cfg.TargetOS, cfg.WindowsMode
+	return cfg.TargetOS, cfg.WindowsMode, architecture
 }
 
 func externalScopeHash(data []byte) string {

@@ -108,7 +108,7 @@ func TestLocalGitBinaryDiffUsesRepositoryEnvironment(t *testing.T) {
 	gitPath := filepath.Join(binDir, "git")
 	script := `#!/bin/sh
 set -eu
-[ "${GIT_CONFIG_GLOBAL:-}" = "/safe/gitconfig" ] || exit 90
+[ "${GIT_CONFIG_GLOBAL+x}" != x ] || exit 90
 [ "${TEST_EXTERNAL_DESKTOP_PASSWORD+x}" != x ] || exit 91
 [ "$*" = "diff --binary HEAD" ] || exit 92
 printf 'fake-binary-diff'

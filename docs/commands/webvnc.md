@@ -396,14 +396,15 @@ explicit instead of fully automatic.
 --local-port <port>         local VNC tunnel port (auto-selected when unset)
 --open                      open the portal VNC page once the bridge connects
 --take-control              ask the portal viewer to request control after connecting
---preflight                 validate the target and authentication without opening a viewer
+--preflight                 foreground bridge only: validate macOS authentication and exit
 --redact-credentials=false  reveal viewer URLs, usernames, and passwords (unsafe)
 --reclaim                   claim this lease for the current repo
 ```
 
 Subcommands: `status`, `reset`, and `daemon start|status|stop`. The bridge,
-`status`, and `reset` forms share the bridge flags above; the `daemon status`
-and `daemon stop` forms take only `--id`.
+`status`, and `reset` forms share the bridge flags above except `--preflight`,
+which is accepted only by the foreground bridge. The `daemon status` and
+`daemon stop` forms take only `--id`.
 
 ## Supported providers
 

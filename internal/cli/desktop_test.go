@@ -680,7 +680,9 @@ func TestDesktopLaunchWebVNCArgsCarriesTargetDetails(t *testing.T) {
 func TestDesktopLaunchWebVNCArgsCarriesExternalPrivateRouting(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	const leaseID = "cbx_abcdef123456"
-	routingPath, err := PersistExternalRouting(leaseID, ExternalConfig{Command: "provider-command", WorkRoot: "/work/crabbox"})
+	stored := ExternalConfig{Command: "provider-command", WorkRoot: "/work/crabbox"}
+	stored.Connection.Desktop = ExternalDesktopConfig{Username: "screen-user", PasswordEnv: "SCREEN_SHARING_PASSWORD"}
+	routingPath, err := PersistExternalRouting(leaseID, stored)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,8 +691,6 @@ func TestDesktopLaunchWebVNCArgsCarriesExternalPrivateRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := Config{Provider: "external", TargetOS: targetMacOS}
-	cfg.External.Connection.Desktop.Username = "screen-user"
-	cfg.External.Connection.Desktop.PasswordEnv = "SCREEN_SHARING_PASSWORD"
 	got := desktopLaunchWebVNCArgs(cfg, SSHTarget{TargetOS: targetMacOS}, leaseID, true, false)
 	want := []string{
 		"--provider", "external",

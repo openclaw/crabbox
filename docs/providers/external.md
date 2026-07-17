@@ -104,8 +104,9 @@ work root inside the distribution instead.
 
 Windows target support supplies routing, shell/path semantics, SSH execution,
 and lifecycle handling. Crabbox does not provision a desktop or VNC server on
-an External Windows host. An adapter that advertises the `desktop` capability
-must separately provide a Crabbox-compatible loopback VNC service and managed
+an External Windows host. External is statically classified as desktop-capable;
+there is no per-adapter desktop capability negotiation. A Windows adapter must
+separately provide a Crabbox-compatible loopback VNC service and managed
 credential file; otherwise use the target for SSH/run workflows only.
 
 `external.config` is arbitrary YAML passed as JSON to the executable. Keep

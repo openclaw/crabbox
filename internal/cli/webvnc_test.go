@@ -191,7 +191,7 @@ func TestWebVNCPortalBootstrapHandoffKeepsTicketOutOfBrowserURLAndArgv(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("handoff mode=%#o want 0600", info.Mode().Perm())
 	}
 	body, err := os.ReadFile(handoff.path)
@@ -264,7 +264,7 @@ func TestOpenWebVNCPortalUsesBearerBootstrapWithoutOpeningCoordinatorURL(t *test
 			if parsed.Scheme != "file" {
 				return fmt.Errorf("browser handoff scheme=%q want file", parsed.Scheme)
 			}
-			body, err := os.ReadFile(filepath.FromSlash(parsed.Path))
+			body, err := os.ReadFile(testFileURLPath(parsed))
 			if err != nil {
 				return err
 			}
@@ -287,6 +287,18 @@ func TestOpenWebVNCPortalUsesBearerBootstrapWithoutOpeningCoordinatorURL(t *test
 		strings.Contains(opened, server.URL) {
 		t.Fatalf("opened browser target leaked bootstrap data: %s", opened)
 	}
+}
+
+func testFileURLPath(parsed *url.URL) string {
+	path := parsed.Path
+	if runtime.GOOS == "windows" {
+		if parsed.Host != "" {
+			path = "//" + parsed.Host + path
+		} else if len(path) >= 3 && path[0] == '/' && path[2] == ':' {
+			path = path[1:]
+		}
+	}
+	return filepath.FromSlash(path)
 }
 
 func TestWebVNCAgentBaseURL(t *testing.T) {

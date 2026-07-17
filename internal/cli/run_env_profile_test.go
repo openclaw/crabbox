@@ -192,3 +192,25 @@ func TestTrustedExternalDesktopPasswordStaysLocalAfterProviderSwitch(t *testing.
 		t.Fatalf("provider switch removed unrelated value: %#v", values)
 	}
 }
+
+func TestResolvedTargetPasswordStaysOutOfRunAndCacheEnvironment(t *testing.T) {
+	t.Setenv("ROUTED_SCREEN_PASSWORD", "operator-secret")
+	t.Setenv("SAFE_REMOTE_VALUE", "preserved")
+	cfg := Config{EnvAllow: []string{"ROUTED_SCREEN_PASSWORD", "SAFE_REMOTE_VALUE"}}
+	selection := runEnvSelection{
+		Profile:   allowedEnv(cfg.EnvAllow),
+		Inline:    allowedEnv(cfg.EnvAllow),
+		Effective: allowedEnv(cfg.EnvAllow),
+	}
+	target := SSHTarget{ChildEnvDenylist: []string{"ROUTED_SCREEN_PASSWORD"}}
+	stripTargetCredentialsFromRunEnv(&selection, target)
+	for name, values := range map[string]map[string]string{"profile": selection.Profile, "inline": selection.Inline, "effective": selection.Effective} {
+		if _, ok := values["ROUTED_SCREEN_PASSWORD"]; ok {
+			t.Fatalf("%s retained resolved credential: %#v", name, values)
+		}
+	}
+	values := allowedRemoteEnvForTarget(cfg, target)
+	if _, ok := values["ROUTED_SCREEN_PASSWORD"]; ok || values["SAFE_REMOTE_VALUE"] != "preserved" {
+		t.Fatalf("resolved cache environment=%#v", values)
+	}
+}

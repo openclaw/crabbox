@@ -33,12 +33,14 @@ func repositoryGitEnvironment() []string {
 		"XDG_CONFIG_HOME": {}, "SYSTEMROOT": {}, "WINDIR": {}, "COMSPEC": {},
 		"PATHEXT": {}, "USERPROFILE": {}, "HOMEDRIVE": {}, "HOMEPATH": {},
 		"APPDATA": {}, "LOCALAPPDATA": {},
+		"GIT_DIR": {}, "GIT_WORK_TREE": {}, "GIT_CEILING_DIRECTORIES": {},
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM": {},
 	}
 	result := make([]string, 0, len(allowed)+4)
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
 		upper := strings.ToUpper(name)
-		if _, ok := allowed[upper]; ok || strings.HasPrefix(upper, "LC_") || strings.HasPrefix(upper, "GIT_") {
+		if _, ok := allowed[upper]; ok || strings.HasPrefix(upper, "LC_") {
 			result = append(result, entry)
 		}
 	}
