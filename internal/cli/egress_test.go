@@ -10,6 +10,8 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -285,6 +287,30 @@ func TestEgressClientBinaryRejectsNonLinuxTargets(t *testing.T) {
 	}
 }
 
+func TestCrossBuildEgressClientStripsDesktopPasswordEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell child fixture")
+	}
+	const passwordEnv = "CRABBOX_TEST_EGRESS_DESKTOP_PASSWORD"
+	dir := t.TempDir()
+	goPath := filepath.Join(dir, "go")
+	script := "#!/bin/sh\n" +
+		"if [ \"${" + passwordEnv + "+x}\" = x ]; then exit 89; fi\n" +
+		"if [ \"$CRABBOX_TEST_KEEP\" != preserved ]; then exit 90; fi\n" +
+		"if [ \"$GOOS\" != linux ] || [ \"$GOARCH\" != amd64 ] || [ \"$CGO_ENABLED\" != 0 ]; then exit 91; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(goPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(passwordEnv, "must-not-reach-go-build")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+	target := SSHTarget{TargetOS: targetLinux, ChildEnvDenylist: []string{passwordEnv}}
+	if err := crossBuildEgressClient(context.Background(), target, t.TempDir(), filepath.Join(t.TempDir(), "egress-client")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSCPBaseArgsUseLegacyProtocolForNativeWindows(t *testing.T) {
 	native := scpBaseArgs(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
 	if !slices.Contains(native, "-O") {
@@ -373,6 +399,29 @@ func TestEgressDaemonSupervisorStopsOnFatalExit(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("supervisor script missing %q:\n%s", want, script)
 		}
+	}
+}
+
+func TestEgressDaemonSupervisorStripsDesktopPasswordEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell child fixture")
+	}
+	const passwordEnv = "CRABBOX_TEST_EGRESS_DESKTOP_PASSWORD"
+	dir := t.TempDir()
+	childPath := filepath.Join(dir, "egress-child")
+	script := "#!/bin/sh\n" +
+		"if [ \"${" + passwordEnv + "+x}\" = x ]; then exit 89; fi\n" +
+		"if [ \"$CRABBOX_TEST_KEEP\" != preserved ]; then exit 90; fi\n" +
+		"exit 4\n"
+	if err := os.WriteFile(childPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(passwordEnv, "must-not-reach-daemon")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+	cmd := egressDaemonSupervisorCommand(childPath, nil, []string{passwordEnv})
+	err := cmd.Run()
+	if err == nil || cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != egressDaemonFatalCode {
+		t.Fatalf("supervisor err=%v exit=%v", err, cmd.ProcessState)
 	}
 }
 

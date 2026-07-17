@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1697,7 +1696,7 @@ func createCheckpointArchive(ctx context.Context, target SSHTarget, workdir, loc
 		return 0, exit(2, "create checkpoint archive: %v", err)
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
-	cmd := exec.CommandContext(ctx, "ssh", sshArgs(target, remoteCheckpointArchiveCommand(workdir))...)
+	cmd := sshCommandContext(ctx, target, sshArgs(target, remoteCheckpointArchiveCommand(workdir))...)
 	cmd.Stdout = file
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

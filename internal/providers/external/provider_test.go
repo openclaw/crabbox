@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,302 @@ func TestProviderSpec(t *testing.T) {
 			t.Fatalf("missing feature %s", feature)
 		}
 	}
+	targets := map[string]bool{}
+	for _, target := range spec.Targets {
+		targets[target.OS+"/"+target.WindowsMode] = true
+	}
+	for _, want := range []string{core.TargetLinux + "/", core.TargetMacOS + "/", core.TargetWindows + "/normal", core.TargetWindows + "/wsl2"} {
+		if !targets[want] {
+			t.Fatalf("missing target %s in %#v", want, spec.Targets)
+		}
+	}
+}
+
+func TestConfigureAcceptsMacOSTarget(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetMacOS
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := backend.(*leaseBackend).cfg
+	if got.TargetOS != core.TargetMacOS {
+		t.Fatalf("target=%q", got.TargetOS)
+	}
+	lease := protocolLease{
+		LeaseID: "cbx_abcdef123456",
+		Slug:    "blue-crab",
+		Name:    "crabbox-blue-crab",
+		CloudID: "provider/node-1",
+		SSH:     &protocolSSH{User: "desktop", Host: "desktop.example.test", Port: "22"},
+	}.target(got, true)
+	if lease.SSH.TargetOS != core.TargetMacOS {
+		t.Fatalf("lease target=%q", lease.SSH.TargetOS)
+	}
+}
+
+func TestConfigureAcceptsNativeWindowsWorkRoot(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetWindows
+	cfg.WindowsMode = core.WindowsModeNormal
+	cfg.WorkRoot = `C:\crabbox`
+	cfg.External.WorkRoot = core.BaseConfig().External.WorkRoot
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := backend.(*leaseBackend).cfg
+	if got.TargetOS != core.TargetWindows || got.WindowsMode != core.WindowsModeNormal || got.WorkRoot != `C:\crabbox` {
+		t.Fatalf("config=%#v", got)
+	}
+}
+
+func TestValidateConfigUsesTopLevelNativeWindowsWorkRootBeforeConfigure(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetWindows
+	cfg.WindowsMode = core.WindowsModeNormal
+	cfg.WorkRoot = `D:\Users\alice\crabbox`
+	cfg.External.WorkRoot = core.BaseConfig().External.WorkRoot
+	if err := validateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateConfigAcceptsDedicatedNativeWindowsUserWorkRoot(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetWindows
+	cfg.WindowsMode = core.WindowsModeNormal
+	cfg.WorkRoot = `D:\Users\alice\crabbox`
+	cfg.External.WorkRoot = cfg.WorkRoot
+	if err := validateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateConfigRejectsUnsafeNativeWindowsWorkRoot(t *testing.T) {
+	for _, workRoot := range []string{
+		`/work/crabbox`,
+		`C:\`,
+		`D:\`,
+		`C:\Windows`,
+		`C:\Windows.`,
+		`C:\Windows \crabbox`,
+		`C:\Windows\crabbox`,
+		`D:\Program Files\crabbox`,
+		`D:\Users`,
+		`D:\Users\alice`,
+		`C:\PROGRA~1`,
+		`C:\LONGFI~1.TXT\crabbox`,
+		`C:\safe:stream\crabbox`,
+		`C:\NUL\crabbox`,
+		`C:\CONIN$\crabbox`,
+		`C:\CONOUT$.log\crabbox`,
+		`C:\COM¹\crabbox`,
+		`C:\LPT³\crabbox`,
+		`C:\safe\..\Users`,
+	} {
+		cfg := testConfig()
+		cfg.TargetOS = core.TargetWindows
+		cfg.WindowsMode = core.WindowsModeNormal
+		cfg.WorkRoot = workRoot
+		cfg.External.WorkRoot = workRoot
+		if err := validateConfig(cfg); err == nil {
+			t.Errorf("work root %q should be rejected", workRoot)
+		}
+	}
+}
+
+func TestValidateConfigRejectsPOSIXHomeWorkRoot(t *testing.T) {
+	for _, target := range []struct {
+		name        string
+		targetOS    string
+		windowsMode string
+		workRoots   []string
+	}{
+		{name: "linux", targetOS: core.TargetLinux, workRoots: []string{"/home/alice", "/Users/alice"}},
+		{name: "macos", targetOS: core.TargetMacOS, workRoots: []string{"/home/alice", "/Users/alice", "/users/alice", "/var/root", "/private/var/root", "/System/Volumes/Data/Users/alice"}},
+		{name: "wsl2", targetOS: core.TargetWindows, windowsMode: core.WindowsModeWSL2, workRoots: []string{"/home/alice", "/Users/alice", "/mnt/c/Users/alice", "/MNT/C/users/Alice"}},
+	} {
+		for _, workRoot := range target.workRoots {
+			t.Run(target.name+"/"+strings.ReplaceAll(workRoot, "/", "_"), func(t *testing.T) {
+				cfg := testConfig()
+				cfg.TargetOS = target.targetOS
+				cfg.WindowsMode = target.windowsMode
+				cfg.WorkRoot = workRoot
+				cfg.External.WorkRoot = workRoot
+				if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "home directory") {
+					t.Fatalf("work root %q error=%v, want home-directory rejection", workRoot, err)
+				}
+			})
+		}
+	}
+}
+
+func TestValidateConfigRejectsTargetSpecificBroadPOSIXWorkRoot(t *testing.T) {
+	for _, target := range []struct {
+		name        string
+		targetOS    string
+		windowsMode string
+		workRoots   []string
+	}{
+		{name: "macos", targetOS: core.TargetMacOS, workRoots: []string{"/Users", "/users", "/private", "/private/var", "/TMP", "/VAR", "/ETC", "/System/Volumes/Data", "/system/volumes/data/Users", "/System/Volumes", "/System/Volumes/Preboot", "/system/volumes/vm", "/System/Volumes/Update", "/Volumes/Backup", "/volumes/share"}},
+		{name: "wsl2", targetOS: core.TargetWindows, windowsMode: core.WindowsModeWSL2, workRoots: []string{"/mnt", "/MNT", "/mnt/c", "/mnt/c/Users", "/MNT/C/users", "/mnt/c/Windows", "/mnt/c/ProgramData", "/mnt/c/Program Files"}},
+	} {
+		for _, workRoot := range target.workRoots {
+			t.Run(target.name+"/"+strings.ReplaceAll(workRoot, "/", "_"), func(t *testing.T) {
+				cfg := testConfig()
+				cfg.TargetOS = target.targetOS
+				cfg.WindowsMode = target.windowsMode
+				cfg.WorkRoot = workRoot
+				cfg.External.WorkRoot = workRoot
+				if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "too broad") {
+					t.Fatalf("work root %q error=%v, want broad-root rejection", workRoot, err)
+				}
+			})
+		}
+	}
+}
+
+func TestValidateConfigRejectsAmbiguousWSLMountedDriveWorkRoot(t *testing.T) {
+	for _, workRoot := range []string{
+		"/mnt/c/PROGRA~1",
+		"/mnt/c/safe:stream/crabbox",
+		"/mnt/c/NUL/crabbox",
+		"/mnt/c/Users/alice/WORKSP~1",
+	} {
+		t.Run(strings.ReplaceAll(workRoot, "/", "_"), func(t *testing.T) {
+			cfg := testConfig()
+			cfg.TargetOS = core.TargetWindows
+			cfg.WindowsMode = core.WindowsModeWSL2
+			cfg.WorkRoot = workRoot
+			cfg.External.WorkRoot = workRoot
+			if err := validateConfig(cfg); err == nil {
+				t.Fatalf("work root %q should be rejected", workRoot)
+			}
+		})
+	}
+}
+
+func TestDesktopCredentialsUseEnvReference(t *testing.T) {
+	t.Setenv("EXTERNAL_TEST_DESKTOP_PASSWORD", "provider-secret")
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetMacOS
+	cfg.External.Connection.Desktop.PasswordEnv = "EXTERNAL_TEST_DESKTOP_PASSWORD"
+	credentials, ok, err := (Provider{}).ResolveDesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetMacOS, User: "lease-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected desktop credentials")
+	}
+	if credentials.Username != "lease-user" || credentials.Password != "provider-secret" {
+		t.Fatalf("credentials=%#v", credentials)
+	}
+	cfg.External.Connection.Desktop.Username = "screen-user"
+	credentials, ok, err = (Provider{}).ResolveDesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetMacOS, User: "lease-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || credentials.Username != "screen-user" {
+		t.Fatalf("explicit username credentials=%#v ok=%t", credentials, ok)
+	}
+}
+
+func TestDesktopCredentialsRejectMissingConfiguredEnvReference(t *testing.T) {
+	const passwordEnv = "CRABBOX_EXTERNAL_TEST_MISSING_DESKTOP_PASSWORD"
+	t.Setenv(passwordEnv, "")
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetMacOS
+	cfg.External.Connection.Desktop.PasswordEnv = passwordEnv
+	credentials, ok, err := (Provider{}).ResolveDesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetMacOS, User: "lease-user"})
+	if err == nil || !strings.Contains(err.Error(), passwordEnv) {
+		t.Fatalf("err=%v", err)
+	}
+	if ok || credentials != (core.DesktopCredentials{}) {
+		t.Fatalf("credentials=%#v ok=%t", credentials, ok)
+	}
+}
+
+func TestDesktopCredentialsRejectMissingPasswordReference(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetMacOS
+	credentials, ok, err := (Provider{}).ResolveDesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetMacOS, User: "lease-user"})
+	if err == nil || !strings.Contains(err.Error(), "external.connection.desktop.passwordEnv") {
+		t.Fatalf("err=%v", err)
+	}
+	if ok || credentials != (core.DesktopCredentials{}) {
+		t.Fatalf("credentials=%#v ok=%t", credentials, ok)
+	}
+}
+
+func TestDesktopCredentialsAreMacOSOnly(t *testing.T) {
+	const passwordEnv = "EXTERNAL_TEST_DESKTOP_PASSWORD"
+	t.Setenv(passwordEnv, "must-not-be-returned")
+
+	for _, target := range []struct {
+		name        string
+		targetOS    string
+		windowsMode string
+	}{
+		{name: "linux", targetOS: core.TargetLinux},
+		{name: "native Windows", targetOS: core.TargetWindows, windowsMode: core.WindowsModeNormal},
+		{name: "Windows WSL2", targetOS: core.TargetWindows, windowsMode: core.WindowsModeWSL2},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.TargetOS = target.targetOS
+			cfg.WindowsMode = target.windowsMode
+			cfg.External.Connection.Desktop.PasswordEnv = passwordEnv
+			credentials, ok, err := (Provider{}).ResolveDesktopCredentials(cfg, core.SSHTarget{
+				TargetOS: target.targetOS,
+				User:     "lease-user",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok || credentials != (core.DesktopCredentials{}) {
+				t.Fatalf("credentials=%#v ok=%t", credentials, ok)
+			}
+		})
+	}
+}
+
+func TestExternalDesktopPasswordEnvRejectsReservedCoordinatorAndProxyNames(t *testing.T) {
+	for _, name := range []string{
+		"CRABBOX_COORDINATOR_TOKEN",
+		"CRABBOX_ACCESS_CLIENT_SECRET",
+		"CF_ACCESS_TOKEN",
+		"CRABBOX_OWNER",
+		"CRABBOX_ORG",
+		"CRABBOX_EXTERNAL_ARG",
+		"GIT_AUTHOR_EMAIL",
+		"https_proxy",
+		"LANG",
+		"lc_all",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.TargetOS = core.TargetMacOS
+			cfg.External.Connection.Desktop.PasswordEnv = name
+			if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "is reserved") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetMacOS
+	cfg.External.Connection.Desktop.PasswordEnv = "SCREEN_SHARING_PASSWORD"
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("dedicated Screen Sharing password environment rejected: %v", err)
+	}
+}
+
+func TestValidateConfigRejectsInvalidDesktopPasswordEnv(t *testing.T) {
+	cfg := testConfig()
+	cfg.External.Connection.Desktop.PasswordEnv = "not an env name"
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "external.connection.desktop.passwordEnv") {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 func TestRouteConfigUsesProviderWorkRoot(t *testing.T) {
@@ -96,8 +393,273 @@ func TestRouteConfigUsesProviderWorkRoot(t *testing.T) {
 func TestCommandRoutingArgsUsesPrivateLeaseState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	args := (Provider{}).CommandRoutingArgs(testConfig(), "cbx_abcdef123456")
-	if len(args) != 2 || args[0] != "--external-routing-file" || !strings.HasSuffix(args[1], ".json") {
+	if len(args) != 4 || args[0] != "--external-routing-file" || !strings.HasSuffix(args[1], ".json") || args[2] != "--external-routing-digest" || args[3] != "" {
 		t.Fatalf("args=%#v", args)
+	}
+}
+
+func TestConfigureRestoresPersistedArchitecture(t *testing.T) {
+	isolateCrabboxState(t)
+	const leaseID = "cbx_arch_route_123456"
+	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetMacOS, core.WindowsModeNormal)
+	core.SetExternalRoutingArchitecture(&saved.External, core.ArchitectureARM64)
+	path, err := core.PersistValidatedExternalRouting(leaseID, saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = "external"
+	cfg.External.RoutingFile = path
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.(*leaseBackend).cfg.Architecture; got != core.ArchitectureARM64 {
+		t.Fatalf("architecture=%q", got)
+	}
+}
+
+func TestConfigurePersistedRoutingArchitectureOverridesLaterConfig(t *testing.T) {
+	isolateCrabboxState(t)
+	const leaseID = "cbx_arch_route_authoritative"
+	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetMacOS, core.WindowsModeNormal)
+	core.SetExternalRoutingArchitecture(&saved.External, core.ArchitectureARM64)
+	path, err := core.PersistValidatedExternalRouting(leaseID, saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_ARCH", core.ArchitectureAMD64)
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("provider: external\nexternal:\n  routingFile: %s\n", path)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := core.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Architecture != core.ArchitectureAMD64 || !core.IsArchitectureExplicit(cfg) {
+		t.Fatalf("precondition architecture=%q explicit=%v", cfg.Architecture, core.IsArchitectureExplicit(cfg))
+	}
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.(*leaseBackend).cfg.Architecture; got != core.ArchitectureARM64 {
+		t.Fatalf("architecture=%q, want persisted %q", got, core.ArchitectureARM64)
+	}
+}
+
+func TestCommandRoutingArgsCarryDesktopCredentialOverrides(t *testing.T) {
+	isolateCrabboxState(t)
+	const leaseID = "cbx_abcdef123456"
+	cfg := testConfig()
+	cfg.External.Connection.Desktop.Username = "screen-user"
+	cfg.External.Connection.Desktop.PasswordEnv = "SCREEN_SHARING_PASSWORD"
+	path, err := core.PersistExternalRouting(leaseID, cfg.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.External, err = core.LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join((Provider{}).CommandRoutingArgs(cfg, leaseID), " ")
+	for _, want := range []string{
+		"--external-desktop-username screen-user",
+		"--external-desktop-password-env SCREEN_SHARING_PASSWORD",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("args=%q missing %q", args, want)
+		}
+	}
+}
+
+func TestCommandRoutingArgsBindChildToExactRouteDigest(t *testing.T) {
+	isolateCrabboxState(t)
+	const leaseID = "cbx_digest_child_123456"
+	first := testConfig()
+	path, err := core.PersistValidatedExternalRouting(leaseID, first.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := core.LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.External = loaded
+	args := (Provider{}).CommandRoutingArgs(first, leaseID)
+	if len(args) < 4 || args[2] != "--external-routing-digest" || args[3] != core.ExternalRoutingDigest(loaded) {
+		t.Fatalf("routing args=%#v", args)
+	}
+
+	replacement := testConfig()
+	replacement.External.Command = "replacement-provider"
+	if _, err := core.PersistValidatedExternalRouting(leaseID, replacement.External); err != nil {
+		t.Fatal(err)
+	}
+	args = (Provider{}).CommandRoutingArgs(first, leaseID)
+	if args[3] != core.ExternalRoutingDigest(loaded) {
+		t.Fatalf("routing args lost loaded route binding: %#v", args)
+	}
+	child := core.BaseConfig()
+	fs := flag.NewFlagSet("external-digest-child", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := registerFlags(fs, child)
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&child, fs, values); err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCommandRoutingArgsLoadsPersistedRouteWhenConfigIsUnbound(t *testing.T) {
+	isolateCrabboxState(t)
+	const leaseID = "cbx_unbound_route_123456"
+	saved := testConfig()
+	path, err := core.PersistValidatedExternalRouting(leaseID, saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := core.LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	args := (Provider{}).CommandRoutingArgs(cfg, leaseID)
+	if len(args) < 4 || args[3] != core.ExternalRoutingDigest(loaded) {
+		t.Fatalf("routing args=%#v", args)
+	}
+}
+
+func TestApplyFlagsRejectsRoutingDigestWithoutRoutingFileFlag(t *testing.T) {
+	isolateCrabboxState(t)
+	cfg := core.BaseConfig()
+	cfg.External.RoutingFile = filepath.Join(t.TempDir(), "configured-route.json")
+	fs := flag.NewFlagSet("external-digest-only", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--external-routing-digest", strings.Repeat("0", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err == nil || !strings.Contains(err.Error(), "requires --external-routing-file") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCommandRoutingArgsPreserveExplicitDesktopCredentialClears(t *testing.T) {
+	isolateCrabboxState(t)
+	const leaseID = "cbx_abcdef123456"
+	const zeroLeaseID = "cbx_abcdef123457"
+	zeroPath, err := core.PersistExternalRouting(zeroLeaseID, testConfig().External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := core.BaseConfig()
+	zeroFS := flag.NewFlagSet("external-zero", flag.ContinueOnError)
+	zeroFS.SetOutput(io.Discard)
+	zeroValues := registerFlags(zeroFS, zero)
+	if err := zeroFS.Parse([]string{"--external-routing-file", zeroPath}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&zero, zeroFS, zeroValues); err != nil {
+		t.Fatal(err)
+	}
+	if args := (Provider{}).CommandRoutingArgs(zero, zeroLeaseID); len(args) != 4 || args[2] != "--external-routing-digest" || args[3] != core.ExternalRoutingDigest(zero.External) {
+		t.Fatalf("non-explicit zero desktop changed legacy routing args: %#v", args)
+	}
+
+	saved := testConfig()
+	saved.External.Connection.Desktop.Username = "stored-user"
+	saved.External.Connection.Desktop.PasswordEnv = "STORED_DESKTOP_PASSWORD"
+	path, err := core.PersistExternalRouting(leaseID, saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := core.BaseConfig()
+	fs := flag.NewFlagSet("external-clear", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{
+		"--external-routing-file", path,
+		"--external-desktop-username=",
+		"--external-desktop-password-env=",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Connection.Desktop != (core.ExternalDesktopConfig{}) {
+		t.Fatalf("desktop clear was not applied: %#v", cfg.External.Connection.Desktop)
+	}
+
+	args := (Provider{}).CommandRoutingArgs(cfg, leaseID)
+	want := []string{
+		"--external-routing-file", path,
+		"--external-routing-digest", core.ExternalRoutingDigest(cfg.External),
+		"--external-desktop-username", "",
+		"--external-desktop-password-env", "",
+	}
+	if len(args) != len(want) {
+		t.Fatalf("routing args=%#v, want %#v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("routing args=%#v, want %#v", args, want)
+		}
+	}
+
+	child := core.BaseConfig()
+	childFS := flag.NewFlagSet("external-clear-child", flag.ContinueOnError)
+	childFS.SetOutput(io.Discard)
+	childValues := registerFlags(childFS, child)
+	if err := childFS.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&child, childFS, childValues); err != nil {
+		t.Fatal(err)
+	}
+	if child.External.Connection.Desktop != (core.ExternalDesktopConfig{}) {
+		t.Fatalf("child resurrected stored desktop tuple: %#v", child.External.Connection.Desktop)
+	}
+}
+
+func TestApplyFlagsPreservesCurrentRoutedAndOverridePasswordEnvironmentsAfterExplicitClear(t *testing.T) {
+	isolateCrabboxState(t)
+	routed := testConfig()
+	routed.External.Connection.Desktop.PasswordEnv = "ROUTED_ARD_PASSWORD"
+	path, err := core.PersistValidatedExternalRouting("cbx_monotonic123", routed.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig()
+	cfg.Provider = providerName
+	cfg.External.Connection.Desktop.PasswordEnv = "CURRENT_ARD_PASSWORD"
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "OVERRIDE_ARD_PASSWORD")
+	fs := flag.NewFlagSet("external-monotonic-clear", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{
+		"--external-routing-file", path,
+		"--external-desktop-password-env=",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Connection.Desktop.PasswordEnv != "" {
+		t.Fatalf("effective desktop password environment=%q, want explicit empty", cfg.External.Connection.Desktop.PasswordEnv)
+	}
+	want := "CURRENT_ARD_PASSWORD,ROUTED_ARD_PASSWORD,OVERRIDE_ARD_PASSWORD"
+	if got := strings.Join(core.ExternalDesktopChildEnvironmentDenylist(cfg), ","); got != want {
+		t.Fatalf("desktop environment denylist=%q, want %q", got, want)
 	}
 }
 
@@ -130,25 +692,80 @@ func TestConfigurePreservesOverridesAppliedToLoadedRouting(t *testing.T) {
 func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
 	isolateCrabboxState(t)
 	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetMacOS, core.WindowsModeNormal)
+	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", "runtime-user")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "RUNTIME_DESKTOP_PASSWORD")
+	cfg := core.BaseConfig()
+	cfg.External.RoutingFile = path
+	cfg.WorkRoot = "/ambient/work-root"
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := backend.(*leaseBackend).cfg
+	if got.External.Command != saved.External.Command || got.WorkRoot != saved.External.WorkRoot || got.TargetOS != core.TargetMacOS ||
+		got.External.Connection.Desktop.Username != "runtime-user" || got.External.Connection.Desktop.PasswordEnv != "RUNTIME_DESKTOP_PASSWORD" {
+		t.Fatalf("config=%#v", got)
+	}
+}
+
+func TestConfigurePreservesExplicitTargetOverRoutingFile(t *testing.T) {
+	isolateCrabboxState(t)
+	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetWindows, core.WindowsModeWSL2)
 	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := core.BaseConfig()
 	cfg.External.RoutingFile = path
+	cfg.TargetOS = core.TargetLinux
+	core.MarkTargetExplicit(&cfg)
 	backend, err := (Provider{}).Configure(cfg, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := backend.(*leaseBackend).cfg
-	if got.External.Command != saved.External.Command || got.WorkRoot != saved.External.WorkRoot {
-		t.Fatalf("config=%#v", got)
+	if got.TargetOS != core.TargetLinux || got.WindowsMode != core.WindowsModeNormal {
+		t.Fatalf("target=%q windows-mode=%q, want explicit Linux/normal", got.TargetOS, got.WindowsMode)
+	}
+}
+
+func TestApplyFlagsKeepsNormalModeForExplicitLinuxTarget(t *testing.T) {
+	isolateCrabboxState(t)
+	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetWindows, core.WindowsModeWSL2)
+	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.External.RoutingFile = path
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	fs.String("target", core.TargetLinux, "")
+	if err := fs.Parse([]string{"--target", core.TargetLinux}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.TargetOS = core.TargetLinux
+	cfg.WindowsMode = core.WindowsModeNormal
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != core.TargetLinux || cfg.WindowsMode != core.WindowsModeNormal {
+		t.Fatalf("target=%q windows-mode=%q", cfg.TargetOS, cfg.WindowsMode)
 	}
 }
 
 func TestApplyFlagsLoadsConfiguredRoutingFile(t *testing.T) {
 	isolateCrabboxState(t)
 	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetMacOS, core.WindowsModeNormal)
 	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +778,7 @@ func TestApplyFlagsLoadsConfiguredRoutingFile(t *testing.T) {
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.External.Command != saved.External.Command || cfg.WorkRoot != saved.External.WorkRoot || !core.ExternalRoutingLoaded(cfg.External) {
+	if cfg.External.Command != saved.External.Command || cfg.WorkRoot != saved.External.WorkRoot || !core.ExternalRoutingLoaded(cfg.External) || cfg.TargetOS != core.TargetMacOS {
 		t.Fatalf("config=%#v", cfg)
 	}
 }
@@ -208,6 +825,97 @@ func TestProtocolClaimScopeIgnoresZeroLifecycleConnection(t *testing.T) {
 	}
 }
 
+func TestExternalLifecycleScopeIgnoresDesktopCredentialMetadata(t *testing.T) {
+	cfg := testConfig()
+	cfg.External.Command = ""
+	cfg.External.Lifecycle.Acquire.Argv = []string{"devboxctl", "new", "{{name}}"}
+	cfg.External.Lifecycle.List.Argv = []string{"devboxctl", "list"}
+	cfg.External.Lifecycle.List.Output = lifecycleOutputJSONNameArray
+	cfg.External.Lifecycle.Release.Argv = []string{"devboxctl", "rm", "{{name}}"}
+	cfg.External.Connection.SSH = core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}.example"}
+	before := externalClaimScope(cfg)
+	cfg.External.Connection.Desktop = core.ExternalDesktopConfig{Username: "screen-user", PasswordEnv: "SCREEN_SHARING_PASSWORD"}
+	if after := externalClaimScope(cfg); after != before {
+		t.Fatalf("desktop credential metadata changed lifecycle scope: before=%s after=%s", before, after)
+	}
+}
+
+func TestExternalLifecycleScopeOmitsZeroDesktopForPreDesktopCompatibility(t *testing.T) {
+	connection := core.ExternalConnectionConfig{SSH: core.ExternalSSHConnectionConfig{User: "developer"}}
+	data, err := json.Marshal(externalClaimScopeData{Connection: &connection})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(`"desktop"`)) {
+		t.Fatalf("zero desktop changed the pre-desktop lifecycle scope encoding: %s", data)
+	}
+}
+
+func TestProtocolClaimScopeBindsNormalizedTargetAndWindowsMode(t *testing.T) {
+	cfg := testConfig()
+	linuxScope := externalClaimScope(cfg)
+	if want := "sha256:26c595c7c118933ff30ac85d"; linuxScope != want {
+		t.Fatalf("default Linux scope=%s, want legacy scope %s", linuxScope, want)
+	}
+
+	mac := cfg
+	mac.TargetOS = core.TargetMacOS
+	macScope := externalClaimScope(mac)
+	if macScope == linuxScope {
+		t.Fatal("macOS and Linux external scopes must differ")
+	}
+	macAlias := cfg
+	macAlias.TargetOS = "darwin"
+	macAlias.WindowsMode = ""
+	if got := externalClaimScope(macAlias); got != macScope {
+		t.Fatalf("normalized macOS scope=%s, want %s", got, macScope)
+	}
+	macARM := mac
+	macARM.Architecture = core.ArchitectureARM64
+	macARMScope := externalClaimScope(macARM)
+	if macARMScope == macScope {
+		t.Fatal("external claim scope must bind ARM64 architecture")
+	}
+	macARMAlias := mac
+	macARMAlias.Architecture = "aarch64"
+	if got := externalClaimScope(macARMAlias); got != macARMScope {
+		t.Fatalf("normalized ARM64 scope=%s, want %s", got, macARMScope)
+	}
+
+	windows := cfg
+	windows.TargetOS = core.TargetWindows
+	windows.WindowsMode = core.WindowsModeNormal
+	windowsScope := externalClaimScope(windows)
+	if windowsScope == linuxScope || windowsScope == macScope {
+		t.Fatal("native Windows external scope must be target-specific")
+	}
+	windowsAlias := cfg
+	windowsAlias.TargetOS = "win"
+	windowsAlias.WindowsMode = "native"
+	if got := externalClaimScope(windowsAlias); got != windowsScope {
+		t.Fatalf("normalized Windows scope=%s, want %s", got, windowsScope)
+	}
+
+	wsl := windows
+	wsl.WindowsMode = core.WindowsModeWSL2
+	if got := externalClaimScope(wsl); got == windowsScope {
+		t.Fatal("native Windows and WSL2 external scopes must differ")
+	}
+
+	// The backend's unencodable-config fallback remains target-bound too.
+	fallbackLinux := cfg
+	fallbackLinux.External.Config = map[string]any{"invalid": make(chan struct{})}
+	legacyFallback := externalScopeHash([]byte("provider-command\x00--profile\x00test"))
+	if got := externalClaimScope(fallbackLinux); got != legacyFallback {
+		t.Fatalf("fallback Linux scope=%s, want legacy scope %s", got, legacyFallback)
+	}
+	fallbackMac := fallbackLinux
+	fallbackMac.TargetOS = core.TargetMacOS
+	if externalClaimScope(fallbackLinux) == externalClaimScope(fallbackMac) {
+		t.Fatal("fallback external scope must bind the normalized target")
+	}
+}
+
 func TestConfigurePreservesExplicitTopLevelWorkRoot(t *testing.T) {
 	cfg := testConfig()
 	cfg.WorkRoot = "/workspace/top-level"
@@ -216,8 +924,12 @@ func TestConfigurePreservesExplicitTopLevelWorkRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := backend.(*leaseBackend).cfg.WorkRoot; got != "/workspace/top-level" {
+	configured := backend.(*leaseBackend).cfg
+	if got := configured.WorkRoot; got != "/workspace/top-level" {
 		t.Fatalf("work root=%q", got)
+	}
+	if got := configured.External.WorkRoot; got != configured.WorkRoot {
+		t.Fatalf("persisted work root=%q, want effective %q", got, configured.WorkRoot)
 	}
 }
 
@@ -262,6 +974,27 @@ func TestFlagsOverrideArgsAndConfigJSON(t *testing.T) {
 	}
 	if cfg.External.Config["namespace"] != "prod" || cfg.External.Config["cpu"] != float64(64) {
 		t.Fatalf("config=%#v", cfg.External.Config)
+	}
+}
+
+func TestFlagsOverrideDesktopCredentials(t *testing.T) {
+	cfg := testConfig()
+	fs := flag.NewFlagSet("external", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{
+		"--external-desktop-username", "screen-user",
+		"--external-desktop-password-env", "EXTERNAL_TEST_DESKTOP_PASSWORD",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Connection.Desktop.Username != "screen-user" {
+		t.Fatalf("desktop username=%q", cfg.External.Connection.Desktop.Username)
+	}
+	if cfg.External.Connection.Desktop.PasswordEnv != "EXTERNAL_TEST_DESKTOP_PASSWORD" {
+		t.Fatalf("desktop password env=%q", cfg.External.Connection.Desktop.PasswordEnv)
 	}
 }
 
@@ -1356,6 +2089,261 @@ func TestInvokeDeclarativeLifecyclePassesSecretEnvWithoutArgvExposure(t *testing
 	}
 }
 
+func TestExternalAdapterStripsDesktopPasswordEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-backed adapter fixture")
+	}
+	const passwordEnv = "EXTERNAL_TEST_DESKTOP_PASSWORD"
+	t.Setenv(passwordEnv, "operator-screen-sharing-secret")
+
+	t.Run("protocol", func(t *testing.T) {
+		cfg := testConfig()
+		cfg.External.Connection.Desktop.PasswordEnv = passwordEnv
+		cfg.External.Command = "sh"
+		cfg.External.Args = []string{"-c", `if [ "${` + passwordEnv + `+set}" = set ]; then exit 41; fi; printf '%s' '{"protocolVersion":1,"leases":[]}'`}
+		backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: processRunner{}}}
+		if _, err := backend.invokeProtocol(context.Background(), protocolRequest{Operation: "list"}); err != nil {
+			t.Fatalf("protocol inherited desktop password environment: %v", err)
+		}
+	})
+
+	t.Run("lifecycle", func(t *testing.T) {
+		cfg := core.BaseConfig()
+		cfg.External.Connection.Desktop.PasswordEnv = passwordEnv
+		cfg.External.Lifecycle.List = core.ExternalLifecycleOperation{
+			Argv:   []string{"sh", "-c", `if [ "${` + passwordEnv + `+set}" = set ]; then exit 42; fi; printf '%s' '[]'`},
+			Env:    map[string]string{passwordEnv: "must-still-be-stripped"},
+			Output: lifecycleOutputJSONNameArray,
+		}
+		backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: processRunner{}}}
+		if _, err := backend.invokeLifecycle(context.Background(), protocolRequest{Operation: "list"}); err != nil {
+			t.Fatalf("lifecycle inherited desktop password environment: %v", err)
+		}
+	})
+}
+
+func TestExternalLifecycleRejectsDesktopPasswordEnvAliases(t *testing.T) {
+	const passwordEnv = "EXTERNAL_TEST_DESKTOP_PASSWORD"
+	t.Setenv(passwordEnv, "operator-screen-sharing-secret")
+
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "exact", value: "{{env." + passwordEnv + "}}"},
+		{name: "prefixed", value: "prefix-{{env." + passwordEnv + "}}"},
+		{name: "embedded", value: "before-{{env." + passwordEnv + "}}-after"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.External.Connection.Desktop.PasswordEnv = passwordEnv
+			cfg.External.Lifecycle.Doctor = core.ExternalLifecycleOperation{
+				Argv: []string{"provider-doctor"},
+				Env:  map[string]string{"DESKTOP_PASSWORD_ALIAS": test.value},
+			}
+			runner := &recordingRunner{}
+			backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+			_, err := backend.invokeLifecycle(context.Background(), protocolRequest{Operation: "doctor"})
+			if err == nil || !strings.Contains(err.Error(), "references configured desktop password environment") {
+				t.Fatalf("err=%v", err)
+			}
+			if len(runner.requests) != 0 {
+				t.Fatalf("lifecycle child launched with aliased password: requests=%#v", runner.requests)
+			}
+		})
+	}
+}
+
+func TestExternalLifecycleRejectsRememberedDesktopPasswordEnvAlias(t *testing.T) {
+	const previousPasswordEnv = "PREVIOUS_EXTERNAL_DESKTOP_PASSWORD"
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.External.Connection.Desktop.PasswordEnv = previousPasswordEnv
+	core.PreserveExternalDesktopChildEnvironmentBoundary(&cfg)
+	cfg.External.Connection.Desktop.PasswordEnv = "CURRENT_EXTERNAL_DESKTOP_PASSWORD"
+	cfg.External.Lifecycle.Doctor = core.ExternalLifecycleOperation{
+		Argv: []string{"provider-doctor"},
+		Env:  map[string]string{"DESKTOP_PASSWORD_ALIAS": "{{env." + previousPasswordEnv + "}}"},
+	}
+	t.Setenv(previousPasswordEnv, "operator-screen-sharing-secret")
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.invokeLifecycle(context.Background(), protocolRequest{Operation: "doctor"})
+	if err == nil || !strings.Contains(err.Error(), "references configured desktop password environment "+previousPasswordEnv) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("lifecycle child launched with remembered password alias: requests=%#v", runner.requests)
+	}
+}
+
+func TestExternalLifecycleRejectsDesktopPasswordArgvReferences(t *testing.T) {
+	const passwordEnv = "EXTERNAL_TEST_DESKTOP_PASSWORD"
+	t.Setenv(passwordEnv, "operator-screen-sharing-secret")
+
+	for _, test := range []struct {
+		name      string
+		operation core.ExternalLifecycleOperation
+	}{
+		{
+			name: "argv exact",
+			operation: core.ExternalLifecycleOperation{
+				Argv:         []string{"provider-doctor", "{{env." + passwordEnv + "}}"},
+				AllowEnvArgv: true,
+			},
+		},
+		{
+			name: "argv embedded",
+			operation: core.ExternalLifecycleOperation{
+				Argv:         []string{"provider-doctor", "--password=before-{{env." + passwordEnv + "}}-after"},
+				AllowEnvArgv: true,
+			},
+		},
+		{
+			name: "later step",
+			operation: core.ExternalLifecycleOperation{
+				Steps: [][]string{
+					{"provider-doctor"},
+					{"provider-check", "prefix-{{env." + passwordEnv + "}}"},
+				},
+				AllowEnvArgv: true,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.External.Connection.Desktop.PasswordEnv = passwordEnv
+			cfg.External.Lifecycle.Doctor = test.operation
+			runner := &recordingRunner{}
+			backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+			_, err := backend.invokeLifecycle(context.Background(), protocolRequest{Operation: "doctor"})
+			if err == nil || !strings.Contains(err.Error(), "argv") || !strings.Contains(err.Error(), "references configured desktop password environment") {
+				t.Fatalf("err=%v", err)
+			}
+			if len(runner.requests) != 0 {
+				t.Fatalf("lifecycle child launched with password argv reference: requests=%#v", runner.requests)
+			}
+		})
+	}
+}
+
+func TestExternalLifecycleRejectsDesktopPasswordNamePrefixReference(t *testing.T) {
+	const passwordEnv = "EXTERNAL_TEST_DESKTOP_PASSWORD"
+	t.Setenv(passwordEnv, "operator-screen-sharing-secret")
+	cfg := core.BaseConfig()
+	cfg.External.Connection.Desktop.PasswordEnv = passwordEnv
+	cfg.External.Lifecycle.List = core.ExternalLifecycleOperation{
+		Argv:       []string{"provider-list"},
+		Output:     lifecycleOutputJSONNameArray,
+		NamePrefix: "cbx-{{env." + passwordEnv + "}}",
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	_, err := backend.invokeLifecycle(context.Background(), protocolRequest{Operation: "list"})
+	if err == nil || !strings.Contains(err.Error(), "namePrefix references configured desktop password environment") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("lifecycle child launched with password namePrefix reference: requests=%#v", runner.requests)
+	}
+}
+
+func TestExternalLifecycleRejectsIndirectDesktopPasswordReferences(t *testing.T) {
+	const passwordEnv = "EXTERNAL_TEST_DESKTOP_PASSWORD"
+	t.Setenv(passwordEnv, "operator-screen-sharing-secret")
+
+	for _, test := range []struct {
+		name       string
+		wantField  string
+		operation  core.ExternalLifecycleOperation
+		connection core.ExternalConnectionConfig
+		request    protocolRequest
+	}{
+		{
+			name:      "resource name into argv",
+			wantField: "resourceName",
+			operation: core.ExternalLifecycleOperation{
+				Argv:         []string{"provider-doctor", "{{resourceName}}"},
+				AllowEnvArgv: true,
+			},
+			connection: core.ExternalConnectionConfig{
+				ResourceName:         "{{env." + passwordEnv + "}}",
+				AllowEnvResourceName: true,
+			},
+			request: protocolRequest{Operation: "doctor"},
+		},
+		{
+			name:      "cloud id",
+			wantField: "cloudId",
+			operation: core.ExternalLifecycleOperation{Argv: []string{"provider-create"}},
+			connection: core.ExternalConnectionConfig{
+				CloudID: "cloud-{{env." + passwordEnv + "}}",
+			},
+			request: protocolRequest{
+				Operation: "acquire",
+				Desired:   &desiredLease{LeaseID: "cbx_abcdef123456", Slug: "fast-coral", Name: "devbox-fast-coral"},
+			},
+		},
+		{
+			name:      "ssh template",
+			wantField: "ssh.host",
+			operation: core.ExternalLifecycleOperation{Argv: []string{"provider-create"}},
+			connection: core.ExternalConnectionConfig{
+				SSH: core.ExternalSSHConnectionConfig{
+					Host:     "host-{{env." + passwordEnv + "}}",
+					AllowEnv: true,
+				},
+			},
+			request: protocolRequest{
+				Operation: "acquire",
+				Desired:   &desiredLease{LeaseID: "cbx_abcdef123456", Slug: "fast-coral", Name: "devbox-fast-coral"},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			test.connection.Desktop.PasswordEnv = passwordEnv
+			cfg.External.Connection = test.connection
+			switch test.request.Operation {
+			case "doctor":
+				cfg.External.Lifecycle.Doctor = test.operation
+			case "acquire":
+				cfg.External.Lifecycle.Acquire = test.operation
+			}
+			runner := &recordingRunner{}
+			backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+			_, err := backend.invokeLifecycle(context.Background(), test.request)
+			if err == nil || !strings.Contains(err.Error(), "external connection "+test.wantField) || !strings.Contains(err.Error(), "references configured desktop password environment") {
+				t.Fatalf("err=%v", err)
+			}
+			if len(runner.requests) != 0 {
+				t.Fatalf("lifecycle child launched with indirect password reference: requests=%#v", runner.requests)
+			}
+		})
+	}
+}
+
+func TestExternalLifecyclePreservesNonSecretEnvTemplates(t *testing.T) {
+	t.Setenv("CRABBOX_EXTERNAL_TEST_REGION", "us-test-1")
+	cfg := core.BaseConfig()
+	cfg.External.Connection.Desktop.PasswordEnv = "EXTERNAL_TEST_DESKTOP_PASSWORD"
+	cfg.External.Lifecycle.Doctor = core.ExternalLifecycleOperation{
+		Argv: []string{"provider-doctor"},
+		Env:  map[string]string{"REGION_ALIAS": "prefix-{{env.CRABBOX_EXTERNAL_TEST_REGION}}-suffix"},
+	}
+	runner := &recordingRunner{}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.invokeLifecycle(context.Background(), protocolRequest{Operation: "doctor"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 1 {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+	if !envContains(runner.requests[0].Env, "REGION_ALIAS=prefix-us-test-1-suffix") {
+		t.Fatalf("nonsecret env template missing: env=%#v", runner.requests[0].Env)
+	}
+}
+
 func TestInvokeDeclarativeLifecyclePreservesEnvResourceNameProvenance(t *testing.T) {
 	t.Setenv("DEVBOX_RESOURCE", "durable-resource-name")
 	cfg := core.BaseConfig()
@@ -1730,13 +2718,17 @@ func TestDeclarativeResolveThenReleaseReusesPersistedResourceName(t *testing.T) 
 func TestConfirmedAbsentLocalCleanupRemovesMatchingRoutingAndSlugReservation(t *testing.T) {
 	isolateCrabboxState(t)
 	cfg := testConfig()
-	backend := &leaseBackend{cfg: cfg}
 	leaseID := "cbx_abcdef123456"
 	slug := "fast-coral"
 	routingPath, err := core.PersistExternalRouting(leaseID, cfg.External)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.External, err = core.LoadExternalRouting(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &leaseBackend{cfg: cfg}
 	dir, err := backend.slugReservationDir()
 	if err != nil {
 		t.Fatal(err)
@@ -1820,11 +2812,19 @@ func TestConfirmedAbsentLocalCleanupPreservesChangedSlugReservationAndRouting(t 
 func TestConfirmedAbsentLocalCleanupPreservesReplacedRouting(t *testing.T) {
 	isolateCrabboxState(t)
 	cfg := testConfig()
-	backend := &leaseBackend{cfg: cfg}
 	leaseID := "cbx_abcdef123456"
+	routingPath, err := core.PersistExternalRouting(leaseID, cfg.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.External, err = core.LoadExternalRouting(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &leaseBackend{cfg: cfg}
 	replacement := cfg.External
 	replacement.WorkRoot = "/home/replacement/crabbox"
-	routingPath, err := core.PersistExternalRouting(leaseID, replacement)
+	routingPath, err = core.PersistExternalRouting(leaseID, replacement)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2051,6 +3051,74 @@ func TestProtocolLeaseDefaultsReadyCheck(t *testing.T) {
 		if !strings.Contains(lease.SSH.ReadyCheck, want) {
 			t.Fatalf("ready check %q missing %q", lease.SSH.ReadyCheck, want)
 		}
+	}
+}
+
+func TestProtocolMacOSLeaseCarriesNativeDesktopCapability(t *testing.T) {
+	cfg := testConfig()
+	cfg.TargetOS = core.TargetMacOS
+	cfg.Architecture = core.ArchitectureARM64
+	cfg.WorkRoot = "/safe/external-work"
+	lease := protocolLease{
+		LeaseID: "cbx_abcdef123456",
+		Slug:    "test",
+		Name:    "devbox-test",
+		Labels:  map[string]string{"target": core.TargetLinux, "windows_mode": core.WindowsModeWSL2, "work_root": "/", "architecture": core.ArchitectureAMD64},
+		SSH: &protocolSSH{
+			User: "tester",
+			Host: "devbox-test",
+		},
+	}.target(cfg, true)
+	if lease.Server.Labels["desktop"] != "true" || lease.Server.Labels["target"] != core.TargetMacOS || lease.Server.Labels["windows_mode"] != "" {
+		t.Fatalf("labels=%#v", lease.Server.Labels)
+	}
+	if lease.Server.Labels["work_root"] != cfg.WorkRoot {
+		t.Fatalf("work_root=%q, want operator value %q", lease.Server.Labels["work_root"], cfg.WorkRoot)
+	}
+	if lease.Server.Labels["architecture"] != cfg.Architecture {
+		t.Fatalf("architecture=%q, want routed value %q", lease.Server.Labels["architecture"], cfg.Architecture)
+	}
+}
+
+func TestExternalReadyCheckDefaultsAreTargetAware(t *testing.T) {
+	baseLease := protocolLease{
+		LeaseID: "cbx_abcdef123456",
+		Slug:    "test",
+		Name:    "devbox-test",
+		SSH:     &protocolSSH{User: "tester", Host: "devbox-test"},
+	}
+
+	native := testConfig()
+	native.TargetOS = core.TargetWindows
+	native.WindowsMode = core.WindowsModeNormal
+	native.WorkRoot = `C:\crabbox`
+	baseLease.Labels = map[string]string{"work_root": `C:\`}
+	nativeTarget := baseLease.target(native, true)
+	if nativeTarget.SSH.ReadyCheck != "" || nativeTarget.Server.Labels["target"] != core.TargetWindows || nativeTarget.Server.Labels["windows_mode"] != core.WindowsModeNormal {
+		t.Fatalf("native Windows target=%#v labels=%#v", nativeTarget.SSH, nativeTarget.Server.Labels)
+	}
+	if nativeTarget.Server.Labels["work_root"] != native.WorkRoot {
+		t.Fatalf("native Windows work_root=%q, want %q", nativeTarget.Server.Labels["work_root"], native.WorkRoot)
+	}
+
+	wsl := native
+	wsl.WindowsMode = core.WindowsModeWSL2
+	wslTarget := baseLease.target(wsl, true)
+	if wslTarget.SSH.ReadyCheck != externalDefaultReadyCheck || wslTarget.Server.Labels["windows_mode"] != core.WindowsModeWSL2 {
+		t.Fatalf("WSL2 target=%#v labels=%#v", wslTarget.SSH, wslTarget.Server.Labels)
+	}
+
+	lifecycleTarget, err := lifecycleSSHForTarget(
+		core.ExternalSSHConnectionConfig{User: "Administrator", Host: "windows.example.test"},
+		lifecycleTemplateContext{values: map[string]string{}},
+		core.TargetWindows,
+		core.WindowsModeNormal,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleTarget.ReadyCheck != "" {
+		t.Fatalf("native lifecycle ready check=%q, want core PowerShell fallback", lifecycleTarget.ReadyCheck)
 	}
 }
 
@@ -3480,6 +4548,9 @@ type processRunner struct{}
 
 func (processRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
+	if req.Env != nil {
+		cmd.Env = req.Env
+	}
 	cmd.Stdin = req.Stdin
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -62,6 +62,31 @@ func TestOpenSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestCuaRegistersCanonicalWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("cua")
+	if err != nil {
+		t.Fatalf("ProviderFor(cua): %v", err)
+	}
+	if provider.Name() != "cua" {
+		t.Fatalf("ProviderFor(cua).Name=%q", provider.Name())
+	}
+	spec := provider.Spec()
+	if spec.Kind != core.ProviderKindServiceControl || spec.Family != "cua" || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("cua spec=%#v", spec)
+	}
+	if len(spec.Targets) != 3 || spec.Targets[0].OS != core.TargetLinux || spec.Targets[1].OS != core.TargetMacOS || spec.Targets[2].OS != core.TargetWindows || spec.Targets[2].WindowsMode != core.WindowsModeNormal {
+		t.Fatalf("cua targets=%#v", spec.Targets)
+	}
+	if spec.Features.Has(core.FeatureArchiveSync) || spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("cua features=%v", spec.Features)
+	}
+	for _, alias := range []string{"cua-cloud", "cua-sandbox", "trycua"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "cua" {
+			t.Fatalf("%q alias unexpectedly resolves to cua", alias)
+		}
+	}
+}
+
 func TestNvidiaBrevRegistersCanonicalAndAliases(t *testing.T) {
 	for _, name := range []string{"nvidia-brev", "brev", "nvidia"} {
 		provider, err := core.ProviderFor(name)
@@ -1266,6 +1291,7 @@ func allBuiltInProviderNames() []string {
 		"codesandbox",
 		"coder",
 		"crownest",
+		"cua",
 		"cubesandbox",
 		"daytona",
 		"digitalocean",

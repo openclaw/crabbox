@@ -74,7 +74,7 @@ func TestEgressDaemonConcurrentStartDoubleProvision(t *testing.T) {
 				defer wg.Done()
 				app := App{Stdout: &outs[g], Stderr: &outs[g]}
 				<-release
-				errs[g] = app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"})
+				errs[g] = app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil)
 			}(g)
 		}
 		close(release)
@@ -137,7 +137,7 @@ func TestEgressDaemonStopUsesLeaseLock(t *testing.T) {
 	leaseID := "stop-lock"
 	var output bytes.Buffer
 	app := App{Stdout: &output, Stderr: &output}
-	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}); err != nil {
+	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil); err != nil {
 		t.Fatalf("start egress daemon: %v (output: %s)", err, strings.TrimSpace(output.String()))
 	}
 	pid := egressDaemonTestPID(t, &output)
@@ -209,7 +209,7 @@ func TestPrepareEgressClientCutoverPreservesDaemonWhenTicketCreationFails(t *tes
 	leaseID := "ticket-failure"
 	var output bytes.Buffer
 	app := App{Stdout: &output, Stderr: &output}
-	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}); err != nil {
+	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil); err != nil {
 		t.Fatalf("start egress daemon: %v (output: %s)", err, strings.TrimSpace(output.String()))
 	}
 	pid := egressDaemonTestPID(t, &output)
@@ -250,7 +250,7 @@ func TestPrepareEgressClientCutoverStopsDaemonForForegroundStart(t *testing.T) {
 	leaseID := "foreground-cutover"
 	var output bytes.Buffer
 	app := App{Stdout: &output, Stderr: &output}
-	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}); err != nil {
+	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil); err != nil {
 		t.Fatalf("start egress daemon: %v (output: %s)", err, strings.TrimSpace(output.String()))
 	}
 	pid := egressDaemonTestPID(t, &output)

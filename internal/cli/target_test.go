@@ -2,6 +2,8 @@ package cli
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -157,6 +159,28 @@ func TestValidateProviderTargetAllowsTartMacOSARM64(t *testing.T) {
 	cfg.architectureExplicit = true
 	if err := validateProviderTarget(cfg); err != nil {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetAllowsExternalARM64Targets(t *testing.T) {
+	for _, target := range []struct {
+		os   string
+		mode string
+	}{
+		{os: targetLinux, mode: windowsModeNormal},
+		{os: targetMacOS, mode: windowsModeNormal},
+		{os: targetWindows, mode: windowsModeNormal},
+		{os: targetWindows, mode: windowsModeWSL2},
+	} {
+		cfg := baseConfig()
+		cfg.Provider = "external"
+		cfg.TargetOS = target.os
+		cfg.WindowsMode = target.mode
+		cfg.Architecture = ArchitectureARM64
+		cfg.architectureExplicit = true
+		if err := validateProviderTarget(cfg); err != nil {
+			t.Errorf("target=%s mode=%s err=%v", target.os, target.mode, err)
+		}
 	}
 }
 
@@ -428,6 +452,78 @@ func TestNormalizeTargetConfigPrefersExplicitSealosWorkRoot(t *testing.T) {
 
 	if cfg.WorkRoot != "/home/devbox/override" {
 		t.Fatalf("WorkRoot=%q want explicit Sealos root", cfg.WorkRoot)
+	}
+}
+
+func TestNormalizeTargetConfigPreservesExplicitPlatformDefaultWorkRoot(t *testing.T) {
+	tests := []struct {
+		name        string
+		targetOS    string
+		windowsMode string
+		workRoot    string
+	}{
+		{name: "linux root on macOS", targetOS: targetMacOS, windowsMode: windowsModeNormal, workRoot: defaultPOSIXWorkRoot},
+		{name: "macOS root on Linux", targetOS: targetLinux, windowsMode: windowsModeNormal, workRoot: defaultMacOSWorkRoot},
+		{name: "macOS root on WSL2", targetOS: targetWindows, windowsMode: windowsModeWSL2, workRoot: defaultMacOSWorkRoot},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS = tt.targetOS
+			cfg.WindowsMode = tt.windowsMode
+			cfg.WorkRoot = tt.workRoot
+			MarkWorkRootExplicit(&cfg)
+
+			normalizeTargetConfig(&cfg)
+
+			if cfg.WorkRoot != tt.workRoot {
+				t.Fatalf("WorkRoot=%q want explicit root %q", cfg.WorkRoot, tt.workRoot)
+			}
+		})
+	}
+}
+
+func TestNormalizeTargetConfigPreservesExternalWorkRoot(t *testing.T) {
+	for _, provider := range []string{"external", "exec-provider"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = provider
+			cfg.TargetOS = targetMacOS
+			cfg.External.WorkRoot = defaultPOSIXWorkRoot
+			cfg.WorkRoot = cfg.External.WorkRoot
+
+			normalizeTargetConfig(&cfg)
+
+			if cfg.WorkRoot != defaultPOSIXWorkRoot {
+				t.Fatalf("WorkRoot=%q want external root %q", cfg.WorkRoot, defaultPOSIXWorkRoot)
+			}
+		})
+	}
+}
+
+func TestLoadConfigPreservesExternalWorkRootFromEnvironment(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "external")
+	t.Setenv("CRABBOX_TARGET", "macos")
+	t.Setenv("CRABBOX_WINDOWS_MODE", "")
+	t.Setenv("CRABBOX_WORK_ROOT", "")
+	t.Setenv("CRABBOX_EXTERNAL_COMMAND", "provider-adapter")
+	t.Setenv("CRABBOX_EXTERNAL_WORK_ROOT", defaultPOSIXWorkRoot)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetMacOS || cfg.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("loaded config target=%q workRoot=%q", cfg.TargetOS, cfg.WorkRoot)
 	}
 }
 

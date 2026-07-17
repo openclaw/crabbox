@@ -141,3 +141,76 @@ func TestAllowedEnvFromProfilesOnlyForAllowlist(t *testing.T) {
 		t.Fatalf("unlisted profile secret forwarded: %#v", env)
 	}
 }
+
+func TestExternalDesktopPasswordNeverEntersRunEnvironmentForAnyTarget(t *testing.T) {
+	t.Setenv("SCREEN_SHARING_PASSWORD", "operator-secret")
+	t.Setenv("SCREEN_SAFE_VALUE", "preserved")
+	for _, targetOS := range []string{targetLinux, targetMacOS, targetWindows} {
+		t.Run(targetOS, func(t *testing.T) {
+			profile := map[string]string{
+				"SCREEN_SHARING_PASSWORD": "profile-secret",
+				"SCREEN_SAFE_VALUE":       "profile-safe",
+			}
+			selection := runEnvSelection{
+				Profile:   allowedProfileEnv([]string{"SCREEN_*"}, profile),
+				Inline:    allowedEnvWithoutProfileKeys([]string{"SCREEN_*"}, profile),
+				Effective: allowedEnvFromProfiles([]string{"SCREEN_*"}, profile),
+			}
+			selection.Inline["SCREEN_SHARING_PASSWORD"] = "expanded-secret"
+			selection.Effective["SCREEN_SHARING_PASSWORD"] = "expanded-secret"
+			cfg := Config{Provider: "external", TargetOS: targetOS}
+			cfg.External.Connection.Desktop.PasswordEnv = "SCREEN_SHARING_PASSWORD"
+			stripExternalDesktopPasswordFromRunEnv(cfg, &selection)
+			for name, values := range map[string]map[string]string{"profile": selection.Profile, "inline": selection.Inline, "effective": selection.Effective} {
+				if _, found := values["SCREEN_SHARING_PASSWORD"]; found {
+					t.Fatalf("%s environment retained desktop password: %#v", name, values)
+				}
+			}
+			if selection.Effective["SCREEN_SAFE_VALUE"] != "profile-safe" {
+				t.Fatalf("unrelated allowed environment lost: %#v", selection.Effective)
+			}
+		})
+	}
+}
+
+func TestTrustedExternalDesktopPasswordStaysLocalAfterProviderSwitch(t *testing.T) {
+	t.Setenv("OPERATOR_ARD_PASSWORD", "operator-secret")
+	t.Setenv("SAFE_REMOTE_VALUE", "preserved")
+	cfg := Config{
+		Provider: "aws",
+		TargetOS: targetLinux,
+		EnvAllow: []string{"OPERATOR_ARD_PASSWORD", "SAFE_REMOTE_VALUE"},
+	}
+	cfg.External.Connection.Desktop.PasswordEnv = "OPERATOR_ARD_PASSWORD"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceTrustedFile
+
+	values := allowedRemoteEnv(cfg)
+	if _, found := values["OPERATOR_ARD_PASSWORD"]; found {
+		t.Fatalf("provider switch forwarded trusted desktop password: %#v", values)
+	}
+	if values["SAFE_REMOTE_VALUE"] != "preserved" {
+		t.Fatalf("provider switch removed unrelated value: %#v", values)
+	}
+}
+
+func TestResolvedTargetPasswordStaysOutOfRunAndCacheEnvironment(t *testing.T) {
+	t.Setenv("ROUTED_SCREEN_PASSWORD", "operator-secret")
+	t.Setenv("SAFE_REMOTE_VALUE", "preserved")
+	cfg := Config{EnvAllow: []string{"ROUTED_SCREEN_PASSWORD", "SAFE_REMOTE_VALUE"}}
+	selection := runEnvSelection{
+		Profile:   allowedEnv(cfg.EnvAllow),
+		Inline:    allowedEnv(cfg.EnvAllow),
+		Effective: allowedEnv(cfg.EnvAllow),
+	}
+	target := SSHTarget{ChildEnvDenylist: []string{"ROUTED_SCREEN_PASSWORD"}}
+	stripTargetCredentialsFromRunEnv(&selection, target)
+	for name, values := range map[string]map[string]string{"profile": selection.Profile, "inline": selection.Inline, "effective": selection.Effective} {
+		if _, ok := values["ROUTED_SCREEN_PASSWORD"]; ok {
+			t.Fatalf("%s retained resolved credential: %#v", name, values)
+		}
+	}
+	values := allowedRemoteEnvForTarget(cfg, target)
+	if _, ok := values["ROUTED_SCREEN_PASSWORD"]; ok || values["SAFE_REMOTE_VALUE"] != "preserved" {
+		t.Fatalf("resolved cache environment=%#v", values)
+	}
+}

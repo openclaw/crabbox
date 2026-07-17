@@ -216,16 +216,24 @@ func (a App) capsuleFromActions(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	view, err := fetchActionsRunView(ctx, runRef)
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if err := ValidateProviderCredentialDestination(cfg); err != nil {
+		return err
+	}
+	childEnvDenylist := externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)
+	view, err := fetchActionsRunView(ctx, runRef, childEnvDenylist)
 	if err != nil {
 		return err
 	}
 	runRef.Attempt = firstNonZero(runRef.Attempt, view.Attempt)
-	workflowPath, err := fetchActionsWorkflowPath(ctx, runRef)
+	workflowPath, err := fetchActionsWorkflowPath(ctx, runRef, childEnvDenylist)
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: workflow path unavailable: %v\n", err)
 	}
-	artifacts, err := fetchActionsArtifacts(ctx, runRef)
+	artifacts, err := fetchActionsArtifacts(ctx, runRef, childEnvDenylist)
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: artifact metadata unavailable: %v\n", err)
 	}
@@ -254,7 +262,7 @@ func (a App) capsuleFromActions(ctx context.Context, args []string) error {
 	}
 	logRef, failureSignature := capsuleArtifactRef{}, ""
 	if !*noLogs {
-		logText, logErr := fetchActionsFailedLog(ctx, runRef)
+		logText, logErr := fetchActionsFailedLog(ctx, runRef, childEnvDenylist)
 		if logErr != nil {
 			fmt.Fprintf(a.Stderr, "warning: failed log unavailable: %v\n", logErr)
 		} else if logText != "" {
@@ -506,12 +514,12 @@ func parsePositiveActionsInt(value, label string) (int, error) {
 	return n, nil
 }
 
-func fetchActionsRunView(ctx context.Context, ref actionsRunRef) (capsuleRunView, error) {
+func fetchActionsRunView(ctx context.Context, ref actionsRunRef, childEnvDenylist []string) (capsuleRunView, error) {
 	args := []string{"run", "view", ref.RunID, "--repo", ref.Repo.Slug(), "--json", "attempt,conclusion,createdAt,displayTitle,event,headBranch,headSha,jobs,name,startedAt,status,updatedAt,url,workflowName"}
 	if ref.Attempt > 0 {
 		args = append(args, "--attempt", strconv.Itoa(ref.Attempt))
 	}
-	out, err := ghOutput(ctx, "", args...)
+	out, err := ghOutputWithChildEnvironment(ctx, "", childEnvDenylist, args...)
 	if err != nil {
 		return capsuleRunView{}, err
 	}
@@ -522,8 +530,8 @@ func fetchActionsRunView(ctx context.Context, ref actionsRunRef) (capsuleRunView
 	return view, nil
 }
 
-func fetchActionsWorkflowPath(ctx context.Context, ref actionsRunRef) (string, error) {
-	out, err := ghOutput(ctx, "", "api", "repos/"+ref.Repo.Slug()+"/actions/runs/"+ref.RunID)
+func fetchActionsWorkflowPath(ctx context.Context, ref actionsRunRef, childEnvDenylist []string) (string, error) {
+	out, err := ghOutputWithChildEnvironment(ctx, "", childEnvDenylist, "api", "repos/"+ref.Repo.Slug()+"/actions/runs/"+ref.RunID)
 	if err != nil {
 		return "", err
 	}
@@ -534,13 +542,13 @@ func fetchActionsWorkflowPath(ctx context.Context, ref actionsRunRef) (string, e
 	return res.Path, nil
 }
 
-func fetchActionsArtifacts(ctx context.Context, ref actionsRunRef) ([]capsuleArtifactRef, error) {
+func fetchActionsArtifacts(ctx context.Context, ref actionsRunRef, childEnvDenylist []string) ([]capsuleArtifactRef, error) {
 	const pageSize = 100
 	artifacts := []capsuleArtifactRef{}
 	seen := 0
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("repos/%s/actions/runs/%s/artifacts?per_page=%d&page=%d", ref.Repo.Slug(), ref.RunID, pageSize, page)
-		out, err := ghOutput(ctx, "", "api", endpoint)
+		out, err := ghOutputWithChildEnvironment(ctx, "", childEnvDenylist, "api", endpoint)
 		if err != nil {
 			return nil, err
 		}
@@ -571,24 +579,24 @@ func appendActionsArtifactRefs(dst []capsuleArtifactRef, src []actionsArtifact) 
 	return dst
 }
 
-func fetchActionsFailedLog(ctx context.Context, ref actionsRunRef) (string, error) {
+func fetchActionsFailedLog(ctx context.Context, ref actionsRunRef, childEnvDenylist []string) (string, error) {
 	args := []string{"run", "view", ref.RunID, "--repo", ref.Repo.Slug(), "--log-failed"}
 	if ref.Attempt > 0 {
 		args = append(args, "--attempt", strconv.Itoa(ref.Attempt))
 	}
-	return ghOutputAllowError(ctx, "", args...)
+	return ghOutputAllowErrorWithChildEnvironment(ctx, "", childEnvDenylist, args...)
 }
 
-func ghOutputAllowError(ctx context.Context, dir string, args ...string) (string, error) {
+func ghOutputAllowErrorWithChildEnvironment(ctx context.Context, dir string, childEnvDenylist []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "gh", args...)
+	if len(childEnvDenylist) > 0 {
+		cmd.Env = childEnvironmentWithout(os.Environ(), childEnvDenylist...)
+	}
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), err
-	}
-	return string(out), nil
+	return string(out), err
 }
 
 func selectCapsuleFailure(jobs []capsuleJobView, preferredJob string) (capsuleJobView, capsuleStepView, bool) {

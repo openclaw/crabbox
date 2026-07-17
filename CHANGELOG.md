@@ -1,12 +1,19 @@
 # Changelog
 
-## 0.38.5 - Unreleased
+## 0.39.1 - Unreleased
 
 ### Added
 
 - Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
+
+## 0.39.0 - 2026-07-17
+
+### Added
+
+- Added external-provider desktop access for remote macOS, Windows, and WSL2 machines while keeping desktop credentials local. Thanks @MuduiClaw.
 - Added a Herdr plugin for Crabbox lease controls and repository workflows, with workspace-aware actions and managed panes. Thanks @zozo123.
 - Added a single `open --editor=<name>` lease handoff for external editors, starting with Zed Remote Projects and preserving lease activity while the editor is connected. Thanks @zozo123.
+- Added experimental read-only CUA diagnostics and existing-sandbox inventory while failing all remote lifecycle mutations closed until upstream exposes safe creation and deletion ownership primitives. Thanks @coygeek.
 - Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
 - Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
 

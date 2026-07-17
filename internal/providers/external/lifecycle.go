@@ -36,12 +36,29 @@ type lifecycleTemplateContext struct {
 
 func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequest) (protocolResponse, error) {
 	operation := lifecycleOperation(b.cfg.External.Lifecycle, request.Operation)
+	passwordEnvs := core.ExternalDesktopChildEnvironmentDenylist(b.cfg)
+	for _, passwordEnv := range passwordEnvs {
+		if err := rejectLifecycleDesktopPasswordConnectionReferences(b.cfg.External.Connection, passwordEnv); err != nil {
+			return protocolResponse{}, core.Exit(2, "external lifecycle %s: %v", request.Operation, err)
+		}
+	}
 	if request.Operation == "cleanup" && request.DryRun {
 		return b.defaultLifecycleResponse(request)
 	}
 	commands := lifecycleOperationCommands(operation)
 	if len(commands) == 0 {
 		return b.defaultLifecycleResponse(request)
+	}
+	for _, passwordEnv := range passwordEnvs {
+		if err := rejectLifecycleDesktopPasswordArgvReferences(commands, passwordEnv); err != nil {
+			return protocolResponse{}, core.Exit(2, "external lifecycle %s: %v", request.Operation, err)
+		}
+		if err := rejectLifecycleDesktopPasswordNamePrefixReference(operation.NamePrefix, passwordEnv); err != nil {
+			return protocolResponse{}, core.Exit(2, "external lifecycle %s: %v", request.Operation, err)
+		}
+		if err := rejectLifecycleDesktopPasswordEnvReferences(operation.Env, passwordEnv); err != nil {
+			return protocolResponse{}, core.Exit(2, "external lifecycle %s env: %v", request.Operation, err)
+		}
 	}
 	templateCtx, err := b.lifecycleContext(request, "")
 	if err != nil {
@@ -59,6 +76,7 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 	if err != nil {
 		return protocolResponse{}, core.Exit(2, "external lifecycle %s env: %v", request.Operation, err)
 	}
+	commandEnv = externalAdapterEnv(b.cfg, commandEnv)
 	var defaultResponse *protocolResponse
 	if operation.Output == lifecycleOutputNone && lifecycleDefaultLeaseResponseOperation(request.Operation) {
 		response, err := b.defaultLifecycleResponse(request)
@@ -463,7 +481,7 @@ func (b *leaseBackend) lifecycleLeaseForRequest(request protocolRequest, resourc
 	if templateCtx.sensitive["resourceName"] {
 		labels[externalResourceNameFromEnv] = "true"
 	}
-	ssh, err := lifecycleSSH(connection.SSH, templateCtx)
+	ssh, err := lifecycleSSHForTarget(connection.SSH, templateCtx, b.cfg.TargetOS, b.cfg.WindowsMode)
 	if err != nil {
 		return protocolLease{}, err
 	}
@@ -480,6 +498,10 @@ func (b *leaseBackend) lifecycleLeaseForRequest(request protocolRequest, resourc
 }
 
 func lifecycleSSH(cfg core.ExternalSSHConnectionConfig, templateCtx lifecycleTemplateContext) (protocolSSH, error) {
+	return lifecycleSSHForTarget(cfg, templateCtx, core.TargetLinux, core.WindowsModeNormal)
+}
+
+func lifecycleSSHForTarget(cfg core.ExternalSSHConnectionConfig, templateCtx lifecycleTemplateContext, targetOS, windowsMode string) (protocolSSH, error) {
 	expand := func(label, value string) (string, error) {
 		expansion, err := expandLifecycleValueTracked(value, templateCtx)
 		if err != nil {
@@ -508,7 +530,7 @@ func lifecycleSSH(cfg core.ExternalSSHConnectionConfig, templateCtx lifecycleTem
 	if err != nil {
 		return protocolSSH{}, err
 	}
-	readyCheck, err := expand("readyCheck", core.Blank(cfg.ReadyCheck, externalDefaultReadyCheck))
+	readyCheck, err := expand("readyCheck", core.Blank(cfg.ReadyCheck, externalDefaultReadyCheckForTarget(targetOS, windowsMode)))
 	if err != nil {
 		return protocolSSH{}, err
 	}
@@ -634,6 +656,103 @@ func lifecycleTemplateReferencesEnv(value string) bool {
 	matches := lifecyclePlaceholderPattern.FindAllStringSubmatch(value, -1)
 	for _, match := range matches {
 		if len(match) > 1 && strings.HasPrefix(match[1], "env.") {
+			return true
+		}
+	}
+	return false
+}
+
+func rejectLifecycleDesktopPasswordEnvReferences(env map[string]string, passwordEnv string) error {
+	passwordEnv = strings.TrimSpace(passwordEnv)
+	if passwordEnv == "" {
+		return nil
+	}
+	keys := make([]string, 0, len(env))
+	for name := range env {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	for _, name := range keys {
+		if lifecycleValueReferencesEnvironment(env[name], passwordEnv) {
+			return fmt.Errorf("%s references configured desktop password environment %s", name, passwordEnv)
+		}
+	}
+	return nil
+}
+
+func rejectLifecycleDesktopPasswordArgvReferences(commands [][]string, passwordEnv string) error {
+	passwordEnv = strings.TrimSpace(passwordEnv)
+	if passwordEnv == "" {
+		return nil
+	}
+	for stepIndex, command := range commands {
+		for argIndex, value := range command {
+			if lifecycleValueReferencesEnvironment(value, passwordEnv) {
+				return fmt.Errorf("step %d argv[%d] references configured desktop password environment %s", stepIndex+1, argIndex, passwordEnv)
+			}
+		}
+	}
+	return nil
+}
+
+func rejectLifecycleDesktopPasswordNamePrefixReference(namePrefix, passwordEnv string) error {
+	passwordEnv = strings.TrimSpace(passwordEnv)
+	if passwordEnv != "" && lifecycleValueReferencesEnvironment(namePrefix, passwordEnv) {
+		return fmt.Errorf("namePrefix references configured desktop password environment %s", passwordEnv)
+	}
+	return nil
+}
+
+func rejectLifecycleDesktopPasswordConnectionReferences(connection core.ExternalConnectionConfig, passwordEnv string) error {
+	passwordEnv = strings.TrimSpace(passwordEnv)
+	if passwordEnv == "" {
+		return nil
+	}
+	values := []struct {
+		name  string
+		value string
+	}{
+		{name: "resourceName", value: connection.ResourceName},
+		{name: "cloudId", value: connection.CloudID},
+		{name: "serverType", value: connection.ServerType},
+		{name: "ssh.user", value: connection.SSH.User},
+		{name: "ssh.host", value: connection.SSH.Host},
+		{name: "ssh.key", value: connection.SSH.Key},
+		{name: "ssh.port", value: connection.SSH.Port},
+		{name: "ssh.readyCheck", value: connection.SSH.ReadyCheck},
+		{name: "ssh.proxyCommand", value: connection.SSH.ProxyCommand},
+	}
+	labelKeys := make([]string, 0, len(connection.Labels))
+	for name := range connection.Labels {
+		labelKeys = append(labelKeys, name)
+	}
+	sort.Strings(labelKeys)
+	for _, name := range labelKeys {
+		values = append(values, struct {
+			name  string
+			value string
+		}{name: "labels." + name, value: connection.Labels[name]})
+	}
+	for index, value := range connection.SSH.FallbackPorts {
+		values = append(values, struct {
+			name  string
+			value string
+		}{name: fmt.Sprintf("ssh.fallbackPorts[%d]", index), value: value})
+	}
+	for _, field := range values {
+		if lifecycleValueReferencesEnvironment(field.value, passwordEnv) {
+			return fmt.Errorf("external connection %s references configured desktop password environment %s", field.name, passwordEnv)
+		}
+	}
+	return nil
+}
+
+func lifecycleValueReferencesEnvironment(value, environment string) bool {
+	for _, match := range lifecyclePlaceholderPattern.FindAllStringSubmatch(value, -1) {
+		if len(match) < 2 || !strings.HasPrefix(match[1], "env.") {
+			continue
+		}
+		if strings.EqualFold(strings.TrimPrefix(match[1], "env."), environment) {
 			return true
 		}
 	}

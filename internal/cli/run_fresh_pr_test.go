@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -94,5 +97,34 @@ func TestWindowsRemoteApplyLocalPatchCommand(t *testing.T) {
 		if !strings.Contains(decoded, want) {
 			t.Fatalf("apply-patch command missing %q in %q", want, decoded)
 		}
+	}
+}
+
+func TestLocalGitBinaryDiffUsesRepositoryEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell git fixture")
+	}
+	binDir := t.TempDir()
+	gitPath := filepath.Join(binDir, "git")
+	script := `#!/bin/sh
+set -eu
+[ "${GIT_CONFIG_GLOBAL+x}" != x ] || exit 90
+[ "${TEST_EXTERNAL_DESKTOP_PASSWORD+x}" != x ] || exit 91
+[ "$*" = "diff --binary HEAD" ] || exit 92
+printf 'fake-binary-diff'
+`
+	if err := os.WriteFile(gitPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("GIT_CONFIG_GLOBAL", "/safe/gitconfig")
+	t.Setenv("TEST_EXTERNAL_DESKTOP_PASSWORD", "operator-secret")
+
+	got, err := localGitBinaryDiff(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "fake-binary-diff" {
+		t.Fatalf("diff=%q", got)
 	}
 }

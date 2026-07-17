@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/base64"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -506,6 +508,57 @@ func TestDesktopClickRejectsWSL2Target(t *testing.T) {
 	}
 }
 
+func TestDesktopAndArtifactCommandsApplyProviderFlags(t *testing.T) {
+	ctx := context.Background()
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	base := []string{
+		"--provider", "azure",
+		"--azure-backend", "invalid",
+		"--id", "cbx_abcdef123456",
+	}
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "click", run: func() error {
+			return app.desktopClick(ctx, append(append([]string(nil), base...), "--x", "1", "--y", "1"))
+		}},
+		{name: "launch", run: func() error {
+			return app.desktopLaunch(ctx, append([]string(nil), base...))
+		}},
+		{name: "terminal", run: func() error {
+			return app.desktopTerminal(ctx, append([]string(nil), base...))
+		}},
+		{name: "proof", run: func() error {
+			return app.desktopProof(ctx, append([]string(nil), base...))
+		}},
+		{name: "artifacts collect", run: func() error {
+			return app.artifactsCollect(ctx, append([]string(nil), base...))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run()
+			if err == nil || !strings.Contains(err.Error(), "azure backend must be vm or dynamic-sessions") {
+				t.Fatalf("error=%v, want provider flag application error", err)
+			}
+			if strings.Contains(err.Error(), "flag provided but not defined") {
+				t.Fatalf("provider flag was not registered: %v", err)
+			}
+		})
+	}
+
+	keys, err := desktopKeySequenceArg([]string{
+		"--provider", "azure",
+		"--azure-backend", "vm",
+		"--id", "cbx_abcdef123456",
+		"--keys", "ctrl+l",
+	})
+	if err != nil || keys != "ctrl+l" {
+		t.Fatalf("desktop key provider flags: keys=%q err=%v", keys, err)
+	}
+}
+
 func TestDesktopKeySequenceArgSkipsLeaseID(t *testing.T) {
 	tests := []struct {
 		name string
@@ -621,6 +674,55 @@ func TestDesktopLaunchWebVNCArgsCarriesTargetDetails(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("webvnc args missing %q: %v", want, got)
 		}
+	}
+}
+
+func TestDesktopLaunchWebVNCArgsCarriesExternalPrivateRouting(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const leaseID = "cbx_abcdef123456"
+	stored := ExternalConfig{Command: "provider-command", WorkRoot: "/work/crabbox"}
+	stored.Connection.Desktop = ExternalDesktopConfig{Username: "screen-user", PasswordEnv: "SCREEN_SHARING_PASSWORD"}
+	routingPath, err := PersistExternalRouting(leaseID, stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing, err := LoadExternalRouting(routingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Provider: "external", TargetOS: targetMacOS}
+	got := desktopLaunchWebVNCArgs(cfg, SSHTarget{TargetOS: targetMacOS}, leaseID, true, false)
+	want := []string{
+		"--provider", "external",
+		"--target", targetMacOS,
+		"--id", leaseID,
+		"--external-routing-file", routingPath,
+		"--external-routing-digest", ExternalRoutingDigest(routing),
+		"--external-desktop-username", "screen-user",
+		"--external-desktop-password-env", "SCREEN_SHARING_PASSWORD",
+		"--open",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("webvnc args=%#v, want %#v", got, want)
+	}
+}
+
+func TestDesktopLaunchWebVNCArgsCarriesProviderRoutingHook(t *testing.T) {
+	got := desktopLaunchWebVNCArgs(
+		Config{Provider: "direct-webvnc-test", TargetOS: targetLinux},
+		SSHTarget{TargetOS: targetLinux},
+		"cbx_abcdef123456",
+		false,
+		false,
+	)
+	want := []string{
+		"--provider", "direct-webvnc-test",
+		"--target", targetLinux,
+		"--id", "cbx_abcdef123456",
+		"--direct-webvnc-routing", "route-cbx_abcdef123456",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("webvnc args=%#v, want %#v", got, want)
 	}
 }
 

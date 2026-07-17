@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -61,6 +63,33 @@ func TestControllerProviderIdentityCancellationKillsProcessTree(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("provider identity child handles remain after reap: %v provider error=%v", entries, err)
+	}
+}
+
+func TestControllerProcessGroupExitWaitsThroughTransientStopError(t *testing.T) {
+	checks := 0
+	err := waitForControllerProcessGroupExit(42, syscall.EPERM, func(processGroupID int) bool {
+		if processGroupID != 42 {
+			t.Fatalf("process group id=%d", processGroupID)
+		}
+		checks++
+		return checks == 1
+	}, time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatalf("transient stop error was retained after group exit: %v", err)
+	}
+	if checks != 2 {
+		t.Fatalf("liveness checks=%d want 2", checks)
+	}
+}
+
+func TestControllerProcessGroupExitRetainsPersistentStopError(t *testing.T) {
+	err := waitForControllerProcessGroupExit(42, syscall.EPERM, func(int) bool { return true }, time.Now().Add(-time.Second))
+	if !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("error=%v want EPERM", err)
+	}
+	if !strings.Contains(err.Error(), "controller process group 42 survived termination") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

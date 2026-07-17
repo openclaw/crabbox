@@ -120,6 +120,9 @@ Delegated-run providers (no SSH lease):
   and live smoke: `internal/providers/superserve`, `scripts/live-superserve-smoke.sh`
 - Crownest Workspace Runs delegated lifecycle, archive-transfer upload, SSE
   event streaming, and local claims: `internal/providers/crownest`
+- CUA experimental diagnostics, read-only inventory, Python SDK bridge,
+  fail-closed lifecycle guards, and non-mutating smoke: `internal/providers/cua`,
+  `docs/providers/cua.md`, `scripts/live-cua-smoke.sh`
 - Anthropic Sandbox Runtime live local enforcement smoke: `scripts/live-anthropic-sandbox-runtime-smoke.sh`
 - Azure Container Apps dynamic sessions (shares the `azure` family, but
   delegated-run): `internal/providers/azuredynamicsessions`, runner image `worker/azure-dynamic-sessions.Dockerfile`
@@ -250,5 +253,5 @@ Provider docs:
 - Credential-free GoReleaser archive config: `.goreleaser.yaml`
 - Local signing, draft, publication, and downstream proof contract: `docs/RELEASING.md`, `scripts/package-release.sh`, `scripts/create-release-draft.sh`, `scripts/publish-release.sh`, `scripts/verify-homebrew-release.sh`
 - Docs command-surface check, link check, site builder, and Pages deploy: `scripts/check-command-docs.mjs`, `scripts/check-docs-links.mjs`, `scripts/build-docs-site.mjs`, `.github/workflows/pages.yml`
-- Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-vultr-smoke.sh`, `scripts/live-vast-smoke.sh`, and `scripts/live-superserve-smoke.sh`
+- Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-cua-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-vultr-smoke.sh`, `scripts/live-vast-smoke.sh`, and `scripts/live-superserve-smoke.sh`
 - Live coordinator auth smoke coverage: `scripts/live-auth-smoke.sh`

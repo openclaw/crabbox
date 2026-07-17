@@ -150,6 +150,7 @@ if ($LASTEXITCODE -ne 0) { throw "git checkout failed with exit $LASTEXITCODE" }
 func localGitBinaryDiff(root string) ([]byte, error) {
 	cmd := exec.Command("git", "diff", "--binary", "HEAD")
 	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
 	return cmd.Output()
 }
 

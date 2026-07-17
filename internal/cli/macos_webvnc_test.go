@@ -13,7 +13,7 @@ import (
 func TestResolveMacOSWebVNCCredentialsFallsBackToManagedPassword(t *testing.T) {
 	target := SSHTarget{TargetOS: targetMacOS, User: "steipete"}
 	var gotCommand string
-	credentials, err := resolveMacOSWebVNCCredentials(
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(
 		context.Background(),
 		Config{Provider: parallelsProvider},
 		target,
@@ -34,6 +34,74 @@ func TestResolveMacOSWebVNCCredentialsFallsBackToManagedPassword(t *testing.T) {
 	if credentials.Username != "steipete" || credentials.Password != "managed-secret" {
 		t.Fatalf("credentials = %#v", credentials)
 	}
+	if authMode != localWebVNCAuthVNC {
+		t.Fatalf("auth mode = %d, want VNC", authMode)
+	}
+}
+
+func TestDesktopConfigUsesResolvedProviderIdentity(t *testing.T) {
+	cfg := desktopConfigForResolvedLease(
+		Config{Provider: "auto", TargetOS: targetLinux},
+		Server{Provider: parallelsProvider},
+		SSHTarget{TargetOS: targetMacOS},
+	)
+	if cfg.Provider != parallelsProvider || cfg.TargetOS != targetMacOS {
+		t.Fatalf("resolved desktop config=%#v", cfg)
+	}
+	_, authMode, err := resolveMacOSWebVNCCredentials(
+		context.Background(),
+		cfg,
+		SSHTarget{TargetOS: targetMacOS, User: "lease-user"},
+		func(context.Context, SSHTarget, string) (string, error) { return "managed-secret", nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authMode != localWebVNCAuthVNC {
+		t.Fatalf("resolved provider auth mode=%d, want VNC", authMode)
+	}
+}
+
+func TestResolveMacOSWebVNCCredentialsUsesProviderARDAccount(t *testing.T) {
+	target := SSHTarget{TargetOS: targetMacOS, User: "lease-user"}
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(
+		context.Background(),
+		Config{Provider: "direct-webvnc-test"},
+		target,
+		func(context.Context, SSHTarget, string) (string, error) {
+			t.Fatal("managed password fallback should not run")
+			return "", nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.Username != "provider-user" || credentials.Password != " provider-secret " {
+		t.Fatalf("credentials = %#v", credentials)
+	}
+	if authMode != localWebVNCAuthARD {
+		t.Fatalf("auth mode = %d, want ARD", authMode)
+	}
+}
+
+func TestResolveMacOSWebVNCCredentialsUsesARDForManagedAccountPassword(t *testing.T) {
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(
+		context.Background(),
+		Config{Provider: "aws"},
+		SSHTarget{TargetOS: targetMacOS, User: "ec2-user"},
+		func(context.Context, SSHTarget, string) (string, error) {
+			return "account-secret\n", nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.Username != "ec2-user" || credentials.Password != "account-secret" {
+		t.Fatalf("credentials=%#v", credentials)
+	}
+	if authMode != localWebVNCAuthARD {
+		t.Fatalf("auth mode=%d, want ARD", authMode)
+	}
 }
 
 func TestCreateMacOSWebVNCHandoffKeepsTokenOutOfOpenURL(t *testing.T) {
@@ -41,7 +109,7 @@ func TestCreateMacOSWebVNCHandoffKeepsTokenOutOfOpenURL(t *testing.T) {
 		Token:    "deadbeefcafef00d",
 		Protocol: "crabbox.deadbeefcafef00d",
 	}
-	handoff, err := createMacOSWebVNCHandoff("6080", session)
+	handoff, err := createMacOSWebVNCHandoff("6080", session, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +137,36 @@ func TestCreateMacOSWebVNCHandoffKeepsTokenOutOfOpenURL(t *testing.T) {
 	} {
 		if !strings.Contains(string(content), want) {
 			t.Fatalf("handoff missing %q: %s", want, content)
+		}
+	}
+}
+
+func TestCreateMacOSWebVNCHandoffOmitsCredentialsForARD(t *testing.T) {
+	session := macOSWebVNCSession{
+		Token:    "deadbeefcafef00d",
+		Protocol: "crabbox.deadbeefcafef00d",
+	}
+	handoff, err := createMacOSWebVNCHandoff("6080", session, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(handoff.Path)
+	content, err := os.ReadFile(handoff.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"/credentials", `"credentialsURL"`} {
+		if strings.Contains(string(content), forbidden) {
+			t.Fatalf("ARD handoff contains %q: %s", forbidden, content)
+		}
+	}
+	for _, want := range []string{
+		"ws://127.0.0.1:6080/websockify",
+		"deadbeefcafef00d",
+		"crabbox.deadbeefcafef00d",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("ARD handoff missing %q: %s", want, content)
 		}
 	}
 }

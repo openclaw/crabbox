@@ -513,6 +513,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	envSelection.Inline = mergeEnv(envSelection.Inline, expansion.Env)
 	envSelection.Effective = mergeEnv(envSelection.Effective, expansion.Env)
+	stripExternalDesktopPasswordFromRunEnv(cfg, &envSelection)
 	envHelperName := strings.TrimSpace(*envHelper)
 	if envHelperName != "" && len(envSelection.Profile) == 0 {
 		return exit(2, "--env-helper requires --env-from-profile values selected by --allow-env")
@@ -840,6 +841,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		timingRecordColdRun = &coldRun
 	}
 	applyResolvedServerConfig(&cfg, server)
+	stripTargetCredentialsFromRunEnv(&envSelection, target)
 	if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
 		cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
 	}
@@ -1114,6 +1116,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		useCoordinator = coord != nil
 		recorder.UseCoordinator(coord)
 		applyResolvedServerConfig(&cfg, server)
+		removeEnvironmentKeys(runReq.Env, target.ChildEnvDenylist...)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 			return true, err
 		}
@@ -2189,13 +2192,19 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		}
 	case "external":
 		if path, err := ExternalRoutingPath(id); err == nil {
-			args = append(args, "--external-routing-file", path)
+			args = append(args, externalRoutingFileArgs(path, cfg.External)...)
 		} else {
 			if strings.TrimSpace(cfg.External.Command) != "" {
 				args = append(args, "--external-command", cfg.External.Command)
 			}
 			if strings.TrimSpace(cfg.External.WorkRoot) != "" {
 				args = append(args, "--external-work-root", cfg.External.WorkRoot)
+			}
+			if strings.TrimSpace(cfg.External.Connection.Desktop.Username) != "" {
+				args = append(args, "--external-desktop-username", cfg.External.Connection.Desktop.Username)
+			}
+			if strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv) != "" {
+				args = append(args, "--external-desktop-password-env", cfg.External.Connection.Desktop.PasswordEnv)
 			}
 		}
 	}
@@ -2767,14 +2776,12 @@ func validateCoordinatorLeaseCapabilities(cfg Config, lease CoordinatorLease) er
 }
 
 func applyResolvedServerConfig(cfg *Config, server Server) {
+	workRoot := server.Labels["work_root"]
 	if server.Provider != "" {
 		cfg.Provider = server.Provider
 	}
 	if server.ServerType.Name != "" {
 		cfg.ServerType = server.ServerType.Name
-	}
-	if root := server.Labels["work_root"]; root != "" {
-		cfg.WorkRoot = root
 	}
 	if targetOS := strings.TrimSpace(server.Labels["target"]); targetOS != "" {
 		cfg.TargetOS = targetOS
@@ -2785,9 +2792,12 @@ func applyResolvedServerConfig(cfg *Config, server Server) {
 		cfg.WindowsMode = ""
 	}
 	normalizeTargetConfig(cfg)
+	if workRoot != "" {
+		cfg.WorkRoot = workRoot
+	}
 	if cfg.Provider == "local-container" || server.Provider == "local-container" {
-		if root := server.Labels["work_root"]; root != "" {
-			cfg.LocalContainer.WorkRoot = root
+		if workRoot != "" {
+			cfg.LocalContainer.WorkRoot = workRoot
 		}
 		if labelBool(server.Labels["docker_socket"]) {
 			cfg.LocalContainer.DockerSocket = true

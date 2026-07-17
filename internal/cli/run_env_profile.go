@@ -63,6 +63,48 @@ type runEnvSelection struct {
 	SummaryRequested bool
 }
 
+func removeEnvironmentKeys(values map[string]string, denied ...string) {
+	for key := range values {
+		for _, name := range denied {
+			if strings.EqualFold(key, strings.TrimSpace(name)) {
+				delete(values, key)
+				break
+			}
+		}
+	}
+}
+
+func stripExternalDesktopPasswordFromRunEnv(cfg Config, selection *runEnvSelection) {
+	if selection == nil {
+		return
+	}
+	denied := externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)
+	removeEnvironmentKeys(selection.Profile, denied...)
+	removeEnvironmentKeys(selection.Inline, denied...)
+	removeEnvironmentKeys(selection.Effective, denied...)
+}
+
+func stripTargetCredentialsFromRunEnv(selection *runEnvSelection, target SSHTarget) {
+	if selection == nil {
+		return
+	}
+	removeEnvironmentKeys(selection.Profile, target.ChildEnvDenylist...)
+	removeEnvironmentKeys(selection.Inline, target.ChildEnvDenylist...)
+	removeEnvironmentKeys(selection.Effective, target.ChildEnvDenylist...)
+}
+
+func allowedRemoteEnv(cfg Config) map[string]string {
+	values := allowedEnv(cfg.EnvAllow)
+	removeEnvironmentKeys(values, externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)...)
+	return values
+}
+
+func allowedRemoteEnvForTarget(cfg Config, target SSHTarget) map[string]string {
+	values := allowedRemoteEnv(cfg)
+	removeEnvironmentKeys(values, target.ChildEnvDenylist...)
+	return values
+}
+
 func selectRunEnv(allow []string, profilePaths []string, explicitAllow bool) (runEnvSelection, error) {
 	profileEnv, err := loadEnvProfiles(profilePaths)
 	if err != nil {

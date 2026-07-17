@@ -113,7 +113,7 @@ func contactSheetEnabled(flags contactSheetFlagValues) bool {
 	return flags.Enabled == nil || *flags.Enabled
 }
 
-func writeContactSheetForVideo(ctx context.Context, videoPath string, flags contactSheetFlagValues) (string, error) {
+func writeContactSheetForVideo(ctx context.Context, videoPath string, flags contactSheetFlagValues, childEnvDenylist []string) (string, error) {
 	if !contactSheetEnabled(flags) {
 		return "", nil
 	}
@@ -125,11 +125,12 @@ func writeContactSheetForVideo(ctx context.Context, videoPath string, flags cont
 		output = contactSheetPathForVideo(videoPath)
 	}
 	_, err := createMediaContactSheet(ctx, mediaContactSheetOptions{
-		Input:  videoPath,
-		Output: output,
-		Frames: valueOrDefault(flags.Frames, 5),
-		Cols:   valueOrDefault(flags.Cols, 5),
-		Width:  valueOrDefault(flags.Width, 320),
+		Input:            videoPath,
+		Output:           output,
+		ChildEnvDenylist: childEnvDenylist,
+		Frames:           valueOrDefault(flags.Frames, 5),
+		Cols:             valueOrDefault(flags.Cols, 5),
+		Width:            valueOrDefault(flags.Width, 320),
 	})
 	if err != nil {
 		return "", err

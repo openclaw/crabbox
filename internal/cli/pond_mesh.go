@@ -75,6 +75,10 @@ type pondMeshRunner interface {
 	Command(ctx context.Context, name string, args ...string) pondMeshHandle
 }
 
+type pondMeshEnvironmentRunner interface {
+	CommandWithEnvironment(ctx context.Context, denied []string, name string, args ...string) pondMeshHandle
+}
+
 // pondMeshHandle is the minimal surface area the connect loop needs from a
 // spawned process: start it, wait for it to exit, and tear it down on context
 // cancellation. The real implementation wraps *exec.Cmd; tests substitute a
@@ -114,7 +118,18 @@ type processSignaler interface {
 type pondMeshExecRunner struct{}
 
 func (pondMeshExecRunner) Command(ctx context.Context, name string, args ...string) pondMeshHandle {
+	return pondMeshExecCommand(ctx, nil, name, args...)
+}
+
+func (pondMeshExecRunner) CommandWithEnvironment(ctx context.Context, denied []string, name string, args ...string) pondMeshHandle {
+	return pondMeshExecCommand(ctx, denied, name, args...)
+}
+
+func pondMeshExecCommand(ctx context.Context, denied []string, name string, args ...string) pondMeshHandle {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if len(denied) > 0 {
+		cmd.Env = childEnvironmentWithout(os.Environ(), denied...)
+	}
 	cmd.WaitDelay = pondMeshCancelWaitDelay
 	h := &pondMeshExecHandle{cmd: cmd, managed: true}
 	// Keep exec.CommandContext's hard-cancel semantics, but terminate the full
@@ -143,6 +158,22 @@ func (pondMeshDaemonRunner) Command(_ context.Context, name string, args ...stri
 	cmd := exec.Command(name, args...)
 	configureDaemonCommand(cmd)
 	return &pondMeshExecHandle{cmd: cmd}
+}
+
+func (pondMeshDaemonRunner) CommandWithEnvironment(_ context.Context, denied []string, name string, args ...string) pondMeshHandle {
+	cmd := exec.Command(name, args...)
+	if len(denied) > 0 {
+		cmd.Env = childEnvironmentWithout(os.Environ(), denied...)
+	}
+	configureDaemonCommand(cmd)
+	return &pondMeshExecHandle{cmd: cmd}
+}
+
+func pondMeshRunnerCommand(ctx context.Context, runner pondMeshRunner, target SSHTarget, name string, args ...string) pondMeshHandle {
+	if environmentRunner, ok := runner.(pondMeshEnvironmentRunner); ok {
+		return environmentRunner.CommandWithEnvironment(ctx, target.ChildEnvDenylist, name, args...)
+	}
+	return runner.Command(ctx, name, args...)
 }
 
 type pondMeshExecHandle struct {
@@ -445,7 +476,7 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 		var startedGroups []pondMeshForwardGroup
 		for _, group := range groups {
 			args := pondMeshSSHArgsForForwards(group.Target, group.Forwards)
-			handle := daemonRunner.Command(context.Background(), "ssh", args...)
+			handle := pondMeshRunnerCommand(context.Background(), daemonRunner, group.Target, "ssh", args...)
 			if err := handle.Start(); err != nil {
 				stopDaemonHandles(started)
 				return fmt.Errorf("start ssh forwards for %s: %w", pondMeshForwardGroupLabel(group.Forwards), err)
@@ -983,7 +1014,7 @@ func pondMeshDaemonProcesses(state pondMeshDaemonState) []pondMeshDaemonProcess 
 }
 
 func pondMeshDaemonProcessCommand(pid int) (string, bool) {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	out, err := systemInspectionCommand("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {
 		return "", false
 	}
@@ -1140,7 +1171,7 @@ func runPondMeshForwards(ctx context.Context, opts pondConnectOptions, members [
 	}
 	for _, group := range groups {
 		args := pondMeshSSHArgsForForwards(group.Target, group.Forwards)
-		handle := runner.Command(ctx, "ssh", args...)
+		handle := pondMeshRunnerCommand(ctx, runner, group.Target, "ssh", args...)
 		if err := handle.Start(); err != nil {
 			parentErr := terminationCtx.Err()
 			cancel()

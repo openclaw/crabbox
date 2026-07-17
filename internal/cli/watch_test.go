@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -193,6 +195,44 @@ func newWatchGitRepo(t *testing.T) string {
 	watchTestGit(t, root, "add", ".")
 	watchTestGit(t, root, "commit", "-q", "-m", "seed")
 	return root
+}
+
+func TestWatchGitChildrenUseRepositoryEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell git fixture")
+	}
+	binDir := t.TempDir()
+	gitPath := filepath.Join(binDir, "git")
+	script := `#!/bin/sh
+set -eu
+[ "${GIT_CEILING_DIRECTORIES:-}" = "/safe/root" ] || exit 90
+[ "${TEST_EXTERNAL_DESKTOP_PASSWORD+x}" != x ] || exit 91
+case " $* " in
+  *" check-ignore "*) printf 'ignored.log\000' ;;
+  *) printf 'tracked.go\000' ;;
+esac
+`
+	if err := os.WriteFile(gitPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("GIT_CEILING_DIRECTORIES", "/safe/root")
+	t.Setenv("TEST_EXTERNAL_DESKTOP_PASSWORD", "operator-secret")
+
+	paths, err := watchGitPaths(t.TempDir(), []string{"tracked.go"}, "ls-files", "--cached", "-z", "--")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(paths, []string{"tracked.go"}) {
+		t.Fatalf("git paths=%#v", paths)
+	}
+	ignored, err := watchGitIgnored(t.TempDir(), []string{"ignored.log"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ignored["ignored.log"]; !ok || len(ignored) != 1 {
+		t.Fatalf("ignored paths=%#v", ignored)
+	}
 }
 
 func newWatchTestSession(root string, execute watchRunExecutor, debounce, idleExit time.Duration, stderr io.Writer) *watchSession {
