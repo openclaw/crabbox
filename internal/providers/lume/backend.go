@@ -1697,6 +1697,11 @@ func shouldCleanup(server Server, claim core.LeaseClaim, now time.Time) (bool, s
 	if !instanceRunning(server.Status) {
 		return true, "instance stopped"
 	}
+	if normalizedState(server.Labels["state"]) == "ready" {
+		if cleanup, reason := core.ShouldCleanupServer(server, now); cleanup {
+			return true, reason
+		}
+	}
 	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
 	if err != nil || lastUsed.IsZero() {
 		return false, "claim active"

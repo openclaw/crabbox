@@ -85,6 +85,25 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	}
 }
 
+func TestShouldCleanupReadyLeaseAtLabelExpiry(t *testing.T) {
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	server := Server{Status: "running", Labels: map[string]string{
+		"state":      "ready",
+		"expires_at": core.LeaseLabelTime(now),
+	}}
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now.Add(time.Second)); !cleanup || !strings.Contains(reason, "expired") {
+		t.Fatalf("shouldCleanup=%v, %q; want expired ready lease cleanup", cleanup, reason)
+	}
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now.Add(-time.Second)); cleanup {
+		t.Fatalf("shouldCleanup=%v, %q; want unexpired ready lease retained", cleanup, reason)
+	}
+	server.Labels["expires_at"] = core.LeaseLabelTime(now.Add(time.Hour))
+	claim := core.LeaseClaim{LastUsedAt: now.Add(-14 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: 3600}
+	if cleanup, reason := shouldCleanup(server, claim, now); !cleanup || reason != "claim expired" {
+		t.Fatalf("shouldCleanup=%v, %q; want stale claim fallback cleanup", cleanup, reason)
+	}
+}
+
 func TestConfigureDefaultsToMacOS(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
