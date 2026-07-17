@@ -169,6 +169,8 @@ func TestValidateConfigRejectsUnsafeNativeWindowsWorkRoot(t *testing.T) {
 		`C:\LONGFI~1.TXT\crabbox`,
 		`C:\safe:stream\crabbox`,
 		`C:\NUL\crabbox`,
+		`C:\CONIN$\crabbox`,
+		`C:\CONOUT$.log\crabbox`,
 		`C:\COM¹\crabbox`,
 		`C:\LPT³\crabbox`,
 		`C:\safe\..\Users`,
@@ -181,6 +183,77 @@ func TestValidateConfigRejectsUnsafeNativeWindowsWorkRoot(t *testing.T) {
 		if err := validateConfig(cfg); err == nil {
 			t.Errorf("work root %q should be rejected", workRoot)
 		}
+	}
+}
+
+func TestValidateConfigRejectsPOSIXHomeWorkRoot(t *testing.T) {
+	for _, target := range []struct {
+		name        string
+		targetOS    string
+		windowsMode string
+		workRoots   []string
+	}{
+		{name: "linux", targetOS: core.TargetLinux, workRoots: []string{"/home/alice", "/Users/alice"}},
+		{name: "macos", targetOS: core.TargetMacOS, workRoots: []string{"/home/alice", "/Users/alice", "/users/alice", "/var/root", "/private/var/root", "/System/Volumes/Data/Users/alice"}},
+		{name: "wsl2", targetOS: core.TargetWindows, windowsMode: core.WindowsModeWSL2, workRoots: []string{"/home/alice", "/Users/alice", "/mnt/c/Users/alice", "/MNT/C/users/Alice"}},
+	} {
+		for _, workRoot := range target.workRoots {
+			t.Run(target.name+"/"+strings.ReplaceAll(workRoot, "/", "_"), func(t *testing.T) {
+				cfg := testConfig()
+				cfg.TargetOS = target.targetOS
+				cfg.WindowsMode = target.windowsMode
+				cfg.WorkRoot = workRoot
+				cfg.External.WorkRoot = workRoot
+				if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "home directory") {
+					t.Fatalf("work root %q error=%v, want home-directory rejection", workRoot, err)
+				}
+			})
+		}
+	}
+}
+
+func TestValidateConfigRejectsTargetSpecificBroadPOSIXWorkRoot(t *testing.T) {
+	for _, target := range []struct {
+		name        string
+		targetOS    string
+		windowsMode string
+		workRoots   []string
+	}{
+		{name: "macos", targetOS: core.TargetMacOS, workRoots: []string{"/Users", "/users", "/private", "/private/var", "/TMP", "/VAR", "/ETC", "/System/Volumes/Data", "/system/volumes/data/Users", "/System/Volumes", "/System/Volumes/Preboot", "/system/volumes/vm", "/System/Volumes/Update", "/Volumes/Backup", "/volumes/share"}},
+		{name: "wsl2", targetOS: core.TargetWindows, windowsMode: core.WindowsModeWSL2, workRoots: []string{"/mnt", "/MNT", "/mnt/c", "/mnt/c/Users", "/MNT/C/users", "/mnt/c/Windows", "/mnt/c/ProgramData", "/mnt/c/Program Files"}},
+	} {
+		for _, workRoot := range target.workRoots {
+			t.Run(target.name+"/"+strings.ReplaceAll(workRoot, "/", "_"), func(t *testing.T) {
+				cfg := testConfig()
+				cfg.TargetOS = target.targetOS
+				cfg.WindowsMode = target.windowsMode
+				cfg.WorkRoot = workRoot
+				cfg.External.WorkRoot = workRoot
+				if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "too broad") {
+					t.Fatalf("work root %q error=%v, want broad-root rejection", workRoot, err)
+				}
+			})
+		}
+	}
+}
+
+func TestValidateConfigRejectsAmbiguousWSLMountedDriveWorkRoot(t *testing.T) {
+	for _, workRoot := range []string{
+		"/mnt/c/PROGRA~1",
+		"/mnt/c/safe:stream/crabbox",
+		"/mnt/c/NUL/crabbox",
+		"/mnt/c/Users/alice/WORKSP~1",
+	} {
+		t.Run(strings.ReplaceAll(workRoot, "/", "_"), func(t *testing.T) {
+			cfg := testConfig()
+			cfg.TargetOS = core.TargetWindows
+			cfg.WindowsMode = core.WindowsModeWSL2
+			cfg.WorkRoot = workRoot
+			cfg.External.WorkRoot = workRoot
+			if err := validateConfig(cfg); err == nil {
+				t.Fatalf("work root %q should be rejected", workRoot)
+			}
+		})
 	}
 }
 
@@ -344,6 +417,38 @@ func TestConfigureRestoresPersistedArchitecture(t *testing.T) {
 	}
 	if got := backend.(*leaseBackend).cfg.Architecture; got != core.ArchitectureARM64 {
 		t.Fatalf("architecture=%q", got)
+	}
+}
+
+func TestConfigurePersistedRoutingArchitectureOverridesLaterConfig(t *testing.T) {
+	isolateCrabboxState(t)
+	const leaseID = "cbx_arch_route_authoritative"
+	saved := testConfig()
+	core.SetExternalRoutingTarget(&saved.External, core.TargetMacOS, core.WindowsModeNormal)
+	core.SetExternalRoutingArchitecture(&saved.External, core.ArchitectureARM64)
+	path, err := core.PersistValidatedExternalRouting(leaseID, saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_ARCH", core.ArchitectureAMD64)
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("provider: external\nexternal:\n  routingFile: %s\n", path)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := core.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Architecture != core.ArchitectureAMD64 || !core.IsArchitectureExplicit(cfg) {
+		t.Fatalf("precondition architecture=%q explicit=%v", cfg.Architecture, core.IsArchitectureExplicit(cfg))
+	}
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{Exec: &recordingRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.(*leaseBackend).cfg.Architecture; got != core.ArchitectureARM64 {
+		t.Fatalf("architecture=%q, want persisted %q", got, core.ArchitectureARM64)
 	}
 }
 

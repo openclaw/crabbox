@@ -601,6 +601,8 @@ func ValidateExternalDesktopPasswordEnvironmentName(name string) error {
 		"COMSPEC":         {},
 		"PATHEXT":         {},
 		"USERPROFILE":     {},
+		"USERNAME":        {},
+		"USERDOMAIN":      {},
 		"HOMEDRIVE":       {},
 		"HOMEPATH":        {},
 		"APPDATA":         {},

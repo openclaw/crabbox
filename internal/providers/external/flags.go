@@ -198,11 +198,96 @@ func validateConfig(cfg core.Config) error {
 	if !strings.HasPrefix(clean, "/") {
 		return core.Exit(2, "external.workRoot %q must resolve to an absolute path", cfg.External.WorkRoot)
 	}
-	switch clean {
-	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var":
+	safetyPath := clean
+	if cfg.TargetOS == core.TargetMacOS {
+		safetyPath = externalMacOSDataVolumePath(clean)
+	}
+	if cfg.TargetOS == core.TargetWindows && cfg.WindowsMode == core.WindowsModeWSL2 {
+		if err := validateExternalWSLMountedDriveWorkRoot(clean); err != nil {
+			return err
+		}
+	}
+	if isExternalGenericBroadWorkRoot(safetyPath, cfg.TargetOS == core.TargetMacOS) {
 		return core.Exit(2, "external.workRoot %q is too broad; choose a dedicated subdirectory", clean)
 	}
+	usesPOSIXWorkRoot := cfg.TargetOS == core.TargetLinux || cfg.TargetOS == core.TargetMacOS ||
+		(cfg.TargetOS == core.TargetWindows && cfg.WindowsMode == core.WindowsModeWSL2)
+	if usesPOSIXWorkRoot && isExternalTargetSpecificBroadWorkRoot(safetyPath, cfg.TargetOS, cfg.WindowsMode) {
+		return core.Exit(2, "external.workRoot %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	if usesPOSIXWorkRoot && isExternalPOSIXHomeWorkRoot(safetyPath, cfg.TargetOS, cfg.WindowsMode) {
+		return core.Exit(2, "external.workRoot %q is a home directory; choose a dedicated subdirectory", clean)
+	}
 	return nil
+}
+
+func externalMacOSDataVolumePath(clean string) string {
+	const prefix = "/System/Volumes/Data"
+	if strings.EqualFold(clean, prefix) {
+		return "/"
+	}
+	if len(clean) > len(prefix) && clean[len(prefix)] == '/' && strings.EqualFold(clean[:len(prefix)], prefix) {
+		return clean[len(prefix):]
+	}
+	return clean
+}
+
+func isExternalGenericBroadWorkRoot(clean string, caseInsensitive bool) bool {
+	for _, root := range []string{"/", "/Users", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/mnt", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var"} {
+		if clean == root || (caseInsensitive && strings.EqualFold(clean, root)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isExternalTargetSpecificBroadWorkRoot(clean, targetOS, windowsMode string) bool {
+	if targetOS == core.TargetMacOS {
+		if strings.EqualFold(clean, "/System") || (len(clean) > len("/System") && clean[len("/System")] == '/' && strings.EqualFold(clean[:len("/System")], "/System")) {
+			return true
+		}
+		parts := strings.Split(strings.TrimPrefix(clean, "/"), "/")
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Volumes") && parts[1] != "" {
+			return true
+		}
+		for _, root := range []string{"/Applications", "/Library", "/Network", "/System", "/Users", "/Volumes", "/cores", "/private", "/private/etc", "/private/tmp", "/private/var"} {
+			if strings.EqualFold(clean, root) {
+				return true
+			}
+		}
+	}
+	if targetOS != core.TargetWindows || windowsMode != core.WindowsModeWSL2 {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(clean, "/"), "/")
+	if len(parts) == 1 && strings.EqualFold(parts[0], "mnt") {
+		return true
+	}
+	if len(parts) < 2 || !strings.EqualFold(parts[0], "mnt") || len(parts[1]) != 1 ||
+		!((parts[1][0] >= 'a' && parts[1][0] <= 'z') || (parts[1][0] >= 'A' && parts[1][0] <= 'Z')) {
+		return false
+	}
+	return len(parts) == 2 || (len(parts) >= 3 && isExternalWindowsProtectedRoot(parts[2])) ||
+		(len(parts) == 3 && strings.EqualFold(parts[2], "Users"))
+}
+
+func isExternalPOSIXHomeWorkRoot(clean, targetOS, windowsMode string) bool {
+	caseInsensitive := targetOS == core.TargetMacOS || (targetOS == core.TargetWindows && windowsMode == core.WindowsModeWSL2)
+	if targetOS == core.TargetMacOS && (strings.EqualFold(clean, "/var/root") || strings.EqualFold(clean, "/private/var/root")) {
+		return true
+	}
+	parts := strings.Split(strings.TrimPrefix(clean, "/"), "/")
+	if len(parts) == 2 && parts[1] != "" {
+		root := parts[0]
+		if root == "Users" || root == "home" ||
+			(caseInsensitive && (strings.EqualFold(root, "Users") || strings.EqualFold(root, "home"))) {
+			return true
+		}
+	}
+	return targetOS == core.TargetWindows && windowsMode == core.WindowsModeWSL2 && len(parts) == 4 &&
+		strings.EqualFold(parts[0], "mnt") && len(parts[1]) == 1 &&
+		((parts[1][0] >= 'a' && parts[1][0] <= 'z') || (parts[1][0] >= 'A' && parts[1][0] <= 'Z')) &&
+		strings.EqualFold(parts[2], "Users") && parts[3] != ""
 }
 
 func validateLifecycleOperation(name string, operation core.ExternalLifecycleOperation) error {
@@ -329,8 +414,7 @@ func validateExternalWindowsWorkRoot(value string) error {
 	if len(parts) == 0 {
 		return core.Exit(2, "external.workRoot %q is too broad; choose a dedicated subdirectory", clean)
 	}
-	switch strings.ToUpper(parts[0]) {
-	case "WINDOWS", "WINNT", "PROGRAM FILES", "PROGRAM FILES (X86)", "PROGRAMDATA", "$RECYCLE.BIN", "SYSTEM VOLUME INFORMATION", "DOCUMENTS AND SETTINGS":
+	if isExternalWindowsProtectedRoot(parts[0]) {
 		return core.Exit(2, "external.workRoot %q is inside a protected Windows directory; choose a dedicated workspace", clean)
 	}
 	if len(parts) <= 2 && strings.EqualFold(parts[0], "Users") {
@@ -339,6 +423,29 @@ func validateExternalWindowsWorkRoot(value string) error {
 	switch strings.ToUpper(clean) {
 	case `C:\WINDOWS`, `C:\PROGRAM FILES`, `C:\PROGRAM FILES (X86)`:
 		return core.Exit(2, "external.workRoot %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	return nil
+}
+
+func isExternalWindowsProtectedRoot(component string) bool {
+	switch strings.ToUpper(component) {
+	case "WINDOWS", "WINNT", "PROGRAM FILES", "PROGRAM FILES (X86)", "PROGRAMDATA", "$RECYCLE.BIN", "SYSTEM VOLUME INFORMATION", "DOCUMENTS AND SETTINGS":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateExternalWSLMountedDriveWorkRoot(clean string) error {
+	parts := strings.Split(strings.TrimPrefix(clean, "/"), "/")
+	if len(parts) < 2 || !strings.EqualFold(parts[0], "mnt") || len(parts[1]) != 1 ||
+		!((parts[1][0] >= 'a' && parts[1][0] <= 'z') || (parts[1][0] >= 'A' && parts[1][0] <= 'Z')) {
+		return nil
+	}
+	for _, part := range parts[2:] {
+		if err := validateWindowsWorkRootComponent(clean, part); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -369,7 +476,7 @@ func validateWindowsWorkRootComponent(value, part string) error {
 }
 
 func windowsReservedDeviceBase(base string) bool {
-	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" {
+	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" || base == "CONIN$" || base == "CONOUT$" {
 		return true
 	}
 	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9' {

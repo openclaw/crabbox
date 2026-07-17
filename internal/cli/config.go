@@ -1573,6 +1573,12 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, err
 	}
+	// Validate this cross-provider environment destination before provider
+	// dispatch. The selected value may itself be CRABBOX_PROVIDER, so waiting
+	// for External provider validation would let that value route around it.
+	if err := ValidateExternalDesktopPasswordEnvironmentName(cfg.External.Connection.Desktop.PasswordEnv); err != nil {
+		return Config{}, exit(2, "%v", err)
+	}
 	applyCloudflareDynamicWorkersRepositoryCaps(&cfg)
 	if coordinator = strings.TrimSpace(coordinator); coordinator != "" {
 		cfg.Coordinator = coordinator

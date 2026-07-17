@@ -193,10 +193,10 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 				cfg.WindowsMode = windowsMode
 			}
 		}
-		if !core.IsArchitectureExplicit(cfg) {
-			if architecture := core.ExternalRoutingArchitecture(cfg.External); architecture != "" {
-				cfg.Architecture = architecture
-			}
+		// A persisted per-lease route defines the claim scope. Later ambient or
+		// repository config must not silently move that lease across scopes.
+		if architecture := core.ExternalRoutingArchitecture(cfg.External); architecture != "" {
+			cfg.Architecture = architecture
 		}
 	}
 	if err := core.ValidateProviderCredentialDestination(cfg); err != nil {

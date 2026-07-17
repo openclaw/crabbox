@@ -3604,6 +3604,8 @@ func TestExternalDesktopReservedEnvironmentCannotSelfRedirect(t *testing.T) {
 		"GOMEMLIMIT",
 		"GOMAXPROCS",
 		"GOTRACEBACK",
+		"USERNAME",
+		"USERDOMAIN",
 	} {
 		t.Run(reserved, func(t *testing.T) {
 			cfg := Config{Provider: "external", TargetOS: targetMacOS}
@@ -3618,6 +3620,31 @@ func TestExternalDesktopReservedEnvironmentCannotSelfRedirect(t *testing.T) {
 				t.Fatalf("error=%v", err)
 			}
 		})
+	}
+}
+
+func TestExternalDesktopReservedProviderEnvironmentCannotBypassValidation(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	// The password value doubles as provider selection before provider-specific
+	// validation runs. Global validation must reject the name first.
+	t.Setenv("CRABBOX_PROVIDER", "aws")
+	if err := os.WriteFile(configPath, []byte(`
+provider: external
+external:
+  command: provider-command
+  connection:
+    desktop:
+      passwordEnv: CRABBOX_PROVIDER
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "CRABBOX_PROVIDER") || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("error=%v, want reserved CRABBOX_PROVIDER rejection before dispatch", err)
 	}
 }
 
