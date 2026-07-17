@@ -1,8 +1,8 @@
 # open
 
 `crabbox open` prepares an existing SSH-capable lease for an external editor.
-Select the editor with `--editor`; Crabbox prints its connection instructions
-and remote folder, then keeps the lease active until you press Ctrl-C.
+Select the editor with `--editor`; Crabbox prints its connection details and
+remote folder, then keeps the lease active until you press Ctrl-C.
 
 Zed Remote Projects is the first supported editor:
 
@@ -11,9 +11,33 @@ crabbox run --id swift-crab --sync-only
 crabbox open --editor=zed --id swift-crab
 ```
 
-In Zed, open **Remote Projects**, select **Connect New Server**, paste the
-printed command, and open the printed folder. Keep `crabbox open` running for
-the duration of the editor session.
+The default output separates the SSH command and remote folder into labeled,
+copyable blocks. In Zed, open **Remote Projects**, select **Connect New Server**,
+paste the SSH command, and open the remote folder. Keep `crabbox open` running
+for the duration of the editor session.
+
+## Automation and agents
+
+Use `--json` when another process needs to consume the handoff:
+
+```sh
+crabbox open --editor=zed --id swift-crab --json
+```
+
+Crabbox writes one newline-terminated JSON object to stdout and then remains in
+the foreground to maintain lease activity. Diagnostics and workspace notices
+continue to use stderr, so stdout stays machine-readable. An agent can start the
+command as a child process, decode the first JSON object, use `sshCommand` and
+`remoteFolder`, and keep the child running until the editor session ends.
+
+The versioned `crabbox/editor-handoff/v1` object includes:
+
+- `editor` and `displayName`
+- `leaseId`, `sshCommand`, and `remoteFolder`
+- `hydratedByActions`
+- `leaseActivity`, which is `foreground`
+- `hardTTLApplies`
+- `releaseCommand`, when the lease has an id
 
 ## Why the command stays running
 
@@ -25,8 +49,8 @@ touches.
 
 The lease's configured hard TTL still applies while the command is running.
 
-Stopping `crabbox open` does not release the lease. Use
-`crabbox stop <id-or-slug>` when the workspace is no longer needed.
+Stopping `crabbox open` does not release the lease. Use the printed release
+command or `crabbox stop <id-or-slug>` when the workspace is no longer needed.
 
 ## Workspace and synchronization
 
@@ -52,10 +76,10 @@ in editor settings.
 
 ## Flags
 
-`crabbox open` requires `--editor=<name>` and accepts the same lease, provider,
-target, routing, network, and `--reclaim` flags as
-[`crabbox connect`](connect.md). The first positional argument is also accepted
-as the lease id or slug:
+`crabbox open` requires `--editor=<name>`. Add `--json` for the versioned
+machine-readable handoff. The command accepts the same lease, provider, target,
+routing, network, and `--reclaim` flags as [`crabbox connect`](connect.md). The
+first positional argument is also accepted as the lease id or slug:
 
 ```sh
 crabbox open --editor=zed swift-crab
