@@ -20,13 +20,14 @@ assert.match(manifest, /^version = "\d+\.\d+\.\d+"$/m);
 assert.match(manifest, /^schema_version = 1$/m);
 assert.match(manifest, /^repository = "https:\/\/github\.com\/openclaw\/crabbox"$/m);
 assert.match(manifest, /^snippets = \["\.\/snippets\/crabbox\.json"\]$/m);
+assert.match(manifest, /^\[grammars\.yaml\]$/m);
 assert.match(manifest, /^rev = "[0-9a-f]{40}"$/m);
 assert.doesNotMatch(manifest, /context_servers|mcp/i);
 assert.match(read("LICENSE"), /^MIT License$/m);
 
 const languageConfig = read("languages/crabbox/config.toml");
 assert.match(languageConfig, /^name = "Crabbox"$/m);
-assert.match(languageConfig, /^grammar = "crabbox-yaml"$/m);
+assert.match(languageConfig, /^grammar = "yaml"$/m);
 assert.match(languageConfig, /"\.crabbox\.yaml"/);
 
 const languageTasks = readJSON("languages/crabbox/tasks.json");

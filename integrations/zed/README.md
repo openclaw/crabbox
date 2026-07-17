@@ -72,15 +72,23 @@ If `.zed/tasks.json` already exists, merge the task objects instead of overwriti
 
 The extension stores no provider credentials, broker tokens, SSH keys, or lease state. It does not modify SSH configuration and does not call provider APIs directly. Interactive tasks pass the selected lease and command to the local Crabbox CLI, which remains the authoritative security, cost, and lifecycle boundary.
 
-Interactive helpers use Bash and therefore target macOS and Linux. Direct tasks such as Doctor, Spawn, Run selected command, Run detected project job, and List invoke `crabbox` directly.
+Zed launches every task through the user's login shell. Direct task definitions keep the `crabbox` command and its arguments separate instead of adding another inline shell program. Interactive helpers intentionally start Bash and therefore target macOS and Linux.
 
 ## Registry publication
 
-Zed publishes extensions from `zed-industries/extensions`. Once this package is merged into Crabbox, the registry PR adds:
+Zed publishes extensions from `zed-industries/extensions`. Once this package is merged into Crabbox, the registry PR adds the repository URL to `.gitmodules`:
+
+```gitconfig
+[submodule "extensions/crabbox"]
+    path = extensions/crabbox
+    url = https://github.com/openclaw/crabbox.git
+```
+
+The checked-out submodule path is then registered in `extensions.toml`:
 
 ```toml
 [crabbox]
-submodule = "https://github.com/openclaw/crabbox"
+submodule = "extensions/crabbox"
 version = "0.1.0"
 path = "integrations/zed"
 ```
@@ -96,4 +104,4 @@ node scripts/check-zed-extension.mjs
 node scripts/test-zed-extension-e2e.mjs
 ```
 
-The dedicated **Zed Extension E2E** workflow validates the registry package and executes every task against a controlled Crabbox CLI boundary, including interactive status, run, connect, inspect, and stop flows.
+The dedicated **Zed Extension E2E** workflow packages the extension with Zed's pinned official `zed-extension` CLI, verifies `archive.tar.gz` and `manifest.json`, and executes every task against a controlled Crabbox CLI boundary, including interactive status, run, connect, inspect, and stop flows.
