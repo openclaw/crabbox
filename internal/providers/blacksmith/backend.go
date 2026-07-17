@@ -1070,6 +1070,16 @@ func (b *blacksmithBackend) cleanupFailedWarmup(ctx context.Context, before map[
 			if before[item.ID] || !blacksmithMatchesConfig(item, b.cfg) {
 				continue
 			}
+			// Do not stop a testbox another crabbox process already owns. A
+			// concurrent warmup with the same repo/workflow/job/ref registers a
+			// lease claim (warmupLease -> claimLeaseForRepoProvider); the
+			// config-only matcher cannot tell that healthy, in-use box from our
+			// own orphan, so gate the stop on the absence of a live claim. Our
+			// own failed warmup never claimed, so a genuine orphan stays
+			// unclaimed and is still swept.
+			if _, claimed, err := core.ResolveLeaseClaimForProvider(item.ID, blacksmithTestboxProvider); err == nil && claimed {
+				continue
+			}
 			_ = b.Stop(ctx, StopRequest{ID: item.ID})
 			before[item.ID] = true
 			stopped = true
