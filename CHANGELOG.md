@@ -6,6 +6,10 @@
 
 - Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
 
+### Fixed
+
+- Prevented apple-container orphan cleanup from deleting claims reclaimed during its resource snapshot, including same-value rewrites, while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
+
 ## 0.39.0 - 2026-07-17
 
 ### Added

@@ -94,7 +94,7 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
 }
 
-var replaceLeaseClaimIfUnchangedDurable = core.ReplaceLeaseClaimIfUnchangedDurable
+var replaceLeaseClaimIfUnchangedDurable = core.ReplaceLeaseClaimIfUnchangedDurableReturning
 
 func shouldCleanupServer(server Server, now time.Time) (bool, string) {
 	return core.ShouldCleanupServer(server, now)
