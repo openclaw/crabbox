@@ -865,24 +865,29 @@ func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now
 	if strings.EqualFold(labels["keep"], "true") {
 		return false, "keep=true"
 	}
+	if !hasClaim {
+		return false, "missing claim"
+	}
+	leaseID := strings.TrimSpace(labels["lease"])
+	containerID := strings.TrimSpace(server.CloudID)
+	if claim.Provider != providerName || claim.LeaseID != leaseID || leaseID == "" || strings.TrimSpace(claim.CloudID) != containerID || containerID == "" {
+		return false, "claim mismatch"
+	}
 	if !strings.EqualFold(server.Status, "running") && server.Status != "ready" {
 		return true, "container state=" + blank(server.Status, "unknown")
 	}
-	if hasClaim {
-		lastUsed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
-		if err != nil || lastUsed.IsZero() {
-			return false, "claim active"
-		}
-		idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-		if idle <= 0 {
-			return false, "claim active"
-		}
-		if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
-			return true, "claim expired"
-		}
+	lastUsed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
+	if err != nil || lastUsed.IsZero() {
 		return false, "claim active"
 	}
-	return false, "missing claim"
+	idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
+	if idle <= 0 {
+		return false, "claim active"
+	}
+	if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
+		return true, "claim expired"
+	}
+	return false, "claim active"
 }
 
 func readyCheck(cfg core.Config) string {

@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Prevented Apple-container cleanup from force-deleting stopped containers without an exact resource-bound local claim. Thanks @coygeek.
 - Limited failed Blacksmith warmup cleanup to Testbox IDs emitted by that invocation, preventing config-matched concurrent Testboxes from being stopped. Thanks @anagnorisis2peripeteia.
 - Prevented Tart cleanup from deleting lease claims and stored SSH keys created or rebound by concurrent acquisitions. Thanks @anagnorisis2peripeteia.
 - Failed Node coordinator startup on malformed trusted-proxy CIDRs, warned on untrusted forwarded client headers, and kept environment-backed provider failures out of top-level request logs.

@@ -137,9 +137,9 @@ variable consumed by the bootstrap script.
 6. `status`, `list`, and `stop` inspect or remove labeled containers via
    `container ls --all --format json`, `container inspect`, and
    `container delete --force`.
-7. `cleanup --provider apple-container` removes stopped containers and running
-   non-`keep` containers whose local claim is stale past the idle timeout plus a
-   safety grace period, and prunes orphaned claims.
+7. `cleanup --provider apple-container` removes exactly claimed stopped containers
+   and exactly claimed running non-`keep` containers whose local claim is stale
+   past the idle timeout plus a safety grace period, and prunes orphaned claims.
 
 ## Limits and caveats
 
