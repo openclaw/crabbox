@@ -3,11 +3,9 @@ name = "Crabbox"
 version = "0.1.0"
 schema_version = 1
 authors = ["Yossi Eliaz <yossi.eliaz@incredibuild.com>", "OpenClaw contributors"]
-description = "Spawn and manage Crabbox remote execution environments from Zed using the Crabbox CLI."
+description = "Control remote sandboxes, VMs, containers, and SSH runners from Zed through the Crabbox CLI."
 repository = "https://github.com/openclaw/crabbox"
 
 snippets = ["./snippets/yaml.json"]
 
-[grammars.crabbox-yaml]
-repository = "https://github.com/tree-sitter-grammars/tree-sitter-yaml"
-rev = "a1c4812a
+[grammars.cr
