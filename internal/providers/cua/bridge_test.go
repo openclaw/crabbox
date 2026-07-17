@@ -73,6 +73,7 @@ func envContains(env []string, value string) bool {
 func TestBridgeSendsJSONOnStdinAndMapsSecretOnlyToSDKEnv(t *testing.T) {
 	secret := "placeholder"
 	t.Setenv("CRABBOX_CUA_API_KEY", secret)
+	t.Setenv("CUA_TELEMETRY_ENABLED", "true")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "placeholder")
 	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		for _, arg := range req.Args {
@@ -82,6 +83,9 @@ func TestBridgeSendsJSONOnStdinAndMapsSecretOnlyToSDKEnv(t *testing.T) {
 		}
 		if !envContains(req.Env, "CUA_API_KEY="+secret) {
 			t.Fatalf("bridge env missing SDK API key: %#v", req.Env)
+		}
+		if !envContains(req.Env, "CUA_TELEMETRY_ENABLED=false") {
+			t.Fatalf("bridge must disable CUA SDK telemetry: %#v", req.Env)
 		}
 		if !envContains(req.Env, "CUA_BASE_URL=https://api.cua.example") || envContains(req.Env, "CUA_API_BASE=https://api.cua.example") {
 			t.Fatalf("bridge env does not match pinned cua-sandbox v0.1.17 base URL contract: %#v", req.Env)

@@ -278,6 +278,7 @@ func bridgeEnv(cfg Config, home string) []string {
 	}
 	env = upsertEnv(env, "HOME", home)
 	env = upsertEnv(env, "USERPROFILE", home)
+	env = upsertEnv(env, "CUA_TELEMETRY_ENABLED", "false")
 	if key := cuaAPIKey(); key != "" {
 		env = upsertEnv(env, "CUA_API_KEY", key)
 	}

@@ -49,7 +49,7 @@ try {
 }
 const checks = Array.isArray(result.checks) ? result.checks : [];
 const mode = checks.find((item) =>
-  item?.provider === "cua" &&
+  item?.details?.provider === "cua" &&
   item?.details?.experimental === "true" &&
   item?.details?.provisioning === "false" &&
   item?.details?.mutation === "false"

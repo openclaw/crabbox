@@ -17,5 +17,6 @@ test("CUA smoke is syntax-valid and diagnostic-only", () => {
   assert.match(source, /diagnostic_only mode=experimental_non_provisioning/);
   assert.match(source, /invalid_or_unclassified_doctor_result/);
   assert.match(source, /JSON\.parse/);
+  assert.match(source, /item\?\.details\?\.provider === "cua"/);
   assert.doesNotMatch(source, /\b(run|stop|cleanup) --provider cua\b/);
 });
