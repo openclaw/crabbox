@@ -22,10 +22,10 @@ func TestProviderSpecAndRegistration(t *testing.T) {
 	if spec.Name != providerName || spec.Family != providerName {
 		t.Fatalf("spec identity=%#v", spec)
 	}
-	if spec.Kind != core.ProviderKindDelegatedRun {
-		t.Fatalf("Kind=%q want delegated-run", spec.Kind)
+	if spec.Kind != core.ProviderKindServiceControl {
+		t.Fatalf("Kind=%q want service-control", spec.Kind)
 	}
-	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+	if len(spec.Targets) != 3 || spec.Targets[0].OS != core.TargetLinux || spec.Targets[1].OS != core.TargetMacOS || spec.Targets[2].OS != core.TargetWindows || spec.Targets[2].WindowsMode != core.WindowsModeNormal {
 		t.Fatalf("Targets=%#v", spec.Targets)
 	}
 	for _, feature := range []core.Feature{
@@ -90,7 +90,7 @@ func TestProviderMetadataEntry(t *testing.T) {
 	if !ok {
 		t.Fatalf("provider metadata missing %q", providerName)
 	}
-	if entry.Category != "delegated-sandbox" || entry.SSH != "no" || entry.Sync != "none" || entry.GPU != "unknown" || entry.Docs != "cua.md" {
+	if entry.Category != "service-control" || entry.SSH != "no" || entry.Sync != "none" || entry.GPU != "unknown" || entry.Docs != "cua.md" {
 		t.Fatalf("unexpected cua metadata: %#v", entry)
 	}
 	if entry.Substrate == "" || entry.Cleanup == "" || !strings.Contains(entry.BestFit, "diagnostics") || !strings.Contains(entry.Caveat, "read-only") {

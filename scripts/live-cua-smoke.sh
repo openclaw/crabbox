@@ -24,7 +24,7 @@ git add .crabbox.yaml
 git commit -qm "test: seed CUA diagnostic fixture"
 
 set +e
-guard_output="$($bin warmup --provider cua 2>&1)"
+guard_output="$("$bin" warmup --provider cua 2>&1)"
 guard_status=$?
 set -e
 if [[ $guard_status -eq 0 ]] || ! grep -Fq 'provider=cua provisioning is disabled' <<<"$guard_output" || ! grep -Fq 'https://github.com/openclaw/crabbox/issues/381' <<<"$guard_output"; then

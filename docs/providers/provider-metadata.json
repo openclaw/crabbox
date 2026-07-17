@@ -235,7 +235,7 @@
   },
   "cua": {
     "status": "built-in",
-    "category": "delegated-sandbox",
+    "category": "service-control",
     "substrate": "CUA cloud sandbox inventory",
     "location": "provider-managed",
     "ssh": "no",

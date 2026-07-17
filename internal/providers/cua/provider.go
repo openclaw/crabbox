@@ -20,10 +20,14 @@ func (Provider) ServerTypeForClass(string) string       { return "" }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      providerName,
-		Kind:        core.ProviderKindDelegatedRun,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
+		Name:   providerName,
+		Family: providerName,
+		Kind:   core.ProviderKindServiceControl,
+		Targets: []core.TargetSpec{
+			{OS: core.TargetLinux},
+			{OS: core.TargetMacOS},
+			{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+		},
 		Features:    core.FeatureSet{},
 		Coordinator: core.CoordinatorNever,
 	}
