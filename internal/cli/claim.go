@@ -1379,11 +1379,6 @@ func replaceLeaseClaimIfUnchanged(leaseID string, current, replacement leaseClai
 	return err
 }
 
-func replaceLeaseClaimIfUnchangedDurable(leaseID string, current, replacement leaseClaim) error {
-	_, err := replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomicDurable)
-	return err
-}
-
 func replaceLeaseClaimIfUnchangedDurableReturning(leaseID string, current, replacement leaseClaim) (leaseClaim, error) {
 	return replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomicDurable)
 }

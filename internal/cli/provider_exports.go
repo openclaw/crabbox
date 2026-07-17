@@ -227,10 +227,6 @@ func ReplaceLeaseClaimIfUnchanged(leaseID string, current, replacement LeaseClai
 	return replaceLeaseClaimIfUnchanged(leaseID, current, replacement)
 }
 
-func ReplaceLeaseClaimIfUnchangedDurable(leaseID string, current, replacement LeaseClaim) error {
-	return replaceLeaseClaimIfUnchangedDurable(leaseID, current, replacement)
-}
-
 func ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID string, current, replacement LeaseClaim) (LeaseClaim, error) {
 	return replaceLeaseClaimIfUnchangedDurableReturning(leaseID, current, replacement)
 }
