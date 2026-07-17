@@ -41,14 +41,14 @@
   {
     "label": "Crabbox: Status of box…",
     "command": "bash",
-    "args": ["-lc", "crabbox list; printf '\nLease id or slug: '; read -r id; test -n \"$id\" && exec crabbox status --id \"$id\" --wait"],
+    "args": ["-c", "crabbox list; printf '\nLease id or slug: '; read -r id; test -n \"$id\" && exec crabbox status --id \"$id\" --wait"],
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always"
   },
   {
     "label": "Crabbox: Run command on box…",
     "command": "bash",
-    "args": ["-lc", "crabbox list; printf '\nLease id or slug: '; read -r id; test -n \"$id\" || exit 2; printf 'Remote command: '; read -r command; test -n \"$command\" && exec crabbox run --id \"$id\" -- sh -lc \"$command\""],
+    "args": ["-c", "crabbox list; printf '\nLease id or slug: '; read -r id; test -n \"$id\" || exit 2; printf 'Remote command: '; read -r command; test -n \"$command\" && exec crabbox run --id \"$id\" -- sh -lc \"$command\""],
     "cwd": "$ZED_WORKTREE_ROOT",
     "save": "all",
     "reveal": "always"
@@ -56,21 +56,21 @@
   {
     "label": "Crabbox: SSH into box…",
     "command": "bash",
-    "args": ["-lc", "crabbox list; printf '\nLease id or slug: '; read -r id; test -n \"$id\" && exec crabbox connect \"$id\""],
+    "args": ["-c", "crabbox list; printf '\nLease id or slug: '; read -r id; test -n \"$id\" && exec crabbox connect \"$id\""],
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always"
   },
   {
     "label": "Crabbox: Inspect box…",
     "command": "bash",
-    "args": ["-lc", "crabbox list; printf '\nLease id or slug: '; read -r id; test -n \"$id\" && exec crabbox inspect --id \"$id\""],
+    "args": ["-c", "crabbox list; printf '\nLease id or slug: '; read -r id; test -n \"$id\" && exec crabbox inspect --id \"$id\""],
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always"
   },
   {
     "label": "Crabbox: Stop box…",
     "command": "bash",
-    "args": ["-lc", "crabbox list; printf '\nLease id or slug to stop: '; read -r id; test -n \"$id\" && exec crabbox stop \"$id\""],
+    "args": ["-c", "crabbox list; printf '\nLease id or slug to stop: '; read -r id; test -n \"$id\" && exec crabbox stop \"$id\""],
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always"
   }
