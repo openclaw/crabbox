@@ -15,6 +15,11 @@
   <dict>
     <key>SuccessfulExit</key>
     <false/>
+    <key>PathState</key>
+    <dict>
+      <key>/Volumes/My Shared Files/challenge</key>
+      <true/>
+    </dict>
   </dict>
   <key>ThrottleInterval</key>
   <integer>10</integer>

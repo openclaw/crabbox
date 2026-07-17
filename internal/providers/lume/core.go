@@ -31,7 +31,6 @@ const (
 	providerName                 = "lume"
 	targetMacOS                  = core.TargetMacOS
 	sshPort                      = "22"
-	bootstrapPassword            = "lume"
 	defaultStartupObserveTimeout = 2 * time.Second
 	defaultStopObserveTimeout    = 30 * time.Second
 	defaultStopPollInterval      = 500 * time.Millisecond

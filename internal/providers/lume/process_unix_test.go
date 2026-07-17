@@ -4,6 +4,7 @@ package lume
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,32 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestStartVMReapsOwnerWhenPersistenceCallbackFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	helper := filepath.Join(t.TempDir(), "fake-lume")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\ntrap 'exit 0' INT TERM HUP\nwhile :; do sleep 0.1 & wait $!; done\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Lume.CLIPath = helper
+	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-owner-callback-failure", bootstrapTrust{}, func(lumeRunOwner) error {
+		return errors.New("claim write failed")
+	})
+	if err == nil || !strings.Contains(err.Error(), "persist owner identity") {
+		t.Fatalf("startVM error=%v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for ownerProcessMatches(owner) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ownerProcessMatches(owner) {
+		t.Fatalf("owner pid %d was not reaped after callback failure", owner.PID)
+	}
+}
 
 func TestStartVMDetachesOwnerAndKeepsPrivateLog(t *testing.T) {
 	home := t.TempDir()
@@ -27,7 +54,14 @@ func TestStartVMDetachesOwnerAndKeepsPrivateLog(t *testing.T) {
 	cfg.Lume.CLIPath = helper
 	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
 	b.startupObserveTimeout = 25 * time.Millisecond
-	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-test-owner")
+	callbackOwner := lumeRunOwner{}
+	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-test-owner", bootstrapTrust{}, func(started lumeRunOwner) error {
+		callbackOwner = started
+		if !ownerProcessMatches(started) {
+			t.Fatalf("owner was not live when persistence callback ran: %#v", started)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +72,9 @@ func TestStartVMDetachesOwnerAndKeepsPrivateLog(t *testing.T) {
 	})
 	if owner.PID <= 0 || owner.StartedAt.IsZero() || owner.StartIdentity == "" {
 		t.Fatalf("owner=%#v", owner)
+	}
+	if callbackOwner.PID != owner.PID || callbackOwner.StartIdentity != owner.StartIdentity {
+		t.Fatalf("callback owner=%#v final owner=%#v", callbackOwner, owner)
 	}
 	info, err := os.Stat(owner.LogPath)
 	if err != nil {
@@ -73,7 +110,7 @@ func TestStoppedGuestIsNotSafeWhileRecordedOwnerLives(t *testing.T) {
 	}}
 	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 	b.startupObserveTimeout = 25 * time.Millisecond
-	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-owner-fence")
+	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-owner-fence", bootstrapTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +145,7 @@ func TestStopVMInterruptsTheIdentityFencedRunOwner(t *testing.T) {
 	b.startupObserveTimeout = 25 * time.Millisecond
 	b.stopObserveTimeout = 3 * time.Second
 	b.stopPollInterval = 10 * time.Millisecond
-	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-stop-owner")
+	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-stop-owner", bootstrapTrust{})
 	if err != nil {
 		t.Fatal(err)
 	}

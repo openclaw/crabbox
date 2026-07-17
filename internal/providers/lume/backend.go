@@ -3,10 +3,13 @@ package lume
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +38,11 @@ type lumeRunOwner struct {
 	LogPath       string
 }
 
+type bootstrapTrust struct {
+	Dir       string
+	Challenge string
+}
+
 type lumeVM struct {
 	Name           string `json:"name"`
 	OS             string `json:"os"`
@@ -48,6 +56,7 @@ type lumeVM struct {
 
 var validPOSIXUser = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9._-]*$`)
 var invalidLogName = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+var validPlatformUUID = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
 
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	applyDefaults(&cfg)
@@ -188,20 +197,6 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s base=%s storage=%s keep=%v\n", providerName, leaseID, slug, cfg.Lume.Base, blank(cfg.Lume.Storage, "home"), req.Keep)
 
 	owner := lumeRunOwner{}
-	cleanupUnclaimedVM := func(cause error) error {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		if stopErr := b.stopVM(cleanupCtx, cfg, name, owner); stopErr != nil {
-			return errors.Join(cause, fmt.Errorf("Lume rollback could not stop VM %s: %w", name, stopErr))
-		}
-		if deleteErr := b.deleteVM(cleanupCtx, cfg, name, owner); deleteErr != nil {
-			return errors.Join(cause, fmt.Errorf("Lume rollback could not delete VM %s: %w", name, deleteErr))
-		}
-		return cause
-	}
-	if err := b.cloneVM(ctx, cfg, name); err != nil {
-		return LeaseTarget{}, cleanupUnclaimedVM(err)
-	}
 	labels := directLeaseLabels(cfg, leaseID, slug, req.Keep, time.Now().UTC())
 	labels["instance"] = name
 	labels["base"] = cfg.Lume.Base
@@ -210,39 +205,98 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	labels["ssh_port"] = sshPort
 	labels["work_root"] = cfg.Lume.WorkRoot
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
+	persistedClaim := core.LeaseClaim{}
+	cleanupUnclaimedVM := func(cause error) error {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		cleanup := func() error {
+			if stopErr := b.stopVM(cleanupCtx, cfg, name, owner); stopErr != nil {
+				return fmt.Errorf("Lume rollback could not stop VM %s: %w", name, stopErr)
+			}
+			if deleteErr := b.deleteVM(cleanupCtx, cfg, name, owner); deleteErr != nil {
+				return fmt.Errorf("Lume rollback could not delete VM %s: %w", name, deleteErr)
+			}
+			return nil
+		}
+		var cleanupErr error
+		if persistedClaim.LeaseID != "" {
+			cleanupErr = core.RemoveLeaseClaimIfUnchangedAfter(leaseID, persistedClaim, cleanup)
+		} else {
+			cleanupErr = cleanup()
+		}
+		if cleanupErr != nil {
+			if persistedClaim.LeaseID == "" {
+				labels["state"] = "error"
+				labels["recovery"] = "rollback-failed"
+				recoveryServer := b.serverFromInstance(lumeVM{Name: name, Status: "unknown"}, claim, cfg)
+				recoveryClaim, claimErr := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, instanceScope(name), recoveryServer, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
+				if claimErr != nil {
+					return errors.Join(cause, cleanupErr, fmt.Errorf("persist Lume rollback recovery claim: %w", claimErr))
+				}
+				persistedClaim = recoveryClaim
+			}
+			if persistedClaim.LeaseID != "" {
+				cleanupKey = false
+			}
+			return errors.Join(cause, cleanupErr)
+		}
+		return cause
+	}
+	if err := b.cloneVM(ctx, cfg, name); err != nil {
+		return LeaseTarget{}, cleanupUnclaimedVM(err)
+	}
 	if req.OnAcquired != nil {
 		acquired := LeaseTarget{Server: b.serverFromInstance(lumeVM{Name: name, Status: "stopped"}, claim, cfg), LeaseID: leaseID}
 		if err := req.OnAcquired(acquired); err != nil {
 			return LeaseTarget{}, cleanupUnclaimedVM(err)
 		}
 	}
-	runOwner, err := b.startVM(ctx, cfg, name)
+	provisional := LeaseTarget{Server: b.serverFromInstance(lumeVM{Name: name, Status: "starting"}, claim, cfg), LeaseID: leaseID}
+	persistedClaim, err = core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, instanceScope(name), provisional.Server, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
+	if err != nil {
+		return LeaseTarget{}, cleanupUnclaimedVM(err)
+	}
+	trust, err := prepareBootstrapTrust(name, cfg.Lume.User, publicKey)
+	if err != nil {
+		return LeaseTarget{}, cleanupUnclaimedVM(err)
+	}
+	defer removeBootstrapTrust(trust)
+	runOwner, err := b.startVM(ctx, cfg, name, trust, func(started lumeRunOwner) error {
+		labels["run_owner_pid"] = strconv.Itoa(started.PID)
+		labels["run_owner_started_at"] = started.StartedAt.UTC().Format(time.RFC3339Nano)
+		labels["run_owner_start_identity"] = started.StartIdentity
+		labels["run_owner_boot_identity"] = started.BootIdentity
+		labels["run_log"] = started.LogPath
+		updated, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, persistedClaim, labels)
+		if updateErr == nil {
+			persistedClaim = updated
+		}
+		return updateErr
+	})
 	owner = runOwner
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
-	labels["run_owner_pid"] = strconv.Itoa(runOwner.PID)
-	labels["run_owner_started_at"] = runOwner.StartedAt.UTC().Format(time.RFC3339Nano)
-	labels["run_owner_start_identity"] = runOwner.StartIdentity
-	labels["run_owner_boot_identity"] = runOwner.BootIdentity
-	labels["run_log"] = runOwner.LogPath
 	inst, err := b.waitForRunningVM(ctx, cfg, name, runOwner)
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
-	if err := b.waitForGuestIdentity(ctx, cfg, name, inst.IPAddress); err != nil {
+	target := SSHTarget{}
+	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
-	if err := b.injectSSHKey(ctx, cfg, name, inst.IPAddress, leaseID, publicKey); err != nil {
+	if err := b.waitForGuestIdentity(ctx, name, inst.IPAddress, trust, target.KnownHostsFile); err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
 	lease, err := b.prepareLease(ctx, cfg, inst, claim, true)
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
-		return LeaseTarget{}, cleanupUnclaimedVM(err)
+	updatedClaim, updateErr := core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug, cfg, instanceScope(name), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, persistedClaim, true)
+	if updateErr != nil {
+		return LeaseTarget{}, cleanupUnclaimedVM(updateErr)
 	}
+	persistedClaim = updatedClaim
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
@@ -515,8 +569,11 @@ func (b *backend) cloneVM(ctx context.Context, cfg Config, name string) error {
 	return nil
 }
 
-func (b *backend) startVM(ctx context.Context, cfg Config, name string) (lumeRunOwner, error) {
+func (b *backend) startVM(ctx context.Context, cfg Config, name string, trust bootstrapTrust, onStarted ...func(lumeRunOwner) error) (lumeRunOwner, error) {
 	args := []string{"run", name, "--no-display"}
+	if trust.Dir != "" {
+		args = append(args, "--shared-dir", trust.Dir+":rw")
+	}
 	if storage := strings.TrimSpace(cfg.Lume.Storage); storage != "" {
 		args = append(args, "--storage", storage)
 	}
@@ -547,16 +604,19 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string) (lumeRun
 	}
 	if err := devNull.Close(); err != nil {
 		_ = cmd.Process.Signal(os.Interrupt)
+		go func() { _ = cmd.Wait() }()
 		return lumeRunOwner{}, exit(2, "lume run %s: close null device: %v", name, err)
 	}
 	startIdentity, startIdentityErr := core.LocalProcessStartIdentity(cmd.Process.Pid)
 	if startIdentityErr != nil || strings.TrimSpace(startIdentity) == "" {
 		_ = cmd.Process.Signal(os.Interrupt)
+		go func() { _ = cmd.Wait() }()
 		return lumeRunOwner{}, exit(2, "lume run %s: capture owner process identity: %v", name, startIdentityErr)
 	}
 	bootIdentity, bootIdentityErr := core.LocalProcessBootIdentity()
 	if core.LocalProcessBootIdentityRequired() && (bootIdentityErr != nil || strings.TrimSpace(bootIdentity) == "") {
 		_ = cmd.Process.Signal(os.Interrupt)
+		go func() { _ = cmd.Wait() }()
 		return lumeRunOwner{}, exit(2, "lume run %s: capture owner boot identity: %v", name, bootIdentityErr)
 	}
 	owner := lumeRunOwner{
@@ -568,6 +628,12 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string) (lumeRun
 	}
 	exitCh := make(chan error, 1)
 	go func() { exitCh <- cmd.Wait() }()
+	if len(onStarted) > 0 && onStarted[0] != nil {
+		if err := onStarted[0](owner); err != nil {
+			_ = cmd.Process.Signal(os.Interrupt)
+			return owner, exit(2, "lume run %s: persist owner identity: %v", name, err)
+		}
+	}
 	select {
 	case <-ctx.Done():
 		_ = cmd.Process.Signal(os.Interrupt)
@@ -609,6 +675,117 @@ func lumeRunLogPath(name string) (string, error) {
 	return filepath.Join(dir, safeName+".log"), nil
 }
 
+func prepareBootstrapTrust(name, user, publicKey string) (bootstrapTrust, error) {
+	stateDir, err := core.CrabboxStateDir()
+	if err != nil {
+		return bootstrapTrust{}, exit(2, "resolve Crabbox state directory for Lume bootstrap trust: %v", err)
+	}
+	parent := filepath.Join(stateDir, "lume", "bootstrap")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return bootstrapTrust{}, exit(2, "create Lume bootstrap trust directory: %v", err)
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		return bootstrapTrust{}, exit(2, "secure Lume bootstrap trust directory: %v", err)
+	}
+	safeName := strings.Trim(invalidLogName.ReplaceAllString(name, "_"), "._")
+	if safeName == "" {
+		return bootstrapTrust{}, exit(2, "derive Lume bootstrap trust directory for %q", name)
+	}
+	if strings.Contains(parent, ":") {
+		return bootstrapTrust{}, exit(2, "Lume bootstrap trust directory cannot contain a colon: %s", parent)
+	}
+	dir, err := os.MkdirTemp(parent, safeName+"-*")
+	if err != nil {
+		return bootstrapTrust{}, exit(2, "create fresh Lume bootstrap trust directory %s: %v", dir, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return bootstrapTrust{}, exit(2, "secure fresh Lume bootstrap trust directory %s: %v", dir, err)
+	}
+	challengeBytes := make([]byte, 32)
+	if _, err := rand.Read(challengeBytes); err != nil {
+		_ = os.Remove(dir)
+		return bootstrapTrust{}, exit(2, "generate Lume bootstrap trust challenge: %v", err)
+	}
+	challenge := base64.RawURLEncoding.EncodeToString(challengeBytes)
+	files := map[string]string{
+		"challenge":      challenge + "\n",
+		"ssh_user":       user + "\n",
+		"authorized_key": strings.TrimSpace(publicKey) + "\n",
+	}
+	for name, value := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0o600); err != nil {
+			_ = os.RemoveAll(dir)
+			return bootstrapTrust{}, exit(2, "write Lume bootstrap trust input %s: %v", name, err)
+		}
+	}
+	return bootstrapTrust{Dir: dir, Challenge: challenge}, nil
+}
+
+func removeBootstrapTrust(trust bootstrapTrust) {
+	if trust.Dir != "" {
+		_ = os.RemoveAll(trust.Dir)
+	}
+}
+
+func pinBootstrapHostKey(host string, trust bootstrapTrust, knownHostsFile string) error {
+	if net.ParseIP(host) == nil {
+		return fmt.Errorf("Lume returned invalid guest IP address %q", host)
+	}
+	identityPath := filepath.Join(trust.Dir, "identity")
+	info, err := os.Lstat(identityPath)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4096 {
+		return fmt.Errorf("Lume bootstrap identity is not a small regular file")
+	}
+	data, err := os.ReadFile(identityPath)
+	if err != nil {
+		return err
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 4 || fields[0] != trust.Challenge {
+		return fmt.Errorf("Lume bootstrap identity challenge mismatch")
+	}
+	if !validPlatformUUID.MatchString(fields[1]) {
+		return fmt.Errorf("Lume bootstrap identity has invalid platform UUID")
+	}
+	if fields[2] != "ssh-ed25519" {
+		return fmt.Errorf("Lume bootstrap identity has unsupported host key type %q", fields[2])
+	}
+	decodedKey, err := base64.StdEncoding.DecodeString(fields[3])
+	if err != nil || len(decodedKey) == 0 {
+		return fmt.Errorf("Lume bootstrap identity has invalid ED25519 host key")
+	}
+	entry := host + ",[" + host + "]:" + sshPort + " " + fields[2] + " " + fields[3] + "\n"
+	tmp, err := os.CreateTemp(filepath.Dir(knownHostsFile), ".lume-known-hosts-*")
+	if err != nil {
+		return fmt.Errorf("create temporary Lume known_hosts: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("secure temporary Lume known_hosts: %w", err)
+	}
+	if _, err := io.WriteString(tmp, entry); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temporary Lume known_hosts: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temporary Lume known_hosts: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary Lume known_hosts: %w", err)
+	}
+	if err := os.Rename(tmpPath, knownHostsFile); err != nil {
+		return fmt.Errorf("install authenticated Lume known_hosts: %w", err)
+	}
+	return nil
+}
+
 func (b *backend) waitForRunningVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) (lumeVM, error) {
 	deadline := time.NewTimer(bootstrapWaitTimeout(cfg))
 	ticker := time.NewTicker(2 * time.Second)
@@ -645,30 +822,14 @@ func (b *backend) waitForRunningVM(ctx context.Context, cfg Config, name string,
 	}
 }
 
-func (b *backend) injectSSHKey(ctx context.Context, cfg Config, name, host, leaseID, publicKey string) error {
-	key := shellSingleQuote(strings.TrimSpace(publicKey))
-	script := "umask 077; mkdir -p \"$HOME/.ssh\"; touch \"$HOME/.ssh/authorized_keys\"; grep -qxF " + key + " \"$HOME/.ssh/authorized_keys\" || printf '%s\\n' " + key + " >> \"$HOME/.ssh/authorized_keys\"; chmod 700 \"$HOME/.ssh\"; chmod 600 \"$HOME/.ssh/authorized_keys\""
-	target := SSHTarget{}
-	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
-		return err
-	}
-	result, err := b.bootstrapSSH(ctx, cfg, host, script, target.KnownHostsFile)
-	if err != nil {
-		return commandError("Lume guest SSH key injection for "+name, result, err)
-	}
-	return nil
-}
-
-func (b *backend) waitForGuestIdentity(ctx context.Context, cfg Config, name, host string) error {
-	script := `current="$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/ { print $(NF-1); exit }')"; marker="$(cat /var/db/crabbox-lume-machine-id 2>/dev/null || true)"; test -n "$current" && test "$marker" = "$current"`
+func (b *backend) waitForGuestIdentity(ctx context.Context, name, host string, trust bootstrapTrust, knownHostsFile string) error {
 	deadline := time.NewTimer(defaultGuestIdentityTimeout)
 	ticker := time.NewTicker(time.Second)
 	defer deadline.Stop()
 	defer ticker.Stop()
-	var last LocalCommandResult
 	var lastErr error
 	for {
-		last, lastErr = b.bootstrapSSH(ctx, cfg, host, script, "")
+		lastErr = pinBootstrapHostKey(host, trust, knownHostsFile)
 		if lastErr == nil {
 			return nil
 		}
@@ -676,64 +837,10 @@ func (b *backend) waitForGuestIdentity(ctx context.Context, cfg Config, name, ho
 		case <-ctx.Done():
 			return exit(2, "wait for Lume VM %s first-boot identity: context cancelled", name)
 		case <-deadline.C:
-			return commandError("wait for Lume first-boot identity", last, lastErr)
+			return exit(2, "wait for Lume VM %s authenticated first-boot identity: %v", name, lastErr)
 		case <-ticker.C:
 		}
 	}
-}
-
-func (b *backend) bootstrapSSH(ctx context.Context, cfg Config, host, command, knownHostsFile string) (LocalCommandResult, error) {
-	askpass, err := os.CreateTemp("", "crabbox-lume-askpass-*.sh")
-	if err != nil {
-		return LocalCommandResult{}, exit(2, "create Lume bootstrap askpass helper: %v", err)
-	}
-	askpassPath := askpass.Name()
-	defer os.Remove(askpassPath)
-	if _, err := askpass.WriteString("#!/bin/sh\nprintf '%s\\n' '" + bootstrapPassword + "'\n"); err != nil {
-		_ = askpass.Close()
-		return LocalCommandResult{}, exit(2, "write Lume bootstrap askpass helper: %v", err)
-	}
-	if err := askpass.Chmod(0o700); err != nil {
-		_ = askpass.Close()
-		return LocalCommandResult{}, exit(2, "secure Lume bootstrap askpass helper: %v", err)
-	}
-	if err := askpass.Close(); err != nil {
-		return LocalCommandResult{}, exit(2, "close Lume bootstrap askpass helper: %v", err)
-	}
-	args := []string{}
-	if knownHostsFile == "" {
-		args = append(args,
-			"-o", "StrictHostKeyChecking=no",
-			"-o", "UserKnownHostsFile=/dev/null",
-		)
-	} else {
-		args = append(args,
-			"-o", "StrictHostKeyChecking=accept-new",
-			"-o", "UserKnownHostsFile="+knownHostsFile,
-		)
-	}
-	args = append(args,
-		"-o", "LogLevel=ERROR",
-		"-o", "ConnectTimeout=10",
-		"-o", "ConnectionAttempts=1",
-		"-o", "PubkeyAuthentication=no",
-		"-o", "PreferredAuthentications=password,keyboard-interactive",
-		"-p", sshPort,
-		cfg.Lume.User+"@"+host,
-		command,
-	)
-	env := append(os.Environ(),
-		"SSH_ASKPASS="+askpassPath,
-		"SSH_ASKPASS_REQUIRE=force",
-		"DISPLAY=:0",
-	)
-	return b.rt.Exec.Run(ctx, LocalCommandRequest{
-		Name:                   "/usr/bin/ssh",
-		Args:                   args,
-		Env:                    env,
-		Stdin:                  strings.NewReader(""),
-		MaxCapturedOutputBytes: 64 << 10,
-	})
 }
 
 func (b *backend) stopVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) error {

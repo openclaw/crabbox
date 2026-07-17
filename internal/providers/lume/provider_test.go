@@ -285,6 +285,66 @@ func TestAcquireRollsBackPartialCloneFailure(t *testing.T) {
 	}
 }
 
+func TestAcquirePreservesRecoveryClaimWhenPartialCloneRollbackFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	const leaseID = "cbx_clone_recovery"
+	vmExists := false
+	name := ""
+	runner := &recordingRunner{}
+	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if len(req.Args) == 0 {
+			return core.LocalCommandResult{}, nil, false
+		}
+		switch req.Args[0] {
+		case "ls":
+			if vmExists {
+				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"running"}]`, name)}, nil, true
+			}
+			return core.LocalCommandResult{Stdout: `[]`}, nil, true
+		case "clone":
+			name = req.Args[2]
+			vmExists = true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "partial clone failure"}, errors.New("exit status 1"), true
+		case "stop":
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "stop unavailable"}, errors.New("exit status 1"), true
+		case "get":
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"running"}]`, name)}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	b.stopObserveTimeout = 15 * time.Millisecond
+	b.stopPollInterval = time.Millisecond
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir()},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "clone-recovery",
+	})
+	if err == nil || !strings.Contains(err.Error(), "rollback could not stop") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID)
+	if claimErr != nil || !ok {
+		t.Fatalf("recovery claim ok=%v err=%v", ok, claimErr)
+	}
+	if claim.Labels["recovery"] != "rollback-failed" || claim.Labels["state"] != "error" {
+		t.Fatalf("recovery claim labels=%#v", claim.Labels)
+	}
+	keyPath, keyErr := testboxKeyPath(leaseID)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("recovery key missing: %v", statErr)
+	}
+}
+
 func TestParseLumeVMsSkipsTimestampedStdoutLogs(t *testing.T) {
 	output := "[2026-07-17T01:19:17Z] INFO: Cleaned up stale session file\n" +
 		`[{"name":"worker-1","status":"running","ipAddress":"192.0.2.10"}]` +
@@ -503,48 +563,58 @@ func TestCloneUsesConfiguredStorage(t *testing.T) {
 	}
 }
 
-func TestInjectSSHKeyUsesPrivateBootstrapTransport(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+func TestPrepareBootstrapTrustCarriesKeyWithoutNetworkPassword(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	publicKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest crabbox-test"
-	leaseID := "cbx_00000000-0000-0000-0000-000000000001"
-	if err := b.injectSSHKey(context.Background(), b.configForRun(), "worker-1", "192.0.2.10", leaseID, publicKey); err != nil {
+	trust, err := prepareBootstrapTrust("worker-1", "lume", publicKey)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 1 || len(runner.calls[0].Args) < 3 {
-		t.Fatalf("calls=%#v", runner.calls)
+	defer removeBootstrapTrust(trust)
+	secondTrust, err := prepareBootstrapTrust("worker-1", "lume", publicKey)
+	if err != nil {
+		t.Fatal(err)
 	}
-	args := strings.Join(runner.calls[0].Args, " ")
-	if runner.calls[0].Name != "/usr/bin/ssh" || !strings.Contains(args, "lume@192.0.2.10") || !strings.Contains(args, publicKey) || !strings.Contains(args, "authorized_keys") {
-		t.Fatalf("key injection args=%q", args)
+	defer removeBootstrapTrust(secondTrust)
+	if secondTrust.Dir == trust.Dir {
+		t.Fatalf("bootstrap directories were reused: %s", trust.Dir)
 	}
-	if strings.Contains(args, "printf '%s\\n' 'lume'") || strings.Contains(args, "PRIVATE KEY") {
-		t.Fatalf("key injection argv unexpectedly contains credential material")
+	info, err := os.Stat(trust.Dir)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("trust directory info=%#v err=%v", info, err)
 	}
-	if !strings.Contains(args, "StrictHostKeyChecking=accept-new") || !strings.Contains(args, leaseID) || strings.Contains(args, "UserKnownHostsFile=/dev/null") {
-		t.Fatalf("key injection did not pin the rotated host key: %q", args)
+	for name, want := range map[string]string{
+		"challenge":      trust.Challenge,
+		"ssh_user":       "lume",
+		"authorized_key": publicKey,
+	} {
+		data, readErr := os.ReadFile(filepath.Join(trust.Dir, name))
+		if readErr != nil || strings.TrimSpace(string(data)) != want {
+			t.Fatalf("%s=%q err=%v want %q", name, data, readErr, want)
+		}
 	}
 }
 
-func TestWaitForGuestIdentityChecksCloneMarkerBeforeSSHTrust(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	if err := b.waitForGuestIdentity(context.Background(), b.configForRun(), "worker-1", "192.0.2.10"); err != nil {
+func TestWaitForGuestIdentityPinsKeyFromVirtioFSChallenge(t *testing.T) {
+	dir := t.TempDir()
+	trust := bootstrapTrust{Dir: dir, Challenge: "test-challenge"}
+	const hostKey = "AAAAC3NzaC1lZDI1NTE5AAAAIEyJYp+0tWfIvx9RZ3k4LZ5bDXb3Y+N+UZxF6p8h"
+	identity := "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 " + hostKey + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "identity"), []byte(identity), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("calls=%#v", runner.calls)
+	knownHosts := filepath.Join(dir, "known_hosts")
+	b := &backend{}
+	if err := b.waitForGuestIdentity(context.Background(), "worker-1", "192.0.2.10", trust, knownHosts); err != nil {
+		t.Fatal(err)
 	}
-	args := strings.Join(runner.calls[0].Args, " ")
-	for _, want := range []string{"lume@192.0.2.10", "IOPlatformUUID", "/var/db/crabbox-lume-machine-id"} {
-		if !strings.Contains(args, want) {
-			t.Fatalf("identity wait args=%q missing %q", args, want)
-		}
+	data, err := os.ReadFile(knownHosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "192.0.2.10,[192.0.2.10]:22 ssh-ed25519 "+hostKey) {
+		t.Fatalf("known_hosts=%q", got)
 	}
 }
 
