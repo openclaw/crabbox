@@ -150,6 +150,10 @@ Pick whichever matches your intent:
   [Interactive desktop and VNC](features/interactive-desktop-vnc.md),
   [Telemetry](features/telemetry.md), [Sync](features/sync.md),
   [Hermetic agent evidence](features/hermetic-agent-evidence.md).
+- **Integrate tools:** [Integration catalog](integrations/README.md),
+  [Editors and control surfaces](integrations/editors.md),
+  [AI agents and harnesses](integrations/agents.md),
+  [Integration authoring](integrations/authoring.md).
 - **Pick or add a target:** [Provider reference](providers/README.md),
   [Provider selection](features/provider-selection.md),
   [Provider landscape](features/provider-landscape.md),

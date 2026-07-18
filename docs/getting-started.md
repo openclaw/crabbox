@@ -116,8 +116,8 @@ Inside the repo:
 crabbox init
 ```
 
-`init` writes three files (override any path with `--config`, `--workflow`, or
-`--skill`; pass `--force` to overwrite existing files):
+`init` writes three files (override paths with `--config`, `--workflow`, or one
+or more `--skill` flags; pass `--force` to overwrite existing files):
 
 ```text
 .crabbox.yaml                          repo defaults (profile, class, sync, env)
