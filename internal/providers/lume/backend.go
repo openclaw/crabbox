@@ -1228,7 +1228,11 @@ func (b *backend) activeMacOSGuestCount(ctx context.Context, cfg Config) (int, e
 	active := 0
 	seen := make(map[string]struct{}, len(instances))
 	for _, inst := range instances {
-		seen[lumeStorageIdentity(inst, "")] = struct{}{}
+		identity, err := lumeStorageIdentity(cfg, inst, "")
+		if err != nil {
+			return 0, err
+		}
+		seen[identity] = struct{}{}
 		if !strings.EqualFold(strings.TrimSpace(inst.OS), targetMacOS) {
 			continue
 		}
@@ -1253,7 +1257,11 @@ func (b *backend) activeMacOSGuestCount(ctx context.Context, cfg Config) (int, e
 			}
 			return 0, getErr
 		}
-		if _, ok := seen[lumeStorageIdentity(inst, claimCfg.Lume.Storage)]; ok {
+		identity, err := lumeStorageIdentity(cfg, inst, claimCfg.Lume.Storage)
+		if err != nil {
+			return 0, err
+		}
+		if _, ok := seen[identity]; ok {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(inst.OS), targetMacOS) {
@@ -1266,12 +1274,13 @@ func (b *backend) activeMacOSGuestCount(ctx context.Context, cfg Config) (int, e
 	return active, nil
 }
 
-func lumeStorageIdentity(inst lumeVM, fallbackStorage string) string {
-	storage := strings.TrimSpace(inst.LocationName)
-	if storage == "" {
-		storage = strings.TrimSpace(fallbackStorage)
+func lumeStorageIdentity(cfg Config, inst lumeVM, fallback string) (string, error) {
+	cfg.Lume.Storage = strings.TrimSpace(firstNonBlank(inst.LocationName, fallback))
+	root, err := lumeStorageRoot(cfg, inst.LocationName)
+	if err != nil {
+		return "", err
 	}
-	return inst.Name + "\x00" + storage
+	return inst.Name + "\x00" + root, nil
 }
 
 func (b *backend) waitForStoppedOrMissingVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) (bool, string, error) {
