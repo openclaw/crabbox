@@ -31,6 +31,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/firecracker"
 	_ "github.com/openclaw/crabbox/internal/providers/freestyle"
 	_ "github.com/openclaw/crabbox/internal/providers/gcp"
+	_ "github.com/openclaw/crabbox/internal/providers/githubcodespaces"
 	_ "github.com/openclaw/crabbox/internal/providers/hetzner"
 	_ "github.com/openclaw/crabbox/internal/providers/hostinger"
 	_ "github.com/openclaw/crabbox/internal/providers/hyperv"

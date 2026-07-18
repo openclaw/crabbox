@@ -83,6 +83,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nvidia-brev scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=phala CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=anthropic-sandbox-runtime scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=opensandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=github-codespaces CRABBOX_LIVE_COORDINATOR=0 CRABBOX_GITHUB_CODESPACES_SMOKE_REPO=example-org/my-app CRABBOX_GITHUB_CODESPACES_SMOKE_REF=main scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=proxmox CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=xcp-ng CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=agent-sandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
@@ -231,6 +232,15 @@ Per-provider smoke prerequisites:
   `scripts/live-opensandbox-smoke.sh` is coordinator-free, proves archive sync,
   off-argv environment forwarding, retained sandbox reuse, staged `sync.delete`
   replacement, list/status, and cleanup.
+- **GitHub Codespaces** — an authenticated `gh` CLI, Python 3, an explicit
+  `CRABBOX_GITHUB_CODESPACES_SMOKE_REPO`, and either `GH_TOKEN`,
+  `GITHUB_TOKEN`, or `CRABBOX_GITHUB_CODESPACES_USE_GH_AUTH=1`.
+  The ref may be explicit or is detected from the repository default branch;
+  the devcontainer path is passed only when explicitly configured.
+  `scripts/live-smoke.sh` delegates to
+  `scripts/live-github-codespaces-smoke.sh`, which is coordinator-free,
+  creates one short-lived Codespace lease, verifies status, sync/run, SSH
+  command generation, list, stop, and dry-run cleanup.
 - **Proxmox** — a locally built Crabbox binary (`CRABBOX_BIN`), Proxmox API
   credentials/config, and `jq`/`perl`. `scripts/proxmox-live-smoke.sh` is
   coordinator-free and read-only by default; set `CRABBOX_PROXMOX_LIVE_SMOKE=1`

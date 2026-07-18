@@ -189,6 +189,7 @@ Current coverage: 77 providers; 4 with convention-named hermetic lifecycle tests
 | [firecracker](../providers/firecracker.md) | yes (`firecracker`) | dedicated | — |
 | [freestyle](../providers/freestyle.md) | — | — | — |
 | [gcp](../providers/gcp.md) | — | — | — |
+| [github-codespaces](../providers/github-codespaces.md) | — | dedicated + matrix | — |
 | [hetzner](../providers/hetzner.md) | — | matrix | — |
 | [hostinger](../providers/hostinger.md) | — | — | — |
 | [hyperv](../providers/hyperv.md) | — | — | — |

@@ -555,6 +555,18 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_NVIDIA_BREV_TARGET",
 		"CRABBOX_NVIDIA_BREV_USER",
 		"CRABBOX_NVIDIA_BREV_WORK_ROOT",
+		"CRABBOX_GITHUB_CODESPACES_API_URL",
+		"CRABBOX_GITHUB_CODESPACES_GH_PATH",
+		"CRABBOX_GITHUB_CODESPACES_REPO",
+		"CRABBOX_GITHUB_CODESPACES_REF",
+		"CRABBOX_GITHUB_CODESPACES_MACHINE",
+		"CRABBOX_GITHUB_CODESPACES_DEVCONTAINER_PATH",
+		"CRABBOX_GITHUB_CODESPACES_WORKING_DIRECTORY",
+		"CRABBOX_GITHUB_CODESPACES_GEO",
+		"CRABBOX_GITHUB_CODESPACES_IDLE_TIMEOUT",
+		"CRABBOX_GITHUB_CODESPACES_RETENTION_PERIOD",
+		"CRABBOX_GITHUB_CODESPACES_DELETE_ON_RELEASE",
+		"CRABBOX_GITHUB_CODESPACES_WORK_ROOT",
 		"HOSTINGER_API_TOKEN",
 		"CRABBOX_HOSTINGER_API_TOKEN",
 		"HOSTINGER_API_URL",
@@ -726,6 +738,188 @@ func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if !IsNvidiaBrevWorkRootExplicit(&cfg) {
 		t.Fatal("env nvidiaBrev work root not marked explicit")
+	}
+}
+
+func TestGitHubCodespacesConfigDefaultsFileEnvAndShow(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.GitHubCodespaces.APIURL != "https://api.github.com" ||
+		cfg.GitHubCodespaces.GHPath != "gh" ||
+		cfg.GitHubCodespaces.Machine != "basicLinux32gb" ||
+		cfg.GitHubCodespaces.IdleTimeout != 30*time.Minute ||
+		cfg.GitHubCodespaces.RetentionPeriod != 7*24*time.Hour ||
+		!cfg.GitHubCodespaces.DeleteOnRelease ||
+		cfg.GitHubCodespaces.WorkRoot != "/workspaces/crabbox" {
+		t.Fatalf("githubCodespaces defaults not applied: %#v", cfg.GitHubCodespaces)
+	}
+
+	deleteOnRelease := true
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "github-codespaces",
+		GitHubCodespaces: &fileGitHubCodespacesConfig{
+			APIURL:           "https://api.github.example",
+			GHPath:           "/opt/gh",
+			Repo:             "example-org/my-app",
+			Ref:              "main",
+			Machine:          "standardLinux32gb",
+			DevcontainerPath: ".devcontainer/devcontainer.json",
+			WorkingDirectory: "/workspaces/my-app",
+			Geo:              "UsWest",
+			IdleTimeout:      "45m",
+			RetentionPeriod:  "48h",
+			DeleteOnRelease:  &deleteOnRelease,
+			WorkRoot:         "/workspaces/my-app",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "github-codespaces" ||
+		cfg.GitHubCodespaces.APIURL != "https://api.github.example" ||
+		cfg.GitHubCodespaces.GHPath != "/opt/gh" ||
+		cfg.GitHubCodespaces.Repo != "example-org/my-app" ||
+		cfg.GitHubCodespaces.Ref != "main" ||
+		cfg.GitHubCodespaces.Machine != "standardLinux32gb" ||
+		cfg.GitHubCodespaces.DevcontainerPath != ".devcontainer/devcontainer.json" ||
+		cfg.GitHubCodespaces.WorkingDirectory != "/workspaces/my-app" ||
+		cfg.GitHubCodespaces.Geo != "UsWest" ||
+		cfg.GitHubCodespaces.IdleTimeout != 45*time.Minute ||
+		cfg.GitHubCodespaces.RetentionPeriod != 48*time.Hour ||
+		!cfg.GitHubCodespaces.DeleteOnRelease ||
+		cfg.GitHubCodespaces.WorkRoot != "/workspaces/my-app" {
+		t.Fatalf("file githubCodespaces config not applied: %#v", cfg.GitHubCodespaces)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "github-codespaces") {
+		t.Fatal("file githubCodespaces delete-on-release not marked explicit")
+	}
+	if !GitHubCodespacesRetentionExplicit(cfg) {
+		t.Fatal("file githubCodespaces retention period not marked explicit")
+	}
+
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_API_URL", "https://api.env.example")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_GH_PATH", "/usr/local/bin/gh")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_REPO", "example-org/env-app")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_REF", "env-main")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_MACHINE", "premiumLinux")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_DEVCONTAINER_PATH", ".devcontainer/env.json")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_WORKING_DIRECTORY", "/workspaces/env-app")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_GEO", "EuropeWest")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_IDLE_TIMEOUT", "1h")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_RETENTION_PERIOD", "72h")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_DELETE_ON_RELEASE", "false")
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_WORK_ROOT", "/workspaces/env-app")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.APIURL != "https://api.env.example" ||
+		cfg.GitHubCodespaces.GHPath != "/usr/local/bin/gh" ||
+		cfg.GitHubCodespaces.Repo != "example-org/env-app" ||
+		cfg.GitHubCodespaces.Ref != "env-main" ||
+		cfg.GitHubCodespaces.Machine != "premiumLinux" ||
+		cfg.GitHubCodespaces.DevcontainerPath != ".devcontainer/env.json" ||
+		cfg.GitHubCodespaces.WorkingDirectory != "/workspaces/env-app" ||
+		cfg.GitHubCodespaces.Geo != "EuropeWest" ||
+		cfg.GitHubCodespaces.IdleTimeout != time.Hour ||
+		cfg.GitHubCodespaces.RetentionPeriod != 72*time.Hour ||
+		cfg.GitHubCodespaces.DeleteOnRelease ||
+		cfg.GitHubCodespaces.WorkRoot != "/workspaces/env-app" {
+		t.Fatalf("env githubCodespaces config not applied: %#v", cfg.GitHubCodespaces)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "github-codespaces") {
+		t.Fatal("env githubCodespaces delete-on-release not marked explicit")
+	}
+	if !GitHubCodespacesRetentionExplicit(cfg) {
+		t.Fatal("env githubCodespaces retention period not marked explicit")
+	}
+
+	view := configShowView(cfg)["githubCodespaces"].(map[string]any)
+	if view["auth"] != "gh" {
+		t.Fatalf("auth=%#v", view["auth"])
+	}
+	if _, ok := view["token"]; ok {
+		t.Fatalf("config show exposed token key: %#v", view)
+	}
+}
+
+func TestGitHubCodespacesConfigAcceptsExplicitZeroRetention(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "github-codespaces",
+		GitHubCodespaces: &fileGitHubCodespacesConfig{
+			RetentionPeriod: "0s",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.RetentionPeriod != 0 || !GitHubCodespacesRetentionExplicit(cfg) {
+		t.Fatalf("file retention=%s explicit=%t", cfg.GitHubCodespaces.RetentionPeriod, GitHubCodespacesRetentionExplicit(cfg))
+	}
+
+	cfg = baseConfig()
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_RETENTION_PERIOD", "0s")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.RetentionPeriod != 0 || !GitHubCodespacesRetentionExplicit(cfg) {
+		t.Fatalf("env retention=%s explicit=%t", cfg.GitHubCodespaces.RetentionPeriod, GitHubCodespacesRetentionExplicit(cfg))
+	}
+}
+
+func TestGitHubCodespacesUntrustedConfigCannotRedirectOrChangeReleasePolicy(t *testing.T) {
+	cfg := baseConfig()
+	cfg.GitHubCodespaces.APIURL = "https://api.trusted.example"
+	cfg.GitHubCodespaces.GHPath = "/trusted/gh"
+	cfg.GitHubCodespaces.Repo = "trusted-org/trusted-app"
+	cfg.GitHubCodespaces.IdleTimeout = 45 * time.Minute
+	cfg.GitHubCodespaces.RetentionPeriod = 24 * time.Hour
+	untrustedRetain := false
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: &fileGitHubCodespacesConfig{
+		APIURL:          "https://api.untrusted.example",
+		GHPath:          "./payload",
+		Repo:            "attacker-org/payload",
+		IdleTimeout:     "24h",
+		RetentionPeriod: "720h",
+		DeleteOnRelease: &untrustedRetain,
+	}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.APIURL != "https://api.trusted.example" || cfg.GitHubCodespaces.GHPath != "/trusted/gh" {
+		t.Fatalf("untrusted redirect applied: %#v", cfg.GitHubCodespaces)
+	}
+	if cfg.GitHubCodespaces.Repo != "trusted-org/trusted-app" {
+		t.Fatalf("untrusted repo redirect applied: %#v", cfg.GitHubCodespaces)
+	}
+	if cfg.GitHubCodespaces.IdleTimeout != 45*time.Minute || cfg.GitHubCodespaces.RetentionPeriod != 24*time.Hour {
+		t.Fatalf("untrusted retention periods applied: %#v", cfg.GitHubCodespaces)
+	}
+	if !cfg.GitHubCodespaces.DeleteOnRelease || DeleteOnReleaseExplicit(cfg, "github-codespaces") {
+		t.Fatalf("untrusted retention policy applied: %#v", cfg.GitHubCodespaces)
+	}
+
+	trustedRetain := false
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: &fileGitHubCodespacesConfig{
+		IdleTimeout:     "1h",
+		RetentionPeriod: "48h",
+		DeleteOnRelease: &trustedRetain,
+	}}, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "github-codespaces") {
+		t.Fatalf("trusted retention policy not applied: %#v", cfg.GitHubCodespaces)
+	}
+	if cfg.GitHubCodespaces.IdleTimeout != time.Hour || cfg.GitHubCodespaces.RetentionPeriod != 48*time.Hour {
+		t.Fatalf("trusted retention periods not applied: %#v", cfg.GitHubCodespaces)
+	}
+
+	untrustedDelete := true
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: &fileGitHubCodespacesConfig{
+		DeleteOnRelease: &untrustedDelete,
+	}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "github-codespaces") {
+		t.Fatalf("untrusted deletion policy replaced trusted retention: %#v", cfg.GitHubCodespaces)
 	}
 }
 

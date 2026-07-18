@@ -438,6 +438,20 @@
     "auth": "Broker-owned credentials through coordinator, or Google ADC / gcloud / GOOGLE_APPLICATION_CREDENTIALS in direct mode",
     "docs": "gcp.md"
   },
+  "github-codespaces": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "GitHub Codespace",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "GitHub Codespaces",
+    "cleanup": "delete or stop claim-owned Codespace",
+    "bestFit": "Repository-backed Linux devcontainer over SSH",
+    "caveat": "Requires gh auth, Codespaces quota, and an SSH-enabled devcontainer",
+    "docs": "github-codespaces.md"
+  },
   "hetzner": {
     "status": "built-in",
     "category": "brokerable-cloud",

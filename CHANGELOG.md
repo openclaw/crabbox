@@ -28,6 +28,7 @@
 - Added experimental read-only CUA diagnostics and existing-sandbox inventory while failing all remote lifecycle mutations closed until upstream exposes safe creation and deletion ownership primitives. Thanks @coygeek.
 - Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
 - Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
+- Added GitHub Codespaces direct Linux SSH leases with token-scope preflight, repository and machine selection, durable pre-create recovery, exact claim-bound ownership, generated OpenSSH configuration, and guarded lifecycle smoke coverage. Thanks @coygeek.
 
 ### Fixed
 
@@ -44,6 +45,7 @@
 - Closed code-server WebSockets whose upstream dial completes after bridge shutdown, preventing orphaned connections and reader goroutines. Thanks @anagnorisis2peripeteia.
 - Stopped failed runs' telemetry samplers promptly so long-lived CLI processes do not retain ticker goroutines or continue probing released leases. Thanks @anagnorisis2peripeteia.
 - Preserved WebVNC reconnect attempt state across consecutive connection failures so retry delays increase instead of repeatedly hammering the coordinator. Thanks @anagnorisis2peripeteia.
+- Prevented repository-local configuration from retaining billable GitHub Codespaces or overriding trusted lifetime and deletion policy. Thanks @coygeek.
 
 ## 0.38.4 - 2026-07-16
 

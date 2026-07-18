@@ -1430,6 +1430,10 @@ if has_provider opensandbox; then
   "$root/scripts/live-opensandbox-smoke.sh"
 fi
 
+if has_provider github-codespaces || has_provider codespaces || has_provider gh-codespaces; then
+  "$root/scripts/live-github-codespaces-smoke.sh"
+fi
+
 if has_provider cua; then
   "$root/scripts/live-cua-smoke.sh"
 fi

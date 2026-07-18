@@ -519,6 +519,30 @@ func TestCodeSandboxRegistersCanonicalAndAliases(t *testing.T) {
 	}
 }
 
+func TestGitHubCodespacesRegistersCanonicalAndAliases(t *testing.T) {
+	for _, name := range []string{"github-codespaces", "codespaces", "gh-codespaces"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "github-codespaces" {
+			t.Fatalf("ProviderFor(%q).Name=%q want github-codespaces", name, provider.Name())
+		}
+	}
+	spec := mustProvider(t, "github-codespaces").Spec()
+	if spec.Family != "github-codespaces" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("github-codespaces spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("github-codespaces targets=%#v", spec.Targets)
+	}
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("github-codespaces features=%v missing %s", spec.Features, feature)
+		}
+	}
+}
+
 func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	provider, err := core.ProviderFor("incus")
 	if err != nil {
@@ -1303,6 +1327,7 @@ func allBuiltInProviderNames() []string {
 		"firecracker",
 		"freestyle",
 		"gcp",
+		"github-codespaces",
 		"hetzner",
 		"hostinger",
 		"hyperv",

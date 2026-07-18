@@ -82,6 +82,8 @@ SSH-lease providers:
 - DigitalOcean Droplets: `internal/providers/digitalocean`, with config glue in `internal/cli/config.go`
 - Vultr instances: `internal/providers/vultr`, with config glue in `internal/cli/config.go`
 - OVHcloud Public Cloud: `internal/providers/ovh`, with config glue in `internal/cli/config.go`
+- GitHub Codespaces: `internal/providers/githubcodespaces`, with config glue
+  and env overrides in `internal/cli/config.go`
 - Parallels (macOS VM host): `internal/providers/parallels`, with CLI helpers in `internal/cli/parallels.go`
 - Proxmox VE: `internal/providers/proxmox`, with CLI helpers in `internal/cli/proxmox.go`
 - XCP-ng (`xcp-ng`): `internal/providers/xcpng`
@@ -254,5 +256,5 @@ Provider docs:
 - Credential-free GoReleaser archive config: `.goreleaser.yaml`
 - Local signing, draft, publication, and downstream proof contract: `docs/RELEASING.md`, `scripts/package-release.sh`, `scripts/create-release-draft.sh`, `scripts/publish-release.sh`, `scripts/verify-homebrew-release.sh`
 - Docs command-surface check, link check, site builder, and Pages deploy: `scripts/check-command-docs.mjs`, `scripts/check-docs-links.mjs`, `scripts/build-docs-site.mjs`, `.github/workflows/pages.yml`
-- Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-cua-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-vultr-smoke.sh`, `scripts/live-vast-smoke.sh`, and `scripts/live-superserve-smoke.sh`
+- Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-cua-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-github-codespaces-smoke.sh`, `scripts/live-vultr-smoke.sh`, `scripts/live-vast-smoke.sh`, and `scripts/live-superserve-smoke.sh`
 - Live coordinator auth smoke coverage: `scripts/live-auth-smoke.sh`

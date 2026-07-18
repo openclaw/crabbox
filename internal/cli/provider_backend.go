@@ -32,6 +32,18 @@ type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
 
+// ProviderConfigDefaulter owns provider-specific defaults that must be applied
+// after generic config parsing and before target validation.
+type ProviderConfigDefaulter interface {
+	ApplyConfigDefaults(cfg *Config) error
+}
+
+// ProviderClaimScoper contributes opaque routing identity to local claims.
+// Core persists and compares the value without interpreting provider fields.
+type ProviderClaimScoper interface {
+	ClaimScope(cfg Config) string
+}
+
 // ProviderDiagnosticSecretSource contributes runtime-only credentials to the
 // final diagnostic redaction pass. Providers should include every credential
 // source that is intentionally absent from Config, including local CLI stores.

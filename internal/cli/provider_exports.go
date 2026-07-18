@@ -266,6 +266,18 @@ func UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected LeaseClai
 	return updateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, server, target, action)
 }
 
+func WithLeaseClaimUnchanged(leaseID string, expected LeaseClaim, action func() error) error {
+	return withLeaseClaimUnchanged(leaseID, expected, action)
+}
+
+func UpdateLeaseClaimEndpointIfUnchangedAction(
+	leaseID string,
+	expected LeaseClaim,
+	action func() (Server, SSHTarget, bool, error),
+) (LeaseClaim, Server, SSHTarget, error) {
+	return updateLeaseClaimEndpointIfUnchangedAction(leaseID, expected, action)
+}
+
 func UpdateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
 	return updateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
 }
@@ -432,6 +444,10 @@ func SetTencentCloudTypeExplicit(cfg *Config) {
 
 func CrabboxStateDir() (string, error) {
 	return crabboxStateDir()
+}
+
+func EnsureCrabboxClaimNamespaceDurable() error {
+	return ensureCrabboxClaimNamespaceDurable()
 }
 
 func DirectLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {

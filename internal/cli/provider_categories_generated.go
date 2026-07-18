@@ -33,6 +33,7 @@ var benchmarkProviderCategories = map[string]string{
 	"firecracker":                "self-hosted-virtualization",
 	"freestyle":                  "delegated-sandbox",
 	"gcp":                        "brokerable-cloud",
+	"github-codespaces":          "direct-cloud",
 	"hetzner":                    "brokerable-cloud",
 	"hostinger":                  "direct-cloud",
 	"hyperv":                     "local-vm",

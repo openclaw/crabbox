@@ -21,6 +21,18 @@ import (
 
 const powerShellEncodedCommandPrefix = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
 
+func TestApplyTargetChildEnvironmentAddsOverridesAndRemovesAmbientValue(t *testing.T) {
+	cmd := &exec.Cmd{Env: []string{"PATH=/bin", "GH_HOST=ambient.example"}}
+	applyTargetChildEnvironment(cmd, SSHTarget{
+		ChildEnvDenylist: []string{"DENIED_VALUE"},
+		ChildEnv:         map[string]string{"GH_HOST": "octocorp.ghe.com", "INVALID=NAME": "ignored"},
+	})
+	joined := strings.Join(cmd.Env, "\n")
+	if strings.Count(joined, "GH_HOST=") != 1 || !strings.Contains(joined, "GH_HOST=octocorp.ghe.com") || strings.Contains(joined, "ambient.example") || strings.Contains(joined, "INVALID=NAME") {
+		t.Fatalf("env=%q", cmd.Env)
+	}
+}
+
 func TestExternalMacTargetScrubsDesktopPasswordFromSSHChild(t *testing.T) {
 	cfg := Config{Provider: "external", TargetOS: targetMacOS}
 	cfg.External.Connection.Desktop.PasswordEnv = "TEST_ARD_PASSWORD"
