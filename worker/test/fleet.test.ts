@@ -925,13 +925,13 @@ describe("runtime adapter relay", () => {
 
   it("revalidates active GitHub-admin backend agents against the user grant", async () => {
     const env = {
-      CRABBOX_GITHUB_ADMIN_LOGINS: "alice",
+      CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner,
       CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
     } as Env;
     const currentGrantVersion = await adminGrantVersion(env);
     const grant = {
       auth: "github" as const,
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: true,
       login: "alice",
@@ -1295,7 +1295,7 @@ describe("runtime adapter relay", () => {
       storage.seed(`lease:${lease.id}`, lease);
     }
     const currentGrantVersion = await adminGrantVersion({
-      CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+      CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner,
     });
     const revoked = ["egress-host", "egress-client"].map(
       (kind) =>
@@ -1322,7 +1322,7 @@ describe("runtime adapter relay", () => {
           kind,
           leaseID: adminLease.id,
           sessionID: "egress_admin",
-          owner: "admin@example.com",
+          owner: testGitHubOwner,
           org: "other-org",
           admin: true,
           auth: "github",
@@ -1337,7 +1337,7 @@ describe("runtime adapter relay", () => {
       } as unknown as DurableObjectState,
       {
         CRABBOX_DEFAULT_ORG: "default-org",
-        CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+        CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner,
       } as Env,
     );
 
@@ -1437,7 +1437,7 @@ describe("runtime adapter relay", () => {
     const currentGitHubControl = new FakeWebSocket({
       kind: "control",
       clientID: "control-current-github-admin",
-      owner: "current-admin@example.com",
+      owner: testGitHubOwner,
       org: "other-org",
       admin: true,
       auth: "github",
@@ -2061,13 +2061,13 @@ describe("runtime adapter relay", () => {
     storage.seed(`lease:${lease.id}`, lease);
     const env = {
       CRABBOX_DEFAULT_ORG: "example-org",
-      CRABBOX_GITHUB_ADMIN_LOGINS: "alice",
+      CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner,
       CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
     } as Env;
     const currentGrantVersion = await adminGrantVersion(env);
     const grant = {
       auth: "github" as const,
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: true,
       login: "alice",
@@ -20262,7 +20262,7 @@ describe("fleet lease identity and idle", () => {
 
   it("rejects bridge tickets whose cached admin grant was revoked", async () => {
     const storage = new MemoryStorage();
-    const fleet = testFleet(storage, {}, { CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin" });
+    const fleet = testFleet(storage, {}, { CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner });
     const leaseID = "cbx_000000000001";
     storage.seed(
       `lease:${leaseID}`,
@@ -27042,6 +27042,54 @@ describe("fleet identity", () => {
     expect(cookie).not.toContain("Domain=");
   });
 
+  it("does not transfer durable ownership when a verified email moves between accounts", async () => {
+    const storage = new MemoryStorage();
+    const fleet = githubLoginTestFleet(storage);
+    const env = (fleet as unknown as { env: Env }).env;
+    env.CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS = "0";
+    const sharedEmail = [{ email: "reassigned@example.com", primary: true, verified: true }];
+    const login = async (accountID: number): Promise<string> => {
+      const start = await fleet.fetch(request("GET", "/portal/login"));
+      const state = new URL(start.headers.get("location") ?? "").searchParams.get("state");
+      expect(state).toBeTruthy();
+      vi.stubGlobal("fetch", githubFetchMock({ member: true, accountID, emails: sharedEmail }));
+      const callback = await fleet.fetch(
+        request("GET", `/v1/auth/github/callback?code=ok&state=${state}`, {
+          headers: { cookie: portalOAuthCookieFromLogin(start) },
+        }),
+      );
+      expect(callback.status).toBe(302);
+      return cookiePairFromResponse(callback, "__Host-crabbox_session");
+    };
+    const throughCoordinator = async (token: string): Promise<Response> =>
+      await routeCoordinatorRequest(
+        new Request("https://crabbox.test/v1/leases/cbx_000000000001", {
+          headers: { authorization: `Bearer ${token}` },
+        }),
+        env,
+        async (prepared) => await fleet.fetch(prepared),
+      );
+
+    const originalCookie = await login(12345);
+    const originalToken = decodeURIComponent(originalCookie.split("=", 2)[1] ?? "");
+    expect(decodeUserTokenPayload(originalToken).owner).toBe("github:12345");
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "github:12345",
+        org: "openclaw",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    expect((await throughCoordinator(originalToken)).status).toBe(200);
+
+    const reassignedCookie = await login(67890);
+    const reassignedToken = decodeURIComponent(reassignedCookie.split("=", 2)[1] ?? "");
+    expect(decodeUserTokenPayload(reassignedToken).owner).toBe("github:67890");
+    expect((await throughCoordinator(reassignedToken)).status).toBe(404);
+  });
+
   it.each([
     ["CRLF", "/portal/leases/cbx_1/vnc%0d%0aSet-Cookie:%20oops"],
     ["CR", "/portal/leases/cbx_1/vnc%0dSet-Cookie:%20oops"],
@@ -27941,6 +27989,12 @@ function portalOAuthCookieFromLogin(response: Response): string {
   if (!cookie) {
     throw new Error("missing portal OAuth browser binding cookie");
   }
+  return cookie.split(";", 1)[0] ?? "";
+}
+
+function cookiePairFromResponse(response: Response, name: string): string {
+  const cookie = setCookieHeaders(response).find((value) => value.startsWith(`${name}=`));
+  if (!cookie) throw new Error(`missing ${name} cookie`);
   return cookie.split(";", 1)[0] ?? "";
 }
 

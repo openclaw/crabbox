@@ -134,7 +134,7 @@ async function requireExactGitHubAccount(
   }
 }
 
-function githubAccountID(owner: string): number | undefined {
+export function githubAccountID(owner: string): number | undefined {
   const match = /^github:([1-9][0-9]*)$/.exec(owner.trim().toLowerCase());
   if (!match) return undefined;
   const value = Number(match[1]);

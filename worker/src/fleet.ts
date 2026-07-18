@@ -16338,10 +16338,7 @@ function copyBridgeGrant(principal: CachedBridgeGrant): CachedBridgeGrant {
   };
 }
 
-type AdminGrantEnv = Pick<
-  Env,
-  "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS" | "CRABBOX_GITHUB_ADMIN_LOGINS"
->;
+type AdminGrantEnv = Pick<Env, "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS">;
 
 interface AdminGrantValidation {
   env: AdminGrantEnv;
@@ -16377,7 +16374,7 @@ function cachedAdminGrantIsCurrent(
     typeof principal.owner === "string" &&
     typeof principal.login === "string"
   ) {
-    return githubUserIsAdmin({ owner: principal.owner, login: principal.login }, validation.env);
+    return githubUserIsAdmin({ owner: principal.owner }, validation.env);
   }
   if (
     principal.auth === "bearer" &&
