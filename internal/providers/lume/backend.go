@@ -281,8 +281,6 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if err := b.cloneVM(ctx, cfg, name); err != nil {
 		return LeaseTarget{}, errors.Join(exit(5, "Lume clone result for %q is ambiguous; inspect the destination before removing it", name), err)
 	}
-	// Capture identity directly from the exact clone destination before any
-	// inventory lookup can adopt a later same-name VM.
 	cfg.Lume.Storage = cloneStorage
 	labels["storage"] = cloneStorage
 	labels["storage_exact"] = "true"
@@ -1020,7 +1018,6 @@ func (b *backend) waitForRunningVM(ctx context.Context, cfg Config, name string,
 		if err == nil && strings.EqualFold(strings.TrimSpace(inst.OS), targetMacOS) && normalizedState(inst.Status) != "stopped" && normalizedState(inst.Status) != "missing" {
 			onVisible()
 		}
-		// Lume's sshAvailable can be false while authenticated SSH works.
 		if err == nil && instanceRunning(inst.Status) && inst.IPAddress != "" {
 			return inst, nil
 		}
@@ -1231,7 +1228,6 @@ func isLumeNotFoundError(err error) bool {
 }
 
 func (b *backend) activeMacOSGuestCount(ctx context.Context, cfg Config) (int, error) {
-	// Capacity is host-wide across Lume storage locations.
 	cfg.Lume.Storage = ""
 	instances, err := b.listInstancesForConfig(ctx, cfg)
 	if err != nil {
@@ -1338,7 +1334,6 @@ func (b *backend) getInstance(ctx context.Context, cfg Config, name string) (lum
 }
 
 func parseLumeVMs(output string) ([]lumeVM, error) {
-	// Skip Lume informational lines before the VM JSON array.
 	for offset := 0; offset < len(output); {
 		next := strings.IndexByte(output[offset:], '[')
 		if next < 0 {
@@ -1432,7 +1427,6 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst lumeVM, cla
 	target.FallbackPorts = nil
 	target.TargetOS = targetMacOS
 	target.ReadyCheck = "uname -s | grep -qx Darwin && test -d \"$HOME\""
-	// Use OpenSSH readiness; sandboxing can block Go's TCP preflight.
 	target.SSHConfigProxy = true
 	if claim.LeaseID != "" {
 		if err := core.UseLeaseKnownHosts(&target, claim.LeaseID); err != nil {
@@ -1604,12 +1598,10 @@ func recoverPendingLaunchOwner(claim core.LeaseClaim) (lumeRunOwner, error) {
 			}
 			marker := "crabbox-lume-launch-" + token
 			if !strings.Contains(command, marker) {
-				// Recycled PID; the closed gate kept Lume from starting.
 				return lumeRunOwner{}, nil
 			}
 			startAfter, startAfterErr := core.LocalProcessStartIdentity(pid)
 			if startBeforeErr != nil || startAfterErr != nil || strings.TrimSpace(startBefore) == "" || startBefore != startAfter {
-				// Changed process; the launch gate remains closed.
 				return lumeRunOwner{}, nil
 			}
 			bootIdentity, bootErr := core.LocalProcessBootIdentity()
@@ -1622,7 +1614,6 @@ func recoverPendingLaunchOwner(claim core.LeaseClaim) (lumeRunOwner, error) {
 			return lumeRunOwner{}, exit(5, "inspect pending Lume launch owner for lease %s: %v", claim.LeaseID, readErr)
 		}
 		if time.Now().After(deadline) {
-			// No handoff means the gate never allowed Lume to run.
 			return lumeRunOwner{}, nil
 		}
 		time.Sleep(25 * time.Millisecond)

@@ -19,10 +19,7 @@ func TestQuarantineDeletePreservesRacedReplacement(t *testing.T) {
 	defer dir.Close()
 	originalInfo, err := dir.Stat()
 	mustNoError(t, err)
-	config, err := os.Open(filepath.Join(vmPath, "config.json"))
-	mustNoError(t, err)
-	defer config.Close()
-	originalConfigInfo, err := config.Stat()
+	configInfo, err := os.Stat(filepath.Join(vmPath, "config.json"))
 	mustNoError(t, err)
 	expectedID, err := lumeVMImmutableIDAtPath(vmPath, name)
 	mustNoError(t, err)
@@ -30,7 +27,7 @@ func TestQuarantineDeletePreservesRacedReplacement(t *testing.T) {
 	mustNoError(t, os.Rename(vmPath, originalPath))
 	writeLumeVMConfig(t, home, name, "cmVwbGFjZW1lbnQ=")
 
-	err = quarantineAndDeleteLumeVM(vmPath, originalInfo, originalConfigInfo, expectedID, name)
+	err = quarantineAndDeleteLumeVM(vmPath, originalInfo, configInfo, expectedID, name)
 	if err == nil || !strings.Contains(err.Error(), "directory changed") {
 		t.Fatalf("raced deletion error=%v", err)
 	}

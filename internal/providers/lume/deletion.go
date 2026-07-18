@@ -12,7 +12,7 @@ import (
 func deleteClaimedVMDirectory(cfg Config, name, expectedID string) error {
 	expectedID = strings.TrimSpace(expectedID)
 	if expectedID == "" {
-		return exit(5, "refusing to delete Lume VM %q without an immutable machine identity", name)
+		return exit(5, "refusing Lume delete %q without immutable identity", name)
 	}
 	if filepath.Base(name) != name || name == "." || name == ".." {
 		return exit(5, "refusing unsafe Lume VM name %q", name)
@@ -24,21 +24,21 @@ func deleteClaimedVMDirectory(cfg Config, name, expectedID string) error {
 	vmPath := filepath.Join(root, name)
 	dir, err := os.Open(vmPath)
 	if err != nil {
-		return exit(5, "open Lume VM %s for deletion: %v", name, err)
+		return exit(5, "open Lume VM %s: %v", name, err)
 	}
 	defer dir.Close()
 	dirInfo, err := dir.Stat()
 	if err != nil || !dirInfo.IsDir() {
-		return exit(5, "inspect Lume VM directory for %s: %v", name, err)
+		return exit(5, "inspect Lume VM %s: %v", name, err)
 	}
 	config, err := os.Open(filepath.Join(vmPath, "config.json"))
 	if err != nil {
-		return exit(5, "open Lume VM identity for %s: %v", name, err)
+		return exit(5, "open Lume identity %s: %v", name, err)
 	}
 	defer config.Close()
 	locked, err := tryExclusiveFileLock(config)
 	if err != nil {
-		return exit(5, "lock Lume VM %s for deletion: %v", name, err)
+		return exit(5, "lock Lume VM %s: %v", name, err)
 	}
 	if !locked {
 		return exit(5, "refusing to delete running Lume VM %s", name)
@@ -54,12 +54,12 @@ func deleteClaimedVMDirectory(cfg Config, name, expectedID string) error {
 func quarantineAndDeleteLumeVM(vmPath string, openedInfo, openedConfigInfo os.FileInfo, expectedID, name string) error {
 	quarantineRoot, err := os.MkdirTemp(filepath.Dir(vmPath), ".crabbox-delete-")
 	if err != nil {
-		return exit(5, "create Lume deletion quarantine for %s: %v", name, err)
+		return exit(5, "create Lume delete quarantine %s: %v", name, err)
 	}
 	quarantined := filepath.Join(quarantineRoot, name)
 	if err := os.Rename(vmPath, quarantined); err != nil {
 		_ = os.Remove(quarantineRoot)
-		return exit(5, "quarantine Lume VM %s for deletion: %v", name, err)
+		return exit(5, "quarantine Lume VM %s: %v", name, err)
 	}
 	refuse := func(reason string) error {
 		return restoreQuarantinedLumeVM(vmPath, quarantined, quarantineRoot, name, reason)
@@ -81,10 +81,10 @@ func quarantineAndDeleteLumeVM(vmPath string, openedInfo, openedConfigInfo os.Fi
 		return refuse(reason)
 	}
 	if err := os.RemoveAll(quarantined); err != nil {
-		return exit(5, "delete quarantined Lume VM %s: %v", name, err)
+		return exit(5, "delete Lume VM %s: %v", name, err)
 	}
 	if err := os.Remove(quarantineRoot); err != nil {
-		return exit(5, "remove Lume deletion quarantine for %s: %v", name, err)
+		return exit(5, "remove Lume quarantine %s: %v", name, err)
 	}
 	return nil
 }

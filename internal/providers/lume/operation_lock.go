@@ -23,9 +23,6 @@ func newLumeCapacitySemaphore() *lumeCapacitySemaphore {
 	return semaphore
 }
 
-// lockLumeCapacity serializes the host-wide check-and-start boundary across
-// Crabbox processes. Apple permits at most two concurrent macOS guests per
-// Apple-branded host, regardless of Lume storage location.
 func lockLumeCapacity(ctx context.Context) (func(), error) {
 	stateDir, err := core.CrabboxStateDir()
 	if err != nil {
