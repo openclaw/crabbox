@@ -505,15 +505,16 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		if instanceRunning(inst.Status) && req.GuardedRemoteCleanup != nil {
 			cleanupLease, prepareErr := b.prepareLease(ctx, cfg, inst, claim, false)
 			if prepareErr != nil {
-				return prepareErr
+				fmt.Fprintf(b.rt.Stderr, "warning: skipping guarded remote cleanup for Lume VM %s: %v\n", name, prepareErr)
+			} else {
+				req.GuardedRemoteCleanup(ctx, cleanupLease)
 			}
-			req.GuardedRemoteCleanup(ctx, cleanupLease)
 			current, currentOK, claimErr := resolveLeaseClaimForProvider(lease.LeaseID)
 			if claimErr != nil {
 				return claimErr
 			}
 			if !currentOK || instanceNameFromClaim(current) != name {
-				return exit(4, "refusing to stop Lume VM %q after its lease claim changed during remote cleanup", name)
+				return exit(4, "refusing to stop Lume VM %q after its lease claim changed during cleanup preparation", name)
 			}
 			claim = current
 			cfg = configForClaim(b.configForRun(), claim)

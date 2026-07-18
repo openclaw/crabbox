@@ -7500,9 +7500,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			if file.Lume.Storage != "" {
 				cfg.Lume.Storage = file.Lume.Storage
 			}
-		}
-		if file.Lume.User != "" {
-			cfg.Lume.User = file.Lume.User
+			if file.Lume.User != "" {
+				cfg.Lume.User = file.Lume.User
+			}
 		}
 		if file.Lume.WorkRoot != "" {
 			cfg.Lume.WorkRoot = file.Lume.WorkRoot

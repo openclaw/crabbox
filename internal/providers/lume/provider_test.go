@@ -583,6 +583,7 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 	const originalMachineID = "bHVtZS1tYWNoaW5lLW9yaWdpbmFs"
 	writeLumeVMConfig(t, home, name, originalMachineID)
 	vmExists := true
+	vmRunning := false
 	runner := &recordingRunner{}
 	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) == 0 {
@@ -591,14 +592,25 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 		switch req.Args[0] {
 		case "ls":
 			if vmExists {
-				return core.LocalCommandResult{Stdout: `[{"name":"crabbox-release-1234","os":"macOS","status":"stopped","locationName":"home"}]`}, nil, true
+				status := "stopped"
+				if vmRunning {
+					status = "running"
+				}
+				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":"crabbox-release-1234","os":"macOS","status":%q,"locationName":"home"}]`, status)}, nil, true
 			}
 			return core.LocalCommandResult{Stdout: `[]`}, nil, true
 		case "get":
 			if vmExists {
-				return core.LocalCommandResult{Stdout: `[{"name":"crabbox-release-1234","os":"macOS","status":"stopped","locationName":"home"}]`}, nil, true
+				status := "stopped"
+				if vmRunning {
+					status = "running"
+				}
+				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":"crabbox-release-1234","os":"macOS","status":%q,"locationName":"home"}]`, status)}, nil, true
 			}
 			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: crabbox-release-1234"}, errors.New("exit status 1"), true
+		case "stop":
+			vmRunning = false
+			return core.LocalCommandResult{}, nil, true
 		case "delete":
 			vmExists = false
 			return core.LocalCommandResult{}, nil, true
@@ -641,8 +653,13 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 		t.Fatalf("claim after replacement refusal ok=%v err=%v", ok, err)
 	}
 	writeLumeVMConfig(t, home, name, originalMachineID)
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+	vmRunning = true
+	remoteCleanupCalled := false
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) { remoteCleanupCalled = true }}); err != nil {
 		t.Fatalf("claimed release: %v", err)
+	}
+	if remoteCleanupCalled {
+		t.Fatal("guarded cleanup ran without a prepared SSH endpoint")
 	}
 	if vmExists {
 		t.Fatal("claimed VM was not deleted")

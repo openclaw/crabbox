@@ -7637,7 +7637,7 @@ func TestLumeHostLifecycleConfigRequiresTrustedFile(t *testing.T) {
 		Base:     "credentialed-personal-vm",
 		Storage:  "other-storage",
 		User:     "repo-user",
-		WorkRoot: "/Users/repo-user/work",
+		WorkRoot: "/Users/trusted-user/repo-work",
 	}}
 	if err := applyFileConfigWithTrust(&cfg, untrusted, false); err != nil {
 		t.Fatal(err)
@@ -7645,7 +7645,7 @@ func TestLumeHostLifecycleConfigRequiresTrustedFile(t *testing.T) {
 	if cfg.Lume.CLIPath != "/opt/homebrew/bin/lume" || cfg.Lume.Base != "trusted-golden" || cfg.Lume.Storage != "trusted-storage" {
 		t.Fatalf("untrusted repo config changed host lifecycle selection: %#v", cfg.Lume)
 	}
-	if cfg.Lume.User != "repo-user" || cfg.Lume.WorkRoot != "/Users/repo-user/work" {
-		t.Fatalf("safe guest settings were not applied: %#v", cfg.Lume)
+	if cfg.Lume.User != "trusted-user" || cfg.Lume.WorkRoot != "/Users/trusted-user/repo-work" {
+		t.Fatalf("bootstrap user trust boundary was not preserved: %#v", cfg.Lume)
 	}
 }

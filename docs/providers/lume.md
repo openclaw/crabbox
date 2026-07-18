@@ -30,7 +30,8 @@ network SSH. Keep credentials and personal keychains out of the base.
 | `--lume-work-root` | `/Users/lume/crabbox` | Guest work root |
 
 Use trusted user config, `CRABBOX_LUME_*` variables, or flags. Repository config
-cannot set host selectors. Paths and `ephemeral` are existing-lease-only.
+cannot select the host, base, storage, or bootstrap user. Paths and `ephemeral`
+are existing-lease-only.
 
 ## Lifecycle
 
