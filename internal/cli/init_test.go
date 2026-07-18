@@ -251,6 +251,131 @@ func TestInitProjectPreflightsEveryTargetBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestInitProjectRejectsAliasedSkillPathsBeforeWriting(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		paths []string
+	}{
+		{
+			name:  "case-only alias",
+			setup: func(_ *testing.T, _ string) {},
+			paths: []string{
+				".agents/skills/crabbox/SKILL.md",
+				".AGENTS/skills/crabbox/SKILL.md",
+			},
+		},
+		{
+			name: "symlinked root",
+			setup: func(t *testing.T, dir string) {
+				agentsSkills := filepath.Join(dir, ".agents", "skills")
+				if err := os.MkdirAll(agentsSkills, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				claudeDir := filepath.Join(dir, ".claude")
+				if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join("..", ".agents", "skills"), filepath.Join(claudeDir, "skills")); err != nil {
+					t.Skipf("create skill-root symlink: %v", err)
+				}
+			},
+			paths: []string{
+				".agents/skills/crabbox/SKILL.md",
+				".claude/skills/crabbox/SKILL.md",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			oldwd, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(dir); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(oldwd) })
+			test.setup(t, dir)
+
+			app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+			err = app.Run(context.Background(), []string{
+				"init",
+				"--skill", test.paths[0],
+				"--skill", test.paths[1],
+			})
+			if err == nil || !strings.Contains(err.Error(), "init target path is repeated") {
+				t.Fatalf("init error=%v, want repeated target error", err)
+			}
+			for _, path := range []string{
+				".crabbox.yaml",
+				".github/workflows/crabbox.yml",
+				test.paths[0],
+			} {
+				if _, statErr := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(statErr) {
+					t.Fatalf("init wrote %s before rejecting aliases: %v", path, statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestInitProjectRejectsHardLinkedTargetsBeforeForceWriting(t *testing.T) {
+	dir := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+
+	paths := []string{
+		".agents/skills/crabbox/SKILL.md",
+		".claude/skills/crabbox/SKILL.md",
+	}
+	first := filepath.Join(dir, paths[0])
+	second := filepath.Join(dir, paths[1])
+	if err := os.MkdirAll(filepath.Dir(first), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(second), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const original = "existing skill\n"
+	if err := os.WriteFile(first, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(first, second); err != nil {
+		t.Skipf("create hard-linked skill target: %v", err)
+	}
+
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	err = app.Run(context.Background(), []string{
+		"init", "--force",
+		"--skill", paths[0],
+		"--skill", paths[1],
+	})
+	if err == nil || !strings.Contains(err.Error(), "init target path is repeated") {
+		t.Fatalf("init error=%v, want repeated target error", err)
+	}
+	for _, path := range []string{".crabbox.yaml", ".github/workflows/crabbox.yml"} {
+		if _, statErr := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(statErr) {
+			t.Fatalf("init wrote %s before rejecting hard links: %v", path, statErr)
+		}
+	}
+	for _, path := range paths {
+		data, readErr := os.ReadFile(filepath.Join(dir, path))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(data) != original {
+			t.Fatalf("init changed %s before rejecting hard links: %q", path, data)
+		}
+	}
+}
+
 func TestInitProjectDetectsRepoCommands(t *testing.T) {
 	dir := t.TempDir()
 	oldwd, err := os.Getwd()

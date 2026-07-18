@@ -110,6 +110,11 @@ generatedTest("generated site publishes Agent Skill and AI Catalog discovery", (
     readGenerated("index.html"),
     /<link rel="ai-catalog" href="\/\.well-known\/ai-catalog\.json" type="application\/ai-catalog\+json">/,
   );
+  assert.match(
+    fs.readFileSync(path.join(repoRoot, ".github", "workflows", "pages.yml"), "utf8"),
+    /actions\/upload-pages-artifact@[^\n]+\n\s+with:\n\s+path: dist\/docs-site\n\s+include-hidden-files: true/,
+    "Pages artifact must include the generated .well-known directory",
+  );
 });
 
 generatedTest("generated navigation includes every integration page exactly once", () => {

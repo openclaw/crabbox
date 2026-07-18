@@ -34,32 +34,41 @@ func (a App) initProject(_ context.Context, args []string) error {
 		{Path: filepath.Join(repo.Root, *config), Content: projectConfigTemplate(repo.Name, detected)},
 		{Path: filepath.Join(repo.Root, *workflow), Content: workflowTemplate()},
 	}
-	if filepath.Clean(files[0].Path) == filepath.Clean(files[1].Path) {
-		return exit(2, "init target path is repeated: %s", files[0].Path)
-	}
-	seenPaths := map[string]struct{}{
-		filepath.Clean(files[0].Path): {},
-		filepath.Clean(files[1].Path): {},
-	}
 	for _, skillPath := range skillPaths {
 		clean, err := normalizeInitSkillPath(skillPath)
 		if err != nil {
 			return err
 		}
 		fullPath := filepath.Join(repo.Root, clean)
-		if _, exists := seenPaths[filepath.Clean(fullPath)]; exists {
-			return exit(2, "init target path is repeated: %s", fullPath)
-		}
-		seenPaths[filepath.Clean(fullPath)] = struct{}{}
 		files = append(files, initGeneratedFile{Path: fullPath, Content: skillTemplate(detected)})
 	}
-	if !*force {
-		for _, file := range files {
-			if _, err := os.Lstat(file.Path); err == nil {
-				return exit(2, "%s already exists; use --force to overwrite", file.Path)
-			} else if !os.IsNotExist(err) {
-				return exit(2, "inspect %s: %v", file.Path, err)
+	seenPaths := make(map[string]struct{}, len(files))
+	var existingTargets []os.FileInfo
+	for _, file := range files {
+		canonical, err := canonicalInitTargetPath(file.Path)
+		if err != nil {
+			return exit(2, "inspect %s: %v", file.Path, err)
+		}
+		// Treat case-only variants as aliases on every platform. Generated target
+		// paths are conventional names, so two variants are always accidental.
+		key := strings.ToLower(filepath.ToSlash(canonical))
+		if _, exists := seenPaths[key]; exists {
+			return exit(2, "init target path is repeated: %s", file.Path)
+		}
+		seenPaths[key] = struct{}{}
+		info, err := os.Stat(file.Path)
+		if err == nil {
+			for _, existing := range existingTargets {
+				if os.SameFile(info, existing) {
+					return exit(2, "init target path is repeated: %s", file.Path)
+				}
 			}
+			existingTargets = append(existingTargets, info)
+			if !*force {
+				return exit(2, "%s already exists; use --force to overwrite", file.Path)
+			}
+		} else if !os.IsNotExist(err) {
+			return exit(2, "inspect %s: %v", file.Path, err)
 		}
 	}
 	for _, file := range files {
@@ -92,6 +101,34 @@ func normalizeInitSkillPath(skillPath string) (string, error) {
 		return "", exit(2, "--skill must end in crabbox%cSKILL.md so the directory matches the declared skill name", filepath.Separator)
 	}
 	return clean, nil
+}
+
+func canonicalInitTargetPath(target string) (string, error) {
+	current, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	var missing []string
+	for {
+		if _, err := os.Lstat(current); err == nil {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", err
+			}
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("no existing ancestor for %s", target)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func writeInitFile(path, content string, force bool) error {
