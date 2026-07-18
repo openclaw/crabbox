@@ -3391,45 +3391,18 @@ test("lume live smoke uses the generic SSH lease lifecycle", () => {
     fakeCrabbox,
     `#!/usr/bin/env bash
 set -euo pipefail
-case "$1" in
-  warmup|status|inspect|ssh|cache|run|history|stop)
-    if [[ "\${CRABBOX_PROVIDER:-}" != "lume" ]]; then
-      printf 'missing lume provider environment for: %s\\n' "$*" >&2
-      exit 97
-    fi
-    ;;
-esac
+[[ "\${CRABBOX_PROVIDER:-}" == lume ]] || exit 97
 printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
 case "$1" in
-  warmup)
-    printf 'provisioning provider=lume lease=cbx_123456789abc slug=lume-smoke-test\\n'
-    printf 'provisioned lease=cbx_123456789abc slug=lume-smoke-test state=ready\\n'
-    ;;
-  status)
-    printf 'lease=cbx_123456789abc slug=lume-smoke-test provider=lume state=ready ready=true\\n'
-    ;;
-  inspect)
-    printf '{"id":"cbx_123456789abc","slug":"lume-smoke-test","provider":"lume","state":"ready","serverType":"crabbox-macos-golden","host":"127.0.0.1","ready":true,"lastTouchedAt":"2026-07-17T00:00:00Z","expiresAt":"2026-07-17T00:30:00Z"}\\n'
-    ;;
-  ssh)
-    exit 0
-    ;;
-  cache)
-    printf '[]\\n'
-    ;;
-  run)
-    printf 'crabbox-live-ok\\n'
-    ;;
-  history)
-    printf 'history ok\\n'
-    ;;
-  stop)
-    printf 'stopped %s\\n' "\${*: -1}"
-    ;;
-  *)
-    printf 'unexpected crabbox args: %s\\n' "$*" >&2
-    exit 99
-    ;;
+  warmup) printf 'provisioned lease=cbx_123456789abc slug=lume-smoke-test state=ready\\n' ;;
+  status) printf 'lease=cbx_123456789abc slug=lume-smoke-test provider=lume state=ready ready=true\\n' ;;
+  inspect) printf '{"id":"cbx_123456789abc","slug":"lume-smoke-test","provider":"lume","state":"ready","host":"127.0.0.1","ready":true}\\n' ;;
+  ssh) ;;
+  cache) printf '[]\\n' ;;
+  run) printf 'crabbox-live-ok\\n' ;;
+  history) printf 'history ok\\n' ;;
+  stop) printf 'stopped\\n' ;;
+  *) exit 99 ;;
 esac
 `,
   );

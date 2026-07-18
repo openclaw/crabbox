@@ -31,7 +31,7 @@ func TestStartVMReapsOwnerWhenPersistenceCallbackFails(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Lume.CLIPath = fakeLumeOwner(t)
-	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &fakeRunner{}}).(*backend)
 	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-owner-callback-failure", bootstrapTrust{}, "", func(lumeRunOwner) error {
 		return errors.New("claim write failed")
 	})
@@ -53,7 +53,7 @@ func TestStartVMDetachesOwnerAndKeepsPrivateLog(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Lume.CLIPath = fakeLumeOwner(t)
-	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
+	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &fakeRunner{}}).(*backend)
 	b.startupObserveTimeout = 25 * time.Millisecond
 	callbackOwner := lumeRunOwner{}
 	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-test-owner", bootstrapTrust{}, "", func(started lumeRunOwner) error {
@@ -122,7 +122,7 @@ func TestStopVMInterruptsTheIdentityFencedRunOwner(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Lume.CLIPath = fakeLumeOwner(t)
-	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+	runner := &fakeRunner{responses: map[string]cmdResult{
 		"get": {Stdout: `[{"name":"crabbox-stop-owner","status":"stopped"}]`},
 	}}
 	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
