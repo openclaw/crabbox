@@ -37,9 +37,10 @@ Keep a local integration thin:
 The CLI remains the only authority for config precedence, credential source
 binding, provider selection, ownership, sync, evidence, and cleanup.
 
-## Catalog metadata
+## Package and workflow metadata
 
-Every first-party catalog entry should make these fields visible in its docs:
+The goal router is intentionally compact. Every first-party package or workflow
+guide linked from it should make these fields visible:
 
 | Field | Meaning |
 | --- | --- |

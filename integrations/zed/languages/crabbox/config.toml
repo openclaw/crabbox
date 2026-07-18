@@ -1,6 +1,6 @@
 name = "Crabbox"
 grammar = "yaml"
-path_suffixes = [".crabbox.yaml", ".crabbox.yml"]
+path_suffixes = ["crabbox.yaml", ".crabbox.yaml"]
 line_comments = ["# "]
 tab_size = 2
 hard_tabs = false

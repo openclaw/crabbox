@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -85,7 +86,99 @@ for (const page of pages) {
 fs.writeFileSync(path.join(outDir, "crabbox.svg"), crabSvg(), "utf8");
 fs.writeFileSync(path.join(outDir, ".nojekyll"), "", "utf8");
 fs.writeFileSync(path.join(outDir, "llms.txt"), llmsTxt(), "utf8");
+writeAgentSkillsDiscovery();
+writeAgentMap();
 console.log(`built docs site: ${path.relative(root, outDir)}`);
+
+function writeAgentSkillsDiscovery() {
+  const sourcePath = path.join(root, "skills", "crabbox", "SKILL.md");
+  const skill = fs.readFileSync(sourcePath, "utf8");
+  const frontmatter = skill.match(/^---\n([\s\S]*?)\n---\n/);
+  if (!frontmatter) throw new Error(`${path.relative(root, sourcePath)} has no YAML frontmatter`);
+
+  const name = frontmatter[1].match(/^name:\s*([a-z0-9-]+)$/m)?.[1];
+  const encodedDescription = frontmatter[1].match(/^description:\s*("(?:\\.|[^"\\])*")$/m)?.[1];
+  if (!name || !encodedDescription) {
+    throw new Error(`${path.relative(root, sourcePath)} must declare a quoted description and name`);
+  }
+  const description = JSON.parse(encodedDescription);
+  const digest = crypto.createHash("sha256").update(skill).digest("hex");
+  const discoveryDir = path.join(outDir, ".well-known", "agent-skills");
+  const publishedSkillDir = path.join(discoveryDir, name);
+  fs.mkdirSync(publishedSkillDir, { recursive: true });
+  fs.writeFileSync(path.join(publishedSkillDir, "SKILL.md"), skill, "utf8");
+  fs.writeFileSync(
+    path.join(discoveryDir, "index.json"),
+    `${JSON.stringify(
+      {
+        $schema: "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+        skills: [
+          {
+            name,
+            type: "skill-md",
+            description,
+            url: `/.well-known/agent-skills/${name}/SKILL.md`,
+            digest: `sha256:${digest}`,
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  writeAICatalog({ name, description });
+}
+
+function writeAICatalog({ name, description }) {
+  const origin = docsOrigin();
+  if (!origin) throw new Error("Agentic Resource Discovery requires a canonical docs origin");
+  const catalog = {
+    specVersion: "1.0",
+    host: {
+      displayName: "Crabbox",
+      documentationUrl: `${origin}/integrations/agents.html`,
+    },
+    entries: [
+      {
+        identifier: `urn:air:crabbox.sh:skill:${name}`,
+        displayName: "Crabbox Agent Skill",
+        // Current AI Catalog integrated-ecosystem type. ARD's draft examples
+        // and bundled conformance helper still disagree on older alternatives.
+        type: "application/agent-skills+md",
+        url: `${origin}/.well-known/agent-skills/${name}/SKILL.md`,
+        description,
+        tags: ["remote-testing", "remote-execution", "developer-tools", "agent-skill"],
+        capabilities: [
+          "RemoteTestExecution",
+          "ReusableRemoteEnvironment",
+          "CrossPlatformValidation",
+          "AuditableExecutionEvidence",
+        ],
+        representativeQueries: [
+          "run this repository's tests on a clean remote machine",
+          "validate this change on Linux, macOS, or Windows",
+          "use Crabbox to collect auditable remote test evidence",
+        ],
+      },
+    ],
+  };
+  fs.writeFileSync(
+    path.join(outDir, ".well-known", "ai-catalog.json"),
+    `${JSON.stringify(catalog, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+function writeAgentMap() {
+  const origin = docsOrigin();
+  if (!origin) return;
+  fs.writeFileSync(
+    path.join(outDir, "robots.txt"),
+    `User-agent: *\nAllow: /\nAgentmap: ${origin}/.well-known/ai-catalog.json\n`,
+    "utf8",
+  );
+}
 
 function llmsTxt() {
   const origin = docsOrigin();
@@ -107,6 +200,15 @@ function llmsTxt() {
   }
   if (source) {
     lines.push("", `Source: ${source}`);
+  }
+  if (origin) {
+    lines.push(
+      "",
+      "Agent Skill and resource discovery:",
+      `- ${origin}/.well-known/agent-skills/index.json`,
+      `- ${origin}/.well-known/agent-skills/crabbox/SKILL.md`,
+      `- ${origin}/.well-known/ai-catalog.json`,
+    );
   }
   lines.push("", "Guidance for agents:", "- Prefer the canonical documentation URLs above over README excerpts or package metadata.", "- Fetch only the pages needed for the current task; this is an index, not a full-site corpus.");
   return `${lines.join("\n")}\n`;
@@ -437,6 +539,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
   <meta name="theme-color" id="theme-color" content="#f4f5f5">
   <title>${escapeHtml(page.title)} - Crabbox Docs</title>
   <link rel="icon" href="${rootPrefix}crabbox.svg">
+  <link rel="ai-catalog" href="/.well-known/ai-catalog.json" type="application/ai-catalog+json">
   <script>(function(){var s;try{s=localStorage.getItem('crabbox-docs-theme')}catch(e){}var d=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches;var t=(s==='light'||s==='dark')?s:(d?'dark':'light');document.documentElement.dataset.theme=t;document.getElementById('theme-color').content=t==='dark'?'#17191b':'#f4f5f5'})();</script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

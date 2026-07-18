@@ -152,10 +152,35 @@ Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 ### Integrations
 
 `crabbox init --detect` generates a repo-local Agent Skill for compatible
-coding agents. The [Zed package](integrations/zed/README.md) adds checked tasks,
-YAML support, and the Zed remote-editor handoff; registry publication is still
-pending. See the [integration catalog](docs/integrations/README.md) for the
-current support and lifecycle boundaries.
+coding agents. The [Zed package](integrations/zed/README.md) adds checked tasks
+and YAML support; a separate core command, `crabbox open --editor=zed`, provides
+the Zed Remote Projects handoff. No Zed registry submission exists yet; it is
+tracked in https://github.com/openclaw/crabbox/issues/1157. See the [integration
+catalog](docs/integrations/README.md) for current support and lifecycle
+boundaries.
+
+Existing repositories that only need agent discovery can install the generic
+Skill with GitHub CLI:
+
+```sh
+gh skill install openclaw/crabbox skills/crabbox \
+  --pin refs/heads/main --agent codex --scope project
+```
+
+Or use the cross-client Skills CLI:
+
+```sh
+npx skills add https://github.com/openclaw/crabbox --skill crabbox
+```
+
+Crabbox also publishes a digest-verified discovery index from its own domain:
+
+```sh
+npx skills add https://crabbox.sh --skill crabbox
+```
+
+Cross-vendor discovery services can index the same Skill through Crabbox's
+[draft-compatible AI Catalog](https://crabbox.sh/.well-known/ai-catalog.json).
 
 Herdr users can add Crabbox lease controls and repository workflows to the
 Herdr action palette. Use a Crabbox build that already contains this
@@ -164,6 +189,9 @@ integration; the plugin installation rejects older binaries:
 ```sh
 herdr plugin install openclaw/crabbox/plugins/herdr
 ```
+
+Direct installation is available now; Herdr marketplace indexing is tracked in
+https://github.com/openclaw/crabbox/issues/1156.
 
 The plugin provides a live boxes overlay plus actions for `warmup`, `prewarm`,
 `connect`, repository jobs, and `doctor`. It does not add lifecycle hooks or

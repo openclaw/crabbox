@@ -113,6 +113,7 @@ func assertValidAgentSkill(t *testing.T, skillPath string, data []byte) {
 	var metadata struct {
 		Name        string `yaml:"name"`
 		Description string `yaml:"description"`
+		License     string `yaml:"license"`
 	}
 	if err := yaml.Unmarshal(remainder[:closing], &metadata); err != nil {
 		t.Fatalf("parse skill frontmatter: %v", err)
@@ -127,11 +128,14 @@ func assertValidAgentSkill(t *testing.T, skillPath string, data []byte) {
 	if metadata.Name != filepath.Base(filepath.Dir(skillPath)) {
 		t.Fatalf("skill name %q does not match parent directory %q", metadata.Name, filepath.Base(filepath.Dir(skillPath)))
 	}
+	if metadata.License != "MIT" {
+		t.Fatalf("skill license=%q, want MIT", metadata.License)
+	}
 	descriptionLength := utf8.RuneCountInString(metadata.Description)
 	if metadata.Description != strings.TrimSpace(metadata.Description) || descriptionLength < 1 || descriptionLength > 1024 {
 		t.Fatalf("invalid skill description %q", metadata.Description)
 	}
-	for _, want := range []string{"Run repository tests", "Use when"} {
+	for _, want := range []string{"Detect and use Crabbox", "Use when", "crabbox.yaml", ".crabbox.yaml", "crabbox CLI"} {
 		if !strings.Contains(metadata.Description, want) {
 			t.Fatalf("skill description missing %q: %q", want, metadata.Description)
 		}
@@ -139,6 +143,111 @@ func assertValidAgentSkill(t *testing.T, skillPath string, data []byte) {
 	body := bytes.TrimSpace(remainder[closing+len("\n---\n"):])
 	if len(body) == 0 {
 		t.Fatal("skill Markdown body is empty")
+	}
+}
+
+func TestNormalizeInitSkillPath(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name    string
+		path    string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", path: ".agents/skills/crabbox/SKILL.md", want: filepath.FromSlash(".agents/skills/crabbox/SKILL.md")},
+		{name: "documented Claude path", path: ".claude/skills/crabbox/SKILL.md", want: filepath.FromSlash(".claude/skills/crabbox/SKILL.md")},
+		{name: "leading dot", path: "./.agents/skills/crabbox/SKILL.md", want: filepath.FromSlash(".agents/skills/crabbox/SKILL.md")},
+		{name: "wrong parent", path: ".agents/skills/remote/SKILL.md", wantErr: true},
+		{name: "wrong filename", path: ".agents/skills/crabbox/crabbox.md", wantErr: true},
+		{name: "outside repository", path: "../crabbox/SKILL.md", wantErr: true},
+		{name: "absolute", path: filepath.Join(string(filepath.Separator), "tmp", "crabbox", "SKILL.md"), wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := normalizeInitSkillPath(test.path)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("normalizeInitSkillPath(%q) succeeded with %q", test.path, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeInitSkillPath(%q): %v", test.path, err)
+			}
+			if got != test.want {
+				t.Fatalf("normalizeInitSkillPath(%q)=%q, want %q", test.path, got, test.want)
+			}
+		})
+	}
+}
+
+func TestInitProjectWritesRepeatedSkillPaths(t *testing.T) {
+	dir := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldwd)
+	})
+
+	paths := []string{
+		".agents/skills/crabbox/SKILL.md",
+		".claude/skills/crabbox/SKILL.md",
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.Run(context.Background(), []string{
+		"init",
+		"--skill", paths[0],
+		"--skill", paths[1],
+	}); err != nil {
+		t.Fatalf("init with repeated --skill: %v", err)
+	}
+	for _, skillPath := range paths {
+		data, err := os.ReadFile(filepath.Join(dir, skillPath))
+		if err != nil {
+			t.Fatalf("read %s: %v", skillPath, err)
+		}
+		assertValidAgentSkill(t, filepath.Join(dir, skillPath), data)
+	}
+}
+
+func TestInitProjectPreflightsEveryTargetBeforeWriting(t *testing.T) {
+	dir := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldwd)
+	})
+
+	if err := os.WriteFile(filepath.Join(dir, ".crabbox.yaml"), []byte("existing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	err = app.Run(context.Background(), []string{
+		"init",
+		"--skill", ".agents/skills/crabbox/SKILL.md",
+		"--skill", ".claude/skills/crabbox/SKILL.md",
+	})
+	if err == nil {
+		t.Fatal("init succeeded with an existing target")
+	}
+	for _, path := range []string{
+		".github/workflows/crabbox.yml",
+		".agents/skills/crabbox/SKILL.md",
+		".claude/skills/crabbox/SKILL.md",
+	} {
+		if _, statErr := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(statErr) {
+			t.Fatalf("init wrote %s before reporting the existing target: %v", path, statErr)
+		}
 	}
 }
 

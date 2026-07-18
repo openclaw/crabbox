@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -45,6 +46,70 @@ generatedTest("generated navigation includes every provider page exactly once", 
       `${markdown} should be linked exactly once from the Providers navigation`,
     );
   }
+});
+
+generatedTest("generated site publishes Agent Skill and AI Catalog discovery", () => {
+  const canonical = fs.readFileSync(path.join(repoRoot, "skills", "crabbox", "SKILL.md"), "utf8");
+  const published = fs.readFileSync(
+    path.join(siteDir, ".well-known", "agent-skills", "crabbox", "SKILL.md"),
+    "utf8",
+  );
+  const index = JSON.parse(
+    fs.readFileSync(path.join(siteDir, ".well-known", "agent-skills", "index.json"), "utf8"),
+  );
+  const description = JSON.parse(canonical.match(/^description:\s*("(?:\\.|[^"\\])*")$/m)[1]);
+  const digest = crypto.createHash("sha256").update(published).digest("hex");
+  const catalog = JSON.parse(
+    fs.readFileSync(path.join(siteDir, ".well-known", "ai-catalog.json"), "utf8"),
+  );
+
+  assert.equal(published, canonical);
+  assert.equal(index.$schema, "https://schemas.agentskills.io/discovery/0.2.0/schema.json");
+  assert.deepEqual(index.skills, [
+    {
+      name: "crabbox",
+      type: "skill-md",
+      description,
+      url: "/.well-known/agent-skills/crabbox/SKILL.md",
+      digest: `sha256:${digest}`,
+    },
+  ]);
+  assert.deepEqual(catalog, {
+    specVersion: "1.0",
+    host: {
+      displayName: "Crabbox",
+      documentationUrl: "https://crabbox.sh/integrations/agents.html",
+    },
+    entries: [
+      {
+        identifier: "urn:air:crabbox.sh:skill:crabbox",
+        displayName: "Crabbox Agent Skill",
+        type: "application/agent-skills+md",
+        url: "https://crabbox.sh/.well-known/agent-skills/crabbox/SKILL.md",
+        description,
+        tags: ["remote-testing", "remote-execution", "developer-tools", "agent-skill"],
+        capabilities: [
+          "RemoteTestExecution",
+          "ReusableRemoteEnvironment",
+          "CrossPlatformValidation",
+          "AuditableExecutionEvidence",
+        ],
+        representativeQueries: [
+          "run this repository's tests on a clean remote machine",
+          "validate this change on Linux, macOS, or Windows",
+          "use Crabbox to collect auditable remote test evidence",
+        ],
+      },
+    ],
+  });
+  assert.match(
+    fs.readFileSync(path.join(siteDir, "robots.txt"), "utf8"),
+    /^Agentmap: https:\/\/crabbox\.sh\/\.well-known\/ai-catalog\.json$/m,
+  );
+  assert.match(
+    readGenerated("index.html"),
+    /<link rel="ai-catalog" href="\/\.well-known\/ai-catalog\.json" type="application\/ai-catalog\+json">/,
+  );
 });
 
 generatedTest("generated navigation includes every integration page exactly once", () => {

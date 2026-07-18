@@ -6,11 +6,19 @@
 
 - Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
 - Added a local Zed task-launcher extension for Crabbox lifecycle and remote execution workflows. Thanks @zozo123.
+- Added the generic Crabbox Agent Skill at the ecosystem installer
+  `skills/crabbox` convention while retaining its repo-discoverable `.agents`
+  projection, plus digest-verified domain discovery under
+  `/.well-known/agent-skills/` and a draft-compatible cross-vendor AI Catalog.
 
 ### Fixed
 
 - Made the default `crabbox init` Agent Skill include standards-compliant
-  `SKILL.md` metadata.
+  `SKILL.md` metadata, enforced conformant skill destinations, and allowed
+  `--skill` to target multiple agent discovery paths with an all-target
+  existence preflight.
+- Made the Zed package recognize both supported Crabbox configuration
+  filenames without advertising the unsupported `.crabbox.yml` suffix.
 - fix(egress): replaced egress sessions can no longer resurrect and clobber their replacement — the coordinator refuses tickets and connects for superseded session IDs, and the host/client daemon exits fatally when replaced.
 - Enforced explicitly declared zero-byte artifact sizes during pull while preserving legacy manifests that omit size.
 - Prevented apple-container orphan cleanup from deleting claims reclaimed during its resource snapshot, including same-value rewrites, while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
