@@ -228,6 +228,10 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	labels["run_owner_pending"] = "true"
 	labels["run_launch_token"] = launchToken
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
+	cloneStorage, err := lumeStorageRoot(cfg, "")
+	if err != nil {
+		return LeaseTarget{}, err
+	}
 	persistedClaim := core.LeaseClaim{}
 	cleanupUnclaimedVM := func(cause error) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -278,7 +282,16 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if err := b.cloneVM(ctx, cfg, name); err != nil {
 		return LeaseTarget{}, errors.Join(exit(5, "Lume clone result for %q is ambiguous; inspect the destination before removing it", name), err)
 	}
-	cfg, claim, cloneInst, err := b.captureCloneIdentity(ctx, cfg, name, claim)
+	// Capture identity directly from the exact clone destination before any
+	// inventory lookup can adopt a later same-name VM.
+	cfg.Lume.Storage = cloneStorage
+	labels["storage"] = cloneStorage
+	labels["storage_exact"] = "true"
+	claim.CloudImmutableID, err = lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: cloneStorage})
+	if err != nil {
+		return LeaseTarget{}, cleanupUnclaimedVM(err)
+	}
+	cloneInst, err := b.getInstance(ctx, cfg, name)
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
@@ -1370,26 +1383,6 @@ func (b *backend) getInstance(ctx context.Context, cfg Config, name string) (lum
 	return instances[0], nil
 }
 
-func (b *backend) captureCloneIdentity(ctx context.Context, cfg Config, name string, claim core.LeaseClaim) (Config, core.LeaseClaim, lumeVM, error) {
-	inst, err := b.getInstance(ctx, cfg, name)
-	if err != nil {
-		return cfg, claim, lumeVM{}, err
-	}
-	storage := strings.TrimSpace(firstNonBlank(inst.LocationName, cfg.Lume.Storage))
-	if storage == "" {
-		return cfg, claim, lumeVM{}, exit(5, "Lume VM %s did not report its storage location", name)
-	}
-	claim.Labels["storage"] = storage
-	claim.Labels["storage_exact"] = "true"
-	cfg.Lume.Storage = storage
-	immutableID, err := lumeVMImmutableID(cfg, inst)
-	if err != nil {
-		return cfg, claim, lumeVM{}, err
-	}
-	claim.CloudImmutableID = immutableID
-	return cfg, claim, inst, nil
-}
-
 func parseLumeVMs(output string) ([]lumeVM, error) {
 	// Skip Lume informational lines before the VM JSON array.
 	for offset := 0; offset < len(output); {
@@ -1578,6 +1571,7 @@ func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg Con
 		status = "ready"
 	}
 	server := Server{CloudID: inst.Name, ImmutableID: claim.CloudImmutableID, Provider: providerName, Name: inst.Name, Status: status, Labels: labels}
+	server.PublicNet.IPv4.IP = inst.IPAddress
 	server.ServerType.Name = cfg.Lume.Base
 	return server
 }
