@@ -778,11 +778,124 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
+	boundOwners := make(map[string]string, len(claims))
 	for _, claim := range claims {
-		if claim.Provider != providerName || strings.TrimSpace(claim.CloudID) != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
+		cloudID := strings.TrimSpace(claim.CloudID)
+		if claim.Provider != providerName || cloudID == "" {
 			continue
 		}
-		item, found, err := b.findPendingClaimInInventory(claim, user, live)
+		key := strings.ToLower(cloudID)
+		if otherLease, ok := boundOwners[key]; ok && otherLease != claim.LeaseID {
+			return exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, otherLease, claim.LeaseID)
+		}
+		boundOwners[key] = claim.LeaseID
+	}
+	now := b.now().UTC()
+	for _, snapshotClaim := range claims {
+		cloudID := strings.TrimSpace(snapshotClaim.CloudID)
+		if snapshotClaim.Provider != providerName || cloudID == "" {
+			continue
+		}
+		if otherLease, ok := seen[strings.ToLower(cloudID)]; ok {
+			if otherLease != snapshotClaim.LeaseID {
+				return exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, otherLease, snapshotClaim.LeaseID)
+			}
+			continue
+		}
+		claim, item, found, err := func() (LeaseClaim, codespace, bool, error) {
+			unlockOperation, err := lockGitHubCodespacesLeaseOperation(ctx, snapshotClaim.LeaseID)
+			if err != nil {
+				return LeaseClaim{}, codespace{}, false, err
+			}
+			defer unlockOperation()
+
+			claim, ok, err := readLeaseClaimWithPresence(snapshotClaim.LeaseID)
+			if err != nil || !ok {
+				return claim, codespace{}, false, err
+			}
+			cloudID := strings.TrimSpace(claim.CloudID)
+			if claim.Provider != providerName || cloudID == "" {
+				return claim, codespace{}, false, nil
+			}
+			if err := b.validateClaimScope(claim, user); err != nil {
+				return claim, codespace{}, false, err
+			}
+			if otherLease, ok := seen[strings.ToLower(cloudID)]; ok {
+				if otherLease != claim.LeaseID {
+					return claim, codespace{}, false, exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, otherLease, claim.LeaseID)
+				}
+				return claim, codespace{}, false, nil
+			}
+			shouldDiscard, reason := shouldDiscardMissingClaim(claim, now)
+			if !shouldDiscard {
+				fmt.Fprintf(b.stderr(), "skip lease=%s reason=claimed-resource-missing\n", claim.LeaseID)
+				return claim, codespace{}, false, nil
+			}
+			item, err := api.getCodespace(ctx, cloudID)
+			if err == nil {
+				if err := validateCodespaceClaimResource(claim, item); err != nil {
+					return claim, codespace{}, false, err
+				}
+				return claim, item, true, nil
+			}
+			if !isGitHubNotFound(err) {
+				return claim, codespace{}, false, err
+			}
+			fmt.Fprintf(b.stderr(), "discard lease=%s reason=%s dry_run=%t\n", claim.LeaseID, reason, req.DryRun)
+			if req.DryRun {
+				return claim, codespace{}, false, nil
+			}
+			return claim, codespace{}, false, discardMissingBoundClaim(claim)
+		}()
+		if err != nil {
+			return err
+		}
+		if found {
+			key := strings.ToLower(strings.TrimSpace(item.Name))
+			if otherLease, ok := seen[key]; ok {
+				return exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", item.Name, otherLease, claim.LeaseID)
+			}
+			seen[key] = claim.LeaseID
+			servers = append(servers, b.mergeLiveServer(serverFromClaim(claim), item))
+		}
+	}
+	for _, snapshotClaim := range claims {
+		if snapshotClaim.Provider != providerName || strings.TrimSpace(snapshotClaim.CloudID) != "" || snapshotClaim.Labels[labelRecovery] != recoveryPreCreate {
+			continue
+		}
+		claim, item, found, err := func() (LeaseClaim, codespace, bool, error) {
+			unlockOperation, err := lockGitHubCodespacesLeaseOperation(ctx, snapshotClaim.LeaseID)
+			if err != nil {
+				return LeaseClaim{}, codespace{}, false, err
+			}
+			defer unlockOperation()
+
+			claim, ok, err := readLeaseClaimWithPresence(snapshotClaim.LeaseID)
+			if err != nil || !ok {
+				return claim, codespace{}, false, err
+			}
+			if claim.Provider != providerName || strings.TrimSpace(claim.CloudID) != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
+				return claim, codespace{}, false, nil
+			}
+			currentLive, err := api.listCodespaces(ctx)
+			if err != nil {
+				return claim, codespace{}, false, err
+			}
+			item, found, err := b.findPendingClaimInInventory(claim, user, currentLive)
+			if err != nil || found {
+				return claim, item, found, err
+			}
+			shouldDiscard, reason := shouldDiscardMissingClaim(claim, now)
+			if !shouldDiscard {
+				fmt.Fprintf(b.stderr(), "skip lease=%s reason=create-recovery-pending\n", claim.LeaseID)
+				return claim, codespace{}, false, nil
+			}
+			fmt.Fprintf(b.stderr(), "discard lease=%s reason=%s dry_run=%t\n", claim.LeaseID, reason, req.DryRun)
+			if req.DryRun {
+				return claim, codespace{}, false, nil
+			}
+			return claim, codespace{}, false, discardPendingClaim(claim)
+		}()
 		if err != nil {
 			return err
 		}
@@ -796,7 +909,6 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		seen[key] = claim.LeaseID
 		servers = append(servers, b.mergeLiveServer(serverFromClaim(claim), item))
 	}
-	now := b.now().UTC()
 	for _, listedServer := range servers {
 		err := func() error {
 			leaseID := strings.TrimSpace(listedServer.Labels["lease"])
@@ -897,6 +1009,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		}
 	}
 	return nil
+}
+
+func shouldDiscardMissingClaim(claim LeaseClaim, now time.Time) (bool, string) {
+	server := serverFromClaim(claim)
+	server.Labels = cloneLabels(server.Labels)
+	server.Labels[labelState] = "provisioning"
+	return shouldCleanupServer(server, now)
 }
 
 func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {

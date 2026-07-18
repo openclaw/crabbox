@@ -25,7 +25,10 @@ func (r ghRunner) authStatus(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.run(ctx, "auth", "status", "--hostname", host)
+	_, err = r.run(ctx, "auth", "status", "--active", "--hostname", host)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unknown flag") && strings.Contains(err.Error(), "--active") {
+		_, err = r.run(ctx, "auth", "status", "--hostname", host)
+	}
 	return err
 }
 

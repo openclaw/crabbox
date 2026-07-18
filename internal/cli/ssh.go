@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ type SSHTarget struct {
 	SSHConfigProxy         bool
 	ProxyCommand           string
 	ChildEnvDenylist       []string
+	ChildEnv               map[string]string
 }
 
 func isLocalMacTarget(target SSHTarget) bool {
@@ -177,13 +179,26 @@ func systemInspectionCommand(name string, args ...string) *exec.Cmd {
 }
 
 func applyTargetChildEnvironment(cmd *exec.Cmd, target SSHTarget) {
-	if cmd != nil && len(target.ChildEnvDenylist) > 0 {
-		env := cmd.Env
-		if env == nil {
-			env = os.Environ()
-		}
-		cmd.Env = childEnvironmentWithout(env, target.ChildEnvDenylist...)
+	if cmd == nil || (len(target.ChildEnvDenylist) == 0 && len(target.ChildEnv) == 0) {
+		return
 	}
+	env := cmd.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	overrideNames := make([]string, 0, len(target.ChildEnv))
+	for name := range target.ChildEnv {
+		if validEnvName(name) {
+			overrideNames = append(overrideNames, name)
+		}
+	}
+	sort.Strings(overrideNames)
+	blocked := append(append([]string(nil), target.ChildEnvDenylist...), overrideNames...)
+	env = childEnvironmentWithout(env, blocked...)
+	for _, name := range overrideNames {
+		env = append(env, name+"="+target.ChildEnv[name])
+	}
+	cmd.Env = env
 }
 
 func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *exec.Cmd {

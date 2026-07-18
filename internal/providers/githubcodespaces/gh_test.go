@@ -37,8 +37,28 @@ func TestGHRunnerAuthStatusReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := runner.onlyCall(t)
-	if want := []string{"auth", "status", "--hostname", "github.com"}; !slices.Equal(call.Args, want) {
+	if want := []string{"auth", "status", "--active", "--hostname", "github.com"}; !slices.Equal(call.Args, want) {
 		t.Fatalf("args=%q", call.Args)
+	}
+}
+
+func TestGHRunnerAuthStatusFallsBackForOlderCLI(t *testing.T) {
+	runner := &recordingRunner{results: []recordingResult{
+		{result: LocalCommandResult{ExitCode: 1, Stderr: "unknown flag: --active"}},
+		{},
+	}}
+	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "gh"}, Runtime{Exec: runner})
+	if err := gh.authStatus(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls=%#v", runner.calls)
+	}
+	if want := []string{"auth", "status", "--active", "--hostname", "github.com"}; !slices.Equal(runner.calls[0].Args, want) {
+		t.Fatalf("first args=%q", runner.calls[0].Args)
+	}
+	if want := []string{"auth", "status", "--hostname", "github.com"}; !slices.Equal(runner.calls[1].Args, want) {
+		t.Fatalf("fallback args=%q", runner.calls[1].Args)
 	}
 }
 
@@ -147,13 +167,24 @@ func TestRedactSecretTextRedactsStatelessInstallationToken(t *testing.T) {
 }
 
 type recordingRunner struct {
-	calls  []LocalCommandRequest
+	calls   []LocalCommandRequest
+	result  LocalCommandResult
+	err     error
+	results []recordingResult
+}
+
+type recordingResult struct {
 	result LocalCommandResult
 	err    error
 }
 
 func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
+	if len(r.results) > 0 {
+		result := r.results[0]
+		r.results = r.results[1:]
+		return result.result, result.err
+	}
 	return r.result, r.err
 }
 

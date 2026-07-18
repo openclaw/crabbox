@@ -20,7 +20,7 @@ func TestSSHConfigParsesProxyTarget(t *testing.T) {
 	if target.User != "vscode" || target.Host != "sturdy-space" || target.Port != "22" || target.Key != "/tmp/codespaces/key" {
 		t.Fatalf("target=%#v", target)
 	}
-	if !target.SSHConfigProxy || target.ProxyCommand != "gh codespace ssh -c sturdy-space --stdio" {
+	if !target.SSHConfigProxy || target.ProxyCommand != "gh codespace ssh -c sturdy-space --stdio" || target.ChildEnv["GH_HOST"] != "github.com" {
 		t.Fatalf("proxy target=%#v", target)
 	}
 	if target.KnownHostsFile != "/dev/null" || target.TargetOS != targetLinux || target.NetworkKind != networkPublic {
@@ -46,8 +46,37 @@ func TestSSHConfigSelectsGeneratedGitHubCLIAliasByProxyCodespace(t *testing.T) {
 	if target.Host != "cs.sturdy-space.main" || !target.SSHConfigProxy {
 		t.Fatalf("target=%#v", target)
 	}
-	if target.ProxyCommand != "'/opt/github/bin/gh' codespace ssh -c sturdy-space --stdio" {
+	if target.ProxyCommand != "'/opt/github/bin/gh' codespace ssh -c sturdy-space --stdio" || target.ChildEnv["GH_HOST"] != "github.com" {
 		t.Fatalf("proxy=%q", target.ProxyCommand)
+	}
+}
+
+func TestSSHConfigProxyPinsConfiguredGitHubHost(t *testing.T) {
+	target, err := selectSSHTarget(Config{GitHubCodespaces: GitHubCodespacesConfig{APIURL: "https://api.octocorp.ghe.com"}}, `Host sturdy-space
+  User vscode
+  IdentityFile /tmp/codespaces/key
+  ProxyCommand gh codespace ssh -c sturdy-space --stdio
+`, "sturdy-space")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ProxyCommand != "gh codespace ssh -c sturdy-space --stdio" || target.ChildEnv["GH_HOST"] != "octocorp.ghe.com" {
+		t.Fatalf("target=%#v", target)
+	}
+}
+
+func TestSSHConfigPreservesHashesInsideDirectiveValues(t *testing.T) {
+	entries, err := parseSSHConfig(`# generated configuration
+Host sturdy-space
+  User vscode # generated user
+  IdentityFile /tmp/alice#dev/codespaces.auto
+  ProxyCommand /opt/github#dev/gh codespace ssh -c sturdy-space --stdio # generated proxy
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].User != "vscode" || entries[0].IdentityFile != "/tmp/alice#dev/codespaces.auto" || entries[0].ProxyCommand != "/opt/github#dev/gh codespace ssh -c sturdy-space --stdio" {
+		t.Fatalf("entries=%#v", entries)
 	}
 }
 

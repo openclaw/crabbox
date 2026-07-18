@@ -137,8 +137,5 @@ func replaceSSHConfigFile(tmpPath, path string) error {
 func syncSSHConfigDirectory(string) error { return nil }
 
 func quoteSSHProxyExecutable(path string) string {
-	if !strings.ContainsAny(path, " \t\"") {
-		return path
-	}
-	return `"` + strings.ReplaceAll(path, `"`, `\"`) + `"`
+	return `"` + strings.ReplaceAll(path, `"`, `""`) + `"`
 }

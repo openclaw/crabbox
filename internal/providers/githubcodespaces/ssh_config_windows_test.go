@@ -22,3 +22,11 @@ func TestRewriteProxyCommandQuotesWindowsExecutable(t *testing.T) {
 		t.Fatalf("proxy=%q want %q", got, want)
 	}
 }
+
+func TestRewriteProxyCommandQuotesWindowsMetacharacters(t *testing.T) {
+	got := rewriteProxyCommandGHPath("gh codespace ssh -c sturdy --stdio", `C:\Tools\R&D\gh.exe`)
+	want := `"C:\Tools\R&D\gh.exe" codespace ssh -c sturdy --stdio`
+	if got != want {
+		t.Fatalf("proxy=%q want %q", got, want)
+	}
+}

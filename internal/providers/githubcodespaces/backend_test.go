@@ -428,7 +428,7 @@ func TestAcquireOnAcquiredErrorRetainsPendingClaimWhenRollbackCannotConfirmResou
 	}
 }
 
-func TestAcquireOnAcquiredErrorRemovesClaimWhenResourceDisappearsAfterPreflight(t *testing.T) {
+func TestAcquireOnAcquiredErrorRetainsClaimWhenResourceDisappearsAfterPreflight(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
 	getCount := 0
@@ -450,14 +450,51 @@ func TestAcquireOnAcquiredErrorRemovesClaimWhenResourceDisappearsAfterPreflight(
 			return callbackErr
 		},
 	})
-	if !errors.Is(err, callbackErr) {
+	if !errors.Is(err, callbackErr) || !strings.Contains(err.Error(), "recovery claim retained") {
 		t.Fatalf("err=%v", err)
 	}
 	if getCount != 2 || len(fc.deletes) != 0 {
 		t.Fatalf("gets=%d deletes=%#v", getCount, fc.deletes)
 	}
-	if _, ok, claimErr := readLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
-		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
+	claim, ok, claimErr := readLeaseClaimWithPresence(leaseID)
+	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
+	}
+}
+
+func TestRollbackCreatedCodespaceRetainsClaimWhenResourceDisappearsAfterPreflight(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-rollback-missing", "Available")
+	fc.items[item.Name] = item
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789ab6"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "rollback-missing-box", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "rollback-missing-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+	getCount := 0
+	fc.onGet = func(name string) {
+		getCount++
+		if getCount == 2 {
+			delete(fc.items, name)
+		}
+	}
+
+	err = rollbackCreatedCodespace(fc, claim)
+	if err == nil || !strings.Contains(err.Error(), "recovery claim retained") {
+		t.Fatalf("err=%v", err)
+	}
+	if getCount != 2 || len(fc.deletes) != 0 {
+		t.Fatalf("gets=%d deletes=%#v", getCount, fc.deletes)
+	}
+	retained, ok, claimErr := readLeaseClaimWithPresence(leaseID)
+	if claimErr != nil || !ok || retained.CloudID != item.Name {
+		t.Fatalf("claim=%#v ok=%t err=%v", retained, ok, claimErr)
 	}
 }
 
@@ -1178,6 +1215,91 @@ func TestCleanupRecoversExpiredPendingCreateBeforeDelete(t *testing.T) {
 	}
 	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || ok {
 		t.Fatalf("claim remained ok=%t err=%v", ok, err)
+	}
+}
+
+func TestCleanupDiscardsExpiredPendingCreateWithoutInventoryMatch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789ae3"
+	now := time.Now().UTC()
+	b.now = func() time.Time { return now.Add(-14 * time.Hour) }
+	persistPendingRecoveryClaimForTest(t, b, leaseID, "pending-absent", "pending-absent-nonce", true)
+	b.now = func() time.Time { return now }
+
+	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || !ok {
+		t.Fatalf("dry-run claim ok=%t err=%v", ok, err)
+	}
+	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || ok {
+		t.Fatalf("claim remained ok=%t err=%v", ok, err)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("deleted unconfirmed resource=%#v", fc.deletes)
+	}
+}
+
+func TestCleanupDiscardsExpiredBoundClaimAfterConfirmedAbsence(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789ae4"
+	now := time.Now().UTC()
+	b.now = func() time.Time { return now.Add(-14 * time.Hour) }
+	item := fakeCodespace("cs-bound-absent", "Available")
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "bound-absent", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "bound-absent", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	b.now = func() time.Time { return now }
+
+	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || !ok {
+		t.Fatalf("dry-run claim ok=%t err=%v", ok, err)
+	}
+	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || ok {
+		t.Fatalf("claim remained ok=%t err=%v", ok, err)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("deleted already-absent resource=%#v", fc.deletes)
+	}
+}
+
+func TestCleanupRetainsExpiredAbsentClaimForDifferentGitHubIdentity(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
+	leaseID := "cbx_123456789ae5"
+	now := time.Now().UTC()
+	b.now = func() time.Time { return now.Add(-14 * time.Hour) }
+	item := fakeCodespace("cs-other-account", "Available")
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "other-account", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "other-account", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	b.now = func() time.Time { return now }
+	fc.user = fakeGitHubUser("bob")
+
+	err := b.Cleanup(context.Background(), CleanupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "account mismatch") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, ok, claimErr := readLeaseClaimWithPresence(leaseID); claimErr != nil || !ok {
+		t.Fatalf("claim ok=%t err=%v", ok, claimErr)
+	}
+	if len(fc.deletes) != 0 {
+		t.Fatalf("deleted other account resource=%#v", fc.deletes)
 	}
 }
 

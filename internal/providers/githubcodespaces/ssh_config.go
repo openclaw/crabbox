@@ -108,10 +108,16 @@ func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 	}
 	if proxy != "" {
 		target.SSHConfigProxy = true
-		target.ProxyCommand = rewriteProxyCommandIdentityFile(
+		command := rewriteProxyCommandIdentityFile(
 			rewriteProxyCommandGHPath(proxy, cfg.GitHubCodespaces.GHPath),
 			entry.IdentityFile,
 		)
+		host, err := (ghRunner{cfg: cfg.GitHubCodespaces}).apiHostname()
+		if err != nil {
+			return SSHTarget{}, err
+		}
+		target.ProxyCommand = command
+		target.ChildEnv = map[string]string{"GH_HOST": host}
 	}
 	return target, nil
 }
@@ -359,6 +365,10 @@ func stripSSHConfigComment(line string) string {
 	var quoted byte
 	for i := 0; i < len(line); i++ {
 		c := line[i]
+		if c == '\\' {
+			i++
+			continue
+		}
 		if quoted != 0 {
 			if c == quoted {
 				quoted = 0
@@ -369,7 +379,7 @@ func stripSSHConfigComment(line string) string {
 			quoted = c
 			continue
 		}
-		if c == '#' {
+		if c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
 			return line[:i]
 		}
 	}

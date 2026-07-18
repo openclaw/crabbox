@@ -274,6 +274,18 @@ func discardPendingClaim(claim LeaseClaim) error {
 	})
 }
 
+func discardMissingBoundClaim(claim LeaseClaim) error {
+	name := strings.TrimSpace(claim.CloudID)
+	resourceID, resourceIDErr := strconv.ParseInt(strings.TrimSpace(claim.Labels[labelCodespaceID]), 10, 64)
+	ownerID, ownerIDErr := strconv.ParseInt(strings.TrimSpace(claim.Labels[labelOwnerID]), 10, 64)
+	if name == "" || claim.Labels[labelCodespaceName] != name || resourceIDErr != nil || resourceID <= 0 || ownerIDErr != nil || ownerID <= 0 || strings.TrimSpace(claim.Labels[labelEnvironmentID]) == "" {
+		return exit(4, "refusing to discard github-codespaces claim %s without its exact bound resource identity", claim.LeaseID)
+	}
+	return removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		return removeStoredSSHConfig(claim.LeaseID)
+	})
+}
+
 func rollbackCreatedCodespace(api codespacesAPI, claim LeaseClaim) error {
 	name := strings.TrimSpace(claim.CloudID)
 	if name == "" || claim.Labels[labelCodespaceName] != name {
@@ -295,7 +307,7 @@ func rollbackCreatedCodespace(api codespacesAPI, claim LeaseClaim) error {
 		defer cancel()
 		item, err := api.getCodespace(ctx, name)
 		if isGitHubNotFound(err) {
-			return removeStoredSSHConfig(claim.LeaseID)
+			return exit(4, "github-codespaces rollback could not confirm created resource %s for lease=%s; recovery claim retained", name, claim.LeaseID)
 		}
 		if err != nil {
 			return err
@@ -340,7 +352,7 @@ func rollbackUnboundCreatedCodespace(api codespacesAPI, pending LeaseClaim, item
 		defer cancel()
 		live, err := api.getCodespace(ctx, name)
 		if isGitHubNotFound(err) {
-			return removeStoredSSHConfig(pending.LeaseID)
+			return exit(4, "github-codespaces rollback could not confirm created resource %s for lease=%s; recovery claim retained", name, pending.LeaseID)
 		}
 		if err != nil {
 			return err
