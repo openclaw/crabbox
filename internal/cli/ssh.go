@@ -730,12 +730,19 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 			"-o", "LogLevel=ERROR",
 		)
 	} else {
+		strictHostKeyChecking := "accept-new"
+		if target.HostKeyAlias != "" {
+			strictHostKeyChecking = "yes"
+		}
 		args = append(args,
-			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "StrictHostKeyChecking="+strictHostKeyChecking,
 			"-o", "UserKnownHostsFile="+sshConfigFileValue(knownHostsFile(target)),
 		)
 		if target.HostKeyAlias != "" {
-			args = append(args, "-o", "HostKeyAlias="+target.HostKeyAlias)
+			args = append(args,
+				"-o", "HostKeyAlias="+target.HostKeyAlias,
+				"-o", "HostKeyAlgorithms=ssh-ed25519",
+			)
 		}
 	}
 	if target.AuthSecret || target.NoControlMaster {

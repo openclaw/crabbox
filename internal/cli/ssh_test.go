@@ -725,7 +725,12 @@ func TestSSHArgsOverrideAmbientForwardingConfig(t *testing.T) {
 func TestSSHArgsUseStableHostKeyAlias(t *testing.T) {
 	target := SSHTarget{User: "lume", Host: "192.0.2.20", Port: "22", HostKeyAlias: "crabbox-lume-worker-1"}
 	got := strings.Join(sshBaseArgs(target), " ")
-	if !strings.Contains(got, "HostKeyAlias=crabbox-lume-worker-1") {
+	for _, want := range []string{"HostKeyAlias=crabbox-lume-worker-1", "StrictHostKeyChecking=yes", "HostKeyAlgorithms=ssh-ed25519"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ssh args missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "StrictHostKeyChecking=accept-new") {
 		t.Fatalf("ssh args=%q", got)
 	}
 }
