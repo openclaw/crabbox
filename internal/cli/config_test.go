@@ -363,6 +363,15 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI",
 		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS",
 		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG",
+		"CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL",
+		"CLOUD_RUN_SANDBOX_URL",
+		"CRABBOX_CLOUD_RUN_SANDBOX_CLI",
+		"CLOUD_RUN_SANDBOX_BINARY",
+		"CRABBOX_CLOUD_RUN_SANDBOX_WORKDIR",
+		"CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS",
+		"CRABBOX_CLOUD_RUN_SANDBOX_WRITE",
+		"CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS",
+		"CRABBOX_CLOUD_RUN_SANDBOX_MODE",
 		"CRABBOX_SMOLVM_API_KEY",
 		"SMOLMACHINES_API_KEY",
 		"SMK_API_KEY",
@@ -1516,6 +1525,62 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/a,/tmp/b" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" || strings.Join(cfg.DockerSandbox.Kit, ",") != "kit-a,kit-b" {
 		t.Fatalf("env dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestCloudRunSandboxConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.CloudRunSandbox.CLIPath != "/usr/local/gcp/bin/sandbox" || cfg.CloudRunSandbox.Workdir != "/tmp/crabbox" || !cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/" {
+		t.Fatalf("cloudRunSandbox defaults not applied: %#v", cfg.CloudRunSandbox)
+	}
+	allowEgress := true
+	write := false
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "cloud-run-sandbox",
+		CloudRunSandbox: &fileCloudRunSandboxConfig{
+			CLIPath:     "/opt/sandbox",
+			Workdir:     "/workspace/app",
+			AllowEgress: &allowEgress,
+			Write:       &write,
+			Rootfs:      "/var/rootfs",
+			Mode:        "container",
+		},
+	})
+	if cfg.Provider != "cloud-run-sandbox" || cfg.CloudRunSandbox.CLIPath != "/opt/sandbox" || cfg.CloudRunSandbox.Workdir != "/workspace/app" || !cfg.CloudRunSandbox.AllowEgress || cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/var/rootfs" || cfg.CloudRunSandbox.Mode != "container" {
+		t.Fatalf("file cloudRunSandbox config not applied: %#v", cfg.CloudRunSandbox)
+	}
+
+	// Empty file section must not clear previously applied values.
+	applyFileConfig(&cfg, fileConfig{CloudRunSandbox: &fileCloudRunSandboxConfig{}})
+	if cfg.CloudRunSandbox.CLIPath != "/opt/sandbox" || cfg.CloudRunSandbox.Workdir != "/workspace/app" || !cfg.CloudRunSandbox.AllowEgress || cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/var/rootfs" || cfg.CloudRunSandbox.Mode != "container" {
+		t.Fatalf("empty file cloudRunSandbox config cleared existing values: %#v", cfg.CloudRunSandbox)
+	}
+
+	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL", "https://gateway.example.run.app")
+	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_CLI", "/usr/local/bin/sandbox")
+	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_WORKDIR", "/tmp/env-work")
+	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS", "false")
+	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_WRITE", "true")
+	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS", "/")
+	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_MODE", "local")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.CloudRunSandbox.GatewayURL != "https://gateway.example.run.app" || cfg.CloudRunSandbox.CLIPath != "/usr/local/bin/sandbox" || cfg.CloudRunSandbox.Workdir != "/tmp/env-work" || cfg.CloudRunSandbox.AllowEgress || !cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/" || cfg.CloudRunSandbox.Mode != "local" {
+		t.Fatalf("env cloudRunSandbox config not applied: %#v", cfg.CloudRunSandbox)
+	}
+
+	// Alternate env names should also apply gateway URL and CLI binary.
+	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL", "")
+	t.Setenv("CLOUD_RUN_SANDBOX_URL", "https://alt.example.run.app")
+	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_CLI", "")
+	t.Setenv("CLOUD_RUN_SANDBOX_BINARY", "/bin/sandbox-alt")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv alternate err=%v", err)
+	}
+	if cfg.CloudRunSandbox.GatewayURL != "https://alt.example.run.app" || cfg.CloudRunSandbox.CLIPath != "/bin/sandbox-alt" {
+		t.Fatalf("alternate env cloudRunSandbox config not applied: %#v", cfg.CloudRunSandbox)
 	}
 }
 
