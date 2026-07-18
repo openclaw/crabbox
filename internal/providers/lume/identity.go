@@ -37,25 +37,29 @@ func lumeVMImmutableID(cfg Config, inst lumeVM) (string, error) {
 	if filepath.Base(inst.Name) != inst.Name || inst.Name == "." || inst.Name == ".." {
 		return "", exit(5, "refusing unsafe Lume VM name %q", inst.Name)
 	}
-	configPath := filepath.Join(root, inst.Name, "config.json")
+	return lumeVMImmutableIDAtPath(filepath.Join(root, inst.Name), inst.Name)
+}
+
+func lumeVMImmutableIDAtPath(vmPath, name string) (string, error) {
+	configPath := filepath.Join(vmPath, "config.json")
 	info, err := os.Lstat(configPath)
 	if err != nil {
-		return "", exit(5, "inspect Lume VM identity for %s: %v", inst.Name, err)
+		return "", exit(5, "inspect Lume VM identity for %s: %v", name, err)
 	}
 	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 1<<20 {
-		return "", exit(5, "Lume VM identity config for %s is not a small regular file", inst.Name)
+		return "", exit(5, "Lume VM identity config for %s is not a small regular file", name)
 	}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return "", exit(5, "read Lume VM identity for %s: %v", inst.Name, err)
+		return "", exit(5, "read Lume VM identity for %s: %v", name, err)
 	}
 	var vmConfig lumeVMConfigFile
 	if err := json.Unmarshal(data, &vmConfig); err != nil {
-		return "", exit(5, "parse Lume VM identity for %s: %v", inst.Name, err)
+		return "", exit(5, "parse Lume VM identity for %s: %v", name, err)
 	}
 	machineID, err := base64.StdEncoding.DecodeString(strings.TrimSpace(vmConfig.MachineIdentifier))
 	if err != nil || len(machineID) == 0 || len(machineID) > 1024 {
-		return "", exit(5, "Lume VM %s has an invalid machine identifier", inst.Name)
+		return "", exit(5, "Lume VM %s has an invalid machine identifier", name)
 	}
 	sum := sha256.Sum256(machineID)
 	return "lume-machine-" + hex.EncodeToString(sum[:]), nil

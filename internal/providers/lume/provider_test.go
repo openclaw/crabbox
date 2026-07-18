@@ -564,19 +564,17 @@ func TestStopAcceptsStoppedStateAfterSignalExit(t *testing.T) {
 	mustNoError(t, b.stopVM(context.Background(), b.configForRun(), "worker-1", lumeRunOwner{}))
 }
 
-func TestDeleteRefusesRunningVM(t *testing.T) {
+func TestStopRefusesRunningVMWithoutExactOwner(t *testing.T) {
 	cfg := testConfig()
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		"get": {Stdout: `[{"name":"worker-1","status":"running"}]`},
 	}}
 	b := testBackend(cfg, runner)
-	if err := b.deleteVM(context.Background(), b.configForRun(), "worker-1", lumeRunOwner{}); err == nil || !strings.Contains(err.Error(), "refusing to delete") {
-		t.Fatalf("delete running error=%v", err)
+	if err := b.stopVM(context.Background(), b.configForRun(), "worker-1", lumeRunOwner{}); err == nil || !strings.Contains(err.Error(), "exact launch owner") {
+		t.Fatalf("stop running error=%v", err)
 	}
-	for _, call := range runner.calls {
-		if len(call.Args) > 0 && call.Args[0] == "delete" {
-			t.Fatalf("delete command ran for a running VM: %#v", runner.calls)
-		}
+	if len(runner.calls) != 1 || runner.calls[0].Args[0] != "get" {
+		t.Fatalf("unexpected Lume mutation: %#v", runner.calls)
 	}
 }
 
@@ -650,26 +648,22 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 		t.Fatalf("claim after replacement refusal ok=%v err=%v", ok, err)
 	}
 	writeLumeVMConfig(t, home, name, originalMachineID)
-	vmRunning = true
+	vmRunning = false
 	remoteCleanupCalled := false
 	mustNoError(t, b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) { remoteCleanupCalled = true }}))
 	if remoteCleanupCalled {
 		t.Fatal("guarded cleanup ran without a prepared SSH endpoint")
 	}
-	if vmExists {
-		t.Fatal("claimed VM was not deleted")
+	if _, err := os.Stat(filepath.Join(home, ".lume", name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("claimed VM directory still exists: %v", err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || ok {
 		t.Fatalf("claim after release ok=%v err=%v", ok, err)
 	}
-	deleted := false
 	for _, call := range runner.calls {
 		if len(call.Args) > 0 && call.Args[0] == "delete" {
-			deleted = true
+			t.Fatalf("unsafe name-based delete call: %#v", runner.calls)
 		}
-	}
-	if !deleted {
-		t.Fatalf("delete call missing: %#v", runner.calls)
 	}
 }
 

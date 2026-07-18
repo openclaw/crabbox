@@ -1057,39 +1057,41 @@ func (b *backend) waitForGuestIdentity(ctx context.Context, name, host string, t
 }
 
 func (b *backend) stopVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) error {
-	args := []string{"stop", name}
-	if storage := strings.TrimSpace(cfg.Lume.Storage); storage != "" {
-		args = append(args, "--storage", storage)
+	state, missing, err := b.observeVMState(ctx, cfg, name)
+	if err != nil {
+		return err
 	}
-	var stopErr error
-	var signalErr error
-	var state string
-	for attempt := 0; attempt < 2; attempt++ {
-		result, err := b.lume(ctx, cfg, args, nil, b.rt.Stderr)
-		if err != nil {
-			stopErr = commandError("lume stop", result, err)
-		} else {
-			stopErr = nil
-		}
-		// Lume stop may leave its run owner; signal only the captured identity.
-		if ownerSafeToSignal(owner) {
-			if err := signalProcessInterrupt(owner.PID); err != nil {
-				signalErr = fmt.Errorf("interrupt Lume owner pid %d: %w", owner.PID, err)
-			}
-		}
-		stopped, observedState, observeErr := b.waitForStoppedOrMissingVM(ctx, cfg, name, owner)
-		state = observedState
-		if stopped {
-			return nil
-		}
-		if observeErr != nil {
-			return errors.Join(stopErr, observeErr)
+	if (missing || state == "stopped") && !ownerProcessMatches(owner) {
+		return nil
+	}
+	if !ownerSafeToSignal(owner) {
+		return exit(5, "refusing to stop running Lume VM %s without its exact launch owner identity", name)
+	}
+	if err := signalProcessInterrupt(owner.PID); err != nil {
+		return fmt.Errorf("interrupt Lume owner pid %d: %w", owner.PID, err)
+	}
+	timeout := b.stopObserveTimeout
+	if timeout <= 0 {
+		timeout = defaultStopObserveTimeout
+	}
+	interval := b.stopPollInterval
+	if interval <= 0 {
+		interval = defaultStopPollInterval
+	}
+	deadline := time.NewTimer(timeout)
+	ticker := time.NewTicker(interval)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	for ownerProcessMatches(owner) {
+		select {
+		case <-ctx.Done():
+			return exit(2, "wait for Lume VM %s owner to stop: context cancelled", name)
+		case <-deadline.C:
+			return exit(5, "Lume VM %s owner pid %d remained running after interrupt", name, owner.PID)
+		case <-ticker.C:
 		}
 	}
-	if stopErr != nil {
-		return errors.Join(stopErr, signalErr, exit(5, "Lume VM %s remained %s after two stop attempts", name, blank(state, "unknown")))
-	}
-	return errors.Join(signalErr, exit(5, "Lume VM %s remained %s after two stop attempts", name, blank(state, "unknown")))
+	return nil
 }
 
 func (b *backend) removeClaimedVM(ctx context.Context, cfg Config, name string, claim core.LeaseClaim, owner lumeRunOwner) error {
@@ -1113,19 +1115,7 @@ func (b *backend) removeClaimedVM(ctx context.Context, cfg Config, name string, 
 		removeLumeRunLog(name)
 		return nil
 	}
-	if !missing {
-		stopped, getErr := b.getInstance(ctx, cfg, name)
-		if getErr != nil {
-			if !isLumeNotFoundError(getErr) {
-				return getErr
-			}
-			removeLumeRunLog(name)
-			return nil
-		} else if err := b.verifyClaimedVMIdentity(cfg, stopped, claim); err != nil {
-			return err
-		}
-	}
-	return b.deleteVM(ctx, cfg, name, owner)
+	return b.deleteVM(cfg, name, claim, owner)
 }
 
 func (b *backend) verifyClaimedVMIdentity(cfg Config, inst lumeVM, claim core.LeaseClaim) error {
@@ -1149,30 +1139,11 @@ func removeLumeRunLog(name string) {
 	}
 }
 
-func (b *backend) deleteVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) error {
-	stopped, state, err := b.observeStoppedOrMissingVM(ctx, cfg, name, owner)
-	if err != nil {
-		return err
-	}
-	if !stopped {
-		return exit(5, "refusing to delete Lume VM %s while state=%s", name, blank(state, "unknown"))
-	}
+func (b *backend) deleteVM(cfg Config, name string, claim core.LeaseClaim, owner lumeRunOwner) error {
 	if ownerProcessMatches(owner) {
 		return exit(5, "refusing to delete Lume VM %s while owner pid %d is still running", name, owner.PID)
 	}
-	if state == "missing" {
-		removeLumeRunLog(name)
-		return nil
-	}
-	args := []string{"delete", name, "--force"}
-	if storage := strings.TrimSpace(cfg.Lume.Storage); storage != "" {
-		args = append(args, "--storage", storage)
-	}
-	result, err := b.lume(ctx, cfg, args, nil, b.rt.Stderr)
-	if err != nil {
-		return commandError("lume delete", result, err)
-	}
-	if err := b.waitForMissingVM(ctx, cfg, name); err != nil {
+	if err := deleteClaimedVMDirectory(cfg, name, claim.CloudImmutableID); err != nil {
 		return err
 	}
 	removeLumeRunLog(name)
@@ -1324,34 +1295,6 @@ func lumeStorageIdentity(cfg Config, inst lumeVM, fallback string) (string, erro
 	return inst.Name + "\x00" + root, nil
 }
 
-func (b *backend) waitForStoppedOrMissingVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) (bool, string, error) {
-	timeout := b.stopObserveTimeout
-	if timeout <= 0 {
-		timeout = defaultStopObserveTimeout
-	}
-	interval := b.stopPollInterval
-	if interval <= 0 {
-		interval = defaultStopPollInterval
-	}
-	deadline := time.NewTimer(timeout)
-	ticker := time.NewTicker(interval)
-	defer deadline.Stop()
-	defer ticker.Stop()
-	for {
-		stopped, state, err := b.observeStoppedOrMissingVM(ctx, cfg, name, owner)
-		if err != nil || stopped {
-			return stopped, state, err
-		}
-		select {
-		case <-ctx.Done():
-			return false, state, exit(2, "wait for Lume VM %s to stop: context cancelled", name)
-		case <-deadline.C:
-			return false, state, nil
-		case <-ticker.C:
-		}
-	}
-}
-
 func (b *backend) observeStoppedOrMissingVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) (bool, string, error) {
 	state, missing, err := b.observeVMState(ctx, cfg, name)
 	if err != nil {
@@ -1381,37 +1324,6 @@ func (b *backend) observeVMState(ctx context.Context, cfg Config, name string) (
 		return "", false, getErr
 	}
 	return "missing", true, nil
-}
-
-func (b *backend) waitForMissingVM(ctx context.Context, cfg Config, name string) error {
-	timeout := b.stopObserveTimeout
-	if timeout <= 0 {
-		timeout = defaultStopObserveTimeout
-	}
-	interval := b.stopPollInterval
-	if interval <= 0 {
-		interval = defaultStopPollInterval
-	}
-	deadline := time.NewTimer(timeout)
-	ticker := time.NewTicker(interval)
-	defer deadline.Stop()
-	defer ticker.Stop()
-	for {
-		state, missing, err := b.observeVMState(ctx, cfg, name)
-		if err != nil {
-			return err
-		}
-		if missing {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return exit(2, "wait for deleted Lume VM %s: context cancelled", name)
-		case <-deadline.C:
-			return exit(5, "Lume VM %s remained %s after delete", name, blank(state, "unknown"))
-		case <-ticker.C:
-		}
-	}
 }
 
 func (b *backend) getInstance(ctx context.Context, cfg Config, name string) (lumeVM, error) {
