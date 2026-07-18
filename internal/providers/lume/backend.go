@@ -668,7 +668,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		missing := normalizedState(inst.Status) == "missing"
 		now := time.Now().UTC()
-		if missing && claim.Labels["recovery"] == "clone-pending" && !clonePendingStale(claim, now) {
+		if missing && claim.Labels["recovery"] == "clone-pending" {
 			continue
 		}
 		server := b.serverFromInstance(inst, claim, claimCfg)
@@ -1192,10 +1192,16 @@ func (b *backend) removeClaimedVM(ctx context.Context, cfg Config, name string, 
 		}
 	}
 	if missing {
+		if err := requireClaimedStorageIdentity(cfg, claim); err != nil {
+			return err
+		}
 		removeLumeRunLog(name)
 		return nil
 	}
-	return b.deleteVM(cfg, name, claim, owner)
+	if err := b.deleteVM(cfg, name, claim, owner); err != nil {
+		return err
+	}
+	return requireClaimedStorageIdentity(cfg, claim)
 }
 
 func (b *backend) verifyClaimedVMIdentity(cfg Config, inst lumeVM, claim core.LeaseClaim) error {

@@ -2,6 +2,7 @@ package lume
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -668,7 +669,7 @@ func TestCleanupBindsPendingCloneIdentityBeforeDelete(t *testing.T) {
 	}
 }
 
-func TestCleanupRetainsFreshMissingPendingClone(t *testing.T) {
+func TestCleanupRetainsMissingPendingCloneRegardlessOfAge(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
@@ -683,6 +684,18 @@ func TestCleanupRetainsFreshMissingPendingClone(t *testing.T) {
 		"state": "provisioning", "recovery": "clone-pending", "run_owner_expected": "false",
 	}}
 	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "fresh-pending-clone", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}))
+	claimPath := join(home, ".local", "state", "crabbox", "claims", leaseID+".json")
+	claimData, err := os.ReadFile(claimPath)
+	must(t, err)
+	var stored core.LeaseClaim
+	must(t, json.Unmarshal(claimData, &stored))
+	stored.ClaimedAt = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	claimData, err = json.MarshalIndent(stored, "", "  ")
+	must(t, err)
+	must(t, os.WriteFile(claimPath, append(claimData, '\n'), 0o600))
+	if cleanup, reason := shouldCleanup(server, stored, time.Now().UTC()); !cleanup || reason != "clone pending stale" {
+		t.Fatalf("old present pending clone cleanup=%v reason=%q", cleanup, reason)
+	}
 	cfg := base()
 	cfg.Lume.Storage = storage
 	keyPath, _, err := ensureTestboxKeyForConfig(cfg, leaseID)
@@ -698,7 +711,49 @@ func TestCleanupRetainsFreshMissingPendingClone(t *testing.T) {
 		t.Fatalf("fresh pending claim=%#v ok=%v err=%v", current, ok, claimErr)
 	}
 	if _, statErr := os.Stat(keyPath); statErr != nil {
-		t.Fatalf("fresh pending key removed: %v", statErr)
+		t.Fatalf("pending key removed: %v", statErr)
+	}
+}
+
+func TestCleanupRetainsClaimWhenStorageChangesAfterMissingObservation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
+	storage := join(home, "mounted-vms")
+	const leaseID, name = "cbx_mount_changed_late", "crabbox-mount-changed-late"
+	putVMAt(t, storage, name, "bGF0ZS1tb3VudC1jaGFuZ2U=")
+	storageID := strings.Repeat("a", 64)
+	must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(storageID+"\n"), 0o600))
+	cfg := base()
+	cfg.Lume.Storage = storage
+	immutableID, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: storage})
+	must(t, err)
+	server := core.Server{CloudID: name, ImmutableID: immutableID, Provider: providerName, Status: "stopped", Labels: labels{
+		"instance": name, "storage": storage, "storage_exact": "true", "storage_id": storageID, "state": "stopped",
+	}}
+	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "mount-changed-late", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}))
+	keyPath, _, err := ensureTestboxKeyForConfig(cfg, leaseID)
+	must(t, err)
+	getCalls := 0
+	runner := &fake{hook: func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+		if len(req.Args) == 0 || req.Args[0] != "get" {
+			return cmdRes{}, nil, false
+		}
+		getCalls++
+		if getCalls < 3 {
+			return cmdRes{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
+		}
+		must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(strings.Repeat("b", 64)+"\n"), 0o600))
+		return cmdRes{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
+	}}
+	err = backendFor(base(), runner).Cleanup(bg, core.CleanupRequest{})
+	want(t, err, "storage identity changed")
+	if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || !ok || current.CloudImmutableID != immutableID {
+		t.Fatalf("claim after late storage change=%#v ok=%v err=%v", current, ok, claimErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("lease key removed after late storage change: %v", statErr)
 	}
 }
 
