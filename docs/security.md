@@ -54,11 +54,14 @@ are rejected `401 unauthorized`. The Node runtime can instead accept an
 explicitly configured trusted reverse-proxy identity from allowlisted peer
 CIDRs. The generally unauthenticated routes are `GET /v1/health`, the GitHub
 login/OAuth and portal login routes, and bridge agent upgrades that use
-short-lived tickets. The workspace lifecycle and desktop-connection routes also
-accept the dedicated `CRABBOX_RUNTIME_ADAPTER_TOKEN` as a non-admin service
-identity. That credential cannot attach workspace terminals and is rejected from
-every other coordinator route. Normal authentication is resolved in
-`worker/src/auth.ts` in this precedence:
+short-lived tickets. The WebVNC viewer bootstrap and its lease-scoped session
+routes also bypass GitHub Portal OAuth at the outer Worker layer, but the Fleet
+coordinator requires and revalidates their one-use ticket or scoped session
+before returning viewer content. The workspace lifecycle and desktop-connection
+routes also accept the dedicated `CRABBOX_RUNTIME_ADAPTER_TOKEN` as a non-admin
+service identity. That credential cannot attach workspace terminals and is
+rejected from every other coordinator route. Normal authentication is resolved
+in `worker/src/auth.ts` in this precedence:
 
 1. **Admin token** — the request token equals the coordinator secret
    `CRABBOX_ADMIN_TOKEN`. Grants admin scope.
@@ -115,6 +118,36 @@ events, telemetry, and live event subscriptions for work recorded against
 their leases, including runs that later replace the active backing lease. See
 [auth and admin](features/auth-admin.md) and [broker auth
 routing](features/broker-auth-routing.md) for the full flow.
+
+### Bearer-to-Portal WebVNC bootstrap
+
+`crabbox webvnc --open` does not require GitHub OAuth when the CLI is already
+authenticated with the shared or admin coordinator bearer. The authenticated
+API request mints a 120-second, one-use opaque viewer ticket bound to the exact
+lease, owner, org, bearer credential hash or admin grant version, and current
+lease ACL. GitHub user tokens cannot mint this Agent bootstrap.
+
+The CLI writes a private temporary HTML file and opens only its random `file:`
+URL. The file-origin page submits the opaque ticket to the coordinator in a
+form POST body, so the bearer, ticket, coordinator viewer URL, and VNC
+credential do not enter browser URLs, fragments, process arguments, or CLI
+output. On Windows, the temporary directory and file use a protected DACL
+limited to the current user; other platforms use mode `0700`/`0600`. The
+coordinator consumes the ticket before validation returns and creates a
+non-persistent HttpOnly cookie scoped to the selected lease's `/vnc` path.
+Server-side expiry is at most 30 minutes and is also capped by the originating
+token's expiry.
+
+This cookie represents only a WebVNC viewer principal. It cannot become
+`crabbox_session`, access the Portal index, share or release a lease, show bridge
+commands, or call lease-management routes. Every page, status, control, theme,
+credential-handoff, and viewer WebSocket request revalidates the lease binding,
+owner/org principal, current shared-token hash or admin grant version, and lease
+ACL. Tickets are deleted on the first consume attempt; expired, replayed,
+wrong-lease, wrong-principal, and revoked grants fail closed. Any VNC credential
+handoff remains server-side and can be consumed once by that viewer session.
+The existing GitHub `crabbox_session` human path remains compatible and
+independent.
 
 ### Cloudflare Access (optional defense-in-depth)
 
@@ -225,7 +258,8 @@ There is no central project secret store. Remote command environment values
 stay on the operator's machine unless explicitly allowed for forwarding.
 Local helper processes, including External provider lifecycle commands, inherit
 the Crabbox process environment unless their own runtime provides stronger
-isolation.
+isolation. The selected External desktop-password variable is an explicit
+exception: Crabbox removes it from every child environment.
 
 Handling rules:
 
@@ -313,6 +347,10 @@ require an exact same-origin browser `Origin` matching `CRABBOX_PUBLIC_URL` (or
 the request origin when no public URL is configured). Missing or sibling-origin
 intent is rejected before the portal cookie is converted into bearer authority;
 explicit bearer API clients remain independent of this browser-only boundary.
+The one-use WebVNC bootstrap POST is the narrow exception: it arrives from the
+CLI's file-origin bootstrap page without a Portal cookie and authorizes only by
+consuming the opaque, lease-bound ticket. Subsequent scoped-cookie mutations
+and viewer upgrades return to the exact same-origin requirement.
 Portal logout follows the same boundary: `GET /portal/logout` only renders a
 confirmation page, and only a same-origin `POST` clears the portal cookie and
 revokes all WebVNC, Code, and mediated-egress bridges bound to that portal

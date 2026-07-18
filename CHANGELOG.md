@@ -1,17 +1,35 @@
 # Changelog
 
-## 0.38.5 - Unreleased
+## 0.39.1 - Unreleased
 
 ### Added
 
+- Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
+- Added a local Zed task-launcher extension for Crabbox lifecycle and remote execution workflows. Thanks @zozo123.
+
+### Fixed
+
+- Enforced explicitly declared zero-byte artifact sizes during pull while preserving legacy manifests that omit size.
+- Prevented apple-container orphan cleanup from deleting claims reclaimed during its resource snapshot, including same-value rewrites, while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
+- Prevented local-container orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
+- Prevented external-provider orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining routing state when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
+- Prevented apple-vm orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
+
+## 0.39.0 - 2026-07-17
+
+### Added
+
+- Added external-provider desktop access for remote macOS, Windows, and WSL2 machines while keeping desktop credentials local. Thanks @MuduiClaw.
 - Added a Herdr plugin for Crabbox lease controls and repository workflows, with workspace-aware actions and managed panes. Thanks @zozo123.
 - Added a single `open --editor=<name>` lease handoff for external editors, starting with Zed Remote Projects and preserving lease activity while the editor is connected. Thanks @zozo123.
+- Added experimental read-only CUA diagnostics and existing-sandbox inventory while failing all remote lifecycle mutations closed until upstream exposes safe creation and deletion ownership primitives. Thanks @coygeek.
 - Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
 - Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
 - Added GitHub Codespaces direct Linux SSH leases with token-scope preflight, repository and machine selection, durable pre-create recovery, exact claim-bound ownership, generated OpenSSH configuration, and guarded lifecycle smoke coverage. Thanks @coygeek.
 
 ### Fixed
 
+- Prevented Apple-container cleanup from force-deleting stopped containers without an exact resource-bound local claim. Thanks @coygeek.
 - Limited failed Blacksmith warmup cleanup to Testbox IDs emitted by that invocation, preventing config-matched concurrent Testboxes from being stopped. Thanks @anagnorisis2peripeteia.
 - Prevented Tart cleanup from deleting lease claims and stored SSH keys created or rebound by concurrent acquisitions. Thanks @anagnorisis2peripeteia.
 - Failed Node coordinator startup on malformed trusted-proxy CIDRs, warned on untrusted forwarded client headers, and kept environment-backed provider failures out of top-level request logs.

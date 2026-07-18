@@ -2,12 +2,15 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 )
+
+const editorHandoffSchema = "crabbox/editor-handoff/v1"
 
 type editorTargetCapabilities struct {
 	supportsWindows       bool
@@ -20,13 +23,25 @@ type editorHandoffSpec struct {
 	targets             editorTargetCapabilities
 }
 
+type editorHandoffOutput struct {
+	Schema            string `json:"schema"`
+	Editor            string `json:"editor"`
+	DisplayName       string `json:"displayName"`
+	LeaseID           string `json:"leaseId,omitempty"`
+	SSHCommand        string `json:"sshCommand"`
+	RemoteFolder      string `json:"remoteFolder"`
+	HydratedByActions bool   `json:"hydratedByActions"`
+	LeaseActivity     string `json:"leaseActivity"`
+	HardTTLApplies    bool   `json:"hardTTLApplies"`
+	ReleaseCommand    string `json:"releaseCommand,omitempty"`
+}
+
 var editorHandoffSpecs = map[string]editorHandoffSpec{
 	"zed": {
 		displayName: "Zed Remote Projects",
 		connectInstructions: "1. Open Remote Projects and select Connect New Server.\n" +
-			"2. Paste: %s\n" +
-			"3. Open: %s\n" +
-			"Keep this process running to maintain lease activity; press Ctrl-C when the Zed session is finished.\n",
+			"2. Paste the SSH command shown above.\n" +
+			"3. Open the remote folder shown above.\n",
 		targets: editorTargetCapabilities{
 			supportsWindows:       false,
 			supportsTokenUsername: false,
@@ -37,9 +52,11 @@ var editorHandoffSpecs = map[string]editorHandoffSpec{
 func (a App) open(ctx context.Context, args []string) error {
 	var editorName string
 	var editor editorHandoffSpec
+	var jsonOut bool
 	resolved, err := a.resolveSSHCommandTargetWithOptions(ctx, "open", args, false, sshCommandResolveOptions{
 		registerFlags: func(fs *flag.FlagSet) {
 			fs.StringVar(&editorName, "editor", "", "editor: "+strings.Join(editorHandoffNames(), ", "))
+			fs.BoolVar(&jsonOut, "json", false, "print a machine-readable handoff")
 		},
 		validateFlags: func() error {
 			editorName = strings.ToLower(strings.TrimSpace(editorName))
@@ -57,7 +74,7 @@ func (a App) open(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.runEditorHandoff(ctx, editorName, editor, resolved)
+	return a.runEditorHandoff(ctx, editorName, editor, resolved, jsonOut)
 }
 
 func editorHandoffNames() []string {
@@ -69,7 +86,7 @@ func editorHandoffNames() []string {
 	return names
 }
 
-func (a App) runEditorHandoff(ctx context.Context, editorName string, editor editorHandoffSpec, resolved resolvedSSHCommandTarget) error {
+func (a App) runEditorHandoff(ctx context.Context, editorName string, editor editorHandoffSpec, resolved resolvedSSHCommandTarget, jsonOut bool) error {
 	if err := validateEditorTarget(editorName, editor, resolved.Config, resolved.Lease.SSH); err != nil {
 		return err
 	}
@@ -87,10 +104,53 @@ func (a App) runEditorHandoff(ctx context.Context, editorName string, editor edi
 
 	stopLeaseActivity := a.startInteractiveSSHLeaseActivity(ctx, resolved.Config, resolved.Lease)
 	defer stopLeaseActivity()
-	writeEditorInstructions(a.Stdout, editor, resolved.Lease.SSH, folder)
+	handoff := newEditorHandoffOutput(
+		editorName,
+		editor,
+		resolved.Config,
+		resolved.Lease,
+		folder,
+		hydratedByActions,
+	)
+	if jsonOut {
+		if err := json.NewEncoder(a.Stdout).Encode(handoff); err != nil {
+			return err
+		}
+	} else {
+		writeEditorInstructions(a.Stdout, editor, handoff)
+	}
 
 	<-ctx.Done()
 	return nil
+}
+
+func newEditorHandoffOutput(editorName string, editor editorHandoffSpec, cfg Config, lease LeaseTarget, folder string, hydratedByActions bool) editorHandoffOutput {
+	leaseID := strings.TrimSpace(lease.LeaseID)
+	releaseCommand := ""
+	if leaseID != "" {
+		releaseCommand = runStopCommand(cfg, leaseID)
+	}
+	return editorHandoffOutput{
+		Schema:            editorHandoffSchema,
+		Editor:            editorName,
+		DisplayName:       editor.displayName,
+		LeaseID:           leaseID,
+		SSHCommand:        editorSSHCommandLine(lease.SSH),
+		RemoteFolder:      folder,
+		HydratedByActions: hydratedByActions,
+		LeaseActivity:     "foreground",
+		HardTTLApplies:    editorHandoffHardTTLApplies(cfg, lease),
+		ReleaseCommand:    releaseCommand,
+	}
+}
+
+func editorHandoffHardTTLApplies(cfg Config, lease LeaseTarget) bool {
+	provider := firstNonBlank(lease.Server.Provider, cfg.Provider)
+	if isStaticProvider(provider) {
+		return false
+	}
+	_, ok := parseLeaseLabelTime(lease.Server.Labels["expires_at"])
+	return ok
 }
 
 func validateEditorTarget(editorName string, editor editorHandoffSpec, cfg Config, target SSHTarget) error {
@@ -108,7 +168,24 @@ func editorSSHCommandLine(target SSHTarget) string {
 	return "ssh " + strings.Join(shellWords(args), " ")
 }
 
-func writeEditorInstructions(out io.Writer, editor editorHandoffSpec, target SSHTarget, folder string) {
-	fmt.Fprintln(out, editor.displayName)
-	fmt.Fprintf(out, editor.connectInstructions, editorSSHCommandLine(target), folder)
+func writeEditorInstructions(out io.Writer, editor editorHandoffSpec, handoff editorHandoffOutput) {
+	fmt.Fprintf(out, "%s is ready.\n\n", editor.displayName)
+	fmt.Fprintln(out, "SSH command:")
+	fmt.Fprintf(out, "  %s\n\n", handoff.SSHCommand)
+	fmt.Fprintln(out, "Remote folder:")
+	fmt.Fprintf(out, "  %s\n\n", handoff.RemoteFolder)
+	fmt.Fprintln(out, "Next:")
+	fmt.Fprint(out, editor.connectInstructions)
+	fmt.Fprintln(out)
+	if handoff.HardTTLApplies {
+		fmt.Fprintln(out, "Lease activity: active while this process runs; the hard TTL still applies.")
+	} else {
+		fmt.Fprintln(out, "Lease activity: active while this process runs.")
+	}
+	fmt.Fprintln(out, "Press Ctrl-C when the editor session is finished.")
+	if handoff.ReleaseCommand != "" {
+		fmt.Fprintf(out, "Release command: %s\n", handoff.ReleaseCommand)
+	} else {
+		fmt.Fprintln(out, "Stopping this process does not release the lease.")
+	}
 }

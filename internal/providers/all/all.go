@@ -19,6 +19,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/coder"
 	_ "github.com/openclaw/crabbox/internal/providers/codesandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/crownest"
+	_ "github.com/openclaw/crabbox/internal/providers/cua"
 	_ "github.com/openclaw/crabbox/internal/providers/cubesandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/daytona"
 	_ "github.com/openclaw/crabbox/internal/providers/digitalocean"

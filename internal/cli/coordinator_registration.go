@@ -435,9 +435,26 @@ func (a App) startRegisteredWebVNCDaemonBestEffort(cfg Config, target SSHTarget,
 	if !shouldStartRegisteredWebVNCDaemon(cfg, keep) {
 		return
 	}
-	if err := a.startWebVNCDaemon(webVNCBridgeArgs(cfg, target, leaseID, false, false), leaseID, false, ""); err != nil {
+	args := webVNCBridgeArgs(cfg, target, leaseID, false, false)
+	// Resolve the password before the daemon environment is scrubbed. The
+	// supervisor forwards this value to the bridge over its one-shot stdin gate.
+	credentialInput := registeredWebVNCDaemonCredentialInput(cfg, args)
+	if err := a.startWebVNCDaemon(args, leaseID, false, "", credentialInput, target.ChildEnvDenylist...); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: could not start registered WebVNC bridge for %s: %v\n", leaseID, err)
 	}
+}
+
+func registeredWebVNCDaemonCredentialInput(cfg Config, args []string) *string {
+	name := webVNCDaemonCredentialName(append([]string{"webvnc"}, args...))
+	if name == "" {
+		return nil
+	}
+	value, ok := LookupExternalDesktopPassword(cfg, name)
+	if !ok || strings.TrimSpace(value) == "" {
+		// Preserve startWebVNCDaemon's existing missing/empty diagnostic.
+		return nil
+	}
+	return &value
 }
 
 func shouldStartRegisteredWebVNCDaemon(cfg Config, keep bool) bool {

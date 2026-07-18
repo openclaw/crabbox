@@ -244,12 +244,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var presetVars stringListFlag
 	var artifactGlobs stringListFlag
 	var requiredArtifactGlobs stringListFlag
+	var requiredArtifactSchemas stringListFlag
 	fs.Var(&downloads, "download", "download a remote file after command success: remote=local; repeatable")
 	fs.Var(&allowEnvFlags, "allow-env", "allow an environment variable for this run; repeatable or comma-separated")
 	fs.Var(&envProfileFlags, "env-from-profile", "load allowed environment values from a local profile file; repeatable")
 	fs.Var(&presetVars, "preset-var", "preset template variable name=value; repeatable or comma-separated")
 	fs.Var(&artifactGlobs, "artifact-glob", "collect remote files matching a safe glob into a local run artifact tarball; repeatable")
 	fs.Var(&requiredArtifactGlobs, "require-artifact", "require a remote file matching a safe glob after command success; repeatable")
+	fs.Var(&requiredArtifactSchemas, "require-artifact-schema", "validate a required artifact's JSON content against a schema file after command success: remote=schema.json; repeatable")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	timingRecord := fs.String("timing-record", "", "append final timing to benchmark JSONL store: default, off, or path")
@@ -380,6 +382,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err := validateRequiredRunArtifactGlobs(requiredArtifactGlobs); err != nil {
 		return err
 	}
+	requiredArtifactSchemas = appendUniqueStrings(nil, requiredArtifactSchemas...)
+	loadedArtifactSchemas, err := loadRequireArtifactSchemas(requiredArtifactSchemas)
+	if err != nil {
+		return err
+	}
 	runArtifactGlobs := appendUniqueStrings(append([]string{}, expansion.ArtifactGlobs...), requiredArtifactGlobs...)
 	if *syncOnly {
 		if len(expansion.ArtifactGlobs) > 0 {
@@ -387,6 +394,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if len(requiredArtifactGlobs) > 0 {
 			return exit(2, "--require-artifact cannot be combined with --sync-only")
+		}
+		if len(requiredArtifactSchemas) > 0 {
+			return exit(2, "--require-artifact-schema cannot be combined with --sync-only")
 		}
 		if strings.TrimSpace(*emitProof) != "" {
 			return exit(2, "--emit-proof cannot be combined with --sync-only")
@@ -503,6 +513,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	envSelection.Inline = mergeEnv(envSelection.Inline, expansion.Env)
 	envSelection.Effective = mergeEnv(envSelection.Effective, expansion.Env)
+	stripExternalDesktopPasswordFromRunEnv(cfg, &envSelection)
 	envHelperName := strings.TrimSpace(*envHelper)
 	if envHelperName != "" && len(envSelection.Profile) == 0 {
 		return exit(2, "--env-helper requires --env-from-profile values selected by --allow-env")
@@ -648,6 +659,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if strings.TrimSpace(*readyPool) != "" {
 			return exit(2, "--pool requires a brokered SSH lease provider")
+		}
+		if len(requiredArtifactSchemas) > 0 {
+			return exit(2, "--require-artifact-schema is not supported for provider=%s yet; use an SSH-backed provider", backend.Spec().Name)
 		}
 		if expansion.Profile.Doctor.Enabled {
 			return exit(2, "%s delegates run execution; profile doctor is not supported", backend.Spec().Name)
@@ -827,6 +841,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		timingRecordColdRun = &coldRun
 	}
 	applyResolvedServerConfig(&cfg, server)
+	stripTargetCredentialsFromRunEnv(&envSelection, target)
 	if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
 		cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
 	}
@@ -1101,6 +1116,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		useCoordinator = coord != nil
 		recorder.UseCoordinator(coord)
 		applyResolvedServerConfig(&cfg, server)
+		removeEnvironmentKeys(runReq.Env, target.ChildEnvDenylist...)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 			return true, err
 		}
@@ -1614,6 +1630,7 @@ afterSync:
 		}
 	}
 	var artifactFailure error
+	var schemaValidationResults []SchemaValidationResult
 	if code == 0 && len(requiredArtifactGlobs) > 0 {
 		requireOutput, err := requireRunArtifactGlobs(ctx, target, workdir, requiredArtifactGlobs)
 		if err != nil {
@@ -1622,6 +1639,17 @@ afterSync:
 		}
 		if strings.TrimSpace(requireOutput) != "" {
 			fmt.Fprintln(a.Stderr, strings.TrimSpace(requireOutput))
+		}
+	}
+	if code == 0 && len(loadedArtifactSchemas) > 0 {
+		results, schemaOutput, schemaErr := validateRemoteArtifactSchemas(ctx, target, workdir, loadedArtifactSchemas)
+		schemaValidationResults = results
+		if strings.TrimSpace(schemaOutput) != "" {
+			fmt.Fprintln(a.Stderr, strings.TrimSpace(schemaOutput))
+		}
+		if schemaErr != nil {
+			artifactFailure = schemaErr
+			code = 7
 		}
 	}
 	if code == 0 {
@@ -1671,6 +1699,7 @@ afterSync:
 	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, code, actionsURL)
 	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, runArtifacts)
 	report.Label = runLabelValue
+	report.SchemaValidations = schemaValidationResults
 	if strings.TrimSpace(*emitProof) != "" && code == 0 {
 		template := cfg.ProofTemplates[strings.TrimSpace(*proofTemplate)]
 		proof, err := writeRunProof(strings.TrimSpace(*emitProof), strings.TrimSpace(*proofTemplate), proofRenderInput{
@@ -2163,13 +2192,19 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		}
 	case "external":
 		if path, err := ExternalRoutingPath(id); err == nil {
-			args = append(args, "--external-routing-file", path)
+			args = append(args, externalRoutingFileArgs(path, cfg.External)...)
 		} else {
 			if strings.TrimSpace(cfg.External.Command) != "" {
 				args = append(args, "--external-command", cfg.External.Command)
 			}
 			if strings.TrimSpace(cfg.External.WorkRoot) != "" {
 				args = append(args, "--external-work-root", cfg.External.WorkRoot)
+			}
+			if strings.TrimSpace(cfg.External.Connection.Desktop.Username) != "" {
+				args = append(args, "--external-desktop-username", cfg.External.Connection.Desktop.Username)
+			}
+			if strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv) != "" {
+				args = append(args, "--external-desktop-password-env", cfg.External.Connection.Desktop.PasswordEnv)
 			}
 		}
 	}
@@ -2741,14 +2776,12 @@ func validateCoordinatorLeaseCapabilities(cfg Config, lease CoordinatorLease) er
 }
 
 func applyResolvedServerConfig(cfg *Config, server Server) {
+	workRoot := server.Labels["work_root"]
 	if server.Provider != "" {
 		cfg.Provider = server.Provider
 	}
 	if server.ServerType.Name != "" {
 		cfg.ServerType = server.ServerType.Name
-	}
-	if root := server.Labels["work_root"]; root != "" {
-		cfg.WorkRoot = root
 	}
 	if targetOS := strings.TrimSpace(server.Labels["target"]); targetOS != "" {
 		cfg.TargetOS = targetOS
@@ -2759,9 +2792,12 @@ func applyResolvedServerConfig(cfg *Config, server Server) {
 		cfg.WindowsMode = ""
 	}
 	normalizeTargetConfig(cfg)
+	if workRoot != "" {
+		cfg.WorkRoot = workRoot
+	}
 	if cfg.Provider == "local-container" || server.Provider == "local-container" {
-		if root := server.Labels["work_root"]; root != "" {
-			cfg.LocalContainer.WorkRoot = root
+		if workRoot != "" {
+			cfg.LocalContainer.WorkRoot = workRoot
 		}
 		if labelBool(server.Labels["docker_socket"]) {
 			cfg.LocalContainer.DockerSocket = true

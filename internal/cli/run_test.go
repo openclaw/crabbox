@@ -3324,19 +3324,49 @@ func TestApplyResolvedServerConfigRestoresLocalContainerSocketConfig(t *testing.
 }
 
 func TestApplyResolvedServerConfigRestoresTargetAndWorkRoot(t *testing.T) {
+	tests := []struct {
+		name        string
+		targetOS    string
+		windowsMode string
+		workRoot    string
+	}{
+		{name: "custom Windows root", targetOS: targetWindows, windowsMode: windowsModeWSL2, workRoot: `D:\crabbox`},
+		{name: "POSIX default on macOS", targetOS: targetMacOS, windowsMode: windowsModeNormal, workRoot: defaultPOSIXWorkRoot},
+		{name: "macOS default on Linux", targetOS: targetLinux, windowsMode: windowsModeNormal, workRoot: defaultMacOSWorkRoot},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			server := Server{Labels: map[string]string{
+				"target":       tt.targetOS,
+				"windows_mode": tt.windowsMode,
+				"work_root":    tt.workRoot,
+			}}
+
+			applyResolvedServerConfig(&cfg, server)
+
+			if cfg.TargetOS != tt.targetOS || cfg.WindowsMode != tt.windowsMode || cfg.WorkRoot != tt.workRoot {
+				t.Fatalf("resolved config=%#v", cfg)
+			}
+		})
+	}
+}
+
+func TestApplyResolvedLeaseConfigPreservesServerPlatformDefaultWorkRoot(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.TargetOS = targetMacOS
-	cfg.WindowsMode = windowsModeNormal
+	target := SSHTarget{TargetOS: targetLinux, User: cfg.SSHUser}
 	server := Server{Labels: map[string]string{
-		"target":       targetWindows,
-		"windows_mode": windowsModeWSL2,
-		"work_root":    `D:\crabbox`,
+		"target":    targetMacOS,
+		"work_root": defaultPOSIXWorkRoot,
 	}}
 
-	applyResolvedServerConfig(&cfg, server)
+	applyResolvedLeaseConfig(&cfg, server, &target)
 
-	if cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeWSL2 || cfg.WorkRoot != `D:\crabbox` {
+	if cfg.TargetOS != targetMacOS || cfg.WorkRoot != defaultPOSIXWorkRoot {
 		t.Fatalf("resolved config=%#v", cfg)
+	}
+	if target.TargetOS != targetMacOS {
+		t.Fatalf("resolved target=%#v", target)
 	}
 }
 

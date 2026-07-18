@@ -21,9 +21,12 @@ target OS:
   present, prefers `grim` on Wayland, and otherwise screenshots `DISPLAY=:99`
   with `scrot` (falling back to ImageMagick `import`). If no capture tool is
   found, it exits with a hint to warm a fresh `--desktop` lease.
-- **macOS** captures the managed Screen Sharing/VNC framebuffer through the lease
-  SSH tunnel. EC2 Mac SSH sessions cannot reliably run `screencapture` against
-  the login-window display, so the framebuffer path is used instead.
+- **macOS** captures the managed Screen Sharing/VNC framebuffer through the
+  lease SSH tunnel. EC2 Mac SSH sessions cannot reliably run `screencapture`
+  against the login-window display, so the framebuffer path is used instead.
+  External macOS leases use the approved operator-managed account credential
+  referenced by `external.connection.desktop.passwordEnv` and authenticate the
+  framebuffer connection with ARD.
 - **Windows** creates a one-shot scheduled task inside the logged-in `crabbox`
   console session, because non-interactive SSH sessions cannot capture the
   visible desktop. The screenshot reflects that active console session.
@@ -52,7 +55,11 @@ Static (`provider=ssh`) macOS and Windows targets are existing host machines,
 not Crabbox-created desktops, so `screenshot` rejects them rather than capturing
 your local or home-host desktop by accident. Static Linux hosts are still
 captured. Managed AWS/Azure Windows and AWS macOS desktop leases are
-Crabbox-created boxes and can be captured by lease id or slug.
+Crabbox-created boxes and can be captured by lease id or slug. A
+desktop-capable External macOS adapter can also be captured once its trusted
+target/account contract and password environment reference are configured.
+Use `crabbox webvnc --provider external --target macos --id <lease> --preflight`
+to verify the same SSH-tunneled RFB/ARD authentication path before capture.
 
 The Blacksmith provider owns machine connectivity and does not support desktop
 screenshots.
@@ -70,6 +77,9 @@ screenshots.
 --static-user <user>        provider=ssh: SSH user
 --static-port <port>        provider=ssh: SSH port
 --static-work-root <path>   provider=ssh: work root on the host
+--external-routing-file <path>
+--external-desktop-username <name>
+--external-desktop-password-env <name>
 --network auto|tailscale|public
 ```
 
@@ -82,3 +92,4 @@ generated from the SSH-capable providers and varies by configuration.
 - [Linux VNC](../features/vnc-linux.md)
 - [Windows VNC](../features/vnc-windows.md)
 - [macOS VNC](../features/vnc-macos.md)
+- [External provider](../providers/external.md)

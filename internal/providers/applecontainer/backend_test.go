@@ -582,6 +582,99 @@ func TestRemoveContainerUsesDeleteForce(t *testing.T) {
 	}
 }
 
+func TestCleanupPreservesUnclaimedStoppedAppleContainer(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container cleanup only runs on macOS/Apple silicon")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ls", "--all", "--format", "json"}): {Stdout: `[{
+			"status":"stopped",
+			"configuration":{
+				"id":"unclaimed-container",
+				"image":{"reference":"debian:bookworm"},
+				"labels":{"crabbox":"true","provider":"apple-container"}
+			}
+		}]`},
+	}}
+
+	if err := testBackend(runner).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if commandWasCalled(runner.calls, "delete") {
+		t.Fatalf("Cleanup deleted unclaimed stopped container: %#v", runner.calls)
+	}
+}
+
+func TestCleanupDeletesStoppedAppleContainerWithExactClaim(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("apple-container cleanup only runs on macOS/Apple silicon")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_claimed_cleanup"
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+		leaseID,
+		"claimed-cleanup",
+		providerName,
+		"",
+		"",
+		t.TempDir(),
+		time.Minute,
+		false,
+		core.Server{CloudID: "claimed-container", Provider: providerName},
+		core.SSHTarget{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ls", "--all", "--format", "json"}): {Stdout: `[{
+			"status":"stopped",
+			"configuration":{
+				"id":"claimed-container",
+				"image":{"reference":"debian:bookworm"},
+				"labels":{"crabbox":"true","provider":"apple-container","lease":"cbx_claimed_cleanup"}
+			}
+		}]`},
+	}}
+
+	if err := testBackend(runner).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if !commandWasCalled(runner.calls, "delete") {
+		t.Fatalf("Cleanup preserved exactly claimed stopped container: %#v", runner.calls)
+	}
+}
+
+func TestShouldCleanupRequiresExactClaimBeforeStateDeletion(t *testing.T) {
+	now := time.Now().UTC()
+	server := core.Server{
+		CloudID: "claimed-container",
+		Status:  "stopped",
+		Labels: map[string]string{
+			"crabbox":  "true",
+			"provider": providerName,
+			"lease":    "cbx_claimed_container",
+		},
+	}
+	exactClaim := core.LeaseClaim{
+		LeaseID:  "cbx_claimed_container",
+		Provider: providerName,
+		CloudID:  "claimed-container",
+	}
+
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, false, now); cleanup || reason != "missing claim" {
+		t.Fatalf("unclaimed cleanup=%v reason=%q, want false/missing claim", cleanup, reason)
+	}
+	conflictingClaim := exactClaim
+	conflictingClaim.CloudID = "other-container"
+	if cleanup, reason := shouldCleanup(server, conflictingClaim, true, now); cleanup || reason != "claim mismatch" {
+		t.Fatalf("conflicting cleanup=%v reason=%q, want false/claim mismatch", cleanup, reason)
+	}
+	if cleanup, reason := shouldCleanup(server, exactClaim, true, now); !cleanup || reason != "container state=stopped" {
+		t.Fatalf("exact cleanup=%v reason=%q, want true/container state=stopped", cleanup, reason)
+	}
+}
+
 func TestRequireExactAppleContainerClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_claimed_apple_container"

@@ -237,7 +237,7 @@ import {
   usageSummary,
   type CostLimitUsage,
 } from "./usage";
-import { WebVNCCredentialHandoffs } from "./webvnc-handoff";
+import { WebVNCCredentialHandoffs, type WebVNCCredentialHandoffResult } from "./webvnc-handoff";
 
 const fleetID = "default";
 const maxStoredRunLogBytes = 8 * 1024 * 1024;
@@ -246,6 +246,8 @@ const maxLeaseTelemetryHistory = 60;
 const maxRunTelemetrySamples = 60;
 const maxExternalRunnerSyncItems = 200;
 const webVNCTicketTTLSeconds = 120;
+const webVNCPortalViewerTicketTTLSeconds = 120;
+const webVNCPortalViewerSessionTTLSeconds = 30 * 60;
 const codeTicketTTLSeconds = 120;
 const codeViewerTicketTTLSeconds = 120;
 const codeViewerSessionTTLSeconds = 8 * 60 * 60;
@@ -370,6 +372,37 @@ interface WebVNCTicketRecord extends CachedBridgeGrant {
   expiresAt: string;
 }
 
+interface PortalViewerPrincipalRecord extends CachedBridgeGrant {
+  auth: AuthContext["auth"];
+  admin: boolean;
+  owner: string;
+  org: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+interface PortalViewerTicketRecord extends PortalViewerPrincipalRecord {
+  ticket: string;
+  leaseID: string;
+  viewerExpiresAt?: string;
+}
+
+interface PortalViewerSessionRecord extends PortalViewerPrincipalRecord {
+  session: string;
+  leaseID: string;
+}
+
+interface WebVNCPortalViewerTicketRecord extends PortalViewerTicketRecord {
+  credentialHandoffTicket?: string;
+  takeControl?: boolean;
+}
+
+interface WebVNCPortalViewerSessionRecord extends PortalViewerSessionRecord {
+  credentialHandoffTicket?: string;
+  credentialStorageID?: string;
+  takeControl?: boolean;
+}
+
 interface NativeVNCTicketRecord {
   ticket: string;
   workspaceID: string;
@@ -390,33 +423,11 @@ interface CodeTicketRecord extends CachedBridgeGrant {
   expiresAt: string;
 }
 
-interface CodeViewerTicketRecord extends CachedBridgeGrant {
-  ticket: string;
-  leaseID: string;
-  auth: AuthContext["auth"];
-  admin: boolean;
-  owner: string;
-  org: string;
-  login?: string;
-  portalSessionHash?: string;
+interface CodeViewerTicketRecord extends PortalViewerTicketRecord {
   returnTo: string;
-  viewerExpiresAt?: string;
-  createdAt: string;
-  expiresAt: string;
 }
 
-interface CodeViewerSessionRecord extends CachedBridgeGrant {
-  session: string;
-  leaseID: string;
-  auth: AuthContext["auth"];
-  admin: boolean;
-  owner: string;
-  org: string;
-  login?: string;
-  portalSessionHash?: string;
-  createdAt: string;
-  expiresAt: string;
-}
+type CodeViewerSessionRecord = PortalViewerSessionRecord;
 
 interface CodeViewerSessionRevocationRecord {
   portalSessionHash: string;
@@ -824,6 +835,8 @@ type BridgeAttachment =
       org?: string;
       admin?: boolean;
       label: string;
+      viewerSessionID?: string;
+      viewerSessionExpiresAt?: string;
     })
   | (CachedBridgeGrant & {
       kind: "code-agent";
@@ -902,6 +915,8 @@ interface WebVNCViewerSession extends CachedBridgeGrant {
   org?: string;
   admin?: boolean;
   label: string;
+  viewerSessionID?: string;
+  viewerSessionExpiresAt?: string;
   connectedAt: string;
 }
 
@@ -927,6 +942,7 @@ export class FleetCoordinator {
   private readonly restoredBridgeSockets = new Set<WebSocket>();
   private readonly adminGrantValidationTimes = new WeakMap<WebSocket, number>();
   private readonly userGrantValidationTimes = new WeakMap<WebSocket, number>();
+  private readonly viewerSessionValidationTimes = new WeakMap<WebSocket, number>();
   private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
@@ -1156,6 +1172,15 @@ export class FleetCoordinator {
         parts[1] === "leases" &&
         parts[2] &&
         parts[3] === "webvnc" &&
+        parts[4] === "viewer-bootstrap"
+      ) {
+        return await this.createWebVNCPortalViewerBootstrap(request, parts[2]);
+      }
+      if (
+        parts[0] === "v1" &&
+        parts[1] === "leases" &&
+        parts[2] &&
+        parts[3] === "webvnc" &&
         parts[4] === "handoff"
       ) {
         return await this.webVNCCredentialHandoff(request, parts[2]);
@@ -1338,6 +1363,13 @@ export class FleetCoordinator {
       attachment: Extract<BridgeAttachment, { kind: "webvnc-agent" | "code-agent" }>;
       portalSessionHash: string;
     }> = [];
+    const viewerSessionsToCheck: Array<{
+      socket: WebSocket;
+      attachment: Extract<BridgeAttachment, { kind: "webvnc-viewer" }> & {
+        viewerSessionID: string;
+        viewerSessionExpiresAt: string;
+      };
+    }> = [];
     for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
       if (!attachment) {
@@ -1357,6 +1389,13 @@ export class FleetCoordinator {
           lease && leaseIsLive(lease) ? "lease expired" : "lease ended",
         );
         continue;
+      }
+      if (attachment.kind === "webvnc-viewer" && webVNCViewerSessionAttachment(attachment)) {
+        if (Date.parse(attachment.viewerSessionExpiresAt) <= now) {
+          revokedViewers.set(socket, "viewer session expired");
+          continue;
+        }
+        viewerSessionsToCheck.push({ socket, attachment });
       }
       if (
         (attachment.kind === "webvnc-agent" || attachment.kind === "code-agent") &&
@@ -1426,38 +1465,50 @@ export class FleetCoordinator {
         }
       }
     }
-    const [githubBridgeRevocations, sharedBridgeRevocations, adminPortalAgentRevocations] =
-      await Promise.all([
-        Promise.all(
-          githubBridgesToCheck.map(async ({ socket, attachment }) => ({
-            socket,
-            attachment,
-            reason: await this.githubBridgeGrantFailureReason(attachment),
-          })),
-        ),
-        Promise.all(
-          sharedBridgesToCheck.map(async ({ socket, attachment }) => ({
-            socket,
-            attachment,
-            reason: (await this.sharedBridgeGrantIsCurrent(attachment))
-              ? undefined
-              : "shared access revoked",
-          })),
-        ),
-        Promise.all(
-          adminPortalAgentsToCheck.map(async ({ socket, attachment, portalSessionHash }) => ({
-            socket,
-            attachment,
-            reason: (await this.portalSessionIsRevoked(portalSessionHash))
-              ? "portal session ended"
-              : undefined,
-          })),
-        ),
-      ]);
+    const [
+      githubBridgeRevocations,
+      sharedBridgeRevocations,
+      adminPortalAgentRevocations,
+      viewerSessionRevocations,
+    ] = await Promise.all([
+      Promise.all(
+        githubBridgesToCheck.map(async ({ socket, attachment }) => ({
+          socket,
+          attachment,
+          reason: await this.githubBridgeGrantFailureReason(attachment),
+        })),
+      ),
+      Promise.all(
+        sharedBridgesToCheck.map(async ({ socket, attachment }) => ({
+          socket,
+          attachment,
+          reason: (await this.sharedBridgeGrantIsCurrent(attachment))
+            ? undefined
+            : "shared access revoked",
+        })),
+      ),
+      Promise.all(
+        adminPortalAgentsToCheck.map(async ({ socket, attachment, portalSessionHash }) => ({
+          socket,
+          attachment,
+          reason: (await this.portalSessionIsRevoked(portalSessionHash))
+            ? "portal session ended"
+            : undefined,
+        })),
+      ),
+      Promise.all(
+        viewerSessionsToCheck.map(async ({ socket, attachment }) => ({
+          socket,
+          attachment,
+          reason: await this.webVNCPortalViewerAttachmentFailureReason(attachment),
+        })),
+      ),
+    ]);
     for (const { socket, attachment, reason } of [
       ...githubBridgeRevocations,
       ...sharedBridgeRevocations,
       ...adminPortalAgentRevocations,
+      ...viewerSessionRevocations,
     ]) {
       if (!reason) continue;
       if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
@@ -1712,6 +1763,10 @@ export class FleetCoordinator {
             ? { portalSessionHash: attachment.portalSessionHash }
             : {}),
           ...(attachment.githubGrant ? { githubGrant: attachment.githubGrant } : {}),
+          ...(attachment.viewerSessionID ? { viewerSessionID: attachment.viewerSessionID } : {}),
+          ...(attachment.viewerSessionExpiresAt
+            ? { viewerSessionExpiresAt: attachment.viewerSessionExpiresAt }
+            : {}),
           label: attachment.label,
           connectedAt: new Date().toISOString(),
         });
@@ -2079,6 +2134,24 @@ export class FleetCoordinator {
     socket: WebSocket,
     attachment: BridgeAttachment,
   ): Promise<boolean> {
+    if (attachment.kind === "webvnc-viewer" && webVNCViewerSessionAttachment(attachment)) {
+      const now = Date.now();
+      if (Date.parse(attachment.viewerSessionExpiresAt) <= now) {
+        this.viewerSessionValidationTimes.delete(socket);
+        this.closeRevokedUserBridge(socket, attachment, "viewer session expired");
+        return false;
+      }
+      const lastValidatedAt = this.viewerSessionValidationTimes.get(socket) ?? 0;
+      if (now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
+        const failureReason = await this.webVNCPortalViewerAttachmentFailureReason(attachment);
+        if (failureReason) {
+          this.viewerSessionValidationTimes.delete(socket);
+          this.closeRevokedUserBridge(socket, attachment, failureReason);
+          return false;
+        }
+        this.viewerSessionValidationTimes.set(socket, now);
+      }
+    }
     if (
       revocableUserBridge(attachment) &&
       attachment.auth === "bearer" &&
@@ -2151,6 +2224,23 @@ export class FleetCoordinator {
     );
   }
 
+  private async webVNCPortalViewerAttachmentFailureReason(
+    attachment: Extract<BridgeAttachment, { kind: "webvnc-viewer" }> & {
+      viewerSessionID: string;
+      viewerSessionExpiresAt: string;
+    },
+  ): Promise<string | undefined> {
+    if (Date.parse(attachment.viewerSessionExpiresAt) <= Date.now()) {
+      return "viewer session expired";
+    }
+    const session = await this.state.storage.get<WebVNCPortalViewerSessionRecord>(
+      webVNCPortalViewerSessionKey(attachment.viewerSessionID),
+    );
+    return webVNCPortalViewerSessionMatchesAttachment(session, attachment)
+      ? undefined
+      : "viewer session ended";
+  }
+
   private async githubBridgeGrantFailureReason(
     attachment: CachedBridgeGrant & { owner?: string; org?: string; admin?: boolean },
   ): Promise<string | undefined> {
@@ -2200,6 +2290,7 @@ export class FleetCoordinator {
     >,
     reason: string,
   ): void {
+    this.viewerSessionValidationTimes.delete(socket);
     if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
       this.clearEgressSession(attachment.leaseID, attachment.sessionID, 1008, reason);
       return;
@@ -2210,6 +2301,7 @@ export class FleetCoordinator {
 
   private handleBridgeClose(socket: WebSocket, code: number, reason: string): void {
     this.restoredBridgeSockets.delete(socket);
+    this.viewerSessionValidationTimes.delete(socket);
     const attachment = this.bridgeAttachment(socket);
     if (!attachment || !this.bridgeSocketIsCurrent(socket, attachment)) {
       return;
@@ -2263,6 +2355,7 @@ export class FleetCoordinator {
     await this.quarantineLegacyWorkspaces();
     await this.expireLeases();
     await this.webVNCCredentialHandoffs.cleanupExpired();
+    await this.cleanupExpiredWebVNCPortalViewerAuth();
     await this.reconcileRuntimeAdapterDeletes();
     await this.maintainWorkspacePrewarm();
     await this.provisionPendingWorkspace();
@@ -6114,6 +6207,29 @@ export class FleetCoordinator {
 
   private async portalRoute(request: Request, parts: string[]): Promise<Response> {
     const method = request.method.toUpperCase();
+    let webVNCViewerSession: WebVNCPortalViewerSessionRecord | undefined;
+    const webVNCViewerSessionCookie = cookieValue(
+      request.headers.get("cookie") ?? "",
+      "crabbox_webvnc_session",
+    );
+    if (
+      parts[1] === "leases" &&
+      parts[2] &&
+      parts[3] === "vnc" &&
+      parts[4] !== "bootstrap" &&
+      webVNCViewerSessionCookie &&
+      !request.headers.has("x-crabbox-auth")
+    ) {
+      webVNCViewerSession = await this.webVNCPortalViewerSession(
+        request,
+        parts[2],
+        webVNCViewerSessionCookie,
+      );
+      if (!webVNCViewerSession) {
+        return this.webVNCPortalViewerAuthenticationRequired(request);
+      }
+      request = webVNCPortalViewerRequest(request, webVNCViewerSession);
+    }
     if (method === "GET" && parts.length === 1) {
       const [visibleLeases, runners, macHosts] = await Promise.all([
         this.portalVisibleLeases(request),
@@ -6217,6 +6333,16 @@ export class FleetCoordinator {
       return await this.portalReleaseLease(request, parts[2]);
     }
     if (
+      method === "POST" &&
+      parts[1] === "leases" &&
+      parts[2] &&
+      parts[3] === "vnc" &&
+      parts[4] === "bootstrap" &&
+      parts[5] === undefined
+    ) {
+      return await this.bootstrapWebVNCPortalViewer(request, parts[2]);
+    }
+    if (
       method === "GET" &&
       parts[1] === "leases" &&
       parts[2] &&
@@ -6236,7 +6362,17 @@ export class FleetCoordinator {
         return portalError("WebVNC unavailable", error, 409);
       }
       return portalVNC(publicLeaseRecord(lease), {
-        canManage: this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
+        canManage:
+          !webVNCViewerSession &&
+          this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
+        viewerOnly: Boolean(webVNCViewerSession),
+        sessionCredentialHandoff: Boolean(
+          webVNCViewerSession?.credentialHandoffTicket || webVNCViewerSession?.credentialStorageID,
+        ),
+        ...(webVNCViewerSession?.credentialStorageID
+          ? { sessionCredentialStorageID: webVNCViewerSession.credentialStorageID }
+          : {}),
+        takeControl: webVNCViewerSession?.takeControl === true,
       });
     }
     if (
@@ -6247,7 +6383,7 @@ export class FleetCoordinator {
       parts[4] === "handoff" &&
       parts[5] === undefined
     ) {
-      return await this.webVNCCredentialHandoff(request, parts[2]);
+      return await this.webVNCCredentialHandoff(request, parts[2], webVNCViewerSession);
     }
     if (
       method === "GET" &&
@@ -6283,7 +6419,7 @@ export class FleetCoordinator {
       parts[3] === "vnc" &&
       parts[4] === "viewer"
     ) {
-      return await this.webVNCViewer(request, parts[2]);
+      return await this.webVNCViewer(request, parts[2], webVNCViewerSession);
     }
     if (parts[1] === "leases" && parts[2] && parts[3] === "code") {
       return await this.codePortalProxy(request, parts[2], parts.slice(4));
@@ -8199,6 +8335,300 @@ export class FleetCoordinator {
     }
   }
 
+  private async createWebVNCPortalViewerBootstrap(
+    request: Request,
+    identifier: string,
+  ): Promise<Response> {
+    if (request.method.toUpperCase() !== "POST") {
+      return json({ error: "not_found" }, { status: 404 });
+    }
+    if (!request.headers.has("x-crabbox-auth") || requestAuthType(request) !== "bearer") {
+      return json({ error: "unauthorized" }, { status: 401 });
+    }
+    const admin = isAdminRequest(request);
+    const lease = await this.resolveLease(identifier, request, admin);
+    if (!lease) {
+      return notFound();
+    }
+    const error = webVNCLeaseError(lease);
+    if (error) {
+      return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
+    }
+    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
+    if (!bridgeGrant) {
+      return json(
+        { error: "user_session_invalid", message: "viewer grant cannot be revalidated" },
+        { status: 401 },
+      );
+    }
+    const input = await optionalJson<{
+      credentialHandoffTicket?: unknown;
+      takeControl?: unknown;
+    }>(request);
+    const credentialHandoffTicket =
+      typeof input.credentialHandoffTicket === "string" ? input.credentialHandoffTicket.trim() : "";
+    if (credentialHandoffTicket && !validWebVNCCredentialHandoffTicket(credentialHandoffTicket)) {
+      return json(
+        { error: "invalid_handoff", message: "valid VNC credential handoff required" },
+        { status: 400 },
+      );
+    }
+    const now = new Date();
+    const ticket: WebVNCPortalViewerTicketRecord = {
+      ticket: newWebVNCPortalViewerTicket(),
+      leaseID: lease.id,
+      auth: requestAuthType(request),
+      admin,
+      owner: requestOwner(request),
+      org: requestOrg(request, this.env),
+      ...bridgeGrant,
+      ...(credentialHandoffTicket ? { credentialHandoffTicket } : {}),
+      ...(input.takeControl === true ? { takeControl: true } : {}),
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + webVNCPortalViewerTicketTTLSeconds * 1000).toISOString(),
+    };
+    const tokenExpiresAt =
+      bridgeGrant.githubGrant?.expiresAt ??
+      request.headers.get("x-crabbox-token-expires-at")?.trim();
+    if (tokenExpiresAt && Number.isFinite(Date.parse(tokenExpiresAt))) {
+      ticket.viewerExpiresAt = new Date(tokenExpiresAt).toISOString();
+    }
+    await this.state.storage.put(webVNCPortalViewerTicketKey(ticket.ticket), ticket);
+    await this.scheduleAlarm();
+    return json(
+      {
+        ticket: ticket.ticket,
+        leaseID: ticket.leaseID,
+        expiresAt: ticket.expiresAt,
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  }
+
+  private async bootstrapWebVNCPortalViewer(
+    request: Request,
+    identifier: string,
+  ): Promise<Response> {
+    const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    if (contentType !== "application/x-www-form-urlencoded") {
+      return json(
+        {
+          error: "unsupported_media_type",
+          message: "form-encoded WebVNC viewer ticket required",
+        },
+        { status: 415, headers: { "cache-control": "no-store" } },
+      );
+    }
+    const value = new URLSearchParams(await request.text()).get("ticket") ?? "";
+    const ticket = await this.consumeWebVNCPortalViewerTicket(value, identifier);
+    if (!ticket) {
+      return json(
+        {
+          error: "webvnc_viewer_ticket_required",
+          message: "valid WebVNC viewer ticket required",
+        },
+        { status: 401, headers: { "cache-control": "no-store" } },
+      );
+    }
+    const now = new Date();
+    const defaultExpiresAt = now.getTime() + webVNCPortalViewerSessionTTLSeconds * 1000;
+    const tokenExpiresAt = Date.parse(ticket.viewerExpiresAt ?? "");
+    const expiresAt = Number.isFinite(tokenExpiresAt)
+      ? Math.min(defaultExpiresAt, tokenExpiresAt)
+      : defaultExpiresAt;
+    if (expiresAt <= now.getTime()) {
+      return json(
+        {
+          error: "webvnc_viewer_ticket_required",
+          message: "valid WebVNC viewer ticket required",
+        },
+        { status: 401, headers: { "cache-control": "no-store" } },
+      );
+    }
+    const session: WebVNCPortalViewerSessionRecord = {
+      session: newWebVNCPortalViewerSession(),
+      leaseID: ticket.leaseID,
+      auth: ticket.auth,
+      admin: ticket.admin,
+      owner: ticket.owner,
+      org: ticket.org,
+      ...copyBridgeGrant(ticket),
+      ...(ticket.credentialHandoffTicket
+        ? {
+            credentialHandoffTicket: ticket.credentialHandoffTicket,
+            credentialStorageID: randomHexToken("webvnc_credential_"),
+          }
+        : {}),
+      ...(ticket.takeControl ? { takeControl: true } : {}),
+      createdAt: now.toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(),
+    };
+    await this.state.storage.put(webVNCPortalViewerSessionKey(session.session), session);
+    await this.scheduleAlarm();
+    const location = `/portal/leases/${encodeURIComponent(ticket.leaseID)}/vnc`;
+    const nonce = randomHexToken("");
+    return new Response(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opening WebVNC</title></head><body><p>Opening WebVNC...</p><script nonce="${nonce}">location.replace(${JSON.stringify(location)})</script></body></html>`,
+      {
+        status: 200,
+        headers: {
+          "cache-control": "no-store",
+          "content-security-policy": `default-src 'none'; base-uri 'none'; frame-ancestors 'none'; script-src 'nonce-${nonce}'`,
+          "content-type": "text/html; charset=utf-8",
+          "referrer-policy": "no-referrer",
+          "set-cookie": webVNCPortalViewerSessionCookie(session),
+          "x-content-type-options": "nosniff",
+        },
+      },
+    );
+  }
+
+  private async consumeWebVNCPortalViewerTicket(
+    value: string,
+    identifier: string,
+  ): Promise<WebVNCPortalViewerTicketRecord | undefined> {
+    if (!validWebVNCPortalViewerTicket(value)) {
+      return undefined;
+    }
+    return await this.withBridgeTicketLock(async () => {
+      const key = webVNCPortalViewerTicketKey(value);
+      const ticket = await this.state.storage.get<WebVNCPortalViewerTicketRecord>(key);
+      if (!ticket || ticket.ticket !== value) {
+        return undefined;
+      }
+      await this.state.storage.delete(key);
+      if (
+        !isCurrentOrgKey(ticket.org) ||
+        Date.parse(ticket.expiresAt) <= Date.now() ||
+        (ticket.viewerExpiresAt !== undefined && Date.parse(ticket.viewerExpiresAt) <= Date.now())
+      ) {
+        return undefined;
+      }
+      const lease = await this.getLease(ticket.leaseID);
+      if (!lease || !identifierMatchesLease(identifier, lease)) {
+        return undefined;
+      }
+      return await this.currentWebVNCPortalViewerGrant(ticket, lease);
+    });
+  }
+
+  private async currentWebVNCPortalViewerGrant<
+    T extends CachedBridgeGrant & {
+      owner: string;
+      org: string;
+      admin: boolean;
+    },
+  >(principal: T, lease: LeaseRecord): Promise<T | undefined> {
+    if (!isCurrentOrgKey(principal.org) || !isCurrentOrgKey(lease.org)) {
+      return undefined;
+    }
+    const current =
+      principal.admin === true
+        ? withCurrentAdminGrant(principal, await this.currentAdminGrantValidation())
+        : principal;
+    if (principal.admin === true && current.admin !== true) {
+      return undefined;
+    }
+    if (!this.leaseViewerAuthorized(lease, current)) {
+      return undefined;
+    }
+    if (current.auth === "github" && (await this.githubBridgeGrantFailureReason(current))) {
+      return undefined;
+    }
+    if (
+      current.auth === "bearer" &&
+      current.admin !== true &&
+      !(await this.sharedBridgeGrantIsCurrent(current))
+    ) {
+      return undefined;
+    }
+    return current;
+  }
+
+  private async webVNCPortalViewerSession(
+    _request: Request,
+    identifier: string,
+    value: string,
+  ): Promise<WebVNCPortalViewerSessionRecord | undefined> {
+    if (!validWebVNCPortalViewerSession(value)) {
+      return undefined;
+    }
+    const key = webVNCPortalViewerSessionKey(value);
+    const session = await this.state.storage.get<WebVNCPortalViewerSessionRecord>(key);
+    const lease = session ? await this.getLease(session.leaseID) : undefined;
+    const current =
+      session && lease ? await this.currentWebVNCPortalViewerGrant(session, lease) : undefined;
+    if (
+      !session ||
+      session.session !== value ||
+      !lease ||
+      !identifierMatchesLease(identifier, lease) ||
+      Date.parse(session.expiresAt) <= Date.now() ||
+      !current
+    ) {
+      if (session) {
+        await this.state.storage.delete(key);
+      }
+      return undefined;
+    }
+    return current;
+  }
+
+  private webVNCPortalViewerAuthenticationRequired(request: Request): Response {
+    const websocket = request.headers.get("upgrade")?.toLowerCase() === "websocket";
+    const url = new URL(request.url);
+    const cookie = request.headers.get("cookie") ?? "";
+    const clearCookie = clearWebVNCPortalViewerSessionCookie(request);
+    if (
+      !websocket &&
+      request.method.toUpperCase() === "GET" &&
+      /^\/portal\/leases\/[^/]+\/vnc$/.test(url.pathname) &&
+      cookieValue(cookie, portalSessionCookieName) &&
+      cookieValue(cookie, "crabbox_webvnc_session")
+    ) {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          "cache-control": "no-store",
+          location: `${url.pathname}${url.search}`,
+          "referrer-policy": "no-referrer",
+          "set-cookie": clearCookie,
+        },
+      });
+    }
+    return json(
+      {
+        error: "webvnc_viewer_session_required",
+        message: "WebVNC viewer session required",
+      },
+      {
+        status: 401,
+        headers: {
+          "cache-control": "no-store",
+          "set-cookie": clearCookie,
+          ...(websocket ? {} : { "referrer-policy": "no-referrer" }),
+        },
+      },
+    );
+  }
+
+  private async consumeWebVNCPortalViewerCredentials(
+    session: WebVNCPortalViewerSessionRecord,
+  ): Promise<WebVNCCredentialHandoffResult> {
+    return await this.withBridgeTicketLock(async () => {
+      const key = webVNCPortalViewerSessionKey(session.session);
+      const current = await this.state.storage.get<WebVNCPortalViewerSessionRecord>(key);
+      const handoff = current?.credentialHandoffTicket;
+      if (!current || !handoff || current.leaseID !== session.leaseID) {
+        return { status: "invalid" };
+      }
+      const updated = { ...current };
+      delete updated.credentialHandoffTicket;
+      await this.state.storage.put(key, updated);
+      return await this.webVNCCredentialHandoffs.consume(session.leaseID, handoff);
+    });
+  }
+
   private async createWebVNCTicket(request: Request, identifier: string): Promise<Response> {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
@@ -8304,7 +8734,11 @@ export class FleetCoordinator {
     });
   }
 
-  private async webVNCCredentialHandoff(request: Request, identifier: string): Promise<Response> {
+  private async webVNCCredentialHandoff(
+    request: Request,
+    identifier: string,
+    viewerSession?: WebVNCPortalViewerSessionRecord,
+  ): Promise<Response> {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
@@ -8323,6 +8757,32 @@ export class FleetCoordinator {
     const body = (await request.json().catch(() => undefined)) as
       | { ticket?: unknown; username?: unknown; password?: unknown }
       | undefined;
+    if (viewerSession) {
+      if (
+        body?.ticket !== undefined ||
+        body?.username !== undefined ||
+        body?.password !== undefined
+      ) {
+        return json(
+          { error: "invalid_handoff", message: "viewer session handoff is server-bound" },
+          { status: 400 },
+        );
+      }
+      const result = await this.consumeWebVNCPortalViewerCredentials(viewerSession);
+      if (result.status !== "accepted") {
+        return json(
+          {
+            error: "invalid_handoff",
+            message: "valid VNC handoff required",
+          },
+          { status: 401 },
+        );
+      }
+      return json(
+        { username: result.username, password: result.password },
+        { headers: { "cache-control": "no-store" } },
+      );
+    }
     if (typeof body?.ticket === "string") {
       if (!portalRequest) {
         return json(
@@ -8884,23 +9344,66 @@ export class FleetCoordinator {
   }
 
   private async cleanupExpiredCodeViewerAuth(): Promise<void> {
-    const now = Date.now();
+    await this.cleanupExpiredPortalViewerRecords([
+      codeViewerTicketPrefix(),
+      codeViewerSessionPrefix(),
+      codeViewerSessionRevocationPrefix(),
+    ]);
+  }
+
+  private async cleanupExpiredWebVNCPortalViewerAuth(now = Date.now()): Promise<void> {
+    this.closeExpiredWebVNCPortalViewerSockets(now);
+    await this.cleanupExpiredPortalViewerRecords(
+      [webVNCPortalViewerTicketPrefix(), webVNCPortalViewerSessionPrefix()],
+      now,
+    );
+  }
+
+  private closeExpiredWebVNCPortalViewerSockets(now: number): void {
+    for (const viewers of this.webVNCViewers.values()) {
+      for (const viewer of viewers.values()) {
+        const attachment = this.bridgeAttachment(viewer.socket);
+        if (
+          attachment?.kind === "webvnc-viewer" &&
+          webVNCViewerSessionAttachment(attachment) &&
+          Date.parse(attachment.viewerSessionExpiresAt) <= now
+        ) {
+          this.closeRevokedUserBridge(viewer.socket, attachment, "viewer session expired");
+        }
+      }
+    }
+  }
+
+  private async cleanupExpiredPortalViewerRecords(
+    prefixes: string[],
+    now = Date.now(),
+  ): Promise<void> {
     await Promise.all(
-      [
-        codeViewerTicketPrefix(),
-        codeViewerSessionPrefix(),
-        codeViewerSessionRevocationPrefix(),
-      ].map(async (prefix) => {
-        const records = await this.state.storage.list<
-          CodeViewerTicketRecord | CodeViewerSessionRecord | CodeViewerSessionRevocationRecord
-        >({ prefix });
-        await Promise.all(
-          [...records.entries()]
-            .filter(([, record]) => Date.parse(record.expiresAt) <= now)
-            .map(([key]) => this.state.storage.delete(key)),
-        );
+      prefixes.map(async (prefix) => {
+        await this.visitStorageRecords<{ expiresAt: string }>(prefix, async (record, key) => {
+          if (Date.parse(record.expiresAt) <= now) {
+            await this.state.storage.delete(key);
+          }
+        });
       }),
     );
+  }
+
+  private async webVNCPortalViewerAlarmTimes(now = Date.now()): Promise<number[]> {
+    const alarmTimes: number[] = [];
+    await Promise.all(
+      [webVNCPortalViewerTicketPrefix(), webVNCPortalViewerSessionPrefix()].map(async (prefix) => {
+        await this.visitStorageRecords<
+          WebVNCPortalViewerTicketRecord | WebVNCPortalViewerSessionRecord
+        >(prefix, (record) => {
+          const time = Date.parse(record.expiresAt);
+          if (Number.isFinite(time) && time > now) {
+            alarmTimes.push(time);
+          }
+        });
+      }),
+    );
+    return alarmTimes;
   }
 
   private async portalLogout(request: Request): Promise<Response> {
@@ -9378,7 +9881,11 @@ export class FleetCoordinator {
     }
   }
 
-  private async webVNCViewer(request: Request, identifier: string): Promise<Response> {
+  private async webVNCViewer(
+    request: Request,
+    identifier: string,
+    viewerSession?: WebVNCPortalViewerSessionRecord,
+  ): Promise<Response> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return json(
         { error: "upgrade_required", message: "WebVNC viewer requires a websocket upgrade" },
@@ -9395,11 +9902,9 @@ export class FleetCoordinator {
         return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
       }
       const admin = isAdminRequest(request);
-      const bridgeGrant = await bridgeGrantForRequest(
-        request,
-        admin,
-        this.env.CRABBOX_SHARED_TOKEN,
-      );
+      const bridgeGrant = viewerSession
+        ? copyBridgeGrant(viewerSession)
+        : await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
       if (!bridgeGrant) {
         return json(
           { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
@@ -9441,6 +9946,12 @@ export class FleetCoordinator {
       const upgrade = this.state.createWebSocketUpgrade();
       const viewer = upgrade.socket;
       const label = webVNCViewerLabel(owner);
+      const viewerSessionAttachment = viewerSession
+        ? {
+            viewerSessionID: viewerSession.session,
+            viewerSessionExpiresAt: viewerSession.expiresAt,
+          }
+        : {};
 
       this.trackWebVNCViewer(lease.id, {
         id: viewerID,
@@ -9451,6 +9962,7 @@ export class FleetCoordinator {
         admin,
         ...bridgeGrant,
         label,
+        ...viewerSessionAttachment,
         connectedAt: new Date().toISOString(),
       });
       if (!this.activeWebVNCControllerID(lease.id)) {
@@ -9468,6 +9980,7 @@ export class FleetCoordinator {
         admin,
         ...bridgeGrant,
         label,
+        ...viewerSessionAttachment,
       });
       flushPendingWebVNC(this.pendingWebVNCToViewer, webVNCBufferKey(lease.id, agent.id), viewer);
       return upgrade.response;
@@ -11578,6 +12091,9 @@ export class FleetCoordinator {
     for (const handoffAlarm of await this.webVNCCredentialHandoffs.alarmTimes(now)) {
       retainAlarm(handoffAlarm);
     }
+    for (const viewerAlarm of await this.webVNCPortalViewerAlarmTimes(now)) {
+      retainAlarm(viewerAlarm);
+    }
     const orphanSweepAlarm = await this.nextAWSOrphanSweepAlarmTime();
     retainAlarm(orphanSweepAlarm);
     const azureOrphanSweepAlarm = await this.nextAzureOrphanSweepAlarmTime();
@@ -12690,6 +13206,9 @@ export class FleetCoordinator {
   }
 
   private leaseManageableByRequest(lease: LeaseRecord, request: Request, admin: boolean): boolean {
+    if (request.headers.has("x-crabbox-webvnc-viewer-session")) {
+      return false;
+    }
     const role = this.leaseAccessRole(lease, request, admin);
     return role === "owner" || role === "manage";
   }
@@ -13923,6 +14442,22 @@ function webVNCTicketPrefix(): string {
 
 function webVNCTicketKey(ticket: string): string {
   return `${webVNCTicketPrefix()}${ticket}`;
+}
+
+function webVNCPortalViewerTicketPrefix(): string {
+  return "webvnc-viewer-ticket:";
+}
+
+function webVNCPortalViewerTicketKey(ticket: string): string {
+  return `${webVNCPortalViewerTicketPrefix()}${ticket}`;
+}
+
+function webVNCPortalViewerSessionPrefix(): string {
+  return "webvnc-viewer-session:";
+}
+
+function webVNCPortalViewerSessionKey(session: string): string {
+  return `${webVNCPortalViewerSessionPrefix()}${session}`;
 }
 
 function codeTicketPrefix(): string {
@@ -15260,6 +15795,14 @@ function newWebVNCSessionID(prefix: "agent" | "viewer"): string {
   return `${prefix}_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function newWebVNCPortalViewerTicket(): string {
+  return randomHexToken("webvnc_view_");
+}
+
+function newWebVNCPortalViewerSession(): string {
+  return randomHexToken("webvnc_session_");
+}
+
 function newCodeTicket(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
@@ -15332,6 +15875,18 @@ function validRegisteredLeaseID(value: string | undefined): value is string {
 
 function validWebVNCTicket(value: string | undefined): value is string {
   return typeof value === "string" && /^wvnc_[a-f0-9]{32}$/.test(value);
+}
+
+function validWebVNCPortalViewerTicket(value: string | undefined): value is string {
+  return typeof value === "string" && /^webvnc_view_[a-f0-9]{32}$/.test(value);
+}
+
+function validWebVNCPortalViewerSession(value: string | undefined): value is string {
+  return typeof value === "string" && /^webvnc_session_[a-f0-9]{32}$/.test(value);
+}
+
+function validWebVNCCredentialHandoffTicket(value: string | undefined): value is string {
+  return typeof value === "string" && /^vnc_handoff_[a-f0-9]{32}$/.test(value);
 }
 
 function validRuntimeAdapterTicket(value: string | undefined): value is string {
@@ -15410,6 +15965,33 @@ function canonicalCodeReturnTo(request: Request, leaseID: string): string {
 function requestAuthType(request: Request): AuthContext["auth"] {
   const auth = request.headers.get("x-crabbox-auth");
   return auth === "bearer" || auth === "github" || auth === "proxy" ? auth : "github";
+}
+
+function webVNCPortalViewerRequest(
+  request: Request,
+  session: WebVNCPortalViewerSessionRecord,
+): Request {
+  const org = orgAuthLabelFromKey(session.org);
+  if (org === undefined) {
+    return request;
+  }
+  const authorized = requestWithAuthContext(request, {
+    authorized: true,
+    auth: session.auth,
+    admin: session.admin,
+    owner: session.owner,
+    org,
+    ...(session.login ? { login: session.login } : {}),
+    ...(session.githubGrant
+      ? {
+          githubGrant: session.githubGrant,
+          tokenExpiresAt: session.githubGrant.expiresAt,
+        }
+      : {}),
+  });
+  const headers = new Headers(authorized.headers);
+  headers.set("x-crabbox-webvnc-viewer-session", session.session);
+  return new Request(authorized, { headers });
 }
 
 function trustedAdminGrantVersion(request: Request): string | undefined {
@@ -15598,6 +16180,29 @@ function codeViewerSessionCookies(
       "Max-Age=0",
     ].join("; "),
   ];
+}
+
+function webVNCPortalViewerSessionCookie(session: WebVNCPortalViewerSessionRecord): string {
+  return [
+    `crabbox_webvnc_session=${encodeURIComponent(session.session)}`,
+    `Path=/portal/leases/${encodeURIComponent(session.leaseID)}/vnc`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Strict",
+  ].join("; ");
+}
+
+function clearWebVNCPortalViewerSessionCookie(request: Request): string {
+  const match = /^(\/portal\/leases\/[^/]+\/vnc)(?:\/|$)/.exec(new URL(request.url).pathname);
+  const path = match?.[1] ?? "/portal";
+  return [
+    "crabbox_webvnc_session=",
+    `Path=${path}`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Strict",
+    "Max-Age=0",
+  ].join("; ");
 }
 
 export function bridgeTicketFromRequest(
@@ -16298,7 +16903,8 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
         validWebVNCSessionID(attachment.agentID) &&
         typeof attachment.owner === "string" &&
         completeBridgePrincipal(attachment) &&
-        typeof attachment.label === "string"
+        typeof attachment.label === "string" &&
+        validOptionalWebVNCViewerSessionAttachment(attachment)
         ? attachment
         : undefined;
     case "webvnc-agent":
@@ -16371,6 +16977,47 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
     default:
       return undefined;
   }
+}
+
+function validOptionalWebVNCViewerSessionAttachment(value: {
+  viewerSessionID?: unknown;
+  viewerSessionExpiresAt?: unknown;
+}): boolean {
+  const absent = value.viewerSessionID === undefined && value.viewerSessionExpiresAt === undefined;
+  return absent || webVNCViewerSessionAttachment(value);
+}
+
+function webVNCViewerSessionAttachment<
+  T extends { viewerSessionID?: unknown; viewerSessionExpiresAt?: unknown },
+>(value: T): value is T & { viewerSessionID: string; viewerSessionExpiresAt: string } {
+  return (
+    validWebVNCPortalViewerSession(
+      typeof value.viewerSessionID === "string" ? value.viewerSessionID : undefined,
+    ) &&
+    typeof value.viewerSessionExpiresAt === "string" &&
+    Number.isFinite(Date.parse(value.viewerSessionExpiresAt))
+  );
+}
+
+function webVNCPortalViewerSessionMatchesAttachment(
+  session: WebVNCPortalViewerSessionRecord | undefined,
+  attachment: Extract<BridgeAttachment, { kind: "webvnc-viewer" }> & {
+    viewerSessionID: string;
+    viewerSessionExpiresAt: string;
+  },
+): boolean {
+  return (
+    session !== undefined &&
+    session.session === attachment.viewerSessionID &&
+    session.leaseID === attachment.leaseID &&
+    session.owner === attachment.owner &&
+    session.org === attachment.org &&
+    session.admin === (attachment.admin === true) &&
+    session.auth === attachment.auth &&
+    session.expiresAt === attachment.viewerSessionExpiresAt &&
+    Date.parse(session.expiresAt) > Date.now() &&
+    JSON.stringify(copyBridgeGrant(session)) === JSON.stringify(copyBridgeGrant(attachment))
+  );
 }
 
 function validOptionalBridgePrincipal(value: {

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,202 @@ import (
 )
 
 const powerShellEncodedCommandPrefix = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+
+func TestExternalMacTargetScrubsDesktopPasswordFromSSHChild(t *testing.T) {
+	cfg := Config{Provider: "external", TargetOS: targetMacOS}
+	cfg.External.Connection.Desktop.PasswordEnv = "TEST_ARD_PASSWORD"
+	target := sshTargetForLease(cfg, "example.test", "tester", "22")
+	if len(target.ChildEnvDenylist) != 1 || target.ChildEnvDenylist[0] != "TEST_ARD_PASSWORD" {
+		t.Fatalf("child env denylist=%v", target.ChildEnvDenylist)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nif [ \"${TEST_ARD_PASSWORD+x}\" = x ]; then exit 89; fi\nprintf child-env-ok\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-ssh")
+	got, err := runSSHOutput(context.Background(), target, "true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "child-env-ok" {
+		t.Fatalf("output=%q", got)
+	}
+}
+
+func TestExternalDesktopChildEnvDenylistAppliesToEveryTarget(t *testing.T) {
+	for _, targetOS := range []string{targetLinux, targetMacOS, targetWindows} {
+		cfg := Config{Provider: "external", TargetOS: targetOS}
+		cfg.External.Connection.Desktop.PasswordEnv = "TEST_ARD_PASSWORD"
+		if got := externalDesktopChildEnvDenylist(cfg, targetOS); len(got) != 1 || got[0] != "TEST_ARD_PASSWORD" {
+			t.Fatalf("target=%s denylist=%v", targetOS, got)
+		}
+	}
+}
+
+func TestExternalDesktopChildEnvDenylistIsMonotonicAcrossOverridesAndEmptyClear(t *testing.T) {
+	cfg := Config{Provider: "external", TargetOS: targetLinux}
+	for _, name := range []string{"CURRENT_ARD_PASSWORD", "ROUTED_ARD_PASSWORD", "OVERRIDE_ARD_PASSWORD"} {
+		cfg.External.Connection.Desktop.PasswordEnv = name
+		PreserveExternalDesktopChildEnvironmentBoundary(&cfg)
+	}
+	cfg.External.Connection.Desktop.PasswordEnv = ""
+
+	target := SSHTarget{
+		User: "tester", Host: "example.test", Port: "22", TargetOS: targetLinux,
+		ChildEnvDenylist: []string{"EXISTING_DENY"},
+	}
+	ApplyTargetChildEnvironmentBoundary(cfg, &target)
+	want := []string{"EXISTING_DENY", "CURRENT_ARD_PASSWORD", "ROUTED_ARD_PASSWORD", "OVERRIDE_ARD_PASSWORD"}
+	if !reflect.DeepEqual(target.ChildEnvDenylist, want) {
+		t.Fatalf("child env denylist=%v, want %v", target.ChildEnvDenylist, want)
+	}
+
+	environment := append([]string{"KEEP=value"},
+		"CURRENT_ARD_PASSWORD=current",
+		"ROUTED_ARD_PASSWORD=routed",
+		"OVERRIDE_ARD_PASSWORD=override",
+	)
+	filtered := strings.Join(childEnvironmentWithout(environment, target.ChildEnvDenylist...), "\n")
+	if filtered != "KEEP=value" {
+		t.Fatalf("filtered child environment=%q", filtered)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+if [ "${CURRENT_ARD_PASSWORD+x}" = x ]; then exit 89; fi
+if [ "${ROUTED_ARD_PASSWORD+x}" = x ]; then exit 90; fi
+if [ "${OVERRIDE_ARD_PASSWORD+x}" = x ]; then exit 91; fi
+[ "${CRABBOX_TEST_KEEP:-}" = preserved ] || exit 92
+printf child-env-ok
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CURRENT_ARD_PASSWORD", "current-secret")
+	t.Setenv("ROUTED_ARD_PASSWORD", "routed-secret")
+	t.Setenv("OVERRIDE_ARD_PASSWORD", "override-secret")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+	got, err := runSSHOutput(context.Background(), target, "true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "child-env-ok" {
+		t.Fatalf("output=%q", got)
+	}
+}
+
+func TestExternalDesktopChildEnvDenylistConfigCopiesAreIndependent(t *testing.T) {
+	original := Config{Provider: "external", TargetOS: targetLinux}
+	original.External.Connection.Desktop.PasswordEnv = "ORIGINAL_ARD_PASSWORD"
+	PreserveExternalDesktopChildEnvironmentBoundary(&original)
+
+	copied := original
+	copied.External.Connection.Desktop.PasswordEnv = "COPIED_ARD_PASSWORD"
+	PreserveExternalDesktopChildEnvironmentBoundary(&copied)
+
+	if got := ExternalDesktopChildEnvironmentDenylist(original); !reflect.DeepEqual(got, []string{"ORIGINAL_ARD_PASSWORD"}) {
+		t.Fatalf("original denylist mutated through copy: %v", got)
+	}
+	if got := ExternalDesktopChildEnvironmentDenylist(copied); !reflect.DeepEqual(got, []string{"ORIGINAL_ARD_PASSWORD", "COPIED_ARD_PASSWORD"}) {
+		t.Fatalf("copied denylist=%v", got)
+	}
+}
+
+func TestExternalDesktopChildEnvDenylistIgnoresUntrustedAndInvalidHistoricalNames(t *testing.T) {
+	cfg := Config{Provider: "external", TargetOS: targetLinux}
+	cfg.External.Connection.Desktop.PasswordEnv = "TRUSTED_ARD_PASSWORD"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceTrustedFile
+	PreserveExternalDesktopChildEnvironmentBoundary(&cfg)
+
+	cfg.External.Connection.Desktop.PasswordEnv = "REPOSITORY_CHOSEN_ENV"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceRepository
+	PreserveExternalDesktopChildEnvironmentBoundary(&cfg)
+	cfg.External.Connection.Desktop.PasswordEnv = "PATH"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceTrustedFile
+	PreserveExternalDesktopChildEnvironmentBoundary(&cfg)
+	cfg.External.Connection.Desktop.PasswordEnv = "ROUTED_ARD_PASSWORD"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceTrustedFile
+	PreserveExternalDesktopChildEnvironmentBoundary(&cfg)
+
+	want := []string{"TRUSTED_ARD_PASSWORD", "ROUTED_ARD_PASSWORD"}
+	if got := ExternalDesktopChildEnvironmentDenylist(cfg); !reflect.DeepEqual(got, want) {
+		t.Fatalf("desktop environment denylist=%v, want %v", got, want)
+	}
+
+	approved := Config{Provider: "external", TargetOS: targetLinux}
+	approved.External.Connection.Desktop.PasswordEnv = "APPROVED_ARD_PASSWORD"
+	approved.credentialProvenance.externalDesktopEnv = credentialDestinationSource(
+		"APPROVED_ARD_PASSWORD", "APPROVED_ARD_PASSWORD", credentialSourceRepository,
+	)
+	if approved.credentialProvenance.externalDesktopEnv != credentialSourceTrustedFile {
+		t.Fatal("repository value matching trusted approval was not upgraded")
+	}
+	PreserveExternalDesktopChildEnvironmentBoundary(&approved)
+	if got := ExternalDesktopChildEnvironmentDenylist(approved); !reflect.DeepEqual(got, []string{"APPROVED_ARD_PASSWORD"}) {
+		t.Fatalf("approved repository denylist=%v", got)
+	}
+}
+
+func TestExternalDesktopChildEnvDenylistIgnoresUntrustedAndInvalidCurrentNames(t *testing.T) {
+	cfg := Config{Provider: "external", TargetOS: targetLinux}
+	cfg.External.Connection.Desktop.PasswordEnv = "GH_TOKEN"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceRepository
+	if got := externalDesktopChildEnvDenylist(cfg, cfg.TargetOS); len(got) != 0 {
+		t.Fatalf("repository-selected current denylist=%v", got)
+	}
+
+	cfg.External.Connection.Desktop.PasswordEnv = "PATH"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceTrustedFile
+	if got := externalDesktopChildEnvDenylist(cfg, cfg.TargetOS); len(got) != 0 {
+		t.Fatalf("reserved current denylist=%v", got)
+	}
+
+	cfg.External.Connection.Desktop.PasswordEnv = "OPERATOR_ARD_PASSWORD"
+	if got := externalDesktopChildEnvDenylist(cfg, cfg.TargetOS); !reflect.DeepEqual(got, []string{"OPERATOR_ARD_PASSWORD"}) {
+		t.Fatalf("trusted current denylist=%v", got)
+	}
+}
+
+func TestExternalDesktopChildEnvDenylistPreservesTrustedSecretAcrossProviderSwitch(t *testing.T) {
+	cfg := Config{Provider: "aws", TargetOS: targetLinux}
+	cfg.External.Connection.Desktop.PasswordEnv = "OPERATOR_ARD_PASSWORD"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceTrustedFile
+	if got := externalDesktopChildEnvDenylist(cfg, cfg.TargetOS); !reflect.DeepEqual(got, []string{"OPERATOR_ARD_PASSWORD"}) {
+		t.Fatalf("provider-switched trusted denylist=%v", got)
+	}
+
+	cfg.External.Connection.Desktop.PasswordEnv = "REPOSITORY_SELECTED_ENV"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceRepository
+	if got := externalDesktopChildEnvDenylist(cfg, cfg.TargetOS); len(got) != 0 {
+		t.Fatalf("provider-switched repository denylist=%v", got)
+	}
+}
+
+func TestSystemInspectionEnvironmentExcludesAmbientSecrets(t *testing.T) {
+	t.Setenv("SCREEN_SHARING_PASSWORD", "operator-secret")
+	entries := systemInspectionEnvironment()
+	env := strings.Join(entries, "\n")
+	if strings.Contains(env, "SCREEN_SHARING_PASSWORD=") {
+		t.Fatal("inspection environment exposed ambient secret variable")
+	}
+	if env != "LC_ALL=C" {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			name, _, _ := strings.Cut(entry, "=")
+			names = append(names, name)
+		}
+		t.Fatalf("inspection environment names=%q", names)
+	}
+}
 
 func TestVersion(t *testing.T) {
 	var out bytes.Buffer

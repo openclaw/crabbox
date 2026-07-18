@@ -1,0 +1,13 @@
+name = "Crabbox"
+grammar = "yaml"
+path_suffixes = [".crabbox.yaml", ".crabbox.yml"]
+line_comments = ["# "]
+tab_size = 2
+hard_tabs = false
+word_characters = ["-", "_"]
+brackets = [
+  { start = "[", end = "]", close = true, newline = false },
+  { start = "{", end = "}", close = true, newline = false },
+  { start = "\"", end = "\"", close = true, newline = false },
+  { start = "'", end = "'", close = true, newline = false },
+]

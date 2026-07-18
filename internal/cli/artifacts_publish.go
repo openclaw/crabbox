@@ -693,13 +693,13 @@ func uploadArtifactS3(ctx context.Context, opts artifactPublishOptions, file art
 	if _, err := exec.LookPath("aws"); err != nil {
 		return "", exit(2, "aws CLI is required for artifacts publish --storage s3: %v", err)
 	}
-	if out, err := commandOutputWithInput(ctx, io.NewSectionReader(file.snapshotFile, file.snapshotOffset, file.snapshotSize), "aws", args...); err != nil {
+	if out, err := artifactPublisherCommandOutputWithInput(ctx, opts, nil, io.NewSectionReader(file.snapshotFile, file.snapshotOffset, file.snapshotSize), "aws", args...); err != nil {
 		return "", exit(2, "aws s3 upload failed: %v: %s", err, tailForError(out))
 	}
 	if opts.Presign && opts.BaseURL == "" {
 		presignArgs := awsBaseArgs(opts)
 		presignArgs = append(presignArgs, "s3", "presign", dest, "--expires-in", fmt.Sprintf("%.0f", opts.Expires.Seconds()))
-		out, err := commandOutput(ctx, "aws", presignArgs...)
+		out, err := artifactPublisherCommandOutput(ctx, opts, nil, "aws", presignArgs...)
 		if err != nil {
 			return "", exit(2, "aws s3 presign failed: %v: %s", err, tailForError(out))
 		}
@@ -732,15 +732,11 @@ func uploadArtifactCloudflare(ctx context.Context, opts artifactPublishOptions, 
 	if _, err := exec.LookPath("wrangler"); err != nil {
 		return "", exit(2, "wrangler CLI is required for artifacts publish --storage cloudflare: %v", err)
 	}
-	out, err := commandOutputWithEnvAndInput(ctx, artifactCloudflareEnv(), io.NewSectionReader(file.snapshotFile, file.snapshotOffset, file.snapshotSize), "wrangler", "r2", "object", "put", opts.Bucket+"/"+key, "--pipe", "--content-type", contentType, "--remote")
+	out, err := artifactPublisherCommandOutputWithInput(ctx, opts, artifactCloudflareEnv(), io.NewSectionReader(file.snapshotFile, file.snapshotOffset, file.snapshotSize), "wrangler", "r2", "object", "put", opts.Bucket+"/"+key, "--pipe", "--content-type", contentType, "--remote")
 	if err != nil {
 		return "", exit(2, "wrangler r2 upload failed: %v: %s", err, tailForError(out))
 	}
 	return artifactCloudflareURL(opts, key), nil
-}
-
-func commandOutputWithInput(ctx context.Context, input io.Reader, name string, args ...string) (string, error) {
-	return commandOutputWithEnvAndInput(ctx, nil, input, name, args...)
 }
 
 func commandOutputWithEnvAndInput(ctx context.Context, env []string, input io.Reader, name string, args ...string) (string, error) {
@@ -771,6 +767,20 @@ func artifactCloudflareEnv() []string {
 		env = append(env, "CLOUDFLARE_ACCOUNT_ID="+accountID)
 	}
 	return env
+}
+
+func artifactPublisherCommandOutput(ctx context.Context, opts artifactPublishOptions, env []string, name string, args ...string) (string, error) {
+	return artifactPublisherCommandOutputWithInput(ctx, opts, env, nil, name, args...)
+}
+
+func artifactPublisherCommandOutputWithInput(ctx context.Context, opts artifactPublishOptions, env []string, input io.Reader, name string, args ...string) (string, error) {
+	if env == nil {
+		env = os.Environ()
+	}
+	if len(opts.ChildEnvDenylist) > 0 {
+		env = childEnvironmentWithout(env, opts.ChildEnvDenylist...)
+	}
+	return commandOutputWithEnvAndInput(ctx, env, input, name, args...)
 }
 
 func artifactS3URL(opts artifactPublishOptions, key string) string {
@@ -1269,21 +1279,16 @@ func summaryText(summary, summaryFile string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-func postGitHubPRComment(ctx context.Context, pr int, repo string, body []byte) error {
-	args := []string{"issue", "comment", strconv.Itoa(pr), "--body-file", "-"}
-	if strings.TrimSpace(repo) != "" {
-		args = append(args, "--repo", strings.TrimSpace(repo))
+func postGitHubPRComment(ctx context.Context, opts artifactPublishOptions, body []byte) error {
+	args := []string{"issue", "comment", strconv.Itoa(opts.PR), "--body-file", "-"}
+	if strings.TrimSpace(opts.Repo) != "" {
+		args = append(args, "--repo", strings.TrimSpace(opts.Repo))
 	}
 	if _, err := exec.LookPath("gh"); err != nil {
 		return exit(2, "gh CLI is required for artifacts publish --pr: %v", err)
 	}
-	cmd := exec.CommandContext(ctx, "gh", args...)
-	cmd.Stdin = bytes.NewReader(body)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		return exit(2, "gh issue comment failed: %v: %s", err, tailForError(out.String()))
+	if out, err := artifactPublisherCommandOutputWithInput(ctx, opts, nil, bytes.NewReader(body), "gh", args...); err != nil {
+		return exit(2, "gh issue comment failed: %v: %s", err, tailForError(out))
 	}
 	return nil
 }

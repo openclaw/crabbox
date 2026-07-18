@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -383,6 +384,93 @@ func TestCoordinatorTokenCommandRefreshesBearer(t *testing.T) {
 	}
 }
 
+func TestCoordinatorChildrenScrubExternalDesktopPassword(t *testing.T) {
+	t.Setenv("CRABBOX_TOKEN_HELPER", "1")
+	t.Setenv("CRABBOX_TOKEN_HELPER_VALUE", "scrubbed-token")
+	t.Setenv("CRABBOX_TOKEN_HELPER_ASSERT_SCRUB", "1")
+	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-coordinator-child")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+	cfg := Config{
+		Coordinator:       "https://broker.example.test",
+		CoordTokenCommand: []string{os.Args[0], "-test.run=^TestCoordinatorTokenCommandHelper$"},
+		Provider:          "external",
+		TargetOS:          targetMacOS,
+	}
+	cfg.External.Connection.Desktop.PasswordEnv = "TEST_ARD_PASSWORD"
+	client, configured, err := newCoordinatorClient(cfg)
+	if err != nil || !configured {
+		t.Fatalf("new coordinator client configured=%t err=%v", configured, err)
+	}
+	if token, err := client.authorizationToken(context.Background()); err != nil || token != "scrubbed-token" {
+		t.Fatalf("token=%q err=%v", token, err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	dir := t.TempDir()
+	curlPath := filepath.Join(dir, "curl")
+	curlScript := "#!/bin/sh\nif [ \"${TEST_ARD_PASSWORD+x}\" = x ] || [ \"$CRABBOX_TEST_KEEP\" != preserved ]; then exit 89; fi\ncat >/dev/null\nprintf '{\"ok\":true}\\n200'\n"
+	if err := os.WriteFile(curlPath, []byte(curlScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	client.TokenCommand = nil
+	client.Token = "static-token"
+	var response map[string]any
+	if err := client.doCurl(context.Background(), http.MethodGet, "/v1/health", nil, false, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["ok"] != true {
+		t.Fatalf("curl response=%v", response)
+	}
+}
+
+func TestCoordinatorOwnerGitScrubsExternalDesktopPassword(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell git fixture")
+	}
+	dir := t.TempDir()
+	gitPath := filepath.Join(dir, "git")
+	script := "#!/bin/sh\nif [ \"${TEST_ARD_PASSWORD+x}\" = x ] || [ \"${CRABBOX_TEST_KEEP+x}\" = x ] || [ \"$GIT_CEILING_DIRECTORIES\" != /safe/root ] || [ \"${GIT_DENIED_ROUTING+x}\" = x ]; then exit 89; fi\nprintf owner@example.test\n"
+	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_OWNER", "")
+	t.Setenv("GIT_AUTHOR_EMAIL", "")
+	t.Setenv("GIT_COMMITTER_EMAIL", "")
+	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-git")
+	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
+	t.Setenv("GIT_CEILING_DIRECTORIES", "/safe/root")
+	t.Setenv("GIT_DENIED_ROUTING", "remove-me")
+	client := CoordinatorClient{ChildEnvDenylist: []string{"TEST_ARD_PASSWORD", "GIT_DENIED_ROUTING"}}
+	if got := client.localCoordinatorOwner(); got != "owner@example.test" {
+		t.Fatalf("owner=%q", got)
+	}
+}
+
+func TestLocalCoordinatorOwnerGitUsesRepositoryEnvironmentWithoutDenylist(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell git fixture")
+	}
+	dir := t.TempDir()
+	gitPath := filepath.Join(dir, "git")
+	script := "#!/bin/sh\nif [ \"${TEST_ARD_PASSWORD+x}\" = x ] || [ \"${CRABBOX_TEST_KEEP+x}\" = x ] || [ \"$GIT_CEILING_DIRECTORIES\" != /safe/root ]; then exit 89; fi\nprintf owner@example.test\n"
+	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_OWNER", "")
+	t.Setenv("GIT_AUTHOR_EMAIL", "")
+	t.Setenv("GIT_COMMITTER_EMAIL", "")
+	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-git")
+	t.Setenv("CRABBOX_TEST_KEEP", "must-not-reach-git")
+	t.Setenv("GIT_CEILING_DIRECTORIES", "/safe/root")
+	if got := localCoordinatorOwnerWithEnvironment(nil); got != "owner@example.test" {
+		t.Fatalf("owner=%q", got)
+	}
+}
+
 func TestCoordinatorConfiguredAuthRecognizesTokenCommand(t *testing.T) {
 	for name, client := range map[string]*CoordinatorClient{
 		"nil":           nil,
@@ -416,6 +504,11 @@ func TestCoordinatorTokenCommandHelper(t *testing.T) {
 	}
 	if delay, err := time.ParseDuration(os.Getenv("CRABBOX_TOKEN_HELPER_DELAY")); err == nil {
 		time.Sleep(delay)
+	}
+	if os.Getenv("CRABBOX_TOKEN_HELPER_ASSERT_SCRUB") == "1" {
+		if _, present := os.LookupEnv("TEST_ARD_PASSWORD"); present || os.Getenv("CRABBOX_TEST_KEEP") != "preserved" {
+			os.Exit(89)
+		}
 	}
 	_, _ = fmt.Fprintln(os.Stdout, os.Getenv("CRABBOX_TOKEN_HELPER_VALUE"))
 	os.Exit(0)

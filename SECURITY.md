@@ -89,13 +89,14 @@ break need an explicit product decision and migration path.
 
 Crabbox targets a single trusted user running on their own machine, so most
 findings are ordinary bugs rather than exploitable vulnerabilities against the
-boundaries above. This project does not run a separate private-disclosure
-process.
+boundaries above.
 
-If you find a security-relevant issue, the most useful thing you can do is send
-a pull request with the fix — that way the fix and the report arrive together
-and nothing sits publicly described but unpatched. For non-sensitive hardening,
-reliability, or expected-behavior questions, a normal GitHub issue is fine.
+Report suspected vulnerabilities privately to
+[security@openclaw.ai](mailto:security@openclaw.ai). Do not open a public issue
+or pull request that discloses an unpatched vulnerability, exploit path, secret,
+or security-sensitive proof of concept. For non-sensitive hardening,
+reliability, or expected-behavior questions, a normal GitHub issue or pull
+request is fine.
 
 A helpful report or PR identifies which supported boundary is crossed (see the
 sections above), the attacker access it requires, and the affected code path.

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +12,10 @@ import (
 )
 
 type credentialValueSource uint8
+
+// transientSecret is an accessor closure so generic struct formatting can
+// reveal only a function address, never the captured credential bytes.
+type transientSecret func() string
 
 const (
 	credentialSourceUnknown credentialValueSource = iota
@@ -94,6 +99,10 @@ type credentialDestinationProvenance struct {
 	externalSSHProxy      credentialValueSource
 	externalSSHAllowEnv   credentialValueSource
 	externalSSHOutput     credentialValueSource
+	externalDesktopUser   credentialValueSource
+	externalDesktopEnv    credentialValueSource
+	externalDesktopTarget credentialValueSource
+	externalDesktopMode   credentialValueSource
 	externalRouting       credentialValueSource
 	externalApproved      externalCredentialApproval
 	externalArgvApproval  externalLifecycleCredentialApproval
@@ -101,19 +110,25 @@ type credentialDestinationProvenance struct {
 }
 
 type externalCredentialApproval struct {
-	resource       string
-	host           string
-	proxy          string
-	allowEnv       bool
-	envSSH         ExternalSSHConnectionConfig
-	providerOutput bool
-	outputContract [32]byte
+	resource           string
+	host               string
+	proxy              string
+	allowEnv           bool
+	envSSH             ExternalSSHConnectionConfig
+	providerOutput     bool
+	desktopUsername    string
+	desktopEnv         string
+	desktopTarget      string
+	desktopWindowsMode string
+	outputContract     [32]byte
 }
 
 type externalLifecycleCredentialApproval struct {
 	configArgv bool
 	contract   [32]byte
 }
+
+const legacyExternalDesktopPasswordEnvironment = "CRABBOX_EXTERNAL_DESKTOP_PASSWORD"
 
 type sourcedCredential struct {
 	value  string
@@ -449,8 +464,32 @@ func validateProviderCredentialDestination(cfg Config) error {
 			return repositoryCredentialDestinationError("exe-dev", "exeDev.controlHost", "CRABBOX_EXE_DEV_CONTROL_HOST or --exe-dev-control-host")
 		}
 	case "external":
+		if err := ValidateExternalDesktopPasswordEnvironmentName(cfg.External.Connection.Desktop.PasswordEnv); err != nil {
+			return exit(2, "%v", err)
+		}
 		if cfg.External.Connection.SSH.TrustProviderOutput && provenance.externalSSHOutput == credentialSourceRepository {
 			return repositoryCredentialDestinationError("external", "external.connection.ssh.trustProviderOutput", "the same provider-output contract in trusted user config")
+		}
+		desktop := cfg.External.Connection.Desktop
+		if strings.TrimSpace(desktop.PasswordEnv) != "" &&
+			!externalDesktopCredentialValueAuthorized(
+				desktop.Username,
+				provenance.externalApproved.desktopUsername,
+				provenance.externalDesktopUser,
+			) {
+			return repositoryCredentialDestinationError("external", "external.connection.desktop.username", "the same desktop account in trusted user config or an explicit flag/environment override")
+		}
+		if strings.TrimSpace(desktop.PasswordEnv) != "" &&
+			!externalDesktopCredentialValueAuthorized(
+				desktop.PasswordEnv,
+				provenance.externalApproved.desktopEnv,
+				provenance.externalDesktopEnv,
+			) {
+			return repositoryCredentialDestinationError("external", "external.connection.desktop.passwordEnv", "the same desktop password environment variable in trusted user config or an explicit flag/environment override")
+		}
+		if strings.TrimSpace(desktop.PasswordEnv) != "" &&
+			!externalDesktopCredentialTargetAuthorized(cfg, provenance) {
+			return repositoryCredentialDestinationError("external", "external desktop target/account contract", "the same target, Windows mode, username, and password environment in trusted user config or explicit flag/environment overrides")
 		}
 		if !externalDeclarativeLifecycleConfigured(cfg.External) {
 			break
@@ -519,6 +558,96 @@ func validateProviderCredentialDestination(cfg Config) error {
 		}
 	}
 	return nil
+}
+
+// ValidateExternalDesktopPasswordEnvironmentName rejects names Crabbox, its
+// runtime loader, or its HTTP stack consume for another security-sensitive
+// purpose. Reusing one value as both an ARD password and process metadata would
+// leak the desktop secret before child-process environment scrubbing can apply.
+func ValidateExternalDesktopPasswordEnvironmentName(name string) error {
+	name = strings.ToUpper(strings.TrimSpace(name))
+	if name == "" {
+		return nil
+	}
+	reservedCrabboxName := strings.HasPrefix(name, "CRABBOX_") && name != legacyExternalDesktopPasswordEnvironment
+	if reservedCrabboxName || strings.HasPrefix(name, "CF_ACCESS_") || strings.HasPrefix(name, "GIT_") || strings.HasPrefix(name, "GH_") || strings.HasPrefix(name, "GITHUB_") || strings.HasPrefix(name, "LC_") || strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_") || strings.HasPrefix(name, "MALLOC") {
+		return fmt.Errorf("external.connection.desktop.passwordEnv %s is reserved for Crabbox, identity, access, locale, or process-loader configuration; choose a dedicated secret environment variable outside those namespaces", name)
+	}
+	reserved := map[string]struct{}{
+		"HTTP_PROXY":      {},
+		"HTTPS_PROXY":     {},
+		"ALL_PROXY":       {},
+		"NO_PROXY":        {},
+		"PATH":            {},
+		"HOME":            {},
+		"USER":            {},
+		"LOGNAME":         {},
+		"SHELL":           {},
+		"SSH_AUTH_SOCK":   {},
+		"TMPDIR":          {},
+		"TMP":             {},
+		"TEMP":            {},
+		"LANG":            {},
+		"TZ":              {},
+		"GODEBUG":         {},
+		"GOGC":            {},
+		"GOMEMLIMIT":      {},
+		"GOMAXPROCS":      {},
+		"GOTRACEBACK":     {},
+		"XDG_CONFIG_HOME": {},
+		"XDG_STATE_HOME":  {},
+		"SYSTEMROOT":      {},
+		"WINDIR":          {},
+		"COMSPEC":         {},
+		"PATHEXT":         {},
+		"USERPROFILE":     {},
+		"USERNAME":        {},
+		"USERDOMAIN":      {},
+		"HOMEDRIVE":       {},
+		"HOMEPATH":        {},
+		"APPDATA":         {},
+		"LOCALAPPDATA":    {},
+	}
+	if _, found := reserved[name]; found {
+		return fmt.Errorf("external.connection.desktop.passwordEnv %s is reserved for process, identity, access, or network configuration; choose a dedicated secret environment variable", name)
+	}
+	return nil
+}
+
+func setExternalDesktopTransientCredential(cfg *Config, name, value string) error {
+	if cfg == nil {
+		return fmt.Errorf("external desktop credential config is unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("external desktop credential environment name is empty")
+	}
+	if len(value) > webVNCDaemonCredentialMaxBytes {
+		return fmt.Errorf("external desktop credential exceeds %d bytes", webVNCDaemonCredentialMaxBytes)
+	}
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("external desktop credential is empty")
+	}
+	cfg.externalDesktopCredentialName = name
+	cfg.externalDesktopCredential = func() string { return value }
+	return nil
+}
+
+// LookupExternalDesktopPassword keeps the daemon-delivered credential inside
+// the exact Config value that owns it; it never enters env, argv, routing, or
+// provider-scope material.
+func LookupExternalDesktopPassword(cfg Config, name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+	if value, ok := os.LookupEnv(name); ok {
+		return value, true
+	}
+	if cfg.externalDesktopCredentialName != name || cfg.externalDesktopCredential == nil {
+		return "", false
+	}
+	return cfg.externalDesktopCredential(), true
 }
 
 // ValidateProviderCredentialDestination enforces source-bound credential
@@ -670,10 +799,7 @@ func externalLifecycleArgsUseConfig(argv []string, directConfig, resourceNameUse
 // to connection values after the External provider loads that private state.
 // An unknown source is reserved for claim-bound automatic routing.
 func MarkExternalRoutingCredentialSources(cfg *Config) {
-	source := cfg.credentialProvenance.externalRouting
-	if source == credentialSourceUnknown {
-		source = credentialSourceTrustedFile
-	}
+	source := externalRoutingCredentialSource(*cfg)
 	connection := cfg.External.Connection
 	provenance := &cfg.credentialProvenance
 	provenance.externalConfig = source
@@ -684,6 +810,28 @@ func MarkExternalRoutingCredentialSources(cfg *Config) {
 	provenance.externalSSHHost = credentialDestinationSource(connection.SSH.Host, provenance.externalApproved.host, source)
 	provenance.externalSSHProxy = credentialDestinationSource(connection.SSH.ProxyCommand, provenance.externalApproved.proxy, source)
 	provenance.externalSSHAllowEnv = credentialSourceForBool(connection.SSH.AllowEnv, source)
+	if source != credentialSourceRepository {
+		targetOS, windowsMode := ExternalRoutingTarget(cfg.External)
+		provenance.externalApproved.desktopTarget = targetOS
+		provenance.externalApproved.desktopWindowsMode = windowsMode
+		provenance.externalApproved.desktopUsername = strings.TrimSpace(connection.Desktop.Username)
+		provenance.externalApproved.desktopEnv = strings.TrimSpace(connection.Desktop.PasswordEnv)
+	}
+	routingTargetOS, routingWindowsMode := ExternalRoutingTarget(cfg.External)
+	currentTargetOS, currentWindowsMode := normalizedExternalDesktopTarget(*cfg)
+	targetSource := externalRoutingTargetCredentialSource(*cfg)
+	if currentTargetOS == routingTargetOS && !externalDesktopCredentialSourceExplicit(provenance.externalDesktopTarget) {
+		provenance.externalDesktopTarget = targetSource
+	}
+	if currentWindowsMode == routingWindowsMode && !externalDesktopCredentialSourceExplicit(provenance.externalDesktopMode) {
+		provenance.externalDesktopMode = targetSource
+	}
+	provenance.externalDesktopUser = credentialDestinationSource(
+		connection.Desktop.Username, provenance.externalApproved.desktopUsername, source,
+	)
+	provenance.externalDesktopEnv = credentialDestinationSource(
+		connection.Desktop.PasswordEnv, provenance.externalApproved.desktopEnv, source,
+	)
 	if source == credentialSourceRepository && connection.SSH.AllowEnv && provenance.externalApproved.allowEnv &&
 		externalSSHEnvApprovalMatches(connection, provenance.externalApproved) {
 		provenance.externalSSHAllowEnv = credentialSourceTrustedFile
@@ -696,6 +844,37 @@ func MarkExternalRoutingCredentialSources(cfg *Config) {
 	}
 }
 
+// MarkExternalRoutingTargetRestored clears stale ambient authorization when a
+// routing file, rather than an explicit target flag, supplied the effective
+// target tuple.
+func MarkExternalRoutingTargetRestored(cfg *Config, targetRestored, windowsModeRestored bool) {
+	if cfg == nil {
+		return
+	}
+	source := externalRoutingTargetCredentialSource(*cfg)
+	if targetRestored {
+		cfg.credentialProvenance.externalDesktopTarget = source
+	}
+	if windowsModeRestored {
+		cfg.credentialProvenance.externalDesktopMode = source
+	}
+}
+
+func externalRoutingCredentialSource(cfg Config) credentialValueSource {
+	source := cfg.credentialProvenance.externalRouting
+	if source == credentialSourceUnknown {
+		return credentialSourceTrustedFile
+	}
+	return source
+}
+
+func externalRoutingTargetCredentialSource(cfg Config) credentialValueSource {
+	if cfg.credentialProvenance.externalRouting == credentialSourceRepository {
+		return credentialSourceRepository
+	}
+	return credentialSourceTrustedFile
+}
+
 // MarkExternalRoutingFileExplicit records an operator-selected routing path
 // before the External provider loads it during flag application.
 func MarkExternalRoutingFileExplicit(cfg *Config) {
@@ -706,6 +885,67 @@ func MarkExternalRoutingFileExplicit(cfg *Config) {
 // adapter contract through a trusted flag.
 func MarkExternalProviderOutputFlagExplicit(cfg *Config) {
 	markExternalProviderOutputExplicit(cfg, credentialSourceFlag)
+}
+
+// MarkExternalDesktopPasswordEnvExplicit records an operator-selected desktop
+// secret reference so repository config cannot redirect inherited credentials.
+func MarkExternalDesktopPasswordEnvExplicit(cfg *Config) {
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceFlag
+}
+
+// MarkExternalDesktopUsernameExplicit records an operator-selected desktop
+// account so repository config cannot retarget an approved password reference.
+func MarkExternalDesktopUsernameExplicit(cfg *Config) {
+	cfg.credentialProvenance.externalDesktopUser = credentialSourceFlag
+}
+
+// IsExternalDesktopUsernameExplicit reports whether an operator override must
+// be reproduced even when it explicitly clears a persisted routing value.
+func IsExternalDesktopUsernameExplicit(cfg *Config) bool {
+	return cfg != nil && externalDesktopCredentialSourceExplicit(cfg.credentialProvenance.externalDesktopUser)
+}
+
+// IsExternalDesktopPasswordEnvExplicit is the password-reference counterpart
+// to IsExternalDesktopUsernameExplicit.
+func IsExternalDesktopPasswordEnvExplicit(cfg *Config) bool {
+	return cfg != nil && externalDesktopCredentialSourceExplicit(cfg.credentialProvenance.externalDesktopEnv)
+}
+
+func externalDesktopCredentialSourceExplicit(source credentialValueSource) bool {
+	return source == credentialSourceFlag || source == credentialSourceEnvironment
+}
+
+// IsExternalDesktopTargetExplicit reports command/programmatic routing
+// choices. Environment and file values may authorize a credential tuple, but
+// do not replace a lease's persisted routing target.
+func IsExternalDesktopTargetExplicit(cfg *Config) bool {
+	return cfg != nil && (cfg.targetFlagExplicit || cfg.credentialProvenance.externalDesktopTarget == credentialSourceFlag)
+}
+
+// IsExternalDesktopWindowsModeExplicit is the Windows-mode counterpart to
+// IsExternalDesktopTargetExplicit.
+func IsExternalDesktopWindowsModeExplicit(cfg *Config) bool {
+	return cfg != nil && (cfg.windowsModeFlagExplicit || cfg.credentialProvenance.externalDesktopMode == credentialSourceFlag)
+}
+
+func externalDesktopCredentialValueAuthorized(value, approved string, source credentialValueSource) bool {
+	return strings.TrimSpace(value) == strings.TrimSpace(approved) || externalDesktopCredentialSourceExplicit(source)
+}
+
+func externalDesktopCredentialTargetAuthorized(cfg Config, provenance credentialDestinationProvenance) bool {
+	targetOS, windowsMode := normalizedExternalDesktopTarget(cfg)
+	approval := provenance.externalApproved
+	return (targetOS == approval.desktopTarget || externalDesktopCredentialSourceExplicit(provenance.externalDesktopTarget)) &&
+		(targetOS != targetWindows || windowsMode == approval.desktopWindowsMode || externalDesktopCredentialSourceExplicit(provenance.externalDesktopMode))
+}
+
+func normalizedExternalDesktopTarget(cfg Config) (string, string) {
+	targetOS := normalizeTargetOS(cfg.TargetOS)
+	windowsMode := normalizeWindowsMode(cfg.WindowsMode)
+	if targetOS != targetWindows {
+		windowsMode = windowsModeNormal
+	}
+	return targetOS, windowsMode
 }
 
 func markExternalProviderOutputExplicit(cfg *Config, source credentialValueSource) {
@@ -816,6 +1056,11 @@ func externalSSHReferencesResourceName(ssh ExternalSSHConnectionConfig) bool {
 }
 
 func externalProviderOutputContract(cfg ExternalConfig) ([32]byte, bool) {
+	// Desktop credentials have their own per-component approval contract. They
+	// are not provider-output SSH coordinates and must not invalidate an
+	// otherwise unchanged trustProviderOutput approval.
+	connection := cfg.Connection
+	connection.Desktop = ExternalDesktopConfig{}
 	contract := struct {
 		Command    string                   `json:"command,omitempty"`
 		Args       []string                 `json:"args,omitempty"`
@@ -827,7 +1072,7 @@ func externalProviderOutputContract(cfg ExternalConfig) ([32]byte, bool) {
 		Args:       cfg.Args,
 		Config:     cfg.Config,
 		Lifecycle:  cfg.Lifecycle,
-		Connection: cfg.Connection,
+		Connection: connection,
 	}
 	data, err := json.Marshal(contract)
 	if err != nil {

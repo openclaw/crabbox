@@ -538,6 +538,13 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 	if req.DryRun {
 		return nil
 	}
+	// Snapshot orphan-candidate claims before the list call so a claim registered
+	// by a concurrent Acquire cannot be compared against an older list snapshot and
+	// swept as missing. Only claims that predate our list view can be orphans.
+	orphanCandidates, err := core.ListLeaseClaims()
+	if err != nil {
+		return err
+	}
 	response, err := b.invoke(ctx, protocolRequest{
 		Operation: "list", All: true, Refresh: true, SkipSSHOutputValidation: true,
 	})
@@ -552,18 +559,29 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 		}
 		live[leaseID] = struct{}{}
 	}
-	claims, err := core.ListLeaseClaims()
-	if err != nil {
-		return err
-	}
-	for _, claim := range claims {
+	for _, claim := range orphanCandidates {
 		if claim.Provider != providerName || strings.TrimSpace(claim.ProviderScope) != b.claimScope() {
 			continue
 		}
-		if _, ok := live[claim.LeaseID]; !ok {
-			core.RemoveLeaseClaim(claim.LeaseID)
-			core.RemoveExternalRouting(claim.LeaseID)
+		if _, ok := live[claim.LeaseID]; ok {
+			continue
 		}
+		// Remove the orphan claim only if it is unchanged since our pre-list
+		// snapshot; a concurrent Acquire/Touch that (re)bound this lease makes it no
+		// longer an orphan, so the guard declines and the live lease survives.
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			continue
+		}
+		// Retain the external routing rather than deleting it in the sweep. A
+		// concurrent Acquire persists this lease's routing (PersistValidatedExternalRouting,
+		// early in Acquire) BEFORE it publishes the replacement claim (claimLeaseForRepo),
+		// so the old claim can still match our pre-list snapshot at the instant the routing
+		// already belongs to a live reacquisition. Deleting it here would leave that live
+		// lease unroutable. Mirrors the merged tart fix
+		// (https://github.com/openclaw/crabbox/pull/1124), which retains per-lease state
+		// for this reason; the apple-container (https://github.com/openclaw/crabbox/pull/1146)
+		// and local-container (https://github.com/openclaw/crabbox/pull/1147) siblings apply
+		// the same retention. A genuinely dead lease's routing is a harmless small residue.
 	}
 	return nil
 }
@@ -585,6 +603,7 @@ func (b *leaseBackend) invokeProtocol(ctx context.Context, request protocolReque
 	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:                   strings.TrimSpace(b.cfg.External.Command),
 		Args:                   append([]string(nil), b.cfg.External.Args...),
+		Env:                    externalAdapterEnv(b.cfg, nil),
 		Stdin:                  &stdin,
 		Stderr:                 b.rt.Stderr,
 		MaxCapturedOutputBytes: externalProviderOutputMaxBytes,
@@ -625,6 +644,28 @@ func (b *leaseBackend) invokeProtocol(ctx context.Context, request protocolReque
 	return response, nil
 }
 
+func externalAdapterEnv(cfg core.Config, env []string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
+	passwordEnvs := core.ExternalDesktopChildEnvironmentDenylist(cfg)
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		blocked := false
+		for _, passwordEnv := range passwordEnvs {
+			if strings.EqualFold(name, passwordEnv) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
 func validateExternalCommandOutputSize(result core.LocalCommandResult) error {
 	for _, output := range []struct {
 		name  string
@@ -648,6 +689,9 @@ type externalClaimScopeData struct {
 	Capabilities *core.ExternalCapabilitiesConfig `json:"capabilities,omitempty"`
 	Lifecycle    *core.ExternalLifecycleConfig    `json:"lifecycle,omitempty"`
 	Connection   *core.ExternalConnectionConfig   `json:"connection,omitempty"`
+	TargetOS     string                           `json:"targetOS,omitempty"`
+	WindowsMode  string                           `json:"windowsMode,omitempty"`
+	Architecture string                           `json:"architecture,omitempty"`
 }
 
 func externalClaimScope(cfg core.Config) string {
@@ -656,14 +700,25 @@ func externalClaimScope(cfg core.Config) string {
 		return scope
 	}
 	data := []byte(strings.TrimSpace(cfg.External.Command) + "\x00" + strings.Join(cfg.External.Args, "\x00"))
+	targetOS, windowsMode, architecture := externalScopeTarget(cfg)
+	if targetOS != "" {
+		data = append(data, []byte("\x00crabbox-target\x00"+targetOS+"\x00"+windowsMode)...)
+	}
+	if architecture != "" {
+		data = append(data, []byte("\x00crabbox-architecture\x00"+architecture)...)
+	}
 	return externalScopeHash(data)
 }
 
 func externalControllerScope(cfg core.Config) (string, error) {
+	targetOS, windowsMode, architecture := externalScopeTarget(cfg)
 	scope := externalClaimScopeData{
-		Command: strings.TrimSpace(cfg.External.Command),
-		Args:    append([]string(nil), cfg.External.Args...),
-		Config:  cfg.External.Config,
+		Command:      strings.TrimSpace(cfg.External.Command),
+		Args:         append([]string(nil), cfg.External.Args...),
+		Config:       cfg.External.Config,
+		TargetOS:     targetOS,
+		WindowsMode:  windowsMode,
+		Architecture: architecture,
 	}
 	if cfg.External.Capabilities.IdempotentLeaseID {
 		capabilities := cfg.External.Capabilities
@@ -671,13 +726,33 @@ func externalControllerScope(cfg core.Config) (string, error) {
 	}
 	if lifecycleConfigured(cfg.External) {
 		scope.Lifecycle = &cfg.External.Lifecycle
-		scope.Connection = &cfg.External.Connection
+		connection := cfg.External.Connection
+		connection.Desktop = core.ExternalDesktopConfig{}
+		scope.Connection = &connection
 	}
 	data, err := json.Marshal(scope)
 	if err != nil {
 		return "", fmt.Errorf("encode external controller provider scope: %w", err)
 	}
 	return externalScopeHash(data), nil
+}
+
+func externalScopeTarget(cfg core.Config) (string, string, string) {
+	core.NormalizeTargetConfig(&cfg)
+	architecture := strings.ToLower(strings.TrimSpace(cfg.Architecture))
+	if normalized, err := core.NormalizeArchitecture(architecture); architecture != "" && err == nil {
+		architecture = normalized
+	}
+	if architecture == core.ArchitectureAMD64 {
+		architecture = ""
+	}
+	if cfg.TargetOS == core.TargetLinux && cfg.WindowsMode == core.WindowsModeNormal {
+		return "", "", architecture
+	}
+	if cfg.TargetOS != core.TargetWindows {
+		return cfg.TargetOS, "", architecture
+	}
+	return cfg.TargetOS, cfg.WindowsMode, architecture
 }
 
 func externalScopeHash(data []byte) string {

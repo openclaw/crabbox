@@ -329,7 +329,7 @@ func enrichExternalRunnerActionsBestEffort(ctx context.Context, cfg Config, runn
 		runs, seen := cache[key]
 		if !seen {
 			var err error
-			runs, err = externalRunnerGitHubRuns(ctx, repo, runners[i].Workflow, runners[i].Ref)
+			runs, err = externalRunnerGitHubRuns(ctx, cfg, repo, runners[i].Workflow, runners[i].Ref)
 			if err != nil {
 				cache[key] = nil
 				continue
@@ -374,7 +374,7 @@ func externalRunnerGitHubRepo(cfg Config, runner CoordinatorExternalRunner) (Git
 	return repo, err == nil
 }
 
-func externalRunnerGitHubRuns(ctx context.Context, repo GitHubRepo, workflow, ref string) ([]externalRunnerActionsRun, error) {
+func externalRunnerGitHubRuns(ctx context.Context, cfg Config, repo GitHubRepo, workflow, ref string) ([]externalRunnerActionsRun, error) {
 	args := []string{
 		"run", "list",
 		"--repo", repo.Slug(),
@@ -385,7 +385,7 @@ func externalRunnerGitHubRuns(ctx context.Context, repo GitHubRepo, workflow, re
 	if ref != "" {
 		args = append(args, "--branch", ref)
 	}
-	out, err := ghOutput(ctx, "", args...)
+	out, err := ghOutputWithChildEnvironment(ctx, "", externalDesktopChildEnvDenylist(cfg, cfg.TargetOS), args...)
 	if err != nil {
 		return nil, err
 	}

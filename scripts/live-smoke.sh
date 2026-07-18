@@ -1434,6 +1434,10 @@ if has_provider github-codespaces || has_provider codespaces || has_provider gh-
   "$root/scripts/live-github-codespaces-smoke.sh"
 fi
 
+if has_provider cua; then
+  "$root/scripts/live-cua-smoke.sh"
+fi
+
 if has_provider proxmox; then
   "$root/scripts/proxmox-live-smoke.sh"
 fi

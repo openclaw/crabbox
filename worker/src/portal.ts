@@ -1010,7 +1010,34 @@ export function portalRunDetail(
   );
 }
 
-export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } = {}): Response {
+export function webVNCCredentialsFromHistoryState(
+  state: unknown,
+  storageID: string,
+): { username: string; password: string } | undefined {
+  if (!storageID || !state || typeof state !== "object") return undefined;
+  const value = (state as Record<string, unknown>)["crabboxWebVNCCredentials"];
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    record["id"] !== storageID ||
+    typeof record["username"] !== "string" ||
+    typeof record["password"] !== "string"
+  ) {
+    return undefined;
+  }
+  return { username: record["username"], password: record["password"] };
+}
+
+export function portalVNC(
+  lease: LeaseRecord,
+  options: {
+    canManage?: boolean;
+    viewerOnly?: boolean;
+    sessionCredentialHandoff?: boolean;
+    sessionCredentialStorageID?: string;
+    takeControl?: boolean;
+  } = {},
+): Response {
   const nonce = scriptNonce();
   const slug = lease.slug || lease.id;
   const target = lease.target || "linux";
@@ -1023,6 +1050,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
   const sharePath = `/portal/leases/${encodeURIComponent(lease.id)}/share`;
   const shareAPIPath = `${sharePath}?format=json`;
   const canManage = options.canManage === true;
+  const viewerOnly = options.viewerOnly === true;
   const shareData = canManage
     ? {
         leaseID: lease.id,
@@ -1065,8 +1093,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
           <button id="vnc-reconnect" class="icon-btn" type="button" title="reconnect" aria-label="reconnect">${reconnectIcon}</button>
           <button id="vnc-fullscreen" class="icon-btn" type="button" title="fullscreen" aria-label="toggle fullscreen">${fullscreenIcon}</button>
           ${canManage ? `<button id="vnc-share" class="button secondary" type="button">share</button>` : ""}
-          <a class="button secondary" href="/portal">leases</a>
-          ${portalLogoutButton()}
+          ${viewerOnly ? "" : `<a class="button secondary" href="/portal">leases</a>${portalLogoutButton()}`}
         `,
       })}
       <section id="screen" class="screen" aria-label="WebVNC display" tabindex="0"></section>
@@ -1147,8 +1174,20 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       let username = fragment.get("username") || "";
       let password = fragment.get("password") || "";
       const handoffTicket = fragment.get("handoff") || "";
-      let credentialsReady = !handoffTicket;
-      const takeControlOnConnect = fragment.get("control") === "take";
+      const sessionCredentialHandoff = ${JSON.stringify(options.sessionCredentialHandoff === true)};
+      const viewerBootstrapSession = ${JSON.stringify(viewerOnly)};
+      const credentialStorageID = ${JSON.stringify(options.sessionCredentialStorageID ?? "")};
+      const restoreWebVNCCredentials = ${webVNCCredentialsFromHistoryState.toString()};
+      let credentialsReady = !handoffTicket && !sessionCredentialHandoff;
+      if (credentialStorageID && !handoffTicket) {
+        const stored = restoreWebVNCCredentials(window.history.state, credentialStorageID);
+        if (stored) {
+          username = stored.username;
+          password = stored.password;
+          credentialsReady = true;
+        }
+      }
+      const takeControlOnConnect = ${JSON.stringify(options.takeControl === true)} || fragment.get("control") === "take";
       const reuseWindowName = "crabbox-webvnc-" + ${JSON.stringify(lease.id)};
       const reuseChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(reuseWindowName) : null;
       let portalReadyForReuse = false;
@@ -1166,7 +1205,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         const response = await fetch(handoffURL, {
           method: "POST",
           headers: { "content-type": "application/json", accept: "application/json" },
-          body: JSON.stringify({ ticket: handoffTicket }),
+          body: JSON.stringify(handoffTicket ? { ticket: handoffTicket } : {}),
         });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(body.message || body.error || "VNC handoff failed");
@@ -1177,7 +1216,11 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         cleanFragment.delete("handoff");
         const cleanURL = new URL(window.location.href);
         cleanURL.hash = cleanFragment.toString();
-        window.history.replaceState(null, "", cleanURL);
+        const historyState = window.history.state && typeof window.history.state === "object" ? { ...window.history.state } : {};
+        if (credentialStorageID) {
+          historyState.crabboxWebVNCCredentials = { id: credentialStorageID, username, password };
+        }
+        window.history.replaceState(historyState, "", cleanURL);
       }
       function setStatus(value, tone = "") {
         status.textContent = value;
@@ -1194,7 +1237,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       reuseChannel?.addEventListener("message", (event) => {
         const message = event.data;
         if (!portalReadyForReuse || typeof message?.requestID !== "string") return;
-        if (message.type === "handoff-offer") {
+        if (message.type === "handoff-offer" || message.type === "session-offer") {
           reuseChannel.postMessage({
             type: "handoff-candidate",
             requestID: message.requestID,
@@ -1202,6 +1245,18 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
             connected,
             controller: isController,
           });
+          return;
+        }
+        if (message.type === "session-grant" && message.recipientID === viewerID) {
+          reuseChannel.postMessage({
+            type: "handoff-accepted",
+            requestID: message.requestID,
+            recipientID: viewerID,
+          });
+          window.focus();
+          const nextURL = new URL(window.location.href);
+          nextURL.hash = "";
+          window.location.replace(nextURL);
           return;
         }
         if (message.type !== "handoff-grant" || message.recipientID !== viewerID) return;
@@ -1224,7 +1279,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         }
       });
       async function reuseExistingWebVNCTab() {
-        if (!handoffTicket || !reuseChannel) return false;
+        if ((!handoffTicket && !viewerBootstrapSession) || !reuseChannel) return false;
         const requestID = viewerID;
         const offered = new URLSearchParams({ handoff: handoffTicket });
         if (takeControlOnConnect) offered.set("control", "take");
@@ -1263,15 +1318,23 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
               return;
             }
             recipientID = selected.recipientID;
-            reuseChannel.postMessage({
-              type: "handoff-grant",
-              requestID,
-              recipientID,
-              fragment: offered.toString(),
-            });
+            if (handoffTicket) {
+              reuseChannel.postMessage({
+                type: "handoff-grant",
+                requestID,
+                recipientID,
+                fragment: offered.toString(),
+              });
+            } else {
+              reuseChannel.postMessage({ type: "session-grant", requestID, recipientID });
+            }
             acceptedTimeout = window.setTimeout(() => finish(false), 180);
           }, 80);
-          reuseChannel.postMessage({ type: "handoff-offer", requestID });
+          if (handoffTicket) {
+            reuseChannel.postMessage({ type: "handoff-offer", requestID });
+          } else {
+            reuseChannel.postMessage({ type: "session-offer", requestID });
+          }
         });
       }
       let rfb;
@@ -1497,10 +1560,6 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
             scheduleRetry(state.message || "waiting for an available WebVNC observer slot");
             return;
           }
-          if (target === "macos" && !password) {
-            stopPolling(missingVNCCredentialMessage);
-            return;
-          }
           setStatus(retryAttempt ? "bridge connected; opening viewer" : "connecting");
           clearDesktopThemeSyncState();
           rfb = new RFB(screen, wsURL.toString(), rfbOptions());
@@ -1569,6 +1628,12 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
           });
           rfb.addEventListener("securityfailure", () => {
             authenticationFailed = true;
+            const historyState = window.history.state;
+            if (historyState && typeof historyState === "object" && historyState.crabboxWebVNCCredentials?.id === credentialStorageID) {
+              const nextHistoryState = { ...historyState };
+              delete nextHistoryState.crabboxWebVNCCredentials;
+              window.history.replaceState(nextHistoryState, "", window.location.href);
+            }
             stopPolling(failedVNCCredentialMessage);
           });
         } catch (error) {
@@ -1632,7 +1697,11 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         return String(value || "").trim().toLowerCase();
       }
       async function shareableWebVNCURL() {
-        if (!username && !password) throw new Error(missingVNCCredentialMessage);
+        const url = new URL(window.location.href);
+        if (!username && !password) {
+          url.hash = "";
+          return url.toString();
+        }
         const response = await fetch(handoffURL, {
           method: "POST",
           headers: { "content-type": "application/json", accept: "application/json" },
@@ -1640,7 +1709,6 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(body.message || body.error || "VNC handoff failed");
-        const url = new URL(window.location.href);
         const linkFragment = new URLSearchParams();
         linkFragment.set("handoff", body.ticket);
         url.hash = linkFragment.toString();

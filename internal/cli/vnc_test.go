@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -42,6 +43,244 @@ func TestVNCNativeHandoffJSONContract(t *testing.T) {
 	}
 	if decoded != handoff {
 		t.Fatalf("decoded handoff=%#v want=%#v", decoded, handoff)
+	}
+}
+
+func TestResolveNativeVNCCredentialsPrefersProviderCredentials(t *testing.T) {
+	credentials, err := resolveNativeVNCCredentials(
+		context.Background(),
+		Config{Provider: "direct-webvnc-test"},
+		SSHTarget{TargetOS: targetMacOS, User: "ssh-user"},
+		vncEndpoint{Managed: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.Username != "provider-user" || credentials.Password != " provider-secret " {
+		t.Fatalf("credentials=%#v", credentials)
+	}
+}
+
+func TestWriteVNCCredentialsDoesNotPrintExternalOperatorPassword(t *testing.T) {
+	const secret = "operator-screen-sharing-secret"
+	for _, provider := range []string{"external", "exec-provider"} {
+		t.Run(provider, func(t *testing.T) {
+			var output bytes.Buffer
+			writeVNCCredentials(
+				&output,
+				Config{Provider: provider, External: ExternalConfig{Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+					Username: "screen-user", PasswordEnv: "SCREEN_SHARING_PASSWORD",
+				}}}},
+				SSHTarget{TargetOS: targetMacOS, User: "screen-user"},
+				vncEndpoint{Managed: true},
+				false,
+				rfbCredentials{Username: "screen-user", Password: secret},
+			)
+			got := output.String()
+			if strings.Contains(got, secret) {
+				t.Fatalf("ordinary VNC output exposed the operator password: %q", got)
+			}
+			for _, want := range []string{
+				"credentials: operator-managed",
+				"macos username: screen-user",
+				"password comes from environment variable SCREEN_SHARING_PASSWORD and is not printed",
+			} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("output missing %q: %q", want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenLocalURLScrubsExternalDesktopPassword(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell opener fixture")
+	}
+	name, _ := openURLCommand("https://example.test")
+	if name == "" {
+		t.Skip("local URL opening unsupported")
+	}
+	dir := t.TempDir()
+	result := filepath.Join(dir, "result")
+	home := filepath.Join(dir, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opener := filepath.Join(dir, name)
+	script := "#!/bin/sh\n" +
+		"if [ \"${TEST_ARD_PASSWORD+x}\" = x ] || [ \"${CRABBOX_COORDINATOR_TOKEN+x}\" = x ] || [ \"${CRABBOX_COORDINATOR_ADMIN_TOKEN+x}\" = x ] || [ \"${CF_ACCESS_CLIENT_SECRET+x}\" = x ] || [ \"${GH_TOKEN+x}\" = x ] || [ \"${GITHUB_TOKEN+x}\" = x ] || [ \"${AWS_SECRET_ACCESS_KEY+x}\" = x ] || [ \"${CUSTOM_AMBIENT_SECRET+x}\" = x ]; then printf leaked > " + shellQuote(result) + "; exit 0; fi\n" +
+		"if [ \"$HOME\" != " + shellQuote(home) + " ]; then printf stripped > " + shellQuote(result) + "; exit 0; fi\n" +
+		"printf scrubbed > " + shellQuote(result) + "\n"
+	if err := os.WriteFile(opener, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", home)
+	t.Setenv("DISPLAY", ":99")
+	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-browser")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "must-not-reach-browser")
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "must-not-reach-browser")
+	t.Setenv("CF_ACCESS_CLIENT_SECRET", "must-not-reach-browser")
+	t.Setenv("GH_TOKEN", "must-not-reach-browser")
+	t.Setenv("GITHUB_TOKEN", "must-not-reach-browser")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "must-not-reach-browser")
+	t.Setenv("CUSTOM_AMBIENT_SECRET", "must-not-reach-browser")
+	if err := openLocalURLWithEnvironment("https://example.test", "TEST_ARD_PASSWORD"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(result); err == nil {
+			if string(data) != "scrubbed" {
+				t.Fatalf("opener environment=%q", data)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("fake opener did not report its environment")
+}
+
+func TestBrowserOpenerEnvironmentUsesMinimalAllowlist(t *testing.T) {
+	environment := []string{
+		"PATH=/usr/bin",
+		"HOME=/tmp/home",
+		"LANG=en_US.UTF-8",
+		"LC_CTYPE=en_US.UTF-8",
+		"DISPLAY=:99",
+		"XAUTHORITY=/run/user/1000/xauthority",
+		"WAYLAND_DISPLAY=wayland-0",
+		"XDG_RUNTIME_DIR=/run/user/1000",
+		"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+		"XDG_CONFIG_HOME=/tmp/config",
+		"XDG_CONFIG_DIRS=/etc/xdg",
+		"XDG_DATA_HOME=/tmp/data",
+		"XDG_DATA_DIRS=/usr/local/share:/usr/share",
+		"BROWSER=example-browser",
+		"SSH_AUTH_SOCK=/tmp/agent.sock",
+		"CRABBOX_COORDINATOR_TOKEN=coordinator-secret",
+		"GH_TOKEN=github-secret",
+		"LC_SECRET=locale-shaped-secret",
+		"CUSTOM_AMBIENT_SECRET=custom-secret",
+	}
+	filtered := browserOpenerEnvironment(environment)
+	got := make(map[string]string, len(filtered))
+	for _, entry := range filtered {
+		name, value, _ := strings.Cut(entry, "=")
+		got[name] = value
+	}
+	for name, value := range map[string]string{
+		"PATH":     "/usr/bin",
+		"HOME":     "/tmp/home",
+		"LANG":     "en_US.UTF-8",
+		"LC_CTYPE": "en_US.UTF-8",
+	} {
+		if got[name] != value {
+			t.Fatalf("%s=%q want %q", name, got[name], value)
+		}
+	}
+	if runtime.GOOS == "linux" {
+		for name, value := range map[string]string{
+			"DISPLAY":                  ":99",
+			"XAUTHORITY":               "/run/user/1000/xauthority",
+			"WAYLAND_DISPLAY":          "wayland-0",
+			"XDG_RUNTIME_DIR":          "/run/user/1000",
+			"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+			"XDG_CONFIG_HOME":          "/tmp/config",
+			"XDG_CONFIG_DIRS":          "/etc/xdg",
+			"XDG_DATA_HOME":            "/tmp/data",
+			"XDG_DATA_DIRS":            "/usr/local/share:/usr/share",
+			"BROWSER":                  "example-browser",
+		} {
+			if got[name] != value {
+				t.Fatalf("%s=%q want %q", name, got[name], value)
+			}
+		}
+	} else {
+		for _, name := range []string{"DISPLAY", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "XDG_DATA_HOME", "XDG_DATA_DIRS", "BROWSER"} {
+			if _, ok := got[name]; ok {
+				t.Fatalf("%s unexpectedly preserved on %s", name, runtime.GOOS)
+			}
+		}
+	}
+	for _, name := range []string{
+		"SSH_AUTH_SOCK",
+		"CRABBOX_COORDINATOR_TOKEN",
+		"GH_TOKEN",
+		"LC_SECRET",
+		"CUSTOM_AMBIENT_SECRET",
+	} {
+		if _, ok := got[name]; ok {
+			t.Fatalf("%s unexpectedly preserved", name)
+		}
+	}
+	if denied := browserOpenerEnvironment(environment, "HOME"); slices.Contains(denied, "HOME=/tmp/home") {
+		t.Fatal("explicit denylist did not override the browser allowlist")
+	}
+}
+
+func TestWriteVNCCredentialsDoesNotApplyExternalMacHintToOtherTargets(t *testing.T) {
+	for _, target := range []struct {
+		name     string
+		targetOS string
+		want     []string
+	}{
+		{name: "Linux", targetOS: targetLinux, want: []string{"password: generated-secret"}},
+		{name: "Windows", targetOS: targetWindows, want: []string{
+			"password: generated-secret",
+			"windows username: crabbox",
+			"windows password: generated-secret",
+		}},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			var output bytes.Buffer
+			writeVNCCredentials(
+				&output,
+				Config{Provider: "external", External: ExternalConfig{Connection: ExternalConnectionConfig{Desktop: ExternalDesktopConfig{
+					PasswordEnv: "SCREEN_SHARING_PASSWORD",
+				}}}},
+				SSHTarget{TargetOS: target.targetOS, User: "crabbox"},
+				vncEndpoint{Managed: true},
+				false,
+				rfbCredentials{Username: "crabbox", Password: "generated-secret"},
+			)
+			got := output.String()
+			for _, want := range target.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("output missing %q: %q", want, got)
+				}
+			}
+			for _, unwanted := range []string{"credentials: operator-managed", "SCREEN_SHARING_PASSWORD", "is not printed"} {
+				if strings.Contains(got, unwanted) {
+					t.Fatalf("output contains macOS-only credential hint %q: %q", unwanted, got)
+				}
+			}
+		})
+	}
+}
+
+func TestWriteVNCCredentialsPrintsManagedMacPasswordAfterProviderSwitch(t *testing.T) {
+	var output bytes.Buffer
+	cfg := Config{Provider: "aws"}
+	cfg.External.Connection.Desktop.PasswordEnv = "SCREEN_SHARING_PASSWORD"
+	cfg.credentialProvenance.externalDesktopEnv = credentialSourceTrustedFile
+	writeVNCCredentials(
+		&output,
+		cfg,
+		SSHTarget{TargetOS: targetMacOS, User: "ec2-user"},
+		vncEndpoint{Managed: true},
+		false,
+		rfbCredentials{Username: "ec2-user", Password: "generated-secret"},
+	)
+	got := output.String()
+	for _, want := range []string{"password: generated-secret", "macos username: ec2-user", "macos password: generated-secret"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "credentials: operator-managed") || strings.Contains(got, "SCREEN_SHARING_PASSWORD") {
+		t.Fatalf("provider-switched output used External credential hint: %q", got)
 	}
 }
 

@@ -335,6 +335,21 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_TENSORLAKE_DISK_MB",
 		"CRABBOX_TENSORLAKE_TIMEOUT_SECS",
 		"CRABBOX_TENSORLAKE_NO_INTERNET",
+		"CRABBOX_CUA_API_URL",
+		"CUA_BASE_URL",
+		"CRABBOX_CUA_IMAGE",
+		"CRABBOX_CUA_KIND",
+		"CRABBOX_CUA_REGION",
+		"CRABBOX_CUA_WORKDIR",
+		"CRABBOX_CUA_VCPUS",
+		"CRABBOX_CUA_MEMORY_MB",
+		"CRABBOX_CUA_DISK_GB",
+		"CRABBOX_CUA_STARTUP_TIMEOUT_SECS",
+		"CRABBOX_CUA_EXEC_TIMEOUT_SECS",
+		"CRABBOX_CUA_BRIDGE_COMMAND",
+		"CRABBOX_CUA_SDK_PACKAGE",
+		"CRABBOX_CUA_SDK_IMPORT",
+		"CRABBOX_CUA_SDK_FALLBACK_IMPORT",
 		"CRABBOX_DOCKER_SANDBOX_CLI",
 		"CRABBOX_DOCKER_SANDBOX_AGENT",
 		"CRABBOX_DOCKER_SANDBOX_TEMPLATE",
@@ -3732,6 +3747,93 @@ func TestExternalFixedLeaseIDCapabilityConfigAndEnv(t *testing.T) {
 	}
 }
 
+func TestExternalDesktopCredentialsEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_USERNAME", "screen-user")
+	t.Setenv("CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV", "EXTERNAL_TEST_DESKTOP_PASSWORD")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Connection.Desktop.Username != "screen-user" {
+		t.Fatalf("desktop username=%q", cfg.External.Connection.Desktop.Username)
+	}
+	if cfg.External.Connection.Desktop.PasswordEnv != "EXTERNAL_TEST_DESKTOP_PASSWORD" {
+		t.Fatalf("desktop password env=%q", cfg.External.Connection.Desktop.PasswordEnv)
+	}
+}
+
+func TestExternalDesktopReservedEnvironmentCannotSelfRedirect(t *testing.T) {
+	const secret = "unique-operator-screen-sharing-secret"
+	for _, reserved := range []string{
+		"CRABBOX_EXTERNAL_DESKTOP_USERNAME",
+		"CRABBOX_EXTERNAL_DESKTOP_PASSWORD_ENV",
+		"GH_TOKEN",
+		"GITHUB_TOKEN",
+		"LD_PRELOAD",
+		"LD_AUDIT",
+		"DYLD_INSERT_LIBRARIES",
+		"dyld_library_path",
+		"MallocDebugReport",
+		"malloc_check_",
+		"MALLOC_STACK_LOGGING",
+		"GODEBUG",
+		"GOGC",
+		"GOMEMLIMIT",
+		"GOMAXPROCS",
+		"GOTRACEBACK",
+		"USERNAME",
+		"USERDOMAIN",
+	} {
+		t.Run(reserved, func(t *testing.T) {
+			cfg := Config{Provider: "external", TargetOS: targetMacOS}
+			cfg.External.Connection.Desktop.PasswordEnv = reserved
+			t.Setenv(reserved, secret)
+			ApplyExternalDesktopEnvironmentOverrides(&cfg)
+			if cfg.External.Connection.Desktop.Username == secret || cfg.External.Connection.Desktop.PasswordEnv == secret {
+				t.Fatalf("reserved environment copied secret into config: %#v", cfg.External.Connection.Desktop)
+			}
+			err := ValidateExternalDesktopPasswordEnvironmentName(cfg.External.Connection.Desktop.PasswordEnv)
+			if err == nil || !strings.Contains(err.Error(), "reserved") || strings.Contains(err.Error(), secret) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestExternalDesktopReservedProviderEnvironmentCannotBypassValidation(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	// The password value doubles as provider selection before provider-specific
+	// validation runs. Global validation must reject the name first.
+	t.Setenv("CRABBOX_PROVIDER", "aws")
+	if err := os.WriteFile(configPath, []byte(`
+provider: external
+external:
+  command: provider-command
+  connection:
+    desktop:
+      passwordEnv: CRABBOX_PROVIDER
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "CRABBOX_PROVIDER") || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("error=%v, want reserved CRABBOX_PROVIDER rejection before dispatch", err)
+	}
+}
+
+func TestLegacyExternalDesktopPasswordEnvironmentRemainsSupported(t *testing.T) {
+	for _, name := range []string{legacyExternalDesktopPasswordEnvironment, strings.ToLower(legacyExternalDesktopPasswordEnvironment)} {
+		if err := ValidateExternalDesktopPasswordEnvironmentName(name); err != nil {
+			t.Fatalf("legacy environment %q rejected: %v", name, err)
+		}
+	}
+}
+
 func TestTartConfigYAMLMissingFieldsNotOverwritten(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -5537,6 +5639,22 @@ tensorlake:
   diskMB: 30000
   timeoutSecs: 1800
   noInternet: true
+cua:
+  apiUrl: https://ignored.example.test
+  apiKey: ignored
+  image: ubuntu:cua-file
+  kind: vm
+  region: us-west
+  workdir: /workspace/cua-test
+  vcpus: 4
+  memoryMB: 8192
+  diskGB: 40
+  startupTimeoutSecs: 300
+  execTimeoutSecs: 900
+  bridgeCommand: python3.12
+  sdkPackage: cua
+  sdkImport: cua
+  sdkFallbackImport: cua_sandbox
 openComputer:
   apiUrl: https://opencomputer.example.test
   workdir: /workspace/oc-test
@@ -5759,6 +5877,9 @@ ssh:
 	}
 	if cfg.Tensorlake.APIURL != "https://api.tensorlake.example.test" || cfg.Tensorlake.CLIPath != "/usr/local/bin/tl" || cfg.Tensorlake.Image != "ubuntu-22.04" || cfg.Tensorlake.Snapshot != "snap-tl" || cfg.Tensorlake.OrganizationID != "org-tl" || cfg.Tensorlake.ProjectID != "proj-tl" || cfg.Tensorlake.Namespace != "ns-tl" || cfg.Tensorlake.Workdir != "/workspace/crabbox-test" || cfg.Tensorlake.CPUs != 4 || cfg.Tensorlake.MemoryMB != 8192 || cfg.Tensorlake.DiskMB != 30000 || cfg.Tensorlake.TimeoutSecs != 1800 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("tensorlake config not loaded: %#v", cfg.Tensorlake)
+	}
+	if cfg.Cua.APIURL != "" || cfg.Cua.Image != "ubuntu:cua-file" || cfg.Cua.Kind != "vm" || cfg.Cua.Region != "us-west" || cfg.Cua.Workdir != "/workspace/cua-test" || cfg.Cua.VCPUs != 4 || cfg.Cua.MemoryMB != 8192 || cfg.Cua.DiskGB != 40 || cfg.Cua.StartupTimeoutSecs != 300 || cfg.Cua.ExecTimeoutSecs != 900 || cfg.Cua.BridgeCommand != "python3.12" || cfg.Cua.SDKPackage != "cua" || cfg.Cua.SDKImport != "cua" || cfg.Cua.SDKFallbackImport != "cua_sandbox" {
+		t.Fatalf("cua config not loaded safely: %#v", cfg.Cua)
 	}
 	if cfg.OpenComputer.APIURL != "" || cfg.OpenComputer.Workdir != "/workspace/oc-test" || cfg.OpenComputer.CPU != 8 || cfg.OpenComputer.MemoryMB != 16384 || cfg.OpenComputer.TimeoutSecs != 600 || cfg.OpenComputer.ExecTimeoutSecs != 7200 {
 		t.Fatalf("opencomputer config not loaded: %#v", cfg.OpenComputer)
@@ -6150,6 +6271,21 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TENSORLAKE_DISK_MB", "20480")
 	t.Setenv("CRABBOX_TENSORLAKE_TIMEOUT_SECS", "900")
 	t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", "true")
+	t.Setenv("CUA_BASE_URL", "https://cua-file.example")
+	t.Setenv("CRABBOX_CUA_API_URL", "https://cua-env.example")
+	t.Setenv("CRABBOX_CUA_IMAGE", "ubuntu:cua-env")
+	t.Setenv("CRABBOX_CUA_KIND", "vm")
+	t.Setenv("CRABBOX_CUA_REGION", "us-central")
+	t.Setenv("CRABBOX_CUA_WORKDIR", "/workspace/cua-env")
+	t.Setenv("CRABBOX_CUA_VCPUS", "6")
+	t.Setenv("CRABBOX_CUA_MEMORY_MB", "12288")
+	t.Setenv("CRABBOX_CUA_DISK_GB", "80")
+	t.Setenv("CRABBOX_CUA_STARTUP_TIMEOUT_SECS", "240")
+	t.Setenv("CRABBOX_CUA_EXEC_TIMEOUT_SECS", "1200")
+	t.Setenv("CRABBOX_CUA_BRIDGE_COMMAND", "python3.12")
+	t.Setenv("CRABBOX_CUA_SDK_PACKAGE", "cua")
+	t.Setenv("CRABBOX_CUA_SDK_IMPORT", "cua")
+	t.Setenv("CRABBOX_CUA_SDK_FALLBACK_IMPORT", "cua_sandbox")
 	t.Setenv("OPENCOMPUTER_API_URL", "https://oc-file.example")
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_URL", "https://oc-env.example")
 	t.Setenv("CRABBOX_OPENCOMPUTER_WORKDIR", "/workspace/oc-env")
@@ -6371,6 +6507,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.Tensorlake.APIKey != "tl-api-env" || cfg.Tensorlake.APIURL != "https://api.tl-env.example" || cfg.Tensorlake.CLIPath != "/opt/tl/bin/tensorlake" || cfg.Tensorlake.Image != "ubuntu:tl-env" || cfg.Tensorlake.Snapshot != "snap-tl-env" || cfg.Tensorlake.OrganizationID != "org-tl-env" || cfg.Tensorlake.ProjectID != "proj-tl-env" || cfg.Tensorlake.Namespace != "ns-tl-env" || cfg.Tensorlake.Workdir != "/workspace/tl-env" || cfg.Tensorlake.CPUs != 2.5 || cfg.Tensorlake.MemoryMB != 4096 || cfg.Tensorlake.DiskMB != 20480 || cfg.Tensorlake.TimeoutSecs != 900 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("unexpected tensorlake env: %#v", cfg.Tensorlake)
 	}
+	if cfg.Cua.APIURL != "https://cua-env.example" || cfg.Cua.Image != "ubuntu:cua-env" || cfg.Cua.Kind != "vm" || cfg.Cua.Region != "us-central" || cfg.Cua.Workdir != "/workspace/cua-env" || cfg.Cua.VCPUs != 6 || cfg.Cua.MemoryMB != 12288 || cfg.Cua.DiskGB != 80 || cfg.Cua.StartupTimeoutSecs != 240 || cfg.Cua.ExecTimeoutSecs != 1200 || cfg.Cua.BridgeCommand != "python3.12" || cfg.Cua.SDKPackage != "cua" || cfg.Cua.SDKImport != "cua" || cfg.Cua.SDKFallbackImport != "cua_sandbox" {
+		t.Fatalf("unexpected cua env: %#v", cfg.Cua)
+	}
 	if cfg.OpenComputer.APIURL != "https://oc-env.example" || cfg.OpenComputer.Workdir != "/workspace/oc-env" || cfg.OpenComputer.CPU != 6 || cfg.OpenComputer.MemoryMB != 12288 || cfg.OpenComputer.TimeoutSecs != 1200 || cfg.OpenComputer.ExecTimeoutSecs != 2400 {
 		t.Fatalf("unexpected opencomputer env: %#v", cfg.OpenComputer)
 	}
@@ -6441,6 +6580,69 @@ func TestApplyEnvRejectsNegativeOpenSandboxTimeouts(t *testing.T) {
 			err := applyEnv(&cfg)
 			if err == nil || !strings.Contains(err.Error(), name+" must be non-negative") {
 				t.Fatalf("err=%v, want negative timeout rejection", err)
+			}
+		})
+	}
+}
+
+func TestApplyEnvRejectsNegativeCUAResources(t *testing.T) {
+	for _, name := range []string{
+		"CRABBOX_CUA_VCPUS",
+		"CRABBOX_CUA_MEMORY_MB",
+		"CRABBOX_CUA_DISK_GB",
+		"CRABBOX_CUA_STARTUP_TIMEOUT_SECS",
+		"CRABBOX_CUA_EXEC_TIMEOUT_SECS",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "-1")
+			cfg := baseConfig()
+			err := applyEnv(&cfg)
+			if err == nil || !strings.Contains(err.Error(), name+" must be non-negative") {
+				t.Fatalf("err=%v, want negative CUA value rejection", err)
+			}
+		})
+	}
+}
+
+func TestCUARepoConfigCannotReplaceBridgeRuntime(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Cua.BridgeCommand = "trusted-python"
+	cfg.Cua.SDKPackage = "trusted-package"
+	cfg.Cua.SDKImport = "trusted_import"
+	cfg.Cua.SDKFallbackImport = "trusted_fallback"
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(strings.Join([]string{
+		"cua:",
+		"  workdir: /workspace/repo",
+		"  bridgeCommand: ./steal-token",
+		"  sdkPackage: ./fake-sdk",
+		"  sdkImport: fake_sdk",
+		"  sdkFallbackImport: fake_fallback",
+	}, "\n")), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cua.BridgeCommand != "trusted-python" || cfg.Cua.SDKPackage != "trusted-package" || cfg.Cua.SDKImport != "trusted_import" || cfg.Cua.SDKFallbackImport != "trusted_fallback" {
+		t.Fatalf("repository config replaced trusted CUA bridge settings: %#v", cfg.Cua)
+	}
+	if cfg.Cua.Workdir != "/workspace/repo" {
+		t.Fatalf("safe repository workdir setting not applied: %#v", cfg.Cua)
+	}
+}
+
+func TestCUAConfigRejectsNegativeYAMLValues(t *testing.T) {
+	for _, field := range []string{"vcpus", "memoryMB", "diskGB", "startupTimeoutSecs", "execTimeoutSecs"} {
+		t.Run(field, func(t *testing.T) {
+			cfg := baseConfig()
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("cua:\n  "+field+": -1\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			err := applyFileConfig(&cfg, file)
+			if err == nil || !strings.Contains(err.Error(), "cua "+field+" must be non-negative") {
+				t.Fatalf("err=%v, want negative CUA %s rejection", err, field)
 			}
 		})
 	}

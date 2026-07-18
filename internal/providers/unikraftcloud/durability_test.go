@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -154,15 +155,16 @@ func TestCreateStateTransitionReconcilesErrorAfterRename(t *testing.T) {
 	t.Cleanup(func() { replaceLeaseClaimIfUnchangedDurable = originalReplace })
 	injected := errors.New("sync failed after rename")
 	calls := 0
-	replaceLeaseClaimIfUnchangedDurable = func(leaseID string, current, replacement LeaseClaim) error {
-		if err := originalReplace(leaseID, current, replacement); err != nil {
-			return err
+	replaceLeaseClaimIfUnchangedDurable = func(leaseID string, current, replacement LeaseClaim) (LeaseClaim, error) {
+		written, err := originalReplace(leaseID, current, replacement)
+		if err != nil {
+			return LeaseClaim{}, err
 		}
 		calls++
 		if calls == 1 {
-			return injected
+			return written, injected
 		}
-		return nil
+		return written, nil
 	}
 	intent, err := transitionUnikraftCloudCreateState(preflight, ukcStateCreateIntent)
 	if err != nil {
@@ -170,6 +172,32 @@ func TestCreateStateTransitionReconcilesErrorAfterRename(t *testing.T) {
 	}
 	if calls != 2 || intent.Labels["state"] != ukcStateCreateIntent {
 		t.Fatalf("calls=%d intent=%#v", calls, intent)
+	}
+}
+
+func TestCreateStateTransitionDoesNotReconcileGuardConflict(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	b := testBackend(&fakeUnikraftCloudAPI{baseURL: "https://api.fra.unikraft.cloud"}, nil, nil)
+	leaseID := leasePrefix + "edededededed"
+	createReq := createInstanceRequest{Name: leaseProviderName(leaseID, ""), Image: b.cfg.UnikraftCloud.Image, MemoryMB: b.cfg.UnikraftCloud.MemoryMB, Autostart: true}
+	preflight, err := b.createIntentClaim(leaseID, "guard-conflict", testClaimScope(t, "https://api.fra.unikraft.cloud"), testUserUUID, WarmupRequest{Repo: Repo{Root: t.TempDir()}}, createReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	concurrent := preflight
+	concurrent.Labels = cloneLabels(preflight.Labels)
+	concurrent.Labels["state"] = ukcStateCreateIntent
+	concurrent, err = replaceLeaseClaimIfUnchangedDurable(leaseID, preflight, concurrent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := transitionUnikraftCloudCreateState(preflight, ukcStateCreateIntent); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("stale transition error=%v, want claim changed", err)
+	}
+	stored, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || !reflect.DeepEqual(stored, concurrent) {
+		t.Fatalf("stored=%#v exists=%v err=%v, want concurrent=%#v", stored, exists, err, concurrent)
 	}
 }
 
@@ -209,14 +237,15 @@ func TestPreflightTransitionFailureDoesNotLeaveAdoptableIntent(t *testing.T) {
 	originalReplace := replaceLeaseClaimIfUnchangedDurable
 	t.Cleanup(func() { replaceLeaseClaimIfUnchangedDurable = originalReplace })
 	injected := errors.New("persistent sync failure after rename")
-	replaceLeaseClaimIfUnchangedDurable = func(leaseID string, current, replacement LeaseClaim) error {
-		if err := originalReplace(leaseID, current, replacement); err != nil {
-			return err
+	replaceLeaseClaimIfUnchangedDurable = func(leaseID string, current, replacement LeaseClaim) (LeaseClaim, error) {
+		written, err := originalReplace(leaseID, current, replacement)
+		if err != nil {
+			return LeaseClaim{}, err
 		}
 		if replacement.Labels["state"] == ukcStateCreateIntent {
-			return injected
+			return written, injected
 		}
-		return nil
+		return written, nil
 	}
 	if _, err := b.preflightCreateIntent(context.Background(), api, preflight); err == nil || !strings.Contains(err.Error(), injected.Error()) {
 		t.Fatalf("preflight error=%v want %v", err, injected)
@@ -239,14 +268,15 @@ func TestRejectedCreateTransitionFailureRetainsNonAdoptableClaim(t *testing.T) {
 	originalReplace := replaceLeaseClaimIfUnchangedDurable
 	t.Cleanup(func() { replaceLeaseClaimIfUnchangedDurable = originalReplace })
 	injected := errors.New("persistent conflict sync failure after rename")
-	replaceLeaseClaimIfUnchangedDurable = func(leaseID string, current, replacement LeaseClaim) error {
-		if err := originalReplace(leaseID, current, replacement); err != nil {
-			return err
+	replaceLeaseClaimIfUnchangedDurable = func(leaseID string, current, replacement LeaseClaim) (LeaseClaim, error) {
+		written, err := originalReplace(leaseID, current, replacement)
+		if err != nil {
+			return LeaseClaim{}, err
 		}
 		if replacement.Labels["state"] == ukcStateCreateConflict {
-			return injected
+			return written, injected
 		}
-		return nil
+		return written, nil
 	}
 	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}})
 	if err == nil || !strings.Contains(err.Error(), injected.Error()) {

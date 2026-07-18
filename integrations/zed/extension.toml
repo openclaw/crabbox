@@ -1,0 +1,14 @@
+id = "crabbox"
+name = "Crabbox"
+version = "0.1.0"
+schema_version = 1
+authors = ["Yossi Eliaz <yossi.eliaz@incredibuild.com>", "OpenClaw contributors"]
+description = "Control remote sandboxes, VMs, containers, and SSH runners from Zed through the Crabbox CLI."
+repository = "https://github.com/openclaw/crabbox"
+
+snippets = ["./snippets/crabbox.json"]
+
+# Zed derives the parser export from this key; upstream exports tree_sitter_yaml.
+[grammars.yaml]
+repository = "https://github.com/tree-sitter-grammars/tree-sitter-yaml"
+rev = "a1c4812a73ec5e089de8e441fdea3a921e8d5079"
