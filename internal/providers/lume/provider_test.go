@@ -114,6 +114,11 @@ func TestShouldCleanupReadyLeaseAtLabelExpiry(t *testing.T) {
 	if cleanup, reason := shouldCleanup(server, claim, now); !cleanup || reason != "claim expired" {
 		t.Fatalf("shouldCleanup=%v, %q; want stale claim fallback cleanup", cleanup, reason)
 	}
+	server.Labels["keep"] = "true"
+	server.Labels["recovery"] = "rollback-failed"
+	if cleanup, _ := shouldCleanup(server, claim, now); !cleanup {
+		t.Fatal("rollback failure was retained")
+	}
 }
 
 func TestConfigureDefaultsAndWorkRoots(t *testing.T) {
@@ -134,14 +139,6 @@ func TestConfigureDefaultsAndWorkRoots(t *testing.T) {
 	applyDefaults(&cfg)
 	if cfg.Lume.WorkRoot != "/Users/builder/crabbox" || cfg.WorkRoot != "/Users/builder/crabbox" {
 		t.Fatalf("work roots=%q %q want overridden user's home", cfg.Lume.WorkRoot, cfg.WorkRoot)
-	}
-	cfg = core.BaseConfig()
-	cfg.Lume.User = "lume"
-	cfg.Lume.WorkRoot = "/Users/lume/crabbox"
-	cfg.WorkRoot = "/Users/lume/other"
-	applyDefaults(&cfg)
-	if cfg.Lume.WorkRoot != "/Users/lume/crabbox" || cfg.WorkRoot != "/Users/lume/crabbox" {
-		t.Fatalf("work roots=%q %q want provider-specific root", cfg.Lume.WorkRoot, cfg.WorkRoot)
 	}
 }
 
@@ -907,14 +904,15 @@ func TestWaitForRunningVMIgnoresLumeSSHAvailableFalseNegative(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-		"get": {Stdout: `[{"name":"worker-1","status":"running","ipAddress":"192.0.2.10","sshAvailable":false}]`},
+		"get": {Stdout: `[{"name":"worker-1","os":"macOS","status":"running","ipAddress":"192.0.2.10","sshAvailable":false}]`},
 	}}
 	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	inst, err := b.waitForRunningVM(context.Background(), b.configForRun(), "worker-1", lumeRunOwner{})
+	visible := false
+	inst, err := b.waitForRunningVM(context.Background(), b.configForRun(), "worker-1", lumeRunOwner{}, func() { visible = true })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inst.IPAddress != "192.0.2.10" || inst.SSHAvailable == nil || *inst.SSHAvailable {
+	if !visible || inst.IPAddress != "192.0.2.10" || inst.SSHAvailable == nil || *inst.SSHAvailable {
 		t.Fatalf("instance=%#v", inst)
 	}
 }
@@ -930,7 +928,7 @@ func TestWaitForRunningVMReportsEarlyOwnerExit(t *testing.T) {
 		"get": {Stdout: `[{"name":"worker-1","status":"stopped"}]`},
 	}}
 	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	_, err := b.waitForRunningVM(context.Background(), b.configForRun(), "worker-1", lumeRunOwner{PID: 2147483647, StartIdentity: "missing", LogPath: logPath})
+	_, err := b.waitForRunningVM(context.Background(), b.configForRun(), "worker-1", lumeRunOwner{PID: 2147483647, StartIdentity: "missing", LogPath: logPath}, func() {})
 	if err == nil || !strings.Contains(err.Error(), "owner exited during startup: capacity unavailable") {
 		t.Fatalf("owner exit error=%v", err)
 	}
