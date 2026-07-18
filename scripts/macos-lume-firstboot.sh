@@ -10,6 +10,7 @@ ssh_user_path="$trust_mount/ssh_user"
 authorized_key_path="$trust_mount/authorized_key"
 sshd_config_path="/etc/ssh/sshd_config.d/00-crabbox-lease.conf"
 legacy_sshd_config_path="/etc/ssh/sshd_config.d/90-crabbox-lease.conf"
+sshd_main_config_path="/etc/ssh/sshd_config"
 platform_uuid="$(/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | /usr/bin/awk -F'"' '/IOPlatformUUID/ { print $(NF-1); exit }')"
 
 if [[ -z "$platform_uuid" ]]; then
@@ -94,8 +95,25 @@ if [[ "$sshd_config_changed" == true ]]; then
     "$sshd_config_path"
   /bin/rm -f "$sshd_config_tmp"
   /bin/rm -f "$legacy_sshd_config_path"
-  /usr/sbin/sshd -t
 fi
+
+# Own the complete include graph. Inherited Match blocks can otherwise weaken
+# authentication for a different user, hostname, or source address.
+sshd_main_tmp="$(/usr/bin/mktemp /tmp/crabbox-lume-sshd-main.XXXXXX)"
+sshd_main_lines=('Include /etc/ssh/sshd_config.d/00-crabbox-lease.conf' 'UsePAM yes' 'AcceptEnv LANG LC_*' 'Subsystem sftp /usr/libexec/sftp-server')
+if [[ -r /etc/ssh/crypto.conf ]]; then
+  if /usr/bin/grep -Eq '^[[:space:]]*(Match|Include)[[:space:]]' /etc/ssh/crypto.conf; then
+    echo "unsupported directive in macOS SSH crypto policy" >&2
+    exit 1
+  fi
+  sshd_main_lines+=('Include /etc/ssh/crypto.conf')
+fi
+/usr/bin/printf '%s\n' "${sshd_main_lines[@]}" >"$sshd_main_tmp"
+if ! /usr/bin/cmp -s "$sshd_main_tmp" "$sshd_main_config_path"; then
+  /usr/bin/install -o root -g wheel -m 0600 "$sshd_main_tmp" "$sshd_main_config_path"
+fi
+/bin/rm -f "$sshd_main_tmp"
+/usr/sbin/sshd -t
 
 preserved_lease_user=""
 if [[ "$challenge_processed" != true ]] && [[ "$sshd_config_changed" != true ]] && [[ -r "$lease_user_marker" ]]; then

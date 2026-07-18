@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestLumeCapacityLockSerializesAndHonorsCancellation(t *testing.T) {
+func TestCapacityLockSerializes(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	unlock, err := lockLumeCapacity(bg)
 	if err != nil {

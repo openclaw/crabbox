@@ -9,6 +9,7 @@ import (
 )
 
 var removeLumeVMDirectory = os.RemoveAll
+var foreignLumeVMDirectoryUse = systemForeignLumeVMDirectoryUse
 
 // Lume delete accepts a mutable name. Lock, quarantine, and recheck the exact
 // directory and config inodes before removing the claimed VM.
@@ -100,6 +101,13 @@ func quarantineAndDeleteLumeVM(vmPath string, openedInfo os.FileInfo, config *os
 			reason = err.Error()
 		}
 		return refuse(reason)
+	}
+	foreignUse, err := foreignLumeVMDirectoryUse(quarantined)
+	if err != nil {
+		return refuse("inspect open VM files: " + err.Error())
+	}
+	if foreignUse != "" {
+		return refuse("VM directory still in use by " + foreignUse)
 	}
 	backup := filepath.Join(quarantineRoot, "config.json")
 	if _, err := config.Seek(0, io.SeekStart); err != nil {

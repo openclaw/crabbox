@@ -19,6 +19,7 @@ test("Lume image hooks preserve the secure bootstrap contract", async () => {
     "/bin/rm -f /etc/ssh/ssh_host_*",
     "/usr/bin/ssh-keygen -A",
     "AuthorizedKeysFile none",
+    "Include /etc/ssh/sshd_config.d/00-crabbox-lease.conf",
     "launchctl kickstart -k system/com.openssh.sshd",
     "/usr/bin/ssh-keyscan",
     '/bin/mv -f "$tmp" "$marker"',
@@ -26,6 +27,7 @@ test("Lume image hooks preserve the secure bootstrap contract", async () => {
   assert.ok(ordered.every((position) => position >= 0));
   assert.deepEqual(ordered, [...ordered].sort((a, b) => a - b));
   assert.doesNotMatch(boot, /kickstart -k system\/com\.openssh\.sshd[^\n]*\|\| true/);
+  assert.doesNotMatch(boot, /printf '%s\\n' \+/);
   contains(install, [
     'for file in "$firstboot_script" "$firstboot_plist"',
     "if [[ -x /Applications/CuaDriver.app/Contents/MacOS/cua-driver ]]; then",
@@ -57,6 +59,9 @@ test("Lume image hooks preserve the secure bootstrap contract", async () => {
     'if [[ "$challenge_processed" == true ]]; then',
     'elif [[ "$identity_changed" == true ]] || [[ ! -f "$sshd_config_path" ]]; then',
     'if [[ "$sshd_config_changed" == true ]]; then',
+    'sshd_main_config_path="/etc/ssh/sshd_config"',
+    "Subsystem sftp /usr/libexec/sftp-server",
+    "Include /etc/ssh/crypto.conf",
     'sshd -T -C "user=$verify_user,host=localhost,addr=127.0.0.1"',
     "require_effective_sshd 'authorizedkeysfile none'",
   ]);
