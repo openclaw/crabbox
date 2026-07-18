@@ -93,7 +93,7 @@ function stubSuccessfulGitHubOAuth(): ReturnType<typeof vi.fn> {
       return Response.json({ access_token: "github-access-token" });
     }
     if (url === "https://api.github.com/user") {
-      return Response.json({ login: "alice", name: "Alice" });
+      return Response.json({ id: 12345, login: "alice", name: "Alice" });
     }
     if (url === "https://api.github.com/user/emails") {
       return Response.json([
@@ -131,7 +131,9 @@ describe("portal OAuth browser binding", () => {
     expect(cookie).toContain("SameSite=Lax");
     expect(cookie).toContain("Max-Age=600");
 
-    const pending = [...(await storage.list<{ portalBindingHash?: string }>({ prefix: "oauth:" })).values()][0];
+    const pending = [
+      ...(await storage.list<{ portalBindingHash?: string }>({ prefix: "oauth:" })).values(),
+    ][0];
     expect(pending?.portalBindingHash).toMatch(/^[a-f0-9]{64}$/);
     expect(pending?.portalBindingHash).not.toBe(binding);
   });
