@@ -71,14 +71,6 @@ func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, s
 	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }
 
-func newLeaseSlug(leaseID string) string {
-	return core.NewLeaseSlug(leaseID)
-}
-
-func normalizeLeaseSlug(value string) string {
-	return core.NormalizeLeaseSlug(value)
-}
-
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
@@ -125,10 +117,6 @@ func shellScriptFromArgv(command []string) string {
 
 func shellQuote(s string) string {
 	return core.ShellQuote(s)
-}
-
-func inventoryDoctorResult(provider string, leases int) DoctorResult {
-	return core.InventoryDoctorResult(provider, leases)
 }
 
 func delegatedSyncOptionsError(spec ProviderSpec, req RunRequest) error {
