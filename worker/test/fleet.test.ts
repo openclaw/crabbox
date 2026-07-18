@@ -981,7 +981,7 @@ describe("runtime adapter relay", () => {
       CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
     } as Env;
     const token = await issueUserToken(env, {
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       ownerSource: "github-verified-email",
       org: "example-org",
       login: "alice",
@@ -991,7 +991,7 @@ describe("runtime adapter relay", () => {
     const portalSessionHash = await sha256Hex(token);
     const grant = {
       auth: "github" as const,
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: false,
       login: "alice",
@@ -19259,27 +19259,40 @@ describe("fleet lease identity and idle", () => {
       testLease({
         id: leaseID,
         slug: "blue-lobster",
-        owner: "alice@example.com",
+        owner: testGitHubOwner,
         org: "example-org",
         code: true,
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
     );
     const token = await issueUserToken(env, {
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       ownerSource: "github-verified-email",
       org: "example-org",
       login: "alice",
       githubAccessToken: "github-access-token",
       ttlSeconds: 60 * 60,
     });
-    const githubFetch = vi.fn<() => Promise<Response>>(
-      async () =>
-        new Response(JSON.stringify({ state: "active", organization: { login: "example-org" } }), {
+    const githubFetch = vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === "https://api.github.com/user") {
+        return new Response(JSON.stringify({ id: testGitHubAccountID, login: "alice" }), {
           status: 200,
           headers: { "content-type": "application/json" },
-        }),
-    );
+        });
+      }
+      if (url.startsWith("https://api.github.com/user/memberships/orgs/")) {
+        return new Response(
+          JSON.stringify({ state: "active", organization: { login: "example-org" } }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      return new Response("ok", { status: 200 });
+    });
     vi.stubGlobal("fetch", githubFetch);
     const portalCookie = `__Host-crabbox_session=${encodeURIComponent(token)}`;
     const throughCoordinator = async (input: Request): Promise<Response> =>
@@ -19319,7 +19332,7 @@ describe("fleet lease identity and idle", () => {
     const portalSessionHash = await sha256Hex(token);
     const agentGrant = {
       auth: "github" as const,
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: false,
       login: "alice",
@@ -19352,7 +19365,7 @@ describe("fleet lease identity and idle", () => {
       leaseID,
       id: "viewer_active",
       agentID: "agent_active",
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: false,
       auth: "github",
@@ -19375,7 +19388,7 @@ describe("fleet lease identity and idle", () => {
       kind: "egress-client",
       leaseID,
       sessionID: "active-egress-session",
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: false,
       auth: "github",
@@ -19426,7 +19439,7 @@ describe("fleet lease identity and idle", () => {
             id: "viewer_active",
             agentID: "agent_active",
             socket: activeWebViewer as unknown as WebSocket,
-            owner: "alice@example.com",
+            owner: testGitHubOwner,
             org: "example-org",
             admin: false,
             auth: "github",
@@ -27009,10 +27022,13 @@ describe("fleet identity", () => {
     const location = start.headers.get("location") ?? "";
     const state = new URL(location).searchParams.get("state");
     expect(state).toBeTruthy();
+    const portalOAuthCookie = portalOAuthCookieFromLogin(start);
 
     vi.stubGlobal("fetch", githubFetchMock({ member: true }));
     const callback = await fleet.fetch(
-      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`, {
+        headers: { cookie: portalOAuthCookie },
+      }),
     );
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/portal/leases/cbx_000000000001/vnc");
@@ -27050,10 +27066,13 @@ describe("fleet identity", () => {
     const location = start.headers.get("location") ?? "";
     const state = new URL(location).searchParams.get("state");
     expect(state).toBeTruthy();
+    const portalOAuthCookie = portalOAuthCookieFromLogin(start);
 
     vi.stubGlobal("fetch", githubFetchMock({ member: true }));
     const callback = await fleet.fetch(
-      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`, {
+        headers: { cookie: portalOAuthCookie },
+      }),
     );
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/portal");
@@ -27193,7 +27212,7 @@ describe("fleet identity", () => {
     };
     expect(body).toMatchObject({
       status: "complete",
-      owner: "friend@example.com",
+      owner: testGitHubOwner,
       org: "openclaw",
       login: "friend",
     });
@@ -27379,7 +27398,7 @@ describe("fleet identity", () => {
     expect(poll.status).toBe(200);
     await expect(poll.json()).resolves.toMatchObject({
       status: "complete",
-      owner: "friend@example.com",
+      owner: testGitHubOwner,
       org: "openclaw",
       login: "friend",
     });
@@ -27907,6 +27926,24 @@ function browserConfirmationFromCallback(callback: Response): string {
   return confirmation ?? "";
 }
 
+const testGitHubAccountID = 12345;
+const testGitHubOwner = `github:${testGitHubAccountID}`;
+
+function setCookieHeaders(response: Response): string[] {
+  const headers = response.headers as Headers & { getSetCookie?: () => string[] };
+  return headers.getSetCookie?.() ?? [response.headers.get("set-cookie") ?? ""];
+}
+
+function portalOAuthCookieFromLogin(response: Response): string {
+  const cookie = setCookieHeaders(response).find((value) =>
+    value.startsWith("__Host-crabbox_oauth="),
+  );
+  if (!cookie) {
+    throw new Error("missing portal OAuth browser binding cookie");
+  }
+  return cookie.split(";", 1)[0] ?? "";
+}
+
 function githubFetchMock({
   member,
   org = "openclaw",
@@ -27914,6 +27951,7 @@ function githubFetchMock({
   profileEmail = null,
   emails = [{ email: "friend@example.com", primary: true, verified: true }],
   emailStatus = 200,
+  accountID = testGitHubAccountID,
 }: {
   member: boolean;
   org?: string;
@@ -27921,6 +27959,7 @@ function githubFetchMock({
   profileEmail?: string | null;
   emails?: Array<{ email?: string; primary?: boolean; verified?: boolean }>;
   emailStatus?: number;
+  accountID?: number;
 }) {
   return vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
     const url =
@@ -27929,7 +27968,12 @@ function githubFetchMock({
       return jsonResponse({ access_token: "github-access-token" });
     }
     if (url === "https://api.github.com/user") {
-      return jsonResponse({ login: "friend", name: "Friendly User", email: profileEmail });
+      return jsonResponse({
+        id: accountID,
+        login: "friend",
+        name: "Friendly User",
+        email: profileEmail,
+      });
     }
     if (url === "https://api.github.com/user/emails") {
       return jsonResponse(
