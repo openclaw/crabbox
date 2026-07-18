@@ -244,9 +244,12 @@ CRABBOX_LIVE_PROVIDERS=github-codespaces \
 CRABBOX_GITHUB_CODESPACES_SMOKE_REPO=example-org/my-app \
 CRABBOX_GITHUB_CODESPACES_SMOKE_REF=main \
 CRABBOX_GITHUB_CODESPACES_SMOKE_DEVCONTAINER_PATH=.devcontainer/devcontainer.json \
-GH_TOKEN=... \
 scripts/live-smoke.sh
 ```
+
+Authenticate with `gh auth login` or inject `GH_TOKEN` through an approved
+credential manager before running the command. Do not type a PAT in an inline
+shell assignment because shell history can retain the complete command.
 
 The script defaults to a skipped classification and does not call Crabbox unless
 `CRABBOX_LIVE=1`, the provider filter selects `github-codespaces`, a smoke repo
@@ -297,7 +300,11 @@ the classification instead of treating the live smoke as a provider failure.
 - Manual Codespaces are intentionally invisible to Crabbox unless a local
   Crabbox claim exists.
 - `deleteOnRelease: true` still refuses deletion when GitHub reports uncommitted
-  or unpushed work.
+  or unpushed work. This includes a local dirty checkout synced by Crabbox:
+  automatic deletion cannot safely distinguish that known input from later
+  remote-only edits. Inspect the stopped Codespace, preserve any work, then make
+  an explicit deletion decision with GitHub CLI or the GitHub UI. Crabbox does
+  not expose a force-delete override for this safety boundary.
 
 ## Related Docs
 

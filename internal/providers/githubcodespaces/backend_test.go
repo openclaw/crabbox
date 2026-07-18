@@ -226,6 +226,49 @@ func TestAcquireRejectsIncompletePermanentIdentity(t *testing.T) {
 	}
 }
 
+func TestAcquireAcceptsRenamedOwnerWithSameUserID(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.useCreateResult = true
+	fc.createResult = fakeCodespace("cs-renamed-owner", "Available")
+	fc.createResult.Owner.Login = "alice-renamed"
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
+
+	lease, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: "cbx_123456789af1",
+		RequestedSlug:    "renamed-owner-box",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Labels[labelLogin] != "alice-renamed" {
+		t.Fatalf("login=%q", lease.Server.Labels[labelLogin])
+	}
+	if lease.Server.Labels[labelUserID] != fmt.Sprintf("%d", fakeGitHubUser("alice").ID) {
+		t.Fatalf("user id=%q", lease.Server.Labels[labelUserID])
+	}
+}
+
+func TestValidateClaimScopeAcceptsRenamedLoginForSameUserID(t *testing.T) {
+	b := newTestBackend(t, newFakeCodespacesClient(), &fakeGH{login: "alice", token: "test" + "-value"})
+	user := fakeGitHubUser("alice")
+	claim := LeaseClaim{
+		LeaseID:       "cbx_123456789af2",
+		Provider:      providerName,
+		ProviderScope: providerClaimScope(b.claimConfig("example-org/my-app")),
+		Labels: map[string]string{
+			labelRepository: "example-org/my-app",
+			labelLogin:      "alice",
+			labelUserID:     fmt.Sprintf("%d", user.ID),
+		},
+	}
+	user.Login = "alice-renamed"
+	if err := b.validateClaimScope(claim, user); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAcquireRetainsClaimWhenAmbiguousCreateHasNoMatch(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()

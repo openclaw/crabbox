@@ -104,13 +104,17 @@ func ValidateGitHubCodespacesConfig(cfg Config) error {
 	if strings.TrimSpace(c.Repo) != "" && !validRepo(c.Repo) {
 		return exit(2, "github-codespaces repo must be owner/name")
 	}
-	for label, value := range map[string]time.Duration{
-		"idle timeout":     c.IdleTimeout,
-		"retention period": c.RetentionPeriod,
-	} {
-		if value < 0 {
-			return exit(2, "github-codespaces %s must be non-negative", label)
-		}
+	if c.IdleTimeout < 0 {
+		return exit(2, "github-codespaces idle timeout must be non-negative")
+	}
+	if c.IdleTimeout > 0 && (c.IdleTimeout < 5*time.Minute || c.IdleTimeout > 4*time.Hour) {
+		return exit(2, "github-codespaces idle timeout must be between 5m and 4h")
+	}
+	if c.RetentionPeriod < 0 {
+		return exit(2, "github-codespaces retention period must be non-negative")
+	}
+	if c.RetentionPeriod > 30*24*time.Hour {
+		return exit(2, "github-codespaces retention period must not exceed 30 days")
 	}
 	if strings.TrimSpace(c.WorkRoot) != "" && !strings.HasPrefix(strings.TrimSpace(c.WorkRoot), "/") {
 		return exit(2, "github-codespaces work root must be absolute")

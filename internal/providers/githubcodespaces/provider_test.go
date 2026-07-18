@@ -317,7 +317,7 @@ func TestValidateGitHubCodespacesConfig(t *testing.T) {
 		GitHubCodespaces: core.GitHubCodespacesConfig{
 			GHPath:          "gh",
 			Repo:            "example-org/my-app",
-			IdleTimeout:     time.Minute,
+			IdleTimeout:     30 * time.Minute,
 			RetentionPeriod: time.Hour,
 			WorkRoot:        "/workspaces/my-app",
 		},
@@ -333,6 +333,10 @@ func TestValidateGitHubCodespacesConfig(t *testing.T) {
 		{name: "non-linux", mut: func(cfg *core.Config) { cfg.TargetOS = core.TargetMacOS }, want: "target=linux only"},
 		{name: "bad repo", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.Repo = "example-org" }, want: "owner/name"},
 		{name: "negative idle", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.IdleTimeout = -time.Second }, want: "non-negative"},
+		{name: "short idle", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.IdleTimeout = 5*time.Minute - time.Second }, want: "between 5m and 4h"},
+		{name: "long idle", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.IdleTimeout = 4*time.Hour + time.Second }, want: "between 5m and 4h"},
+		{name: "negative retention", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.RetentionPeriod = -time.Second }, want: "non-negative"},
+		{name: "long retention", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.RetentionPeriod = 30*24*time.Hour + time.Second }, want: "not exceed 30 days"},
 		{name: "relative work root", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.WorkRoot = "workspace" }, want: "absolute"},
 		{name: "missing gh", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.GHPath = "" }, want: "gh path is required"},
 	}

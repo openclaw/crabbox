@@ -129,6 +129,21 @@ func TestGHRunnerMapsGHECloudAPIHostToCLIHost(t *testing.T) {
 	}
 }
 
+func TestGHRunnerMapsGHECloudDefaultHTTPSPortToPortlessCLIHost(t *testing.T) {
+	runner := &recordingRunner{result: LocalCommandResult{Stdout: "value"}}
+	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "gh", APIURL: "https://api.octocorp.ghe.com:443"}, Runtime{Exec: runner})
+	if _, err := gh.authToken(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	call := runner.onlyCall(t)
+	if want := []string{"auth", "token", "--hostname", "octocorp.ghe.com"}; !slices.Equal(call.Args, want) {
+		t.Fatalf("args=%q", call.Args)
+	}
+	if !slices.Contains(call.Env, "GH_HOST=octocorp.ghe.com") {
+		t.Fatalf("env=%q", call.Env)
+	}
+}
+
 func TestGHRunnerErrorRedactsToken(t *testing.T) {
 	runner := &recordingRunner{
 		result: LocalCommandResult{ExitCode: 1, Stderr: "denied ghp_this_token_value_is_redacted"},

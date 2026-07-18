@@ -55,13 +55,12 @@ func (b *backend) validateClaimScope(claim LeaseClaim, user githubUser) error {
 	if expectedScope == "" || claim.ProviderScope != expectedScope {
 		return exit(4, "github-codespaces claim %s scope mismatch: claim=%q current=%q", claim.LeaseID, claim.ProviderScope, expectedScope)
 	}
-	expectedLogin := strings.TrimSpace(claim.Labels[labelLogin])
 	expectedUserID, err := strconv.ParseInt(strings.TrimSpace(claim.Labels[labelUserID]), 10, 64)
 	if err != nil || expectedUserID <= 0 {
 		return exit(4, "github-codespaces claim %s has no valid authenticated user identity", claim.LeaseID)
 	}
-	if expectedUserID != user.ID || expectedLogin == "" || user.Login == "" || !strings.EqualFold(expectedLogin, user.Login) {
-		return exit(3, "github-codespaces account mismatch: current login=%s id=%d does not match lease login=%s id=%d", user.Login, user.ID, expectedLogin, expectedUserID)
+	if expectedUserID != user.ID {
+		return exit(3, "github-codespaces account mismatch: current login=%s id=%d does not match lease login=%s id=%d", user.Login, user.ID, claim.Labels[labelLogin], expectedUserID)
 	}
 	if repo == "" {
 		return exit(4, "github-codespaces claim %s has no repository identity", claim.LeaseID)
@@ -222,13 +221,12 @@ func validateCreatedCodespaceIdentity(expected LeaseClaim, item codespace) (code
 		return codespace{}, exit(4, "github-codespaces create repository mismatch: got %q want %q; recovery claim retained", item.Repository.FullName, repo)
 	}
 	ownerLogin := strings.TrimSpace(item.Owner.Login)
-	expectedLogin := strings.TrimSpace(expected.Labels[labelLogin])
 	expectedUserID, userIDErr := strconv.ParseInt(strings.TrimSpace(expected.Labels[labelUserID]), 10, 64)
 	if item.ID <= 0 || strings.TrimSpace(item.EnvironmentID) == "" || item.Owner.ID <= 0 || ownerLogin == "" {
 		return codespace{}, exit(4, "github-codespaces create returned incomplete permanent resource identity; recovery claim retained")
 	}
-	if userIDErr != nil || expectedUserID <= 0 || item.Owner.ID != expectedUserID || expectedLogin == "" || !strings.EqualFold(ownerLogin, expectedLogin) {
-		return codespace{}, exit(4, "github-codespaces create owner mismatch: got login=%q id=%d want login=%q id=%d; recovery claim retained", ownerLogin, item.Owner.ID, expectedLogin, expectedUserID)
+	if userIDErr != nil || expectedUserID <= 0 || item.Owner.ID != expectedUserID {
+		return codespace{}, exit(4, "github-codespaces create owner mismatch: got login=%q id=%d want login=%q id=%d; recovery claim retained", ownerLogin, item.Owner.ID, expected.Labels[labelLogin], expectedUserID)
 	}
 	item.Repository.FullName = liveRepo
 	item.Owner.Login = ownerLogin
@@ -246,6 +244,7 @@ func (b *backend) bindValidatedCreatedClaim(expected LeaseClaim, item codespace)
 	labels[labelDisplayName] = displayName
 	labels[labelEnvironmentID] = item.EnvironmentID
 	labels[labelOwnerID] = strconv.FormatInt(item.Owner.ID, 10)
+	labels[labelLogin] = item.Owner.Login
 	labels[labelRepository] = repo
 	labels[labelMachine] = firstNonEmpty(item.Machine.Name, labels[labelMachine])
 	labels[labelState] = "provisioning"

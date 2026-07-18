@@ -115,7 +115,7 @@ func (r ghRunner) apiHostname() (string, error) {
 		host = "github.com"
 	} else if strings.HasPrefix(strings.ToLower(parsed.Hostname()), "api.") && strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".ghe.com") {
 		host = strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "api.")
-		if parsed.Port() != "" {
+		if parsed.Port() != "" && parsed.Port() != "443" {
 			host += ":" + parsed.Port()
 		}
 	}

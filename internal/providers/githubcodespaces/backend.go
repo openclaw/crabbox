@@ -105,7 +105,6 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	login := user.Login
 	repo, err := b.resolveRepo(req.Repo)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -237,7 +236,9 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		}
 		return LeaseTarget{}, err
 	}
-	labels := b.labelsFor(leaseID, slug, repo, login, req.Keep, release, available, "ready", user)
+	refreshedUser := user
+	refreshedUser.Login = claim.Labels[labelLogin]
+	labels := b.labelsFor(leaseID, slug, repo, refreshedUser.Login, req.Keep, release, available, "ready", refreshedUser)
 	labels[labelDisplayName] = displayName
 	labels[labelRecoveryNonce] = recoveryNonce
 	server := b.serverFromCodespace(available, labels)
