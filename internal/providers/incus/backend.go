@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,12 @@ type backend struct {
 }
 
 var waitForSSHReady = core.WaitForSSHReady
+
+const (
+	incusClaimReservationUntilLabel = "incus_reservation_until"
+	incusLegacyReservationGrace     = 12 * time.Hour
+	incusResolveCompletionMargin    = time.Minute
+)
 
 type retainedAcquireError struct {
 	err     error
@@ -275,11 +282,31 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseT
 		if err != nil {
 			return LeaseTarget{}, err
 		}
-		preflightClaim, err = core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, server.Labels["slug"], providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+		reservationWindow := 2*cfg.Incus.StartTimeout + core.BootstrapWaitTimeout(cfg) + incusResolveCompletionMargin
+		preflightClaim, err = core.ClaimLeaseForRepoProviderScopePondEndpointReservationIfUnchanged(leaseID, server.Labels["slug"], providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, server, core.SSHTarget{}, incusClaimReservationUntilLabel, reservationWindow, previousClaim, previousClaimExists)
 		if err != nil {
 			return LeaseTarget{}, err
 		}
 		rollbackClaim = true
+		// Cleanup may have won an absent-claim deletion while this Resolve waited
+		// for the claim lock. Re-read the provider only after reservation publication;
+		// failure rolls the reservation back through the deferred CAS above.
+		current, _, currentErr := client.GetInstance(inst.Name)
+		if currentErr != nil {
+			return LeaseTarget{}, fmt.Errorf("revalidate Incus instance %s after reserving claim: %w", inst.Name, currentErr)
+		}
+		if !isCrabboxInstance(*current) {
+			return LeaseTarget{}, core.Exit(4, "Incus instance %s changed ownership while reserving claim", inst.Name)
+		}
+		currentServer := serverFromInstance(*current, nil, cfg)
+		if strings.TrimSpace(currentServer.Labels["lease"]) != leaseID ||
+			strings.TrimSpace(currentServer.Labels["provider"]) != providerName ||
+			strings.TrimSpace(currentServer.Labels["created_at"]) == "" ||
+			currentServer.Labels["created_at"] != server.Labels["created_at"] {
+			return LeaseTarget{}, core.Exit(4, "Incus instance %s changed lease identity while reserving claim", inst.Name)
+		}
+		inst = *current
+		server = currentServer
 	}
 	if req.StatusOnly {
 		state, _, err := client.GetInstanceState(inst.Name)
@@ -529,12 +556,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
+	now := time.Now().UTC()
 	for _, inst := range instances {
 		if !isCrabboxInstance(inst) {
 			continue
 		}
 		server := serverFromInstance(inst, nil, cfg)
-		shouldDelete, reason := core.ShouldCleanupServer(server, time.Now().UTC())
+		shouldDelete, reason := core.ShouldCleanupServer(server, now)
 		if !shouldDelete {
 			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=%s\n", inst.Name, reason)
 			continue
@@ -543,6 +571,10 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		expectedClaim, expectedClaimExists := claimsByLease[leaseID]
 		if expectedClaimExists && !incusCleanupClaimMatchesInstance(expectedClaim, leaseID, inst.Name) {
 			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=claim-scope-mismatch\n", inst.Name, core.Blank(leaseID, "-"))
+			continue
+		}
+		if expectedClaimExists && !incusCleanupClaimAllowsInstanceCleanup(expectedClaim, server.Labels, now) {
+			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=claim-newer-than-instance\n", inst.Name, core.Blank(leaseID, "-"))
 			continue
 		}
 		if req.DryRun {
@@ -565,6 +597,9 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			}
 			return client.DeleteInstance(inst.Name)
 		}
+		// For claimed instances, CleanupLeaseClaimIfUnchangedAfter holds the claim
+		// file lock while cleanupInstance runs. Resolve's guarded preflight claim
+		// cannot publish between this comparison and DeleteInstance.
 		if leaseID == "" {
 			if err := cleanupInstance(); err != nil {
 				return err
@@ -588,6 +623,45 @@ func incusCleanupClaimMatchesInstance(claim core.LeaseClaim, leaseID, instanceNa
 	return claim.LeaseID == leaseID &&
 		claim.Provider == providerName &&
 		claim.ProviderScope == instanceScope(instanceName)
+}
+
+func incusCleanupClaimAllowsInstanceCleanup(claim core.LeaseClaim, labels map[string]string, now time.Time) bool {
+	claimAt, claimOK := latestIncusCleanupTime(claim.ClaimedAt, claim.LastUsedAt)
+	instanceAt, instanceOK := latestIncusCleanupTime(labels["created_at"], labels["last_touched_at"])
+	if !claimOK || !instanceOK {
+		return false
+	}
+	reservationUntil, reservationOK := latestIncusCleanupTime(claim.Labels[incusClaimReservationUntilLabel])
+	reservationOK = reservationOK && reservationUntil.After(claimAt)
+	if reservationOK && !now.After(reservationUntil) {
+		return false
+	}
+	if !claimAt.After(instanceAt) {
+		return true
+	}
+	if reservationOK {
+		return true
+	}
+	// Older binaries did not persist a reservation deadline. Give their newest
+	// claim timestamp the same conservative post-idle grace used by the local
+	// provider cleanup paths, then permit cleanup instead of leaking forever.
+	legacyWindow := time.Duration(claim.IdleTimeoutSeconds)*time.Second + incusLegacyReservationGrace
+	return now.After(claimAt.Add(legacyWindow))
+}
+
+func latestIncusCleanupTime(values ...string) (time.Time, bool) {
+	var latest time.Time
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		parsed, err := time.Parse(time.RFC3339, value)
+		if seconds, unixErr := strconv.ParseInt(value, 10, 64); unixErr == nil && seconds > 0 {
+			parsed, err = time.Unix(seconds, 0).UTC(), nil
+		}
+		if err == nil && parsed.After(latest) {
+			latest = parsed
+		}
+	}
+	return latest, !latest.IsZero()
 }
 
 func verifyIncusCleanupClaimUnchanged(leaseID string, expected core.LeaseClaim, expectedExists bool) error {
