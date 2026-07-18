@@ -68,9 +68,7 @@ export async function requireCurrentGitHubMembership(
     throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
   }
   if (!allowedGitHubOrgs(env).includes(identity.org.trim().toLowerCase())) {
-    throw new GitHubAuthorizationError(
-      `GitHub organization ${identity.org} is no longer allowed.`,
-    );
+    throw new GitHubAuthorizationError(`GitHub organization ${identity.org} is no longer allowed.`);
   }
   const key = membershipCacheKey(identity, env);
   const now = Date.now();
@@ -120,7 +118,9 @@ async function requireExactGitHubAccount(
 ): Promise<void> {
   const expectedID = githubAccountID(owner);
   if (expectedID === undefined) {
-    throw new GitHubAuthorizationError("This GitHub session uses a legacy mutable identity. Log in again.");
+    throw new GitHubAuthorizationError(
+      "This GitHub session uses a legacy mutable identity. Log in again.",
+    );
   }
   const response = await fetch(`${githubAPIURL}/user`, { headers: githubHeaders(accessToken) });
   if (!response.ok) {
