@@ -184,10 +184,8 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	servers := make([]Server, 0, len(instances))
-	for _, inst := range instances {
-		if inst.Name != cfg.Lume.Base && strings.HasPrefix(inst.Name, "crabbox-") {
-			servers = append(servers, b.serverFromInstance(inst, claims[inst.Name], cfg))
-		}
+	for _, claim := range claims {
+		servers = append(servers, Server{Labels: claim.Labels})
 	}
 	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
 	if err != nil {
@@ -382,10 +380,10 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		}
 		return lease, nil
 	}
+	if req.StatusOnly {
+		return lease, nil
+	}
 	if !instanceRunning(inst.Status) {
-		if req.StatusOnly {
-			return lease, nil
-		}
 		return LeaseTarget{}, exit(5, "Lume VM %s is %s; start a new lease or clean it up", inst.Name, blank(inst.Status, "not running"))
 	}
 	lease, err = b.prepareLease(ctx, cfg, inst, claim, false)
