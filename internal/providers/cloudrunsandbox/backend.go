@@ -342,6 +342,84 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	return nil
 }
 
+func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
+	transport, err := newTransport(b.cfg, b.rt)
+	if err != nil {
+		return err
+	}
+	scope, err := b.claimScope()
+	if err != nil {
+		return err
+	}
+	claims, err := listCloudRunSandboxLeaseClaims()
+	if err != nil {
+		return err
+	}
+	now := b.now().UTC()
+	checked, removed, claimsRemoved := 0, 0, 0
+	for _, claim := range claims {
+		if claim.Provider != providerName {
+			continue
+		}
+		if claim.ProviderScope != "" && claim.ProviderScope != scope {
+			continue
+		}
+		checked++
+		sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
+		if sandboxID == "" || sandboxID == claim.LeaseID {
+			continue
+		}
+		due, reason := claimCleanupDue(claim, now)
+		if !due {
+			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+			continue
+		}
+		if req.DryRun {
+			fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+			continue
+		}
+		if err := transport.Destroy(ctx, sandboxID); err != nil && !isNotFoundDetail(err.Error()) {
+			fmt.Fprintf(b.rt.Stderr, "warning: destroy sandbox=%s failed: %v\n", sandboxID, err)
+		}
+		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			return err
+		}
+		fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+		removed++
+		claimsRemoved++
+	}
+	if !req.DryRun {
+		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
+	}
+	return nil
+}
+
+func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
+	if claim.IdleTimeoutSeconds <= 0 {
+		return false, "no-idle-timeout"
+	}
+	lastUsed := strings.TrimSpace(claim.LastUsedAt)
+	if lastUsed == "" {
+		lastUsed = strings.TrimSpace(claim.ClaimedAt)
+	}
+	if lastUsed == "" {
+		return true, "missing-timestamps"
+	}
+	parsed, err := time.Parse(time.RFC3339, lastUsed)
+	if err != nil {
+		// Accept common claim timestamp formats.
+		parsed, err = time.Parse(time.RFC3339Nano, lastUsed)
+		if err != nil {
+			return true, "unparseable-timestamp"
+		}
+	}
+	deadline := parsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
+	if now.Before(deadline) {
+		return false, "idle-timeout-remaining"
+	}
+	return true, "idle-timeout-expired"
+}
+
 func (b *backend) createSandbox(ctx context.Context, transport sandboxTransport, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
 	sandboxID := newSandboxName(repo)
 	leaseID := leasePrefix + sandboxID

@@ -4318,12 +4318,12 @@ type fileAnthropicSRTConfig struct {
 }
 
 type fileCloudRunSandboxConfig struct {
-	CLIPath     string  `yaml:"cliPath,omitempty"`
-	Workdir     string  `yaml:"workdir,omitempty"`
-	AllowEgress *bool   `yaml:"allowEgress,omitempty"`
-	Write       *bool   `yaml:"write,omitempty"`
-	Rootfs      string  `yaml:"rootfs,omitempty"`
-	Mode        string  `yaml:"mode,omitempty"`
+	CLIPath     string `yaml:"cliPath,omitempty"`
+	Workdir     string `yaml:"workdir,omitempty"`
+	AllowEgress *bool  `yaml:"allowEgress,omitempty"`
+	Write       *bool  `yaml:"write,omitempty"`
+	Rootfs      string `yaml:"rootfs,omitempty"`
+	Mode        string `yaml:"mode,omitempty"`
 }
 
 type fileModalConfig struct {
