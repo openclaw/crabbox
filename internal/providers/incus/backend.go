@@ -509,6 +509,19 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
+	// Snapshot claim ownership before listing instances. A concurrent Acquire can
+	// reclaim an expired instance after ListInstances returns, refresh its labels,
+	// and replace its claim while Cleanup still holds the stale expired view.
+	claimCandidates, err := core.ListLeaseClaims()
+	if err != nil {
+		return err
+	}
+	claimsByLease := make(map[string]core.LeaseClaim, len(claimCandidates))
+	for _, claim := range claimCandidates {
+		if claim.LeaseID != "" {
+			claimsByLease[claim.LeaseID] = claim
+		}
+	}
 	instances, err := client.ListInstances()
 	if err != nil {
 		return err
@@ -523,22 +536,67 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=%s\n", inst.Name, reason)
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(server.Labels["lease"], "-"), reason)
-		if req.DryRun {
+		leaseID := strings.TrimSpace(server.Labels["lease"])
+		expectedClaim, expectedClaimExists := claimsByLease[leaseID]
+		if expectedClaimExists && !incusCleanupClaimMatchesInstance(expectedClaim, leaseID, inst.Name) {
+			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=claim-scope-mismatch\n", inst.Name, core.Blank(leaseID, "-"))
 			continue
 		}
-		if inst.IsActive() {
-			if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
+		if req.DryRun {
+			if leaseID != "" {
+				if err := verifyIncusCleanupClaimUnchanged(leaseID, expectedClaim, expectedClaimExists); err != nil {
+					fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=changed-during-cleanup err=%v\n", inst.Name, leaseID, err)
+					continue
+				}
+			}
+			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(leaseID, "-"), reason)
+			continue
+		}
+		cleanupStarted := false
+		cleanupInstance := func() error {
+			cleanupStarted = true
+			if inst.IsActive() {
+				if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
+					return err
+				}
+			}
+			return client.DeleteInstance(inst.Name)
+		}
+		if leaseID == "" {
+			if err := cleanupInstance(); err != nil {
 				return err
 			}
+		} else if err := core.CleanupLeaseClaimIfUnchangedAfter(leaseID, expectedClaim, expectedClaimExists, cleanupInstance); err != nil {
+			if cleanupStarted {
+				return err
+			}
+			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=changed-during-cleanup err=%v\n", inst.Name, leaseID, err)
+			continue
 		}
-		if err := client.DeleteInstance(inst.Name); err != nil {
-			return err
-		}
-		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
-			core.RemoveLeaseClaim(leaseID)
-			core.RemoveStoredTestboxKey(leaseID)
-		}
+		// Retain the stored testbox key. Acquire prepares or reuses it before
+		// publishing replacement claim ownership, outside the claim lock. Deleting
+		// it here could strand a concurrent reuse that has not published yet.
+		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(leaseID, "-"), reason)
+	}
+	return nil
+}
+
+func incusCleanupClaimMatchesInstance(claim core.LeaseClaim, leaseID, instanceName string) bool {
+	return claim.LeaseID == leaseID &&
+		claim.Provider == providerName &&
+		claim.ProviderScope == instanceScope(instanceName)
+}
+
+func verifyIncusCleanupClaimUnchanged(leaseID string, expected core.LeaseClaim, expectedExists bool) error {
+	if expectedExists {
+		return core.VerifyLeaseClaimUnchanged(leaseID, expected)
+	}
+	_, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return core.Exit(2, "lease %s claim changed; retry", leaseID)
 	}
 	return nil
 }
