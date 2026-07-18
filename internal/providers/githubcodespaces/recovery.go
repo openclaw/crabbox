@@ -222,7 +222,7 @@ func validateCreatedCodespaceIdentity(expected LeaseClaim, item codespace) (code
 	}
 	ownerLogin := strings.TrimSpace(item.Owner.Login)
 	expectedUserID, userIDErr := strconv.ParseInt(strings.TrimSpace(expected.Labels[labelUserID]), 10, 64)
-	if item.ID <= 0 || strings.TrimSpace(item.EnvironmentID) == "" || item.Owner.ID <= 0 || ownerLogin == "" {
+	if item.ID <= 0 || strings.TrimSpace(item.EnvironmentID) == "" || item.Owner.ID <= 0 || ownerLogin == "" || item.Repository.ID <= 0 {
 		return codespace{}, exit(4, "github-codespaces create returned incomplete permanent resource identity; recovery claim retained")
 	}
 	if userIDErr != nil || expectedUserID <= 0 || item.Owner.ID != expectedUserID {
@@ -246,6 +246,7 @@ func (b *backend) bindValidatedCreatedClaim(expected LeaseClaim, item codespace)
 	labels[labelOwnerID] = strconv.FormatInt(item.Owner.ID, 10)
 	labels[labelLogin] = item.Owner.Login
 	labels[labelRepository] = repo
+	labels[labelRepositoryID] = strconv.FormatInt(item.Repository.ID, 10)
 	labels[labelMachine] = firstNonEmpty(item.Machine.Name, labels[labelMachine])
 	labels[labelState] = "provisioning"
 	server := b.serverFromCodespace(item, labels)

@@ -338,6 +338,9 @@ func TestValidateGitHubCodespacesConfig(t *testing.T) {
 		{name: "negative retention", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.RetentionPeriod = -time.Second }, want: "non-negative"},
 		{name: "long retention", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.RetentionPeriod = 30*24*time.Hour + time.Second }, want: "not exceed 30 days"},
 		{name: "relative work root", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.WorkRoot = "workspace" }, want: "absolute"},
+		{name: "noncanonical work root", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.WorkRoot = "/workspaces/my-app/../.." }, want: "canonical"},
+		{name: "broad work root", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.WorkRoot = "/workspaces" }, want: "too broad"},
+		{name: "broad generic work root", mut: func(cfg *core.Config) { cfg.WorkRoot = "/" }, want: "too broad"},
 		{name: "missing gh", mut: func(cfg *core.Config) { cfg.GitHubCodespaces.GHPath = "" }, want: "gh path is required"},
 	}
 	for _, tt := range tests {

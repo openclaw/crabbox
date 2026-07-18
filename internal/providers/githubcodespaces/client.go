@@ -52,15 +52,16 @@ type createCodespaceRequest struct {
 }
 
 type codespace struct {
-	ID            int64         `json:"id"`
-	Name          string        `json:"name"`
-	DisplayName   string        `json:"display_name"`
-	State         string        `json:"state"`
-	EnvironmentID string        `json:"environment_id"`
-	Owner         githubUser    `json:"owner"`
-	Repository    repositoryRef `json:"repository"`
-	Machine       machineRef    `json:"machine"`
-	GitStatus     gitStatus     `json:"git_status"`
+	ID                     int64         `json:"id"`
+	Name                   string        `json:"name"`
+	DisplayName            string        `json:"display_name"`
+	State                  string        `json:"state"`
+	EnvironmentID          string        `json:"environment_id"`
+	RetentionPeriodMinutes *int          `json:"retention_period_minutes"`
+	Owner                  githubUser    `json:"owner"`
+	Repository             repositoryRef `json:"repository"`
+	Machine                machineRef    `json:"machine"`
+	GitStatus              gitStatus     `json:"git_status"`
 }
 
 func (c client) currentUser(ctx context.Context) (githubUser, error) {
@@ -123,6 +124,7 @@ type codespaceMachine struct {
 }
 
 type repositoryRef struct {
+	ID       int64
 	FullName string
 }
 
@@ -132,9 +134,11 @@ type machineRef struct {
 
 func (r *repositoryRef) UnmarshalJSON(data []byte) error {
 	var object struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	}
 	if err := json.Unmarshal(data, &object); err == nil && object.FullName != "" {
+		r.ID = object.ID
 		r.FullName = object.FullName
 		return nil
 	}

@@ -1,6 +1,7 @@
 package githubcodespaces
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -191,6 +192,7 @@ func TestAcquireRejectsIncompletePermanentIdentity(t *testing.T) {
 		{name: "environment id", mutate: func(item *codespace) { item.EnvironmentID = "" }, want: "incomplete permanent resource identity"},
 		{name: "owner id", mutate: func(item *codespace) { item.Owner.ID = 0 }, want: "incomplete permanent resource identity"},
 		{name: "owner login", mutate: func(item *codespace) { item.Owner.Login = "" }, want: "incomplete permanent resource identity"},
+		{name: "repository id", mutate: func(item *codespace) { item.Repository.ID = 0 }, want: "incomplete permanent resource identity"},
 		{name: "wrong owner", mutate: func(item *codespace) { item.Owner = fakeGitHubUser("bob") }, want: "owner mismatch"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -247,6 +249,32 @@ func TestAcquireAcceptsRenamedOwnerWithSameUserID(t *testing.T) {
 	}
 	if lease.Server.Labels[labelUserID] != fmt.Sprintf("%d", fakeGitHubUser("alice").ID) {
 		t.Fatalf("user id=%q", lease.Server.Labels[labelUserID])
+	}
+}
+
+func TestAcquireRejectsAndRollsBackZeroEffectiveRetention(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.useCreateResult = true
+	fc.createResult = fakeCodespace("cs-zero-effective-retention", "Available")
+	zero := 0
+	fc.createResult.RetentionPeriodMinutes = &zero
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
+	leaseID := "cbx_123456789af7"
+
+	_, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "zero-effective-retention",
+	})
+	if err == nil || !strings.Contains(err.Error(), "effective retention is zero") {
+		t.Fatalf("err=%v", err)
+	}
+	if strings.Join(fc.deletes, ",") != "cs-zero-effective-retention" {
+		t.Fatalf("deletes=%#v", fc.deletes)
+	}
+	if _, ok, claimErr := readLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
+		t.Fatalf("claim ok=%t err=%v", ok, claimErr)
 	}
 }
 
@@ -1088,6 +1116,85 @@ func TestReleaseDeleteFallsBackToStopForDirtyCodespace(t *testing.T) {
 	}
 }
 
+func TestReleaseDirtyCodespaceRefusesZeroRetentionWithoutStopping(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-zero-retention", "Available")
+	item.GitStatus.HasUncommittedChanges = true
+	zero := 0
+	item.RetentionPeriodMinutes = &zero
+	fc.items[item.Name] = item
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
+	leaseID := "cbx_123456789af3"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "zero-retention", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "zero-retention", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "effective retention is zero") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fc.stops) != 0 || len(fc.deletes) != 0 {
+		t.Fatalf("stops=%#v deletes=%#v", fc.stops, fc.deletes)
+	}
+}
+
+func TestReleaseCleanCodespaceRefusesZeroRetentionWithoutStopping(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-clean-zero-retention", "Available")
+	zero := 0
+	item.RetentionPeriodMinutes = &zero
+	fc.items[item.Name] = item
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
+	leaseID := "cbx_123456789af6"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "clean-zero-retention", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "clean-zero-retention", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "effective retention is zero") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fc.stops) != 0 || len(fc.deletes) != 0 {
+		t.Fatalf("stops=%#v deletes=%#v", fc.stops, fc.deletes)
+	}
+}
+
+func TestCleanupDryRunReportsDirtyRetentionWithoutMutation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	item := fakeCodespace("cs-dirty-dry-run", "Available")
+	item.GitStatus.HasUncommittedChanges = true
+	fc.items[item.Name] = item
+	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
+	var stderr bytes.Buffer
+	b.rt.Stderr = &stderr
+	leaseID := "cbx_123456789af4"
+	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "dirty-dry-run", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
+	server.Labels["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	if err := claimLeaseTargetForRepoConfig(leaseID, "dirty-dry-run", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "retain codespace=cs-dirty-dry-run") || len(fc.stops) != 0 || len(fc.deletes) != 0 {
+		t.Fatalf("stderr=%q stops=%#v deletes=%#v", stderr.String(), fc.stops, fc.deletes)
+	}
+}
+
+func TestCodespaceTerminalIncludesArchivedAndMoved(t *testing.T) {
+	for _, state := range []string{"Archived", "Moved"} {
+		if !codespaceTerminal(state) {
+			t.Fatalf("state %q was not terminal", state)
+		}
+	}
+}
+
 func TestReleaseDeleteRechecksGitStatusAfterStop(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -1771,15 +1878,17 @@ func (f *fakeGH) config(codespace string) string {
 }
 
 func fakeCodespace(name, state string) codespace {
+	retentionMinutes := 7 * 24 * 60
 	return codespace{
-		ID:            int64(len(name) + 100),
-		Name:          name,
-		DisplayName:   "Crabbox",
-		State:         state,
-		EnvironmentID: "env-" + name,
-		Owner:         fakeGitHubUser("alice"),
-		Repository:    repositoryRef{FullName: "example-org/my-app"},
-		Machine:       machineRef{Name: "standardLinux32gb"},
+		ID:                     int64(len(name) + 100),
+		Name:                   name,
+		DisplayName:            "Crabbox",
+		State:                  state,
+		EnvironmentID:          "env-" + name,
+		RetentionPeriodMinutes: &retentionMinutes,
+		Owner:                  fakeGitHubUser("alice"),
+		Repository:             repositoryRef{ID: 1001, FullName: "example-org/my-app"},
+		Machine:                machineRef{Name: "standardLinux32gb"},
 		GitStatus: gitStatus{
 			aheadPresent:       true,
 			unpushedPresent:    true,

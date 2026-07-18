@@ -2,6 +2,7 @@ package githubcodespaces
 
 import (
 	"flag"
+	"path"
 	"strings"
 	"time"
 )
@@ -116,11 +117,33 @@ func ValidateGitHubCodespacesConfig(cfg Config) error {
 	if c.RetentionPeriod > 30*24*time.Hour {
 		return exit(2, "github-codespaces retention period must not exceed 30 days")
 	}
-	if strings.TrimSpace(c.WorkRoot) != "" && !strings.HasPrefix(strings.TrimSpace(c.WorkRoot), "/") {
-		return exit(2, "github-codespaces work root must be absolute")
+	if err := validateGitHubCodespacesWorkRoot("work root", c.WorkRoot); err != nil {
+		return err
+	}
+	if err := validateGitHubCodespacesWorkRoot("generic work root", cfg.WorkRoot); err != nil {
+		return err
 	}
 	if strings.TrimSpace(c.GHPath) == "" {
 		return exit(2, "github-codespaces gh path is required")
+	}
+	return nil
+}
+
+func validateGitHubCodespacesWorkRoot(label, value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	clean := path.Clean(trimmed)
+	if !path.IsAbs(clean) {
+		return exit(2, "github-codespaces %s must be absolute", label)
+	}
+	if clean != trimmed {
+		return exit(2, "github-codespaces %s must be a canonical path", label)
+	}
+	switch clean {
+	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace", "/workspaces":
+		return exit(2, "github-codespaces %s %q is too broad; choose a dedicated subdirectory", label, clean)
 	}
 	return nil
 }

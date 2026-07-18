@@ -30,7 +30,7 @@ func TestClientCreateCodespaceRequestShape(t *testing.T) {
 			t.Fatalf("missing GitHub headers: %#v", r.Header)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":7,"name":"codespace-1","display_name":"Crabbox","state":"Available","environment_id":"env_1","owner":{"id":42,"login":"alice"},"repository":{"full_name":"example-org/my-app"},"machine":{"name":"standardLinux32gb"}}`))
+		_, _ = w.Write([]byte(`{"id":7,"name":"codespace-1","display_name":"Crabbox","state":"Available","environment_id":"env_1","owner":{"id":42,"login":"alice"},"repository":{"id":1001,"full_name":"example-org/my-app"},"machine":{"name":"standardLinux32gb"}}`))
 	}))
 	defer server.Close()
 

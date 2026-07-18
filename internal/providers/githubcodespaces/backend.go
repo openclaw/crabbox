@@ -58,6 +58,7 @@ const (
 	labelDisplayName    = "codespace_display_name"
 	labelEnvironmentID  = "codespace_environment_id"
 	labelRepository     = "github_repository"
+	labelRepositoryID   = "github_repository_id"
 	labelRef            = "github_ref"
 	labelMachine        = "github_machine"
 	labelLogin          = "github_login"
@@ -235,6 +236,9 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 			err = errors.Join(err, rollbackCreatedCodespace(api, claim))
 		}
 		return LeaseTarget{}, err
+	}
+	if err := validateStopPreservesCodespace(available); err != nil {
+		return LeaseTarget{}, errors.Join(err, rollbackCreatedCodespace(api, claim))
 	}
 	refreshedUser := user
 	refreshedUser.Login = claim.Labels[labelLogin]
@@ -649,6 +653,9 @@ func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI,
 		if err := validateCodespaceClaimResource(claim, preflight); err != nil {
 			return err
 		}
+		if err := validateStopPreservesCodespace(preflight); err != nil {
+			return err
+		}
 	}
 	absent := false
 	updated, err := updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, func() error {
@@ -661,6 +668,9 @@ func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI,
 			return err
 		}
 		if err := validateCodespaceClaimResource(claim, item); err != nil {
+			return err
+		}
+		if err := validateStopPreservesCodespace(item); err != nil {
 			return err
 		}
 		err = api.stopCodespace(ctx, name)
@@ -695,6 +705,12 @@ func (b *backend) deleteClaimedCodespace(ctx context.Context, api codespacesAPI,
 			return err
 		}
 		if err := validateCodespaceClaimResource(claim, item); err != nil {
+			return err
+		}
+		if err := validateDeleteSafe(item); err != nil {
+			return err
+		}
+		if err := validateStopPreservesCodespace(item); err != nil {
 			return err
 		}
 		// Stop is idempotent. Always issue it so even an initially stopped
@@ -959,10 +975,39 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				fmt.Fprintf(b.stderr(), "skip codespace=%s reason=%s\n", server.DisplayID(), reason)
 				return nil
 			}
-			fmt.Fprintf(b.stderr(), "delete codespace=%s lease=%s dry_run=%t\n", server.DisplayID(), claim.LeaseID, req.DryRun)
 			if req.DryRun {
+				item := pendingItem
+				if !pending {
+					item, err = api.getCodespace(ctx, server.CloudID)
+					if err != nil {
+						if isGitHubNotFound(err) {
+							fmt.Fprintf(b.stderr(), "delete codespace=%s lease=%s dry_run=true reason=already-absent\n", server.DisplayID(), claim.LeaseID)
+							return nil
+						}
+						return err
+					}
+					if err := validateCodespaceClaimResource(claim, item); err != nil {
+						return err
+					}
+				}
+				if err := validateDeleteSafe(item); err != nil {
+					var unsafe *unsafeCodespaceDeleteError
+					if !errors.As(err, &unsafe) {
+						return err
+					}
+					if err := validateStopPreservesCodespace(item); err != nil {
+						return err
+					}
+					fmt.Fprintf(b.stderr(), "retain codespace=%s lease=%s action=stop dry_run=true reason=uncommitted-or-unpushed-changes\n", server.DisplayID(), claim.LeaseID)
+					return nil
+				}
+				if err := validateStopPreservesCodespace(item); err != nil {
+					return err
+				}
+				fmt.Fprintf(b.stderr(), "delete codespace=%s lease=%s dry_run=true\n", server.DisplayID(), claim.LeaseID)
 				return nil
 			}
+			fmt.Fprintf(b.stderr(), "delete codespace=%s lease=%s dry_run=false\n", server.DisplayID(), claim.LeaseID)
 			if pending {
 				claim, pendingItem, err = b.bindCreatedClaim(claim, pendingItem)
 				if err != nil {
@@ -1317,6 +1362,9 @@ func (b *backend) labelsFor(leaseID, slug, repo, login string, keep bool, releas
 		labels[labelOwnerID] = strconv.FormatInt(item.Owner.ID, 10)
 	}
 	labels[labelRepository] = firstNonEmpty(item.Repository.FullName, repo)
+	if item.Repository.ID > 0 {
+		labels[labelRepositoryID] = strconv.FormatInt(item.Repository.ID, 10)
+	}
 	labels[labelRef] = strings.TrimSpace(b.cfg.GitHubCodespaces.Ref)
 	labels[labelMachine] = firstNonEmpty(item.Machine.Name, b.effectiveMachine())
 	labels[labelLogin] = strings.TrimSpace(user.Login)
@@ -1451,6 +1499,9 @@ func (b *backend) mergeLiveServer(server Server, item codespace) Server {
 		server.Labels[labelOwnerID] = strconv.FormatInt(item.Owner.ID, 10)
 	}
 	server.Labels[labelRepository] = firstNonEmpty(item.Repository.FullName, server.Labels[labelRepository])
+	if item.Repository.ID > 0 {
+		server.Labels[labelRepositoryID] = strconv.FormatInt(item.Repository.ID, 10)
+	}
 	server.Labels[labelMachine] = firstNonEmpty(item.Machine.Name, server.Labels[labelMachine])
 	server.ServerType.Name = firstNonEmpty(item.Machine.Name, server.ServerType.Name)
 	return server
@@ -1511,11 +1562,21 @@ func codespaceStopping(state string) bool {
 
 func codespaceTerminal(state string) bool {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "failed", "unavailable", "deleted":
+	case "failed", "unavailable", "deleted", "archived", "moved":
 		return true
 	default:
 		return false
 	}
+}
+
+func validateStopPreservesCodespace(item codespace) error {
+	if item.RetentionPeriodMinutes == nil {
+		return exit(3, "refusing to stop github-codespaces codespace=%s without an effective retention period", item.Name)
+	}
+	if *item.RetentionPeriodMinutes <= 0 {
+		return exit(3, "refusing to stop github-codespaces codespace=%s because effective retention is zero", item.Name)
+	}
+	return nil
 }
 
 type unsafeCodespaceDeleteError struct {
@@ -1554,7 +1615,7 @@ func validateCodespaceClaimResource(claim LeaseClaim, item codespace) error {
 		{label: labelCodespaceID, live: strconv.FormatInt(item.ID, 10), name: "codespace id"},
 		{label: labelEnvironmentID, live: item.EnvironmentID, name: "environment id"},
 		{label: labelOwnerID, live: strconv.FormatInt(item.Owner.ID, 10), name: "owner id"},
-		{label: labelRepository, live: item.Repository.FullName, name: "repository"},
+		{label: labelRepositoryID, live: strconv.FormatInt(item.Repository.ID, 10), name: "repository id"},
 	} {
 		expected := strings.TrimSpace(claim.Labels[identity.label])
 		if expected == "" || strings.TrimSpace(identity.live) == "" {

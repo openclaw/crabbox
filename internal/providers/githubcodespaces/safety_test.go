@@ -181,6 +181,7 @@ func TestSafetyClaimResourceRequiresPermanentIdentity(t *testing.T) {
 		{name: "codespace id changed", mutateLive: func(live *codespace) { live.ID++ }, want: "codespace id changed"},
 		{name: "environment id changed", mutateLive: func(live *codespace) { live.EnvironmentID = "env-other" }, want: "environment id changed"},
 		{name: "owner id changed", mutateLive: func(live *codespace) { live.Owner.ID++ }, want: "owner id changed"},
+		{name: "repository id changed", mutateLive: func(live *codespace) { live.Repository.ID++ }, want: "repository id changed"},
 		{name: "missing claim id", mutateClaim: func(claim *LeaseClaim) { delete(claim.Labels, labelCodespaceID) }, want: "without complete codespace id identity"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -198,6 +199,20 @@ func TestSafetyClaimResourceRequiresPermanentIdentity(t *testing.T) {
 				t.Fatalf("err=%v", err)
 			}
 		})
+	}
+}
+
+func TestSafetyClaimResourceAllowsRepositoryRenameWithStableID(t *testing.T) {
+	item := fakeCodespace("cs-repository-renamed", "Available")
+	b := newTestBackend(t, newFakeCodespacesClient(), &fakeGH{login: "alice", token: "test" + "-value"})
+	claim := LeaseClaim{
+		LeaseID: "cbx_123456789af5",
+		CloudID: item.Name,
+		Labels:  b.labelsFor("cbx_123456789af5", "repository-renamed", "example-org/my-app", "alice", false, releaseDelete, item, "ready"),
+	}
+	item.Repository.FullName = "renamed-org/renamed-app"
+	if err := validateCodespaceClaimResource(claim, item); err != nil {
+		t.Fatal(err)
 	}
 }
 
