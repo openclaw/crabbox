@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- Made the default `crabbox init` Agent Skill include standards-compliant
+  `SKILL.md` metadata.
 - fix(egress): replaced egress sessions can no longer resurrect and clobber their replacement — the coordinator refuses tickets and connects for superseded session IDs, and the host/client daemon exits fatally when replaced.
 - Enforced explicitly declared zero-byte artifact sizes during pull while preserving legacy manifests that omit size.
 - Prevented apple-container orphan cleanup from deleting claims reclaimed during its resource snapshot, including same-value rewrites, while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.

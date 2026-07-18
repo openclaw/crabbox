@@ -149,7 +149,13 @@ the native `crabbox-apple-vm-helper` for the local Apple VZ provider.
 
 Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 
-### Herdr plugin
+### Integrations
+
+`crabbox init --detect` generates a repo-local Agent Skill for compatible
+coding agents. The [Zed package](integrations/zed/README.md) adds checked tasks,
+YAML support, and the Zed remote-editor handoff; registry publication is still
+pending. See the [integration catalog](docs/integrations/README.md) for the
+current support and lifecycle boundaries.
 
 Herdr users can add Crabbox lease controls and repository workflows to the
 Herdr action palette. Use a Crabbox build that already contains this
@@ -584,6 +590,7 @@ path is documented in
 
 - **Get the model:** [How Crabbox Works](docs/how-it-works.md), [Architecture](docs/architecture.md), [Concepts](docs/concepts.md), [Orchestrator](docs/orchestrator.md)
 - **Use the CLI:** [CLI](docs/cli.md), [Commands](docs/commands/README.md), [Features](docs/features/README.md), [Configuration](docs/features/configuration.md)
+- **Integrate editors and agents:** [Integrations](docs/integrations/README.md), [Editors](docs/integrations/editors.md), [AI agents and harnesses](docs/integrations/agents.md)
 - **Choose a provider:** [Providers](docs/providers/README.md), [AWS](docs/providers/aws.md), [Azure](docs/providers/azure.md), [GCP](docs/providers/gcp.md), [Hetzner](docs/providers/hetzner.md), [DigitalOcean](docs/providers/digitalocean.md), [Linode](docs/providers/linode.md), [Hostinger](docs/providers/hostinger.md)
 - **Advanced features:** [Actions hydration](docs/features/actions-hydration.md), [Capsules](docs/features/capsules.md), [Checkpoints](docs/features/checkpoints.md), [Jobs](docs/features/jobs.md), [Pond](docs/features/pond.md)
 - **Interactive QA:** [Interactive Desktop and VNC](docs/features/interactive-desktop-vnc.md), [Artifacts](docs/features/artifacts.md), [Portal](docs/features/portal.md)

@@ -7,12 +7,18 @@ import { markdownToHtml } from "./build-docs-site.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const providersDir = path.join(repoRoot, "docs", "providers");
+const integrationsDir = path.join(repoRoot, "docs", "integrations");
 const siteDir = path.join(repoRoot, "dist", "docs-site");
 const providerIndexFile = path.join(siteDir, "providers", "index.html");
 const generatedTest = fs.existsSync(providerIndexFile) ? test : test.skip;
 
 const providerMarkdown = fs
   .readdirSync(providersDir)
+  .filter((name) => name.endsWith(".md"))
+  .sort((a, b) => (a === "README.md" ? -1 : b === "README.md" ? 1 : a.localeCompare(b)));
+
+const integrationMarkdown = fs
+  .readdirSync(integrationsDir)
   .filter((name) => name.endsWith(".md"))
   .sort((a, b) => (a === "README.md" ? -1 : b === "README.md" ? 1 : a.localeCompare(b)));
 
@@ -37,6 +43,30 @@ generatedTest("generated navigation includes every provider page exactly once", 
       occurrences(providerNav, href),
       1,
       `${markdown} should be linked exactly once from the Providers navigation`,
+    );
+  }
+});
+
+generatedTest("generated navigation includes every integration page exactly once", () => {
+  const html = readGenerated("integrations/index.html");
+  const integrationNav = navSection(html, "Integrations");
+
+  assert.match(
+    integrationNav,
+    new RegExp(`<span class="nav-count">${integrationMarkdown.length}</span>`),
+  );
+  assert.equal(
+    occurrences(integrationNav, '<a class="nav-link'),
+    integrationMarkdown.length,
+    "integration navigation count should match the integration Markdown count",
+  );
+
+  for (const markdown of integrationMarkdown) {
+    const output = markdown === "README.md" ? "index.html" : markdown.replace(/\.md$/, ".html");
+    assert.equal(
+      occurrences(integrationNav, `href="../integrations/${output}"`),
+      1,
+      `${markdown} should be linked exactly once from the Integrations navigation`,
     );
   }
 });

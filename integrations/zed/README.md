@@ -76,7 +76,7 @@ Zed launches every task through the user's login shell. Direct task definitions 
 
 ## Registry publication
 
-Zed publishes extensions from `zed-industries/extensions`. Once this package is merged into Crabbox, the registry PR adds the repository URL to `.gitmodules`:
+Zed publishes extensions from `zed-industries/extensions`. The registry PR adds the Crabbox repository URL to `.gitmodules`:
 
 ```gitconfig
 [submodule "extensions/crabbox"]

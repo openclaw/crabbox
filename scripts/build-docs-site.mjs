@@ -38,6 +38,7 @@ const legacyProviderFeatureNotes = new Set([
 
 const sections = [
   ["Start", ["README.md", "getting-started.md", "how-it-works.md", "architecture.md", "orchestrator.md", "cli.md"]],
+  ["Integrations", rels("integrations")],
   ["Providers", rels("providers")],
   ["Features", rels("features")],
   ["Commands", rels("commands")],

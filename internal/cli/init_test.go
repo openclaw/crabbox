@@ -5,9 +5,15 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"gopkg.in/yaml.v3"
 )
+
+var agentSkillNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 func TestInitProjectWritesExpectedFiles(t *testing.T) {
 	dir := t.TempDir()
@@ -39,8 +45,17 @@ func TestInitProjectWritesExpectedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "crabbox warmup") {
-		t.Fatalf("skill missing warmup instructions: %s", data)
+	assertValidAgentSkill(t, filepath.Join(dir, ".agents/skills/crabbox/SKILL.md"), data)
+	skillText := string(data)
+	for _, want := range []string{
+		"# Crabbox",
+		"target-platform coverage",
+		"crabbox warmup",
+		"crabbox stop <slug>",
+	} {
+		if !strings.Contains(skillText, want) {
+			t.Fatalf("skill missing %q: %s", want, data)
+		}
 	}
 	workflow, err := os.ReadFile(filepath.Join(dir, ".github/workflows/crabbox.yml"))
 	if err != nil {
@@ -79,6 +94,51 @@ func TestInitProjectWritesExpectedFiles(t *testing.T) {
 	}
 	if err := app.Run(context.Background(), []string{"init"}); err == nil {
 		t.Fatal("second init without --force succeeded")
+	}
+}
+
+func assertValidAgentSkill(t *testing.T, skillPath string, data []byte) {
+	t.Helper()
+
+	const opening = "---\n"
+	if !bytes.HasPrefix(data, []byte(opening)) {
+		t.Fatalf("skill frontmatter must begin at byte zero:\n%s", data)
+	}
+	remainder := data[len(opening):]
+	closing := bytes.Index(remainder, []byte("\n---\n"))
+	if closing < 0 {
+		t.Fatalf("skill frontmatter is not closed:\n%s", data)
+	}
+
+	var metadata struct {
+		Name        string `yaml:"name"`
+		Description string `yaml:"description"`
+	}
+	if err := yaml.Unmarshal(remainder[:closing], &metadata); err != nil {
+		t.Fatalf("parse skill frontmatter: %v", err)
+	}
+	if metadata.Name != "crabbox" {
+		t.Fatalf("skill name=%q, want crabbox", metadata.Name)
+	}
+	nameLength := utf8.RuneCountInString(metadata.Name)
+	if nameLength < 1 || nameLength > 64 || !agentSkillNamePattern.MatchString(metadata.Name) {
+		t.Fatalf("invalid skill name %q", metadata.Name)
+	}
+	if metadata.Name != filepath.Base(filepath.Dir(skillPath)) {
+		t.Fatalf("skill name %q does not match parent directory %q", metadata.Name, filepath.Base(filepath.Dir(skillPath)))
+	}
+	descriptionLength := utf8.RuneCountInString(metadata.Description)
+	if metadata.Description != strings.TrimSpace(metadata.Description) || descriptionLength < 1 || descriptionLength > 1024 {
+		t.Fatalf("invalid skill description %q", metadata.Description)
+	}
+	for _, want := range []string{"Run repository tests", "Use when"} {
+		if !strings.Contains(metadata.Description, want) {
+			t.Fatalf("skill description missing %q: %q", want, metadata.Description)
+		}
+	}
+	body := bytes.TrimSpace(remainder[closing+len("\n---\n"):])
+	if len(body) == 0 {
+		t.Fatal("skill Markdown body is empty")
 	}
 }
 

@@ -284,9 +284,14 @@ jobs:
 
 func skillTemplate(detected initProjectDetection) string {
 	var b strings.Builder
-	b.WriteString(`# Crabbox
+	b.WriteString(`---
+name: crabbox
+description: "Run repository tests and validation on Crabbox remote runners. Use when work needs remote compute, a clean or reusable environment, target-platform coverage, or auditable execution evidence."
+---
 
-Use Crabbox for remote Linux verification.
+# Crabbox
+
+Use Crabbox for remote project verification.
 
 Workflow:
 - Warm early: crabbox warmup

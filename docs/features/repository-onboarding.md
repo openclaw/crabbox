@@ -42,11 +42,20 @@ The generated config holds the project-specific defaults that should travel with
 
 ## Generated agent instructions (`SKILL.md`)
 
-The generated skill points agents at the warmup/reuse workflow rather than ad-hoc commands:
-warm a box early with `crabbox warmup`, reuse the returned slug for interactive checks, run
-checks with `crabbox run --id <slug> -- <command>`, inspect a failure over `crabbox ssh`, and
-`crabbox stop <slug>` when finished. It also instructs agents not to debug product failures on
-a reused box that fails its sync sanity check: stop it, warm a fresh box, and rerun.
+The generated skill follows the open Agent Skills format with required `name`
+and `description` frontmatter. It points agents at the warmup/reuse workflow
+rather than ad-hoc commands: warm a box early with `crabbox warmup`, reuse the
+returned slug for interactive checks, run checks with
+`crabbox run --id <slug> -- <command>`, inspect a failure over `crabbox ssh`,
+and `crabbox stop <slug>` when finished. It also instructs agents not to debug
+product failures on a reused box that fails its sync sanity check: stop it,
+warm a fresh box, and rerun.
+
+The default `.agents/skills` location is shared by several coding-agent
+clients. Use `--skill` during the first initialization when a client requires a
+different project discovery path. Keep an override ending in
+`crabbox/SKILL.md`, because the skill name must match its parent directory. See
+[AI Agents and Harnesses](../integrations/agents.md).
 
 ## Detection (`--detect`)
 
