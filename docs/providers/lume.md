@@ -1,20 +1,19 @@
 # Lume Provider
 
 Lume provides macOS SSH leases on Apple silicon with the `lume` CLI and no cloud
-account. Crabbox rejects a third guest.
+account.
 
 ## Golden image
 
-The stopped base needs the `lume` account (or configured `lume.user`) with
-Remote Login, workload tools, and this first-boot hook:
+The stopped base needs the configured Lume user with Remote Login and this
+first-boot hook:
 
 ```sh
 scripts/install-macos-lume-image-hooks.sh
 ```
 
 The hook installs the lease key, disables alternate authentication, rotates host
-keys, and returns authenticated identity before network SSH. Keep credentials
-and keychains out of the base.
+keys, and authenticates identity before SSH. Keep credentials out of the base.
 
 ## Configuration
 
@@ -26,11 +25,11 @@ and keychains out of the base.
 | `--lume-user` | `lume` | Prepared SSH account |
 | `--lume-work-root` | `/Users/lume/crabbox` | Guest work root |
 
-Use trusted user config, `CRABBOX_LUME_*`, or flags. Repository config cannot
+Use trusted config, `CRABBOX_LUME_*`, or flags. Repository config cannot
 select host, base, storage, or bootstrap user; paths and `ephemeral` are
 existing-lease-only.
 
 ## Lifecycle
 
-Clone and start headless; authenticate and pin SSH; run; then guarded-clean,
-stop, delete the exact claimed VM, and confirm absence.
+Clone/start headless; pin SSH; run; guarded-clean; stop; delete the claimed VM;
+confirm absence.

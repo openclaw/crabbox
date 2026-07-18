@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	osuser "os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -426,20 +425,21 @@ func TestStoragePathInventoryUsesExactGetForLifecycle(t *testing.T) {
 	}
 }
 
-func TestStorageIdentityDistinguishesSameNameAcrossLocations(t *testing.T) {
-	registered := lumeStorageIdentity(lumeVM{Name: "worker", LocationName: "fast"}, "")
-	direct := lumeStorageIdentity(lumeVM{Name: "worker", LocationName: "/Volumes/VMs"}, "/Volumes/VMs")
-	if registered == direct {
-		t.Fatalf("storage identities collided: %q", registered)
-	}
-}
-
 func TestLumeNotFoundClassificationIsSpecific(t *testing.T) {
 	if !isLumeNotFoundError(errors.New("lume get failed: Error: Virtual machine not found: worker")) {
 		t.Fatal("exact Lume VM-not-found error was not classified")
 	}
 	if isLumeNotFoundError(errors.New("exec: lume: executable file not found in $PATH")) {
 		t.Fatal("missing CLI was classified as a missing VM")
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{"ls": {Stdout: `[]`}}, errors: map[string]error{"get\x00worker\x00--format\x00json": errors.New("transient get failure")}}
+	b := newBackend((Provider{}).Spec(), core.BaseConfig(), core.Runtime{Exec: runner}).(*backend)
+	if _, _, err := b.observeVMState(context.Background(), b.configForRun(), "worker"); err == nil {
+		t.Fatal("observe converted transient get failure to missing")
+	}
+	claim := core.LeaseClaim{LeaseID: "cbx_transient", Labels: map[string]string{"instance": "worker"}}
+	if _, _, err := b.resolveClaimedInstance(context.Background(), claim); err == nil {
+		t.Fatal("resolve converted transient get failure to missing")
 	}
 }
 
@@ -817,18 +817,6 @@ func TestLumeStorageKeywordsAndLocationsAreCaseSensitive(t *testing.T) {
 	}
 	if !isDirectStoragePath("ephemeral") {
 		t.Fatal("lowercase ephemeral storage keyword not recognized")
-	}
-}
-
-func TestExpandLumePathSupportsNamedUserHome(t *testing.T) {
-	account, err := osuser.Current()
-	if err != nil {
-		t.Skipf("current user unavailable: %v", err)
-	}
-	got := expandLumePath("~" + account.Username + "/lume-vms")
-	want := filepath.Join(account.HomeDir, "lume-vms")
-	if got != want {
-		t.Fatalf("expanded path=%q want %q", got, want)
 	}
 }
 

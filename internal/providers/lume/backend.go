@@ -1319,6 +1319,9 @@ func (b *backend) observeVMState(ctx context.Context, cfg Config, name string) (
 			return normalizedState(candidate.Status), false, nil
 		}
 	}
+	if !isLumeNotFoundError(getErr) {
+		return "", false, getErr
+	}
 	return "missing", true, nil
 }
 
@@ -1444,6 +1447,9 @@ func (b *backend) resolveClaimedInstance(ctx context.Context, claim core.LeaseCl
 		if candidate.Name == name {
 			return candidate, claim, nil
 		}
+	}
+	if !isLumeNotFoundError(getErr) {
+		return lumeVM{}, core.LeaseClaim{}, getErr
 	}
 	return lumeVM{Name: name, Status: "missing"}, claim, nil
 }
