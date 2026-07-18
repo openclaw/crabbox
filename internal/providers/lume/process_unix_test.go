@@ -135,39 +135,6 @@ func TestRecoverPendingLaunchOwnerMatchesHandoffMarker(t *testing.T) {
 	}
 }
 
-func TestStoppedGuestIsNotSafeWhileRecordedOwnerLives(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	helper := filepath.Join(t.TempDir(), "fake-lume")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\ntrap 'exit 0' INT TERM HUP\nwhile :; do sleep 0.1 & wait $!; done\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Lume.CLIPath = helper
-	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-		"get": {Stdout: `[{"name":"crabbox-owner-fence","status":"stopped"}]`},
-	}}
-	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	b.startupObserveTimeout = 25 * time.Millisecond
-	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-owner-fence", bootstrapTrust{}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	process, err := os.FindProcess(owner.PID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = process.Signal(os.Interrupt) })
-	stopped, state, err := b.observeStoppedOrMissingVM(context.Background(), b.configForRun(), "crabbox-owner-fence", owner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stopped || !strings.Contains(state, "owner running") {
-		t.Fatalf("stopped=%v state=%q", stopped, state)
-	}
-}
-
 func TestStopVMInterruptsTheIdentityFencedRunOwner(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

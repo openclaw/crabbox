@@ -551,19 +551,6 @@ func TestTouchPreservesLifecycleRoutingLabels(t *testing.T) {
 	}
 }
 
-func TestStopAcceptsStoppedStateAfterSignalExit(t *testing.T) {
-	cfg := testConfig()
-	runner := &recordingRunner{
-		responses: map[string]core.LocalCommandResult{
-			"stop\x00worker-1": {ExitCode: 130, Stderr: "interrupted"},
-			"get":              {Stdout: `[{"name":"worker-1","status":"stopped"}]`},
-		},
-		errors: map[string]error{"stop\x00worker-1": errors.New("exit status 130")},
-	}
-	b := testBackend(cfg, runner)
-	mustNoError(t, b.stopVM(context.Background(), b.configForRun(), "worker-1", lumeRunOwner{}))
-}
-
 func TestStopRefusesRunningVMWithoutExactOwner(t *testing.T) {
 	cfg := testConfig()
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{

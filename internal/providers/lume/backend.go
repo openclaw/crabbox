@@ -1295,17 +1295,6 @@ func lumeStorageIdentity(cfg Config, inst lumeVM, fallback string) (string, erro
 	return inst.Name + "\x00" + root, nil
 }
 
-func (b *backend) observeStoppedOrMissingVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) (bool, string, error) {
-	state, missing, err := b.observeVMState(ctx, cfg, name)
-	if err != nil {
-		return false, "", err
-	}
-	if ownerProcessMatches(owner) {
-		return false, state + " (owner running)", nil
-	}
-	return missing || state == "stopped", state, nil
-}
-
 func (b *backend) observeVMState(ctx context.Context, cfg Config, name string) (string, bool, error) {
 	inst, getErr := b.getInstance(ctx, cfg, name)
 	if getErr == nil {
