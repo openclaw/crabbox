@@ -60,6 +60,9 @@ func validateConfig(cfg *core.Config) error {
 	if strings.TrimSpace(cfg.Lume.Base) == "" {
 		return exit(2, "lume base VM must not be empty")
 	}
+	if strings.TrimSpace(cfg.Lume.Storage) == "ephemeral" {
+		return exit(2, "lume storage \"ephemeral\" is not supported because Lume excludes ephemeral VMs from inventory")
+	}
 	if !validPOSIXUser.MatchString(cfg.Lume.User) {
 		return exit(2, "lume user %q is not a valid POSIX account name", cfg.Lume.User)
 	}

@@ -740,21 +740,10 @@ func TestImmutableIDHome(t *testing.T) {
 	}
 }
 
-func TestStorageNamesAreLiteral(t *testing.T) {
-	home := t.TempDir()
-	storageRoot := join(home, "ephemeral")
-	t.Setenv("HOME", home)
-	writeLumeSettings(t, home, fmt.Sprintf("defaultLocationName: ephemeral\nvmLocations:\n  - name: ephemeral\n    path: %q\n", storageRoot))
-	const name = "worker-ephemeral"
-	putVMAt(t, storageRoot, name, "bHVtZS1jYXNl")
-	cfg := base()
-	cfg.Lume.Storage = "ephemeral"
-	if isDirectStoragePath(cfg.Lume.Storage) {
-		t.Fatal("configured location treated as a direct path")
-	}
-	if _, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: "ephemeral"}); err != nil {
-		t.Fatal(err)
-	}
+func TestEphemeralStorageRejected(t *testing.T) {
+	cfg := configFor()
+	_, err := applyTestFlags(t, cfg, "--lume-storage", "ephemeral")
+	want(t, err, "excludes ephemeral VMs from inventory")
 }
 
 func TestCloneUsesStorage(t *testing.T) {

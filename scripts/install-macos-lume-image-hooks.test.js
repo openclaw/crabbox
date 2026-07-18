@@ -19,6 +19,7 @@ test("Lume image hooks preserve the secure bootstrap contract", async () => {
   assert.doesNotMatch(boot, /kickstart -k system\/com\.openssh\.sshd[^\n]*\|\| true/);
   assert.doesNotMatch(boot, /printf '%s\\n' \+/);
   contains(install, ['for file in "$firstboot_script" "$firstboot_plist"',
+	'sudo rm -f "$marker"',
     "if [[ -x /Applications/CuaDriver.app/Contents/MacOS/cua-driver ]]; then", 'if launchctl bootstrap "gui/$(id -u)"',
     "it will start at the next GUI login", "Cua Driver is not installed; skipped its optional LaunchAgent",
     "Lume first-boot identity hook did not become ready"]);

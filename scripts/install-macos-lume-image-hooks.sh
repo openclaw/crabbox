@@ -21,11 +21,12 @@ sudo install -o root -g wheel -m 0755 \
 sudo install -o root -g wheel -m 0644 \
   "$firstboot_plist" \
   /Library/LaunchDaemons/dev.crabbox.lume-firstboot.plist
+marker="/var/db/crabbox-lume-machine-id"
 sudo launchctl bootout system/dev.crabbox.lume-firstboot >/dev/null 2>&1 || true
+sudo rm -f "$marker"
 sudo launchctl bootstrap system \
   /Library/LaunchDaemons/dev.crabbox.lume-firstboot.plist
 
-marker="/var/db/crabbox-lume-machine-id"
 platform_uuid="$(/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | /usr/bin/awk -F'"' '/IOPlatformUUID/ { print $(NF-1); exit }')"
 firstboot_ready=false
 for _ in {1..60}; do

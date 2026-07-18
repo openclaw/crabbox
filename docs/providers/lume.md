@@ -13,6 +13,6 @@ Defaults: `lume`; base `crabbox-macos-golden`; storage; user `lume`; root
 `/Users/lume/crabbox`.
 
 Trusted config, `CRABBOX_LUME_*`, flags. Repo cannot set host, base, storage, or
-bootstrap user; direct paths: existing only.
+bootstrap user. Lume's unlisted `ephemeral` storage is unsupported.
 
 Clone/start; SSH; run; clean; destroy; confirm absent.
