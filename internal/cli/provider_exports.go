@@ -154,6 +154,12 @@ func ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug string, 
 	return claimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
 
+// ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter holds the claim
+// lock across action and the durable guarded claim publication.
+func ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool, action func() error) (LeaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, action)
+}
+
 // ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged binds an
 // exact resource while atomically replacing any previously published route.
 func ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
@@ -492,6 +498,10 @@ func LeaseProviderName(leaseID, slug string) string {
 
 func LocalProcessStartIdentity(pid int) (string, error) {
 	return webVNCDaemonProcessStartIdentity(pid)
+}
+
+func LocalProcessCommand(pid int) (string, bool) {
+	return webVNCDaemonProcessCommand(pid)
 }
 
 func LocalProcessBootIdentity() (string, error) {

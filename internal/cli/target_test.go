@@ -196,6 +196,38 @@ func TestValidateProviderTargetRejectsTartExplicitAMD64(t *testing.T) {
 	}
 }
 
+func TestValidateProviderTargetAllowsLumeMacOSARM64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "lume"
+	cfg.TargetOS = targetMacOS
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	if err := validateProviderTarget(cfg); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetDefaultsLumeToARM64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "lume"
+	cfg.TargetOS = targetMacOS
+	if got := effectiveArchitectureForConfig(cfg); got != ArchitectureARM64 {
+		t.Fatalf("effective architecture=%q want arm64", got)
+	}
+}
+
+func TestValidateProviderTargetRejectsLumeExplicitAMD64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "lume"
+	cfg.TargetOS = targetMacOS
+	cfg.Architecture = ArchitectureAMD64
+	cfg.architectureExplicit = true
+	err := validateProviderTarget(cfg)
+	if err == nil || !strings.Contains(err.Error(), "supports architecture=arm64 only") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestValidateProviderTargetDefaultsAppleVMToARM64(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "apple-vm"

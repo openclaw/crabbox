@@ -29,6 +29,7 @@ type SSHTarget struct {
 	Key                    string
 	CertificateFile        string
 	KnownHostsFile         string
+	HostKeyAlias           string
 	Port                   string
 	FallbackPorts          []string
 	TargetOS               string
@@ -744,10 +745,20 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 			"-o", "LogLevel=ERROR",
 		)
 	} else {
+		strictHostKeyChecking := "accept-new"
+		if target.HostKeyAlias != "" {
+			strictHostKeyChecking = "yes"
+		}
 		args = append(args,
-			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "StrictHostKeyChecking="+strictHostKeyChecking,
 			"-o", "UserKnownHostsFile="+sshConfigFileValue(knownHostsFile(target)),
 		)
+		if target.HostKeyAlias != "" {
+			args = append(args,
+				"-o", "HostKeyAlias="+target.HostKeyAlias,
+				"-o", "HostKeyAlgorithms=ssh-ed25519",
+			)
+		}
 	}
 	if target.AuthSecret || target.NoControlMaster {
 		args = append(args, "-o", "ControlMaster=no")
@@ -805,6 +816,7 @@ func sshControlPath(target SSHTarget) string {
 		target.Key,
 		target.CertificateFile,
 		target.KnownHostsFile,
+		target.HostKeyAlias,
 		target.ProxyCommand,
 	}, "\x00")
 	sum := sha1.Sum([]byte(scope))

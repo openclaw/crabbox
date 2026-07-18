@@ -159,18 +159,18 @@ func validateProviderTarget(cfg Config) error {
 		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
 	machineTarget := cfg.TargetOS != targetWorkerRuntime
-	if machineTarget && (provider.Name() == "tart" || provider.Name() == "apple-vm" || provider.Name() == "aws-lambda-microvm") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
+	if machineTarget && (provider.Name() == "tart" || provider.Name() == "apple-vm" || provider.Name() == "lume" || provider.Name() == "aws-lambda-microvm") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
 		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
 	}
 	if machineTarget && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
-		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vm" && provider.Name() != "aws-lambda-microvm" && provider.Name() != "external" {
-			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-vm, provider=aws-lambda-microvm, or provider=external")
+		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vm" && provider.Name() != "lume" && provider.Name() != "aws-lambda-microvm" && provider.Name() != "external" {
+			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-vm, provider=lume, provider=aws-lambda-microvm, or provider=external")
 		}
 		if cfg.TargetOS != targetLinux &&
 			!(provider.Name() == "azure" && cfg.TargetOS == targetWindows) &&
-			!(provider.Name() == "tart" && cfg.TargetOS == targetMacOS) &&
+			!((provider.Name() == "tart" || provider.Name() == "lume") && cfg.TargetOS == targetMacOS) &&
 			!(provider.Name() == "external" && (cfg.TargetOS == targetMacOS || cfg.TargetOS == targetWindows)) {
-			return exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, provider=tart target=macos, or provider=external target=macos/windows only")
+			return exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, provider=tart/provider=lume target=macos, or provider=external target=macos/windows only")
 		}
 		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
 			return exit(2, "provider=azure target=windows architecture=arm64 supports windows.mode=normal only; windows.mode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support")
@@ -247,6 +247,9 @@ func providerSpecSupportsTarget(spec ProviderSpec, targetOS, windowsMode string)
 
 func unsupportedManagedTargetMessageForConfig(provider string, cfg Config) string {
 	target := cfg.TargetOS
+	if provider == "lume" {
+		return "provider=lume supports target=macos only"
+	}
 	if provider == "azure" {
 		if target == targetMacOS {
 			return "provider=azure managed provisioning supports target=linux and Windows only; use provider=aws with an EC2 Mac Dedicated Host or provider=ssh for existing macOS hosts"

@@ -691,6 +691,20 @@ func TestLeaseCreateFlagsApplySelectedProviderFlags(t *testing.T) {
 	}
 }
 
+func TestLeaseCreateFlagsRejectLumeLinuxTarget(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "lume", "--target", "linux"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	err := applyLeaseCreateFlags(&cfg, fs, values)
+	if err == nil || !strings.Contains(err.Error(), "provider=lume supports target=macos only") {
+		t.Fatalf("err=%v, want explicit Linux target rejection", err)
+	}
+}
+
 func TestLeaseCreateFlagsApplyCacheVolumes(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)

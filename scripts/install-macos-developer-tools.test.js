@@ -79,3 +79,13 @@ test("custom Homebrew formula parsing does not glob", async () => {
   assert.match(text, /formulas\+=\("\$\{parts\[@\]\}"\)/);
   assert.match(text, /read -r -a formulas <<<"\$CRABBOX_MACOS_BREW_FORMULAS"/);
 });
+
+test("Homebrew and SSH shell setup remain noninteractive and idempotent", async () => {
+  const text = await source();
+
+  assert.match(text, /brew analytics off/);
+  assert.match(text, /HOMEBREW_NO_ASK=1 brew install --no-ask "\$formula"/);
+  assert.match(text, /zshenv_line='export PATH="\/usr\/local\/bin:\/opt\/homebrew\/bin:\/opt\/homebrew\/sbin:\$PATH"'/);
+  assert.match(text, /grep -qxF "\$zshenv_line" "\$HOME\/\.zshenv"/);
+  assert.match(text, /tail -c 1 "\$HOME\/\.zshenv"/);
+});
