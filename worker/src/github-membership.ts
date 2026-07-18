@@ -13,6 +13,11 @@ interface GitHubTeam {
   };
 }
 
+interface GitHubUser {
+  id?: number;
+  login?: string;
+}
+
 interface AllowedGitHubTeam {
   org: string;
   slug: string;
@@ -62,6 +67,11 @@ export async function requireCurrentGitHubMembership(
   if (githubUserIsRevoked(identity, env)) {
     throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
   }
+  if (!allowedGitHubOrgs(env).includes(identity.org.trim().toLowerCase())) {
+    throw new GitHubAuthorizationError(
+      `GitHub organization ${identity.org} is no longer allowed.`,
+    );
+  }
   const key = membershipCacheKey(identity, env);
   const now = Date.now();
   const cachedUntil = membershipCache.get(key) ?? 0;
@@ -73,7 +83,10 @@ export async function requireCurrentGitHubMembership(
   if (loading) {
     return loading;
   }
-  const load = requireExactGitHubMembership(identity.accessToken, identity.login, identity.org, env)
+  const load = requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login)
+    .then(() =>
+      requireExactGitHubMembership(identity.accessToken, identity.login, identity.org, env),
+    )
     .then(() => {
       const ttlSeconds = membershipCacheSeconds(env);
       if (ttlSeconds > 0) {
@@ -98,6 +111,34 @@ export function githubUserIsRevoked(
     if (entry.startsWith("login:")) return entry.slice("login:".length) === login;
     return entry === owner || entry === login;
   });
+}
+
+async function requireExactGitHubAccount(
+  accessToken: string,
+  owner: string,
+  login: string,
+): Promise<void> {
+  const expectedID = githubAccountID(owner);
+  if (expectedID === undefined) {
+    throw new GitHubAuthorizationError("This GitHub session uses a legacy mutable identity. Log in again.");
+  }
+  const response = await fetch(`${githubAPIURL}/user`, { headers: githubHeaders(accessToken) });
+  if (!response.ok) {
+    throw new GitHubAuthorizationError(
+      `Could not verify GitHub user ${login}: GitHub returned ${response.status}.`,
+    );
+  }
+  const user = (await response.json()) as GitHubUser;
+  if (typeof user.id !== "number" || !Number.isSafeInteger(user.id) || user.id !== expectedID) {
+    throw new GitHubAuthorizationError("The GitHub credential no longer matches this session.");
+  }
+}
+
+function githubAccountID(owner: string): number | undefined {
+  const match = /^github:([1-9][0-9]*)$/.exec(owner.trim().toLowerCase());
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) ? value : undefined;
 }
 
 async function requireExactGitHubMembership(
@@ -192,12 +233,12 @@ async function userGitHubTeams(accessToken: string): Promise<GitHubTeam[]> {
 }
 
 function membershipCacheKey(
-  identity: Pick<GitHubMembershipIdentity, "tokenID" | "org" | "login">,
+  identity: Pick<GitHubMembershipIdentity, "tokenID" | "owner" | "org">,
   env: GitHubMembershipEnv,
 ): string {
   return JSON.stringify([
     identity.tokenID,
-    identity.login.toLowerCase(),
+    identity.owner.toLowerCase(),
     identity.org.toLowerCase(),
     envList(env.CRABBOX_GITHUB_ALLOWED_ORGS || env.CRABBOX_GITHUB_ALLOWED_ORG),
     envList(env.CRABBOX_GITHUB_ALLOWED_TEAMS || env.CRABBOX_GITHUB_ALLOWED_TEAM),
