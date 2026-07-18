@@ -59,6 +59,14 @@ func markDeleteOnReleaseExplicit(cfg *Config) {
 	core.MarkDeleteOnReleaseExplicit(cfg, providerName)
 }
 
+func markRetentionPeriodExplicit(cfg *Config) {
+	core.MarkGitHubCodespacesRetentionExplicit(cfg)
+}
+
+func retentionPeriodExplicit(cfg Config) bool {
+	return core.GitHubCodespacesRetentionExplicit(cfg)
+}
+
 func deleteOnReleaseExplicit(cfg Config) bool {
 	return core.DeleteOnReleaseExplicit(cfg, providerName)
 }

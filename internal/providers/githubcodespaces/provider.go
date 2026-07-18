@@ -54,7 +54,7 @@ func (Provider) ApplyConfigDefaults(cfg *Config) error {
 	if c.IdleTimeout == 0 {
 		c.IdleTimeout = time.Duration(defaultIdleTimeoutMinutes) * time.Minute
 	}
-	if c.RetentionPeriod == 0 {
+	if c.RetentionPeriod == 0 && !retentionPeriodExplicit(*cfg) {
 		c.RetentionPeriod = time.Duration(defaultRetentionPeriodDays) * 24 * time.Hour
 	}
 	if strings.TrimSpace(c.WorkRoot) == "" {

@@ -119,6 +119,7 @@ type Config struct {
 	linodeImageExplicit           bool
 	linodeTypeExplicit            bool
 	GitHubCodespaces              GitHubCodespacesConfig
+	githubCodespacesRetentionSet  bool
 	Lambda                        LambdaConfig
 	lambdaImageExplicit           bool
 	lambdaImageFamilyExplicit     bool
@@ -2743,6 +2744,14 @@ func MarkDeleteOnReleaseExplicit(cfg *Config, provider string) {
 	cfg.deleteOnReleaseExplicit[normalizeProviderName(provider)] = true
 }
 
+func GitHubCodespacesRetentionExplicit(cfg Config) bool {
+	return cfg.githubCodespacesRetentionSet
+}
+
+func MarkGitHubCodespacesRetentionExplicit(cfg *Config) {
+	cfg.githubCodespacesRetentionSet = true
+}
+
 func EffectiveHostingerWorkRoot(cfg Config) string {
 	if cfg.Hostinger.WorkRoot != "" {
 		return cfg.Hostinger.WorkRoot
@@ -5205,7 +5214,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if trusted {
 			applyLeaseDuration(&cfg.GitHubCodespaces.IdleTimeout, file.GitHubCodespaces.IdleTimeout)
-			applyLeaseDuration(&cfg.GitHubCodespaces.RetentionPeriod, file.GitHubCodespaces.RetentionPeriod)
+			if applyNonNegativeLeaseDuration(&cfg.GitHubCodespaces.RetentionPeriod, file.GitHubCodespaces.RetentionPeriod) {
+				MarkGitHubCodespacesRetentionExplicit(cfg)
+			}
 		}
 		if trusted && file.GitHubCodespaces.DeleteOnRelease != nil {
 			cfg.GitHubCodespaces.DeleteOnRelease = *file.GitHubCodespaces.DeleteOnRelease
@@ -7985,6 +7996,18 @@ func applyLeaseDuration(target *time.Duration, value string) {
 	}
 }
 
+func applyNonNegativeLeaseDuration(target *time.Duration, value string) bool {
+	if value == "" {
+		return false
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
+		return false
+	}
+	*target = parsed
+	return true
+}
+
 // appleVMEnv reads a CRABBOX_APPLE_VM_* variable, falling back to the
 // deprecated CRABBOX_APPLE_VZ_* spelling from before the provider rename.
 func appleVMEnv(name string) string {
@@ -8271,7 +8294,9 @@ func applyEnv(cfg *Config) error {
 		applyLeaseDuration(&cfg.GitHubCodespaces.IdleTimeout, idleTimeout)
 	}
 	if retentionPeriod := os.Getenv("CRABBOX_GITHUB_CODESPACES_RETENTION_PERIOD"); retentionPeriod != "" {
-		applyLeaseDuration(&cfg.GitHubCodespaces.RetentionPeriod, retentionPeriod)
+		if applyNonNegativeLeaseDuration(&cfg.GitHubCodespaces.RetentionPeriod, retentionPeriod) {
+			MarkGitHubCodespacesRetentionExplicit(cfg)
+		}
 	}
 	if value, ok := getenvBool("CRABBOX_GITHUB_CODESPACES_DELETE_ON_RELEASE"); ok {
 		cfg.GitHubCodespaces.DeleteOnRelease = value

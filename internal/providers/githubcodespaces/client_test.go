@@ -67,6 +67,30 @@ func TestClientCreateCodespaceRequestShape(t *testing.T) {
 	}
 }
 
+func TestClientCreateCodespaceIncludesExplicitZeroRetention(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":7,"name":"codespace-1"}`))
+	}))
+	defer server.Close()
+
+	c := newClient(GitHubCodespacesConfig{APIURL: server.URL}, Runtime{HTTP: server.Client()}, "redacted")
+	if _, err := c.createCodespace(context.Background(), createCodespaceRequest{
+		Repo:            "example-org/my-app",
+		RetentionPeriod: 0,
+		RetentionSet:    true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := gotBody["retention_period_minutes"]; !ok || value.(float64) != 0 {
+		t.Fatalf("body=%#v", gotBody)
+	}
+}
+
 func TestClientCurrentUserUsesConfiguredAPIBase(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v3/user" || r.Header.Get("Authorization") != "Bearer ghp_this_token_value_is_redacted" {

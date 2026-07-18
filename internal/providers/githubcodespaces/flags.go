@@ -62,6 +62,8 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 	}
 	if flagWasSet(fs, "github-codespaces-machine") {
 		cfg.GitHubCodespaces.Machine = *v.Machine
+		cfg.ServerType = strings.TrimSpace(*v.Machine)
+		cfg.ServerTypeExplicit = true
 	}
 	if flagWasSet(fs, "github-codespaces-devcontainer-path") {
 		cfg.GitHubCodespaces.DevcontainerPath = *v.Devcontainer
@@ -77,6 +79,7 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 	}
 	if flagWasSet(fs, "github-codespaces-retention-period") {
 		cfg.GitHubCodespaces.RetentionPeriod = *v.RetentionPeriod
+		markRetentionPeriodExplicit(cfg)
 	}
 	if flagWasSet(fs, "github-codespaces-delete-on-release") {
 		cfg.GitHubCodespaces.DeleteOnRelease = *v.DeleteOnRelease

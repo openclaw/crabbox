@@ -187,6 +187,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		Geo:              strings.TrimSpace(b.cfg.GitHubCodespaces.Geo),
 		IdleTimeout:      b.githubIdleTimeout(),
 		RetentionPeriod:  b.cfg.GitHubCodespaces.RetentionPeriod,
+		RetentionSet:     retentionPeriodExplicit(b.cfg),
 		DisplayName:      displayName,
 	})
 	if createErr == nil && strings.TrimSpace(created.Name) == "" {

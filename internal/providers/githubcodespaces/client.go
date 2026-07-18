@@ -42,6 +42,7 @@ type createCodespaceRequest struct {
 	Geo              string
 	IdleTimeout      time.Duration
 	RetentionPeriod  time.Duration
+	RetentionSet     bool
 	DisplayName      string
 }
 
@@ -198,7 +199,7 @@ func (c client) createCodespace(ctx context.Context, req createCodespaceRequest)
 	if req.IdleTimeout > 0 {
 		body["idle_timeout_minutes"] = durationMinutesCeil(req.IdleTimeout)
 	}
-	if req.RetentionPeriod > 0 {
+	if req.RetentionPeriod > 0 || req.RetentionSet {
 		body["retention_period_minutes"] = durationMinutesCeil(req.RetentionPeriod)
 	}
 	if req.DisplayName != "" {

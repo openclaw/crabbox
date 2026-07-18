@@ -54,10 +54,11 @@ refuses to manage an unclaimed Codespace by name.
   ```
 
 - Ensure `GH_TOKEN`, `GITHUB_TOKEN`, or the `gh` credential store has a token
-  with access to Codespaces and the selected repository on GitHub.com. Custom
-  enterprise hosts use `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, or the
-  host-specific `gh` credential store; dotcom token variables are stripped from
-  enterprise `gh` commands. For local GitHub.com auth, refresh the missing OAuth
+  with access to Codespaces and the selected repository on GitHub.com or
+  GHE.com. GitHub Enterprise Server hosts use `GH_ENTERPRISE_TOKEN`,
+  `GITHUB_ENTERPRISE_TOKEN`, or the host-specific `gh` credential store; the
+  other token family is stripped from each `gh` command. For local GitHub.com
+  auth, refresh the missing OAuth
   scope before live smoke:
   ```sh
   gh auth refresh -h github.com -s codespace

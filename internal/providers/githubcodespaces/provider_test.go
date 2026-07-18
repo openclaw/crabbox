@@ -164,6 +164,12 @@ func TestApplyFlagsSetsCodespacesConfigAndRejectsClass(t *testing.T) {
 	if !core.DeleteOnReleaseExplicit(cfg, providerName) {
 		t.Fatal("delete-on-release flag not marked explicit")
 	}
+	if cfg.ServerType != "standardLinux32gb" || !cfg.ServerTypeExplicit {
+		t.Fatalf("machine flag did not synchronize generic type: type=%q explicit=%t", cfg.ServerType, cfg.ServerTypeExplicit)
+	}
+	if !core.GitHubCodespacesRetentionExplicit(cfg) {
+		t.Fatal("retention-period flag not marked explicit")
+	}
 
 	typeAliasDefaults := core.Config{
 		GitHubCodespaces: core.GitHubCodespacesConfig{
@@ -202,6 +208,54 @@ func TestApplyFlagsSetsCodespacesConfigAndRejectsClass(t *testing.T) {
 	}
 	if err := ApplyGitHubCodespacesProviderFlags(&cfg, reject, rejectValues); err == nil || !strings.Contains(err.Error(), "--class is not supported") {
 		t.Fatalf("class err=%v", err)
+	}
+}
+
+func TestProviderSpecificMachineFlagOverridesExplicitGenericType(t *testing.T) {
+	defaults := core.Config{GitHubCodespaces: core.GitHubCodespacesConfig{GHPath: defaultGHPath, Machine: defaultCodespaceMachine}}
+	cfg := defaults
+	cfg.Provider = providerName
+	cfg.TargetOS = targetLinux
+	cfg.ServerType = "stale-explicit-type"
+	cfg.ServerTypeExplicit = true
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterGitHubCodespacesProviderFlags(fs, defaults)
+	fs.String("class", "", "")
+	fs.String("type", "", "")
+	if err := fs.Parse([]string{"--github-codespaces-machine", "premiumLinux"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyGitHubCodespacesProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Provider{}).ApplyConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerType != "premiumLinux" || cfg.GitHubCodespaces.Machine != "premiumLinux" || (Provider{}).ServerTypeForConfig(cfg) != "premiumLinux" {
+		t.Fatalf("provider machine did not win: type=%q machine=%q effective=%q", cfg.ServerType, cfg.GitHubCodespaces.Machine, (Provider{}).ServerTypeForConfig(cfg))
+	}
+}
+
+func TestExplicitZeroRetentionSurvivesProviderDefaults(t *testing.T) {
+	defaults := core.Config{GitHubCodespaces: core.GitHubCodespacesConfig{GHPath: defaultGHPath, RetentionPeriod: 7 * 24 * time.Hour}}
+	cfg := defaults
+	cfg.Provider = providerName
+	cfg.TargetOS = targetLinux
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterGitHubCodespacesProviderFlags(fs, defaults)
+	fs.String("class", "", "")
+	fs.String("type", "", "")
+	if err := fs.Parse([]string{"--github-codespaces-retention-period", "0s"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyGitHubCodespacesProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Provider{}).ApplyConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.RetentionPeriod != 0 || !core.GitHubCodespacesRetentionExplicit(cfg) {
+		t.Fatalf("retention=%s explicit=%t", cfg.GitHubCodespaces.RetentionPeriod, core.GitHubCodespacesRetentionExplicit(cfg))
 	}
 }
 

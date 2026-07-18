@@ -792,6 +792,9 @@ func TestGitHubCodespacesConfigDefaultsFileEnvAndShow(t *testing.T) {
 	if !DeleteOnReleaseExplicit(cfg, "github-codespaces") {
 		t.Fatal("file githubCodespaces delete-on-release not marked explicit")
 	}
+	if !GitHubCodespacesRetentionExplicit(cfg) {
+		t.Fatal("file githubCodespaces retention period not marked explicit")
+	}
 
 	t.Setenv("CRABBOX_GITHUB_CODESPACES_API_URL", "https://api.env.example")
 	t.Setenv("CRABBOX_GITHUB_CODESPACES_GH_PATH", "/usr/local/bin/gh")
@@ -825,6 +828,9 @@ func TestGitHubCodespacesConfigDefaultsFileEnvAndShow(t *testing.T) {
 	if !DeleteOnReleaseExplicit(cfg, "github-codespaces") {
 		t.Fatal("env githubCodespaces delete-on-release not marked explicit")
 	}
+	if !GitHubCodespacesRetentionExplicit(cfg) {
+		t.Fatal("env githubCodespaces retention period not marked explicit")
+	}
 
 	view := configShowView(cfg)["githubCodespaces"].(map[string]any)
 	if view["auth"] != "gh" {
@@ -832,6 +838,31 @@ func TestGitHubCodespacesConfigDefaultsFileEnvAndShow(t *testing.T) {
 	}
 	if _, ok := view["token"]; ok {
 		t.Fatalf("config show exposed token key: %#v", view)
+	}
+}
+
+func TestGitHubCodespacesConfigAcceptsExplicitZeroRetention(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "github-codespaces",
+		GitHubCodespaces: &fileGitHubCodespacesConfig{
+			RetentionPeriod: "0s",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.RetentionPeriod != 0 || !GitHubCodespacesRetentionExplicit(cfg) {
+		t.Fatalf("file retention=%s explicit=%t", cfg.GitHubCodespaces.RetentionPeriod, GitHubCodespacesRetentionExplicit(cfg))
+	}
+
+	cfg = baseConfig()
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_RETENTION_PERIOD", "0s")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.RetentionPeriod != 0 || !GitHubCodespacesRetentionExplicit(cfg) {
+		t.Fatalf("env retention=%s explicit=%t", cfg.GitHubCodespaces.RetentionPeriod, GitHubCodespacesRetentionExplicit(cfg))
 	}
 }
 
