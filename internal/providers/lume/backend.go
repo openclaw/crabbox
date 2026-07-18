@@ -433,6 +433,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 		return DoctorResult{}, err
 	}
 	baseState := "missing"
+	baseOS := ""
 	claims, err := providerClaims()
 	if err != nil {
 		return DoctorResult{}, err
@@ -441,6 +442,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	for _, inst := range instances {
 		if inst.Name == cfg.Lume.Base {
 			baseState = normalizedState(inst.Status)
+			baseOS = strings.TrimSpace(inst.OS)
 		}
 		if inst.Name != cfg.Lume.Base && claims[inst.Name].LeaseID != "" {
 			leases++
@@ -451,6 +453,9 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	}
 	if baseState != "stopped" {
 		return DoctorResult{}, exit(2, "Lume base VM %q must be stopped, found %s", cfg.Lume.Base, baseState)
+	}
+	if !strings.EqualFold(baseOS, targetMacOS) {
+		return DoctorResult{}, exit(2, "Lume base VM %q must run macOS, found %s", cfg.Lume.Base, blank(baseOS, "unknown"))
 	}
 	probe := "unchecked"
 	if req.ProbeSSH {
@@ -1749,10 +1754,8 @@ func shouldCleanup(server Server, claim core.LeaseClaim, now time.Time) (bool, s
 	if !instanceRunning(server.Status) {
 		return true, "instance stopped"
 	}
-	if normalizedState(server.Labels["state"]) == "ready" {
-		if cleanup, reason := core.ShouldCleanupServer(server, now); cleanup {
-			return true, reason
-		}
+	if cleanup, reason := core.ShouldCleanupServer(server, now); cleanup {
+		return true, reason
 	}
 	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
 	if err != nil || lastUsed.IsZero() {
