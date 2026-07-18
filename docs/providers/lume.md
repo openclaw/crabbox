@@ -1,40 +1,36 @@
 # Lume Provider
 
-Lume provides local ARM64 macOS SSH leases. Crabbox clones a stopped base VM,
-runs over SSH, then stops and deletes the clone. It needs Apple silicon and the
-`lume` CLI, but no coordinator, cloud account, or cloud credentials. Crabbox
-serializes acquisition and rejects a third active macOS guest.
+Lume provides macOS SSH leases on Apple silicon with the `lume` CLI and no cloud
+account. Crabbox rejects a third guest.
 
 ## Golden image
 
-The configured base must be stopped. Its `lume` account (or `lume.user`) needs
-Remote Login, workload tools, and the bundled first-boot hook:
+The stopped base needs the `lume` account (or configured `lume.user`) with
+Remote Login, workload tools, and this first-boot hook:
 
 ```sh
 scripts/install-macos-lume-image-hooks.sh
 ```
 
-The hook blocks SSH until it installs the lease key, disables alternate
-authentication, rotates host keys, and returns the ED25519 key and platform
-identity through a private challenge-bound share. Crabbox pins that key before
-network SSH. Keep credentials and personal keychains out of the base.
+The hook installs the lease key, disables alternate authentication, rotates host
+keys, and returns authenticated identity before network SSH. Keep credentials
+and keychains out of the base.
 
 ## Configuration
 
-| Flag | Default | Description |
+| Flag | Default | Selects |
 | --- | --- | --- |
-| `--lume-cli` | `lume` | Lume CLI path |
+| `--lume-cli` | `lume` | CLI executable |
 | `--lume-base` | `crabbox-macos-golden` | Stopped base VM |
-| `--lume-storage` | home storage | Persistent storage name |
+| `--lume-storage` | home | Persistent storage |
 | `--lume-user` | `lume` | Prepared SSH account |
 | `--lume-work-root` | `/Users/lume/crabbox` | Guest work root |
 
-Use trusted user config, `CRABBOX_LUME_*` variables, or flags. Repository config
-cannot select the host, base, storage, or bootstrap user. Paths and `ephemeral`
-are existing-lease-only.
+Use trusted user config, `CRABBOX_LUME_*`, or flags. Repository config cannot
+select host, base, storage, or bootstrap user; paths and `ephemeral` are
+existing-lease-only.
 
 ## Lifecycle
 
-Clone and start headless under an identity-fenced owner; authenticate first
-boot and pin its key; use normal Crabbox SSH sync/execution; then run guarded
-cleanup, stop, delete the exact claimed VM, and confirm absence.
+Clone and start headless; authenticate and pin SSH; run; then guarded-clean,
+stop, delete the exact claimed VM, and confirm absence.

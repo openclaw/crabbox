@@ -584,6 +584,9 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 	writeLumeVMConfig(t, home, name, originalMachineID)
 	vmExists := true
 	vmRunning := false
+	vmJSON := func() string {
+		return fmt.Sprintf(`[{"name":"crabbox-release-1234","os":"macOS","status":%q,"locationName":"home"}]`, map[bool]string{false: "stopped", true: "running"}[vmRunning])
+	}
 	runner := &recordingRunner{}
 	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) == 0 {
@@ -592,20 +595,12 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 		switch req.Args[0] {
 		case "ls":
 			if vmExists {
-				status := "stopped"
-				if vmRunning {
-					status = "running"
-				}
-				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":"crabbox-release-1234","os":"macOS","status":%q,"locationName":"home"}]`, status)}, nil, true
+				return core.LocalCommandResult{Stdout: vmJSON()}, nil, true
 			}
 			return core.LocalCommandResult{Stdout: `[]`}, nil, true
 		case "get":
 			if vmExists {
-				status := "stopped"
-				if vmRunning {
-					status = "running"
-				}
-				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":"crabbox-release-1234","os":"macOS","status":%q,"locationName":"home"}]`, status)}, nil, true
+				return core.LocalCommandResult{Stdout: vmJSON()}, nil, true
 			}
 			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: crabbox-release-1234"}, errors.New("exit status 1"), true
 		case "stop":
