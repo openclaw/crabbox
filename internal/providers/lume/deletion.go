@@ -34,12 +34,30 @@ func deleteClaimedVMDirectory(cfg Config, name, expectedID string) error {
 	if err != nil || !dirInfo.IsDir() {
 		return exit(5, "inspect Lume VM %s: %v", name, err)
 	}
+	resizeGuard, err := os.OpenFile(filepath.Join(root, "."+name+".resize.guard"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return exit(5, "open Lume resize guard %s: %v", name, err)
+	}
+	defer resizeGuard.Close()
+	locked, err := tryExclusiveFileLock(resizeGuard)
+	if err != nil {
+		return exit(5, "lock Lume resize guard %s: %v", name, err)
+	}
+	if !locked {
+		return exit(5, "refusing to delete Lume VM %s during disk resize", name)
+	}
+	defer unlockFile(resizeGuard)
+	if _, err := os.Lstat(filepath.Join(vmPath, "resize.lock.json")); err == nil {
+		return exit(5, "refusing to delete Lume VM %s with pending disk resize", name)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return exit(5, "inspect Lume resize state %s: %v", name, err)
+	}
 	config, err := os.Open(filepath.Join(vmPath, "config.json"))
 	if err != nil {
 		return exit(5, "open Lume identity %s: %v", name, err)
 	}
 	defer config.Close()
-	locked, err := tryExclusiveFileLock(config)
+	locked, err = tryExclusiveFileLock(config)
 	if err != nil {
 		return exit(5, "lock Lume VM %s: %v", name, err)
 	}

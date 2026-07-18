@@ -22,4 +22,10 @@ func TestConfigShowIncludesLume(t *testing.T) {
 	if !strings.Contains(text.String(), "lume cli=/opt/homebrew/bin/lume base=macos-golden storage=fast user=builder work_root=/Users/builder/work") {
 		t.Fatalf("config show missing Lume settings: %q", text.String())
 	}
+	text.Reset()
+	cfg.Lume.Storage = ""
+	writeConfigShowText(&text, cfg)
+	if !strings.Contains(text.String(), "storage=default") {
+		t.Fatalf("config show invented default Lume storage: %q", text.String())
+	}
 }

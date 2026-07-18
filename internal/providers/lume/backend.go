@@ -1201,7 +1201,7 @@ func (b *backend) listClaimedInstancesAtStoragePath(ctx context.Context, cfg Con
 
 func isDirectStoragePath(storage string) bool {
 	storage = strings.TrimSpace(storage)
-	return storage == "ephemeral" || strings.ContainsAny(storage, `/\\`)
+	return strings.ContainsAny(storage, `/\\`)
 }
 
 func requireDirectStorageAvailable(cfg Config) error {

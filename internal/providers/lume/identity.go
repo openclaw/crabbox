@@ -70,9 +70,6 @@ func lumeStorageRoot(cfg Config, reportedLocation string) (string, error) {
 	if storage == "" {
 		storage = strings.TrimSpace(reportedLocation)
 	}
-	if storage == "ephemeral" {
-		return filepath.Clean(os.TempDir()), nil
-	}
 	if strings.ContainsAny(storage, `/\\`) {
 		return filepath.Clean(expandLumePath(storage)), nil
 	}

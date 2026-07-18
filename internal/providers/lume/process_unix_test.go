@@ -3,13 +3,11 @@
 package lume
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -20,19 +18,25 @@ import (
 
 func fakeLumeOwner(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "fake-lume")
+	path := join(t.TempDir(), "fake-lume")
 	mustNoError(t, os.WriteFile(path, []byte("#!/bin/sh\ntrap 'exit 0' INT TERM HUP\nwhile :; do sleep 0.1 & wait $!; done\n"), 0o700))
 	return path
 }
 
+func newOwnerBackend(t *testing.T, runner *fakeRunner) *backend {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	if runner == nil {
+		runner = &fakeRunner{}
+	}
+	cfg := base()
+	cfg.Provider, cfg.Lume.CLIPath = providerName, fakeLumeOwner(t)
+	return newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+}
+
 func TestStartVMReapsOwnerWhenPersistenceCallbackFails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Lume.CLIPath = fakeLumeOwner(t)
-	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &fakeRunner{}}).(*backend)
-	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-owner-callback-failure", bootstrapTrust{}, "", func(lumeRunOwner) error {
+	b := newOwnerBackend(t, nil)
+	owner, err := b.startVM(bg, b.configForRun(), "crabbox-owner-callback-failure", bootstrapTrust{}, "", func(lumeRunOwner) error {
 		return errors.New("claim write failed")
 	})
 	if err == nil || !strings.Contains(err.Error(), "persist owner identity") {
@@ -48,15 +52,10 @@ func TestStartVMReapsOwnerWhenPersistenceCallbackFails(t *testing.T) {
 }
 
 func TestStartVMDetachesOwnerAndKeepsPrivateLog(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Lume.CLIPath = fakeLumeOwner(t)
-	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &fakeRunner{}}).(*backend)
+	b := newOwnerBackend(t, nil)
 	b.startupObserveTimeout = 25 * time.Millisecond
 	callbackOwner := lumeRunOwner{}
-	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-test-owner", bootstrapTrust{}, "", func(started lumeRunOwner) error {
+	owner, err := b.startVM(bg, b.configForRun(), "crabbox-test-owner", bootstrapTrust{}, "", func(started lumeRunOwner) error {
 		callbackOwner = started
 		if !ownerProcessMatches(started) {
 			t.Fatalf("owner was not live when persistence callback ran: %#v", started)
@@ -91,7 +90,7 @@ func TestStartVMDetachesOwnerAndKeepsPrivateLog(t *testing.T) {
 func TestRecoverPendingLaunchOwnerMatchesHandoffMarker(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
 	token, err := newLaunchToken()
 	mustNoError(t, err)
 	handoff, err := prepareLaunchHandoff(token)
@@ -104,7 +103,7 @@ func TestRecoverPendingLaunchOwnerMatchesHandoffMarker(t *testing.T) {
 		_ = os.RemoveAll(handoff.Dir)
 	})
 	mustNoError(t, os.WriteFile(handoff.OwnerPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600))
-	claim := core.LeaseClaim{LeaseID: "cbx_pending_live", Labels: map[string]string{
+	claim := claim{LeaseID: "cbx_pending_live", Labels: labels{
 		"run_owner_expected": "true",
 		"run_owner_pending":  "true",
 		"run_launch_token":   token,
@@ -117,26 +116,21 @@ func TestRecoverPendingLaunchOwnerMatchesHandoffMarker(t *testing.T) {
 }
 
 func TestStopVMInterruptsTheIdentityFencedRunOwner(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Lume.CLIPath = fakeLumeOwner(t)
-	runner := &fakeRunner{responses: map[string]cmdResult{
+	runner := &fakeRunner{responses: results{
 		"get": {Stdout: `[{"name":"crabbox-stop-owner","status":"stopped"}]`},
 	}}
-	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	b := newOwnerBackend(t, runner)
 	b.startupObserveTimeout = 25 * time.Millisecond
 	b.stopObserveTimeout = 3 * time.Second
 	b.stopPollInterval = 10 * time.Millisecond
-	owner, err := b.startVM(context.Background(), b.configForRun(), "crabbox-stop-owner", bootstrapTrust{}, "")
+	owner, err := b.startVM(bg, b.configForRun(), "crabbox-stop-owner", bootstrapTrust{}, "")
 	mustNoError(t, err)
 	t.Cleanup(func() {
 		if process, findErr := os.FindProcess(owner.PID); findErr == nil {
 			_ = process.Signal(os.Interrupt)
 		}
 	})
-	mustNoError(t, b.stopVM(context.Background(), b.configForRun(), "crabbox-stop-owner", owner))
+	mustNoError(t, b.stopVM(bg, b.configForRun(), "crabbox-stop-owner", owner))
 	if ownerProcessMatches(owner) {
 		t.Fatalf("identity-fenced owner pid %d survived stop", owner.PID)
 	}

@@ -8,30 +8,55 @@ import (
 	"testing"
 )
 
-func TestQuarantineDeletePreservesRacedReplacement(t *testing.T) {
+func newDeleteFence(t *testing.T, name, machineID string) (string, os.FileInfo, *os.File, os.FileInfo, string) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	const name = "crabbox-delete-race"
-	writeLumeVMConfig(t, home, name, "b3JpZ2luYWw=")
-	vmPath := filepath.Join(home, ".lume", name)
-	dir, err := os.Open(vmPath)
+	t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
+	writeLumeVMConfig(t, home, name, machineID)
+	path := join(home, ".lume", name)
+	dir, err := os.Open(path)
 	mustNoError(t, err)
-	defer dir.Close()
-	originalInfo, err := dir.Stat()
+	t.Cleanup(func() { _ = dir.Close() })
+	dirInfo, err := dir.Stat()
 	mustNoError(t, err)
-	config, err := os.Open(filepath.Join(vmPath, "config.json"))
+	config, err := os.Open(join(path, "config.json"))
 	mustNoError(t, err)
-	defer config.Close()
+	t.Cleanup(func() { _ = config.Close() })
 	configInfo, err := config.Stat()
 	mustNoError(t, err)
-	expectedID, err := lumeVMImmutableIDAtPath(vmPath, name)
+	id, err := lumeVMImmutableIDAtPath(path, name)
 	mustNoError(t, err)
+	return path, dirInfo, config, configInfo, id
+}
+
+func TestDeleteRespectsLumeResizeTransactions(t *testing.T) {
+	const name = "crabbox-resize-fence"
+	path, _, _, _, id := newDeleteFence(t, name, "cmVzaXplLWZlbmNl")
+	guard, err := os.OpenFile(join(filepath.Dir(path), "."+name+".resize.guard"), os.O_CREATE|os.O_RDWR, 0o600)
+	mustNoError(t, err)
+	locked, err := tryExclusiveFileLock(guard)
+	if err != nil || !locked {
+		t.Fatalf("lock resize guard=%v err=%v", locked, err)
+	}
+	want(t, deleteClaimedVMDirectory(base(), name, id), "during disk resize")
+	mustNoError(t, unlockFile(guard))
+	mustNoError(t, guard.Close())
+	mustNoError(t, os.WriteFile(join(path, "resize.lock.json"), []byte(`{}`), 0o600))
+	want(t, deleteClaimedVMDirectory(base(), name, id), "pending disk resize")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("resize-fenced VM was lost: %v", err)
+	}
+}
+
+func TestQuarantineDeletePreservesRacedReplacement(t *testing.T) {
+	const name = "crabbox-delete-race"
+	vmPath, originalInfo, config, configInfo, expectedID := newDeleteFence(t, name, "b3JpZ2luYWw=")
 	originalPath := vmPath + "-moved"
 	mustNoError(t, os.Rename(vmPath, originalPath))
-	writeLumeVMConfig(t, home, name, "cmVwbGFjZW1lbnQ=")
+	writeLumeVMConfigAt(t, filepath.Dir(vmPath), name, "cmVwbGFjZW1lbnQ=")
 
-	err = quarantineAndDeleteLumeVM(vmPath, originalInfo, config, configInfo, expectedID, name)
+	err := quarantineAndDeleteLumeVM(vmPath, originalInfo, config, configInfo, expectedID, name)
 	if err == nil || !strings.Contains(err.Error(), "directory changed") {
 		t.Fatalf("raced deletion error=%v", err)
 	}
@@ -46,31 +71,16 @@ func TestQuarantineDeletePreservesRacedReplacement(t *testing.T) {
 }
 
 func TestQuarantineDeleteRestoresPartialFailure(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
 	const name = "crabbox-delete-partial"
-	writeLumeVMConfig(t, home, name, "cGFydGlhbA==")
-	vmPath := filepath.Join(home, ".lume", name)
-	dir, err := os.Open(vmPath)
-	mustNoError(t, err)
-	defer dir.Close()
-	dirInfo, err := dir.Stat()
-	mustNoError(t, err)
-	config, err := os.Open(filepath.Join(vmPath, "config.json"))
-	mustNoError(t, err)
-	defer config.Close()
-	configInfo, err := config.Stat()
-	mustNoError(t, err)
-	expectedID, err := lumeVMImmutableIDAtPath(vmPath, name)
-	mustNoError(t, err)
+	vmPath, dirInfo, config, configInfo, expectedID := newDeleteFence(t, name, "cGFydGlhbA==")
 	oldRemove := removeLumeVMDirectory
 	removeLumeVMDirectory = func(path string) error {
-		mustNoError(t, os.Remove(filepath.Join(path, "config.json")))
+		mustNoError(t, os.Remove(join(path, "config.json")))
 		return errors.New("injected partial failure")
 	}
 	t.Cleanup(func() { removeLumeVMDirectory = oldRemove })
 
-	err = quarantineAndDeleteLumeVM(vmPath, dirInfo, config, configInfo, expectedID, name)
+	err := quarantineAndDeleteLumeVM(vmPath, dirInfo, config, configInfo, expectedID, name)
 	if err == nil || !strings.Contains(err.Error(), "partial Lume delete failed") {
 		t.Fatalf("partial deletion error=%v", err)
 	}
