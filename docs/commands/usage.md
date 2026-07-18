@@ -7,7 +7,7 @@ This page is the command reference for cost visibility. Keep command-specific be
 ```sh
 crabbox usage
 crabbox usage --scope org --org example-org
-crabbox usage --scope user --user alice@example.com --month 2026-05
+crabbox usage --scope user --user github:12345 --month 2026-05
 crabbox usage --scope all --json
 ```
 
@@ -17,7 +17,7 @@ crabbox usage --scope all --json
 
 ```text
 --scope user|org|all   reporting scope (default user)
---user <email>         owner email to report (admin only for other owners)
+--user <owner>         owner identity to report (admin only for other owners)
 --org <name>           organization to report
 --month YYYY-MM        billing month to summarize (default current UTC month)
 --json                 print the raw summary and limits as JSON
@@ -28,7 +28,7 @@ crabbox usage --scope all --json
 ## Scopes and authorization
 
 ```text
-user    a single owner email (default)
+user    a single owner identity (default)
 org     a single organization
 all     the entire fleet
 ```
@@ -40,15 +40,20 @@ The broker decides what you may see based on how you authenticated:
 
 Owner identity for shared bearer-token mode comes from `CRABBOX_OWNER`, then Git author/committer email env (`GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_EMAIL`), then local `git config user.email`. Set `CRABBOX_ORG` to group leases under an organization. Only a verified Cloudflare Access JWT email can supply the bearer-token owner; raw Access identity headers are ignored.
 
+GitHub browser-login owners use the immutable `github:<numeric-id>` value shown
+by `crabbox whoami`; emails and GitHub logins are display information, not owner
+selectors. Shared bearer-token owners may still be email-shaped because that
+deployment controls their stable configured identity.
+
 ## Output
 
 Human output prints one total row, then any non-empty group breakdowns (owners, orgs, providers, server types), then the active limits:
 
 ```text
-usage month=2026-05 scope=user user=alice@example.com org=example-org
+usage month=2026-05 scope=user user=github:12345 org=example-org
 total leases=2 active=0 runtime=12m41s estimated=$0.13 reserved=$4.57
 owners:
-  alice@example.com        leases=2   active=0   runtime=12m41s    estimated=$0.13     reserved=$4.57
+  github:12345             leases=2   active=0   runtime=12m41s    estimated=$0.13     reserved=$4.57
 limits:
   active leases: fleet=off user=off org=off
   monthly usd:   fleet=off user=off org=off

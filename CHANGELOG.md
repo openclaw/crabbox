@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Bound GitHub OAuth callbacks to the initiating browser and bound sessions, durable ownership, and admin grants to immutable GitHub account IDs instead of reassignable emails or logins. Thanks @zozo123.
+- Bound GitHub OAuth callbacks independently to each initiating browser flow and bound sessions, durable ownership, admin grants, and revocations to immutable GitHub account IDs instead of reassignable emails or logins, with a fail-closed operator recovery path for legacy records. Thanks @zozo123.
 - fix(egress): replaced egress sessions can no longer resurrect and clobber their replacement — the coordinator refuses tickets and connects for superseded session IDs, and the host/client daemon exits fatally when replaced.
 - Enforced explicitly declared zero-byte artifact sizes during pull while preserving legacy manifests that omit size.
 - Prevented apple-container orphan cleanup from deleting claims reclaimed during its resource snapshot, including same-value rewrites, while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.

@@ -64,10 +64,13 @@ function setCookies(response: Response): string[] {
   return headers.getSetCookie?.() ?? [headers.get("set-cookie") ?? ""];
 }
 
-function cookiePair(response: Response, name: string): string {
-  const cookie = setCookies(response).find((value) => value.startsWith(`${name}=`));
-  if (!cookie) throw new Error(`missing ${name} cookie`);
-  return cookie.split(";", 1)[0] ?? "";
+function portalBindingCookie(response: Response): { name: string; pair: string } {
+  const cookie = setCookies(response).find((value) =>
+    value.startsWith("__Host-crabbox_oauth_state_"),
+  );
+  if (!cookie) throw new Error("missing portal OAuth binding cookie");
+  const pair = cookie.split(";", 1)[0] ?? "";
+  return { name: pair.split("=", 1)[0] ?? "", pair };
 }
 
 function oauthState(response: Response): string {
@@ -117,11 +120,11 @@ describe("portal OAuth browser binding", () => {
     const response = await startPortalLogin(storage);
 
     expect(response.status).toBe(302);
-    const binding = decodeURIComponent(
-      cookiePair(response, "__Host-crabbox_oauth").split("=", 2)[1] ?? "",
-    );
+    const portalCookie = portalBindingCookie(response);
+    expect(portalCookie.name).toMatch(/^__Host-crabbox_oauth_state_[a-f0-9]{32}$/);
+    const binding = decodeURIComponent(portalCookie.pair.split("=", 2)[1] ?? "");
     expect(binding).toMatch(/^bind_[a-f0-9]{32}$/);
-    const cookie = setCookies(response).find((value) => value.startsWith("__Host-crabbox_oauth="));
+    const cookie = setCookies(response).find((value) => value.startsWith(`${portalCookie.name}=`));
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("Secure");
     expect(cookie).toContain("SameSite=Lax");
@@ -134,46 +137,48 @@ describe("portal OAuth browser binding", () => {
     expect(pending?.portalBindingHash).not.toBe(binding);
   });
 
-  it.each([undefined, "__Host-crabbox_oauth=bind_00000000000000000000000000000000"])(
-    "rejects a callback without the initiating browser binding",
-    async (cookie) => {
-      const storage = new MemoryStorage();
-      const login = await startPortalLogin(storage);
-      const state = oauthState(login);
-      const fetchMock = vi.fn<() => void>(() => {
-        throw new Error("GitHub must not be called before browser binding passes");
-      });
-      vi.stubGlobal("fetch", fetchMock);
+  it.each([
+    ["missing", undefined],
+    ["wrong", "bind_00000000000000000000000000000000"],
+  ])("rejects a callback with a %s browser binding", async (_label, binding) => {
+    const storage = new MemoryStorage();
+    const login = await startPortalLogin(storage);
+    const state = oauthState(login);
+    const portalCookie = portalBindingCookie(login);
+    const cookie = binding ? `${portalCookie.name}=${binding}` : undefined;
+    const fetchMock = vi.fn<() => void>(() => {
+      throw new Error("GitHub must not be called before browser binding passes");
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
-      const response = await githubAuthRoute(
-        new Request(
-          `https://broker.test/v1/auth/github/callback?code=code&state=${encodeURIComponent(state)}`,
-          { headers: cookie ? { cookie } : undefined },
-        ),
-        "callback",
-        testRuntime(storage),
-        env,
-      );
+    const response = await githubAuthRoute(
+      new Request(
+        `https://broker.test/v1/auth/github/callback?code=code&state=${encodeURIComponent(state)}`,
+        { headers: cookie ? { cookie } : undefined },
+      ),
+      "callback",
+      testRuntime(storage),
+      env,
+    );
 
-      expect(response.status).toBe(403);
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(setCookies(response).join("\n")).toContain(
-        "__Host-crabbox_oauth=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
-      );
-      expect((await storage.list({ prefix: "oauth:" })).size).toBe(0);
-    },
-  );
+    expect(response.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(setCookies(response).join("\n")).toContain(
+      `${portalCookie.name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
+    );
+    expect((await storage.list({ prefix: "oauth:" })).size).toBe(0);
+  });
 
   it("accepts the bound browser once and clears the binding cookie", async () => {
     const storage = new MemoryStorage();
     const login = await startPortalLogin(storage);
     const state = oauthState(login);
-    const cookie = cookiePair(login, "__Host-crabbox_oauth");
+    const portalCookie = portalBindingCookie(login);
     const fetchMock = stubSuccessfulGitHubOAuth();
     const callbackURL = `https://broker.test/v1/auth/github/callback?code=code&state=${encodeURIComponent(state)}`;
 
     const response = await githubAuthRoute(
-      new Request(callbackURL, { headers: { cookie } }),
+      new Request(callbackURL, { headers: { cookie: portalCookie.pair } }),
       "callback",
       testRuntime(storage),
       env,
@@ -183,18 +188,97 @@ describe("portal OAuth browser binding", () => {
     expect(response.headers.get("location")).toBe("/portal");
     expect(setCookies(response).join("\n")).toContain("__Host-crabbox_session=");
     expect(setCookies(response).join("\n")).toContain(
-      "__Host-crabbox_oauth=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+      `${portalCookie.name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
     );
     expect((await storage.list({ prefix: "oauth:" })).size).toBe(0);
 
     const calls = fetchMock.mock.calls.length;
     const replay = await githubAuthRoute(
-      new Request(callbackURL, { headers: { cookie } }),
+      new Request(callbackURL, { headers: { cookie: portalCookie.pair } }),
       "callback",
       testRuntime(storage),
       env,
     );
     expect(replay.status).toBe(400);
     expect(fetchMock).toHaveBeenCalledTimes(calls);
+  });
+
+  it("keeps concurrent portal logins independently bound", async () => {
+    const storage = new MemoryStorage();
+    const firstLogin = await startPortalLogin(storage);
+    const secondLogin = await startPortalLogin(storage);
+    const firstCookie = portalBindingCookie(firstLogin);
+    const secondCookie = portalBindingCookie(secondLogin);
+    expect(firstCookie.name).not.toBe(secondCookie.name);
+    const browserCookies = `${firstCookie.pair}; ${secondCookie.pair}`;
+    stubSuccessfulGitHubOAuth();
+
+    const callbacks = await Promise.all(
+      (
+        [
+          [firstLogin, firstCookie, secondCookie],
+          [secondLogin, secondCookie, firstCookie],
+        ] as const
+      ).map(async ([login, cookie, otherCookie]) => ({
+        cookie,
+        otherCookie,
+        response: await githubAuthRoute(
+          new Request(
+            `https://broker.test/v1/auth/github/callback?code=code&state=${encodeURIComponent(oauthState(login))}`,
+            { headers: { cookie: browserCookies } },
+          ),
+          "callback",
+          testRuntime(storage),
+          env,
+        ),
+      })),
+    );
+    for (const { response, cookie, otherCookie } of callbacks) {
+      expect(response.status).toBe(302);
+      const cookies = setCookies(response).join("\n");
+      expect(cookies).toContain(`${cookie.name}=;`);
+      expect(cookies).not.toContain(`${otherCookie.name}=;`);
+    }
+    expect((await storage.list({ prefix: "oauth:" })).size).toBe(0);
+  });
+
+  it("does not clear an unrelated binding for an unknown callback state", async () => {
+    const storage = new MemoryStorage();
+    const login = await startPortalLogin(storage);
+    const portalCookie = portalBindingCookie(login);
+
+    const response = await githubAuthRoute(
+      new Request("https://broker.test/v1/auth/github/callback?code=code&state=unknown", {
+        headers: { cookie: portalCookie.pair },
+      }),
+      "callback",
+      testRuntime(storage),
+      env,
+    );
+
+    expect(response.status).toBe(400);
+    expect(setCookies(response).join("\n")).not.toContain(`${portalCookie.name}=;`);
+    expect((await storage.list({ prefix: "oauth:" })).size).toBeGreaterThan(0);
+  });
+
+  it("fails closed on legacy email revocation configuration", async () => {
+    const storage = new MemoryStorage();
+    const login = await startPortalLogin(storage);
+    stubSuccessfulGitHubOAuth();
+
+    const response = await githubAuthRoute(
+      new Request(
+        `https://broker.test/v1/auth/github/callback?code=code&state=${encodeURIComponent(oauthState(login))}`,
+        { headers: { cookie: portalBindingCookie(login).pair } },
+      ),
+      "callback",
+      testRuntime(storage),
+      { ...env, CRABBOX_GITHUB_REVOKED_USERS: "owner:alice@example.com" },
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.text()).toContain(
+      "Replace email or login selectors with github:&lt;numeric-id&gt;",
+    );
   });
 });

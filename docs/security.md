@@ -94,9 +94,10 @@ by coordinator config:
 - `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` controls successful request-time
   membership caching (default 300, maximum 3600; set 0 to check every request).
 - `CRABBOX_GITHUB_REVOKED_USERS` immediately rejects comma-separated immutable
-  `github:<numeric-id>` owners or GitHub logins. Optional `login:` / `owner:`
-  prefixes disambiguate values. Use this for narrow emergency revocation without
-  rotating every token.
+  `github:<numeric-id>` owners; an optional `owner:` prefix is accepted. Use this
+  for narrow emergency revocation without rotating every token. Email, login,
+  or invalid selectors fail all GitHub auth closed until replaced, so a mutable
+  identity change cannot silently bypass an old revocation.
 - The GitHub account must expose at least one verified email through the OAuth
   `user:email` scope. Email is an eligibility check only; public profile and
   unverified emails are never trusted as the token owner.
@@ -107,9 +108,10 @@ the browser receives a random confirmation through that loopback URL. Polling
 requires both the CLI-held secret and the browser confirmation, so forwarding an
 authorization URL cannot deliver the resulting user token to the sender.
 
-Portal login stores a short-lived, host-only browser-binding cookie and retains
-only its hash with the pending OAuth state. The callback must present that
-binding before code exchange, and terminal outcomes clear it.
+Portal login stores a short-lived, host-only browser-binding cookie scoped by
+OAuth state and retains only its hash with the pending OAuth record. The
+callback must present that exact binding before code exchange, and terminal
+outcomes clear only that flow's cookie, so concurrent logins remain independent.
 
 Unauthenticated CLI and portal login starts share a ten-pending-attempt limit per
 caller source and a 100-attempt global backstop. Admission and storage are serialized,

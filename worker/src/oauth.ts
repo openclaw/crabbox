@@ -6,11 +6,7 @@ import {
 } from "./auth";
 import { legacyPortalSessionCookieName, portalSessionCookieName } from "./cookies";
 import type { CoordinatorRuntime, CoordinatorStorage } from "./coordinator-runtime";
-import {
-  githubUserIsRevoked,
-  GitHubAuthorizationError,
-  requireGitHubLoginMembership,
-} from "./github-membership";
+import { GitHubAuthorizationError, requireGitHubLoginMembership } from "./github-membership";
 import { errorMessage, json, readJson } from "./http";
 import { requestOrgLabel } from "./org-identity";
 import { timingSafeEqual } from "./timing-safe";
@@ -19,7 +15,7 @@ import type { Env, Provider } from "./types";
 const githubAuthorizeURL = "https://github.com/login/oauth/authorize";
 const githubTokenURL = "https://github.com/login/oauth/access_token";
 const githubAPIURL = "https://api.github.com";
-const portalOAuthCookieName = "__Host-crabbox_oauth";
+const portalOAuthCookiePrefix = "__Host-crabbox_oauth_";
 const pendingOAuthTTLSeconds = 10 * 60;
 const maxPendingOAuthLogins = 100;
 const maxPendingOAuthLoginsPerSource = 10;
@@ -114,7 +110,7 @@ export async function githubPortalLogin(
   const headers = legacyPortalSessionCookieHeaders();
   headers.append(
     "set-cookie",
-    sessionCookie(portalOAuthCookieName, portalBinding, pendingOAuthTTLSeconds),
+    sessionCookie(portalOAuthCookieName(pending.state), portalBinding, pendingOAuthTTLSeconds),
   );
   return redirect(
     githubAuthorizeURLFor(clientID, pending.state, pending.redirectURI),
@@ -279,7 +275,6 @@ async function githubAuthCallback(
       "Crabbox login denied",
       "The GitHub OAuth callback did not arrive on the configured public origin.",
       403,
-      clearPortalOAuthCookieHeaders(),
     );
   }
   const code = url.searchParams.get("code") ?? "";
@@ -296,7 +291,7 @@ async function githubAuthCallback(
     return html("Crabbox login unavailable", message, 503, terminalPortalOAuthHeaders(pending));
   }
   if (pending.mode === "portal") {
-    const binding = requestCookie(request, portalOAuthCookieName);
+    const binding = requestCookie(request, portalOAuthCookieName(pending.state));
     const bindingHash = binding ? await sha256Hex(binding) : "";
     if (!pending.portalBindingHash || !timingSafeEqual(bindingHash, pending.portalBindingHash)) {
       await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, pending));
@@ -304,7 +299,7 @@ async function githubAuthCallback(
         "Crabbox login denied",
         "This GitHub login was not started in this browser.",
         403,
-        clearPortalOAuthCookieHeaders(),
+        clearPortalOAuthCookieHeaders(pending),
       );
     }
   }
@@ -333,10 +328,7 @@ async function githubAuthCallback(
     const accessToken = await exchangeGitHubCode(code, pending.redirectURI, env);
     const identity = await githubIdentity(accessToken);
     const requestedOrg = requestOrgLabel(new Request(request.url), env);
-    if (githubUserIsRevoked(identity, env)) {
-      throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
-    }
-    const org = await requireGitHubLoginMembership(accessToken, identity.login, requestedOrg, env);
+    const org = await requireGitHubLoginMembership(accessToken, identity, requestedOrg, env);
     const ttlSeconds = userTokenTTLSeconds(env);
     const tokenInput = {
       owner: identity.owner,
@@ -376,12 +368,12 @@ async function githubAuthCallback(
       browserConfirmationHash: await sha256Hex(browserConfirmation),
     });
     if (!completed) {
-      return expiredOAuthResponse();
+      return expiredOAuthResponse(pending);
     }
     if (completed.mode === "portal") {
       await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, completed));
       const headers = portalSessionCookieHeaders(token, ttlSeconds);
-      headers.append("set-cookie", sessionCookie(portalOAuthCookieName, "", 0));
+      headers.append("set-cookie", sessionCookie(portalOAuthCookieName(completed.state), "", 0));
       return redirect(completed.returnTo || "/portal", 302, headers);
     }
     if (!completed.loopbackRedirectURI) {
@@ -471,12 +463,12 @@ async function finishPendingOAuth(
   });
 }
 
-function expiredOAuthResponse(): Response {
+function expiredOAuthResponse(pending?: OAuthPending): Response {
   return html(
     "Crabbox login expired",
     "The login request expired. Run crabbox login --url <broker-url> again.",
     400,
-    clearPortalOAuthCookieHeaders(),
+    pending ? terminalPortalOAuthHeaders(pending) : undefined,
   );
 }
 
@@ -771,13 +763,17 @@ function legacyPortalSessionCookieHeaders(): Headers {
 }
 
 function terminalPortalOAuthHeaders(pending: OAuthPending): Headers {
-  return pending.mode === "portal" ? clearPortalOAuthCookieHeaders() : new Headers();
+  return pending.mode === "portal" ? clearPortalOAuthCookieHeaders(pending) : new Headers();
 }
 
-function clearPortalOAuthCookieHeaders(): Headers {
+function clearPortalOAuthCookieHeaders(pending: OAuthPending): Headers {
   const headers = new Headers();
-  headers.append("set-cookie", sessionCookie(portalOAuthCookieName, "", 0));
+  headers.append("set-cookie", sessionCookie(portalOAuthCookieName(pending.state), "", 0));
   return headers;
+}
+
+function portalOAuthCookieName(state: string): string {
+  return `${portalOAuthCookiePrefix}${state}`;
 }
 
 function requestCookie(request: Request, name: string): string | undefined {

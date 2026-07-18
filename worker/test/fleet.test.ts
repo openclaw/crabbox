@@ -926,7 +926,7 @@ describe("runtime adapter relay", () => {
   it("revalidates active GitHub-admin backend agents against the user grant", async () => {
     const env = {
       CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner,
-      CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
+      CRABBOX_GITHUB_REVOKED_USERS: "github:12345",
     } as Env;
     const currentGrantVersion = await adminGrantVersion(env);
     const grant = {
@@ -978,7 +978,7 @@ describe("runtime adapter relay", () => {
     const env = {
       CRABBOX_SESSION_SECRET: "session-secret",
       CRABBOX_DEFAULT_ORG: "example-org",
-      CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
+      CRABBOX_GITHUB_REVOKED_USERS: "github:12345",
     } as Env;
     const token = await issueUserToken(env, {
       owner: testGitHubOwner,
@@ -2062,7 +2062,7 @@ describe("runtime adapter relay", () => {
     const env = {
       CRABBOX_DEFAULT_ORG: "example-org",
       CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner,
-      CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
+      CRABBOX_GITHUB_REVOKED_USERS: "github:12345",
     } as Env;
     const currentGrantVersion = await adminGrantVersion(env);
     const grant = {
@@ -20160,7 +20160,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    (fleet as unknown as { env: Env }).env.CRABBOX_GITHUB_REVOKED_USERS = "login:alice";
+    (fleet as unknown as { env: Env }).env.CRABBOX_GITHUB_REVOKED_USERS = "github:12345";
     const githubFetch = vi.fn<() => Promise<Response>>(async () => {
       throw new Error("emergency revocation must fail before GitHub API access");
     });
@@ -27061,9 +27061,12 @@ describe("fleet identity", () => {
       expect(callback.status).toBe(302);
       return cookiePairFromResponse(callback, "__Host-crabbox_session");
     };
-    const throughCoordinator = async (token: string): Promise<Response> =>
+    const throughCoordinator = async (
+      token: string,
+      leaseID = "cbx_000000000001",
+    ): Promise<Response> =>
       await routeCoordinatorRequest(
-        new Request("https://crabbox.test/v1/leases/cbx_000000000001", {
+        new Request(`https://crabbox.test/v1/leases/${leaseID}`, {
           headers: { authorization: `Bearer ${token}` },
         }),
         env,
@@ -27083,11 +27086,30 @@ describe("fleet identity", () => {
       }),
     );
     expect((await throughCoordinator(originalToken)).status).toBe(200);
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        owner: "reassigned@example.com",
+        org: "openclaw",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
 
     const reassignedCookie = await login(67890);
     const reassignedToken = decodeURIComponent(reassignedCookie.split("=", 2)[1] ?? "");
     expect(decodeUserTokenPayload(reassignedToken).owner).toBe("github:67890");
     expect((await throughCoordinator(reassignedToken)).status).toBe(404);
+    expect((await throughCoordinator(reassignedToken, "cbx_000000000002")).status).toBe(404);
+
+    const recovered = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_000000000002/share", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { users: { "github:67890": "manage" } },
+      }),
+    );
+    expect(recovered.status).toBe(200);
+    expect((await throughCoordinator(reassignedToken, "cbx_000000000002")).status).toBe(200);
   });
 
   it.each([
@@ -27984,7 +28006,7 @@ function setCookieHeaders(response: Response): string[] {
 
 function portalOAuthCookieFromLogin(response: Response): string {
   const cookie = setCookieHeaders(response).find((value) =>
-    value.startsWith("__Host-crabbox_oauth="),
+    value.startsWith("__Host-crabbox_oauth_state_"),
   );
   if (!cookie) {
     throw new Error("missing portal OAuth browser binding cookie");

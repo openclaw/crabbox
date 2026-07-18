@@ -472,7 +472,7 @@ CRABBOX_WINDOWS_MODE               normal|wsl2
 CRABBOX_DESKTOP                    request the desktop capability
 CRABBOX_BROWSER                    request the browser capability
 CRABBOX_NETWORK                    auto|tailscale|public
-CRABBOX_OWNER                      lease owner email
+CRABBOX_OWNER                      stable lease owner for shared-token automation
 CRABBOX_ORG                        owning org
 CRABBOX_PROFILE                    default profile
 CRABBOX_CONFIG                     path to an explicit config file

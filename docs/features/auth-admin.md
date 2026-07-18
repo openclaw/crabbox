@@ -39,9 +39,11 @@ confirm identity or membership. Legacy email-owned sessions are rejected, so
 users must log in again after upgrading the broker with this security fix.
 
 Set `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` to tune the positive cache from 0
-to 3600 seconds. `CRABBOX_GITHUB_REVOKED_USERS` immediately denies listed GitHub
-logins or immutable `github:<numeric-id>` owners; use `login:` or `owner:`
-prefixes when needed.
+to 3600 seconds. `CRABBOX_GITHUB_REVOKED_USERS` immediately denies listed
+immutable `github:<numeric-id>` owners; an optional `owner:` prefix is accepted.
+An email, login, or other invalid selector makes GitHub login and existing
+GitHub sessions fail closed until an operator replaces it. This prevents a
+renamed or reassigned mutable identity from silently escaping an old revocation.
 
 ```sh
 crabbox login --url https://broker.example.com
@@ -57,6 +59,36 @@ GitHub user tokens create and use normal leases by default. The token payload
 can never carry an `admin` claim; deployments may grant admin at request time by
 listing immutable `github:<numeric-id>` values in
 `CRABBOX_GITHUB_ADMIN_OWNERS`.
+
+### Upgrading legacy email-owned resources
+
+The immutable-owner upgrade intentionally does not infer a GitHub account from
+an email address. Before deployment, replace email entries in
+`CRABBOX_GITHUB_REVOKED_USERS` with the affected account's
+`github:<numeric-id>` owner. Replace mutable GitHub admin grants with
+`CRABBOX_GITHUB_ADMIN_OWNERS` entries, and replace email values in
+`CRABBOX_CAPACITY_ADMIN_OWNERS` for GitHub users with their immutable owners.
+Shared-token capacity owners may retain their configured stable service owner.
+GitHub auth remains fail closed while an email or login revocation entry is
+present.
+
+Existing email-owned leases, runs, and explicit shares remain under their
+recorded owner for auditability; a new GitHub login does not inherit them even
+when the account presents the same verified email. For an active lease that a
+specific account must recover, an operator should authenticate with the admin
+token, inspect the legacy record, and explicitly grant `manage` access to that
+account's immutable owner:
+
+```sh
+CRABBOX_COORDINATOR_TOKEN="$CRABBOX_COORDINATOR_ADMIN_TOKEN" \
+  crabbox share --id cbx_000000000001 --user github:12345 --role manage
+```
+
+Replace legacy email entries in explicit share lists the same way. If the
+ownership itself must change, create a replacement lease under the new login
+and release the legacy lease after preserving any required artifacts. Do not
+bulk-map email owners to account IDs: a renamed or reassigned address is exactly
+the security boundary this upgrade protects.
 
 ## Shared and admin tokens (automation, operators)
 

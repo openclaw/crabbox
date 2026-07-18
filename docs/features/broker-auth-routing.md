@@ -187,7 +187,7 @@ CRABBOX_GITHUB_CLIENT_SECRET
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional; comma-separated team slugs
 CRABBOX_GITHUB_ADMIN_OWNERS      # optional; comma-separated github:<numeric-id> owners with admin
-CRABBOX_GITHUB_REVOKED_USERS     # optional; comma-separated logins/emails denied immediately
+CRABBOX_GITHUB_REVOKED_USERS     # optional; comma-separated github:<numeric-id> owners denied immediately
 CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS # optional; default 300, range 0-3600
 CRABBOX_SESSION_SECRET           # required for user tokens; must differ from CRABBOX_SHARED_TOKEN
 CRABBOX_USER_TOKEN_TTL_SECONDS   # optional; default 15552000 (180 days), clamped to 1h-365d

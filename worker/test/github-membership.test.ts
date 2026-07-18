@@ -178,8 +178,21 @@ describe("GitHub user-token membership", () => {
     await expect(authenticateRequest(tokenRequest(token), env)).resolves.toBeUndefined();
   });
 
-  it.each([`github:${accountID}`, `owner:github:${accountID}`, "login:alice"])(
+  it.each([`github:${accountID}`, `owner:github:${accountID}`])(
     "applies narrow revocation %s before the GitHub cache",
+    async (revoked) => {
+      const env = testEnv({ CRABBOX_GITHUB_REVOKED_USERS: revoked });
+      const token = await testToken(env);
+      const fetchMock = vi.fn<() => void>();
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(authenticateRequest(tokenRequest(token), env)).resolves.toBeUndefined();
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["alice@example.com", "owner:alice@example.com", "alice", "login:alice", "owner:alice"])(
+    "fails closed on legacy or invalid revocation selector %s",
     async (revoked) => {
       const env = testEnv({ CRABBOX_GITHUB_REVOKED_USERS: revoked });
       const token = await testToken(env);

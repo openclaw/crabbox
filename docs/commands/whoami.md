@@ -24,12 +24,12 @@ is configured it fails with exit code `2` and the message
 ## Human output
 
 ```text
-user=alice@example.com org=example-org auth=github broker=https://broker.example.com
+user=github:12345 org=example-org auth=github broker=https://broker.example.com
 ```
 
 The fields:
 
-- `user` - the resolved owner email, as the coordinator sees it.
+- `user` - the resolved owner identity, as the coordinator sees it.
 - `org` - the organization namespace, when set (empty otherwise).
 - `auth` - the auth mode the coordinator accepted: `github` for signed
   login tokens, `bearer` for shared automation tokens.
@@ -40,7 +40,7 @@ The fields:
 
 ```json
 {
-  "owner": "alice@example.com",
+  "owner": "github:12345",
   "org": "example-org",
   "auth": "github"
 }
@@ -52,8 +52,9 @@ The JSON form is exactly the coordinator's `/v1/whoami` response: `owner`,
 ## How identity is resolved
 
 When you log in through the browser flow, the broker issues a signed user
-token (prefix `cbxu_`) that embeds your verified GitHub email and allowed-org
-membership. For requests carrying that token the coordinator derives
+token (prefix `cbxu_`) that embeds your immutable `github:<numeric-id>` owner and
+allowed-org membership. A verified GitHub email remains an eligibility check,
+not ownership. For requests carrying that token the coordinator derives
 `owner`/`org` from the token itself and reports `auth=github`.
 
 Shared bearer-token automation has no embedded identity, so the broker reads

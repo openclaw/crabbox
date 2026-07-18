@@ -227,7 +227,7 @@ CRABBOX_PUBLIC_URL               # canonical HTTPS coordinator origin
 CRABBOX_SESSION_SECRET            # signs cbxu_ user tokens; required and distinct from CRABBOX_SHARED_TOKEN
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional: restrict to org teams (alias CRABBOX_GITHUB_ALLOWED_TEAM)
-CRABBOX_GITHUB_REVOKED_USERS     # optional: deny listed github:<numeric-id> owners or logins
+CRABBOX_GITHUB_REVOKED_USERS     # optional: deny listed github:<numeric-id> owners; mutable selectors fail closed
 CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS # optional: positive-cache TTL, default 300, max 3600
 ```
 
@@ -627,7 +627,7 @@ Recommended limits for a small installation:
 ```text
 CRABBOX_MAX_ACTIVE_LEASES=2
 CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER=1
-CRABBOX_CAPACITY_ADMIN_OWNERS=alice@example.com,bob@example.com
+CRABBOX_CAPACITY_ADMIN_OWNERS=github:12345,github:67890
 CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN=4
 CRABBOX_MAX_MONTHLY_USD=25
 CRABBOX_MAX_MONTHLY_USD_PER_OWNER=10

@@ -47,23 +47,28 @@ const membershipLoads = new Map<string, Promise<void>>();
 
 export async function requireGitHubLoginMembership(
   accessToken: string,
-  login: string,
+  identity: Pick<GitHubMembershipIdentity, "owner" | "login">,
   requestedOrg: string,
   env: GitHubMembershipEnv,
 ): Promise<string> {
+  requireSafeGitHubRevocationConfig(env);
+  if (githubUserIsRevoked(identity, env)) {
+    throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
+  }
   const allowed = allowedGitHubOrgs(env);
   const requested = requestedOrg.toLowerCase();
   const org = allowed.includes(requested) ? requested : allowed[0];
   if (!org) {
     throw new GitHubAuthorizationError("GitHub login is not configured with an allowed org.");
   }
-  return requireExactGitHubMembership(accessToken, login, org, env);
+  return requireExactGitHubMembership(accessToken, identity.login, org, env);
 }
 
 export async function requireCurrentGitHubMembership(
   identity: GitHubMembershipIdentity,
   env: GitHubMembershipEnv,
 ): Promise<void> {
+  requireSafeGitHubRevocationConfig(env);
   if (githubUserIsRevoked(identity, env)) {
     throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
   }
@@ -98,17 +103,31 @@ export async function requireCurrentGitHubMembership(
   return load;
 }
 
-export function githubUserIsRevoked(
-  identity: Pick<GitHubMembershipIdentity, "owner" | "login">,
+function githubUserIsRevoked(
+  identity: Pick<GitHubMembershipIdentity, "owner">,
   env: Pick<GitHubMembershipEnv, "CRABBOX_GITHUB_REVOKED_USERS">,
 ): boolean {
   const owner = identity.owner.trim().toLowerCase();
-  const login = identity.login.trim().toLowerCase();
   return envList(env.CRABBOX_GITHUB_REVOKED_USERS).some((entry) => {
     if (entry.startsWith("owner:")) return entry.slice("owner:".length) === owner;
-    if (entry.startsWith("login:")) return entry.slice("login:".length) === login;
-    return entry === owner || entry === login;
+    return entry === owner;
   });
+}
+
+function requireSafeGitHubRevocationConfig(
+  env: Pick<GitHubMembershipEnv, "CRABBOX_GITHUB_REVOKED_USERS">,
+): void {
+  const invalid = envList(env.CRABBOX_GITHUB_REVOKED_USERS).find((entry) => {
+    if (githubAccountID(entry) !== undefined) return false;
+    return (
+      !entry.startsWith("owner:") || githubAccountID(entry.slice("owner:".length)) === undefined
+    );
+  });
+  if (invalid) {
+    throw new GitHubAuthorizationError(
+      "CRABBOX_GITHUB_REVOKED_USERS contains a mutable or invalid selector. Replace email or login selectors with github:<numeric-id>.",
+    );
+  }
 }
 
 async function requireExactGitHubAccount(
