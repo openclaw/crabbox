@@ -30,6 +30,46 @@ func TestValidateGatewayURL(t *testing.T) {
 	}
 }
 
+func TestClientHelpers(t *testing.T) {
+	t.Parallel()
+	if got := firstNonEmpty("", "  ", " value ", "later"); got != "value" {
+		t.Fatalf("firstNonEmpty=%q", got)
+	}
+	if !isLoopbackHost("localhost") || !isLoopbackHost("::1") || isLoopbackHost("example.com") {
+		t.Fatal("unexpected loopback classification")
+	}
+	if err := validateEnv(map[string]string{"VALID_1": "x"}); err != nil {
+		t.Fatalf("valid env rejected: %v", err)
+	}
+	if err := validateEnv(map[string]string{"INVALID-NAME": "x"}); err == nil {
+		t.Fatal("expected invalid env rejection")
+	}
+	if !isNotFoundDetail("resource does not exist") || isNotFoundDetail("permission denied") {
+		t.Fatal("unexpected not-found classification")
+	}
+}
+
+func TestRemoteRequestBody(t *testing.T) {
+	t.Parallel()
+	transport := &remoteTransport{cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{
+		AllowEgress: true,
+		Write:       true,
+		Rootfs:      "base",
+		Workdir:     "/default",
+	}}}
+	body := transport.requestBody("box", runOptions{
+		Rootfs:  "override",
+		Workdir: "/work",
+		Env:     map[string]string{"A": "B"},
+	}, map[string]any{"command": "echo ok"})
+	if body["sandboxId"] != "box" || body["executionMode"] != "stateful" || body["allowEgress"] != true || body["write"] != true {
+		t.Fatalf("unexpected base body: %#v", body)
+	}
+	if body["rootfs"] != "override" || body["workdir"] != "/work" || body["cwd"] != "/work" || body["command"] != "echo ok" {
+		t.Fatalf("unexpected optional body: %#v", body)
+	}
+}
+
 func TestRemoteTransportLifecycle(t *testing.T) {
 	t.Parallel()
 	var creates, execs, destroys, writes int
