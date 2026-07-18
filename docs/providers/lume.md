@@ -1,35 +1,21 @@
 # Lume Provider
 
-Lume provides macOS SSH leases on Apple silicon with the `lume` CLI and no cloud
-account.
+Local macOS SSH leases. Needs the `lume` CLI.
 
 ## Golden image
 
-The stopped base needs the configured Lume user with Remote Login and this
-first-boot hook:
+The stopped base needs the Lume user, Remote Login, and
+`scripts/install-macos-lume-image-hooks.sh`.
 
-```sh
-scripts/install-macos-lume-image-hooks.sh
-```
-
-The hook installs the lease key, disables alternate authentication, rotates host
-keys, and authenticates identity before SSH. Keep credentials out of the base.
+It installs the lease key, disables alternate auth, rotates host keys, and
+authenticates before SSH. Keep credentials out of the base.
 
 ## Configuration
 
-| Flag | Default | Selects |
-| --- | --- | --- |
-| `--lume-cli` | `lume` | CLI executable |
-| `--lume-base` | `crabbox-macos-golden` | Stopped base VM |
-| `--lume-storage` | home | Persistent storage |
-| `--lume-user` | `lume` | Prepared SSH account |
-| `--lume-work-root` | `/Users/lume/crabbox` | Guest work root |
+Defaults: CLI `lume`; base `crabbox-macos-golden`; storage Lume default; user
+`lume`; guest work root `/Users/lume/crabbox`. Matching flags use `--lume-*`.
 
-Use trusted config, `CRABBOX_LUME_*`, or flags. Repository config cannot
-select host, base, storage, or bootstrap user; paths and `ephemeral` are
-existing-lease-only.
+Use trusted config, `CRABBOX_LUME_*`, or flags. Repo config cannot select host,
+base, storage, or bootstrap user; paths and `ephemeral` are existing-lease-only.
 
-## Lifecycle
-
-Clone/start headless; pin SSH; run; guarded-clean; stop; delete the claimed VM;
-confirm absence.
+Clone/start headless; pin SSH; run; clean; stop; delete; confirm absence.

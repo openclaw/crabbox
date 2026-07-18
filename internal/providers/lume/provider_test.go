@@ -502,19 +502,18 @@ func TestConfigForClaimPinsLifecycleSettings(t *testing.T) {
 	}
 }
 
-func TestConfigForClaimTreatsHomeAndLegacyUnknownAsDefaultStorage(t *testing.T) {
-	for _, label := range []string{"home", "unknown"} {
+func TestConfigForClaimPreservesExactStorageLocation(t *testing.T) {
+	for _, tc := range []struct{ label, exact, want string }{{"home", "", ""}, {"home", "true", "home"}, {"Home", "", "Home"}, {"unknown", "", ""}} {
 		cfg := core.BaseConfig()
 		cfg.Lume.Storage = "current-storage"
-		got := configForClaim(cfg, core.LeaseClaim{Labels: map[string]string{"storage": label}})
-		if got.Lume.Storage != "" {
-			t.Fatalf("storage label %q resolved to %q, want home storage", label, got.Lume.Storage)
+		claim := core.LeaseClaim{Labels: map[string]string{"storage": tc.label, "storage_exact": tc.exact}}
+		if got := configForClaim(cfg, claim).Lume.Storage; got != tc.want {
+			t.Fatalf("storage label %q exact=%q resolved to %q, want %q", tc.label, tc.exact, got, tc.want)
 		}
 	}
-	cfg := core.BaseConfig()
-	got := configForClaim(cfg, core.LeaseClaim{Labels: map[string]string{"storage": "Home"}})
-	if got.Lume.Storage != "Home" {
-		t.Fatalf("case-sensitive storage location resolved to %q", got.Lume.Storage)
+	labels := (&backend{}).serverFromInstance(lumeVM{LocationName: "home"}, core.LeaseClaim{}, core.BaseConfig()).Labels
+	if labels["storage"] != "home" || labels["storage_exact"] != "true" {
+		t.Fatal(labels)
 	}
 }
 

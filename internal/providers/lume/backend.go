@@ -130,10 +130,10 @@ func configForClaim(cfg Config, claim core.LeaseClaim) Config {
 		cfg.Lume.Base = value
 	}
 	if value, ok := claim.Labels["storage"]; ok {
-		switch strings.TrimSpace(value) {
-		case "", "home", "unknown":
+		value = strings.TrimSpace(value)
+		if value == "" || value == "unknown" || (value == "home" && claim.Labels["storage_exact"] != "true") {
 			cfg.Lume.Storage = ""
-		default:
+		} else {
 			cfg.Lume.Storage = value
 		}
 	}
@@ -220,7 +220,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	labels := directLeaseLabels(cfg, leaseID, slug, req.Keep, time.Now().UTC())
 	labels["instance"] = name
 	labels["base"] = cfg.Lume.Base
-	labels["storage"] = blank(cfg.Lume.Storage, "home")
+	labels["storage"] = strings.TrimSpace(cfg.Lume.Storage)
 	labels["ssh_user"] = cfg.Lume.User
 	labels["ssh_port"] = sshPort
 	labels["work_root"] = cfg.Lume.WorkRoot
@@ -270,15 +270,19 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return cause
 	}
 	if err := b.cloneVM(ctx, cfg, name); err != nil {
-		// A clone error does not prove that Lume created the destination. It may
-		// instead report a destination created concurrently outside Crabbox.
-		// Never delete an unclaimed VM after this ambiguous result.
 		return LeaseTarget{}, errors.Join(exit(5, "Lume clone result for %q is ambiguous; inspect the destination before removing it", name), err)
 	}
 	cloneInst, err := b.getInstance(ctx, cfg, name)
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
+	storage := strings.TrimSpace(firstNonBlank(cloneInst.LocationName, cfg.Lume.Storage))
+	if storage == "" {
+		return LeaseTarget{}, cleanupUnclaimedVM(exit(5, "Lume VM %s did not report its storage location", name))
+	}
+	labels["storage"] = storage
+	labels["storage_exact"] = "true"
+	cfg.Lume.Storage = storage
 	immutableID, err := lumeVMImmutableID(cfg, cloneInst)
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
@@ -986,10 +990,8 @@ func (b *backend) waitForRunningVM(ctx context.Context, cfg Config, name string,
 			return lumeVM{}, exit(2, "Lume VM %s owner exited during startup", name)
 		}
 		inst, err := b.getInstance(ctx, cfg, name)
-		// Lume 0.3.16 computes sshAvailable with `nc -z`, which reports a
-		// false negative on some macOS hosts even when TCP/22 is accepting
-		// connections. The first-boot identity probe below is the authoritative
-		// guest SSH readiness check.
+		// Lume 0.3.16's `nc -z` sshAvailable can be false while TCP/22 works;
+		// the authenticated first-boot probe is authoritative.
 		if err == nil && instanceRunning(inst.Status) && inst.IPAddress != "" {
 			return inst, nil
 		}
@@ -1547,7 +1549,12 @@ func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg Con
 		labels["base"] = cfg.Lume.Base
 	}
 	if labels["storage"] == "" {
-		labels["storage"] = blank(cfg.Lume.Storage, "home")
+		if storage := strings.TrimSpace(inst.LocationName); storage != "" {
+			labels["storage"] = storage
+			labels["storage_exact"] = "true"
+		} else {
+			labels["storage"] = strings.TrimSpace(cfg.Lume.Storage)
+		}
 	}
 	if labels["ssh_user"] == "" {
 		labels["ssh_user"] = cfg.Lume.User
