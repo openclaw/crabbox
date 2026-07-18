@@ -48,6 +48,7 @@ same order as the CLI help.
 - [open](open.md)
 - [ports](ports.md)
 - [cp](cp.md)
+- [tunnel](tunnel.md)
 - [vnc](vnc.md)
 - [webvnc](webvnc.md)
 - [code](code.md)

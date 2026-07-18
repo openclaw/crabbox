@@ -1,0 +1,571 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestSSHTransportConfigParsesWithOpenSSH(t *testing.T) {
+	ssh, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("OpenSSH client is required")
+	}
+	t.Setenv("HOME", t.TempDir())
+	session, err := newSSHTransportSession(t.Context(), SSHTarget{
+		User:         `DOMAIN\alice%id`,
+		Host:         "ssh.example.test",
+		Port:         "2200",
+		ProxyCommand: `provider-proxy --route "blue box" %h %p`,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	cmd := exec.Command(ssh, "-G", "-F", session.configPath, sshTransportHostAlias)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("ssh -G: %v: %s", err, stderr.String())
+	}
+	got := strings.ToLower(stdout.String())
+	for _, line := range []string{
+		"hostname ssh.example.test",
+		`user domain\alice%id`,
+		"port 2200",
+		`proxycommand provider-proxy --route "blue box" %h %p`,
+		"exitonforwardfailure yes",
+		"gatewayports no",
+	} {
+		if !strings.Contains(got, line) {
+			t.Fatalf("ssh -G missing %q:\n%s", line, stdout.String())
+		}
+	}
+}
+
+func TestSSHTransportProxyCommandExecutesAsCommand(t *testing.T) {
+	ssh, err := exec.LookPath("ssh")
+	if err != nil || os.PathSeparator == '\\' {
+		t.Skip("POSIX OpenSSH client is required")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "proxy-ran")
+	proxy := filepath.Join(dir, "proxy")
+	script := "#!/bin/sh\nprintf ran > \"$CRABBOX_TEST_PROXY_MARKER\"\nexit 1\n"
+	if err := os.WriteFile(proxy, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRABBOX_TEST_PROXY_MARKER", marker)
+	session, err := newSSHTransportSession(t.Context(), SSHTarget{
+		User:         "alice",
+		Host:         "ssh.example.test",
+		Port:         "22",
+		ProxyCommand: proxy,
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	cmd := exec.Command(ssh, "-F", session.configPath, sshTransportHostAlias, "exit 0")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("SSH unexpectedly completed through failing proxy fixture")
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "ran" {
+		t.Fatalf("ProxyCommand did not run: data=%q err=%v", got, err)
+	}
+}
+
+func TestSSHTransportSessionKeepsSecretsOutOfProcessArgs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	target := SSHTarget{
+		User:         "token-user-secret",
+		Host:         "ssh.example.test",
+		Port:         "22",
+		AuthSecret:   true,
+		ProxyCommand: "provider proxy --session session-123 %h %p",
+	}
+	session, err := newSSHTransportSession(t.Context(), target, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := session.configPath
+	t.Cleanup(func() { _ = session.Close() })
+
+	copyArgs, err := resolvedSSHCopyArgs(session, target, "./input.txt", "SANDBOX:/tmp/input.txt", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnelArgs := resolvedSSHTunnelArgs(session, "41000", "3000")
+	for _, rendered := range []string{strings.Join(copyArgs, " "), strings.Join(tunnelArgs, " ")} {
+		for _, secret := range []string{"token-user-secret"} {
+			if strings.Contains(rendered, secret) {
+				t.Fatalf("process args leaked %q: %q", secret, rendered)
+			}
+		}
+		if !strings.Contains(rendered, configPath) || !strings.Contains(rendered, sshTransportHostAlias) {
+			t.Fatalf("process args do not use private resolved config: %q", rendered)
+		}
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.Contains(got, `User "token-user-secret"`) || !strings.Contains(got, `ProxyCommand provider proxy --session session-123 %h %p`) {
+		t.Fatalf("private config did not preserve resolved transport: %q", got)
+	}
+	if err := verifySSHTransportPathPrivate(configPath, false); err != nil {
+		t.Fatalf("private config permissions: %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("private config remained after close: %v", err)
+	}
+}
+
+func TestSSHTransportConfigProxyIncludesUserRouting(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX OpenSSH config fixture")
+	}
+	ssh, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("OpenSSH client is required")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.Mkdir(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	userConfig := "Host proxy-alias\n  ProxyJump jump.example.test\n  HostKeyAlias edge%blue\n  LocalForward 127.0.0.1:41001 127.0.0.1:3001\n  RemoteForward 127.0.0.1:41002 127.0.0.1:3002\n  DynamicForward 127.0.0.1:41003\n  RequestTTY force\n  RemoteCommand echo inherited\nMatch originalhost proxy-alias user alice exec \"test %p = 2222\"\n  HostName routed.example.test\n"
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(userConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := SSHTarget{User: "alice", Host: "proxy-alias", Port: "2222", SSHConfigProxy: true}
+	session, err := newSSHTransportSession(t.Context(), target, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	if session.host() != sshTransportHostAlias {
+		t.Fatalf("destination=%q", session.host())
+	}
+	cmd := exec.Command(ssh, "-G", "-F", session.configPath, session.host())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh -G: %v: %s", err, output)
+	}
+	got := strings.ToLower(string(output))
+	for _, line := range []string{"hostname routed.example.test", "hostkeyalias edge%blue", "user alice", "port 2222", "requesttty false"} {
+		if !strings.Contains(got, line) {
+			t.Fatalf("ssh -G missing %q:\n%s", line, output)
+		}
+	}
+	if !strings.Contains(got, "proxycommand ") || !strings.Contains(got, "jump.example.test") || !strings.Contains(got, "jump_config") {
+		t.Fatalf("ssh -G did not preserve the configured jump route:\n%s", output)
+	}
+	jumpConfig, err := os.ReadFile(filepath.Join(session.dir, "jump_config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"ClearAllForwardings yes", "ControlMaster no", "PermitLocalCommand no", "BatchMode yes", filepath.Join(home, ".ssh", "config")} {
+		if !strings.Contains(string(jumpConfig), value) {
+			t.Fatalf("jump config missing %q:\n%s", value, jumpConfig)
+		}
+	}
+	for _, directive := range []string{"localforward ", "remoteforward ", "dynamicforward ", "echo inherited"} {
+		if strings.Contains(got, directive) {
+			t.Fatalf("ssh -G inherited session directive %q:\n%s", directive, output)
+		}
+	}
+}
+
+func TestSSHTransportRouteSeedDoesNotInterpretAliasAsPattern(t *testing.T) {
+	seed, err := renderSSHTransportRouteSeed(SSHTarget{User: "alice", Port: "22"}, "/tmp/user-config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(seed, "Host ") {
+		t.Fatalf("route seed contains Host pattern:\n%s", seed)
+	}
+	for _, value := range []string{`User "alice"`, `Port "22"`, `Include "/tmp/user-config"`} {
+		if !strings.Contains(seed, value) {
+			t.Fatalf("route seed missing %q:\n%s", value, seed)
+		}
+	}
+}
+
+func TestSSHTransportRouteParserLimitsNoneSentinelToProxySettings(t *testing.T) {
+	route := parseSSHTransportConfigRoute("hostname none\nhostkeyalias none\nproxyjump none\nproxycommand none\n", "/private/config")
+	if route.hostName != "none" || route.hostKeyAlias != "none" {
+		t.Fatalf("route=%#v", route)
+	}
+	if route.proxyJump != "" || route.proxyCommand != "" {
+		t.Fatalf("proxy sentinels not cleared: %#v", route)
+	}
+}
+
+func TestSSHTransportRouteProbeKeepsSecretUserOutOfArgs(t *testing.T) {
+	target := SSHTarget{User: "secret-token-user", Host: "proxy-alias", Port: "22", AuthSecret: true}
+	args := sshTransportRouteCommandArgs("/private/seed-config", target, false)
+	if strings.Contains(strings.Join(args, " "), target.User) {
+		t.Fatalf("route probe args leaked secret user: %#v", args)
+	}
+	seed, err := renderSSHTransportRouteSeed(target, "/private/user-config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(seed, `User "secret-token-user"`) {
+		t.Fatalf("private seed missing user: %s", seed)
+	}
+}
+
+func TestSSHTransportRouteProbeMatchesSessionMode(t *testing.T) {
+	target := SSHTarget{Host: "proxy-alias"}
+	execArgs := sshTransportRouteCommandArgs("/private/config", target, false)
+	if got := execArgs[len(execArgs)-1]; got != "rsync --server" {
+		t.Fatalf("exec route command=%q; args=%#v", got, execArgs)
+	}
+	forwardArgs := sshTransportRouteCommandArgs("/private/config", target, true)
+	if !containsString(forwardArgs, "-N") || containsString(forwardArgs, "rsync --server") {
+		t.Fatalf("forward route args=%#v", forwardArgs)
+	}
+	wslArgs := sshTransportRouteCommandArgs("/private/config", SSHTarget{Host: "proxy-alias", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, false)
+	if got := wslArgs[len(wslArgs)-1]; got != "wsl.exe rsync --server" {
+		t.Fatalf("WSL route command=%q; args=%#v", got, wslArgs)
+	}
+}
+
+func TestSSHTransportRouteRejectsUnsafeAliasBeforeMatchExec(t *testing.T) {
+	_, err := resolveSSHTransportConfigRoute(t.Context(), SSHTarget{User: "alice", Host: "[prod]", Port: "22", SSHConfigProxy: true}, false)
+	if err == nil || !strings.Contains(err.Error(), "unsafe for ProxyCommand") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestSSHTransportConfigRejectsEnvironmentExpansionInLiteral(t *testing.T) {
+	_, err := renderSSHTransportConfig(SSHTarget{User: "token-${ID}", Host: "example.test", Port: "22"}, false)
+	if err == nil || !strings.Contains(err.Error(), "environment expansion") {
+		t.Fatalf("err=%v", err)
+	}
+	_, err = renderSSHTransportRouteSeed(SSHTarget{User: "alice", Port: "22"}, `/tmp/${CONFIG}`)
+	if err == nil || !strings.Contains(err.Error(), "environment expansion") {
+		t.Fatalf("seed err=%v", err)
+	}
+}
+
+func TestSSHTransportRoutePreservesOriginalHostAndFDPass(t *testing.T) {
+	target := SSHTarget{User: "alice", Host: "proxy-alias", Port: "22"}
+	config, err := renderSSHTransportConfigWithRoute(target, false, sshTransportConfigRoute{
+		hostName:       "routed.example.test",
+		proxyCommand:   "broker --target %n --host %h --port %p",
+		proxyUseFDPass: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{
+		"HostName \"routed.example.test\"",
+		"ProxyCommand broker --target proxy-alias --host %h --port %p",
+		"ProxyUseFdpass yes",
+	} {
+		if !strings.Contains(config, value) {
+			t.Fatalf("private config missing %q:\n%s", value, config)
+		}
+	}
+}
+
+func TestSSHTransportLiteralFieldsEscapeOnlyTokenDirectives(t *testing.T) {
+	target := SSHTarget{
+		User:            `DOMAIN\user%h`,
+		Host:            "host%p",
+		Port:            "22",
+		Key:             "/tmp/key%n",
+		CertificateFile: "/tmp/cert%r",
+		KnownHostsFile:  "/tmp/known%h",
+	}
+	config, err := renderSSHTransportConfig(target, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{`DOMAIN\user%%h`, "host%%p", "key%%n", "cert%%r", "known%%h"} {
+		if !strings.Contains(config, value) {
+			t.Fatalf("private config did not escape %q:\n%s", value, config)
+		}
+	}
+}
+
+func TestProxyJumpCommandPreservesMultiHopChainAndOwnership(t *testing.T) {
+	got := proxyJumpCommand(sshTransportConfigRoute{
+		proxyJump:      "jump-a,jump-b,jump-c",
+		jumpConfigPath: "/private/jump-config",
+	})
+	for _, value := range []string{"'/private/jump-config'", "'-J' 'jump-a,jump-b'", "'jump-c'", "'ControlMaster=no'", "'PermitLocalCommand=no'", "'BatchMode=yes'"} {
+		if !strings.Contains(got, value) {
+			t.Fatalf("jump command missing %q: %s", value, got)
+		}
+	}
+}
+
+func TestProxyJumpCommandPreservesFinalHopUserAndPort(t *testing.T) {
+	got := proxyJumpCommand(sshTransportConfigRoute{proxyJump: "jump-a,alice@jump.example.test:2222"})
+	for _, value := range []string{"'-J' 'jump-a'", "'-p' '2222'", "'alice@jump.example.test'"} {
+		if !strings.Contains(got, value) {
+			t.Fatalf("jump command missing %q: %s", value, got)
+		}
+	}
+}
+
+func TestProxyJumpCommandExpandsOriginalHost(t *testing.T) {
+	config, err := renderSSHTransportConfigWithRoute(
+		SSHTarget{User: "alice", Host: "original.example.test", Port: "22"},
+		false,
+		sshTransportConfigRoute{proxyJump: "jump-%n"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(config, "jump-original.example.test") || strings.Contains(config, "jump-%n") {
+		t.Fatalf("config did not expand original host:\n%s", config)
+	}
+}
+
+func TestProxyJumpExpansionQuotesResolvedTokensBeforeShell(t *testing.T) {
+	expanded := expandSSHProxyJumpTokens("%r@jump-%n:%p", "[prod]", "routed.example.test", "token-user", "2222")
+	if expanded != "token-user@jump-[prod]:2222" {
+		t.Fatalf("expanded=%q", expanded)
+	}
+}
+
+func TestSSHTransportConfigRejectsUnsafeProxyTokens(t *testing.T) {
+	_, err := renderSSHTransportConfig(SSHTarget{
+		User:         "alice",
+		Host:         "host;touch-pwn",
+		Port:         "22",
+		ProxyCommand: "provider-proxy %n %p",
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "unsafe for ProxyCommand") {
+		t.Fatalf("err=%v", err)
+	}
+	_, err = renderSSHTransportConfig(SSHTarget{
+		User:         "token;touch-pwn",
+		Host:         "example.test",
+		Port:         "22",
+		ProxyCommand: "provider-proxy %r %p",
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "unsafe for ProxyCommand") {
+		t.Fatalf("user err=%v", err)
+	}
+}
+
+func TestRsyncRemoteShellQuotesApostropheForRsyncParser(t *testing.T) {
+	session := &sshTransportSession{configPath: `/tmp/O'Brien/ssh config`}
+	if got, want := session.rsyncRemoteShell(), `'ssh' '-F' '/tmp/O''Brien/ssh config'`; got != want {
+		t.Fatalf("remote shell=%q, want %q", got, want)
+	}
+}
+
+func TestProxyJumpHopArgsPreservesIPv6Port(t *testing.T) {
+	want := []string{"-p", "2222", "alice@2001:db8::1"}
+	if got := proxyJumpHopArgs("alice@[2001:db8::1]:2222"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("args=%#v, want %#v", got, want)
+	}
+}
+
+func TestProxyJumpHopArgsPreservesURI(t *testing.T) {
+	for _, uri := range []string{"ssh://alice@jump.example.test:2222", "ssh://alice@[2001:db8::1]:2222"} {
+		if got := proxyJumpHopArgs(uri); !reflect.DeepEqual(got, []string{uri}) {
+			t.Fatalf("URI %q args=%#v", uri, got)
+		}
+	}
+}
+
+func TestSSHTransportRouteResolutionHonorsCancellation(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX fake SSH helper")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := newSSHTransportSession(ctx, SSHTarget{User: "alice", Host: "proxy-alias", Port: "22", SSHConfigProxy: true}, false)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("route cancellation took %s", elapsed)
+	}
+}
+
+func TestSSHTransportConfigRejectsDirectiveInjection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, err := renderSSHTransportConfig(SSHTarget{User: "alice\nProxyCommand leak", Host: "example.test", Port: "22"}, false)
+	if err == nil || !strings.Contains(err.Error(), "control character") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestWSLSSHTransportTargetUsesProtectedLinuxPaths(t *testing.T) {
+	target := SSHTarget{
+		Key:             `C:\Users\alice\.config\crabbox\id_ed25519`,
+		CertificateFile: `C:\Users\alice\.config\crabbox\id_ed25519-cert.pub`,
+		KnownHostsFile:  `C:\Users\alice\.config\crabbox\known_hosts`,
+		ProxyCommand:    `C:\Tools\provider.exe proxy %h %p`,
+	}
+	got := wslSSHTransportTarget(target, "/tmp/crabbox-private", "/mnt")
+	if got.Key != "/tmp/crabbox-private/identity" || got.CertificateFile != "/tmp/crabbox-private/identity-cert.pub" {
+		t.Fatalf("protected identity paths: %#v", got)
+	}
+	if got.KnownHostsFile != "/mnt/c/Users/alice/.config/crabbox/known_hosts" {
+		t.Fatalf("known hosts path=%q", got.KnownHostsFile)
+	}
+	if got.ProxyCommand != "/mnt/c/Tools/provider.exe proxy %h %p" {
+		t.Fatalf("proxy command=%q", got.ProxyCommand)
+	}
+}
+
+func TestWSLSSHTransportSessionStagesAndRemovesPrivateFiles(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX WSL fixture")
+	}
+	dir := t.TempDir()
+	wsl := filepath.Join(dir, "wsl")
+	if err := os.WriteFile(wsl, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(dir, "identity")
+	certificate := filepath.Join(dir, "identity-cert.pub")
+	knownHosts := filepath.Join(dir, "known_hosts")
+	for path, data := range map[string]string{key: "private-key", certificate: "certificate", knownHosts: "host-key"} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := SSHTarget{
+		User:            "alice",
+		Host:            "example.test",
+		Port:            "22",
+		Key:             key,
+		CertificateFile: certificate,
+		KnownHostsFile:  knownHosts,
+	}
+	session, err := newWSLSSHTransportSession(t.Context(), target, wsl, "/mnt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := session.configPath
+	t.Cleanup(func() { _ = session.Close() })
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(config), `IdentityFile "/tmp/`) || !strings.Contains(string(config), `CertificateFile "/tmp/`) {
+		t.Fatalf("WSL config does not use staged identities: %s", config)
+	}
+	if info, err := os.Stat(configPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("WSL config mode: info=%v err=%v", info, err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("WSL private config remained: %v", err)
+	}
+}
+
+func TestPrivateSSHTransportProbeKeepsSecretsOutOfArgvAndEnvironment(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX fake SSH helper")
+	}
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "capture")
+	sshPath := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\nset -eu\nprintf 'args=%s\\n' \"$*\" > \"$CRABBOX_TEST_SSH_CAPTURE\"\nprintf 'denied=%s\\n' \"${CRABBOX_TEST_DENIED-secret-missing}\" >> \"$CRABBOX_TEST_SSH_CAPTURE\"\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRABBOX_TEST_SSH_CAPTURE", capture)
+	t.Setenv("CRABBOX_TEST_DENIED", "environment-secret")
+	target := SSHTarget{
+		User:             "username-secret",
+		Host:             "example.test",
+		Port:             "22",
+		AuthSecret:       true,
+		ProxyCommand:     "provider proxy --session session-123 %h %p",
+		ChildEnvDenylist: []string{"CRABBOX_TEST_DENIED"},
+	}
+	if !probePrivateSSHTransport(t.Context(), &target, 5*time.Second) {
+		t.Fatal("private SSH transport probe failed")
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, secret := range []string{"username-secret", "environment-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("probe leaked %q: %q", secret, got)
+		}
+	}
+	if !strings.Contains(got, "secret-missing") || !strings.Contains(got, sshTransportHostAlias) {
+		t.Fatalf("probe capture=%q", got)
+	}
+}
+
+func TestPrivateSSHTransportProbeBudgetsEachFallbackPort(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX fake SSH helper")
+	}
+	dir := t.TempDir()
+	attempts := filepath.Join(dir, "attempts")
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+set -eu
+config=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-F" ]; then config="$2"; shift 2; else shift; fi
+done
+port=$(awk '$1 == "Port" {gsub(/"/, "", $2); print $2; exit}' "$config")
+printf '%s\n' "$port" >> "$CRABBOX_TEST_SSH_ATTEMPTS"
+if [ "$port" = "2201" ]; then exec sleep 2; fi
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRABBOX_TEST_SSH_ATTEMPTS", attempts)
+	target := SSHTarget{User: "alice", Host: "example.test", Port: "2201", FallbackPorts: []string{"2202"}}
+	if !probePrivateSSHTransport(t.Context(), &target, 500*time.Millisecond) {
+		t.Fatal("fallback SSH transport probe failed")
+	}
+	if target.Port != "2202" {
+		t.Fatalf("selected port=%q", target.Port)
+	}
+	data, err := os.ReadFile(attempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Fields(string(data)); len(got) != 2 || got[0] != "2201" || got[1] != "2202" {
+		t.Fatalf("probe attempts=%q", data)
+	}
+}

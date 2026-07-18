@@ -49,6 +49,7 @@ live in the [Command Reference](../commands/README.md).
 - [Prebaked runner images](prebaked-images.md): image storage and the image/cache/state boundary.
 - [Image bake runbook](image-bake-runbook.md): exact bake, candidate smoke, promotion, rollback, and cleanup flow.
 - [SSH keys](ssh-keys.md): per-lease keys, cleanup, and local storage.
+- [SSH lease transport](ssh-transport.md): native-or-rsync copy selection, loopback tunnels, readiness, and credential boundaries.
 
 ## Sync, execution, and evidence
 

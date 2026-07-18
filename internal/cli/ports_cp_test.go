@@ -70,7 +70,7 @@ func TestPortsRejectsUnsupportedProvider(t *testing.T) {
 }
 
 func TestCopyRejectsUnsupportedProvider(t *testing.T) {
-	err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).copyCommand(context.Background(), []string{"--provider", "aws", "--id", "cbx_123", "./file.txt", "SANDBOX:/tmp/file.txt"})
+	err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).copyCommand(context.Background(), []string{"--provider", "service-control-test", "--id", "cbx_123", "./file.txt", "SANDBOX:/tmp/file.txt"})
 	if err == nil || !strings.Contains(err.Error(), "does not support cp") {
 		t.Fatalf("err=%v", err)
 	}

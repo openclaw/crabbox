@@ -1030,14 +1030,25 @@ func rsyncLocalPathForGOOS(goos, path string) string {
 // into WSL /tmp with correct permissions, and paths within args are
 // converted to WSL mount paths.
 func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *exec.Cmd {
+	wslExe, ok := windowsRsyncWSLExecutable(ctx, target)
+	if !ok {
+		return windowsNativeRsyncCommand(ctx, args)
+	}
+	return windowsWSLRsyncCommand(ctx, target, args, wslExe)
+}
+
+func windowsRsyncWSLExecutable(ctx context.Context, target SSHTarget) (string, bool) {
 	wslExe, err := exec.LookPath("wsl.exe")
 	if err != nil {
 		wslExe, err = exec.LookPath("wsl")
 	}
-	// Fall back to native rsync when WSL is absent or lacks native tools.
 	if err != nil || !windowsWSLHasNativeRsyncSSH(ctx, target, wslExe) {
-		return windowsNativeRsyncCommand(ctx, args)
+		return "", false
 	}
+	return wslExe, true
+}
+
+func windowsWSLRsyncCommand(ctx context.Context, target SSHTarget, args []string, wslExe string) *exec.Cmd {
 	mountRoot := windowsWSLMountRoot(ctx, target, wslExe)
 
 	// Prepare WSL key: copy with correct permissions.

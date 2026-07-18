@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added bidirectional `cp` over resolved SSH leases and a readiness-gated, loopback-only `tunnel` command with owned process-tree teardown. Thanks @onmax.
 - Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
 - Added a local Zed task-launcher extension for Crabbox lifecycle and remote execution workflows. Thanks @zozo123.
 
