@@ -546,6 +546,27 @@ func TestWSLSSHTransportSessionStagesAndRemovesPrivateFiles(t *testing.T) {
 	}
 }
 
+func TestWSLSSHTransportSessionDoesNotCleanUpFailedDirectoryCreation(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX WSL fixture")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "cleanup-ran")
+	wsl := filepath.Join(dir, "wsl")
+	script := "#!/bin/sh\ncase \"$*\" in\n  *'rm -rf'*) : > \"$CRABBOX_TEST_WSL_CLEANUP_MARKER\" ;;\nesac\nexit 1\n"
+	if err := os.WriteFile(wsl, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_TEST_WSL_CLEANUP_MARKER", marker)
+	_, err := newWSLSSHTransportSession(t.Context(), SSHTarget{}, wsl, "/mnt")
+	if err == nil || !strings.Contains(err.Error(), "create private WSL SSH transport directory") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("cleanup ran without directory ownership: %v", err)
+	}
+}
+
 func TestPrivateSSHTransportProbeKeepsSecretsOutOfArgvAndEnvironment(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("POSIX fake SSH helper")

@@ -92,7 +92,11 @@ func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mo
 		return nil, fmt.Errorf("secure private WSL SSH transport directory: %w", err)
 	}
 	wslDir := "/tmp/" + filepath.Base(dir)
+	wslDirOwned := false
 	cleanup := func() error {
+		if !wslDirOwned {
+			return nil
+		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(cleanupCtx, wslExe, "rm", "-rf", "--", wslDir)
@@ -112,6 +116,7 @@ func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mo
 	if output, err := mkdir.CombinedOutput(); err != nil {
 		return fail(fmt.Errorf("create private WSL SSH transport directory: %w: %s", err, strings.TrimSpace(string(output))))
 	}
+	wslDirOwned = true
 
 	wslTarget := wslSSHTransportTarget(target, wslDir, mountRoot)
 	if target.Key != "" {
