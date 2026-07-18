@@ -509,6 +509,12 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (core.Server, err
 	if name == "" {
 		return core.Server{}, core.Exit(2, "provider=%s touch requires an Incus instance name", providerName)
 	}
+	leaseID := strings.TrimSpace(core.Blank(req.Lease.LeaseID, server.Labels["lease"]))
+	unlock, err := lockIncusLeaseOperation(ctx, leaseID, name)
+	if err != nil {
+		return core.Server{}, err
+	}
+	defer unlock()
 	if err := setInstanceLabels(ctx, client, name, server.Labels); err != nil {
 		return core.Server{}, err
 	}

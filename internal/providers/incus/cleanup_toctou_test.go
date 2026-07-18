@@ -80,6 +80,77 @@ func TestIncusLeaseOperationLockSerializesReclaimAndCleanup(t *testing.T) {
 	}
 }
 
+func TestTouchWaitsForCleanupOperationLock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
+
+	const (
+		leaseID = "cbx_incus_touch_lock"
+		name    = "crabbox-incus-touch-lock"
+	)
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			name: {
+				Name:        name,
+				Status:      "Running",
+				StatusCode:  api.Running,
+				InstancePut: api.InstancePut{Config: map[string]string{}},
+			},
+		},
+		states: map[string]*api.InstanceState{name: {Status: "Running", StatusCode: api.Running}},
+	}
+	oldNewClient := newClient
+	newClient = func(Config) (instanceClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	unlockCleanup, err := lockIncusLeaseOperation(context.Background(), leaseID, name)
+	if err != nil {
+		t.Fatalf("lock cleanup operation: %v", err)
+	}
+	defer unlockCleanup()
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).(*backend)
+	touchDone := make(chan error, 1)
+	go func() {
+		_, err := b.Touch(context.Background(), core.TouchRequest{
+			Lease: core.LeaseTarget{
+				LeaseID: leaseID,
+				Server: core.Server{
+					CloudID: name,
+					Labels:  map[string]string{"instance": name, "lease": leaseID},
+				},
+			},
+			State: "running",
+		})
+		touchDone <- err
+	}()
+
+	select {
+	case err := <-touchDone:
+		t.Fatalf("Touch completed while cleanup lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if len(fake.updated) != 0 {
+		t.Fatalf("Touch updated provider state while cleanup lock was held: %v", fake.updated)
+	}
+	unlockCleanup()
+	select {
+	case err := <-touchDone:
+		if err != nil {
+			t.Fatalf("Touch after cleanup lock release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Touch did not complete after cleanup lock release")
+	}
+	if len(fake.updated) != 1 || fake.updated[0] != name {
+		t.Fatalf("updated=%v want [%s]", fake.updated, name)
+	}
+}
+
 func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, publishClaim bool) {
 	t.Helper()
 	home := t.TempDir()
