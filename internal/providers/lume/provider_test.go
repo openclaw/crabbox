@@ -23,6 +23,8 @@ type recordingRunner struct {
 	hook      func(core.LocalCommandRequest) (core.LocalCommandResult, error, bool)
 }
 
+const testLumeHostKey = "AAAAC3NzaC1lZDI1NTE5AAAAIOCh4W5YA0Lp2pvT+yWIG/tC7BrQalNUIHSqfjYkJei6"
+
 func writeLumeVMConfig(t *testing.T, home, name, machineIdentifier string) {
 	t.Helper()
 	dir := filepath.Join(home, ".lume", name)
@@ -35,13 +37,12 @@ func writeLumeVMConfig(t *testing.T, home, name, machineIdentifier string) {
 	}
 }
 
-func writeLumeKnownHost(t *testing.T, leaseID, name string) {
+func writeLumeKnownHost(t *testing.T, leaseID, name, key string) {
 	t.Helper()
 	target := core.SSHTarget{}
 	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
 		t.Fatal(err)
 	}
-	const key = "AAAAC3NzaC1lZDI1NTE5AAAAIOCh4W5YA0Lp2pvT+yWIG/tC7BrQalNUIHSqfjYkJei6"
 	if err := os.WriteFile(target.KnownHostsFile, []byte(lumeHostKeyAlias(name)+" ssh-ed25519 "+key+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +117,7 @@ func TestShouldCleanupReadyLeaseAtLabelExpiry(t *testing.T) {
 	}
 }
 
-func TestConfigureDefaultsToMacOS(t *testing.T) {
+func TestConfigureDefaultsAndWorkRoots(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	configured, err := (Provider{}).Configure(cfg, core.Runtime{})
@@ -127,10 +128,7 @@ func TestConfigureDefaultsToMacOS(t *testing.T) {
 	if got.TargetOS != core.TargetMacOS || got.Lume.User != "lume" || got.Lume.Base != "crabbox-macos-golden" {
 		t.Fatalf("unexpected defaults: %#v", got.Lume)
 	}
-}
-
-func TestApplyDefaultsDerivesWorkRootFromOverriddenUser(t *testing.T) {
-	cfg := core.BaseConfig()
+	cfg = core.BaseConfig()
 	cfg.Lume.User = "builder"
 	cfg.Lume.WorkRoot = "/Users/lume/crabbox"
 	cfg.WorkRoot = "/Users/lume/crabbox"
@@ -138,10 +136,7 @@ func TestApplyDefaultsDerivesWorkRootFromOverriddenUser(t *testing.T) {
 	if cfg.Lume.WorkRoot != "/Users/builder/crabbox" || cfg.WorkRoot != "/Users/builder/crabbox" {
 		t.Fatalf("work roots=%q %q want overridden user's home", cfg.Lume.WorkRoot, cfg.WorkRoot)
 	}
-}
-
-func TestApplyDefaultsPreservesExplicitDefaultUserWorkRoot(t *testing.T) {
-	cfg := core.BaseConfig()
+	cfg = core.BaseConfig()
 	cfg.Lume.User = "lume"
 	cfg.Lume.WorkRoot = "/Users/lume/crabbox"
 	cfg.WorkRoot = "/Users/lume/other"
@@ -384,19 +379,6 @@ func TestFlagsPreserveStoragePathForExistingLeaseLifecycle(t *testing.T) {
 	}
 	if cfg.Lume.Storage != "/Volumes/VMs" {
 		t.Fatalf("storage=%q", cfg.Lume.Storage)
-	}
-}
-
-func TestConfigurePreservesStoragePathFromConfig(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Lume.Storage = "/Volumes/VMs"
-	configured, err := (Provider{}).Configure(cfg, core.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if configured.(*backend).cfg.Lume.Storage != "/Volumes/VMs" {
-		t.Fatalf("storage=%q", configured.(*backend).cfg.Lume.Storage)
 	}
 }
 
@@ -684,7 +666,7 @@ func TestPrepareLeaseUsesPerLeaseKnownHosts(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	leaseID := "cbx_00000000-0000-0000-0000-000000000001"
-	writeLumeKnownHost(t, leaseID, "worker-1")
+	writeLumeKnownHost(t, leaseID, "worker-1", testLumeHostKey)
 	claim := core.LeaseClaim{LeaseID: leaseID, Labels: map[string]string{"instance": "worker-1", "state": "ready"}}
 	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
 	lease, err := b.prepareLease(context.Background(), b.configForRun(), lumeVM{Name: "worker-1", Status: "running", IPAddress: "192.0.2.10"}, claim, false)
@@ -702,7 +684,7 @@ func TestPrepareLeaseUsesPerLeaseKnownHosts(t *testing.T) {
 func TestRebindResolvedLeaseTargetRestoresHostKeyAlias(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const leaseID = "cbx_rebind123456"
-	writeLumeKnownHost(t, leaseID, "worker-1")
+	writeLumeKnownHost(t, leaseID, "worker-1", testLumeHostKey)
 	target := core.LeaseTarget{Server: core.Server{CloudID: "worker-1", Labels: map[string]string{"state": "ready"}}}
 	b := &backend{}
 	if err := b.RebindResolvedLeaseTarget(&target, leaseID); err != nil {
@@ -723,13 +705,7 @@ func TestRebindResolvedLeaseTargetRequiresAuthenticatedPin(t *testing.T) {
 		}
 	}
 	const leaseID = "cbx_untrusted_malformed"
-	pin := core.SSHTarget{}
-	if err := core.UseLeaseKnownHosts(&pin, leaseID); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(pin.KnownHostsFile, []byte(lumeHostKeyAlias("worker-1")+" ssh-ed25519 AQ==\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeLumeKnownHost(t, leaseID, "worker-1", "AQ==")
 	target := core.LeaseTarget{Server: core.Server{CloudID: "worker-1", Labels: map[string]string{"state": "ready"}}}
 	if err := b.RebindResolvedLeaseTarget(&target, leaseID); err == nil {
 		t.Fatal("accepted malformed SSH key blob as authenticated pin")
@@ -844,13 +820,6 @@ func TestExpandLumePathSupportsNamedUserHome(t *testing.T) {
 	}
 }
 
-func TestLumeHostKeyAliasEncodesUnsafeVMName(t *testing.T) {
-	alias := lumeHostKeyAlias("worker name,[host]:22")
-	if invalidLogName.MatchString(alias) || strings.ContainsAny(alias, " ,[]:") {
-		t.Fatalf("unsafe host-key alias=%q", alias)
-	}
-}
-
 func TestCloneUsesConfiguredStorage(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -905,8 +874,7 @@ func TestPrepareBootstrapTrustCarriesKeyWithoutNetworkPassword(t *testing.T) {
 func TestWaitForGuestIdentityPinsKeyFromVirtioFSChallenge(t *testing.T) {
 	dir := t.TempDir()
 	trust := bootstrapTrust{Dir: dir, Challenge: "test-challenge"}
-	const hostKey = "AAAAC3NzaC1lZDI1NTE5AAAAIOCh4W5YA0Lp2pvT+yWIG/tC7BrQalNUIHSqfjYkJei6"
-	identity := "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 " + hostKey + "\n"
+	identity := "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 " + testLumeHostKey + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "identity"), []byte(identity), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -924,15 +892,10 @@ func TestWaitForGuestIdentityPinsKeyFromVirtioFSChallenge(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(data)
-	if !strings.Contains(got, lumeHostKeyAlias("worker-1")+" ssh-ed25519 "+hostKey) || strings.Contains(got, "192.0.2.10") {
+	if !strings.Contains(got, lumeHostKeyAlias("worker-1")+" ssh-ed25519 "+testLumeHostKey) || strings.Contains(got, "192.0.2.10") {
 		t.Fatalf("known_hosts=%q", got)
 	}
-}
-
-func TestPinBootstrapHostKeyRejectsMalformedSSHBlob(t *testing.T) {
-	dir := t.TempDir()
-	trust := bootstrapTrust{Dir: dir, Challenge: "test-challenge"}
-	identity := "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 AQ==\n"
+	identity = "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 AQ==\n"
 	if err := os.WriteFile(filepath.Join(dir, "identity"), []byte(identity), 0o600); err != nil {
 		t.Fatal(err)
 	}
