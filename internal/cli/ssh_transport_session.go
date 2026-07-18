@@ -203,6 +203,11 @@ type sshTransportConfigRoute struct {
 	jumpConfigPath string
 }
 
+type sshTransportRouteCapabilities struct {
+	remoteCommand bool
+	sessionType   bool
+}
+
 func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, localForward bool) (_ sshTransportConfigRoute, err error) {
 	if !target.SSHConfigProxy {
 		return sshTransportConfigRoute{}, nil
@@ -233,7 +238,18 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 	if err := secureSSHTransportPath(seedPath, false); err != nil {
 		return sshTransportConfigRoute{}, fmt.Errorf("secure private SSH route config: %w", err)
 	}
-	args := sshTransportRouteCommandArgs(seedPath, target, localForward)
+	capabilityPath := filepath.Join(dir, "capability_config")
+	if err := os.WriteFile(capabilityPath, nil, 0o600); err != nil {
+		return sshTransportConfigRoute{}, fmt.Errorf("write private SSH capability config: %w", err)
+	}
+	if err := secureSSHTransportPath(capabilityPath, false); err != nil {
+		return sshTransportConfigRoute{}, fmt.Errorf("secure private SSH capability config: %w", err)
+	}
+	capabilities := probeSSHTransportRouteCapabilities(ctx, target, capabilityPath)
+	if cause := context.Cause(ctx); cause != nil {
+		return sshTransportConfigRoute{}, cause
+	}
+	args := sshTransportRouteCommandArgs(seedPath, target, localForward, capabilities)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	err = runOwnedSSHTransportCommand(ctx, target, args, &stdout, &stderr)
@@ -241,7 +257,8 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 		if cause := context.Cause(ctx); cause != nil {
 			return sshTransportConfigRoute{}, cause
 		}
-		return sshTransportConfigRoute{}, fmt.Errorf("resolve OpenSSH route for %s: %w: %s", target.Host, err, strings.TrimSpace(stderr.String()))
+		diagnostic := strings.TrimSpace(redactSSHTransportDiagnostic(target, stderr.String()))
+		return sshTransportConfigRoute{}, fmt.Errorf("resolve OpenSSH route for %s: %w: %s", target.Host, err, diagnostic)
 	}
 	return parseSSHTransportConfigRoute(stdout.String(), userConfigPath), nil
 }
@@ -274,8 +291,21 @@ func parseSSHTransportConfigRoute(output, userConfigPath string) sshTransportCon
 	return route
 }
 
-func sshTransportRouteCommandArgs(seedPath string, target SSHTarget, localForward bool) []string {
+func sshTransportRouteCommandArgs(seedPath string, target SSHTarget, localForward bool, capabilities sshTransportRouteCapabilities) []string {
+	// Command-line options override config-file values. Neutralize interactive
+	// session directives while preserving the route selected by the user's
+	// Host and Match blocks.
+	sessionType := "default"
+	if localForward {
+		sessionType = "none"
+	}
 	args := []string{"-G", "-F", seedPath}
+	if capabilities.remoteCommand {
+		args = append(args, "-o", "RemoteCommand=none")
+	}
+	if capabilities.sessionType {
+		args = append(args, "-o", "SessionType="+sessionType)
+	}
 	if localForward {
 		args = append(args, "-N")
 	}
@@ -288,6 +318,20 @@ func sshTransportRouteCommandArgs(seedPath string, target SSHTarget, localForwar
 		args = append(args, command)
 	}
 	return args
+}
+
+func probeSSHTransportRouteCapabilities(ctx context.Context, target SSHTarget, configPath string) sshTransportRouteCapabilities {
+	supports := func(option string) bool {
+		if context.Cause(ctx) != nil {
+			return false
+		}
+		args := []string{"-G", "-F", configPath, "-o", option, "--", "crabbox-option-probe.invalid"}
+		return runOwnedSSHTransportCommand(ctx, target, args, io.Discard, io.Discard) == nil
+	}
+	return sshTransportRouteCapabilities{
+		remoteCommand: supports("RemoteCommand=none"),
+		sessionType:   supports("SessionType=default"),
+	}
 }
 
 func runOwnedSSHTransportCommand(ctx context.Context, target SSHTarget, args []string, stdout, stderr io.Writer) error {
@@ -408,7 +452,9 @@ func expandSSHProxyJumpTokens(command, originalHost, host, user, port string) st
 func proxyJumpCommand(route sshTransportConfigRoute) string {
 	args := []string{"ssh"}
 	if route.jumpConfigPath != "" {
-		args = append(args, "-F", route.jumpConfigPath)
+		// This command is embedded in ProxyCommand. Protect path percent signs
+		// from the outer OpenSSH client's token expansion.
+		args = append(args, "-F", strings.ReplaceAll(route.jumpConfigPath, "%", "%%"))
 	}
 	args = append(args,
 		"-o", "ClearAllForwardings=yes",

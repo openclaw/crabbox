@@ -148,11 +148,18 @@ func TestSSHTransportConfigProxyIncludesUserRouting(t *testing.T) {
 	if err := os.Mkdir(sshDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	userConfig := "Host proxy-alias\n  ProxyJump jump.example.test\n  HostKeyAlias edge%blue\n  LocalForward 127.0.0.1:41001 127.0.0.1:3001\n  RemoteForward 127.0.0.1:41002 127.0.0.1:3002\n  DynamicForward 127.0.0.1:41003\n  RequestTTY force\n  RemoteCommand echo inherited\nMatch originalhost proxy-alias user alice exec \"test %p = 2222\"\n  HostName routed.example.test\n"
+	userConfig := "IgnoreUnknown CrabboxFutureOption\nCrabboxFutureOption yes\nHost proxy-alias\n  ProxyJump jump.example.test\n  HostKeyAlias edge%blue\n  LocalForward 127.0.0.1:41001 127.0.0.1:3001\n  RemoteForward 127.0.0.1:41002 127.0.0.1:3002\n  DynamicForward 127.0.0.1:41003\n  RequestTTY force\n  RemoteCommand echo inherited\n  SessionType none\nMatch originalhost proxy-alias user alice exec \"test %p = 2222\"\n  HostName routed.example.test\n"
 	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(userConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	target := SSHTarget{User: "alice", Host: "proxy-alias", Port: "2222", SSHConfigProxy: true}
+	copySession, err := newSSHTransportSession(t.Context(), target, false)
+	if err != nil {
+		t.Fatalf("copy-mode route: %v", err)
+	}
+	if err := copySession.Close(); err != nil {
+		t.Fatal(err)
+	}
 	session, err := newSSHTransportSession(t.Context(), target, true)
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +225,7 @@ func TestSSHTransportRouteParserLimitsNoneSentinelToProxySettings(t *testing.T) 
 
 func TestSSHTransportRouteProbeKeepsSecretUserOutOfArgs(t *testing.T) {
 	target := SSHTarget{User: "secret-token-user", Host: "proxy-alias", Port: "22", AuthSecret: true}
-	args := sshTransportRouteCommandArgs("/private/seed-config", target, false)
+	args := sshTransportRouteCommandArgs("/private/seed-config", target, false, sshTransportRouteCapabilities{remoteCommand: true, sessionType: true})
 	if strings.Contains(strings.Join(args, " "), target.User) {
 		t.Fatalf("route probe args leaked secret user: %#v", args)
 	}
@@ -233,17 +240,67 @@ func TestSSHTransportRouteProbeKeepsSecretUserOutOfArgs(t *testing.T) {
 
 func TestSSHTransportRouteProbeMatchesSessionMode(t *testing.T) {
 	target := SSHTarget{Host: "proxy-alias"}
-	execArgs := sshTransportRouteCommandArgs("/private/config", target, false)
+	capabilities := sshTransportRouteCapabilities{remoteCommand: true, sessionType: true}
+	execArgs := sshTransportRouteCommandArgs("/private/config", target, false, capabilities)
+	for _, option := range []string{"RemoteCommand=none", "SessionType=default"} {
+		if !containsString(execArgs, option) {
+			t.Fatalf("exec route args missing %q: %#v", option, execArgs)
+		}
+	}
 	if got := execArgs[len(execArgs)-1]; got != "rsync --server" {
 		t.Fatalf("exec route command=%q; args=%#v", got, execArgs)
 	}
-	forwardArgs := sshTransportRouteCommandArgs("/private/config", target, true)
-	if !containsString(forwardArgs, "-N") || containsString(forwardArgs, "rsync --server") {
+	forwardArgs := sshTransportRouteCommandArgs("/private/config", target, true, capabilities)
+	if !containsString(forwardArgs, "-N") || !containsString(forwardArgs, "RemoteCommand=none") || !containsString(forwardArgs, "SessionType=none") || containsString(forwardArgs, "rsync --server") {
 		t.Fatalf("forward route args=%#v", forwardArgs)
 	}
-	wslArgs := sshTransportRouteCommandArgs("/private/config", SSHTarget{Host: "proxy-alias", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, false)
+	wslArgs := sshTransportRouteCommandArgs("/private/config", SSHTarget{Host: "proxy-alias", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, false, capabilities)
 	if got := wslArgs[len(wslArgs)-1]; got != "wsl.exe rsync --server" {
 		t.Fatalf("WSL route command=%q; args=%#v", got, wslArgs)
+	}
+	legacyArgs := sshTransportRouteCommandArgs("/private/config", target, false, sshTransportRouteCapabilities{})
+	for _, option := range []string{"RemoteCommand=none", "SessionType=default", "IgnoreUnknown"} {
+		if containsString(legacyArgs, option) {
+			t.Fatalf("legacy route args contain unsupported option %q: %#v", option, legacyArgs)
+		}
+	}
+}
+
+func TestSSHTransportRouteCapabilitiesAreProbedWithoutUserConfig(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX executable fixture")
+	}
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\ncase \"$*\" in\n  *RemoteCommand=none*) exit 0 ;;\n  *SessionType=default*) exit 1 ;;\n  *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(ssh, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	capabilities := probeSSHTransportRouteCapabilities(t.Context(), SSHTarget{}, "/private/isolated-config")
+	if !capabilities.remoteCommand || capabilities.sessionType {
+		t.Fatalf("capabilities=%#v", capabilities)
+	}
+}
+
+func TestSSHTransportRouteFailureRedactsSecretUser(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX executable fixture")
+	}
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf 'route failed for secret-token-user\\n' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("HOME", t.TempDir())
+	target := SSHTarget{User: "secret-token-user", Host: "proxy-alias", Port: "22", AuthSecret: true, SSHConfigProxy: true}
+	_, err := resolveSSHTransportConfigRoute(t.Context(), target, false)
+	if err == nil {
+		t.Fatal("expected route resolution failure")
+	}
+	if strings.Contains(err.Error(), target.User) {
+		t.Fatalf("route failure leaked secret user: %v", err)
 	}
 }
 
@@ -309,9 +366,9 @@ func TestSSHTransportLiteralFieldsEscapeOnlyTokenDirectives(t *testing.T) {
 func TestProxyJumpCommandPreservesMultiHopChainAndOwnership(t *testing.T) {
 	got := proxyJumpCommand(sshTransportConfigRoute{
 		proxyJump:      "jump-a,jump-b,jump-c",
-		jumpConfigPath: "/private/jump-config",
+		jumpConfigPath: "/private/jump%h-config",
 	})
-	for _, value := range []string{"'/private/jump-config'", "'-J' 'jump-a,jump-b'", "'jump-c'", "'ControlMaster=no'", "'PermitLocalCommand=no'", "'BatchMode=yes'"} {
+	for _, value := range []string{"'/private/jump%%h-config'", "'-J' 'jump-a,jump-b'", "'jump-c'", "'ControlMaster=no'", "'PermitLocalCommand=no'", "'BatchMode=yes'"} {
 		if !strings.Contains(got, value) {
 			t.Fatalf("jump command missing %q: %s", value, got)
 		}
