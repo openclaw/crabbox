@@ -257,6 +257,7 @@ hardware for macOS VM workflows.
 | -------------------------------------------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------- |
 | [AWS Lambda MicroVM](docs/providers/aws-lambda-microvm.md) — `aws-lambda-microvm`                              | Linux ARM64  | Lambda Firecracker MicroVM with archive sync, retained reuse, and pause/resume. |
 | [Cloudflare](docs/providers/cloudflare.md) — `cloudflare` (`cf`)                                               | Linux        | Cloudflare Containers via the Worker runtime.                                   |
+| [Cloud Run Sandbox](docs/providers/cloud-run-sandbox.md) — `cloud-run-sandbox` (`gcrun-sandbox`, `cloudrun-sandbox`) | Linux | Google Cloud Run sandboxes via gateway or in-container `sandbox` CLI. |
 | [Docker Sandbox](docs/providers/docker-sandbox.md) — `docker-sandbox`                                          | Linux        | Docker Sandboxes through the standalone `sbx` CLI.                              |
 | [E2B](docs/providers/e2b.md) — `e2b`                                                                           | Linux        | E2B Firecracker sandbox.                                                        |
 | [Freestyle](docs/providers/freestyle.md) — `freestyle`                                                         | Linux        | Freestyle VMs through the Freestyle REST API.                                   |
@@ -533,7 +534,8 @@ blacksmith:
 
 Keep provider tokens in environment variables, not repo config (for example
 `CRABBOX_SEMAPHORE_TOKEN`, `CRABBOX_SPRITES_TOKEN`, `RUNPOD_API_KEY`,
-`MORPH_API_KEY`, `ASCII_BOX_API_KEY`, `E2B_API_KEY`, `DAYTONA_API_KEY`). The full env-var
+`MORPH_API_KEY`, `ASCII_BOX_API_KEY`, `E2B_API_KEY`, `DAYTONA_API_KEY`,
+`CLOUD_RUN_SANDBOX_URL`/`CLOUD_RUN_SANDBOX_SECRET`). The full env-var
 reference, per-provider sections, and per-command flags are in
 [docs/cli.md](docs/cli.md), [Configuration](docs/features/configuration.md),
 and the [provider docs](docs/providers/README.md).

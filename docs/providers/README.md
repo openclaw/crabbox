@@ -41,7 +41,8 @@ Providers also differ by control plane and reachability:
   tart, and `hyperv` creates local Windows VMs through Microsoft Hyper-V.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `blaxel`, `e2b`, `modal`, `islo`, `cloudflare`,
-  `cloudflare-sandbox`, `azure-dynamic-sessions`, `docker-sandbox`, `smolvm`).
+  `cloudflare-sandbox`, `cloud-run-sandbox`, `azure-dynamic-sessions`,
+  `docker-sandbox`, `smolvm`).
   `anthropic-sandbox-runtime` is the local macOS/Linux delegated-run exception:
   Anthropic's `srt` executes on the current machine while still owning sync/run
   policy end to end.
@@ -62,9 +63,10 @@ providers.
 Remote providers with environment API-key or bearer-token auth include
 `digitalocean`, `linode`, `vultr`, `lambda`, `runpod`, `vast`,
 `opencomputer`, `e2b`, `blaxel`, `codesandbox`, `cloudflare`,
-`cloudflare-sandbox`, `cloudflare-dynamic-workers`, `crownest`, `freestyle`,
-`islo`, `morph`, `opensandbox`, `orgo`, `smolvm`, `sprites`, `superserve`,
-`tensorlake`, `upstash-box`, `vercel-sandbox`, `wandb`, and service-control
+`cloudflare-sandbox`, `cloudflare-dynamic-workers`, `cloud-run-sandbox`,
+`crownest`, `freestyle`, `islo`, `morph`, `opensandbox`, `orgo`, `smolvm`,
+`sprites`, `superserve`, `tensorlake`, `upstash-box`, `vercel-sandbox`, `wandb`,
+and service-control
 providers such as `railway`, `fastapi-cloud`, and `unikraft-cloud`.
 
 Brokerable providers (`aws`, `azure`, `daytona`, `gcp`, `hetzner`) can run with
@@ -85,7 +87,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 78 providers (44 SSH lease, 30 delegated run, 4 service control).
+Current built-in surface: 79 providers (44 SSH lease, 31 delegated run, 4 service control).
 
 Access terms:
 
@@ -107,6 +109,7 @@ Access terms:
 | [azure-dynamic-sessions](azure-dynamic-sessions.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Azure Container Apps Dynamic Session | `cloud`; GPU: no | Azure session pool; provider session expiry | Short delegated container sessions in Azure | No Crabbox-managed SSH lease |
 | [blacksmith-testbox](blacksmith-testbox.md) (`blacksmith`) | built-in; `delegated-run` · ci-proof-runner | No SSH; `provider-owned` · direct only; features: `cache-volume`, `run-proof`, `run-session`, `run-artifacts` | `linux`; Blacksmith Testbox runner | `provider-managed`; GPU: no | Blacksmith; provider session cleanup | CI reproduction with proof and reusable sessions | Execution and artifacts follow the Testbox contract |
 | [blaxel](blaxel.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Blaxel managed Linux sandbox | `provider-managed`; GPU: unknown | Blaxel; owned sandbox delete | Managed delegated Linux sandbox execution | Requires Blaxel API credentials and workspace access |
+| [cloud-run-sandbox](cloud-run-sandbox.md) (`gcrun-sandbox`, `google-cloud-run-sandbox`, `cloudrun-sandbox`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Google Cloud Run sandbox | `cloud`; GPU: no | Cloud Run sandbox CLI or ComputeSDK gateway; sandbox delete | Isolated untrusted command execution on Cloud Run | Requires a Cloud Run service with --sandbox-launcher, or a remote gateway URL and secret |
 | [cloudflare](cloudflare.md) (`cf`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Cloudflare Container | `cloud`; GPU: no | Cloudflare Worker; container delete | Fast delegated Linux container execution | Requires Worker deployment and container availability |
 | [cloudflare-dynamic-workers](cloudflare-dynamic-workers.md) (`cf-dynamic`, `cfdw`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: `cleanup`, `module-run`, `run-session` | `worker-runtime`; Cloudflare Dynamic Worker | `cloud`; GPU: no | Cloudflare loader Worker; terminal metadata and local claim removal | Hosted Worker module execution | No shell, SSH, or filesystem sync; Dynamic Workers must be enabled |
 | [cloudflare-sandbox](cloudflare-sandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Cloudflare Sandbox bridge | `cloud`; GPU: no | Cloudflare Sandbox bridge; sandbox delete | Cloudflare Sandbox Linux command execution through a bridge | Requires a configured bridge URL; no SSH, browser, Tailscale, URL sessions, mounts, or checkpoints |

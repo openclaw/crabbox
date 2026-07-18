@@ -116,7 +116,8 @@ Delegated-run providers (no SSH lease):
   live smoke `scripts/live-aws-lambda-microvm-smoke.sh`,
   `internal/providers/dockersandbox`,
   `internal/providers/e2b`, `internal/providers/islo`, `internal/providers/modal`,
-  `internal/providers/opencomputer`, `internal/providers/anthropicsandboxruntime`,
+  `internal/providers/opencomputer`, `internal/providers/cloudrunsandbox`,
+  `internal/providers/anthropicsandboxruntime`,
   `internal/providers/tensorlake`, `internal/providers/upstashbox`,
   `internal/providers/blacksmith`, `internal/providers/wandb`
 - Superserve delegated lifecycle, archive sync, data-plane file upload, exec,

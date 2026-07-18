@@ -1309,6 +1309,7 @@ func allBuiltInProviderNames() []string {
 		"azure-dynamic-sessions",
 		"blaxel",
 		"blacksmith-testbox",
+		"cloud-run-sandbox",
 		"cloudflare",
 		"cloudflare-dynamic-workers",
 		"cloudflare-sandbox",

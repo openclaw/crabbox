@@ -1528,6 +1528,10 @@ if has_provider docker-sandbox; then
   "$root/scripts/live-docker-sandbox-smoke.sh"
 fi
 
+if has_provider cloud-run-sandbox || has_provider gcrun-sandbox || has_provider cloudrun-sandbox || has_provider google-cloud-run-sandbox; then
+  "$root/scripts/live-cloud-run-sandbox-smoke.sh"
+fi
+
 if has_provider smolvm || has_provider smol || has_provider smolmachines || has_provider smolfleet; then
   CRABBOX_SMOLVM_LIVE_SMOKE=1 "$root/scripts/live-smolvm-smoke.sh"
 fi

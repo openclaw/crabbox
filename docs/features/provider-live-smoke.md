@@ -171,6 +171,7 @@ Current coverage: 78 providers; 4 with convention-named hermetic lifecycle tests
 | [azure-dynamic-sessions](../providers/azure-dynamic-sessions.md) | — | — | — |
 | [blacksmith-testbox](../providers/blacksmith-testbox.md) | — | matrix | — |
 | [blaxel](../providers/blaxel.md) | — | dedicated | — |
+| [cloud-run-sandbox](../providers/cloud-run-sandbox.md) | — | dedicated + matrix | — |
 | [cloudflare](../providers/cloudflare.md) | — | dedicated | — |
 | [cloudflare-dynamic-workers](../providers/cloudflare-dynamic-workers.md) | — | dedicated | — |
 | [cloudflare-sandbox](../providers/cloudflare-sandbox.md) | — | — | — |

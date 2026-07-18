@@ -16,6 +16,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/cloudflare"
 	_ "github.com/openclaw/crabbox/internal/providers/cloudflaredynamicworkers"
 	_ "github.com/openclaw/crabbox/internal/providers/cloudflaresandbox"
+	_ "github.com/openclaw/crabbox/internal/providers/cloudrunsandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/coder"
 	_ "github.com/openclaw/crabbox/internal/providers/codesandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/crownest"

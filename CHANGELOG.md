@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `provider: cloud-run-sandbox` (`gcrun-sandbox`, `google-cloud-run-sandbox`, `cloudrun-sandbox`) for Google Cloud Run sandboxes in public preview: stateful lifecycle through the in-container `sandbox` CLI or a ComputeSDK-compatible gateway, archive sync, local claim scoping, doctor checks, and live smoke hooks. Thanks @zozo123.
 - Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
 - Added native local macOS SSH leases through Lume, cloning a stopped golden VM per lease with isolated SSH identity, durable clone and storage recovery, and verified stop-before-delete lifecycle handling. Thanks @madhavajay.
 - Added a local Zed task-launcher extension for Crabbox lifecycle and remote execution workflows. Thanks @zozo123.
