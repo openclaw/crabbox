@@ -391,6 +391,61 @@ func TestAmbiguousCloneRetainsVM(t *testing.T) {
 	}
 }
 
+func TestAcquireControllerAcceptancePrecedesNormalClaimPublication(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
+	storage := join(home, ".lume")
+	must(t, os.MkdirAll(storage, 0o700))
+	const leaseID = "cbx_controller_acceptance"
+	name := ""
+	runner := &fake{hook: func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+		if len(req.Args) == 0 {
+			return cmdRes{}, nil, false
+		}
+		switch req.Args[0] {
+		case "ls":
+			return cmdRes{Stdout: `[]`}, nil, true
+		case "clone":
+			name = req.Args[2]
+			putVMAt(t, storage, name, "Y29udHJvbGxlci1hY2NlcHRhbmNl")
+			return cmdRes{}, nil, true
+		case "get":
+			return cmdRes{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
+		default:
+			return cmdRes{}, nil, false
+		}
+	}}
+	accepted := false
+	_, err := backendFor(configFor(), runner).Acquire(bg, core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir()},
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    "controller-acceptance",
+		OnAcquired: func(acquired core.LeaseTarget) error {
+			accepted = true
+			if acquired.Server.ImmutableID == "" {
+				t.Fatal("OnAcquired received no immutable identity")
+			}
+			pending, ok, claimErr := resolveLeaseClaimForProvider(leaseID)
+			if claimErr != nil || !ok || pending.Labels["recovery"] != "clone-pending" || pending.CloudImmutableID != "" {
+				t.Fatalf("claim during OnAcquired=%#v ok=%v err=%v", pending, ok, claimErr)
+			}
+			return errors.New("controller rejected identity")
+		},
+	})
+	want(t, err, "controller rejected identity")
+	if !accepted {
+		t.Fatal("OnAcquired was not called")
+	}
+	if _, statErr := os.Stat(join(storage, name)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("rejected VM was not rolled back: %v", statErr)
+	}
+	if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || ok {
+		t.Fatalf("rejected claim after rollback=%#v ok=%v err=%v", current, ok, claimErr)
+	}
+}
+
 func TestAmbiguousCloneRetainsPendingClaimWhenStorageChanges(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

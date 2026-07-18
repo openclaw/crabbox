@@ -260,7 +260,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		defer cancel()
 		cleanup := func() error {
 			destroyClaim := claim
-			if persistedClaim.LeaseID != "" {
+			if persistedClaim.LeaseID != "" && strings.TrimSpace(persistedClaim.CloudImmutableID) != "" {
 				destroyClaim = persistedClaim
 			}
 			if strings.TrimSpace(destroyClaim.CloudImmutableID) == "" {
@@ -356,16 +356,19 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}
 	cloneInst.Status = "starting"
 	provisional := LeaseTarget{Server: b.serverFromInstance(cloneInst, claim, cfg), LeaseID: leaseID}
-	persistedClaim, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, persistedClaim, provisional.Server, SSHTarget{}, func() error {
-		return verifyLumeStorageIdentity(cfg, storageID)
-	})
-	if err != nil {
+	if err := verifyLumeStorageIdentity(cfg, storageID); err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
 	if req.OnAcquired != nil {
 		if err := req.OnAcquired(provisional); err != nil {
 			return LeaseTarget{}, cleanupUnclaimedVM(err)
 		}
+	}
+	persistedClaim, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, persistedClaim, provisional.Server, SSHTarget{}, func() error {
+		return verifyLumeStorageIdentity(cfg, storageID)
+	})
+	if err != nil {
+		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
 	trust, err := prepareBootstrapTrust(name, cfg.Lume.User, publicKey)
 	if err != nil {
