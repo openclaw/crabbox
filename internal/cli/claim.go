@@ -178,6 +178,20 @@ func claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, provide
 	})
 }
 
+func claimLeaseForRepoProviderScopePondEndpointReservationIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, reservationLabel string, reservationDuration time.Duration, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	var updated leaseClaim
+	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{
+		setEndpoint:         true,
+		server:              server,
+		target:              target,
+		reservationLabel:    reservationLabel,
+		reservationDuration: reservationDuration,
+		guard:               unchangedLeaseClaimGuard(leaseID, expected, expectedExists),
+		result:              &updated,
+	})
+	return updated, err
+}
+
 type staticClaimDetails struct {
 	Present     bool
 	Host        string
@@ -195,6 +209,8 @@ type claimMetadata struct {
 	replaceEndpoint       bool
 	server                Server
 	target                SSHTarget
+	reservationLabel      string
+	reservationDuration   time.Duration
 	guard                 func(leaseClaim, bool) error
 	result                *leaseClaim
 	allowProviderMetadata bool
@@ -275,6 +291,12 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 				existing.BridgeURL = ""
 			}
 			applyLeaseClaimEndpoint(existing, metadata.server, metadata.target)
+			if metadata.reservationLabel != "" && metadata.reservationDuration > 0 {
+				if existing.Labels == nil {
+					existing.Labels = make(map[string]string)
+				}
+				existing.Labels[metadata.reservationLabel] = leaseLabelTime(time.Now().UTC().Add(metadata.reservationDuration))
+			}
 			if metadata.replaceEndpoint {
 				existing.SSHHost = metadata.target.Host
 				if port, err := strconv.Atoi(strings.TrimSpace(metadata.target.Port)); err == nil && port > 0 {

@@ -12,6 +12,67 @@ import (
 	"time"
 )
 
+func TestClaimEndpointReservationDeadlineStartsAfterClaimLockAcquired(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_reservation_lock"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "reservation", "incus", "instance:test", "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("read initial claim: exists=%v err=%v", exists, err)
+	}
+
+	lockHeld := make(chan struct{})
+	releaseLock := make(chan struct{})
+	cleanupErr := errors.New("leave claim unchanged")
+	cleanupDone := make(chan error, 1)
+	go func() {
+		cleanupDone <- cleanupLeaseClaimIfUnchangedAfter(leaseID, expected, true, func() error {
+			close(lockHeld)
+			<-releaseLock
+			return cleanupErr
+		})
+	}()
+	<-lockHeld
+
+	const reservationDuration = 2 * time.Minute
+	type claimResult struct {
+		claim leaseClaim
+		err   error
+	}
+	claimDone := make(chan claimResult, 1)
+	go func() {
+		claim, claimErr := claimLeaseForRepoProviderScopePondEndpointReservationIfUnchanged(
+			leaseID, "reservation", "incus", "instance:test", "", "/repo", time.Minute, true,
+			Server{CloudID: "test", Labels: map[string]string{"state": "expired"}}, SSHTarget{},
+			"reservation_until", reservationDuration, expected, true,
+		)
+		claimDone <- claimResult{claim: claim, err: claimErr}
+	}()
+	select {
+	case result := <-claimDone:
+		t.Fatalf("claim publication bypassed held lock: err=%v", result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releasedAt := time.Now().UTC()
+	close(releaseLock)
+	if err := <-cleanupDone; !errors.Is(err, cleanupErr) {
+		t.Fatalf("cleanup error=%v want %v", err, cleanupErr)
+	}
+	result := <-claimDone
+	if result.err != nil {
+		t.Fatalf("publish reservation: %v", result.err)
+	}
+	deadline, ok := parseLeaseLabelTime(result.claim.Labels["reservation_until"])
+	if !ok {
+		t.Fatalf("invalid reservation deadline %q", result.claim.Labels["reservation_until"])
+	}
+	if minimum := releasedAt.Add(reservationDuration - time.Second); deadline.Before(minimum) {
+		t.Fatalf("reservation deadline=%s want >=%s", deadline, minimum)
+	}
+}
+
 func TestConfirmedAbsentClaimRemovalRequiresDirectorySyncAndRetriesAfterDeletion(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_123456789abc"
