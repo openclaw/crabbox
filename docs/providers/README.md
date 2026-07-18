@@ -85,7 +85,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 77 providers (43 SSH lease, 30 delegated run, 4 service control).
+Current built-in surface: 78 providers (44 SSH lease, 30 delegated run, 4 service control).
 
 Access terms:
 
