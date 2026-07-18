@@ -385,6 +385,20 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
 			return server, SSHTarget{}, false, nil
 		}
+		if codespaceStopping(item.State) {
+			item, err = b.waitForStopped(ctx, api, item.Name)
+			if err != nil {
+				return Server{}, SSHTarget{}, false, err
+			}
+			if err := validateResolvedItem(item); err != nil {
+				return Server{}, SSHTarget{}, false, err
+			}
+			server = b.mergeLiveServer(server, item)
+		}
+		if codespaceStopped(item.State) && (req.StatusOnly || req.NoLocalStateMutations) {
+			server.Labels[labelState] = "stopped"
+			return server, SSHTarget{}, false, nil
+		}
 		if codespaceStopped(item.State) {
 			item, err = api.startCodespace(ctx, item.Name)
 			if err != nil {
@@ -1363,6 +1377,10 @@ func codespaceStopped(state string) bool {
 	default:
 		return false
 	}
+}
+
+func codespaceStopping(state string) bool {
+	return strings.EqualFold(strings.TrimSpace(state), "shuttingdown") || strings.EqualFold(strings.TrimSpace(state), "shutting_down")
 }
 
 func codespaceTerminal(state string) bool {

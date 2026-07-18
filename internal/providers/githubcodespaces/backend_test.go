@@ -647,6 +647,37 @@ func TestResolveStartsStoppedCodespaceAndRefreshesTarget(t *testing.T) {
 	}
 }
 
+func TestResolveWaitsForShutdownThenRestartsCodespace(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-stopping"] = fakeCodespace("cs-stopping", "ShuttingDown")
+	fc.getSeq["cs-stopping"] = []codespace{
+		fakeCodespace("cs-stopping", "ShuttingDown"),
+		fakeCodespace("cs-stopping", "Shutdown"),
+		fakeCodespace("cs-stopping", "Starting"),
+		fakeCodespace("cs-stopping", "Available"),
+	}
+	startState := ""
+	fc.onStart = func(name string) {
+		startState = fc.items[name].State
+	}
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ad0"
+	server := b.serverFromCodespace(fc.items["cs-stopping"], b.labelsFor(leaseID, "stopping-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopping"], "stopping"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "stopping-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReadyProbe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.starts) != 1 || fc.starts[0] != "cs-stopping" || startState != "Shutdown" || lease.Server.Status != "Available" || lease.SSH.Host != "cs.cs-stopping.main" {
+		t.Fatalf("starts=%#v startState=%q lease=%#v", fc.starts, startState, lease)
+	}
+}
+
 func TestResolveWaitsForTransitionalCodespaceBeforeSSH(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
@@ -694,6 +725,27 @@ func TestResolveStatusOnlyReadyProbeDoesNotStartStoppedCodespace(t *testing.T) {
 	}
 	if lease.Server.Status != "Shutdown" || lease.Server.Labels[labelState] != "stopped" {
 		t.Fatalf("lease=%#v", lease)
+	}
+}
+
+func TestResolveStatusOnlyNormalizesStoppedCodespace(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-stopped-status"] = fakeCodespace("cs-stopped-status", "Shutdown")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ac6"
+	server := b.serverFromCodespace(fc.items["cs-stopped-status"], b.labelsFor(leaseID, "stopped-status-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopped-status"], "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "stopped-status-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Status != "Shutdown" || lease.Server.Labels[labelState] != "stopped" || len(fc.starts) != 0 || len(b.waits) != 0 {
+		t.Fatalf("lease=%#v starts=%#v waits=%#v", lease, fc.starts, b.waits)
 	}
 }
 
@@ -776,7 +828,8 @@ func TestReleaseDeleteRemovesOnlyClaimBackedCodespaceAndConfig(t *testing.T) {
 	if err := claimLeaseTargetForRepoConfig(leaseID, "delete-box", b.cfg, server, SSHTarget{Host: "cs-delete", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := storeSSHConfig(leaseID, fg.config("cs-delete")); err != nil {
+	configPath, err := storeSSHConfig(leaseID, fg.config("cs-delete"))
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -788,6 +841,9 @@ func TestReleaseDeleteRemovesOnlyClaimBackedCodespaceAndConfig(t *testing.T) {
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
 		t.Fatalf("claim remains ok=%t err=%v", ok, err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("stored config remains err=%v path=%s", err, configPath)
 	}
 }
 
@@ -1386,6 +1442,7 @@ type fakeCodespacesClient struct {
 	useCreateResult bool
 	onCreate        func(createCodespaceRequest)
 	onGet           func(string)
+	onStart         func(string)
 	onStop          func(string)
 	listErr         error
 	starts          []string
@@ -1462,6 +1519,9 @@ func (f *fakeCodespacesClient) getCodespace(_ context.Context, name string) (cod
 }
 
 func (f *fakeCodespacesClient) startCodespace(_ context.Context, name string) (codespace, error) {
+	if f.onStart != nil {
+		f.onStart(name)
+	}
 	f.starts = append(f.starts, name)
 	item := f.items[name]
 	item.State = "Starting"

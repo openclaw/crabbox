@@ -91,6 +91,32 @@ func TestClientCreateCodespaceIncludesExplicitZeroRetention(t *testing.T) {
 	}
 }
 
+func TestClientListAcceptsResponseAboveLegacyOneMiBLimit(t *testing.T) {
+	displayName := strings.Repeat("x", (1<<20)+1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RequestURI() != "/user/codespaces?per_page=30" {
+			t.Fatalf("request=%q", r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"codespaces": []map[string]any{{"name": "large-space", "display_name": displayName}}}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+
+	c := newClient(GitHubCodespacesConfig{APIURL: server.URL}, Runtime{HTTP: server.Client()}, "redacted")
+	items, err := c.listCodespaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items=%d", len(items))
+	}
+	if items[0].Name != "large-space" || items[0].DisplayName != displayName {
+		t.Fatalf("name=%q display_len=%d", items[0].Name, len(items[0].DisplayName))
+	}
+}
+
 func TestClientCurrentUserUsesConfiguredAPIBase(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v3/user" || r.Header.Get("Authorization") != "Bearer ghp_this_token_value_is_redacted" {
@@ -157,10 +183,10 @@ func TestClientLifecycleOperationsRequestShape(t *testing.T) {
 		calls = append(calls, r.Method+" "+r.URL.RequestURI())
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/user/codespaces?per_page=100":
-			w.Header().Set("Link", `<`+server.URL+`/api/v3/user/codespaces?per_page=100&page=2>; rel="next"`)
+		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/user/codespaces?per_page=30":
+			w.Header().Set("Link", `<`+server.URL+`/api/v3/user/codespaces?per_page=30&page=2>; rel="next"`)
 			_, _ = w.Write([]byte(`{"codespaces":[{"name":"space-1","state":"Available","repository":"example-org/my-app","machine":"standardLinux32gb"}]}`))
-		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/user/codespaces?per_page=100&page=2":
+		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/user/codespaces?per_page=30&page=2":
 			_, _ = w.Write([]byte(`{"codespaces":[{"name":"space-2","state":"Shutdown","repository":"example-org/my-app","machine":"standardLinux32gb"}]}`))
 		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/user/codespaces/space-1":
 			_, _ = w.Write([]byte(`{"name":"space-1","state":"Available","repository":"example-org/my-app","machine":"standardLinux32gb"}`))
@@ -215,8 +241,8 @@ func TestClientLifecycleOperationsRequestShape(t *testing.T) {
 		t.Fatalf("machines=%#v err=%v", machines, err)
 	}
 	want := strings.Join([]string{
-		"GET /api/v3/user/codespaces?per_page=100",
-		"GET /api/v3/user/codespaces?per_page=100&page=2",
+		"GET /api/v3/user/codespaces?per_page=30",
+		"GET /api/v3/user/codespaces?per_page=30&page=2",
 		"GET /api/v3/user/codespaces/space-1",
 		"POST /api/v3/user/codespaces/space-1/start",
 		"POST /api/v3/user/codespaces/space-2/start",
@@ -246,7 +272,7 @@ func TestClientListCodespacesRejectsCrossOriginPagination(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "outside configured API base") {
 		t.Fatalf("err=%v", err)
 	}
-	if got := strings.Join(calls, "\n"); got != "GET /api/v3/user/codespaces?per_page=100" {
+	if got := strings.Join(calls, "\n"); got != "GET /api/v3/user/codespaces?per_page=30" {
 		t.Fatalf("calls=%q", got)
 	}
 }

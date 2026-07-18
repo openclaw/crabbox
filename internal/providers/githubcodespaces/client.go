@@ -20,6 +20,11 @@ type githubAPIResponseError struct {
 	message string
 }
 
+const (
+	githubCodespacesListPageSize    = 30
+	githubCodespacesMaxResponseSize = 16 << 20
+)
+
 func (e *githubAPIResponseError) Error() string { return e.message }
 
 type client struct {
@@ -209,7 +214,7 @@ func (c client) createCodespace(ctx context.Context, req createCodespaceRequest)
 }
 
 func (c client) listCodespaces(ctx context.Context) ([]codespace, error) {
-	path := "/user/codespaces?per_page=100"
+	path := fmt.Sprintf("/user/codespaces?per_page=%d", githubCodespacesListPageSize)
 	var all []codespace
 	for path != "" {
 		var out struct {
@@ -346,9 +351,12 @@ func (c client) doWithHeader(ctx context.Context, method, path string, body any,
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, githubCodespacesMaxResponseSize+1))
 	if readErr != nil {
 		return nil, readErr
+	}
+	if len(data) > githubCodespacesMaxResponseSize {
+		return nil, exit(4, "github-codespaces API response exceeds %d-byte limit", githubCodespacesMaxResponseSize)
 	}
 	if accepted == nil {
 		accepted = map[int]bool{}

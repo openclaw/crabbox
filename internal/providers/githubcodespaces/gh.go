@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-var githubTokenPattern = regexp.MustCompile(`(?i)(?:github_pat_|gh[opusr]_)[a-z0-9_]{12,}`)
+var githubTokenPattern = regexp.MustCompile(`(?i)(?:github_pat_[a-z0-9_]{12,}|gh[opur]_[a-z0-9_]{12,}|ghs_[a-z0-9._-]{36,})`)
 
 type ghRunner struct {
 	cfg GitHubCodespacesConfig
