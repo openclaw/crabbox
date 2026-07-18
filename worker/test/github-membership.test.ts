@@ -11,7 +11,11 @@ const liveOrg = process.env.CRABBOX_GITHUB_LIVE_ORG;
 const liveLogin = process.env.CRABBOX_GITHUB_LIVE_LOGIN;
 const liveAccountID = Number(process.env.CRABBOX_GITHUB_LIVE_ID);
 const liveMembershipConfigured = Boolean(
-  liveAccessToken && liveOrg && liveLogin && Number.isSafeInteger(liveAccountID) && liveAccountID > 0,
+  liveAccessToken &&
+  liveOrg &&
+  liveLogin &&
+  Number.isSafeInteger(liveAccountID) &&
+  liveAccountID > 0,
 );
 
 function testEnv(overrides: Partial<Env> = {}): Env {
