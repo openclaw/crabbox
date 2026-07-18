@@ -678,6 +678,26 @@ func TestResolveWaitsForShutdownThenRestartsCodespace(t *testing.T) {
 	}
 }
 
+func TestResolveShuttingDownCodespaceUsesReadyTimeout(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-stopping"] = fakeCodespace("cs-stopping", "ShuttingDown")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	b.readyTimeout = time.Nanosecond
+	b.pollInterval = time.Hour
+	leaseID := "cbx_123456789ad1"
+	server := b.serverFromCodespace(fc.items["cs-stopping"], b.labelsFor(leaseID, "stopping-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopping"], "stopping"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "stopping-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReadyProbe: true})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestResolveWaitsForTransitionalCodespaceBeforeSSH(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()

@@ -386,7 +386,13 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 			return server, SSHTarget{}, false, nil
 		}
 		if codespaceStopping(item.State) {
-			item, err = b.waitForStopped(ctx, api, item.Name)
+			waitCtx := ctx
+			cancel := func() {}
+			if b.readyTimeout > 0 {
+				waitCtx, cancel = context.WithTimeout(ctx, b.readyTimeout)
+			}
+			item, err = b.waitForStopped(waitCtx, api, item.Name)
+			cancel()
 			if err != nil {
 				return Server{}, SSHTarget{}, false, err
 			}

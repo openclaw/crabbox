@@ -6,22 +6,28 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 func TestClientCreateCodespaceRequestShape(t *testing.T) {
+	var captureMu sync.Mutex
 	var gotMethod, gotPath, gotAuth string
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		captureMu.Lock()
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
+		gotBody = body
+		captureMu.Unlock()
 		if r.Header.Get("Accept") != "application/vnd.github+json" || r.Header.Get("X-GitHub-Api-Version") != "2022-11-28" {
 			t.Fatalf("missing GitHub headers: %#v", r.Header)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatal(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":7,"name":"codespace-1","display_name":"Crabbox","state":"Available","environment_id":"env_1","owner":{"id":42,"login":"alice"},"repository":{"full_name":"example-org/my-app"},"machine":{"name":"standardLinux32gb"}}`))
@@ -43,6 +49,8 @@ func TestClientCreateCodespaceRequestShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	captureMu.Lock()
+	defer captureMu.Unlock()
 	if gotMethod != http.MethodPost || gotPath != "/repos/example-org/my-app/codespaces" {
 		t.Fatalf("request=%s %s", gotMethod, gotPath)
 	}
@@ -68,11 +76,16 @@ func TestClientCreateCodespaceRequestShape(t *testing.T) {
 }
 
 func TestClientCreateCodespaceIncludesExplicitZeroRetention(t *testing.T) {
+	var captureMu sync.Mutex
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+		body := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
+		captureMu.Lock()
+		gotBody = body
+		captureMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":7,"name":"codespace-1"}`))
 	}))
@@ -86,6 +99,8 @@ func TestClientCreateCodespaceIncludesExplicitZeroRetention(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	captureMu.Lock()
+	defer captureMu.Unlock()
 	if value, ok := gotBody["retention_period_minutes"]; !ok || value.(float64) != 0 {
 		t.Fatalf("body=%#v", gotBody)
 	}
@@ -177,10 +192,13 @@ func TestFlexibleRefsDecodeRESTObjectsAndGHStrings(t *testing.T) {
 }
 
 func TestClientLifecycleOperationsRequestShape(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callsMu.Lock()
 		calls = append(calls, r.Method+" "+r.URL.RequestURI())
+		callsMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/user/codespaces?per_page=30":
@@ -252,15 +270,21 @@ func TestClientLifecycleOperationsRequestShape(t *testing.T) {
 		"DELETE /api/v3/user/codespaces/space-2",
 		"GET /api/v3/repos/example-org/my-app/codespaces/machines?ref=main",
 	}, "\n")
-	if got := strings.Join(calls, "\n"); got != want {
+	callsMu.Lock()
+	gotCalls := append([]string(nil), calls...)
+	callsMu.Unlock()
+	if got := strings.Join(gotCalls, "\n"); got != want {
 		t.Fatalf("calls:\n%s\nwant:\n%s", got, want)
 	}
 }
 
 func TestClientListCodespacesRejectsCrossOriginPagination(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callsMu.Lock()
 		calls = append(calls, r.Method+" "+r.URL.RequestURI())
+		callsMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Link", `<https://attacker.example/user/codespaces?page=2>; rel="next"`)
 		_, _ = w.Write([]byte(`{"codespaces":[{"name":"space-1","state":"Available","repository":"example-org/my-app","machine":"standardLinux32gb"}]}`))
@@ -272,15 +296,21 @@ func TestClientListCodespacesRejectsCrossOriginPagination(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "outside configured API base") {
 		t.Fatalf("err=%v", err)
 	}
-	if got := strings.Join(calls, "\n"); got != "GET /api/v3/user/codespaces?per_page=30" {
+	callsMu.Lock()
+	gotCalls := append([]string(nil), calls...)
+	callsMu.Unlock()
+	if got := strings.Join(gotCalls, "\n"); got != "GET /api/v3/user/codespaces?per_page=30" {
 		t.Fatalf("calls=%q", got)
 	}
 }
 
 func TestClientRejectsRedirectWithoutForwardingAuthorization(t *testing.T) {
+	var sinkMu sync.Mutex
 	sinkCalls := 0
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sinkMu.Lock()
 		sinkCalls++
+		sinkMu.Unlock()
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Fatalf("redirect leaked authorization=%q", got)
 		}
@@ -298,8 +328,11 @@ func TestClientRejectsRedirectWithoutForwardingAuthorization(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "status=302") {
 		t.Fatalf("err=%v", err)
 	}
-	if sinkCalls != 0 {
-		t.Fatalf("redirect target calls=%d", sinkCalls)
+	sinkMu.Lock()
+	gotSinkCalls := sinkCalls
+	sinkMu.Unlock()
+	if gotSinkCalls != 0 {
+		t.Fatalf("redirect target calls=%d", gotSinkCalls)
 	}
 }
 
