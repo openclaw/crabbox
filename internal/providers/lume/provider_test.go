@@ -421,13 +421,14 @@ func TestAcquireRejectsStoragePathBeforeLumeMutation(t *testing.T) {
 
 func TestStoragePathInventoryUsesExactGetForLifecycle(t *testing.T) {
 	home := t.TempDir()
+	storage := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
-	cfg.Lume.Storage = "/Volumes/VMs"
+	cfg.Lume.Storage = storage
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-		"get\x00crabbox-macos-golden\x00--format\x00json\x00--storage\x00/Volumes/VMs": {
+		"get\x00crabbox-macos-golden\x00--format\x00json\x00--storage\x00" + storage: {
 			Stdout: `[{"name":"crabbox-macos-golden","os":"macOS","status":"stopped"}]`,
 		},
 	}}
@@ -443,6 +444,42 @@ func TestStoragePathInventoryUsesExactGetForLifecycle(t *testing.T) {
 		if len(call.Args) > 0 && call.Args[0] == "ls" {
 			t.Fatalf("path lifecycle used unsupported list filter: %#v", runner.calls)
 		}
+	}
+}
+
+func TestDirectStoragePathMustExistBeforeLookup(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Lume.Storage = filepath.Join(t.TempDir(), "unmounted")
+	runner := &recordingRunner{}
+	b := testBackend(cfg, runner)
+	if _, err := b.getInstance(context.Background(), cfg, "worker"); err == nil || !strings.Contains(err.Error(), "storage") {
+		t.Fatalf("getInstance error=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("Lume called with unavailable storage: %#v", runner.calls)
+	}
+}
+
+func TestListIncludesClaimFromPriorStorage(t *testing.T) {
+	home := t.TempDir()
+	storage := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	const leaseID, name = "cbx_prior_storage", "crabbox-prior-storage"
+	server := core.Server{CloudID: name, Provider: providerName, Labels: map[string]string{"instance": name, "storage": storage, "storage_exact": "true", "state": "ready"}}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "prior", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		"ls": {Stdout: `[]`},
+		"get\x00" + name + "\x00--format\x00json\x00--storage\x00" + storage: {Stdout: `[{"name":"crabbox-prior-storage","status":"running","ipAddress":"192.0.2.12"}]`},
+	}}
+	views, err := testBackend(core.BaseConfig(), runner).List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].CloudID != name || views[0].Status != "ready" {
+		t.Fatalf("views=%#v", views)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -400,24 +401,40 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 
 func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
 	cfg := b.configForRun()
-	instances, err := b.listInstances(ctx)
-	if err != nil {
-		return nil, err
-	}
 	claims, err := providerClaims()
 	if err != nil {
 		return nil, err
 	}
-	views := make([]LeaseView, 0, len(instances))
+	instances, err := b.listInstances(ctx)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]LeaseView, 0, len(instances)+len(claims))
+	seen := make(map[string]struct{}, len(claims))
+	claimNames := make([]string, 0, len(claims))
+	for name := range claims {
+		claimNames = append(claimNames, name)
+	}
+	sort.Strings(claimNames)
+	for _, name := range claimNames {
+		inst, claim, resolveErr := b.resolveClaimedInstance(ctx, claims[name])
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		views = append(views, b.serverFromInstance(inst, claim, configForClaim(cfg, claim)))
+		seen[name] = struct{}{}
+	}
 	for _, inst := range instances {
 		if inst.Name == cfg.Lume.Base {
 			continue
 		}
-		claim := claims[inst.Name]
-		if claim.LeaseID == "" && !strings.HasPrefix(inst.Name, "crabbox-") {
+		if _, ok := seen[inst.Name]; ok {
 			continue
 		}
-		views = append(views, b.serverFromInstance(inst, claim, configForClaim(cfg, claim)))
+		if !strings.HasPrefix(inst.Name, "crabbox-") {
+			continue
+		}
+		views = append(views, b.serverFromInstance(inst, core.LeaseClaim{}, cfg))
 	}
 	return views, nil
 }
@@ -1169,6 +1186,9 @@ func (b *backend) listInstances(ctx context.Context) ([]lumeVM, error) {
 
 func (b *backend) listInstancesForConfig(ctx context.Context, cfg Config) ([]lumeVM, error) {
 	if isDirectStoragePath(cfg.Lume.Storage) {
+		if err := requireDirectStorageAvailable(cfg); err != nil {
+			return nil, err
+		}
 		return b.listClaimedInstancesAtStoragePath(ctx, cfg)
 	}
 	args := []string{"ls", "--format", "json"}
@@ -1214,6 +1234,24 @@ func (b *backend) listClaimedInstancesAtStoragePath(ctx context.Context, cfg Con
 func isDirectStoragePath(storage string) bool {
 	storage = strings.TrimSpace(storage)
 	return storage == "ephemeral" || strings.ContainsAny(storage, `/\\`)
+}
+
+func requireDirectStorageAvailable(cfg Config) error {
+	if !isDirectStoragePath(cfg.Lume.Storage) {
+		return nil
+	}
+	root, err := lumeStorageRoot(cfg, "")
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return exit(5, "Lume storage %q is unavailable: %v", root, err)
+	}
+	if !info.IsDir() {
+		return exit(5, "Lume storage %q is unavailable: not a directory", root)
+	}
+	return nil
 }
 
 func isLumeNotFoundError(err error) bool {
@@ -1377,6 +1415,9 @@ func (b *backend) waitForMissingVM(ctx context.Context, cfg Config, name string)
 }
 
 func (b *backend) getInstance(ctx context.Context, cfg Config, name string) (lumeVM, error) {
+	if err := requireDirectStorageAvailable(cfg); err != nil {
+		return lumeVM{}, err
+	}
 	args := []string{"get", name, "--format", "json"}
 	if storage := strings.TrimSpace(cfg.Lume.Storage); storage != "" {
 		args = append(args, "--storage", storage)
