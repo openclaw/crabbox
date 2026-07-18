@@ -27,14 +27,60 @@ func (c *afterListClient) ListInstances() ([]api.Instance, error) {
 }
 
 func TestCleanupPreservesInstanceReclaimedDuringList(t *testing.T) {
-	testCleanupPreservesInstanceReclaimedDuringList(t, false)
+	testCleanupPreservesInstanceReclaimedDuringList(t, false, true)
 }
 
 func TestCleanupDryRunDoesNotPlanReclaimedInstanceRemoval(t *testing.T) {
-	testCleanupPreservesInstanceReclaimedDuringList(t, true)
+	testCleanupPreservesInstanceReclaimedDuringList(t, true, true)
 }
 
-func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun bool) {
+func TestCleanupPreservesReclaimedInstanceBeforeClaimPublish(t *testing.T) {
+	testCleanupPreservesInstanceReclaimedDuringList(t, false, false)
+}
+
+func TestIncusLeaseOperationLockSerializesReclaimAndCleanup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
+
+	const (
+		leaseID = "cbx_incus_lock"
+		name    = "crabbox-incus-lock"
+	)
+	unlockReclaim, err := lockIncusLeaseOperation(context.Background(), leaseID, name)
+	if err != nil {
+		t.Fatalf("lock reclaim operation: %v", err)
+	}
+	defer unlockReclaim()
+
+	cleanupAcquired := make(chan struct{})
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		unlockCleanup, lockErr := lockIncusLeaseOperation(context.Background(), leaseID, name)
+		if lockErr != nil {
+			t.Errorf("lock cleanup operation: %v", lockErr)
+			return
+		}
+		close(cleanupAcquired)
+		unlockCleanup()
+	}()
+
+	select {
+	case <-cleanupAcquired:
+		t.Fatal("cleanup operation acquired lock while reclaim still held it")
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlockReclaim()
+	select {
+	case <-cleanupDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup operation did not acquire lock after reclaim released it")
+	}
+}
+
+func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, publishClaim bool) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -112,11 +158,13 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun bool) 
 			Status:   "ready",
 			Labels:   freshLabels,
 		}
-		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
-			leaseID, slug, providerName, instanceScope(name), "", repoRoot,
-			5*time.Minute, true, freshServer, core.SSHTarget{},
-		); err != nil {
-			t.Fatalf("reclaim during ListInstances: %v", err)
+		if publishClaim {
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+				leaseID, slug, providerName, instanceScope(name), "", repoRoot,
+				5*time.Minute, true, freshServer, core.SSHTarget{},
+			); err != nil {
+				t.Fatalf("reclaim during ListInstances: %v", err)
+			}
 		}
 		freshConfig := cloneMap(instanceConfig)
 		for key, value := range freshLabels {
