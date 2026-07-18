@@ -252,6 +252,7 @@ const codeTicketTTLSeconds = 120;
 const codeViewerTicketTTLSeconds = 120;
 const codeViewerSessionTTLSeconds = 8 * 60 * 60;
 const egressTicketTTLSeconds = 120;
+export const replacedEgressSessionsPerLease = 256;
 const runtimeAdapterTicketTTLSeconds = 120;
 const nativeVNCTicketTTLSeconds = 60;
 const runtimeAdapterProvisionalClaimTTLSeconds = 10 * 60;
@@ -934,6 +935,13 @@ export class FleetCoordinator {
   private readonly egressHosts = new Map<string, WebSocket>();
   private readonly egressClients = new Map<string, WebSocket>();
   private readonly egressSessions = new Map<string, EgressSessionStatus>();
+  // Per-lease tombstones survive session revocation and DO restarts, and are dropped only when the
+  // lease's egress state is torn down. FIFO overflow after 256 replacements while one zombie stays
+  // offline is accepted residual risk. Full closure would require server-bound session identity
+  // (protocol change, out of scope).
+  private readonly replacedEgressSessions = new Map<string, string[]>();
+  private readonly hydratedEgressSessionState = new Set<string>();
+  private readonly egressSessionStateHydrations = new Map<string, Promise<void>>();
   private readonly runtimeAdapterAgents = new Map<string, WebSocket>();
   private readonly runtimeAdapterPending = new Map<string, RuntimeAdapterPendingRequest>();
   private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
@@ -1272,7 +1280,6 @@ export class FleetCoordinator {
       endpoint: string;
     }> = [];
     const endpointCounts = new Map<string, number>();
-    const egressSessions = new Map<string, Set<string>>();
     for (const socket of this.state.getWebSockets()) {
       const attachment = this.bridgeAttachment(socket);
       if (!attachment) {
@@ -1285,17 +1292,9 @@ export class FleetCoordinator {
       const endpoint = restoredBridgeEndpoint(attachment);
       candidates.push({ socket, attachment, endpoint });
       endpointCounts.set(endpoint, (endpointCounts.get(endpoint) ?? 0) + 1);
-      if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
-        const sessions = egressSessions.get(attachment.leaseID) ?? new Set<string>();
-        sessions.add(attachment.sessionID);
-        egressSessions.set(attachment.leaseID, sessions);
-      }
     }
     for (const { socket, attachment, endpoint } of candidates) {
-      const ambiguousEgressLease =
-        (attachment.kind === "egress-host" || attachment.kind === "egress-client") &&
-        (egressSessions.get(attachment.leaseID)?.size ?? 0) > 1;
-      if ((endpointCounts.get(endpoint) ?? 0) > 1 || ambiguousEgressLease) {
+      if ((endpointCounts.get(endpoint) ?? 0) > 1) {
         this.rejectRestoredBridgeSocket(socket, attachment);
         continue;
       }
@@ -1306,10 +1305,14 @@ export class FleetCoordinator {
 
   private async reconcileRestoredBridgeSockets(): Promise<void> {
     const leaseIDs = new Set<string>();
+    const egressLeaseIDs = new Set<string>();
     for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
       if (attachment && "leaseID" in attachment) {
         leaseIDs.add(attachment.leaseID);
+        if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
+          egressLeaseIDs.add(attachment.leaseID);
+        }
       }
     }
     const [leaseEntries, adminGrants] = await Promise.all([
@@ -1318,6 +1321,88 @@ export class FleetCoordinator {
       ),
       this.currentAdminGrantValidation(),
     ]);
+    await Promise.all(
+      [...egressLeaseIDs].map((leaseID) => this.hydrateEgressSessionState(leaseID)),
+    );
+    const restoredEgressSessions = new Map<
+      string,
+      Map<string, Extract<BridgeAttachment, { kind: "egress-host" | "egress-client" }>>
+    >();
+    for (const socket of this.restoredBridgeSockets) {
+      const attachment = this.bridgeAttachment(socket);
+      if (attachment?.kind !== "egress-host" && attachment?.kind !== "egress-client") {
+        continue;
+      }
+      const sessions = restoredEgressSessions.get(attachment.leaseID) ?? new Map();
+      sessions.set(attachment.sessionID, attachment);
+      restoredEgressSessions.set(attachment.leaseID, sessions);
+    }
+    const forgetRestoredEgressSession = (leaseID: string, sessionID: string) => {
+      for (const candidate of this.restoredBridgeSockets) {
+        const attachment = this.bridgeAttachment(candidate);
+        if (
+          (attachment?.kind === "egress-host" || attachment?.kind === "egress-client") &&
+          attachment.leaseID === leaseID &&
+          attachment.sessionID === sessionID
+        ) {
+          this.restoredBridgeSockets.delete(candidate);
+        }
+      }
+    };
+    for (const leaseID of [...restoredEgressSessions.keys()].toSorted()) {
+      const sessions = restoredEgressSessions.get(leaseID)!;
+      let active = this.egressSessions.get(leaseID);
+      if (active && this.egressSessionWasReplaced(leaseID, active.sessionID)) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- restored session transitions must commit in winner order.
+        await this.clearEgressSession(
+          leaseID,
+          active.sessionID,
+          1012,
+          "replaced by a newer egress session",
+        );
+        active = undefined;
+      }
+      const sessionIDs = [...sessions.keys()].toSorted();
+      if (!active && sessionIDs.length > 1) {
+        for (const sessionID of sessionIDs) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- all ambiguous restored sessions must close before reconciliation continues.
+          await this.clearEgressSession(
+            leaseID,
+            sessionID,
+            1011,
+            "egress session state lost; reconnect",
+          );
+          forgetRestoredEgressSession(leaseID, sessionID);
+        }
+        continue;
+      }
+      const candidateWinnerSessionID = active?.sessionID ?? sessionIDs[0];
+      const winnerSessionID =
+        candidateWinnerSessionID &&
+        !this.egressSessionWasReplaced(leaseID, candidateWinnerSessionID)
+          ? candidateWinnerSessionID
+          : undefined;
+      const winner = winnerSessionID ? sessions.get(winnerSessionID) : undefined;
+      if (winner) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- persist the winner before rejecting other restored sessions.
+        await this.trackEgressSession(winner);
+      }
+      for (const sessionID of sessionIDs) {
+        if (sessionID === winnerSessionID) {
+          continue;
+        }
+        // oxlint-disable-next-line eslint/no-await-in-loop -- persist each tombstone before clearing its restored session.
+        await this.recordReplacedEgressSession(leaseID, sessionID);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- preserve tombstone-before-clear ordering per session.
+        await this.clearEgressSession(
+          leaseID,
+          sessionID,
+          1012,
+          "replaced by a newer egress session",
+        );
+        forgetRestoredEgressSession(leaseID, sessionID);
+      }
+    }
     const leases = new Map(leaseEntries);
     const now = Date.now();
     const revoked = new Map<string, string>();
@@ -1533,15 +1618,17 @@ export class FleetCoordinator {
       this.handleBridgeClose(socket, 1008, "admin access revoked");
       closeSocket(socket, 1008, "admin access revoked");
     }
-    for (const { leaseID, sessionID } of revokedAdminEgressSessions.values()) {
-      this.clearEgressSession(leaseID, sessionID, 1008, "admin access revoked");
-    }
-    for (const [leaseID, reason] of revoked) {
-      this.closeLeaseBridges(leaseID, 1008, reason);
-    }
-    for (const { leaseID, sessionID, reason } of revokedEgressSessions.values()) {
-      this.clearEgressSession(leaseID, sessionID, 1008, reason);
-    }
+    await Promise.all([
+      ...[...revokedAdminEgressSessions.values()].map(({ leaseID, sessionID }) =>
+        this.clearEgressSession(leaseID, sessionID, 1008, "admin access revoked"),
+      ),
+      ...[...revoked.entries()].map(([leaseID, reason]) =>
+        this.closeLeaseBridges(leaseID, 1008, reason),
+      ),
+      ...[...revokedEgressSessions.values()].map(({ leaseID, sessionID, reason }) =>
+        this.clearEgressSession(leaseID, sessionID, 1008, reason),
+      ),
+    ]);
     for (const socket of this.restoredBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
       const reason =
@@ -1559,12 +1646,13 @@ export class FleetCoordinator {
         rightAttachment?.kind === "webvnc-agent" || rightAttachment?.kind === "code-agent";
       return Number(leftIsAgent) - Number(rightIsAgent);
     });
-    for (const [socket, reason] of revokedUserBridges) {
+    await revokedUserBridges.reduce<Promise<void>>(async (pending, [socket, reason]) => {
+      await pending;
       const attachment = this.bridgeAttachment(socket);
       if (attachment && revocableUserBridge(attachment)) {
-        this.closeRevokedUserBridge(socket, attachment, reason);
+        await this.closeRevokedUserBridge(socket, attachment, reason);
       }
-    }
+    }, Promise.resolve());
     this.restoredBridgeSockets.clear();
   }
 
@@ -1605,7 +1693,7 @@ export class FleetCoordinator {
     this.currentAdminGrantVersion = version;
     const validation = await adminGrantValidation(this.env, version);
     if (this.currentAdminGrantVersion === version) {
-      this.reconcileAdminBridgeSockets(validation);
+      await this.reconcileAdminBridgeSockets(validation);
     }
   }
 
@@ -1630,8 +1718,8 @@ export class FleetCoordinator {
     return sockets;
   }
 
-  private reconcileAdminBridgeSockets(validation: AdminGrantValidation): void {
-    const revokedEgressSessions = new Set<string>();
+  private async reconcileAdminBridgeSockets(validation: AdminGrantValidation): Promise<void> {
+    const revokedEgressSessions = new Map<string, { leaseID: string; sessionID: string }>();
     for (const socket of this.adminBridgeSockets()) {
       const attachment = this.bridgeAttachment(socket);
       if (
@@ -1646,19 +1734,21 @@ export class FleetCoordinator {
       if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
         const key = egressSocketKey(attachment.leaseID, attachment.sessionID);
         if (!revokedEgressSessions.has(key)) {
-          revokedEgressSessions.add(key);
-          this.clearEgressSession(
-            attachment.leaseID,
-            attachment.sessionID,
-            1008,
-            "admin access revoked",
-          );
+          revokedEgressSessions.set(key, {
+            leaseID: attachment.leaseID,
+            sessionID: attachment.sessionID,
+          });
         }
         continue;
       }
       this.handleBridgeClose(socket, 1008, "admin access revoked");
       closeSocket(socket, 1008, "admin access revoked");
     }
+    await Promise.all(
+      [...revokedEgressSessions.values()].map(({ leaseID, sessionID }) =>
+        this.clearEgressSession(leaseID, sessionID, 1008, "admin access revoked"),
+      ),
+    );
   }
 
   private async reconcileScheduledAdminGrants(
@@ -1779,11 +1869,9 @@ export class FleetCoordinator {
         break;
       case "egress-host":
         this.egressHosts.set(egressSocketKey(attachment.leaseID, attachment.sessionID), socket);
-        this.trackEgressSession(attachment);
         break;
       case "egress-client":
         this.egressClients.set(egressSocketKey(attachment.leaseID, attachment.sessionID), socket);
-        this.trackEgressSession(attachment);
         break;
       case "runtime-adapter-agent":
         closeSocket(
@@ -1819,8 +1907,10 @@ export class FleetCoordinator {
     this.webVNCViewers.set(leaseID, viewers);
   }
 
-  private trackEgressSession(attachment: Extract<BridgeAttachment, { sessionID: string }>): void {
-    this.activateEgressSession(
+  private async trackEgressSession(
+    attachment: Extract<BridgeAttachment, { sessionID: string }>,
+  ): Promise<void> {
+    await this.activateEgressSession(
       attachment.leaseID,
       attachment.sessionID,
       undefined,
@@ -1829,19 +1919,23 @@ export class FleetCoordinator {
     );
   }
 
-  private activateEgressSession(
+  private async activateEgressSession(
     leaseID: string,
     sessionID: string,
     profile: string | undefined,
     allow: string[] | undefined,
     nowDate: Date,
-  ): void {
+  ): Promise<void> {
     const previous = this.egressSessions.get(leaseID);
+    if (this.egressSessionWasReplaced(leaseID, sessionID)) {
+      return;
+    }
     if (!shouldActivateEgressSession(previous, sessionID, nowDate.toISOString())) {
       return;
     }
     if (previous && previous.sessionID !== sessionID) {
-      this.clearEgressSession(
+      await this.recordReplacedEgressSession(leaseID, previous.sessionID);
+      await this.clearEgressSession(
         leaseID,
         previous.sessionID,
         1012,
@@ -1860,7 +1954,63 @@ export class FleetCoordinator {
     if (sessionProfile) {
       sessionStatus.profile = sessionProfile;
     }
+    await this.state.storage.put(activeEgressSessionKey(leaseID), sessionStatus);
     this.egressSessions.set(leaseID, sessionStatus);
+  }
+
+  private egressSessionWasReplaced(leaseID: string, sessionID: string): boolean {
+    return this.replacedEgressSessions.get(leaseID)?.includes(sessionID) ?? false;
+  }
+
+  private async recordReplacedEgressSession(leaseID: string, sessionID: string): Promise<void> {
+    const replaced = [...(this.replacedEgressSessions.get(leaseID) ?? [])];
+    if (replaced.includes(sessionID)) {
+      return;
+    }
+    replaced.push(sessionID);
+    if (replaced.length > replacedEgressSessionsPerLease) {
+      replaced.shift();
+    }
+    await this.state.storage.put(replacedEgressSessionsKey(leaseID), replaced);
+    this.replacedEgressSessions.set(leaseID, replaced);
+  }
+
+  private async hydrateEgressSessionState(leaseID: string): Promise<void> {
+    if (this.hydratedEgressSessionState.has(leaseID)) {
+      return;
+    }
+    const existing = this.egressSessionStateHydrations.get(leaseID);
+    if (existing) {
+      await existing;
+      return;
+    }
+    const pending = (async () => {
+      const [storedActive, storedReplaced] = await Promise.all([
+        this.state.storage.get<unknown>(activeEgressSessionKey(leaseID)),
+        this.state.storage.get<unknown>(replacedEgressSessionsKey(leaseID)),
+      ]);
+      const replaced = boundedReplacedEgressSessions(storedReplaced);
+      if (replaced.length > 0) {
+        this.replacedEgressSessions.set(leaseID, replaced);
+      } else {
+        this.replacedEgressSessions.delete(leaseID);
+      }
+      const active = storedEgressSessionStatus(storedActive, leaseID);
+      if (active && replaced.includes(active.sessionID)) {
+        await this.state.storage.delete(activeEgressSessionKey(leaseID));
+      } else if (active && !this.egressSessions.has(leaseID)) {
+        this.egressSessions.set(leaseID, active);
+      }
+      this.hydratedEgressSessionState.add(leaseID);
+    })();
+    this.egressSessionStateHydrations.set(leaseID, pending);
+    try {
+      await pending;
+    } finally {
+      if (this.egressSessionStateHydrations.get(leaseID) === pending) {
+        this.egressSessionStateHydrations.delete(leaseID);
+      }
+    }
   }
 
   private async controlSocket(request: Request): Promise<Response> {
@@ -2032,6 +2182,9 @@ export class FleetCoordinator {
     attachment: BridgeAttachment,
     message: string | ArrayBuffer | Blob,
   ): Promise<void> {
+    if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
+      await this.hydrateEgressSessionState(attachment.leaseID);
+    }
     if (socket.readyState !== WebSocket.OPEN || !this.bridgeSocketIsCurrent(socket, attachment)) {
       this.rejectRestoredBridgeSocket(socket, attachment);
       return;
@@ -2138,7 +2291,7 @@ export class FleetCoordinator {
       const now = Date.now();
       if (Date.parse(attachment.viewerSessionExpiresAt) <= now) {
         this.viewerSessionValidationTimes.delete(socket);
-        this.closeRevokedUserBridge(socket, attachment, "viewer session expired");
+        await this.closeRevokedUserBridge(socket, attachment, "viewer session expired");
         return false;
       }
       const lastValidatedAt = this.viewerSessionValidationTimes.get(socket) ?? 0;
@@ -2146,7 +2299,7 @@ export class FleetCoordinator {
         const failureReason = await this.webVNCPortalViewerAttachmentFailureReason(attachment);
         if (failureReason) {
           this.viewerSessionValidationTimes.delete(socket);
-          this.closeRevokedUserBridge(socket, attachment, failureReason);
+          await this.closeRevokedUserBridge(socket, attachment, failureReason);
           return false;
         }
         this.viewerSessionValidationTimes.set(socket, now);
@@ -2162,7 +2315,7 @@ export class FleetCoordinator {
       if (now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
         if (!(await this.sharedBridgeGrantIsCurrent(attachment))) {
           this.userGrantValidationTimes.delete(socket);
-          this.closeRevokedUserBridge(socket, attachment, "shared access revoked");
+          await this.closeRevokedUserBridge(socket, attachment, "shared access revoked");
           return false;
         }
         this.userGrantValidationTimes.set(socket, now);
@@ -2181,7 +2334,7 @@ export class FleetCoordinator {
         const failureReason = await this.githubBridgeGrantFailureReason(attachment);
         if (failureReason) {
           this.userGrantValidationTimes.delete(socket);
-          this.closeRevokedUserBridge(socket, attachment, failureReason);
+          await this.closeRevokedUserBridge(socket, attachment, failureReason);
           return false;
         }
         this.userGrantValidationTimes.set(socket, now);
@@ -2201,7 +2354,7 @@ export class FleetCoordinator {
     }
     this.adminGrantValidationTimes.delete(socket);
     if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
-      this.clearEgressSession(
+      await this.clearEgressSession(
         attachment.leaseID,
         attachment.sessionID,
         1008,
@@ -2274,7 +2427,7 @@ export class FleetCoordinator {
       : "user access revoked";
   }
 
-  private closeRevokedUserBridge(
+  private async closeRevokedUserBridge(
     socket: WebSocket,
     attachment: Extract<
       BridgeAttachment,
@@ -2289,10 +2442,10 @@ export class FleetCoordinator {
       }
     >,
     reason: string,
-  ): void {
+  ): Promise<void> {
     this.viewerSessionValidationTimes.delete(socket);
     if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
-      this.clearEgressSession(attachment.leaseID, attachment.sessionID, 1008, reason);
+      await this.clearEgressSession(attachment.leaseID, attachment.sessionID, 1008, reason);
       return;
     }
     this.handleBridgeClose(socket, 1008, reason);
@@ -6083,9 +6236,11 @@ export class FleetCoordinator {
       }
       revokedEgressSessions.add(attachment.sessionID);
     }
-    for (const sessionID of revokedEgressSessions) {
-      this.clearEgressSession(lease.id, sessionID, code, reason);
-    }
+    await Promise.all(
+      [...revokedEgressSessions].map((sessionID) =>
+        this.clearEgressSession(lease.id, sessionID, code, reason),
+      ),
+    );
   }
 
   private leaseManagerAuthorized(
@@ -6805,6 +6960,7 @@ export class FleetCoordinator {
         404,
       );
     }
+    await this.hydrateEgressSessionState(lease.id);
     const visibleRuns = await this.recentRuns(12, async (run) => {
       if (run.leaseIDs !== undefined && !this.runReferencesLease(run, lease.id)) {
         return false;
@@ -7221,7 +7377,7 @@ export class FleetCoordinator {
       },
     );
     if (result.status === "completed") {
-      this.closeLeaseBridges(lease.id, 1008, "lease ended");
+      await this.closeLeaseBridges(lease.id, 1008, "lease ended");
     }
     return result;
   }
@@ -7265,7 +7421,7 @@ export class FleetCoordinator {
       },
     );
     if (result.status === "completed") {
-      this.closeLeaseBridges(lease.id, 1008, "lease ended");
+      await this.closeLeaseBridges(lease.id, 1008, "lease ended");
     }
     return result;
   }
@@ -7499,6 +7655,13 @@ export class FleetCoordinator {
     await this.cleanupExpiredEgressTickets();
     const now = new Date();
     const requestedSessionID = input.sessionID ?? input.sessionId;
+    await this.hydrateEgressSessionState(lease.id);
+    if (
+      validEgressSessionID(requestedSessionID) &&
+      this.egressSessionWasReplaced(lease.id, requestedSessionID)
+    ) {
+      return egressSessionReplacedResponse();
+    }
     const sessionID = validEgressSessionID(requestedSessionID)
       ? requestedSessionID
       : newEgressSessionID();
@@ -7520,7 +7683,7 @@ export class FleetCoordinator {
       ticket.profile = profile;
     }
     await this.state.storage.put(egressTicketKey(ticket.ticket), ticket);
-    this.activateEgressSession(lease.id, ticket.sessionID, profile, ticket.allow ?? [], now);
+    await this.activateEgressSession(lease.id, ticket.sessionID, profile, ticket.allow ?? [], now);
     return json({
       ticket: ticket.ticket,
       leaseID: ticket.leaseID,
@@ -7553,6 +7716,10 @@ export class FleetCoordinator {
         return notFound();
       }
       const { lease, ticket } = consumed;
+      await this.hydrateEgressSessionState(lease.id);
+      if (this.egressSessionWasReplaced(lease.id, ticket.sessionID)) {
+        return egressSessionReplacedResponse();
+      }
       if (lease.state !== "active") {
         return json(
           { error: "egress_unavailable", message: "lease is not active" },
@@ -7569,7 +7736,7 @@ export class FleetCoordinator {
         ...principal,
       };
       const ticketCreatedAt = new Date(ticket.createdAt);
-      this.activateEgressSession(
+      await this.activateEgressSession(
         lease.id,
         ticket.sessionID,
         ticket.profile,
@@ -7594,6 +7761,7 @@ export class FleetCoordinator {
     if (!lease) {
       return notFound();
     }
+    await this.hydrateEgressSessionState(lease.id);
     const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
     const session = this.egressSessions.get(lease.id);
     const key = session ? egressSocketKey(lease.id, session.sessionID) : undefined;
@@ -9352,14 +9520,15 @@ export class FleetCoordinator {
   }
 
   private async cleanupExpiredWebVNCPortalViewerAuth(now = Date.now()): Promise<void> {
-    this.closeExpiredWebVNCPortalViewerSockets(now);
+    await this.closeExpiredWebVNCPortalViewerSockets(now);
     await this.cleanupExpiredPortalViewerRecords(
       [webVNCPortalViewerTicketPrefix(), webVNCPortalViewerSessionPrefix()],
       now,
     );
   }
 
-  private closeExpiredWebVNCPortalViewerSockets(now: number): void {
+  private async closeExpiredWebVNCPortalViewerSockets(now: number): Promise<void> {
+    const closings: Promise<void>[] = [];
     for (const viewers of this.webVNCViewers.values()) {
       for (const viewer of viewers.values()) {
         const attachment = this.bridgeAttachment(viewer.socket);
@@ -9368,10 +9537,13 @@ export class FleetCoordinator {
           webVNCViewerSessionAttachment(attachment) &&
           Date.parse(attachment.viewerSessionExpiresAt) <= now
         ) {
-          this.closeRevokedUserBridge(viewer.socket, attachment, "viewer session expired");
+          closings.push(
+            this.closeRevokedUserBridge(viewer.socket, attachment, "viewer session expired"),
+          );
         }
       }
     }
+    await Promise.all(closings);
   }
 
   private async cleanupExpiredPortalViewerRecords(
@@ -9428,7 +9600,7 @@ export class FleetCoordinator {
               expiresAt: new Date(expiresAt).toISOString(),
             },
           );
-          this.closeBridgesForPortalSession(portalSessionHash);
+          await this.closeBridgesForPortalSession(portalSessionHash);
         });
       }
     }
@@ -9723,7 +9895,7 @@ export class FleetCoordinator {
     }
   }
 
-  private closeBridgesForPortalSession(portalSessionHash: string): void {
+  private async closeBridgesForPortalSession(portalSessionHash: string): Promise<void> {
     for (const [leaseID, viewers] of this.webVNCViewers) {
       for (const [id, viewer] of viewers) {
         const attachment = this.bridgeAttachment(viewer.socket);
@@ -9783,9 +9955,11 @@ export class FleetCoordinator {
         sessionID: attachment.sessionID,
       });
     }
-    for (const { leaseID, sessionID } of egressSessions.values()) {
-      this.clearEgressSession(leaseID, sessionID, 1008, "portal session ended");
-    }
+    await Promise.all(
+      [...egressSessions.values()].map(({ leaseID, sessionID }) =>
+        this.clearEgressSession(leaseID, sessionID, 1008, "portal session ended"),
+      ),
+    );
   }
 
   private clearCodeLease(leaseID: string, code = 1011, reason = "code bridge disconnected"): void {
@@ -9832,7 +10006,11 @@ export class FleetCoordinator {
     this.egressHosts.delete(key);
   }
 
-  private clearEgressLease(leaseID: string, code = 1011, reason = "lease ended"): void {
+  private async clearEgressLease(
+    leaseID: string,
+    code = 1011,
+    reason = "lease ended",
+  ): Promise<void> {
     for (const [key, socket] of this.egressHosts) {
       if (egressSocketLeaseID(key) === leaseID) {
         closeSocket(socket, code, reason);
@@ -9846,9 +10024,15 @@ export class FleetCoordinator {
       }
     }
     this.egressSessions.delete(leaseID);
+    await Promise.all([
+      this.state.storage.delete(activeEgressSessionKey(leaseID)),
+      this.state.storage.delete(replacedEgressSessionsKey(leaseID)),
+    ]);
+    this.replacedEgressSessions.delete(leaseID);
+    this.hydratedEgressSessionState.add(leaseID);
   }
 
-  private closeLeaseBridges(leaseID: string, code: number, reason: string): void {
+  private async closeLeaseBridges(leaseID: string, code: number, reason: string): Promise<void> {
     const webVNCAgents = this.webVNCAgents.get(leaseID);
     for (const [agentID, socket] of webVNCAgents ?? []) {
       closeSocket(socket, code, reason);
@@ -9862,22 +10046,25 @@ export class FleetCoordinator {
     this.codeAgents.delete(leaseID);
     closeSocket(codeAgent, code, reason);
     this.clearCodeLease(leaseID, code, reason);
-    this.clearEgressLease(leaseID, code, reason);
+    await this.clearEgressLease(leaseID, code, reason);
   }
 
-  private clearEgressSession(
+  private async clearEgressSession(
     leaseID: string,
     sessionID: string,
     code: number,
     reason: string,
-  ): void {
+  ): Promise<void> {
     const key = egressSocketKey(leaseID, sessionID);
     closeSocket(this.egressHosts.get(key), code, reason);
     closeSocket(this.egressClients.get(key), code, reason);
     this.egressHosts.delete(key);
     this.egressClients.delete(key);
-    if (this.egressSessions.get(leaseID)?.sessionID === sessionID) {
+    const clearedActiveSession = this.egressSessions.get(leaseID)?.sessionID === sessionID;
+    if (clearedActiveSession) {
+      await this.recordReplacedEgressSession(leaseID, sessionID);
       this.egressSessions.delete(leaseID);
+      await this.state.storage.delete(activeEgressSessionKey(leaseID));
     }
   }
 
@@ -11878,7 +12065,7 @@ export class FleetCoordinator {
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
       await this.visitLeaseRecords(async (stored) => {
         if (!leaseIsLive(stored)) {
-          this.closeLeaseBridges(stored.id, 1008, "lease ended");
+          await this.closeLeaseBridges(stored.id, 1008, "lease ended");
         }
         const workspace = stored.workspaceID
           ? await this.state.storage.get<WorkspaceRecord>(
@@ -11919,7 +12106,7 @@ export class FleetCoordinator {
           delete lease.cleanupStartedAt;
           delete lease.cleanupClaimExpiresAt;
           await this.putLease(lease, { noCache: true });
-          this.closeLeaseBridges(lease.id, 1008, "lease expired");
+          await this.closeLeaseBridges(lease.id, 1008, "lease expired");
           return;
         }
         if (lease.state === "provisioning" && !lease.cloudID) {
@@ -13842,7 +14029,7 @@ export class FleetCoordinator {
     if (preparation.blocked) {
       return preparation.lease;
     }
-    this.closeLeaseBridges(lease.id, 1008, "lease ended");
+    await this.closeLeaseBridges(lease.id, 1008, "lease ended");
     if (!preparation.cleanup) {
       return preparation.lease;
     }
@@ -14498,6 +14685,14 @@ function egressTicketPrefix(): string {
 
 function egressTicketKey(ticket: string): string {
   return `${egressTicketPrefix()}${ticket}`;
+}
+
+function activeEgressSessionKey(leaseID: string): string {
+  return `active-egress-session:${leaseID}`;
+}
+
+function replacedEgressSessionsKey(leaseID: string): string {
+  return `replaced-egress-sessions:${leaseID}`;
 }
 
 function runtimeAdapterTicketPrefix(): string {
@@ -15855,6 +16050,65 @@ function egressSocketKey(leaseID: string, sessionID: string): string {
 
 function egressSocketLeaseID(key: string): string {
   return key.split("\u0000", 1)[0] ?? key;
+}
+
+function egressSessionReplacedResponse(): Response {
+  return json(
+    {
+      error: "egress_session_replaced",
+      message: "egress session was replaced by a newer session",
+    },
+    { status: 409 },
+  );
+}
+
+function boundedReplacedEgressSessions(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const replaced: string[] = [];
+  for (const sessionID of value) {
+    if (
+      typeof sessionID === "string" &&
+      validEgressSessionID(sessionID) &&
+      !replaced.includes(sessionID)
+    ) {
+      replaced.push(sessionID);
+    }
+  }
+  return replaced.slice(-replacedEgressSessionsPerLease);
+}
+
+function storedEgressSessionStatus(
+  value: unknown,
+  leaseID: string,
+): EgressSessionStatus | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const stored = value as Partial<EgressSessionStatus>;
+  if (
+    stored.leaseID !== leaseID ||
+    !validEgressSessionID(stored.sessionID) ||
+    !Array.isArray(stored.allow) ||
+    !stored.allow.every((entry) => typeof entry === "string") ||
+    typeof stored.createdAt !== "string" ||
+    !Number.isFinite(Date.parse(stored.createdAt)) ||
+    typeof stored.updatedAt !== "string" ||
+    !Number.isFinite(Date.parse(stored.updatedAt)) ||
+    (stored.profile !== undefined && typeof stored.profile !== "string")
+  ) {
+    return undefined;
+  }
+  const profile = boundedEgressString(stored.profile);
+  return {
+    leaseID,
+    sessionID: stored.sessionID,
+    allow: boundedEgressAllowlist(stored.allow),
+    createdAt: stored.createdAt,
+    updatedAt: stored.updatedAt,
+    ...(profile ? { profile } : {}),
+  };
 }
 
 export function shouldActivateEgressSession(
