@@ -669,6 +669,46 @@ func TestCleanupBindsPendingCloneIdentityBeforeDelete(t *testing.T) {
 	}
 }
 
+func TestCleanupRetainsPendingCloneWhenStorageChangesDuringIdentityBind(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
+	storage := join(home, ".lume")
+	const leaseID, name = "cbx_pending_clone_swap", "crabbox-pending-clone-swap"
+	putVMAt(t, storage, name, "cGVuZGluZy1jbG9uZS1zd2Fw")
+	storageID := strings.Repeat("a", 64)
+	must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(storageID+"\n"), 0o600))
+	server := core.Server{CloudID: name, Provider: providerName, Status: "provisioning", Labels: labels{
+		"instance": name, "storage": storage, "storage_exact": "true", "storage_id": storageID,
+		"state": "provisioning", "recovery": "clone-pending", "run_owner_expected": "false",
+	}}
+	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "pending-clone-swap", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}))
+	cfg := base()
+	cfg.Lume.Storage = storage
+	keyPath, _, err := ensureTestboxKeyForConfig(cfg, leaseID)
+	must(t, err)
+	getCalls := 0
+	runner := &fake{hook: func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+		if len(req.Args) == 0 || req.Args[0] != "get" {
+			return cmdRes{}, nil, false
+		}
+		getCalls++
+		if getCalls == 2 {
+			must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(strings.Repeat("b", 64)+"\n"), 0o600))
+		}
+		return cmdRes{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
+	}}
+	err = backendFor(base(), runner).Cleanup(bg, core.CleanupRequest{})
+	want(t, err, "storage identity changed")
+	if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || !ok || current.Labels["recovery"] != "clone-pending" || current.CloudImmutableID != "" {
+		t.Fatalf("pending claim after storage swap=%#v ok=%v err=%v", current, ok, claimErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("pending key removed after storage swap: %v", statErr)
+	}
+}
+
 func TestCleanupRetainsMissingPendingCloneRegardlessOfAge(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

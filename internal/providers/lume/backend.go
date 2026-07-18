@@ -1558,6 +1558,9 @@ func (b *backend) recoverPendingCloneClaim(ctx context.Context, claim core.Lease
 		if err != nil {
 			return Server{}, SSHTarget{}, false, err
 		}
+		if err := requireClaimedStorageIdentity(cfg, claim); err != nil {
+			return Server{}, SSHTarget{}, false, err
+		}
 		bound := claim
 		bound.CloudImmutableID = immutableID
 		bound.Labels = cloneLabels(claim.Labels)
