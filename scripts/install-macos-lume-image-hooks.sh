@@ -49,9 +49,12 @@ if [[ -x /Applications/CuaDriver.app/Contents/MacOS/cua-driver ]]; then
   install -m 0644 "$cua_plist" \
     "$HOME/Library/LaunchAgents/com.trycua.cua-driver.plist"
   launchctl bootout "gui/$(id -u)/com.trycua.cua-driver" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" \
-    "$HOME/Library/LaunchAgents/com.trycua.cua-driver.plist"
-  echo "installed optional Cua Driver LaunchAgent"
+  if launchctl bootstrap "gui/$(id -u)" \
+    "$HOME/Library/LaunchAgents/com.trycua.cua-driver.plist"; then
+    echo "installed and started optional Cua Driver LaunchAgent"
+  else
+    echo "installed optional Cua Driver LaunchAgent; it will start at the next GUI login" >&2
+  fi
 else
   echo "Cua Driver is not installed; skipped its optional LaunchAgent"
 fi

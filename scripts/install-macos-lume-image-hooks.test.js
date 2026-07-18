@@ -36,6 +36,8 @@ test("Cua Driver remains optional while the SSH identity hook is mandatory", asy
 
   assert.match(text, /for file in "\$firstboot_script" "\$firstboot_plist"/);
   assert.match(text, /if \[\[ -x \/Applications\/CuaDriver\.app\/Contents\/MacOS\/cua-driver \]\]; then/);
+  assert.match(text, /if launchctl bootstrap "gui\/\$\(id -u\)"/);
+  assert.match(text, /it will start at the next GUI login/);
   assert.match(text, /Cua Driver is not installed; skipped its optional LaunchAgent/);
   assert.match(text, /Lume first-boot identity hook did not become ready/);
 });

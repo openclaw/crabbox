@@ -1751,8 +1751,12 @@ func shouldCleanup(server Server, claim core.LeaseClaim, now time.Time) (bool, s
 	if strings.EqualFold(server.Labels["keep"], "true") {
 		return false, "keep=true"
 	}
-	if !instanceRunning(server.Status) {
+	state := normalizedState(server.Status)
+	if state == "stopped" || state == "missing" {
 		return true, "instance stopped"
+	}
+	if state == "provisioning (stale)" {
+		return true, "provisioning stale"
 	}
 	if cleanup, reason := core.ShouldCleanupServer(server, now); cleanup {
 		return true, reason

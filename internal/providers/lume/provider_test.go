@@ -121,6 +121,24 @@ func TestShouldCleanupReadyLeaseAtLabelExpiry(t *testing.T) {
 	}
 }
 
+func TestShouldCleanupRetainsActiveStartup(t *testing.T) {
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	server := Server{Status: "starting", Labels: map[string]string{
+		"state":      "starting",
+		"expires_at": core.LeaseLabelTime(now.Add(time.Hour)),
+	}}
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now); cleanup {
+		t.Fatalf("shouldCleanup=%v, %q; want active startup retained", cleanup, reason)
+	}
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now.Add(2*time.Hour)); !cleanup || !strings.Contains(reason, "expired") {
+		t.Fatalf("shouldCleanup=%v, %q; want expired startup cleanup", cleanup, reason)
+	}
+	server.Status = "provisioning (stale)"
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now); !cleanup || reason != "provisioning stale" {
+		t.Fatalf("shouldCleanup=%v, %q; want stale provisioning cleanup", cleanup, reason)
+	}
+}
+
 func TestConfigureDefaultsAndWorkRoots(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
