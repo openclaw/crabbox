@@ -29,6 +29,18 @@ if [[ -z "$expected_host_key" ]]; then
   echo "could not read the new OpenSSH ED25519 host key" >&2
   exit 1
 fi
+sshd_policy=(
+  'AuthenticationMethods publickey'
+  'PubkeyAuthentication yes'
+  'PasswordAuthentication no'
+  'KbdInteractiveAuthentication no'
+  'HostbasedAuthentication no'
+  'GSSAPIAuthentication no'
+  'PermitEmptyPasswords no'
+  'AuthorizedKeysCommand none'
+  'AuthorizedPrincipalsFile none'
+  'TrustedUserCAKeys none'
+)
 
 challenge_processed=false
 challenge=""
@@ -65,35 +77,15 @@ if [[ -r "$challenge_path" ]]; then
   sshd_config_tmp="$(/usr/bin/mktemp /tmp/crabbox-lume-sshd.XXXXXX)"
   /usr/bin/printf '%s\n' \
     "AllowUsers $ssh_user" \
-    'AuthenticationMethods publickey' \
-    'PubkeyAuthentication yes' \
-    'PasswordAuthentication no' \
-    'KbdInteractiveAuthentication no' \
-    'HostbasedAuthentication no' \
-    'GSSAPIAuthentication no' \
-    'PermitEmptyPasswords no' \
-    'AuthorizedKeysCommand none' \
-    'AuthorizedPrincipalsFile none' \
-    'TrustedUserCAKeys none' \
+    "${sshd_policy[@]}" \
     'AuthorizedKeysFile .ssh/authorized_keys' >"$sshd_config_tmp"
   challenge_processed=true
   sshd_config_changed=true
 elif [[ "$identity_changed" == true ]] || [[ ! -f "$sshd_config_path" ]]; then
-  # This deny-all configuration is baked into the stopped golden image. A
-  # clone therefore cannot accept any SSH login while its VirtioFS bootstrap
-  # share is mounting or if the share never appears.
+  # Deny all logins until the clone's VirtioFS bootstrap appears.
   sshd_config_tmp="$(/usr/bin/mktemp /tmp/crabbox-lume-sshd.XXXXXX)"
   /usr/bin/printf '%s\n' \
-    'AuthenticationMethods publickey' \
-    'PubkeyAuthentication yes' \
-    'PasswordAuthentication no' \
-    'KbdInteractiveAuthentication no' \
-    'HostbasedAuthentication no' \
-    'GSSAPIAuthentication no' \
-    'PermitEmptyPasswords no' \
-    'AuthorizedKeysCommand none' \
-    'AuthorizedPrincipalsFile none' \
-    'TrustedUserCAKeys none' \
+    "${sshd_policy[@]}" \
     'AuthorizedKeysFile none' >"$sshd_config_tmp"
   sshd_config_changed=true
 fi
@@ -154,9 +146,7 @@ fi
 
 /bin/launchctl kickstart -k system/com.openssh.sshd >/dev/null
 
-# Publish the clone identity only after sshd actually serves the new key.
-# Crabbox treats the marker as the boundary between its unpinned identity poll
-# and the connection that pins this key in the lease's known_hosts file.
+# Publish identity only after sshd serves the rotated key.
 sshd_ready=false
 for _ in {1..60}; do
   served_host_key="$(
@@ -182,9 +172,7 @@ trap '/bin/rm -f "$tmp"' EXIT
 /bin/mv -f "$tmp" "$marker"
 trap - EXIT
 
-# Lume maps Crabbox's fresh host directory through VirtioFS. The challenge
-# binds this response to the exact `lume run` process, so Crabbox can pin the
-# rotated key before making any network connection to the guest.
+# Bind the VirtioFS response to this run before any guest network connection.
 if [[ "$challenge_processed" == true ]]; then
   identity_tmp="$(/usr/bin/mktemp "${identity_path}.XXXXXX")"
   trap '/bin/rm -f "$identity_tmp"' EXIT
