@@ -85,7 +85,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 77 providers (43 SSH lease, 30 delegated run, 4 service control).
+Current built-in surface: 78 providers (44 SSH lease, 30 delegated run, 4 service control).
 
 Access terms:
 
@@ -135,6 +135,7 @@ Access terms:
 | [lambda](lambda.md) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Lambda Cloud on-demand instance | `cloud`; GPU: yes | Crabbox; instance and key termination | Direct GPU-backed Linux workload over SSH | Direct-only; billing, quota, and capacity are account-owned |
 | [linode](linode.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Linode instance | `cloud`; GPU: optional | Crabbox; instance and key delete | Straightforward direct Linux VM | Direct-only; optional firewall must already exist |
 | [local-container](local-container.md) (`docker`, `container`, `local-docker`) | built-in; `ssh-lease` · local-runtime | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `cache-volume`, `workspace-checkpoint`, `workspace-fork` | `linux`; Docker-compatible container | `local`; GPU: optional | Crabbox; container delete | Fast local Linux test environment | Isolation follows the local container runtime |
+| [lume](lume.md) (`local-lume`, `lume-macos`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `macos`; Lume Apple silicon macOS VM | `local`; GPU: no | Crabbox; verified VM stop and delete | Layered local macOS VM development sessions | Apple silicon host, stopped prepared base, and Lume bootstrap account required |
 | [modal](modal.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Modal Sandbox | `provider-managed`; GPU: optional | Modal; sandbox termination | Hosted Python or GPU-oriented delegated workloads | Provider owns execution; no normal SSH lease |
 | [morph](morph.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Morph Cloud VM | `provider-managed`; GPU: unknown | Morph; pause by default; optional delete | Managed Linux VM over SSH | Release retains the paused instance unless deleteOnRelease is enabled |
 | [multipass](multipass.md) (`mp`, `canonical-multipass`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `cache-volume` | `linux`; Canonical Multipass VM | `local`; GPU: no | Crabbox; VM delete and purge | Portable local Ubuntu VM | Ubuntu-only first implementation |

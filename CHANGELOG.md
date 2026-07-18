@@ -5,6 +5,7 @@
 ### Added
 
 - Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
+- Added native local macOS SSH leases through Lume, cloning a stopped golden VM per lease with isolated SSH identity, durable clone and storage recovery, and verified stop-before-delete lifecycle handling. Thanks @madhavajay.
 - Added a local Zed task-launcher extension for Crabbox lifecycle and remote execution workflows. Thanks @zozo123.
 
 ### Fixed

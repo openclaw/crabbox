@@ -265,6 +265,36 @@ func TestDurableGuardedClaimWriteHoldsLockThroughDirectorySync(t *testing.T) {
 	}
 }
 
+func TestDurableGuardedClaimActionFailurePreventsPublication(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_durable_action"
+	actionErr := errors.New("storage identity changed")
+	actionCalled := false
+	_, err := claimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(
+		leaseID,
+		"durable-action",
+		Config{Provider: "aws"},
+		"account:test",
+		Server{Provider: "aws", CloudID: "i-pending"},
+		SSHTarget{},
+		"/repo",
+		time.Minute,
+		false,
+		leaseClaim{},
+		false,
+		func() error {
+			actionCalled = true
+			return actionErr
+		},
+	)
+	if !errors.Is(err, actionErr) || !actionCalled {
+		t.Fatalf("durable action called=%v err=%v", actionCalled, err)
+	}
+	if claim, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+		t.Fatalf("claim published after action failure: claim=%#v exists=%v err=%v", claim, exists, readErr)
+	}
+}
+
 func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")
