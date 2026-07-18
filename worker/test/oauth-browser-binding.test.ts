@@ -87,7 +87,7 @@ async function startPortalLogin(storage: MemoryStorage): Promise<Response> {
 }
 
 function stubSuccessfulGitHubOAuth(): ReturnType<typeof vi.fn> {
-  const mock = vi.fn(async (input: string | URL | Request) => {
+  const mock = vi.fn<(input: string | URL | Request) => Promise<Response>>(async (input) => {
     const url = input instanceof Request ? input.url : input.toString();
     if (url === "https://github.com/login/oauth/access_token") {
       return Response.json({ access_token: "github-access-token" });
@@ -140,7 +140,7 @@ describe("portal OAuth browser binding", () => {
       const storage = new MemoryStorage();
       const login = await startPortalLogin(storage);
       const state = oauthState(login);
-      const fetchMock = vi.fn(() => {
+      const fetchMock = vi.fn<() => void>(() => {
         throw new Error("GitHub must not be called before browser binding passes");
       });
       vi.stubGlobal("fetch", fetchMock);

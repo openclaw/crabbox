@@ -115,7 +115,7 @@ describe("GitHub user-token membership", () => {
   it("rejects a credential whose GitHub account id no longer matches the session", async () => {
     const env = testEnv();
     const token = await testToken(env);
-    const fetchMock = vi.fn(async () => userResponse(67890, "alice"));
+    const fetchMock = vi.fn<() => Promise<Response>>(async () => userResponse(67890, "alice"));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(authenticateRequest(tokenRequest(token), env)).resolves.toBeUndefined();
@@ -149,7 +149,7 @@ describe("GitHub user-token membership", () => {
   ])("fails closed after %s", async (label, firstResult) => {
     const env = testEnv();
     const token = await testToken(env);
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
       const url = String(input);
       if (label === "membership removal" && url === "https://api.github.com/user") {
         return firstResult();
