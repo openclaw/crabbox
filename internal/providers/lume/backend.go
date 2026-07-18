@@ -1787,10 +1787,6 @@ func instanceRunning(state string) bool {
 
 func normalizedState(state string) string { return strings.ToLower(strings.TrimSpace(state)) }
 
-func shellSingleQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
-}
-
 func commandError(action string, result LocalCommandResult, err error) error {
 	code := result.ExitCode
 	if code == 0 {
