@@ -244,6 +244,7 @@ func TestActiveMacOSGuestCountIsHostWide(t *testing.T) {
 			{"name":"base","os":"macOS","status":"stopped"},
 			{"name":"one","os":"macOS","status":"running"},
 			{"name":"two","os":"macOS","status":"starting"},
+			{"name":"stale","os":"macOS","status":"provisioning (stale)"},
 			{"name":"linux","os":"Linux","status":"running"}
 		]`},
 	}}
@@ -575,9 +576,9 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 	const originalMachineID = "bHVtZS1tYWNoaW5lLW9yaWdpbmFs"
 	writeLumeVMConfig(t, home, name, originalMachineID)
 	vmExists := true
-	vmRunning := false
+	vmState := "stopped"
 	vmJSON := func() string {
-		return fmt.Sprintf(`[{"name":"crabbox-release-1234","os":"macOS","status":%q,"locationName":"home"}]`, map[bool]string{false: "stopped", true: "running"}[vmRunning])
+		return fmt.Sprintf(`[{"name":"crabbox-release-1234","os":"macOS","status":%q,"locationName":"home"}]`, vmState)
 	}
 	runner := &recordingRunner{}
 	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
@@ -596,7 +597,7 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 			}
 			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: crabbox-release-1234"}, errors.New("exit status 1"), true
 		case "stop":
-			vmRunning = false
+			vmState = "stopped"
 			return core.LocalCommandResult{}, nil, true
 		case "delete":
 			vmExists = false
@@ -635,7 +636,7 @@ func TestReleaseRequiresExactClaimAndRemovesItAfterDelete(t *testing.T) {
 		t.Fatalf("claim after replacement refusal ok=%v err=%v", ok, err)
 	}
 	writeLumeVMConfig(t, home, name, originalMachineID)
-	vmRunning = false
+	vmState = "provisioning (stale)"
 	remoteCleanupCalled := false
 	mustNoError(t, b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) { remoteCleanupCalled = true }}))
 	if remoteCleanupCalled {

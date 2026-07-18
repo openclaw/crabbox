@@ -1103,7 +1103,7 @@ func (b *backend) removeClaimedVM(ctx context.Context, cfg Config, name string, 
 			return err
 		}
 	}
-	if (!missing && state != "stopped") || ownerProcessMatches(owner) {
+	if (!missing && !inactiveLumeState(state)) || ownerProcessMatches(owner) {
 		if err := b.stopVM(ctx, cfg, name, owner); err != nil {
 			return err
 		}
@@ -1245,7 +1245,7 @@ func (b *backend) activeMacOSGuestCount(ctx context.Context, cfg Config) (int, e
 			continue
 		}
 		state := normalizedState(inst.Status)
-		if state != "stopped" && state != "missing" {
+		if !inactiveLumeState(state) {
 			active++
 		}
 	}
@@ -1274,7 +1274,7 @@ func (b *backend) activeMacOSGuestCount(ctx context.Context, cfg Config) (int, e
 		}
 		if strings.EqualFold(strings.TrimSpace(inst.OS), targetMacOS) {
 			state := normalizedState(inst.Status)
-			if state != "stopped" && state != "missing" {
+			if !inactiveLumeState(state) {
 				active++
 			}
 		}
@@ -1712,6 +1712,15 @@ func (b *backend) lume(ctx context.Context, cfg Config, args []string, stdout, s
 func instanceRunning(state string) bool {
 	switch normalizedState(state) {
 	case "running", "ready":
+		return true
+	default:
+		return false
+	}
+}
+
+func inactiveLumeState(state string) bool {
+	switch normalizedState(state) {
+	case "stopped", "missing", "provisioning (stale)":
 		return true
 	default:
 		return false
