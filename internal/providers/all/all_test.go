@@ -1337,6 +1337,7 @@ func allBuiltInProviderNames() []string {
 		"lambda",
 		"linode",
 		"local-container",
+		"lume",
 		"modal",
 		"morph",
 		"multipass",
