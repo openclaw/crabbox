@@ -104,6 +104,8 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun bool) 
 
 	client := &afterListClient{fakeClient: fake}
 	client.afterList = func() {
+		// Match Resolve's production ordering: publish the preflight claim before
+		// starting or refreshing the reused instance.
 		freshLabels := core.TouchDirectLeaseLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
 		freshServer := core.Server{
 			CloudID:  name,

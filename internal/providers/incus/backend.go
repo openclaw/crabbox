@@ -268,6 +268,9 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseT
 		}
 	}()
 	if req.Repo.Root != "" && leaseID != "" {
+		// Reserve the existing instance before starting or relabeling it. Cleanup
+		// holds this same claim lock across deletion, so a reuse either publishes
+		// ownership first or waits for cleanup to finish.
 		previousClaim, previousClaimExists, err = core.ReadLeaseClaimWithPresence(leaseID)
 		if err != nil {
 			return LeaseTarget{}, err
@@ -509,9 +512,9 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	// Snapshot claim ownership before listing instances. A concurrent Acquire can
-	// reclaim an expired instance after ListInstances returns, refresh its labels,
-	// and replace its claim while Cleanup still holds the stale expired view.
+	// Snapshot claim ownership before listing instances. Resolve reserves a reused
+	// instance by replacing its claim before it starts or refreshes the instance,
+	// while Cleanup still holds the stale expired view returned by ListInstances.
 	claimCandidates, err := core.ListLeaseClaims()
 	if err != nil {
 		return err
