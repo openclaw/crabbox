@@ -852,6 +852,29 @@ func TestCleanupRetainsClaimWhenStorageChangesAfterMissingObservation(t *testing
 	}
 }
 
+func TestDeleteVMRevalidatesStorageIdentityImmediatelyBeforeDelete(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	storage := join(home, ".lume")
+	const name = "crabbox-delete-storage-swap"
+	putVMAt(t, storage, name, "ZGVsZXRlLXN0b3JhZ2Utc3dhcA==")
+	storageID := strings.Repeat("a", 64)
+	must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(storageID+"\n"), 0o600))
+	cfg := base()
+	cfg.Lume.Storage = storage
+	immutableID, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: storage})
+	must(t, err)
+	claim := core.LeaseClaim{CloudImmutableID: immutableID, Labels: labels{
+		"instance": name, "storage": storage, "storage_exact": "true", "storage_id": storageID,
+	}}
+	must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(strings.Repeat("b", 64)+"\n"), 0o600))
+	err = backendFor(base(), &fake{}).deleteVM(cfg, name, claim, lumeRunOwner{})
+	want(t, err, "storage identity changed")
+	if _, statErr := os.Stat(join(storage, name, "config.json")); statErr != nil {
+		t.Fatalf("VM deleted from unconfirmed storage: %v", statErr)
+	}
+}
+
 func TestListUsesClaimStorage(t *testing.T) {
 	home := t.TempDir()
 	storage := t.TempDir()

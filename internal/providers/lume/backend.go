@@ -249,7 +249,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	})
 	if err != nil {
 		current, ok, readErr := resolveLeaseClaimForProvider(leaseID)
-		if ok && instanceNameFromClaim(current) == name {
+		if readErr != nil || (ok && instanceNameFromClaim(current) == name) {
 			cleanupKey = false
 		}
 		return LeaseTarget{}, errors.Join(err, readErr)
@@ -1231,6 +1231,9 @@ func removeLumeRunLog(name string) {
 func (b *backend) deleteVM(cfg Config, name string, claim core.LeaseClaim, owner lumeRunOwner) error {
 	if ownerProcessMatches(owner) {
 		return exit(5, "refusing to delete Lume VM %s while owner pid %d is still running", name, owner.PID)
+	}
+	if err := requireClaimedStorageIdentity(cfg, claim); err != nil {
+		return err
 	}
 	if err := deleteClaimedVM(cfg, name, claim.CloudImmutableID); err != nil {
 		return err
