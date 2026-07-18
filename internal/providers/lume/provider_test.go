@@ -35,6 +35,18 @@ func writeLumeVMConfig(t *testing.T, home, name, machineIdentifier string) {
 	}
 }
 
+func writeLumeKnownHost(t *testing.T, leaseID, name string) {
+	t.Helper()
+	target := core.SSHTarget{}
+	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	const key = "AAAAC3NzaC1lZDI1NTE5AAAAIOCh4W5YA0Lp2pvT+yWIG/tC7BrQalNUIHSqfjYkJei6"
+	if err := os.WriteFile(target.KnownHostsFile, []byte(lumeHostKeyAlias(name)+" ssh-ed25519 "+key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if r.hook != nil {
@@ -672,7 +684,8 @@ func TestPrepareLeaseUsesPerLeaseKnownHosts(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	leaseID := "cbx_00000000-0000-0000-0000-000000000001"
-	claim := core.LeaseClaim{LeaseID: leaseID, Labels: map[string]string{"instance": "worker-1"}}
+	writeLumeKnownHost(t, leaseID, "worker-1")
+	claim := core.LeaseClaim{LeaseID: leaseID, Labels: map[string]string{"instance": "worker-1", "state": "ready"}}
 	b := newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
 	lease, err := b.prepareLease(context.Background(), b.configForRun(), lumeVM{Name: "worker-1", Status: "running", IPAddress: "192.0.2.10"}, claim, false)
 	if err != nil {
@@ -688,13 +701,38 @@ func TestPrepareLeaseUsesPerLeaseKnownHosts(t *testing.T) {
 
 func TestRebindResolvedLeaseTargetRestoresHostKeyAlias(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	target := core.LeaseTarget{Server: core.Server{CloudID: "worker-1"}}
+	const leaseID = "cbx_rebind123456"
+	writeLumeKnownHost(t, leaseID, "worker-1")
+	target := core.LeaseTarget{Server: core.Server{CloudID: "worker-1", Labels: map[string]string{"state": "ready"}}}
 	b := &backend{}
-	if err := b.RebindResolvedLeaseTarget(&target, "cbx_rebind123456"); err != nil {
+	if err := b.RebindResolvedLeaseTarget(&target, leaseID); err != nil {
 		t.Fatal(err)
 	}
 	if target.SSH.HostKeyAlias != lumeHostKeyAlias("worker-1") {
 		t.Fatalf("host key alias=%q", target.SSH.HostKeyAlias)
+	}
+}
+
+func TestRebindResolvedLeaseTargetRequiresAuthenticatedPin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	b := &backend{}
+	for _, state := range []string{"starting", "ready"} {
+		target := core.LeaseTarget{Server: core.Server{CloudID: "worker-1", Labels: map[string]string{"state": state}}}
+		if err := b.RebindResolvedLeaseTarget(&target, "cbx_untrusted_"+state); err == nil {
+			t.Fatalf("state=%s accepted without authenticated host-key pin", state)
+		}
+	}
+	const leaseID = "cbx_untrusted_malformed"
+	pin := core.SSHTarget{}
+	if err := core.UseLeaseKnownHosts(&pin, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pin.KnownHostsFile, []byte(lumeHostKeyAlias("worker-1")+" ssh-ed25519 AQ==\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := core.LeaseTarget{Server: core.Server{CloudID: "worker-1", Labels: map[string]string{"state": "ready"}}}
+	if err := b.RebindResolvedLeaseTarget(&target, leaseID); err == nil {
+		t.Fatal("accepted malformed SSH key blob as authenticated pin")
 	}
 }
 
@@ -867,7 +905,7 @@ func TestPrepareBootstrapTrustCarriesKeyWithoutNetworkPassword(t *testing.T) {
 func TestWaitForGuestIdentityPinsKeyFromVirtioFSChallenge(t *testing.T) {
 	dir := t.TempDir()
 	trust := bootstrapTrust{Dir: dir, Challenge: "test-challenge"}
-	const hostKey = "AAAAC3NzaC1lZDI1NTE5AAAAIEyJYp+0tWfIvx9RZ3k4LZ5bDXb3Y+N+UZxF6p8h"
+	const hostKey = "AAAAC3NzaC1lZDI1NTE5AAAAIOCh4W5YA0Lp2pvT+yWIG/tC7BrQalNUIHSqfjYkJei6"
 	identity := "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 " + hostKey + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "identity"), []byte(identity), 0o600); err != nil {
 		t.Fatal(err)
@@ -888,6 +926,18 @@ func TestWaitForGuestIdentityPinsKeyFromVirtioFSChallenge(t *testing.T) {
 	got := string(data)
 	if !strings.Contains(got, lumeHostKeyAlias("worker-1")+" ssh-ed25519 "+hostKey) || strings.Contains(got, "192.0.2.10") {
 		t.Fatalf("known_hosts=%q", got)
+	}
+}
+
+func TestPinBootstrapHostKeyRejectsMalformedSSHBlob(t *testing.T) {
+	dir := t.TempDir()
+	trust := bootstrapTrust{Dir: dir, Challenge: "test-challenge"}
+	identity := "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 AQ==\n"
+	if err := os.WriteFile(filepath.Join(dir, "identity"), []byte(identity), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pinBootstrapHostKey("192.0.2.10", lumeHostKeyAlias("worker-1"), trust, filepath.Join(dir, "known_hosts")); err == nil {
+		t.Fatal("accepted malformed SSH key blob from bootstrap identity")
 	}
 }
 

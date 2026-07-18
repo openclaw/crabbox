@@ -21,6 +21,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	xssh "golang.org/x/crypto/ssh"
 )
 
 type backend struct {
@@ -115,7 +116,7 @@ func (b *backend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string)
 		return exit(5, "Lume lease %s has no VM identity for SSH host-key binding", leaseID)
 	}
 	target.SSH.HostKeyAlias = lumeHostKeyAlias(name)
-	return nil
+	return requireAuthenticatedLumeHostKey(target.SSH, target.Server.Labels["state"], name)
 }
 
 func (b *backend) configForRun() Config {
@@ -933,6 +934,10 @@ func pinBootstrapHostKey(host, hostKeyAlias string, trust bootstrapTrust, knownH
 	if err != nil || len(decodedKey) == 0 {
 		return "", fmt.Errorf("Lume bootstrap identity has invalid ED25519 host key")
 	}
+	parsedKey, err := xssh.ParsePublicKey(decodedKey)
+	if err != nil || parsedKey.Type() != xssh.KeyAlgoED25519 {
+		return "", fmt.Errorf("Lume bootstrap identity has invalid ED25519 host key")
+	}
 	entry := hostKeyAlias + " " + fields[2] + " " + fields[3] + "\n"
 	tmp, err := os.CreateTemp(filepath.Dir(knownHostsFile), ".lume-known-hosts-*")
 	if err != nil {
@@ -1469,6 +1474,9 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst lumeVM, cla
 		if err := core.UseLeaseKnownHosts(&target, claim.LeaseID); err != nil {
 			return LeaseTarget{}, err
 		}
+		if err := requireAuthenticatedLumeHostKey(target, claim.Labels["state"], inst.Name); err != nil {
+			return LeaseTarget{}, err
+		}
 	}
 	if wait {
 		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "lume ssh", bootstrapWaitTimeout(cfg)); err != nil {
@@ -1483,6 +1491,28 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst lumeVM, cla
 func lumeHostKeyAlias(name string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(name)))
 	return "crabbox-lume-" + hex.EncodeToString(sum[:16])
+}
+
+func requireAuthenticatedLumeHostKey(target SSHTarget, state, name string) error {
+	if normalizedState(state) != "ready" {
+		return exit(5, "refusing Lume SSH for VM %q before authenticated bootstrap completed", name)
+	}
+	info, err := os.Lstat(target.KnownHostsFile)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
+		return exit(5, "refusing Lume SSH for VM %q without its authenticated host-key pin", name)
+	}
+	data, err := os.ReadFile(target.KnownHostsFile)
+	if err != nil {
+		return exit(5, "read authenticated Lume host-key pin for VM %q: %v", name, err)
+	}
+	alias := lumeHostKeyAlias(name)
+	for _, line := range strings.Split(string(data), "\n") {
+		marker, hosts, key, _, rest, parseErr := xssh.ParseKnownHosts([]byte(line + "\n"))
+		if parseErr == nil && marker == "" && len(hosts) == 1 && hosts[0] == alias && key.Type() == xssh.KeyAlgoED25519 && len(rest) == 0 {
+			return nil
+		}
+	}
+	return exit(5, "refusing Lume SSH for VM %q without its authenticated host-key pin", name)
 }
 
 func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg Config) Server {
