@@ -2,6 +2,6 @@
 
 package lume
 
-func systemForeignLumeVMDirectoryUse(string) (string, error) {
+func systemForeignVMUse(string) (string, error) {
 	return "", nil
 }

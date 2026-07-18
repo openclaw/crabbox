@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-func systemForeignLumeVMDirectoryUse(path string) (string, error) {
+func systemForeignVMUse(path string) (string, error) {
 	output, err := exec.Command("/usr/sbin/lsof", "-F", "p", "+D", path).CombinedOutput()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(strings.TrimSpace(string(output))) == 0 {

@@ -15,21 +15,21 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type cmdResult = core.LocalCommandResult
+type cmdRes = core.LocalCommandResult
 type claim = core.LeaseClaim
 type labels = map[string]string
-type results = map[string]cmdResult
+type results = map[string]cmdRes
 
 var bg = context.Background()
 var join = filepath.Join
 
 func base() core.Config { return core.BaseConfig() }
 
-type fakeRun struct {
+type fake struct {
 	calls     []core.LocalCommandRequest
 	responses results
 	errors    map[string]error
-	hook      func(core.LocalCommandRequest) (cmdResult, error, bool)
+	hook      func(core.LocalCommandRequest) (cmdRes, error, bool)
 }
 
 const hostKey = "AAAAC3NzaC1lZDI1NTE5AAAAIOCh4W5YA0Lp2pvT+yWIG/tC7BrQalNUIHSqfjYkJei6"
@@ -41,35 +41,35 @@ func want(t *testing.T, err error, text string) {
 	}
 }
 
-func writeVM(t *testing.T, home, name, machineIdentifier string) {
+func putVM(t *testing.T, home, name, machineIdentifier string) {
 	t.Helper()
-	writeVMAt(t, join(home, ".lume"), name, machineIdentifier)
+	putVMAt(t, join(home, ".lume"), name, machineIdentifier)
 }
 
-func writeVMAt(t *testing.T, root, name, machineIdentifier string) {
+func putVMAt(t *testing.T, root, name, machineIdentifier string) {
 	t.Helper()
 	dir := join(root, name)
-	noErr(t, os.MkdirAll(dir, 0o700))
+	must(t, os.MkdirAll(dir, 0o700))
 	data := fmt.Sprintf(`{"machineIdentifier":%q}`, machineIdentifier)
-	noErr(t, os.WriteFile(join(dir, "config.json"), []byte(data), 0o600))
+	must(t, os.WriteFile(join(dir, "config.json"), []byte(data), 0o600))
 }
 
 func writeLumeSettings(t *testing.T, home, settings string) {
 	t.Helper()
 	dir := join(home, ".config", "lume")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Dir(dir))
-	noErr(t, os.MkdirAll(dir, 0o700))
-	noErr(t, os.WriteFile(join(dir, "config.yaml"), []byte(settings), 0o600))
+	must(t, os.MkdirAll(dir, 0o700))
+	must(t, os.WriteFile(join(dir, "config.yaml"), []byte(settings), 0o600))
 }
 
 func writeLumeKnownHost(t *testing.T, leaseID, name, key string) {
 	t.Helper()
 	target := core.SSHTarget{}
-	noErr(t, core.UseLeaseKnownHosts(&target, leaseID))
-	noErr(t, os.WriteFile(target.KnownHostsFile, []byte(lumeHostKeyAlias(name)+" ssh-ed25519 "+key+"\n"), 0o600))
+	must(t, core.UseLeaseKnownHosts(&target, leaseID))
+	must(t, os.WriteFile(target.KnownHostsFile, []byte(lumeHostKeyAlias(name)+" ssh-ed25519 "+key+"\n"), 0o600))
 }
 
-func (r *fakeRun) Run(_ context.Context, req core.LocalCommandRequest) (cmdResult, error) {
+func (r *fake) Run(_ context.Context, req core.LocalCommandRequest) (cmdRes, error) {
 	r.calls = append(r.calls, req)
 	if r.hook != nil {
 		if result, err, handled := r.hook(req); handled {
@@ -88,30 +88,30 @@ func (r *fakeRun) Run(_ context.Context, req core.LocalCommandRequest) (cmdResul
 			return result, nil
 		}
 	}
-	return cmdResult{}, nil
+	return cmdRes{}, nil
 }
 
 func applyTestFlags(t *testing.T, cfg core.Config, args ...string) (core.Config, error) {
 	t.Helper()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := registerFlags(fs, cfg)
-	noErr(t, fs.Parse(args))
+	must(t, fs.Parse(args))
 	err := applyFlags(&cfg, fs, values)
 	return cfg, err
 }
 
-func testBackend(cfg core.Config, runner core.CommandRunner) *backend {
+func backendFor(cfg core.Config, runner core.CommandRunner) *backend {
 	rt := core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}
 	return newBackend((Provider{}).Spec(), cfg, rt).(*backend)
 }
 
-func testConfig() core.Config {
+func configFor() core.Config {
 	cfg := base()
 	cfg.Provider = providerName
 	return cfg
 }
 
-func noErr(t *testing.T, err error) {
+func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
@@ -186,9 +186,9 @@ func TestCleanupKeepsStartup(t *testing.T) {
 }
 
 func TestDefaults(t *testing.T) {
-	cfg := testConfig()
+	cfg := configFor()
 	configured, err := (Provider{}).Configure(cfg, core.Runtime{})
-	noErr(t, err)
+	must(t, err)
 	got := configured.(*backend).cfg
 	if got.TargetOS != core.TargetMacOS || got.Lume.User != "lume" || got.Lume.Base != "crabbox-macos-golden" {
 		t.Fatalf("unexpected defaults: %#v", got.Lume)
@@ -216,7 +216,7 @@ func TestRejectsNonMacOS(t *testing.T) {
 }
 
 func TestFlags(t *testing.T) {
-	cfg := testConfig()
+	cfg := configFor()
 	cfg, err := applyTestFlags(t, cfg,
 		"--lume-cli", "/opt/lume/bin/lume",
 		"--lume-base", "macos-xcode-golden",
@@ -224,21 +224,21 @@ func TestFlags(t *testing.T) {
 		"--lume-user", "builder",
 		"--lume-work-root", "/Users/builder/work",
 	)
-	noErr(t, err)
+	must(t, err)
 	if cfg.Lume.CLIPath != "/opt/lume/bin/lume" || cfg.Lume.Base != "macos-xcode-golden" || cfg.Lume.Storage != "external" || cfg.Lume.User != "builder" || cfg.WorkRoot != "/Users/builder/work" {
 		t.Fatalf("unexpected lume config: %#v workRoot=%q", cfg.Lume, cfg.WorkRoot)
 	}
 }
 
 func TestDoctorStoppedBase(t *testing.T) {
-	cfg := testConfig()
-	runner := &fakeRun{responses: results{
+	cfg := configFor()
+	runner := &fake{responses: results{
 		"--version": {Stdout: "0.3.16\n"},
 		"ls":        {Stdout: `[{"name":"crabbox-macos-golden","os":"macOS","status":"stopped","locationName":"home"}]`},
 	}}
-	b := testBackend(cfg, runner)
+	b := backendFor(cfg, runner)
 	result, err := b.Doctor(bg, core.DoctorRequest{})
-	noErr(t, err)
+	must(t, err)
 	if !strings.Contains(result.Message, "base_state=stopped") || !strings.Contains(result.Message, "runtime=0.3.16") {
 		t.Fatalf("doctor message=%q", result.Message)
 	}
@@ -246,15 +246,15 @@ func TestDoctorStoppedBase(t *testing.T) {
 		t.Fatalf("base VM must not be counted as a lease: %q", result.Message)
 	}
 
-	runner.responses["ls"] = cmdResult{Stdout: `[{"name":"crabbox-macos-golden","os":"macOS","status":"running","locationName":"home"}]`}
+	runner.responses["ls"] = cmdRes{Stdout: `[{"name":"crabbox-macos-golden","os":"macOS","status":"running","locationName":"home"}]`}
 	_, err = b.Doctor(bg, core.DoctorRequest{})
 	want(t, err, "must be stopped")
 }
 
 func TestHostGuestCount(t *testing.T) {
-	cfg := testConfig()
+	cfg := configFor()
 	cfg.Lume.Storage = "external"
-	runner := &fakeRun{responses: results{
+	runner := &fake{responses: results{
 		"ls": {Stdout: `[
 			{"name":"base","os":"macOS","status":"stopped"},
 			{"name":"one","os":"macOS","status":"running"},
@@ -263,9 +263,9 @@ func TestHostGuestCount(t *testing.T) {
 			{"name":"linux","os":"Linux","status":"running"}
 		]`},
 	}}
-	b := testBackend(cfg, runner)
+	b := backendFor(cfg, runner)
 	active, err := b.activeMacOSGuestCount(bg, b.configForRun())
-	noErr(t, err)
+	must(t, err)
 	if active != 2 {
 		t.Fatalf("active=%d want 2", active)
 	}
@@ -276,14 +276,14 @@ func TestHostGuestCount(t *testing.T) {
 
 func TestAcquireGuestLimit(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	cfg := testConfig()
-	runner := &fakeRun{responses: results{
+	cfg := configFor()
+	runner := &fake{responses: results{
 		"ls": {Stdout: `[
 			{"name":"one","os":"macOS","status":"running"},
 			{"name":"two","os":"macOS","status":"running"}
 		]`},
 	}}
-	b := testBackend(cfg, runner)
+	b := backendFor(cfg, runner)
 	_, err := b.Acquire(bg, core.AcquireRequest{RequestedLeaseID: "cbx_capacity_test"})
 	want(t, err, "2 of 2")
 	for _, call := range runner.calls {
@@ -302,38 +302,38 @@ func TestAmbiguousCloneRetainsVM(t *testing.T) {
 	vmExists := false
 	deleteCalled := false
 	name := ""
-	runner := &fakeRun{}
-	runner.hook = func(req core.LocalCommandRequest) (cmdResult, error, bool) {
+	runner := &fake{}
+	runner.hook = func(req core.LocalCommandRequest) (cmdRes, error, bool) {
 		if len(req.Args) == 0 {
-			return cmdResult{}, nil, false
+			return cmdRes{}, nil, false
 		}
 		switch req.Args[0] {
 		case "ls":
 			if vmExists {
-				return cmdResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
+				return cmdRes{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
 			}
-			return cmdResult{Stdout: `[]`}, nil, true
+			return cmdRes{Stdout: `[]`}, nil, true
 		case "clone":
 			name = req.Args[2]
 			vmExists = true
-			return cmdResult{ExitCode: 1, Stderr: "partial clone failure"}, errors.New("exit status 1"), true
+			return cmdRes{ExitCode: 1, Stderr: "partial clone failure"}, errors.New("exit status 1"), true
 		case "stop":
-			return cmdResult{}, nil, true
+			return cmdRes{}, nil, true
 		case "get":
 			if vmExists {
-				return cmdResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
+				return cmdRes{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
 			}
-			return cmdResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
+			return cmdRes{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
 		case "delete":
 			deleteCalled = true
 			vmExists = false
-			return cmdResult{}, nil, true
+			return cmdRes{}, nil, true
 		default:
-			return cmdResult{}, nil, false
+			return cmdRes{}, nil, false
 		}
 	}
-	cfg := testConfig()
-	b := testBackend(cfg, runner)
+	cfg := configFor()
+	b := backendFor(cfg, runner)
 	_, err := b.Acquire(bg, core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir()},
 		RequestedLeaseID: leaseID,
@@ -366,20 +366,20 @@ func TestParseSkipsLogs(t *testing.T) {
 		`[{"name":"worker-1","status":"running","ipAddress":"192.0.2.10"}]` +
 		"\n[2026-07-17T01:19:18Z] INFO: done\n"
 	instances, err := parseLumeVMs(output)
-	noErr(t, err)
+	must(t, err)
 	if len(instances) != 1 || instances[0].Name != "worker-1" || instances[0].IPAddress != "192.0.2.10" {
 		t.Fatalf("instances=%#v", instances)
 	}
 }
 
 func TestRejectsWorkRootTraversal(t *testing.T) {
-	cfg := testConfig()
+	cfg := configFor()
 	_, err := applyTestFlags(t, cfg, "--lume-work-root", "/Users/lume/../../etc")
 	want(t, err, "must be beneath /Users/lume")
 }
 
 func TestKeepStoragePath(t *testing.T) {
-	cfg := testConfig()
+	cfg := configFor()
 	cfg, err := applyTestFlags(t, cfg, "--lume-storage", "/Volumes/VMs")
 	if err != nil || cfg.Lume.Storage != "/Volumes/VMs" {
 		t.Fatalf("storage=%q apply error=%v", cfg.Lume.Storage, err)
@@ -388,10 +388,10 @@ func TestKeepStoragePath(t *testing.T) {
 
 func TestRejectsStoragePath(t *testing.T) {
 	for _, storage := range []string{"/Volumes/VMs", `C:\\VMs`} {
-		cfg := testConfig()
+		cfg := configFor()
 		cfg.Lume.Storage = storage
-		runner := &fakeRun{}
-		b := testBackend(cfg, runner)
+		runner := &fake{}
+		b := backendFor(cfg, runner)
 		_, err := b.Acquire(bg, core.AcquireRequest{RequestedLeaseID: "cbx_path_storage"})
 		want(t, err, "existing lease lifecycle")
 		if len(runner.calls) != 0 {
@@ -405,16 +405,16 @@ func TestStorageExactGet(t *testing.T) {
 	storage := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
-	cfg := testConfig()
+	cfg := configFor()
 	cfg.Lume.Storage = storage
-	runner := &fakeRun{responses: results{
+	runner := &fake{responses: results{
 		"get\x00crabbox-macos-golden\x00--format\x00json\x00--storage\x00" + storage: {
 			Stdout: `[{"name":"crabbox-macos-golden","os":"macOS","status":"stopped"}]`,
 		},
 	}}
-	b := testBackend(cfg, runner)
+	b := backendFor(cfg, runner)
 	instances, err := b.listInstancesForConfig(bg, b.configForRun())
-	noErr(t, err)
+	must(t, err)
 	if len(instances) != 1 || instances[0].Name != "crabbox-macos-golden" {
 		t.Fatalf("instances=%#v", instances)
 	}
@@ -428,8 +428,8 @@ func TestStorageExactGet(t *testing.T) {
 func TestStorageMustExist(t *testing.T) {
 	cfg := base()
 	cfg.Lume.Storage = join(t.TempDir(), "unmounted")
-	runner := &fakeRun{}
-	b := testBackend(cfg, runner)
+	runner := &fake{}
+	b := backendFor(cfg, runner)
 	_, err := b.getInstance(bg, cfg, "worker")
 	want(t, err, "storage")
 	if len(runner.calls) != 0 {
@@ -444,13 +444,13 @@ func TestListUsesClaimStorage(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
 	const leaseID, name = "cbx_prior_storage", "crabbox-prior-storage"
 	server := core.Server{CloudID: name, Provider: providerName, Labels: labels{"instance": name, "storage": storage, "storage_exact": "true", "state": "ready"}}
-	noErr(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "prior", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}))
-	runner := &fakeRun{responses: results{
+	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "prior", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}))
+	runner := &fake{responses: results{
 		"ls": {Stdout: `[]`},
 		"get\x00" + name + "\x00--format\x00json\x00--storage\x00" + storage: {Stdout: `[{"name":"crabbox-prior-storage","status":"running","ipAddress":"192.0.2.12"}]`},
 	}}
-	views, err := testBackend(base(), runner).List(bg, core.ListRequest{})
-	noErr(t, err)
+	views, err := backendFor(base(), runner).List(bg, core.ListRequest{})
+	must(t, err)
 	if len(views) != 1 || views[0].CloudID != name || views[0].Status != "ready" {
 		t.Fatalf("views=%#v", views)
 	}
@@ -463,7 +463,7 @@ func TestLumeNotFoundIsSpecific(t *testing.T) {
 	if isLumeNotFoundError(errors.New("exec: lume: executable file not found in $PATH")) {
 		t.Fatal("missing CLI was classified as a missing VM")
 	}
-	runner := &fakeRun{responses: results{"ls": {Stdout: `[]`}}, errors: map[string]error{"get\x00worker\x00--format\x00json": errors.New("transient get failure")}}
+	runner := &fake{responses: results{"ls": {Stdout: `[]`}}, errors: map[string]error{"get\x00worker\x00--format\x00json": errors.New("transient get failure")}}
 	b := newBackend((Provider{}).Spec(), base(), core.Runtime{Exec: runner}).(*backend)
 	if _, _, err := b.observeVMState(bg, b.configForRun(), "worker"); err == nil {
 		t.Fatal("observe converted transient get failure to missing")
@@ -491,11 +491,11 @@ func TestRecoversPendingOwner(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
 	token, err := newLaunchToken()
-	noErr(t, err)
+	must(t, err)
 	handoff, err := prepareLaunchHandoff(token)
-	noErr(t, err)
+	must(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(handoff.Dir) })
-	noErr(t, os.WriteFile(handoff.OwnerPath, []byte("99999999\n"), 0o600))
+	must(t, os.WriteFile(handoff.OwnerPath, []byte("99999999\n"), 0o600))
 	claim := claim{LeaseID: "cbx_stale_pending", Labels: labels{
 		"run_owner_expected": "true",
 		"run_owner_pending":  "true",
@@ -541,8 +541,8 @@ func TestClaimConfigPinsStorage(t *testing.T) {
 }
 
 func TestTouchKeepsRouting(t *testing.T) {
-	cfg := testConfig()
-	b := testBackend(cfg, &fakeRun{})
+	cfg := configFor()
+	b := backendFor(cfg, &fake{})
 	server := core.Server{Labels: labels{
 		"storage":              "home",
 		"instance":             "worker-1",
@@ -551,7 +551,7 @@ func TestTouchKeepsRouting(t *testing.T) {
 		"run_log":              "/tmp/worker-1.log",
 	}}
 	got, err := b.Touch(bg, core.TouchRequest{Lease: core.LeaseTarget{Server: server}, State: "ready"})
-	noErr(t, err)
+	must(t, err)
 	for key, want := range server.Labels {
 		if got.Labels[key] != want {
 			t.Fatalf("label %s=%q want %q", key, got.Labels[key], want)
@@ -560,11 +560,11 @@ func TestTouchKeepsRouting(t *testing.T) {
 }
 
 func TestStopRequiresExactOwner(t *testing.T) {
-	cfg := testConfig()
-	runner := &fakeRun{responses: results{
+	cfg := configFor()
+	runner := &fake{responses: results{
 		"get": {Stdout: `[{"name":"worker-1","status":"running"}]`},
 	}}
-	b := testBackend(cfg, runner)
+	b := backendFor(cfg, runner)
 	want(t, b.stopVM(bg, b.configForRun(), "worker-1", lumeRunOwner{}), "exact launch owner")
 	if len(runner.calls) != 1 || runner.calls[0].Args[0] != "get" {
 		t.Fatalf("unexpected Lume mutation: %#v", runner.calls)
@@ -579,40 +579,40 @@ func TestReleaseClaim(t *testing.T) {
 	const leaseID = "cbx_release123456"
 	const name = "crabbox-release-1234"
 	const originalMachineID = "bHVtZS1tYWNoaW5lLW9yaWdpbmFs"
-	writeVM(t, home, name, originalMachineID)
+	putVM(t, home, name, originalMachineID)
 	vmExists := true
 	vmState := "stopped"
 	vmJSON := func() string {
 		return fmt.Sprintf(`[{"name":"crabbox-release-1234","os":"macOS","status":%q,"locationName":"home"}]`, vmState)
 	}
-	runner := &fakeRun{}
-	runner.hook = func(req core.LocalCommandRequest) (cmdResult, error, bool) {
+	runner := &fake{}
+	runner.hook = func(req core.LocalCommandRequest) (cmdRes, error, bool) {
 		if len(req.Args) == 0 {
-			return cmdResult{}, nil, false
+			return cmdRes{}, nil, false
 		}
 		switch req.Args[0] {
 		case "ls":
 			if vmExists {
-				return cmdResult{Stdout: vmJSON()}, nil, true
+				return cmdRes{Stdout: vmJSON()}, nil, true
 			}
-			return cmdResult{Stdout: `[]`}, nil, true
+			return cmdRes{Stdout: `[]`}, nil, true
 		case "get":
 			if vmExists {
-				return cmdResult{Stdout: vmJSON()}, nil, true
+				return cmdRes{Stdout: vmJSON()}, nil, true
 			}
-			return cmdResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: crabbox-release-1234"}, errors.New("exit status 1"), true
+			return cmdRes{ExitCode: 1, Stderr: "Error: Virtual machine not found: crabbox-release-1234"}, errors.New("exit status 1"), true
 		case "stop":
 			vmState = "stopped"
-			return cmdResult{}, nil, true
+			return cmdRes{}, nil, true
 		case "delete":
 			vmExists = false
-			return cmdResult{}, nil, true
+			return cmdRes{}, nil, true
 		default:
-			return cmdResult{}, nil, false
+			return cmdRes{}, nil, false
 		}
 	}
-	cfg := testConfig()
-	b := testBackend(cfg, runner)
+	cfg := configFor()
+	b := backendFor(cfg, runner)
 	lease := core.LeaseTarget{
 		LeaseID: leaseID,
 		Server: core.Server{CloudID: name, Labels: labels{
@@ -621,14 +621,14 @@ func TestReleaseClaim(t *testing.T) {
 		}},
 	}
 	immutableID, err := lumeVMImmutableID(b.configForRun(), lumeVM{Name: name, LocationName: "home"})
-	noErr(t, err)
+	must(t, err)
 	lease.Server.ImmutableID = immutableID
 	want(t, b.ReleaseLease(bg, core.ReleaseLeaseRequest{Lease: lease}), "unclaimed")
 	if len(runner.calls) != 0 {
 		t.Fatalf("unclaimed release called Lume: %#v", runner.calls)
 	}
-	noErr(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "release", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, lease.Server, core.SSHTarget{}))
-	writeVM(t, home, name, "bHVtZS1tYWNoaW5lLXJlcGxhY2VtZW50")
+	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "release", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, lease.Server, core.SSHTarget{}))
+	putVM(t, home, name, "bHVtZS1tYWNoaW5lLXJlcGxhY2VtZW50")
 	want(t, b.ReleaseLease(bg, core.ReleaseLeaseRequest{Lease: lease}), "identity changed")
 	if !vmExists {
 		t.Fatal("replacement VM was deleted")
@@ -636,10 +636,10 @@ func TestReleaseClaim(t *testing.T) {
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || !ok {
 		t.Fatalf("claim after replacement refusal ok=%v err=%v", ok, err)
 	}
-	writeVM(t, home, name, originalMachineID)
+	putVM(t, home, name, originalMachineID)
 	vmState = "provisioning (stale)"
 	remoteCleanupCalled := false
-	noErr(t, b.ReleaseLease(bg, core.ReleaseLeaseRequest{Lease: lease, GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) { remoteCleanupCalled = true }}))
+	must(t, b.ReleaseLease(bg, core.ReleaseLeaseRequest{Lease: lease, GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) { remoteCleanupCalled = true }}))
 	if remoteCleanupCalled {
 		t.Fatal("guarded cleanup ran without a prepared SSH endpoint")
 	}
@@ -658,13 +658,13 @@ func TestReleaseClaim(t *testing.T) {
 
 func TestPrepareLeaseUsesKnownHosts(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := testConfig()
+	cfg := configFor()
 	leaseID := "cbx_00000000-0000-0000-0000-000000000001"
 	writeLumeKnownHost(t, leaseID, "worker-1", hostKey)
 	claim := claim{LeaseID: leaseID, Labels: labels{"instance": "worker-1", "state": "ready"}}
-	b := testBackend(cfg, &fakeRun{})
+	b := backendFor(cfg, &fake{})
 	lease, err := b.prepareLease(bg, b.configForRun(), lumeVM{Name: "worker-1", Status: "running", IPAddress: "192.0.2.10"}, claim, false)
-	noErr(t, err)
+	must(t, err)
 	if lease.SSH.DisableHostKeyChecking || filepath.Base(lease.SSH.KnownHostsFile) != "known_hosts" || !strings.Contains(lease.SSH.KnownHostsFile, leaseID) || lease.SSH.HostKeyAlias != lumeHostKeyAlias("worker-1") {
 		t.Fatalf("known hosts not isolated: %#v", lease.SSH)
 	}
@@ -679,7 +679,7 @@ func TestRebindHostAlias(t *testing.T) {
 	writeLumeKnownHost(t, leaseID, "worker-1", hostKey)
 	target := core.LeaseTarget{Server: core.Server{CloudID: "worker-1", Labels: labels{"state": "ready"}}}
 	b := &backend{}
-	noErr(t, b.RebindResolvedLeaseTarget(&target, leaseID))
+	must(t, b.RebindResolvedLeaseTarget(&target, leaseID))
 	if target.SSH.HostKeyAlias != lumeHostKeyAlias("worker-1") {
 		t.Fatalf("host key alias=%q", target.SSH.HostKeyAlias)
 	}
@@ -706,13 +706,13 @@ func TestImmutableID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	const name = "worker-identity"
-	writeVM(t, home, name, "bHVtZS1tYWNoaW5lLW9uZQ==")
+	putVM(t, home, name, "bHVtZS1tYWNoaW5lLW9uZQ==")
 	cfg := base()
 	first, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: "home"})
-	noErr(t, err)
-	writeVM(t, home, name, "bHVtZS1tYWNoaW5lLXR3bw==")
+	must(t, err)
+	putVM(t, home, name, "bHVtZS1tYWNoaW5lLXR3bw==")
 	second, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: "home"})
-	noErr(t, err)
+	must(t, err)
 	if first == second || !strings.HasPrefix(first, "lume-machine-") || !strings.HasPrefix(second, "lume-machine-") {
 		t.Fatalf("immutable IDs first=%q second=%q", first, second)
 	}
@@ -724,7 +724,7 @@ func TestImmutableIDStorage(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeLumeSettings(t, home, fmt.Sprintf("defaultLocationName: fast\nvmLocations:\n  - name: fast\n    path: %q\n", storageRoot))
 	const name = "worker-fast"
-	writeVMAt(t, storageRoot, name, "bHVtZS1mYXN0")
+	putVMAt(t, storageRoot, name, "bHVtZS1mYXN0")
 	if _, err := lumeVMImmutableID(base(), lumeVM{Name: name, LocationName: "fast"}); err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +734,7 @@ func TestImmutableIDHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	writeLumeSettings(t, home, "telemetryEnabled: false\n")
-	writeVM(t, home, "worker-home-default", "bHVtZS1ob21lLWRlZmF1bHQ=")
+	putVM(t, home, "worker-home-default", "bHVtZS1ob21lLWRlZmF1bHQ=")
 	if _, err := lumeVMImmutableID(base(), lumeVM{Name: "worker-home-default", LocationName: "home"}); err != nil {
 		t.Fatal(err)
 	}
@@ -746,7 +746,7 @@ func TestStorageNamesAreLiteral(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeLumeSettings(t, home, fmt.Sprintf("defaultLocationName: ephemeral\nvmLocations:\n  - name: ephemeral\n    path: %q\n", storageRoot))
 	const name = "worker-ephemeral"
-	writeVMAt(t, storageRoot, name, "bHVtZS1jYXNl")
+	putVMAt(t, storageRoot, name, "bHVtZS1jYXNl")
 	cfg := base()
 	cfg.Lume.Storage = "ephemeral"
 	if isDirectStoragePath(cfg.Lume.Storage) {
@@ -758,12 +758,12 @@ func TestStorageNamesAreLiteral(t *testing.T) {
 }
 
 func TestCloneUsesStorage(t *testing.T) {
-	cfg := testConfig()
+	cfg := configFor()
 	cfg.Lume.Base = "golden"
 	cfg.Lume.Storage = "fast"
-	runner := &fakeRun{responses: results{}}
-	b := testBackend(cfg, runner)
-	noErr(t, b.cloneVM(bg, b.configForRun(), "worker-1"))
+	runner := &fake{responses: results{}}
+	b := backendFor(cfg, runner)
+	must(t, b.cloneVM(bg, b.configForRun(), "worker-1"))
 	if len(runner.calls) != 1 {
 		t.Fatalf("calls=%d", len(runner.calls))
 	}
@@ -777,10 +777,10 @@ func TestBootstrapKeyOnly(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	publicKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest crabbox-test"
 	trust, err := prepareBootstrapTrust("worker-1", "lume", publicKey)
-	noErr(t, err)
+	must(t, err)
 	defer removeBootstrapTrust(trust)
 	secondTrust, err := prepareBootstrapTrust("worker-1", "lume", publicKey)
-	noErr(t, err)
+	must(t, err)
 	defer removeBootstrapTrust(secondTrust)
 	if secondTrust.Dir == trust.Dir {
 		t.Fatalf("bootstrap directories were reused: %s", trust.Dir)
@@ -805,36 +805,36 @@ func TestGuestIdentityPin(t *testing.T) {
 	dir := t.TempDir()
 	trust := bootstrapTrust{Dir: dir, Challenge: "test-challenge"}
 	identity := "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 " + hostKey + "\n"
-	noErr(t, os.WriteFile(join(dir, "identity"), []byte(identity), 0o600))
+	must(t, os.WriteFile(join(dir, "identity"), []byte(identity), 0o600))
 	knownHosts := join(dir, "known_hosts")
 	b := &backend{}
 	platformUUID, err := b.waitForGuestIdentity(bg, "worker-1", "192.0.2.10", trust, knownHosts)
-	noErr(t, err)
+	must(t, err)
 	if platformUUID != "00112233-4455-6677-8899-AABBCCDDEEFF" {
 		t.Fatalf("platform UUID=%q", platformUUID)
 	}
 	data, err := os.ReadFile(knownHosts)
-	noErr(t, err)
+	must(t, err)
 	got := string(data)
 	if !strings.Contains(got, lumeHostKeyAlias("worker-1")+" ssh-ed25519 "+hostKey) || strings.Contains(got, "192.0.2.10") {
 		t.Fatalf("known_hosts=%q", got)
 	}
 	identity = "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 AQ==\n"
-	noErr(t, os.WriteFile(join(dir, "identity"), []byte(identity), 0o600))
+	must(t, os.WriteFile(join(dir, "identity"), []byte(identity), 0o600))
 	if _, err := pinBootstrapHostKey("192.0.2.10", lumeHostKeyAlias("worker-1"), trust, join(dir, "known_hosts")); err == nil {
 		t.Fatal("accepted malformed SSH key blob from bootstrap identity")
 	}
 }
 
 func TestWaitSSHFalseNegative(t *testing.T) {
-	cfg := testConfig()
-	runner := &fakeRun{responses: results{
+	cfg := configFor()
+	runner := &fake{responses: results{
 		"get": {Stdout: `[{"name":"worker-1","os":"macOS","status":"running","ipAddress":"192.0.2.10","sshAvailable":false}]`},
 	}}
-	b := testBackend(cfg, runner)
+	b := backendFor(cfg, runner)
 	visible := false
 	inst, err := b.waitForRunningVM(bg, b.configForRun(), "worker-1", lumeRunOwner{}, func() { visible = true })
-	noErr(t, err)
+	must(t, err)
 	if !visible || inst.IPAddress != "192.0.2.10" || inst.SSHAvailable == nil || *inst.SSHAvailable {
 		t.Fatalf("instance=%#v", inst)
 	}
@@ -842,12 +842,12 @@ func TestWaitSSHFalseNegative(t *testing.T) {
 
 func TestWaitOwnerExit(t *testing.T) {
 	logPath := join(t.TempDir(), "owner.log")
-	noErr(t, os.WriteFile(logPath, []byte("capacity unavailable\n"), 0o600))
-	cfg := testConfig()
-	runner := &fakeRun{responses: results{
+	must(t, os.WriteFile(logPath, []byte("capacity unavailable\n"), 0o600))
+	cfg := configFor()
+	runner := &fake{responses: results{
 		"get": {Stdout: `[{"name":"worker-1","status":"stopped"}]`},
 	}}
-	b := testBackend(cfg, runner)
+	b := backendFor(cfg, runner)
 	_, err := b.waitForRunningVM(bg, b.configForRun(), "worker-1", lumeRunOwner{PID: 2147483647, StartIdentity: "missing", LogPath: logPath}, func() {})
 	want(t, err, "owner exited during startup: capacity unavailable")
 }

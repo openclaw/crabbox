@@ -1140,7 +1140,7 @@ func (b *backend) deleteVM(cfg Config, name string, claim core.LeaseClaim, owner
 	if ownerProcessMatches(owner) {
 		return exit(5, "refusing to delete Lume VM %s while owner pid %d is still running", name, owner.PID)
 	}
-	if err := deleteClaimedVMDirectory(cfg, name, claim.CloudImmutableID); err != nil {
+	if err := deleteClaimedVM(cfg, name, claim.CloudImmutableID); err != nil {
 		return err
 	}
 	removeLumeRunLog(name)

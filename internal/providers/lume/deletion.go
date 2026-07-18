@@ -8,12 +8,12 @@ import (
 	"strings"
 )
 
-var removeLumeVMDirectory = os.RemoveAll
-var foreignLumeVMDirectoryUse = systemForeignLumeVMDirectoryUse
+var removeVMDir = os.RemoveAll
+var foreignVMUse = systemForeignVMUse
 
 // Lume delete accepts a mutable name. Lock, quarantine, and recheck the exact
 // directory and config inodes before removing the claimed VM.
-func deleteClaimedVMDirectory(cfg Config, name, expectedID string) error {
+func deleteClaimedVM(cfg Config, name, expectedID string) error {
 	expectedID = strings.TrimSpace(expectedID)
 	if expectedID == "" {
 		return exit(5, "refusing Lume delete %q without immutable identity", name)
@@ -70,10 +70,10 @@ func deleteClaimedVMDirectory(cfg Config, name, expectedID string) error {
 	if err != nil {
 		return exit(5, "inspect locked Lume VM %s: %v", name, err)
 	}
-	return quarantineAndDeleteLumeVM(vmPath, dirInfo, config, configInfo, expectedID, name)
+	return quarantineDeleteVM(vmPath, dirInfo, config, configInfo, expectedID, name)
 }
 
-func quarantineAndDeleteLumeVM(vmPath string, openedInfo os.FileInfo, config *os.File, openedConfigInfo os.FileInfo, expectedID, name string) error {
+func quarantineDeleteVM(vmPath string, openedInfo os.FileInfo, config *os.File, openedConfigInfo os.FileInfo, expectedID, name string) error {
 	quarantineRoot, err := os.MkdirTemp(filepath.Dir(vmPath), ".crabbox-delete-")
 	if err != nil {
 		return exit(5, "create Lume delete quarantine %s: %v", name, err)
@@ -84,7 +84,7 @@ func quarantineAndDeleteLumeVM(vmPath string, openedInfo os.FileInfo, config *os
 		return exit(5, "quarantine Lume VM %s: %v", name, err)
 	}
 	refuse := func(reason string) error {
-		return restoreQuarantinedLumeVM(vmPath, quarantined, quarantineRoot, name, reason)
+		return restoreQuarantinedVM(vmPath, quarantined, quarantineRoot, name, reason)
 	}
 	movedInfo, err := os.Lstat(quarantined)
 	if err != nil || !os.SameFile(openedInfo, movedInfo) {
@@ -102,7 +102,7 @@ func quarantineAndDeleteLumeVM(vmPath string, openedInfo os.FileInfo, config *os
 		}
 		return refuse(reason)
 	}
-	foreignUse, err := foreignLumeVMDirectoryUse(quarantined)
+	foreignUse, err := foreignVMUse(quarantined)
 	if err != nil {
 		return refuse("inspect open VM files: " + err.Error())
 	}
@@ -124,9 +124,9 @@ func quarantineAndDeleteLumeVM(vmPath string, openedInfo os.FileInfo, config *os
 	if err != nil || backupID != expectedID {
 		return refuse("verify identity backup before deletion")
 	}
-	if err := removeLumeVMDirectory(quarantined); err != nil {
+	if err := removeVMDir(quarantined); err != nil {
 		if _, statErr := os.Lstat(quarantined); statErr == nil {
-			return restorePartiallyDeletedLumeVM(vmPath, quarantined, quarantineRoot, backup, name, expectedID, err)
+			return restorePartialVM(vmPath, quarantined, quarantineRoot, backup, name, expectedID, err)
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return exit(5, "inspect partial Lume VM %s: %v; identity backup at %s", name, statErr, backup)
 		}
@@ -143,7 +143,7 @@ func quarantineAndDeleteLumeVM(vmPath string, openedInfo os.FileInfo, config *os
 	return nil
 }
 
-func restorePartiallyDeletedLumeVM(vmPath, quarantined, quarantineRoot, backup, name, expectedID string, deleteErr error) error {
+func restorePartialVM(vmPath, quarantined, quarantineRoot, backup, name, expectedID string, deleteErr error) error {
 	if _, err := os.Lstat(vmPath); !errors.Is(err, os.ErrNotExist) {
 		return exit(5, "partial Lume delete failed for %s: %v; VM preserved at %s; identity backup at %s", name, deleteErr, quarantined, backup)
 	}
@@ -175,7 +175,7 @@ func restorePartiallyDeletedLumeVM(vmPath, quarantined, quarantineRoot, backup, 
 	return exit(5, "partial Lume delete failed for %s: %v; VM restored", name, deleteErr)
 }
 
-func restoreQuarantinedLumeVM(vmPath, quarantined, quarantineRoot, name, reason string) error {
+func restoreQuarantinedVM(vmPath, quarantined, quarantineRoot, name, reason string) error {
 	if _, err := os.Lstat(vmPath); errors.Is(err, os.ErrNotExist) {
 		if os.Rename(quarantined, vmPath) == nil {
 			_ = os.Remove(quarantineRoot)

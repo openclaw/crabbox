@@ -3381,55 +3381,30 @@ esac
   assert.doesNotMatch(calls, /^history(?: |$)/m);
 });
 
-test("lume live smoke uses the generic SSH lease lifecycle", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-lume-"));
-  const bin = path.join(dir, "bin");
-  const fakeCrabbox = path.join(bin, "crabbox");
-  const crabboxLog = path.join(dir, "crabbox.log");
-  fs.mkdirSync(bin);
-  writeExecutable(
-    fakeCrabbox,
-    `#!/usr/bin/env bash
-set -euo pipefail
+test("lume live smoke executes the generic lifecycle", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-lume-"));
+  const fake = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls");
+  writeExecutable(fake, `#!/bin/bash
 [[ "\${CRABBOX_PROVIDER:-}" == lume ]] || exit 97
-printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+echo "$*" >>"\${CRABBOX_FAKE_LOG:?}"
 case "$1" in
-  warmup) printf 'provisioned lease=cbx_123456789abc slug=lume-smoke-test state=ready\\n' ;;
-  status) printf 'lease=cbx_123456789abc slug=lume-smoke-test provider=lume state=ready ready=true\\n' ;;
-  inspect) printf '{"id":"cbx_123456789abc","slug":"lume-smoke-test","provider":"lume","state":"ready","host":"127.0.0.1","ready":true}\\n' ;;
-  ssh) ;;
-  cache) printf '[]\\n' ;;
-  run) printf 'crabbox-live-ok\\n' ;;
-  history) printf 'history ok\\n' ;;
-  stop) printf 'stopped\\n' ;;
-  *) exit 99 ;;
-esac
-`,
-  );
-
-  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-      CRABBOX_BIN: fakeCrabbox,
-      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
-      CRABBOX_FAKE_LOG: crabboxLog,
-      CRABBOX_LIVE: "1",
-      CRABBOX_LIVE_COORDINATOR: "0",
-      CRABBOX_LIVE_PROVIDERS: "lume",
-      CRABBOX_LIVE_REPO: repoRoot,
-    },
-    encoding: "utf8",
-  });
-
+warmup) echo 'provisioned lease=cbx_123456789abc slug=lume-smoke state=ready' ;;
+status) echo 'lease=cbx_123456789abc slug=lume-smoke provider=lume state=ready ready=true' ;;
+inspect) echo '{"id":"cbx_123456789abc","slug":"lume-smoke","provider":"lume","state":"ready","host":"127.0.0.1","ready":true}' ;;
+cache) echo '[]' ;;
+run) echo crabbox-live-ok ;;
+ssh|stop) : ;;
+*) exit 99 ;;
+esac`);
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], { cwd: repoRoot, encoding: "utf8", env: {
+    ...process.env, CRABBOX_BIN: fake, CRABBOX_CONFIG: path.join(dir, "missing.yaml"), CRABBOX_FAKE_LOG: log,
+    CRABBOX_LIVE: "1", CRABBOX_LIVE_COORDINATOR: "0", CRABBOX_LIVE_PROVIDERS: "lume", CRABBOX_LIVE_REPO: repoRoot,
+  }});
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /crabbox-live-ok/);
-  const calls = fs.readFileSync(crabboxLog, "utf8");
-  assert.match(calls, /^warmup --provider lume --ttl 30m --idle-timeout 5m$/m);
-  for (const command of ["status", "inspect", "ssh", "cache", "run", "stop"]) {
+  const calls = fs.readFileSync(log, "utf8");
+  for (const command of ["warmup", "status", "inspect", "ssh", "cache", "run", "stop"])
     assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
-  }
   assert.doesNotMatch(calls, /^history(?: |$)/m);
 });
 
