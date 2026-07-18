@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -33,7 +32,6 @@ type backend struct {
 }
 
 var waitForSSHReady = core.WaitForSSHReady
-var errIncusCleanupInstanceChanged = errors.New("incus instance changed during cleanup")
 
 type retainedAcquireError struct {
 	err     error
@@ -258,16 +256,6 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseT
 	}
 	if req.ReleaseOnly {
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
-	}
-	// Cleanup uses the same cross-process lock from its final provider-state
-	// validation through deletion. Take it before any reuse mutation so Cleanup
-	// cannot delete between a reclaim's provider update and claim publication.
-	if !req.StatusOnly && leaseID != "" {
-		unlock, lockErr := lockIncusLeaseOperation(ctx, leaseID, inst.Name)
-		if lockErr != nil {
-			return LeaseTarget{}, lockErr
-		}
-		defer unlock()
 	}
 	var previousClaim, preflightClaim core.LeaseClaim
 	var previousClaimExists, rollbackClaim bool
@@ -509,12 +497,6 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (core.Server, err
 	if name == "" {
 		return core.Server{}, core.Exit(2, "provider=%s touch requires an Incus instance name", providerName)
 	}
-	leaseID := strings.TrimSpace(core.Blank(req.Lease.LeaseID, server.Labels["lease"]))
-	unlock, err := lockIncusLeaseOperation(ctx, leaseID, name)
-	if err != nil {
-		return core.Server{}, err
-	}
-	defer unlock()
 	if err := setInstanceLabels(ctx, client, name, server.Labels); err != nil {
 		return core.Server{}, err
 	}
@@ -560,83 +542,42 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=claim-scope-mismatch\n", inst.Name, core.Blank(leaseID, "-"))
 			continue
 		}
-		if err := b.cleanupIncusInstanceCandidate(ctx, client, cfg, req, inst, leaseID, reason, expectedClaim, expectedClaimExists); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (b *backend) cleanupIncusInstanceCandidate(ctx context.Context, client instanceClient, cfg Config, req CleanupRequest, inst api.Instance, leaseID, reason string, expectedClaim core.LeaseClaim, expectedClaimExists bool) error {
-	unlock, err := lockIncusLeaseOperation(ctx, leaseID, inst.Name)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	if req.DryRun {
-		if leaseID != "" {
-			if err := verifyIncusCleanupClaimUnchanged(leaseID, expectedClaim, expectedClaimExists); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=changed-during-cleanup err=%v\n", inst.Name, leaseID, err)
-				return nil
+		if req.DryRun {
+			if leaseID != "" {
+				if err := verifyIncusCleanupClaimUnchanged(leaseID, expectedClaim, expectedClaimExists); err != nil {
+					fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=changed-during-cleanup err=%v\n", inst.Name, leaseID, err)
+					continue
+				}
 			}
+			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(leaseID, "-"), reason)
+			continue
 		}
-		unchanged, changeReason, err := incusCleanupInstanceUnchanged(client, inst, cfg)
-		if err != nil {
-			return err
+		cleanupStarted := false
+		cleanupInstance := func() error {
+			cleanupStarted = true
+			if inst.IsActive() {
+				if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
+					return err
+				}
+			}
+			return client.DeleteInstance(inst.Name)
 		}
-		if !unchanged {
-			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=changed-during-cleanup detail=%s\n", inst.Name, core.Blank(leaseID, "-"), changeReason)
-			return nil
-		}
-		fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(leaseID, "-"), reason)
-		return nil
-	}
-
-	cleanupStarted := false
-	cleanupSkipped := false
-	cleanupSkipReason := ""
-	cleanupInstance := func() error {
-		cleanupStarted = true
-		unchanged, changeReason, err := incusCleanupInstanceUnchanged(client, inst, cfg)
-		if err != nil {
-			return err
-		}
-		if !unchanged {
-			cleanupSkipped = true
-			cleanupSkipReason = changeReason
-			return errIncusCleanupInstanceChanged
-		}
-		if inst.IsActive() {
-			if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
+		if leaseID == "" {
+			if err := cleanupInstance(); err != nil {
 				return err
 			}
-		}
-		return client.DeleteInstance(inst.Name)
-	}
-	if leaseID == "" {
-		if err := cleanupInstance(); err != nil {
-			if cleanupSkipped && errors.Is(err, errIncusCleanupInstanceChanged) {
-				fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=- reason=changed-during-cleanup detail=%s\n", inst.Name, cleanupSkipReason)
-				return nil
+		} else if err := core.CleanupLeaseClaimIfUnchangedAfter(leaseID, expectedClaim, expectedClaimExists, cleanupInstance); err != nil {
+			if cleanupStarted {
+				return err
 			}
-			return err
+			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=changed-during-cleanup err=%v\n", inst.Name, leaseID, err)
+			continue
 		}
-	} else if err := core.CleanupLeaseClaimIfUnchangedAfter(leaseID, expectedClaim, expectedClaimExists, cleanupInstance); err != nil {
-		if cleanupSkipped && errors.Is(err, errIncusCleanupInstanceChanged) {
-			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=changed-during-cleanup detail=%s\n", inst.Name, leaseID, cleanupSkipReason)
-			return nil
-		}
-		if cleanupStarted {
-			return err
-		}
-		fmt.Fprintf(b.rt.Stderr, "skip instance name=%s lease=%s reason=changed-during-cleanup err=%v\n", inst.Name, leaseID, err)
-		return nil
+		// Retain the stored testbox key. Acquire prepares or reuses it before
+		// publishing replacement claim ownership, outside the claim lock. Deleting
+		// it here could strand a concurrent reuse that has not published yet.
+		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(leaseID, "-"), reason)
 	}
-	// Retain the stored testbox key. Acquire prepares or reuses it before
-	// publishing replacement claim ownership, outside the claim lock. Deleting it
-	// here could strand a concurrent reuse that has not published yet.
-	fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(leaseID, "-"), reason)
 	return nil
 }
 
@@ -644,25 +585,6 @@ func incusCleanupClaimMatchesInstance(claim core.LeaseClaim, leaseID, instanceNa
 	return claim.LeaseID == leaseID &&
 		claim.Provider == providerName &&
 		claim.ProviderScope == instanceScope(instanceName)
-}
-
-func incusCleanupInstanceUnchanged(client instanceClient, snapshot api.Instance, cfg Config) (bool, string, error) {
-	current, _, err := client.GetInstance(snapshot.Name)
-	if err != nil {
-		return false, "", err
-	}
-	if !isCrabboxInstance(*current) {
-		return false, "ownership labels changed", nil
-	}
-	if current.Status != snapshot.Status ||
-		current.StatusCode != snapshot.StatusCode ||
-		!reflect.DeepEqual(labelsFromInstance(*current), labelsFromInstance(snapshot)) {
-		return false, "provider state changed", nil
-	}
-	if shouldDelete, reason := core.ShouldCleanupServer(serverFromInstance(*current, nil, cfg), time.Now().UTC()); !shouldDelete {
-		return false, reason, nil
-	}
-	return true, "", nil
 }
 
 func verifyIncusCleanupClaimUnchanged(leaseID string, expected core.LeaseClaim, expectedExists bool) error {
