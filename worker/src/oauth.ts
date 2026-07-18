@@ -293,20 +293,12 @@ async function githubAuthCallback(
   if (pending.redirectURI !== oauthConfig.redirectURI) {
     const message = "The GitHub OAuth public origin changed. Start a new login.";
     await finishPendingOAuth(runtime, pending.id, claim, { error: message });
-    return html(
-      "Crabbox login unavailable",
-      message,
-      503,
-      terminalPortalOAuthHeaders(pending),
-    );
+    return html("Crabbox login unavailable", message, 503, terminalPortalOAuthHeaders(pending));
   }
   if (pending.mode === "portal") {
     const binding = requestCookie(request, portalOAuthCookieName);
     const bindingHash = binding ? await sha256Hex(binding) : "";
-    if (
-      !pending.portalBindingHash ||
-      !timingSafeEqual(bindingHash, pending.portalBindingHash)
-    ) {
+    if (!pending.portalBindingHash || !timingSafeEqual(bindingHash, pending.portalBindingHash)) {
       await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, pending));
       return html(
         "Crabbox login denied",
@@ -409,12 +401,7 @@ async function githubAuthCallback(
   } catch (err) {
     await finishPendingOAuth(runtime, pending.id, claim, { error: errorMessage(err) });
     if (err instanceof GitHubAuthorizationError) {
-      return html(
-        "Crabbox login denied",
-        err.message,
-        403,
-        terminalPortalOAuthHeaders(pending),
-      );
+      return html("Crabbox login denied", err.message, 403, terminalPortalOAuthHeaders(pending));
     }
     return html(
       "Crabbox login failed",

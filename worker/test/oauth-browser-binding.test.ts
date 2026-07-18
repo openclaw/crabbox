@@ -96,9 +96,7 @@ function stubSuccessfulGitHubOAuth(): ReturnType<typeof vi.fn> {
       return Response.json({ id: 12345, login: "alice", name: "Alice" });
     }
     if (url === "https://api.github.com/user/emails") {
-      return Response.json([
-        { email: "alice@example.com", primary: true, verified: true },
-      ]);
+      return Response.json([{ email: "alice@example.com", primary: true, verified: true }]);
     }
     if (url === "https://api.github.com/user/memberships/orgs/openclaw") {
       return Response.json({ state: "active", organization: { login: "openclaw" } });
@@ -123,9 +121,7 @@ describe("portal OAuth browser binding", () => {
       cookiePair(response, "__Host-crabbox_oauth").split("=", 2)[1] ?? "",
     );
     expect(binding).toMatch(/^bind_[a-f0-9]{32}$/);
-    const cookie = setCookies(response).find((value) =>
-      value.startsWith("__Host-crabbox_oauth="),
-    );
+    const cookie = setCookies(response).find((value) => value.startsWith("__Host-crabbox_oauth="));
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("Secure");
     expect(cookie).toContain("SameSite=Lax");
