@@ -223,15 +223,38 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	labels["ssh_user"] = cfg.Lume.User
 	labels["ssh_port"] = sshPort
 	labels["work_root"] = cfg.Lume.WorkRoot
-	labels["run_owner_expected"] = "true"
-	labels["run_owner_pending"] = "true"
-	labels["run_launch_token"] = launchToken
+	labels["state"] = "provisioning"
+	labels["recovery"] = "clone-pending"
+	labels["run_owner_expected"] = "false"
+	labels["run_owner_pending"] = "false"
+	// Acquire and Cleanup hold the same cross-process capacity lock. Cleanup
+	// can observe this pending claim only after Acquire exits or crashes.
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
 	cloneStorage, err := lumeStorageRoot(cfg, "")
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	persistedClaim := core.LeaseClaim{}
+	storageID, err := ensureLumeStorageIdentity(cloneStorage)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	labels["storage"] = cloneStorage
+	labels["storage_exact"] = "true"
+	labels["storage_id"] = storageID
+	recoveryCfg := cfg
+	recoveryCfg.Lume.Storage = cloneStorage
+	pendingServer := b.serverFromInstance(lumeVM{Name: name, Status: "provisioning", LocationName: cloneStorage}, claim, recoveryCfg)
+	persistedClaim, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug, recoveryCfg, instanceScope(name), pendingServer, SSHTarget{}, req.Repo.Root, recoveryCfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false, func() error {
+		return verifyLumeStorageIdentity(recoveryCfg, storageID)
+	})
+	if err != nil {
+		current, ok, readErr := resolveLeaseClaimForProvider(leaseID)
+		if ok && instanceNameFromClaim(current) == name {
+			cleanupKey = false
+		}
+		return LeaseTarget{}, errors.Join(err, readErr)
+	}
+	cleanupKey = false
 	cleanupUnclaimedVM := func(cause error) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -276,14 +299,53 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 			}
 			return errors.Join(cause, cleanupErr)
 		}
+		cleanupKey = true
 		return cause
 	}
-	if err := b.cloneVM(ctx, cfg, name); err != nil {
-		return LeaseTarget{}, errors.Join(exit(5, "Lume clone result for %q is ambiguous; inspect the destination before removing it", name), err)
+	if cloneErr := b.cloneVM(ctx, recoveryCfg, name); cloneErr != nil {
+		labels["state"] = "error"
+		labels["recovery"] = "clone-ambiguous"
+		labels["run_owner_expected"] = "false"
+		labels["run_owner_pending"] = "false"
+		delete(labels, "run_launch_token")
+		recoveryInst := lumeVM{Name: name, Status: "unknown", LocationName: cloneStorage}
+		var identityErr error
+		identityBound := false
+		recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelRecovery()
+		if observed, probeErr := b.getInstance(recoveryCtx, recoveryCfg, name); probeErr == nil {
+			recoveryInst = observed
+			claim.CloudImmutableID, identityErr = lumeVMImmutableID(recoveryCfg, observed)
+			if identityErr != nil {
+				identityErr = fmt.Errorf("pin ambiguous Lume clone identity: %w", identityErr)
+			} else {
+				identityBound = strings.TrimSpace(claim.CloudImmutableID) != ""
+			}
+		} else if !isLumeNotFoundError(probeErr) {
+			identityErr = fmt.Errorf("inspect ambiguous Lume clone destination: %w", probeErr)
+		}
+		var updateErr error
+		if identityBound {
+			recoveryServer := b.serverFromInstance(recoveryInst, claim, recoveryCfg)
+			updated, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, persistedClaim, recoveryServer, SSHTarget{}, func() error {
+				return verifyLumeStorageIdentity(recoveryCfg, storageID)
+			})
+			updateErr = err
+			if updateErr == nil {
+				persistedClaim = updated
+			}
+		} else {
+			// Keep clone-pending until cleanup can bind the immutable identity under CAS.
+			updateErr = verifyLumeStorageIdentity(recoveryCfg, storageID)
+		}
+		return LeaseTarget{}, errors.Join(exit(5, "Lume clone result for %q is ambiguous; recovery claim retained for cleanup", name), cloneErr, identityErr, updateErr)
 	}
 	cfg.Lume.Storage = cloneStorage
-	labels["storage"] = cloneStorage
-	labels["storage_exact"] = "true"
+	labels["state"] = "starting"
+	delete(labels, "recovery")
+	labels["run_owner_expected"] = "true"
+	labels["run_owner_pending"] = "true"
+	labels["run_launch_token"] = launchToken
 	claim.CloudImmutableID, err = lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: cloneStorage})
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
@@ -292,17 +354,18 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
-	if req.OnAcquired != nil {
-		acquired := LeaseTarget{Server: b.serverFromInstance(cloneInst, claim, cfg), LeaseID: leaseID}
-		if err := req.OnAcquired(acquired); err != nil {
-			return LeaseTarget{}, cleanupUnclaimedVM(err)
-		}
-	}
 	cloneInst.Status = "starting"
 	provisional := LeaseTarget{Server: b.serverFromInstance(cloneInst, claim, cfg), LeaseID: leaseID}
-	persistedClaim, err = core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, instanceScope(name), provisional.Server, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
+	persistedClaim, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, persistedClaim, provisional.Server, SSHTarget{}, func() error {
+		return verifyLumeStorageIdentity(cfg, storageID)
+	})
 	if err != nil {
 		return LeaseTarget{}, cleanupUnclaimedVM(err)
+	}
+	if req.OnAcquired != nil {
+		if err := req.OnAcquired(provisional); err != nil {
+			return LeaseTarget{}, cleanupUnclaimedVM(err)
+		}
 	}
 	trust, err := prepareBootstrapTrust(name, cfg.Lume.User, publicKey)
 	if err != nil {
@@ -588,17 +651,28 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		claimCfg := configForClaim(cfg, claim)
-		owner, ownerErr := ownerForDestruction(claim)
-		if ownerErr != nil {
-			return ownerErr
-		}
 		inst, _, resolveErr := b.resolveClaimedInstance(ctx, claim)
 		if resolveErr != nil {
 			return resolveErr
 		}
+		if claim.Labels["recovery"] == "clone-pending" && normalizedState(inst.Status) != "missing" {
+			claim, inst, resolveErr = b.recoverPendingCloneClaim(ctx, claim)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			claimCfg = configForClaim(cfg, claim)
+		}
+		owner, ownerErr := ownerForDestruction(claim)
+		if ownerErr != nil {
+			return ownerErr
+		}
 		missing := normalizedState(inst.Status) == "missing"
+		now := time.Now().UTC()
+		if missing && claim.Labels["recovery"] == "clone-pending" && !clonePendingStale(claim, now) {
+			continue
+		}
 		server := b.serverFromInstance(inst, claim, claimCfg)
-		shouldDelete, reason := shouldCleanup(server, claim, time.Now().UTC())
+		shouldDelete, reason := shouldCleanup(server, claim, now)
 		if missing {
 			shouldDelete, reason = true, "instance missing"
 		}
@@ -611,6 +685,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		action := func() error {
 			if missing {
+				if err := requireClaimedStorageIdentity(claimCfg, claim); err != nil {
+					return err
+				}
 				state, stillMissing, observeErr := b.observeVMState(ctx, claimCfg, name)
 				if observeErr != nil {
 					return observeErr
@@ -620,6 +697,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 				}
 				if ownerProcessMatches(owner) {
 					return exit(5, "refusing to remove missing Lume claim %s while owner pid %d is still running", claim.LeaseID, owner.PID)
+				}
+				if err := requireClaimedStorageIdentity(claimCfg, claim); err != nil {
+					return err
 				}
 				removeLumeRunLog(name)
 				return nil
@@ -656,7 +736,7 @@ func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	}
 	original := server.Labels
 	server.Labels = touchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"base", "storage", "instance", "ssh_user", "ssh_port", "work_root", "run_owner_expected", "run_owner_pending", "run_launch_token", "run_owner_pid", "run_owner_started_at", "run_owner_start_identity", "run_owner_boot_identity", "run_log"} {
+	for _, key := range []string{"base", "storage", "storage_id", "instance", "ssh_user", "ssh_port", "work_root", "run_owner_expected", "run_owner_pending", "run_launch_token", "run_owner_pid", "run_owner_started_at", "run_owner_start_identity", "run_owner_boot_identity", "run_log"} {
 		if value := strings.TrimSpace(original[key]); value != "" {
 			server.Labels[key] = value
 		}
@@ -1092,6 +1172,9 @@ func (b *backend) stopVM(ctx context.Context, cfg Config, name string, owner lum
 }
 
 func (b *backend) removeClaimedVM(ctx context.Context, cfg Config, name string, claim core.LeaseClaim, owner lumeRunOwner) error {
+	if err := requireClaimedStorageIdentity(cfg, claim); err != nil {
+		return err
+	}
 	inst, err := b.getInstance(ctx, cfg, name)
 	missing := err != nil && isLumeNotFoundError(err)
 	if err != nil && !missing {
@@ -1222,6 +1305,32 @@ func requireDirectStorageAvailable(cfg Config) error {
 	return nil
 }
 
+func requireClaimedStorageIdentity(cfg Config, claim core.LeaseClaim) error {
+	expected := strings.TrimSpace(claim.Labels["storage_id"])
+	if expected == "" {
+		return exit(5, "refusing to remove Lume lease %s without its durable storage identity; claim retained", claim.LeaseID)
+	}
+	if err := verifyLumeStorageIdentity(cfg, expected); err != nil {
+		return errors.Join(exit(5, "refusing to remove Lume lease %s because storage identity cannot be confirmed; claim retained", claim.LeaseID), err)
+	}
+	return nil
+}
+
+func verifyLumeStorageIdentity(cfg Config, expected string) error {
+	root, err := lumeStorageRoot(cfg, "")
+	if err != nil {
+		return err
+	}
+	actual, err := readLumeStorageIdentity(root)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return exit(4, "Lume storage identity changed for %q", root)
+	}
+	return nil
+}
+
 func isLumeNotFoundError(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "virtual machine not found:")
@@ -1295,6 +1404,16 @@ func (b *backend) observeVMState(ctx context.Context, cfg Config, name string) (
 	inst, getErr := b.getInstance(ctx, cfg, name)
 	if getErr == nil {
 		return normalizedState(inst.Status), false, nil
+	}
+	if isDirectStoragePath(cfg.Lume.Storage) && isLumeNotFoundError(getErr) {
+		inst, secondErr := b.getInstance(ctx, cfg, name)
+		if secondErr == nil {
+			return normalizedState(inst.Status), false, nil
+		}
+		if isLumeNotFoundError(secondErr) {
+			return "missing", true, nil
+		}
+		return "", false, secondErr
 	}
 	instances, listErr := b.listInstancesForConfig(ctx, cfg)
 	if listErr != nil {
@@ -1393,6 +1512,12 @@ func (b *backend) resolveClaimedInstance(ctx context.Context, claim core.LeaseCl
 	if getErr == nil {
 		return inst, claim, nil
 	}
+	if isDirectStoragePath(cfg.Lume.Storage) {
+		if !isLumeNotFoundError(getErr) {
+			return lumeVM{}, core.LeaseClaim{}, getErr
+		}
+		return lumeVM{Name: name, Status: "missing"}, claim, nil
+	}
 	instances, listErr := b.listInstancesForConfig(ctx, cfg)
 	if listErr != nil {
 		return lumeVM{}, core.LeaseClaim{}, errors.Join(getErr, listErr)
@@ -1406,6 +1531,39 @@ func (b *backend) resolveClaimedInstance(ctx context.Context, claim core.LeaseCl
 		return lumeVM{}, core.LeaseClaim{}, getErr
 	}
 	return lumeVM{Name: name, Status: "missing"}, claim, nil
+}
+
+func (b *backend) recoverPendingCloneClaim(ctx context.Context, claim core.LeaseClaim) (core.LeaseClaim, lumeVM, error) {
+	if claim.Labels["recovery"] != "clone-pending" || strings.TrimSpace(claim.CloudImmutableID) != "" {
+		return claim, lumeVM{}, exit(4, "Lume lease %s has no pending clone recovery state", claim.LeaseID)
+	}
+	name := instanceNameFromClaim(claim)
+	cfg := configForClaim(b.configForRun(), claim)
+	var observed lumeVM
+	updated, _, _, err := core.UpdateLeaseClaimEndpointIfUnchangedAction(claim.LeaseID, claim, func() (Server, SSHTarget, bool, error) {
+		if err := requireClaimedStorageIdentity(cfg, claim); err != nil {
+			return Server{}, SSHTarget{}, false, err
+		}
+		inst, err := b.getInstance(ctx, cfg, name)
+		if err != nil {
+			return Server{}, SSHTarget{}, false, err
+		}
+		immutableID, err := lumeVMImmutableID(cfg, inst)
+		if err != nil {
+			return Server{}, SSHTarget{}, false, err
+		}
+		bound := claim
+		bound.CloudImmutableID = immutableID
+		bound.Labels = cloneLabels(claim.Labels)
+		bound.Labels["state"] = "error"
+		bound.Labels["recovery"] = "clone-ambiguous"
+		observed = inst
+		return b.serverFromInstance(inst, bound, cfg), SSHTarget{}, true, nil
+	})
+	if err != nil {
+		return claim, lumeVM{}, err
+	}
+	return updated, observed, nil
 }
 
 func (b *backend) prepareLease(ctx context.Context, cfg Config, inst lumeVM, claim core.LeaseClaim, wait bool) (LeaseTarget, error) {
@@ -1678,8 +1836,16 @@ func ownerSafeToSignal(owner lumeRunOwner) bool {
 }
 
 func shouldCleanup(server Server, claim core.LeaseClaim, now time.Time) (bool, string) {
-	if server.Labels["recovery"] == "rollback-failed" {
+	switch server.Labels["recovery"] {
+	case "clone-pending":
+		if clonePendingStale(claim, now) {
+			return true, "clone pending stale"
+		}
+		return false, "clone pending"
+	case "rollback-failed":
 		return true, "rollback failed"
+	case "clone-ambiguous":
+		return true, "clone ambiguous"
 	}
 	if strings.EqualFold(server.Labels["keep"], "true") {
 		return false, "keep=true"
@@ -1703,6 +1869,11 @@ func shouldCleanup(server Server, claim core.LeaseClaim, now time.Time) (bool, s
 		return false, "claim active"
 	}
 	return true, "claim expired"
+}
+
+func clonePendingStale(claim core.LeaseClaim, now time.Time) bool {
+	claimedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.ClaimedAt))
+	return err == nil && !claimedAt.IsZero() && now.After(claimedAt.Add(15*time.Minute))
 }
 
 func (b *backend) lume(ctx context.Context, cfg Config, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {

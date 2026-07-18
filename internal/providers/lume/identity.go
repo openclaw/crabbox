@@ -1,11 +1,13 @@
 package lume
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	osuser "os/user"
 	"path/filepath"
@@ -14,6 +16,8 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 	"gopkg.in/yaml.v3"
 )
+
+const lumeStorageIdentityFile = ".crabbox-lume-storage-id"
 
 type lumeSettingsFile struct {
 	DefaultLocationName string           `yaml:"defaultLocationName"`
@@ -63,6 +67,120 @@ func lumeVMImmutableIDAtPath(vmPath, name string) (string, error) {
 	}
 	sum := sha256.Sum256(machineID)
 	return "lume-machine-" + hex.EncodeToString(sum[:]), nil
+}
+
+func ensureLumeStorageIdentity(root string) (string, error) {
+	root = filepath.Clean(root)
+	info, err := os.Lstat(root)
+	if err != nil {
+		return "", exit(5, "inspect Lume storage %q: %v", root, err)
+	}
+	if !info.IsDir() {
+		return "", exit(5, "Lume storage %q is not a directory", root)
+	}
+	marker := filepath.Join(root, lumeStorageIdentityFile)
+	if _, err := os.Lstat(marker); err == nil {
+		identity, err := readLumeStorageIdentity(root)
+		if err != nil {
+			return "", err
+		}
+		if err := syncLumeStorageDirectory(root); err != nil {
+			return "", err
+		}
+		return identity, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", exit(5, "inspect Lume storage identity %q: %v", root, err)
+	}
+
+	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		return "", exit(5, "generate Lume storage identity: %v", err)
+	}
+	identity := hex.EncodeToString(random)
+	file, err := os.CreateTemp(root, "."+lumeStorageIdentityFile+".tmp-")
+	if err != nil {
+		return "", exit(5, "create temporary Lume storage identity %q: %v", root, err)
+	}
+	temporary := file.Name()
+	defer func() {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+	}()
+	if _, err := file.WriteString(identity + "\n"); err != nil {
+		return "", exit(5, "write Lume storage identity %q: %v", root, err)
+	}
+	if err := file.Sync(); err != nil {
+		return "", exit(5, "sync Lume storage identity %q: %v", root, err)
+	}
+	if err := file.Close(); err != nil {
+		return "", exit(5, "close Lume storage identity %q: %v", root, err)
+	}
+	if err := os.Link(temporary, marker); errors.Is(err, os.ErrExist) {
+		installed, readErr := readLumeStorageIdentity(root)
+		if readErr != nil {
+			return "", readErr
+		}
+		if syncErr := syncLumeStorageDirectory(root); syncErr != nil {
+			return "", syncErr
+		}
+		return installed, nil
+	} else if err != nil {
+		return "", exit(5, "publish Lume storage identity %q: %v", root, err)
+	}
+	if err := os.Remove(temporary); err != nil {
+		return "", exit(5, "remove temporary Lume storage identity %q: %v", root, err)
+	}
+	if err := syncLumeStorageDirectory(root); err != nil {
+		return "", err
+	}
+	return identity, nil
+}
+
+func syncLumeStorageDirectory(root string) error {
+	dir, err := os.Open(root)
+	if err != nil {
+		return exit(5, "open Lume storage %q for identity sync: %v", root, err)
+	}
+	syncErr := dir.Sync()
+	closeErr := dir.Close()
+	if syncErr != nil {
+		return exit(5, "sync Lume storage identity directory %q: %v", root, syncErr)
+	}
+	if closeErr != nil {
+		return exit(5, "close Lume storage identity directory %q: %v", root, closeErr)
+	}
+	return nil
+}
+
+func readLumeStorageIdentity(root string) (string, error) {
+	root = filepath.Clean(root)
+	marker := filepath.Join(root, lumeStorageIdentityFile)
+	before, err := os.Lstat(marker)
+	if err != nil {
+		return "", exit(5, "read Lume storage identity %q: %v", root, err)
+	}
+	if !before.Mode().IsRegular() || before.Size() <= 0 || before.Size() > 128 {
+		return "", exit(5, "Lume storage identity %q is not a small regular file", marker)
+	}
+	file, err := os.Open(marker)
+	if err != nil {
+		return "", exit(5, "open Lume storage identity %q: %v", root, err)
+	}
+	defer file.Close()
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(before, after) {
+		return "", exit(5, "Lume storage identity %q changed while opening", root)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 129))
+	if err != nil {
+		return "", exit(5, "read Lume storage identity %q: %v", root, err)
+	}
+	identity := strings.TrimSpace(string(data))
+	decoded, decodeErr := hex.DecodeString(identity)
+	if decodeErr != nil || len(decoded) != 32 {
+		return "", exit(5, "Lume storage identity %q is invalid", root)
+	}
+	return identity, nil
 }
 
 func lumeStorageRoot(cfg Config, reportedLocation string) (string, error) {
