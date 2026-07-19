@@ -128,9 +128,11 @@ func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mo
 		return nil
 	}
 	fail := func(cause error) (*sshTransportSession, error) {
-		_ = cleanup()
-		_ = os.RemoveAll(dir)
-		return nil, cause
+		cleanupErr := cleanup()
+		if err := os.RemoveAll(dir); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove reserved private WSL SSH transport directory: %w", err))
+		}
+		return nil, errors.Join(cause, cleanupErr)
 	}
 	mkdir := exec.CommandContext(ctx, wslExe, "sh", "-c", `umask 077; mktemp -d /tmp/crabbox-ssh-transport-XXXXXX`)
 	applyTargetChildEnvironment(mkdir, target)

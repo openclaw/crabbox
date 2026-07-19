@@ -767,6 +767,39 @@ func TestWSLSSHTransportSessionDoesNotCleanUpFailedDirectoryCreation(t *testing.
 	}
 }
 
+func TestWSLSSHTransportSessionSurfacesStagedCredentialCleanupFailure(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX WSL fixture")
+	}
+	dir := t.TempDir()
+	wslDir := "/tmp/crabbox-ssh-transport-cleanupfail"
+	t.Cleanup(func() { _ = os.RemoveAll(wslDir) })
+	wsl := filepath.Join(dir, "wsl")
+	script := "#!/bin/sh\ncase \"$*\" in\n  *mktemp*) mkdir -p \"$CRABBOX_TEST_WSL_DIR\"; printf '%s\\n' \"$CRABBOX_TEST_WSL_DIR\" ;;\n  *'rm -rf'*) exit 42 ;;\n  *) exec \"$@\" ;;\nesac\n"
+	if err := os.WriteFile(wsl, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_TEST_WSL_DIR", wslDir)
+	key := filepath.Join(dir, "identity")
+	if err := os.WriteFile(key, []byte("private-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := SSHTarget{
+		User:            "alice",
+		Host:            "example.test",
+		Port:            "22",
+		Key:             key,
+		CertificateFile: filepath.Join(dir, "missing-certificate"),
+	}
+	_, err := newWSLSSHTransportSession(t.Context(), target, wsl, "/mnt")
+	if err == nil || !strings.Contains(err.Error(), "read SSH certificate for WSL copy transport") || !strings.Contains(err.Error(), "remove private WSL SSH transport config") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(wslDir, "identity")); statErr != nil {
+		t.Fatalf("fixture did not stage the credential before cleanup failed: %v", statErr)
+	}
+}
+
 func TestPrivateSSHTransportProbeKeepsSecretsOutOfArgvAndEnvironment(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("POSIX fake SSH helper")
