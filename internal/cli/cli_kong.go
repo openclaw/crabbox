@@ -39,7 +39,8 @@ type crabboxKongCLI struct {
 	Status      statusKongCmd      `cmd:"" passthrough:"" help:"Show lease state; add --wait to block until ready."`
 	List        listKongCmd        `cmd:"" passthrough:"" help:"List Crabbox machines."`
 	Ports       portsKongCmd       `cmd:"" passthrough:"" help:"Publish, list, or unpublish provider-native ports."`
-	Cp          cpKongCmd          `cmd:"" name:"cp" passthrough:"" help:"Copy files between host and a delegated sandbox."`
+	Cp          cpKongCmd          `cmd:"" name:"cp" passthrough:"" help:"Copy files between the host and a lease."`
+	Tunnel      tunnelKongCmd      `cmd:"" passthrough:"" help:"Forward a lease loopback port to this machine."`
 	Share       shareKongCmd       `cmd:"" passthrough:"" help:"Share a lease with users or the owning org."`
 	Unshare     unshareKongCmd     `cmd:"" passthrough:"" help:"Remove lease sharing."`
 	Image       imageKongCmd       `cmd:"" help:"Create provider images and promote brokered AWS runner images."`
@@ -220,6 +221,9 @@ type portsKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type cpKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type tunnelKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type statusKongCmd struct {
@@ -641,6 +645,7 @@ func (c *resultsKongCmd) Run(ctx context.Context, app App) error   { return app.
 func (c *verifyKongCmd) Run(ctx context.Context, app App) error    { return app.verify(ctx, c.Args) }
 func (c *portsKongCmd) Run(ctx context.Context, app App) error     { return app.ports(ctx, c.Args) }
 func (c *cpKongCmd) Run(ctx context.Context, app App) error        { return app.copyCommand(ctx, c.Args) }
+func (c *tunnelKongCmd) Run(ctx context.Context, app App) error    { return app.tunnel(ctx, c.Args) }
 func (c *statusKongCmd) Run(ctx context.Context, app App) error    { return app.status(ctx, c.Args) }
 func (c *listKongCmd) Run(ctx context.Context, app App) error      { return app.list(ctx, c.Args) }
 func (c *shareKongCmd) Run(ctx context.Context, app App) error     { return app.share(ctx, c.Args) }

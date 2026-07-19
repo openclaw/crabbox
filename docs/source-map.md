@@ -202,6 +202,7 @@ Provider docs:
 - Desktop/browser/code capability flags, env injection, and VNC checks: `internal/cli/capabilities.go`, `internal/cli/run.go`
 - Desktop app launch, terminal, record, proof, input (`click`/`type`/`paste`/`key`): `internal/cli/desktop.go`, `internal/cli/desktop_input.go`, `internal/cli/desktop_proof.go`
 - VNC tunnel command: `internal/cli/vnc.go`
+- Generic SSH copy and local tunnel commands: `internal/cli/cp.go`, `internal/cli/tunnel.go`, `internal/cli/ssh_transport_session.go`
 - Screenshot capture (incl. direct RFB grab): `internal/cli/screenshot.go`, `internal/cli/rfb_screenshot.go`
 - WebVNC portal bridge and daemon process identity: `internal/cli/webvnc.go`, `internal/cli/webvnc_process_*.go`, `worker/src/portal.ts`, `worker/src/fleet.ts`
 - Workspace controller HTTP service, descriptor-verified durable state lock, crash-owned lifecycle subprocess adapter, and platform process controls: `internal/cli/controller.go`, `internal/cli/controller_service.go`, `internal/cli/controller_state_lock_*.go`, `internal/cli/controller_subprocess.go`, `internal/cli/controller_command_*.go`

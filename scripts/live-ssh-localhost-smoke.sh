@@ -5,9 +5,9 @@ set -euo pipefail
 #
 # Generates a disposable ed25519 key, authorizes it for the current user,
 # ensures a local sshd is running, then drives the static SSH provider
-# through warmup -> status -> run -> list -> stop. No cloud resources, no
-# credentials beyond the throwaway keypair; the authorized_keys entry is
-# removed again on exit.
+# through warmup -> status -> run -> cp upload/download -> tunnel -> list ->
+# stop. No cloud resources, no credentials beyond the throwaway keypair; the
+# authorized_keys entry is removed again on exit.
 #
 # Environment:
 #   CRABBOX_BIN                  Crabbox binary (default: ./bin/crabbox)
@@ -24,6 +24,9 @@ work_root="$work_dir/workroot"
 authorized_keys="$HOME/.ssh/authorized_keys"
 authorized_entry=""
 cleanup_armed=0
+http_server_pid=""
+tunnel_pid=""
+tunnel_result="skipped"
 
 classify_blocker() {
   local command="$1"
@@ -62,6 +65,14 @@ run_capture() {
   printf '%s\n' "$output"
 }
 
+file_mode() {
+  if stat -f '%Lp' "$1" >/dev/null 2>&1; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+
 remove_authorized_entry() {
   if [ -n "$authorized_entry" ] && [ -f "$authorized_keys" ]; then
     grep -vF -- "$authorized_entry" "$authorized_keys" >"$authorized_keys.crabbox-smoke" || true
@@ -72,6 +83,14 @@ remove_authorized_entry() {
 }
 
 cleanup() {
+  if [ -n "$tunnel_pid" ]; then
+    kill -INT "$tunnel_pid" >/dev/null 2>&1 || true
+    wait "$tunnel_pid" 2>/dev/null || true
+  fi
+  if [ -n "$http_server_pid" ]; then
+    kill "$http_server_pid" >/dev/null 2>&1 || true
+    wait "$http_server_pid" 2>/dev/null || true
+  fi
   if [ "$cleanup_armed" -eq 1 ]; then
     "$bin" stop --provider ssh "$slug" >/dev/null 2>&1 || true
   fi
@@ -136,6 +155,83 @@ if [[ "$run_output" != *crabbox-ssh-localhost-ok* ]]; then
   exit 1
 fi
 
+printf 'crabbox-ssh-cp-roundtrip\n' >"$work_dir/cp upload.txt"
+RSYNC_OLD_ARGS=1 RSYNC_PROTECT_ARGS=1 run_capture "$bin cp upload over resolved SSH" "$bin" cp --provider ssh --id "$slug" \
+  "$work_dir/cp upload.txt" "SANDBOX:$work_root/cp remote[1].txt" >/dev/null
+chmod 0711 "$work_root/cp remote[1].txt"
+(
+  umask 022
+  RSYNC_OLD_ARGS=1 RSYNC_PROTECT_ARGS=1 run_capture "$bin cp download over resolved SSH" "$bin" cp --provider ssh --id "$slug" \
+    "SANDBOX:$work_root/cp remote[1].txt" "$work_dir/cp download.txt"
+) >/dev/null
+if ! cmp -s "$work_dir/cp upload.txt" "$work_dir/cp download.txt"; then
+  classify_validation_failure "$bin cp --provider ssh --id $slug" 1 "SSH cp roundtrip content mismatch"
+  exit 1
+fi
+if [ "$(file_mode "$work_dir/cp download.txt")" != "644" ]; then
+  classify_validation_failure "$bin cp --provider ssh --id $slug" 1 "SSH cp download did not normalize an unusual remote file mode to 0644"
+  exit 1
+fi
+
+if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+  remote_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+  mkdir -p "$work_dir/http"
+  printf 'crabbox-ssh-tunnel-ok\n' >"$work_dir/http/index.html"
+  python3 -m http.server "$remote_port" --bind 127.0.0.1 --directory "$work_dir/http" \
+    >"$work_dir/http-server.log" 2>&1 &
+  http_server_pid=$!
+  server_wait_attempt=0
+  while [ "$server_wait_attempt" -lt 40 ]; do
+    if curl -fsS "http://127.0.0.1:$remote_port" >/dev/null 2>&1; then
+      break
+    fi
+    if ! kill -0 "$http_server_pid" 2>/dev/null; then
+      classify_validation_failure "python3 -m http.server $remote_port" 1 "HTTP fixture exited before readiness: $(cat "$work_dir/http-server.log")"
+      exit 1
+    fi
+    sleep 0.1
+    server_wait_attempt=$((server_wait_attempt + 1))
+  done
+  if [ "$server_wait_attempt" -ge 40 ]; then
+    classify_validation_failure "python3 -m http.server $remote_port" 1 "HTTP fixture did not accept connections"
+    exit 1
+  fi
+  "$bin" tunnel --provider ssh --id "$slug" "$remote_port" \
+    >"$work_dir/tunnel-url" 2>"$work_dir/tunnel-error" &
+  tunnel_pid=$!
+  tunnel_wait_attempt=0
+  while [ "$tunnel_wait_attempt" -lt 80 ]; do
+    if [ -s "$work_dir/tunnel-url" ]; then
+      break
+    fi
+    if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+      classify_validation_failure "$bin tunnel --provider ssh --id $slug $remote_port" 1 "$(cat "$work_dir/tunnel-error")"
+      exit 1
+    fi
+    sleep 0.25
+    tunnel_wait_attempt=$((tunnel_wait_attempt + 1))
+  done
+  if [ ! -s "$work_dir/tunnel-url" ]; then
+    classify_validation_failure "$bin tunnel --provider ssh --id $slug $remote_port" 1 "tunnel did not print a readiness URL within 20 seconds: $(cat "$work_dir/tunnel-error")"
+    exit 1
+  fi
+  tunnel_url="$(tr -d '\r\n' <"$work_dir/tunnel-url")"
+  tunnel_output="$(curl -fsS "$tunnel_url")"
+  if [ "$tunnel_output" != "crabbox-ssh-tunnel-ok" ]; then
+    classify_validation_failure "$bin tunnel --provider ssh --id $slug $remote_port" 1 "unexpected tunnel response: $tunnel_output"
+    exit 1
+  fi
+  tunnel_result="ready"
+  kill -INT "$tunnel_pid"
+  wait "$tunnel_pid"
+  tunnel_pid=""
+  kill "$http_server_pid"
+  wait "$http_server_pid" 2>/dev/null || true
+  http_server_pid=""
+else
+  printf 'classification=environment_skipped feature=tunnel reason=python3-or-curl-missing\n' >&2
+fi
+
 list_output="$(run_capture "$bin list --provider ssh --json" "$bin" list --provider ssh --json)"
 printf '%s\n' "$list_output"
 validation_status=0
@@ -191,4 +287,4 @@ fi
 
 run_capture "$bin stop --provider ssh $slug" "$bin" stop --provider ssh "$slug" >/dev/null
 cleanup_armed=0
-printf 'classification=live_ssh_localhost_smoke_passed slug=%s host=127.0.0.1 cleanup=complete\n' "$slug"
+printf 'classification=live_ssh_localhost_smoke_passed slug=%s host=127.0.0.1 cp=roundtrip tunnel=%s cleanup=complete\n' "$slug" "$tunnel_result"
