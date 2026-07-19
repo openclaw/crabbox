@@ -385,6 +385,14 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err := requireHost(); err != nil {
 		return err
 	}
+	// Snapshot orphan-candidate claims before listing instances so a claim
+	// registered by a concurrent Acquire cannot be compared against an older
+	// instance view and misclassified as a "missing instance" orphan. Only claims
+	// that predate our instance view can be genuine orphans.
+	orphanCandidates, err := core.ListLeaseClaims()
+	if err != nil {
+		return err
+	}
 	instances, err := b.listInstances(ctx, cfg)
 	if err != nil {
 		return err
@@ -437,8 +445,8 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		removed++
 	}
 	claimsRemoved := 0
-	for _, claim := range claims {
-		if claim.LeaseID == "" {
+	for _, claim := range orphanCandidates {
+		if !isAppleVMProviderName(claim.Provider) || claim.LeaseID == "" {
 			continue
 		}
 		if _, ok := live[claim.LeaseID]; ok {
@@ -449,12 +457,25 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
+			if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, err)
+				continue
+			}
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=missing instance\n", claim.LeaseID)
 			continue
 		}
+		// Remove only if the claim is unchanged since our pre-instance snapshot; a
+		// concurrent Acquire/Touch that (re)bound this lease makes it no longer an
+		// orphan, so RemoveLeaseClaimIfUnchanged declines and the live lease survives.
+		// Intentionally retain the stored testbox key: Acquire creates or reuses it
+		// before publishing its claim, outside this claim CAS. Until keys have their
+		// own generation/ownership fence, deleting one here can break the concurrent
+		// live lease; fail closed by retaining inert local key material.
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, err)
+			continue
+		}
 		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s reason=missing instance\n", claim.LeaseID)
-		core.RemoveLeaseClaim(claim.LeaseID)
-		core.RemoveStoredTestboxKey(claim.LeaseID)
 		claimsRemoved++
 	}
 	if !req.DryRun {

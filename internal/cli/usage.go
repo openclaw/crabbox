@@ -11,7 +11,7 @@ import (
 func (a App) usage(ctx context.Context, args []string) error {
 	fs := newFlagSet("usage", a.Stderr)
 	scope := fs.String("scope", "user", "scope: user, org, or all")
-	owner := fs.String("user", "", "user email")
+	owner := fs.String("user", "", "owner identity")
 	org := fs.String("org", "", "org name")
 	month := fs.String("month", time.Now().UTC().Format("2006-01"), "month: YYYY-MM")
 	jsonOut := fs.Bool("json", false, "print JSON")

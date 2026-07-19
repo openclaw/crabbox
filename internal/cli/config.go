@@ -118,6 +118,8 @@ type Config struct {
 	Linode                        LinodeConfig
 	linodeImageExplicit           bool
 	linodeTypeExplicit            bool
+	GitHubCodespaces              GitHubCodespacesConfig
+	githubCodespacesRetentionSet  bool
 	Lambda                        LambdaConfig
 	lambdaImageExplicit           bool
 	lambdaImageFamilyExplicit     bool
@@ -239,6 +241,7 @@ type Config struct {
 	tartDiskExplicit              bool
 	tartCPUsExplicit              bool
 	tartMemoryExplicit            bool
+	Lume                          LumeConfig
 	HyperV                        HyperVConfig
 	WindowsSandbox                WindowsSandboxConfig
 	Tailscale                     TailscaleConfig
@@ -315,6 +318,24 @@ type LinodeConfig struct {
 	Type       string
 	FirewallID string
 	SSHCIDRs   []string
+}
+
+// GitHubCodespacesConfig is intentionally token-free. Authentication comes
+// from the GitHub CLI credential store or GitHub's standard environment
+// variables at the point of use, never from Crabbox config or argv.
+type GitHubCodespacesConfig struct {
+	APIURL           string
+	GHPath           string
+	Repo             string
+	Ref              string
+	Machine          string
+	DevcontainerPath string
+	WorkingDirectory string
+	Geo              string
+	IdleTimeout      time.Duration
+	RetentionPeriod  time.Duration
+	DeleteOnRelease  bool
+	WorkRoot         string
 }
 
 type LambdaConfig struct {
@@ -1295,6 +1316,14 @@ type TartConfig struct {
 	Disk     int
 }
 
+type LumeConfig struct {
+	CLIPath  string
+	Base     string
+	Storage  string
+	User     string
+	WorkRoot string
+}
+
 type HyperVConfig struct {
 	Image         string
 	User          string
@@ -1692,6 +1721,15 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	applySingleProviderTargetDefault(cfg)
 	applyOSImageProviderDefaults(cfg, false)
+	if provider, err := ProviderFor(cfg.Provider); err == nil {
+		if defaulter, ok := provider.(ProviderConfigDefaulter); ok {
+			if err := defaulter.ApplyConfigDefaults(cfg); err != nil {
+				return err
+			}
+			normalizeTargetConfig(cfg)
+			return validateTargetConfig(*cfg)
+		}
+	}
 	if cfg.Provider == "digitalocean" {
 		if cfg.DigitalOcean.Region == "" {
 			cfg.DigitalOcean.Region = "nyc3"
@@ -2158,6 +2196,25 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		if !cfg.ServerTypeExplicit && cfg.Tart.Image != "" {
 			cfg.ServerType = cfg.Tart.Image
+		}
+		return nil
+	}
+	if cfg.Provider == "lume" || cfg.Provider == "local-lume" || cfg.Provider == "lume-macos" {
+		if cfg.Lume.User != "" {
+			cfg.SSHUser = cfg.Lume.User
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.Lume.WorkRoot != "" {
+			cfg.WorkRoot = cfg.Lume.WorkRoot
+		}
+		if !IsTargetExplicit(cfg) && (cfg.TargetOS == "" || cfg.TargetOS == targetLinux) {
+			cfg.TargetOS = targetMacOS
+		}
+		if !cfg.ServerTypeExplicit && cfg.Lume.Base != "" {
+			cfg.ServerType = cfg.Lume.Base
 		}
 		return nil
 	}
@@ -2715,6 +2772,14 @@ func MarkDeleteOnReleaseExplicit(cfg *Config, provider string) {
 	cfg.deleteOnReleaseExplicit[normalizeProviderName(provider)] = true
 }
 
+func GitHubCodespacesRetentionExplicit(cfg Config) bool {
+	return cfg.githubCodespacesRetentionSet
+}
+
+func MarkGitHubCodespacesRetentionExplicit(cfg *Config) {
+	cfg.githubCodespacesRetentionSet = true
+}
+
 func EffectiveHostingerWorkRoot(cfg Config) string {
 	if cfg.Hostinger.WorkRoot != "" {
 		return cfg.Hostinger.WorkRoot
@@ -2783,6 +2848,15 @@ func baseConfig() Config {
 			Region: "us-ord",
 			Image:  linodeImage,
 			Type:   "g6-standard-1",
+		},
+		GitHubCodespaces: GitHubCodespacesConfig{
+			APIURL:          "https://api.github.com",
+			GHPath:          "gh",
+			Machine:         "basicLinux32gb",
+			IdleTimeout:     30 * time.Minute,
+			RetentionPeriod: 7 * 24 * time.Hour,
+			DeleteOnRelease: true,
+			WorkRoot:        "/workspaces/crabbox",
 		},
 		Lambda: LambdaConfig{
 			Region:      "us-west-1",
@@ -3215,6 +3289,12 @@ func baseConfig() Config {
 			CPUs:     4,
 			Memory:   8192,
 		},
+		Lume: LumeConfig{
+			CLIPath:  "lume",
+			Base:     "crabbox-macos-golden",
+			User:     "lume",
+			WorkRoot: "/Users/lume/crabbox",
+		},
 		HyperV: HyperVConfig{
 			User:     "crabbox",
 			WorkRoot: defaultWindowsWorkRoot,
@@ -3270,6 +3350,7 @@ type fileConfig struct {
 	DigitalOcean             *fileDigitalOceanConfig             `yaml:"digitalocean,omitempty"`
 	Vultr                    *fileVultrConfig                    `yaml:"vultr,omitempty"`
 	Linode                   *fileLinodeConfig                   `yaml:"linode,omitempty"`
+	GitHubCodespaces         *fileGitHubCodespacesConfig         `yaml:"githubCodespaces,omitempty"`
 	Lambda                   *fileLambdaConfig                   `yaml:"lambda,omitempty"`
 	Nebius                   *fileNebiusConfig                   `yaml:"nebius,omitempty"`
 	OVH                      *fileOVHConfig                      `yaml:"ovh,omitempty"`
@@ -3345,6 +3426,7 @@ type fileConfig struct {
 	MXC                      *fileMXCConfig                      `yaml:"mxc,omitempty"`
 	Multipass                *fileMultipassConfig                `yaml:"multipass,omitempty"`
 	Tart                     *fileTartConfig                     `yaml:"tart,omitempty"`
+	Lume                     *fileLumeConfig                     `yaml:"lume,omitempty"`
 	HyperV                   *fileHyperVConfig                   `yaml:"hyperv,omitempty"`
 	WindowsSandbox           *fileWindowsSandboxConfig           `yaml:"windowsSandbox,omitempty"`
 	Tailscale                *fileTailscaleConfig                `yaml:"tailscale,omitempty"`
@@ -3413,6 +3495,21 @@ type fileLinodeConfig struct {
 	Type       string   `yaml:"type,omitempty"`
 	FirewallID string   `yaml:"firewall,omitempty"`
 	SSHCIDRs   []string `yaml:"sshCIDRs,omitempty"`
+}
+
+type fileGitHubCodespacesConfig struct {
+	APIURL           string `yaml:"apiUrl,omitempty"`
+	GHPath           string `yaml:"ghPath,omitempty"`
+	Repo             string `yaml:"repo,omitempty"`
+	Ref              string `yaml:"ref,omitempty"`
+	Machine          string `yaml:"machine,omitempty"`
+	DevcontainerPath string `yaml:"devcontainerPath,omitempty"`
+	WorkingDirectory string `yaml:"workingDirectory,omitempty"`
+	Geo              string `yaml:"geo,omitempty"`
+	IdleTimeout      string `yaml:"idleTimeout,omitempty"`
+	RetentionPeriod  string `yaml:"retentionPeriod,omitempty"`
+	DeleteOnRelease  *bool  `yaml:"deleteOnRelease,omitempty"`
+	WorkRoot         string `yaml:"workRoot,omitempty"`
 }
 
 type fileLambdaConfig struct {
@@ -4487,6 +4584,14 @@ type fileTartConfig struct {
 	Disk     *int   `yaml:"disk,omitempty"`
 }
 
+type fileLumeConfig struct {
+	CLIPath  string `yaml:"cliPath,omitempty"`
+	Base     string `yaml:"base,omitempty"`
+	Storage  string `yaml:"storage,omitempty"`
+	User     string `yaml:"user,omitempty"`
+	WorkRoot string `yaml:"workRoot,omitempty"`
+}
+
 type fileHyperVConfig struct {
 	Image         string `yaml:"image,omitempty"`
 	User          string `yaml:"user,omitempty"`
@@ -5123,6 +5228,45 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if len(file.Linode.SSHCIDRs) > 0 {
 			cfg.Linode.SSHCIDRs = file.Linode.SSHCIDRs
+		}
+	}
+	if file.GitHubCodespaces != nil {
+		if trusted && file.GitHubCodespaces.APIURL != "" {
+			cfg.GitHubCodespaces.APIURL = file.GitHubCodespaces.APIURL
+		}
+		if trusted && file.GitHubCodespaces.GHPath != "" {
+			cfg.GitHubCodespaces.GHPath = expandUserPath(file.GitHubCodespaces.GHPath)
+		}
+		if trusted && file.GitHubCodespaces.Repo != "" {
+			cfg.GitHubCodespaces.Repo = file.GitHubCodespaces.Repo
+		}
+		if file.GitHubCodespaces.Ref != "" {
+			cfg.GitHubCodespaces.Ref = file.GitHubCodespaces.Ref
+		}
+		if file.GitHubCodespaces.Machine != "" {
+			cfg.GitHubCodespaces.Machine = file.GitHubCodespaces.Machine
+		}
+		if file.GitHubCodespaces.DevcontainerPath != "" {
+			cfg.GitHubCodespaces.DevcontainerPath = file.GitHubCodespaces.DevcontainerPath
+		}
+		if file.GitHubCodespaces.WorkingDirectory != "" {
+			cfg.GitHubCodespaces.WorkingDirectory = file.GitHubCodespaces.WorkingDirectory
+		}
+		if file.GitHubCodespaces.Geo != "" {
+			cfg.GitHubCodespaces.Geo = file.GitHubCodespaces.Geo
+		}
+		if trusted {
+			applyLeaseDuration(&cfg.GitHubCodespaces.IdleTimeout, file.GitHubCodespaces.IdleTimeout)
+			if applyNonNegativeLeaseDuration(&cfg.GitHubCodespaces.RetentionPeriod, file.GitHubCodespaces.RetentionPeriod) {
+				MarkGitHubCodespacesRetentionExplicit(cfg)
+			}
+		}
+		if trusted && file.GitHubCodespaces.DeleteOnRelease != nil {
+			cfg.GitHubCodespaces.DeleteOnRelease = *file.GitHubCodespaces.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "github-codespaces")
+		}
+		if file.GitHubCodespaces.WorkRoot != "" {
+			cfg.GitHubCodespaces.WorkRoot = file.GitHubCodespaces.WorkRoot
 		}
 	}
 	if file.Lambda != nil {
@@ -7446,6 +7590,25 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.tartDiskExplicit = true
 		}
 	}
+	if file.Lume != nil {
+		if trusted {
+			if file.Lume.CLIPath != "" {
+				cfg.Lume.CLIPath = file.Lume.CLIPath
+			}
+			if file.Lume.Base != "" {
+				cfg.Lume.Base = file.Lume.Base
+			}
+			if file.Lume.Storage != "" {
+				cfg.Lume.Storage = file.Lume.Storage
+			}
+			if file.Lume.User != "" {
+				cfg.Lume.User = file.Lume.User
+			}
+		}
+		if file.Lume.WorkRoot != "" {
+			cfg.Lume.WorkRoot = file.Lume.WorkRoot
+		}
+	}
 	if file.HyperV != nil {
 		if file.HyperV.Image != "" {
 			cfg.HyperV.Image = file.HyperV.Image
@@ -7895,6 +8058,18 @@ func applyLeaseDuration(target *time.Duration, value string) {
 	}
 }
 
+func applyNonNegativeLeaseDuration(target *time.Duration, value string) bool {
+	if value == "" {
+		return false
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
+		return false
+	}
+	*target = parsed
+	return true
+}
+
 // appleVMEnv reads a CRABBOX_APPLE_VM_* variable, falling back to the
 // deprecated CRABBOX_APPLE_VZ_* spelling from before the provider rename.
 func appleVMEnv(name string) string {
@@ -8169,6 +8344,27 @@ func applyEnv(cfg *Config) error {
 	if cidrs := os.Getenv("CRABBOX_LINODE_SSH_CIDRS"); cidrs != "" {
 		cfg.Linode.SSHCIDRs = splitCommaList(cidrs)
 	}
+	cfg.GitHubCodespaces.APIURL = getenv("CRABBOX_GITHUB_CODESPACES_API_URL", cfg.GitHubCodespaces.APIURL)
+	cfg.GitHubCodespaces.GHPath = expandUserPath(getenv("CRABBOX_GITHUB_CODESPACES_GH_PATH", cfg.GitHubCodespaces.GHPath))
+	cfg.GitHubCodespaces.Repo = getenv("CRABBOX_GITHUB_CODESPACES_REPO", cfg.GitHubCodespaces.Repo)
+	cfg.GitHubCodespaces.Ref = getenv("CRABBOX_GITHUB_CODESPACES_REF", cfg.GitHubCodespaces.Ref)
+	cfg.GitHubCodespaces.Machine = getenv("CRABBOX_GITHUB_CODESPACES_MACHINE", cfg.GitHubCodespaces.Machine)
+	cfg.GitHubCodespaces.DevcontainerPath = getenv("CRABBOX_GITHUB_CODESPACES_DEVCONTAINER_PATH", cfg.GitHubCodespaces.DevcontainerPath)
+	cfg.GitHubCodespaces.WorkingDirectory = getenv("CRABBOX_GITHUB_CODESPACES_WORKING_DIRECTORY", cfg.GitHubCodespaces.WorkingDirectory)
+	cfg.GitHubCodespaces.Geo = getenv("CRABBOX_GITHUB_CODESPACES_GEO", cfg.GitHubCodespaces.Geo)
+	if idleTimeout := os.Getenv("CRABBOX_GITHUB_CODESPACES_IDLE_TIMEOUT"); idleTimeout != "" {
+		applyLeaseDuration(&cfg.GitHubCodespaces.IdleTimeout, idleTimeout)
+	}
+	if retentionPeriod := os.Getenv("CRABBOX_GITHUB_CODESPACES_RETENTION_PERIOD"); retentionPeriod != "" {
+		if applyNonNegativeLeaseDuration(&cfg.GitHubCodespaces.RetentionPeriod, retentionPeriod) {
+			MarkGitHubCodespacesRetentionExplicit(cfg)
+		}
+	}
+	if value, ok := getenvBool("CRABBOX_GITHUB_CODESPACES_DELETE_ON_RELEASE"); ok {
+		cfg.GitHubCodespaces.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "github-codespaces")
+	}
+	cfg.GitHubCodespaces.WorkRoot = getenv("CRABBOX_GITHUB_CODESPACES_WORK_ROOT", cfg.GitHubCodespaces.WorkRoot)
 	cfg.Lambda.Region = getenv("CRABBOX_LAMBDA_REGION", cfg.Lambda.Region)
 	if lambdaType := os.Getenv("CRABBOX_LAMBDA_TYPE"); lambdaType != "" {
 		cfg.Lambda.Type = lambdaType
@@ -9355,6 +9551,11 @@ func applyEnv(cfg *Config) error {
 		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
 		cfg.tartDiskExplicit = cfg.Tart.Disk > 0
 	}
+	cfg.Lume.CLIPath = getenv("CRABBOX_LUME_CLI", cfg.Lume.CLIPath)
+	cfg.Lume.Base = getenv("CRABBOX_LUME_BASE", cfg.Lume.Base)
+	cfg.Lume.Storage = getenv("CRABBOX_LUME_STORAGE", cfg.Lume.Storage)
+	cfg.Lume.User = getenv("CRABBOX_LUME_USER", cfg.Lume.User)
+	cfg.Lume.WorkRoot = getenv("CRABBOX_LUME_WORK_ROOT", cfg.Lume.WorkRoot)
 	cfg.HyperV.Image = getenv("CRABBOX_HYPERV_IMAGE", cfg.HyperV.Image)
 	cfg.HyperV.User = getenv("CRABBOX_HYPERV_USER", cfg.HyperV.User)
 	cfg.HyperV.WorkRoot = getenv("CRABBOX_HYPERV_WORK_ROOT", cfg.HyperV.WorkRoot)

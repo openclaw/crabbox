@@ -114,6 +114,10 @@ func ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, provide
 	return claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target)
 }
 
+func ClaimLeaseForRepoProviderScopePondEndpointReservationIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, reservationLabel string, reservationDuration time.Duration, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseForRepoProviderScopePondEndpointReservationIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target, reservationLabel, reservationDuration, expected, expectedExists)
+}
+
 func ClaimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
 }
@@ -148,6 +152,12 @@ func ClaimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug string, cfg Con
 // guarded update and durably syncs newly created claim namespace ancestors.
 func ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 	return claimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
+// ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter holds the claim
+// lock across action and the durable guarded claim publication.
+func ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool, action func() error) (LeaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, action)
 }
 
 // ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged binds an
@@ -260,6 +270,18 @@ func ReplaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, ex
 // runs, then updates the endpoint only if the claim still matches expected.
 func UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected LeaseClaim, server Server, target SSHTarget, action func() error) (LeaseClaim, error) {
 	return updateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, server, target, action)
+}
+
+func WithLeaseClaimUnchanged(leaseID string, expected LeaseClaim, action func() error) error {
+	return withLeaseClaimUnchanged(leaseID, expected, action)
+}
+
+func UpdateLeaseClaimEndpointIfUnchangedAction(
+	leaseID string,
+	expected LeaseClaim,
+	action func() (Server, SSHTarget, bool, error),
+) (LeaseClaim, Server, SSHTarget, error) {
+	return updateLeaseClaimEndpointIfUnchangedAction(leaseID, expected, action)
 }
 
 func UpdateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
@@ -430,6 +452,10 @@ func CrabboxStateDir() (string, error) {
 	return crabboxStateDir()
 }
 
+func EnsureCrabboxClaimNamespaceDurable() error {
+	return ensureCrabboxClaimNamespaceDurable()
+}
+
 func DirectLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {
 	return directLeaseLabels(cfg, leaseID, slug, provider, market, keep, now)
 }
@@ -472,6 +498,10 @@ func LeaseProviderName(leaseID, slug string) string {
 
 func LocalProcessStartIdentity(pid int) (string, error) {
 	return webVNCDaemonProcessStartIdentity(pid)
+}
+
+func LocalProcessCommand(pid int) (string, bool) {
+	return webVNCDaemonProcessCommand(pid)
 }
 
 func LocalProcessBootIdentity() (string, error) {

@@ -1,4 +1,5 @@
 import {
+  githubAccountID,
   requireCurrentGitHubMembership,
   type GitHubMembershipEnv,
   type GitHubMembershipIdentity,
@@ -72,7 +73,6 @@ export async function authenticateRequest(
     | "CRABBOX_ACCESS_TEAM_DOMAIN"
     | "CRABBOX_ACCESS_AUD"
     | "CRABBOX_GITHUB_ADMIN_OWNERS"
-    | "CRABBOX_GITHUB_ADMIN_LOGINS"
     | "CRABBOX_GITHUB_ALLOWED_ORG"
     | "CRABBOX_GITHUB_ALLOWED_ORGS"
     | "CRABBOX_GITHUB_ALLOWED_TEAM"
@@ -158,14 +158,12 @@ export async function authenticateRequest(
 }
 
 export function githubUserIsAdmin(
-  payload: { owner: string; login: string },
-  env: Pick<Env, "CRABBOX_GITHUB_ADMIN_OWNERS" | "CRABBOX_GITHUB_ADMIN_LOGINS">,
+  payload: { owner: string },
+  env: Pick<Env, "CRABBOX_GITHUB_ADMIN_OWNERS">,
 ): boolean {
   const owner = payload.owner.trim().toLowerCase();
-  const login = payload.login.trim().toLowerCase();
   return (
-    envList(env.CRABBOX_GITHUB_ADMIN_OWNERS).includes(owner) ||
-    envList(env.CRABBOX_GITHUB_ADMIN_LOGINS).includes(login)
+    githubAccountID(owner) !== undefined && envList(env.CRABBOX_GITHUB_ADMIN_OWNERS).includes(owner)
   );
 }
 
@@ -208,10 +206,7 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
 
 export async function requestWithAdminGrantVersion(
   request: Request,
-  env: Pick<
-    Env,
-    "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS" | "CRABBOX_GITHUB_ADMIN_LOGINS"
-  >,
+  env: Pick<Env, "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS">,
 ): Promise<Request> {
   const headers = new Headers(request.headers);
   headers.set("x-crabbox-admin-grant-version", await adminGrantVersion(env));
@@ -297,13 +292,7 @@ export async function verifiedUserTokenExpiresAtForRevocation(
 // Logout must remain available when GitHub membership revalidation is unavailable or revoked.
 export async function authenticateUserTokenForRevocation(
   token: string,
-  env: Pick<
-    Env,
-    | "CRABBOX_SHARED_TOKEN"
-    | "CRABBOX_SESSION_SECRET"
-    | "CRABBOX_GITHUB_ADMIN_OWNERS"
-    | "CRABBOX_GITHUB_ADMIN_LOGINS"
-  >,
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET" | "CRABBOX_GITHUB_ADMIN_OWNERS">,
 ): Promise<AuthContext | undefined> {
   const payload = await verifyUserToken(token, env).catch(() => undefined);
   if (!payload) return undefined;
@@ -793,17 +782,13 @@ export async function sha256Hex(value: string): Promise<string> {
 }
 
 export async function adminGrantVersion(
-  env: Pick<
-    Env,
-    "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS" | "CRABBOX_GITHUB_ADMIN_LOGINS"
-  >,
+  env: Pick<Env, "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS">,
 ): Promise<string> {
   const tokenHash = env.CRABBOX_ADMIN_TOKEN ? await sha256Hex(env.CRABBOX_ADMIN_TOKEN) : "";
   return sha256Hex(
     JSON.stringify({
       tokenHash,
       owners: [...new Set(envList(env.CRABBOX_GITHUB_ADMIN_OWNERS))].toSorted(),
-      logins: [...new Set(envList(env.CRABBOX_GITHUB_ADMIN_LOGINS))].toSorted(),
     }),
   );
 }

@@ -13,10 +13,14 @@ func (a App) initProject(_ context.Context, args []string) error {
 	force := fs.Bool("force", false, "overwrite generated files")
 	detect := fs.Bool("detect", false, "detect repo test commands and write a jobs.detected entry")
 	workflow := fs.String("workflow", ".github/workflows/crabbox.yml", "workflow path")
-	skill := fs.String("skill", ".agents/skills/crabbox/SKILL.md", "agent skill path")
+	var skillPaths stringListFlag
+	fs.Var(&skillPaths, "skill", "agent skill path (repeatable; default .agents/skills/crabbox/SKILL.md)")
 	config := fs.String("config", ".crabbox.yaml", "repo config path")
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if len(skillPaths) == 0 {
+		skillPaths = append(skillPaths, ".agents/skills/crabbox/SKILL.md")
 	}
 	repo, err := findRepo()
 	if err != nil {
@@ -26,16 +30,52 @@ func (a App) initProject(_ context.Context, args []string) error {
 	if *detect {
 		detected = detectInitProject(repo.Root)
 	}
-	files := map[string]string{
-		filepath.Join(repo.Root, *config):   projectConfigTemplate(repo.Name, detected),
-		filepath.Join(repo.Root, *workflow): workflowTemplate(),
-		filepath.Join(repo.Root, *skill):    skillTemplate(detected),
+	files := []initGeneratedFile{
+		{Path: filepath.Join(repo.Root, *config), Content: projectConfigTemplate(repo.Name, detected)},
+		{Path: filepath.Join(repo.Root, *workflow), Content: workflowTemplate()},
 	}
-	for path, content := range files {
-		if err := writeInitFile(path, content, *force); err != nil {
+	for _, skillPath := range skillPaths {
+		clean, err := normalizeInitSkillPath(skillPath)
+		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Stdout, "wrote %s\n", path)
+		fullPath := filepath.Join(repo.Root, clean)
+		files = append(files, initGeneratedFile{Path: fullPath, Content: skillTemplate(detected)})
+	}
+	seenPaths := make(map[string]struct{}, len(files))
+	var existingTargets []os.FileInfo
+	for _, file := range files {
+		canonical, err := canonicalInitTargetPath(file.Path)
+		if err != nil {
+			return exit(2, "inspect %s: %v", file.Path, err)
+		}
+		// Treat case-only variants as aliases on every platform. Generated target
+		// paths are conventional names, so two variants are always accidental.
+		key := strings.ToLower(filepath.ToSlash(canonical))
+		if _, exists := seenPaths[key]; exists {
+			return exit(2, "init target path is repeated: %s", file.Path)
+		}
+		seenPaths[key] = struct{}{}
+		info, err := os.Stat(file.Path)
+		if err == nil {
+			for _, existing := range existingTargets {
+				if os.SameFile(info, existing) {
+					return exit(2, "init target path is repeated: %s", file.Path)
+				}
+			}
+			existingTargets = append(existingTargets, info)
+			if !*force {
+				return exit(2, "%s already exists; use --force to overwrite", file.Path)
+			}
+		} else if !os.IsNotExist(err) {
+			return exit(2, "inspect %s: %v", file.Path, err)
+		}
+	}
+	for _, file := range files {
+		if err := writeInitFile(file.Path, file.Content, *force); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.Stdout, "wrote %s\n", file.Path)
 	}
 	if *detect {
 		if len(detected.Commands) == 0 {
@@ -45,6 +85,50 @@ func (a App) initProject(_ context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+type initGeneratedFile struct {
+	Path    string
+	Content string
+}
+
+func normalizeInitSkillPath(skillPath string) (string, error) {
+	clean := filepath.Clean(skillPath)
+	if !filepath.IsLocal(clean) {
+		return "", exit(2, "--skill must be a repository-relative path ending in crabbox%cSKILL.md", filepath.Separator)
+	}
+	if filepath.Base(clean) != "SKILL.md" || filepath.Base(filepath.Dir(clean)) != "crabbox" {
+		return "", exit(2, "--skill must end in crabbox%cSKILL.md so the directory matches the declared skill name", filepath.Separator)
+	}
+	return clean, nil
+}
+
+func canonicalInitTargetPath(target string) (string, error) {
+	current, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	var missing []string
+	for {
+		if _, err := os.Lstat(current); err == nil {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", err
+			}
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("no existing ancestor for %s", target)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func writeInitFile(path, content string, force bool) error {
@@ -284,9 +368,18 @@ jobs:
 
 func skillTemplate(detected initProjectDetection) string {
 	var b strings.Builder
-	b.WriteString(`# Crabbox
+	b.WriteString(`---
+name: crabbox
+description: "Detect and use Crabbox for repository tests and validation on remote runners. Use when crabbox.yaml or .crabbox.yaml exists, the crabbox CLI is available, or work needs remote compute, a clean or reusable environment, target-platform coverage, or auditable execution evidence."
+license: MIT
+---
 
-Use Crabbox for remote Linux verification.
+# Crabbox
+
+Use Crabbox for remote project verification. Treat repo-root crabbox.yaml or
+.crabbox.yaml, or an available crabbox CLI, as a signal to use this skill for
+validation work. Inspect repository config before executing it; detection does
+not grant permission to expose secrets or start paid infrastructure.
 
 Workflow:
 - Warm early: crabbox warmup

@@ -252,8 +252,8 @@ so later QA comments do not overwrite earlier evidence.
 The coordinator scopes each new grant under versioned base64url encodings of
 the exact authenticated organization and owner. These values are reversible,
 not hashed or encrypted, and appear in object paths for both public and signed
-URLs. The owner can be a non-public GitHub verified email. Caller prefixes
-cannot cross or replace that authorization namespace.
+URLs. A GitHub user's owner is its immutable `github:<numeric-id>` account
+identity. Caller prefixes cannot cross or replace that authorization namespace.
 
 `artifacts publish --pr` can place these URLs in public pull-request comments.
 Operators should weigh that identity disclosure before enabling

@@ -140,7 +140,11 @@ func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onCon
 	if onConnected != nil {
 		onConnected()
 	}
-	return bridge.serveHost(ctx, allow)
+	err = bridge.serveHost(ctx, allow)
+	if replacedEgressSessionClose(err) {
+		return exit(egressDaemonFatalCode, "egress session replaced: %v", err)
+	}
+	return err
 }
 
 func (a App) egressClient(ctx context.Context, args []string) error {
@@ -174,7 +178,11 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "egress client: connected lease=%s session=%s listen=%s\n", leaseID, bridge.sessionID, *listen)
-	return bridge.serveClient(ctx, *listen)
+	err = bridge.serveClient(ctx, *listen)
+	if replacedEgressSessionClose(err) {
+		return exit(egressDaemonFatalCode, "egress session replaced: %v", err)
+	}
+	return err
 }
 
 func (a App) egressStart(ctx context.Context, args []string) error {
@@ -481,6 +489,14 @@ func fatalEgressBridgeSetupError(err error) bool {
 	default:
 		return false
 	}
+}
+
+func replacedEgressSessionClose(err error) bool {
+	if websocket.CloseStatus(err) != websocket.StatusServiceRestart {
+		return false
+	}
+	var closeErr websocket.CloseError
+	return errors.As(err, &closeErr) && strings.Contains(closeErr.Reason, "replaced by a newer egress")
 }
 
 func reusableEgressSessionID(ctx context.Context, coord *CoordinatorClient, leaseID, sessionID string) (string, error) {

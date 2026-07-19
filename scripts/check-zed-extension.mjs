@@ -28,7 +28,8 @@ assert.match(read("LICENSE"), /^MIT License$/m);
 const languageConfig = read("languages/crabbox/config.toml");
 assert.match(languageConfig, /^name = "Crabbox"$/m);
 assert.match(languageConfig, /^grammar = "yaml"$/m);
-assert.match(languageConfig, /"\.crabbox\.yaml"/);
+assert.match(languageConfig, /^path_suffixes = \["crabbox\.yaml", "\.crabbox\.yaml"\]$/m);
+assert.doesNotMatch(languageConfig, /crabbox\.yml/);
 
 const languageTasks = readJSON("languages/crabbox/tasks.json");
 const projectTasks = readJSON("project-tasks.json");

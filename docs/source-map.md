@@ -48,6 +48,32 @@ Crabbox has three implementation surfaces:
   `docs/features/agent-runtime-bridge.md`; no generic harness HTTP/SSE bridge,
   sandbox-agent launcher, or `crabbox station` command is registered yet.
 
+## Integration Surfaces
+
+- Public integration catalog and authoring boundary: `docs/integrations`;
+  docs-site navigation registration: `scripts/build-docs-site.mjs`.
+- The catalog inventories Crabbox-hosted surfaces. Host-owned integrations are
+  versioned and inventoried in their host repositories rather than duplicated
+  in this source map.
+- Publishable generic Agent Skill: `skills/crabbox/SKILL.md`, with the
+  byte-identical repo-discovery projection at
+  `.agents/skills/crabbox/SKILL.md` and drift validation in
+  `scripts/check-agent-skills.mjs`. The docs builder publishes the same bytes
+  plus a SHA-256 digest at `/.well-known/agent-skills/` for domain discovery,
+  and advertises the artifact through `/.well-known/ai-catalog.json` for
+  Agentic Resource Discovery.
+- Generated repo-local Agent Skill: `internal/cli/init.go`, with onboarding
+  behavior in `docs/commands/init.md`.
+- Versioned editor handoff and foreground lease activity:
+  `internal/cli/open.go`, `docs/commands/open.md`.
+- Zed task/language package and validation: `integrations/zed`,
+  `scripts/check-zed-extension.mjs`, `scripts/test-zed-extension-e2e.mjs`.
+- Herdr package and CLI adapter: `plugins/herdr`,
+  `internal/cli/herdr_plugin.go`, `scripts/herdr-plugin.test.js`.
+- Long-running in-box agent harnesses remain contract-only under Station:
+  `docs/features/agent-runtime-bridge.md`, `docs/features/station-profiles.md`,
+  and the disabled primitives in `internal/station`.
+
 ## Leases, Slugs, Claims, And Expiry
 
 - Canonical lease IDs (`cbx_<12 hex>`) and per-lease SSH key paths: `internal/cli/lease.go`
@@ -82,6 +108,8 @@ SSH-lease providers:
 - DigitalOcean Droplets: `internal/providers/digitalocean`, with config glue in `internal/cli/config.go`
 - Vultr instances: `internal/providers/vultr`, with config glue in `internal/cli/config.go`
 - OVHcloud Public Cloud: `internal/providers/ovh`, with config glue in `internal/cli/config.go`
+- GitHub Codespaces: `internal/providers/githubcodespaces`, with config glue
+  and env overrides in `internal/cli/config.go`
 - Parallels (macOS VM host): `internal/providers/parallels`, with CLI helpers in `internal/cli/parallels.go`
 - Proxmox VE: `internal/providers/proxmox`, with CLI helpers in `internal/cli/proxmox.go`
 - XCP-ng (`xcp-ng`): `internal/providers/xcpng`
@@ -95,6 +123,7 @@ SSH-lease providers:
   macOS CI/release jobs
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
 - Cirrus Labs tart local macOS VM: `internal/providers/tart`
+- Lume local macOS VM cloned from a stopped golden image: `internal/providers/lume`
 - Microsoft Hyper-V local Windows VM: `internal/providers/hyperv`
 - Daytona, Morph, exe.dev, KubeVirt, Sealos DevBox, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, Lambda, Vast:
   `internal/providers/daytona`, `internal/providers/morph`, `internal/providers/exedev`, `internal/providers/kubevirt`, `internal/providers/sealosdevbox`, `internal/providers/external`, `internal/providers/tenki`, `internal/providers/namespace`,
@@ -254,5 +283,5 @@ Provider docs:
 - Credential-free GoReleaser archive config: `.goreleaser.yaml`
 - Local signing, draft, publication, and downstream proof contract: `docs/RELEASING.md`, `scripts/package-release.sh`, `scripts/create-release-draft.sh`, `scripts/publish-release.sh`, `scripts/verify-homebrew-release.sh`
 - Docs command-surface check, link check, site builder, and Pages deploy: `scripts/check-command-docs.mjs`, `scripts/check-docs-links.mjs`, `scripts/build-docs-site.mjs`, `.github/workflows/pages.yml`
-- Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-cua-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-vultr-smoke.sh`, `scripts/live-vast-smoke.sh`, and `scripts/live-superserve-smoke.sh`
+- Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-cua-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-github-codespaces-smoke.sh`, `scripts/live-vultr-smoke.sh`, `scripts/live-vast-smoke.sh`, and `scripts/live-superserve-smoke.sh`
 - Live coordinator auth smoke coverage: `scripts/live-auth-smoke.sh`

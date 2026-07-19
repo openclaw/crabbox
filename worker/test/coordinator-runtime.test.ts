@@ -631,7 +631,7 @@ describe("coordinator runtimes", () => {
           return Response.json({ access_token: "github-access-token" });
         }
         if (url === "https://api.github.com/user") {
-          return Response.json({ login: "friend", email: "public@example.com" });
+          return Response.json({ id: 12345, login: "friend", email: "public@example.com" });
         }
         if (url === "https://api.github.com/user/emails") {
           return Response.json([{ email: "friend@example.com", primary: true, verified: true }]);

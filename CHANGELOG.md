@@ -6,14 +6,29 @@
 
 - Added bidirectional `cp` over resolved SSH leases and a readiness-gated, loopback-only `tunnel` command with owned process-tree teardown. Thanks @onmax.
 - Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
+- Added native local macOS SSH leases through Lume, cloning a stopped golden VM per lease with isolated SSH identity, durable clone and storage recovery, and verified stop-before-delete lifecycle handling. Thanks @madhavajay.
 - Added a local Zed task-launcher extension for Crabbox lifecycle and remote execution workflows. Thanks @zozo123.
+- Added the generic Crabbox Agent Skill at the ecosystem installer
+  `skills/crabbox` convention while retaining its repo-discoverable `.agents`
+  projection, plus digest-verified domain discovery under
+  `/.well-known/agent-skills/` and a draft-compatible cross-vendor AI Catalog.
 
 ### Fixed
 
+- Bound GitHub OAuth callbacks independently to each initiating browser flow and bound sessions, durable ownership, admin grants, and revocations to immutable GitHub account IDs instead of reassignable emails or logins, with a fail-closed operator recovery path for legacy records. Thanks @zozo123.
+- Made the default `crabbox init` Agent Skill include standards-compliant
+  `SKILL.md` metadata, enforced conformant skill destinations, and allowed
+  `--skill` to target multiple agent discovery paths with an all-target
+  existence preflight.
+- Made the Zed package recognize both supported Crabbox configuration
+  filenames without advertising the unsupported `.crabbox.yml` suffix.
+- fix(egress): replaced egress sessions can no longer resurrect and clobber their replacement — the coordinator refuses tickets and connects for superseded session IDs, and the host/client daemon exits fatally when replaced.
 - Enforced explicitly declared zero-byte artifact sizes during pull while preserving legacy manifests that omit size.
 - Prevented apple-container orphan cleanup from deleting claims reclaimed during its resource snapshot, including same-value rewrites, while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
 - Prevented local-container orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
 - Prevented external-provider orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining routing state when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
+- Prevented apple-vm orphan cleanup from deleting claims reclaimed during its resource snapshot while retaining stored SSH keys when ownership cannot be proven safe to remove. Thanks @anagnorisis2peripeteia.
+- Prevented Incus cleanup from deleting expired instances reclaimed during its resource snapshot, while retaining stored SSH keys when ownership cannot be proven safe to remove.
 
 ## 0.39.0 - 2026-07-17
 
@@ -25,6 +40,7 @@
 - Added experimental read-only CUA diagnostics and existing-sandbox inventory while failing all remote lifecycle mutations closed until upstream exposes safe creation and deletion ownership primitives. Thanks @coygeek.
 - Added a searchable, filterable Features capability explorer with responsive light and dark layouts, deep-linked state, and browser interaction proof. Thanks @zozo123.
 - Added Modal environment selection and named Secret injection without passing Secret values through Crabbox. Thanks @simonMoisselin.
+- Added GitHub Codespaces direct Linux SSH leases with token-scope preflight, repository and machine selection, durable pre-create recovery, exact claim-bound ownership, generated OpenSSH configuration, and guarded lifecycle smoke coverage. Thanks @coygeek.
 
 ### Fixed
 
@@ -41,6 +57,7 @@
 - Closed code-server WebSockets whose upstream dial completes after bridge shutdown, preventing orphaned connections and reader goroutines. Thanks @anagnorisis2peripeteia.
 - Stopped failed runs' telemetry samplers promptly so long-lived CLI processes do not retain ticker goroutines or continue probing released leases. Thanks @anagnorisis2peripeteia.
 - Preserved WebVNC reconnect attempt state across consecutive connection failures so retry delays increase instead of repeatedly hammering the coordinator. Thanks @anagnorisis2peripeteia.
+- Prevented repository-local configuration from retaining billable GitHub Codespaces or overriding trusted lifetime and deletion policy. Thanks @coygeek.
 
 ## 0.38.4 - 2026-07-16
 

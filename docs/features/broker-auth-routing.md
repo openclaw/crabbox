@@ -84,14 +84,15 @@ matches the token in this precedence (`worker/src/auth.ts`):
 3. **Signed user token** — a token with the `cbxu_` prefix, an HMAC-SHA256 signature over a
    base64url payload, verified only with `CRABBOX_SESSION_SECRET`. The session
    secret must be configured and distinct from `CRABBOX_SHARED_TOKEN`. Minted by
-   `crabbox login` only after GitHub returns a verified owner email, with a
-   default 180-day expiry. The payload records the verified-email provenance
-   and an encrypted GitHub OAuth credential. Current allowed-org/team membership
-   is revalidated on requests, with positive checks cached for five minutes and
-   GitHub errors failing closed after cache expiry. Older token schemas are
-   rejected and require a fresh login.
-   User tokens are non-admin unless their verified GitHub email or login matches
-   `CRABBOX_GITHUB_ADMIN_OWNERS` or `CRABBOX_GITHUB_ADMIN_LOGINS`.
+   `crabbox login` only after GitHub returns a stable numeric account ID and at
+   least one verified email, with a default 180-day expiry. The payload records
+   the immutable `github:<numeric-id>` owner and an encrypted GitHub OAuth
+   credential. The credential's account ID and current allowed-org/team
+   membership are revalidated on requests, with positive checks cached for five
+   minutes and GitHub errors failing closed after cache expiry. Legacy
+   email-owned sessions are rejected and require a fresh login.
+   User tokens are non-admin unless their immutable owner matches
+   `CRABBOX_GITHUB_ADMIN_OWNERS`.
 
 Anything else returns `401 unauthorized`.
 
@@ -185,9 +186,8 @@ CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional; comma-separated team slugs
-CRABBOX_GITHUB_ADMIN_OWNERS      # optional; comma-separated GitHub verified emails with admin
-CRABBOX_GITHUB_ADMIN_LOGINS      # optional; comma-separated GitHub logins with admin
-CRABBOX_GITHUB_REVOKED_USERS     # optional; comma-separated logins/emails denied immediately
+CRABBOX_GITHUB_ADMIN_OWNERS      # optional; comma-separated github:<numeric-id> owners with admin
+CRABBOX_GITHUB_REVOKED_USERS     # optional; comma-separated github:<numeric-id> owners denied immediately
 CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS # optional; default 300, range 0-3600
 CRABBOX_SESSION_SECRET           # required for user tokens; must differ from CRABBOX_SHARED_TOKEN
 CRABBOX_USER_TOKEN_TTL_SECONDS   # optional; default 15552000 (180 days), clamped to 1h-365d

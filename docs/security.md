@@ -70,15 +70,16 @@ in `worker/src/auth.ts` in this precedence:
 3. **Signed user token** — a `cbxu_`-prefixed token issued by GitHub browser
    login. It is an HMAC-SHA256 signature (verified in constant time) over a
    base64url payload signed with `CRABBOX_SESSION_SECRET`, which must be set and
-   must differ from `CRABBOX_SHARED_TOKEN`. The versioned payload carries a
-   verified-email `owner`, its `github-verified-email` provenance, `org`, and
-   GitHub `login`, has a default 180-day expiry, and contains the OAuth
-   credential encrypted under a key derived from the session secret. Every
-   request revalidates current allowed-org/team membership through GitHub, with
-   successful checks cached for five minutes. GitHub errors fail closed after
-   the cache expires. The token is rejected if it carries an `admin` claim —
-   browser login can never mint admin tokens. Tokens from older schemas are
-   rejected; users must log in again after this security upgrade.
+   must differ from `CRABBOX_SHARED_TOKEN`. The versioned payload carries the
+   immutable `github:<numeric-id>` account owner, verified-email eligibility
+   provenance, `org`, and GitHub `login`, has a default 180-day expiry, and
+   contains the OAuth credential encrypted under a key derived from the session
+   secret. Every request revalidates that the credential still belongs to the
+   recorded account plus current allowed-org/team membership through GitHub,
+   with successful checks cached for five minutes. GitHub errors fail closed
+   after the cache expires. The token is rejected if it carries an `admin`
+   claim; admin is derived only from an immutable owner allowlist at request
+   time. Legacy email-owned sessions are rejected and require a fresh login.
 
 ### GitHub browser login
 
@@ -92,18 +93,25 @@ by coordinator config:
   narrows access to selected team slugs after org membership passes.
 - `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` controls successful request-time
   membership caching (default 300, maximum 3600; set 0 to check every request).
-- `CRABBOX_GITHUB_REVOKED_USERS` immediately rejects comma-separated GitHub
-  logins or verified emails. Optional `login:` / `owner:` prefixes disambiguate
-  values. Use this for narrow emergency revocation without rotating every token.
+- `CRABBOX_GITHUB_REVOKED_USERS` immediately rejects comma-separated immutable
+  `github:<numeric-id>` owners; an optional `owner:` prefix is accepted. Use this
+  for narrow emergency revocation without rotating every token. Email, login,
+  or invalid selectors fail all GitHub auth closed until replaced, so a mutable
+  identity change cannot silently bypass an old revocation.
 - The GitHub account must expose at least one verified email through the OAuth
-  `user:email` scope. Public profile and unverified emails are never trusted as
-  the token owner.
+  `user:email` scope. Email is an eligibility check only; public profile and
+  unverified emails are never trusted as the token owner.
 
 CLI login also binds token release to the initiating device. The CLI opens a
 one-use listener on a random `127.0.0.1` port and path; after GitHub authorization,
 the browser receives a random confirmation through that loopback URL. Polling
 requires both the CLI-held secret and the browser confirmation, so forwarding an
 authorization URL cannot deliver the resulting user token to the sender.
+
+Portal login stores a short-lived, host-only browser-binding cookie scoped by
+OAuth state and retains only its hash with the pending OAuth record. The
+callback must present that exact binding before code exchange, and terminal
+outcomes clear only that flow's cookie, so concurrent logins remain independent.
 
 Unauthenticated CLI and portal login starts share a ten-pending-attempt limit per
 caller source and a 100-attempt global backstop. Admission and storage are serialized,
@@ -207,9 +215,9 @@ admin       view all leases/runs/pool/usage; drain/delete machines; image lifecy
 ```
 
 Admin scope comes from `CRABBOX_ADMIN_TOKEN`, or from a signed GitHub user token
-whose verified email or login matches `CRABBOX_GITHUB_ADMIN_OWNERS` or
-`CRABBOX_GITHUB_ADMIN_LOGINS`. Locally, admin commands can still send the admin
-bearer via `CRABBOX_COORDINATOR_ADMIN_TOKEN` or `broker.adminToken`.
+whose immutable `github:<numeric-id>` owner matches `CRABBOX_GITHUB_ADMIN_OWNERS`.
+Locally, admin commands can still send the admin bearer via
+`CRABBOX_COORDINATOR_ADMIN_TOKEN` or `broker.adminToken`.
 
 Organization labels are exact, case-sensitive identities: 1-63 printable ASCII
 characters with no leading or trailing spaces. The coordinator stores them in a
@@ -431,10 +439,10 @@ repo:
   encryption of the OAuth credential used for membership revalidation. The
   session secret is required, must be independent from the shared token, and
   should be rotated separately.
-- `CRABBOX_GITHUB_ADMIN_OWNERS`, `CRABBOX_GITHUB_ADMIN_LOGINS` — optional
-  comma-separated GitHub verified emails and logins whose user tokens become
-  admin at request time; set these per deployment, not in the reusable repo
-  config.
+- `CRABBOX_GITHUB_ADMIN_OWNERS` — optional comma-separated immutable GitHub
+  owners in `github:<numeric-id>` form whose user tokens become admin at request
+  time; set these per deployment, not in the reusable repo config. Mutable email
+  and login grants are rejected and must be migrated explicitly.
 - `CRABBOX_TAILSCALE_CLIENT_ID`, `CRABBOX_TAILSCALE_CLIENT_SECRET` — minting
   one-off Tailscale auth keys for brokered `--tailscale` leases.
 - `CRABBOX_ARTIFACTS_ACCESS_KEY_ID`, `CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY`,

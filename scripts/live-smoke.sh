@@ -1430,6 +1430,10 @@ if has_provider opensandbox; then
   "$root/scripts/live-opensandbox-smoke.sh"
 fi
 
+if has_provider github-codespaces || has_provider codespaces || has_provider gh-codespaces; then
+  "$root/scripts/live-github-codespaces-smoke.sh"
+fi
+
 if has_provider cua; then
   "$root/scripts/live-cua-smoke.sh"
 fi
@@ -1550,6 +1554,10 @@ fi
 
 if has_provider tart || has_provider local-tart || has_provider macos-vm; then
   provider_smoke tart --ttl 30m --idle-timeout 5m
+fi
+
+if has_provider lume || has_provider local-lume || has_provider lume-macos; then
+  provider_smoke lume --ttl 30m --idle-timeout 5m
 fi
 
 if has_provider apple-vm || has_provider applevm; then

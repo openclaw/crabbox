@@ -6,18 +6,17 @@ import {
 } from "./auth";
 import { legacyPortalSessionCookieName, portalSessionCookieName } from "./cookies";
 import type { CoordinatorRuntime, CoordinatorStorage } from "./coordinator-runtime";
-import {
-  githubUserIsRevoked,
-  GitHubAuthorizationError,
-  requireGitHubLoginMembership,
-} from "./github-membership";
+import { GitHubAuthorizationError, requireGitHubLoginMembership } from "./github-membership";
 import { errorMessage, json, readJson } from "./http";
 import { requestOrgLabel } from "./org-identity";
+import { timingSafeEqual } from "./timing-safe";
 import type { Env, Provider } from "./types";
 
 const githubAuthorizeURL = "https://github.com/login/oauth/authorize";
 const githubTokenURL = "https://github.com/login/oauth/access_token";
 const githubAPIURL = "https://api.github.com";
+const portalOAuthCookiePrefix = "__Host-crabbox_oauth_";
+const pendingOAuthTTLSeconds = 10 * 60;
 const maxPendingOAuthLogins = 100;
 const maxPendingOAuthLoginsPerSource = 10;
 const defaultUserTokenTTLSeconds = 180 * 24 * 60 * 60;
@@ -29,6 +28,7 @@ interface OAuthPending {
   state: string;
   pollSecretHash?: string;
   browserConfirmationHash?: string;
+  portalBindingHash?: string;
   mode?: "cli" | "portal";
   provider?: Provider;
   returnTo?: string;
@@ -47,6 +47,7 @@ interface OAuthPending {
 }
 
 interface GitHubUser {
+  id?: number;
   login?: string;
   name?: string | null;
 }
@@ -94,20 +95,27 @@ export async function githubPortalLogin(
     return html("Crabbox login unavailable", signingError, 503);
   }
   const url = new URL(request.url);
+  const portalBinding = randomID("bind");
   const pending = newPendingOAuth({
     mode: "portal",
     returnTo: safePortalReturnTo(url.searchParams.get("returnTo")),
     redirectURI: oauthConfig.redirectURI,
+    portalBindingHash: await sha256Hex(portalBinding),
     sourceHash: await pendingOAuthSourceHash(request, env.CRABBOX_SESSION_SECRET!),
   });
   if (!(await admitPendingOAuth(runtime, pending))) {
     return html("Crabbox login busy", "Too many pending GitHub logins. Try again shortly.", 429);
   }
 
+  const headers = legacyPortalSessionCookieHeaders();
+  headers.append(
+    "set-cookie",
+    sessionCookie(portalOAuthCookieName(pending.state), portalBinding, pendingOAuthTTLSeconds),
+  );
   return redirect(
     githubAuthorizeURLFor(clientID, pending.state, pending.redirectURI),
     302,
-    legacyPortalSessionCookieHeaders(),
+    headers,
   );
 }
 
@@ -209,7 +217,7 @@ function newPendingOAuth(
     id: randomID("login"),
     state: randomID("state"),
     createdAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + 10 * 60 * 1000).toISOString(),
+    expiresAt: new Date(now.getTime() + pendingOAuthTTLSeconds * 1000).toISOString(),
   };
 }
 
@@ -280,27 +288,47 @@ async function githubAuthCallback(
   if (pending.redirectURI !== oauthConfig.redirectURI) {
     const message = "The GitHub OAuth public origin changed. Start a new login.";
     await finishPendingOAuth(runtime, pending.id, claim, { error: message });
-    return html("Crabbox login unavailable", message, 503);
+    return html("Crabbox login unavailable", message, 503, terminalPortalOAuthHeaders(pending));
+  }
+  if (pending.mode === "portal") {
+    const binding = requestCookie(request, portalOAuthCookieName(pending.state));
+    const bindingHash = binding ? await sha256Hex(binding) : "";
+    if (!pending.portalBindingHash || !timingSafeEqual(bindingHash, pending.portalBindingHash)) {
+      await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, pending));
+      return html(
+        "Crabbox login denied",
+        "This GitHub login was not started in this browser.",
+        403,
+        clearPortalOAuthCookieHeaders(pending),
+      );
+    }
   }
   if (error || !code) {
     await finishPendingOAuth(runtime, pending.id, claim, {
       error: error || "missing_code",
     });
-    return html("Crabbox login failed", "GitHub did not authorize the login.", 400);
+    return html(
+      "Crabbox login failed",
+      "GitHub did not authorize the login.",
+      400,
+      terminalPortalOAuthHeaders(pending),
+    );
   }
   const signingError = userTokenSigningConfigurationError(env);
   if (signingError) {
     await finishPendingOAuth(runtime, pending.id, claim, { error: signingError });
-    return html("Crabbox login unavailable", signingError, 503);
+    return html(
+      "Crabbox login unavailable",
+      signingError,
+      503,
+      terminalPortalOAuthHeaders(pending),
+    );
   }
   try {
     const accessToken = await exchangeGitHubCode(code, pending.redirectURI, env);
     const identity = await githubIdentity(accessToken);
     const requestedOrg = requestOrgLabel(new Request(request.url), env);
-    if (githubUserIsRevoked(identity, env)) {
-      throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
-    }
-    const org = await requireGitHubLoginMembership(accessToken, identity.login, requestedOrg, env);
+    const org = await requireGitHubLoginMembership(accessToken, identity, requestedOrg, env);
     const ttlSeconds = userTokenTTLSeconds(env);
     const tokenInput = {
       owner: identity.owner,
@@ -340,15 +368,13 @@ async function githubAuthCallback(
       browserConfirmationHash: await sha256Hex(browserConfirmation),
     });
     if (!completed) {
-      return expiredOAuthResponse();
+      return expiredOAuthResponse(pending);
     }
     if (completed.mode === "portal") {
       await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, completed));
-      return redirect(
-        completed.returnTo || "/portal",
-        302,
-        portalSessionCookieHeaders(token, ttlSeconds),
-      );
+      const headers = portalSessionCookieHeaders(token, ttlSeconds);
+      headers.append("set-cookie", sessionCookie(portalOAuthCookieName(completed.state), "", 0));
+      return redirect(completed.returnTo || "/portal", 302, headers);
     }
     if (!completed.loopbackRedirectURI) {
       await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, completed));
@@ -367,9 +393,14 @@ async function githubAuthCallback(
   } catch (err) {
     await finishPendingOAuth(runtime, pending.id, claim, { error: errorMessage(err) });
     if (err instanceof GitHubAuthorizationError) {
-      return html("Crabbox login denied", err.message, 403);
+      return html("Crabbox login denied", err.message, 403, terminalPortalOAuthHeaders(pending));
     }
-    return html("Crabbox login failed", "The coordinator could not finish GitHub login.", 500);
+    return html(
+      "Crabbox login failed",
+      "The coordinator could not finish GitHub login.",
+      500,
+      terminalPortalOAuthHeaders(pending),
+    );
   }
 }
 
@@ -394,6 +425,7 @@ async function claimPendingOAuth(
           "Crabbox login already used",
           "This GitHub login callback is already being processed or completed.",
           409,
+          terminalPortalOAuthHeaders(pending),
         ),
       };
     }
@@ -431,11 +463,12 @@ async function finishPendingOAuth(
   });
 }
 
-function expiredOAuthResponse(): Response {
+function expiredOAuthResponse(pending?: OAuthPending): Response {
   return html(
     "Crabbox login expired",
     "The login request expired. Run crabbox login --url <broker-url> again.",
     400,
+    pending ? terminalPortalOAuthHeaders(pending) : undefined,
   );
 }
 
@@ -615,6 +648,9 @@ async function githubIdentity(accessToken: string): Promise<{
     throw new Error(`github user lookup failed: ${userResponse.status}`);
   }
   const user = (await userResponse.json()) as GitHubUser;
+  if (typeof user.id !== "number" || !Number.isSafeInteger(user.id) || user.id <= 0) {
+    throw new GitHubAuthorizationError("GitHub account did not provide a stable numeric identity.");
+  }
   const login = user.login || "unknown";
   const emailResponse = await fetch(`${githubAPIURL}/user/emails`, { headers });
   if (!emailResponse.ok) {
@@ -624,14 +660,11 @@ async function githubIdentity(accessToken: string): Promise<{
   const verifiedEmails = emails.filter(
     (email) => email.verified && typeof email.email === "string" && email.email.trim(),
   );
-  const owner = (
-    verifiedEmails.find((email) => email.primary)?.email || verifiedEmails[0]?.email
-  )?.trim();
-  if (!owner) {
+  if (verifiedEmails.length === 0) {
     throw new GitHubAuthorizationError("GitHub account must have a verified email to use Crabbox.");
   }
   const identity = {
-    owner,
+    owner: `github:${user.id}`,
     ownerSource: "github-verified-email",
     login,
   } as {
@@ -727,6 +760,33 @@ function legacyPortalSessionCookieHeaders(): Headers {
   const headers = new Headers();
   headers.append("set-cookie", sessionCookie(legacyPortalSessionCookieName, "", 0));
   return headers;
+}
+
+function terminalPortalOAuthHeaders(pending: OAuthPending): Headers {
+  return pending.mode === "portal" ? clearPortalOAuthCookieHeaders(pending) : new Headers();
+}
+
+function clearPortalOAuthCookieHeaders(pending: OAuthPending): Headers {
+  const headers = new Headers();
+  headers.append("set-cookie", sessionCookie(portalOAuthCookieName(pending.state), "", 0));
+  return headers;
+}
+
+function portalOAuthCookieName(state: string): string {
+  return `${portalOAuthCookiePrefix}${state}`;
+}
+
+function requestCookie(request: Request, name: string): string | undefined {
+  for (const item of (request.headers.get("cookie") ?? "").split(";")) {
+    const [rawName, ...rawValue] = item.trim().split("=");
+    if (rawName !== name) continue;
+    try {
+      return decodeURIComponent(rawValue.join("="));
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 function sessionCookie(name: string, value: string, maxAgeSeconds: number): string {

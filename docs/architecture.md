@@ -132,7 +132,8 @@ Auth (`worker/src/auth.ts`) requires a Bearer token, matched in order:
 signed user token (prefix `cbxu_`, HMAC-SHA256, 180-day default expiry) minted
 after GitHub OAuth login verifies allowed org membership. The signed token keeps
 the OAuth credential encrypted under the session secret so request authentication
-can periodically revalidate current org/team membership. An optional Cloudflare
+can periodically revalidate the immutable GitHub account ID and current org/team
+membership. An optional Cloudflare
 Access JWT (`cf-access-jwt-assertion`) can supply the owner identity. The
 coordinator injects `x-crabbox-auth`, `-admin`, `-owner`, `-org`, and `-github-login`
 headers. The portal converts one unique `__Host-crabbox_session` host-only

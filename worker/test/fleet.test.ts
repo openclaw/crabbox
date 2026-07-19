@@ -36,6 +36,7 @@ import {
   forwardOrBufferWebVNC,
   resetWebVNCBridge,
   recordAzureDeferredCleanup,
+  replacedEgressSessionsPerLease,
   shouldActivateEgressSession,
   workspaceTerminalOriginAllowed,
   type WebVNCBuffer,
@@ -924,13 +925,13 @@ describe("runtime adapter relay", () => {
 
   it("revalidates active GitHub-admin backend agents against the user grant", async () => {
     const env = {
-      CRABBOX_GITHUB_ADMIN_LOGINS: "alice",
-      CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
+      CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner,
+      CRABBOX_GITHUB_REVOKED_USERS: "github:12345",
     } as Env;
     const currentGrantVersion = await adminGrantVersion(env);
     const grant = {
       auth: "github" as const,
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: true,
       login: "alice",
@@ -977,10 +978,10 @@ describe("runtime adapter relay", () => {
     const env = {
       CRABBOX_SESSION_SECRET: "session-secret",
       CRABBOX_DEFAULT_ORG: "example-org",
-      CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
+      CRABBOX_GITHUB_REVOKED_USERS: "github:12345",
     } as Env;
     const token = await issueUserToken(env, {
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       ownerSource: "github-verified-email",
       org: "example-org",
       login: "alice",
@@ -990,7 +991,7 @@ describe("runtime adapter relay", () => {
     const portalSessionHash = await sha256Hex(token);
     const grant = {
       auth: "github" as const,
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: false,
       login: "alice",
@@ -1294,7 +1295,7 @@ describe("runtime adapter relay", () => {
       storage.seed(`lease:${lease.id}`, lease);
     }
     const currentGrantVersion = await adminGrantVersion({
-      CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+      CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner,
     });
     const revoked = ["egress-host", "egress-client"].map(
       (kind) =>
@@ -1321,7 +1322,7 @@ describe("runtime adapter relay", () => {
           kind,
           leaseID: adminLease.id,
           sessionID: "egress_admin",
-          owner: "admin@example.com",
+          owner: testGitHubOwner,
           org: "other-org",
           admin: true,
           auth: "github",
@@ -1336,7 +1337,7 @@ describe("runtime adapter relay", () => {
       } as unknown as DurableObjectState,
       {
         CRABBOX_DEFAULT_ORG: "default-org",
-        CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin",
+        CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner,
       } as Env,
     );
 
@@ -1436,7 +1437,7 @@ describe("runtime adapter relay", () => {
     const currentGitHubControl = new FakeWebSocket({
       kind: "control",
       clientID: "control-current-github-admin",
-      owner: "current-admin@example.com",
+      owner: testGitHubOwner,
       org: "other-org",
       admin: true,
       auth: "github",
@@ -2060,13 +2061,13 @@ describe("runtime adapter relay", () => {
     storage.seed(`lease:${lease.id}`, lease);
     const env = {
       CRABBOX_DEFAULT_ORG: "example-org",
-      CRABBOX_GITHUB_ADMIN_LOGINS: "alice",
-      CRABBOX_GITHUB_REVOKED_USERS: "login:alice",
+      CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner,
+      CRABBOX_GITHUB_REVOKED_USERS: "github:12345",
     } as Env;
     const currentGrantVersion = await adminGrantVersion(env);
     const grant = {
       auth: "github" as const,
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: true,
       login: "alice",
@@ -19258,27 +19259,40 @@ describe("fleet lease identity and idle", () => {
       testLease({
         id: leaseID,
         slug: "blue-lobster",
-        owner: "alice@example.com",
+        owner: testGitHubOwner,
         org: "example-org",
         code: true,
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
     );
     const token = await issueUserToken(env, {
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       ownerSource: "github-verified-email",
       org: "example-org",
       login: "alice",
       githubAccessToken: "github-access-token",
       ttlSeconds: 60 * 60,
     });
-    const githubFetch = vi.fn<() => Promise<Response>>(
-      async () =>
-        new Response(JSON.stringify({ state: "active", organization: { login: "example-org" } }), {
+    const githubFetch = vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === "https://api.github.com/user") {
+        return new Response(JSON.stringify({ id: testGitHubAccountID, login: "alice" }), {
           status: 200,
           headers: { "content-type": "application/json" },
-        }),
-    );
+        });
+      }
+      if (url.startsWith("https://api.github.com/user/memberships/orgs/")) {
+        return new Response(
+          JSON.stringify({ state: "active", organization: { login: "example-org" } }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      return new Response("ok", { status: 200 });
+    });
     vi.stubGlobal("fetch", githubFetch);
     const portalCookie = `__Host-crabbox_session=${encodeURIComponent(token)}`;
     const throughCoordinator = async (input: Request): Promise<Response> =>
@@ -19318,7 +19332,7 @@ describe("fleet lease identity and idle", () => {
     const portalSessionHash = await sha256Hex(token);
     const agentGrant = {
       auth: "github" as const,
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: false,
       login: "alice",
@@ -19351,7 +19365,7 @@ describe("fleet lease identity and idle", () => {
       leaseID,
       id: "viewer_active",
       agentID: "agent_active",
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: false,
       auth: "github",
@@ -19374,7 +19388,7 @@ describe("fleet lease identity and idle", () => {
       kind: "egress-client",
       leaseID,
       sessionID: "active-egress-session",
-      owner: "alice@example.com",
+      owner: testGitHubOwner,
       org: "example-org",
       admin: false,
       auth: "github",
@@ -19425,7 +19439,7 @@ describe("fleet lease identity and idle", () => {
             id: "viewer_active",
             agentID: "agent_active",
             socket: activeWebViewer as unknown as WebSocket,
-            owner: "alice@example.com",
+            owner: testGitHubOwner,
             org: "example-org",
             admin: false,
             auth: "github",
@@ -20146,7 +20160,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    (fleet as unknown as { env: Env }).env.CRABBOX_GITHUB_REVOKED_USERS = "login:alice";
+    (fleet as unknown as { env: Env }).env.CRABBOX_GITHUB_REVOKED_USERS = "github:12345";
     const githubFetch = vi.fn<() => Promise<Response>>(async () => {
       throw new Error("emergency revocation must fail before GitHub API access");
     });
@@ -20248,7 +20262,7 @@ describe("fleet lease identity and idle", () => {
 
   it("rejects bridge tickets whose cached admin grant was revoked", async () => {
     const storage = new MemoryStorage();
-    const fleet = testFleet(storage, {}, { CRABBOX_GITHUB_ADMIN_LOGINS: "current-admin" });
+    const fleet = testFleet(storage, {}, { CRABBOX_GITHUB_ADMIN_OWNERS: testGitHubOwner });
     const leaseID = "cbx_000000000001";
     storage.seed(
       `lease:${leaseID}`,
@@ -20502,6 +20516,697 @@ describe("fleet lease identity and idle", () => {
       clientConnected: false,
     });
     expect(staleTicketBody.ticket).toMatch(/^egress_[a-f0-9]{32}$/);
+  });
+
+  it("rejects replaced egress sessions while allowing active-session reconnects", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testWebSocketCoordinator(storage);
+    const leaseID = "cbx_000000000001";
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "monotonic-egress",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const createTicket = async (role: "host" | "client", sessionID: string) => {
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases/monotonic-egress/egress/ticket", {
+          headers,
+          body: { role, sessionID, allow: ["example.com"] },
+        }),
+      );
+      const body = (await response.clone().json()) as { ticket?: string; error?: string };
+      return { response, body };
+    };
+    const connect = (role: "host" | "client", ticket: string) =>
+      fleet.fetch(
+        request("GET", `/v1/leases/monotonic-egress/egress/${role}`, {
+          headers: {
+            "x-crabbox-bridge-ticket": ticket,
+            upgrade: "websocket",
+          },
+        }),
+      );
+
+    const sessionA = "egress_session_a";
+    const sessionB = "egress_session_b";
+    const beforeReplacement = await createTicket("host", sessionA);
+    expect(beforeReplacement.response.status).toBe(200);
+    const replacement = await createTicket("client", sessionB);
+    expect(replacement.response.status).toBe(200);
+
+    const staleRemint = await createTicket("host", sessionA);
+    expect(staleRemint.response.status).toBe(409);
+    expect(staleRemint.body).toEqual({
+      error: "egress_session_replaced",
+      message: "egress session was replaced by a newer session",
+    });
+
+    const staleConnect = await connect("host", beforeReplacement.body.ticket ?? "");
+    expect(staleConnect.status).toBe(409);
+    await expect(staleConnect.json()).resolves.toEqual({
+      error: "egress_session_replaced",
+      message: "egress session was replaced by a newer session",
+    });
+
+    const replacementConnect = await connect("client", replacement.body.ticket ?? "");
+    expect(replacementConnect.status).toBe(200);
+    const sameSessionHost = await createTicket("host", sessionB);
+    expect(sameSessionHost.response.status).toBe(200);
+    expect((await connect("host", sameSessionHost.body.ticket ?? "")).status).toBe(200);
+    const sameSessionReconnect = await createTicket("host", sessionB);
+    expect(sameSessionReconnect.response.status).toBe(200);
+    expect((await connect("host", sameSessionReconnect.body.ticket ?? "")).status).toBe(200);
+
+    const status = await fleet.fetch(
+      request("GET", "/v1/leases/monotonic-egress/egress/status", { headers }),
+    );
+    await expect(status.json()).resolves.toMatchObject({
+      active: true,
+      sessionID: sessionB,
+      hostConnected: true,
+      clientConnected: true,
+    });
+  });
+
+  it("keeps replaced egress session tombstones across coordinator restarts", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_000000000001";
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "restarted-egress",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const ticketRequest = (fleet: FleetCoordinator, sessionID: string) =>
+      fleet.fetch(
+        request("POST", "/v1/leases/restarted-egress/egress/ticket", {
+          headers,
+          body: { role: "host", sessionID, allow: ["example.com"] },
+        }),
+      );
+
+    const firstCoordinator = testWebSocketCoordinator(storage);
+    expect((await ticketRequest(firstCoordinator, "egress_restart_a")).status).toBe(200);
+    expect((await ticketRequest(firstCoordinator, "egress_restart_b")).status).toBe(200);
+    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toEqual(["egress_restart_a"]);
+
+    const restartedCoordinator = testWebSocketCoordinator(storage);
+    const stale = await ticketRequest(restartedCoordinator, "egress_restart_a");
+    expect(stale.status).toBe(409);
+    await expect(stale.json()).resolves.toEqual({
+      error: "egress_session_replaced",
+      message: "egress session was replaced by a newer session",
+    });
+  });
+
+  it("persists a disconnected active egress session across coordinator restarts", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_000000000001";
+    const sessionA = "egress_active_a";
+    const sessionB = "egress_active_b";
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "active-restarted-egress",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const ticketRequest = (fleet: FleetCoordinator, sessionID: string) =>
+      fleet.fetch(
+        request("POST", "/v1/leases/active-restarted-egress/egress/ticket", {
+          headers,
+          body: { role: "host", sessionID, allow: ["example.com"] },
+        }),
+      );
+
+    const firstCoordinator = testWebSocketCoordinator(storage);
+    expect((await ticketRequest(firstCoordinator, sessionA)).status).toBe(200);
+    expect(storage.value(`active-egress-session:${leaseID}`)).toEqual({
+      leaseID,
+      sessionID: sessionA,
+      allow: ["example.com"],
+      createdAt: expect.any(String),
+      updatedAt: expect.any(String),
+    });
+
+    const restartedCoordinator = testWebSocketCoordinator(storage);
+    expect((await ticketRequest(restartedCoordinator, sessionB)).status).toBe(200);
+    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toEqual([sessionA]);
+    expect(storage.value(`active-egress-session:${leaseID}`)).toEqual({
+      leaseID,
+      sessionID: sessionB,
+      allow: ["example.com"],
+      createdAt: expect.any(String),
+      updatedAt: expect.any(String),
+    });
+
+    const secondRestart = testWebSocketCoordinator(storage);
+    const status = await secondRestart.fetch(
+      request("GET", "/v1/leases/active-restarted-egress/egress/status", { headers }),
+    );
+    await expect(status.json()).resolves.toMatchObject({
+      active: true,
+      sessionID: sessionB,
+      hostConnected: false,
+      clientConnected: false,
+    });
+    const stale = await ticketRequest(secondRestart, sessionA);
+    expect(stale.status).toBe(409);
+    await expect(stale.json()).resolves.toEqual({
+      error: "egress_session_replaced",
+      message: "egress session was replaced by a newer session",
+    });
+  });
+
+  it("honors a tombstone over an inconsistent stored active egress session", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_000000000001";
+    const sessionID = "egress_crash_stale";
+    const now = new Date().toISOString();
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "crash-stale-egress",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(`active-egress-session:${leaseID}`, {
+      leaseID,
+      sessionID,
+      allow: ["example.com"],
+      createdAt: now,
+      updatedAt: now,
+    });
+    storage.seed(`replaced-egress-sessions:${leaseID}`, [sessionID]);
+
+    const fleet = testWebSocketCoordinator(storage);
+    const status = await fleet.fetch(
+      request("GET", "/v1/leases/crash-stale-egress/egress/status", { headers }),
+    );
+    await expect(status.json()).resolves.toMatchObject({
+      active: false,
+      sessionID: "",
+      hostConnected: false,
+      clientConnected: false,
+    });
+    expect(storage.value(`active-egress-session:${leaseID}`)).toBeUndefined();
+
+    const stale = await fleet.fetch(
+      request("POST", "/v1/leases/crash-stale-egress/egress/ticket", {
+        headers,
+        body: { role: "host", sessionID, allow: ["example.com"] },
+      }),
+    );
+    expect(stale.status).toBe(409);
+    await expect(stale.json()).resolves.toEqual({
+      error: "egress_session_replaced",
+      message: "egress session was replaced by a newer session",
+    });
+  });
+
+  it("keeps the persisted active egress session during restart reconciliation", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_000000000001";
+    const winnerSessionID = "egress_hibernated_b";
+    const replacedSessionID = "egress_hibernated_a";
+    const now = new Date().toISOString();
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "hibernated-egress",
+        provider: "external",
+        lifecycle: "registered",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(`active-egress-session:${leaseID}`, {
+      leaseID,
+      sessionID: winnerSessionID,
+      allow: ["example.com"],
+      createdAt: now,
+      updatedAt: now,
+    });
+    const restored = [winnerSessionID, replacedSessionID].flatMap((sessionID) =>
+      ["egress-host", "egress-client"].map(
+        (kind) =>
+          new FakeWebSocket({
+            kind,
+            leaseID,
+            sessionID,
+            owner: "alice@example.com",
+            org: "example-org",
+            admin: false,
+            auth: "proxy",
+          }),
+      ),
+    );
+    const winnerSockets = restored.filter(
+      (socket) =>
+        (socket.deserializeAttachment() as { sessionID?: string } | undefined)?.sessionID ===
+        winnerSessionID,
+    );
+    const replacedSockets = restored.filter(
+      (socket) =>
+        (socket.deserializeAttachment() as { sessionID?: string } | undefined)?.sessionID ===
+        replacedSessionID,
+    );
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => restored as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    for (const socket of winnerSockets) {
+      expect(socket.closeCode).toBeUndefined();
+    }
+    for (const socket of replacedSockets) {
+      expect(socket.closeCode).toBe(1012);
+      expect(socket.closeReason).toBe("replaced by a newer egress session");
+    }
+    const relay = fleet as unknown as {
+      egressSessions: Map<string, { sessionID: string }>;
+      replacedEgressSessions: Map<string, string[]>;
+    };
+    expect(relay.egressSessions.get(leaseID)?.sessionID).toBe(winnerSessionID);
+    expect(relay.replacedEgressSessions.get(leaseID)).toEqual([replacedSessionID]);
+    expect(storage.value(`active-egress-session:${leaseID}`)).toMatchObject({
+      leaseID,
+      sessionID: winnerSessionID,
+    });
+    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toEqual([replacedSessionID]);
+
+    const stale = await fleet.fetch(
+      request("POST", "/v1/leases/hibernated-egress/egress/ticket", {
+        headers,
+        body: { role: "host", sessionID: replacedSessionID, allow: ["example.com"] },
+      }),
+    );
+    expect(stale.status).toBe(409);
+    await expect(stale.json()).resolves.toMatchObject({ error: "egress_session_replaced" });
+  });
+
+  it("nonfatally resets ambiguous restored egress sessions without tombstoning them", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_000000000001";
+    const sessionIDs = ["egress_ambiguous_a", "egress_ambiguous_b"];
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "ambiguous-egress",
+        provider: "external",
+        lifecycle: "registered",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const restored = sessionIDs.flatMap((sessionID) =>
+      ["egress-host", "egress-client"].map(
+        (kind) =>
+          new FakeWebSocket({
+            kind,
+            leaseID,
+            sessionID,
+            owner: "alice@example.com",
+            org: "example-org",
+            admin: false,
+            auth: "proxy",
+          }),
+      ),
+    );
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => restored as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    for (const socket of restored) {
+      expect(socket.closeCode).toBe(1011);
+      expect(socket.closeReason).toBe("egress session state lost; reconnect");
+    }
+    const relay = fleet as unknown as {
+      egressSessions: Map<string, { sessionID: string }>;
+      replacedEgressSessions: Map<string, string[]>;
+    };
+    expect(relay.egressSessions.has(leaseID)).toBe(false);
+    expect(relay.replacedEgressSessions.has(leaseID)).toBe(false);
+    expect(storage.value(`active-egress-session:${leaseID}`)).toBeUndefined();
+    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toBeUndefined();
+
+    const mint = (sessionID: string) =>
+      fleet.fetch(
+        request("POST", "/v1/leases/ambiguous-egress/egress/ticket", {
+          headers,
+          body: { role: "host", sessionID, allow: ["example.com"] },
+        }),
+      );
+    expect((await mint(sessionIDs[0] ?? "")).status).toBe(200);
+    expect((await mint(sessionIDs[1] ?? "")).status).toBe(200);
+  });
+
+  it("tracks one restored egress session when no active record exists", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_000000000001";
+    const sessionID = "egress_single_restored";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "single-restored-egress",
+        provider: "external",
+        lifecycle: "registered",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const restored = ["egress-host", "egress-client"].map(
+      (kind) =>
+        new FakeWebSocket({
+          kind,
+          leaseID,
+          sessionID,
+          owner: "alice@example.com",
+          org: "example-org",
+          admin: false,
+          auth: "proxy",
+        }),
+    );
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => restored as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    for (const socket of restored) {
+      expect(socket.closeCode).toBeUndefined();
+    }
+    const relay = fleet as unknown as {
+      egressSessions: Map<string, { sessionID: string }>;
+      replacedEgressSessions: Map<string, string[]>;
+    };
+    expect(relay.egressSessions.get(leaseID)?.sessionID).toBe(sessionID);
+    expect(relay.replacedEgressSessions.has(leaseID)).toBe(false);
+    expect(storage.value(`active-egress-session:${leaseID}`)).toMatchObject({
+      leaseID,
+      sessionID,
+    });
+    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toBeUndefined();
+  });
+
+  it("rejects a tombstoned hibernated egress socket during restart reconciliation", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_000000000001";
+    const sessionID = "egress_hibernated";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "hibernated-egress",
+        provider: "external",
+        lifecycle: "registered",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(`replaced-egress-sessions:${leaseID}`, [sessionID]);
+    const restored = [
+      new FakeWebSocket({
+        kind: "egress-host",
+        leaseID,
+        sessionID,
+        owner: "alice@example.com",
+        org: "example-org",
+        admin: false,
+      }),
+    ];
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => restored as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    for (const socket of restored) {
+      expect(socket.closeCode).toBe(1012);
+      expect(socket.closeReason).toBe("replaced by a newer egress session");
+    }
+    const relay = fleet as unknown as {
+      egressSessions: Map<string, { sessionID: string }>;
+      replacedEgressSessions: Map<string, string[]>;
+    };
+    expect(relay.egressSessions.has(leaseID)).toBe(false);
+    expect(relay.replacedEgressSessions.get(leaseID)).toEqual([sessionID]);
+  });
+
+  it("bounds replaced egress session tombstones per lease", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testWebSocketCoordinator(storage);
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "bounded-egress",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const createTicket = (sessionID: string) =>
+      fleet.fetch(
+        request("POST", "/v1/leases/bounded-egress/egress/ticket", {
+          headers,
+          body: { role: "host", sessionID, allow: ["example.com"] },
+        }),
+      );
+    const sessions = Array.from(
+      { length: replacedEgressSessionsPerLease + 2 },
+      (_, index) => `egress_bound_${index}`,
+    );
+    const responses = await sessions.reduce<Promise<Response[]>>(async (pending, sessionID) => {
+      const collected = await pending;
+      collected.push(await createTicket(sessionID));
+      return collected;
+    }, Promise.resolve([]));
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    const relay = fleet as unknown as { replacedEgressSessions: Map<string, string[]> };
+    const expectedTombstones = sessions.slice(1, replacedEgressSessionsPerLease + 1);
+    expect(relay.replacedEgressSessions.get("cbx_000000000001")).toEqual(expectedTombstones);
+    expect(storage.value("replaced-egress-sessions:cbx_000000000001")).toEqual(expectedTombstones);
+
+    expect((await createTicket(sessions[0] ?? "")).status).toBe(200);
+    const newestTombstone = await createTicket(sessions[replacedEgressSessionsPerLease] ?? "");
+    expect(newestTombstone.status).toBe(409);
+    await expect(newestTombstone.json()).resolves.toMatchObject({
+      error: "egress_session_replaced",
+    });
+  });
+
+  it("clears replaced egress session tombstones on lease release", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testWebSocketCoordinator(storage);
+    const leaseID = "cbx_000000000001";
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "released-egress",
+        provider: "external",
+        lifecycle: "registered",
+        owner: "alice@example.com",
+        org: "example-org",
+        keep: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const createTicket = (sessionID: string) =>
+      fleet.fetch(
+        request("POST", "/v1/leases/released-egress/egress/ticket", {
+          headers,
+          body: { role: "host", sessionID, allow: ["example.com"] },
+        }),
+      );
+    expect((await createTicket("egress_release_a")).status).toBe(200);
+    expect((await createTicket("egress_release_b")).status).toBe(200);
+    const relay = fleet as unknown as { replacedEgressSessions: Map<string, string[]> };
+    expect(relay.replacedEgressSessions.get(leaseID)).toEqual(["egress_release_a"]);
+    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toEqual(["egress_release_a"]);
+    expect(storage.value(`active-egress-session:${leaseID}`)).toMatchObject({
+      leaseID,
+      sessionID: "egress_release_b",
+    });
+
+    const released = await fleet.fetch(
+      request("POST", "/v1/leases/released-egress/release", {
+        headers,
+        body: { delete: false },
+      }),
+    );
+    expect(released.status).toBe(200);
+    await expect(released.json()).resolves.toMatchObject({ lease: { state: "released" } });
+    expect(relay.replacedEgressSessions.has(leaseID)).toBe(false);
+    expect(storage.value(`active-egress-session:${leaseID}`)).toBeUndefined();
+    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toBeUndefined();
+  });
+
+  it("keeps replaced egress session tombstones on bridge authorization revocation", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testWebSocketCoordinator(storage);
+    const leaseID = "cbx_000000000001";
+    const ownerHeaders = {
+      "x-crabbox-owner": "owner@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const managerHeaders = {
+      "x-crabbox-owner": "manager@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "revoked-egress",
+        owner: "owner@example.com",
+        org: "example-org",
+        share: { users: { "manager@example.com": "manage" } },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const createTicket = (sessionID: string) =>
+      fleet.fetch(
+        request("POST", "/v1/leases/revoked-egress/egress/ticket", {
+          headers: managerHeaders,
+          body: { role: "host", sessionID, allow: ["example.com"] },
+        }),
+      );
+    expect((await createTicket("egress_revoke_a")).status).toBe(200);
+    const current = await createTicket("egress_revoke_b");
+    expect(current.status).toBe(200);
+    const currentTicket = ((await current.json()) as { ticket: string }).ticket;
+    const connected = await fleet.fetch(
+      request("GET", "/v1/leases/revoked-egress/egress/host", {
+        headers: { "x-crabbox-bridge-ticket": currentTicket, upgrade: "websocket" },
+      }),
+    );
+    expect(connected.status).toBe(200);
+    const relay = fleet as unknown as {
+      egressSessions: Map<string, { sessionID: string }>;
+      replacedEgressSessions: Map<string, string[]>;
+    };
+    expect(relay.replacedEgressSessions.get(leaseID)).toEqual(["egress_revoke_a"]);
+    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toEqual(["egress_revoke_a"]);
+    expect(storage.value(`active-egress-session:${leaseID}`)).toMatchObject({
+      leaseID,
+      sessionID: "egress_revoke_b",
+    });
+
+    const revoked = await fleet.fetch(
+      request("PUT", "/v1/leases/revoked-egress/share", {
+        headers: ownerHeaders,
+        body: { users: { "manager@example.com": "use" } },
+      }),
+    );
+    expect(revoked.status).toBe(200);
+    expect(relay.egressSessions.has(leaseID)).toBe(false);
+    expect(relay.replacedEgressSessions.get(leaseID)).toEqual([
+      "egress_revoke_a",
+      "egress_revoke_b",
+    ]);
+    expect(storage.value(`active-egress-session:${leaseID}`)).toBeUndefined();
+    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toEqual([
+      "egress_revoke_a",
+      "egress_revoke_b",
+    ]);
+
+    const ownerTicket = (sessionID: string) =>
+      fleet.fetch(
+        request("POST", "/v1/leases/revoked-egress/egress/ticket", {
+          headers: ownerHeaders,
+          body: { role: "host", sessionID, allow: ["example.com"] },
+        }),
+      );
+    const stale = await ownerTicket("egress_revoke_a");
+    expect(stale.status).toBe(409);
+    await expect(stale.json()).resolves.toMatchObject({ error: "egress_session_replaced" });
+
+    const revokedCurrent = await ownerTicket("egress_revoke_b");
+    expect(revokedCurrent.status).toBe(409);
+    await expect(revokedCurrent.json()).resolves.toMatchObject({
+      error: "egress_session_replaced",
+    });
+
+    const fresh = await ownerTicket("egress_revoke_c");
+    expect(fresh.status).toBe(200);
+    expect(storage.value(`active-egress-session:${leaseID}`)).toMatchObject({
+      leaseID,
+      sessionID: "egress_revoke_c",
+    });
   });
 
   it("does not let an older egress session replace a newer current session", () => {
@@ -26317,10 +27022,13 @@ describe("fleet identity", () => {
     const location = start.headers.get("location") ?? "";
     const state = new URL(location).searchParams.get("state");
     expect(state).toBeTruthy();
+    const portalOAuthCookie = portalOAuthCookieFromLogin(start);
 
     vi.stubGlobal("fetch", githubFetchMock({ member: true }));
     const callback = await fleet.fetch(
-      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`, {
+        headers: { cookie: portalOAuthCookie },
+      }),
     );
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/portal/leases/cbx_000000000001/vnc");
@@ -26332,6 +27040,76 @@ describe("fleet identity", () => {
     expect(cookie).toContain("Secure");
     expect(cookie).toContain("SameSite=Lax");
     expect(cookie).not.toContain("Domain=");
+  });
+
+  it("does not transfer durable ownership when a verified email moves between accounts", async () => {
+    const storage = new MemoryStorage();
+    const fleet = githubLoginTestFleet(storage);
+    const env = (fleet as unknown as { env: Env }).env;
+    env.CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS = "0";
+    const sharedEmail = [{ email: "reassigned@example.com", primary: true, verified: true }];
+    const login = async (accountID: number): Promise<string> => {
+      const start = await fleet.fetch(request("GET", "/portal/login"));
+      const state = new URL(start.headers.get("location") ?? "").searchParams.get("state");
+      expect(state).toBeTruthy();
+      vi.stubGlobal("fetch", githubFetchMock({ member: true, accountID, emails: sharedEmail }));
+      const callback = await fleet.fetch(
+        request("GET", `/v1/auth/github/callback?code=ok&state=${state}`, {
+          headers: { cookie: portalOAuthCookieFromLogin(start) },
+        }),
+      );
+      expect(callback.status).toBe(302);
+      return cookiePairFromResponse(callback, "__Host-crabbox_session");
+    };
+    const throughCoordinator = async (
+      token: string,
+      leaseID = "cbx_000000000001",
+    ): Promise<Response> =>
+      await routeCoordinatorRequest(
+        new Request(`https://crabbox.test/v1/leases/${leaseID}`, {
+          headers: { authorization: `Bearer ${token}` },
+        }),
+        env,
+        async (prepared) => await fleet.fetch(prepared),
+      );
+
+    const originalCookie = await login(12345);
+    const originalToken = decodeURIComponent(originalCookie.split("=", 2)[1] ?? "");
+    expect(decodeUserTokenPayload(originalToken).owner).toBe("github:12345");
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "github:12345",
+        org: "openclaw",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    expect((await throughCoordinator(originalToken)).status).toBe(200);
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        owner: "reassigned@example.com",
+        org: "openclaw",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const reassignedCookie = await login(67890);
+    const reassignedToken = decodeURIComponent(reassignedCookie.split("=", 2)[1] ?? "");
+    expect(decodeUserTokenPayload(reassignedToken).owner).toBe("github:67890");
+    expect((await throughCoordinator(reassignedToken)).status).toBe(404);
+    expect((await throughCoordinator(reassignedToken, "cbx_000000000002")).status).toBe(404);
+
+    const recovered = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_000000000002/share", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { users: { "github:67890": "manage" } },
+      }),
+    );
+    expect(recovered.status).toBe(200);
+    expect((await throughCoordinator(reassignedToken, "cbx_000000000002")).status).toBe(200);
   });
 
   it.each([
@@ -26358,10 +27136,13 @@ describe("fleet identity", () => {
     const location = start.headers.get("location") ?? "";
     const state = new URL(location).searchParams.get("state");
     expect(state).toBeTruthy();
+    const portalOAuthCookie = portalOAuthCookieFromLogin(start);
 
     vi.stubGlobal("fetch", githubFetchMock({ member: true }));
     const callback = await fleet.fetch(
-      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`, {
+        headers: { cookie: portalOAuthCookie },
+      }),
     );
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/portal");
@@ -26501,7 +27282,7 @@ describe("fleet identity", () => {
     };
     expect(body).toMatchObject({
       status: "complete",
-      owner: "friend@example.com",
+      owner: testGitHubOwner,
       org: "openclaw",
       login: "friend",
     });
@@ -26687,7 +27468,7 @@ describe("fleet identity", () => {
     expect(poll.status).toBe(200);
     await expect(poll.json()).resolves.toMatchObject({
       status: "complete",
-      owner: "friend@example.com",
+      owner: testGitHubOwner,
       org: "openclaw",
       login: "friend",
     });
@@ -27215,6 +27996,30 @@ function browserConfirmationFromCallback(callback: Response): string {
   return confirmation ?? "";
 }
 
+const testGitHubAccountID = 12345;
+const testGitHubOwner = `github:${testGitHubAccountID}`;
+
+function setCookieHeaders(response: Response): string[] {
+  const headers = response.headers as Headers & { getSetCookie?: () => string[] };
+  return headers.getSetCookie?.() ?? [response.headers.get("set-cookie") ?? ""];
+}
+
+function portalOAuthCookieFromLogin(response: Response): string {
+  const cookie = setCookieHeaders(response).find((value) =>
+    value.startsWith("__Host-crabbox_oauth_state_"),
+  );
+  if (!cookie) {
+    throw new Error("missing portal OAuth browser binding cookie");
+  }
+  return cookie.split(";", 1)[0] ?? "";
+}
+
+function cookiePairFromResponse(response: Response, name: string): string {
+  const cookie = setCookieHeaders(response).find((value) => value.startsWith(`${name}=`));
+  if (!cookie) throw new Error(`missing ${name} cookie`);
+  return cookie.split(";", 1)[0] ?? "";
+}
+
 function githubFetchMock({
   member,
   org = "openclaw",
@@ -27222,6 +28027,7 @@ function githubFetchMock({
   profileEmail = null,
   emails = [{ email: "friend@example.com", primary: true, verified: true }],
   emailStatus = 200,
+  accountID = testGitHubAccountID,
 }: {
   member: boolean;
   org?: string;
@@ -27229,6 +28035,7 @@ function githubFetchMock({
   profileEmail?: string | null;
   emails?: Array<{ email?: string; primary?: boolean; verified?: boolean }>;
   emailStatus?: number;
+  accountID?: number;
 }) {
   return vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
     const url =
@@ -27237,7 +28044,12 @@ function githubFetchMock({
       return jsonResponse({ access_token: "github-access-token" });
     }
     if (url === "https://api.github.com/user") {
-      return jsonResponse({ login: "friend", name: "Friendly User", email: profileEmail });
+      return jsonResponse({
+        id: accountID,
+        login: "friend",
+        name: "Friendly User",
+        email: profileEmail,
+      });
     }
     if (url === "https://api.github.com/user/emails") {
       return jsonResponse(
@@ -27322,6 +28134,16 @@ function testCoordinator(
     { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
     providers,
   );
+}
+
+function testWebSocketCoordinator(
+  storage = new MemoryStorage(),
+  env: Partial<Env> = {},
+): FleetCoordinator {
+  return new FleetCoordinator(new FakeCoordinatorRuntime(storage), {
+    CRABBOX_DEFAULT_ORG: "default-org",
+    ...env,
+  } as Env);
 }
 
 function expiredRuntimeAdapterClaim(adapterID: string) {

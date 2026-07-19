@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ type SSHTarget struct {
 	Key                    string
 	CertificateFile        string
 	KnownHostsFile         string
+	HostKeyAlias           string
 	Port                   string
 	FallbackPorts          []string
 	TargetOS               string
@@ -40,6 +42,7 @@ type SSHTarget struct {
 	SSHConfigProxy         bool
 	ProxyCommand           string
 	ChildEnvDenylist       []string
+	ChildEnv               map[string]string
 }
 
 func isLocalMacTarget(target SSHTarget) bool {
@@ -177,13 +180,26 @@ func systemInspectionCommand(name string, args ...string) *exec.Cmd {
 }
 
 func applyTargetChildEnvironment(cmd *exec.Cmd, target SSHTarget) {
-	if cmd != nil && len(target.ChildEnvDenylist) > 0 {
-		env := cmd.Env
-		if env == nil {
-			env = os.Environ()
-		}
-		cmd.Env = childEnvironmentWithout(env, target.ChildEnvDenylist...)
+	if cmd == nil || (len(target.ChildEnvDenylist) == 0 && len(target.ChildEnv) == 0) {
+		return
 	}
+	env := cmd.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	overrideNames := make([]string, 0, len(target.ChildEnv))
+	for name := range target.ChildEnv {
+		if validEnvName(name) {
+			overrideNames = append(overrideNames, name)
+		}
+	}
+	sort.Strings(overrideNames)
+	blocked := append(append([]string(nil), target.ChildEnvDenylist...), overrideNames...)
+	env = childEnvironmentWithout(env, blocked...)
+	for _, name := range overrideNames {
+		env = append(env, name+"="+target.ChildEnv[name])
+	}
+	cmd.Env = env
 }
 
 func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *exec.Cmd {
@@ -729,10 +745,20 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 			"-o", "LogLevel=ERROR",
 		)
 	} else {
+		strictHostKeyChecking := "accept-new"
+		if target.HostKeyAlias != "" {
+			strictHostKeyChecking = "yes"
+		}
 		args = append(args,
-			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "StrictHostKeyChecking="+strictHostKeyChecking,
 			"-o", "UserKnownHostsFile="+sshConfigFileValue(knownHostsFile(target)),
 		)
+		if target.HostKeyAlias != "" {
+			args = append(args,
+				"-o", "HostKeyAlias="+target.HostKeyAlias,
+				"-o", "HostKeyAlgorithms=ssh-ed25519",
+			)
+		}
 	}
 	if target.AuthSecret || target.NoControlMaster {
 		args = append(args, "-o", "ControlMaster=no")
@@ -790,6 +816,7 @@ func sshControlPath(target SSHTarget) string {
 		target.Key,
 		target.CertificateFile,
 		target.KnownHostsFile,
+		target.HostKeyAlias,
 		target.ProxyCommand,
 	}, "\x00")
 	sum := sha1.Sum([]byte(scope))

@@ -12,6 +12,67 @@ import (
 	"time"
 )
 
+func TestClaimEndpointReservationDeadlineStartsAfterClaimLockAcquired(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_reservation_lock"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "reservation", "incus", "instance:test", "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("read initial claim: exists=%v err=%v", exists, err)
+	}
+
+	lockHeld := make(chan struct{})
+	releaseLock := make(chan struct{})
+	cleanupErr := errors.New("leave claim unchanged")
+	cleanupDone := make(chan error, 1)
+	go func() {
+		cleanupDone <- cleanupLeaseClaimIfUnchangedAfter(leaseID, expected, true, func() error {
+			close(lockHeld)
+			<-releaseLock
+			return cleanupErr
+		})
+	}()
+	<-lockHeld
+
+	const reservationDuration = 2 * time.Minute
+	type claimResult struct {
+		claim leaseClaim
+		err   error
+	}
+	claimDone := make(chan claimResult, 1)
+	go func() {
+		claim, claimErr := claimLeaseForRepoProviderScopePondEndpointReservationIfUnchanged(
+			leaseID, "reservation", "incus", "instance:test", "", "/repo", time.Minute, true,
+			Server{CloudID: "test", Labels: map[string]string{"state": "expired"}}, SSHTarget{},
+			"reservation_until", reservationDuration, expected, true,
+		)
+		claimDone <- claimResult{claim: claim, err: claimErr}
+	}()
+	select {
+	case result := <-claimDone:
+		t.Fatalf("claim publication bypassed held lock: err=%v", result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releasedAt := time.Now().UTC()
+	close(releaseLock)
+	if err := <-cleanupDone; !errors.Is(err, cleanupErr) {
+		t.Fatalf("cleanup error=%v want %v", err, cleanupErr)
+	}
+	result := <-claimDone
+	if result.err != nil {
+		t.Fatalf("publish reservation: %v", result.err)
+	}
+	deadline, ok := parseLeaseLabelTime(result.claim.Labels["reservation_until"])
+	if !ok {
+		t.Fatalf("invalid reservation deadline %q", result.claim.Labels["reservation_until"])
+	}
+	if minimum := releasedAt.Add(reservationDuration - time.Second); deadline.Before(minimum) {
+		t.Fatalf("reservation deadline=%s want >=%s", deadline, minimum)
+	}
+}
+
 func TestConfirmedAbsentClaimRemovalRequiresDirectorySyncAndRetriesAfterDeletion(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_123456789abc"
@@ -201,6 +262,36 @@ func TestDurableGuardedClaimWriteHoldsLockThroughDirectorySync(t *testing.T) {
 	}
 	if stored.Slug != second.Slug {
 		t.Fatalf("stored claim=%#v want second mutation", stored)
+	}
+}
+
+func TestDurableGuardedClaimActionFailurePreventsPublication(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_durable_action"
+	actionErr := errors.New("storage identity changed")
+	actionCalled := false
+	_, err := claimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(
+		leaseID,
+		"durable-action",
+		Config{Provider: "aws"},
+		"account:test",
+		Server{Provider: "aws", CloudID: "i-pending"},
+		SSHTarget{},
+		"/repo",
+		time.Minute,
+		false,
+		leaseClaim{},
+		false,
+		func() error {
+			actionCalled = true
+			return actionErr
+		},
+	)
+	if !errors.Is(err, actionErr) || !actionCalled {
+		t.Fatalf("durable action called=%v err=%v", actionCalled, err)
+	}
+	if claim, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+		t.Fatalf("claim published after action failure: claim=%#v exists=%v err=%v", claim, exists, readErr)
 	}
 }
 
@@ -942,6 +1033,78 @@ func TestConditionalClaimEndpointActionUpdatesAtomically(t *testing.T) {
 	}
 	if actionCalled {
 		t.Fatal("conditional endpoint update ran action for changed claim")
+	}
+}
+
+func TestConditionalClaimEndpointActionBuildsResultUnderLock(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_conditionalresult123"
+	initial := Server{Provider: "aws", CloudID: "i-123", Labels: map[string]string{"provider": "aws", "state": "provisioning"}}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "result", Config{Provider: "aws"}, initial, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := Server{Provider: "aws", CloudID: "i-123", Labels: map[string]string{"provider": "aws", "state": "ready"}}
+	target := SSHTarget{Host: "203.0.113.20", Port: "22"}
+	actionCalled := false
+	updated, gotServer, gotTarget, err := updateLeaseClaimEndpointIfUnchangedAction(leaseID, expected, func() (Server, SSHTarget, bool, error) {
+		actionCalled = true
+		return ready, target, true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !actionCalled || gotServer.CloudID != ready.CloudID || gotTarget.Host != target.Host || updated.Labels["state"] != "ready" || updated.SSHHost != target.Host {
+		t.Fatalf("called=%t server=%#v target=%#v claim=%#v", actionCalled, gotServer, gotTarget, updated)
+	}
+	guarded, _, _, err := updateLeaseClaimEndpointIfUnchangedAction(leaseID, updated, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guarded.LeaseID != updated.LeaseID || guarded.CloudID != updated.CloudID || guarded.SSHHost != updated.SSHHost {
+		t.Fatalf("nil-action claim=%#v want=%#v", guarded, updated)
+	}
+
+	if err := updateLeaseClaimEndpoint(leaseID, Server{Provider: "aws", CloudID: "i-456"}, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	actionCalled = false
+	if _, _, _, err := updateLeaseClaimEndpointIfUnchangedAction(leaseID, updated, func() (Server, SSHTarget, bool, error) {
+		actionCalled = true
+		return ready, target, true, nil
+	}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("err=%v", err)
+	}
+	if actionCalled {
+		t.Fatal("action ran for a changed claim")
+	}
+}
+
+func TestWithLeaseClaimUnchangedSkipsActionAfterClaimChange(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_guardedreadonly123"
+	if err := claimLeaseTargetForRepoConfig(leaseID, "read-only", Config{Provider: "aws"}, Server{Provider: "aws", CloudID: "i-123"}, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimEndpoint(leaseID, Server{Provider: "aws", CloudID: "i-456"}, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := withLeaseClaimUnchanged(leaseID, expected, func() error {
+		called = true
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("err=%v", err)
+	}
+	if called {
+		t.Fatal("read-only action ran for a changed claim")
 	}
 }
 

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.crabbox.lume-firstboot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/libexec/crabbox-lume-firstboot</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>PathState</key>
+    <dict>
+      <key>/Volumes/My Shared Files/challenge</key>
+      <true/>
+    </dict>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/var/log/crabbox-lume-firstboot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/crabbox-lume-firstboot.log</string>
+</dict>
+</plist>

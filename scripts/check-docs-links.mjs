@@ -3,7 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 
 const root = process.cwd();
-const files = [path.join(root, "README.md"), ...walk(path.join(root, "docs"))];
+const explicitFiles = [
+  path.join(root, "README.md"),
+  path.join(root, ".agents", "skills", "crabbox", "SKILL.md"),
+  path.join(root, "skills", "crabbox", "SKILL.md"),
+  path.join(root, "integrations", "zed", "README.md"),
+  path.join(root, "plugins", "herdr", "README.md"),
+].filter((file) => fs.existsSync(file));
+const files = [...explicitFiles, ...walk(path.join(root, "docs"))];
 const failures = [];
 
 for (const file of files) {

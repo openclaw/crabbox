@@ -78,4 +78,6 @@ live in the [Command Reference](../commands/README.md).
 
 ## Integrations
 
+- [Integration catalog](../integrations/README.md): editors, terminal UIs,
+  coding-agent clients, and the boundary with future in-box Station harnesses.
 - [Repository onboarding](repository-onboarding.md): `crabbox init`, repo config, workflow stub, and agent skill.

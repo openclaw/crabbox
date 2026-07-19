@@ -93,7 +93,8 @@ usage summary's active count uses the same definition.
 CRABBOX_MAX_ACTIVE_LEASES            fleet-wide active lease cap
 CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER  per-owner active lease cap
 CRABBOX_MAX_ACTIVE_LEASES_PER_ORG    per-org active lease cap
-CRABBOX_CAPACITY_ADMIN_OWNERS        comma-separated owners with an elevated active lease cap
+CRABBOX_CAPACITY_ADMIN_OWNERS        comma-separated owners with an elevated active lease cap;
+                                      use github:<numeric-id> for GitHub users
 CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN
                                       per-owner active lease cap for capacity admins
 CRABBOX_MAX_MONTHLY_USD              fleet-wide monthly reserved-USD budget
@@ -111,7 +112,8 @@ the scope over budget is refused before it provisions.
 
 Leases are attributed to an owner and an org. The broker resolves them by token kind:
 
-- **Signed GitHub login token** — carries verified owner/org/login identity from the payload.
+- **Signed GitHub login token** — carries an immutable `github:<numeric-id>` owner plus
+  verified org and display login identity from the payload.
 - **Admin token** (`CRABBOX_ADMIN_TOKEN`) — owner is a verified Access JWT email if present,
   else the `X-Crabbox-Owner` header, else `unknown`; org is the `X-Crabbox-Org` header,
   else `CRABBOX_DEFAULT_ORG`, else `unknown`. The CLI sets `X-Crabbox-Owner` from

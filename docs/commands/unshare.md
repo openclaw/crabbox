@@ -11,7 +11,7 @@ session to change its sharing.
 ## Usage
 
 ```sh
-crabbox unshare --id swift-crab --user alice@example.com
+crabbox unshare --id swift-crab --user github:12345
 crabbox unshare --id swift-crab --org
 crabbox unshare --id swift-crab --all
 crabbox unshare swift-crab --all --json
@@ -26,8 +26,9 @@ command exits with a usage error.
 
 ## What each flag removes
 
-- `--user <email>` revokes one user's access. Repeat the flag to remove several
-  users in a single call. Emails are matched case-insensitively.
+- `--user <owner>` revokes one owner's access. Repeat the flag to remove several
+  users in a single call. Use `github:<numeric-id>` for GitHub users; values are
+  matched case-insensitively.
 - `--org` removes org-wide access, so the lease is no longer shared with everyone
   in the owning org.
 - `--all` clears every sharing rule (all users and any org grant) in one step.
@@ -42,7 +43,7 @@ lists the org grant followed by each remaining user:
 
 ```text
 org=off
-user=bob@example.com role=use
+user=github:67890 role=use
 ```
 
 `role` is `use` (run on the lease) or `manage` (run plus change sharing).
@@ -54,7 +55,7 @@ individual shares are left. Pass `--json` to emit the same state as a
 
 ```text
 --id <lease-id-or-slug>   Lease to modify (or pass as the first positional arg).
---user <email>            User to remove; repeatable.
+--user <owner>            Owner identity to remove; repeatable.
 --org                     Remove the org-wide grant.
 --all                     Remove every sharing rule.
 --json                    Print the resulting share state as JSON.
