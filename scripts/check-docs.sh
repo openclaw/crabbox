@@ -3,6 +3,7 @@ set -euo pipefail
 
 node scripts/check-command-docs.mjs
 node scripts/check-provider-matrix.mjs
+node scripts/check-agent-skills.mjs
 node scripts/check-docs-links.mjs
 node scripts/check-zed-extension.mjs
 node scripts/test-zed-extension-e2e.mjs

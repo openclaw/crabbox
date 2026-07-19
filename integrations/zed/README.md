@@ -8,7 +8,7 @@ It does **not** run Zed inside a Crabbox and does not use MCP. Every action invo
 
 ## What it provides
 
-When `.crabbox.yaml` or `.crabbox.yml` is active, Zed's task picker includes:
+When `crabbox.yaml` or `.crabbox.yaml` is active, Zed's task picker includes:
 
 - **Crabbox: Doctor** — validate configuration, credentials, and provider readiness.
 - **Crabbox: Spawn reusable box** — provision or claim a reusable execution environment with `crabbox warmup`.
@@ -38,7 +38,11 @@ crabbox init --detect
 
 ## Install from the Zed extension registry
 
-After the registry submission is accepted, open **zed: extensions**, search for **Crabbox**, and select **Install**. The registry entry points at the `integrations/zed` package in the Crabbox repository.
+No Crabbox submission exists in the Zed extension registry yet. After a
+submission is accepted, open **zed: extensions**, search for **Crabbox**, and
+select **Install**. The registry entry will point at the `integrations/zed`
+package in the Crabbox repository. Publication is tracked in
+https://github.com/openclaw/crabbox/issues/1157.
 
 Until then, install the exact package as a development extension:
 
@@ -76,7 +80,7 @@ Zed launches every task through the user's login shell. Direct task definitions 
 
 ## Registry publication
 
-Zed publishes extensions from `zed-industries/extensions`. Once this package is merged into Crabbox, the registry PR adds the repository URL to `.gitmodules`:
+Zed publishes extensions from `zed-industries/extensions`. The registry PR adds the Crabbox repository URL to `.gitmodules`:
 
 ```gitconfig
 [submodule "extensions/crabbox"]

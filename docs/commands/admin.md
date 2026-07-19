@@ -37,7 +37,7 @@ Flags:
 
 ```text
 --state <state>     filter by active, released, expired, or failed
---owner <email>     filter by owner email
+--owner <owner>     filter by owner identity
 --org <name>        filter by org
 --limit <n>         maximum leases (default 100)
 --json              print JSON
@@ -54,7 +54,7 @@ Flags:
 ```text
 --state <state>     filter by state (default expired)
 --provider <name>   provider to audit (default aws)
---owner <email>     filter by owner email
+--owner <owner>     filter by owner identity
 --org <name>        filter by org
 --limit <n>         maximum leases (default 100)
 --fail-on-live      exit non-zero when expired leases still have live cloud instances or audit errors

@@ -1252,15 +1252,15 @@ describe("coordinator auth", () => {
       env,
       allowGitHubMembership,
     );
-
-    expect(ownerAuth).toMatchObject({ admin: true, owner: "vincentkoc@ieee.org" });
-    expect(loginAuth).toMatchObject({ admin: true, login: "steipete" });
+    // Mutable email and login allowlists are legacy inputs and must no longer grant authority.
+    expect(ownerAuth).toMatchObject({ admin: false, owner: "vincentkoc@ieee.org" });
+    expect(loginAuth).toMatchObject({ admin: false, login: "steipete" });
     expect(
       requestWithAuthContext(
         new Request("https://example.test/v1/admin/leases"),
         ownerAuth!,
       ).headers.get("x-crabbox-admin"),
-    ).toBe("true");
+    ).toBe("false");
   });
 
   it("rejects signed user tokens with admin claims", async () => {

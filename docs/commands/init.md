@@ -22,9 +22,10 @@ crabbox init --workflow .github/workflows/crabbox-test.yml
 ```
 
 Each path is configurable with the `--config`, `--workflow`, and `--skill`
-flags. By default `init` refuses to overwrite an existing file: if any target
-path already exists it stops with an error and writes nothing further. Pass
-`--force` to regenerate and overwrite the files in place.
+flags. Repeat `--skill` to write identical skills for multiple client discovery
+paths. By default `init` preflights every destination and writes nothing when
+any target already exists. Pass `--force` to regenerate and overwrite files in
+place.
 
 ## `.crabbox.yaml`
 
@@ -93,15 +94,35 @@ works fine without it; hydration is optional.
 
 ## `.agents/skills/crabbox/SKILL.md`
 
-Repo-local agent instructions. The generated skill explains how an agent should
-operate Crabbox in this repo: warm a box early, reuse the returned slug for
-interactive checks while keeping the `cbx_` id in scripts/logs, run checks with
-`crabbox run --id <slug> -- <command>`, inspect with `crabbox ssh`, and stop with
-`crabbox stop <slug>` when finished. When `--detect` finds a check, the skill
-also points agents at `crabbox job run detected`.
+Repo-local agent instructions in the open
+[Agent Skills](https://agentskills.io/specification) format. The generated
+`SKILL.md` includes the required `name` and `description` frontmatter, then
+explains how an agent should operate Crabbox in this repo: warm a box early,
+reuse the returned slug for interactive checks while keeping the `cbx_` id in
+scripts/logs, run checks with `crabbox run --id <slug> -- <command>`, inspect
+with `crabbox ssh`, and stop with `crabbox stop <slug>` when finished. When
+`--detect` finds a check, the skill also points agents at
+`crabbox job run detected`.
 
 Edit this file to match how you want agents to operate in the repo. The skill is
-read by OpenClaw and similar agent runtimes that auto-discover `.agents/skills/`.
+available to clients that discover `.agents/skills/`. Skill content is
+portable, but discovery directories are client-owned. Repeat `--skill <path>`
+when a repository needs the shared path plus a client-specific location; for
+example:
+
+```sh
+crabbox init --detect \
+  --skill .agents/skills/crabbox/SKILL.md \
+  --skill .claude/skills/crabbox/SKILL.md
+```
+
+Supplying any `--skill` replaces the implicit default. Every destination must
+be repository-relative and end in `crabbox/SKILL.md`; Crabbox rejects other
+paths because the declared skill name must match its parent directory.
+
+See [AI Agents and Harnesses](../integrations/agents.md) for the boundary
+between a local agent skill, a one-shot repo harness, and a future long-running
+Station runtime.
 
 ## Flags
 
@@ -110,7 +131,7 @@ read by OpenClaw and similar agent runtimes that auto-discover `.agents/skills/`
 --detect            detect repo test commands and write a jobs.detected entry
 --config <path>     repo config path (default .crabbox.yaml)
 --workflow <path>   Actions workflow path (default .github/workflows/crabbox.yml)
---skill <path>      agent skill path (default .agents/skills/crabbox/SKILL.md)
+--skill <path>      agent skill path; repeatable (default .agents/skills/crabbox/SKILL.md)
 ```
 
 ## Re-running

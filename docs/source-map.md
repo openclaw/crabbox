@@ -48,6 +48,32 @@ Crabbox has three implementation surfaces:
   `docs/features/agent-runtime-bridge.md`; no generic harness HTTP/SSE bridge,
   sandbox-agent launcher, or `crabbox station` command is registered yet.
 
+## Integration Surfaces
+
+- Public integration catalog and authoring boundary: `docs/integrations`;
+  docs-site navigation registration: `scripts/build-docs-site.mjs`.
+- The catalog inventories Crabbox-hosted surfaces. Host-owned integrations are
+  versioned and inventoried in their host repositories rather than duplicated
+  in this source map.
+- Publishable generic Agent Skill: `skills/crabbox/SKILL.md`, with the
+  byte-identical repo-discovery projection at
+  `.agents/skills/crabbox/SKILL.md` and drift validation in
+  `scripts/check-agent-skills.mjs`. The docs builder publishes the same bytes
+  plus a SHA-256 digest at `/.well-known/agent-skills/` for domain discovery,
+  and advertises the artifact through `/.well-known/ai-catalog.json` for
+  Agentic Resource Discovery.
+- Generated repo-local Agent Skill: `internal/cli/init.go`, with onboarding
+  behavior in `docs/commands/init.md`.
+- Versioned editor handoff and foreground lease activity:
+  `internal/cli/open.go`, `docs/commands/open.md`.
+- Zed task/language package and validation: `integrations/zed`,
+  `scripts/check-zed-extension.mjs`, `scripts/test-zed-extension-e2e.mjs`.
+- Herdr package and CLI adapter: `plugins/herdr`,
+  `internal/cli/herdr_plugin.go`, `scripts/herdr-plugin.test.js`.
+- Long-running in-box agent harnesses remain contract-only under Station:
+  `docs/features/agent-runtime-bridge.md`, `docs/features/station-profiles.md`,
+  and the disabled primitives in `internal/station`.
+
 ## Leases, Slugs, Claims, And Expiry
 
 - Canonical lease IDs (`cbx_<12 hex>`) and per-lease SSH key paths: `internal/cli/lease.go`

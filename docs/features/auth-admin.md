@@ -11,7 +11,7 @@ privilege levels:
 
 | Credential | How it is obtained | Privilege |
 | --- | --- | --- |
-| **GitHub user token** | `crabbox login` (browser OAuth) | Own and shared leases/runs only |
+| **GitHub user token** | `crabbox login` (browser OAuth) | Own and shared leases/runs; optional immutable-owner admin grant |
 | **Shared bearer token** | `crabbox login --token-stdin` or `config set-broker --token-stdin` | All non-admin routes, acting as one shared identity |
 | **Admin token** | `config set-broker --admin-token-stdin` or `CRABBOX_COORDINATOR_ADMIN_TOKEN` | Fleet-wide admin routes |
 
@@ -28,18 +28,22 @@ allowed GitHub org** (`CRABBOX_GITHUB_ALLOWED_ORGS`, or the singular
 `CRABBOX_GITHUB_ALLOWED_ORG`) and, if any **allowed teams** are configured
 (`CRABBOX_GITHUB_ALLOWED_TEAMS` / `CRABBOX_GITHUB_ALLOWED_TEAM`), a member of one
 of them. The account must also expose a verified email through GitHub's
-`user:email` scope; the broker never uses a public profile or unverified email
-as the owner. On success the broker issues a signed user token (prefix `cbxu_`,
-HMAC-SHA256, default 180-day expiry) and the CLI stores it in the user config.
-The token carries the GitHub OAuth credential encrypted under the independent
-session secret. The broker revalidates current org/team membership on requests,
-caching successful checks for five minutes and failing closed when GitHub can no
-longer confirm membership. Tokens from older schemas are rejected, so users
-must log in again after upgrading the broker with this security fix.
+`user:email` scope as an eligibility check; ownership uses GitHub's immutable
+numeric account ID, never an email or login. On success the broker issues a
+signed user token (prefix `cbxu_`, HMAC-SHA256, default 180-day expiry) and the
+CLI stores it in the user config. The token carries the GitHub OAuth credential
+encrypted under the independent session secret. The broker revalidates that
+credential's account ID and current org/team membership on requests, caching
+successful checks for five minutes and failing closed when GitHub can no longer
+confirm identity or membership. Legacy email-owned sessions are rejected, so
+users must log in again after upgrading the broker with this security fix.
 
 Set `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` to tune the positive cache from 0
-to 3600 seconds. `CRABBOX_GITHUB_REVOKED_USERS` immediately denies listed GitHub
-logins or verified emails; use `login:` or `owner:` prefixes when needed.
+to 3600 seconds. `CRABBOX_GITHUB_REVOKED_USERS` immediately denies listed
+immutable `github:<numeric-id>` owners; an optional `owner:` prefix is accepted.
+An email, login, or other invalid selector makes GitHub login and existing
+GitHub sessions fail closed until an operator replaces it. This prevents a
+renamed or reassigned mutable identity from silently escaping an old revocation.
 
 ```sh
 crabbox login --url https://broker.example.com
@@ -51,8 +55,40 @@ crabbox login --url https://broker.example.com --provider aws # also set the def
 `login` reuses the broker URL already in config. After storing the token, the
 CLI calls `whoami` to confirm the credential works.
 
-GitHub user tokens can create and use **normal leases only**. They cannot reach
-admin routes, and the token payload can never carry an `admin` claim.
+GitHub user tokens create and use normal leases by default. The token payload
+can never carry an `admin` claim; deployments may grant admin at request time by
+listing immutable `github:<numeric-id>` values in
+`CRABBOX_GITHUB_ADMIN_OWNERS`.
+
+### Upgrading legacy email-owned resources
+
+The immutable-owner upgrade intentionally does not infer a GitHub account from
+an email address. Before deployment, replace email entries in
+`CRABBOX_GITHUB_REVOKED_USERS` with the affected account's
+`github:<numeric-id>` owner. Replace mutable GitHub admin grants with
+`CRABBOX_GITHUB_ADMIN_OWNERS` entries, and replace email values in
+`CRABBOX_CAPACITY_ADMIN_OWNERS` for GitHub users with their immutable owners.
+Shared-token capacity owners may retain their configured stable service owner.
+GitHub auth remains fail closed while an email or login revocation entry is
+present.
+
+Existing email-owned leases, runs, and explicit shares remain under their
+recorded owner for auditability; a new GitHub login does not inherit them even
+when the account presents the same verified email. For an active lease that a
+specific account must recover, an operator should authenticate with the admin
+token, inspect the legacy record, and explicitly grant `manage` access to that
+account's immutable owner:
+
+```sh
+CRABBOX_COORDINATOR_TOKEN="$CRABBOX_COORDINATOR_ADMIN_TOKEN" \
+  crabbox share --id cbx_000000000001 --user github:12345 --role manage
+```
+
+Replace legacy email entries in explicit share lists the same way. If the
+ownership itself must change, create a replacement lease under the new login
+and release the legacy lease after preserving any required artifacts. Do not
+bulk-map email owners to account IDs: a renamed or reassigned address is exactly
+the security boundary this upgrade protects.
 
 ## Shared and admin tokens (automation, operators)
 
@@ -88,7 +124,8 @@ the effective owner and org and re-injects them as trusted headers
 (`x-crabbox-owner`, `-org`, `-auth`, `-admin`, `-github-login`) before handling
 the request:
 
-- GitHub user token -> `owner`/`org`/`login` come from the signed token.
+- GitHub user token -> immutable `github:<numeric-id>` `owner` plus `org` and
+  display `login` come from the signed token.
 - Admin or shared token -> `owner` from `X-Crabbox-Owner` (CLI sends
   `CRABBOX_OWNER`, a Git email env var, or `git config user.email`) or, for the
   shared token, `CRABBOX_SHARED_OWNER`; `org` from `X-Crabbox-Org`
@@ -127,8 +164,8 @@ POST /v1/leases with hostId      admin token only
 /v1/admin/*                      admin token only
 ```
 
-A lease is **visible** to a caller who is the owner (matching owner email and
-org), an admin, or a share recipient. It is **manageable** by the owner, an
+A lease is **visible** to a caller who is the owner (matching immutable owner
+and org), an admin, or a share recipient. It is **manageable** by the owner, an
 admin, or a `manage` share recipient. Non-admin admin-route requests are
 rejected with `403 admin token required`.
 
@@ -151,11 +188,11 @@ recipients. Listing or changing the roster requires owner, admin, or `manage`
 access.
 
 ```sh
-crabbox share --id swift-crab --user alice@example.com           # default role: use
-crabbox share --id swift-crab --user alice@example.com --role manage
+crabbox share --id swift-crab --user github:12345                # default role: use
+crabbox share --id swift-crab --user github:12345 --role manage
 crabbox share --id swift-crab --org                              # share with the lease org
 crabbox share --id swift-crab --list                             # show current sharing
-crabbox unshare --id swift-crab --user alice@example.com
+crabbox unshare --id swift-crab --user github:12345
 crabbox unshare --id swift-crab --org
 crabbox unshare --id swift-crab --all
 ```

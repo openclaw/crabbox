@@ -149,7 +149,38 @@ the native `crabbox-apple-vm-helper` for the local Apple VZ provider.
 
 Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 
-### Herdr plugin
+### Integrations
+
+`crabbox init --detect` generates a repo-local Agent Skill for compatible
+coding agents. The [Zed package](integrations/zed/README.md) adds checked tasks
+and YAML support; a separate core command, `crabbox open --editor=zed`, provides
+the Zed Remote Projects handoff. No Zed registry submission exists yet; it is
+tracked in https://github.com/openclaw/crabbox/issues/1157. See the [integration
+catalog](docs/integrations/README.md) for current support and lifecycle
+boundaries.
+
+Existing repositories that only need agent discovery can install the generic
+Skill with GitHub CLI:
+
+```sh
+gh skill install openclaw/crabbox skills/crabbox \
+  --pin refs/heads/main --agent codex --scope project
+```
+
+Or use the cross-client Skills CLI:
+
+```sh
+npx skills add https://github.com/openclaw/crabbox --skill crabbox
+```
+
+Crabbox also publishes a digest-verified discovery index from its own domain:
+
+```sh
+npx skills add https://crabbox.sh --skill crabbox
+```
+
+Cross-vendor discovery services can index the same Skill through Crabbox's
+[draft-compatible AI Catalog](https://crabbox.sh/.well-known/ai-catalog.json).
 
 Herdr users can add Crabbox lease controls and repository workflows to the
 Herdr action palette. Use a Crabbox build that already contains this
@@ -158,6 +189,9 @@ integration; the plugin installation rejects older binaries:
 ```sh
 herdr plugin install openclaw/crabbox/plugins/herdr
 ```
+
+Direct installation is available now; Herdr marketplace indexing is tracked in
+https://github.com/openclaw/crabbox/issues/1156.
 
 The plugin provides a live boxes overlay plus actions for `warmup`, `prewarm`,
 `connect`, repository jobs, and `doctor`. It does not add lifecycle hooks or
@@ -586,6 +620,7 @@ path is documented in
 
 - **Get the model:** [How Crabbox Works](docs/how-it-works.md), [Architecture](docs/architecture.md), [Concepts](docs/concepts.md), [Orchestrator](docs/orchestrator.md)
 - **Use the CLI:** [CLI](docs/cli.md), [Commands](docs/commands/README.md), [Features](docs/features/README.md), [Configuration](docs/features/configuration.md)
+- **Integrate editors and agents:** [Integrations](docs/integrations/README.md), [Editors](docs/integrations/editors.md), [AI agents and harnesses](docs/integrations/agents.md)
 - **Choose a provider:** [Providers](docs/providers/README.md), [AWS](docs/providers/aws.md), [Azure](docs/providers/azure.md), [GCP](docs/providers/gcp.md), [Hetzner](docs/providers/hetzner.md), [DigitalOcean](docs/providers/digitalocean.md), [Linode](docs/providers/linode.md), [Hostinger](docs/providers/hostinger.md)
 - **Advanced features:** [Actions hydration](docs/features/actions-hydration.md), [Capsules](docs/features/capsules.md), [Checkpoints](docs/features/checkpoints.md), [Jobs](docs/features/jobs.md), [Pond](docs/features/pond.md)
 - **Interactive QA:** [Interactive Desktop and VNC](docs/features/interactive-desktop-vnc.md), [Artifacts](docs/features/artifacts.md), [Portal](docs/features/portal.md)

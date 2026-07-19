@@ -439,7 +439,7 @@ CRABBOX_SESSION_SECRET            required for browser login; must differ from C
 CRABBOX_CODE_ORIGIN_TEMPLATE      required for browser Code; per-lease HTTPS origin template
 CRABBOX_GITHUB_ALLOWED_ORG or CRABBOX_GITHUB_ALLOWED_ORGS
 CRABBOX_GITHUB_ALLOWED_TEAMS      optional
-CRABBOX_GITHUB_REVOKED_USERS      optional narrow login/email revocation list
+CRABBOX_GITHUB_REVOKED_USERS      optional github:<numeric-id> revocation list; mutable entries fail GitHub auth closed
 CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS optional; default 300, range 0-3600
 CRABBOX_ACCESS_TEAM_DOMAIN        required for Access JWT verification
 CRABBOX_ACCESS_AUD                required for Access JWT verification
