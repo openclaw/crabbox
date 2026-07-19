@@ -65,6 +65,14 @@ run_capture() {
   printf '%s\n' "$output"
 }
 
+file_mode() {
+  if stat -f '%Lp' "$1" >/dev/null 2>&1; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+
 remove_authorized_entry() {
   if [ -n "$authorized_entry" ] && [ -f "$authorized_keys" ]; then
     grep -vF -- "$authorized_entry" "$authorized_keys" >"$authorized_keys.crabbox-smoke" || true
@@ -150,10 +158,18 @@ fi
 printf 'crabbox-ssh-cp-roundtrip\n' >"$work_dir/cp upload.txt"
 RSYNC_OLD_ARGS=1 RSYNC_PROTECT_ARGS=1 run_capture "$bin cp upload over resolved SSH" "$bin" cp --provider ssh --id "$slug" \
   "$work_dir/cp upload.txt" "SANDBOX:$work_root/cp remote[1].txt" >/dev/null
-RSYNC_OLD_ARGS=1 RSYNC_PROTECT_ARGS=1 run_capture "$bin cp download over resolved SSH" "$bin" cp --provider ssh --id "$slug" \
-  "SANDBOX:$work_root/cp remote[1].txt" "$work_dir/cp download.txt" >/dev/null
+chmod 0711 "$work_root/cp remote[1].txt"
+(
+  umask 022
+  RSYNC_OLD_ARGS=1 RSYNC_PROTECT_ARGS=1 run_capture "$bin cp download over resolved SSH" "$bin" cp --provider ssh --id "$slug" \
+    "SANDBOX:$work_root/cp remote[1].txt" "$work_dir/cp download.txt"
+) >/dev/null
 if ! cmp -s "$work_dir/cp upload.txt" "$work_dir/cp download.txt"; then
   classify_validation_failure "$bin cp --provider ssh --id $slug" 1 "SSH cp roundtrip content mismatch"
+  exit 1
+fi
+if [ "$(file_mode "$work_dir/cp download.txt")" != "644" ]; then
+  classify_validation_failure "$bin cp --provider ssh --id $slug" 1 "SSH cp download did not normalize an unusual remote file mode to 0644"
   exit 1
 fi
 

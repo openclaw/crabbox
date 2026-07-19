@@ -472,7 +472,7 @@ func TestProxyJumpCommandPreservesMultiHopChainAndOwnership(t *testing.T) {
 	if err := os.WriteFile(userConfig, []byte("Host *\n  ProxyUseFdpass yes\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	path, err := writeSSHTransportJumpConfig(dir, userConfig, "jump-a,jump-b,jump-c")
+	path, err := writeSSHTransportJumpConfig(dir, userConfig, "jump-a,jump-b,jump-c", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,9 +508,27 @@ func TestProxyJumpCommandPreservesMultiHopChainAndOwnership(t *testing.T) {
 	}
 }
 
+func TestSSHTransportConfigsHonorRemoteCommandCapability(t *testing.T) {
+	legacyJump := renderSSHTransportJumpConfig("/tmp/user-config", "", false)
+	if strings.Contains(legacyJump, "RemoteCommand") {
+		t.Fatalf("legacy jump config contains unsupported RemoteCommand:\n%s", legacyJump)
+	}
+	modernJump := renderSSHTransportJumpConfig("/tmp/user-config", "", true)
+	if !strings.Contains(modernJump, "RemoteCommand none") {
+		t.Fatalf("modern jump config did not neutralize inherited RemoteCommand:\n%s", modernJump)
+	}
+	finalConfig, err := renderSSHTransportConfig(SSHTarget{User: "alice", Host: "example.test", Port: "22"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(finalConfig, "RemoteCommand") {
+		t.Fatalf("owned final config contains an unnecessary version-specific RemoteCommand:\n%s", finalConfig)
+	}
+}
+
 func TestProxyJumpCommandPreservesFinalHopUserAndPort(t *testing.T) {
 	dir := t.TempDir()
-	path, err := writeSSHTransportJumpConfig(dir, "", "jump-a,alice@jump.example.test:2222")
+	path, err := writeSSHTransportJumpConfig(dir, "", "jump-a,alice@jump.example.test:2222", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +553,7 @@ func TestProxyJumpConfigChainGrowsLinearly(t *testing.T) {
 		hops[index] = fmt.Sprintf("jump-%d.example.test", index)
 	}
 	dir := t.TempDir()
-	path, err := writeSSHTransportJumpConfig(dir, "", strings.Join(hops, ","))
+	path, err := writeSSHTransportJumpConfig(dir, "", strings.Join(hops, ","), true)
 	if err != nil {
 		t.Fatal(err)
 	}

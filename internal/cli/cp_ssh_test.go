@@ -41,6 +41,14 @@ func TestResolvedSSHCopyArgs(t *testing.T) {
 	if containsString(download, "--copy-links") {
 		t.Fatalf("download should not apply host-side -L: %#v", download)
 	}
+	for _, option := range []string{"-rtz", "--no-links", "--no-devices", "--no-specials", "--no-owner", "--no-group", "--no-perms", "--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r"} {
+		if !containsString(download, option) {
+			t.Fatalf("safe download args missing %s: %#v", option, download)
+		}
+	}
+	if containsString(download, "-az") {
+		t.Fatalf("download must not inherit archive receive semantics: %#v", download)
+	}
 }
 
 func TestResolvedSSHCopyArgsEscapesRemotePatterns(t *testing.T) {

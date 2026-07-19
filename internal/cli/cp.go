@@ -316,6 +316,12 @@ func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, ds
 		return nil, exit(2, "remote copy paths must not contain control characters")
 	}
 	args := []string{"-az", "--no-old-args"}
+	if srcRemote {
+		// A lease is outside the host trust boundary. Preserve regular file and
+		// directory contents plus timestamps, but never materialize sender-owned
+		// links, special files, ownership, groups, or permission bits locally.
+		args = []string{"-rtz", "--no-links", "--no-devices", "--no-specials", "--no-owner", "--no-group", "--no-perms", "--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r", "--no-old-args"}
+	}
 	if isWindowsWSL2Target(target) {
 		args = append(args, "--secluded-args")
 	} else {

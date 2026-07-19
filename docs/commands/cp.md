@@ -58,7 +58,12 @@ the full transfer and removes it after the child exits.
 
 SSH fallback requires rsync on both sides. The local client must be rsync 3.4.3
 or newer; Crabbox rejects older clients before connecting because known
-sender/receiver vulnerabilities cross the lease trust boundary. Native Windows
+sender/receiver vulnerabilities cross the lease trust boundary.
+Downloads preserve regular files, directories, and timestamps, but do not
+materialize lease-provided symlinks or special files and do not apply remote
+ownership or group metadata to the host. New local files and directories use
+normalized non-executable modes (`0644` and `0755`, subject to the host umask)
+instead of lease-provided permission bits. Native Windows
 SSH targets use the archive sync path and currently require a provider-native
 copy backend; WSL2 targets use the SSH rsync fallback after Crabbox verifies
 that the remote rsync supports secluded arguments.

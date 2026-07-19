@@ -23,6 +23,11 @@ Transfers require local rsync 3.4.3 or newer. Crabbox rejects older clients
 before connecting because known sender and receiver vulnerabilities cross the
 lease trust boundary.
 
+Downloads accept regular files and directories, not lease-provided symlinks or
+special files. Ownership and group metadata are discarded, and newly created
+host files and directories use normalized `0644`/`0755` modes subject to the
+host umask rather than lease-provided permission bits.
+
 POSIX and WSL2 SSH targets use this path. Native Windows sync is archive-based,
 not rsync-based, so native Windows currently needs a provider-native copy
 backend. WSL2 copies probe the remote rsync for secluded-argument support and

@@ -58,7 +58,7 @@ func newSSHTransportSession(ctx context.Context, target SSHTarget, localForward 
 		}
 		route.proxyJump = expandSSHProxyJumpTokens(route.proxyJump, target.Host, hostName, target.User, target.Port)
 		route.proxyJumpExpanded = true
-		route.jumpConfigPath, err = writeSSHTransportJumpConfig(dir, route.userConfigPath, route.proxyJump)
+		route.jumpConfigPath, err = writeSSHTransportJumpConfig(dir, route.userConfigPath, route.proxyJump, route.capabilities.remoteCommand)
 		if err != nil {
 			return fail(err)
 		}
@@ -314,6 +314,7 @@ type sshTransportConfigRoute struct {
 	userConfigPath       string
 	jumpConfigPath       string
 	userPercentExpansion bool
+	capabilities         sshTransportRouteCapabilities
 }
 
 type sshTransportRouteCapabilities struct {
@@ -374,6 +375,7 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 		return sshTransportConfigRoute{}, fmt.Errorf("resolve OpenSSH route for %s: %w: %s", target.Host, err, diagnostic)
 	}
 	route := parseSSHTransportConfigRoute(stdout.String(), userConfigPath)
+	route.capabilities = capabilities
 	if target.Key == "" {
 		route.identityFiles, err = resolveSSHTransportAuthenticationPaths(ctx, target, localForward, capabilities, seedPath, route.identityFiles)
 		if err != nil {
@@ -624,7 +626,7 @@ func renderSSHTransportRouteSeed(target SSHTarget, userConfigPath string, userPe
 	return seed.String(), nil
 }
 
-func writeSSHTransportJumpConfig(dir, userConfigPath, proxyJump string) (string, error) {
+func writeSSHTransportJumpConfig(dir, userConfigPath, proxyJump string, remoteCommandSupported bool) (string, error) {
 	if err := validateSSHTransportLiteralValue("config path", userConfigPath); err != nil {
 		return "", err
 	}
@@ -640,7 +642,7 @@ func writeSSHTransportJumpConfig(dir, userConfigPath, proxyJump string) (string,
 		if previousPath != "" {
 			proxyCommand = proxyJumpDirectCommand(previousPath, hops[index-1])
 		}
-		config := renderSSHTransportJumpConfig(userConfigPath, proxyCommand)
+		config := renderSSHTransportJumpConfig(userConfigPath, proxyCommand, remoteCommandSupported)
 		if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 			return "", fmt.Errorf("write private SSH jump config: %w", err)
 		}
@@ -652,7 +654,7 @@ func writeSSHTransportJumpConfig(dir, userConfigPath, proxyJump string) (string,
 	return previousPath, nil
 }
 
-func renderSSHTransportJumpConfig(userConfigPath, proxyCommand string) string {
+func renderSSHTransportJumpConfig(userConfigPath, proxyCommand string, remoteCommandSupported bool) string {
 	var config strings.Builder
 	config.WriteString("Host *\n")
 	config.WriteString("  ClearAllForwardings yes\n")
@@ -660,7 +662,9 @@ func renderSSHTransportJumpConfig(userConfigPath, proxyCommand string) string {
 	config.WriteString("  ForwardX11 no\n")
 	config.WriteString("  ForwardX11Trusted no\n")
 	config.WriteString("  RequestTTY no\n")
-	config.WriteString("  RemoteCommand none\n")
+	if remoteCommandSupported {
+		config.WriteString("  RemoteCommand none\n")
+	}
 	config.WriteString("  PermitLocalCommand no\n")
 	config.WriteString("  BatchMode yes\n")
 	config.WriteString("  ControlMaster no\n")
@@ -880,7 +884,6 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 	b.WriteString("  ForwardX11 no\n")
 	b.WriteString("  ForwardX11Trusted no\n")
 	b.WriteString("  RequestTTY no\n")
-	b.WriteString("  RemoteCommand none\n")
 	b.WriteString("  ConnectTimeout 10\n")
 	b.WriteString("  ConnectionAttempts 1\n")
 	b.WriteString("  ServerAliveInterval 15\n")
