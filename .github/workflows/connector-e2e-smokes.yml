@@ -112,6 +112,33 @@ jobs:
         if: matrix.name == 'local-container'
         run: sudo apt-get update && sudo apt-get install -y ripgrep
 
+      - name: Install security-current rsync
+        if: matrix.name == 'ssh-localhost'
+        env:
+          RSYNC_VERSION: 3.4.4
+          RSYNC_SHA256: bd88cf82fa653da32314fb229136407c5c90f80d1758d8f4b091767877d8fa96
+        run: |
+          archive="$RUNNER_TEMP/rsync-$RSYNC_VERSION.tar.gz"
+          prefix="$RUNNER_TEMP/rsync-install"
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            "https://download.samba.org/pub/rsync/src/rsync-$RSYNC_VERSION.tar.gz"
+          printf '%s  %s\n' "$RSYNC_SHA256" "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/rsync-$RSYNC_VERSION"
+          ./configure \
+            --prefix="$prefix" \
+            --disable-openssl \
+            --disable-xxhash \
+            --disable-zstd \
+            --disable-lz4 \
+            --disable-iconv \
+            --disable-acl-support \
+            --disable-xattr-support
+          make -j2
+          make install
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+
       - name: Build CLI
         if: matrix.build-cli == true
         run: go build -trimpath -o bin/crabbox ./cmd/crabbox

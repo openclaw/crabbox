@@ -71,13 +71,14 @@ See [warmup](commands/warmup.md), [prewarm](commands/prewarm.md),
 crabbox sync-plan [--limit <n>]              preview local sync manifest size hotspots
 crabbox shard --from <checkpoint-id> --count <n> -- <command...>
                                                 fork a checkpoint into parallel test shards
-crabbox cp --id <id> <src> SANDBOX:<dst>     copy files between host and a delegated sandbox
+crabbox cp --id <id> <src> SANDBOX:<dst>     copy files between host and a lease
+crabbox tunnel --id <id> [--local-port N] N  forward remote loopback port N over resolved SSH
 crabbox job list                              list repo-local configured jobs
 crabbox job run <name>                        run a configured job
 ```
 
 See [sync-plan](commands/sync-plan.md), [shard](commands/shard.md),
-[cp](commands/cp.md), [job](commands/job.md).
+[cp](commands/cp.md), [tunnel](commands/tunnel.md), [job](commands/job.md).
 
 ### Observability
 

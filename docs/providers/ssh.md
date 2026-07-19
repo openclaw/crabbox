@@ -182,6 +182,8 @@ path.
 | --- | --- |
 | SSH | yes |
 | Crabbox sync | yes |
+| `cp` | yes on POSIX and WSL2 targets (rsync over resolved SSH) |
+| `tunnel` | yes (local and remote loopback only) |
 | Desktop / browser / code | host-dependent (requires the tooling installed on the host) |
 | Actions hydration | Linux hosts only |
 | Tailscale | use the host's existing tailnet address or MagicDNS name |
@@ -202,3 +204,4 @@ path.
 - [Provider backends](../provider-backends.md)
 - [Sync](../features/sync.md)
 - [SSH keys](../features/ssh-keys.md)
+- [SSH lease transport](../features/ssh-transport.md)

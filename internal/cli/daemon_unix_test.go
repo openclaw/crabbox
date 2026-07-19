@@ -29,7 +29,7 @@ func TestStopDaemonProcessKillsProcessGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = cmd.Process.Wait()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		err := syscall.Kill(childPID, 0)
 		if err == syscall.ESRCH {

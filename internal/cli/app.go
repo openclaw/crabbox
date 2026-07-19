@@ -121,6 +121,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.ports(ctx, helpArgs), true
 	case "cp":
 		return a.copyCommand(ctx, helpArgs), true
+	case "tunnel":
+		return a.tunnel(ctx, helpArgs), true
 	case "vnc":
 		return a.vnc(ctx, helpArgs), true
 	case "webvnc":
@@ -219,7 +221,8 @@ Commands:
   connect     Open an interactive SSH session to a lease
   open        Prepare an editor handoff for a lease
   ports       Publish, list, or unpublish provider-native ports
-  cp          Copy files between host and a delegated sandbox
+  cp          Copy files between the host and a lease
+  tunnel      Forward a lease loopback port to this machine
   vnc         Print or open VNC connection details for a desktop lease
   webvnc      Open a desktop lease or local VNC tunnel in a browser
   code        Bridge a code lease into the authenticated web portal
@@ -250,6 +253,7 @@ Common Flows:
   crabbox open --editor=zed --id blue-lobster
   crabbox ports --id blue-lobster --publish 8080
   crabbox cp --id blue-lobster ./coverage.xml SANDBOX:/tmp/coverage.xml
+  crabbox tunnel --id blue-lobster 3000
   crabbox vnc --id blue-lobster --open
   crabbox desktop launch --id blue-lobster --browser --url https://example.com --webvnc --open
   crabbox desktop proof --id blue-lobster --output artifacts/blue-lobster-proof -- ./scripts/visual-smoke.sh
