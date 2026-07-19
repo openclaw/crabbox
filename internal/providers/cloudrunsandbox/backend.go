@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -234,7 +235,7 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 		if claim.Provider != providerName || !strings.HasPrefix(claim.LeaseID, leasePrefix) {
 			continue
 		}
-		if claim.ProviderScope != "" && claim.ProviderScope != scope {
+		if claim.ProviderScope != scope {
 			continue
 		}
 		sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
@@ -351,6 +352,9 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
+	// Snapshot candidates before any cleanup mutation. A concurrent reuse updates
+	// the claim before touching the sandbox, and the guarded destroy below must see
+	// that update rather than deleting a newly reclaimed sandbox from a stale view.
 	claims, err := listCloudRunSandboxLeaseClaims()
 	if err != nil {
 		return err
@@ -361,7 +365,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if claim.Provider != providerName {
 			continue
 		}
-		if claim.ProviderScope != "" && claim.ProviderScope != scope {
+		if claim.ProviderScope != scope {
 			continue
 		}
 		checked++
@@ -375,14 +379,26 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
+			if err := verifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+				changed, inspectErr := claimChangedSinceSnapshot(claim)
+				if inspectErr != nil {
+					return fmt.Errorf("inspect cloud-run-sandbox claim after cleanup guard failed: %v: %w", err, inspectErr)
+				}
+				if changed {
+					fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=changed-during-cleanup err=%v\n", sandboxID, claim.LeaseID, err)
+					continue
+				}
+				return err
+			}
 			fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
 			continue
 		}
-		if err := transport.Destroy(ctx, sandboxID); err != nil && !isNotFoundDetail(err.Error()) {
-			fmt.Fprintf(b.rt.Stderr, "warning: destroy sandbox=%s failed: %v\n", sandboxID, err)
-		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		wasRemoved, err := b.destroyClaimedSandboxIfUnchanged(ctx, transport, sandboxID, claim)
+		if err != nil {
 			return err
+		}
+		if !wasRemoved {
+			continue
 		}
 		fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
 		removed++
@@ -392,6 +408,51 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
 	}
 	return nil
+}
+
+func (b *backend) destroyClaimedSandboxIfUnchanged(ctx context.Context, transport sandboxTransport, sandboxID string, claim LeaseClaim) (bool, error) {
+	cleanupStarted := false
+	var destroyErr error
+	cleanupSandbox := func() error {
+		cleanupStarted = true
+		destroyErr = transport.Destroy(ctx, sandboxID)
+		if destroyErr != nil && isNotFoundDetail(destroyErr.Error()) {
+			destroyErr = nil
+		}
+		return destroyErr
+	}
+	// Hold the claim lock across the final comparison and remote destroy. This
+	// closes the compare/destroy race while removing the claim only after a
+	// confirmed destroy (or confirmed absence), so failed cleanup stays tracked.
+	if err := removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, cleanupSandbox); err != nil {
+		if destroyErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: destroy sandbox=%s failed; claim retained: %v\n", sandboxID, err)
+			return false, nil
+		}
+		if cleanupStarted {
+			// The remote destroy succeeded, so this is a local claim-removal or
+			// durability failure and must remain visible to cleanup automation.
+			return false, err
+		}
+		changed, inspectErr := claimChangedSinceSnapshot(claim)
+		if inspectErr != nil {
+			return false, fmt.Errorf("inspect cloud-run-sandbox claim after cleanup guard failed: %v: %w", err, inspectErr)
+		}
+		if changed {
+			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=changed-during-cleanup err=%v\n", sandboxID, claim.LeaseID, err)
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func claimChangedSinceSnapshot(expected LeaseClaim) (bool, error) {
+	current, exists, err := readLeaseClaimWithPresence(expected.LeaseID)
+	if err != nil {
+		return false, err
+	}
+	return !exists || !reflect.DeepEqual(current, expected), nil
 }
 
 func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
@@ -450,7 +511,12 @@ func (b *backend) createSandbox(ctx context.Context, transport sandboxTransport,
 		Rootfs:      b.cfg.CloudRunSandbox.Rootfs,
 		Workdir:     workdir,
 	}); err != nil {
-		return "", "", "", err
+		// Creation is not transactional: a timeout or lost response can arrive
+		// after the deterministically named sandbox was created. Keep the exact,
+		// scoped claim so stop/cleanup can recover it instead of leaving untracked
+		// billable infrastructure.
+		claimed = false
+		return "", "", "", fmt.Errorf("cloud-run-sandbox create remains indeterminate; recovery claim retained lease=%s: %w", leaseID, err)
 	}
 	claimed = false
 	return leaseID, sandboxID, slug, nil
@@ -468,11 +534,11 @@ func (b *backend) resolveLeaseID(id, repoRoot string, reclaim bool) (string, str
 	if claim, ok, err := resolveLeaseClaim(id); err != nil {
 		return "", "", "", err
 	} else if ok && claim.Provider == providerName {
-		if claim.ProviderScope != "" && claim.ProviderScope != scope {
+		if claim.ProviderScope != scope {
 			return "", "", "", exit(4, "cloud-run-sandbox lease %q belongs to a different gateway/cli scope", id)
 		}
 		if repoRoot != "" {
-			if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, scope, claim.Pond, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
+			if err := claimLeaseForRepoProviderScopePondIfUnchanged(claim.LeaseID, claim.Slug, providerName, scope, claim.Pond, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, claim); err != nil {
 				return "", "", "", err
 			}
 		}
@@ -490,11 +556,11 @@ func (b *backend) resolveLeaseID(id, repoRoot string, reclaim bool) (string, str
 	if claim.Provider != providerName {
 		return "", "", "", exit(4, "cloud-run-sandbox sandbox %q is not claimed by Crabbox", id)
 	}
-	if claim.ProviderScope != "" && claim.ProviderScope != scope {
+	if claim.ProviderScope != scope {
 		return "", "", "", exit(4, "cloud-run-sandbox lease %q belongs to a different gateway/cli scope", id)
 	}
 	if repoRoot != "" {
-		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, scope, claim.Pond, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
+		if err := claimLeaseForRepoProviderScopePondIfUnchanged(claim.LeaseID, claim.Slug, providerName, scope, claim.Pond, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, claim); err != nil {
 			return "", "", "", err
 		}
 	}

@@ -83,12 +83,21 @@ func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, 
 	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim) error {
+	_, err := core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, expected, true)
+	return err
+}
+
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
 
 func readLeaseClaim(leaseID string) (core.LeaseClaim, error) {
 	return core.ReadLeaseClaim(leaseID)
+}
+
+func readLeaseClaimWithPresence(leaseID string) (core.LeaseClaim, bool, error) {
+	return core.ReadLeaseClaimWithPresence(leaseID)
 }
 
 func listCloudRunSandboxLeaseClaims() ([]core.LeaseClaim, error) {
@@ -99,8 +108,12 @@ func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
 }
 
-func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
-	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
+func verifyLeaseClaimUnchanged(leaseID string, expected LeaseClaim) error {
+	return core.VerifyLeaseClaimUnchanged(leaseID, expected)
+}
+
+func removeLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
