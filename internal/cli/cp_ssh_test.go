@@ -3,8 +3,10 @@ package cli
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -17,7 +19,7 @@ func TestResolvedSSHCopyArgs(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = session.Close() })
 
-	upload, err := resolvedSSHCopyArgs(session, SSHTarget{}, "./source dir", "SANDBOX:/tmp/destination file", true)
+	upload, err := resolvedSSHCopyArgs(session, SSHTarget{}, "./source dir", "SANDBOX:/tmp/destination file", true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +32,7 @@ func TestResolvedSSHCopyArgs(t *testing.T) {
 			t.Fatalf("safe rsync args missing %s: %#v", option, upload)
 		}
 	}
-	download, err := resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX:/tmp/result.log", "./result.log", true)
+	download, err := resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX:/tmp/result.log", "./result.log", true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +55,7 @@ func TestResolvedSSHCopyArgs(t *testing.T) {
 
 func TestResolvedSSHCopyArgsEscapesRemotePatterns(t *testing.T) {
 	session := &sshTransportSession{configPath: "/private/config"}
-	args, err := resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX:/tmp/result[1]*?.json", "result.json", false)
+	args, err := resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX:/tmp/result[1]*?.json", "result.json", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,9 +64,37 @@ func TestResolvedSSHCopyArgsEscapesRemotePatterns(t *testing.T) {
 	}
 }
 
+func TestResolvedSSHCopyArgsSecludedTransport(t *testing.T) {
+	session := &sshTransportSession{configPath: "/private/config"}
+	download, err := resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX:/tmp/result[1]*?.json", "./output", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(download, "--secluded-args") || containsString(download, "--no-secluded-args") {
+		t.Fatalf("secluded download args=%#v", download)
+	}
+	// The server-side globbing of secluded args still honors backslash
+	// escapes, so the source keeps the literal-wildcard escaping.
+	if got := download[len(download)-2]; got != sshTransportHostAlias+`:/tmp/result\[1]\*\?.json` {
+		t.Fatalf("secluded remote source=%q", got)
+	}
+	if containsString(download, "--rsync-path") {
+		t.Fatalf("non-WSL2 secluded args must not override --rsync-path: %#v", download)
+	}
+	upload, err := resolvedSSHCopyArgs(session, SSHTarget{}, "./input", "SANDBOX:/tmp/result[1]*?.json", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Secluded destinations bypass the remote shell entirely, so they stay
+	// unescaped exactly like the WSL2 secluded path.
+	if got := upload[len(upload)-1]; got != sshTransportHostAlias+`:/tmp/result[1]*?.json` {
+		t.Fatalf("secluded destination operand=%q", got)
+	}
+}
+
 func TestResolvedSSHCopyArgsKeepsLeadingColonInRemotePath(t *testing.T) {
 	session := &sshTransportSession{configPath: "/private/config"}
-	args, err := resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX::result", "result", false)
+	args, err := resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX::result", "result", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +105,7 @@ func TestResolvedSSHCopyArgsKeepsLeadingColonInRemotePath(t *testing.T) {
 
 func TestResolvedSSHCopyArgsRejectsRemoteControlCharacters(t *testing.T) {
 	session := &sshTransportSession{configPath: "/private/config"}
-	_, err := resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX:/tmp/result\nnext", "result", false)
+	_, err := resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX:/tmp/result\nnext", "result", false, false)
 	if err == nil || !strings.Contains(err.Error(), "control characters") {
 		t.Fatalf("err=%v", err)
 	}
@@ -98,7 +128,7 @@ func TestRsyncRemoteCopyPathPreservesLiteralBackslash(t *testing.T) {
 
 func TestResolvedSSHCopyArgsSelectsWSLRemoteRsync(t *testing.T) {
 	session := &sshTransportSession{configPath: "/private/config"}
-	args, err := resolvedSSHCopyArgs(session, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "./input", "SANDBOX:/tmp/input", false)
+	args, err := resolvedSSHCopyArgs(session, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "./input", "SANDBOX:/tmp/input", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,14 +139,14 @@ func TestResolvedSSHCopyArgsSelectsWSLRemoteRsync(t *testing.T) {
 	if !containsString(args, "--secluded-args") || containsString(args, "--no-secluded-args") {
 		t.Fatalf("WSL2 rsync args=%#v", args)
 	}
-	uploadPatternArgs, err := resolvedSSHCopyArgs(session, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "./input", "SANDBOX:/tmp/result[1]*?.json", false)
+	uploadPatternArgs, err := resolvedSSHCopyArgs(session, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "./input", "SANDBOX:/tmp/result[1]*?.json", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := uploadPatternArgs[len(uploadPatternArgs)-1]; got != sshTransportHostAlias+`:/tmp/result[1]*?.json` {
 		t.Fatalf("WSL2 destination operand=%q", got)
 	}
-	patternArgs, err := resolvedSSHCopyArgs(session, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "SANDBOX:/tmp/result[1]*?.json", "./output", false)
+	patternArgs, err := resolvedSSHCopyArgs(session, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "SANDBOX:/tmp/result[1]*?.json", "./output", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +180,7 @@ func TestResolvedSSHCopyFallsBackFromUnsafeWSLRsync(t *testing.T) {
 
 func TestResolvedSSHCopyArgsTreatsColonPathAsLocal(t *testing.T) {
 	session := &sshTransportSession{configPath: "/private/config"}
-	args, err := resolvedSSHCopyArgs(session, SSHTarget{}, "report:final", "SANDBOX:/tmp/report", false)
+	args, err := resolvedSSHCopyArgs(session, SSHTarget{}, "report:final", "SANDBOX:/tmp/report", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +221,7 @@ printf 'opaque-user-value@example.test: Permission denied\n' >&2
 	if err := os.WriteFile(rsyncPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	installFakeSecludedArgsProbeSSH(t, dir, 1)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_TEST_RSYNC_ARGS", capture)
 	t.Setenv("HOME", t.TempDir())
@@ -210,8 +241,68 @@ printf 'opaque-user-value@example.test: Permission denied\n' >&2
 	if !strings.Contains(got, sshTransportHostAlias+":/tmp/input.txt") {
 		t.Fatalf("rsync argv=%q", got)
 	}
+	if !strings.Contains(got, "--no-secluded-args") {
+		t.Fatalf("probe failure must fall back to shell-transported args: %q", got)
+	}
 	if strings.Contains(stderr.String(), target.User) || !strings.Contains(stderr.String(), diagnosticRedaction) {
 		t.Fatalf("SSH diagnostics were not redacted: %q", stderr.String())
+	}
+}
+
+// installFakeSecludedArgsProbeSSH writes an ssh shim into dir that answers the
+// secluded-args capability probe with probeExit and delegates every other
+// invocation (config resolution, feature probes, the transfer itself) to the
+// real ssh binary so the transport session behaves normally.
+func installFakeSecludedArgsProbeSSH(t *testing.T, dir string, probeExit int) {
+	t.Helper()
+	realSSH, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+set -eu
+case " $* " in
+  *" rsync --protect-args --version "*) exit ` + strconv.Itoa(probeExit) + ` ;;
+esac
+exec "` + realSSH + `" "$@"
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCopyOverResolvedSSHPrefersSecludedArgsWhenRemoteSupportsThem(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX fake rsync helper")
+	}
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "args")
+	rsyncPath := filepath.Join(dir, "rsync")
+	script := `#!/bin/sh
+set -eu
+case " $* " in
+  *" --version "*) printf 'rsync  version 3.4.4  protocol version 32\n'; exit 0 ;;
+esac
+printf '%s\n' "$@" > "$CRABBOX_TEST_RSYNC_ARGS"
+`
+	if err := os.WriteFile(rsyncPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	installFakeSecludedArgsProbeSSH(t, dir, 0)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TEST_RSYNC_ARGS", capture)
+	t.Setenv("HOME", t.TempDir())
+	target := SSHTarget{User: "alice", Host: "example.test", Port: "22"}
+	if err := copyOverResolvedSSH(t.Context(), target, "./input.txt", "SANDBOX:/tmp/input.txt", false, os.Stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "--secluded-args") || strings.Contains(got, "--no-secluded-args") {
+		t.Fatalf("supported secluded args were not preferred: %q", got)
 	}
 }
 

@@ -104,15 +104,29 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 		}
 		return exit(2, "SSH cp requires rsync 3.4.3 or newer for secure transfers; found %s", version)
 	}
-	if isWindowsWSL2Target(target) {
+	// Prefer secluded arguments whenever the remote rsync supports them: the
+	// paths then travel over the rsync protocol stream instead of the remote
+	// shell command line. Shell-transported filename args are where rsync
+	// clients apply wildcard escaping, and rsync 3.4.4's safe_arg() leaves one
+	// uninitialized heap byte after a backslash-escaped wildcard (our escaped
+	// "\[" and friends), intermittently corrupting the remote path. WSL2
+	// targets still hard-require secluded support; other targets fall back to
+	// shell-transported args so remotes without secluded support (for example
+	// macOS openrsync) keep working.
+	secludedArgs := isWindowsWSL2Target(target)
+	if secludedArgs {
 		if probeErr := probeResolvedSSHRemoteSecludedArgs(ctx, session, target, wslExe); probeErr != nil {
 			if ctxErr := context.Cause(ctx); ctxErr != nil {
 				return ctxErr
 			}
 			return exit(2, "SSH cp to WSL2 requires remote rsync support for secluded arguments")
 		}
+	} else if probeErr := probeResolvedSSHRemoteSecludedArgs(ctx, session, target, wslExe); probeErr == nil {
+		secludedArgs = true
+	} else if ctxErr := context.Cause(ctx); ctxErr != nil {
+		return ctxErr
 	}
-	args, err := resolvedSSHCopyArgs(session, target, src, dst, followLink)
+	args, err := resolvedSSHCopyArgs(session, target, src, dst, followLink, secludedArgs)
 	if err != nil {
 		return err
 	}
@@ -168,7 +182,13 @@ func resolvedSSHCopyWSLArgs(args []string, mountRoot string) []string {
 }
 
 func probeResolvedSSHRemoteSecludedArgs(ctx context.Context, session *sshTransportSession, target SSHTarget, wslExe string) error {
-	args := append(session.commandPrefix(), "-n", session.host(), "wsl.exe rsync --protect-args --version")
+	// --protect-args is the pre-3.2.6 spelling of --secluded-args, so the
+	// probe also accepts older remote rsyncs that predate the rename.
+	remoteProbe := "rsync --protect-args --version"
+	if isWindowsWSL2Target(target) {
+		remoteProbe = "wsl.exe " + remoteProbe
+	}
+	args := append(session.commandPrefix(), "-n", session.host(), remoteProbe)
 	name := "ssh"
 	if wslExe != "" {
 		name = wslExe
@@ -299,7 +319,8 @@ func sshCopyUsesWSL(goos string, target SSHTarget) bool {
 	return goos == "windows" && !target.SSHConfigProxy
 }
 
-func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, dst string, followLink bool) ([]string, error) {
+func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, dst string, followLink, secludedArgs bool) ([]string, error) {
+	secludedArgs = secludedArgs || isWindowsWSL2Target(target)
 	srcRemote, srcPath := sandboxCopyPath(src)
 	dstRemote, dstPath := sandboxCopyPath(dst)
 	if srcRemote == dstRemote {
@@ -322,7 +343,7 @@ func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, ds
 		// links, special files, ownership, groups, or permission bits locally.
 		args = []string{"-rtz", "--no-links", "--no-devices", "--no-specials", "--no-owner", "--no-group", "--no-perms", "--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r", "--no-old-args"}
 	}
-	if isWindowsWSL2Target(target) {
+	if secludedArgs {
 		args = append(args, "--secluded-args")
 	} else {
 		args = append(args, "--no-secluded-args")
@@ -339,7 +360,7 @@ func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, ds
 		args = append(args, session.host()+":"+rsyncRemoteCopyPath(srcPath), rsyncCopyLocalPath(dstPath))
 	} else {
 		remoteDestination := rsyncRemoteCopyPath(dstPath)
-		if isWindowsWSL2Target(target) {
+		if secludedArgs {
 			remoteDestination = rsyncSecludedRemoteDestinationPath(dstPath)
 		}
 		args = append(args, rsyncCopyLocalPath(srcPath), session.host()+":"+remoteDestination)

@@ -101,7 +101,7 @@ func TestSSHTransportSessionKeepsSecretsOutOfProcessArgs(t *testing.T) {
 	configPath := session.configPath
 	t.Cleanup(func() { _ = session.Close() })
 
-	copyArgs, err := resolvedSSHCopyArgs(session, target, "./input.txt", "SANDBOX:/tmp/input.txt", false)
+	copyArgs, err := resolvedSSHCopyArgs(session, target, "./input.txt", "SANDBOX:/tmp/input.txt", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
