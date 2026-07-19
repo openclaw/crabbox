@@ -36,19 +36,25 @@ type LocalCommandRequest = core.LocalCommandRequest
 type LocalCommandResult = core.LocalCommandResult
 
 const (
-	providerName       = "cloud-run-sandbox"
-	providerFamily     = "cloud-run-sandbox"
-	leasePrefix        = "gcrs_"
-	namePrefix         = "crabbox-"
-	defaultCLIPath     = "/usr/local/gcp/bin/sandbox"
-	defaultWorkdir     = "/tmp/crabbox"
-	targetLinux        = core.TargetLinux
-	NetworkPublic      = core.NetworkPublic
-	statusViewReady    = "running"
-	maxSandboxNameLen  = 63
-	sandboxNameSuffix  = 6
-	cleanupTimeout     = 30 * time.Second
-	defaultExecTimeout = 300 * time.Second
+	providerName          = "cloud-run-sandbox"
+	providerFamily        = "cloud-run-sandbox"
+	leasePrefix           = "gcrs_"
+	namePrefix            = "crabbox-"
+	defaultCLIPath        = "/usr/local/gcp/bin/sandbox"
+	defaultWorkdir        = "/tmp/crabbox"
+	defaultSandboxPath    = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	targetLinux           = core.TargetLinux
+	NetworkPublic         = core.NetworkPublic
+	statusViewReady       = "running"
+	maxSandboxNameLen     = 63
+	sandboxNameSuffix     = 16
+	cleanupTimeout        = 30 * time.Second
+	defaultExecTimeout    = 300 * time.Second
+	leaseActivityTimeout  = 15 * time.Minute
+	claimStateLabel       = "cloud_run_sandbox_state"
+	claimActiveUntilLabel = "cloud_run_sandbox_active_until"
+	claimExpiresAtLabel   = "cloud_run_sandbox_expires_at"
+	claimOwnershipLabel   = "cloud_run_sandbox_ownership_token"
 )
 
 func exit(code int, format string, args ...any) core.ExitError {
@@ -83,9 +89,12 @@ func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, 
 	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
-func claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim) error {
-	_, err := core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, expected, true)
-	return err
+func claimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, labels map[string]string) (LeaseClaim, error) {
+	return core.ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, labels)
+}
+
+func claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim) (LeaseClaim, error) {
+	return core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, expected, true)
 }
 
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
@@ -100,12 +109,29 @@ func readLeaseClaimWithPresence(leaseID string) (core.LeaseClaim, bool, error) {
 	return core.ReadLeaseClaimWithPresence(leaseID)
 }
 
-func listCloudRunSandboxLeaseClaims() ([]core.LeaseClaim, error) {
-	return core.ListLeaseClaimsWithPrefix(leasePrefix)
+func withLeaseClaimUnchanged(leaseID string, expected LeaseClaim, action func() error) error {
+	return core.WithLeaseClaimUnchanged(leaseID, expected, action)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
+func resolveLeaseClaimAfterActionIfUnchanged(
+	leaseID string,
+	expected LeaseClaim,
+	action func() error,
+	resolve func(error) (map[string]string, bool),
+) (LeaseClaim, bool, bool, error) {
+	return core.ResolveLeaseClaimAfterActionIfUnchanged(leaseID, expected, action, resolve)
+}
+
+func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
+}
+
+func updateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string, lastUsed time.Time) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID, expected, labels, lastUsed)
+}
+
+func listCloudRunSandboxLeaseClaims() ([]core.LeaseClaim, error) {
+	return core.ListLeaseClaimsWithPrefix(leasePrefix)
 }
 
 func verifyLeaseClaimUnchanged(leaseID string, expected LeaseClaim) error {

@@ -2045,6 +2045,7 @@ func TestConfigShowRedactsAllEndpointURLComponents(t *testing.T) {
 	cfg.FastAPICloud.APIURL = rawURL
 	cfg.CloudflareDynamicWorkers.LoaderURL = rawURL
 	cfg.CloudflareSandbox.BridgeURL = rawURL
+	cfg.CloudRunSandbox.GatewayURL = rawURL
 	cfg.Nomad.Address = rawURL
 	cfg.Vast.APIURL = rawURL
 	cfg.Hostinger.APIURL = rawURL

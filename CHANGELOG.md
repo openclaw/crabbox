@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `provider: cloud-run-sandbox` (`gcrun-sandbox`, `google-cloud-run-sandbox`, `cloudrun-sandbox`) for Google Cloud Run sandboxes in public preview: stateful lifecycle through the in-container `sandbox` CLI or a ComputeSDK-compatible gateway, archive sync, local claim scoping, doctor checks, and live smoke hooks. Thanks @zozo123.
+- Added `provider: cloud-run-sandbox` (`gcrun-sandbox`, `google-cloud-run-sandbox`, `cloudrun-sandbox`) for Google Cloud Run sandboxes in public preview: stateful lifecycle through the in-container `sandbox` CLI or a durable-routing gateway, archive sync, local claim scoping, doctor checks, and live smoke hooks. Thanks @zozo123.
 - Added bounded JSON Schema validation for required run artifacts across supported standard drafts, with local references and redacted failure diagnostics. Thanks @dwin-gharibi.
 - Added native local macOS SSH leases through Lume, cloning a stopped golden VM per lease with isolated SSH identity, durable clone and storage recovery, and verified stop-before-delete lifecycle handling. Thanks @madhavajay.
 - Added a local Zed task-launcher extension for Crabbox lifecycle and remote execution workflows. Thanks @zozo123.
@@ -15,7 +15,7 @@
 
 ### Fixed
 
-- Kept Cloud Run sandbox creation and cleanup fail-closed: indeterminate creates retain exact recovery claims, cleanup serializes destroy against concurrent reclaim, and failed destroys remain tracked for retry. Thanks @zozo123.
+- Kept Cloud Run sandbox creation and cleanup fail-closed: indeterminate creates retain exact recovery claims while definitive conflicts drop provisional ownership, cleanup serializes against active work and concurrent reclaim, absolute lease TTLs are enforced, failed destroys remain tracked and reported for retry, direct payloads travel on stdin instead of argv, and remote gateways must confirm durable routing plus synchronous deletion. Thanks @zozo123.
 - Bound GitHub OAuth callbacks independently to each initiating browser flow and bound sessions, durable ownership, admin grants, and revocations to immutable GitHub account IDs instead of reassignable emails or logins, with a fail-closed operator recovery path for legacy records. Thanks @zozo123.
 - Made the default `crabbox init` Agent Skill include standards-compliant
   `SKILL.md` metadata, enforced conformant skill destinations, and allowed

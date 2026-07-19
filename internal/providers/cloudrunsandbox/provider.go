@@ -77,10 +77,6 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 }
 
 func validateConfig(cfg Config) error {
-	mode := strings.ToLower(strings.TrimSpace(cfg.CloudRunSandbox.Mode))
-	if mode != "" && mode != "local" && mode != "container" {
-		return exit(2, "cloudRunSandbox.mode must be empty, \"local\", or \"container\"")
-	}
 	if workdir := strings.TrimSpace(cfg.CloudRunSandbox.Workdir); workdir != "" && !strings.HasPrefix(workdir, "/") {
 		return exit(2, "cloudRunSandbox.workdir must be an absolute path")
 	}

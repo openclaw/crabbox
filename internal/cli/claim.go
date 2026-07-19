@@ -163,6 +163,18 @@ func claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, prov
 	return updated, err
 }
 
+func claimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, labels map[string]string) (leaseClaim, error) {
+	var updated leaseClaim
+	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, false, claimMetadata{
+		setLabels: true,
+		labels:    labels,
+		guard:     unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false),
+		result:    &updated,
+		durable:   true,
+	})
+	return updated, err
+}
+
 func claimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, cacheVolumes []string) error {
 	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{
 		setCacheVolumes: true,
@@ -217,6 +229,8 @@ type claimMetadata struct {
 	allowEmptyRepoRoot    bool
 	durable               bool
 	action                func() error
+	setLabels             bool
+	labels                map[string]string
 }
 
 func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
@@ -290,6 +304,9 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 		}
 		if metadata.setCacheVolumes {
 			existing.CacheVolumes = append([]string(nil), metadata.cacheVolumes...)
+		}
+		if metadata.setLabels {
+			existing.Labels = cloneStringMap(metadata.labels)
 		}
 		if metadata.setEndpoint {
 			if metadata.replaceEndpoint {
@@ -590,6 +607,23 @@ func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected leaseClaim, labe
 			return nil
 		}
 		claim.Labels = cloneStringMap(labels)
+		updated = cloneLeaseClaim(*claim)
+		return nil
+	})
+	return updated, err
+}
+
+func updateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID string, expected leaseClaim, labels map[string]string, lastUsed time.Time) (leaseClaim, error) {
+	if leaseID == "" {
+		return leaseClaim{}, nil
+	}
+	var updated leaseClaim
+	err := mutateLeaseClaimGuarded(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true), func(claim *leaseClaim) error {
+		if claim.LeaseID == "" {
+			return nil
+		}
+		claim.Labels = cloneStringMap(labels)
+		claim.LastUsedAt = lastUsed.UTC().Format(time.RFC3339)
 		updated = cloneLeaseClaim(*claim)
 		return nil
 	})
@@ -1404,6 +1438,67 @@ func verifyLeaseClaimUnchanged(leaseID string, expected leaseClaim) error {
 
 func removeLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, action func() error) error {
 	return removeLeaseClaimIfUnchangedAfterWithSync(leaseID, expected, action, syncControllerDirectory)
+}
+
+func resolveLeaseClaimAfterActionIfUnchanged(
+	leaseID string,
+	expected leaseClaim,
+	action func() error,
+	resolve func(error) (map[string]string, bool),
+) (leaseClaim, bool, bool, error) {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return leaseClaim{}, false, false, err
+	}
+	var updated leaseClaim
+	removed := false
+	actionSucceeded := false
+	err = withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := unchangedLeaseClaimGuard(leaseID, expected, true)(claim, exists); err != nil {
+			return err
+		}
+		actionErr := action()
+		actionSucceeded = actionErr == nil
+		labels, shouldRemove := resolve(actionErr)
+		if labels == nil {
+			return actionErr
+		}
+		claim.Labels = cloneStringMap(labels)
+		claim.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+		var publicationErr error
+		if err := refreshLeaseClaimRevision(&claim); err != nil {
+			publicationErr = err
+		} else if err := writeLeaseClaimAtomicDurable(path, claim); err != nil {
+			publicationErr = err
+		}
+		updated = cloneLeaseClaim(claim)
+		if !shouldRemove {
+			return errors.Join(actionErr, publicationErr)
+		}
+		// A definitive create conflict must never retain destructive ownership of
+		// the pre-existing resource. Attempt removal even when publishing the
+		// non-destructive conflict state failed; the removal is the safety gate.
+		if err := removeControllerFile(path); err != nil {
+			return errors.Join(actionErr, publicationErr, exit(2, "remove claim %s: %v", path, err))
+		}
+		if err := syncControllerDirectory(filepath.Dir(path)); err != nil {
+			// The unlink is not a durable safety result until the directory sync
+			// succeeds. Recreate the non-destructive conflict tombstone so a crash
+			// cannot resurrect the original creating claim as destructive ownership.
+			tombstoneErr := writeLeaseClaimAtomicDurable(path, claim)
+			if tombstoneErr == nil {
+				updated = cloneLeaseClaim(claim)
+			}
+			return errors.Join(actionErr, publicationErr, exit(2, "sync removed claim directory %s: %v", filepath.Dir(path), err), tombstoneErr)
+		}
+		removed = true
+		return errors.Join(actionErr, publicationErr)
+	})
+	return updated, removed, actionSucceeded, err
 }
 
 func removeLeaseClaimIfUnchangedAfterWithSync(leaseID string, expected leaseClaim, action func() error, syncDirectory func(string) error) error {

@@ -276,6 +276,19 @@ func WithLeaseClaimUnchanged(leaseID string, expected LeaseClaim, action func() 
 	return withLeaseClaimUnchanged(leaseID, expected, action)
 }
 
+func ResolveLeaseClaimAfterActionIfUnchanged(
+	leaseID string,
+	expected LeaseClaim,
+	action func() error,
+	resolve func(error) (map[string]string, bool),
+) (LeaseClaim, bool, bool, error) {
+	return resolveLeaseClaimAfterActionIfUnchanged(leaseID, expected, action, resolve)
+}
+
+func ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, labels map[string]string) (LeaseClaim, error) {
+	return claimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, labels)
+}
+
 func UpdateLeaseClaimEndpointIfUnchangedAction(
 	leaseID string,
 	expected LeaseClaim,
@@ -286,6 +299,10 @@ func UpdateLeaseClaimEndpointIfUnchangedAction(
 
 func UpdateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
 	return updateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
+}
+
+func UpdateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string, lastUsed time.Time) (LeaseClaim, error) {
+	return updateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID, expected, labels, lastUsed)
 }
 
 func UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected LeaseClaim, labels map[string]string, action func() error) (LeaseClaim, error) {

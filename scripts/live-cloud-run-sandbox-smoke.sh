@@ -5,6 +5,9 @@ slug="cloud-run-sandbox-smoke-$(date +%Y%m%d%H%M%S)-$$"
 cleanup_armed=0
 root="$(cd "$(dirname "$0")/.." && pwd)"
 bin="${CRABBOX_BIN:-$root/bin/crabbox}"
+if [[ "$bin" != /* ]]; then
+  bin="$root/$bin"
+fi
 
 classify_blocker() {
   local command="$1"
@@ -43,31 +46,39 @@ cleanup() {
 trap cleanup EXIT
 
 if [ ! -x "$bin" ]; then
-  (cd "$root" && go build -trimpath -o bin/crabbox ./cmd/crabbox)
+  mkdir -p "$(dirname "$bin")"
+  (cd "$root" && go build -trimpath -o "$bin" ./cmd/crabbox)
 fi
 
 doctor_out="$(run_capture "crabbox doctor --provider cloud-run-sandbox" \
   "$bin" doctor --provider cloud-run-sandbox)"
 printf '%s\n' "$doctor_out"
 
-if ! printf '%s' "$doctor_out" | rg -q 'control_plane=ready|mode=remote|mode=direct|Status: ok|status=ok|"status": "ok"'; then
-  # Accept inventory-style doctor messages too.
-  if ! printf '%s' "$doctor_out" | rg -qi 'ready|ok'; then
-    printf 'classification=diagnostic_only command=%q exit=0\n' "crabbox doctor --provider cloud-run-sandbox" >&2
-    printf '%s\n' "$doctor_out" >&2
-    exit 0
-  fi
+if ! printf '%s' "$doctor_out" | grep -Eq 'control_plane=ready|Status: ok|status=ok|"status": "ok"'; then
+  printf 'classification=unexpected_output command=%q exit=1\n' "crabbox doctor --provider cloud-run-sandbox" >&2
+  printf '%s\n' "$doctor_out" >&2
+  exit 1
 fi
 
 cleanup_armed=1
 run_capture "crabbox warmup --provider cloud-run-sandbox" \
   "$bin" warmup --provider cloud-run-sandbox --slug "$slug" --ttl 15m --idle-timeout 5m
 
-run_capture "crabbox run --provider cloud-run-sandbox --id $slug -- echo ok" \
-  "$bin" run --provider cloud-run-sandbox --id "$slug" --no-sync -- echo ok
+run_out="$(run_capture "crabbox run --provider cloud-run-sandbox --id $slug -- echo ok" \
+  "$bin" run --provider cloud-run-sandbox --id "$slug" --no-sync -- echo ok)"
+printf '%s\n' "$run_out"
+if ! printf '%s\n' "$run_out" | grep -Fxq 'ok'; then
+  printf 'classification=unexpected_output command=%q exit=1\n' "crabbox run --provider cloud-run-sandbox --id $slug -- echo ok" >&2
+  exit 1
+fi
 
-run_capture "crabbox list --provider cloud-run-sandbox --json" \
-  "$bin" list --provider cloud-run-sandbox --json
+list_out="$(run_capture "crabbox list --provider cloud-run-sandbox --json" \
+  "$bin" list --provider cloud-run-sandbox --json)"
+printf '%s\n' "$list_out"
+if ! printf '%s' "$list_out" | grep -Fq "$slug"; then
+  printf 'classification=unexpected_output command=%q exit=1 missing_slug=%q\n' "crabbox list --provider cloud-run-sandbox --json" "$slug" >&2
+  exit 1
+fi
 
 run_capture "crabbox stop --provider cloud-run-sandbox" \
   "$bin" stop --provider cloud-run-sandbox --id "$slug"

@@ -371,7 +371,6 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS",
 		"CRABBOX_CLOUD_RUN_SANDBOX_WRITE",
 		"CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS",
-		"CRABBOX_CLOUD_RUN_SANDBOX_MODE",
 		"CRABBOX_SMOLVM_API_KEY",
 		"SMOLMACHINES_API_KEY",
 		"SMK_API_KEY",
@@ -1544,16 +1543,15 @@ func TestCloudRunSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 			AllowEgress: &allowEgress,
 			Write:       &write,
 			Rootfs:      "/var/rootfs",
-			Mode:        "container",
 		},
 	})
-	if cfg.Provider != "cloud-run-sandbox" || cfg.CloudRunSandbox.CLIPath != "/opt/sandbox" || cfg.CloudRunSandbox.Workdir != "/workspace/app" || !cfg.CloudRunSandbox.AllowEgress || cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/var/rootfs" || cfg.CloudRunSandbox.Mode != "container" {
+	if cfg.Provider != "cloud-run-sandbox" || cfg.CloudRunSandbox.CLIPath != "/opt/sandbox" || cfg.CloudRunSandbox.Workdir != "/workspace/app" || !cfg.CloudRunSandbox.AllowEgress || cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/var/rootfs" {
 		t.Fatalf("file cloudRunSandbox config not applied: %#v", cfg.CloudRunSandbox)
 	}
 
 	// Empty file section must not clear previously applied values.
 	applyFileConfig(&cfg, fileConfig{CloudRunSandbox: &fileCloudRunSandboxConfig{}})
-	if cfg.CloudRunSandbox.CLIPath != "/opt/sandbox" || cfg.CloudRunSandbox.Workdir != "/workspace/app" || !cfg.CloudRunSandbox.AllowEgress || cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/var/rootfs" || cfg.CloudRunSandbox.Mode != "container" {
+	if cfg.CloudRunSandbox.CLIPath != "/opt/sandbox" || cfg.CloudRunSandbox.Workdir != "/workspace/app" || !cfg.CloudRunSandbox.AllowEgress || cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/var/rootfs" {
 		t.Fatalf("empty file cloudRunSandbox config cleared existing values: %#v", cfg.CloudRunSandbox)
 	}
 
@@ -1563,11 +1561,10 @@ func TestCloudRunSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS", "false")
 	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_WRITE", "true")
 	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS", "/")
-	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_MODE", "local")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatalf("applyEnv err=%v", err)
 	}
-	if cfg.CloudRunSandbox.GatewayURL != "https://gateway.example.run.app" || cfg.CloudRunSandbox.CLIPath != "/usr/local/bin/sandbox" || cfg.CloudRunSandbox.Workdir != "/tmp/env-work" || cfg.CloudRunSandbox.AllowEgress || !cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/" || cfg.CloudRunSandbox.Mode != "local" {
+	if cfg.CloudRunSandbox.GatewayURL != "https://gateway.example.run.app" || cfg.CloudRunSandbox.CLIPath != "/usr/local/bin/sandbox" || cfg.CloudRunSandbox.Workdir != "/tmp/env-work" || cfg.CloudRunSandbox.AllowEgress || !cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/" {
 		t.Fatalf("env cloudRunSandbox config not applied: %#v", cfg.CloudRunSandbox)
 	}
 

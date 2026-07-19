@@ -3,6 +3,7 @@ package cloudrunsandbox
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"io"
@@ -66,7 +67,6 @@ func TestProviderConfigureAndFlags(t *testing.T) {
 		"--cloud-run-sandbox-allow-egress",
 		"--cloud-run-sandbox-write=false",
 		"--cloud-run-sandbox-rootfs", "/rootfs",
-		"--cloud-run-sandbox-mode", "local",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -79,8 +79,7 @@ func TestProviderConfigureAndFlags(t *testing.T) {
 		cfg.CloudRunSandbox.Workdir != "/tmp/work" ||
 		!cfg.CloudRunSandbox.AllowEgress ||
 		cfg.CloudRunSandbox.Write ||
-		cfg.CloudRunSandbox.Rootfs != "/rootfs" ||
-		cfg.CloudRunSandbox.Mode != "local" {
+		cfg.CloudRunSandbox.Rootfs != "/rootfs" {
 		t.Fatalf("flags not applied: %#v", cfg.CloudRunSandbox)
 	}
 
@@ -198,7 +197,7 @@ func TestDoctorListStopStatusCleanup(t *testing.T) {
 		t.Fatalf("claimScope: %v", err)
 	}
 	leaseID := leasePrefix + "demo-box-1"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "slug-demo", providerName, scope, "", t.TempDir(), time.Minute, false); err != nil {
+	if err := claimTestCloudRunSandboxLease(leaseID, "slug-demo", scope, t.TempDir(), time.Minute); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 
@@ -245,6 +244,28 @@ func TestDoctorListStopStatusCleanup(t *testing.T) {
 	}
 }
 
+func TestDoctorFailsWhenLocalClaimsAreUnreadable(t *testing.T) {
+	isolateLeaseHome(t)
+	fake := &fakeTransport{mode: "remote"}
+	previousTransport := newTransport
+	newTransport = func(Config, Runtime) (sandboxTransport, error) { return fake, nil }
+	t.Cleanup(func() { newTransport = previousTransport })
+	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "claims"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := NewBackend(Provider{}.Spec(), Config{
+		CloudRunSandbox: CloudRunSandboxConfig{GatewayURL: "https://gw.example.run.app", CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	if err == nil || result.Status != "error" || !strings.Contains(result.Message, "local_claims=blocked") {
+		t.Fatalf("doctor result=%#v err=%v", result, err)
+	}
+}
+
 func TestClaimCleanupDue(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
@@ -272,6 +293,17 @@ func TestClaimCleanupDue(t *testing.T) {
 	}, now); !due || reason != "idle-timeout-expired" {
 		t.Fatalf("expired due=%v reason=%s", due, reason)
 	}
+	creating := LeaseClaim{Labels: map[string]string{
+		claimStateLabel:       "creating",
+		claimActiveUntilLabel: now.Add(time.Minute).Format(time.RFC3339Nano),
+		claimOwnershipLabel:   "sandbox-token",
+	}}
+	if due, reason := claimCleanupDue(creating, now); due || reason != "in-flight-creating" {
+		t.Fatalf("active create due=%v reason=%s", due, reason)
+	}
+	if due, reason := claimCleanupDue(creating, now.Add(2*time.Minute)); !due || reason != "stale-creating" {
+		t.Fatalf("stale create due=%v reason=%s", due, reason)
+	}
 }
 
 func TestBuildCommandAndHelpers(t *testing.T) {
@@ -287,13 +319,34 @@ func TestBuildCommandAndHelpers(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0] != "echo hi" {
 		t.Fatalf("shell mode: %v %v", got, err)
 	}
-	if cleanupCommand("gcrs_x") != `crabbox stop --provider cloud-run-sandbox --id 'gcrs_x'` &&
-		!strings.Contains(cleanupCommand("gcrs_x"), "gcrs_x") {
-		t.Fatalf("cleanupCommand=%q", cleanupCommand("gcrs_x"))
+	directCleanup := cleanupCommand(Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath}}, "gcrs_x")
+	if directCleanup != `crabbox stop --provider cloud-run-sandbox --id 'gcrs_x'` {
+		t.Fatalf("cleanupCommand=%q", directCleanup)
 	}
-	name := newSandboxName(Repo{Root: "/tmp/My Repo!"})
+	remoteCleanup := cleanupCommand(Config{CloudRunSandbox: CloudRunSandboxConfig{GatewayURL: "https://gateway.example.run.app"}}, "gcrs_x")
+	if !strings.Contains(remoteCleanup, "--cloud-run-sandbox-gateway-url 'https://gateway.example.run.app'") {
+		t.Fatalf("remote cleanupCommand=%q", remoteCleanup)
+	}
+	customDirectCleanup := cleanupCommand(Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/opt/sandbox"}}, "gcrs_x")
+	if !strings.Contains(customDirectCleanup, "--cloud-run-sandbox-cli '/opt/sandbox'") {
+		t.Fatalf("custom direct cleanupCommand=%q", customDirectCleanup)
+	}
+	name, err := newSandboxName(Repo{Root: "/tmp/My Repo!"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.HasPrefix(name, "crabbox-my-repo-") {
 		t.Fatalf("sandbox name=%q", name)
+	}
+	if suffix := strings.TrimPrefix(name, "crabbox-my-repo-"); len(suffix) != sandboxNameSuffix*2 {
+		t.Fatalf("ownership suffix=%q len=%d", suffix, len(suffix))
+	}
+	longName, err := newSandboxName(Repo{Root: "/tmp/" + strings.Repeat("a", 100)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(longName) > maxSandboxNameLen {
+		t.Fatalf("sandbox name length=%d name=%q", len(longName), longName)
 	}
 	if sanitizeName("Hello_World!!") != "hello-world" {
 		t.Fatalf("sanitize=%q", sanitizeName("Hello_World!!"))
@@ -336,6 +389,9 @@ func TestExecCommandAndUploadArchive(t *testing.T) {
 	if transport.wrotePath != "/tmp/a.tgz.b64" || transport.wroteContent == "" {
 		t.Fatalf("write path=%q content empty=%v", transport.wrotePath, transport.wroteContent == "")
 	}
+	if transport.writeCount != 1 || len(transport.appendValues) != 1 || transport.appendValues[0] {
+		t.Fatalf("small upload writes=%d append=%v", transport.writeCount, transport.appendValues)
+	}
 	if len(execs) == 0 || !strings.Contains(execs[0], "base64 -d") {
 		t.Fatalf("expected decode exec, got %v", execs)
 	}
@@ -358,15 +414,45 @@ func TestExecCommandAndUploadArchive(t *testing.T) {
 	}
 }
 
+func TestUploadArchiveStreamsBoundedChunks(t *testing.T) {
+	t.Parallel()
+	input := strings.Repeat("a", archiveUploadChunkSize)
+	transport := &writeCaptureTransport{fakeTransport: &fakeTransport{
+		onExec: func(string, string) (int, string, string, error) { return 0, "", "", nil },
+	}}
+	b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{
+		CLIPath: defaultCLIPath,
+		Workdir: defaultWorkdir,
+	}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	if err := b.uploadArchive(context.Background(), transport, "box", "/tmp/large.tgz", strings.NewReader(input)); err != nil {
+		t.Fatal(err)
+	}
+	if transport.writeCount < 2 || len(transport.appendValues) < 2 || transport.appendValues[0] || !transport.appendValues[1] {
+		t.Fatalf("writes=%d append=%v", transport.writeCount, transport.appendValues)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(transport.wroteContent)
+	if err != nil || string(decoded) != input {
+		t.Fatalf("decoded bytes=%d err=%v", len(decoded), err)
+	}
+}
+
 type writeCaptureTransport struct {
 	*fakeTransport
 	wrotePath    string
 	wroteContent string
+	writeCount   int
+	appendValues []bool
 }
 
-func (w *writeCaptureTransport) WriteFile(_ context.Context, sandboxID, path, content string) error {
+func (w *writeCaptureTransport) WriteFile(_ context.Context, sandboxID, path, content string, appendContent bool) error {
 	w.wrotePath = path
-	w.wroteContent = content
+	w.writeCount++
+	w.appendValues = append(w.appendValues, appendContent)
+	if appendContent {
+		w.wroteContent += content
+	} else {
+		w.wroteContent = content
+	}
 	if w.onWrite != nil {
 		return w.onWrite(sandboxID, path)
 	}

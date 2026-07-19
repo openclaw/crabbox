@@ -1064,7 +1064,6 @@ type CloudRunSandboxConfig struct {
 	AllowEgress bool
 	Write       bool
 	Rootfs      string
-	Mode        string
 }
 
 type ModalConfig struct {
@@ -4323,7 +4322,6 @@ type fileCloudRunSandboxConfig struct {
 	AllowEgress *bool  `yaml:"allowEgress,omitempty"`
 	Write       *bool  `yaml:"write,omitempty"`
 	Rootfs      string `yaml:"rootfs,omitempty"`
-	Mode        string `yaml:"mode,omitempty"`
 }
 
 type fileModalConfig struct {
@@ -7346,9 +7344,6 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.CloudRunSandbox.Rootfs != "" {
 			cfg.CloudRunSandbox.Rootfs = file.CloudRunSandbox.Rootfs
 		}
-		if file.CloudRunSandbox.Mode != "" {
-			cfg.CloudRunSandbox.Mode = file.CloudRunSandbox.Mode
-		}
 	}
 	if file.Modal != nil {
 		if file.Modal.App != "" {
@@ -9376,7 +9371,6 @@ func applyEnv(cfg *Config) error {
 		cfg.CloudRunSandbox.Write = value
 	}
 	cfg.CloudRunSandbox.Rootfs = getenv("CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS", cfg.CloudRunSandbox.Rootfs)
-	cfg.CloudRunSandbox.Mode = getenv("CRABBOX_CLOUD_RUN_SANDBOX_MODE", cfg.CloudRunSandbox.Mode)
 	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
 	cfg.Modal.Workdir = getenv("CRABBOX_MODAL_WORKDIR", cfg.Modal.Workdir)
