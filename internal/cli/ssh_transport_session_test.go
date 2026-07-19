@@ -151,6 +151,7 @@ func TestSSHTransportConfigProxyIncludesUserRouting(t *testing.T) {
 	}
 	identityFile := filepath.Join(sshDir, "proxy-proxy-alias identity")
 	certificateFile := filepath.Join(sshDir, "proxy-routed.example.test identity-cert.pub")
+	identityAgent := filepath.Join(sshDir, "agent-proxy-alias.sock")
 	for path, contents := range map[string]string{identityFile: "private-key", certificateFile: "certificate"} {
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
@@ -158,7 +159,8 @@ func TestSSHTransportConfigProxyIncludesUserRouting(t *testing.T) {
 	}
 	identityPattern := filepath.Join(sshDir, "proxy-%n identity")
 	certificatePattern := filepath.Join(sshDir, "proxy-%h identity-cert.pub")
-	userConfig := fmt.Sprintf("IgnoreUnknown CrabboxFutureOption\nCrabboxFutureOption yes\nHost proxy-alias\n  ProxyJump jump.example.test\n  HostKeyAlias edge%%blue\n  IdentityFile \"%s\"\n  IdentitiesOnly yes\n  CertificateFile \"%s\"\n  LocalForward 127.0.0.1:41001 127.0.0.1:3001\n  RemoteForward 127.0.0.1:41002 127.0.0.1:3002\n  DynamicForward 127.0.0.1:41003\n  RequestTTY force\n  RemoteCommand echo inherited\n  SessionType none\nMatch originalhost proxy-alias user alice exec \"test %%p = 2222\"\n  HostName routed.example.test\n", identityPattern, certificatePattern)
+	identityAgentPattern := filepath.Join(sshDir, "agent-%n.sock")
+	userConfig := fmt.Sprintf("IgnoreUnknown CrabboxFutureOption\nCrabboxFutureOption yes\nHost proxy-alias\n  ProxyJump jump.example.test\n  HostKeyAlias edge%%blue\n  IdentityFile \"%s\"\n  IdentitiesOnly yes\n  IdentityAgent \"%s\"\n  CertificateFile \"%s\"\n  LocalForward 127.0.0.1:41001 127.0.0.1:3001\n  RemoteForward 127.0.0.1:41002 127.0.0.1:3002\n  DynamicForward 127.0.0.1:41003\n  RequestTTY force\n  RemoteCommand echo inherited\n  SessionType none\nMatch originalhost proxy-alias user alice exec \"test %%p = 2222\"\n  HostName routed.example.test\n", identityPattern, identityAgentPattern, certificatePattern)
 	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(userConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +186,7 @@ func TestSSHTransportConfigProxyIncludesUserRouting(t *testing.T) {
 		t.Fatalf("ssh -G: %v: %s", err, output)
 	}
 	got := strings.ToLower(string(output))
-	for _, line := range []string{"hostname routed.example.test", "hostkeyalias edge%blue", "user alice", "port 2222", "requesttty false", "identityfile " + strings.ToLower(identityFile), "identitiesonly yes", "certificatefile " + strings.ToLower(certificateFile)} {
+	for _, line := range []string{"hostname routed.example.test", "hostkeyalias edge%blue", "user alice", "port 2222", "requesttty false", "identityfile " + strings.ToLower(identityFile), "identitiesonly yes", "identityagent " + strings.ToLower(identityAgent), "certificatefile " + strings.ToLower(certificateFile)} {
 		if !strings.Contains(got, line) {
 			t.Fatalf("ssh -G missing %q:\n%s", line, output)
 		}
@@ -247,7 +249,7 @@ func TestSSHTransportConfigProxyPreservesIdentityNone(t *testing.T) {
 	if err := os.Mkdir(sshDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte("Host no-identity\n  IdentityFile none\n  IdentitiesOnly yes\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte("Host no-identity\n  IdentityFile none\n  IdentitiesOnly yes\n  IdentityAgent none\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	session, err := newSSHTransportSession(t.Context(), SSHTarget{User: "alice", Host: "no-identity", Port: "22", SSHConfigProxy: true}, false)
@@ -261,6 +263,9 @@ func TestSSHTransportConfigProxyPreservesIdentityNone(t *testing.T) {
 	}
 	if !strings.Contains(string(config), `IdentityFile "none"`) {
 		t.Fatalf("private config did not preserve IdentityFile none:\n%s", config)
+	}
+	if !strings.Contains(string(config), `IdentityAgent "none"`) {
+		t.Fatalf("private config did not preserve IdentityAgent none:\n%s", config)
 	}
 }
 
@@ -723,7 +728,7 @@ while [ "$#" -gt 0 ]; do
 done
 port=$(awk '$1 == "Port" {gsub(/"/, "", $2); print $2; exit}' "$config")
 printf '%s\n' "$port" >> "$CRABBOX_TEST_SSH_ATTEMPTS"
-if [ "$port" = "2201" ]; then exec sleep 2; fi
+if [ "$port" = "2201" ]; then exec sleep 10; fi
 exit 0
 `
 	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
@@ -733,7 +738,7 @@ exit 0
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_TEST_SSH_ATTEMPTS", attempts)
 	target := SSHTarget{User: "alice", Host: "example.test", Port: "2201", FallbackPorts: []string{"2202"}}
-	if !probePrivateSSHTransport(t.Context(), &target, 500*time.Millisecond) {
+	if !probePrivateSSHTransport(t.Context(), &target, 5*time.Second) {
 		t.Fatal("fallback SSH transport probe failed")
 	}
 	if target.Port != "2202" {

@@ -225,6 +225,7 @@ type sshTransportConfigRoute struct {
 	hostKeyAlias     string
 	identityFiles    []string
 	identitiesOnly   bool
+	identityAgent    string
 	certificateFiles []string
 	proxyJump        string
 	proxyCommand     string
@@ -307,6 +308,10 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 	} else {
 		route.certificateFiles = nil
 	}
+	route.identityAgent, err = resolveSSHTransportIdentityAgent(ctx, target, localForward, capabilities, seedPath, route.identityAgent)
+	if err != nil {
+		return sshTransportConfigRoute{}, err
+	}
 	return route, nil
 }
 
@@ -325,6 +330,8 @@ func parseSSHTransportConfigRoute(output, userConfigPath string) sshTransportCon
 			route.identityFiles = append(route.identityFiles, value)
 		case "identitiesonly":
 			route.identitiesOnly = strings.EqualFold(value, "yes")
+		case "identityagent":
+			route.identityAgent = value
 		case "certificatefile":
 			route.certificateFiles = append(route.certificateFiles, value)
 		case "proxyjump":
@@ -342,6 +349,24 @@ func parseSSHTransportConfigRoute(output, userConfigPath string) sshTransportCon
 		}
 	}
 	return route
+}
+
+func resolveSSHTransportIdentityAgent(
+	ctx context.Context,
+	target SSHTarget,
+	localForward bool,
+	capabilities sshTransportRouteCapabilities,
+	seedPath, value string,
+) (string, error) {
+	legacyEnvironmentReference := strings.HasPrefix(value, "$") && !strings.HasPrefix(value, "${")
+	if value == "" || strings.EqualFold(value, "none") || strings.EqualFold(value, "SSH_AUTH_SOCK") || legacyEnvironmentReference {
+		return value, nil
+	}
+	resolved, err := resolveSSHTransportAuthenticationPaths(ctx, target, localForward, capabilities, seedPath, []string{value})
+	if err != nil {
+		return "", err
+	}
+	return resolved[0], nil
 }
 
 func resolveSSHTransportAuthenticationPaths(
@@ -707,6 +732,7 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 		"port":             target.Port,
 		"known hosts file": knownHostsFile(target),
 		"host key alias":   hostKeyAlias,
+		"identity agent":   route.identityAgent,
 		"proxy command":    proxyCommand,
 	} {
 		if strings.ContainsAny(value, "\x00\r\n") {
@@ -769,6 +795,9 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 	if target.Key != "" || route.identitiesOnly {
 		b.WriteString("  IdentitiesOnly yes\n")
 	}
+	if route.identityAgent != "" {
+		writeSSHTransportLiteralConfigValue(&b, "IdentityAgent", route.identityAgent)
+	}
 	for _, certificateFile := range certificateFiles {
 		writeSSHTransportLiteralConfigValue(&b, "CertificateFile", certificateFile)
 	}
@@ -809,7 +838,7 @@ func writeSSHTransportLiteralConfigValue(b *strings.Builder, name, value string)
 
 func sshTransportDirectiveExpandsPercent(name string) bool {
 	switch strings.ToLower(name) {
-	case "hostname", "user", "identityfile", "certificatefile", "include", "userknownhostsfile":
+	case "hostname", "user", "identityfile", "identityagent", "certificatefile", "include", "userknownhostsfile":
 		return true
 	default:
 		return false

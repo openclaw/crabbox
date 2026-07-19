@@ -26,22 +26,20 @@ func TestResolvedSSHRemoteSecludedArgsProbeHonorsCancellation(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_TEST_SSH_CHILD_PID", pidPath)
-	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	err := probeResolvedSSHRemoteSecludedArgs(ctx, &sshTransportSession{configPath: "/private/config"}, SSHTarget{}, "")
+	result := make(chan error, 1)
+	go func() {
+		result <- probeResolvedSSHRemoteSecludedArgs(ctx, &sshTransportSession{configPath: "/private/config"}, SSHTarget{}, "")
+	}()
+	childPID := waitForPIDFile(t, pidPath)
+	cancel()
+	err := <-result
 	if err == nil {
 		t.Fatal("expected probe error")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("probe error=%v", err)
-	}
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	childPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		t.Fatal(err)
 	}
 	if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("probe descendant %d survived cancellation: %v", childPID, err)
@@ -61,19 +59,17 @@ func TestOwnedSSHTransportCommandReapsDescendants(t *testing.T) {
 	if resolved, err := exec.LookPath("ssh"); err != nil || resolved != sshPath {
 		t.Fatalf("fake ssh resolution=%q err=%v", resolved, err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	err := runOwnedSSHTransportCommand(ctx, SSHTarget{}, []string{"-G", "example.test"}, &bytes.Buffer{}, &bytes.Buffer{})
-	if !errors.Is(err, context.DeadlineExceeded) {
+	result := make(chan error, 1)
+	go func() {
+		result <- runOwnedSSHTransportCommand(ctx, SSHTarget{}, []string{"-G", "example.test"}, &bytes.Buffer{}, &bytes.Buffer{})
+	}()
+	childPID := waitForPIDFile(t, pidPath)
+	cancel()
+	err := <-result
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("owned command err=%v", err)
-	}
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	childPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		t.Fatal(err)
 	}
 	if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("owned SSH descendant %d survived cancellation: %v", childPID, err)

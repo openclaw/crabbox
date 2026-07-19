@@ -89,12 +89,11 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 	terminationCtx, stopTerminationSignals := pondMeshTerminationContext(ctx)
 	defer stopTerminationSignals()
 	ctx = terminationCtx
-	session, wslExe, mountRoot, err := newResolvedSSHCopySession(ctx, target)
+	session, wslExe, mountRoot, capabilities, err := newResolvedSSHCopySession(ctx, target)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, session.Close()) }()
-	capabilities := resolvedSSHCopyRsyncCapabilities(ctx, target, wslExe)
 	if ctxErr := context.Cause(ctx); ctxErr != nil {
 		return ctxErr
 	}
@@ -269,19 +268,31 @@ func redactSSHTransportDiagnostic(target SSHTarget, value string) string {
 	return RedactDiagnosticSecrets(value)
 }
 
-func newResolvedSSHCopySession(ctx context.Context, target SSHTarget) (*sshTransportSession, string, string, error) {
+func newResolvedSSHCopySession(ctx context.Context, target SSHTarget) (*sshTransportSession, string, string, resolvedRsyncCapabilities, error) {
 	if !sshCopyUsesWSL(runtime.GOOS, target) {
 		session, err := newSSHTransportSession(ctx, target, false)
-		return session, "", "", err
+		return session, "", "", resolvedSSHCopyRsyncCapabilities(ctx, target, ""), err
 	}
 	wslExe, ok := windowsRsyncWSLExecutable(ctx, target)
 	if !ok {
 		session, err := newSSHTransportSession(ctx, target, false)
-		return session, "", "", err
+		return session, "", "", resolvedSSHCopyRsyncCapabilities(ctx, target, ""), err
+	}
+	wslCapabilities := resolvedSSHCopyRsyncCapabilities(ctx, target, wslExe)
+	if !wslCapabilities.safeTransport {
+		nativeCapabilities := resolvedSSHCopyRsyncCapabilities(ctx, target, "")
+		if preferNativeResolvedRsync(wslCapabilities, nativeCapabilities) {
+			session, err := newSSHTransportSession(ctx, target, false)
+			return session, "", "", nativeCapabilities, err
+		}
 	}
 	mountRoot := windowsWSLMountRoot(ctx, target, wslExe)
 	session, err := newWSLSSHTransportSession(ctx, target, wslExe, mountRoot)
-	return session, wslExe, mountRoot, err
+	return session, wslExe, mountRoot, wslCapabilities, err
+}
+
+func preferNativeResolvedRsync(wsl, native resolvedRsyncCapabilities) bool {
+	return !wsl.safeTransport && native.safeTransport
 }
 
 func sshCopyUsesWSL(goos string, target SSHTarget) bool {

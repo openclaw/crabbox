@@ -126,6 +126,20 @@ func TestSSHCopyUsesNativeWindowsTransportForConfigProxy(t *testing.T) {
 	}
 }
 
+func TestResolvedSSHCopyFallsBackFromUnsafeWSLRsync(t *testing.T) {
+	unsafeWSL := resolvedRsyncCapabilities{version: "3.2.7"}
+	safeNative := resolvedRsyncCapabilities{version: "3.4.4", safeTransport: true}
+	if !preferNativeResolvedRsync(unsafeWSL, safeNative) {
+		t.Fatal("safe native rsync should replace an unsafe WSL rsync")
+	}
+	if preferNativeResolvedRsync(unsafeWSL, resolvedRsyncCapabilities{version: "3.4.2"}) {
+		t.Fatal("an unsafe native rsync must not replace WSL")
+	}
+	if preferNativeResolvedRsync(safeNative, safeNative) {
+		t.Fatal("safe WSL rsync remains preferred")
+	}
+}
+
 func TestResolvedSSHCopyArgsTreatsColonPathAsLocal(t *testing.T) {
 	session := &sshTransportSession{configPath: "/private/config"}
 	args, err := resolvedSSHCopyArgs(session, SSHTarget{}, "report:final", "SANDBOX:/tmp/report", false)
