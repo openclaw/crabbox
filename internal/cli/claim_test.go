@@ -995,6 +995,166 @@ func TestConditionalClaimActionFailureRetainsClaim(t *testing.T) {
 	}
 }
 
+func TestResolveLeaseClaimAfterActionPublishesOutcomeAndRemovesConflict(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_resolvecreate123"
+	initialLabels := map[string]string{"state": "creating", "ownership": "owner-1"}
+	expected, err := claimLeaseForRepoProviderScopePondWithLabels(
+		leaseID, "resolve-create", "cloud-run-sandbox", "project:test/region:test", "", "/repo", time.Minute, initialLabels,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialLabels["state"] = "mutated"
+	if expected.Labels["state"] != "creating" {
+		t.Fatalf("claim retained caller labels: %#v", expected.Labels)
+	}
+
+	timeoutErr := errors.New("create result unknown")
+	recovery, removed, actionSucceeded, err := resolveLeaseClaimAfterActionIfUnchanged(
+		leaseID,
+		expected,
+		func() error { return timeoutErr },
+		func(actionErr error) (map[string]string, bool) {
+			if !errors.Is(actionErr, timeoutErr) {
+				t.Fatalf("resolve action error=%v", actionErr)
+			}
+			return map[string]string{"state": "recovery", "ownership": "owner-1"}, false
+		},
+	)
+	if !errors.Is(err, timeoutErr) || removed || actionSucceeded {
+		t.Fatalf("recovery result removed=%t succeeded=%t err=%v", removed, actionSucceeded, err)
+	}
+	if recovery.Labels["state"] != "recovery" || recovery.Revision == expected.Revision {
+		t.Fatalf("recovery claim=%#v", recovery)
+	}
+	persisted, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Labels["state"] != "recovery" || persisted.Revision != recovery.Revision {
+		t.Fatalf("persisted recovery=%#v want %#v", persisted, recovery)
+	}
+
+	ready, removed, actionSucceeded, err := resolveLeaseClaimAfterActionIfUnchanged(
+		leaseID,
+		recovery,
+		func() error { return nil },
+		func(actionErr error) (map[string]string, bool) {
+			if actionErr != nil {
+				t.Fatalf("ready action error=%v", actionErr)
+			}
+			return map[string]string{"state": "ready", "ownership": "owner-1"}, false
+		},
+	)
+	if err != nil || removed || !actionSucceeded || ready.Labels["state"] != "ready" {
+		t.Fatalf("ready result claim=%#v removed=%t succeeded=%t err=%v", ready, removed, actionSucceeded, err)
+	}
+
+	conflictErr := errors.New("sandbox already exists")
+	conflict, removed, actionSucceeded, err := resolveLeaseClaimAfterActionIfUnchanged(
+		leaseID,
+		ready,
+		func() error { return conflictErr },
+		func(actionErr error) (map[string]string, bool) {
+			if !errors.Is(actionErr, conflictErr) {
+				t.Fatalf("conflict action error=%v", actionErr)
+			}
+			return map[string]string{"state": "conflict"}, true
+		},
+	)
+	if !errors.Is(err, conflictErr) || !removed || actionSucceeded || conflict.Labels["state"] != "conflict" {
+		t.Fatalf("conflict result claim=%#v removed=%t succeeded=%t err=%v", conflict, removed, actionSucceeded, err)
+	}
+	if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+		t.Fatalf("conflict claim exists=%t err=%v", exists, readErr)
+	}
+}
+
+func TestResolveLeaseClaimAfterActionFailsClosedBeforeMutation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_resolveguard123"
+	expected, err := claimLeaseForRepoProviderScopePondWithLabels(
+		leaseID, "resolve-guard", "cloud-run-sandbox", "project:test/region:test", "", "/repo", time.Minute,
+		map[string]string{"state": "creating"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unknownErr := errors.New("unclassified create failure")
+	updated, removed, actionSucceeded, err := resolveLeaseClaimAfterActionIfUnchanged(
+		leaseID,
+		expected,
+		func() error { return unknownErr },
+		func(error) (map[string]string, bool) { return nil, false },
+	)
+	if !errors.Is(err, unknownErr) || removed || actionSucceeded || updated.LeaseID != "" {
+		t.Fatalf("unclassified result claim=%#v removed=%t succeeded=%t err=%v", updated, removed, actionSucceeded, err)
+	}
+	retained, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(retained, expected) {
+		t.Fatalf("unclassified failure changed claim:\n got %#v\nwant %#v", retained, expected)
+	}
+
+	stale := expected
+	stale.Revision = "stale-revision"
+	called := false
+	if _, _, _, err := resolveLeaseClaimAfterActionIfUnchanged(
+		leaseID,
+		stale,
+		func() error {
+			called = true
+			return nil
+		},
+		func(error) (map[string]string, bool) { return map[string]string{"state": "ready"}, false },
+	); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("stale guard err=%v", err)
+	}
+	if called {
+		t.Fatal("action ran after claim changed")
+	}
+
+	if _, _, _, err := resolveLeaseClaimAfterActionIfUnchanged(
+		"../invalid", leaseClaim{}, func() error { return nil }, func(error) (map[string]string, bool) { return nil, false },
+	); err == nil {
+		t.Fatal("invalid lease ID was accepted")
+	}
+}
+
+func TestUpdateLeaseClaimLabelsAndLastUsedIfUnchanged(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_labeltime123"
+	expected, err := claimLeaseForRepoProviderScopePondWithLabels(
+		leaseID, "label-time", "cloud-run-sandbox", "project:test/region:test", "", "/repo", time.Minute,
+		map[string]string{"state": "creating"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lastUsed := time.Date(2026, time.July, 19, 7, 30, 0, 0, time.FixedZone("test", 2*60*60))
+	labels := map[string]string{"state": "ready", "ownership": "owner-1"}
+	updated, err := updateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID, expected, labels, lastUsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels["state"] = "mutated"
+	if updated.Labels["state"] != "ready" || updated.LastUsedAt != "2026-07-19T05:30:00Z" {
+		t.Fatalf("updated claim=%#v", updated)
+	}
+
+	if _, err := updateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID, expected, map[string]string{"state": "stale"}, time.Now()); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("stale update err=%v", err)
+	}
+	if empty, err := updateLeaseClaimLabelsAndLastUsedIfUnchanged("", leaseClaim{}, nil, time.Time{}); err != nil || empty.LeaseID != "" {
+		t.Fatalf("empty update claim=%#v err=%v", empty, err)
+	}
+}
+
 func TestConditionalClaimEndpointActionUpdatesAtomically(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_conditionalendpoint123"
