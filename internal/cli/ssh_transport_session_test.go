@@ -276,6 +276,18 @@ func TestSSHTransportControlPathParserPreservesSpaces(t *testing.T) {
 	}
 }
 
+func TestSSHTransportUserPercentCapabilityParser(t *testing.T) {
+	for output, want := range map[string]bool{
+		"user crabbox%probe\n":  true,
+		"user crabbox%%probe\n": false,
+	} {
+		got, err := parseSSHTransportUserPercentExpansion(output)
+		if err != nil || got != want {
+			t.Fatalf("output=%q got=%v err=%v, want %v", output, got, err, want)
+		}
+	}
+}
+
 func TestExpandSSHTransportHomeTokenPreservesEscapedPercent(t *testing.T) {
 	if got, want := expandSSHTransportHomeToken(`%d/.ssh/key-%%d-%%%d`, `/home/alice%ops`), `/home/alice%%ops/.ssh/key-%%d-%%/home/alice%%ops`; got != want {
 		t.Fatalf("expanded=%q, want %q", got, want)
@@ -283,7 +295,7 @@ func TestExpandSSHTransportHomeTokenPreservesEscapedPercent(t *testing.T) {
 }
 
 func TestSSHTransportRouteSeedDoesNotInterpretAliasAsPattern(t *testing.T) {
-	seed, err := renderSSHTransportRouteSeed(SSHTarget{User: "alice", Port: "22"}, "/tmp/user-config")
+	seed, err := renderSSHTransportRouteSeed(SSHTarget{User: "alice", Port: "22"}, "/tmp/user-config", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +325,7 @@ func TestSSHTransportRouteProbeKeepsSecretUserOutOfArgs(t *testing.T) {
 	if strings.Contains(strings.Join(args, " "), target.User) {
 		t.Fatalf("route probe args leaked secret user: %#v", args)
 	}
-	seed, err := renderSSHTransportRouteSeed(target, "/private/user-config")
+	seed, err := renderSSHTransportRouteSeed(target, "/private/user-config", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +391,7 @@ func TestSSHTransportRouteFailureRedactsSecretUser(t *testing.T) {
 	t.Setenv("PATH", dir)
 	t.Setenv("HOME", t.TempDir())
 	target := SSHTarget{User: "secret-token-user", Host: "proxy-alias", Port: "22", AuthSecret: true, SSHConfigProxy: true}
-	_, err := resolveSSHTransportConfigRoute(t.Context(), target, false)
+	_, err := resolveSSHTransportConfigRoute(t.Context(), target, false, false)
 	if err == nil {
 		t.Fatal("expected route resolution failure")
 	}
@@ -389,7 +401,7 @@ func TestSSHTransportRouteFailureRedactsSecretUser(t *testing.T) {
 }
 
 func TestSSHTransportRouteRejectsUnsafeAliasBeforeMatchExec(t *testing.T) {
-	_, err := resolveSSHTransportConfigRoute(t.Context(), SSHTarget{User: "alice", Host: "[prod]", Port: "22", SSHConfigProxy: true}, false)
+	_, err := resolveSSHTransportConfigRoute(t.Context(), SSHTarget{User: "alice", Host: "[prod]", Port: "22", SSHConfigProxy: true}, false, false)
 	if err == nil || !strings.Contains(err.Error(), "unsafe for ProxyCommand") {
 		t.Fatalf("err=%v", err)
 	}
@@ -400,7 +412,7 @@ func TestSSHTransportConfigRejectsEnvironmentExpansionInLiteral(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "environment expansion") {
 		t.Fatalf("err=%v", err)
 	}
-	_, err = renderSSHTransportRouteSeed(SSHTarget{User: "alice", Port: "22"}, `/tmp/${CONFIG}`)
+	_, err = renderSSHTransportRouteSeed(SSHTarget{User: "alice", Port: "22"}, `/tmp/${CONFIG}`, false)
 	if err == nil || !strings.Contains(err.Error(), "environment expansion") {
 		t.Fatalf("seed err=%v", err)
 	}
@@ -436,7 +448,7 @@ func TestSSHTransportLiteralFieldsEscapeOnlyTokenDirectives(t *testing.T) {
 		CertificateFile: "/tmp/cert%r",
 		KnownHostsFile:  "/tmp/known%h",
 	}
-	config, err := renderSSHTransportConfig(target, false)
+	config, err := renderSSHTransportConfigWithRoute(target, false, sshTransportConfigRoute{userPercentExpansion: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,6 +456,13 @@ func TestSSHTransportLiteralFieldsEscapeOnlyTokenDirectives(t *testing.T) {
 		if !strings.Contains(config, value) {
 			t.Fatalf("private config did not escape %q:\n%s", value, config)
 		}
+	}
+	legacyConfig, err := renderSSHTransportConfigWithRoute(target, false, sshTransportConfigRoute{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(legacyConfig, `User "DOMAIN\user%h"`) || strings.Contains(legacyConfig, `User "DOMAIN\user%%h"`) {
+		t.Fatalf("pre-10 OpenSSH user was incorrectly escaped:\n%s", legacyConfig)
 	}
 }
 

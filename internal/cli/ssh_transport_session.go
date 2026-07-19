@@ -39,10 +39,18 @@ func newSSHTransportSession(ctx context.Context, target SSHTarget, localForward 
 		_ = os.RemoveAll(dir)
 		return nil, cause
 	}
-	route, err := resolveSSHTransportConfigRoute(ctx, target, localForward)
+	userPercentExpansion := false
+	if strings.Contains(target.User, "%") {
+		userPercentExpansion, err = probeSSHTransportUserPercentExpansion(ctx, target, dir)
+		if err != nil {
+			return fail(err)
+		}
+	}
+	route, err := resolveSSHTransportConfigRoute(ctx, target, localForward, userPercentExpansion)
 	if err != nil {
 		return fail(err)
 	}
+	route.userPercentExpansion = userPercentExpansion
 	if route.proxyJump != "" {
 		hostName := target.Host
 		if route.hostName != "" {
@@ -139,6 +147,13 @@ func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mo
 		return fail(fmt.Errorf("create private WSL SSH transport directory: mktemp returned an unsafe path"))
 	}
 	wslDirOwned = true
+	userPercentExpansion := false
+	if strings.Contains(target.User, "%") {
+		userPercentExpansion, err = probeWSLSSHTransportUserPercentExpansion(ctx, target, wslExe, wslDir)
+		if err != nil {
+			return fail(err)
+		}
+	}
 
 	wslTarget := wslSSHTransportTarget(target, wslDir, mountRoot)
 	if target.Key != "" {
@@ -159,7 +174,7 @@ func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mo
 			return fail(err)
 		}
 	}
-	config, err := renderSSHTransportConfig(wslTarget, false)
+	config, err := renderSSHTransportConfigWithRoute(wslTarget, false, sshTransportConfigRoute{userPercentExpansion: userPercentExpansion})
 	if err != nil {
 		return fail(err)
 	}
@@ -174,6 +189,63 @@ func validWSLSSHTransportDirectory(value string) bool {
 	const prefix = "/tmp/crabbox-ssh-transport-"
 	suffix := strings.TrimPrefix(value, prefix)
 	return suffix != value && len(suffix) >= 6 && !strings.ContainsAny(suffix, "/\\\x00\r\n\t ")
+}
+
+func probeSSHTransportUserPercentExpansion(ctx context.Context, target SSHTarget, dir string) (bool, error) {
+	path := filepath.Join(dir, "user_percent_config")
+	if err := os.WriteFile(path, []byte(`User "crabbox%%probe"`+"\n"), 0o600); err != nil {
+		return false, fmt.Errorf("write private SSH user capability config: %w", err)
+	}
+	if err := secureSSHTransportPath(path, false); err != nil {
+		return false, fmt.Errorf("secure private SSH user capability config: %w", err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := runOwnedSSHTransportCommand(ctx, target, []string{"-G", "-F", path, "--", "crabbox-user-probe.invalid"}, &stdout, &stderr); err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return false, cause
+		}
+		return false, fmt.Errorf("probe OpenSSH user token support: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return parseSSHTransportUserPercentExpansion(stdout.String())
+}
+
+func probeWSLSSHTransportUserPercentExpansion(ctx context.Context, target SSHTarget, wslExe, wslDir string) (bool, error) {
+	path := wslDir + "/user_percent_config"
+	if err := writeWSLSSHTransportFile(ctx, wslExe, path, []byte(`User "crabbox%%probe"`+"\n"), target); err != nil {
+		return false, err
+	}
+	cmd := exec.CommandContext(ctx, wslExe, "ssh", "-G", "-F", path, "--", "crabbox-user-probe.invalid")
+	applyTargetChildEnvironment(cmd, target)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return false, cause
+		}
+		return false, fmt.Errorf("probe WSL OpenSSH user token support: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return parseSSHTransportUserPercentExpansion(stdout.String())
+}
+
+func parseSSHTransportUserPercentExpansion(output string) (bool, error) {
+	for _, line := range strings.Split(output, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || !strings.EqualFold(key, "user") {
+			continue
+		}
+		switch strings.TrimSpace(value) {
+		case "crabbox%probe":
+			return true, nil
+		case "crabbox%%probe":
+			return false, nil
+		default:
+			return false, fmt.Errorf("probe OpenSSH user token support: unexpected resolved user")
+		}
+	}
+	return false, fmt.Errorf("probe OpenSSH user token support: resolved user omitted")
 }
 
 func wslSSHTransportTarget(target SSHTarget, wslDir, mountRoot string) SSHTarget {
@@ -227,18 +299,19 @@ func sshTransportDestination(target SSHTarget) string {
 }
 
 type sshTransportConfigRoute struct {
-	hostName          string
-	hostKeyAlias      string
-	identityFiles     []string
-	identitiesOnly    bool
-	identityAgent     string
-	certificateFiles  []string
-	proxyJump         string
-	proxyJumpExpanded bool
-	proxyCommand      string
-	proxyUseFDPass    bool
-	userConfigPath    string
-	jumpConfigPath    string
+	hostName             string
+	hostKeyAlias         string
+	identityFiles        []string
+	identitiesOnly       bool
+	identityAgent        string
+	certificateFiles     []string
+	proxyJump            string
+	proxyJumpExpanded    bool
+	proxyCommand         string
+	proxyUseFDPass       bool
+	userConfigPath       string
+	jumpConfigPath       string
+	userPercentExpansion bool
 }
 
 type sshTransportRouteCapabilities struct {
@@ -246,7 +319,7 @@ type sshTransportRouteCapabilities struct {
 	sessionType   bool
 }
 
-func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, localForward bool) (_ sshTransportConfigRoute, err error) {
+func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, localForward, userPercentExpansion bool) (_ sshTransportConfigRoute, err error) {
 	if !target.SSHConfigProxy {
 		return sshTransportConfigRoute{}, nil
 	}
@@ -260,13 +333,13 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 	}
 	seedPath := filepath.Join(dir, "ssh_config")
 	userConfigPath := ""
-	if home, err := os.UserHomeDir(); err == nil {
+	if home, homeErr := os.UserHomeDir(); homeErr == nil {
 		candidate := filepath.Join(home, ".ssh", "config")
 		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
 			userConfigPath = candidate
 		}
 	}
-	seed, err := renderSSHTransportRouteSeed(target, userConfigPath)
+	seed, err := renderSSHTransportRouteSeed(target, userConfigPath, userPercentExpansion)
 	if err != nil {
 		return sshTransportConfigRoute{}, err
 	}
@@ -527,7 +600,7 @@ func runOwnedSSHTransportCommand(ctx context.Context, target SSHTarget, args []s
 	return err
 }
 
-func renderSSHTransportRouteSeed(target SSHTarget, userConfigPath string) (string, error) {
+func renderSSHTransportRouteSeed(target SSHTarget, userConfigPath string, userPercentExpansion bool) (string, error) {
 	if err := validateSSHTransportLiteralValue("config path", userConfigPath); err != nil {
 		return "", err
 	}
@@ -541,7 +614,7 @@ func renderSSHTransportRouteSeed(target SSHTarget, userConfigPath string) (strin
 	// a Host pattern. User and port live in this protected config, keeping
 	// token-style usernames out of process arguments; validation above protects
 	// Match exec and ProxyCommand expansion in the included config.
-	writeSSHTransportLiteralConfigValue(&seed, "User", target.User)
+	writeSSHTransportUserConfigValue(&seed, target.User, userPercentExpansion)
 	writeSSHTransportLiteralConfigValue(&seed, "Port", target.Port)
 	if userConfigPath != "" {
 		writeSSHTransportLiteralConfigValue(&seed, "Include", userConfigPath)
@@ -798,7 +871,7 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 	var b strings.Builder
 	b.WriteString("Host " + quoteSSHTransportConfigValue(sshTransportDestination(target)) + "\n")
 	writeSSHTransportLiteralConfigValue(&b, "HostName", hostName)
-	writeSSHTransportLiteralConfigValue(&b, "User", target.User)
+	writeSSHTransportUserConfigValue(&b, target.User, route.userPercentExpansion)
 	writeSSHTransportLiteralConfigValue(&b, "Port", target.Port)
 	b.WriteString("  BatchMode yes\n")
 	b.WriteString("  ForwardAgent no\n")
@@ -870,9 +943,16 @@ func writeSSHTransportLiteralConfigValue(b *strings.Builder, name, value string)
 	writeSSHTransportConfigValue(b, name, value)
 }
 
+func writeSSHTransportUserConfigValue(b *strings.Builder, value string, expandsPercent bool) {
+	if expandsPercent {
+		value = strings.ReplaceAll(value, "%", "%%")
+	}
+	writeSSHTransportConfigValue(b, "User", value)
+}
+
 func sshTransportDirectiveExpandsPercent(name string) bool {
 	switch strings.ToLower(name) {
-	case "hostname", "user", "identityfile", "identityagent", "certificatefile", "include", "userknownhostsfile":
+	case "hostname", "identityfile", "identityagent", "certificatefile", "include", "userknownhostsfile":
 		return true
 	default:
 		return false
