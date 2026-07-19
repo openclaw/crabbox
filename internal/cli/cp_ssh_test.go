@@ -254,6 +254,32 @@ func TestParseRsyncVersionSafetyBoundary(t *testing.T) {
 	}
 }
 
+func TestResolvedSSHCopyWSLArgsConvertsOnlyLocalOperands(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "download preserves escaped remote wildcards",
+			args: []string{"-az", "-e", "ssh -F /tmp/config", "--", sshTransportHostAlias + `:/tmp/result\[1\].json`, "/c/Users/alice/result.json"},
+			want: []string{"-az", "-e", "ssh -F /tmp/config", "--", sshTransportHostAlias + `:/tmp/result\[1\].json`, "/mnt/c/Users/alice/result.json"},
+		},
+		{
+			name: "upload preserves remote backslashes",
+			args: []string{"-az", "--", "/d/work/input.txt", sshTransportHostAlias + `:/tmp/name\\with\\slashes`},
+			want: []string{"-az", "--", "/mnt/d/work/input.txt", sshTransportHostAlias + `:/tmp/name\\with\\slashes`},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := resolvedSSHCopyWSLArgs(test.args, "/mnt"); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("args=%#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRedactSSHTransportDiagnostic(t *testing.T) {
 	target := SSHTarget{User: "opaque-user-value", AuthSecret: true}
 	got := redactSSHTransportDiagnostic(target, "opaque-user-value@example.test: Permission denied")

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -83,6 +84,12 @@ func (s *sshTransportSession) Close() error {
 }
 
 func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mountRoot string) (*sshTransportSession, error) {
+	// Config-backed routes must use the native OpenSSH client that owns the
+	// user's config and authentication paths. newResolvedSSHCopySession keeps
+	// those targets out of WSL; enforce the same boundary for direct callers.
+	if target.SSHConfigProxy {
+		return nil, exit(2, "SSH config proxy routes require native OpenSSH")
+	}
 	dir, err := os.MkdirTemp("", "crabbox-ssh-transport-*")
 	if err != nil {
 		return nil, fmt.Errorf("reserve private WSL SSH transport directory: %w", err)
@@ -91,7 +98,7 @@ func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mo
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("secure private WSL SSH transport directory: %w", err)
 	}
-	wslDir := "/tmp/" + filepath.Base(dir)
+	wslDir := ""
 	wslDirOwned := false
 	cleanup := func() error {
 		if !wslDirOwned {
@@ -111,10 +118,19 @@ func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mo
 		_ = os.RemoveAll(dir)
 		return nil, cause
 	}
-	mkdir := exec.CommandContext(ctx, wslExe, "sh", "-c", `umask 077; mkdir -m 700 -- "$1"`, "crabbox", wslDir)
+	mkdir := exec.CommandContext(ctx, wslExe, "sh", "-c", `umask 077; mktemp -d /tmp/crabbox-ssh-transport-XXXXXX`)
 	applyTargetChildEnvironment(mkdir, target)
-	if output, err := mkdir.CombinedOutput(); err != nil {
-		return fail(fmt.Errorf("create private WSL SSH transport directory: %w: %s", err, strings.TrimSpace(string(output))))
+	var mkdirStdout bytes.Buffer
+	var mkdirStderr bytes.Buffer
+	mkdir.Stdout = &mkdirStdout
+	mkdir.Stderr = &mkdirStderr
+	err = mkdir.Run()
+	if err != nil {
+		return fail(fmt.Errorf("create private WSL SSH transport directory: %w: %s", err, strings.TrimSpace(mkdirStderr.String())))
+	}
+	wslDir = strings.TrimSpace(mkdirStdout.String())
+	if !validWSLSSHTransportDirectory(wslDir) {
+		return fail(fmt.Errorf("create private WSL SSH transport directory: mktemp returned an unsafe path"))
 	}
 	wslDirOwned = true
 
@@ -146,6 +162,12 @@ func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mo
 		return fail(err)
 	}
 	return &sshTransportSession{dir: dir, configPath: configPath, destination: sshTransportDestination(wslTarget), cleanup: cleanup}, nil
+}
+
+func validWSLSSHTransportDirectory(value string) bool {
+	const prefix = "/tmp/crabbox-ssh-transport-"
+	suffix := strings.TrimPrefix(value, prefix)
+	return suffix != value && len(suffix) >= 6 && !strings.ContainsAny(suffix, "/\\\x00\r\n\t ")
 }
 
 func wslSSHTransportTarget(target SSHTarget, wslDir, mountRoot string) SSHTarget {
@@ -199,13 +221,16 @@ func sshTransportDestination(target SSHTarget) string {
 }
 
 type sshTransportConfigRoute struct {
-	hostName       string
-	hostKeyAlias   string
-	proxyJump      string
-	proxyCommand   string
-	proxyUseFDPass bool
-	userConfigPath string
-	jumpConfigPath string
+	hostName         string
+	hostKeyAlias     string
+	identityFiles    []string
+	identitiesOnly   bool
+	certificateFiles []string
+	proxyJump        string
+	proxyCommand     string
+	proxyUseFDPass   bool
+	userConfigPath   string
+	jumpConfigPath   string
 }
 
 type sshTransportRouteCapabilities struct {
@@ -265,7 +290,24 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 		diagnostic := strings.TrimSpace(redactSSHTransportDiagnostic(target, stderr.String()))
 		return sshTransportConfigRoute{}, fmt.Errorf("resolve OpenSSH route for %s: %w: %s", target.Host, err, diagnostic)
 	}
-	return parseSSHTransportConfigRoute(stdout.String(), userConfigPath), nil
+	route := parseSSHTransportConfigRoute(stdout.String(), userConfigPath)
+	if target.Key == "" {
+		route.identityFiles, err = resolveSSHTransportAuthenticationPaths(ctx, target, localForward, capabilities, seedPath, route.identityFiles)
+		if err != nil {
+			return sshTransportConfigRoute{}, err
+		}
+	} else {
+		route.identityFiles = nil
+	}
+	if target.CertificateFile == "" {
+		route.certificateFiles, err = resolveSSHTransportAuthenticationPaths(ctx, target, localForward, capabilities, seedPath, route.certificateFiles)
+		if err != nil {
+			return sshTransportConfigRoute{}, err
+		}
+	} else {
+		route.certificateFiles = nil
+	}
+	return route, nil
 }
 
 func parseSSHTransportConfigRoute(output, userConfigPath string) sshTransportConfigRoute {
@@ -279,6 +321,12 @@ func parseSSHTransportConfigRoute(output, userConfigPath string) sshTransportCon
 		switch strings.ToLower(key) {
 		case "hostname":
 			route.hostName = value
+		case "identityfile":
+			route.identityFiles = append(route.identityFiles, value)
+		case "identitiesonly":
+			route.identitiesOnly = strings.EqualFold(value, "yes")
+		case "certificatefile":
+			route.certificateFiles = append(route.certificateFiles, value)
 		case "proxyjump":
 			if !strings.EqualFold(value, "none") {
 				route.proxyJump = value
@@ -294,6 +342,98 @@ func parseSSHTransportConfigRoute(output, userConfigPath string) sshTransportCon
 		}
 	}
 	return route
+}
+
+func resolveSSHTransportAuthenticationPaths(
+	ctx context.Context,
+	target SSHTarget,
+	localForward bool,
+	capabilities sshTransportRouteCapabilities,
+	seedPath string,
+	paths []string,
+) ([]string, error) {
+	resolved := make([]string, 0, len(paths))
+	home := ""
+	for index, path := range paths {
+		if err := validateSSHTransportRoutedAuthenticationPath("authentication file", path); err != nil {
+			return nil, err
+		}
+		if strings.EqualFold(path, "none") {
+			resolved = append(resolved, path)
+			continue
+		}
+		if strings.Contains(path, "%d") {
+			if home == "" {
+				currentUser, err := osuser.Current()
+				if err != nil {
+					return nil, fmt.Errorf("resolve local home for SSH authentication path: %w", err)
+				}
+				home = currentUser.HomeDir
+			}
+			path = expandSSHTransportHomeToken(path, home)
+		}
+		probePath := filepath.Join(filepath.Dir(seedPath), fmt.Sprintf("authentication_path_config_%d", index))
+		var probe strings.Builder
+		// OpenSSH 7.x accepted %d for authentication files but not ControlPath,
+		// so resolve that stable local value first. Asking the invoked client to
+		// render the remaining shared tokens keeps version-specific semantics and
+		// preserves the original Host alias.
+		writeSSHTransportConfigValue(&probe, "ControlPath", path)
+		writeSSHTransportLiteralConfigValue(&probe, "Include", seedPath)
+		if err := os.WriteFile(probePath, []byte(probe.String()), 0o600); err != nil {
+			return nil, fmt.Errorf("write private SSH authentication path config: %w", err)
+		}
+		if err := secureSSHTransportPath(probePath, false); err != nil {
+			return nil, fmt.Errorf("secure private SSH authentication path config: %w", err)
+		}
+
+		args := sshTransportRouteCommandArgs(probePath, target, localForward, capabilities)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if err := runOwnedSSHTransportCommand(ctx, target, args, &stdout, &stderr); err != nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return nil, cause
+			}
+			diagnostic := strings.TrimSpace(redactSSHTransportDiagnostic(target, stderr.String()))
+			return nil, fmt.Errorf("resolve OpenSSH authentication path for %s: %w: %s", target.Host, err, diagnostic)
+		}
+		expanded, ok := parseSSHTransportControlPath(stdout.String())
+		if !ok {
+			return nil, fmt.Errorf("resolve OpenSSH authentication path for %s: OpenSSH omitted the expanded path", target.Host)
+		}
+		resolved = append(resolved, expanded)
+	}
+	return resolved, nil
+}
+
+func expandSSHTransportHomeToken(value, home string) string {
+	var expanded strings.Builder
+	for index := 0; index < len(value); index++ {
+		if value[index] == '%' && index+1 < len(value) {
+			switch value[index+1] {
+			case '%':
+				expanded.WriteString("%%")
+				index++
+				continue
+			case 'd':
+				expanded.WriteString(strings.ReplaceAll(home, "%", "%%"))
+				index++
+				continue
+			}
+		}
+		expanded.WriteByte(value[index])
+	}
+	return expanded.String()
+}
+
+func parseSSHTransportControlPath(output string) (string, bool) {
+	for _, line := range strings.Split(output, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if ok && strings.EqualFold(key, "controlpath") {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return "", false
 }
 
 func sshTransportRouteCommandArgs(seedPath string, target SSHTarget, localForward bool, capabilities sshTransportRouteCapabilities) []string {
@@ -553,12 +693,18 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 		proxyCommand = proxyJumpCommand(route)
 		proxyUseFDPass = false
 	}
+	identityFiles := route.identityFiles
+	if target.Key != "" {
+		identityFiles = []string{target.Key}
+	}
+	certificateFiles := route.certificateFiles
+	if target.CertificateFile != "" {
+		certificateFiles = []string{target.CertificateFile}
+	}
 	for name, value := range map[string]string{
 		"host":             hostName,
 		"user":             target.User,
 		"port":             target.Port,
-		"identity file":    target.Key,
-		"certificate file": target.CertificateFile,
 		"known hosts file": knownHostsFile(target),
 		"host key alias":   hostKeyAlias,
 		"proxy command":    proxyCommand,
@@ -568,6 +714,19 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 		}
 		if name != "proxy command" {
 			if err := validateSSHTransportLiteralValue(name, value); err != nil {
+				return "", err
+			}
+		}
+	}
+	for _, field := range []struct {
+		name   string
+		values []string
+	}{
+		{name: "identity file", values: identityFiles},
+		{name: "certificate file", values: certificateFiles},
+	} {
+		for _, value := range field.values {
+			if err := validateSSHTransportRoutedAuthenticationPath(field.name, value); err != nil {
 				return "", err
 			}
 		}
@@ -604,12 +763,14 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 	b.WriteString("  ControlMaster no\n")
 	b.WriteString("  ControlPath none\n")
 	b.WriteString("  ControlPersist no\n")
-	if target.Key != "" {
-		writeSSHTransportLiteralConfigValue(&b, "IdentityFile", target.Key)
+	for _, identityFile := range identityFiles {
+		writeSSHTransportLiteralConfigValue(&b, "IdentityFile", identityFile)
+	}
+	if target.Key != "" || route.identitiesOnly {
 		b.WriteString("  IdentitiesOnly yes\n")
 	}
-	if target.CertificateFile != "" {
-		writeSSHTransportLiteralConfigValue(&b, "CertificateFile", target.CertificateFile)
+	for _, certificateFile := range certificateFiles {
+		writeSSHTransportLiteralConfigValue(&b, "CertificateFile", certificateFile)
 	}
 	if hostKeyAlias != "" {
 		writeSSHTransportLiteralConfigValue(&b, "HostKeyAlias", hostKeyAlias)
@@ -661,6 +822,16 @@ func validateSSHTransportLiteralValue(name, value string) error {
 	}
 	if strings.Contains(value, "${") {
 		return exit(2, "resolved SSH %s contains unsupported OpenSSH environment expansion syntax", name)
+	}
+	if strings.Contains(value, `"`) {
+		return exit(2, "resolved SSH %s contains an unsupported double quote", name)
+	}
+	return nil
+}
+
+func validateSSHTransportRoutedAuthenticationPath(name, value string) error {
+	if strings.ContainsAny(value, "\x00\r\n") {
+		return exit(2, "resolved SSH %s contains an unsupported control character", name)
 	}
 	if strings.Contains(value, `"`) {
 		return exit(2, "resolved SSH %s contains an unsupported double quote", name)

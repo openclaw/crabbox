@@ -50,11 +50,11 @@ The resolved SSH user, key/certificate paths, host-key policy, and ProxyCommand
 are rendered into a mode-`0600` temporary OpenSSH config. The Crabbox-launched
 rsync/ssh argv contains only that config path and a fixed non-secret alias;
 secret SSH usernames are not placed in argv or environment variables.
-Config-backed SSH routes materialize only the effective `HostName`,
-`ProxyJump`, or `ProxyCommand`; interactive session directives are not
-inherited. OpenSSH executes the provider-resolved ProxyCommand under that
-provider's existing transport contract. Crabbox removes the config when the
-transfer exits.
+Config-backed SSH routes materialize the effective authentication files,
+`HostName`, `ProxyJump`, or `ProxyCommand`; interactive session directives are
+not inherited. OpenSSH executes the provider-resolved ProxyCommand under that
+provider's existing transport contract. Crabbox keeps the private config for
+the full transfer and removes it after the child exits.
 
 SSH fallback requires rsync on both sides. The local client must be rsync 3.4.3
 or newer; Crabbox rejects older clients before connecting because known

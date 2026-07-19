@@ -121,12 +121,8 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 	commandArgs := args
 	if runtime.GOOS == "windows" {
 		if wslExe != "" {
-			wslArgs := make([]string, len(args))
-			for i, arg := range args {
-				wslArgs[i] = windowsToWSLPathWithRoot(arg, mountRoot)
-			}
 			name = wslExe
-			commandArgs = append([]string{"rsync"}, wslArgs...)
+			commandArgs = append([]string{"rsync"}, resolvedSSHCopyWSLArgs(args, mountRoot)...)
 		}
 	}
 	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, name, commandArgs...)
@@ -155,6 +151,21 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 		return fmt.Errorf("copy over resolved SSH transport: %w", waitErr)
 	}
 	return nil
+}
+
+func resolvedSSHCopyWSLArgs(args []string, mountRoot string) []string {
+	wslArgs := append([]string(nil), args...)
+	operands := false
+	for index, arg := range wslArgs {
+		if arg == "--" {
+			operands = true
+			continue
+		}
+		if operands && !strings.HasPrefix(arg, sshTransportHostAlias+":") {
+			wslArgs[index] = windowsToWSLPathWithRoot(arg, mountRoot)
+		}
+	}
+	return wslArgs
 }
 
 func probeResolvedSSHRemoteSecludedArgs(ctx context.Context, session *sshTransportSession, target SSHTarget, wslExe string) error {

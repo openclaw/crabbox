@@ -52,9 +52,9 @@ containing the resolved user, host, port, key/certificate paths, host-key
 policy, and ProxyCommand. The Crabbox-launched subprocess receives only `-F
 <private-path>` and a fixed non-secret alias. Token usernames therefore do not
 enter that argv or environment. For targets whose routing lives in the user's
-OpenSSH config, Crabbox resolves only `HostName`, `ProxyJump`, and
-`ProxyCommand` and materializes those route fields. Interactive directives such
-as extra forwards, TTY requests, and remote commands are not inherited.
+OpenSSH config, Crabbox preserves its resolved identity and certificate files
+along with `HostName`, `ProxyJump`, and `ProxyCommand`. Interactive directives
+such as extra forwards, TTY requests, and remote commands are not inherited.
 OpenSSH executes the provider-resolved ProxyCommand under the provider's
 existing transport contract. The config directory is mode `0700`, the file is
 mode `0600`, and cleanup runs after the child exits. Windows applies a protected

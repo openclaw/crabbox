@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,7 +149,16 @@ func TestSSHTransportConfigProxyIncludesUserRouting(t *testing.T) {
 	if err := os.Mkdir(sshDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	userConfig := "IgnoreUnknown CrabboxFutureOption\nCrabboxFutureOption yes\nHost proxy-alias\n  ProxyJump jump.example.test\n  HostKeyAlias edge%blue\n  LocalForward 127.0.0.1:41001 127.0.0.1:3001\n  RemoteForward 127.0.0.1:41002 127.0.0.1:3002\n  DynamicForward 127.0.0.1:41003\n  RequestTTY force\n  RemoteCommand echo inherited\n  SessionType none\nMatch originalhost proxy-alias user alice exec \"test %p = 2222\"\n  HostName routed.example.test\n"
+	identityFile := filepath.Join(sshDir, "proxy-proxy-alias identity")
+	certificateFile := filepath.Join(sshDir, "proxy-routed.example.test identity-cert.pub")
+	for path, contents := range map[string]string{identityFile: "private-key", certificateFile: "certificate"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identityPattern := filepath.Join(sshDir, "proxy-%n identity")
+	certificatePattern := filepath.Join(sshDir, "proxy-%h identity-cert.pub")
+	userConfig := fmt.Sprintf("IgnoreUnknown CrabboxFutureOption\nCrabboxFutureOption yes\nHost proxy-alias\n  ProxyJump jump.example.test\n  HostKeyAlias edge%%blue\n  IdentityFile \"%s\"\n  IdentitiesOnly yes\n  CertificateFile \"%s\"\n  LocalForward 127.0.0.1:41001 127.0.0.1:3001\n  RemoteForward 127.0.0.1:41002 127.0.0.1:3002\n  DynamicForward 127.0.0.1:41003\n  RequestTTY force\n  RemoteCommand echo inherited\n  SessionType none\nMatch originalhost proxy-alias user alice exec \"test %%p = 2222\"\n  HostName routed.example.test\n", identityPattern, certificatePattern)
 	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(userConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +184,7 @@ func TestSSHTransportConfigProxyIncludesUserRouting(t *testing.T) {
 		t.Fatalf("ssh -G: %v: %s", err, output)
 	}
 	got := strings.ToLower(string(output))
-	for _, line := range []string{"hostname routed.example.test", "hostkeyalias edge%blue", "user alice", "port 2222", "requesttty false"} {
+	for _, line := range []string{"hostname routed.example.test", "hostkeyalias edge%blue", "user alice", "port 2222", "requesttty false", "identityfile " + strings.ToLower(identityFile), "identitiesonly yes", "certificatefile " + strings.ToLower(certificateFile)} {
 		if !strings.Contains(got, line) {
 			t.Fatalf("ssh -G missing %q:\n%s", line, output)
 		}
@@ -195,6 +205,75 @@ func TestSSHTransportConfigProxyIncludesUserRouting(t *testing.T) {
 		if strings.Contains(got, directive) {
 			t.Fatalf("ssh -G inherited session directive %q:\n%s", directive, output)
 		}
+	}
+}
+
+func TestSSHTransportRouteParserPreservesAuthenticationFiles(t *testing.T) {
+	route := parseSSHTransportConfigRoute("identityfile /home/alice/.ssh/first\nidentityfile ${HOME}/.ssh/key-%n-%k-%j-%C-%h-%%n\nidentitiesonly yes\ncertificatefile /home/alice/.ssh/id-cert-%n.pub\n", "/private/config")
+	if got, want := route.identityFiles, []string{"/home/alice/.ssh/first", "${HOME}/.ssh/key-%n-%k-%j-%C-%h-%%n"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("identity files=%#v, want %#v", got, want)
+	}
+	if !route.identitiesOnly || !reflect.DeepEqual(route.certificateFiles, []string{"/home/alice/.ssh/id-cert-%n.pub"}) {
+		t.Fatalf("route=%#v", route)
+	}
+	route.identityFiles = []string{"/home/alice/.ssh/first", "/home/alice/.ssh/key-proxy-alias"}
+	route.certificateFiles = []string{"/home/alice/.ssh/id-cert-proxy-alias.pub"}
+	config, err := renderSSHTransportConfigWithRoute(SSHTarget{User: "alice", Host: "proxy-alias", Port: "22"}, false, route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{
+		`IdentityFile "/home/alice/.ssh/first"`,
+		`IdentityFile "/home/alice/.ssh/key-proxy-alias"`,
+		"IdentitiesOnly yes",
+		`CertificateFile "/home/alice/.ssh/id-cert-proxy-alias.pub"`,
+	} {
+		if !strings.Contains(config, value) {
+			t.Fatalf("private config missing %q:\n%s", value, config)
+		}
+	}
+}
+
+func TestSSHTransportConfigProxyPreservesIdentityNone(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX OpenSSH config fixture")
+	}
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("OpenSSH client is required")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.Mkdir(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte("Host no-identity\n  IdentityFile none\n  IdentitiesOnly yes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := newSSHTransportSession(t.Context(), SSHTarget{User: "alice", Host: "no-identity", Port: "22", SSHConfigProxy: true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	config, err := os.ReadFile(session.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(config), `IdentityFile "none"`) {
+		t.Fatalf("private config did not preserve IdentityFile none:\n%s", config)
+	}
+}
+
+func TestSSHTransportControlPathParserPreservesSpaces(t *testing.T) {
+	path, ok := parseSSHTransportControlPath("hostname example.test\ncontrolpath /tmp/key alias-hash\n")
+	if !ok || path != "/tmp/key alias-hash" {
+		t.Fatalf("path=%q ok=%v", path, ok)
+	}
+}
+
+func TestExpandSSHTransportHomeTokenPreservesEscapedPercent(t *testing.T) {
+	if got, want := expandSSHTransportHomeToken(`%d/.ssh/key-%%d-%%%d`, `/home/alice%ops`), `/home/alice%%ops/.ssh/key-%%d-%%/home/alice%%ops`; got != want {
+		t.Fatalf("expanded=%q, want %q", got, want)
 	}
 }
 
@@ -503,7 +582,8 @@ func TestWSLSSHTransportSessionStagesAndRemovesPrivateFiles(t *testing.T) {
 	}
 	dir := t.TempDir()
 	wsl := filepath.Join(dir, "wsl")
-	if err := os.WriteFile(wsl, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755); err != nil {
+	wslScript := "#!/bin/sh\ncase \"$*\" in *mktemp*) printf 'harmless WSL warning\\n' >&2 ;; esac\nexec \"$@\"\n"
+	if err := os.WriteFile(wsl, []byte(wslScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	key := filepath.Join(dir, "identity")
@@ -543,6 +623,26 @@ func TestWSLSSHTransportSessionStagesAndRemovesPrivateFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 		t.Fatalf("WSL private config remained: %v", err)
+	}
+}
+
+func TestWSLSSHTransportSessionRejectsConfigProxyRoute(t *testing.T) {
+	_, err := newWSLSSHTransportSession(t.Context(), SSHTarget{SSHConfigProxy: true}, "wsl", "/mnt")
+	if err == nil || !strings.Contains(err.Error(), "require native OpenSSH") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidWSLSSHTransportDirectory(t *testing.T) {
+	for _, value := range []string{"/tmp/crabbox-ssh-transport-abc123", "/tmp/crabbox-ssh-transport-1234567890"} {
+		if !validWSLSSHTransportDirectory(value) {
+			t.Fatalf("valid path rejected: %q", value)
+		}
+	}
+	for _, value := range []string{"", "/tmp/crabbox-ssh-transport-short", "/tmp/other-abc123", "/tmp/crabbox-ssh-transport-abc123/child", "/tmp/crabbox-ssh-transport-abc 123", "/home/alice/crabbox-ssh-transport-abc123"} {
+		if validWSLSSHTransportDirectory(value) {
+			t.Fatalf("unsafe path accepted: %q", value)
+		}
 	}
 }
 
