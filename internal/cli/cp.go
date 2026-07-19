@@ -336,12 +336,26 @@ func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, ds
 	if strings.ContainsAny(remotePath, "\x00\r\n") {
 		return nil, exit(2, "remote copy paths must not contain control characters")
 	}
-	// POSIX remote shells expand a leading tilde for downloads. Keep that
-	// established behavior instead of sending the tilde literally over the
-	// secluded-args protocol. WSL2 already required secluded args before the
-	// general capability probe was added, so its behavior stays unchanged.
+	// A secluded remote rsync starts in the SSH user's home, so current-user
+	// tilde paths can stay secluded after being made relative. Named-user
+	// tildes still need shell expansion. Do not send their wildcard escapes
+	// through the rsync 3.4.4 safe_arg() path this transport is avoiding.
 	if secludedArgs && !isWindowsWSL2Target(target) && strings.HasPrefix(remotePath, "~") {
-		secludedArgs = false
+		if srcRemote && !strings.Contains(remotePath, "/") {
+			return nil, exit(2, "remote downloads from bare ~ or ~user are unsupported; use a path under ~/ or an absolute path")
+		}
+		if normalized, ok := rsyncSecludedRemoteHomePath(remotePath); ok {
+			if srcRemote {
+				srcPath = normalized
+			} else {
+				dstPath = normalized
+			}
+		} else {
+			if strings.ContainsAny(remotePath, "*?[") {
+				return nil, exit(2, "remote copy paths using ~user must not contain wildcard characters; use an absolute path")
+			}
+			secludedArgs = false
+		}
 	}
 	args := []string{"-az", "--no-old-args"}
 	if srcRemote {
@@ -384,6 +398,16 @@ func rsyncSecludedRemoteDestinationPath(path string) string {
 		return "./" + path
 	}
 	return path
+}
+
+func rsyncSecludedRemoteHomePath(path string) (string, bool) {
+	if path == "~" {
+		return ".", true
+	}
+	if strings.HasPrefix(path, "~/") {
+		return "." + path[1:], true
+	}
+	return path, false
 }
 
 func rsyncSecludedRemoteSourcePath(path string) string {
