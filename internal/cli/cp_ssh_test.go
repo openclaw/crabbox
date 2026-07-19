@@ -92,6 +92,50 @@ func TestResolvedSSHCopyArgsSecludedTransport(t *testing.T) {
 	}
 }
 
+func TestResolvedSSHCopyArgsSecludedSourceEscaping(t *testing.T) {
+	session := &sshTransportSession{configPath: "/private/config"}
+	tests := map[string]string{
+		`SANDBOX:/tmp/foo\bar[1].json`:   sshTransportHostAlias + `:/tmp/foo\\bar\[1].json`,
+		`SANDBOX:/tmp/foo\bar/result[1]`: sshTransportHostAlias + `:/tmp/foo\bar/result\[1]`,
+	}
+	for source, want := range tests {
+		args, err := resolvedSSHCopyArgs(session, SSHTarget{}, source, "./output", false, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := args[len(args)-2]; got != want {
+			t.Errorf("secluded remote source=%q, want %q", got, want)
+		}
+	}
+}
+
+func TestResolvedSSHCopyArgsPreservesRemoteTildeExpansion(t *testing.T) {
+	session := &sshTransportSession{configPath: "/private/config"}
+	tests := []struct {
+		name        string
+		source      string
+		destination string
+		remoteArg   int
+	}{
+		{name: "download", source: "SANDBOX:~/result.log", destination: "./output", remoteArg: -2},
+		{name: "upload", source: "./input", destination: "SANDBOX:~/result.log", remoteArg: -1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args, err := resolvedSSHCopyArgs(session, SSHTarget{}, test.source, test.destination, false, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !containsString(args, "--no-secluded-args") || containsString(args, "--secluded-args") {
+				t.Fatalf("tilde path must use shell-transported args: %#v", args)
+			}
+			if got := args[len(args)+test.remoteArg]; got != sshTransportHostAlias+":~/result.log" {
+				t.Fatalf("remote path=%q", got)
+			}
+		})
+	}
+}
+
 func TestResolvedSSHCopyArgsKeepsLeadingColonInRemotePath(t *testing.T) {
 	session := &sshTransportSession{configPath: "/private/config"}
 	args, err := resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX::result", "result", false, false)

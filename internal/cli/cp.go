@@ -336,6 +336,13 @@ func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, ds
 	if strings.ContainsAny(remotePath, "\x00\r\n") {
 		return nil, exit(2, "remote copy paths must not contain control characters")
 	}
+	// POSIX remote shells expand a leading tilde for downloads. Keep that
+	// established behavior instead of sending the tilde literally over the
+	// secluded-args protocol. WSL2 already required secluded args before the
+	// general capability probe was added, so its behavior stays unchanged.
+	if secludedArgs && !isWindowsWSL2Target(target) && strings.HasPrefix(remotePath, "~") {
+		secludedArgs = false
+	}
 	args := []string{"-az", "--no-old-args"}
 	if srcRemote {
 		// A lease is outside the host trust boundary. Preserve regular file and
@@ -357,7 +364,11 @@ func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, ds
 	}
 	args = append(args, "--")
 	if srcRemote {
-		args = append(args, session.host()+":"+rsyncRemoteCopyPath(srcPath), rsyncCopyLocalPath(dstPath))
+		remoteSource := rsyncRemoteCopyPath(srcPath)
+		if secludedArgs {
+			remoteSource = rsyncSecludedRemoteSourcePath(srcPath)
+		}
+		args = append(args, session.host()+":"+remoteSource, rsyncCopyLocalPath(dstPath))
 	} else {
 		remoteDestination := rsyncRemoteCopyPath(dstPath)
 		if secludedArgs {
@@ -369,6 +380,25 @@ func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, ds
 }
 
 func rsyncSecludedRemoteDestinationPath(path string) string {
+	if strings.HasPrefix(path, ":") {
+		return "./" + path
+	}
+	return path
+}
+
+func rsyncSecludedRemoteSourcePath(path string) string {
+	components := strings.Split(path, "/")
+	for index, component := range components {
+		if strings.ContainsAny(component, "*?[") {
+			component = strings.ReplaceAll(component, `\`, `\\`)
+		}
+		components[index] = strings.NewReplacer(
+			`*`, `\*`,
+			`?`, `\?`,
+			`[`, `\[`,
+		).Replace(component)
+	}
+	path = strings.Join(components, "/")
 	if strings.HasPrefix(path, ":") {
 		return "./" + path
 	}
