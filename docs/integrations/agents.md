@@ -90,7 +90,7 @@ instructions; they do not grant credentials or bypass the agent host's command
 approval and sandbox policy. See [`crabbox init`](../commands/init.md) and
 [Repository Onboarding](../features/repository-onboarding.md).
 
-The standards-compliant generated metadata is scheduled for Crabbox 0.39.1.
+The standards-compliant generated metadata is scheduled for Crabbox 0.40.0.
 Released 0.39.0 binaries still emit a body-only skill; until upgrading, add the
 required `name` and `description` frontmatter manually.
 
@@ -121,7 +121,7 @@ The checked-in `skills/crabbox` source and `.agents/skills/crabbox` projection
 are byte-identical and CI rejects drift. Use `crabbox init` when the repository
 also needs Crabbox configuration, Actions hydration, and detected project-job
 instructions; use a skill manager when only agent discovery is missing.
-`--pin refs/heads/main` selects this unreleased branch explicitly; after 0.39.1
+`--pin refs/heads/main` selects this unreleased branch explicitly; after 0.40.0
 is tagged, omit it to follow GitHub CLI's latest-release resolution.
 
 ### Discover from crabbox.sh

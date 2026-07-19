@@ -39,7 +39,7 @@ Status labels are deliberate:
   no user-facing command is shipped.
 
 Catalog status tracks repository state, not the latest release archive. The
-standards-compliant Agent Skill metadata is scheduled for 0.39.1; released
+standards-compliant Agent Skill metadata is scheduled for 0.40.0; released
 0.39.0 binaries still generate a body-only `SKILL.md`.
 
 ## Two extension planes
