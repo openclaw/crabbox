@@ -448,23 +448,99 @@ func TestSSHTransportLiteralFieldsEscapeOnlyTokenDirectives(t *testing.T) {
 }
 
 func TestProxyJumpCommandPreservesMultiHopChainAndOwnership(t *testing.T) {
-	got := proxyJumpCommand(sshTransportConfigRoute{
-		proxyJump:      "jump-a,jump-b,jump-c",
-		jumpConfigPath: "/private/jump%h-config",
-	})
-	for _, value := range []string{"'/private/jump%%h-config'", "'-J' 'jump-a,jump-b'", "'jump-c'", "'ControlMaster=no'", "'PermitLocalCommand=no'", "'BatchMode=yes'"} {
+	dir := t.TempDir()
+	userConfig := filepath.Join(dir, "user_config")
+	if err := os.WriteFile(userConfig, []byte("Host *\n  ProxyUseFdpass yes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path, err := writeSSHTransportJumpConfig(dir, userConfig, "jump-a,jump-b,jump-c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := proxyJumpCommand(sshTransportConfigRoute{proxyJump: "jump-a,jump-b,jump-c", jumpConfigPath: path})
+	for _, value := range []string{"/jump_config'", "'jump-c'", "'ControlMaster=no'", "'PermitLocalCommand=no'", "'BatchMode=yes'"} {
 		if !strings.Contains(got, value) {
 			t.Fatalf("jump command missing %q: %s", value, got)
+		}
+	}
+	if strings.Contains(got, "'-J'") {
+		t.Fatalf("jump command delegated an unsafe implicit hop: %s", got)
+	}
+	for index, hop := range []string{"", "jump-a", "jump-b"} {
+		name := fmt.Sprintf("jump_config_%d", index)
+		if index == 2 {
+			name = "jump_config"
+		}
+		config, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, value := range []string{"ControlMaster no", "PermitLocalCommand no", "BatchMode yes", userConfig} {
+			if !strings.Contains(string(config), value) {
+				t.Fatalf("%s missing %q:\n%s", name, value, config)
+			}
+		}
+		if hop != "" && (!strings.Contains(string(config), hop) || !strings.Contains(string(config), "ProxyCommand")) {
+			t.Fatalf("%s did not proxy through %s:\n%s", name, hop, config)
+		}
+		if hop != "" && !strings.Contains(string(config), "ProxyUseFdpass no") {
+			t.Fatalf("%s allowed inherited FD passing:\n%s", name, config)
 		}
 	}
 }
 
 func TestProxyJumpCommandPreservesFinalHopUserAndPort(t *testing.T) {
-	got := proxyJumpCommand(sshTransportConfigRoute{proxyJump: "jump-a,alice@jump.example.test:2222"})
-	for _, value := range []string{"'-J' 'jump-a'", "'-p' '2222'", "'alice@jump.example.test'"} {
+	dir := t.TempDir()
+	path, err := writeSSHTransportJumpConfig(dir, "", "jump-a,alice@jump.example.test:2222")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := proxyJumpCommand(sshTransportConfigRoute{proxyJump: "jump-a,alice@jump.example.test:2222", jumpConfigPath: path})
+	for _, value := range []string{"'-p' '2222'", "'alice@jump.example.test'"} {
 		if !strings.Contains(got, value) {
 			t.Fatalf("jump command missing %q: %s", value, got)
 		}
+	}
+	config, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(config), "ProxyCommand") || !strings.Contains(string(config), "jump-a") {
+		t.Fatalf("final hop config did not preserve the preceding hop:\n%s", config)
+	}
+}
+
+func TestProxyJumpConfigChainGrowsLinearly(t *testing.T) {
+	hops := make([]string, 100)
+	for index := range hops {
+		hops[index] = fmt.Sprintf("jump-%d.example.test", index)
+	}
+	dir := t.TempDir()
+	path, err := writeSSHTransportJumpConfig(dir, "", strings.Join(hops, ","))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := proxyJumpCommand(sshTransportConfigRoute{proxyJump: strings.Join(hops, ","), jumpConfigPath: path})
+	if len(command) > 4096 {
+		t.Fatalf("outer jump command grew with chain: %d bytes", len(command))
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != len(hops) {
+		t.Fatalf("jump configs=%d, want %d", len(entries), len(hops))
+	}
+	total := 0
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += int(info.Size())
+	}
+	if total > len(hops)*2048 {
+		t.Fatalf("jump config chain grew superlinearly: %d bytes for %d hops", total, len(hops))
 	}
 }
 
