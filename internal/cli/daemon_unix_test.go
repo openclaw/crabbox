@@ -44,7 +44,9 @@ func TestStopDaemonProcessKillsProcessGroup(t *testing.T) {
 
 func waitForPIDFile(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	// The child fork/exec that writes this file can be slow under CI load, so
+	// allow generous slack before declaring the descendant never started.
+	deadline := time.Now().Add(5 * time.Second)
 	var lastErr error
 	for {
 		data, err := os.ReadFile(path)

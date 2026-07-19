@@ -16,6 +16,26 @@ import (
 	"time"
 )
 
+// assertDescendantReaped polls until the process is gone (ESRCH). Descendant
+// teardown after context cancellation is asynchronous at the OS level and can
+// still be in flight when the cancelled command returns, so a single immediate
+// Kill(pid, 0) check is racy under load (observed as CI flakes). Poll within a
+// bounded deadline instead.
+func assertDescendantReaped(t *testing.T, label string, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s descendant %d survived cancellation: %v", label, pid, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestResolvedSSHRemoteSecludedArgsProbeHonorsCancellation(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")
@@ -41,9 +61,7 @@ func TestResolvedSSHRemoteSecludedArgsProbeHonorsCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("probe error=%v", err)
 	}
-	if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
-		t.Fatalf("probe descendant %d survived cancellation: %v", childPID, err)
-	}
+	assertDescendantReaped(t, "probe", childPID)
 }
 
 func TestOwnedSSHTransportCommandReapsDescendants(t *testing.T) {
@@ -71,9 +89,7 @@ func TestOwnedSSHTransportCommandReapsDescendants(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("owned command err=%v", err)
 	}
-	if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
-		t.Fatalf("owned SSH descendant %d survived cancellation: %v", childPID, err)
-	}
+	assertDescendantReaped(t, "owned SSH", childPID)
 }
 
 func TestRsyncRemoteShellRoundTripsApostrophePath(t *testing.T) {
@@ -167,7 +183,5 @@ wait "$child"
 	case <-time.After(5 * time.Second):
 		t.Fatal("cancelled copy did not return")
 	}
-	if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
-		t.Fatalf("rsync descendant %d survived cancellation: %v", childPID, err)
-	}
+	assertDescendantReaped(t, "rsync", childPID)
 }
