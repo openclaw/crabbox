@@ -336,26 +336,17 @@ func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, ds
 	if strings.ContainsAny(remotePath, "\x00\r\n") {
 		return nil, exit(2, "remote copy paths must not contain control characters")
 	}
-	// A secluded remote rsync starts in the SSH user's home, so current-user
-	// tilde paths can stay secluded after being made relative. Named-user
-	// tildes still need shell expansion. Do not send their wildcard escapes
-	// through the rsync 3.4.4 safe_arg() path this transport is avoiding.
+	// Tilde paths need remote-shell expansion. Keep that behavior when the
+	// encoded path avoids rsync 3.4.4's safe_arg() bug, and fail closed when a
+	// backslash-wildcard pair would re-enter the vulnerable transport path.
 	if secludedArgs && !isWindowsWSL2Target(target) && strings.HasPrefix(remotePath, "~") {
 		if srcRemote && !strings.Contains(remotePath, "/") {
 			return nil, exit(2, "remote downloads from bare ~ or ~user are unsupported; use a path under ~/ or an absolute path")
 		}
-		if normalized, ok := rsyncSecludedRemoteHomePath(remotePath); ok {
-			if srcRemote {
-				srcPath = normalized
-			} else {
-				dstPath = normalized
-			}
-		} else {
-			if strings.ContainsAny(remotePath, "*?[") {
-				return nil, exit(2, "remote copy paths using ~user must not contain wildcard characters; use an absolute path")
-			}
-			secludedArgs = false
+		if rsyncRemoteCopyPathTriggersSafeArgBug(remotePath) {
+			return nil, exit(2, "remote copy paths using ~ must not require rsync wildcard escaping; use an absolute path")
 		}
+		secludedArgs = false
 	}
 	args := []string{"-az", "--no-old-args"}
 	if srcRemote {
@@ -400,16 +391,6 @@ func rsyncSecludedRemoteDestinationPath(path string) string {
 	return path
 }
 
-func rsyncSecludedRemoteHomePath(path string) (string, bool) {
-	if path == "~" {
-		return ".", true
-	}
-	if strings.HasPrefix(path, "~/") {
-		return "." + path[1:], true
-	}
-	return path, false
-}
-
 func rsyncSecludedRemoteSourcePath(path string) string {
 	components := strings.Split(path, "/")
 	for index, component := range components {
@@ -442,6 +423,16 @@ func rsyncRemoteCopyPath(path string) string {
 		return "./" + path
 	}
 	return path
+}
+
+func rsyncRemoteCopyPathTriggersSafeArgBug(path string) bool {
+	path = rsyncRemoteCopyPath(path)
+	for index := 0; index+1 < len(path); index++ {
+		if path[index] == '\\' && strings.ContainsRune("*?[]", rune(path[index+1])) {
+			return true
+		}
+	}
+	return false
 }
 
 func rsyncCopyLocalPath(path string) string {

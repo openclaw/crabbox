@@ -109,7 +109,7 @@ func TestResolvedSSHCopyArgsSecludedSourceEscaping(t *testing.T) {
 	}
 }
 
-func TestResolvedSSHCopyArgsKeepsCurrentUserTildePathsSecluded(t *testing.T) {
+func TestResolvedSSHCopyArgsPreservesCurrentUserTildeExpansion(t *testing.T) {
 	session := &sshTransportSession{configPath: "/private/config"}
 	tests := []struct {
 		name        string
@@ -126,10 +126,10 @@ func TestResolvedSSHCopyArgsKeepsCurrentUserTildePathsSecluded(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !containsString(args, "--secluded-args") || containsString(args, "--no-secluded-args") {
-				t.Fatalf("current-user tilde path must use secluded args: %#v", args)
+			if !containsString(args, "--no-secluded-args") || containsString(args, "--secluded-args") {
+				t.Fatalf("current-user tilde path must use shell-transported args: %#v", args)
 			}
-			if got := args[len(args)+test.remoteArg]; got != sshTransportHostAlias+":./result.log" {
+			if got := args[len(args)+test.remoteArg]; got != sshTransportHostAlias+":~/result.log" {
 				t.Fatalf("remote path=%q", got)
 			}
 		})
@@ -148,9 +148,11 @@ func TestResolvedSSHCopyArgsPreservesNamedUserTildeExpansion(t *testing.T) {
 	if got := args[len(args)-2]; got != sshTransportHostAlias+":~alice/result.log" {
 		t.Fatalf("remote source=%q", got)
 	}
-	_, err = resolvedSSHCopyArgs(session, SSHTarget{}, "SANDBOX:~alice/result[1].log", "./output", false, true)
-	if err == nil || !strings.Contains(err.Error(), "use an absolute path") {
-		t.Fatalf("unsafe named-user wildcard err=%v", err)
+	for _, source := range []string{"SANDBOX:~alice/result[1].log", `SANDBOX:~alice/file\]name`} {
+		_, err = resolvedSSHCopyArgs(session, SSHTarget{}, source, "./output", false, true)
+		if err == nil || !strings.Contains(err.Error(), "use an absolute path") {
+			t.Fatalf("unsafe named-user path=%q err=%v", source, err)
+		}
 	}
 }
 
