@@ -45,7 +45,8 @@ the directory containing `SKILL.md`.
 
 The [Agent Skills standard](https://agentskills.io/specification) defines
 `SKILL.md`, not a mandatory search path. Official client documentation was
-audited on 2026-07-18; host behavior can change independently of Crabbox.
+audited on 2026-07-18 (pi on 2026-07-20); host behavior can change
+independently of Crabbox.
 
 | Client | Discovers the default `.agents/skills` path | Notes |
 | --- | --- | --- |
@@ -58,6 +59,7 @@ audited on 2026-07-18; host behavior can change independently of Crabbox.
 | [Gemini CLI](https://geminicli.com/docs/cli/using-agent-skills/) | Yes, from the workspace root | Launch Gemini from the repository root, trust the workspace, then use `/skills list` or `/skills reload`. |
 | [Google Antigravity](https://antigravity.google/docs/skills) | Yes | `.agent/skills` is a legacy alternative. |
 | [OpenCode](https://opencode.ai/docs/skills/) | Yes | Walks from the current directory to the worktree root; [`opencode debug skill`](https://opencode.ai/docs/cli/) shows the resolved inventory. |
+| [pi](https://pi.dev/docs/latest/skills) | Yes, from cwd through the git-repo root | Also scans the native `.pi/skills` project path and the global `~/.pi/agent/skills` and `~/.agents/skills` roots. Trust the workspace, then invoke with `/skill:crabbox`; slash-command invocation is gated by the `enableSkillCommands` setting, and `--no-skills` disables discovery. |
 
 The same shared path is also documented by [Roo Code](https://docs.roocode.com/features/skills),
 [Amp](https://ampcode.com/manual#agent-skills),
