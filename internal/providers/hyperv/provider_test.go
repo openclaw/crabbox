@@ -22,12 +22,20 @@ type recordingRunner struct {
 	errors    map[string]error
 	onRun     func(core.LocalCommandRequest)
 	respond   func(core.LocalCommandRequest) (core.LocalCommandResult, error, bool)
+	// blockUntilCtx simulates a command that blocks (like a PowerShell Direct
+	// call wedged during guest boot) until its context is canceled, mirroring
+	// execCommandRunner's exec.CommandContext kill-on-cancel behavior.
+	blockUntilCtx func(core.LocalCommandRequest) bool
 }
 
-func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+func (r *recordingRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if r.onRun != nil {
 		r.onRun(req)
+	}
+	if r.blockUntilCtx != nil && r.blockUntilCtx(req) {
+		<-ctx.Done()
+		return core.LocalCommandResult{}, ctx.Err()
 	}
 	if r.respond != nil {
 		if result, err, ok := r.respond(req); ok {
@@ -1503,21 +1511,21 @@ func TestEnsureOpenSSHInstallsWithSshdClosed(t *testing.T) {
 	var script string
 	for _, call := range runner.calls {
 		s := call.Args[len(call.Args)-1]
-		if strings.Contains(s, "Invoke-Command") && strings.Contains(s, "OpenSSH.Server") {
+		if strings.Contains(s, "Invoke-Command") && strings.Contains(s, "crabbox-openssh.msi") {
 			script = s
 		}
 	}
 	if script == "" {
 		t.Fatal("ensureOpenSSH should invoke an OpenSSH install over PowerShell Direct")
 	}
-	for _, want := range []string{"OpenSSH.Server~~~~0.0.1.0", "Add-WindowsCapability", "Stop-Service", "StartupType Manual", "Disable-NetFirewallRule"} {
+	for _, want := range []string{win32OpenSSHURL, win32OpenSSHSHA256, "Get-FileHash", "msiexec.exe", "Get-Service -Name sshd", "Stop-Service", "StartupType Manual", "Disable-NetFirewallRule"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("ensureOpenSSH script missing %q", want)
 		}
 	}
-	for _, unwanted := range []string{"OpenSSH.Server*", "Add-WindowsCapability -Online -Name $cap.Name"} {
+	for _, unwanted := range []string{"Add-WindowsCapability", "OpenSSH.Server~~~~"} {
 		if strings.Contains(script, unwanted) {
-			t.Errorf("ensureOpenSSH uses ambiguous capability selection: %s", script)
+			t.Errorf("ensureOpenSSH should no longer use Features-on-Demand: %s", script)
 		}
 	}
 	for _, unwanted := range []string{"Start-Service sshd", "New-NetFirewallRule"} {
@@ -1861,5 +1869,164 @@ func TestApplyFlagsHyperVInitPassword(t *testing.T) {
 	}
 	if !cfg.HyperV.InitPassword {
 		t.Fatal("--hyperv-init-password not applied")
+	}
+}
+
+func readinessProbe(req core.LocalCommandRequest) bool {
+	if len(req.Args) == 0 {
+		return false
+	}
+	return strings.Contains(req.Args[len(req.Args)-1], "{ $true }")
+}
+
+// A guest that blocks the first probes (PowerShell Direct wedged mid-boot) then
+// answers must be bounded per attempt and retried to success, not hung. Killing
+// a blocked probe does not corrupt the guest session, so the next attempt works.
+func TestWaitGuestReadyRetriesThroughBlockingBoot(t *testing.T) {
+	runner := &recordingRunner{}
+	blocked := 0
+	runner.blockUntilCtx = func(req core.LocalCommandRequest) bool {
+		if readinessProbe(req) && blocked < 2 {
+			blocked++
+			return true
+		}
+		return false
+	}
+	b := testBackend(runner)
+	b.guestReadyProbeTimeout = 20 * time.Millisecond
+	b.guestReadyBudget = 5 * time.Second
+	b.guestRetryBackoff = time.Millisecond
+
+	if err := b.waitGuestReady(context.Background(), "crabbox-blue-1234", "crabbox"); err != nil {
+		t.Fatalf("waitGuestReady should succeed after transient boot blocking: %v", err)
+	}
+	if blocked != 2 {
+		t.Fatalf("expected 2 blocked probes before success, got %d", blocked)
+	}
+	probes := 0
+	for _, c := range runner.calls {
+		if readinessProbe(c) {
+			probes++
+		}
+	}
+	if probes < 3 {
+		t.Fatalf("expected >=3 readiness probes (2 blocked + 1 success), got %d", probes)
+	}
+}
+
+// If the guest never answers PowerShell Direct, the wait must fail cleanly at the
+// budget instead of hanging on a single wedged probe.
+func TestWaitGuestReadyFailsAfterBudget(t *testing.T) {
+	runner := &recordingRunner{}
+	runner.blockUntilCtx = func(req core.LocalCommandRequest) bool { return readinessProbe(req) }
+	b := testBackend(runner)
+	b.guestReadyProbeTimeout = 15 * time.Millisecond
+	b.guestReadyBudget = 60 * time.Millisecond
+	b.guestRetryBackoff = time.Millisecond
+
+	err := b.waitGuestReady(context.Background(), "crabbox-blue-1234", "crabbox")
+	if err == nil {
+		t.Fatal("waitGuestReady should fail once the boot budget is exceeded")
+	}
+	if !strings.Contains(err.Error(), "did not accept PowerShell Direct") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWaitGuestReadyAbortsOnContextCancel(t *testing.T) {
+	runner := &recordingRunner{}
+	runner.blockUntilCtx = func(core.LocalCommandRequest) bool { return true }
+	b := testBackend(runner)
+	b.guestReadyProbeTimeout = time.Second
+	b.guestReadyBudget = time.Minute
+	b.guestRetryBackoff = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := b.waitGuestReady(ctx, "crabbox-blue-1234", "crabbox"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitGuestReady should return context.Canceled, got: %v", err)
+	}
+}
+
+// A single wedged Invoke-Command attempt must be bounded by guestInvokeTimeout
+// and retried, not left to hang the provision forever.
+func TestInvokeInGuestBoundsBlockingAttempt(t *testing.T) {
+	runner := &recordingRunner{}
+	first := true
+	runner.blockUntilCtx = func(core.LocalCommandRequest) bool {
+		if first {
+			first = false
+			return true
+		}
+		return false
+	}
+	b := testBackend(runner)
+	b.guestInvokeTimeout = 20 * time.Millisecond
+	b.guestRetryBackoff = time.Millisecond
+
+	if err := b.invokeInGuest(context.Background(), "crabbox-blue-1234", "crabbox", "1", "probe"); err != nil {
+		t.Fatalf("invokeInGuest should retry past a wedged attempt: %v", err)
+	}
+	if len(runner.calls) < 2 {
+		t.Fatalf("expected a retry after the bounded attempt, got %d calls", len(runner.calls))
+	}
+}
+
+func TestInvokeInGuestAbortsOnContextCancel(t *testing.T) {
+	runner := &recordingRunner{}
+	runner.blockUntilCtx = func(core.LocalCommandRequest) bool { return true }
+	b := testBackend(runner)
+	b.guestInvokeTimeout = time.Second
+	b.guestRetryBackoff = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := b.invokeInGuest(ctx, "crabbox-blue-1234", "crabbox", "1", "probe"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("invokeInGuest should return context.Canceled, got: %v", err)
+	}
+}
+
+// The readiness gate must run before the first real guest call (the pre-network
+// SSH lockdown), so PowerShell Direct is proven up before we depend on it.
+func TestAcquireWaitsForGuestReadyBeforeLockdown(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.onRun = func(req core.LocalCommandRequest) {
+		if len(req.Args) == 0 {
+			return
+		}
+		// Cancel as soon as the lockdown runs so Acquire stops early; we only
+		// care about the call ordering up to that point.
+		if strings.Contains(req.Args[len(req.Args)-1], "Crabbox-SSH-Quarantine") {
+			cancel()
+		}
+	}
+	b := testBackend(runner)
+	_, _ = b.Acquire(ctx, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "ready-order"})
+
+	readyIdx, stageIdx := -1, -1
+	for i, call := range runner.calls {
+		if len(call.Args) == 0 {
+			continue
+		}
+		script := call.Args[len(call.Args)-1]
+		switch {
+		case readyIdx < 0 && readinessProbe(call):
+			readyIdx = i
+		case stageIdx < 0 && strings.Contains(script, "Crabbox-SSH-Quarantine") && !strings.Contains(script, "Remove-NetFirewallRule"):
+			stageIdx = i
+		}
+	}
+	if readyIdx < 0 || stageIdx < 0 {
+		t.Fatalf("missing calls: readiness=%d lockdown=%d", readyIdx, stageIdx)
+	}
+	if readyIdx >= stageIdx {
+		t.Fatalf("readiness probe (%d) must precede pre-network lockdown (%d)", readyIdx, stageIdx)
 	}
 }
