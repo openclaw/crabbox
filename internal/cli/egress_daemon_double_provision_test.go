@@ -120,9 +120,16 @@ func TestEgressDaemonConcurrentStartDoubleProvision(t *testing.T) {
 		if stopErr != nil || !stopped {
 			t.Fatalf("iteration %d: stop recorded supervisor: stopped=%t err=%v output=%s", i, stopped, stopErr, strings.TrimSpace(stopOutput.String()))
 		}
+		// stopDaemonProcess signals the supervisor group with SIGKILL, which the
+		// kernel delivers asynchronously; poll (bounded) for teardown rather than
+		// asserting the process is gone the instant stop returns.
 		for _, pid := range pids {
+			deadline := time.Now().Add(3 * time.Second)
+			for egressDaemonTestAlive(pid) && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+			}
 			if egressDaemonTestAlive(pid) {
-				t.Fatalf("iteration %d: supervisor pid %d remained alive after stop", i, pid)
+				t.Fatalf("iteration %d: supervisor pid %d remained alive 3s after stop", i, pid)
 			}
 		}
 		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
