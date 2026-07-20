@@ -193,6 +193,34 @@ Native Windows targets use PowerShell and tar-based manifest sync. Prefer plain
 argv for one executable such as `dotnet test`; use `--shell` for multi-statement
 PowerShell and `--script <file.ps1>` for longer scripts.
 
+### Hyper-V Windows leases
+
+`hyperv` is a native-Windows SSH-lease provider. A template needs a Generation 2
+VHDX, DHCP networking, and a known local administrator credential supplied
+through trusted user config or `CRABBOX_HYPERV_GUEST_PASSWORD`.
+See `docs/providers/hyperv.md` for the complete bootstrap and lifecycle contract.
+
+OpenSSH Server and git do not need to be preinstalled. When absent, the provider
+uses PowerShell Direct to bootstrap a pinned, SHA-256-verified Win32-OpenSSH MSI
+and MinGit inside the guest; templates with existing `sshd` and `git` skip those
+downloads. Guest internet access to GitHub is therefore required only for
+missing bootstrap tools. OpenSSH installation does not depend on Windows Update
+or a Features on Demand source.
+
+```powershell
+crabbox run --provider hyperv --target windows `
+  --hyperv-image 'C:\Images\windows.vhdx' `
+  --timing-json --no-sync `
+  -- powershell -NoProfile -Command "whoami; hostname"
+```
+
+For provider-development proof on an interactive Windows host, prefer an
+elevated headless/session-0 runner. Windows can display credential UI for failed
+early PowerShell Direct attempts even when the host command is non-interactive.
+Keep the guest password out of command arguments and logs, save the timing/run
+output, and verify that the lease reaches `state=ready`, executes over SSH, and
+releases cleanly.
+
 ## Secrets And Environment Forwarding
 
 Crabbox does not forward the whole local environment. Forwarding is name-based:
