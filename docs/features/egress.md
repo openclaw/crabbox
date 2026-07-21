@@ -331,6 +331,7 @@ Expected evidence:
 
 Related docs:
 
+- [Server-bound egress session identity (design proposal)](../plan/egress-session-identity.md)
 - [Interactive desktop and VNC](interactive-desktop-vnc.md)
 - [Broker auth and routing](broker-auth-routing.md)
 - [Browser portal](portal.md)
