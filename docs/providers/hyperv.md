@@ -29,10 +29,10 @@ reject configuration on non-Windows hosts.
 - The Hyper-V PowerShell module (included with the Hyper-V feature)
 
 OpenSSH and git do **not** need to be pre-installed. When missing, the provider
-installs pinned, SHA-256-verified Win32-OpenSSH and MinGit packages. Existing
-installations are reused. The OpenSSH bootstrap does not require Windows Update
-or Features on Demand. ISO images are not supported; use an installed VHDX with
-a known administrator password.
+installs pinned, SHA-256-verified Win32-OpenSSH (matching the guest architecture)
+and MinGit packages. Existing installations are reused. The OpenSSH bootstrap
+does not require Windows Update or Features on Demand. ISO images are not
+supported; use an installed VHDX with a known administrator password.
 
 ### Preparing a template
 

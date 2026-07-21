@@ -1516,7 +1516,23 @@ func TestEnsureOpenSSHInstallsWithSshdClosed(t *testing.T) {
 	if script == "" {
 		t.Fatal("ensureOpenSSH should invoke an OpenSSH install over PowerShell Direct")
 	}
-	for _, want := range []string{win32OpenSSHURL, win32OpenSSHSHA256, "Get-FileHash", "msiexec.exe", "Get-Service -Name sshd", "Stop-Service", "StartupType Manual", "Disable-NetFirewallRule"} {
+	for _, want := range []string{
+		"Get-CimInstance Win32_Processor",
+		"switch ([int]$nativeArch)",
+		"9 {",
+		win32OpenSSHAMD64URL,
+		win32OpenSSHAMD64SHA256,
+		"12 {",
+		win32OpenSSHARM64URL,
+		win32OpenSSHARM64SHA256,
+		"unsupported Windows architecture for OpenSSH",
+		"Get-FileHash",
+		"msiexec.exe",
+		"Get-Service -Name sshd",
+		"Stop-Service",
+		"StartupType Manual",
+		"Disable-NetFirewallRule",
+	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("ensureOpenSSH script missing %q", want)
 		}

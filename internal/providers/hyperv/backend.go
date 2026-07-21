@@ -693,8 +693,10 @@ func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, 
 // privileged guest code, so update the URL and SHA-256 together and never use a
 // floating release. The upstream tag intentionally has no leading "v".
 const (
-	win32OpenSSHURL    = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi"
-	win32OpenSSHSHA256 = "ddec9c53864280759cf9f74791cefd387100e3946aa849a1c138a4ed1b96b7d9"
+	win32OpenSSHAMD64URL    = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi"
+	win32OpenSSHAMD64SHA256 = "ddec9c53864280759cf9f74791cefd387100e3946aa849a1c138a4ed1b96b7d9"
+	win32OpenSSHARM64URL    = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-ARM64-v10.0.0.0.msi"
+	win32OpenSSHARM64SHA256 = "7a17d0e22d004fb47ca4bfd8fef926fa305de4ebf70a6f3c7a29c39aabef0023"
 )
 
 // ensureOpenSSH reuses an existing service or installs the pinned, verified MSI
@@ -702,13 +704,19 @@ const (
 // rule, so stageSSHKey's pre-network block and the stop/manual steps below keep
 // it closed until injectSSHKey installs the final key-only configuration.
 func (b *backend) ensureOpenSSH(ctx context.Context, vmName, user string) error {
+	// Win32_Processor.Architecture uses 9 for x64 and 12 for ARM64.
 	scriptBlock := `$ErrorActionPreference='Stop'; ` +
 		`if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) { ` +
 		`[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; ` +
+		`$nativeArch=(Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Architecture); ` +
+		`switch ([int]$nativeArch) { ` +
+		`9 { $msiUri='` + win32OpenSSHAMD64URL + `'; $expectedHash='` + win32OpenSSHAMD64SHA256 + `' } ` +
+		`12 { $msiUri='` + win32OpenSSHARM64URL + `'; $expectedHash='` + win32OpenSSHARM64SHA256 + `' } ` +
+		`default { throw ('unsupported Windows architecture for OpenSSH: ' + $nativeArch) } }; ` +
 		`$msi=Join-Path $env:TEMP 'crabbox-openssh.msi'; ` +
-		`Invoke-WebRequest -UseBasicParsing -Uri '` + win32OpenSSHURL + `' -OutFile $msi; ` +
+		`Invoke-WebRequest -UseBasicParsing -Uri $msiUri -OutFile $msi; ` +
 		`$hash=(Get-FileHash -Path $msi -Algorithm SHA256).Hash; ` +
-		`if ($hash -ne '` + win32OpenSSHSHA256 + `') { Remove-Item $msi -Force; throw ('OpenSSH SHA-256 mismatch: got ' + $hash) }; ` +
+		`if ($hash -ne $expectedHash) { Remove-Item $msi -Force; throw ('OpenSSH SHA-256 mismatch: got ' + $hash) }; ` +
 		`$proc=Start-Process msiexec.exe -ArgumentList @('/i', ('"'+$msi+'"'), '/qn', '/norestart') -Wait -PassThru; ` +
 		`if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { throw ('OpenSSH MSI install failed: exit ' + $proc.ExitCode) }; ` +
 		`Remove-Item $msi -Force -ErrorAction SilentlyContinue; ` +
