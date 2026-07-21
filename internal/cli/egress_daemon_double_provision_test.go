@@ -50,6 +50,20 @@ func egressDaemonTestAlive(pid int) bool {
 	return running && !strings.Contains(strings.ToLower(command), "<defunct>")
 }
 
+func assertEgressDaemonTestStopped(t *testing.T, label string, pid int) {
+	t.Helper()
+	// stopDaemonProcess signals the supervisor group with SIGKILL, which the
+	// kernel delivers asynchronously; poll (bounded) for teardown rather than
+	// asserting the process is gone the instant stop returns.
+	deadline := time.Now().Add(3 * time.Second)
+	for egressDaemonTestAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if egressDaemonTestAlive(pid) {
+		t.Fatalf("%s pid %d remained alive 3s after stop", label, pid)
+	}
+}
+
 func killEgressDaemonTestGroup(pid int) {
 	_ = syscall.Kill(-pid, syscall.SIGKILL) // Setpgid: pgid == supervisor pid
 	_ = syscall.Kill(pid, syscall.SIGKILL)
@@ -120,17 +134,8 @@ func TestEgressDaemonConcurrentStartDoubleProvision(t *testing.T) {
 		if stopErr != nil || !stopped {
 			t.Fatalf("iteration %d: stop recorded supervisor: stopped=%t err=%v output=%s", i, stopped, stopErr, strings.TrimSpace(stopOutput.String()))
 		}
-		// stopDaemonProcess signals the supervisor group with SIGKILL, which the
-		// kernel delivers asynchronously; poll (bounded) for teardown rather than
-		// asserting the process is gone the instant stop returns.
 		for _, pid := range pids {
-			deadline := time.Now().Add(3 * time.Second)
-			for egressDaemonTestAlive(pid) && time.Now().Before(deadline) {
-				time.Sleep(20 * time.Millisecond)
-			}
-			if egressDaemonTestAlive(pid) {
-				t.Fatalf("iteration %d: supervisor pid %d remained alive 3s after stop", i, pid)
-			}
+			assertEgressDaemonTestStopped(t, fmt.Sprintf("iteration %d: supervisor", i), pid)
 		}
 		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 			t.Fatalf("iteration %d: pid file still exists after stop: %v", i, err)
@@ -202,9 +207,7 @@ func TestEgressDaemonStopUsesLeaseLock(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("stop did not complete after lease lock release")
 	}
-	if egressDaemonTestAlive(pid) {
-		t.Fatalf("daemon pid %d remained alive after locked stop", pid)
-	}
+	assertEgressDaemonTestStopped(t, "locked-stop daemon", pid)
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 		t.Fatalf("pid file still exists after locked stop: %v", err)
 	}
@@ -288,9 +291,7 @@ func TestPrepareEgressClientCutoverStopsDaemonForForegroundStart(t *testing.T) {
 	if _, err := app.prepareEgressClientCutover(context.Background(), coord, leaseID, "egress_foreground", "", []string{"example.com"}); err != nil {
 		t.Fatal(err)
 	}
-	if egressDaemonTestAlive(pid) {
-		t.Fatalf("daemon pid %d remained alive after foreground cutover", pid)
-	}
+	assertEgressDaemonTestStopped(t, "foreground-cutover daemon", pid)
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 		t.Fatalf("pid file still exists after foreground cutover: %v", err)
 	}
