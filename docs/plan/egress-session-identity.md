@@ -115,10 +115,19 @@ Invariant: `activeGen` is strictly greater than the generation of every
 superseded server-bound session, independent of the active record's survival.
 Two rules maintain it: activation persists `activeGen = g`, and a legacy
 session replacing a server-bound active session persists
-`activeGen = counter + 1` (allocating and burning a generation) before
-activating. Without the second rule, a server-bound session at generation G
-replaced by a legacy session could resurrect after the active record is lost
-to a crash — its embedded G would not be below `activeGen`.
+`activeGen = counter + 1` (allocating and burning a generation). Without the
+second rule, a server-bound session at generation G replaced by a legacy
+session could resurrect after the active record is lost to a crash — its
+embedded G would not be below `activeGen`.
+
+Atomicity: every activation that advances `activeGen` commits the identity
+record and the active-session record in a single atomic multi-key
+`storage.put({...})` (Durable Object multi-key puts commit atomically), and
+socket bookkeeping happens after that commit. A crash therefore leaves either
+the old state fully intact (current session unaffected) or the transition
+fully applied (successor active, predecessor fenced) — never an advanced fence
+without its recorded successor, which would permanently reject the
+still-current session.
 
 ### Why the MAC is required
 
@@ -200,6 +209,10 @@ Worker (`worker/test/fleet.test.ts`, beside the #1152 suites):
   second rule).
 - abandoned fresh mint (ticket issued, never connected) → the current session
   keeps reconnecting; `activeGen` unchanged until a successor activates.
+- torn-write simulation: identity and active-session records are committed
+  atomically — no interleaved state may reject the current session without a
+  recorded successor (assert via a storage stub that fails between logical
+  writes if the implementation ever splits the commit).
 - legacy interplay per the compatibility matrix.
 - eviction test inversion: after >256 replacements, a server-bound zombie is
   still rejected (the exact residual #1152 documents).
