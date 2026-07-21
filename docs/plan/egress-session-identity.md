@@ -150,14 +150,17 @@ therefore a deliberate, gated final step — taken only when rollback to a
 pre-identity worker is no longer a supported path — not an automatic
 consequence of this design.
 
-Atomicity: every activation that advances `activeGen` commits the identity
-record and the active-session record in a single atomic multi-key
-`storage.put({...})` (Durable Object multi-key puts commit atomically), and
-socket bookkeeping happens after that commit. A crash therefore leaves either
-the old state fully intact (current session unaffected) or the transition
-fully applied (successor active, predecessor fenced) — never an advanced fence
-without its recorded successor, which would permanently reject the
-still-current session.
+Atomicity: every activation that advances `activeGen` commits all three
+affected records — the identity record, the active-session record, and, when
+the activation replaces a session, the updated tombstone list — in a single
+atomic multi-key `storage.put({...})` (Durable Object multi-key puts commit
+atomically), with socket bookkeeping after the commit. A crash therefore
+leaves either the old state fully intact (current session unaffected) or the
+transition fully applied (successor active, predecessor fenced AND
+tombstoned) — never an advanced fence without its recorded successor (which
+would permanently reject the still-current session), and never a fenced
+predecessor without its tombstone (which would let a pre-identity worker
+re-admit it after a rollback).
 
 ### Why the MAC is required
 
@@ -239,10 +242,11 @@ Worker (`worker/test/fleet.test.ts`, beside the #1152 suites):
   second rule).
 - abandoned fresh mint (ticket issued, never connected) → the current session
   keeps reconnecting; `activeGen` unchanged until a successor activates.
-- torn-write simulation: identity and active-session records are committed
-  atomically — no interleaved state may reject the current session without a
-  recorded successor (assert via a storage stub that fails between logical
-  writes if the implementation ever splits the commit).
+- torn-write simulation: identity, active-session, and tombstone records are
+  committed atomically — no interleaved state may reject the current session
+  without a recorded successor, or fence a predecessor without its tombstone
+  (assert via a storage stub that fails between logical writes if the
+  implementation ever splits the commit).
 - rollback simulation: seed an identity record with `activeGen = G` plus a
   tombstone for G's session (as an old worker would leave after replacing it),
   and assert the redeployed worker rejects G — tombstones override the fence.
