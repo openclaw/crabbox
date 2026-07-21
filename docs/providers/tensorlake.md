@@ -7,7 +7,8 @@ Read when:
   project;
 - changing `internal/providers/tensorlake`.
 
-Tensorlake is a delegated run provider (provider family `firecracker`). Crabbox
+[Tensorlake](https://tensorlake.ai) is a delegated run provider (provider family
+`firecracker`). Crabbox
 shells out to the `tensorlake` CLI (`tensorlake sbx ...`) for sandbox lifecycle
 and command execution. Tensorlake owns the Firecracker MicroVM and the command
 transport; Crabbox owns local config, repo claims, sync manifests and
@@ -25,9 +26,9 @@ does not expose SSH through Crabbox.
 - The `tensorlake` CLI must be on `PATH`, or pointed at with `--tensorlake-cli`
   / `tensorlake.cliPath`. Crabbox invokes `tensorlake sbx create`, `exec`, `cp`,
   `describe`, `ls`, and `terminate`.
-- A Tensorlake API key. Crabbox passes it to the CLI through the
-  `TENSORLAKE_API_KEY` environment variable; it is never placed on the command
-  line.
+- A Tensorlake API key from [cloud.tensorlake.ai](https://cloud.tensorlake.ai).
+  Crabbox passes it to the CLI through the `TENSORLAKE_API_KEY` environment
+  variable; it is never placed on the command line.
 
 ## Commands
 
@@ -38,6 +39,13 @@ crabbox run --provider tensorlake --id blue-lobster --shell 'pnpm install && pnp
 crabbox status --provider tensorlake --id blue-lobster
 crabbox stop --provider tensorlake blue-lobster
 ```
+
+Tensorlake publishes a Crabbox-ready public image, `tl-crabbox`
+(`--tensorlake-image tl-crabbox`): the standard Ubuntu base plus a writable
+`/workspace` (Crabbox's default workdir) and pnpm preinstalled. On the stock
+Tensorlake images, commands run as `tl-user`, which cannot create `/workspace`;
+either pin `tl-crabbox` or set `tensorlake.workdir` to a user-writable path such
+as `/home/tl-user/crabbox`.
 
 ## Auth
 
@@ -59,7 +67,7 @@ target: linux
 tensorlake:
   apiUrl: https://api.tensorlake.ai
   cliPath: tensorlake
-  image: ""              # CLI default image when empty; pin a registered image otherwise
+  image: tl-crabbox      # Crabbox-ready public image; "" uses the CLI default
   snapshot: ""           # snapshot ID to restore from (alternative to image)
   organizationId: ""
   projectId: ""
@@ -166,11 +174,14 @@ orchestrators that need to inspect or clean up retained sandboxes later.
   trust the sandbox and command.
 - `tensorlake.workdir` must be an absolute path (default `/workspace/crabbox`)
   and cannot be a broad system directory such as `/`, `/tmp`, or `/workspace`.
-  It serves as both the sync target and the `-w` working directory for exec.
+  It serves as both the sync target and the `-w` working directory for exec. The
+  default requires a writable `/workspace`; the `tl-crabbox` image provides one,
+  otherwise point `workdir` at a user-writable path.
 - IDs accepted by `--id` and `stop` are Crabbox slugs and `tlsbx_<sandbox-id>`
   lease IDs that have a local Crabbox claim. Sandboxes without a local claim are
   rejected (the same Crabbox-owned-only safety pattern as Islo).
 
 Related docs:
 
+- [Run your test suite with Crabbox](https://docs.tensorlake.ai/sandboxes/crabbox) — Tensorlake's walkthrough for running Crabbox on Tensorlake sandboxes.
 - [Provider backends](../provider-backends.md)
