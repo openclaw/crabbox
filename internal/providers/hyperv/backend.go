@@ -22,13 +22,7 @@ type backend struct {
 	cfg  Config
 	rt   Runtime
 
-	// Guest boot/readiness timing. crabbox waits for PowerShell Direct itself to
-	// answer a trivial authenticated probe before the first real guest call,
-	// because PS Direct blocks (rather than fast-failing) while the guest is
-	// still booting. Each attempt is bounded by guestReadyProbeTimeout so a
-	// blocked probe is killed and retried (proven not to corrupt the guest
-	// session), and guestInvokeTimeout bounds each real guest call so a wedged
-	// mid-session call cannot hang the provision forever. Overridable in tests.
+	// PowerShell Direct timeouts; overridden by tests.
 	guestReadyProbeTimeout time.Duration
 	guestReadyBudget       time.Duration
 	guestInvokeTimeout     time.Duration
@@ -619,28 +613,15 @@ func hypervInitHiveName(vhdPath string) string {
 	return fmt.Sprintf("crabbox-init-%x", sum[:8])
 }
 
-// invokeGuestScript runs one host powershell invocation bounded by perAttempt.
-// The bound matters for PowerShell Direct calls (Invoke-Command -VMName blocks
-// rather than fast-failing when a guest is unreachable, and execCommandRunner
-// kills the process on ctx cancel); without it a single wedged call would hang
-// forever. A per-attempt timeout surfaces as an error while the outer ctx stays
-// live, so callers retry it; an outer-ctx cancel surfaces via ctx.Err().
+// invokeGuestScript bounds a PowerShell Direct attempt so callers can retry it.
 func (b *backend) invokeGuestScript(ctx context.Context, script string, env []string, perAttempt time.Duration) (LocalCommandResult, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, perAttempt)
 	defer cancel()
 	return b.powershellWithEnv(attemptCtx, script, env)
 }
 
-// waitGuestReady blocks until PowerShell Direct answers a trivial authenticated
-// probe, or the boot budget elapses. This is the actual readiness signal the
-// first real guest call (stageSSHKey) needs: it succeeds only once the guest's
-// VM-session service and auth subsystem are up. Early in boot PS Direct blocks
-// (rather than fast-failing) and can return transient "credential is
-// invalid"/connection errors, so every failure is retried within the budget and
-// each attempt is bounded by guestReadyProbeTimeout. A blocked probe is killed
-// at that timeout; this does not corrupt the guest session (the next probe
-// succeeds), it only fails-fast so the loop can advance. Running this once up
-// front keeps the boot-window block out of every downstream step.
+// waitGuestReady retries an authenticated PowerShell Direct probe until the
+// guest responds or the boot budget expires.
 func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error {
 	script := fmt.Sprintf(
 		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
@@ -648,11 +629,7 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 		escapePSString(user), escapePSString(vmName),
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
-	// Bound the whole loop by the budget: backoff waits, the per-attempt probe
-	// timeout, and launching another probe at all are all capped to the remaining
-	// budget (invokeGuestScript derives its attempt deadline from budgetCtx). This
-	// keeps the total wait within guestReadyBudget instead of overshooting by one
-	// backoff plus one probe timeout.
+	// Include attempts and backoff in the overall boot budget.
 	budgetCtx, cancel := context.WithTimeout(ctx, b.guestReadyBudget)
 	defer cancel()
 	var lastErr error
@@ -679,12 +656,8 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 }
 
 // invokeInGuest runs a PowerShell script block inside the guest over PowerShell
-// Direct, authenticating as user with the configured guest password. It retries
-// with backoff, and bounds each attempt with guestInvokeTimeout (generous, so
-// long installs such as Add-WindowsCapability complete) so a wedged call can
-// never hang the provision. scriptBlock is the body of an Invoke-Command
-// -ScriptBlock { ... }; the guest password is passed via the _CRABBOX_GP env
-// var, never on the command line.
+// Direct with bounded retries. The guest password is passed through
+// _CRABBOX_GP, never the command line.
 func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, label string) error {
 	script := fmt.Sprintf(
 		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
@@ -714,17 +687,7 @@ func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, 
 	return lastErr
 }
 
-// Win32-OpenSSH release pinned for the guest OpenSSH server bootstrap. This is
-// the same payload winget installs as Microsoft.OpenSSH.Preview, fetched
-// directly from GitHub so the install does not depend on Windows Update /
-// Features-on-Demand (Add-WindowsCapability), which is blocked or offline on many
-// templates and fails with 0x800f0950. The MSI downloads inside the guest and
-// installs a privileged service, so it must not float with "latest": a changed
-// release response or substituted artifact would be privileged guest code
-// execution. Update the URL and SHA-256 together (SHA-256 is of the exact asset).
-// Note: the upstream release tag is "10.0.0.0p2-Preview" with no leading "v", so
-// the download path intentionally has no "v" before the tag (verified live: the
-// "v"-prefixed tag 404s).
+// Pinned Win32-OpenSSH release. Update the URL and SHA-256 together.
 const (
 	win32OpenSSHURL    = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi"
 	win32OpenSSHSHA256 = "ddec9c53864280759cf9f74791cefd387100e3946aa849a1c138a4ed1b96b7d9"
@@ -732,16 +695,9 @@ const (
 
 // ensureOpenSSH installs the Windows OpenSSH server inside the guest, but keeps
 // sshd stopped and its firewall rule disabled until injectSSHKey replaces the
-// template credentials and host keys. This lets a plain Windows template be
-// used as-is: it only needs a reachable administrator account
-// (CRABBOX_HYPERV_GUEST_PASSWORD), not a pre-baked SSH setup. Idempotent: a
-// no-op install when the sshd service already exists (so a template that
-// pre-bakes OpenSSH skips the per-lease download). Installs the pinned
-// Win32-OpenSSH MSI from GitHub (SHA-256-verified) instead of the FoD capability
-// so it works on templates without Windows Update access; needs guest internet.
-// The MSI registers sshd StartType Automatic (and may start it and add its own
-// allow rule), so the stop/Manual step here still quarantines it; the actual
-// network block is the Crabbox-SSH-Quarantine rule stageSSHKey sets pre-network.
+// template credentials and host keys. Existing installations are reused;
+// otherwise it installs the pinned, verified MSI without relying on Windows
+// Update. stageSSHKey's firewall rule keeps the service quarantined.
 func (b *backend) ensureOpenSSH(ctx context.Context, vmName, user string) error {
 	scriptBlock := `$ErrorActionPreference='Stop'; ` +
 		`if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) { ` +

@@ -28,15 +28,11 @@ reject configuration on non-Windows hosts.
     first use
 - The Hyper-V PowerShell module (included with the Hyper-V feature)
 
-OpenSSH and git do **not** need to be pre-installed. On first acquire the
-provider installs the pinned, SHA-256-verified Win32-OpenSSH MSI used by the
-`Microsoft.OpenSSH.Preview` winget package and, if absent, portable MinGit
-(also pinned and SHA-256-verified). Both installs are no-ops when already
-present, so a template that pre-bakes inbox/FoD OpenSSH, the MSI version, or git
-skips the matching per-lease download. OpenSSH bootstrap does not depend on
-Windows Update, WSUS, or a matching Features on Demand source. This keeps the
-template requirement to a plain Windows VHDX with a known admin password. ISO
-images are not supported — provide a fully installed VHDX.
+OpenSSH and git do **not** need to be pre-installed. When missing, the provider
+installs pinned, SHA-256-verified Win32-OpenSSH and MinGit packages. Existing
+installations are reused. The OpenSSH bootstrap does not require Windows Update
+or Features on Demand. ISO images are not supported; use an installed VHDX with
+a known administrator password.
 
 ### Preparing a template
 
@@ -134,9 +130,7 @@ During `Acquire`, the provider:
 2. With `--hyperv-init-password`, mounts the lease disk offline and writes a
    first-boot `RunOnce` that sets the guest password (password-less templates)
 3. Creates and starts the VM with its network adapter disconnected
-4. Waits for a trivial authenticated PowerShell Direct call to succeed. The
-   readiness loop has an overall boot budget and bounds each attempt so a guest
-   that is still booting cannot hang acquisition.
+4. Waits for PowerShell Direct readiness within a bounded boot timeout
 5. Uses PowerShell Direct to stop/disable sshd, add an inbound TCP/22 block
    rule, replace authorized keys, discard template `Match` authentication
    blocks, and restrict SSH to the selected user
@@ -147,11 +141,9 @@ During `Acquire`, the provider:
 8. Installs git (MinGit) if absent — required for Crabbox sync
 9. Waits for SSH readiness on the injected key
 
-The readiness probe, OpenSSH-install, and key-injection steps authenticate over
-PowerShell Direct using the guest administrator password. The readiness probe
-retries within a bounded boot budget; later guest operations retry transient
-failures with backoff and bound each individual host PowerShell process so a
-wedged call cannot hang the lease indefinitely.
+PowerShell Direct calls use the guest administrator password. Readiness and
+later guest operations have bounded retries, preventing a stalled call from
+hanging the lease.
 
 Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in trusted user
 config to match the administrator password in your VHDX template. The provider

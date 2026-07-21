@@ -22,9 +22,7 @@ type recordingRunner struct {
 	errors    map[string]error
 	onRun     func(core.LocalCommandRequest)
 	respond   func(core.LocalCommandRequest) (core.LocalCommandResult, error, bool)
-	// blockUntilCtx simulates a command that blocks (like a PowerShell Direct
-	// call wedged during guest boot) until its context is canceled, mirroring
-	// execCommandRunner's exec.CommandContext kill-on-cancel behavior.
+	// blockUntilCtx simulates a command that blocks until cancellation.
 	blockUntilCtx func(core.LocalCommandRequest) bool
 }
 
@@ -1879,9 +1877,7 @@ func readinessProbe(req core.LocalCommandRequest) bool {
 	return strings.Contains(req.Args[len(req.Args)-1], "{ $true }")
 }
 
-// A guest that blocks the first probes (PowerShell Direct wedged mid-boot) then
-// answers must be bounded per attempt and retried to success, not hung. Killing
-// a blocked probe does not corrupt the guest session, so the next attempt works.
+// A blocked readiness probe must time out and retry.
 func TestWaitGuestReadyRetriesThroughBlockingBoot(t *testing.T) {
 	runner := &recordingRunner{}
 	blocked := 0
@@ -1914,8 +1910,7 @@ func TestWaitGuestReadyRetriesThroughBlockingBoot(t *testing.T) {
 	}
 }
 
-// If the guest never answers PowerShell Direct, the wait must fail cleanly at the
-// budget instead of hanging on a single wedged probe.
+// An unresponsive guest must fail at the boot budget.
 func TestWaitGuestReadyFailsAfterBudget(t *testing.T) {
 	runner := &recordingRunner{}
 	runner.blockUntilCtx = func(req core.LocalCommandRequest) bool { return readinessProbe(req) }
@@ -1948,8 +1943,7 @@ func TestWaitGuestReadyAbortsOnContextCancel(t *testing.T) {
 	}
 }
 
-// A single wedged Invoke-Command attempt must be bounded by guestInvokeTimeout
-// and retried, not left to hang the provision forever.
+// A blocked guest call must time out and retry.
 func TestInvokeInGuestBoundsBlockingAttempt(t *testing.T) {
 	runner := &recordingRunner{}
 	first := true
@@ -1986,8 +1980,7 @@ func TestInvokeInGuestAbortsOnContextCancel(t *testing.T) {
 	}
 }
 
-// The readiness gate must run before the first real guest call (the pre-network
-// SSH lockdown), so PowerShell Direct is proven up before we depend on it.
+// The readiness probe must precede the SSH lockdown.
 func TestAcquireWaitsForGuestReadyBeforeLockdown(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -2001,8 +1994,7 @@ func TestAcquireWaitsForGuestReadyBeforeLockdown(t *testing.T) {
 		if len(req.Args) == 0 {
 			return
 		}
-		// Cancel as soon as the lockdown runs so Acquire stops early; we only
-		// care about the call ordering up to that point.
+		// Stop after the lockdown; only the call order matters.
 		if strings.Contains(req.Args[len(req.Args)-1], "Crabbox-SSH-Quarantine") {
 			cancel()
 		}
