@@ -113,12 +113,31 @@ wins, and lower ones are rejected from then on.
 
 Invariant: `activeGen` is strictly greater than the generation of every
 superseded server-bound session, independent of the active record's survival.
-Two rules maintain it: activation persists `activeGen = g`, and a legacy
-session replacing a server-bound active session persists
-`activeGen = counter + 1` (allocating and burning a generation). Without the
-second rule, a server-bound session at generation G replaced by a legacy
-session could resurrect after the active record is lost to a crash — its
+Two rules maintain it: activation persists `activeGen = g`, and any legacy
+activation that becomes the current session while an identity record exists
+persists `activeGen = counter + 1` (allocating and burning a generation) —
+unconditionally, not only when it visibly replaces a server-bound active
+record, because the record it replaced may have been lost to a crash.
+Same-session legacy reconnects do not bump the fence. Without the
+unconditional rule, a server-bound session at generation G could resurrect
+after a crash erased the active record and a legacy session took over — its
 embedded G would not be below `activeGen`.
+
+### Transition safety: tombstones stay authoritative
+
+During the transition period, server-bound sessions continue to be tombstoned
+on replacement exactly as in #1152, and admission requires BOTH checks: the
+generation fence (`g >= activeGen`) AND absence from the tombstone list. The
+fence alone cannot survive a worker rollback: activate server generation G,
+roll the worker back, let a legacy session replace G under tombstone-only
+semantics, roll forward — `activeGen` still equals G, so the fence would
+re-admit the superseded session. The old worker did record G's tombstone,
+which the redeployed worker honors, closing the rollback window (a rollback
+lasting through 256+ replacements degrades to exactly the current #1152
+guarantee, which is the floor for every mixed state). Tombstone retirement is
+therefore a deliberate, gated final step — taken only when rollback to a
+pre-identity worker is no longer a supported path — not an automatic
+consequence of this design.
 
 Atomicity: every activation that advances `activeGen` commits the identity
 record and the active-session record in a single atomic multi-key
@@ -213,6 +232,12 @@ Worker (`worker/test/fleet.test.ts`, beside the #1152 suites):
   atomically — no interleaved state may reject the current session without a
   recorded successor (assert via a storage stub that fails between logical
   writes if the implementation ever splits the commit).
+- rollback simulation: seed an identity record with `activeGen = G` plus a
+  tombstone for G's session (as an old worker would leave after replacing it),
+  and assert the redeployed worker rejects G — tombstones override the fence.
+- legacy takeover after record loss: delete the active record, activate a
+  legacy session, and assert the fence advanced (prior server-bound generation
+  rejected).
 - legacy interplay per the compatibility matrix.
 - eviction test inversion: after >256 replacements, a server-bound zombie is
   still rejected (the exact residual #1152 documents).
@@ -231,7 +256,8 @@ variant on a dev coordinator once the worker half is deployed.
 1. Worker deploy: accepts and issues server-bound IDs; all existing traffic is
    legacy and unaffected.
 2. CLI release: `egress start` adopts server-issued IDs.
-3. Later cleanup (separate change): retire tombstones when legacy CLI share is
-   negligible.
+3. Later cleanup (separate change): retire tombstones only when BOTH legacy
+   CLI share is negligible AND rollback to a pre-identity worker is no longer
+   a supported path (see Transition safety).
 
 No flag day; each step is independently shippable and revertible.
