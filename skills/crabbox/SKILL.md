@@ -193,6 +193,25 @@ Native Windows targets use PowerShell and tar-based manifest sync. Prefer plain
 argv for one executable such as `dotnet test`; use `--shell` for multi-statement
 PowerShell and `--script <file.ps1>` for longer scripts.
 
+### Hyper-V Windows leases
+
+`hyperv` needs a Generation 2 VHDX, DHCP, and a known local administrator
+password in trusted config or `CRABBOX_HYPERV_GUEST_PASSWORD`. It installs
+pinned, verified OpenSSH and MinGit packages when missing, using PowerShell
+Direct. See `docs/providers/hyperv.md` for template and lifecycle details.
+
+```powershell
+crabbox run --provider hyperv --target windows `
+  --hyperv-image 'C:\Images\windows.vhdx' `
+  --timing-json --no-sync `
+  -- powershell -NoProfile -Command "whoami; hostname"
+```
+
+For provider testing, use an elevated headless/session-0 runner when possible:
+early PowerShell Direct failures can show credential UI even for non-interactive
+commands. Keep the guest password out of arguments and logs, and verify the
+lease becomes ready, runs over SSH, and releases cleanly.
+
 ## Secrets And Environment Forwarding
 
 Crabbox does not forward the whole local environment. Forwarding is name-based:
