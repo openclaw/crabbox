@@ -1,9 +1,12 @@
 # Server-Bound Egress Session Identity
 
-Status: proposal, not implemented. Design follow-up to
+Status: proposal with two open problems (see Open problems below) — not yet
+implementable as specified. Design follow-up to
 [#1152](https://github.com/openclaw/crabbox/pull/1152), which made replaced
 egress sessions stay dead via persisted per-lease tombstones and fatal
-replacement closes in the CLI.
+replacement closes in the CLI. The steady-state design (server-bound IDs,
+generation fence, atomic commits) is settled; the unresolved part is the
+mixed legacy/server-bound transition semantics.
 
 Read when:
 
@@ -268,6 +271,42 @@ CLI (`internal/cli`):
 
 Live proof: repeat the #1152 production-lease scenario, plus a forced-eviction
 variant on a dev coordinator once the worker half is deployed.
+
+## Open problems
+
+Structured review (seven rounds) hardened the steady-state design but
+identified two transition-period defects that this revision does not resolve.
+Both must be settled before implementation.
+
+1. **Unknown-predecessor tombstoning after active-record loss.** The identity
+   record stores only key and generations, so after the active-session record
+   is lost to a crash, a successor's activation can advance the fence but
+   cannot tombstone the predecessor it never saw. A subsequent rollback to a
+   pre-identity worker ignores the fence and re-admits that predecessor.
+   Candidate fix: persist the current session ID inside the identity record
+   (committed in the same atomic put), so the successor can always tombstone
+   its predecessor by ID. Cost: the identity record becomes a superset of the
+   active-session record; the two should probably merge.
+
+2. **Legacy takeover fences pending server mints.** Activation ordering today
+   compares ticket mint times (`ticketCreatedAt`), not connect times. A legacy
+   session L that activates while a newer server-bound mint S is in flight
+   must lose to S under current semantics — but the unconditional
+   `activeGen = counter + 1` bump fences S out, fatally rejecting a
+   legitimate in-flight start. Any bump high enough to fence crash-lost
+   predecessors also fences pending successors; the fence cannot distinguish
+   them without more state. Candidate fix: stamp EVERY ticket (legacy
+   included) with the allocator value at mint and order all conflicts by that
+   stamped generation, reducing the MAC's role to letting reconnect mints
+   inherit their original generation. This unifies ordering across session
+   kinds and eliminates the special legacy bump rule, but it is a deeper
+   change to the ticket record and admission paths than this revision
+   specifies.
+
+The second candidate fix likely subsumes the first (a stamped-generation
+ticket model can carry predecessor identity naturally); the next revision
+should explore that unification rather than patching the two edges
+independently.
 
 ## Rollout
 
