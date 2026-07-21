@@ -22,7 +22,9 @@ type backend struct {
 	cfg  Config
 	rt   Runtime
 
-	// PowerShell Direct timeouts; overridden by tests.
+	// PowerShell Direct can block instead of failing while a guest boots, so
+	// readiness probes and later guest calls need per-attempt timeouts.
+	// Overridden by tests.
 	guestReadyProbeTimeout time.Duration
 	guestReadyBudget       time.Duration
 	guestInvokeTimeout     time.Duration
@@ -620,8 +622,8 @@ func (b *backend) invokeGuestScript(ctx context.Context, script string, env []st
 	return b.powershellWithEnv(attemptCtx, script, env)
 }
 
-// waitGuestReady retries an authenticated PowerShell Direct probe until the
-// guest responds or the boot budget expires.
+// waitGuestReady gates the first real guest call on authenticated PowerShell
+// Direct readiness. Each probe is bounded because early boot calls can block.
 func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error {
 	script := fmt.Sprintf(
 		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
@@ -687,17 +689,18 @@ func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, 
 	return lastErr
 }
 
-// Pinned Win32-OpenSSH release. Update the URL and SHA-256 together.
+// Pinned Win32-OpenSSH payload used by Microsoft.OpenSSH.Preview. It runs as
+// privileged guest code, so update the URL and SHA-256 together and never use a
+// floating release. The upstream tag intentionally has no leading "v".
 const (
 	win32OpenSSHURL    = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi"
 	win32OpenSSHSHA256 = "ddec9c53864280759cf9f74791cefd387100e3946aa849a1c138a4ed1b96b7d9"
 )
 
-// ensureOpenSSH installs the Windows OpenSSH server inside the guest, but keeps
-// sshd stopped and its firewall rule disabled until injectSSHKey replaces the
-// template credentials and host keys. Existing installations are reused;
-// otherwise it installs the pinned, verified MSI without relying on Windows
-// Update. stageSSHKey's firewall rule keeps the service quarantined.
+// ensureOpenSSH reuses an existing service or installs the pinned, verified MSI
+// without relying on Windows Update. The MSI may start sshd and add an allow
+// rule, so stageSSHKey's pre-network block and the stop/manual steps below keep
+// it closed until injectSSHKey installs the final key-only configuration.
 func (b *backend) ensureOpenSSH(ctx context.Context, vmName, user string) error {
 	scriptBlock := `$ErrorActionPreference='Stop'; ` +
 		`if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) { ` +

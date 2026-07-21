@@ -207,9 +207,10 @@ crabbox run --provider hyperv --target windows `
   -- powershell -NoProfile -Command "whoami; hostname"
 ```
 
-For provider testing, use an elevated headless/session-0 runner when possible.
-Keep the guest password out of arguments and logs, and verify the lease becomes
-ready, runs over SSH, and releases cleanly.
+For provider testing, use an elevated headless/session-0 runner when possible:
+early PowerShell Direct failures can show credential UI even for non-interactive
+commands. Keep the guest password out of arguments and logs, and verify the
+lease becomes ready, runs over SSH, and releases cleanly.
 
 ## Secrets And Environment Forwarding
 
