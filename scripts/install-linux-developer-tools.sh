@@ -3,6 +3,7 @@ set -euo pipefail
 
 pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
 node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
+trufflehog_version="3.95.9"
 docker_images="${CRABBOX_LINUX_DOCKER_IMAGES:-hello-world ubuntu:24.04 node:24-bookworm}"
 install_desktop="${CRABBOX_LINUX_DESKTOP_TOOLS:-1}"
 install_browser="${CRABBOX_LINUX_BROWSER:-1}"
@@ -15,6 +16,7 @@ chromium_policy_dir="${CRABBOX_LINUX_CHROMIUM_POLICY_DIR:-/etc/chromium/policies
 browser_bin_dir="${CRABBOX_LINUX_BROWSER_BIN_DIR:-/usr/local/bin}"
 browser_state_dir="${CRABBOX_LINUX_BROWSER_STATE_DIR:-/var/lib/crabbox}"
 chrome_defaults_file="${CRABBOX_LINUX_CHROME_DEFAULTS_FILE:-/etc/default/google-chrome}"
+trufflehog_bin_dir="${CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR:-/usr/local/bin}"
 nodesource_signing_key_fingerprint="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
 docker_signing_key_fingerprint="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 google_linux_signing_key_fingerprint="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
@@ -236,6 +238,79 @@ install_node_pnpm() {
   command -v pnpm >/dev/null
 }
 
+trufflehog_sha256_for_arch() {
+  case "$1" in
+    amd64) printf '%s\n' "f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e" ;;
+    arm64) printf '%s\n' "9d9c2ec4ea36a089a9c5aaafe1969d176013ddf9f44d68e8cd75291aed8c83ed" ;;
+    *)
+      log "unsupported TruffleHog architecture: $1"
+      return 1
+      ;;
+  esac
+}
+
+trufflehog_binary_ready() {
+  local binary="$1"
+  [[ -x "$binary" ]] &&
+    "$binary" --version 2>/dev/null |
+      awk -v version="$trufflehog_version" '
+        {
+          for (field = 1; field <= NF; field++) {
+            if ($field == version) {
+              found = 1
+            }
+          }
+        }
+        END { exit found ? 0 : 1 }
+      '
+}
+
+trufflehog_ready() {
+  trufflehog_binary_ready "$trufflehog_bin_dir/trufflehog"
+}
+
+install_trufflehog() {
+  if trufflehog_ready; then
+    return 0
+  fi
+
+  local arch
+  local archive
+  local candidate
+  local checksum
+  local target
+  local tmp_dir
+  local url
+  arch="$(dpkg --print-architecture)"
+  checksum="$(trufflehog_sha256_for_arch "$arch")"
+  archive="trufflehog_${trufflehog_version}_linux_${arch}.tar.gz"
+  url="https://github.com/trufflesecurity/trufflehog/releases/download/v${trufflehog_version}/${archive}"
+  tmp_dir="$(mktemp -d)"
+
+  if ! retry curl -fsSL --output "$tmp_dir/$archive" "$url" ||
+    ! (
+      cd "$tmp_dir"
+      printf '%s  %s\n' "$checksum" "$archive" | sha256sum -c -
+    ) ||
+    ! tar --no-same-owner -xzf "$tmp_dir/$archive" -C "$tmp_dir" trufflehog; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  install -d -m 0755 "$trufflehog_bin_dir"
+  target="$trufflehog_bin_dir/trufflehog"
+  candidate="$(mktemp "${target}.tmp.XXXXXX")"
+  if ! install -m 0755 "$tmp_dir/trufflehog" "$candidate" ||
+    ! trufflehog_binary_ready "$candidate" ||
+    ! mv -f "$candidate" "$target"; then
+    rm -f "$candidate"
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+  rm -rf "$tmp_dir"
+  trufflehog_ready
+}
+
 install_docker() {
   apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   systemctl enable --now docker || service docker start
@@ -262,7 +337,7 @@ prepare_fast_boot() {
 
 print_versions() {
   # shellcheck disable=SC1091
-  . /etc/os-release
+  . "$os_release_file"
   printf 'os=%s %s\n' "${PRETTY_NAME:-unknown}" "$(uname -m)"
   git --version
   gh --version | head -n 1
@@ -274,6 +349,7 @@ print_versions() {
   npm --version
   corepack --version
   pnpm --version
+  "$trufflehog_bin_dir/trufflehog" --version
   docker --version
   docker compose version
 }
@@ -333,6 +409,7 @@ APT
     install_chrome_or_chromium
   fi
   install_node_pnpm
+  install_trufflehog
   install_docker
   prepare_fast_boot
   print_versions

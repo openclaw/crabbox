@@ -421,3 +421,193 @@ exit 0
 		"temporary keyring directories should be removed",
 	);
 });
+
+function installTruffleHogFixture(dir) {
+	const bin = path.join(dir, "bin");
+	const targetBin = path.join(dir, "target-bin");
+	const downloadLog = path.join(dir, "download.log");
+	const checksumLog = path.join(dir, "checksum.log");
+	fs.mkdirSync(bin);
+	fs.mkdirSync(targetBin);
+	writeExecutable(
+		path.join(bin, "dpkg"),
+		`#!/usr/bin/env bash
+[[ "$*" == "--print-architecture" ]] && printf 'amd64\n'
+`,
+	);
+	writeExecutable(
+		path.join(bin, "curl"),
+		`#!/usr/bin/env bash
+set -euo pipefail
+output=""
+printf '%s\n' "$*" > "$CRABBOX_FAKE_DOWNLOAD_LOG"
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -o|--output)
+      output="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+printf 'fake archive\n' > "$output"
+`,
+	);
+	writeExecutable(
+		path.join(bin, "sha256sum"),
+		`#!/usr/bin/env bash
+set -euo pipefail
+cat > "$CRABBOX_FAKE_CHECKSUM_LOG"
+[[ "\${CRABBOX_FAKE_CHECKSUM_RESULT:-pass}" == "pass" ]]
+`,
+	);
+	writeExecutable(
+		path.join(bin, "tar"),
+		`#!/usr/bin/env bash
+set -euo pipefail
+output_dir=""
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -C)
+      output_dir="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+cat > "$output_dir/trufflehog" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'trufflehog %s\n' "\${CRABBOX_FAKE_TRUFFLEHOG_VERSION:-3.95.9}"
+SCRIPT
+chmod 0755 "$output_dir/trufflehog"
+`,
+	);
+	return { bin, targetBin, downloadLog, checksumLog };
+}
+
+test("linux developer image installs pinned TruffleHog after checksum verification", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-"));
+	const fixture = installTruffleHogFixture(dir);
+	const result = spawnSync(
+		"bash",
+		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ninstall_trufflehog"],
+		{
+			cwd: repoRoot,
+			env: {
+				...process.env,
+				PATH: `${fixture.bin}${path.delimiter}${process.env.PATH ?? ""}`,
+				CRABBOX_FAKE_CHECKSUM_LOG: fixture.checksumLog,
+				CRABBOX_FAKE_DOWNLOAD_LOG: fixture.downloadLog,
+				CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR: fixture.targetBin,
+			},
+			encoding: "utf8",
+		},
+	);
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(
+		fs.readFileSync(fixture.downloadLog, "utf8"),
+		/trufflehog\/releases\/download\/v3\.95\.9\/trufflehog_3\.95\.9_linux_amd64\.tar\.gz/,
+	);
+	assert.match(
+		fs.readFileSync(fixture.checksumLog, "utf8"),
+		/^f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e  trufflehog_3\.95\.9_linux_amd64\.tar\.gz\n$/,
+	);
+	assert.equal(
+		spawnSync(path.join(fixture.targetBin, "trufflehog"), ["--version"], {
+			encoding: "utf8",
+		}).stdout,
+		"trufflehog 3.95.9\n",
+	);
+});
+
+test("linux developer image keeps the existing TruffleHog binary when verification fails", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-failure-"));
+	const fixture = installTruffleHogFixture(dir);
+	const target = path.join(fixture.targetBin, "trufflehog");
+	writeExecutable(target, "#!/usr/bin/env bash\nprintf 'trufflehog 3.95.8\\n'\n");
+	const result = spawnSync(
+		"bash",
+		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ninstall_trufflehog"],
+		{
+			cwd: repoRoot,
+			env: {
+				...process.env,
+				PATH: `${fixture.bin}${path.delimiter}${process.env.PATH ?? ""}`,
+				CRABBOX_FAKE_CHECKSUM_LOG: fixture.checksumLog,
+				CRABBOX_FAKE_CHECKSUM_RESULT: "fail",
+				CRABBOX_FAKE_DOWNLOAD_LOG: fixture.downloadLog,
+				CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR: fixture.targetBin,
+			},
+			encoding: "utf8",
+		},
+	);
+
+	assert.notEqual(result.status, 0, "checksum failures must stop image preparation");
+	assert.equal(fs.readFileSync(target, "utf8"), "#!/usr/bin/env bash\nprintf 'trufflehog 3.95.8\\n'\n");
+});
+
+test("linux developer image keeps the existing TruffleHog binary when candidate validation fails", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-invalid-"));
+	const fixture = installTruffleHogFixture(dir);
+	const target = path.join(fixture.targetBin, "trufflehog");
+	const existing = "#!/usr/bin/env bash\nprintf 'trufflehog 3.95.8\\n'\n";
+	writeExecutable(target, existing);
+	const result = spawnSync(
+		"bash",
+		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ninstall_trufflehog"],
+		{
+			cwd: repoRoot,
+			env: {
+				...process.env,
+				PATH: `${fixture.bin}${path.delimiter}${process.env.PATH ?? ""}`,
+				CRABBOX_FAKE_CHECKSUM_LOG: fixture.checksumLog,
+				CRABBOX_FAKE_DOWNLOAD_LOG: fixture.downloadLog,
+				CRABBOX_FAKE_TRUFFLEHOG_VERSION: "0.0.0",
+				CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR: fixture.targetBin,
+			},
+			encoding: "utf8",
+		},
+	);
+
+	assert.notEqual(result.status, 0, "invalid downloaded binaries must stop image preparation");
+	assert.equal(fs.readFileSync(target, "utf8"), existing);
+});
+
+test("linux developer image reports TruffleHog from the configured install directory", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-version-"));
+	const fixture = installTruffleHogFixture(dir);
+	const osRelease = path.join(dir, "os-release");
+	fs.writeFileSync(osRelease, "PRETTY_NAME='Test Linux'\n", "utf8");
+	writeExecutable(
+		path.join(fixture.targetBin, "trufflehog"),
+		"#!/usr/bin/env bash\nprintf 'trufflehog 3.95.9\\n'\n",
+	);
+	for (const command of ["git", "gh", "jq", "rg", "fd", "python3", "node", "npm", "corepack", "pnpm", "docker"]) {
+		writeExecutable(
+			path.join(fixture.bin, command),
+			`#!/usr/bin/env bash\nprintf '${command} test-version\\n'\n`,
+		);
+	}
+	const result = spawnSync(
+		"bash",
+		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\nprint_versions"],
+		{
+			cwd: repoRoot,
+			env: {
+				...process.env,
+				PATH: `${fixture.bin}${path.delimiter}/usr/bin:/bin`,
+				CRABBOX_LINUX_OS_RELEASE_FILE: osRelease,
+				CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR: fixture.targetBin,
+			},
+			encoding: "utf8",
+		},
+	);
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /trufflehog 3\.95\.9/);
+});
