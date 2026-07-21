@@ -101,6 +101,15 @@ whose generation is below the active one, replacing the timestamp comparison
 for server-bound IDs. Timestamp last-writer-wins remains only for
 legacy-vs-legacy conflicts.
 
+Invariant: the persisted counter is always strictly greater than the
+generation of every superseded server-bound session, independent of the active
+record's survival. Two rules maintain it: fresh mints increment the counter,
+and a legacy session replacing a server-bound active session also increments
+and persists the counter before activating. Without the second rule, a
+server-bound session at generation G replaced by a legacy session could
+resurrect after the active record is lost to a crash — its embedded G would
+not be below the counter.
+
 ### Why the MAC is required
 
 Without it, the generation ordering trusts a client-supplied string: any caller
@@ -127,7 +136,7 @@ they silently inherit the stronger guarantee.
 | Zombie session | Replacement session | Outcome |
 | --- | --- | --- |
 | server-bound | server-bound | zombie generation < current → 409 always, no history needed |
-| server-bound | legacy | legacy activation bumps nothing, but zombie's `generation == active` check fails (active is legacy) → 409 |
+| server-bound | legacy | legacy replacement durably bumps the counter (see invariant above), so the zombie's generation is below it → 409 even if the active record is later lost |
 | legacy | server-bound | legacy re-mint hits tombstones — current guarantee (bounded) |
 | legacy | legacy | current #1152 guarantee (bounded tombstones) |
 
@@ -176,6 +185,9 @@ Worker (`worker/test/fleet.test.ts`, beside the #1152 suites):
   active record deleted (crash simulation) — the case tombstones cannot cover.
 - crafted ID with bad MAC → legacy path (tombstone semantics apply, no
   generation bump).
+- legacy session replaces a server-bound session → counter advanced; the
+  server-bound zombie gets 409 after active-record loss (the invariant's
+  second rule).
 - legacy interplay per the compatibility matrix.
 - eviction test inversion: after >256 replacements, a server-bound zombie is
   still rejected (the exact residual #1152 documents).
