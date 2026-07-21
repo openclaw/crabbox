@@ -270,10 +270,6 @@ trufflehog_ready() {
 }
 
 install_trufflehog() {
-  if trufflehog_ready; then
-    return 0
-  fi
-
   local arch
   local archive
   local candidate
@@ -301,14 +297,13 @@ install_trufflehog() {
   target="$trufflehog_bin_dir/trufflehog"
   candidate="$(mktemp "${target}.tmp.XXXXXX")"
   if ! install -m 0755 "$tmp_dir/trufflehog" "$candidate" ||
-    ! trufflehog_binary_ready "$candidate" ||
-    ! mv -f "$candidate" "$target"; then
+    ! trufflehog_binary_ready "$candidate"; then
     rm -f "$candidate"
     rm -rf "$tmp_dir"
     return 1
   fi
   rm -rf "$tmp_dir"
-  trufflehog_ready
+  mv -f "$candidate" "$target"
 }
 
 install_docker() {

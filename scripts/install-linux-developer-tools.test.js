@@ -525,6 +525,35 @@ test("linux developer image installs pinned TruffleHog after checksum verificati
 	);
 });
 
+test("linux developer image re-verifies an existing same-version TruffleHog binary", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-existing-"));
+	const fixture = installTruffleHogFixture(dir);
+	const target = path.join(fixture.targetBin, "trufflehog");
+	writeExecutable(target, "#!/usr/bin/env bash\nprintf 'trufflehog 3.95.9\\n'\nprintf 'untrusted\\n'\n");
+	const result = spawnSync(
+		"bash",
+		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ninstall_trufflehog"],
+		{
+			cwd: repoRoot,
+			env: {
+				...process.env,
+				PATH: `${fixture.bin}${path.delimiter}${process.env.PATH ?? ""}`,
+				CRABBOX_FAKE_CHECKSUM_LOG: fixture.checksumLog,
+				CRABBOX_FAKE_DOWNLOAD_LOG: fixture.downloadLog,
+				CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR: fixture.targetBin,
+			},
+			encoding: "utf8",
+		},
+	);
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(fs.readFileSync(fixture.downloadLog, "utf8"), /trufflehog_3\.95\.9_linux_amd64/);
+	assert.equal(
+		spawnSync(target, ["--version"], { encoding: "utf8" }).stdout,
+		"trufflehog 3.95.9\n",
+	);
+});
+
 test("linux developer image keeps the existing TruffleHog binary when verification fails", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-failure-"));
 	const fixture = installTruffleHogFixture(dir);
