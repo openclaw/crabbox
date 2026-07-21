@@ -41,6 +41,23 @@ var (
 	metadataLessStaleAfter     = 6 * time.Hour
 )
 
+// sleepPoll waits for delay or returns early when ctx is cancelled.
+// Used by terminate polls so SIGINT/cancel during start cleanup does not
+// block for full grace windows on bare time.Sleep.
+func sleepPoll(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 const (
 	inheritedStartupFD       = 3
 	startupAuthorizationByte = 0xa5
@@ -294,7 +311,7 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		failure := errors.Join(
 			fmt.Errorf("remove preparation marker: %w", err),
 			startupDiagnostics(root, *name),
-			cleanupStartedHelper(inst, instanceRoot),
+			cleanupStartedHelper(ctx, inst, instanceRoot),
 		)
 		return failure
 	}
@@ -305,7 +322,7 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	for {
 		current, err := readMetadata(MetadataPath(root, *name))
 		if err == nil {
-			handled, err := handleStartReadinessMetadata(root, *name, current, inst, stdout)
+			handled, err := handleStartReadinessMetadata(ctx, root, *name, current, inst, stdout)
 			if handled {
 				return err
 			}
@@ -327,11 +344,11 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			failure := errors.Join(
 				fmt.Errorf("timed out waiting for helper daemon to report readiness"),
 				startupDiagnostics(root, *name),
-				cleanupStartedHelper(inst, instanceRoot),
+				cleanupStartedHelper(ctx, inst, instanceRoot),
 			)
 			return failure
 		case <-ctx.Done():
-			return errors.Join(ctx.Err(), cleanupStartedHelper(inst, instanceRoot))
+			return errors.Join(ctx.Err(), cleanupStartedHelper(context.Background(), inst, instanceRoot))
 		case <-pollTicker.C:
 		}
 	}
@@ -375,7 +392,7 @@ func authorizeStartedHelper(stateRoot, name string, inst Instance, writer io.Wri
 	return inst, nil
 }
 
-func handleStartReadinessMetadata(stateRoot, name string, inst, expected Instance, stdout io.Writer) (bool, error) {
+func handleStartReadinessMetadata(ctx context.Context, stateRoot, name string, inst, expected Instance, stdout io.Writer) (bool, error) {
 	rawPID := inst.PID
 	inst = normalizeInstance(inst)
 	if rawPID != expected.PID {
@@ -388,7 +405,7 @@ func handleStartReadinessMetadata(stateRoot, name string, inst, expected Instanc
 		return true, errors.New(inst.Error)
 	case StatusStopping, StatusStopped:
 		failure := errors.Join(helperStoppedBeforeReadinessError(inst.Status), startupDiagnostics(stateRoot, name))
-		return true, errors.Join(failure, cleanupStartedHelper(expected, InstanceDir(stateRoot, name)))
+		return true, errors.Join(failure, cleanupStartedHelper(ctx, expected, InstanceDir(stateRoot, name)))
 	default:
 		return false, nil
 	}
@@ -450,8 +467,8 @@ func readTail(path string, limit int64) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-func cleanupStartedHelper(inst Instance, instanceRoot string) error {
-	if err := terminateStartedHelper(inst); err != nil {
+func cleanupStartedHelper(ctx context.Context, inst Instance, instanceRoot string) error {
+	if err := terminateStartedHelper(ctx, inst); err != nil {
 		return fmt.Errorf("terminate helper daemon: %w", err)
 	}
 	if err := os.RemoveAll(instanceRoot); err != nil {
@@ -473,11 +490,11 @@ func cleanupUnauthorizedStartedHelper(inst Instance, instanceRoot string, waitCh
 		if strings.TrimSpace(inst.PIDStartedAt) == "" {
 			return fmt.Errorf("helper process %d did not exit after startup authorization closed", inst.PID)
 		}
-		return cleanupStartedHelper(inst, instanceRoot)
+		return cleanupStartedHelper(context.Background(), inst, instanceRoot)
 	}
 }
 
-func terminateStartedHelper(inst Instance) error {
+func terminateStartedHelper(ctx context.Context, inst Instance) error {
 	matches, err := startedHelperIdentityMatches(inst)
 	if err != nil || !matches {
 		return err
@@ -491,7 +508,9 @@ func terminateStartedHelper(inst Instance) error {
 		if err != nil || !matches {
 			return err
 		}
-		time.Sleep(terminateInstancePollTime)
+		if err := sleepPoll(ctx, terminateInstancePollTime); err != nil {
+			return err
+		}
 	}
 	matches, err = startedHelperIdentityMatches(inst)
 	if err != nil || !matches {
@@ -506,7 +525,9 @@ func terminateStartedHelper(inst Instance) error {
 		if err != nil || !matches {
 			return err
 		}
-		time.Sleep(terminateInstancePollTime)
+		if err := sleepPoll(ctx, terminateInstancePollTime); err != nil {
+			return err
+		}
 	}
 	return fmt.Errorf("helper process %d remained alive after SIGKILL", inst.PID)
 }
@@ -663,7 +684,9 @@ func runDelete(args []string, stdout, stderr io.Writer) error {
 	}
 	inst = migrateLegacyProcessIdentity(inst)
 	inst = normalizeInstance(inst)
-	if err := terminateInstance(root, *name, inst); err != nil {
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	if err := terminateInstance(ctx, root, *name, inst); err != nil {
 		return err
 	}
 	inst.Status = StatusStopped
@@ -673,7 +696,7 @@ func runDelete(args []string, stdout, stderr io.Writer) error {
 	return json.NewEncoder(stdout).Encode(DeleteResponse{Deleted: true, Instance: inst})
 }
 
-func terminateInstance(stateRoot, name string, inst Instance) error {
+func terminateInstance(ctx context.Context, stateRoot, name string, inst Instance) error {
 	pid := inst.PID
 	if pid > 0 && processAlive(pid) {
 		matches, err := processIdentityMatches(inst)
@@ -697,7 +720,9 @@ func terminateInstance(stateRoot, name string, inst Instance) error {
 				if !matches {
 					break
 				}
-				time.Sleep(terminateInstancePollTime)
+				if err := sleepPoll(ctx, terminateInstancePollTime); err != nil {
+					return err
+				}
 			}
 			if processAlive(pid) {
 				matches, err := processIdentityMatches(inst)
