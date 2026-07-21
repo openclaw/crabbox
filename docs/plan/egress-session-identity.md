@@ -68,47 +68,57 @@ One new storage record per lease, hydrated and torn down exactly like the
 tombstone and active-session records introduced in #1152:
 
 ```text
-egress-identity:<leaseID> → { key: <32 random bytes>, generation: <number> }
+egress-identity:<leaseID> → { key: <32 random bytes>, counter: <number>, activeGen: <number> }
 ```
 
 - `key` is created on first use, lease-scoped, never rotated (lease lifetimes
   are bounded; teardown deletes the record). No dependency on
   `CRABBOX_SESSION_SECRET` or any global secret.
-- `generation` increments on every fresh mint. Deleted with the lease, like all
-  other egress state.
+- `counter` is the generation allocator: incremented and persisted on every
+  fresh mint. Never used for rejection.
+- `activeGen` is the highest generation that has ever **activated** on this
+  lease: supersession is recorded at activation, not at mint. Used for all
+  rejection decisions.
 
-### Mint semantics
+Both numbers are deleted with the lease, like all other egress state.
+
+### Mint and admission semantics
 
 `createEgressTicket` classifies the requested session ID:
 
-1. **No session requested** (or invalid format): fresh start. Increment and
-   persist `generation`, issue a server-bound ID embedding it. This is already
-   the server-generated fallback path; it changes from random-only to
-   generation-bearing.
-2. **Server-bound ID, MAC verifies**: reconnect. Valid iff
-   `generation == generation of the current active session`; otherwise
-   `409 egress_session_replaced`. The comparison needs only the persisted
-   active record plus the embedded generation — crucially, a zombie is rejected
-   even when the active record is missing (crash, hibernation edge), because
-   its embedded generation is below the persisted counter.
+1. **No session requested** (or invalid format): fresh start. `counter += 1`
+   (persisted), issue a server-bound ID embedding `g = counter`. This is
+   already the server-generated fallback path; it changes from random-only to
+   generation-bearing. Minting alone changes nothing else — an abandoned mint
+   can never invalidate the current session.
+2. **Server-bound ID, MAC verifies, embedded generation `g`**:
+   - `g < activeGen` → `409 egress_session_replaced`. This holds even when the
+     active-session record is missing (crash, hibernation edge): rejection
+     depends only on the persisted `activeGen`.
+   - `g >= activeGen` → admitted. `g == activeGen` is a reconnect of the
+     current session; `g > activeGen` is a freshly minted successor that has
+     not yet activated.
 3. **Legacy client ID** (no or invalid MAC): current #1152 semantics unchanged
    — tombstone check, last-writer-wins activation. Current guarantees, no
    better, no worse.
 
-`egressAgent` (connect) applies the same classification to the consumed
-ticket's session ID; `activateEgressSession` refuses any server-bound session
-whose generation is below the active one, replacing the timestamp comparison
-for server-bound IDs. Timestamp last-writer-wins remains only for
-legacy-vs-legacy conflicts.
+`egressAgent` (connect) applies the same admission rule to the consumed
+ticket's session ID. `activateEgressSession` activates a server-bound session
+iff `g >= activeGen`, and on activation persists `activeGen = g` — this is the
+moment the previous generation becomes permanently invalid. Generation
+ordering replaces the timestamp comparison for server-bound sessions;
+timestamp last-writer-wins remains only for legacy-vs-legacy conflicts. Racing
+fresh mints resolve deterministically: the highest generation to activate
+wins, and lower ones are rejected from then on.
 
-Invariant: the persisted counter is always strictly greater than the
-generation of every superseded server-bound session, independent of the active
-record's survival. Two rules maintain it: fresh mints increment the counter,
-and a legacy session replacing a server-bound active session also increments
-and persists the counter before activating. Without the second rule, a
-server-bound session at generation G replaced by a legacy session could
-resurrect after the active record is lost to a crash — its embedded G would
-not be below the counter.
+Invariant: `activeGen` is strictly greater than the generation of every
+superseded server-bound session, independent of the active record's survival.
+Two rules maintain it: activation persists `activeGen = g`, and a legacy
+session replacing a server-bound active session persists
+`activeGen = counter + 1` (allocating and burning a generation) before
+activating. Without the second rule, a server-bound session at generation G
+replaced by a legacy session could resurrect after the active record is lost
+to a crash — its embedded G would not be below `activeGen`.
 
 ### Why the MAC is required
 
@@ -136,7 +146,7 @@ they silently inherit the stronger guarantee.
 | Zombie session | Replacement session | Outcome |
 | --- | --- | --- |
 | server-bound | server-bound | zombie generation < current → 409 always, no history needed |
-| server-bound | legacy | legacy replacement durably bumps the counter (see invariant above), so the zombie's generation is below it → 409 even if the active record is later lost |
+| server-bound | legacy | legacy replacement durably advances `activeGen` (see invariant above), so the zombie's generation is below it → 409 even if the active record is later lost |
 | legacy | server-bound | legacy re-mint hits tombstones — current guarantee (bounded) |
 | legacy | legacy | current #1152 guarantee (bounded tombstones) |
 
@@ -185,9 +195,11 @@ Worker (`worker/test/fleet.test.ts`, beside the #1152 suites):
   active record deleted (crash simulation) — the case tombstones cannot cover.
 - crafted ID with bad MAC → legacy path (tombstone semantics apply, no
   generation bump).
-- legacy session replaces a server-bound session → counter advanced; the
+- legacy session replaces a server-bound session → `activeGen` advanced; the
   server-bound zombie gets 409 after active-record loss (the invariant's
   second rule).
+- abandoned fresh mint (ticket issued, never connected) → the current session
+  keeps reconnecting; `activeGen` unchanged until a successor activates.
 - legacy interplay per the compatibility matrix.
 - eviction test inversion: after >256 replacements, a server-bound zombie is
   still rejected (the exact residual #1152 documents).
