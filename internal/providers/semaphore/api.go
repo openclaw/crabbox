@@ -268,12 +268,20 @@ func (c *apiClient) resolveProjectID(ctx context.Context, name string) (string, 
 				return p.Metadata.ID, nil
 			}
 		}
-		path = nextLinkPath(headers)
+		path, err = c.nextLinkPath(headers)
+		if err != nil {
+			return "", err
+		}
 	}
 	return "", fmt.Errorf("project %q not found", name)
 }
 
-func nextLinkPath(headers http.Header) string {
+// nextLinkPath returns the next-page request path from a Link header, or "" when
+// pagination is finished. References are resolved against the configured host and
+// rejected when they would change scheme, hostname, port, or introduce userinfo
+// (which previously let `@host/...` relative links turn the configured host into
+// URL userinfo and attach the API token to an unrelated hostname).
+func (c *apiClient) nextLinkPath(headers http.Header) (string, error) {
 	for _, part := range strings.Split(headers.Get("Link"), ",") {
 		sections := strings.Split(part, ";")
 		if len(sections) < 2 || !strings.Contains(part, `rel="next"`) {
@@ -282,20 +290,99 @@ func nextLinkPath(headers http.Header) string {
 		raw := strings.TrimSpace(sections[0])
 		raw = strings.TrimPrefix(raw, "<")
 		raw = strings.TrimSuffix(raw, ">")
-		u, err := url.Parse(raw)
+		path, err := c.resolvePaginationRef(raw)
 		if err != nil {
-			continue
+			return "", err
 		}
-		if u.IsAbs() {
-			return u.RequestURI()
+		if path != "" {
+			return path, nil
 		}
-		return raw
 	}
-	return ""
+	return "", nil
+}
+
+func (c *apiClient) resolvePaginationRef(ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", nil
+	}
+	base, err := c.configuredBaseURL()
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(ref)
+	if err != nil {
+		return "", fmt.Errorf("semaphore pagination link: %w", err)
+	}
+	resolved := base.ResolveReference(parsed)
+	if resolved.User != nil {
+		return "", fmt.Errorf("semaphore pagination link contains userinfo")
+	}
+	if !sameOriginURL(base, resolved) {
+		return "", fmt.Errorf("semaphore pagination link points outside configured host")
+	}
+	return resolved.RequestURI(), nil
+}
+
+func (c *apiClient) configuredBaseURL() (*url.URL, error) {
+	base, err := url.Parse("https://" + c.host)
+	if err != nil {
+		return nil, fmt.Errorf("semaphore configured host: %w", err)
+	}
+	if base.Path == "" {
+		base.Path = "/"
+	}
+	return base, nil
+}
+
+// apiURL builds an absolute request URL for a same-origin request path or URI.
+// It rejects values that would select a different authority than c.host.
+func (c *apiClient) apiURL(path string) (string, error) {
+	base, err := c.configuredBaseURL()
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("semaphore request path: %w", err)
+	}
+	resolved := base.ResolveReference(parsed)
+	if resolved.User != nil {
+		return "", fmt.Errorf("semaphore request URL contains userinfo")
+	}
+	if !sameOriginURL(base, resolved) {
+		return "", fmt.Errorf("semaphore request URL points outside configured host")
+	}
+	return resolved.String(), nil
+}
+
+func sameOriginURL(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveURLPort(a) == effectiveURLPort(b)
+}
+
+func effectiveURLPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 func (c *apiClient) getWithHeaders(ctx context.Context, path string) ([]byte, http.Header, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://"+c.host+path, nil)
+	endpoint, err := c.apiURL(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -343,7 +430,11 @@ func redactSemaphoreSecrets(value string, secrets ...string) string {
 }
 
 func (c *apiClient) get(ctx context.Context, path string, target any) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://"+c.host+path, nil)
+	endpoint, err := c.apiURL(path)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return err
 	}
@@ -376,7 +467,11 @@ func (c *apiClient) post(ctx context.Context, path string, payload any, target a
 		bodyReader = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://"+c.host+path, bodyReader)
+	endpoint, err := c.apiURL(path)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bodyReader)
 	if err != nil {
 		return err
 	}

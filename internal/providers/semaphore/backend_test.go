@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -563,6 +564,113 @@ func TestResolveProjectIDNotFound(t *testing.T) {
 	_, err := client.resolveProjectID(context.Background(), "missing")
 	if err == nil {
 		t.Error("expected error for missing project")
+	}
+}
+
+func TestResolveProjectIDRejectsUserinfoPaginationLink(t *testing.T) {
+	// Relative Link targets of the form `@attacker/...` used to be concatenated as
+	// `https://<configured-host>@attacker/...`, turning the configured host into
+	// URL userinfo and sending Authorization to an unrelated hostname.
+	const token = "sem-secret-token"
+	var seen []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Host+"|"+r.URL.RequestURI()+"|"+r.Header.Get("Authorization"))
+		if r.URL.Path == "/api/v1alpha/projects/my-project" {
+			w.WriteHeader(400)
+			return
+		}
+		if r.URL.Path == "/api/v1alpha/projects" {
+			w.Header().Set("Link", `<@pagination-target.invalid/api/v1alpha/projects?page=2>; rel="next"`)
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"metadata": map[string]string{"name": "other", "id": "other-id"}},
+			})
+			return
+		}
+		// Safe resolution turns `@attacker/...` into a same-host path prefix `/@attacker/...`.
+		// Respond empty so pagination ends without treating it as a successful attacker hop.
+		if strings.HasPrefix(r.URL.Path, "/@") {
+			json.NewEncoder(w).Encode([]map[string]any{})
+			return
+		}
+		t.Errorf("unexpected request host=%q path=%q", r.Host, r.URL.RequestURI())
+		w.WriteHeader(500)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	client := &apiClient{host: host, token: token, http: server.Client()}
+
+	// After the fix, the crafted Link is resolved as a path on the configured
+	// host (or rejected). Project resolution may fail with not-found; either
+	// outcome is fine. The critical property is no request to the attacker host.
+	_, _ = client.resolveProjectID(context.Background(), "my-project")
+	for _, s := range seen {
+		if strings.Contains(strings.SplitN(s, "|", 2)[0], "pagination-target.invalid") {
+			t.Fatalf("request reached attacker host: %q (all=%v)", s, seen)
+		}
+	}
+	// Token must only appear on the TLS test server host, never as a separate
+	// request whose Host header is the attacker.
+	for _, s := range seen {
+		parts := strings.SplitN(s, "|", 3)
+		if len(parts) == 3 && parts[0] != host && strings.Contains(parts[2], token) {
+			t.Fatalf("token sent to non-configured host %q: %q", parts[0], s)
+		}
+	}
+}
+
+func TestResolvePaginationRefRejectsCrossOriginAndUserinfo(t *testing.T) {
+	client := &apiClient{host: "semaphore.example.test"}
+
+	path, err := client.resolvePaginationRef("/api/v1alpha/projects?page=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/api/v1alpha/projects?page=2" {
+		t.Fatalf("path=%q", path)
+	}
+
+	path, err = client.resolvePaginationRef("https://semaphore.example.test/api/v1alpha/projects?page=3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/api/v1alpha/projects?page=3" {
+		t.Fatalf("same-origin absolute path=%q", path)
+	}
+
+	if _, err := client.resolvePaginationRef("https://evil.example/api"); err == nil ||
+		!strings.Contains(err.Error(), "outside configured host") {
+		t.Fatalf("cross-origin err=%v", err)
+	}
+
+	// Authority-changing relative form that string-concat used to mis-route.
+	// Resolved against the base it becomes a path on the configured host; apiURL
+	// then keeps it same-origin. Ensure the dangerous concat form is not used by
+	// checking apiURL rejects explicit userinfo.
+	if _, err := client.apiURL("https://user:pass@evil.example/api"); err == nil ||
+		!strings.Contains(err.Error(), "userinfo") && !strings.Contains(err.Error(), "outside") {
+		t.Fatalf("userinfo URL err=%v", err)
+	}
+
+	// The original attack string must not produce an authority change when
+	// resolved and used via apiURL.
+	path, err = client.resolvePaginationRef("@pagination-target.invalid/api/v1alpha/projects?page=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := client.apiURL(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Hostname() != "semaphore.example.test" {
+		t.Fatalf("hostname=%q, want configured host (endpoint=%q)", u.Hostname(), endpoint)
+	}
+	if u.User != nil {
+		t.Fatalf("userinfo present: %v", u.User)
 	}
 }
 
