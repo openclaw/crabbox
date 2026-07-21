@@ -105,11 +105,22 @@ Both numbers are deleted with the lease, like all other egress state.
 `egressAgent` (connect) applies the same admission rule to the consumed
 ticket's session ID. `activateEgressSession` activates a server-bound session
 iff `g >= activeGen`, and on activation persists `activeGen = g` — this is the
-moment the previous generation becomes permanently invalid. Generation
-ordering replaces the timestamp comparison for server-bound sessions;
-timestamp last-writer-wins remains only for legacy-vs-legacy conflicts. Racing
-fresh mints resolve deterministically: the highest generation to activate
-wins, and lower ones are rejected from then on.
+moment the previous generation becomes permanently invalid. Racing fresh
+mints resolve deterministically: the highest generation to activate wins, and
+lower ones are rejected from then on.
+
+Ordering across session kinds:
+
+- **server-bound vs server-bound**: generation ordering, as above. Timestamps
+  are not consulted.
+- **any conflict involving a legacy session** (legacy-vs-legacy,
+  legacy-replacing-server, server-replacing-legacy): the existing #1152
+  timestamp last-writer-wins comparison, unchanged — this is what "current
+  guarantees" means for legacy participants, and it keeps a legacy ticket
+  minted before a server-bound activation behaving exactly as today (its
+  admission is still subject to the tombstone check; if it wins activation,
+  the replaced server-bound session is tombstoned and the fence bumps per the
+  invariant; if it loses, nothing changes).
 
 Invariant: `activeGen` is strictly greater than the generation of every
 superseded server-bound session, independent of the active record's survival.
@@ -238,7 +249,10 @@ Worker (`worker/test/fleet.test.ts`, beside the #1152 suites):
 - legacy takeover after record loss: delete the active record, activate a
   legacy session, and assert the fence advanced (prior server-bound generation
   rejected).
-- legacy interplay per the compatibility matrix.
+- legacy interplay per the compatibility matrix, including mixed ordering:
+  a legacy ticket minted before a server-bound activation and connected after
+  it follows timestamp last-writer-wins (both the older-loses and newer-wins
+  variants), with fence bump and tombstone applied when it wins.
 - eviction test inversion: after >256 replacements, a server-bound zombie is
   still rejected (the exact residual #1152 documents).
 
