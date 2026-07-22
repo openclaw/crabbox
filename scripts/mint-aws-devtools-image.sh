@@ -463,6 +463,7 @@ if ($nodeMajor -lt 24) { throw "Node.js 24 or newer is required, found major $no
 npm --version
 corepack --version
 pnpm --version
+trufflehog --no-update --version
 docker --version
 docker version
 docker image inspect mcr.microsoft.com/windows/servercore:ltsc2022 | Out-Null
@@ -482,6 +483,8 @@ command -v node
 command -v npm
 command -v corepack
 command -v pnpm
+command -v trufflehog
+trufflehog --no-update --version
 command -v docker
 node --version
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) throw new Error(`Node.js 24 or newer is required, found ${process.version}`)'

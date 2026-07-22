@@ -52,7 +52,7 @@ function base64Encode(bytes: Uint8Array): string {
   return btoa(chunks.join(""));
 }
 
-export function cloudInit(config: LeaseConfig): string {
+export function cloudInit(config: LeaseConfig, additionalBootstrap = ""): string {
   if (config.awsPrivate) {
     return privateAWSCloudInit(config);
   }
@@ -62,7 +62,7 @@ export function cloudInit(config: LeaseConfig): string {
   const readyChecks = optionalReadyChecks(config);
   const sshHostKeys = optionalSSHHostKeys(config);
   const writeFiles = optionalWriteFiles(config);
-  const bootstrap = optionalBootstrap(config);
+  const bootstrap = [optionalBootstrap(config), additionalBootstrap].filter(Boolean).join("\n");
   return `#cloud-config
 package_update: false
 package_upgrade: false

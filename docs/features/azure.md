@@ -19,6 +19,12 @@ and Windows WSL2 when your subscription has credits or available quota. It
 follows the same ordered region fallback as AWS for brokered leases, while
 keeping Windows classes smaller than the large Linux-focused classes.
 
+Linux VMs install checksum-pinned TruffleHog 3.95.9 once during cloud-init.
+Azure uses Marketplace images rather than Crabbox-promoted developer images, so
+there is no separate Azure image publication step. Brokered environments pick
+up bootstrap changes when the coordinator Worker is deployed; direct mode picks
+them up with the updated Crabbox CLI.
+
 This page covers the `azure` VM backend. Azure Container Apps dynamic sessions
 are a separate, delegated-run backend selected with `--azure-backend
 dynamic-sessions`; see the [Provider Reference](../providers/README.md).
@@ -27,7 +33,7 @@ dynamic-sessions`; see the [Provider Reference](../providers/README.md).
 
 | Target | Brokered | Notes |
 | --- | --- | --- |
-| Linux | Yes | Cloud-init bootstrap, SSH, rsync, optional desktop/browser/code. |
+| Linux | Yes | Cloud-init bootstrap, SSH, rsync, pinned TruffleHog, optional desktop/browser/code. |
 | Windows native | Yes | Native Windows SSH/sync/run and optional desktop/VNC. No browser/code. |
 | Windows WSL2 | Yes | Nested-virtualization VM sizes; POSIX sync/run/actions hydration through WSL. |
 | macOS | No | Azure offers no managed macOS; use AWS EC2 Mac or a static SSH host. |

@@ -47,6 +47,47 @@ const LEGACY_AZURE_NOBLE_GEN2_IMAGE =
   "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest";
 const DEFAULT_AZURE_WINDOWS_IMAGE =
   "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest";
+const AZURE_TRUFFLEHOG_VERSION = "3.95.9";
+const AZURE_TRUFFLEHOG_AMD64_SHA256 =
+  "f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e";
+const AZURE_TRUFFLEHOG_ARM64_SHA256 =
+  "9d9c2ec4ea36a089a9c5aaafe1969d176013ddf9f44d68e8cd75291aed8c83ed";
+
+export function azureLinuxCloudInit(config: LeaseConfig): string {
+  return cloudInit(config, azureLinuxTruffleHogBootstrap());
+}
+
+function azureLinuxTruffleHogBootstrap(): string {
+  const versionPattern = AZURE_TRUFFLEHOG_VERSION.replaceAll(".", "[.]");
+  return `    if ! command -v trufflehog >/dev/null 2>&1 || ! trufflehog --no-update --version | grep -Eq '(^|[[:space:]])${versionPattern}($|[[:space:]])'; then
+      trufflehog_version=${AZURE_TRUFFLEHOG_VERSION}
+      trufflehog_arch="$(dpkg --print-architecture)"
+      case "$trufflehog_arch" in
+        amd64) trufflehog_sha256=${AZURE_TRUFFLEHOG_AMD64_SHA256} ;;
+        arm64) trufflehog_sha256=${AZURE_TRUFFLEHOG_ARM64_SHA256} ;;
+        *) echo "unsupported TruffleHog architecture: $trufflehog_arch" >&2; exit 1 ;;
+      esac
+      trufflehog_archive="trufflehog_\${trufflehog_version}_linux_\${trufflehog_arch}.tar.gz"
+      trufflehog_url="https://github.com/trufflesecurity/trufflehog/releases/download/v\${trufflehog_version}/\${trufflehog_archive}"
+      trufflehog_tmp="$(mktemp -d)"
+      retry curl -fsSL --output "$trufflehog_tmp/$trufflehog_archive" "$trufflehog_url"
+      (
+        cd "$trufflehog_tmp"
+        printf '%s  %s\\n' "$trufflehog_sha256" "$trufflehog_archive" | sha256sum -c -
+      )
+      tar --no-same-owner -xzf "$trufflehog_tmp/$trufflehog_archive" -C "$trufflehog_tmp" trufflehog
+      trufflehog_candidate="$(mktemp /usr/local/bin/trufflehog.tmp.XXXXXX)"
+      install -m 0755 "$trufflehog_tmp/trufflehog" "$trufflehog_candidate"
+      if ! "$trufflehog_candidate" --no-update --version | grep -Eq '(^|[[:space:]])${versionPattern}($|[[:space:]])'; then
+        rm -f "$trufflehog_candidate"
+        rm -rf "$trufflehog_tmp"
+        exit 1
+      fi
+      mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog
+      rm -rf "$trufflehog_tmp"
+    fi
+    trufflehog --no-update --version`;
+}
 
 function azureOwnedDeleteClaimKey(providerScope: string, cloudID: string, leaseID: string): string {
   return ["provider:azure:delete-claim", providerScope, cloudID, leaseID]
@@ -1140,7 +1181,9 @@ export class AzureClient {
       { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS },
     );
     const customData = btoa(
-      config.target === "windows" ? azureWindowsBootstrapPowerShell(config) : cloudInit(config),
+      config.target === "windows"
+        ? azureWindowsBootstrapPowerShell(config)
+        : azureLinuxCloudInit(config),
     );
     const storageProfile: Record<string, unknown> = {};
     const vmProperties: Record<string, unknown> = {

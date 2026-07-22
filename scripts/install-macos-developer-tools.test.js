@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,4 +88,73 @@ test("Homebrew and SSH shell setup remain noninteractive and idempotent", async 
   assert.match(text, /zshenv_line='export PATH="\/usr\/local\/bin:\/opt\/homebrew\/bin:\/opt\/homebrew\/sbin:\$PATH"'/);
   assert.match(text, /grep -qxF "\$zshenv_line" "\$HOME\/\.zshenv"/);
   assert.match(text, /tail -c 1 "\$HOME\/\.zshenv"/);
+});
+
+test("TruffleHog archives are pinned, verified, and atomically installed", async () => {
+  const text = await source();
+  const start = text.indexOf("install_trufflehog() {");
+  const end = text.indexOf("link_common_tools() {");
+  const installTruffleHog = text.slice(start, end);
+
+  assert.match(text, /trufflehog_version="3\.95\.9"/);
+  assert.match(text, /4306a58d25b85aad7b5fb6f5732df77c50a9161db2746b56e196649072218691/);
+  assert.match(text, /944c6ea3a2993a9f808d08107b40e03ba92bc75972876a1ee47d567bfd6fa1b5/);
+  assert.match(text, /"\$binary" --no-update --version/);
+  const download = installTruffleHog.indexOf('curl -fsSL --retry 3 --output "$tmp_dir/$archive" "$url"');
+  const verify = installTruffleHog.indexOf("shasum -a 256 -c -");
+  const extract = installTruffleHog.indexOf('tar -xzf "$tmp_dir/$archive" -C "$tmp_dir" trufflehog');
+  const validate = installTruffleHog.indexOf('trufflehog_binary_ready "$candidate"');
+  const replace = installTruffleHog.indexOf('mv -f "$candidate" "$target"');
+  assert.ok(download >= 0, "TruffleHog download must be present");
+  assert.ok(verify > download, "checksum verification must follow the download");
+  assert.ok(extract > verify, "archive extraction must follow verification");
+  assert.ok(validate > extract, "candidate validation must follow extraction");
+  assert.ok(replace > validate, "atomic replacement must follow candidate validation");
+});
+
+test("TruffleHog checksum mapping covers Intel and Apple Silicon images", () => {
+  const result = spawnSync(
+    "bash",
+    [
+      "-lc",
+      [
+        `CRABBOX_MACOS_SOURCE_ONLY=1 source ${shellQuote(script)}`,
+        "trufflehog_sha256_for_arch amd64",
+        "trufflehog_sha256_for_arch arm64",
+      ].join("; "),
+    ],
+    { encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /4306a58d25b85aad7b5fb6f5732df77c50a9161db2746b56e196649072218691/);
+  assert.match(result.stdout, /944c6ea3a2993a9f808d08107b40e03ba92bc75972876a1ee47d567bfd6fa1b5/);
+});
+
+test("pinned TruffleHog is reused without another download", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "crabbox-macos-trufflehog-"));
+  const trufflehog = path.join(dir, "trufflehog");
+  const curl = path.join(dir, "curl");
+  await writeFile(trufflehog, "#!/bin/sh\nprintf 'trufflehog 3.95.9\\n'\n");
+  await writeFile(curl, "#!/bin/sh\nexit 99\n");
+  await chmod(trufflehog, 0o755);
+  await chmod(curl, 0o755);
+
+  const result = spawnSync(
+    "bash",
+    [
+      "-lc",
+      [
+        `CRABBOX_MACOS_SOURCE_ONLY=1 CRABBOX_MACOS_TRUFFLEHOG_BIN_DIR=${shellQuote(dir)} source ${shellQuote(script)}`,
+        "install_trufflehog",
+      ].join("; "),
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stderr, /TruffleHog 3\.95\.9 is already installed/);
 });

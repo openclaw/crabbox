@@ -641,6 +641,8 @@ test("macOS lifecycle smoke preserves full mock lifecycle evidence", async () =>
   assert.match(fakeLog, /command -v node/);
   assert.match(fakeLog, /command -v corepack/);
   assert.match(fakeLog, /command -v pnpm/);
+  assert.match(fakeLog, /command -v trufflehog/);
+  assert.match(fakeLog, /trufflehog --no-update --version/);
   assert.match(fakeLog, /^checkpoint create --id cbx_source --name full-checkpoint --mode native --strategy image --wait --wait-timeout 60m$/m);
   assert.match(fakeLog, /^checkpoint fork chk_macos --desktop$/m);
   assert.match(fakeLog, /^checkpoint delete chk_macos$/m);

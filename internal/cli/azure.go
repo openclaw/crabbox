@@ -43,6 +43,9 @@ const (
 	legacyAzureJammyImage             = "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
 	legacyAzureNobleGen2Image         = "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest"
 	defaultAzureWindowsImage          = "MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest"
+	azureTruffleHogVersion            = "3.95.9"
+	azureTruffleHogAMD64SHA256        = "f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e"
+	azureTruffleHogARM64SHA256        = "9d9c2ec4ea36a089a9c5aaafe1969d176013ddf9f44d68e8cd75291aed8c83ed"
 	azureDeleteRetryDelay             = 15 * time.Second
 	azureDeleteRetryAttempts          = 13
 	azureSnapshotQuarantineNSGSuffix  = "-q-nsg"
@@ -1355,7 +1358,7 @@ func (c *AzureClient) azureOSProfile(cfg Config, publicKey, name, leaseID string
 		return &armcompute.OSProfile{
 			ComputerName:  to.Ptr(name),
 			AdminUsername: to.Ptr(cfg.SSHUser),
-			CustomData:    to.Ptr(base64.StdEncoding.EncodeToString([]byte(cloudInit(cfg, publicKey)))),
+			CustomData:    to.Ptr(base64.StdEncoding.EncodeToString([]byte(azureLinuxCloudInit(cfg, publicKey)))),
 			LinuxConfiguration: &armcompute.LinuxConfiguration{
 				DisablePasswordAuthentication: to.Ptr(true),
 				SSH: &armcompute.SSHConfiguration{
@@ -1382,6 +1385,42 @@ func (c *AzureClient) azureOSProfile(cfg Config, publicKey, name, leaseID string
 			ProvisionVMAgent:       to.Ptr(true),
 		},
 	}, nil
+}
+
+func azureLinuxCloudInit(cfg Config, publicKey string) string {
+	return cloudInitWithAdditionalBootstrap(cfg, publicKey, azureLinuxTruffleHogBootstrap())
+}
+
+func azureLinuxTruffleHogBootstrap() string {
+	versionPattern := strings.ReplaceAll(azureTruffleHogVersion, ".", "[.]")
+	return fmt.Sprintf(`    if ! command -v trufflehog >/dev/null 2>&1 || ! trufflehog --no-update --version | grep -Eq '(^|[[:space:]])%[1]s($|[[:space:]])'; then
+      trufflehog_version=%[2]s
+      trufflehog_arch="$(dpkg --print-architecture)"
+      case "$trufflehog_arch" in
+        amd64) trufflehog_sha256=%[3]s ;;
+        arm64) trufflehog_sha256=%[4]s ;;
+        *) echo "unsupported TruffleHog architecture: $trufflehog_arch" >&2; exit 1 ;;
+      esac
+      trufflehog_archive="trufflehog_${trufflehog_version}_linux_${trufflehog_arch}.tar.gz"
+      trufflehog_url="https://github.com/trufflesecurity/trufflehog/releases/download/v${trufflehog_version}/${trufflehog_archive}"
+      trufflehog_tmp="$(mktemp -d)"
+      retry curl -fsSL --output "$trufflehog_tmp/$trufflehog_archive" "$trufflehog_url"
+      (
+        cd "$trufflehog_tmp"
+        printf '%%s  %%s\n' "$trufflehog_sha256" "$trufflehog_archive" | sha256sum -c -
+      )
+      tar --no-same-owner -xzf "$trufflehog_tmp/$trufflehog_archive" -C "$trufflehog_tmp" trufflehog
+      trufflehog_candidate="$(mktemp /usr/local/bin/trufflehog.tmp.XXXXXX)"
+      install -m 0755 "$trufflehog_tmp/trufflehog" "$trufflehog_candidate"
+      if ! "$trufflehog_candidate" --no-update --version | grep -Eq '(^|[[:space:]])%[1]s($|[[:space:]])'; then
+        rm -f "$trufflehog_candidate"
+        rm -rf "$trufflehog_tmp"
+        exit 1
+      fi
+      mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog
+      rm -rf "$trufflehog_tmp"
+    fi
+    trufflehog --no-update --version`, versionPattern, azureTruffleHogVersion, azureTruffleHogAMD64SHA256, azureTruffleHogARM64SHA256)
 }
 
 type azureSnapshotPrerequisiteResult struct {

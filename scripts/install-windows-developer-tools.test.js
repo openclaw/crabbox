@@ -73,3 +73,30 @@ test("Windows developer tools prep verifies the Docker archive before extraction
   assert.ok(cleanup > extract, "Docker archive cleanup must follow extraction");
   assert.ok(register > cleanup, "Docker service registration must follow verified extraction");
 });
+
+test("Windows developer tools prep verifies and atomically installs pinned TruffleHog archives", () => {
+  assert.match(script, /\$TruffleHogVersion = "3\.95\.9"/);
+  assert.match(script, /25cc731f678922c870edba49f19c324aa6c8e7190b551c4fbe49d0c4e1c5446a/);
+  assert.match(script, /df982afbf72d1c1a125e4871b624b7f959b2f62caa40e4d14bf861fb93c237bb/);
+  assert.match(script, /Resolve-TruffleHogAsset/);
+  assert.match(script, /catch \{\s+return \$false\s+\}/);
+  assert.match(script, /& \$Path --no-update --version/);
+
+  const start = script.indexOf("function Install-TruffleHog");
+  const end = script.indexOf("function Install-StaticDockerEngine");
+  const installTruffleHog = script.slice(start, end);
+  assert.match(installTruffleHog, /if \(Test-TruffleHogBinary -Path \$target\) \{/);
+  assert.match(installTruffleHog, /TruffleHog \$TruffleHogVersion is already installed/);
+  const download = installTruffleHog.indexOf("Invoke-WebRequest -Uri $url -OutFile $archive");
+  const verify = installTruffleHog.indexOf(
+    'Assert-FileSHA256 -Path $archive -Expected $asset.SHA256 -Name "TruffleHog archive"',
+  );
+  const extract = installTruffleHog.indexOf("& tar.exe -xzf $archive");
+  const validate = installTruffleHog.indexOf("Test-TruffleHogBinary -Path $candidate");
+  const replace = installTruffleHog.indexOf("Move-Item -LiteralPath $candidate -Destination $target -Force");
+  assert.ok(download >= 0, "TruffleHog download must be present");
+  assert.ok(verify > download, "checksum verification must follow the download");
+  assert.ok(extract > verify, "archive extraction must follow verification");
+  assert.ok(validate > extract, "candidate validation must follow extraction");
+  assert.ok(replace > validate, "atomic replacement must follow candidate validation");
+});

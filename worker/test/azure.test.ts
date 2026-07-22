@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AzureClient,
+  azureLinuxCloudInit,
   azureLabelsFromTags,
   azureLROPollIntervalMS,
   azureProvisioningErrorCategory,
@@ -33,6 +34,21 @@ const baseEnv: Env = {
 };
 
 afterEach(() => vi.useRealTimers());
+
+it("installs pinned TruffleHog once in Azure Linux cloud-init", () => {
+  const got = azureLinuxCloudInit(testLeaseConfig());
+
+  expect(got).toContain(
+    "trufflehog/releases/download/v${trufflehog_version}/${trufflehog_archive}",
+  );
+  expect(got).toContain("f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e");
+  expect(got).toContain("9d9c2ec4ea36a089a9c5aaafe1969d176013ddf9f44d68e8cd75291aed8c83ed");
+  expect(got).toContain("trufflehog --no-update --version");
+  expect(got.indexOf("sha256sum -c -")).toBeLessThan(got.indexOf("tar --no-same-owner"));
+  expect(got.indexOf('trufflehog_candidate="$(mktemp')).toBeLessThan(
+    got.indexOf('mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog'),
+  );
+});
 
 function isAzureLoginURL(value: string): boolean {
   return new URL(value).hostname === "login.microsoftonline.com";

@@ -43,6 +43,11 @@ $ChocolateyPackageURL = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_URL
 if (-not $ChocolateyPackageURL) { $ChocolateyPackageURL = "https://community.chocolatey.org/api/v2/package/chocolatey/2.7.3" }
 $ChocolateyPackageSHA256 = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_SHA256
 if (-not $ChocolateyPackageSHA256) { $ChocolateyPackageSHA256 = "40778cc59245b3eb6ea5147aeef5bea5d577419e5abce22a224189740dc16db5" }
+$TruffleHogVersion = "3.95.9"
+$TruffleHogAMD64SHA256 = "25cc731f678922c870edba49f19c324aa6c8e7190b551c4fbe49d0c4e1c5446a"
+$TruffleHogARM64SHA256 = "df982afbf72d1c1a125e4871b624b7f959b2f62caa40e4d14bf861fb93c237bb"
+$TruffleHogInstallDir = $env:CRABBOX_WINDOWS_TRUFFLEHOG_INSTALL_DIR
+if (-not $TruffleHogInstallDir) { $TruffleHogInstallDir = "C:\Program Files\TruffleHog" }
 
 function Write-Log {
   param([string]$Message)
@@ -180,6 +185,60 @@ function Enable-CorepackPnpm {
   Write-Log "activating pnpm $PnpmVersion"
   & corepack enable
   & corepack prepare "pnpm@$PnpmVersion" --activate
+}
+
+function Resolve-TruffleHogAsset {
+  $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+  switch ($architecture) {
+    "X64" { return @{ Name = "amd64"; SHA256 = $TruffleHogAMD64SHA256 } }
+    "Arm64" { return @{ Name = "arm64"; SHA256 = $TruffleHogARM64SHA256 } }
+    default { throw "unsupported TruffleHog architecture: $architecture" }
+  }
+}
+
+function Test-TruffleHogBinary {
+  param([string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+  try {
+    $output = (& $Path --no-update --version 2>$null | Out-String).Trim()
+    return $LASTEXITCODE -eq 0 -and ($output -split "\s+") -contains $TruffleHogVersion
+  } catch {
+    return $false
+  }
+}
+
+function Install-TruffleHog {
+  $target = Join-Path $TruffleHogInstallDir "trufflehog.exe"
+  if (Test-TruffleHogBinary -Path $target) {
+    Write-Log "TruffleHog $TruffleHogVersion is already installed"
+    Add-MachinePath $TruffleHogInstallDir
+    return
+  }
+
+  $asset = Resolve-TruffleHogAsset
+  $archiveName = "trufflehog_$($TruffleHogVersion)_windows_$($asset.Name).tar.gz"
+  $url = "https://github.com/trufflesecurity/trufflehog/releases/download/v$TruffleHogVersion/$archiveName"
+  $workDir = Join-Path $env:TEMP ("crabbox-trufflehog-" + [Guid]::NewGuid().ToString("N"))
+  $archive = Join-Path $workDir $archiveName
+  $extractDir = Join-Path $workDir "extract"
+  $candidate = Join-Path $TruffleHogInstallDir ("trufflehog.exe.new-" + [Guid]::NewGuid().ToString("N"))
+  Write-Log "installing TruffleHog $TruffleHogVersion"
+  try {
+    New-Item -ItemType Directory -Force -Path $workDir, $extractDir, $TruffleHogInstallDir | Out-Null
+    Retry { Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing }
+    Assert-FileSHA256 -Path $archive -Expected $asset.SHA256 -Name "TruffleHog archive"
+    & tar.exe -xzf $archive -C $extractDir trufflehog.exe
+    if ($LASTEXITCODE -ne 0) { throw "TruffleHog archive extraction failed with exit code $LASTEXITCODE" }
+    Copy-Item -LiteralPath (Join-Path $extractDir "trufflehog.exe") -Destination $candidate -Force
+    if (-not (Test-TruffleHogBinary -Path $candidate)) {
+      throw "downloaded TruffleHog binary did not report version $TruffleHogVersion"
+    }
+    Move-Item -LiteralPath $candidate -Destination $target -Force
+  } finally {
+    Remove-Item -Force -LiteralPath $candidate -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force -LiteralPath $workDir -ErrorAction SilentlyContinue
+  }
+  Add-MachinePath $TruffleHogInstallDir
 }
 
 function Install-StaticDockerEngine {
@@ -320,6 +379,7 @@ Refresh-SessionPath
 Install-Node
 Refresh-SessionPath
 Enable-CorepackPnpm
+Install-TruffleHog
 Install-DockerEngine
 Prepare-Caches
 Disable-FirstBootNoise
@@ -344,6 +404,7 @@ node --version
 npm --version
 corepack --version
 pnpm --version
+trufflehog --no-update --version
 if (Get-Command docker.exe -ErrorAction SilentlyContinue) {
   docker --version
 }

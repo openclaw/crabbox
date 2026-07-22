@@ -893,6 +893,8 @@ command -v corepack
 corepack --version
 command -v pnpm
 pnpm --version
+command -v trufflehog
+trufflehog --no-update --version
 command -v python3
 python3 --version
 test -d "$HOME/crabbox"

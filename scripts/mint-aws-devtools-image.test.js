@@ -131,6 +131,15 @@ test("AWS devtools mint wrapper defaults to dry plan", async () => {
   await assert.rejects(readFile(fake.log, "utf8"));
 });
 
+test("AWS developer image smoke requires TruffleHog on Linux and Windows", async () => {
+  const text = await readFile(script, "utf8");
+  assert.match(text, /pnpm --version\ntrufflehog --no-update --version\ndocker --version/);
+  assert.match(
+    text,
+    /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker/,
+  );
+});
+
 test("AWS devtools mint wrapper runs linux source candidate and promoted proof", async () => {
   const fake = await setupFakeCrabbox();
   const result = await runScript(
@@ -214,7 +223,18 @@ test("AWS devtools mint wrapper uses sg for first docker group member", async ()
     await writeFile(file, body);
     await chmod(file, 0o755);
   };
-  for (const name of ["git", "gh", "jq", "rg", "fd", "python3", "npm", "corepack", "pnpm"]) {
+  for (const name of [
+    "git",
+    "gh",
+    "jq",
+    "rg",
+    "fd",
+    "python3",
+    "npm",
+    "corepack",
+    "pnpm",
+    "trufflehog",
+  ]) {
     await writeTool(name, "#!/usr/bin/env bash\nexit 0\n");
   }
   await writeTool("node", "#!/usr/bin/env bash\n[[ \"${1:-}\" == \"--version\" ]] && printf 'v24.0.0\\n'\nexit 0\n");

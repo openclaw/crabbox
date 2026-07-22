@@ -8,6 +8,8 @@ python_formula="${CRABBOX_MACOS_PYTHON_FORMULA:-python@3.13}"
 require_xcode="${CRABBOX_MACOS_REQUIRE_XCODE:-0}"
 xcode_developer_dir="${CRABBOX_MACOS_XCODE_DEVELOPER_DIR:-}"
 force_links="${CRABBOX_MACOS_FORCE_LINKS:-0}"
+trufflehog_version="3.95.9"
+trufflehog_bin_dir="${CRABBOX_MACOS_TRUFFLEHOG_BIN_DIR:-/usr/local/bin}"
 homebrew_install_commit="280cbc9adffcbdef15dd1c9d991ef2d1dd7cfc9c"
 homebrew_install_sha256="f3e91784ffeda32bc397de7acc1154724cc47522a459c9ac656cca176eeba457"
 homebrew_install_url="https://raw.githubusercontent.com/Homebrew/install/${homebrew_install_commit}/install.sh"
@@ -38,6 +40,15 @@ log() {
 die() {
   log "$*"
   exit 1
+}
+
+run_as_root() {
+  if [[ "$(id -u)" -eq 0 || -w "$trufflehog_bin_dir" ]] ||
+    { [[ ! -e "$trufflehog_bin_dir" ]] && [[ -w "$(dirname "$trufflehog_bin_dir")" ]]; }; then
+    "$@"
+    return
+  fi
+  sudo "$@"
 }
 
 shell_single_quote() {
@@ -281,6 +292,80 @@ install_node_and_pnpm() {
   link_tool pnpm "$node_bin" "$corepack_bin" "$npm_bin"
 }
 
+trufflehog_arch() {
+  case "$1" in
+    x86_64 | amd64) printf '%s\n' "amd64" ;;
+    arm64 | aarch64) printf '%s\n' "arm64" ;;
+    *)
+      log "unsupported TruffleHog architecture: $1"
+      return 1
+      ;;
+  esac
+}
+
+trufflehog_sha256_for_arch() {
+  case "$1" in
+    amd64) printf '%s\n' "4306a58d25b85aad7b5fb6f5732df77c50a9161db2746b56e196649072218691" ;;
+    arm64) printf '%s\n' "944c6ea3a2993a9f808d08107b40e03ba92bc75972876a1ee47d567bfd6fa1b5" ;;
+    *)
+      log "unsupported TruffleHog architecture: $1"
+      return 1
+      ;;
+  esac
+}
+
+trufflehog_binary_ready() {
+  local binary="$1"
+  [[ -x "$binary" ]] &&
+    "$binary" --no-update --version 2>/dev/null |
+      awk -v version="$trufflehog_version" '
+        {
+          for (field = 1; field <= NF; field++) {
+            if ($field == version) {
+              found = 1
+            }
+          }
+        }
+        END { exit found ? 0 : 1 }
+      '
+}
+
+install_trufflehog() {
+  local arch archive candidate checksum target tmp_dir url
+  arch="$(trufflehog_arch "$(uname -m)")"
+  checksum="$(trufflehog_sha256_for_arch "$arch")"
+  archive="trufflehog_${trufflehog_version}_darwin_${arch}.tar.gz"
+  url="https://github.com/trufflesecurity/trufflehog/releases/download/v${trufflehog_version}/${archive}"
+  target="$trufflehog_bin_dir/trufflehog"
+
+  if trufflehog_binary_ready "$target"; then
+    log "TruffleHog $trufflehog_version is already installed"
+    return
+  fi
+
+  tmp_dir="$(mktemp -d)"
+  if ! curl -fsSL --retry 3 --output "$tmp_dir/$archive" "$url" ||
+    ! (
+      cd "$tmp_dir"
+      printf '%s  %s\n' "$checksum" "$archive" | shasum -a 256 -c -
+    ) ||
+    ! tar -xzf "$tmp_dir/$archive" -C "$tmp_dir" trufflehog; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  run_as_root mkdir -p "$trufflehog_bin_dir"
+  candidate="$(run_as_root mktemp "${target}.tmp.XXXXXX")"
+  if ! run_as_root install -m 0755 "$tmp_dir/trufflehog" "$candidate" ||
+    ! trufflehog_binary_ready "$candidate" ||
+    ! run_as_root mv -f "$candidate" "$target"; then
+    run_as_root rm -f "$candidate" || true
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+  rm -rf "$tmp_dir"
+}
+
 link_common_tools() {
   local brew_prefix python_bin zshenv_line
   brew_prefix="$(brew --prefix)"
@@ -335,6 +420,7 @@ print_versions() {
   npm --version
   corepack --version
   pnpm --version
+  "$trufflehog_bin_dir/trufflehog" --no-update --version
 }
 
 if [[ "${CRABBOX_MACOS_SOURCE_ONLY:-0}" == "1" ]]; then
@@ -347,5 +433,6 @@ install_homebrew
 install_formulas
 install_node_and_pnpm
 link_common_tools
+install_trufflehog
 prepare_cache_dirs
 print_versions
