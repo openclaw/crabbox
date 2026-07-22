@@ -512,7 +512,7 @@ lease-acting commands):
 --provider <name>            See `crabbox providers` for the full list.
 --profile <name>
 --class <name>
---arch amd64|arm64           CPU architecture; arm64 supports Linux on AWS/Azure and native Windows on Azure.
+--arch amd64|arm64           CPU architecture; arm64 supports Linux on AWS/Azure/Apple Container and native Windows on Azure.
 --os <selector>              Portable Linux OS image, e.g. ubuntu:26.04
 --type <provider-type>
 --market spot|on-demand

@@ -55,6 +55,9 @@ need stronger host separation, larger capacity, or shared team infrastructure.
 container system status
 crabbox run --provider apple-container -- pnpm test
 
+crabbox run --provider apple-container --arch arm64 -- uname -m
+crabbox run --provider apple-container --arch amd64 -- uname -m
+
 crabbox warmup --provider apple --slug apple-smoke
 crabbox run --provider apple --id apple-smoke -- pnpm test:changed
 crabbox ssh --provider apple --id apple-smoke
@@ -74,6 +77,7 @@ crabbox run --provider apple-container \
 ```yaml
 provider: apple-container
 target: linux
+architecture: arm64        # native default; set amd64 for an x86_64 guest
 appleContainer:
   cliPath: container        # path to Apple's container CLI
   image: ubuntu:26.04       # base image; defaults to the Crabbox OS image (--os)
@@ -89,6 +93,10 @@ default (follows `--os`; currently `ubuntu:26.04`), `user=crabbox`,
 `workRoot=/work/crabbox`, SSH port `22`. If provider code is constructed
 directly without the normal config layer, an empty `appleContainer.image` falls
 back to the same Crabbox OS image default.
+
+The implicit guest architecture is native `arm64`. Explicit `--arch arm64` and
+`--arch amd64` selections are forwarded to `container run --arch`, so the
+reported Crabbox architecture matches the guest runtime architecture.
 
 Provider flags:
 

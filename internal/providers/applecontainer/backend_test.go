@@ -235,6 +235,43 @@ func TestCreateContainerBuildsRunArgs(t *testing.T) {
 	if strings.Count(args, "--dns") != 1 {
 		t.Fatalf("custom DNS should not be duplicated:\n%s", args)
 	}
+	if strings.Contains(args, "--arch") {
+		t.Fatalf("implicit native architecture should not add --arch:\n%s", args)
+	}
+}
+
+func TestCreateContainerForwardsExplicitArchitecture(t *testing.T) {
+	for _, architecture := range []string{core.ArchitectureARM64, core.ArchitectureAMD64} {
+		t.Run(architecture, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			contents := "provider: apple-container\ntarget: linux\narchitecture: " + architecture + "\n"
+			if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			cfg, err := core.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.AppleContainer = core.AppleContainerConfig{
+				CLIPath:  "container",
+				Image:    "debian:bookworm",
+				User:     "runner",
+				WorkRoot: "/work/crabbox",
+			}
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+				commandKey([]string{"run"}): {Stdout: "crabbox-blue\n"},
+			}}
+			b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+			if _, err := b.createContainer(context.Background(), b.configForRun(), "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true); err != nil {
+				t.Fatal(err)
+			}
+			args := recordedArgsForCommand(t, runner, "run")
+			if !strings.Contains(args, "--arch\n"+architecture) {
+				t.Fatalf("explicit architecture missing from run args:\n%s", args)
+			}
+		})
+	}
 }
 
 func TestCreateContainerAddsHostDNS(t *testing.T) {
@@ -986,6 +1023,27 @@ func TestDoctorRejectsIncompatibleRunCLI(t *testing.T) {
 		}
 		if _, err := testBackend(runner).Doctor(context.Background(), core.DoctorRequest{}); err == nil {
 			t.Fatal("doctor passed despite run lacking --dns")
+		}
+	})
+	t.Run("explicit architecture needs arch option", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(configPath, []byte("provider: apple-container\ntarget: linux\narchitecture: arm64\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CRABBOX_CONFIG", configPath)
+		cfg, err := core.LoadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		runner := &recordingRunner{
+			responses: map[string]core.LocalCommandResult{
+				commandKey([]string{"system", "status"}): {Stdout: "running\n"},
+				commandKey([]string{"run", "--help"}):    {Stdout: "OPTIONS:\n  -u, --user <user>\n  --label <label>\n  --dns <server>\n"},
+			},
+		}
+		b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+		if _, err := b.Doctor(context.Background(), core.DoctorRequest{}); err == nil || !strings.Contains(err.Error(), "--arch") {
+			t.Fatalf("doctor error=%v, want missing --arch", err)
 		}
 	})
 }

@@ -95,7 +95,7 @@ func effectiveArchitectureForConfig(cfg Config) string {
 	if cfg.architectureExplicit {
 		return cfg.Architecture
 	}
-	if cfg.Provider == "apple-vm" || cfg.Provider == "applevm" || cfg.Provider == "lume" || cfg.Provider == "local-lume" || cfg.Provider == "lume-macos" || cfg.Provider == "aws-lambda-microvm" {
+	if cfg.Provider == "apple-container" || cfg.Provider == "apple" || cfg.Provider == "applecontainer" || cfg.Provider == "apple-vm" || cfg.Provider == "applevm" || cfg.Provider == "lume" || cfg.Provider == "local-lume" || cfg.Provider == "lume-macos" || cfg.Provider == "aws-lambda-microvm" {
 		return ArchitectureARM64
 	}
 	if cfg.TargetOS == targetLinux || cfg.TargetOS == targetWindows {

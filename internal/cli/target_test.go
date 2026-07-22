@@ -263,6 +263,26 @@ func TestValidateProviderTargetRejectsAppleVMExplicitAMD64(t *testing.T) {
 	}
 }
 
+func TestValidateProviderTargetDefaultsAppleContainerToARM64(t *testing.T) {
+	for _, provider := range []string{"apple-container", "apple", "applecontainer"} {
+		cfg := baseConfig()
+		cfg.Provider = provider
+		cfg.TargetOS = targetLinux
+		if got := effectiveArchitectureForConfig(cfg); got != ArchitectureARM64 {
+			t.Errorf("provider=%s effective architecture=%q want arm64", provider, got)
+		}
+	}
+}
+
+func TestProviderSupportsARM64IncludesAppleContainer(t *testing.T) {
+	if !providerSupportsARM64("apple-container") {
+		t.Fatal("apple-container should support ARM64")
+	}
+	if providerSupportsARM64("apple-machine") {
+		t.Fatal("apple-machine should remain conservative until upstream AMD64 support is proven")
+	}
+}
+
 func TestValidateProviderTargetDefaultsAWSLambdaMicroVMToARM64(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws-lambda-microvm"

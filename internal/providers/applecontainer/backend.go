@@ -454,6 +454,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		"-e", "CRABBOX_WORK_ROOT=" + cfg.AppleContainer.WorkRoot,
 		"-e", "CRABBOX_SSH_PORT=" + sshPort,
 	}
+	if core.IsArchitectureExplicit(cfg) {
+		args = append(args, "--arch", cfg.Architecture)
+	}
 	for i, volume := range cfg.Cache.Volumes {
 		args = append(args, "-e", fmt.Sprintf("CRABBOX_CACHE_VOLUME_PATH_%d=%s", i, strings.TrimSpace(volume.Path)))
 	}
@@ -854,7 +857,8 @@ func (b *backend) serverFromContainer(c inspectContainer, cfg core.Config) core.
 }
 
 // checkRunSurface verifies the `container run` subcommand exists and advertises
-// the options the lease path depends on (`--user`, `--label`, `--dns`). It uses
+// the options the lease path depends on (`--user`, `--label`, `--dns`, and
+// `--arch` when architecture was explicit). It uses
 // `run --help`, which has no side effects, so doctor can detect an incompatible
 // CLI before any lease is attempted.
 func (b *backend) checkRunSurface(ctx context.Context) error {
@@ -863,7 +867,11 @@ func (b *backend) checkRunSurface(ctx context.Context) error {
 		return exit(2, "%s `container run` subcommand unavailable (incompatible container CLI?): %s", providerName, commandDetail(result, err))
 	}
 	help := result.Stdout + result.Stderr
-	for _, opt := range []string{"--user", "--label", "--dns"} {
+	required := []string{"--user", "--label", "--dns"}
+	if core.IsArchitectureExplicit(b.configForRun()) {
+		required = append(required, "--arch")
+	}
+	for _, opt := range required {
 		if !strings.Contains(help, opt) {
 			return exit(2, "%s `container run` is missing the required %s option; upgrade Apple's container CLI", providerName, opt)
 		}

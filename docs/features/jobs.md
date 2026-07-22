@@ -143,7 +143,7 @@ windows:
   mode: wsl2           # normal | wsl2; sets --windows-mode
 profile: project-check
 class: beast
-architecture: amd64    # amd64 | arm64; arm64 supports Linux on AWS/Azure and native Windows on Azure
+architecture: amd64    # amd64 | arm64; arm64 supports Linux on AWS/Azure/Apple Container and native Windows on Azure
 type: m8i.4xlarge      # alias: serverType
 market: on-demand      # alias: capacity.market
 network: auto

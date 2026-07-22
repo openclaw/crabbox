@@ -163,8 +163,8 @@ func validateProviderTarget(cfg Config) error {
 		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
 	}
 	if machineTarget && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
-		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vm" && provider.Name() != "lume" && provider.Name() != "aws-lambda-microvm" && provider.Name() != "external" {
-			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-vm, provider=lume, provider=aws-lambda-microvm, or provider=external")
+		if !providerSupportsARM64(provider.Name()) {
+			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-container, provider=apple-vm, provider=lume, provider=aws-lambda-microvm, or provider=external")
 		}
 		if cfg.TargetOS != targetLinux &&
 			!(provider.Name() == "azure" && cfg.TargetOS == targetWindows) &&
@@ -208,6 +208,15 @@ func validateProviderTarget(cfg Config) error {
 		return nil
 	}
 	return nil
+}
+
+func providerSupportsARM64(name string) bool {
+	switch name {
+	case "azure", "aws", "tart", "apple-container", "apple-vm", "lume", "aws-lambda-microvm", "external":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateProviderTargetSupport(cfg Config) (Provider, error) {

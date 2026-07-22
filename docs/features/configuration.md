@@ -98,7 +98,7 @@ broker:
 
 provider: aws            # default provider when --provider is unset
 target: linux            # default target OS: linux | macos | windows
-architecture: amd64      # amd64 | arm64; arm64 supports Linux on AWS/Azure and native Windows on Azure
+architecture: amd64      # amd64 | arm64; arm64 supports Linux on AWS/Azure/Apple Container and native Windows on Azure
 os: ubuntu:26.04         # OS image; resolved to per-provider images for linux
 windows:
   mode: normal           # normal | wsl2 when target=windows
@@ -1096,8 +1096,9 @@ ignored. The `serverType:` and `--type` paths intentionally do not fall back;
 they fail loud if the provider rejects the type.
 
 Set `architecture: arm64` (or `--arch arm64`) for Linux ARM capacity on AWS or
-Azure. Explicit ARM provider types also select matching ARM Linux images when
-no provider-specific image override is set.
+Azure. Apple Container defaults to native ARM64 and also accepts explicit ARM64
+or AMD64 guest selection. Explicit ARM cloud provider types select matching ARM
+Linux images when no provider-specific image override is set.
 
 ## Environment variables
 

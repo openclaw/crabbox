@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Forwarded explicit ARM64 and AMD64 guest architecture selections to Apple Container while preserving the implicit native ARM64 path.
 - Made `cp` over resolved SSH prefer rsync secluded arguments whenever the remote rsync supports them, so remote paths travel over the rsync protocol instead of the remote shell command line. This sidesteps an upstream rsync 3.4.4 `safe_arg()` bug that appends one uninitialized heap byte after a backslash-escaped wildcard (e.g. `\[`), which intermittently corrupted remote copy paths; remotes without secluded-args support (such as macOS openrsync) keep the previous shell-transported behavior. Thanks @zozo123.
 - Kept Cloud Run sandbox creation and cleanup fail-closed: indeterminate creates retain exact recovery claims while definitive conflicts drop provisional ownership, cleanup serializes against active work and concurrent reclaim, absolute lease TTLs are enforced, failed destroys remain tracked and reported for retry, direct payloads travel on stdin instead of argv, and remote gateways must confirm durable routing plus synchronous deletion. Thanks @zozo123.
 - Bound GitHub OAuth callbacks independently to each initiating browser flow and bound sessions, durable ownership, admin grants, and revocations to immutable GitHub account IDs instead of reassignable emails or logins, with a fail-closed operator recovery path for legacy records. Thanks @zozo123.

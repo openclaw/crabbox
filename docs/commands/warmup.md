@@ -254,7 +254,7 @@ warmup, because it also dispatches the workflow and waits for the ready marker.
 --provider <name>                  provider (see crabbox providers); default hetzner
 --profile <name>                   configuration profile
 --class <name>                     machine class; default beast
---arch amd64|arm64                 CPU architecture; arm64 supports Linux on AWS/Azure and native Windows on Azure
+--arch amd64|arm64                 CPU architecture; arm64 supports Linux on AWS/Azure/Apple Container and native Windows on Azure
 --os ubuntu:26.04|ubuntu:24.04     portable Linux OS image selector
 --type <provider-type>             provider server/instance type
 --market spot|on-demand            capacity market (AWS)
