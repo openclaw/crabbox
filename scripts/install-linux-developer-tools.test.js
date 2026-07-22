@@ -640,3 +640,9 @@ test("linux developer image reports TruffleHog from the configured install direc
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 	assert.match(result.stdout, /trufflehog 3\.95\.9/);
 });
+
+test("linux developer image keeps pinned TruffleHog probes update-free", () => {
+	const script = fs.readFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), "utf8");
+	assert.match(script, /"\$binary" --no-update --version/);
+	assert.match(script, /"\$trufflehog_bin_dir\/trufflehog" --no-update --version/);
+});

@@ -16,6 +16,26 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
 )
 
+func TestAzureLinuxCloudInitInstallsPinnedTruffleHog(t *testing.T) {
+	got := azureLinuxCloudInit(baseConfig(), "ssh-ed25519 test")
+	for _, want := range []string{
+		"trufflehog_version=3.95.9",
+		"f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e",
+		"9d9c2ec4ea36a089a9c5aaafe1969d176013ddf9f44d68e8cd75291aed8c83ed",
+		"trufflehog --no-update --version",
+		"sha256sum -c -",
+		"tar --no-same-owner",
+		`mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Azure Linux cloud-init missing %q", want)
+		}
+	}
+	if strings.Index(got, "sha256sum -c -") > strings.Index(got, "tar --no-same-owner") {
+		t.Fatal("Azure Linux cloud-init must verify the archive before extraction")
+	}
+}
+
 func TestParseAzureImageRef(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

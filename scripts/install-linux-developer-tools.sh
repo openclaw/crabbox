@@ -252,7 +252,7 @@ trufflehog_sha256_for_arch() {
 trufflehog_binary_ready() {
   local binary="$1"
   [[ -x "$binary" ]] &&
-    "$binary" --version 2>/dev/null |
+    "$binary" --no-update --version 2>/dev/null |
       awk -v version="$trufflehog_version" '
         {
           for (field = 1; field <= NF; field++) {
@@ -344,7 +344,7 @@ print_versions() {
   npm --version
   corepack --version
   pnpm --version
-  "$trufflehog_bin_dir/trufflehog" --version
+  "$trufflehog_bin_dir/trufflehog" --no-update --version
   docker --version
   docker compose version
 }

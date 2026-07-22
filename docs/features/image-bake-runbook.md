@@ -320,12 +320,12 @@ scripts/mint-aws-devtools-image.sh \
   verification stops image preparation; failed Google verification skips
   Chrome and tries the distro Chromium package.
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
-  tooling, GitHub CLI, Node 24, corepack/pnpm, and Windows Server container
-  support with Docker Engine. It deliberately avoids Docker Desktop because
-  headless image bakes should not depend on a user-session desktop app or
-  Docker Desktop licensing. The Chocolatey package, Node MSI, and Docker Engine
-  archive are pinned to reviewed SHA-256 digests and verified before privileged
-  installation or extraction.
+  tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, and Windows
+  Server container support with Docker Engine. It deliberately avoids Docker
+  Desktop because headless image bakes should not depend on a user-session
+  desktop app or Docker Desktop licensing. The Chocolatey package, Node MSI,
+  TruffleHog archive, and Docker Engine archive are pinned to reviewed SHA-256
+  digests and verified before privileged installation or extraction.
 
 Windows developer bakes are headless by default for faster boot and fewer
 desktop-bootstrap moving parts. Pass `--desktop` only when the image must back
@@ -509,11 +509,12 @@ image generic: it verifies Command Line Tools by default, or selects an
 installed `/Applications/Xcode*.app` developer directory when
 `CRABBOX_MACOS_REQUIRE_XCODE=1`. It installs Homebrew when missing, installs
 common developer packages (Git, GitHub CLI, jq/yq, ripgrep, fd, ShellCheck,
-shfmt, Python, Node 24, pnpm via corepack), and creates `/usr/local/bin` shims
-so non-login SSH commands find those tools after the AMI boots. It does not
-download Xcode — install Xcode in a private prep hook first if the base image
-lacks it. Do not put Apple credentials, download tokens, or private package
-mirrors in this repository or in baked images.
+shfmt, Python, Node 24, pnpm via corepack), installs TruffleHog 3.95.9 from a
+reviewed SHA-256-pinned archive, and creates `/usr/local/bin` shims so non-login
+SSH commands find those tools after the AMI boots. It does not download Xcode —
+install Xcode in a private prep hook first if the base image lacks it. Do not
+put Apple credentials, download tokens, or private package mirrors in this
+repository or in baked images.
 
 ### Generic developer-tools wrapper
 

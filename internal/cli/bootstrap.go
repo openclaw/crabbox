@@ -38,6 +38,10 @@ func awsUserData(cfg Config, publicKey string) string {
 }
 
 func cloudInit(cfg Config, publicKey string) string {
+	return cloudInitWithAdditionalBootstrap(cfg, publicKey, "")
+}
+
+func cloudInitWithAdditionalBootstrap(cfg Config, publicKey, additionalBootstrap string) string {
 	portLines := ""
 	for _, port := range sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts) {
 		portLines += fmt.Sprintf("      Port %s\n", port)
@@ -45,6 +49,12 @@ func cloudInit(cfg Config, publicKey string) string {
 	readyChecks := cloudInitOptionalReadyChecks(cfg)
 	writeFiles := cloudInitOptionalWriteFiles(cfg)
 	bootstrap := cloudInitOptionalBootstrap(cfg)
+	if additionalBootstrap != "" {
+		if bootstrap != "" {
+			bootstrap += "\n"
+		}
+		bootstrap += additionalBootstrap
+	}
 	yamlSSHUser := yamlInlineString(cfg.SSHUser)
 	yamlPublicKey := yamlInlineString(publicKey)
 	shellSSHUser := shellQuote(cfg.SSHUser)
