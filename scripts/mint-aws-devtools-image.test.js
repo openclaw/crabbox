@@ -223,7 +223,18 @@ test("AWS devtools mint wrapper uses sg for first docker group member", async ()
     await writeFile(file, body);
     await chmod(file, 0o755);
   };
-  for (const name of ["git", "gh", "jq", "rg", "fd", "python3", "npm", "corepack", "pnpm"]) {
+  for (const name of [
+    "git",
+    "gh",
+    "jq",
+    "rg",
+    "fd",
+    "python3",
+    "npm",
+    "corepack",
+    "pnpm",
+    "trufflehog",
+  ]) {
     await writeTool(name, "#!/usr/bin/env bash\nexit 0\n");
   }
   await writeTool("node", "#!/usr/bin/env bash\n[[ \"${1:-}\" == \"--version\" ]] && printf 'v24.0.0\\n'\nexit 0\n");
