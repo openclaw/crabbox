@@ -16,6 +16,8 @@ const (
 	openSSHWin64ZipSHA256            = "0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54"
 	ubuntuWSLRootFSURL               = "https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
 	ubuntuWSLRootFSSHA256            = "8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea"
+	wslTruffleHogVersion             = "3.95.9"
+	wslTruffleHogAMD64SHA256         = "f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e"
 	defaultTailscaleVersion          = "1.98.4"
 	defaultTailscaleAMD64SHA256      = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
 	defaultTailscaleARM64SHA256      = "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7"
@@ -353,6 +355,7 @@ func windowsManagedCorePreludePowerShell(cfg Config) string {
 
 func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	workRoot := windowsWSLWorkRoot(cfg)
+	truffleHogVersionPattern := strings.ReplaceAll(wslTruffleHogVersion, ".", "[.]")
 	return `
 	$wslDistro = "Crabbox"
 	$wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
@@ -440,6 +443,29 @@ APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync
+trufflehog_version=` + shellQuote(wslTruffleHogVersion) + `
+trufflehog_sha256=` + shellQuote(wslTruffleHogAMD64SHA256) + `
+if ! command -v trufflehog >/dev/null 2>&1 || ! trufflehog --no-update --version | grep -Eq '(^|[[:space:]])` + truffleHogVersionPattern + `($|[[:space:]])'; then
+  trufflehog_archive="trufflehog_${trufflehog_version}_linux_amd64.tar.gz"
+  trufflehog_tmp="$(mktemp -d)"
+  curl -fsSL --retry 3 --output "$trufflehog_tmp/$trufflehog_archive" \
+    "https://github.com/trufflesecurity/trufflehog/releases/download/v${trufflehog_version}/${trufflehog_archive}"
+  (
+    cd "$trufflehog_tmp"
+    printf '%s  %s\n' "$trufflehog_sha256" "$trufflehog_archive" | sha256sum -c -
+  )
+  tar --no-same-owner -xzf "$trufflehog_tmp/$trufflehog_archive" -C "$trufflehog_tmp" trufflehog
+  trufflehog_candidate="$(mktemp /usr/local/bin/trufflehog.tmp.XXXXXX)"
+  install -m 0755 "$trufflehog_tmp/trufflehog" "$trufflehog_candidate"
+  if ! "$trufflehog_candidate" --no-update --version | grep -Eq '(^|[[:space:]])` + truffleHogVersionPattern + `($|[[:space:]])'; then
+    rm -f "$trufflehog_candidate"
+    rm -rf "$trufflehog_tmp"
+    exit 1
+  fi
+  mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog
+  rm -rf "$trufflehog_tmp"
+fi
+trufflehog --no-update --version
 cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -448,6 +474,7 @@ python3 --version >/dev/null
 rsync --version >/dev/null
 curl --version >/dev/null
 jq --version >/dev/null
+trufflehog --no-update --version >/dev/null
 wslpath -w ` + shellQuote(workRoot) + ` >/dev/null
 test -w ` + shellQuote(workRoot) + `
 READY

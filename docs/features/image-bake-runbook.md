@@ -326,6 +326,9 @@ scripts/mint-aws-devtools-image.sh \
   desktop app or Docker Desktop licensing. The Chocolatey package, Node MSI,
   TruffleHog archive, and Docker Engine archive are pinned to reviewed SHA-256
   digests and verified before privileged installation or extraction.
+- **Windows WSL2**: the shared Windows bootstrap installs the checksum-pinned
+  Linux TruffleHog 3.95.9 binary inside the managed WSL distro. This happens
+  during environment setup and does not require autoreview-time installation.
 
 Windows developer bakes are headless by default for faster boot and fewer
 desktop-bootstrap moving parts. Pass `--desktop` only when the image must back

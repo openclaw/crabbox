@@ -20,6 +20,8 @@ follows the same ordered region fallback as AWS for brokered leases, while
 keeping Windows classes smaller than the large Linux-focused classes.
 
 Linux VMs install checksum-pinned TruffleHog 3.95.9 once during cloud-init.
+Windows WSL2 VMs install the matching Linux binary once while the managed WSL
+distro is created.
 Azure uses Marketplace images rather than Crabbox-promoted developer images, so
 there is no separate Azure image publication step. Brokered environments pick
 up bootstrap changes when the coordinator Worker is deployed; direct mode picks
@@ -35,7 +37,7 @@ dynamic-sessions`; see the [Provider Reference](../providers/README.md).
 | --- | --- | --- |
 | Linux | Yes | Cloud-init bootstrap, SSH, rsync, pinned TruffleHog, optional desktop/browser/code. |
 | Windows native | Yes | Native Windows SSH/sync/run and optional desktop/VNC. No browser/code. |
-| Windows WSL2 | Yes | Nested-virtualization VM sizes; POSIX sync/run/actions hydration through WSL. |
+| Windows WSL2 | Yes | Nested-virtualization VM sizes; POSIX sync/run/actions hydration and pinned TruffleHog through WSL. |
 | macOS | No | Azure offers no managed macOS; use AWS EC2 Mac or a static SSH host. |
 
 ```sh

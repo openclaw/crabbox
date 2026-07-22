@@ -686,6 +686,12 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc");
     expect(got).toContain("test -w /proc/sys/fs/binfmt_misc/register");
     expect(got).toContain(":WSLInterop:M::MZ::/init:PF");
+    expect(got).toContain("trufflehog_version=3.95.9");
+    expect(got).toContain("trufflehog_${trufflehog_version}_linux_amd64.tar.gz");
+    expect(got).toContain("f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e");
+    expect(got).toContain("sha256sum -c -");
+    expect(got).toContain('mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog');
+    expect(got).toContain("trufflehog --no-update --version >/dev/null");
     expect(got).toContain("test -e /proc/sys/fs/binfmt_misc/WSLInterop");
     expect(got).toContain("test -w '/work/crabbox'");
     expect(got).toContain("PubkeyAuthentication yes");
