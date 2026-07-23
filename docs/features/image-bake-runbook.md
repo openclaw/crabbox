@@ -257,6 +257,47 @@ crabbox image fsr-status ami-1234567890abcdef0 --region us-west-2 --json
 FSR is AWS-only. Treat snapshot warmup as a separate provider-cost decision; do
 not enable it casually for every candidate.
 
+## GitHub Actions publication
+
+Merging an installer or image-wrapper change updates the source recipe only. It
+does not create or promote an AWS image. Actual publication is a successful
+`Publish Developer Image` workflow run, which executes the same source smoke,
+candidate smoke, promotion, and promoted-image smoke described below.
+
+Configure the `image-publisher` GitHub environment with:
+
+- the `CRABBOX_COORDINATOR` environment variable;
+- the `CRABBOX_COORDINATOR_ADMIN_TOKEN` environment secret;
+- `CRABBOX_ACCESS_CLIENT_ID` and `CRABBOX_ACCESS_CLIENT_SECRET` environment
+  secrets when the coordinator is behind Cloudflare Access.
+
+Add required reviewers to that environment so paid image creation and
+fleet-wide promotion need explicit administrator approval. Dispatch one
+platform at a time from the protected default branch:
+
+```bash
+gh workflow run devtools-image-publish.yml \
+  --ref main \
+  -f target=linux \
+  -f region=eu-west-1
+
+gh workflow run devtools-image-publish.yml \
+  --ref main \
+  -f target=windows \
+  -f region=eu-west-1
+
+gh workflow run devtools-image-publish.yml \
+  --ref main \
+  -f target=macos \
+  -f region=eu-west-1 \
+  -f macos_host=use-existing
+```
+
+Use `macos_host=allocate` only when no suitable EC2 Mac Dedicated Host is
+available. The workflow uploads its complete mint logs and macOS lifecycle
+evidence as a 30-day Actions artifact. A failed candidate or promoted-image
+smoke fails the workflow and leaves the previous promoted image selected.
+
 ## Developer-image wrappers
 
 For generic AWS Linux and Windows developer AMIs, use the guarded wrapper

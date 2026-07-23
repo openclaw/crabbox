@@ -1,0 +1,212 @@
+name: Publish Developer Image
+run-name: Publish ${{ inputs.target }} developer image in ${{ inputs.region }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Developer image platform
+        required: true
+        type: choice
+        options:
+          - linux
+          - windows
+          - macos
+      region:
+        description: AWS region
+        required: true
+        default: eu-west-1
+        type: string
+      linux_type:
+        description: Linux source instance type
+        required: true
+        default: m7i.large
+        type: string
+      windows_type:
+        description: Windows source instance type
+        required: true
+        default: m7i.large
+        type: string
+      macos_type:
+        description: macOS source instance type
+        required: true
+        default: mac-m4.metal
+        type: string
+      macos_host:
+        description: Use an available EC2 Mac host or allocate one
+        required: true
+        default: use-existing
+        type: choice
+        options:
+          - use-existing
+          - allocate
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devtools-image-publish-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Guard protected publication
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the protected default-branch workflow
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          RUN_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          expected_ref="refs/heads/$DEFAULT_BRANCH"
+          expected_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/devtools-image-publish.yml@$expected_ref"
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          [[ "$GITHUB_REF" == "$expected_ref" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$expected_workflow_ref" ]]
+          [[ "$REF_PROTECTED" == true ]]
+          [[ "$WORKFLOW_SHA" == "$RUN_SHA" ]]
+
+      - name: Validate publication inputs
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          REGION: ${{ inputs.region }}
+          LINUX_TYPE: ${{ inputs.linux_type }}
+          WINDOWS_TYPE: ${{ inputs.windows_type }}
+          MACOS_TYPE: ${{ inputs.macos_type }}
+          MACOS_HOST: ${{ inputs.macos_host }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET" =~ ^(linux|windows|macos)$ ]]
+          [[ "$REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
+          [[ "$LINUX_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$WINDOWS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$MACOS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$MACOS_HOST" =~ ^(use-existing|allocate)$ ]]
+
+  publish:
+    name: Build, smoke, and promote
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    environment: image-publisher
+    env:
+      CRABBOX_COORDINATOR: ${{ vars.CRABBOX_COORDINATOR }}
+      CRABBOX_COORDINATOR_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
+      CRABBOX_COORDINATOR_ADMIN_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
+      CRABBOX_OWNER: image-publisher@openclaw.invalid
+      CRABBOX_ORG: openclaw
+      CRABBOX_ACCESS_CLIENT_ID: ${{ secrets.CRABBOX_ACCESS_CLIENT_ID }}
+      CRABBOX_ACCESS_CLIENT_SECRET: ${{ secrets.CRABBOX_ACCESS_CLIENT_SECRET }}
+      TARGET: ${{ inputs.target }}
+      REGION: ${{ inputs.region }}
+      LINUX_TYPE: ${{ inputs.linux_type }}
+      WINDOWS_TYPE: ${{ inputs.windows_type }}
+      MACOS_TYPE: ${{ inputs.macos_type }}
+      MACOS_HOST: ${{ inputs.macos_host }}
+    steps:
+      - name: Verify publisher configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$CRABBOX_COORDINATOR" ]]; then
+            echo "::error::Set the CRABBOX_COORDINATOR variable on the image-publisher environment."
+            exit 1
+          fi
+          if [[ -z "$CRABBOX_COORDINATOR_ADMIN_TOKEN" ]]; then
+            echo "::error::Set the CRABBOX_COORDINATOR_ADMIN_TOKEN secret on the image-publisher environment."
+            exit 1
+          fi
+
+      - name: Check out protected source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build trusted Crabbox CLI
+        run: go build -trimpath -o bin/crabbox ./cmd/crabbox
+
+      - name: Publish and prove image
+        shell: bash
+        env:
+          CRABBOX_IMAGE_LOG_DIR: ${{ runner.temp }}/devtools-image-proof/aws
+          CRABBOX_MACOS_ARTIFACT_DIR: ${{ runner.temp }}/devtools-image-proof/macos
+        run: |
+          set -euo pipefail
+          proof_dir="$RUNNER_TEMP/devtools-image-proof"
+          mkdir -p "$proof_dir"
+          case "$TARGET" in
+            linux)
+              command=(
+                scripts/mint-aws-devtools-image.sh
+                --target linux
+                --region "$REGION"
+                --class standard
+                --type "$LINUX_TYPE"
+                --run
+              )
+              ;;
+            windows)
+              command=(
+                scripts/mint-aws-devtools-image.sh
+                --target windows
+                --region "$REGION"
+                --class standard
+                --type "$WINDOWS_TYPE"
+                --windows-mode normal
+                --run
+              )
+              ;;
+            macos)
+              command=(
+                scripts/mint-macos-devtools-image.sh
+                --region "$REGION"
+                --type "$MACOS_TYPE"
+                "--$MACOS_HOST"
+              )
+              ;;
+          esac
+          printf 'Publishing from protected commit %s\n' "$GITHUB_SHA"
+          printf 'Command:'
+          printf ' %q' "${command[@]}"
+          printf '\n'
+          "${command[@]}" 2>&1 | tee "$proof_dir/publish.log"
+
+      - name: Summarize publication
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Developer image publication"
+            echo
+            echo "- Target: \`$TARGET\`"
+            echo "- Region: \`$REGION\`"
+            echo "- Source commit: \`$GITHUB_SHA\`"
+            if [[ -f "$RUNNER_TEMP/devtools-image-proof/publish.log" ]]; then
+              echo
+              echo "### Result"
+              grep -E 'candidate AMI smoke passed|promoted (linux|windows) developer image passed|promoted macOS image lifecycle passed' \
+                "$RUNNER_TEMP/devtools-image-proof/publish.log" || true
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload publication proof
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: devtools-image-${{ inputs.target }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/devtools-image-proof
+          if-no-files-found: error
+          retention-days: 30
