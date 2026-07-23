@@ -46,6 +46,8 @@ live in the [Command Reference](../commands/README.md).
 - [Mediated egress](egress.md): browser/app egress through an operator machine
   using the coordinator mediator.
 - [Runner bootstrap](runner-bootstrap.md): cloud-init, installed tools, SSH port, and readiness.
+- [Nested execution](nested-execution.md): WSL2, container engines, prepared KVM
+  hosts, and their conditional boundaries.
 - [Prebaked runner images](prebaked-images.md): image storage and the image/cache/state boundary.
 - [Image bake runbook](image-bake-runbook.md): exact bake, candidate smoke, promotion, rollback, and cleanup flow.
 - [SSH keys](ssh-keys.md): per-lease keys, cleanup, and local storage.
