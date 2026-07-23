@@ -639,7 +639,7 @@ func TestTerminateInstanceSkipsSignalWhenPIDIdentityMismatches(t *testing.T) {
 		return "actual-start", nil
 	}
 
-	err := terminateInstance(root, name, Instance{PID: cmd.Process.Pid, PIDStartedAt: "old-start"})
+	err := terminateInstance(context.Background(), root, name, Instance{PID: cmd.Process.Pid, PIDStartedAt: "old-start"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +670,7 @@ func TestTerminateInstancePreservesStateWhenIdentityProbeFails(t *testing.T) {
 		return "", errors.New("transient ps failure")
 	}
 
-	err := terminateInstance(root, name, Instance{PID: cmd.Process.Pid, PIDStartedAt: "recorded-start"})
+	err := terminateInstance(context.Background(), root, name, Instance{PID: cmd.Process.Pid, PIDStartedAt: "recorded-start"})
 	if err == nil || !strings.Contains(err.Error(), "transient ps failure") {
 		t.Fatalf("terminateInstance error=%v, want process identity probe failure", err)
 	}
@@ -712,7 +712,7 @@ func TestTerminateInstanceSignalsOnlyMatchingPIDIdentity(t *testing.T) {
 	terminateInstanceGraceTime = time.Second
 	terminateInstancePollTime = 5 * time.Millisecond
 
-	err := terminateInstance(root, name, Instance{PID: cmd.Process.Pid, PIDStartedAt: "matching-start"})
+	err := terminateInstance(context.Background(), root, name, Instance{PID: cmd.Process.Pid, PIDStartedAt: "matching-start"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -766,7 +766,7 @@ func TestTerminateInstanceRechecksIdentityBeforeKill(t *testing.T) {
 	terminateInstanceGraceTime = time.Second
 	terminateInstancePollTime = time.Millisecond
 
-	err := terminateInstance(root, name, Instance{PID: 4242, PIDStartedAt: "original-start"})
+	err := terminateInstance(context.Background(), root, name, Instance{PID: 4242, PIDStartedAt: "original-start"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -818,7 +818,7 @@ func TestTerminateStartedHelperRechecksIdentityBeforeKill(t *testing.T) {
 	terminateInstanceGraceTime = time.Second
 	terminateInstancePollTime = time.Millisecond
 
-	if err := terminateStartedHelper(Instance{PID: 4242, PIDStartedAt: "original-start"}); err != nil {
+	if err := terminateStartedHelper(context.Background(), Instance{PID: 4242, PIDStartedAt: "original-start"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -862,7 +862,7 @@ func TestCleanupStartedHelperPreservesStateOnIdentityProbeFailure(t *testing.T) 
 		return nil
 	}
 
-	err := cleanupStartedHelper(Instance{PID: 4242, PIDStartedAt: "original-start"}, instanceRoot)
+	err := cleanupStartedHelper(context.Background(), Instance{PID: 4242, PIDStartedAt: "original-start"}, instanceRoot)
 	if err == nil || !strings.Contains(err.Error(), "transient ps failure") {
 		t.Fatalf("cleanup error=%v, want identity probe failure", err)
 	}
@@ -988,7 +988,7 @@ func TestHandleStartReadinessMetadataStoppedBeforeReadiness(t *testing.T) {
 	pid := unusedPID(t)
 	mustCreateInstanceDir(t, root, name)
 
-	handled, err := handleStartReadinessMetadata(root, name, Instance{
+	handled, err := handleStartReadinessMetadata(context.Background(), root, name, Instance{
 		Name:      name,
 		Status:    StatusStopped,
 		PID:       pid,
@@ -1019,7 +1019,7 @@ func TestHandleStartReadinessMetadataStoppingDeadPIDCleansInstanceDir(t *testing
 	pid := unusedPID(t)
 	mustCreateInstanceDir(t, root, name)
 
-	handled, err := handleStartReadinessMetadata(root, name, Instance{
+	handled, err := handleStartReadinessMetadata(context.Background(), root, name, Instance{
 		Name:      name,
 		Status:    StatusStopping,
 		PID:       pid,
@@ -1095,4 +1095,55 @@ func unusedPID(t *testing.T) int {
 	}
 	t.Fatal("failed to find an unused pid")
 	return 0
+}
+
+func TestSleepPollHonorsCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	err := sleepPoll(ctx, time.Hour)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("sleepPoll returned %v, want context.Canceled", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("sleepPoll took %v; expected immediate return on cancel", time.Since(start))
+	}
+}
+
+func TestTerminateStartedHelperHonorsCancellationDuringPoll(t *testing.T) {
+	originalProcessStartTime := processStartTime
+	originalProcessAlive := processAlive
+	originalSignalProcess := signalProcess
+	originalTerminateGrace := terminateInstanceGraceTime
+	originalTerminatePoll := terminateInstancePollTime
+	t.Cleanup(func() {
+		processStartTime = originalProcessStartTime
+		processAlive = originalProcessAlive
+		signalProcess = originalSignalProcess
+		terminateInstanceGraceTime = originalTerminateGrace
+		terminateInstancePollTime = originalTerminatePoll
+	})
+
+	processAlive = func(int) bool { return true }
+	processStartTime = func(int) (string, error) { return "original-start", nil }
+	signalProcess = func(int, os.Signal) error { return nil }
+	terminateInstanceGraceTime = time.Hour
+	terminateInstancePollTime = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after the first poll sleep begins.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err := terminateStartedHelper(ctx, Instance{PID: 4242, PIDStartedAt: "original-start"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("terminateStartedHelper returned %v, want context.Canceled", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("terminateStartedHelper took %v; expected cancel during poll", time.Since(start))
+	}
 }
