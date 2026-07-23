@@ -19,6 +19,10 @@ const featuresPage = path.join(siteDir, "features", "index.html");
 if (!fs.existsSync(featuresPage)) {
   throw new Error(`generated Features page not found: ${featuresPage}`);
 }
+const homePage = path.join(siteDir, "index.html");
+if (!fs.existsSync(homePage)) {
+  throw new Error(`generated homepage not found: ${homePage}`);
+}
 
 fs.mkdirSync(outDir, { recursive: true });
 for (const artifact of [
@@ -28,6 +32,9 @@ for (const artifact of [
   "features-empty-desktop.png",
   "features-desktop-dark.png",
   "features-mobile.png",
+  "home-desktop-light.png",
+  "home-desktop-dark.png",
+  "home-mobile.png",
   "interaction-proof.json",
   "SHA256SUMS",
 ]) {
@@ -64,7 +71,7 @@ const server = http.createServer((request, response) => {
 
 const baseURL = await listen(server, preferredPort, explicitPort);
 const proof = {
-  subject: "Features explorer browser proof",
+  subject: "Docs browser proof",
   source: {
     commit: process.env.CRABBOX_DOCS_PROOF_COMMIT || process.env.GITHUB_SHA || null,
     workflowCommit: process.env.GITHUB_SHA || null,
@@ -73,6 +80,7 @@ const proof = {
     runId: process.env.GITHUB_RUN_ID || null,
   },
   url: `${baseURL}/features/`,
+  homeUrl: `${baseURL}/`,
   siteDir: path.relative(process.cwd(), siteDir) || ".",
   outDir: path.relative(process.cwd(), outDir) || ".",
   screenshots: [],
@@ -101,6 +109,12 @@ try {
   await proveEscapeClears(desktopLight.page);
   await proveEmptyResult(desktopLight.page);
   await screenshot(desktopLight.page, "features-empty-desktop.png");
+  await openHome(desktopLight.page);
+  await assertHomeShell(desktopLight.page, "desktop light");
+  await proveHomeJobFinder(desktopLight.page);
+  await openHome(desktopLight.page);
+  await assertHomeShell(desktopLight.page, "desktop light restored");
+  await screenshot(desktopLight.page, "home-desktop-light.png");
   await assertNoPageErrors(desktopLight);
   await desktopLight.context.close();
   activeProofPage = undefined;
@@ -114,6 +128,10 @@ try {
   await assertTheme(desktopDark.page, "dark");
   await assertFeatureShell(desktopDark.page);
   await screenshot(desktopDark.page, "features-desktop-dark.png");
+  await openHome(desktopDark.page);
+  await assertTheme(desktopDark.page, "dark");
+  await assertHomeShell(desktopDark.page, "desktop dark");
+  await screenshot(desktopDark.page, "home-desktop-dark.png");
   await assertNoPageErrors(desktopDark);
   await desktopDark.context.close();
   activeProofPage = undefined;
@@ -128,6 +146,10 @@ try {
   await assertTheme(mobile.page, "light");
   await assertMobileLayout(mobile.page);
   await screenshot(mobile.page, "features-mobile.png");
+  await openHome(mobile.page);
+  await assertTheme(mobile.page, "light");
+  await assertHomeShell(mobile.page, "mobile light");
+  await screenshot(mobile.page, "home-mobile.png");
   await assertNoPageErrors(mobile);
   await mobile.context.close();
   activeProofPage = undefined;
@@ -137,6 +159,12 @@ try {
   await proveFilePreview(filePreview.page);
   await assertNoPageErrors(filePreview);
   await filePreview.context.close();
+  activeProofPage = undefined;
+
+  const noScriptHome = await openNoScriptHome(browser);
+  activeProofPage = noScriptHome;
+  await proveNoScriptHome(noScriptHome.page);
+  await noScriptHome.context.close();
   activeProofPage = undefined;
 } catch (error) {
   failure = error;
@@ -257,12 +285,182 @@ async function openFilePreview(browser) {
   return { context, page, errors, name: "direct file preview" };
 }
 
+async function openNoScriptHome(browser) {
+  const context = await browser.newContext({
+    colorScheme: "light",
+    javaScriptEnabled: false,
+    reducedMotion: "reduce",
+    viewport: { width: 1280, height: 900 },
+  });
+  await context.route("**/*", (route) => {
+    const url = route.request().url();
+    if (url.startsWith(baseURL) || url.startsWith("data:")) return route.continue();
+    return route.abort("blockedbyclient");
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(7000);
+  await page.goto(proof.homeUrl, { waitUntil: "domcontentloaded" });
+  await page.locator('[data-home-job-radio][value="fast-feedback"]').waitFor({ state: "attached" });
+  return { context, page, errors: [], name: "no-script homepage" };
+}
+
+async function openHome(page) {
+  await page.goto(proof.homeUrl, { waitUntil: "domcontentloaded" });
+  await page.addStyleTag({
+    content:
+      "*,*:before,*:after{animation:none!important;transition:none!important;caret-color:transparent!important}html{scroll-behavior:auto!important}",
+  });
+  await page.locator(".hero-home h1").waitFor({ state: "visible" });
+  await page.waitForFunction(() => document.querySelectorAll("[data-home-job-radio]").length === 6);
+  await page.evaluate(async () => {
+    if (document.fonts?.ready) await document.fonts.ready;
+  });
+  await page.waitForTimeout(50);
+}
+
+async function assertHomeShell(page, name) {
+  await assertText(page, ".hero-home h1", /Run Your Code in\s+the Right Box\./, `${name} homepage headline is intact`);
+  await assertVisible(page, ".home-capability-note", `${name} nested-capability boundary is visible`);
+  const layout = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    scrollWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+    jobChoices: document.querySelectorAll("[data-home-job-radio]").length,
+    jobResults: document.querySelectorAll("[data-home-job-result]").length,
+    visibleJobResults: [...document.querySelectorAll("[data-home-job-result]")]
+      .filter((result) => getComputedStyle(result).display !== "none")
+      .map((result) => result.getAttribute("data-home-job-result")),
+    selectedJob: document.querySelector("[data-home-job-radio]:checked")?.value || "",
+    minimumJobChoiceHeight: Math.min(
+      ...[...document.querySelectorAll(".home-job-option label")].map((label) => label.getBoundingClientRect().height),
+    ),
+    visibleFinderCopyButtons: [...document.querySelectorAll(".home-job-command .copy")]
+      .filter((button) => button.getClientRects().length > 0 && getComputedStyle(button).opacity !== "0")
+      .map((button) => button.getBoundingClientRect().height),
+    controlledJobResults: [...document.querySelectorAll("[data-home-job-radio]")]
+      .filter((radio) => document.getElementById(radio.getAttribute("aria-controls"))).length,
+    finderDisclaimer: document.querySelector(".home-job-disclaimer")?.textContent.replace(/\s+/g, " ").trim() || "",
+    capabilityText: document.querySelector(".home-capability-note")?.textContent.replace(/\s+/g, " ").trim() || "",
+    example: document.querySelector(".home-console pre")?.textContent.trim() || "",
+    registeredProviders: document.querySelector(".home-facts li:last-child")?.textContent.trim() || "",
+  }));
+  proof.interactions.home ||= {};
+  proof.interactions.home[name] = layout;
+  assert(layout.scrollWidth <= layout.innerWidth + 1, `${name} homepage has no horizontal overflow`, layout);
+  assert(layout.jobChoices === 6, `${name} homepage exposes six curated job choices`, layout);
+  assert(layout.jobResults === 6, `${name} homepage provides one route per job`, layout);
+  assert(layout.visibleJobResults.length === 1, `${name} homepage exposes exactly one job result`, layout);
+  assert(layout.visibleJobResults[0] === layout.selectedJob, `${name} selected job controls the visible result`, layout);
+  assert(layout.minimumJobChoiceHeight >= 44, `${name} job choices meet the minimum touch target`, layout);
+  assert(
+    layout.visibleFinderCopyButtons.length === 1 && layout.visibleFinderCopyButtons[0] >= 44,
+    `${name} finder copy control remains discoverable and meets the minimum touch target`,
+    layout,
+  );
+  assert(layout.controlledJobResults === 6, `${name} job choices identify their result panels`, layout);
+  assert(layout.finderDisclaimer.includes("Built-in guidance, not a live provider check."), `${name} homepage states the recommendation boundary`, layout);
+  assert(layout.capabilityText.includes("There is no generic nested mode."), `${name} homepage states the nested boundary`, layout);
+  assert(layout.example.includes("--provider local-container"), `${name} homepage example names its provider`, layout);
+  assert(/^\d+ registered providers$/.test(layout.registeredProviders), `${name} homepage provider count is explicit`, layout);
+}
+
+async function proveHomeJobFinder(page) {
+  await page.goto(`${proof.homeUrl}?job=not-a-route`, { waitUntil: "domcontentloaded" });
+  await page.locator('[data-home-job-radio][value="fast-feedback"]').waitFor({ state: "attached" });
+  let state = await page.evaluate(() => ({
+    job: new URL(location.href).searchParams.get("job"),
+    checked: document.querySelector("[data-home-job-radio]:checked")?.value,
+  }));
+  assert(state.job === null, "job finder removes an invalid deep-link route", state);
+  assert(state.checked === "fast-feedback", "invalid job route falls back to the default", state);
+
+  await page.locator('label[for="home-job-gpu"]').click();
+  await page.waitForFunction(() => new URL(location.href).searchParams.get("job") === "gpu");
+  state = await page.evaluate(() => ({
+    job: new URL(location.href).searchParams.get("job"),
+    checked: document.querySelector("[data-home-job-radio]:checked")?.value,
+    visible: [...document.querySelectorAll("[data-home-job-result]")]
+      .filter((result) => getComputedStyle(result).display !== "none")
+      .map((result) => result.getAttribute("data-home-job-result")),
+    command: document.querySelector('[data-home-job-result="gpu"] code')?.textContent || "",
+    copyText: document.querySelector('[data-home-job-result="gpu"] [data-copy-text]')?.dataset.copyText || "",
+  }));
+  assert(state.job === "gpu", "job finder writes shareable URL state", state);
+  assert(state.checked === "gpu", "job finder selects the requested GPU route", state);
+  assert(state.visible.length === 1 && state.visible[0] === "gpu", "job finder shows only the GPU result", state);
+  assert(state.command.includes("crabbox providers recommend gpu"), "GPU route exposes the canonical recommendation", state);
+  assert(state.copyText === "crabbox providers recommend gpu", "GPU route copies only the runnable recommendation", state);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(baseURL).origin });
+  await page.locator('[data-home-job-result="gpu"] .copy').click();
+  await page.locator('[data-home-job-result="gpu"] .copy').getByText("Copied").waitFor();
+  const copiedCommand = await page.evaluate(() => navigator.clipboard.readText());
+  assert(copiedCommand === "crabbox providers recommend gpu", "finder clipboard contains the exact runnable recommendation", {
+    copiedCommand,
+  });
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator('[data-home-job-radio][value="gpu"]').waitFor({ state: "attached" });
+  state = await page.evaluate(() => ({
+    checked: document.querySelector("[data-home-job-radio]:checked")?.value,
+    visible: [...document.querySelectorAll("[data-home-job-result]")]
+      .filter((result) => getComputedStyle(result).display !== "none")
+      .map((result) => result.getAttribute("data-home-job-result")),
+  }));
+  assert(state.checked === "gpu", "job finder restores a deep-linked route", state);
+  assert(state.visible.length === 1 && state.visible[0] === "gpu", "deep-linked route restores the matching result", state);
+
+  const gpuRadio = page.locator('[data-home-job-radio][value="gpu"]');
+  await gpuRadio.focus();
+  await gpuRadio.press("ArrowLeft");
+  await page.waitForFunction(() => new URL(location.href).searchParams.get("job") === "fanout-testing");
+  state = await page.evaluate(() => ({
+    job: new URL(location.href).searchParams.get("job"),
+    checked: document.querySelector("[data-home-job-radio]:checked")?.value,
+  }));
+  assert(state.job === "fanout-testing" && state.checked === "fanout-testing", "native radio keyboard navigation updates the route", state);
+}
+
 async function proveFilePreview(page) {
   const initialURL = page.url();
   await page.locator("#fx-search").fill("desktop");
   const visibleCards = await page.locator("[data-fx-card]:visible").count();
   assert(visibleCards > 0, "direct file preview search remains interactive", { visibleCards });
   assert(page.url() === initialURL, "direct file preview avoids unsupported History API writes", { url: page.url() });
+
+  await page.goto(pathToFileURL(homePage).href, { waitUntil: "domcontentloaded" });
+  await page.locator('label[for="home-job-gpu"]').click();
+  const fileJobState = await page.evaluate(() => ({
+    url: location.href,
+    checked: document.querySelector("[data-home-job-radio]:checked")?.value,
+    visible: [...document.querySelectorAll("[data-home-job-result]")]
+      .filter((result) => getComputedStyle(result).display !== "none")
+      .map((result) => result.getAttribute("data-home-job-result")),
+  }));
+  assert(fileJobState.checked === "gpu", "direct file preview job finder remains interactive", fileJobState);
+  assert(fileJobState.visible.length === 1 && fileJobState.visible[0] === "gpu", "direct file preview updates the job result", fileJobState);
+  assert(!new URL(fileJobState.url).searchParams.has("job"), "direct file preview job finder avoids unsupported History API writes", fileJobState);
+}
+
+async function proveNoScriptHome(page) {
+  await page.locator('[data-home-job-radio][value="gpu"]').focus();
+  await page.keyboard.press("Space");
+  let state = await noScriptJobState(page);
+  assert(state.checked === "gpu", "no-script job finder selects a route with native controls", state);
+  assert(state.visible.length === 1 && state.visible[0] === "gpu", "no-script job finder shows the selected result", state);
+
+  await page.keyboard.press("ArrowLeft");
+  state = await noScriptJobState(page);
+  assert(state.checked === "fanout-testing", "no-script job finder supports native keyboard navigation", state);
+  assert(state.visible.length === 1 && state.visible[0] === "fanout-testing", "no-script keyboard navigation updates the result", state);
+  proof.interactions.noScriptHome = state;
+}
+
+async function noScriptJobState(page) {
+  return page.evaluate(() => ({
+    checked: document.querySelector("[data-home-job-radio]:checked")?.value || "",
+    visible: [...document.querySelectorAll("[data-home-job-result]")]
+      .filter((result) => getComputedStyle(result).display !== "none")
+      .map((result) => result.getAttribute("data-home-job-result")),
+  }));
 }
 
 async function assertFeatureShell(page) {

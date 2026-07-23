@@ -38,7 +38,19 @@ const legacyProviderFeatureNotes = new Set([
 ]);
 
 const sections = [
-  ["Start", ["README.md", "getting-started.md", "how-it-works.md", "architecture.md", "orchestrator.md", "cli.md"]],
+  [
+    "Start",
+    [
+      "README.md",
+      "getting-started.md",
+      "use-cases.md",
+      "pricing.md",
+      "how-it-works.md",
+      "architecture.md",
+      "orchestrator.md",
+      "cli.md",
+    ],
+  ],
   ["Integrations", rels("integrations")],
   ["Providers", rels("providers")],
   ["Features", rels("features")],
@@ -526,10 +538,23 @@ function layout({ page, html, toc, prev, next, sectionName }) {
   const editUrl = `${repoEditBase}/${page.rel}`;
   const isHome = page.rel === "README.md";
   const isProviderIndex = page.rel === "providers/README.md";
+  const documentTitle = isHome
+    ? "Crabbox — Run Any Repository Command in the Right Box"
+    : `${page.title} - Crabbox Docs`;
+  const metaDescription = isHome
+    ? "Run repository commands in local sandboxes, cloud VMs, SSH hosts, Windows and WSL2, macOS, or hosted agent sandboxes through one CLI."
+    : `${page.title} documentation for Crabbox remote execution.`;
+  const canonicalUrl = pageUrl(docsOrigin(), page.outRel);
   const prevNext = !isHome && (prev || next) ? pageNavHtml(prev, next, rootPrefix) : "";
   const heroBlock = isHome ? landingHero(rootPrefix) : standardHero(page, sectionName, editUrl);
-  const articleClass = isHome ? "doc doc-home" : isProviderIndex ? "doc doc-wide" : "doc";
-  const tocBlock = isHome || isProviderIndex ? "" : toc;
+  const articleClass = isProviderIndex ? "doc doc-wide" : "doc";
+  const tocBlock = isProviderIndex ? "" : toc;
+  const articleBlock = isHome
+    ? ""
+    : `<div class="doc-grid${isProviderIndex ? " doc-grid-wide" : ""}">
+        <article class="${articleClass}">${html}${prevNext}</article>
+        ${tocBlock}
+      </div>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -537,7 +562,14 @@ function layout({ page, html, toc, prev, next, sectionName }) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" id="theme-color" content="#f4f5f5">
-  <title>${escapeHtml(page.title)} - Crabbox Docs</title>
+  <title>${escapeHtml(documentTitle)}</title>
+  <meta name="description" content="${escapeAttr(metaDescription)}">
+  <link rel="canonical" href="${escapeAttr(canonicalUrl)}">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Crabbox">
+  <meta property="og:title" content="${escapeAttr(documentTitle)}">
+  <meta property="og:description" content="${escapeAttr(metaDescription)}">
+  <meta property="og:url" content="${escapeAttr(canonicalUrl)}">
   <link rel="icon" href="${rootPrefix}crabbox.svg">
   <link rel="ai-catalog" href="/.well-known/ai-catalog.json" type="application/ai-catalog+json">
   <script>(function(){var s;try{s=localStorage.getItem('crabbox-docs-theme')}catch(e){}var d=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches;var t=(s==='light'||s==='dark')?s:(d?'dark':'light');document.documentElement.dataset.theme=t;document.getElementById('theme-color').content=t==='dark'?'#17191b':'#f4f5f5'})();</script>
@@ -557,7 +589,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
       <div class="sidebar-head">
         <a class="brand" href="${rootPrefix}index.html" aria-label="Crabbox docs home">
           <img src="${rootPrefix}crabbox.svg" alt="" width="42" height="42">
-          <span><strong>Crabbox</strong><small>Remote testbox docs</small></span>
+          <span><strong>Crabbox</strong><small>Execution control plane</small></span>
         </a>
         ${themeToggleHtml()}
       </div>
@@ -568,10 +600,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
     </aside>
     <main id="main-content" tabindex="-1">
       ${heroBlock}
-      <div class="doc-grid${isHome ? " doc-grid-home" : ""}${isProviderIndex ? " doc-grid-wide" : ""}">
-        <article class="${articleClass}">${html}${prevNext}</article>
-        ${tocBlock}
-      </div>
+      ${articleBlock}
     </main>
   </div>
   <script>${js()}</script>
@@ -593,36 +622,212 @@ function standardHero(page, sectionName, editUrl) {
 }
 
 function landingHero(rootPrefix) {
-  const features = [
-    ["Local loop, remote box", "Keep your editor and git workflow. Crabbox rsyncs your dirty checkout to a leased remote box and streams the run back."],
-    ["Brokered, not BYO creds", "A Cloudflare Worker holds provider credentials and serializes lease state. Your CLI only carries a bearer token."],
-    ["Cost-aware leases", "TTL-bounded machines, monthly spend caps, and per-user / per-org / per-provider usage from the broker."],
-    ["Reuse what's warm", "<code>crabbox warmup</code> keeps a box hot. Reuse it with <code>--id</code> across runs, SSH, and CI hydration."],
-    ["Many providers, one loop", "Brokered Hetzner / AWS / Azure, delegated E2B / Daytona / Blacksmith / Semaphore, or static SSH targets - Linux, Windows, and macOS."],
-    ["Plays with Actions", "<code>actions hydrate</code> reuses your repository's GitHub Actions setup steps so local runs land in the same hydrated workspace."],
-    ["Desktop in your browser", "<code>crabbox webvnc</code> streams a Linux, macOS, or Windows desktop into the browser. Drive UI tests, capture screenshots, hand the live session to a teammate - no VPN."],
-    ["Proof for every run", "<code>crabbox artifacts collect</code> bundles screenshots, video, JUnit summaries, logs, and lease metadata. Drop it on a PR as before/after evidence instead of scraping log output."],
+  const useCases = [
+    {
+      id: "fast-feedback",
+      number: "01",
+      title: "Fast Test Loops",
+      summary: "Warm boxes and reusable caches",
+      resultTitle: "Shorten the edit–run loop.",
+      resultBody: "Start with providers that favor local execution, reusable caches, warm sessions, or other fast-feedback paths.",
+      commands: ["crabbox providers recommend fast-feedback", "crabbox doctor --provider <name>"],
+      href: "use-cases.html#speed-up-test-and-build-loops",
+      linkLabel: "Open the Fast Test Loop Guide",
+    },
+    {
+      id: "agent-sandbox",
+      number: "02",
+      title: "Coding Agents",
+      summary: "Agent workspaces and cleanup routes",
+      resultTitle: "Separate agent fit from cleanup guarantees.",
+      resultBody: "Compare agent- and devbox-shaped runtimes with the stricter disposable route, then inspect the selected provider’s isolation, network, secret, and cleanup boundary.",
+      commands: [
+        "crabbox providers recommend agent-sandbox",
+        "crabbox providers recommend disposable-execution",
+        "crabbox doctor --provider <name>",
+      ],
+      href: "use-cases.html#give-a-coding-agent-a-disposable-environment",
+      linkLabel: "Open the Coding Agent Guide",
+    },
+    {
+      id: "cross-platform",
+      number: "03",
+      title: "Cross-Platform",
+      summary: "Linux, Windows, WSL2, macOS",
+      resultTitle: "Match the operating system before the vendor.",
+      resultBody: "Compare the platform routes independently; Windows includes native and WSL2-capable paths, subject to the selected host.",
+      commands: [
+        "crabbox providers recommend linux-vm",
+        "crabbox providers recommend windows",
+        "crabbox providers recommend macos",
+      ],
+      href: "use-cases.html#validate-linux-windows-wsl2-or-macos",
+      linkLabel: "Open the Platform Validation Guide",
+    },
+    {
+      id: "desktop",
+      number: "04",
+      title: "Browser & Desktop QA",
+      summary: "Visible browser and desktop sessions",
+      resultTitle: "Start with a visible desktop-capable target.",
+      resultBody: "Compare browser and desktop paths first, then add evidence routing when screenshots, video, or diagnostics must survive the lease.",
+      commands: ["crabbox providers recommend desktop", "crabbox doctor --provider <name>"],
+      href: "use-cases.html#test-a-browser-or-visible-desktop",
+      linkLabel: "Open the Browser & Desktop Guide",
+    },
+    {
+      id: "fanout-testing",
+      number: "05",
+      title: "Parallel Experiments",
+      summary: "Parallel runs from prepared state",
+      resultTitle: "Fan prepared state out across multiple attempts.",
+      resultBody: "Start with checkpoint- and fork-capable workspace providers for test shards, branch comparisons, or best-of-N runs.",
+      commands: ["crabbox providers recommend fanout-testing", "crabbox doctor --provider <name>"],
+      href: "use-cases.html#fan-out-parallel-experiments",
+      linkLabel: "Open the Parallel Experiments Guide",
+    },
+    {
+      id: "gpu",
+      number: "06",
+      title: "GPU Workloads",
+      summary: "GPU machines and sandboxes",
+      resultTitle: "Require GPU capability before choosing capacity.",
+      resultBody: "Compare SSH-accessible and delegated accelerator paths for model tests, CUDA builds, rendering, or other GPU-shaped work.",
+      commands: ["crabbox providers recommend gpu", "crabbox doctor --provider <name>"],
+      href: "use-cases.html#run-gpu-workloads",
+      linkLabel: "Open the GPU Workload Guide",
+    },
   ];
-  const cards = features
-    .map(([title, body]) => `<article class="feature"><h3>${escapeHtml(title)}</h3><p>${body}</p></article>`)
+  const jobChoices = useCases
+    .map(
+      ({ id, number, title, summary }, index) =>
+        `<div class="home-job-option">
+          <input class="home-job-radio sr-only" type="radio" name="home-job" id="home-job-${escapeAttr(id)}" value="${escapeAttr(id)}" aria-controls="home-job-result-${escapeAttr(id)}" data-home-job-radio${index === 0 ? " checked" : ""}>
+          <label for="home-job-${escapeAttr(id)}"><span>${number}</span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(summary)}</small></label>
+        </div>`,
+    )
     .join("");
+  const jobResults = useCases
+    .map(({ id, resultTitle, resultBody, commands, href, linkLabel }, index) => {
+      const recommendationCommands = commands.filter((command) => !command.startsWith("crabbox doctor "));
+      const copyLabel = recommendationCommands.length === 1 ? "Copy recommendation command" : "Copy recommendation commands";
+      return `<article class="home-job-result" id="home-job-result-${escapeAttr(id)}" data-home-job-result="${escapeAttr(id)}" aria-labelledby="home-job-result-title-${escapeAttr(id)}"${index === 0 ? ' data-home-job-default="true"' : ""}>
+          <div class="home-job-result-copy">
+            <p class="eyebrow">Recommended Starting Path</p>
+            <h3 id="home-job-result-title-${escapeAttr(id)}">${escapeHtml(resultTitle)}</h3>
+            <p>${escapeHtml(resultBody)}</p>
+          </div>
+          <div class="home-job-command">
+            <div><span>built-in recommendations</span><small>verify after selection</small></div>
+            <pre data-copyable data-copy-text="${escapeAttr(recommendationCommands.join("\n"))}" data-copy-label="${copyLabel}"><code>${commands.map((command) => `<span class="home-job-command-line"><i aria-hidden="true">$</i><b>${escapeHtml(command)}</b></span>`).join("")}</code></pre>
+            <a href="${rootPrefix}${href}">${escapeHtml(linkLabel)} <i aria-hidden="true">→</i></a>
+          </div>
+        </article>`;
+    })
+    .join("");
+  const paths = [
+    [
+      "Local",
+      "Stay on this machine",
+      "Containers, full VMs, and policy sandboxes for fast checks without cloud credentials.",
+      "use-cases.html#run-locally-without-cloud-credentials",
+      "See Local Paths",
+    ],
+    [
+      "Your Accounts and Infrastructure",
+      "Use capacity you control",
+      "Cloud accounts, SSH hosts, and self-hosted virtualization such as Proxmox or Firecracker.",
+      "use-cases.html#use-infrastructure-you-already-own",
+      "Use Your Infrastructure",
+    ],
+    [
+      "Provider-Managed",
+      "Delegate the runtime",
+      "Hosted sandboxes, devboxes, CI proof runners, browser sessions, and GPU jobs.",
+      "providers/index.html?q=provider-managed",
+      "Browse Managed Providers",
+    ],
+  ];
+  const pathCards = paths
+    .map(
+      ([eyebrow, title, body, href, label], index) =>
+        `<article class="home-path"><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(eyebrow)}</p><h3>${escapeHtml(title)}</h3><div>${escapeHtml(body)}</div><a href="${rootPrefix}${href}">${escapeHtml(label)} <i aria-hidden="true">→</i></a></article>`,
+    )
+    .join("");
+  const providerCount = Object.keys(providerMetadata).length;
   return `<header class="hero hero-home">
-        <div class="home-title">
-          <img src="${rootPrefix}crabbox.svg" alt="" width="72" height="72">
-          <div><p class="eyebrow">Remote execution control plane</p><h1>Crabbox</h1></div>
+        <div class="home-hero-copy">
+          <div class="home-title">
+            <img src="${rootPrefix}crabbox.svg" alt="" width="56" height="56" fetchpriority="high">
+            <div><strong>Crabbox</strong><small>Remote Execution Control Plane</small></div>
+          </div>
+          <p class="eyebrow">One CLI. Many Runtimes.</p>
+          <h1>Run Your Code in <em>the Right Box.</em></h1>
+          <p class="lede">Keep editing locally. Crabbox runs the working tree you have on the machine it needs—a local runtime, cloud VM, SSH host, or managed sandbox—then streams the result back. No bespoke CI job for every iteration.</p>
+          <div class="cta">
+            <a class="cta-primary" href="${rootPrefix}getting-started.html">Run Your First Command</a>
+            <a class="cta-secondary" href="#home-use-cases-heading">Route Your Workload</a>
+          </div>
+          <ul class="home-facts" aria-label="Crabbox product facts">
+            <li>MIT licensed</li>
+            <li>Linux, Windows, and macOS</li>
+            <li>${providerCount} registered providers</li>
+          </ul>
         </div>
-        <p class="home-tagline">A short-lived box for every run.</p>
-        <p class="lede">Keep the local edit-and-run loop while Crabbox leases, syncs, executes, and releases work across shared cloud capacity.</p>
-        <div class="cta">
-          <a class="cta-primary" href="${rootPrefix}getting-started.html">Get started</a>
-          <a class="cta-secondary" href="${rootPrefix}providers/index.html">Browse ${Object.keys(providerMetadata).length} providers</a>
+        <div class="home-console" role="group" aria-label="Example Crabbox run">
+          <div class="home-console-bar"><span aria-hidden="true">● ● ●</span><strong>crabbox / run</strong><small>ready</small></div>
+          <pre><code><span>$</span> crabbox run --provider local-container -- pnpm test</code></pre>
+          <ol>
+            <li><b>01</b><div><strong>Lease</strong><small>blue-lobster · local-container</small></div><i aria-hidden="true">✓</i></li>
+            <li><b>02</b><div><strong>Sync</strong><small>tracked + nonignored files</small></div><i aria-hidden="true">✓</i></li>
+            <li><b>03</b><div><strong>Run</strong><small>pnpm test · live output</small></div><i aria-hidden="true">✓</i></li>
+            <li><b>04</b><div><strong>Release</strong><small>owned container removed</small></div><i aria-hidden="true">✓</i></li>
+          </ol>
+          <div class="home-console-result"><i aria-hidden="true">✓</i><div><strong>Result returned</strong><small>temporary container cleaned up</small></div></div>
         </div>
-        <pre class="hero-snippet" aria-label="Example Crabbox run"><code><span class="prompt">$</span> crabbox run -- pnpm test
-<span class="comment"># lease cbx_8f2 - hetzner cax21 - ready 11s</span>
-<span class="comment"># sync 184 files (1.2 MB)</span>
-<span class="comment"># tests passed in 47s - released</span></code></pre>
       </header>
-      <section class="features" aria-labelledby="highlights-heading"><h2 class="sr-only" id="highlights-heading">Highlights</h2>${cards}</section>`;
+      <section class="home-section home-use-cases" aria-labelledby="home-use-cases-heading">
+        <header><div><p class="eyebrow">Interactive Workload Router</p><h2 id="home-use-cases-heading">Pick the Job. Get the Starting Commands.</h2></div><p>Turn ${providerCount} registered providers into a focused comparison path. Choose a workload, run the matching built-in recommendations, then verify the provider you select with <code>crabbox doctor</code>.</p></header>
+        <form class="home-job-finder" data-home-job-finder>
+          <fieldset>
+            <legend class="sr-only">Choose the job Crabbox should help with</legend>
+            <div class="home-job-layout">
+              <div class="home-job-choices">${jobChoices}</div>
+              <div class="home-job-results">${jobResults}</div>
+            </div>
+          </fieldset>
+          <p class="home-job-disclaimer"><strong>Built-in guidance, not a live provider check.</strong> Availability, price, performance, credentials, quota, and security still depend on the provider. Verify readiness with <code>crabbox doctor</code>.</p>
+        </form>
+        <a class="home-section-link" href="${rootPrefix}use-cases.html">See All Recommendation Paths <span aria-hidden="true">→</span></a>
+      </section>
+      <section class="home-section home-paths" aria-labelledby="home-paths-heading">
+        <header><div><p class="eyebrow">Choose by Ownership</p><h2 id="home-paths-heading">Run Here, There, or Managed.</h2></div><p>The loop stays the same. Only the runtime owner, isolation boundary, and billing relationship change.</p></header>
+        <div class="home-path-grid">${pathCards}</div>
+      </section>
+      <section class="home-section home-pricing" aria-labelledby="home-pricing-heading">
+        <header><div><p class="eyebrow">Current Cost Model</p><h2 id="home-pricing-heading">Crabbox Software Is Free. Compute Isn’t.</h2></div><p>No opaque “box credit” is needed to understand today’s product. Crabbox separates its software from the infrastructure that runs the work.</p></header>
+        <div class="home-price-grid">
+          <article><span>Crabbox Software</span><strong>$0 license fee</strong><p>MIT-licensed CLI and coordinator.</p></article>
+          <article><span>Compute</span><strong>Provider rate</strong><p>Cloud, sandbox, GPU, or local runtime bills remain external.</p></article>
+          <article><span>Coordinator</span><strong>Your infrastructure</strong><p>Run it on Cloudflare or Node.js with PostgreSQL.</p></article>
+          <article><span>Coordinator Guardrails</span><strong>TTL and spend caps</strong><p>For brokered providers, estimate reserved cost and reject leases over configured limits.</p></article>
+        </div>
+        <a class="home-section-link" href="${rootPrefix}pricing.html">See Pricing and Cost Boundaries <span aria-hidden="true">→</span></a>
+      </section>
+      <aside class="home-capability-note" aria-labelledby="home-nested-heading">
+        <div><p class="eyebrow">Conditional Capability</p><h2 id="home-nested-heading">Need WSL2 or KVM?</h2></div>
+        <p>WSL2 works on compatible AWS and Azure Windows targets. Firecracker requires Crabbox to run on a prepared Linux <code>/dev/kvm</code> host. There is no generic nested mode. <a href="${rootPrefix}features/nested-execution.html">Read the exact boundaries <span aria-hidden="true">→</span></a></p>
+      </aside>
+      <section class="home-install" aria-labelledby="home-install-heading">
+        <div><p class="eyebrow">Install the CLI</p><h2 id="home-install-heading">One Command to Start.</h2><p>Install Crabbox, choose direct, local, delegated, or team-coordinator access, then run the command your repository already knows.</p><a href="${rootPrefix}getting-started.html">Open the 10-Minute Guide <span aria-hidden="true">→</span></a></div>
+        <pre><code><span>$</span> brew install openclaw/tap/crabbox
+<span>$</span> crabbox doctor
+<span>$</span> crabbox run -- pnpm test</code></pre>
+      </section>
+      <aside class="home-trust" aria-labelledby="home-trust-heading">
+        <div><p class="eyebrow">Trust Boundary</p><h2 id="home-trust-heading">Choose Isolation Deliberately.</h2></div>
+        <p>Crabbox is a developer execution tool, not one uniform hostile multi-tenant sandbox. Isolation, network policy, secrets, and host access depend on the selected runtime. <a href="${rootPrefix}security.html">Read the security model</a> before running unfamiliar code.</p>
+      </aside>`;
 }
 
 function pageNavHtml(prev, next, rootPrefix) {
@@ -665,7 +870,7 @@ function css() {
 :root[data-theme="dark"]{color-scheme:dark;--ink:#f4f0ea;--muted:#aeb5b6;--shell:#17191b;--paper:#202326;--reef:#62c7bd;--coral:#ff8a78;--ochre:#efc15b;--line:#353a3d;--line-soft:#2b2f32;--panel:#202326;--sidebar:#111315;--body-soft:#c7cccb;--code-bg:#0e1011;--code-fg:#f4f0ea;--code-border:#08090a;--code-comment:#8d9999;--code-scroll:#4e565a;--inline-bg:#2b3032;--inline-border:#3b4245;--nav-active-bg:#402722;--nav-active-fg:#ffb3a5;--quote-bg:#1b2d2c;--focus:#62c7bd}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth;scroll-padding-top:24px}
-body{margin:0;background:var(--shell);color:var(--ink);font-family:"IBM Plex Sans",Avenir Next,sans-serif;line-height:1.65;overflow-x:hidden;-webkit-font-smoothing:antialiased;transition:background-color .18s,color .18s}
+body{margin:0;background:var(--shell);color:var(--ink);font-family:"IBM Plex Sans",Avenir Next,sans-serif;line-height:1.65;-webkit-font-smoothing:antialiased;transition:background-color .18s,color .18s}
 [hidden]{display:none!important}
 ::selection{background:var(--coral);color:var(--paper)}
 a{color:var(--reef);text-decoration-thickness:.07em;text-underline-offset:.18em;transition:color .15s}
@@ -727,41 +932,125 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 .edit{color:var(--muted)}
 
 /* landing hero */
-.hero-home{display:block;border-bottom:1px solid var(--line);padding:42px 0 34px}
+.home main{max-width:1500px}
+.hero-home{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(380px,.92fr);align-items:center;gap:44px;padding:48px;border:1px solid var(--line);border-radius:24px;background:radial-gradient(circle at 6% 8%,color-mix(in srgb,var(--coral) 13%,transparent),transparent 28%),radial-gradient(circle at 93% 92%,color-mix(in srgb,var(--reef) 15%,transparent),transparent 31%),var(--paper);overflow:hidden}
 .hero-home:after{display:none}
-.home-title{display:flex;align-items:center;gap:18px;margin-bottom:22px}
-.home-title img{width:72px;height:72px;flex:0 0 72px}
-.home-title .eyebrow{margin-bottom:4px}
-.hero-home h1{font-size:4rem;line-height:.95;letter-spacing:0;font-weight:700;margin:0}
-.home-tagline{font-family:Fraunces,Georgia,serif;font-size:1.7rem;line-height:1.2;margin:0 0 10px;color:var(--ink);text-wrap:balance}
-.lede{margin:0 0 22px;color:var(--body-soft);font-size:1.08rem;line-height:1.55;max-width:62ch;text-wrap:pretty}
+.home-hero-copy{min-width:0}
+.home-title{display:flex;align-items:center;gap:12px;margin-bottom:34px}
+.home-title img{width:56px;height:56px;flex:0 0 56px}
+.home-title strong,.home-title small{display:block}
+.home-title strong{font:700 1.42rem/1 Fraunces,Georgia,serif}
+.home-title small{margin-top:5px;color:var(--muted);font-size:.68rem;font-weight:700;letter-spacing:.02em;text-transform:uppercase}
+.hero-home h1{max-width:760px;font-size:clamp(3.45rem,5.7vw,6.2rem);line-height:.88;letter-spacing:-.045em;font-weight:700;margin:0;text-wrap:balance}
+.hero-home h1 em{display:block;color:var(--coral);font-style:normal}
+.lede{margin:24px 0 26px;color:var(--body-soft);font-size:1.08rem;line-height:1.58;max-width:62ch;text-wrap:pretty}
 .cta{display:flex;gap:10px;flex-wrap:wrap}
 .cta-primary,.cta-secondary{display:inline-flex;align-items:center;border-radius:6px;padding:10px 16px;font-weight:600;font-size:.93rem;text-decoration:none;touch-action:manipulation;transition:transform .15s,box-shadow .15s,background-color .15s,border-color .15s,color .15s}
 .cta-primary{background:var(--ink);color:var(--paper);border:1px solid var(--ink)}
 .cta-primary:hover{background:var(--reef);border-color:var(--reef);color:var(--paper);transform:translateY(-1px);box-shadow:0 8px 20px color-mix(in srgb,var(--reef) 22%,transparent)}
 .cta-secondary{border:1px solid var(--ink);color:var(--ink);background:transparent}
 .cta-secondary:hover{border-color:var(--coral);color:var(--coral);transform:translateY(-1px)}
-.hero-snippet{max-width:880px;margin:30px 0 0;background:var(--code-bg);color:var(--code-fg);border-radius:8px;padding:20px 22px;font:500 .88rem/1.65 "IBM Plex Mono",ui-monospace,monospace;border:1px solid var(--code-border);box-shadow:0 16px 34px rgba(0,0,0,.18);overflow:auto}
-.hero-snippet code{background:transparent;border:0;padding:0;color:inherit;font:inherit;display:block;white-space:pre}
-.hero-snippet .prompt{color:var(--ochre)}
-.hero-snippet .comment{color:var(--code-comment)}
-
-/* feature grid */
-.features{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:26px 0 8px}
-.feature{background:var(--panel);border:1px solid var(--line-soft);border-radius:8px;padding:18px 18px 16px;transition:border-color .15s,transform .15s,box-shadow .15s}
-.feature:hover{border-color:var(--coral);transform:translateY(-2px);box-shadow:0 10px 24px rgba(0,0,0,.08)}
-.feature h3{font-family:Fraunces,Georgia,serif;font-size:1.05rem;margin:0 0 6px;font-weight:600;letter-spacing:0;line-height:1.2}
-.feature p{margin:0;color:var(--body-soft);font-size:.92rem;line-height:1.5}
-.feature code{font-size:.86em;background:var(--inline-bg);border:1px solid var(--inline-border);border-radius:5px;padding:.04em .3em}
+.home-facts{display:flex;flex-wrap:wrap;gap:8px 22px;padding:0;margin:24px 0 0;color:var(--muted);font-size:.76rem;font-weight:700;list-style:none}
+.home-facts li{position:relative;padding-left:14px}
+.home-facts li:before{content:"";position:absolute;left:0;top:.58em;width:5px;height:5px;border-radius:50%;background:var(--reef)}
+.home-console{min-width:0;padding:16px;border:1px solid var(--code-border);border-radius:18px;background:var(--code-bg);color:var(--code-fg);box-shadow:0 28px 72px rgba(0,0,0,.25)}
+.home-console-bar{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:3px 3px 14px;border-bottom:1px solid rgba(255,255,255,.1);font-size:.72rem}
+.home-console-bar span{color:var(--coral);letter-spacing:.12em}
+.home-console-bar small{text-align:right;color:#7dd3c7}
+.home-console pre{max-width:100%;margin:13px 0;padding:14px;overflow:auto;border:1px solid rgba(255,255,255,.09);border-radius:9px;background:#0d0f10;font:500 .76rem/1.55 "IBM Plex Mono",ui-monospace,monospace}
+.home-console pre code{white-space:pre}
+.home-console pre span{color:#efc15b}
+.home-console ol{display:grid;gap:8px;padding:0;margin:0;list-style:none}
+.home-console li{display:grid;grid-template-columns:42px minmax(0,1fr) 22px;align-items:center;gap:10px;padding:12px;border:1px solid rgba(255,255,255,.09);border-radius:10px;background:rgba(255,255,255,.035)}
+.home-console li b{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.1);font:700 .66rem/1 "IBM Plex Mono",monospace}
+.home-console li strong,.home-console li small,.home-console-result strong,.home-console-result small{display:block}
+.home-console li small,.home-console-result small{overflow-wrap:anywhere;color:var(--code-comment)}
+.home-console li i,.home-console-result>i{color:#7dd3c7;font-style:normal}
+.home-console-result{display:flex;gap:11px;align-items:center;margin-top:10px;padding:13px;border-radius:10px;background:color-mix(in srgb,var(--reef) 30%,#111)}
+.home-section{padding:82px 0;border-bottom:1px solid var(--line)}
+.home-section>header{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,.72fr);align-items:end;gap:40px;margin-bottom:28px}
+.home-section>header h2,.home-install h2{margin:0;color:var(--ink);font:700 clamp(2.3rem,4.1vw,4.4rem)/.98 Fraunces,Georgia,serif;letter-spacing:-.035em;text-wrap:balance}
+.home-section>header>p{max-width:58ch;margin:0 0 5px;color:var(--body-soft);font-size:1rem;text-wrap:pretty}
+.home-section>header code,.home-capability-note code{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.86em}
+.home-job-finder{padding:18px;border:1px solid var(--code-border);border-radius:22px;background:radial-gradient(circle at 100% 0,color-mix(in srgb,var(--reef) 34%,transparent),transparent 38%),var(--code-bg);color:var(--code-fg);box-shadow:0 24px 60px rgba(0,0,0,.16)}
+.home-job-finder fieldset{min-width:0;padding:0;margin:0;border:0}
+.home-job-layout{display:grid;grid-template-columns:minmax(300px,.82fr) minmax(0,1.18fr);gap:18px;align-items:stretch}
+.home-job-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.home-job-option{position:relative;min-width:0}
+.home-job-option label{display:flex;min-height:108px;height:100%;flex-direction:column;padding:15px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(255,255,255,.045);color:var(--code-fg);cursor:pointer;touch-action:manipulation;transition:transform .15s,border-color .15s,background-color .15s,box-shadow .15s}
+.home-job-option label:hover{transform:translateY(-2px);border-color:rgba(125,211,199,.65);background:rgba(255,255,255,.075)}
+.home-job-option input:focus-visible+label{outline:3px solid #7dd3c7;outline-offset:2px}
+.home-job-option input:checked+label{border-color:#7dd3c7;background:color-mix(in srgb,var(--reef) 34%,#171a1c);box-shadow:inset 3px 0 0 #7dd3c7}
+.home-job-option label>span{color:#7dd3c7;font:700 .64rem/1 "IBM Plex Mono",monospace}
+.home-job-option label>strong{margin-top:12px;font:600 1.06rem/1.15 Fraunces,Georgia,serif;text-wrap:balance}
+.home-job-option label>small{margin-top:auto;padding-top:8px;color:var(--code-comment);font-size:.69rem;line-height:1.35;overflow-wrap:anywhere}
+.home-job-result{display:none;min-width:0;height:100%;grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr);gap:20px;padding:26px;border:1px solid rgba(255,255,255,.13);border-radius:15px;background:linear-gradient(145deg,rgba(255,255,255,.075),rgba(255,255,255,.025))}
+.home-job-result:first-child{display:grid}
+.home-job-finder:has(.home-job-radio:checked) .home-job-result{display:none}
+.home-job-finder:has(#home-job-fast-feedback:checked) [data-home-job-result="fast-feedback"],
+.home-job-finder:has(#home-job-agent-sandbox:checked) [data-home-job-result="agent-sandbox"],
+.home-job-finder:has(#home-job-cross-platform:checked) [data-home-job-result="cross-platform"],
+.home-job-finder:has(#home-job-desktop:checked) [data-home-job-result="desktop"],
+.home-job-finder:has(#home-job-fanout-testing:checked) [data-home-job-result="fanout-testing"],
+.home-job-finder:has(#home-job-gpu:checked) [data-home-job-result="gpu"]{display:grid}
+.home-job-result-copy{display:flex;min-width:0;flex-direction:column}
+.home-job-result-copy .eyebrow{margin-bottom:12px}
+.home-job-result h3{margin:0;color:var(--code-fg);font:600 2rem/1.05 Fraunces,Georgia,serif;text-wrap:balance}
+.home-job-result-copy>p:not(.eyebrow){margin:16px 0;color:var(--code-comment);font-size:.9rem;text-wrap:pretty}
+.home-job-command{display:flex;min-width:0;flex-direction:column;padding:14px;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:#0d0f10}
+.home-job-command>div{display:flex;justify-content:space-between;gap:12px;padding:1px 2px 12px;border-bottom:1px solid rgba(255,255,255,.09);font-size:.66rem}
+.home-job-command>div span{color:#f0ebe2;font-weight:700}
+.home-job-command>div small{color:#7dd3c7}
+.home-job-command pre{position:relative;max-width:100%;margin:14px 0;padding:2px 58px 2px 0;overflow:auto;background:transparent;border:0;color:var(--code-fg);font:500 .72rem/1.75 "IBM Plex Mono",ui-monospace,monospace}
+.home-job-command pre code{display:grid;min-width:0;gap:3px;white-space:normal}
+.home-job-command-line{display:grid;min-width:0;grid-template-columns:auto minmax(0,1fr);gap:7px}
+.home-job-command-line i{color:#efc15b;font-style:normal}
+.home-job-command-line b{min-width:0;font:inherit;overflow-wrap:anywhere}
+.home-job-command a{display:inline-flex;align-items:center;gap:8px;margin-top:auto;color:#7dd3c7;font-size:.75rem;font-weight:700;text-decoration:none}
+.home-job-command a:hover{color:#ff8a78}
+.home-job-command a i{font-style:normal;transition:transform .16s}
+.home-job-command a:hover i{transform:translateX(3px)}
+.home-job-disclaimer{margin:14px 3px 2px;color:var(--code-comment);font-size:.73rem;text-wrap:pretty}
+.home-job-disclaimer strong{color:var(--code-fg)}
+.home-section-link{display:inline-flex;align-items:center;gap:10px;margin-top:22px;color:var(--ink);font-weight:700;text-decoration:none}
+.home-section-link span{transition:transform .16s}
+.home-section-link:hover span{transform:translateX(3px)}
+.home-path-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--line);border-radius:16px;background:var(--paper);overflow:hidden}
+.home-path{display:flex;min-height:280px;flex-direction:column;padding:26px}
+.home-path+.home-path{border-left:1px solid var(--line)}
+.home-path>span{color:var(--coral);font:700 .7rem/1 "IBM Plex Mono",monospace}
+.home-path>p{margin:38px 0 5px;color:var(--muted);font-size:.68rem;font-weight:700;text-transform:uppercase}
+.home-path h3{margin:0 0 12px;font:600 1.55rem/1.1 Fraunces,Georgia,serif;text-wrap:balance}
+.home-path>div{color:var(--body-soft);font-size:.91rem}
+.home-path a{display:inline-flex;gap:8px;align-items:center;margin-top:auto;padding-top:25px;font-weight:700;text-decoration:none}
+.home-path a i{font-style:normal;transition:transform .16s}
+.home-path a:hover i{transform:translateX(3px)}
+.home-price-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.home-price-grid article{min-width:0;padding:22px;border:1px solid var(--line);border-radius:12px;background:var(--paper)}
+.home-price-grid span,.home-price-grid strong{display:block}
+.home-price-grid span{color:var(--muted);font-size:.68rem;font-weight:700;text-transform:uppercase}
+.home-price-grid strong{margin:24px 0 9px;font:600 1.25rem/1.12 Fraunces,Georgia,serif;overflow-wrap:anywhere}
+.home-price-grid p{margin:0;color:var(--body-soft);font-size:.84rem;line-height:1.45}
+.home-capability-note{display:grid;grid-template-columns:minmax(230px,.55fr) minmax(0,1.45fr);align-items:center;gap:38px;margin-top:28px;padding:26px 28px;border:1px solid color-mix(in srgb,var(--reef) 32%,var(--line));border-radius:14px;background:color-mix(in srgb,var(--reef) 7%,var(--paper))}
+.home-capability-note .eyebrow{margin-bottom:5px}
+.home-capability-note h2{margin:0;font:600 1.75rem/1.08 Fraunces,Georgia,serif;text-wrap:balance}
+.home-capability-note>p{margin:0;color:var(--body-soft);text-wrap:pretty}
+.home-capability-note a{font-weight:700;white-space:nowrap}
+.home-install{display:grid;grid-template-columns:minmax(0,1fr) minmax(380px,.85fr);align-items:center;gap:48px;margin:82px 0 0;padding:38px 40px;border:1px solid var(--line);border-radius:18px;background:var(--paper)}
+.home-install h2{font-size:clamp(2.2rem,3.6vw,3.6rem)}
+.home-install>div>p:not(.eyebrow){max-width:58ch;margin:16px 0;color:var(--body-soft)}
+.home-install a{display:inline-flex;gap:8px;align-items:center;font-weight:700;text-decoration:none}
+.home-install pre{max-width:100%;margin:0;padding:20px;overflow:auto;border:1px solid var(--code-border);border-radius:12px;background:var(--code-bg);color:var(--code-fg);font:500 .78rem/1.8 "IBM Plex Mono",ui-monospace,monospace;box-shadow:0 14px 34px rgba(0,0,0,.18)}
+.home-install pre code{white-space:pre}
+.home-install pre span{color:#efc15b}
+.home-trust{display:grid;grid-template-columns:minmax(260px,.65fr) minmax(0,1.35fr);gap:48px;align-items:start;margin-top:64px;padding:34px 0 0;border-top:1px solid var(--line)}
+.home-trust h2{margin:0;font:600 1.7rem/1.1 Fraunces,Georgia,serif;text-wrap:balance}
+.home-trust>p{max-width:72ch;margin:0;color:var(--body-soft)}
 
 /* layout: doc + toc */
 .doc-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:36px;margin-top:30px}
-.doc-grid-home{margin-top:18px}
-.doc-home{padding:8px 0 0;max-width:78ch;margin-inline:auto;width:100%}
-.doc-home>:first-child{margin-top:0}
-@media(min-width:1180px){.doc-grid{grid-template-columns:minmax(0,78ch) 210px;justify-content:start}.doc-grid-home,.doc-grid-wide{grid-template-columns:minmax(0,1fr)}}
+@media(min-width:1180px){.doc-grid{grid-template-columns:minmax(0,78ch) 210px;justify-content:start}.doc-grid-wide{grid-template-columns:minmax(0,1fr)}}
 .doc{min-width:0;max-width:78ch;overflow-wrap:break-word}
-.doc-home{max-width:none}
 .doc-wide{max-width:none}
 .doc h1{display:none}
 .doc h2{font-family:Fraunces,Georgia,serif;font-size:1.65rem;line-height:1.15;margin:1.9em 0 .5em;font-weight:600;letter-spacing:0;position:relative;text-wrap:balance;scroll-margin-top:24px}
@@ -781,10 +1070,11 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 .doc pre::-webkit-scrollbar{height:8px}
 .doc pre::-webkit-scrollbar-thumb{background:var(--code-scroll);border-radius:8px}
 .doc pre code{display:block;background:transparent;border:0;color:inherit;padding:0;font-size:1em;white-space:pre;overflow-wrap:normal;word-break:normal;tab-size:2}
-.doc pre .copy{position:absolute;top:8px;right:8px;background:rgba(255,251,244,.06);color:var(--code-fg);border:1px solid rgba(255,251,244,.18);border-radius:6px;padding:3px 9px;font:600 .7rem/1 "IBM Plex Sans",sans-serif;cursor:pointer;opacity:0;transition:opacity .15s,background .15s,border-color .15s}
-.doc pre:hover .copy,.doc pre .copy:focus{opacity:1}
-.doc pre .copy:hover{background:rgba(255,251,244,.14)}
-.doc pre .copy.copied{background:var(--coral);border-color:var(--coral);opacity:1}
+:is(.doc pre,[data-copyable]) .copy{position:absolute;top:8px;right:8px;background:rgba(255,251,244,.06);color:var(--code-fg);border:1px solid rgba(255,251,244,.18);border-radius:6px;padding:3px 9px;font:600 .7rem/1 "IBM Plex Sans",sans-serif;cursor:pointer;opacity:0;transition:opacity .15s,background-color .15s,border-color .15s}
+:is(.doc pre,[data-copyable]):hover .copy,:is(.doc pre,[data-copyable]) .copy:focus-visible{opacity:1}
+:is(.doc pre,[data-copyable]) .copy:hover{background:rgba(255,251,244,.14)}
+:is(.doc pre,[data-copyable]) .copy.copied{background:var(--coral);border-color:var(--coral);opacity:1}
+.home-job-command [data-copyable] .copy{min-width:44px;min-height:44px;opacity:1}
 .doc blockquote{margin:1.4em 0;padding:12px 16px;border-left:3px solid var(--coral);background:var(--quote-bg);border-radius:0 8px 8px 0;color:var(--ink)}
 .doc blockquote p:last-child{margin-bottom:0}
 .table-scroll{width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-inline:contain;margin:1.2em 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);scrollbar-width:thin;scrollbar-color:var(--code-scroll) transparent}
@@ -844,6 +1134,11 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 .nav-backdrop{display:none;position:fixed;inset:0;z-index:20;width:100%;height:100%;border:0;background:rgba(0,0,0,.48);padding:0;cursor:pointer}
 
 /* mobile */
+@media(max-width:1280px){
+  .hero-home{grid-template-columns:1fr;padding:40px}
+  .home-console{max-width:760px}
+  .home-price-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
 @media(max-width:900px){
   .shell{display:block}
   body.nav-open{overflow:hidden}
@@ -855,20 +1150,53 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
   .hero{padding-top:8px}
   .hero h1{font-size:2.2rem}
   .hero-meta{width:100%;justify-content:flex-start}
-  .hero-home{padding-top:18px}
-  .hero-home h1{font-size:3rem}
-  .home-tagline{font-size:1.45rem}
-  .hero-snippet{font-size:.78rem;padding:16px 16px}
-  .features{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:22px}
+  .hero-home{padding:32px}
+  .hero-home h1{font-size:clamp(3.2rem,10vw,5rem)}
+  .home-section{padding:64px 0}
+  .home-section>header{grid-template-columns:1fr;gap:16px}
+  .home-job-layout{grid-template-columns:1fr}
+  .home-job-choices{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .home-path-grid{grid-template-columns:1fr}
+  .home-path{min-height:230px}
+  .home-path+.home-path{border-top:1px solid var(--line);border-left:0}
+  .home-capability-note{grid-template-columns:1fr;gap:12px}
+  .home-install{grid-template-columns:1fr;margin-top:64px}
+  .home-trust{grid-template-columns:1fr;gap:16px}
   .doc-grid{margin-top:22px;gap:24px}
   .doc :is(h2,h3,h4) .anchor{display:none}
 }
 @media(max-width:520px){
   main{padding:64px 16px 48px}
-  .home-title{gap:13px}
-  .home-title img{width:58px;height:58px;flex-basis:58px}
-  .hero-home h1{font-size:2.65rem}
-  .features{grid-template-columns:1fr}
+  .hero-home{padding:24px 18px;border-radius:18px}
+  .home-title{gap:10px;margin-bottom:28px}
+  .home-title img{width:48px;height:48px;flex-basis:48px}
+  .home-title strong{font-size:1.24rem}
+  .home-title small{font-size:.58rem}
+  .hero-home h1{font-size:clamp(2.85rem,15vw,4rem)}
+  .lede{font-size:1rem}
+  .cta-primary,.cta-secondary{width:100%;justify-content:center}
+  .home-facts{display:grid;gap:7px}
+  .home-console{margin-top:4px;padding:11px;border-radius:13px}
+  .home-console-bar{grid-template-columns:1fr auto}
+  .home-console-bar strong{display:none}
+  .home-console pre{font-size:.68rem}
+  .home-console li{grid-template-columns:36px minmax(0,1fr) 18px;padding:10px}
+  .home-console li b{width:29px;height:29px}
+  .home-price-grid{grid-template-columns:1fr}
+  .home-section{padding:54px 0}
+  .home-section>header h2,.home-install h2{font-size:2.45rem}
+  .home-job-finder{margin:0 -2px;padding:10px;border-radius:16px}
+  .home-job-choices{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .home-job-option label{min-height:76px;padding:11px}
+  .home-job-option label>strong{font-size:.98rem}
+  .home-job-option label>small{display:none}
+  .home-job-result{grid-template-columns:1fr;gap:18px;padding:19px}
+  .home-job-result h3{font-size:1.8rem}
+  .home-job-command pre{font-size:.66rem}
+  .home-capability-note{padding:22px 20px}
+  .home-capability-note a{white-space:normal}
+  .home-install{gap:28px;margin-top:54px;padding:28px 20px}
+  .home-install pre{margin:0 -6px;padding:16px;font-size:.7rem}
   .page-nav{grid-template-columns:1fr}
   .page-nav-next{grid-column:1}
   .doc pre{margin-left:-16px;margin-right:-16px;border-radius:0;border-left:0;border-right:0}
@@ -956,7 +1284,16 @@ const input=document.getElementById('doc-search');
 const navSections=[...document.querySelectorAll('[data-nav-section]')];
 const navEmpty=document.querySelector('.nav-empty');
 let navOpenState=null;
-input?.addEventListener('input',()=>{
+const navParams=new URLSearchParams(location.search);
+if(input)input.value=navParams.get('docs')||'';
+const syncNavURL=()=>{
+  if(location.protocol==='file:')return;
+  const next=new URL(location.href);
+  const value=input?.value.trim()||'';
+  value?next.searchParams.set('docs',value):next.searchParams.delete('docs');
+  history.replaceState(null,'',next);
+};
+const applyNavFilters=(updateURL=true)=>{
   const q=input.value.trim().toLowerCase();
   const terms=q.split(/\\s+/).filter(Boolean);
   if(q&&!navOpenState)navOpenState=new Map(navSections.map((section)=>[section,section.open]));
@@ -976,7 +1313,10 @@ input?.addEventListener('input',()=>{
   });
   if(!q)navOpenState=null;
   if(navEmpty)navEmpty.hidden=!q||matches>0;
-});
+  if(updateURL)syncNavURL();
+};
+input?.addEventListener('input',()=>applyNavFilters());
+if(input?.value)applyNavFilters(false);
 
 const providerFilter=document.querySelector('[data-provider-filter]');
 if(providerFilter){
@@ -985,8 +1325,20 @@ if(providerFilter){
   const providerRows=[...document.querySelectorAll('.provider-matrix tbody tr')];
   const providerCount=providerFilter.querySelector('[data-provider-count]');
   const providerEmpty=providerFilter.querySelector('[data-provider-empty]');
-  let providerGroup='all';
-  const applyProviderFilters=()=>{
+  const providerParams=new URLSearchParams(location.search);
+  let providerGroup=providerParams.get('group')||'all';
+  if(!providerButtons.some((button)=>button.dataset.providerGroupFilter===providerGroup))providerGroup='all';
+  if(providerInput)providerInput.value=providerParams.get('q')||'';
+  providerButtons.forEach((button)=>button.setAttribute('aria-pressed',button.dataset.providerGroupFilter===providerGroup?'true':'false'));
+  const syncProviderURL=()=>{
+    if(location.protocol==='file:')return;
+    const next=new URL(location.href);
+    const value=providerInput?.value.trim()||'';
+    value?next.searchParams.set('q',value):next.searchParams.delete('q');
+    providerGroup!=='all'?next.searchParams.set('group',providerGroup):next.searchParams.delete('group');
+    history.replaceState(null,'',next);
+  };
+  const applyProviderFilters=(updateURL=true)=>{
     const terms=(providerInput?.value.trim().toLowerCase()||'').split(/\\s+/).filter(Boolean);
     let count=0;
     providerRows.forEach((row)=>{
@@ -1000,6 +1352,7 @@ if(providerFilter){
     });
     if(providerCount)providerCount.textContent=count===1?'1 provider':count+' providers';
     if(providerEmpty)providerEmpty.hidden=count>0;
+    if(updateURL)syncProviderURL();
   };
   providerInput?.addEventListener('input',applyProviderFilters);
   providerButtons.forEach((button)=>button.addEventListener('click',()=>{
@@ -1007,9 +1360,39 @@ if(providerFilter){
     providerButtons.forEach((item)=>item.setAttribute('aria-pressed',item===button?'true':'false'));
     applyProviderFilters();
   }));
+  applyProviderFilters(false);
 }
 
-document.querySelectorAll('.doc pre').forEach(pre=>{const btn=document.createElement('button');btn.type='button';btn.className='copy';btn.setAttribute('aria-live','polite');btn.textContent='Copy';btn.addEventListener('click',async()=>{const code=pre.querySelector('code')?.textContent??'';try{await navigator.clipboard.writeText(code);btn.textContent='Copied';btn.classList.add('copied');setTimeout(()=>{btn.textContent='Copy';btn.classList.remove('copied')},1400)}catch{btn.textContent='Failed';setTimeout(()=>{btn.textContent='Copy'},1400)}});pre.appendChild(btn)});
+const homeJobFinder=document.querySelector('[data-home-job-finder]');
+if(homeJobFinder){
+  const homeJobRadios=[...homeJobFinder.querySelectorAll('[data-home-job-radio]')];
+  const selectHomeJob=(value)=>{
+    const radio=homeJobRadios.find((item)=>item.value===value)||homeJobRadios[0];
+    if(radio)radio.checked=true;
+    return radio?.value||'';
+  };
+  const homeJobParams=new URLSearchParams(location.search);
+  const syncHomeJobURL=(value)=>{
+    if(location.protocol==='file:')return;
+    const next=new URL(location.href);
+    if(value)next.searchParams.set('job',value);
+    else next.searchParams.delete('job');
+    history.replaceState(null,'',next);
+  };
+  const requestedHomeJob=homeJobParams.get('job');
+  const selectedHomeJob=selectHomeJob(requestedHomeJob);
+  if(requestedHomeJob&&requestedHomeJob!==selectedHomeJob)syncHomeJobURL('');
+  homeJobRadios.forEach((radio)=>radio.addEventListener('change',()=>{
+    if(radio.checked)syncHomeJobURL(radio.value);
+  }));
+  window.addEventListener('popstate',()=>{
+    const requested=new URLSearchParams(location.search).get('job');
+    const selected=selectHomeJob(requested);
+    if(requested&&requested!==selected)syncHomeJobURL('');
+  });
+}
+
+document.querySelectorAll('.doc pre,[data-copyable]').forEach(pre=>{const btn=document.createElement('button');const copyLabel=pre.dataset.copyLabel||'Copy code';btn.type='button';btn.className='copy';btn.setAttribute('aria-live','polite');btn.setAttribute('aria-label',copyLabel);btn.textContent='Copy';btn.addEventListener('click',async()=>{const code=pre.dataset.copyText??pre.querySelector('code')?.textContent??'';try{await navigator.clipboard.writeText(code);btn.textContent='Copied';btn.setAttribute('aria-label','Copied');btn.classList.add('copied');setTimeout(()=>{btn.textContent='Copy';btn.setAttribute('aria-label',copyLabel);btn.classList.remove('copied')},1400)}catch{btn.textContent='Failed';btn.setAttribute('aria-label','Copy failed');setTimeout(()=>{btn.textContent='Copy';btn.setAttribute('aria-label',copyLabel)},1400)}});pre.appendChild(btn)});
 
 const tocLinks=document.querySelectorAll('.toc a');
 if(tocLinks.length){const map=new Map();tocLinks.forEach(a=>{const id=a.getAttribute('href').slice(1);const el=document.getElementById(id);if(el)map.set(el,a)});const setActive=l=>{tocLinks.forEach(x=>x.classList.remove('active'));l.classList.add('active')};const obs=new IntersectionObserver(entries=>{const visible=entries.filter(e=>e.isIntersecting).sort((a,b)=>a.boundingClientRect.top-b.boundingClientRect.top);if(visible.length){const link=map.get(visible[0].target);if(link)setActive(link)}},{rootMargin:'-15% 0px -65% 0px',threshold:0});map.forEach((_,el)=>obs.observe(el))}
