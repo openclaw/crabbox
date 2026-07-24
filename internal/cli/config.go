@@ -1323,13 +1323,14 @@ type MultipassConfig struct {
 }
 
 type TartConfig struct {
-	Image    string
-	User     string
-	Password string
-	WorkRoot string
-	CPUs     int
-	Memory   int
-	Disk     int
+	Image        string
+	User         string
+	Password     string
+	WorkRoot     string
+	CPUs         int
+	Memory       int
+	Disk         int
+	RandomSerial bool
 }
 
 type LumeConfig struct {
@@ -4606,13 +4607,14 @@ type fileMultipassConfig struct {
 }
 
 type fileTartConfig struct {
-	Image    string `yaml:"image,omitempty"`
-	User     string `yaml:"user,omitempty"`
-	Password string `yaml:"password,omitempty"`
-	WorkRoot string `yaml:"workRoot,omitempty"`
-	CPUs     *int   `yaml:"cpus,omitempty"`
-	Memory   *int   `yaml:"memory,omitempty"`
-	Disk     *int   `yaml:"disk,omitempty"`
+	Image        string `yaml:"image,omitempty"`
+	User         string `yaml:"user,omitempty"`
+	Password     string `yaml:"password,omitempty"`
+	WorkRoot     string `yaml:"workRoot,omitempty"`
+	CPUs         *int   `yaml:"cpus,omitempty"`
+	Memory       *int   `yaml:"memory,omitempty"`
+	Disk         *int   `yaml:"disk,omitempty"`
+	RandomSerial *bool  `yaml:"randomSerial,omitempty"`
 }
 
 type fileLumeConfig struct {
@@ -7637,6 +7639,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Tart.Disk = *file.Tart.Disk
 			cfg.tartDiskExplicit = true
 		}
+		if file.Tart.RandomSerial != nil {
+			cfg.Tart.RandomSerial = *file.Tart.RandomSerial
+		}
 	}
 	if file.Lume != nil {
 		if trusted {
@@ -9608,6 +9613,9 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("CRABBOX_TART_DISK"); v != "" {
 		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
 		cfg.tartDiskExplicit = cfg.Tart.Disk > 0
+	}
+	if v, ok := getenvBool("CRABBOX_TART_RANDOM_SERIAL"); ok {
+		cfg.Tart.RandomSerial = v
 	}
 	cfg.Lume.CLIPath = getenv("CRABBOX_LUME_CLI", cfg.Lume.CLIPath)
 	cfg.Lume.Base = getenv("CRABBOX_LUME_BASE", cfg.Lume.Base)

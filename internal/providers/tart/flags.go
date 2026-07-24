@@ -10,11 +10,12 @@ import (
 )
 
 type flagValues struct {
-	Image  *string
-	User   *string
-	CPUs   *int
-	Memory *int
-	Disk   *int
+	Image        *string
+	User         *string
+	CPUs         *int
+	Memory       *int
+	Disk         *int
+	RandomSerial *bool
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -24,6 +25,11 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 		CPUs:   fs.Int("tart-cpu", defaults.Tart.CPUs, "CPU count for tart VMs"),
 		Memory: fs.Int("tart-memory", defaults.Tart.Memory, "memory in MB for tart VMs"),
 		Disk:   fs.Int("tart-disk", defaults.Tart.Disk, "disk size in GB for tart VMs (0 = use clone default)"),
+		RandomSerial: fs.Bool(
+			"tart-random-serial",
+			defaults.Tart.RandomSerial,
+			"generate a new macOS machine identifier for each cloned VM",
+		),
 	}
 }
 
@@ -59,6 +65,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		if *v.Disk > 0 {
 			core.MarkTartDiskExplicit(cfg)
 		}
+	}
+	if flagWasSet(fs, "tart-random-serial") {
+		cfg.Tart.RandomSerial = *v.RandomSerial
 	}
 	if isTartProviderName(cfg.Provider) {
 		if core.IsTargetExplicit(cfg) && cfg.TargetOS != targetMacOS {

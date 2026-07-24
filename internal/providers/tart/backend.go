@@ -133,7 +133,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if core.IsTartDiskExplicit(&cfg) {
 		diskLabel = fmt.Sprintf("%dGB", cfg.Tart.Disk)
 	}
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB disk=%s keep=%v\n", providerName, leaseID, slug, cfg.Tart.Image, cfg.Tart.CPUs, cfg.Tart.Memory, diskLabel, req.Keep)
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB disk=%s random_serial=%v keep=%v\n", providerName, leaseID, slug, cfg.Tart.Image, cfg.Tart.CPUs, cfg.Tart.Memory, diskLabel, cfg.Tart.RandomSerial, req.Keep)
 
 	if err := b.cloneVM(ctx, cfg, name); err != nil {
 		_ = b.deleteVM(context.Background(), name)
@@ -414,6 +414,11 @@ func (b *backend) cloneVM(ctx context.Context, cfg Config, name string) error {
 
 // configureVM applies CPU, memory, and disk settings to the cloned VM before boot.
 func (b *backend) configureVM(ctx context.Context, cfg Config, name string) error {
+	if cfg.Tart.RandomSerial {
+		if _, err := b.tart(ctx, []string{"set", name, "--random-serial"}, nil, b.rt.Stderr); err != nil {
+			return fmt.Errorf("tart set --random-serial: %w", err)
+		}
+	}
 	if cfg.Tart.CPUs > 0 {
 		if _, err := b.tart(ctx, []string{"set", name, "--cpu", strconv.Itoa(cfg.Tart.CPUs)}, nil, b.rt.Stderr); err != nil {
 			return fmt.Errorf("tart set --cpu: %w", err)
