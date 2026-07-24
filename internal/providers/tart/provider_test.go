@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1008,6 +1009,25 @@ func TestConfigureVMSkipsZeroCPUAndMemory(t *testing.T) {
 	}
 }
 
+func TestConfigureVMAppliesRandomSerialBeforeOtherSettings(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Tart.RandomSerial = true
+	cfg.Tart.CPUs = 4
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+
+	if err := b.configureVM(context.Background(), cfg, "crabbox-test"); err != nil {
+		t.Fatalf("configureVM: %v", err)
+	}
+	if len(runner.calls) < 2 {
+		t.Fatalf("configureVM calls = %v, want random serial and CPU", runner.calls)
+	}
+	if got := runner.calls[0].Args; !slices.Equal(got, []string{"set", "crabbox-test", "--random-serial"}) {
+		t.Fatalf("first configureVM call = %v, want random serial", got)
+	}
+}
+
 func TestShouldCleanupStoppedInstance(t *testing.T) {
 	server := Server{Status: "stopped", Labels: map[string]string{}}
 	ok, reason := shouldCleanup(server, core.LeaseClaim{}, true, time.Now())
@@ -1233,6 +1253,22 @@ func TestApplyFlagsAcceptsPositiveResources(t *testing.T) {
 	}
 	if cfg.Tart.Disk != 100 {
 		t.Fatalf("Disk = %d, want 100", cfg.Tart.Disk)
+	}
+}
+
+func TestApplyFlagsEnablesRandomSerial(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-random-serial"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, vals); err != nil {
+		t.Fatalf("applyFlags: %v", err)
+	}
+	if !cfg.Tart.RandomSerial {
+		t.Fatal("RandomSerial = false, want true")
 	}
 }
 

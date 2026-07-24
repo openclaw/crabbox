@@ -81,7 +81,7 @@ func captureRemoteMacVNCScreenshot(ctx context.Context, cfg Config, target SSHTa
 	return nil
 }
 
-func clickRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, x, y int) error {
+func clickRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, x, y, count int) error {
 	tunnel, localPort, err := startVNCForegroundTunnelOnReservedPort(ctx, target, "", "127.0.0.1", managedVNCPort)
 	if err != nil {
 		return err
@@ -97,7 +97,7 @@ func clickRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, x, y i
 		return fmt.Errorf("connect to verified macOS VNC tunnel: %w", err)
 	}
 	defer conn.Close()
-	if err := clickRFBPointerFromConn(ctx, conn, creds, authMode, x, y); err != nil {
+	if err := clickRFBPointerFromConnCount(ctx, conn, creds, authMode, x, y, count); err != nil {
 		return fmt.Errorf("click macOS VNC pointer: %w", err)
 	}
 	return nil
@@ -260,6 +260,10 @@ func rfbKeysymForRune(r rune) (uint32, error) {
 }
 
 func clickRFBPointerFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode, x, y int) error {
+	return clickRFBPointerFromConnCount(ctx, conn, creds, authMode, x, y, 1)
+}
+
+func clickRFBPointerFromConnCount(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode, x, y, count int) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
@@ -273,14 +277,25 @@ func clickRFBPointerFromConn(ctx context.Context, conn net.Conn, creds rfbCreden
 	if x < 0 || y < 0 || x >= int(width) || y >= int(height) {
 		return fmt.Errorf("pointer coordinates %d,%d exceed framebuffer %dx%d", x, y, width, height)
 	}
+	if count < 1 || count > 2 {
+		return fmt.Errorf("pointer click count must be 1 or 2, found %d", count)
+	}
 	if err := writeRFBPointerEvent(conn, 0, x, y); err != nil {
 		return err
 	}
-	if err := writeRFBPointerEvent(conn, 1, x, y); err != nil {
-		return err
+	for click := 0; click < count; click++ {
+		if err := writeRFBPointerEvent(conn, 1, x, y); err != nil {
+			return err
+		}
+		time.Sleep(80 * time.Millisecond)
+		if err := writeRFBPointerEvent(conn, 0, x, y); err != nil {
+			return err
+		}
+		if click+1 < count {
+			time.Sleep(80 * time.Millisecond)
+		}
 	}
-	time.Sleep(80 * time.Millisecond)
-	return writeRFBPointerEvent(conn, 0, x, y)
+	return nil
 }
 
 func captureRFBFrameFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode) (image.Image, error) {

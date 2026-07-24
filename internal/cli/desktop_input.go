@@ -51,18 +51,25 @@ func (a App) desktopClick(ctx context.Context, args []string) error {
 	}
 	x, xOK := intFlagValue(args, "x")
 	y, yOK := intFlagValue(args, "y")
-	if !xOK || !yOK || x < 0 || y < 0 {
-		return exit(2, "usage: crabbox desktop click --id <lease-id-or-slug> --x <n> --y <n>")
+	count, countOK := intFlagValue(args, "count")
+	if !countOK {
+		count = 1
+	}
+	if !xOK || !yOK || x < 0 || y < 0 || count < 1 || count > 2 {
+		return exit(2, "usage: crabbox desktop click --id <lease-id-or-slug> --x <n> --y <n> [--count 1|2]")
 	}
 	if !desktopClickSupportsTarget(target) {
 		return exit(2, "desktop click supports target=linux, target=macos, or target=windows with windowsMode=normal")
 	}
 	if target.TargetOS == targetMacOS {
-		if err := clickRemoteMacVNC(ctx, cfg, target, x, y); err != nil {
+		if err := clickRemoteMacVNC(ctx, cfg, target, x, y, count); err != nil {
 			return exit(5, "desktop click failed for %s: %v", leaseID, err)
 		}
-		fmt.Fprintf(a.Stdout, "clicked: lease=%s x=%d y=%d method=vnc\n", leaseID, x, y)
+		fmt.Fprintf(a.Stdout, "clicked: lease=%s x=%d y=%d count=%d method=vnc\n", leaseID, x, y, count)
 		return nil
+	}
+	if count != 1 {
+		return exit(2, "desktop click --count is currently supported only for target=macos")
 	}
 	if out, err := runSSHCombinedOutput(ctx, target, desktopClickRemoteCommand(target, x, y)); err != nil {
 		a.printDesktopInputRescue(classifyDesktopFailure(out), out, cfg, target, leaseID)
@@ -210,6 +217,7 @@ func (a App) desktopCommandTarget(ctx context.Context, name string, args []strin
 	if strings.HasSuffix(name, "click") {
 		fs.Int("x", -1, "x coordinate")
 		fs.Int("y", -1, "y coordinate")
+		fs.Int("count", 1, "click count (macOS only: 1 or 2)")
 	}
 	if strings.HasSuffix(name, "paste") || strings.HasSuffix(name, "type") {
 		fs.String("text", "", "text to enter")
