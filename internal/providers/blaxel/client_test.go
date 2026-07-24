@@ -343,3 +343,102 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	}
 	return parsed
 }
+
+func TestAPICreateSandboxRequestMapsLifecyclePolicies(t *testing.T) {
+	t.Parallel()
+
+	got := apiCreateSandboxRequest(CreateSandboxRequest{
+		Name:     "sbx-test",
+		Image:    "blaxel/base-image:latest",
+		Region:   "us-was-1",
+		MemoryMB: 2048,
+		TTL:      "20m",
+		IdleTTL:  "10m",
+	})
+
+	if got.Spec.Runtime.TTL != "20m" {
+		t.Fatalf("runtime.ttl=%q", got.Spec.Runtime.TTL)
+	}
+	if got.Spec.Lifecycle.TerminatedRetention != defaultTerminatedRetention {
+		t.Fatalf("terminatedRetention=%q", got.Spec.Lifecycle.TerminatedRetention)
+	}
+	if len(got.Spec.Lifecycle.ExpirationPolicies) != 2 {
+		t.Fatalf("policies=%#v", got.Spec.Lifecycle.ExpirationPolicies)
+	}
+	if got.Spec.Lifecycle.ExpirationPolicies[0] != (blaxelExpirationPolicy{Action: "delete", Type: "ttl-max-age", Value: "20m"}) {
+		t.Fatalf("max-age policy=%#v", got.Spec.Lifecycle.ExpirationPolicies[0])
+	}
+	if got.Spec.Lifecycle.ExpirationPolicies[1] != (blaxelExpirationPolicy{Action: "delete", Type: "ttl-idle", Value: "10m"}) {
+		t.Fatalf("idle policy=%#v", got.Spec.Lifecycle.ExpirationPolicies[1])
+	}
+
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		`"expirationPolicies"`,
+		`"ttl-max-age"`,
+		`"ttl-idle"`,
+		`"terminatedRetention":"5m"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("create body missing %s: %s", want, body)
+		}
+	}
+}
+
+func TestAPICreateSandboxRequestDefaultsLifecycleWhenTTLUnset(t *testing.T) {
+	t.Parallel()
+
+	got := apiCreateSandboxRequest(CreateSandboxRequest{
+		Name:  "sbx-default",
+		Image: "blaxel/base-image:latest",
+	})
+	if len(got.Spec.Lifecycle.ExpirationPolicies) != 1 {
+		t.Fatalf("policies=%#v", got.Spec.Lifecycle.ExpirationPolicies)
+	}
+	if got.Spec.Lifecycle.ExpirationPolicies[0].Type != "ttl-max-age" || got.Spec.Lifecycle.ExpirationPolicies[0].Value != defaultSandboxMaxAgeTTL {
+		t.Fatalf("default policy=%#v", got.Spec.Lifecycle.ExpirationPolicies[0])
+	}
+	if got.Spec.Lifecycle.TerminatedRetention != defaultTerminatedRetention {
+		t.Fatalf("terminatedRetention=%q", got.Spec.Lifecycle.TerminatedRetention)
+	}
+	if got.Spec.Runtime.TTL != defaultSandboxMaxAgeTTL {
+		t.Fatalf("runtime.ttl=%q", got.Spec.Runtime.TTL)
+	}
+}
+
+func TestAPICreateSandboxRequestHonorsExplicitTerminatedRetention(t *testing.T) {
+	t.Parallel()
+
+	got := apiCreateSandboxRequest(CreateSandboxRequest{
+		Name:                "sbx-ret",
+		IdleTTL:             "3m",
+		TerminatedRetention: "15m",
+	})
+	if got.Spec.Lifecycle.TerminatedRetention != "15m" {
+		t.Fatalf("terminatedRetention=%q", got.Spec.Lifecycle.TerminatedRetention)
+	}
+	if len(got.Spec.Lifecycle.ExpirationPolicies) != 1 || got.Spec.Lifecycle.ExpirationPolicies[0].Type != "ttl-idle" {
+		t.Fatalf("policies=%#v", got.Spec.Lifecycle.ExpirationPolicies)
+	}
+}
+
+
+func TestAPIUpdateSandboxRequestOmitsEmptyLifecycle(t *testing.T) {
+	t.Parallel()
+	got := apiUpdateSandboxRequest(Sandbox{ID: "sbx-1", Name: "sbx-1", Region: "us-was-1", Image: "img"}, map[string]string{"crabbox.lease": "blx_sbx-1"})
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	if strings.Contains(body, "lifecycle") || strings.Contains(body, "runtime") || strings.Contains(body, "region") || strings.Contains(body, `"spec"`) {
+		t.Fatalf("update body should be labels-only, got %s", body)
+	}
+	if !strings.Contains(body, `"crabbox.lease":"blx_sbx-1"`) {
+		t.Fatalf("missing labels: %s", body)
+	}
+}

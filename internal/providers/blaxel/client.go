@@ -40,8 +40,11 @@ type CreateSandboxRequest struct {
 	MemoryMB   int               `json:"memoryMb,omitempty"`
 	TTL        string            `json:"ttl,omitempty"`
 	IdleTTL    string            `json:"idleTtl,omitempty"`
-	WorkingDir string            `json:"workingDir,omitempty"`
-	Labels     map[string]string `json:"labels,omitempty"`
+	// TerminatedRetention is optional Blaxel lifecycle retention after stop/delete.
+	// When empty and any expiration policy is present, apiCreateSandboxRequest defaults it to "5m".
+	TerminatedRetention string            `json:"terminatedRetention,omitempty"`
+	WorkingDir          string            `json:"workingDir,omitempty"`
+	Labels              map[string]string `json:"labels,omitempty"`
 }
 
 type ListSandboxesRequest struct {
@@ -583,6 +586,12 @@ func cleanSandboxPath(value string) string {
 	return strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(value)), "/")
 }
 
+type blaxelExpirationPolicy struct {
+	Action string `json:"action,omitempty"`
+	Type   string `json:"type,omitempty"`
+	Value  string `json:"value,omitempty"`
+}
+
 type blaxelAPISandbox struct {
 	Metadata struct {
 		Name      string            `json:"name,omitempty"`
@@ -596,19 +605,27 @@ type blaxelAPISandbox struct {
 		Runtime struct {
 			Image  string `json:"image,omitempty"`
 			Memory int    `json:"memory,omitempty"`
-			TTL    string `json:"ttl,omitempty"`
+			// TTL is retained for older Blaxel control planes that still read runtime.ttl.
+			// Modern APIs require spec.lifecycle.expirationPolicies (see apiCreateSandboxRequest).
+			TTL string `json:"ttl,omitempty"`
 		} `json:"runtime,omitempty"`
 		Lifecycle struct {
-			ExpirationPolicies []struct {
-				Action string `json:"action,omitempty"`
-				Type   string `json:"type,omitempty"`
-				Value  string `json:"value,omitempty"`
-			} `json:"expirationPolicies,omitempty"`
+			ExpirationPolicies  []blaxelExpirationPolicy `json:"expirationPolicies,omitempty"`
+			TerminatedRetention string                   `json:"terminatedRetention,omitempty"`
 		} `json:"lifecycle,omitempty"`
 	} `json:"spec,omitempty"`
 	State  string `json:"state,omitempty"`
 	Status string `json:"status,omitempty"`
 }
+
+// defaultTerminatedRetention is applied whenever Crabbox emits lifecycle
+// expiration policies. Blaxel rejects creates whose lifecycle object is empty.
+const defaultTerminatedRetention = "5m"
+
+// defaultSandboxMaxAgeTTL is used when neither --blaxel-ttl nor --blaxel-idle-ttl
+// is set. The live Blaxel API requires at least one expiration policy or a
+// terminatedRetention value; an empty lifecycle body returns HTTP 400.
+const defaultSandboxMaxAgeTTL = "2h"
 
 func apiCreateSandboxRequest(req CreateSandboxRequest) blaxelAPISandbox {
 	var out blaxelAPISandbox
@@ -617,27 +634,68 @@ func apiCreateSandboxRequest(req CreateSandboxRequest) blaxelAPISandbox {
 	out.Spec.Region = req.Region
 	out.Spec.Runtime.Image = req.Image
 	out.Spec.Runtime.Memory = req.MemoryMB
-	out.Spec.Runtime.TTL = req.TTL
-	if strings.TrimSpace(req.IdleTTL) != "" {
-		out.Spec.Lifecycle.ExpirationPolicies = []struct {
-			Action string `json:"action,omitempty"`
-			Type   string `json:"type,omitempty"`
-			Value  string `json:"value,omitempty"`
-		}{{
+
+	ttl := strings.TrimSpace(req.TTL)
+	idleTTL := strings.TrimSpace(req.IdleTTL)
+	// Keep legacy runtime.ttl for older backends when a max-age is configured.
+	out.Spec.Runtime.TTL = ttl
+
+	var policies []blaxelExpirationPolicy
+	if ttl != "" {
+		policies = append(policies, blaxelExpirationPolicy{
+			Action: "delete",
+			Type:   "ttl-max-age",
+			Value:  ttl,
+		})
+	}
+	if idleTTL != "" {
+		policies = append(policies, blaxelExpirationPolicy{
 			Action: "delete",
 			Type:   "ttl-idle",
-			Value:  req.IdleTTL,
-		}}
+			Value:  idleTTL,
+		})
 	}
+	// Ensure modern Blaxel always receives a non-empty lifecycle configuration.
+	// Without this, creates fail with:
+	//   "lifecycle configuration must contain at least one expiration policy
+	//    or a terminated retention duration"
+	if len(policies) == 0 {
+		policies = append(policies, blaxelExpirationPolicy{
+			Action: "delete",
+			Type:   "ttl-max-age",
+			Value:  defaultSandboxMaxAgeTTL,
+		})
+		if out.Spec.Runtime.TTL == "" {
+			out.Spec.Runtime.TTL = defaultSandboxMaxAgeTTL
+		}
+	}
+	out.Spec.Lifecycle.ExpirationPolicies = policies
+
+	retention := strings.TrimSpace(req.TerminatedRetention)
+	if retention == "" {
+		retention = defaultTerminatedRetention
+	}
+	out.Spec.Lifecycle.TerminatedRetention = retention
 	return out
 }
 
-func apiUpdateSandboxRequest(current Sandbox, labels map[string]string) blaxelAPISandbox {
-	var out blaxelAPISandbox
+type blaxelAPISandboxLabelUpdate struct {
+	Metadata struct {
+		Name   string            `json:"name,omitempty"`
+		Labels map[string]string `json:"labels,omitempty"`
+	} `json:"metadata,omitempty"`
+}
+
+func apiUpdateSandboxRequest(current Sandbox, labels map[string]string) blaxelAPISandboxLabelUpdate {
+	// Label updates must not rewrite sandbox runtime/lifecycle. encoding/json
+	// never omits nested struct values, so a labels PUT built from blaxelAPISandbox
+	// would serialize empty "lifecycle":{} / "runtime":{} objects. Blaxel treats
+	// that as clearing policies and returns HTTP 400:
+	//   lifecycle configuration must contain at least one expiration policy
+	//   or a terminated retention duration
+	var out blaxelAPISandboxLabelUpdate
 	out.Metadata.Name = firstNonEmpty(current.Name, current.ID)
 	out.Metadata.Labels = labels
-	out.Spec.Region = current.Region
-	out.Spec.Runtime.Image = current.Image
 	return out
 }
 
