@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -179,7 +180,7 @@ func TestClientUsesManagementShapeAndSandboxDataPlane(t *testing.T) {
 				t.Fatalf("process body=%#v", body)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"pid": "1234", "status": "running"})
-		case r.Method == http.MethodPost && r.URL.Path == "/sandbox/sbx-1/filesystem-multipart/initiate/tmp/archive.tgz":
+		case r.Method == http.MethodPost && r.URL.Path == "/sandbox/sbx-1/filesystem-multipart/initiate//tmp/archive.tgz":
 			_ = json.NewEncoder(w).Encode(map[string]any{"uploadId": "upload-1", "path": "/tmp/archive.tgz"})
 		case r.Method == http.MethodPut && r.URL.Path == "/sandbox/sbx-1/filesystem-multipart/upload-1/part":
 			sawUpload = true
@@ -426,19 +427,157 @@ func TestAPICreateSandboxRequestHonorsExplicitTerminatedRetention(t *testing.T) 
 	}
 }
 
+func TestUpdateSandboxLabelsRoundTripsFullDocument(t *testing.T) {
+	// Blaxel PUT is a full replace: the update body must carry the current
+	// spec (runtime + lifecycle) or the sandbox gets DEACTIVATED.
+	var putBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v0/sandboxes/sbx-1" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": "sbx-1", "labels": map[string]string{"old": "1"}},
+				"spec": map[string]any{
+					"region":  "us-pdx-1",
+					"runtime": map[string]any{"image": "img", "memory": 4096},
+					"lifecycle": map[string]any{
+						"expirationPolicies":  []map[string]string{{"type": "ttl-max-age", "value": "10m", "action": "delete"}},
+						"terminatedRetention": "1m",
+					},
+				},
+				"status": "DEPLOYED",
+			})
+			return
+		}
+		if r.Method == http.MethodPut && r.URL.Path == "/v0/sandboxes/sbx-1" {
+			buf := new(strings.Builder)
+			_, _ = io.Copy(buf, r.Body)
+			putBody = buf.String()
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "sbx-1"}, "status": "DEPLOYED"})
+			return
+		}
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	t.Cleanup(srv.Close)
 
-func TestAPIUpdateSandboxRequestOmitsEmptyLifecycle(t *testing.T) {
-	t.Parallel()
-	got := apiUpdateSandboxRequest(Sandbox{ID: "sbx-1", Name: "sbx-1", Region: "us-was-1", Image: "img"}, map[string]string{"crabbox.lease": "blx_sbx-1"})
-	raw, err := json.Marshal(got)
+	client, err := newBlaxelClient(core.Config{Blaxel: core.BlaxelConfig{
+		APIURL:    srv.URL,
+		APIKey:    "test-key",
+		Workspace: "workspace-test",
+	}}, core.Runtime{HTTP: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := string(raw)
-	if strings.Contains(body, "lifecycle") || strings.Contains(body, "runtime") || strings.Contains(body, "region") || strings.Contains(body, `"spec"`) {
-		t.Fatalf("update body should be labels-only, got %s", body)
+	if _, err := client.UpdateSandboxLabels(context.Background(), "sbx-1", map[string]string{"crabbox.lease": "blx_sbx-1"}); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(body, `"crabbox.lease":"blx_sbx-1"`) {
-		t.Fatalf("missing labels: %s", body)
+	for _, want := range []string{`"crabbox.lease":"blx_sbx-1"`, `"lifecycle"`, `"ttl-max-age"`, `"terminatedRetention":"1m"`, `"runtime"`, `"region"`} {
+		if !strings.Contains(putBody, want) {
+			t.Fatalf("PUT body missing %s: %s", want, putBody)
+		}
+	}
+	if strings.Contains(putBody, `"old":"1"`) {
+		t.Fatalf("PUT body should replace labels, got %s", putBody)
+	}
+}
+
+func TestDoSandboxRetryRecoversFromWorkloadUnavailable(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Management-plane sandbox lookup for sandboxBaseURL.
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v0/sandboxes/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": "sbx", "url": "http://" + r.Host + "/sandbox/sbx"},
+				"status":   "DEPLOYED",
+			})
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/process") {
+			calls++
+			if calls < 3 {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"code":"WORKLOAD_UNAVAILABLE","status":404}`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"pid":"123","status":"running"}`))
+			return
+		}
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := newBlaxelClient(core.Config{Blaxel: core.BlaxelConfig{
+		APIURL:    srv.URL,
+		APIKey:    "test-key",
+		Workspace: "workspace-test",
+	}}, core.Runtime{HTTP: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, ok := client.(*restClient)
+	if !ok {
+		t.Fatalf("unexpected client type %T", client)
+	}
+
+	oldDelays := blaxelWorkloadRetryDelays
+	blaxelWorkloadRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { blaxelWorkloadRetryDelays = oldDelays })
+
+	var out blaxelAPIProcess
+	_, err = rc.doSandboxRetry(context.Background(), "sbx", http.MethodPost, "/process", nil, map[string]any{}, &out)
+	if err != nil {
+		t.Fatalf("doSandboxRetry: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 calls, got %d", calls)
+	}
+	if out.PID != "123" {
+		t.Fatalf("unexpected pid %s", out.PID)
+	}
+}
+
+func TestDoSandboxRetryDoesNotRetryOtherErrors(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v0/sandboxes/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": "sbx", "url": "http://" + r.Host + "/sandbox/sbx"},
+				"status":   "DEPLOYED",
+			})
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/process") {
+			calls++
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"bad request"}`))
+			return
+		}
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := newBlaxelClient(core.Config{Blaxel: core.BlaxelConfig{
+		APIURL:    srv.URL,
+		APIKey:    "test-key",
+		Workspace: "workspace-test",
+	}}, core.Runtime{HTTP: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, ok := client.(*restClient)
+	if !ok {
+		t.Fatalf("unexpected client type %T", client)
+	}
+
+	oldDelays := blaxelWorkloadRetryDelays
+	blaxelWorkloadRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { blaxelWorkloadRetryDelays = oldDelays })
+
+	var out blaxelAPIProcess
+	_, err = rc.doSandboxRetry(context.Background(), "sbx", http.MethodPost, "/process", nil, map[string]any{}, &out)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 call for non-retryable error, got %d", calls)
 	}
 }

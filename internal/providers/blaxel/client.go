@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 )
 
 type Client interface {
@@ -34,12 +35,12 @@ type Client interface {
 }
 
 type CreateSandboxRequest struct {
-	Name       string            `json:"name,omitempty"`
-	Image      string            `json:"image,omitempty"`
-	Region     string            `json:"region,omitempty"`
-	MemoryMB   int               `json:"memoryMb,omitempty"`
-	TTL        string            `json:"ttl,omitempty"`
-	IdleTTL    string            `json:"idleTtl,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Image    string `json:"image,omitempty"`
+	Region   string `json:"region,omitempty"`
+	MemoryMB int    `json:"memoryMb,omitempty"`
+	TTL      string `json:"ttl,omitempty"`
+	IdleTTL  string `json:"idleTtl,omitempty"`
 	// TerminatedRetention is optional Blaxel lifecycle retention after stop/delete.
 	// When empty and any expiration policy is present, apiCreateSandboxRequest defaults it to "5m".
 	TerminatedRetention string            `json:"terminatedRetention,omitempty"`
@@ -356,13 +357,30 @@ func listLabelQuery(labels map[string]string) string {
 }
 
 func (c *restClient) UpdateSandboxLabels(ctx context.Context, id string, labels map[string]string) (Sandbox, error) {
-	current, err := c.GetSandbox(ctx, id)
+	// Blaxel PUT is a full replace: a labels-only body passes validation but
+	// DEACTIVATES the sandbox (spec is dropped). Round-trip the current
+	// document and merge labels into it so runtime/lifecycle survive.
+	raw, err := c.do(ctx, http.MethodGet, "/v0/sandboxes/"+url.PathEscape(id), nil, nil, nil)
 	if err != nil {
 		return Sandbox{}, err
 	}
-	req := apiUpdateSandboxRequest(current, labels)
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return Sandbox{}, fmt.Errorf("blaxel sandbox %s: decode for label update: %w", id, err)
+	}
+	metadata, _ := doc["metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = map[string]any{}
+		doc["metadata"] = metadata
+	}
+	metadata["labels"] = labels
+	// Send only metadata + spec back: status/timestamps are server-owned.
+	body := map[string]any{"metadata": metadata}
+	if spec, ok := doc["spec"]; ok {
+		body["spec"] = spec
+	}
 	var out blaxelAPISandbox
-	_, err = c.do(ctx, http.MethodPut, "/v0/sandboxes/"+url.PathEscape(id), nil, req, &out)
+	_, err = c.do(ctx, http.MethodPut, "/v0/sandboxes/"+url.PathEscape(id), nil, body, &out)
 	if err != nil {
 		return Sandbox{}, err
 	}
@@ -376,19 +394,19 @@ func (c *restClient) DeleteSandbox(ctx context.Context, id string) error {
 
 func (c *restClient) ExecuteProcess(ctx context.Context, sandbox string, req ExecuteProcessRequest) (Process, error) {
 	var out blaxelAPIProcess
-	_, err := c.doSandbox(ctx, sandbox, http.MethodPost, "/process", nil, apiProcessRequest(req), &out)
+	_, err := c.doSandboxRetry(ctx, sandbox, http.MethodPost, "/process", nil, apiProcessRequest(req), &out)
 	return out.process(), err
 }
 
 func (c *restClient) GetProcess(ctx context.Context, sandbox, process string) (Process, error) {
 	var out blaxelAPIProcess
-	_, err := c.doSandbox(ctx, sandbox, http.MethodGet, "/process/"+url.PathEscape(process), nil, nil, &out)
+	_, err := c.doSandboxRetry(ctx, sandbox, http.MethodGet, "/process/"+url.PathEscape(process), nil, nil, &out)
 	return out.process(), err
 }
 
 func (c *restClient) GetProcessLogs(ctx context.Context, sandbox, process string) (ProcessLogs, error) {
 	var out ProcessLogs
-	_, err := c.doSandbox(ctx, sandbox, http.MethodGet, "/process/"+url.PathEscape(process)+"/logs", nil, nil, &out)
+	_, err := c.doSandboxRetry(ctx, sandbox, http.MethodGet, "/process/"+url.PathEscape(process)+"/logs", nil, nil, &out)
 	return out, err
 }
 
@@ -400,11 +418,39 @@ func (c *restClient) StopProcess(ctx context.Context, sandbox, process string) e
 func (c *restClient) WriteFile(ctx context.Context, sandbox string, req WriteFileRequest) error {
 	endpoint := "/filesystem/" + cleanSandboxPath(req.Path)
 	body := map[string]any{"content": req.Content, "isDirectory": req.Directory}
-	_, err := c.doSandbox(ctx, sandbox, http.MethodPut, endpoint, nil, body, nil)
+	_, err := c.doSandboxRetry(ctx, sandbox, http.MethodPut, endpoint, nil, body, nil)
 	return err
 }
 
 func (c *restClient) UploadFile(ctx context.Context, sandbox, remotePath string, reader io.Reader) error {
+	// Retry the whole multipart flow on WORKLOAD_UNAVAILABLE: the workload
+	// proxy can still be coming up after the control plane says ready.
+	// Safe because that error means the request never reached the workload.
+	for attempt := 0; ; attempt++ {
+		err := c.uploadFileOnce(ctx, sandbox, remotePath, reader)
+		if err == nil || !isWorkloadUnavailable(err) || attempt >= len(blaxelWorkloadRetryDelays) {
+			return err
+		}
+		// Rewind the source for the next attempt (sync passes an *os.File).
+		seeker, ok := reader.(io.Seeker)
+		if !ok {
+			return err
+		}
+		if _, seekErr := seeker.Seek(0, io.SeekStart); seekErr != nil {
+			return err
+		}
+		delay := blaxelWorkloadRetryDelays[attempt]
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (c *restClient) uploadFileOnce(ctx context.Context, sandbox, remotePath string, reader io.Reader) error {
 	initiate := struct {
 		Permissions string `json:"permissions,omitempty"`
 	}{Permissions: "0644"}
@@ -430,7 +476,7 @@ func (c *restClient) UploadFile(ctx context.Context, sandbox, remotePath string,
 func (c *restClient) GetDirectoryTree(ctx context.Context, sandbox, remotePath string) (DirectoryTree, error) {
 	var out DirectoryTree
 	endpoint := "/filesystem/tree/" + cleanSandboxPath(remotePath)
-	_, err := c.doSandbox(ctx, sandbox, http.MethodGet, endpoint, nil, nil, &out)
+	_, err := c.doSandboxRetry(ctx, sandbox, http.MethodGet, endpoint, nil, nil, &out)
 	return out, err
 }
 
@@ -446,6 +492,49 @@ func (c *restClient) do(ctx context.Context, method, endpoint string, values url
 	return c.doAt(ctx, c.base, method, endpoint, values, request, response)
 }
 
+// blaxelWorkloadRetryDelays follows Blaxel's own WORKLOAD_UNAVAILABLE guidance:
+// exponential backoff starting at 500ms, capping at 30s, giving up after ~60s.
+var blaxelWorkloadRetryDelays = []time.Duration{
+	500 * time.Millisecond,
+	1 * time.Second,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+}
+
+// isWorkloadUnavailable reports whether err is Blaxel's transient "workload
+// not yet serving" response. The control plane can mark a sandbox ready while
+// the workload proxy still 404s every data-plane request for tens of seconds.
+func isWorkloadUnavailable(err error) bool {
+	var apiErr apiError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return strings.Contains(apiErr.Body, "WORKLOAD_UNAVAILABLE")
+}
+
+// doSandboxRetry wraps doSandbox with bounded retries for the sandbox data
+// plane (process exec, filesystem, multipart upload). WORKLOAD_UNAVAILABLE
+// means the request never reached the workload, so retrying is safe.
+// Management-plane calls keep using do/doSandbox directly.
+func (c *restClient) doSandboxRetry(ctx context.Context, sandbox, method, endpoint string, values url.Values, request any, response any) ([]byte, error) {
+	body, err := c.doSandbox(ctx, sandbox, method, endpoint, values, request, response)
+	for i := 0; err != nil && isWorkloadUnavailable(err) && i < len(blaxelWorkloadRetryDelays); i++ {
+		delay := blaxelWorkloadRetryDelays[i]
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		body, err = c.doSandbox(ctx, sandbox, method, endpoint, values, request, response)
+	}
+	return body, err
+}
+
 func (c *restClient) doAt(ctx context.Context, baseURL, method, endpoint string, values url.Values, request any, response any) ([]byte, error) {
 	var body io.Reader
 	if request != nil {
@@ -459,7 +548,7 @@ func (c *restClient) doAt(ctx context.Context, baseURL, method, endpoint string,
 	if err != nil {
 		return nil, err
 	}
-	reqURL.Path = path.Join(reqURL.Path, endpoint)
+	reqURL.Path = joinEndpointPreservingDoubleSlash(reqURL.Path, endpoint)
 	if strings.HasSuffix(endpoint, "/") && !strings.HasSuffix(reqURL.Path, "/") {
 		reqURL.Path += "/"
 	}
@@ -550,7 +639,7 @@ func (c *restClient) doMultipartAt(ctx context.Context, baseURL, method, endpoin
 	if err != nil {
 		return nil, err
 	}
-	reqURL.Path = path.Join(reqURL.Path, endpoint)
+	reqURL.Path = joinEndpointPreservingDoubleSlash(reqURL.Path, endpoint)
 	reqURL.RawQuery = values.Encode()
 	httpReq, err := http.NewRequestWithContext(ctx, method, reqURL.String(), body)
 	if err != nil {
@@ -583,7 +672,18 @@ func (c *restClient) doMultipartAt(ctx context.Context, baseURL, method, endpoin
 }
 
 func cleanSandboxPath(value string) string {
-	return strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(value)), "/")
+	// Keep the leading slash: Blaxel's filesystem APIs treat relative paths as
+	// living under their virtual /blaxel root (invisible to sandbox processes),
+	// while absolute paths map to the real guest filesystem.
+	return path.Clean("/" + strings.TrimSpace(value))
+}
+
+// joinEndpointPreservingDoubleSlash appends an endpoint to a base path without
+// collapsing "//": filesystem endpoints encode absolute guest paths as
+// "/filesystem/<verb>//abs/path" (leading "/" after the verb marks the path as
+// guest-absolute), and path.Join would silently flatten it to a relative path.
+func joinEndpointPreservingDoubleSlash(base, endpoint string) string {
+	return strings.TrimRight(base, "/") + endpoint
 }
 
 type blaxelExpirationPolicy struct {
@@ -676,26 +776,6 @@ func apiCreateSandboxRequest(req CreateSandboxRequest) blaxelAPISandbox {
 		retention = defaultTerminatedRetention
 	}
 	out.Spec.Lifecycle.TerminatedRetention = retention
-	return out
-}
-
-type blaxelAPISandboxLabelUpdate struct {
-	Metadata struct {
-		Name   string            `json:"name,omitempty"`
-		Labels map[string]string `json:"labels,omitempty"`
-	} `json:"metadata,omitempty"`
-}
-
-func apiUpdateSandboxRequest(current Sandbox, labels map[string]string) blaxelAPISandboxLabelUpdate {
-	// Label updates must not rewrite sandbox runtime/lifecycle. encoding/json
-	// never omits nested struct values, so a labels PUT built from blaxelAPISandbox
-	// would serialize empty "lifecycle":{} / "runtime":{} objects. Blaxel treats
-	// that as clearing policies and returns HTTP 400:
-	//   lifecycle configuration must contain at least one expiration policy
-	//   or a terminated retention duration
-	var out blaxelAPISandboxLabelUpdate
-	out.Metadata.Name = firstNonEmpty(current.Name, current.ID)
-	out.Metadata.Labels = labels
 	return out
 }
 
