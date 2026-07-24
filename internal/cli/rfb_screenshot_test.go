@@ -391,6 +391,24 @@ func TestClickRFBPointerSendsPressAndRelease(t *testing.T) {
 	}
 }
 
+func TestDoubleClickRFBPointerSendsTwoPressAndReleasePairs(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- serveTestPointerRFBWithCount(server, 12, 34, 2)
+	}()
+
+	if err := clickRFBPointerFromConnCount(context.Background(), client, rfbCredentials{}, localWebVNCAuthAuto, 12, 34, 2); err != nil {
+		t.Fatalf("double click RFB pointer: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake RFB server: %v", err)
+	}
+}
+
 func TestClickRFBPointerHonorsVNCModeWhenServerOffersARD(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
@@ -577,11 +595,18 @@ func TestRFBPasswordOnlyCredentialsPreferVNCAuth(t *testing.T) {
 }
 
 func serveTestPointerRFB(conn net.Conn, wantX, wantY int) error {
+	return serveTestPointerRFBWithCount(conn, wantX, wantY, 1)
+}
+
+func serveTestPointerRFBWithCount(conn net.Conn, wantX, wantY, count int) error {
 	if err := serveTestInputRFBInit(conn); err != nil {
 		return err
 	}
 
-	wantMasks := []byte{0, 1, 0}
+	wantMasks := []byte{0}
+	for click := 0; click < count; click++ {
+		wantMasks = append(wantMasks, 1, 0)
+	}
 	for _, wantMask := range wantMasks {
 		event := make([]byte, 6)
 		if _, err := io.ReadFull(conn, event); err != nil {
