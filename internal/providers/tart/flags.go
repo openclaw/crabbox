@@ -10,12 +10,13 @@ import (
 )
 
 type flagValues struct {
-	Image        *string
-	User         *string
-	CPUs         *int
-	Memory       *int
-	Disk         *int
-	RandomSerial *bool
+	Image          *string
+	User           *string
+	CPUs           *int
+	Memory         *int
+	Disk           *int
+	RandomSerial   *bool
+	USBPassthrough *bool
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -29,6 +30,11 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 			"tart-random-serial",
 			defaults.Tart.RandomSerial,
 			"generate a new macOS machine identifier for each cloned VM",
+		),
+		USBPassthrough: fs.Bool(
+			"tart-usb-passthrough",
+			defaults.Tart.USBPassthrough,
+			"allow selected physical USB accessories to attach to the VM (macOS 27+ host)",
 		),
 	}
 }
@@ -68,6 +74,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "tart-random-serial") {
 		cfg.Tart.RandomSerial = *v.RandomSerial
+	}
+	if flagWasSet(fs, "tart-usb-passthrough") {
+		cfg.Tart.USBPassthrough = *v.USBPassthrough
 	}
 	if isTartProviderName(cfg.Provider) {
 		if core.IsTargetExplicit(cfg) && cfg.TargetOS != targetMacOS {

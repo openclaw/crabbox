@@ -3400,6 +3400,7 @@ func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
 	t.Setenv("CRABBOX_TART_MEMORY", "16384")
 	t.Setenv("CRABBOX_TART_DISK", "100")
 	t.Setenv("CRABBOX_TART_RANDOM_SERIAL", "true")
+	t.Setenv("CRABBOX_TART_USB_PASSTHROUGH", "true")
 	applyEnv(&cfg)
 	if cfg.Tart.Image != "ghcr.io/env:latest" || cfg.Tart.User != "env-user" || cfg.Tart.WorkRoot != "/work/env" || cfg.Tart.CPUs != 8 || cfg.Tart.Memory != 16384 || cfg.Tart.Disk != 100 {
 		t.Fatalf("env tart config not applied: %+v", cfg.Tart)
@@ -3409,6 +3410,9 @@ func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if !cfg.Tart.RandomSerial {
 		t.Fatal("CRABBOX_TART_RANDOM_SERIAL did not enable random serial")
+	}
+	if !cfg.Tart.USBPassthrough {
+		t.Fatal("CRABBOX_TART_USB_PASSTHROUGH did not enable USB passthrough")
 	}
 	t.Setenv("CRABBOX_TART_DISK", "0")
 	applyEnv(&cfg)
@@ -3798,11 +3802,13 @@ func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
 	zero := 0
 	negative := -1
 	randomSerial := true
+	usbPassthrough := true
 	file.Tart = &fileTartConfig{
-		CPUs:         &zero,
-		Memory:       &zero,
-		Disk:         &negative,
-		RandomSerial: &randomSerial,
+		CPUs:           &zero,
+		Memory:         &zero,
+		Disk:           &negative,
+		RandomSerial:   &randomSerial,
+		USBPassthrough: &usbPassthrough,
 	}
 	if err := applyFileConfig(&cfg, file); err != nil {
 		t.Fatal(err)
@@ -3818,6 +3824,9 @@ func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
 	}
 	if !cfg.Tart.RandomSerial {
 		t.Fatal("Tart.RandomSerial=false, want true from YAML")
+	}
+	if !cfg.Tart.USBPassthrough {
+		t.Fatal("Tart.USBPassthrough=false, want true from YAML")
 	}
 	if !IsTartCPUsExplicit(&cfg) {
 		t.Fatal("tartCPUsExplicit must be true after YAML sets cpus")

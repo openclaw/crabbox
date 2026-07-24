@@ -55,11 +55,18 @@ tart:
   cpus: 4
   memory: 8192
   # disk: 80  # only set to resize beyond the base image default
+  # usbPassthrough: true  # macOS 27+ host; requires a signed Tart build
 ```
 
 Environment variables: `CRABBOX_TART_IMAGE`, `CRABBOX_TART_USER`,
 `CRABBOX_TART_PASSWORD`, `CRABBOX_TART_WORK_ROOT`, `CRABBOX_TART_CPUS`,
-`CRABBOX_TART_MEMORY`, `CRABBOX_TART_DISK`.
+`CRABBOX_TART_MEMORY`, `CRABBOX_TART_DISK`, `CRABBOX_TART_RANDOM_SERIAL`,
+`CRABBOX_TART_USB_PASSTHROUGH`.
+
+USB passthrough is opt-in. On a macOS 27 or newer host it adds Tart's
+`--usb-passthrough` run flag. The Tart executable must be Dock-visible and
+signed with Apple's `com.apple.developer.accessory-access.usb` entitlement.
+The host user selects the physical accessory from macOS's accessory menu.
 
 `CRABBOX_TART_PASSWORD` (or `tart.password` in the mode-0600 user config printed
 by `crabbox config path`) is the guest account password the local WebVNC viewer

@@ -343,9 +343,16 @@ func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
 }
 
 func TestStartVMArgsHeadless(t *testing.T) {
-	args := startVMArgs("crabbox-blue-1234abcd")
+	args := startVMArgs("crabbox-blue-1234abcd", false)
 	if len(args) != 3 || args[0] != "run" || args[2] != "--no-graphics" {
 		t.Fatalf("startVMArgs=%v want [run <name> --no-graphics]", args)
+	}
+}
+
+func TestStartVMArgsUSBPassthrough(t *testing.T) {
+	args := startVMArgs("crabbox-blue-1234abcd", true)
+	if len(args) != 4 || args[3] != "--usb-passthrough" {
+		t.Fatalf("startVMArgs=%v want USB passthrough opt-in", args)
 	}
 }
 
@@ -1269,6 +1276,22 @@ func TestApplyFlagsEnablesRandomSerial(t *testing.T) {
 	}
 	if !cfg.Tart.RandomSerial {
 		t.Fatal("RandomSerial = false, want true")
+	}
+}
+
+func TestApplyFlagsEnablesUSBPassthrough(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	vals := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-usb-passthrough"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, vals); err != nil {
+		t.Fatalf("applyFlags: %v", err)
+	}
+	if !cfg.Tart.USBPassthrough {
+		t.Fatal("USBPassthrough = false, want true")
 	}
 }
 
@@ -4202,7 +4225,7 @@ func TestServerFromInstanceSourcePreferred(t *testing.T) {
 }
 
 func TestStartVMArgsFormat(t *testing.T) {
-	args := startVMArgs("test-vm-name")
+	args := startVMArgs("test-vm-name", false)
 	if len(args) != 3 {
 		t.Fatalf("startVMArgs len = %d, want 3", len(args))
 	}

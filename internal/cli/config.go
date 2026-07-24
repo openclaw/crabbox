@@ -1323,14 +1323,15 @@ type MultipassConfig struct {
 }
 
 type TartConfig struct {
-	Image        string
-	User         string
-	Password     string
-	WorkRoot     string
-	CPUs         int
-	Memory       int
-	Disk         int
-	RandomSerial bool
+	Image          string
+	User           string
+	Password       string
+	WorkRoot       string
+	CPUs           int
+	Memory         int
+	Disk           int
+	RandomSerial   bool
+	USBPassthrough bool
 }
 
 type LumeConfig struct {
@@ -4607,14 +4608,15 @@ type fileMultipassConfig struct {
 }
 
 type fileTartConfig struct {
-	Image        string `yaml:"image,omitempty"`
-	User         string `yaml:"user,omitempty"`
-	Password     string `yaml:"password,omitempty"`
-	WorkRoot     string `yaml:"workRoot,omitempty"`
-	CPUs         *int   `yaml:"cpus,omitempty"`
-	Memory       *int   `yaml:"memory,omitempty"`
-	Disk         *int   `yaml:"disk,omitempty"`
-	RandomSerial *bool  `yaml:"randomSerial,omitempty"`
+	Image          string `yaml:"image,omitempty"`
+	User           string `yaml:"user,omitempty"`
+	Password       string `yaml:"password,omitempty"`
+	WorkRoot       string `yaml:"workRoot,omitempty"`
+	CPUs           *int   `yaml:"cpus,omitempty"`
+	Memory         *int   `yaml:"memory,omitempty"`
+	Disk           *int   `yaml:"disk,omitempty"`
+	RandomSerial   *bool  `yaml:"randomSerial,omitempty"`
+	USBPassthrough *bool  `yaml:"usbPassthrough,omitempty"`
 }
 
 type fileLumeConfig struct {
@@ -7642,6 +7644,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Tart.RandomSerial != nil {
 			cfg.Tart.RandomSerial = *file.Tart.RandomSerial
 		}
+		if file.Tart.USBPassthrough != nil {
+			cfg.Tart.USBPassthrough = *file.Tart.USBPassthrough
+		}
 	}
 	if file.Lume != nil {
 		if trusted {
@@ -9616,6 +9621,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if v, ok := getenvBool("CRABBOX_TART_RANDOM_SERIAL"); ok {
 		cfg.Tart.RandomSerial = v
+	}
+	if v, ok := getenvBool("CRABBOX_TART_USB_PASSTHROUGH"); ok {
+		cfg.Tart.USBPassthrough = v
 	}
 	cfg.Lume.CLIPath = getenv("CRABBOX_LUME_CLI", cfg.Lume.CLIPath)
 	cfg.Lume.Base = getenv("CRABBOX_LUME_BASE", cfg.Lume.Base)

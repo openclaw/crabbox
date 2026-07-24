@@ -133,7 +133,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if core.IsTartDiskExplicit(&cfg) {
 		diskLabel = fmt.Sprintf("%dGB", cfg.Tart.Disk)
 	}
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB disk=%s random_serial=%v keep=%v\n", providerName, leaseID, slug, cfg.Tart.Image, cfg.Tart.CPUs, cfg.Tart.Memory, diskLabel, cfg.Tart.RandomSerial, req.Keep)
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB disk=%s random_serial=%v usb_passthrough=%v keep=%v\n", providerName, leaseID, slug, cfg.Tart.Image, cfg.Tart.CPUs, cfg.Tart.Memory, diskLabel, cfg.Tart.RandomSerial, cfg.Tart.USBPassthrough, req.Keep)
 
 	if err := b.cloneVM(ctx, cfg, name); err != nil {
 		_ = b.deleteVM(context.Background(), name)
@@ -438,15 +438,19 @@ func (b *backend) configureVM(ctx context.Context, cfg Config, name string) erro
 }
 
 // startVMArgs returns the tart run arguments for starting a VM headless.
-func startVMArgs(name string) []string {
-	return []string{"run", name, "--no-graphics"}
+func startVMArgs(name string, usbPassthrough bool) []string {
+	args := []string{"run", name, "--no-graphics"}
+	if usbPassthrough {
+		args = append(args, "--usb-passthrough")
+	}
+	return args
 }
 
 // startVM starts the VM headless in the background.
 // When keep is true the tart process is fully detached so it survives
 // crabbox exit, matching how docker run -d keeps containers alive.
 func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep bool) error {
-	args := startVMArgs(name)
+	args := startVMArgs(name, cfg.Tart.USBPassthrough)
 	var stderrBuf bytes.Buffer
 	var detachedStderr *os.File
 	var devNull *os.File
