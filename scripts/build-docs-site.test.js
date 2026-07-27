@@ -9,6 +9,7 @@ import { markdownToHtml } from "./build-docs-site.mjs";
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const providersDir = path.join(repoRoot, "docs", "providers");
 const integrationsDir = path.join(repoRoot, "docs", "integrations");
+const useCasesFile = path.join(repoRoot, "docs", "use-cases.md");
 const siteDir = path.join(repoRoot, "dist", "docs-site");
 const providerIndexFile = path.join(siteDir, "providers", "index.html");
 const generatedTest = fs.existsSync(providerIndexFile) ? test : test.skip;
@@ -161,15 +162,101 @@ generatedTest("generated AWS page is active in Providers navigation and pager", 
   assert.match(pager, new RegExp(`href="\.\./providers/${escapeRegExp(next)}"`));
 });
 
-generatedTest("homepage primary CTA targets an indexed Start page", () => {
+generatedTest("homepage presents use-case, pricing, and onboarding paths", () => {
   const home = readGenerated("index.html");
   const startNav = navSection(home, "Start");
   const gettingStarted = readGenerated("getting-started.html");
+  const useCases = readGenerated("use-cases.html");
+  const pricing = readGenerated("pricing.html");
 
-  assert.match(home, /<a class="cta-primary" href="getting-started\.html">Get started<\/a>/);
+  assert.match(
+    home,
+    /<title>Crabbox — Run Any Repository Command in the Right Box<\/title>/,
+  );
+  assert.match(home, /<meta name="description" content="[^"]+">/);
+  assert.match(home, /<link rel="canonical" href="https:\/\/crabbox\.sh\/">/);
+  assert.match(home, /<meta property="og:title" content="Crabbox — Run Any Repository Command in the Right Box">/);
+  assert.match(home, /navParams\.get\('docs'\)/);
+  assert.match(home, /next\.searchParams\.set\('docs',value\)/);
+  assert.match(
+    home,
+    /<a class="cta-primary" href="getting-started\.html">Run Your First Command<\/a>/,
+  );
+  assert.match(
+    home,
+    /<a class="cta-secondary" href="#home-use-cases-heading">Route Your Workload<\/a>/,
+  );
+  assert.match(home, /<form class="home-job-finder" data-home-job-finder>/);
+  assert.equal(occurrences(home, 'class="home-job-radio sr-only"'), 6, "homepage should expose six job choices");
+  assert.equal(occurrences(home, 'class="home-job-result"'), 6, "every job choice should have a result");
+  assert.equal(occurrences(home, 'data-home-job-radio checked'), 1, "job finder should have one default route");
+  assert.equal(occurrences(home, 'aria-controls="home-job-result-'), 6, "every job choice should identify its result");
+  assert.equal(occurrences(home, "data-copy-text="), 6, "every job result should expose a runnable copy target");
+  assert.doesNotMatch(home, /data-copy-text="[^"]*\$/);
+  assert.doesNotMatch(home, /data-copy-text="[^"]*&lt;name&gt;/);
+  assert.match(home, /homeJobParams\.get\('job'\)/);
+  assert.match(home, /next\.searchParams\.set\('job',value\)/);
+  const useCaseAnchors = [...home.matchAll(/<a href="use-cases\.html#([^"]+)">Open the /g)]
+    .map((match) => match[1]);
+  assert.equal(useCaseAnchors.length, 6);
+  for (const anchor of useCaseAnchors) {
+    assert.match(useCases, new RegExp(`id="${escapeRegExp(anchor)}"`), `homepage use-case anchor ${anchor} should exist`);
+  }
+  const providersSource = fs.readFileSync(path.join(repoRoot, "internal", "cli", "providers.go"), "utf8");
+  const registry = providersSource.match(
+    /func providerRecommendationUseCases\(\) \[\]string \{\s*return \[\]string\{([\s\S]*?)\n\t\}\n\}/,
+  );
+  assert.ok(registry, "provider recommendation registry should be readable");
+  const registered = new Set([...registry[1].matchAll(/"([a-z][a-z0-9-]*)"/g)].map((match) => match[1]));
+  const finderRecommendations = [...home.matchAll(/class="home-job-command-line"><i aria-hidden="true">\$<\/i><b>crabbox providers recommend ([a-z][a-z0-9-]*)/g)]
+    .map((match) => match[1]);
+  assert.equal(finderRecommendations.length, 9, "job finder should expose every intended starting route");
+  assert.deepEqual(
+    [...new Set(finderRecommendations.filter((name) => !registered.has(name)))],
+    [],
+    "job finder recommendations should stay on the canonical CLI surface",
+  );
+  const providerCount = Object.keys(
+    JSON.parse(fs.readFileSync(path.join(providersDir, "provider-metadata.json"), "utf8")),
+  ).length;
+  assert.match(home, new RegExp(`<li>${providerCount} registered providers</li>`));
+  assert.match(home, new RegExp(`Turn ${providerCount} registered providers into a focused comparison path\\.`));
+  assert.match(home, /href="pricing\.html">See Pricing and Cost Boundaries/);
+  assert.match(home, /There is no generic nested mode\./);
+  assert.match(home, /href="features\/nested-execution\.html">Read the exact boundaries/);
+  assert.match(home, /<aside class="home-trust"[^>]*aria-labelledby="home-trust-heading">/);
+  assert.doesNotMatch(
+    home,
+    /<div class="doc-grid/,
+    "homepage should end after its decision journey instead of embedding the full docs README",
+  );
   assert.match(startNav, /href="getting-started\.html"[^>]*>Getting Started<\/a>/);
+  assert.match(startNav, /href="use-cases\.html"[^>]*>Use Cases<\/a>/);
+  assert.match(startNav, /href="pricing\.html"[^>]*>Pricing and Costs<\/a>/);
   assert.match(gettingStarted, /<a class="nav-link active" href="getting-started\.html"[^>]*aria-current="page">Getting Started<\/a>/);
+  assert.match(useCases, /<a class="nav-link active" href="use-cases\.html"[^>]*aria-current="page">Use Cases<\/a>/);
+  assert.match(pricing, /<a class="nav-link active" href="pricing\.html"[^>]*aria-current="page">Pricing and Costs<\/a>/);
   assert.match(gettingStarted, /<nav class="page-nav"/);
+});
+
+test("use-case guide only invokes registered provider recommendations", () => {
+  const providersSource = fs.readFileSync(path.join(repoRoot, "internal", "cli", "providers.go"), "utf8");
+  const registry = providersSource.match(
+    /func providerRecommendationUseCases\(\) \[\]string \{\s*return \[\]string\{([\s\S]*?)\n\t\}\n\}/,
+  );
+  assert.ok(registry, "provider recommendation registry should be readable");
+  const registered = new Set([...registry[1].matchAll(/"([a-z][a-z0-9-]*)"/g)].map((match) => match[1]));
+  const guide = fs.readFileSync(useCasesFile, "utf8");
+  const invoked = [...guide.matchAll(/^crabbox providers recommend(?: ([a-z][a-z0-9-]*))?(?:\s|$)/gm)]
+    .map((match) => match[1])
+    .filter(Boolean);
+
+  assert.ok(invoked.length > 0, "use-case guide should include recommendation examples");
+  assert.deepEqual(
+    [...new Set(invoked.filter((name) => !registered.has(name)))],
+    [],
+    "use-case guide recommendations should stay on the canonical CLI surface",
+  );
 });
 
 generatedTest("provider index renders filterable rows in a scroll region", () => {
@@ -184,6 +271,9 @@ generatedTest("provider index renders filterable rows in a scroll region", () =>
   assert.match(filter, /data-provider-group-filter="all"[^>]*aria-pressed="true"/);
   assert.match(filter, /data-provider-empty/);
   assert.match(matrixRegion, /<table class="provider-matrix">/);
+  assert.match(html, /new URLSearchParams\(location\.search\)/);
+  assert.match(html, /providerParams\.get\('group'\)/);
+  assert.match(html, /providerParams\.get\('q'\)/);
   assert.equal(
     occurrences(html, "split(/\\s+/)"),
     3,
@@ -265,6 +355,7 @@ generatedTest("generated Features navigation stays capability-focused", () => {
   }
 
   assert.match(featuresNav, /href="\.\.\/features\/configuration\.html"/);
+  assert.match(featuresNav, /href="\.\.\/features\/nested-execution\.html"/);
   assert.match(featuresNav, /href="\.\.\/features\/sync\.html"/);
   assert.match(featuresNav, /href="\.\.\/features\/artifacts\.html"/);
 });
