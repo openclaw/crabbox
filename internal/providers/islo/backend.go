@@ -611,7 +611,7 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 		return "", "", "", err
 	}
 	name := newIsloSandboxName(repo)
-	create := &gosdk.SandboxCreate{Name: stringValue(name)}
+	create := &gosdk.CreateSandboxRequest{Name: stringValue(name)}
 	base := core.BaseConfig()
 	// A non-base image can come from an explicit top-level --os selection;
 	// preserve that supported override even without an islo.image marker.

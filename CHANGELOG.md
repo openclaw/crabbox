@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Refreshed provider SDKs and Worker tooling, preserving Islo sandbox creation across its generated SDK rename and removing known high-severity Worker dependency advisories.
+
 ## 0.40.1 - 2026-07-23
 
 ### Added

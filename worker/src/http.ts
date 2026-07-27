@@ -148,7 +148,7 @@ function redactDiagnosticPass(value: string, secrets: readonly string[]): string
     addRedaction(match.index, match.index + match[0].length);
   }
   for (const secret of secrets) {
-    for (let offset = 0; offset < value.length; ) {
+    for (let offset = 0; offset < value.length;) {
       const start = value.indexOf(secret, offset);
       if (start < 0) break;
       addRedaction(start, start + secret.length);
@@ -160,7 +160,7 @@ function redactDiagnosticPass(value: string, secrets: readonly string[]): string
 
 function diagnosticMarkerRanges(value: string): DiagnosticRedactionRange[] {
   const ranges: DiagnosticRedactionRange[] = [];
-  for (let offset = 0; offset < value.length; ) {
+  for (let offset = 0; offset < value.length;) {
     const squareStart = value.indexOf("[redacted]", offset);
     const angleStart = value.indexOf("<redacted>", offset);
     if (squareStart < 0 && angleStart < 0) break;

@@ -23,7 +23,7 @@ import (
 )
 
 type isloAPI interface {
-	CreateSandbox(context.Context, *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error)
+	CreateSandbox(context.Context, *gosdk.CreateSandboxRequest) (*gosdk.SandboxResponse, error)
 	GetSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
 	PauseSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
 	ResumeSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
@@ -176,7 +176,7 @@ func isloURLEffectiveOrigin(value *url.URL) string {
 	return strings.ToLower(value.Scheme) + "://" + strings.ToLower(value.Hostname()) + ":" + port
 }
 
-func (c *isloSDKClient) CreateSandbox(ctx context.Context, req *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error) {
+func (c *isloSDKClient) CreateSandbox(ctx context.Context, req *gosdk.CreateSandboxRequest) (*gosdk.SandboxResponse, error) {
 	sandbox, err := c.sdk.Sandboxes.CreateSandbox(ctx, req)
 	if err != nil {
 		return nil, isloSanitizeRedirectError(err)

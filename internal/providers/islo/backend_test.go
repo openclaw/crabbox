@@ -1763,7 +1763,7 @@ func TestIsloSDKClientListUsesInjectedHTTPAndPaginates(t *testing.T) {
 				"session_token":  "jwt-from-test",
 				"cookie_max_age": 3600,
 			})
-		case "/sandboxes/":
+		case "/sandboxes":
 			listHits++
 			if got := r.Header.Get("Authorization"); got != "Bearer jwt-from-test" {
 				t.Fatalf("Authorization=%q", got)
@@ -1921,7 +1921,7 @@ type fakeIsloSyncClient struct {
 	execDeadline             time.Time
 	rejectCanceledContext    bool
 	closeUploadReader        bool
-	createRequest            *gosdk.SandboxCreate
+	createRequest            *gosdk.CreateSandboxRequest
 	createName               string
 	getSandbox               *gosdk.SandboxResponse
 	getSandboxes             []*gosdk.SandboxResponse
@@ -1936,7 +1936,7 @@ type fakeIsloSyncClient struct {
 	resumedName              string
 }
 
-func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error) {
+func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.CreateSandboxRequest) (*gosdk.SandboxResponse, error) {
 	f.createRequest = req
 	name := f.createName
 	if name == "" {
