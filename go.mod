@@ -32,7 +32,7 @@ require (
 	github.com/hashicorp/nomad/api v0.0.0-20260724112153-37c73b2918bd
 	github.com/islo-labs/go-sdk v0.0.0-20260719125711-521c0d4b53aa
 	github.com/lima-vm/go-qcow2reader v0.7.1
-	github.com/lxc/incus/v7 v7.2.0
+	github.com/lxc/incus/v7 v7.1.0
 	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36
 	github.com/sirupsen/logrus v1.9.4
 	github.com/tailscale/hujson v0.0.0-20260722022634-78b5b162ee49
