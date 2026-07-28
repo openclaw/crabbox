@@ -3095,6 +3095,10 @@ func startReadyPoolBorrowHeartbeat(ctx context.Context, coord *CoordinatorClient
 			_, err := coord.HeartbeatReadyPoolBorrow(callCtx, entry.Key, entry.LeaseID, entry.BorrowToken)
 			heartbeatCancel()
 			if err != nil && rootCtx.Err() == nil {
+				if readyPoolCoordinatorRouteUnsupported(err) {
+					fmt.Fprintf(stderr, "warning: ready-pool borrow heartbeat is unsupported by the coordinator for %s; disabling heartbeats for this borrow\n", entry.LeaseID)
+					return
+				}
 				fmt.Fprintf(stderr, "warning: ready-pool borrow heartbeat failed for %s: %v\n", entry.LeaseID, err)
 			}
 			select {

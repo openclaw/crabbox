@@ -120,6 +120,10 @@ busy, and in-flight claimed entries count toward `maxReady`; the claim is
 consumed only when a compatible hydrated lease registers. This makes repeated
 or concurrent keepers safe without moving provisioning or hydration into the
 coordinator.
+Once issued, an unexpired claim is not revoked by later desired-capacity or
+compatibility changes. Those changes only gate issuance of new claims, so a
+keeper that has already paid the provisioning and hydration cost can still
+register its lease.
 
 A future autoscaler can adjust the persisted target using observed demand:
 
@@ -138,9 +142,12 @@ draining and release the oldest first.
 repo/ref overrides must come from config so creation and readiness counting use
 the same borrow criteria.
 
-Borrow creates a two-minute deadline. `crabbox run --pool` refreshes it every
-30 seconds; manual keepers use `pool heartbeat`. A missed deadline quarantines
-the entry so a late borrower cannot silently return it to ready. Stale and
+Borrow heartbeat enforcement is negotiated per borrow. `crabbox run --pool`
+opts in and refreshes its two-minute deadline every 30 seconds. Manual and
+older-client borrows have no deadline until their first successful
+`pool heartbeat`, which opts them in. A missed negotiated deadline quarantines
+the entry so a late borrower cannot silently return it to ready. This keeps a
+new worker compatible with already-deployed CLIs during rollout. Stale and
 quarantined records are pruned after 24 hours. The metrics route reports current
 state counts plus borrow, hit/miss, fill, heartbeat, quarantine, and prune
 counters.

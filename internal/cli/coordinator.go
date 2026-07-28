@@ -1636,6 +1636,12 @@ func isCoordinatorNotFound(err error) bool {
 	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound
 }
 
+func readyPoolCoordinatorRouteUnsupported(err error) bool {
+	var httpErr CoordinatorHTTPError
+	return errors.As(err, &httpErr) &&
+		(httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusMethodNotAllowed)
+}
+
 func (c *CoordinatorClient) CreateImage(ctx context.Context, leaseID, name string, noReboot bool, strategies ...string) (CoordinatorImage, error) {
 	var res struct {
 		Image CoordinatorImage `json:"image"`

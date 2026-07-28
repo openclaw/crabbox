@@ -494,6 +494,7 @@ export interface ReadyPoolEntry {
   workRoot?: string;
   borrowedBy?: string;
   borrowedAt?: string;
+  borrowHeartbeatRequired?: boolean;
   borrowHeartbeatAt?: string;
   borrowExpiresAt?: string;
   borrowToken?: string;
@@ -528,6 +529,7 @@ export interface ReadyPoolBorrowRequest {
   allowMissingCommit?: boolean;
   fingerprint?: string;
   compatibilityKey?: string;
+  heartbeat?: boolean;
   provider?: Provider;
   target?: TargetOS;
 }

@@ -20,9 +20,11 @@ Ready pools are broker records for already hydrated leases. The CLI registers a
 lease after `prewarm` or `actions hydrate` has prepared it. Borrow marks one
 ready entry busy. Return either makes it ready again or drains and releases it.
 Manual returns for busy leases must pass the token printed by `pool borrow`.
-Long-lived manual borrows must also send `pool heartbeat`; `crabbox run --pool`
-sends these heartbeats automatically. An abandoned borrow is quarantined and
-cannot become ready again without being drained.
+`crabbox run --pool` negotiates heartbeat enforcement and sends heartbeats
+automatically. Manual and older-client borrows remain deadline-free unless
+they send `pool heartbeat`; the first successful heartbeat opts that borrow in.
+An opted-in abandoned borrow is quarantined and cannot become ready again
+without being drained.
 
 ## Subcommands
 
@@ -40,8 +42,21 @@ pool ensure <key>         reconcile desired ready capacity
 With `--create`, each keeper first obtains an atomic fill claim, then forwards
 arguments after `--` to `prewarm`. Concurrent keepers count active claims
 toward the maximum, so they cannot double-provision the same missing slot.
+An issued claim remains valid until registration, explicit release, or expiry;
+later policy or capacity changes block new claims but never revoke in-flight
+provisioning. `pool ensure` succeeds only when the actual `ready` count reaches
+`--min-ready`. Another keeper's in-flight claim is reported but does not make
+the command succeed.
 Forwarded `--repo` and `--ref` overrides are rejected; set the desired
 repository/ref in config before ensuring the pool.
+
+During a rolling upgrade, a new CLI falls back once to the legacy client-side
+count-then-create algorithm when the coordinator returns 404 or 405 for the
+reconcile route. The notice is printed once to stderr. That fallback preserves
+the older `--min-ready` behavior but cannot enforce atomic claims, `--max-ready`,
+or compatibility keys until the coordinator is upgraded. A new CLI also stops
+sending borrow heartbeats after the first unsupported-route response from an
+older coordinator.
 
 `--compatibility-key` names a provider-neutral capability and size class. For
 example, compatible AWS and Azure 16-vCPU shapes can share `linux-16-vcpu`

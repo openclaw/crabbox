@@ -12253,6 +12253,238 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("preserves an outstanding fill claim when ready capacity rises", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const key = "shared-linux";
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    for (const id of ["cbx_000000000013", "cbx_000000000014"]) {
+      storage.seed(
+        `lease:${id}`,
+        testLease({
+          id,
+          owner: "alice@example.com",
+          org: "example-org",
+          expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+        }),
+      );
+    }
+
+    const claimed = await fleet.fetch(
+      request("POST", `/v1/ready-pools/${key}/reconcile`, {
+        headers,
+        body: {
+          minReady: 1,
+          maxReady: 1,
+          claim: true,
+          compatibilityKey: "linux-16-vcpu",
+        },
+      }),
+    );
+    const claimedBody = (await claimed.json()) as { claim: { token: string } };
+
+    expect(
+      (
+        await fleet.fetch(
+          request("POST", `/v1/ready-pools/${key}/register`, {
+            headers,
+            body: {
+              leaseID: "cbx_000000000013",
+              compatibilityKey: "linux-16-vcpu",
+            },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const reconciled = await fleet.fetch(
+      request("POST", `/v1/ready-pools/${key}/reconcile`, {
+        headers,
+        body: {
+          minReady: 1,
+          maxReady: 1,
+          claim: true,
+          compatibilityKey: "linux-16-vcpu",
+        },
+      }),
+    );
+    await expect(reconciled.json()).resolves.toMatchObject({
+      satisfied: true,
+      counts: { ready: 1, inFlight: 1 },
+    });
+
+    const completed = await fleet.fetch(
+      request("POST", `/v1/ready-pools/${key}/register`, {
+        headers,
+        body: {
+          leaseID: "cbx_000000000014",
+          compatibilityKey: "linux-16-vcpu",
+          fillClaimToken: claimedBody.claim.token,
+        },
+      }),
+    );
+    expect(completed.status).toBe(200);
+  });
+
+  it("preserves but does not count an outstanding incompatible fill claim", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const key = "shared-linux";
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const leaseID = "cbx_000000000015";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      }),
+    );
+
+    const first = await fleet.fetch(
+      request("POST", `/v1/ready-pools/${key}/reconcile`, {
+        headers,
+        body: { minReady: 1, maxReady: 1, claim: true, compatibilityKey: "linux-16-vcpu" },
+      }),
+    );
+    const firstBody = (await first.json()) as { claim: { token: string } };
+    const second = await fleet.fetch(
+      request("POST", `/v1/ready-pools/${key}/reconcile`, {
+        headers,
+        body: { minReady: 1, maxReady: 1, claim: true, compatibilityKey: "linux-arm64" },
+      }),
+    );
+    await expect(second.json()).resolves.toMatchObject({
+      counts: { inFlight: 1 },
+      claim: { compatibilityKey: "linux-arm64" },
+    });
+
+    const completed = await fleet.fetch(
+      request("POST", `/v1/ready-pools/${key}/register`, {
+        headers,
+        body: {
+          leaseID,
+          compatibilityKey: "linux-16-vcpu",
+          fillClaimToken: firstBody.claim.token,
+        },
+      }),
+    );
+    expect(completed.status).toBe(200);
+  });
+
+  it("keeps a pre-deploy busy pool entry exempt from heartbeat quarantine", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const key = "legacy";
+    const leaseID = "cbx_000000000019";
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      }),
+    );
+    storage.seed<ReadyPoolEntry>(`ready-pool:${key}:${leaseID}`, {
+      key,
+      leaseID,
+      state: "busy",
+      owner: "alice@example.com",
+      org: "example-org",
+      borrowedBy: "alice@example.com",
+      borrowedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      borrowToken: "legacy-borrow-token",
+      createdAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+      updatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+    });
+
+    await fleet.alarm();
+    expect(storage.value<ReadyPoolEntry>(`ready-pool:${key}:${leaseID}`)?.state).toBe("busy");
+    const returned = await fleet.fetch(
+      request("POST", `/v1/ready-pools/${key}/return`, {
+        headers,
+        body: { leaseID, result: "ready", borrowToken: "legacy-borrow-token" },
+      }),
+    );
+    expect(returned.status).toBe(200);
+  });
+
+  it("does not impose a heartbeat deadline on a legacy borrow request", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const key = "legacy";
+    const leaseID = "cbx_000000000020";
+    const storageKey = `ready-pool:${key}:${leaseID}`;
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      }),
+    );
+    expect(
+      (
+        await fleet.fetch(
+          request("POST", `/v1/ready-pools/${key}/register`, {
+            headers,
+            body: { leaseID },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const borrowed = await fleet.fetch(
+      request("POST", `/v1/ready-pools/${key}/borrow`, {
+        headers,
+        body: {},
+      }),
+    );
+    expect(borrowed.status).toBe(200);
+    const borrowedBody = (await borrowed.json()) as { entry: { borrowToken: string } };
+    expect(storage.value<ReadyPoolEntry>(storageKey)).not.toHaveProperty("borrowExpiresAt");
+    storage.seed<ReadyPoolEntry>(storageKey, {
+      ...storage.value<ReadyPoolEntry>(storageKey)!,
+      updatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+    await fleet.alarm();
+    expect(storage.value<ReadyPoolEntry>(storageKey)?.state).toBe("busy");
+
+    const heartbeat = await fleet.fetch(
+      request("POST", `/v1/ready-pools/${key}/heartbeat`, {
+        headers,
+        body: { leaseID, borrowToken: borrowedBody.entry.borrowToken },
+      }),
+    );
+    expect(heartbeat.status).toBe(200);
+    expect(storage.value<ReadyPoolEntry>(storageKey)).toMatchObject({
+      state: "busy",
+      borrowHeartbeatRequired: true,
+    });
+    storage.seed<ReadyPoolEntry>(storageKey, {
+      ...storage.value<ReadyPoolEntry>(storageKey)!,
+      borrowExpiresAt: new Date(Date.now() - 1).toISOString(),
+    });
+    await fleet.alarm();
+    expect(storage.value<ReadyPoolEntry>(storageKey)?.state).toBe("quarantined");
+  });
+
   it("heartbeats borrowed pool entries, quarantines abandoned borrows, and prunes them", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -12285,7 +12517,7 @@ describe("fleet lease identity and idle", () => {
     const borrowed = await fleet.fetch(
       request("POST", `/v1/ready-pools/${key}/borrow`, {
         headers,
-        body: { compatibilityKey: "linux-16-vcpu" },
+        body: { compatibilityKey: "linux-16-vcpu", heartbeat: true },
       }),
     );
     const borrowedBody = (await borrowed.json()) as {

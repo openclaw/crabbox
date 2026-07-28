@@ -921,6 +921,45 @@ func TestReadyPoolBorrowHeartbeatTouchesImmediately(t *testing.T) {
 	}
 }
 
+func TestReadyPoolBorrowHeartbeatDisablesAfterUnsupportedRoute(t *testing.T) {
+	previousInterval := readyPoolBorrowHeartbeatInterval
+	readyPoolBorrowHeartbeatInterval = 10 * time.Millisecond
+	t.Cleanup(func() { readyPoolBorrowHeartbeatInterval = previousInterval })
+	var requests atomic.Int32
+	first := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		select {
+		case first <- struct{}{}:
+		default:
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	stop := startReadyPoolBorrowHeartbeat(context.Background(), &client, CoordinatorReadyPoolEntry{
+		Key:         "shared-linux",
+		LeaseID:     "cbx_123",
+		BorrowToken: "borrow-token",
+	}, &stderr)
+	select {
+	case <-first:
+	case <-time.After(2 * time.Second):
+		stop()
+		t.Fatal("ready-pool heartbeat did not start")
+	}
+	time.Sleep(50 * time.Millisecond)
+	stop()
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("unsupported heartbeat requests=%d, want 1", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "disabling") {
+		t.Fatalf("unsupported heartbeat warning=%q", got)
+	}
+}
+
 func TestCoordinatorReadyPoolReconcileAndReleaseClaim(t *testing.T) {
 	var seen []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -246,9 +246,33 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 	for {
 		res, err := coord.ReconcileReadyPool(ctx, key, borrowInput)
 		if err != nil {
+			if readyPoolCoordinatorRouteUnsupported(err) {
+				fmt.Fprintln(a.Stderr, "notice: coordinator does not support atomic ready-pool reconciliation; using legacy count-then-create fallback")
+				entries, ready, legacyErr := ensureReadyPoolLegacy(
+					ctx,
+					coord,
+					key,
+					*minReady,
+					*create,
+					borrowInput,
+					func() error { return prewarmApp.prewarm(ctx, prewarmArgs) },
+				)
+				if legacyErr != nil {
+					return legacyErr
+				}
+				if ready < *minReady {
+					if *jsonOut {
+						if encodeErr := json.NewEncoder(a.Stdout).Encode(map[string]any{"key": key, "ready": ready, "minReady": *minReady, "entries": entries}); encodeErr != nil {
+							return encodeErr
+						}
+					}
+					return exit(5, "pool=%s ready=%d min_ready=%d create=%t", key, ready, *minReady, *create)
+				}
+				return renderReadyPoolLegacyResult(a.Stdout, key, ready, *minReady, entries, *jsonOut)
+			}
 			return err
 		}
-		if res.Satisfied {
+		if res.Counts.Ready >= *minReady {
 			return renderReadyPoolReconcileResult(a.Stdout, res, *jsonOut)
 		}
 		if !*create {
@@ -260,15 +284,12 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 			return exit(5, "pool=%s ready=%d min_ready=%d create=false", key, res.Counts.Ready, *minReady)
 		}
 		if res.Claim == nil {
-			if res.Reconciling {
-				return renderReadyPoolReconcileResult(a.Stdout, res, *jsonOut)
-			}
 			if *jsonOut {
 				if err := json.NewEncoder(a.Stdout).Encode(res); err != nil {
 					return err
 				}
 			}
-			return exit(5, "pool=%s ready=%d min_ready=%d max_ready=%d capped=%t", key, res.Counts.Ready, *minReady, *maxReady, res.Capped)
+			return exit(5, "pool=%s ready=%d in_flight=%d min_ready=%d max_ready=%d capped=%t", key, res.Counts.Ready, res.Counts.InFlight, *minReady, *maxReady, res.Capped)
 		}
 		if err := prewarmApp.prewarmWithPoolFillClaim(ctx, prewarmArgs, res.Claim.Token); err != nil {
 			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -280,6 +301,52 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 			return err
 		}
 	}
+}
+
+func ensureReadyPoolLegacy(
+	ctx context.Context,
+	coord *CoordinatorClient,
+	key string,
+	minReady int,
+	create bool,
+	borrowInput map[string]any,
+	prewarm func() error,
+) ([]CoordinatorReadyPoolEntry, int, error) {
+	entries, err := coord.ReadyPool(ctx, key)
+	if err != nil {
+		return nil, 0, err
+	}
+	ready := countReadyPoolEntries(entries, borrowInput)
+	if ready >= minReady || !create {
+		return entries, ready, nil
+	}
+	for next := ready; next < minReady; next++ {
+		if err := prewarm(); err != nil {
+			return nil, 0, err
+		}
+	}
+	entries, err = coord.ReadyPool(ctx, key)
+	if err != nil {
+		return nil, 0, err
+	}
+	return entries, countReadyPoolEntries(entries, borrowInput), nil
+}
+
+func renderReadyPoolLegacyResult(
+	w io.Writer,
+	key string,
+	ready int,
+	minReady int,
+	entries []CoordinatorReadyPoolEntry,
+	jsonOut bool,
+) error {
+	if jsonOut {
+		return json.NewEncoder(w).Encode(map[string]any{
+			"key": key, "ready": ready, "minReady": minReady, "entries": entries,
+		})
+	}
+	fmt.Fprintf(w, "pool=%s ready=%d min_ready=%d\n", key, ready, minReady)
+	return nil
 }
 
 func renderReadyPoolReconcileResult(w io.Writer, res CoordinatorReadyPoolReconcileResponse, jsonOut bool) error {
@@ -353,6 +420,7 @@ func readyPoolRunBorrowInput(cfg Config, repo Repo, repoSlug string) map[string]
 
 func readyPoolRunBorrowInputForRun(cfg Config, repo Repo, repoSlug string, noSync bool) (map[string]any, error) {
 	input := readyPoolRunBorrowInput(cfg, repo, repoSlug)
+	input["heartbeat"] = true
 	if !noSync {
 		return input, nil
 	}
@@ -551,6 +619,46 @@ func applyReadyPoolEndpoint(target SSHTarget, entry CoordinatorReadyPoolEntry) S
 		target.FallbackPorts = nil
 	}
 	return target
+}
+
+func countReadyPoolEntries(entries []CoordinatorReadyPoolEntry, borrowInput map[string]any) int {
+	ready := 0
+	now := time.Now()
+	for _, entry := range entries {
+		expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.ExpiresAt))
+		if entry.State == "ready" && err == nil && expiresAt.After(now) && readyPoolEntryMatchesLegacyBorrowInput(entry, borrowInput) {
+			ready++
+		}
+	}
+	return ready
+}
+
+func readyPoolEntryMatchesLegacyBorrowInput(entry CoordinatorReadyPoolEntry, input map[string]any) bool {
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "repo", value: entry.Repo},
+		{name: "ref", value: entry.Ref},
+		{name: "fingerprint", value: entry.Fingerprint},
+		{name: "provider", value: entry.Provider},
+		{name: "target", value: entry.TargetOS},
+	} {
+		if !readyPoolLegacyStringMatches(field.value, readyPoolInputString(input, field.name)) {
+			return false
+		}
+	}
+	commit := readyPoolInputString(input, "commit")
+	if commit == "" || entry.Commit == commit {
+		return true
+	}
+	allowMissingCommit, _ := input["allowMissingCommit"].(bool)
+	return allowMissingCommit && entry.Commit == ""
+}
+
+func readyPoolLegacyStringMatches(got, want string) bool {
+	want = strings.TrimSpace(want)
+	return want == "" || strings.TrimSpace(got) == want
 }
 
 func readyPoolInputString(input map[string]any, key string) string {

@@ -1,9 +1,14 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReadyPoolReturnNeedsHydrationStop(t *testing.T) {
@@ -41,10 +46,117 @@ func TestReadyPoolRunBorrowInputForRunRequiresExactNoSyncCommit(t *testing.T) {
 	if _, ok := input["allowMissingCommit"]; ok {
 		t.Fatalf("no-sync exact head input allowed missing commit: %#v", input)
 	}
+	if heartbeat, _ := input["heartbeat"].(bool); !heartbeat {
+		t.Fatalf("run borrow input did not negotiate heartbeat support: %#v", input)
+	}
 
 	_, err = readyPoolRunBorrowInputForRun(Config{Actions: ActionsConfig{Ref: "feature"}}, Repo{BaseRef: "main"}, "openclaw/openclaw", true)
 	if err == nil {
 		t.Fatal("no-sync ref-only input succeeded")
+	}
+}
+
+func TestReadyPoolCoordinatorRouteUnsupported(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
+		if !readyPoolCoordinatorRouteUnsupported(CoordinatorHTTPError{StatusCode: status}) {
+			t.Fatalf("status %d was not treated as rollout-compatible", status)
+		}
+	}
+	if readyPoolCoordinatorRouteUnsupported(CoordinatorHTTPError{StatusCode: http.StatusInternalServerError}) {
+		t.Fatal("server failure was treated as an unsupported route")
+	}
+}
+
+func TestReadyPoolLegacyEnsureIgnoresUnsupportedCompatibilityCriteria(t *testing.T) {
+	ready := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/ready-pools/shared-linux" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if ready {
+			_, _ = w.Write([]byte(`{"pool":[{"key":"shared-linux","leaseID":"cbx_123","state":"ready","owner":"alice@example.com","org":"example-org","repo":"example-org/my-app","ref":"main","createdAt":"2026-05-01T00:00:00Z","updatedAt":"2026-05-01T00:00:00Z","expiresAt":"` + time.Now().Add(time.Hour).Format(time.RFC3339Nano) + `"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"pool":[]}`))
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	prewarms := 0
+	entries, count, err := ensureReadyPoolLegacy(
+		context.Background(),
+		&client,
+		"shared-linux",
+		1,
+		true,
+		map[string]any{
+			"repo":             "example-org/my-app",
+			"ref":              "main",
+			"compatibilityKey": "linux-16-vcpu",
+		},
+		func() error {
+			prewarms++
+			ready = true
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prewarms != 1 || count != 1 || len(entries) != 1 {
+		t.Fatalf("prewarms=%d ready=%d entries=%d", prewarms, count, len(entries))
+	}
+}
+
+func TestReadyPoolEnsureFallsBackOnceForOlderCoordinator(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/ready-pools/shared-linux/reconcile":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/ready-pools/shared-linux":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"pool":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "local-test-token")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.readyPoolEnsure(context.Background(), []string{"shared-linux", "--min-ready", "0"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(stderr.String(), "legacy count-then-create fallback"); got != 1 {
+		t.Fatalf("fallback notices=%d stderr=%q", got, stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "ready=0 min_ready=0") {
+		t.Fatalf("fallback output=%q", got)
+	}
+}
+
+func TestReadyPoolEnsureDoesNotCountAnotherKeepersClaimAsReady(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/ready-pools/shared-linux/reconcile" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"desired":{"key":"shared-linux","criteria":{},"minReady":1,"maxReady":1,"createdAt":"2026-05-01T00:00:00Z","updatedAt":"2026-05-01T00:00:00Z"},"counts":{"ready":0,"busy":0,"draining":0,"quarantined":0,"stale":0,"inFlight":1},"satisfied":false,"reconciling":true,"capped":true,"counters":{}}`))
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "local-test-token")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	err := app.readyPoolEnsure(context.Background(), []string{"shared-linux", "--min-ready", "1", "--create"})
+	if err == nil || !strings.Contains(err.Error(), "ready=0") {
+		t.Fatalf("pending-only ensure error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}
 }
 

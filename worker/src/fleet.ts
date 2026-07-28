@@ -10901,13 +10901,20 @@ export class FleetCoordinator {
           state: "busy",
           borrowedBy: requestOwner(request),
           borrowedAt: now,
-          borrowHeartbeatAt: now,
-          borrowExpiresAt: new Date(nowMs + readyPoolBorrowTimeoutMs).toISOString(),
           borrowToken: crypto.randomUUID(),
           lastUsedAt: now,
           updatedAt: now,
           expiresAt: lease.expiresAt,
         };
+        if (input.heartbeat === true) {
+          borrowed.borrowHeartbeatRequired = true;
+          borrowed.borrowHeartbeatAt = now;
+          borrowed.borrowExpiresAt = new Date(nowMs + readyPoolBorrowTimeoutMs).toISOString();
+        } else {
+          delete borrowed.borrowHeartbeatRequired;
+          delete borrowed.borrowHeartbeatAt;
+          delete borrowed.borrowExpiresAt;
+        }
         await this.putReadyPoolEntry(borrowed);
         await this.incrementReadyPoolCounters(request, key, { warmHits: 1 });
         await this.scheduleAlarm();
@@ -10958,7 +10965,8 @@ export class FleetCoordinator {
           );
         }
         const nowMs = Date.now();
-        if (readyPoolBorrowDeadline(current) <= nowMs) {
+        const deadline = readyPoolBorrowDeadline(current);
+        if (deadline !== undefined && deadline <= nowMs) {
           await this.quarantineReadyPoolEntry(current, "borrow heartbeat expired", nowMs);
           await this.scheduleAlarm();
           return json(
@@ -10969,6 +10977,7 @@ export class FleetCoordinator {
         const now = new Date(nowMs).toISOString();
         const updated: ReadyPoolEntry = {
           ...current,
+          borrowHeartbeatRequired: true,
           borrowHeartbeatAt: now,
           borrowExpiresAt: new Date(nowMs + readyPoolBorrowTimeoutMs).toISOString(),
           updatedAt: now,
@@ -11045,29 +11054,13 @@ export class FleetCoordinator {
             readyPoolEntryMatches(entry, criteria)
           );
         });
-        const scopedClaims = (await this.readyPoolFillClaims()).filter(
+        const claims = (await this.readyPoolFillClaims()).filter(
           (claim) =>
             claim.key === key &&
             claim.owner === owner &&
             claim.org === org &&
-            claim.compatibilityKey === compatibilityKey,
-        );
-        const matchingClaims = scopedClaims
-          .filter((claim) => readyPoolCriteriaEqual(claim.criteria, criteria))
-          .toSorted((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
-        await Promise.all(
-          scopedClaims
-            .filter((claim) => !readyPoolCriteriaEqual(claim.criteria, criteria))
-            .map((claim) => this.state.storage.delete(readyPoolFillClaimKey(claim.token))),
-        );
-        const activeEntries = entries.filter(
-          (entry) => entry.state === "ready" || entry.state === "busy",
-        ).length;
-        const claims = matchingClaims.slice(0, Math.max(0, maxReady - activeEntries));
-        await Promise.all(
-          matchingClaims
-            .slice(claims.length)
-            .map((claim) => this.state.storage.delete(readyPoolFillClaimKey(claim.token))),
+            claim.compatibilityKey === compatibilityKey &&
+            readyPoolCriteriaEqual(claim.criteria, criteria),
         );
         const counts = readyPoolCapacityCounts(entries, claims.length);
         const activeCapacity = counts.ready + counts.busy + counts.inFlight;
@@ -11278,6 +11271,7 @@ export class FleetCoordinator {
     const {
       borrowedAt: _borrowedAt,
       borrowedBy: _borrowedBy,
+      borrowHeartbeatRequired: _borrowHeartbeatRequired,
       borrowHeartbeatAt: _borrowHeartbeatAt,
       borrowExpiresAt: _borrowExpiresAt,
       borrowToken: _borrowToken,
@@ -11285,6 +11279,7 @@ export class FleetCoordinator {
     } = current;
     void _borrowedAt;
     void _borrowedBy;
+    void _borrowHeartbeatRequired;
     void _borrowHeartbeatAt;
     void _borrowExpiresAt;
     void _borrowToken;
@@ -11348,7 +11343,13 @@ export class FleetCoordinator {
         );
         continue;
       }
-      if (!leaseStale && entry.state === "busy" && readyPoolBorrowDeadline(entry) <= nowMs) {
+      const borrowDeadline = readyPoolBorrowDeadline(entry);
+      if (
+        !leaseStale &&
+        entry.state === "busy" &&
+        borrowDeadline !== undefined &&
+        borrowDeadline <= nowMs
+      ) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- quarantine and its counter update are one serialized transition.
         await this.quarantineReadyPoolEntry(entry, "borrow heartbeat expired", nowMs);
         continue;
@@ -12707,7 +12708,10 @@ export class FleetCoordinator {
     }
     await this.visitStorageRecords<ReadyPoolEntry>(readyPoolPrefix, async (entry) => {
       if (entry.state === "busy") {
-        retainAlarm(Math.max(now + 1, readyPoolBorrowDeadline(entry)));
+        const borrowDeadline = readyPoolBorrowDeadline(entry);
+        if (borrowDeadline !== undefined) {
+          retainAlarm(Math.max(now + 1, borrowDeadline));
+        }
       }
       if (entry.state === "stale" || entry.state === "quarantined" || entry.state === "draining") {
         const pruneAt = Date.parse(entry.updatedAt) + readyPoolTerminalRetentionMs;
@@ -14814,7 +14818,10 @@ function readyPoolCapacityCounts(
   return counts;
 }
 
-function readyPoolBorrowDeadline(entry: ReadyPoolEntry): number {
+function readyPoolBorrowDeadline(entry: ReadyPoolEntry): number | undefined {
+  if (entry.borrowHeartbeatRequired !== true) {
+    return undefined;
+  }
   const explicit = Date.parse(entry.borrowExpiresAt ?? "");
   if (Number.isFinite(explicit)) {
     return explicit;
@@ -14827,6 +14834,7 @@ function withoutReadyPoolBorrow(entry: ReadyPoolEntry): ReadyPoolEntry {
   const {
     borrowedAt: _borrowedAt,
     borrowedBy: _borrowedBy,
+    borrowHeartbeatRequired: _borrowHeartbeatRequired,
     borrowHeartbeatAt: _borrowHeartbeatAt,
     borrowExpiresAt: _borrowExpiresAt,
     borrowToken: _borrowToken,
@@ -14834,6 +14842,7 @@ function withoutReadyPoolBorrow(entry: ReadyPoolEntry): ReadyPoolEntry {
   } = entry;
   void _borrowedAt;
   void _borrowedBy;
+  void _borrowHeartbeatRequired;
   void _borrowHeartbeatAt;
   void _borrowExpiresAt;
   void _borrowToken;
