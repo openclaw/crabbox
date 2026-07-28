@@ -13,6 +13,10 @@ import (
 const prewarmFailureCleanupTimeout = 2 * time.Minute
 
 func (a App) prewarm(ctx context.Context, args []string) error {
+	return a.prewarmWithPoolFillClaim(ctx, args, "")
+}
+
+func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFillClaim string) error {
 	started := time.Now()
 	defaults := defaultConfig()
 	fs := newFlagSet("prewarm", a.Stderr)
@@ -27,6 +31,7 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 	keepAliveMinutes := fs.Int("keep-alive-minutes", 90, "minutes for workflow to keep a GitHub runner job alive")
 	probeCommand := fs.String("probe-command", "", "optional shell command to prove the hydrated box is test-ready")
 	poolKey := fs.String("pool", "", "register the hydrated lease in a broker ready pool")
+	poolCompatibilityKey := fs.String("pool-compatibility-key", "", "provider-neutral ready-pool capability and size key")
 	dryRun := fs.Bool("dry-run", false, "print the planned Crabbox commands without running them")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
@@ -69,6 +74,9 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 		return exit(2, "prewarm is not supported for provider=%s; it does not provide a lease or run surface", backend.Spec().Name)
 	}
 	readyPoolKey := strings.TrimSpace(*poolKey)
+	if strings.TrimSpace(poolFillClaim) != "" && readyPoolKey == "" {
+		return exit(2, "ready-pool fill claim requires --pool")
+	}
 	if readyPoolKey != "" && backendCoordinator(backend) == nil {
 		return exit(2, "--pool requires a coordinator-backed SSH lease provider")
 	}
@@ -134,7 +142,7 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 	}
 	if readyPoolKey != "" {
 		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, acquiredLease, "pool registration", func() error {
-			return a.registerPrewarmedLeaseInReadyPool(ctx, cfg, leaseID, readyPoolKey, *githubRunner)
+			return a.registerPrewarmedLeaseInReadyPool(ctx, cfg, leaseID, readyPoolKey, *poolCompatibilityKey, poolFillClaim, *githubRunner)
 		}); err != nil {
 			return err
 		}
@@ -192,6 +200,7 @@ func prewarmWarmupArgs(args []string) []string {
 	valueFlags := map[string]struct{}{
 		"repo": {}, "workflow": {}, "job": {}, "ref": {},
 		"wait-timeout": {}, "keep-alive-minutes": {}, "probe-command": {}, "pool": {},
+		"pool-compatibility-key": {},
 	}
 	boolFlags := map[string]struct{}{
 		"no-hydrate": {}, "github-runner": {}, "dry-run": {}, "timing-json": {},
@@ -221,7 +230,7 @@ func prewarmWarmupArgs(args []string) []string {
 	return out
 }
 
-func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, leaseID, poolKey string, githubRunner bool) error {
+func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, leaseID, poolKey, compatibilityKey, fillClaim string, githubRunner bool) error {
 	repo, _ := findRepo()
 	input := map[string]any{"leaseID": leaseID}
 	if repoValue := firstNonBlank(cfg.Actions.Repo, bestEffortGitHubRepoSlug(repo, cfg)); repoValue != "" {
@@ -233,6 +242,8 @@ func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, 
 	if commit := prewarmReadyPoolCommit(cfg, repo, githubRunner); commit != "" {
 		input["commit"] = commit
 	}
+	addStringInput(input, "compatibilityKey", compatibilityKey)
+	addStringInput(input, "fillClaimToken", fillClaim)
 	addStringInput(input, "sshHost", readyPoolClaimSSHHost(leaseID))
 	addStringInput(input, "sshPort", readyPoolClaimSSHPort(leaseID))
 	addStringInput(input, "workRoot", readyPoolClaimWorkRoot(leaseID))

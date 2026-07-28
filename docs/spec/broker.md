@@ -22,22 +22,24 @@ and command time; image boot and repository setup happen ahead of demand.
 
 ## Pool identity
 
-A pool key names one interchangeable lease class:
+A pool key names one logical lease class:
 
 ```text
-<repo>/<ref>/<provider>/<target>/<type>
+<repo>/<ref>/<target>
 ```
 
 Examples:
 
 ```text
-example/app/main/aws/linux/c6i.2xlarge
-example/app/main/azure/linux/standard-d2ads-v6
+example/app/main/linux
 ```
 
-The key is operator-chosen and normalized by the broker. Entries also record
-repo, ref, commit, fingerprint, image, provider, target, server type, SSH
-endpoint, work root, owner, org, state, and expiry.
+The key is operator-chosen and normalized by the broker. An optional
+provider-neutral compatibility key identifies a capability and size class such
+as `linux-16-vcpu`; compatible AWS and Azure entries can therefore satisfy the
+same logical pool. Entries also record repo, ref, commit, fingerprint, image,
+provider, target, server type, SSH endpoint, work root, owner, org, state, and
+expiry.
 
 ## States
 
@@ -45,6 +47,7 @@ endpoint, work root, owner, org, state, and expiry.
 ready      hydrated, active, borrowable
 busy       leased to one run
 draining   no longer borrowable; release or expiry cleanup owns it
+quarantined borrow heartbeat expired; cannot return directly to ready
 stale      broker entry exists but the backing lease is gone or expired
 ```
 
@@ -60,21 +63,28 @@ GET  /v1/ready-pools
 GET  /v1/ready-pools/:key
 POST /v1/ready-pools/:key/register
 POST /v1/ready-pools/:key/borrow
+POST /v1/ready-pools/:key/heartbeat
 POST /v1/ready-pools/:key/return
+POST /v1/ready-pools/:key/reconcile
+POST /v1/ready-pools/:key/release-fill-claim
+GET  /v1/ready-pools/:key/metrics
 ```
 
 The broker stores pool entries in coordinator storage. The CLI owns SSH
 keys, source sync, and Actions hydration, so it registers a lease only after it
 has proved the remote endpoint and setup. The broker is the arbiter for
-exclusive borrow/return and uses the recorded SSH endpoint so provider-specific
-port fallback does not repeat on every hot run.
+exclusive borrow/return, desired-capacity fill claims, and borrow deadlines. It
+uses the recorded SSH endpoint so provider-specific port fallback does not
+repeat on every hot run. The coordinator does not issue SSH credentials; fill
+keepers and borrowers retain the existing client-owned access contract.
 
 ## CLI flow
 
 Prewarm and register:
 
 ```sh
-crabbox prewarm --pool example/app/main/azure/linux/standard-d2ads-v6 \
+crabbox prewarm --pool example/app/main/linux \
+  --pool-compatibility-key linux-16-vcpu \
   --provider azure \
   --type Standard_D2ads_v6 \
   --market on-demand \
@@ -84,23 +94,34 @@ crabbox prewarm --pool example/app/main/azure/linux/standard-d2ads-v6 \
 Borrow for a run:
 
 ```sh
-crabbox run --pool example/app/main/azure/linux/standard-d2ads-v6 -- pnpm test
+crabbox run --pool example/app/main/linux \
+  --pool-compatibility-key linux-16-vcpu -- pnpm test
 ```
 
 Manual operations:
 
 ```sh
 crabbox pool ready
-crabbox pool register example/app/main/aws/linux/c6i.2xlarge --id cbx_...
-crabbox pool borrow example/app/main/aws/linux/c6i.2xlarge
-crabbox pool return example/app/main/aws/linux/c6i.2xlarge --id cbx_... --result ready --borrow-token <token>
-crabbox pool ensure example/app/main/aws/linux/c6i.2xlarge --min-ready 1 --create -- \
-  --provider aws --type c6i.2xlarge
+crabbox pool register example/app/main/linux --id cbx_... --compatibility-key linux-16-vcpu
+crabbox pool borrow example/app/main/linux --compatibility-key linux-16-vcpu
+crabbox pool heartbeat example/app/main/linux --id cbx_... --borrow-token <token>
+crabbox pool return example/app/main/linux --id cbx_... --result ready --borrow-token <token>
+crabbox pool ensure example/app/main/linux --min-ready 2 --max-ready 4 \
+  --compatibility-key linux-16-vcpu --create -- \
+  --provider aws --type c6i.4xlarge
 ```
 
 ## Capacity algorithm
 
-Each pool has `minReady`, default `1`. A reconciler should run:
+Each pool has `minReady`, default `1`, and `maxReady`, which defaults to
+`minReady`. `pool ensure` persists that desired state and asks the singleton
+coordinator reconciler for at most one short-lived fill claim at a time. Ready,
+busy, and in-flight claimed entries count toward `maxReady`; the claim is
+consumed only when a compatible hydrated lease registers. This makes repeated
+or concurrent keepers safe without moving provisioning or hydration into the
+coordinator.
+
+A future autoscaler can adjust the persisted target using observed demand:
 
 ```text
 targetReady = max(minReady, ceil(recentPeakConcurrentBorrows * 1.25))
@@ -108,14 +129,21 @@ targetReady = clamp(targetReady, minReady, maxReady)
 ```
 
 Use a short lookback for bursts, such as 30 minutes, and a longer decay window,
-such as 4 hours, before reducing `targetReady`. If ready entries are below
-target, create leases from the promoted provider image, hydrate them with the
-configured workflow for the current ref, probe them, and register them. If
+such as 4 hours, before reducing `targetReady`. A keeper with a fill claim
+creates a lease from the promoted provider image, hydrates it with the
+configured workflow for the current ref, probes it, and registers it. If
 entries exceed target and are idle past the pool idle window, mark them
 draining and release the oldest first.
 `crabbox pool ensure --create` forwards provider sizing flags to `prewarm`, but
 repo/ref overrides must come from config so creation and readiness counting use
 the same borrow criteria.
+
+Borrow creates a two-minute deadline. `crabbox run --pool` refreshes it every
+30 seconds; manual keepers use `pool heartbeat`. A missed deadline quarantines
+the entry so a late borrower cannot silently return it to ready. Stale and
+quarantined records are pruned after 24 hours. The metrics route reports current
+state counts plus borrow, hit/miss, fill, heartbeat, quarantine, and prune
+counters.
 
 ## Images and hydration
 

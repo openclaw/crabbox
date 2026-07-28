@@ -26,7 +26,7 @@ crabbox run --id cbx_abcdef123456 --junit junit.xml -- go test ./...
 crabbox run --provider ssh --target macos --static-host mac-studio.local -- xcodebuild test
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- dotnet test
 crabbox run --profile live-qa --preset qa-live --scenario login-regression --emit-proof /tmp/proof.md --stop-after success
-crabbox run --pool example/app/main/aws/linux/c6i.2xlarge -- pnpm test
+crabbox run --pool example/app/main/linux --pool-compatibility-key linux-16-vcpu -- pnpm test
 ```
 
 The trailing command after `--` is sent to the box verbatim as argv. Use
@@ -41,7 +41,8 @@ either the stable `cbx_...` ID or the active friendly slug (see
 [identifiers](../features/identifiers.md)).
 
 With `--pool <key>`, Crabbox borrows one hydrated broker ready-pool lease,
-uses the pool-recorded SSH endpoint, runs the command, and returns the lease.
+uses the pool-recorded SSH endpoint, keeps the borrow deadline alive while it
+runs the command and return-time scrub, and then returns the lease.
 Before a reusable return, Crabbox resets the checkout to the pool's recorded
 branch, fetches its latest remote commit, removes run-local state, and verifies
 the normal Git worktree is clean. The default `--pool-return auto` scrubs and

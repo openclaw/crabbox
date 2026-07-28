@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added coordinator-owned ready-pool desired capacity with atomic fill claims, provider-neutral compatibility keys, borrow heartbeats, abandoned-borrow quarantine, stale-record pruning, and pool counters.
+
 ## 0.40.1 - 2026-07-23
 
 ### Added

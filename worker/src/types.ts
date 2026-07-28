@@ -469,7 +469,7 @@ export interface LeaseRecord {
   registeredAt?: string;
 }
 
-export type ReadyPoolEntryState = "ready" | "busy" | "draining" | "stale";
+export type ReadyPoolEntryState = "ready" | "busy" | "draining" | "quarantined" | "stale";
 
 export interface ReadyPoolEntry {
   key: string;
@@ -481,6 +481,7 @@ export interface ReadyPoolEntry {
   ref?: string;
   commit?: string;
   fingerprint?: string;
+  compatibilityKey?: string;
   image?: string;
   provider?: string;
   target?: TargetOS;
@@ -493,6 +494,8 @@ export interface ReadyPoolEntry {
   workRoot?: string;
   borrowedBy?: string;
   borrowedAt?: string;
+  borrowHeartbeatAt?: string;
+  borrowExpiresAt?: string;
   borrowToken?: string;
   lastReadyAt?: string;
   lastUsedAt?: string;
@@ -509,6 +512,8 @@ export interface ReadyPoolRegisterRequest {
   ref?: string;
   commit?: string;
   fingerprint?: string;
+  compatibilityKey?: string;
+  fillClaimToken?: string;
   image?: string;
   sshHost?: string;
   sshUser?: string;
@@ -522,6 +527,7 @@ export interface ReadyPoolBorrowRequest {
   commit?: string;
   allowMissingCommit?: boolean;
   fingerprint?: string;
+  compatibilityKey?: string;
   provider?: Provider;
   target?: TargetOS;
 }
@@ -531,6 +537,61 @@ export interface ReadyPoolReturnRequest {
   result?: "ready" | "drain" | "release";
   reason?: string;
   borrowToken?: string;
+}
+
+export interface ReadyPoolBorrowHeartbeatRequest {
+  leaseID?: string;
+  borrowToken?: string;
+}
+
+export interface ReadyPoolReconcileRequest extends ReadyPoolBorrowRequest {
+  minReady?: number;
+  maxReady?: number;
+  claim?: boolean;
+}
+
+export interface ReadyPoolFillClaim {
+  token: string;
+  key: string;
+  compatibilityKey?: string;
+  owner: string;
+  org: string;
+  criteria: ReadyPoolBorrowRequest;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface ReadyPoolCapacityCounts {
+  ready: number;
+  busy: number;
+  draining: number;
+  quarantined: number;
+  stale: number;
+  inFlight: number;
+}
+
+export interface ReadyPoolCounters {
+  borrowRequests: number;
+  warmHits: number;
+  warmMisses: number;
+  fillClaimsCreated: number;
+  fillClaimsCompleted: number;
+  borrowHeartbeats: number;
+  quarantined: number;
+  stalePruned: number;
+  updatedAt: string;
+}
+
+export interface ReadyPoolDesiredCapacity {
+  key: string;
+  owner: string;
+  org: string;
+  criteria: ReadyPoolBorrowRequest;
+  compatibilityKey?: string;
+  minReady: number;
+  maxReady: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface LeaseNetworkState {

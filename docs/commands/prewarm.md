@@ -8,7 +8,7 @@ Blacksmith Testbox, hydration stays provider-owned.
 ```sh
 crabbox prewarm
 crabbox prewarm --provider azure --probe-command 'node -v && pnpm -v'
-crabbox prewarm --pool example/app/main/aws/linux/c6i.2xlarge
+crabbox prewarm --pool example/app/main/linux --pool-compatibility-key linux-16-vcpu
 crabbox prewarm --dry-run
 ```
 

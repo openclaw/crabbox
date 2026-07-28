@@ -44,6 +44,7 @@ func (a App) readyPoolRegister(ctx context.Context, args []string) error {
 	ref := fs.String("ref", "", "source ref")
 	commit := fs.String("commit", "", "source commit")
 	fingerprint := fs.String("fingerprint", "", "repo setup fingerprint")
+	compatibilityKey := fs.String("compatibility-key", "", "provider-neutral capability and size key")
 	image := fs.String("image", "", "base image id or name")
 	sshHost := fs.String("ssh-host", "", "proven SSH host")
 	sshUser := fs.String("ssh-user", "", "proven SSH user")
@@ -74,6 +75,7 @@ func (a App) readyPoolRegister(ctx context.Context, args []string) error {
 		input["commit"] = commitValue
 	}
 	addStringInput(input, "fingerprint", *fingerprint)
+	addStringInput(input, "compatibilityKey", *compatibilityKey)
 	addStringInput(input, "image", *image)
 	addStringInput(input, "sshHost", firstNonBlank(*sshHost, readyPoolClaimSSHHost(*id)))
 	addStringInput(input, "sshUser", *sshUser)
@@ -100,6 +102,7 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 	ref := fs.String("ref", "", "source ref")
 	commit := fs.String("commit", "", "source commit")
 	fingerprint := fs.String("fingerprint", "", "repo setup fingerprint")
+	compatibilityKey := fs.String("compatibility-key", "", "provider-neutral capability and size key")
 	provider := fs.String("provider", "", "provider filter")
 	target := fs.String("target", "", "target OS filter")
 	jsonOut := fs.Bool("json", false, "print JSON")
@@ -114,7 +117,7 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	res, err := coord.BorrowReadyPoolLease(ctx, key, readyPoolBorrowInput(*repo, *ref, *commit, *fingerprint, *provider, *target))
+	res, err := coord.BorrowReadyPoolLease(ctx, key, readyPoolBorrowInput(*repo, *ref, *commit, *fingerprint, *compatibilityKey, *provider, *target))
 	if err != nil {
 		return err
 	}
@@ -122,6 +125,33 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 		return json.NewEncoder(a.Stdout).Encode(res)
 	}
 	fmt.Fprintf(a.Stdout, "borrowed pool=%s lease=%s state=%s token=%s ssh=%s@%s:%s\n", res.Entry.Key, res.Entry.LeaseID, res.Entry.State, res.Entry.BorrowToken, blank(res.Entry.SSHUser, res.Lease.SSHUser), blank(res.Entry.SSHHost, res.Lease.Host), blank(res.Entry.SSHPort, res.Lease.SSHPort))
+	return nil
+}
+
+func (a App) readyPoolHeartbeat(ctx context.Context, args []string) error {
+	fs := newFlagSet("pool heartbeat", a.Stderr)
+	id := fs.String("id", "", "borrowed lease id")
+	borrowToken := fs.String("borrow-token", "", "borrow token from pool borrow")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	args, key := extractFirstPositionalArg(args, map[string]bool{"id": true, "borrow-token": true})
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if key == "" || *id == "" || *borrowToken == "" {
+		return exit(2, "usage: crabbox pool heartbeat <key> --id <lease-id> --borrow-token <token>")
+	}
+	coord, err := readyPoolCoordinator()
+	if err != nil {
+		return err
+	}
+	res, err := coord.HeartbeatReadyPoolBorrow(ctx, key, *id, *borrowToken)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(res)
+	}
+	fmt.Fprintf(a.Stdout, "heartbeat pool=%s lease=%s state=%s expires=%s\n", res.Entry.Key, res.Entry.LeaseID, res.Entry.State, res.Entry.BorrowExpiresAt)
 	return nil
 }
 
@@ -160,9 +190,11 @@ func (a App) readyPoolReturn(ctx context.Context, args []string) error {
 func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 	fs := newFlagSet("pool ensure", a.Stderr)
 	minReady := fs.Int("min-ready", 1, "minimum ready leases")
-	create := fs.Bool("create", false, "create one missing ready lease with prewarm")
+	maxReady := fs.Int("max-ready", -1, "maximum ready, busy, and in-flight leases (default min-ready)")
+	compatibilityKey := fs.String("compatibility-key", "", "provider-neutral capability and size key")
+	create := fs.Bool("create", false, "claim and create missing ready leases with prewarm")
 	jsonOut := fs.Bool("json", false, "print JSON")
-	args, key := extractFirstPositionalArg(args, map[string]bool{"min-ready": true})
+	args, key := extractFirstPositionalArg(args, map[string]bool{"min-ready": true, "max-ready": true, "compatibility-key": true})
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -171,6 +203,15 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 	}
 	if err := validateReadyPoolEnsurePrewarmArgs(fs.Args()); err != nil {
 		return err
+	}
+	if *minReady < 0 || *minReady > 100 {
+		return exit(2, "--min-ready must be between 0 and 100")
+	}
+	if *maxReady < 0 {
+		*maxReady = *minReady
+	}
+	if *maxReady < *minReady || *maxReady > 100 {
+		return exit(2, "--max-ready must be between min-ready and 100")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -189,57 +230,63 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 		repoSlug = bestEffortGitHubRepoSlug(repo, cfg)
 	}
 	borrowInput := readyPoolRunBorrowInput(cfg, repo, repoSlug)
-	entries, err := coord.ReadyPool(ctx, key)
-	if err != nil {
-		return err
-	}
-	ready := countReadyPoolEntries(entries, borrowInput)
-	if ready >= *minReady {
-		if *jsonOut {
-			if err := json.NewEncoder(a.Stdout).Encode(map[string]any{"key": key, "ready": ready, "minReady": *minReady, "entries": entries}); err != nil {
-				return err
-			}
-		} else {
-			fmt.Fprintf(a.Stdout, "pool=%s ready=%d min_ready=%d\n", key, ready, *minReady)
-		}
-		return nil
-	}
-	if !*create {
-		if *jsonOut {
-			if err := json.NewEncoder(a.Stdout).Encode(map[string]any{"key": key, "ready": ready, "minReady": *minReady, "entries": entries}); err != nil {
-				return err
-			}
-		}
-		return exit(5, "pool=%s ready=%d min_ready=%d create=false", key, ready, *minReady)
-	}
+	addStringInput(borrowInput, "compatibilityKey", *compatibilityKey)
+	borrowInput["minReady"] = *minReady
+	borrowInput["maxReady"] = *maxReady
+	borrowInput["claim"] = *create
 	prewarmArgs := append([]string{}, fs.Args()...)
 	prewarmArgs = append(prewarmArgs, "--pool", key)
+	if strings.TrimSpace(*compatibilityKey) != "" {
+		prewarmArgs = append(prewarmArgs, "--pool-compatibility-key", strings.TrimSpace(*compatibilityKey))
+	}
 	prewarmApp := a
 	if *jsonOut {
 		prewarmApp.Stdout = a.Stderr
 	}
-	for next := ready; next < *minReady; next++ {
-		if err := prewarmApp.prewarm(ctx, prewarmArgs); err != nil {
+	for {
+		res, err := coord.ReconcileReadyPool(ctx, key, borrowInput)
+		if err != nil {
+			return err
+		}
+		if res.Satisfied {
+			return renderReadyPoolReconcileResult(a.Stdout, res, *jsonOut)
+		}
+		if !*create {
+			if *jsonOut {
+				if err := json.NewEncoder(a.Stdout).Encode(res); err != nil {
+					return err
+				}
+			}
+			return exit(5, "pool=%s ready=%d min_ready=%d create=false", key, res.Counts.Ready, *minReady)
+		}
+		if res.Claim == nil {
+			if res.Reconciling {
+				return renderReadyPoolReconcileResult(a.Stdout, res, *jsonOut)
+			}
+			if *jsonOut {
+				if err := json.NewEncoder(a.Stdout).Encode(res); err != nil {
+					return err
+				}
+			}
+			return exit(5, "pool=%s ready=%d min_ready=%d max_ready=%d capped=%t", key, res.Counts.Ready, *minReady, *maxReady, res.Capped)
+		}
+		if err := prewarmApp.prewarmWithPoolFillClaim(ctx, prewarmArgs, res.Claim.Token); err != nil {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			releaseErr := coord.ReleaseReadyPoolFillClaim(releaseCtx, key, res.Claim.Token)
+			cancel()
+			if releaseErr != nil {
+				fmt.Fprintf(a.Stderr, "warning: release ready-pool fill claim failed: %v\n", releaseErr)
+			}
 			return err
 		}
 	}
-	entries, err = coord.ReadyPool(ctx, key)
-	if err != nil {
-		return err
+}
+
+func renderReadyPoolReconcileResult(w io.Writer, res CoordinatorReadyPoolReconcileResponse, jsonOut bool) error {
+	if jsonOut {
+		return json.NewEncoder(w).Encode(res)
 	}
-	ready = countReadyPoolEntries(entries, borrowInput)
-	if ready < *minReady {
-		if *jsonOut {
-			if err := json.NewEncoder(a.Stdout).Encode(map[string]any{"key": key, "ready": ready, "minReady": *minReady, "entries": entries}); err != nil {
-				return err
-			}
-		}
-		return exit(5, "pool=%s ready=%d min_ready=%d create=true", key, ready, *minReady)
-	}
-	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(map[string]any{"key": key, "ready": ready, "minReady": *minReady, "entries": entries})
-	}
-	fmt.Fprintf(a.Stdout, "pool=%s ready=%d min_ready=%d\n", key, ready, *minReady)
+	fmt.Fprintf(w, "pool=%s ready=%d busy=%d in_flight=%d min_ready=%d max_ready=%d satisfied=%t reconciling=%t\n", res.Desired.Key, res.Counts.Ready, res.Counts.Busy, res.Counts.InFlight, res.Desired.MinReady, res.Desired.MaxReady, res.Satisfied, res.Reconciling)
 	return nil
 }
 
@@ -276,12 +323,13 @@ func readyPoolCoordinatorFromConfig(cfg Config) (*CoordinatorClient, error) {
 	return coord, nil
 }
 
-func readyPoolBorrowInput(repo, ref, commit, fingerprint, provider, target string) map[string]any {
+func readyPoolBorrowInput(repo, ref, commit, fingerprint, compatibilityKey, provider, target string) map[string]any {
 	input := map[string]any{}
 	addStringInput(input, "repo", repo)
 	addStringInput(input, "ref", ref)
 	addStringInput(input, "commit", commit)
 	addStringInput(input, "fingerprint", fingerprint)
+	addStringInput(input, "compatibilityKey", compatibilityKey)
 	addStringInput(input, "provider", provider)
 	addStringInput(input, "target", target)
 	return input
@@ -296,7 +344,7 @@ func readyPoolRegisterCommit(cfg Config, repo Repo, ref, explicitCommit string) 
 }
 
 func readyPoolRunBorrowInput(cfg Config, repo Repo, repoSlug string) map[string]any {
-	input := readyPoolBorrowInput(repoSlug, firstNonBlank(cfg.Actions.Ref, repo.BaseRef), readyPoolRunBorrowCommit(cfg, repo), "", "", "")
+	input := readyPoolBorrowInput(repoSlug, firstNonBlank(cfg.Actions.Ref, repo.BaseRef), readyPoolRunBorrowCommit(cfg, repo), "", "", "", "")
 	if readyPoolRunAllowsMissingCommit(cfg, repo) {
 		input["allowMissingCommit"] = true
 	}
@@ -382,14 +430,15 @@ func readyPoolClaimWorkRoot(leaseID string) string {
 func poolRegisterValueFlags() map[string]bool {
 	return map[string]bool{
 		"id": true, "repo": true, "ref": true, "commit": true, "fingerprint": true,
-		"image": true, "ssh-host": true, "ssh-user": true, "ssh-port": true, "work-root": true,
+		"compatibility-key": true, "image": true,
+		"ssh-host": true, "ssh-user": true, "ssh-port": true, "work-root": true,
 	}
 }
 
 func poolBorrowValueFlags() map[string]bool {
 	return map[string]bool{
 		"repo": true, "ref": true, "commit": true, "fingerprint": true,
-		"provider": true, "target": true,
+		"compatibility-key": true, "provider": true, "target": true,
 	}
 }
 
@@ -502,49 +551,6 @@ func applyReadyPoolEndpoint(target SSHTarget, entry CoordinatorReadyPoolEntry) S
 		target.FallbackPorts = nil
 	}
 	return target
-}
-
-func countReadyPoolEntries(entries []CoordinatorReadyPoolEntry, borrowInput map[string]any) int {
-	ready := 0
-	now := time.Now()
-	for _, entry := range entries {
-		expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.ExpiresAt))
-		if entry.State == "ready" && err == nil && expiresAt.After(now) && readyPoolEntryMatchesBorrowInput(entry, borrowInput) {
-			ready++
-		}
-	}
-	return ready
-}
-
-func readyPoolEntryMatchesBorrowInput(entry CoordinatorReadyPoolEntry, input map[string]any) bool {
-	for _, field := range []struct {
-		name  string
-		value string
-	}{
-		{name: "repo", value: entry.Repo},
-		{name: "ref", value: entry.Ref},
-		{name: "fingerprint", value: entry.Fingerprint},
-		{name: "provider", value: entry.Provider},
-		{name: "target", value: entry.TargetOS},
-	} {
-		if !readyPoolStringMatches(field.value, readyPoolInputString(input, field.name)) {
-			return false
-		}
-	}
-	commit := readyPoolInputString(input, "commit")
-	if commit == "" {
-		return true
-	}
-	if entry.Commit == commit {
-		return true
-	}
-	allowMissingCommit, _ := input["allowMissingCommit"].(bool)
-	return allowMissingCommit && entry.Commit == ""
-}
-
-func readyPoolStringMatches(got, want string) bool {
-	want = strings.TrimSpace(want)
-	return want == "" || strings.TrimSpace(got) == want
 }
 
 func readyPoolInputString(input map[string]any, key string) string {

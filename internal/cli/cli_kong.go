@@ -560,12 +560,13 @@ type controllerStateValidateKongCmd struct {
 }
 
 type poolKongCmd struct {
-	List     poolListKongCmd     `cmd:"" passthrough:"" help:"List machine inventory."`
-	Ready    poolReadyKongCmd    `cmd:"" passthrough:"" help:"List ready-pool leases."`
-	Register poolRegisterKongCmd `cmd:"" passthrough:"" help:"Register a hydrated lease in a ready pool."`
-	Borrow   poolBorrowKongCmd   `cmd:"" passthrough:"" help:"Borrow a ready-pool lease."`
-	Return   poolReturnKongCmd   `cmd:"" passthrough:"" help:"Return or drain a ready-pool lease."`
-	Ensure   poolEnsureKongCmd   `cmd:"" passthrough:"" help:"Ensure ready-pool capacity."`
+	List      poolListKongCmd      `cmd:"" passthrough:"" help:"List machine inventory."`
+	Ready     poolReadyKongCmd     `cmd:"" passthrough:"" help:"List ready-pool leases."`
+	Register  poolRegisterKongCmd  `cmd:"" passthrough:"" help:"Register a hydrated lease in a ready pool."`
+	Borrow    poolBorrowKongCmd    `cmd:"" passthrough:"" help:"Borrow a ready-pool lease."`
+	Heartbeat poolHeartbeatKongCmd `cmd:"" passthrough:"" help:"Refresh a ready-pool borrow deadline."`
+	Return    poolReturnKongCmd    `cmd:"" passthrough:"" help:"Return or drain a ready-pool lease."`
+	Ensure    poolEnsureKongCmd    `cmd:"" passthrough:"" help:"Ensure ready-pool capacity."`
 }
 type poolListKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -577,6 +578,9 @@ type poolRegisterKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type poolBorrowKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type poolHeartbeatKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type poolReturnKongCmd struct {
@@ -882,6 +886,9 @@ func (c *poolRegisterKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *poolBorrowKongCmd) Run(ctx context.Context, app App) error {
 	return app.readyPoolBorrow(ctx, stripKongCommandPath(c.Args, "pool", "borrow"))
+}
+func (c *poolHeartbeatKongCmd) Run(ctx context.Context, app App) error {
+	return app.readyPoolHeartbeat(ctx, stripKongCommandPath(c.Args, "pool", "heartbeat"))
 }
 func (c *poolReturnKongCmd) Run(ctx context.Context, app App) error {
 	return app.readyPoolReturn(ctx, stripKongCommandPath(c.Args, "pool", "return"))

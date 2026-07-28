@@ -237,6 +237,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	stopAfter := fs.String("stop-after", "", "stop policy for the lease: success, always, failure, or never")
 	leaseOutput := fs.String("lease-output", "", "write a small JSON lease handle for orchestrators")
 	readyPool := fs.String("pool", "", "borrow a broker ready-pool lease")
+	readyPoolCompatibilityKey := fs.String("pool-compatibility-key", "", "provider-neutral ready-pool capability and size key")
 	readyPoolReturn := fs.String("pool-return", "auto", "ready-pool return policy: auto, ready, drain, release")
 	var downloads stringListFlag
 	var allowEnvFlags stringListFlag
@@ -327,6 +328,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if strings.TrimSpace(*readyPool) != "" && strings.TrimSpace(*leaseIDFlag) != "" {
 		return exit(2, "--pool borrows the lease id; omit --id")
+	}
+	if strings.TrimSpace(*readyPoolCompatibilityKey) != "" && strings.TrimSpace(*readyPool) == "" {
+		return exit(2, "--pool-compatibility-key requires --pool")
 	}
 	if strings.TrimSpace(*readyPool) != "" && strings.TrimSpace(*stopAfter) != "" {
 		return exit(2, "--pool uses --pool-return for cleanup policy; omit --stop-after")
@@ -555,6 +559,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var target SSHTarget
 	var leaseID string
 	var borrowedPool *CoordinatorReadyPoolResponse
+	var stopReadyPoolHeartbeat func()
 	var runFailure error
 	var workdir string
 	var hydratedByActions bool
@@ -562,6 +567,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if borrowedPool == nil {
 			return
 		}
+		defer func() {
+			if stopReadyPoolHeartbeat != nil {
+				stopReadyPoolHeartbeat()
+				stopReadyPoolHeartbeat = nil
+			}
+		}()
 		failure := runFailure
 		if failure == nil {
 			failure = err
@@ -599,6 +610,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if readyPoolReturnNeedsHydrationStop(result) {
 			a.writeActionsHydrationStopBestEffort(context.WithoutCancel(ctx), target, borrowedPool.Entry.LeaseID)
+		}
+		if stopReadyPoolHeartbeat != nil {
+			stopReadyPoolHeartbeat()
+			stopReadyPoolHeartbeat = nil
 		}
 		returnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		_, returnErr := coord.ReturnReadyPoolLease(returnCtx, borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result, reason, borrowedPool.Entry.BorrowToken)
@@ -759,11 +774,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if err != nil {
 			return err
 		}
+		addStringInput(borrowInput, "compatibilityKey", *readyPoolCompatibilityKey)
 		res, err := coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
 		if err != nil {
 			return err
 		}
 		borrowedPool = &res
+		stopReadyPoolHeartbeat = startReadyPoolBorrowHeartbeat(context.WithoutCancel(ctx), coord, res.Entry, a.Stderr)
 		*leaseIDFlag = res.Entry.LeaseID
 		fmt.Fprintf(a.Stderr, "borrowed pool=%s lease=%s\n", res.Entry.Key, res.Entry.LeaseID)
 	}
@@ -3050,6 +3067,35 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 			heartbeatCancel()
 			if err != nil && rootCtx.Err() == nil {
 				fmt.Fprintf(stderr, "warning: heartbeat failed for %s: %v\n", leaseID, err)
+			}
+			select {
+			case <-ticker.C:
+			case <-rootCtx.Done():
+				return
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+var readyPoolBorrowHeartbeatInterval = 30 * time.Second
+
+func startReadyPoolBorrowHeartbeat(ctx context.Context, coord *CoordinatorClient, entry CoordinatorReadyPoolEntry, stderr io.Writer) func() {
+	rootCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(readyPoolBorrowHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			callCtx, heartbeatCancel := context.WithTimeout(rootCtx, 20*time.Second)
+			_, err := coord.HeartbeatReadyPoolBorrow(callCtx, entry.Key, entry.LeaseID, entry.BorrowToken)
+			heartbeatCancel()
+			if err != nil && rootCtx.Err() == nil {
+				fmt.Fprintf(stderr, "warning: ready-pool borrow heartbeat failed for %s: %v\n", entry.LeaseID, err)
 			}
 			select {
 			case <-ticker.C:

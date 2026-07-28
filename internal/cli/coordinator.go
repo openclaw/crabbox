@@ -483,40 +483,91 @@ type CoordinatorExternalRunnerSyncResponse struct {
 }
 
 type CoordinatorReadyPoolEntry struct {
-	Key          string `json:"key"`
-	LeaseID      string `json:"leaseID"`
-	State        string `json:"state"`
-	Owner        string `json:"owner"`
-	Org          string `json:"org"`
-	Repo         string `json:"repo,omitempty"`
-	Ref          string `json:"ref,omitempty"`
-	Commit       string `json:"commit,omitempty"`
-	Fingerprint  string `json:"fingerprint,omitempty"`
-	Image        string `json:"image,omitempty"`
-	Provider     string `json:"provider,omitempty"`
-	TargetOS     string `json:"target,omitempty"`
-	WindowsMode  string `json:"windowsMode,omitempty"`
-	Class        string `json:"class,omitempty"`
-	ServerType   string `json:"serverType,omitempty"`
-	SSHHost      string `json:"sshHost,omitempty"`
-	SSHUser      string `json:"sshUser,omitempty"`
-	SSHPort      string `json:"sshPort,omitempty"`
-	WorkRoot     string `json:"workRoot,omitempty"`
-	BorrowedBy   string `json:"borrowedBy,omitempty"`
-	BorrowedAt   string `json:"borrowedAt,omitempty"`
-	BorrowToken  string `json:"borrowToken,omitempty"`
-	LastReadyAt  string `json:"lastReadyAt,omitempty"`
-	LastUsedAt   string `json:"lastUsedAt,omitempty"`
-	LastResult   string `json:"lastResult,omitempty"`
-	FailureCount int    `json:"failureCount,omitempty"`
-	CreatedAt    string `json:"createdAt"`
-	UpdatedAt    string `json:"updatedAt"`
-	ExpiresAt    string `json:"expiresAt"`
+	Key               string `json:"key"`
+	LeaseID           string `json:"leaseID"`
+	State             string `json:"state"`
+	Owner             string `json:"owner"`
+	Org               string `json:"org"`
+	Repo              string `json:"repo,omitempty"`
+	Ref               string `json:"ref,omitempty"`
+	Commit            string `json:"commit,omitempty"`
+	Fingerprint       string `json:"fingerprint,omitempty"`
+	CompatibilityKey  string `json:"compatibilityKey,omitempty"`
+	Image             string `json:"image,omitempty"`
+	Provider          string `json:"provider,omitempty"`
+	TargetOS          string `json:"target,omitempty"`
+	WindowsMode       string `json:"windowsMode,omitempty"`
+	Class             string `json:"class,omitempty"`
+	ServerType        string `json:"serverType,omitempty"`
+	SSHHost           string `json:"sshHost,omitempty"`
+	SSHUser           string `json:"sshUser,omitempty"`
+	SSHPort           string `json:"sshPort,omitempty"`
+	WorkRoot          string `json:"workRoot,omitempty"`
+	BorrowedBy        string `json:"borrowedBy,omitempty"`
+	BorrowedAt        string `json:"borrowedAt,omitempty"`
+	BorrowHeartbeatAt string `json:"borrowHeartbeatAt,omitempty"`
+	BorrowExpiresAt   string `json:"borrowExpiresAt,omitempty"`
+	BorrowToken       string `json:"borrowToken,omitempty"`
+	LastReadyAt       string `json:"lastReadyAt,omitempty"`
+	LastUsedAt        string `json:"lastUsedAt,omitempty"`
+	LastResult        string `json:"lastResult,omitempty"`
+	FailureCount      int    `json:"failureCount,omitempty"`
+	CreatedAt         string `json:"createdAt"`
+	UpdatedAt         string `json:"updatedAt"`
+	ExpiresAt         string `json:"expiresAt"`
 }
 
 type CoordinatorReadyPoolResponse struct {
 	Entry CoordinatorReadyPoolEntry `json:"entry"`
 	Lease CoordinatorLease          `json:"lease"`
+}
+
+type CoordinatorReadyPoolFillClaim struct {
+	Token            string         `json:"token"`
+	Key              string         `json:"key"`
+	CompatibilityKey string         `json:"compatibilityKey,omitempty"`
+	Criteria         map[string]any `json:"criteria"`
+	CreatedAt        string         `json:"createdAt"`
+	ExpiresAt        string         `json:"expiresAt"`
+}
+
+type CoordinatorReadyPoolCapacityCounts struct {
+	Ready       int `json:"ready"`
+	Busy        int `json:"busy"`
+	Draining    int `json:"draining"`
+	Quarantined int `json:"quarantined"`
+	Stale       int `json:"stale"`
+	InFlight    int `json:"inFlight"`
+}
+
+type CoordinatorReadyPoolCounters struct {
+	BorrowRequests      int    `json:"borrowRequests"`
+	WarmHits            int    `json:"warmHits"`
+	WarmMisses          int    `json:"warmMisses"`
+	FillClaimsCreated   int    `json:"fillClaimsCreated"`
+	FillClaimsCompleted int    `json:"fillClaimsCompleted"`
+	BorrowHeartbeats    int    `json:"borrowHeartbeats"`
+	Quarantined         int    `json:"quarantined"`
+	StalePruned         int    `json:"stalePruned"`
+	UpdatedAt           string `json:"updatedAt"`
+}
+
+type CoordinatorReadyPoolReconcileResponse struct {
+	Desired struct {
+		Key              string         `json:"key"`
+		CompatibilityKey string         `json:"compatibilityKey,omitempty"`
+		Criteria         map[string]any `json:"criteria"`
+		MinReady         int            `json:"minReady"`
+		MaxReady         int            `json:"maxReady"`
+		CreatedAt        string         `json:"createdAt"`
+		UpdatedAt        string         `json:"updatedAt"`
+	} `json:"desired"`
+	Counts      CoordinatorReadyPoolCapacityCounts `json:"counts"`
+	Satisfied   bool                               `json:"satisfied"`
+	Reconciling bool                               `json:"reconciling"`
+	Capped      bool                               `json:"capped"`
+	Claim       *CoordinatorReadyPoolFillClaim     `json:"claim,omitempty"`
+	Counters    CoordinatorReadyPoolCounters       `json:"counters"`
 }
 
 type CoordinatorRunEventResponse struct {
@@ -1137,6 +1188,30 @@ func (c *CoordinatorClient) BorrowReadyPoolLease(ctx context.Context, key string
 	var res CoordinatorReadyPoolResponse
 	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/borrow", input, &res)
 	return res, err
+}
+
+func (c *CoordinatorClient) HeartbeatReadyPoolBorrow(ctx context.Context, key, leaseID, borrowToken string) (CoordinatorReadyPoolResponse, error) {
+	var res CoordinatorReadyPoolResponse
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/heartbeat", map[string]any{
+		"leaseID":     leaseID,
+		"borrowToken": borrowToken,
+	}, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) ReconcileReadyPool(ctx context.Context, key string, input map[string]any) (CoordinatorReadyPoolReconcileResponse, error) {
+	var res CoordinatorReadyPoolReconcileResponse
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/reconcile", input, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) ReleaseReadyPoolFillClaim(ctx context.Context, key, claimToken string) error {
+	var res struct {
+		Released bool `json:"released"`
+	}
+	return c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/release-fill-claim", map[string]any{
+		"claimToken": claimToken,
+	}, &res)
 }
 
 func (c *CoordinatorClient) ReturnReadyPoolLease(ctx context.Context, key, leaseID, result, reason, borrowToken string) (CoordinatorReadyPoolResponse, error) {

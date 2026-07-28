@@ -204,7 +204,13 @@ import type {
   ProviderMachine,
   ProvisioningAttempt,
   ReadyPoolBorrowRequest,
+  ReadyPoolBorrowHeartbeatRequest,
+  ReadyPoolCapacityCounts,
+  ReadyPoolCounters,
+  ReadyPoolDesiredCapacity,
   ReadyPoolEntry,
+  ReadyPoolFillClaim,
+  ReadyPoolReconcileRequest,
   ReadyPoolRegisterRequest,
   ReadyPoolReturnRequest,
   PromotedImageRecord,
@@ -295,6 +301,12 @@ const azureOrphanSweepFirstAlarmKey = "azure-orphan-sweep:first-alarm";
 const awsIngressReconcileRecordKey = "aws-ingress-reconcile:pending";
 const azureDeferredCleanupPrefix = "azure-cleanup:";
 const readyPoolPrefix = "ready-pool:";
+const readyPoolDesiredPrefix = "ready-pool-desired:";
+const readyPoolFillClaimPrefix = "ready-pool-fill-claim:";
+const readyPoolCountersPrefix = "ready-pool-counters:";
+const readyPoolBorrowTimeoutMs = 2 * 60_000;
+const readyPoolFillClaimTimeoutMs = 15 * 60_000;
+const readyPoolTerminalRetentionMs = 24 * 60 * 60_000;
 const workspaceReconcileIntervalMs = 10_000;
 const workspaceReconcileMaxIntervalMs = 5 * 60_000;
 const workspaceProvisionClaimMs = 15 * 60_000;
@@ -2510,6 +2522,9 @@ export class FleetCoordinator {
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.cleanupExpiredWebVNCPortalViewerAuth();
     await this.reconcileRuntimeAdapterDeletes();
+    await this.withReadyPoolBorrowLock(() =>
+      this.state.runExclusive(() => this.maintainReadyPools(Date.now())),
+    );
     await this.maintainWorkspacePrewarm();
     await this.provisionPendingWorkspace();
     await this.maintainWorkspacePrewarm();
@@ -10634,8 +10649,20 @@ export class FleetCoordinator {
     if (method === "POST" && action === "borrow") {
       return await this.borrowReadyPoolLease(request, key);
     }
+    if (method === "POST" && action === "heartbeat") {
+      return await this.heartbeatReadyPoolBorrow(request, key);
+    }
     if (method === "POST" && action === "return") {
       return await this.returnReadyPoolLease(request, key);
+    }
+    if (method === "POST" && action === "reconcile") {
+      return await this.reconcileReadyPoolCapacity(request, key);
+    }
+    if (method === "POST" && action === "release-fill-claim") {
+      return await this.releaseReadyPoolFillClaim(request, key);
+    }
+    if (method === "GET" && action === "metrics") {
+      return await this.readyPoolMetrics(request, key);
     }
     return notFound();
   }
@@ -10655,12 +10682,7 @@ export class FleetCoordinator {
   private async readyPoolStatusSnapshot(request: Request, key?: string): Promise<ReadyPoolEntry[]> {
     const entries = await this.readyPoolEntries();
     const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
-    const visible = entries.filter(
-      (entry) =>
-        (!key || entry.key === key) &&
-        this.readyPoolEntryVisibleToRequest(entry, request, leases.get(entry.leaseID)),
-    );
-    await this.markStaleReadyPoolEntries(visible, leases, Date.now());
+    await this.maintainReadyPoolEntries(entries, leases, Date.now());
     return (await this.readyPoolEntries())
       .filter(
         (entry) =>
@@ -10674,17 +10696,21 @@ export class FleetCoordinator {
   private async registerReadyPoolLease(request: Request, key: string): Promise<Response> {
     const input = await readJson<ReadyPoolRegisterRequest>(request);
     const leaseID = input.leaseID ?? "";
+    const compatibilityKey = normalizeReadyPoolCompatibilityKey(input.compatibilityKey);
+    if (input.compatibilityKey !== undefined && !compatibilityKey) {
+      return json({ error: "invalid_compatibility_key" }, { status: 400 });
+    }
     if (!validLeaseID(leaseID)) {
       return json({ error: "invalid_lease_id" }, { status: 400 });
     }
-    const lease = await this.resolveLease(leaseID, request, isAdminRequest(request));
-    if (!lease) {
+    const resolvedLease = await this.resolveLease(leaseID, request, isAdminRequest(request));
+    if (!resolvedLease) {
       return notFound();
     }
-    if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+    if (!this.leaseManageableByRequest(resolvedLease, request, isAdminRequest(request))) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
-    if (isRegisteredLease(lease)) {
+    if (isRegisteredLease(resolvedLease)) {
       return json(
         {
           error: "unsupported_lifecycle",
@@ -10693,7 +10719,7 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    if (lease.provider === "daytona") {
+    if (resolvedLease.provider === "daytona") {
       return json(
         {
           error: "provider_not_supported",
@@ -10702,64 +10728,131 @@ export class FleetCoordinator {
         { status: 409 },
       );
     }
-    if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
+    if (resolvedLease.state !== "active" || Date.parse(resolvedLease.expiresAt) <= Date.now()) {
       return json({ error: "lease_not_active" }, { status: 409 });
     }
-    return await this.withReadyPoolBorrowLock(async () => {
-      const existingPoolEntries = (await this.readyPoolEntries()).filter(
-        (entry) => entry.leaseID === leaseID,
-      );
-      if (existingPoolEntries.some((entry) => entry.state === "busy")) {
-        return json(
-          {
-            error: "lease_pool_busy",
-            message: "lease is currently borrowed from a ready pool",
-          },
-          { status: 409 },
+    return await this.withReadyPoolBorrowLock(() =>
+      this.state.runExclusive(async () => {
+        const lease = (await this.getLease(leaseID)) ?? resolvedLease;
+        if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+          return json(
+            { error: "forbidden", message: "lease manage access required" },
+            { status: 403 },
+          );
+        }
+        if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
+          return json({ error: "lease_not_active" }, { status: 409 });
+        }
+        const fillClaimToken = nonSecretString(input.fillClaimToken);
+        const fillClaim = fillClaimToken
+          ? await this.state.storage.get<ReadyPoolFillClaim>(readyPoolFillClaimKey(fillClaimToken))
+          : undefined;
+        if (fillClaimToken && !fillClaim) {
+          return json({ error: "fill_claim_not_found" }, { status: 409 });
+        }
+        if (
+          fillClaim &&
+          (fillClaim.key !== key ||
+            fillClaim.owner !== requestOwner(request) ||
+            fillClaim.org !== requestOrg(request, this.env))
+        ) {
+          return json({ error: "fill_claim_mismatch" }, { status: 409 });
+        }
+        if (fillClaim && Date.parse(fillClaim.expiresAt) <= Date.now()) {
+          await this.state.storage.delete(readyPoolFillClaimKey(fillClaim.token));
+          return json({ error: "fill_claim_expired" }, { status: 409 });
+        }
+        if (
+          fillClaim?.compatibilityKey &&
+          compatibilityKey &&
+          fillClaim.compatibilityKey !== compatibilityKey
+        ) {
+          return json({ error: "fill_claim_compatibility_mismatch" }, { status: 409 });
+        }
+        const existingPoolEntries = (await this.readyPoolEntries()).filter(
+          (entry) => entry.leaseID === leaseID,
         );
-      }
-      const now = new Date().toISOString();
-      const entry: ReadyPoolEntry = {
-        key,
-        leaseID,
-        state: "ready",
-        owner: lease.owner,
-        org: lease.org,
-        provider: lease.provider,
-        target: lease.target,
-        class: lease.class,
-        serverType: lease.serverType,
-        lastReadyAt: now,
-        createdAt: now,
-        updatedAt: now,
-        expiresAt: lease.expiresAt,
-      };
-      addReadyPoolEntryString(entry, "repo", input.repo);
-      addReadyPoolEntryString(entry, "ref", input.ref);
-      addReadyPoolEntryString(entry, "commit", input.commit);
-      addReadyPoolEntryString(entry, "fingerprint", input.fingerprint);
-      addReadyPoolEntryString(entry, "image", input.image);
-      addReadyPoolEntryString(entry, "sshHost", readyPoolLeaseSSHHost(lease, input.sshHost));
-      addReadyPoolEntryString(entry, "sshUser", readyPoolLeaseSSHUser(lease, input.sshUser));
-      addReadyPoolEntryString(entry, "sshPort", readyPoolLeaseSSHPort(lease, input.sshPort));
-      addReadyPoolEntryString(entry, "workRoot", readyPoolLeaseWorkRoot(lease, input.workRoot));
-      if (lease.windowsMode) {
-        entry.windowsMode = lease.windowsMode;
-      }
-      await Promise.all(
-        existingPoolEntries
-          .filter((existing) => existing.key !== key)
-          .map((existing) => this.deleteReadyPoolEntry(existing)),
-      );
-      await this.putReadyPoolEntry(entry);
-      return json({ entry: publicReadyPoolEntry(entry), lease: publicLeaseRecord(lease) });
-    });
+        if (existingPoolEntries.some((entry) => entry.state === "busy")) {
+          return json(
+            {
+              error: "lease_pool_busy",
+              message: "lease is currently borrowed from a ready pool",
+            },
+            { status: 409 },
+          );
+        }
+        const now = new Date().toISOString();
+        const entry: ReadyPoolEntry = {
+          key,
+          leaseID,
+          state: "ready",
+          owner: lease.owner,
+          org: lease.org,
+          provider: lease.provider,
+          target: lease.target,
+          class: lease.class,
+          serverType: lease.serverType,
+          lastReadyAt: now,
+          createdAt: now,
+          updatedAt: now,
+          expiresAt: lease.expiresAt,
+        };
+        addReadyPoolEntryString(entry, "repo", input.repo);
+        addReadyPoolEntryString(entry, "ref", input.ref);
+        addReadyPoolEntryString(entry, "commit", input.commit);
+        addReadyPoolEntryString(entry, "fingerprint", input.fingerprint);
+        addReadyPoolEntryString(
+          entry,
+          "compatibilityKey",
+          fillClaim?.compatibilityKey ?? compatibilityKey,
+        );
+        addReadyPoolEntryString(entry, "image", input.image);
+        addReadyPoolEntryString(entry, "sshHost", readyPoolLeaseSSHHost(lease, input.sshHost));
+        addReadyPoolEntryString(entry, "sshUser", readyPoolLeaseSSHUser(lease, input.sshUser));
+        addReadyPoolEntryString(entry, "sshPort", readyPoolLeaseSSHPort(lease, input.sshPort));
+        addReadyPoolEntryString(entry, "workRoot", readyPoolLeaseWorkRoot(lease, input.workRoot));
+        if (lease.windowsMode) {
+          entry.windowsMode = lease.windowsMode;
+        }
+        if (fillClaim && !readyPoolEntryMatches(entry, fillClaim.criteria)) {
+          return json(
+            {
+              error: "fill_claim_criteria_mismatch",
+              message: "registered lease does not satisfy the claimed compatibility criteria",
+            },
+            { status: 409 },
+          );
+        }
+        await Promise.all(
+          existingPoolEntries
+            .filter((existing) => existing.key !== key)
+            .map((existing) => this.deleteReadyPoolEntry(existing)),
+        );
+        await this.putReadyPoolEntry(entry);
+        if (fillClaim) {
+          await this.state.storage.delete(readyPoolFillClaimKey(fillClaim.token));
+          await this.incrementReadyPoolCounters(request, key, { fillClaimsCompleted: 1 });
+        }
+        await this.scheduleAlarm();
+        return json({ entry: publicReadyPoolEntry(entry), lease: publicLeaseRecord(lease) });
+      }),
+    );
   }
 
   private async borrowReadyPoolLease(request: Request, key: string): Promise<Response> {
     const input = await readJson<ReadyPoolBorrowRequest>(request);
+    const compatibilityKey = normalizeReadyPoolCompatibilityKey(input.compatibilityKey);
+    if (input.compatibilityKey !== undefined && !compatibilityKey) {
+      return json({ error: "invalid_compatibility_key" }, { status: 400 });
+    }
+    if (compatibilityKey) {
+      input.compatibilityKey = compatibilityKey;
+    } else {
+      delete input.compatibilityKey;
+    }
     return await this.withReadyPoolBorrowLock(async () => {
       return await this.state.runExclusive(async () => {
+        await this.incrementReadyPoolCounters(request, key, { borrowRequests: 1 });
         const entries = (await this.readyPoolStatusSnapshot(request, key)).filter((entry) =>
           readyPoolEntryMatches(entry, input),
         );
@@ -10789,6 +10882,7 @@ export class FleetCoordinator {
         );
         const first = ready[0];
         if (!first) {
+          await this.incrementReadyPoolCounters(request, key, { warmMisses: 1 });
           if (blockedByManageAccess) {
             return json(
               { error: "forbidden", message: "lease manage access required" },
@@ -10801,24 +10895,279 @@ export class FleetCoordinator {
           );
         }
         const { entry, lease } = first;
-        const now = new Date().toISOString();
+        const now = new Date(nowMs).toISOString();
         const borrowed: ReadyPoolEntry = {
           ...entry,
           state: "busy",
           borrowedBy: requestOwner(request),
           borrowedAt: now,
+          borrowHeartbeatAt: now,
+          borrowExpiresAt: new Date(nowMs + readyPoolBorrowTimeoutMs).toISOString(),
           borrowToken: crypto.randomUUID(),
           lastUsedAt: now,
           updatedAt: now,
           expiresAt: lease.expiresAt,
         };
         await this.putReadyPoolEntry(borrowed);
+        await this.incrementReadyPoolCounters(request, key, { warmHits: 1 });
+        await this.scheduleAlarm();
         return json({
           entry: publicReadyPoolEntry(borrowed),
           lease: publicLeaseRecord(lease),
         });
       });
     });
+  }
+
+  private async heartbeatReadyPoolBorrow(request: Request, key: string): Promise<Response> {
+    const input = await readJson<ReadyPoolBorrowHeartbeatRequest>(request);
+    const leaseID = input.leaseID ?? "";
+    const borrowToken = nonSecretString(input.borrowToken);
+    if (!validLeaseID(leaseID)) {
+      return json({ error: "invalid_lease_id" }, { status: 400 });
+    }
+    if (!borrowToken) {
+      return json({ error: "borrow_token_required" }, { status: 400 });
+    }
+    return await this.withReadyPoolBorrowLock(() =>
+      this.state.runExclusive(async () => {
+        const current = await this.getReadyPoolEntry(key, leaseID);
+        const lease = await this.getLease(leaseID);
+        if (!current || !this.readyPoolEntryVisibleToRequest(current, request, lease)) {
+          return notFound();
+        }
+        if (current.state !== "busy") {
+          return json(
+            { error: "not_borrowed", message: "pool entry is not borrowed" },
+            { status: 409 },
+          );
+        }
+        if (current.borrowedBy !== requestOwner(request)) {
+          return json(
+            { error: "forbidden", message: "lease is borrowed by another user" },
+            { status: 403 },
+          );
+        }
+        if (current.borrowToken !== borrowToken) {
+          return json(
+            {
+              error: "borrow_token_mismatch",
+              message: "borrow token does not match current borrow",
+            },
+            { status: 409 },
+          );
+        }
+        const nowMs = Date.now();
+        if (readyPoolBorrowDeadline(current) <= nowMs) {
+          await this.quarantineReadyPoolEntry(current, "borrow heartbeat expired", nowMs);
+          await this.scheduleAlarm();
+          return json(
+            { error: "borrow_expired", message: "pool borrow heartbeat expired" },
+            { status: 409 },
+          );
+        }
+        const now = new Date(nowMs).toISOString();
+        const updated: ReadyPoolEntry = {
+          ...current,
+          borrowHeartbeatAt: now,
+          borrowExpiresAt: new Date(nowMs + readyPoolBorrowTimeoutMs).toISOString(),
+          updatedAt: now,
+          expiresAt: lease?.expiresAt ?? current.expiresAt,
+        };
+        await this.putReadyPoolEntry(updated);
+        await this.incrementReadyPoolCounters(request, key, { borrowHeartbeats: 1 });
+        await this.scheduleAlarm();
+        return json({ entry: publicReadyPoolEntry(redactReadyPoolEntry(updated)) });
+      }),
+    );
+  }
+
+  private async reconcileReadyPoolCapacity(request: Request, key: string): Promise<Response> {
+    const input = await readJson<ReadyPoolReconcileRequest>(request);
+    const minReady = nonNegativeReadyPoolCapacity(input.minReady, 1);
+    if (minReady === undefined) {
+      return json(
+        {
+          error: "invalid_capacity",
+          message: "minReady and maxReady must be integers with 0 <= minReady <= maxReady <= 100",
+        },
+        { status: 400 },
+      );
+    }
+    const maxReady = nonNegativeReadyPoolCapacity(input.maxReady, minReady);
+    if (maxReady === undefined || maxReady < minReady) {
+      return json(
+        {
+          error: "invalid_capacity",
+          message: "minReady and maxReady must be integers with 0 <= minReady <= maxReady <= 100",
+        },
+        { status: 400 },
+      );
+    }
+    const compatibilityKey = normalizeReadyPoolCompatibilityKey(input.compatibilityKey);
+    if (input.compatibilityKey !== undefined && !compatibilityKey) {
+      return json({ error: "invalid_compatibility_key" }, { status: 400 });
+    }
+    const criteria = readyPoolCriteria({
+      ...input,
+      ...(compatibilityKey ? { compatibilityKey } : {}),
+    });
+    const nowMs = Date.now();
+    return await this.withReadyPoolBorrowLock(() =>
+      this.state.runExclusive(async () => {
+        await this.maintainReadyPools(nowMs);
+        const owner = requestOwner(request);
+        const org = requestOrg(request, this.env);
+        const policyKey = readyPoolDesiredKey(owner, org, key, compatibilityKey);
+        const previous = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
+        const now = new Date(nowMs).toISOString();
+        const desired: ReadyPoolDesiredCapacity = {
+          key,
+          owner,
+          org,
+          criteria,
+          minReady,
+          maxReady,
+          createdAt: previous?.createdAt ?? now,
+          updatedAt: now,
+          ...(compatibilityKey ? { compatibilityKey } : {}),
+        };
+        await this.state.storage.put(policyKey, desired);
+
+        const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
+        const entries = (await this.readyPoolEntries()).filter((entry) => {
+          const lease = leases.get(entry.leaseID);
+          return (
+            entry.key === key &&
+            Boolean(
+              lease && this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
+            ) &&
+            readyPoolEntryMatches(entry, criteria)
+          );
+        });
+        const scopedClaims = (await this.readyPoolFillClaims()).filter(
+          (claim) =>
+            claim.key === key &&
+            claim.owner === owner &&
+            claim.org === org &&
+            claim.compatibilityKey === compatibilityKey,
+        );
+        const matchingClaims = scopedClaims
+          .filter((claim) => readyPoolCriteriaEqual(claim.criteria, criteria))
+          .toSorted((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+        await Promise.all(
+          scopedClaims
+            .filter((claim) => !readyPoolCriteriaEqual(claim.criteria, criteria))
+            .map((claim) => this.state.storage.delete(readyPoolFillClaimKey(claim.token))),
+        );
+        const activeEntries = entries.filter(
+          (entry) => entry.state === "ready" || entry.state === "busy",
+        ).length;
+        const claims = matchingClaims.slice(0, Math.max(0, maxReady - activeEntries));
+        await Promise.all(
+          matchingClaims
+            .slice(claims.length)
+            .map((claim) => this.state.storage.delete(readyPoolFillClaimKey(claim.token))),
+        );
+        const counts = readyPoolCapacityCounts(entries, claims.length);
+        const activeCapacity = counts.ready + counts.busy + counts.inFlight;
+        let claim: ReadyPoolFillClaim | undefined;
+        if (input.claim === true && counts.ready < minReady && activeCapacity < maxReady) {
+          claim = {
+            token: crypto.randomUUID(),
+            key,
+            owner,
+            org,
+            criteria,
+            createdAt: now,
+            expiresAt: new Date(nowMs + readyPoolFillClaimTimeoutMs).toISOString(),
+            ...(compatibilityKey ? { compatibilityKey } : {}),
+          };
+          await this.state.storage.put(readyPoolFillClaimKey(claim.token), claim);
+          counts.inFlight++;
+          await this.incrementReadyPoolCounters(request, key, { fillClaimsCreated: 1 });
+        }
+        await this.scheduleAlarm();
+        const counters = await this.readyPoolCounters(request, key);
+        return json({
+          desired: {
+            key: desired.key,
+            criteria: desired.criteria,
+            minReady: desired.minReady,
+            maxReady: desired.maxReady,
+            createdAt: desired.createdAt,
+            updatedAt: desired.updatedAt,
+            ...(desired.compatibilityKey ? { compatibilityKey: desired.compatibilityKey } : {}),
+          },
+          counts,
+          satisfied: counts.ready >= minReady,
+          reconciling: counts.ready + counts.inFlight >= minReady,
+          capped:
+            counts.ready < minReady && counts.ready + counts.busy + counts.inFlight >= maxReady,
+          claim: claim
+            ? {
+                token: claim.token,
+                key: claim.key,
+                criteria: claim.criteria,
+                createdAt: claim.createdAt,
+                expiresAt: claim.expiresAt,
+                ...(claim.compatibilityKey ? { compatibilityKey: claim.compatibilityKey } : {}),
+              }
+            : undefined,
+          counters,
+        });
+      }),
+    );
+  }
+
+  private async releaseReadyPoolFillClaim(request: Request, key: string): Promise<Response> {
+    const input = await readJson<{ claimToken?: string }>(request);
+    const token = nonSecretString(input.claimToken);
+    if (!token) {
+      return json({ error: "fill_claim_token_required" }, { status: 400 });
+    }
+    return await this.withReadyPoolBorrowLock(() =>
+      this.state.runExclusive(async () => {
+        const claim = await this.state.storage.get<ReadyPoolFillClaim>(
+          readyPoolFillClaimKey(token),
+        );
+        if (
+          !claim ||
+          claim.key !== key ||
+          claim.owner !== requestOwner(request) ||
+          claim.org !== requestOrg(request, this.env)
+        ) {
+          return notFound();
+        }
+        await this.state.storage.delete(readyPoolFillClaimKey(token));
+        await this.scheduleAlarm();
+        return json({ released: true });
+      }),
+    );
+  }
+
+  private async readyPoolMetrics(request: Request, key: string): Promise<Response> {
+    return await this.withReadyPoolBorrowLock(() =>
+      this.state.runExclusive(async () => {
+        await this.maintainReadyPools(Date.now());
+        const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
+        const entries = (await this.readyPoolEntries()).filter((entry) => {
+          const lease = leases.get(entry.leaseID);
+          return entry.key === key && this.readyPoolEntryVisibleToRequest(entry, request, lease);
+        });
+        const claims = (await this.readyPoolFillClaims()).filter(
+          (claim) =>
+            claim.key === key &&
+            claim.owner === requestOwner(request) &&
+            claim.org === requestOrg(request, this.env),
+        );
+        return json({
+          key,
+          counts: readyPoolCapacityCounts(entries, claims.length),
+          counters: await this.readyPoolCounters(request, key),
+        });
+      }),
+    );
   }
 
   private async returnReadyPoolLease(request: Request, key: string): Promise<Response> {
@@ -10868,6 +11217,15 @@ export class FleetCoordinator {
           { status: 400 },
         );
       }
+      if ((current.state === "quarantined" || current.state === "stale") && result === "ready") {
+        return json(
+          {
+            error: "pool_entry_quarantined",
+            message: "quarantined or stale pool entries must be drained or released",
+          },
+          { status: 409 },
+        );
+      }
       if (result === "release" || result === "drain") {
         if (!canManage) {
           return json(
@@ -10893,6 +11251,7 @@ export class FleetCoordinator {
       if (!lease || lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
         const stale = this.nextReturnedReadyPoolEntry(current, lease, "stale", input.reason);
         await this.putReadyPoolEntry(stale);
+        await this.state.runExclusive(() => this.scheduleAlarm());
         return json({
           entry: publicReadyPoolEntry(stale),
           lease: lease ? publicLeaseRecord(lease) : undefined,
@@ -10900,6 +11259,7 @@ export class FleetCoordinator {
       }
       const returned = this.nextReturnedReadyPoolEntry(current, lease, "ready", input.reason);
       await this.putReadyPoolEntry(returned);
+      await this.state.runExclusive(() => this.scheduleAlarm());
       return json({
         entry: publicReadyPoolEntry(returned),
         lease: publicLeaseRecord(lease),
@@ -10918,11 +11278,15 @@ export class FleetCoordinator {
     const {
       borrowedAt: _borrowedAt,
       borrowedBy: _borrowedBy,
+      borrowHeartbeatAt: _borrowHeartbeatAt,
+      borrowExpiresAt: _borrowExpiresAt,
       borrowToken: _borrowToken,
       ...base
     } = current;
     void _borrowedAt;
     void _borrowedBy;
+    void _borrowHeartbeatAt;
+    void _borrowExpiresAt;
     void _borrowToken;
     const returned: ReadyPoolEntry = {
       ...base,
@@ -10940,26 +11304,86 @@ export class FleetCoordinator {
     return returned;
   }
 
-  private async markStaleReadyPoolEntries(
+  private async maintainReadyPools(nowMs: number): Promise<void> {
+    const entries: ReadyPoolEntry[] = [];
+    const leases = new Map<string, LeaseRecord>();
+    await Promise.all([
+      this.visitStorageRecords<ReadyPoolEntry>(readyPoolPrefix, async (entry) => {
+        entries.push(entry);
+      }),
+      this.visitLeaseRecords(async (lease) => {
+        leases.set(lease.id, lease);
+      }),
+    ]);
+    await this.maintainReadyPoolEntries(entries, leases, nowMs);
+    await this.visitStorageRecords<ReadyPoolFillClaim>(readyPoolFillClaimPrefix, async (claim) => {
+      if (Date.parse(claim.expiresAt) <= nowMs) {
+        await this.state.storage.delete(readyPoolFillClaimKey(claim.token));
+      }
+    });
+  }
+
+  private async maintainReadyPoolEntries(
     entries: ReadyPoolEntry[],
     leases: Map<string, LeaseRecord>,
     nowMs: number,
   ): Promise<void> {
-    await Promise.all(
-      entries
-        .filter((entry) => {
-          const lease = leases.get(entry.leaseID);
-          return !lease || lease.state !== "active" || Date.parse(lease.expiresAt) <= nowMs;
-        })
-        .map((entry) =>
-          this.putReadyPoolEntry({
+    for (const entry of entries) {
+      const lease = leases.get(entry.leaseID);
+      const backingLeaseExpiresAt = Date.parse(lease?.expiresAt ?? "");
+      const leaseStale =
+        !lease ||
+        lease.state !== "active" ||
+        !Number.isFinite(backingLeaseExpiresAt) ||
+        backingLeaseExpiresAt <= nowMs;
+      if (leaseStale && entry.state !== "stale") {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- ordered writes prevent stale maintenance from racing a newer entry transition.
+        await this.putReadyPoolEntry(
+          withoutReadyPoolBorrow({
             ...entry,
             state: "stale",
-            updatedAt: new Date().toISOString(),
+            updatedAt: new Date(nowMs).toISOString(),
             lastResult: "lease expired or missing",
           }),
-        ),
+        );
+        continue;
+      }
+      if (!leaseStale && entry.state === "busy" && readyPoolBorrowDeadline(entry) <= nowMs) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- quarantine and its counter update are one serialized transition.
+        await this.quarantineReadyPoolEntry(entry, "borrow heartbeat expired", nowMs);
+        continue;
+      }
+      if (
+        (entry.state === "stale" || entry.state === "quarantined" || entry.state === "draining") &&
+        Date.parse(entry.updatedAt) + readyPoolTerminalRetentionMs <= nowMs
+      ) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- pruning is serialized with counter persistence for this entry.
+        await this.deleteReadyPoolEntry(entry);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- counters sharing a scope must not lose concurrent increments.
+        await this.incrementReadyPoolCountersForScope(entry.owner, entry.org, entry.key, {
+          stalePruned: 1,
+        });
+      }
+    }
+  }
+
+  private async quarantineReadyPoolEntry(
+    entry: ReadyPoolEntry,
+    reason: string,
+    nowMs: number,
+  ): Promise<void> {
+    await this.putReadyPoolEntry(
+      withoutReadyPoolBorrow({
+        ...entry,
+        state: "quarantined",
+        updatedAt: new Date(nowMs).toISOString(),
+        lastResult: reason,
+        failureCount: (entry.failureCount ?? 0) + 1,
+      }),
     );
+    await this.incrementReadyPoolCountersForScope(entry.owner, entry.org, entry.key, {
+      quarantined: 1,
+    });
   }
 
   private async listLeases(request: Request): Promise<Response> {
@@ -12281,6 +12705,23 @@ export class FleetCoordinator {
     for (const viewerAlarm of await this.webVNCPortalViewerAlarmTimes(now)) {
       retainAlarm(viewerAlarm);
     }
+    await this.visitStorageRecords<ReadyPoolEntry>(readyPoolPrefix, async (entry) => {
+      if (entry.state === "busy") {
+        retainAlarm(Math.max(now + 1, readyPoolBorrowDeadline(entry)));
+      }
+      if (entry.state === "stale" || entry.state === "quarantined" || entry.state === "draining") {
+        const pruneAt = Date.parse(entry.updatedAt) + readyPoolTerminalRetentionMs;
+        if (Number.isFinite(pruneAt)) {
+          retainAlarm(Math.max(now + 1, pruneAt));
+        }
+      }
+    });
+    await this.visitStorageRecords<ReadyPoolFillClaim>(readyPoolFillClaimPrefix, async (claim) => {
+      const expiresAt = Date.parse(claim.expiresAt);
+      if (Number.isFinite(expiresAt)) {
+        retainAlarm(Math.max(now + 1, expiresAt));
+      }
+    });
     const orphanSweepAlarm = await this.nextAWSOrphanSweepAlarmTime();
     retainAlarm(orphanSweepAlarm);
     const azureOrphanSweepAlarm = await this.nextAzureOrphanSweepAlarmTime();
@@ -13165,6 +13606,61 @@ export class FleetCoordinator {
   private async readyPoolEntries(): Promise<ReadyPoolEntry[]> {
     const entries = await this.state.storage.list<ReadyPoolEntry>({ prefix: readyPoolPrefix });
     return [...entries.values()];
+  }
+
+  private async readyPoolFillClaims(): Promise<ReadyPoolFillClaim[]> {
+    const claims = await this.state.storage.list<ReadyPoolFillClaim>({
+      prefix: readyPoolFillClaimPrefix,
+    });
+    return [...claims.values()];
+  }
+
+  private async readyPoolCounters(request: Request, key: string): Promise<ReadyPoolCounters> {
+    return await this.readyPoolCountersForScope(
+      requestOwner(request),
+      requestOrg(request, this.env),
+      key,
+    );
+  }
+
+  private async readyPoolCountersForScope(
+    owner: string,
+    org: string,
+    key: string,
+  ): Promise<ReadyPoolCounters> {
+    return (
+      (await this.state.storage.get<ReadyPoolCounters>(readyPoolCountersKey(owner, org, key))) ??
+      emptyReadyPoolCounters()
+    );
+  }
+
+  private async incrementReadyPoolCounters(
+    request: Request,
+    key: string,
+    delta: Partial<Record<keyof Omit<ReadyPoolCounters, "updatedAt">, number>>,
+  ): Promise<void> {
+    await this.incrementReadyPoolCountersForScope(
+      requestOwner(request),
+      requestOrg(request, this.env),
+      key,
+      delta,
+    );
+  }
+
+  private async incrementReadyPoolCountersForScope(
+    owner: string,
+    org: string,
+    key: string,
+    delta: Partial<Record<keyof Omit<ReadyPoolCounters, "updatedAt">, number>>,
+  ): Promise<void> {
+    const counters = await this.readyPoolCountersForScope(owner, org, key);
+    for (const [name, amount] of Object.entries(delta) as Array<
+      [keyof Omit<ReadyPoolCounters, "updatedAt">, number]
+    >) {
+      counters[name] += amount;
+    }
+    counters.updatedAt = new Date().toISOString();
+    await this.state.storage.put(readyPoolCountersKey(owner, org, key), counters);
   }
 
   private async getReadyPoolEntry(
@@ -14246,6 +14742,15 @@ function normalizeReadyPoolKey(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+function normalizeReadyPoolCompatibilityKey(value: unknown): string | undefined {
+  const normalized = nonSecretString(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 128);
+  return normalized || undefined;
+}
+
 function decodeReadyPoolRouteKey(value: string): string | undefined {
   try {
     return decodeURIComponent(value);
@@ -14260,9 +14765,103 @@ function readyPoolEntryMatches(entry: ReadyPoolEntry, input: ReadyPoolBorrowRequ
     readyPoolFieldMatches(entry.ref, input.ref) &&
     readyPoolFieldMatches(entry.commit, input.commit, input.allowMissingCommit === true) &&
     readyPoolFieldMatches(entry.fingerprint, input.fingerprint) &&
+    readyPoolFieldMatches(entry.compatibilityKey, input.compatibilityKey) &&
     readyPoolFieldMatches(entry.provider, input.provider) &&
     readyPoolFieldMatches(entry.target, input.target)
   );
+}
+
+function readyPoolCriteria(input: ReadyPoolBorrowRequest): ReadyPoolBorrowRequest {
+  const criteria: ReadyPoolBorrowRequest = {};
+  for (const key of ["repo", "ref", "commit", "fingerprint", "provider", "target"] as const) {
+    const value = nonSecretString(input[key]);
+    if (value) {
+      (criteria as Record<string, unknown>)[key] = value;
+    }
+  }
+  const compatibilityKey = normalizeReadyPoolCompatibilityKey(input.compatibilityKey);
+  if (compatibilityKey) {
+    criteria.compatibilityKey = compatibilityKey;
+  }
+  if (input.allowMissingCommit === true) {
+    criteria.allowMissingCommit = true;
+  }
+  return criteria;
+}
+
+function readyPoolCriteriaEqual(
+  left: ReadyPoolBorrowRequest,
+  right: ReadyPoolBorrowRequest,
+): boolean {
+  return JSON.stringify(readyPoolCriteria(left)) === JSON.stringify(readyPoolCriteria(right));
+}
+
+function readyPoolCapacityCounts(
+  entries: ReadyPoolEntry[],
+  inFlight: number,
+): ReadyPoolCapacityCounts {
+  const counts: ReadyPoolCapacityCounts = {
+    ready: 0,
+    busy: 0,
+    draining: 0,
+    quarantined: 0,
+    stale: 0,
+    inFlight,
+  };
+  for (const entry of entries) {
+    counts[entry.state]++;
+  }
+  return counts;
+}
+
+function readyPoolBorrowDeadline(entry: ReadyPoolEntry): number {
+  const explicit = Date.parse(entry.borrowExpiresAt ?? "");
+  if (Number.isFinite(explicit)) {
+    return explicit;
+  }
+  const anchor = Date.parse(entry.borrowHeartbeatAt ?? entry.borrowedAt ?? entry.updatedAt);
+  return Number.isFinite(anchor) ? anchor + readyPoolBorrowTimeoutMs : Number.NEGATIVE_INFINITY;
+}
+
+function withoutReadyPoolBorrow(entry: ReadyPoolEntry): ReadyPoolEntry {
+  const {
+    borrowedAt: _borrowedAt,
+    borrowedBy: _borrowedBy,
+    borrowHeartbeatAt: _borrowHeartbeatAt,
+    borrowExpiresAt: _borrowExpiresAt,
+    borrowToken: _borrowToken,
+    ...rest
+  } = entry;
+  void _borrowedAt;
+  void _borrowedBy;
+  void _borrowHeartbeatAt;
+  void _borrowExpiresAt;
+  void _borrowToken;
+  return rest;
+}
+
+function nonNegativeReadyPoolCapacity(value: unknown, fallback: number): number | undefined {
+  const capacity = value === undefined ? fallback : value;
+  return typeof capacity === "number" &&
+    Number.isInteger(capacity) &&
+    capacity >= 0 &&
+    capacity <= 100
+    ? capacity
+    : undefined;
+}
+
+function emptyReadyPoolCounters(): ReadyPoolCounters {
+  return {
+    borrowRequests: 0,
+    warmHits: 0,
+    warmMisses: 0,
+    fillClaimsCreated: 0,
+    fillClaimsCompleted: 0,
+    borrowHeartbeats: 0,
+    quarantined: 0,
+    stalePruned: 0,
+    updatedAt: new Date(0).toISOString(),
+  };
 }
 
 function addReadyPoolEntryString(
@@ -14320,6 +14919,27 @@ function readyPoolFieldMatches(
 
 function readyPoolKey(key: string, leaseID: string): string {
   return `${readyPoolPrefix}${key}:${leaseID}`;
+}
+
+function readyPoolDesiredKey(
+  owner: string,
+  org: string,
+  key: string,
+  compatibilityKey?: string,
+): string {
+  return `${readyPoolDesiredPrefix}${[org, owner, key, compatibilityKey ?? ""]
+    .map((part) => encodeURIComponent(part))
+    .join(":")}`;
+}
+
+function readyPoolFillClaimKey(token: string): string {
+  return `${readyPoolFillClaimPrefix}${token}`;
+}
+
+function readyPoolCountersKey(owner: string, org: string, key: string): string {
+  return `${readyPoolCountersPrefix}${[org, owner, key]
+    .map((part) => encodeURIComponent(part))
+    .join(":")}`;
 }
 
 function runKey(runID: string): string {

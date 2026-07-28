@@ -4,7 +4,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestReadyPoolReturnNeedsHydrationStop(t *testing.T) {
@@ -23,24 +22,13 @@ func TestReadyPoolReturnNeedsHydrationStop(t *testing.T) {
 	}
 }
 
-func TestCountReadyPoolEntriesUsesBorrowCriteria(t *testing.T) {
-	future := time.Now().Add(time.Hour).Format(time.RFC3339Nano)
-	entries := []CoordinatorReadyPoolEntry{
-		{State: "ready", ExpiresAt: future, Repo: "openclaw/openclaw", Ref: "main", Commit: "aaa"},
-		{State: "ready", ExpiresAt: future, Repo: "openclaw/openclaw", Ref: "main", Commit: "bbb"},
-		{State: "ready", ExpiresAt: future, Repo: "openclaw/openclaw", Ref: "main"},
-		{State: "busy", ExpiresAt: future, Repo: "openclaw/openclaw", Ref: "main", Commit: "aaa"},
-		{State: "ready", ExpiresAt: future, Repo: "openclaw/openclaw", Ref: "release", Commit: "aaa"},
+func TestReadyPoolBorrowInputIncludesCompatibilityKey(t *testing.T) {
+	input := readyPoolBorrowInput("example-org/my-app", "main", "abc123", "setup-v2", "linux-16-vcpu", "", "linux")
+	if got := readyPoolInputString(input, "compatibilityKey"); got != "linux-16-vcpu" {
+		t.Fatalf("compatibility key=%q", got)
 	}
-
-	strict := map[string]any{"repo": "openclaw/openclaw", "ref": "main", "commit": "aaa"}
-	if got := countReadyPoolEntries(entries, strict); got != 1 {
-		t.Fatalf("strict ready count=%d, want 1", got)
-	}
-
-	branch := map[string]any{"repo": "openclaw/openclaw", "ref": "main", "commit": "aaa", "allowMissingCommit": true}
-	if got := countReadyPoolEntries(entries, branch); got != 2 {
-		t.Fatalf("branch ready count=%d, want 2", got)
+	if _, ok := input["provider"]; ok {
+		t.Fatalf("empty provider unexpectedly constrained compatible pool: %#v", input)
 	}
 }
 

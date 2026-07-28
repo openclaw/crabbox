@@ -890,6 +890,71 @@ func TestCoordinatorHeartbeatTouchesImmediately(t *testing.T) {
 	}
 }
 
+func TestReadyPoolBorrowHeartbeatTouchesImmediately(t *testing.T) {
+	heartbeats := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/ready-pools/shared-linux/heartbeat" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		heartbeats <- string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"entry":{"key":"shared-linux","leaseID":"cbx_123","state":"busy","owner":"alice@example.com","org":"example-org","createdAt":"2026-05-01T00:00:00Z","updatedAt":"2026-05-01T00:00:00Z","expiresAt":"2026-05-01T01:00:00Z"}}`))
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	stop := startReadyPoolBorrowHeartbeat(context.Background(), &client, CoordinatorReadyPoolEntry{
+		Key:         "shared-linux",
+		LeaseID:     "cbx_123",
+		BorrowToken: "borrow-token",
+	}, io.Discard)
+	defer stop()
+
+	select {
+	case body := <-heartbeats:
+		if !strings.Contains(body, `"leaseID":"cbx_123"`) || !strings.Contains(body, `"borrowToken":"borrow-token"`) {
+			t.Fatalf("ready-pool heartbeat body=%s", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ready-pool heartbeat did not touch immediately")
+	}
+}
+
+func TestCoordinatorReadyPoolReconcileAndReleaseClaim(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seen = append(seen, r.Method+" "+r.URL.Path+" "+string(body))
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/reconcile") {
+			_, _ = w.Write([]byte(`{"desired":{"key":"shared-linux","minReady":1,"maxReady":2,"criteria":{},"createdAt":"2026-05-01T00:00:00Z","updatedAt":"2026-05-01T00:00:00Z"},"counts":{"ready":0,"busy":0,"draining":0,"quarantined":0,"stale":0,"inFlight":1},"satisfied":false,"reconciling":true,"capped":false,"claim":{"token":"fill-token","key":"shared-linux","criteria":{},"createdAt":"2026-05-01T00:00:00Z","expiresAt":"2026-05-01T00:15:00Z"},"counters":{}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"released":true}`))
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	res, err := client.ReconcileReadyPool(context.Background(), "shared-linux", map[string]any{
+		"minReady": 1,
+		"maxReady": 2,
+		"claim":    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Claim == nil || res.Claim.Token != "fill-token" || !res.Reconciling {
+		t.Fatalf("reconcile response=%+v", res)
+	}
+	if err := client.ReleaseReadyPoolFillClaim(context.Background(), "shared-linux", res.Claim.Token); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || !strings.Contains(seen[0], `"claim":true`) || !strings.Contains(seen[1], `"claimToken":"fill-token"`) {
+		t.Fatalf("requests=%q", seen)
+	}
+}
+
 func TestCoordinatorHeartbeatIncludesTelemetry(t *testing.T) {
 	bodies := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
