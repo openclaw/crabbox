@@ -134,6 +134,11 @@ CRABBOX_RUN_ID    Unique ID for this crabbox run invocation.
 CRABBOX_SLUG      Friendly lease slug when available; empty otherwise.
 ```
 
+`CRABBOX_LEASE_ID` and `CRABBOX_SLUG` can be empty when a delegated provider
+creates a fresh sandbox during the run itself, because the session does not
+exist yet when the command environment is assembled. Scripts that namespace
+external resources should fall back to `CRABBOX_RUN_ID`, which is always set.
+
 `CRABBOX_RUN_ID` uses the durable coordinator-issued run ID when the run is
 coordinator-backed. Without a coordinator, the CLI generates the same
 `run_<12 lowercase hex characters>` shape before dispatch. The value stays
