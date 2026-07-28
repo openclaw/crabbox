@@ -1,4 +1,4 @@
-import { base64URL, sha256Hex } from "./auth";
+import { base64URL, sha256Hex, type GitHubUserGrant } from "./auth";
 import { bearerToken, pathParts } from "./http";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";
@@ -6,6 +6,8 @@ import type { Env } from "./types";
 export const pairingGrantTTLSeconds = 5 * 60;
 export const deviceTokenTTLSeconds = 90 * 24 * 60 * 60;
 export const pairingRequestBodyBytes = 4 * 1024;
+export const maxDeviceTokensPerOwner = 10;
+export const maxPairingGrantsPerOwner = 10;
 
 const pairingGrantPrefix = "cbxp_";
 export const deviceTokenPrefix = "cbxd_";
@@ -13,6 +15,8 @@ const deviceAudience = "crabbox-device";
 const pairingAudience = "crabbox-device-pairing";
 const leaseReadScope = "leases:read";
 const deviceIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const sha256Pattern = /^[a-f0-9]{64}$/;
+const encoder = new TextEncoder();
 
 export interface PairingGrantRecord {
   version: 1;
@@ -21,6 +25,8 @@ export interface PairingGrantRecord {
   grantHash: string;
   owner: string;
   org: string;
+  ownerLogin: string;
+  ownerGrant: GitHubUserGrant;
   name: string;
   createdAt: string;
   expiresAt: string;
@@ -34,6 +40,8 @@ export interface DeviceTokenRecord {
   tokenHash: string;
   owner: string;
   org: string;
+  ownerLogin: string;
+  ownerGrant: GitHubUserGrant;
   name: string;
   createdAt: string;
   expiresAt: string;
@@ -45,6 +53,18 @@ export interface PublicDeviceRecord {
   scope: [typeof leaseReadScope];
   name: string;
   createdAt: string;
+  expiresAt: string;
+}
+
+export interface PairingGrantOwnerIndexRecord {
+  version: 1;
+  grantHash: string;
+  expiresAt: string;
+}
+
+export interface DeviceOwnerIndexRecord {
+  version: 1;
+  deviceID: string;
   expiresAt: string;
 }
 
@@ -71,6 +91,22 @@ export function isPairingExchangeRequest(request: Request): boolean {
   return (
     request.method.toUpperCase() === "POST" &&
     pathParts(request).join("/") === "v1/pairing/exchange"
+  );
+}
+
+export function isPairingGrantRequest(request: Request): boolean {
+  return (
+    request.method.toUpperCase() === "POST" && pathParts(request).join("/") === "v1/pairing/grants"
+  );
+}
+
+export function isDeviceManagementRequest(request: Request): boolean {
+  const parts = pathParts(request);
+  return (
+    (request.method.toUpperCase() === "GET" || request.method.toUpperCase() === "DELETE") &&
+    parts[0] === "v1" &&
+    parts[1] === "devices" &&
+    (parts.length === 2 || parts.length === 3)
   );
 }
 
@@ -108,6 +144,14 @@ export function pairingGrantPrefixKey(): string {
   return "pairing-grant:";
 }
 
+export function pairingGrantOwnerIndexKey(owner: string, org: string, grantHash: string): string {
+  return `${pairingGrantOwnerIndexPrefix(owner, org)}${grantHash}`;
+}
+
+export function pairingGrantOwnerIndexPrefix(owner: string, org: string): string {
+  return `pairing-grant-owner:${ownerScope(owner, org)}:`;
+}
+
 export async function newDeviceToken(): Promise<{
   id: string;
   token: string;
@@ -134,6 +178,14 @@ export function deviceTokenPrefixKey(): string {
   return "device-token:";
 }
 
+export function deviceOwnerIndexKey(owner: string, org: string, deviceID: string): string {
+  return `${deviceOwnerIndexPrefix(owner, org)}${deviceID}`;
+}
+
+export function deviceOwnerIndexPrefix(owner: string, org: string): string {
+  return `device-owner:${ownerScope(owner, org)}:`;
+}
+
 export function validDeviceID(id: string): boolean {
   return deviceIDPattern.test(id);
 }
@@ -146,6 +198,9 @@ export function validPairingGrantRecord(record: PairingGrantRecord, hash: string
     typeof record.owner === "string" &&
     record.owner.length > 0 &&
     typeof record.org === "string" &&
+    typeof record.ownerLogin === "string" &&
+    record.ownerLogin.length > 0 &&
+    validGitHubUserGrant(record.ownerGrant) &&
     typeof record.name === "string" &&
     Number.isFinite(Date.parse(record.createdAt)) &&
     Number.isFinite(Date.parse(record.expiresAt)) &&
@@ -159,6 +214,10 @@ export function validDeviceTokenRecord(
   id: string,
   tokenHash: string,
 ): boolean {
+  return validStoredDeviceTokenRecord(record, id) && timingSafeEqual(record.tokenHash, tokenHash);
+}
+
+export function validStoredDeviceTokenRecord(record: DeviceTokenRecord, id: string): boolean {
   return (
     record.version === 1 &&
     record.id === id &&
@@ -169,11 +228,38 @@ export function validDeviceTokenRecord(
     typeof record.owner === "string" &&
     record.owner.length > 0 &&
     typeof record.org === "string" &&
+    typeof record.ownerLogin === "string" &&
+    record.ownerLogin.length > 0 &&
+    validGitHubUserGrant(record.ownerGrant) &&
     typeof record.name === "string" &&
     Number.isFinite(Date.parse(record.createdAt)) &&
     Number.isFinite(Date.parse(record.expiresAt)) &&
     typeof record.tokenHash === "string" &&
-    timingSafeEqual(record.tokenHash, tokenHash)
+    sha256Pattern.test(record.tokenHash)
+  );
+}
+
+export function validPairingGrantOwnerIndexRecord(
+  record: PairingGrantOwnerIndexRecord,
+  grantHash: string,
+): boolean {
+  return (
+    record.version === 1 &&
+    record.grantHash === grantHash &&
+    sha256Pattern.test(record.grantHash) &&
+    Number.isFinite(Date.parse(record.expiresAt))
+  );
+}
+
+export function validDeviceOwnerIndexRecord(
+  record: DeviceOwnerIndexRecord,
+  deviceID: string,
+): boolean {
+  return (
+    record.version === 1 &&
+    record.deviceID === deviceID &&
+    validDeviceID(record.deviceID) &&
+    Number.isFinite(Date.parse(record.expiresAt))
   );
 }
 
@@ -222,4 +308,21 @@ function validPairingGrant(grant: string): boolean {
 
 function randomSecret(): string {
   return base64URL(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+function ownerScope(owner: string, org: string): string {
+  return base64URL(encoder.encode(JSON.stringify([owner, org])));
+}
+
+function validGitHubUserGrant(grant: GitHubUserGrant): boolean {
+  return (
+    grant !== null &&
+    typeof grant === "object" &&
+    typeof grant.tokenID === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(grant.tokenID) &&
+    typeof grant.sealedCredential === "string" &&
+    grant.sealedCredential.length > 0 &&
+    typeof grant.expiresAt === "string" &&
+    Number.isFinite(Date.parse(grant.expiresAt))
+  );
 }

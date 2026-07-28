@@ -25,6 +25,13 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   if (method === "GET" && path.join("/") === "v1/auth/github/callback") {
     return "direct";
   }
+  if (
+    path[0] === "v1" &&
+    ((path[1] === "pairing" && (path[2] === "grants" || path[2] === "exchange")) ||
+      path[1] === "devices")
+  ) {
+    return "direct";
+  }
   if (method === "POST" && path.join("/") === "v1/leases") {
     return "direct";
   }

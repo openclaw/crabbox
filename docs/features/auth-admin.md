@@ -30,8 +30,11 @@ allowed GitHub org** (`CRABBOX_GITHUB_ALLOWED_ORGS`, or the singular
 of them. The account must also expose a verified email through GitHub's
 `user:email` scope as an eligibility check; ownership uses GitHub's immutable
 numeric account ID, never an email or login. On success the broker issues a
-signed user token (prefix `cbxu_`, HMAC-SHA256, default 180-day expiry) and the
-CLI stores it in the user config. The token carries the GitHub OAuth credential
+signed user token (prefix `cbxu_`, HMAC-SHA256, default 180-day expiry) for CLI
+login, while portal login receives a distinct `cbwp_` browser-session token in a
+host-only cookie. Normal API Bearer authentication accepts `cbxu_` but rejects
+`cbwp_`; browser-only authority is never inferred from a caller-supplied Cookie
+header. The token carries the GitHub OAuth credential
 encrypted under the independent session secret. The broker revalidates that
 credential's account ID and current org/team membership on requests, caching
 successful checks for five minutes and failing closed when GitHub can no longer

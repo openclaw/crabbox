@@ -103,6 +103,21 @@ export async function requireCurrentGitHubMembership(
   return load;
 }
 
+export async function requireFreshGitHubMembership(
+  identity: GitHubMembershipIdentity,
+  env: GitHubMembershipEnv,
+): Promise<void> {
+  requireSafeGitHubRevocationConfig(env);
+  if (githubUserIsRevoked(identity, env)) {
+    throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
+  }
+  if (!allowedGitHubOrgs(env).includes(identity.org.trim().toLowerCase())) {
+    throw new GitHubAuthorizationError(`GitHub organization ${identity.org} is no longer allowed.`);
+  }
+  await requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login);
+  await requireExactGitHubMembership(identity.accessToken, identity.login, identity.org, env);
+}
+
 function githubUserIsRevoked(
   identity: Pick<GitHubMembershipIdentity, "owner">,
   env: Pick<GitHubMembershipEnv, "CRABBOX_GITHUB_REVOKED_USERS">,

@@ -10,8 +10,10 @@ import {
   isAdminRequest,
   requestWithAuthContext,
   sha256Hex,
+  verifiedPortalTokenExpiresAtForRevocation,
   verifiedUserTokenExpiresAtForRevocation,
   type AuthContext,
+  type AuthRequestContext,
   type GitHubUserGrant,
 } from "./auth";
 import {
@@ -69,6 +71,7 @@ import {
   type DaytonaSSHEndpoint,
 } from "./daytona";
 import { GCPClient, gcpProviderLabelValue } from "./gcp";
+import { requireFreshGitHubMembership } from "./github-membership";
 import {
   HetznerClient,
   HetznerProvisioningError,
@@ -127,24 +130,33 @@ import {
 import { defaultOSImage, normalizeOSImage } from "./os-image";
 import {
   coordinatorOriginStatus,
+  deviceOwnerIndexKey,
+  deviceOwnerIndexPrefix,
   deviceTokenKey,
-  deviceTokenPrefixKey,
   deviceTokenRouteAllowed,
   deviceTokenTTLSeconds,
   isDeviceTokenRequest,
+  maxDeviceTokensPerOwner,
+  maxPairingGrantsPerOwner,
   newDeviceToken,
   newPairingGrant,
   pairingDeviceName,
   pairingGrantHash,
   pairingGrantKey,
-  pairingGrantPrefixKey,
+  pairingGrantOwnerIndexKey,
+  pairingGrantOwnerIndexPrefix,
   pairingGrantTTLSeconds,
   parsedDeviceToken,
   publicDeviceRecord,
   validDeviceID,
+  validDeviceOwnerIndexRecord,
+  validPairingGrantOwnerIndexRecord,
+  validStoredDeviceTokenRecord,
   validDeviceTokenRecord,
   validPairingGrantRecord,
+  type DeviceOwnerIndexRecord,
   type DeviceTokenRecord,
+  type PairingGrantOwnerIndexRecord,
   type PairingGrantRecord,
 } from "./pairing";
 import {
@@ -206,6 +218,7 @@ import {
   tailscaleTagOwnershipErrorMessage,
   validateTailscaleTags,
 } from "./tailscale";
+import { timingSafeEqual } from "./timing-safe";
 import type {
   CapacityHint,
   Env,
@@ -998,6 +1011,7 @@ export class FleetCoordinator {
     private readonly state: CoordinatorRuntime,
     private readonly env: Env,
     private readonly testProviders: Partial<Record<Provider, CloudProvider>> = {},
+    private readonly authContext: AuthRequestContext = {},
   ) {
     this.webVNCCredentialHandoffs = new WebVNCCredentialHandoffs(state);
     this.restoreBridgeWebSockets();
@@ -1311,7 +1325,9 @@ export class FleetCoordinator {
   private async createPairingGrant(request: Request): Promise<Response> {
     const originError = pairingOriginError(request, this.env);
     if (originError) return originError;
-    if (!pairingOwnerSession(request)) {
+    const ownerSession = pairingBrowserSession(request);
+    if (!ownerSession) {
+      await request.arrayBuffer().catch(() => undefined);
       return json({ error: "owner_session_required" }, { status: 403 });
     }
     const input = await pairingInput(request);
@@ -1319,27 +1335,40 @@ export class FleetCoordinator {
     const name = pairingDeviceName(input.name);
     if (!name) return json({ error: "invalid_device_name" }, { status: 400 });
     const now = new Date();
+    const owner = requestOwner(request);
+    const org = requestOrg(request, this.env);
     const credentials = await newPairingGrant();
     const record: PairingGrantRecord = {
       version: 1,
       audience: "crabbox-device-pairing",
       scope: "leases:read",
       grantHash: credentials.grantHash,
-      owner: requestOwner(request),
-      org: requestOrg(request, this.env),
+      owner,
+      org,
+      ownerLogin: ownerSession.login,
+      ownerGrant: ownerSession.grant,
       name,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + pairingGrantTTLSeconds * 1000).toISOString(),
     };
-    const grants = await this.state.storage.list<PairingGrantRecord>({
-      prefix: pairingGrantPrefixKey(),
+    const ownerIndex: PairingGrantOwnerIndexRecord = {
+      version: 1,
+      grantHash: record.grantHash,
+      expiresAt: record.expiresAt,
+    };
+    const stored = await this.state.runExclusive(async () => {
+      const activeGrants = await this.activeOwnerPairingGrants(owner, org, now.getTime());
+      if (activeGrants.length >= maxPairingGrantsPerOwner) return false;
+      await this.state.storage.put(
+        pairingGrantOwnerIndexKey(owner, org, record.grantHash),
+        ownerIndex,
+      );
+      await this.state.storage.put(pairingGrantKey(record.grantHash), record);
+      return true;
     });
-    await Promise.all(
-      [...grants.entries()]
-        .filter(([, grant]) => Date.parse(grant.expiresAt) <= now.getTime())
-        .map(([key]) => this.state.storage.delete(key)),
-    );
-    await this.state.storage.put(pairingGrantKey(record.grantHash), record);
+    if (!stored) {
+      return pairingJSON({ error: "pairing_grant_limit_reached" }, { status: 429 });
+    }
     return pairingJSON({
       grant: credentials.grant,
       audience: record.audience,
@@ -1361,8 +1390,14 @@ export class FleetCoordinator {
     if (!record || !validPairingGrantRecord(record, grantHash)) {
       return pairingUnauthorized("pairing_grant_invalid");
     }
+    await this.state.storage.delete(
+      pairingGrantOwnerIndexKey(record.owner, record.org, record.grantHash),
+    );
     if (Date.parse(record.expiresAt) <= Date.now()) {
       return pairingUnauthorized("pairing_grant_expired");
+    }
+    if (!(await this.pairingOwnerIsCurrent(record))) {
+      return pairingUnauthorized("pairing_owner_unauthorized");
     }
     const now = new Date();
     const credentials = await newDeviceToken();
@@ -1374,57 +1409,84 @@ export class FleetCoordinator {
       tokenHash: credentials.tokenHash,
       owner: record.owner,
       org: record.org,
+      ownerLogin: record.ownerLogin,
+      ownerGrant: record.ownerGrant,
       name: record.name,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + deviceTokenTTLSeconds * 1000).toISOString(),
     };
-    await this.state.storage.put(deviceTokenKey(device.id), device);
+    const ownerIndex: DeviceOwnerIndexRecord = {
+      version: 1,
+      deviceID: device.id,
+      expiresAt: device.expiresAt,
+    };
+    const stored = await this.state.runExclusive(async () => {
+      const activeDevices = await this.activeOwnerDevices(record.owner, record.org);
+      if (activeDevices.length >= maxDeviceTokensPerOwner) return false;
+      await this.state.storage.put(
+        deviceOwnerIndexKey(device.owner, device.org, device.id),
+        ownerIndex,
+      );
+      await this.state.storage.put(deviceTokenKey(device.id), device);
+      return true;
+    });
+    if (!stored) {
+      return pairingJSON(
+        { error: "device_limit_reached", limit: maxDeviceTokensPerOwner },
+        { status: 409 },
+      );
+    }
     return pairingJSON({ device: publicDeviceRecord(device), token: credentials.token });
   }
 
   private async deviceRoute(request: Request, deviceID?: string): Promise<Response> {
-    const originError = pairingOriginError(request, this.env);
+    const method = request.method.toUpperCase();
+    const originError = pairingOriginError(request, this.env, method !== "GET");
     if (originError) return originError;
-    if (!pairingOwnerSession(request)) {
+    if (!pairingBrowserSession(request)) {
       return json({ error: "owner_session_required" }, { status: 403 });
     }
-    const method = request.method.toUpperCase();
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     if (method === "GET" && !deviceID) {
-      const records = await this.state.storage.list<DeviceTokenRecord>({
-        prefix: deviceTokenPrefixKey(),
-      });
-      const expiredKeys: string[] = [];
-      const devices = [...records.entries()]
-        .filter(([key, record]) => {
-          if (Date.parse(record.expiresAt) <= Date.now()) {
-            expiredKeys.push(key);
-            return false;
-          }
-          return record.owner === owner && record.org === org;
-        })
-        .map(([, record]) => publicDeviceRecord(record))
-        .toSorted((left, right) => right.createdAt.localeCompare(left.createdAt));
-      await Promise.all(expiredKeys.map((key) => this.state.storage.delete(key)));
+      const devices = await this.state.runExclusive(async () =>
+        (await this.activeOwnerDevices(owner, org))
+          .map((record) => publicDeviceRecord(record))
+          .toSorted((left, right) => right.createdAt.localeCompare(left.createdAt)),
+      );
       return pairingJSON({ devices });
     }
     if (method === "DELETE" && !deviceID) {
-      const records = await this.state.storage.list<DeviceTokenRecord>({
-        prefix: deviceTokenPrefixKey(),
+      const devices = await this.state.runExclusive(async () => {
+        const active = await this.activeOwnerDevices(owner, org);
+        await Promise.all(
+          active.flatMap((record) => [
+            this.state.storage.delete(deviceTokenKey(record.id)),
+            this.state.storage.delete(deviceOwnerIndexKey(owner, org, record.id)),
+          ]),
+        );
+        return active;
       });
-      const keys = [...records.entries()]
-        .filter(([, record]) => record.owner === owner && record.org === org)
-        .map(([key]) => key);
-      await Promise.all(keys.map((key) => this.state.storage.delete(key)));
-      return pairingJSON({ revoked: keys.length });
+      return pairingJSON({ revoked: devices.length });
     }
     if (method === "DELETE" && deviceID && validDeviceID(deviceID)) {
-      const key = deviceTokenKey(deviceID);
-      const record = await this.state.storage.get<DeviceTokenRecord>(key, { noCache: true });
-      if (!record || record.owner !== owner || record.org !== org) return notFound();
-      await this.state.storage.delete(key);
-      return new Response(null, { status: 204, headers: pairingResponseHeaders() });
+      return await this.state.runExclusive(async () => {
+        const key = deviceTokenKey(deviceID);
+        const record = await this.state.storage.get<DeviceTokenRecord>(key, { noCache: true });
+        if (
+          !record ||
+          !validStoredDeviceTokenRecord(record, deviceID) ||
+          record.owner !== owner ||
+          record.org !== org
+        ) {
+          return notFound();
+        }
+        await Promise.all([
+          this.state.storage.delete(key),
+          this.state.storage.delete(deviceOwnerIndexKey(owner, org, deviceID)),
+        ]);
+        return new Response(null, { status: 204, headers: pairingResponseHeaders() });
+      });
     }
     return json({ error: "not_found" }, { status: 404 });
   }
@@ -1443,13 +1505,14 @@ export class FleetCoordinator {
       return pairingUnauthorized("device_token_invalid");
     }
     if (Date.parse(record.expiresAt) <= Date.now()) {
-      await this.state.storage.delete(key);
       return pairingUnauthorized("device_token_expired");
     }
     const org = orgAuthLabelFromKey(record.org);
     if (org === undefined) {
-      await this.state.storage.delete(key);
       return pairingUnauthorized("device_token_invalid");
+    }
+    if (!(await this.pairingOwnerIsCurrent(record))) {
+      return pairingUnauthorized("device_owner_unauthorized");
     }
     return requestWithAuthContext(request, {
       authorized: true,
@@ -1459,6 +1522,91 @@ export class FleetCoordinator {
       org,
       tokenExpiresAt: record.expiresAt,
     });
+  }
+
+  private async pairingOwnerIsCurrent(
+    record: Pick<DeviceTokenRecord, "owner" | "org" | "ownerLogin" | "ownerGrant">,
+  ): Promise<boolean> {
+    const org = orgAuthLabelFromKey(record.org);
+    if (org === undefined) return false;
+    return await githubUserGrantIsCurrent(
+      record.ownerGrant,
+      { owner: record.owner, org, login: record.ownerLogin },
+      this.env,
+      {
+        githubMembership: this.authContext.githubMembership ?? requireFreshGitHubMembership,
+      },
+    );
+  }
+
+  private async activeOwnerDevices(owner: string, org: string): Promise<DeviceTokenRecord[]> {
+    const indexes = await this.state.storage.list<DeviceOwnerIndexRecord>({
+      prefix: deviceOwnerIndexPrefix(owner, org),
+      limit: maxDeviceTokensPerOwner + 1,
+      noCache: true,
+    });
+    const records = await Promise.all(
+      [...indexes.entries()].map(async ([indexKey, index]) => {
+        if (!validDeviceOwnerIndexRecord(index, index.deviceID)) {
+          await this.state.storage.delete(indexKey);
+          return undefined;
+        }
+        const key = deviceTokenKey(index.deviceID);
+        const record = await this.state.storage.get<DeviceTokenRecord>(key, { noCache: true });
+        if (
+          !record ||
+          !validStoredDeviceTokenRecord(record, index.deviceID) ||
+          record.owner !== owner ||
+          record.org !== org
+        ) {
+          await this.state.storage.delete(indexKey);
+          return undefined;
+        }
+        if (Date.parse(record.expiresAt) <= Date.now()) {
+          await Promise.all([this.state.storage.delete(indexKey), this.state.storage.delete(key)]);
+          return undefined;
+        }
+        return record;
+      }),
+    );
+    return records.filter((record): record is DeviceTokenRecord => record !== undefined);
+  }
+
+  private async activeOwnerPairingGrants(
+    owner: string,
+    org: string,
+    now: number,
+  ): Promise<PairingGrantRecord[]> {
+    const indexes = await this.state.storage.list<PairingGrantOwnerIndexRecord>({
+      prefix: pairingGrantOwnerIndexPrefix(owner, org),
+      limit: maxPairingGrantsPerOwner + 1,
+      noCache: true,
+    });
+    const records = await Promise.all(
+      [...indexes.entries()].map(async ([indexKey, index]) => {
+        if (!validPairingGrantOwnerIndexRecord(index, index.grantHash)) {
+          await this.state.storage.delete(indexKey);
+          return undefined;
+        }
+        const key = pairingGrantKey(index.grantHash);
+        const record = await this.state.storage.get<PairingGrantRecord>(key, { noCache: true });
+        if (
+          !record ||
+          !validPairingGrantRecord(record, index.grantHash) ||
+          record.owner !== owner ||
+          record.org !== org
+        ) {
+          await this.state.storage.delete(indexKey);
+          return undefined;
+        }
+        if (Date.parse(record.expiresAt) <= now) {
+          await Promise.all([this.state.storage.delete(indexKey), this.state.storage.delete(key)]);
+          return undefined;
+        }
+        return record;
+      }),
+    );
+    return records.filter((record): record is PairingGrantRecord => record !== undefined);
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -5548,6 +5696,9 @@ export class FleetCoordinator {
     if (method === "GET" && action === undefined) {
       const admin = isAdminRequest(request);
       const lease = await this.resolveLease(leaseID, request, false);
+      if (lease && requestAuthType(request) === "device") {
+        return json({ lease: this.deviceLeaseRecord(lease) });
+      }
       const refreshed =
         lease && this.leaseProviderAccessVisibleToRequest(lease, request, admin)
           ? await this.refreshLeaseAccessForResolution(lease)
@@ -9790,7 +9941,9 @@ export class FleetCoordinator {
     await this.cleanupExpiredCodeViewerAuth();
     const token = cookieValue(request.headers.get("cookie") ?? "", portalSessionCookieName);
     if (token) {
-      const verifiedTokenExpiresAt = await verifiedUserTokenExpiresAtForRevocation(token, this.env);
+      const verifiedTokenExpiresAt =
+        (await verifiedPortalTokenExpiresAtForRevocation(token, this.env)) ??
+        (await verifiedUserTokenExpiresAtForRevocation(token, this.env));
       if (verifiedTokenExpiresAt) {
         const portalSessionHash = await sha256Hex(token);
         const now = new Date();
@@ -11585,6 +11738,9 @@ export class FleetCoordinator {
     const leases = admin
       ? this.filterLeases(await this.leaseRecords(), request)
       : this.filterLeasesForRequest(await this.leaseRecords(), request);
+    if (requestAuthType(request) === "device") {
+      return json({ leases: leases.map((lease) => this.deviceLeaseRecord(lease)) });
+    }
     return json({ leases: leases.map((lease) => this.leaseForListRequest(lease, request, admin)) });
   }
 
@@ -14103,13 +14259,14 @@ export class FleetCoordinator {
 
   private leaseForRequest(lease: LeaseRecord, request: Request, admin: boolean): LeaseRecord {
     const visible = publicLeaseRecord(lease);
+    const role = this.leaseAccessRole(lease, request, admin);
     if (visible.cleanupError) {
       visible.cleanupError = coordinatorDiagnosticText(this.env, visible.cleanupError);
     }
     if (visible.failureError) {
       visible.failureError = coordinatorDiagnosticText(this.env, visible.failureError);
     }
-    if (visible.share && !this.leaseManageableByRequest(lease, request, admin)) {
+    if (visible.share && role !== "owner" && role !== "manage") {
       delete visible.share;
     }
     if (
@@ -14120,6 +14277,60 @@ export class FleetCoordinator {
       visible.sshUser = "<token>";
     }
     return visible;
+  }
+
+  private deviceLeaseRecord(lease: LeaseRecord): Record<string, unknown> {
+    return {
+      id: lease.id,
+      slug: lease.slug,
+      workspaceID: lease.workspaceID,
+      provider: lease.provider,
+      lifecycle: lease.lifecycle,
+      target: lease.target,
+      os: lease.os,
+      windowsMode: lease.windowsMode,
+      desktop: lease.desktop,
+      desktopEnv: lease.desktopEnv,
+      browser: lease.browser,
+      code: lease.code,
+      owner: lease.owner,
+      org: orgLabelForDisplay(lease.org),
+      profile: lease.profile,
+      class: lease.class,
+      serverType: lease.serverType,
+      requestedServerType: lease.requestedServerType,
+      pond: lease.pond,
+      exposedPorts: lease.exposedPorts,
+      market: lease.market,
+      keep: lease.keep,
+      ttlSeconds: lease.ttlSeconds,
+      idleTimeoutSeconds: lease.idleTimeoutSeconds,
+      estimatedHourlyUSD: lease.estimatedHourlyUSD,
+      maxEstimatedUSD: lease.maxEstimatedUSD,
+      state: lease.state,
+      createdAt: lease.createdAt,
+      updatedAt: lease.updatedAt,
+      lastTouchedAt: lease.lastTouchedAt,
+      expiresAt: lease.expiresAt,
+      releasedAt: lease.releasedAt,
+      endedAt: lease.endedAt,
+      registeredAt: lease.registeredAt,
+      telemetry: lease.telemetry,
+      telemetryHistory: lease.telemetryHistory,
+      cleanupAttempts: lease.cleanupAttempts,
+      cleanupFailedAt: lease.cleanupFailedAt,
+      cleanupRetryAt: lease.cleanupRetryAt,
+      cleanupError: lease.cleanupError
+        ? coordinatorDiagnosticText(this.env, lease.cleanupError)
+        : undefined,
+      failureError: lease.failureError
+        ? coordinatorDiagnosticText(this.env, lease.failureError)
+        : undefined,
+      host: "<redacted>",
+      sshUser: "<redacted>",
+      sshPort: "<redacted>",
+      workRoot: "<redacted>",
+    };
   }
 
   private async authoritativeLeaseProviderMetadata(
@@ -14169,12 +14380,13 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     request: Request,
     admin: boolean,
-  ): "owner" | LeaseShareRole | undefined {
-    return this.leaseAccessRoleForPrincipal(lease, {
+  ): "owner" | LeaseShareRole | "device" | undefined {
+    const role = this.leaseAccessRoleForPrincipal(lease, {
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       admin,
     });
+    return role && requestAuthType(request) === "device" ? "device" : role;
   }
 
   private leaseAccessRoleForPrincipal(
@@ -17045,21 +17257,34 @@ function requestAuthType(request: Request): AuthContext["auth"] {
     : "github";
 }
 
-function pairingOwnerSession(request: Request): boolean {
-  if (!request.headers.has("x-crabbox-auth")) return false;
-  const auth = requestAuthType(request);
-  return (
-    auth === "github" ||
-    auth === "proxy" ||
-    (auth === "bearer" && !isAdminRequest(request) && requestOwner(request) !== "unknown")
-  );
+function pairingBrowserSession(
+  request: Request,
+): { login: string; grant: GitHubUserGrant } | undefined {
+  if (
+    requestAuthType(request) !== "github" ||
+    request.headers.get("x-crabbox-portal-session") !== "true"
+  ) {
+    return undefined;
+  }
+  const cookie = cookieValue(request.headers.get("cookie") ?? "", portalSessionCookieName);
+  const token = bearerToken(request);
+  if (!cookie || !token || !timingSafeEqual(cookie, token)) return undefined;
+  const login = request.headers.get("x-crabbox-github-login")?.trim() ?? "";
+  const tokenID = request.headers.get("x-crabbox-github-token-id")?.trim() ?? "";
+  const sealedCredential = request.headers.get("x-crabbox-github-sealed-credential")?.trim() ?? "";
+  const expiresAt = request.headers.get("x-crabbox-token-expires-at")?.trim() ?? "";
+  if (!login || !tokenID || !sealedCredential || Date.parse(expiresAt) <= Date.now()) {
+    return undefined;
+  }
+  return { login, grant: { tokenID, sealedCredential, expiresAt } };
 }
 
 function pairingOriginError(
   request: Request,
   env: Pick<Env, "CRABBOX_PUBLIC_URL">,
+  requireOriginHeader = true,
 ): Response | undefined {
-  const status = coordinatorOriginStatus(request, env, true);
+  const status = coordinatorOriginStatus(request, env, requireOriginHeader);
   if (status === "unavailable") {
     return json({ error: "pairing_unavailable" }, { status: 503 });
   }

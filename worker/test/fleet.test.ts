@@ -27441,7 +27441,7 @@ describe("fleet identity", () => {
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/portal/leases/cbx_000000000001/vnc");
     const cookie = callback.headers.get("set-cookie") ?? "";
-    expect(cookie).toContain("__Host-crabbox_session=cbxu_");
+    expect(cookie).toContain("__Host-crabbox_session=cbwp_");
     expect(cookie).toContain("crabbox_session=;");
     expect(cookie).toContain("Path=/");
     expect(cookie).toContain("HttpOnly");
@@ -27470,12 +27470,12 @@ describe("fleet identity", () => {
       return cookiePairFromResponse(callback, "__Host-crabbox_session");
     };
     const throughCoordinator = async (
-      token: string,
+      sessionCookie: string,
       leaseID = "cbx_000000000001",
     ): Promise<Response> =>
       await routeCoordinatorRequest(
-        new Request(`https://crabbox.test/v1/leases/${leaseID}`, {
-          headers: { authorization: `Bearer ${token}` },
+        new Request(`https://crabbox.test/portal/leases/${leaseID}`, {
+          headers: { cookie: sessionCookie },
         }),
         env,
         async (prepared) => await fleet.fetch(prepared),
@@ -27493,7 +27493,7 @@ describe("fleet identity", () => {
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
     );
-    expect((await throughCoordinator(originalToken)).status).toBe(200);
+    expect((await throughCoordinator(originalCookie)).status).toBe(200);
     storage.seed(
       "lease:cbx_000000000002",
       testLease({
@@ -27507,8 +27507,8 @@ describe("fleet identity", () => {
     const reassignedCookie = await login(67890);
     const reassignedToken = decodeURIComponent(reassignedCookie.split("=", 2)[1] ?? "");
     expect(decodeUserTokenPayload(reassignedToken).owner).toBe("github:67890");
-    expect((await throughCoordinator(reassignedToken)).status).toBe(404);
-    expect((await throughCoordinator(reassignedToken, "cbx_000000000002")).status).toBe(404);
+    expect((await throughCoordinator(reassignedCookie)).status).toBe(404);
+    expect((await throughCoordinator(reassignedCookie, "cbx_000000000002")).status).toBe(404);
 
     const recovered = await fleet.fetch(
       request("PUT", "/v1/leases/cbx_000000000002/share", {
@@ -27517,7 +27517,7 @@ describe("fleet identity", () => {
       }),
     );
     expect(recovered.status).toBe(200);
-    expect((await throughCoordinator(reassignedToken, "cbx_000000000002")).status).toBe(200);
+    expect((await throughCoordinator(reassignedCookie, "cbx_000000000002")).status).toBe(200);
   });
 
   it.each([
@@ -27554,7 +27554,7 @@ describe("fleet identity", () => {
     );
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/portal");
-    expect(callback.headers.get("set-cookie")).toContain("__Host-crabbox_session=cbxu_");
+    expect(callback.headers.get("set-cookie")).toContain("__Host-crabbox_session=cbwp_");
   });
 
   it("requires a POST before clearing the portal session", async () => {
@@ -29649,14 +29649,17 @@ function decodeUserTokenPayload(token: string): {
   iat: number;
   jti: string;
   githubCredential: string;
+  owner: string;
 } {
-  expect(token).toMatch(/^cbxu_/);
-  const [payload] = token.slice("cbxu_".length).split(".");
+  expect(token).toMatch(/^cb(?:xu|wp)_/);
+  const prefix = token.startsWith("cbwp_") ? "cbwp_" : "cbxu_";
+  const [payload] = token.slice(prefix.length).split(".");
   const decoded = Buffer.from(payload, "base64url").toString("utf8");
   return JSON.parse(decoded) as {
     exp: number;
     iat: number;
     jti: string;
     githubCredential: string;
+    owner: string;
   };
 }

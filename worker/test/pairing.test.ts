@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { issuePortalToken, issueUserToken } from "../src/auth";
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   type CoordinatorRuntime,
@@ -9,44 +10,75 @@ import {
 } from "../src/coordinator-runtime";
 import { FleetCoordinator } from "../src/fleet";
 import { orgKeyForLabel } from "../src/org-identity";
-import { deviceTokenTTLSeconds, pairingGrantTTLSeconds } from "../src/pairing";
+import {
+  deviceTokenTTLSeconds,
+  maxDeviceTokensPerOwner,
+  maxPairingGrantsPerOwner,
+  pairingGrantTTLSeconds,
+} from "../src/pairing";
 import type { Env, LeaseRecord } from "../src/types";
 
 const origin = "https://coordinator.example.test";
-const owner = "alice@example.com";
+const owner = "github:12345";
+const ownerLogin = "alice";
+const otherOwner = "github:67890";
 const org = "example-org";
 
 class MemoryStorage implements CoordinatorStorage {
   private readonly values = new Map<string, unknown>();
+  writes = 0;
+  readonly listPrefixes: string[] = [];
 
   get<T>(key: string): Promise<T | undefined> {
     return Promise.resolve(this.values.get(key) as T | undefined);
   }
 
   put<T>(key: string, value: T): Promise<void> {
+    this.writes += 1;
     this.values.set(key, value);
     return Promise.resolve();
   }
 
   delete(key: string): Promise<void> {
+    this.writes += 1;
     this.values.delete(key);
     return Promise.resolve();
   }
 
-  list<T>({ prefix = "" }: { prefix?: string } = {}): Promise<Map<string, T>> {
+  list<T>({
+    prefix = "",
+    limit,
+    startAfter,
+  }: {
+    prefix?: string;
+    limit?: number;
+    startAfter?: string;
+    noCache?: boolean;
+  } = {}): Promise<Map<string, T>> {
+    this.listPrefixes.push(prefix);
+    const entries = [...this.values]
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .filter(([key]) => key.startsWith(prefix) && (!startAfter || key > startAfter));
     return Promise.resolve(
       new Map(
-        [...this.values]
-          .filter(([key]) => key.startsWith(prefix))
-          .map(([key, value]) => [key, value as T]),
+        (limit === undefined ? entries : entries.slice(0, limit)).map(([key, value]) => [
+          key,
+          value as T,
+        ]),
       ),
     );
   }
 
   take<T>(key: string): Promise<T | undefined> {
+    this.writes += 1;
     const value = this.values.get(key) as T | undefined;
     this.values.delete(key);
     return Promise.resolve(value);
+  }
+
+  resetObservations(): void {
+    this.writes = 0;
+    this.listPrefixes.length = 0;
   }
 
   serialized(): string {
@@ -116,6 +148,8 @@ class MemoryRuntime implements CoordinatorRuntime {
 interface PairingFixture {
   env: Env;
   runtime: MemoryRuntime;
+  membershipAllowed: { value: boolean };
+  membershipChecks: ReturnType<typeof vi.fn>;
   request(
     path: string,
     init?: RequestInit,
@@ -123,6 +157,10 @@ interface PairingFixture {
     destinationOrigin?: string,
   ): Promise<Response>;
   ownerRequest(path: string, init?: RequestInit, requestOrigin?: string): Promise<Response>;
+  bearerRequest(path: string, init?: RequestInit): Promise<Response>;
+  userBearerRequest(path: string, init?: RequestInit): Promise<Response>;
+  portalBearerRequest(path: string, init?: RequestInit): Promise<Response>;
+  userCookieRequest(path: string, init?: RequestInit): Promise<Response>;
   pair(name?: string): Promise<{ deviceID: string; grant: string; token: string }>;
 }
 
@@ -133,16 +171,17 @@ describe("coordinator device pairing", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
-  it("exchanges an owner grant for a read-only token and reuses lease visibility", async () => {
-    const fixture = pairingFixture();
+  it("exchanges a browser grant for a distinct credential-free device principal", async () => {
+    const fixture = await pairingFixture();
     await seedLease(fixture.runtime, lease("cbx_000000000001", owner));
     await seedLease(
       fixture.runtime,
-      lease("cbx_000000000002", "bob@example.com", { users: { [owner]: "use" } }),
+      lease("cbx_000000000002", otherOwner, { users: { [owner]: "use" } }),
     );
-    await seedLease(fixture.runtime, lease("cbx_000000000003", "carol@example.com"));
+    await seedLease(fixture.runtime, lease("cbx_000000000003", "github:99999"));
 
     const { deviceID, grant, token } = await fixture.pair("Alice's phone");
     expect(fixture.runtime.storage.serialized()).not.toContain(grant);
@@ -155,14 +194,31 @@ describe("coordinator device pairing", () => {
       "cbx_000000000001",
       "cbx_000000000002",
     ]);
+    for (const item of listBody.leases) {
+      expect(item).toMatchObject({
+        host: "<redacted>",
+        sshUser: "<redacted>",
+        sshPort: "<redacted>",
+        workRoot: "<redacted>",
+      });
+      expect(item).not.toHaveProperty("sshHostKey");
+      expect(item).not.toHaveProperty("providerAccessExpiresAt");
+      expect(item).not.toHaveProperty("tailscale");
+    }
 
     const inspect = await fixture.request("/v1/leases/cbx_000000000002", deviceRequest(token));
     expect(inspect.status).toBe(200);
     await expect(inspect.json()).resolves.toMatchObject({
-      lease: { id: "cbx_000000000002", owner: "bob@example.com" },
+      lease: {
+        id: "cbx_000000000002",
+        owner: otherOwner,
+        host: "<redacted>",
+        sshUser: "<redacted>",
+      },
     });
 
-    const devices = await fixture.ownerRequest("/v1/devices");
+    fixture.runtime.storage.resetObservations();
+    const devices = await fixture.ownerRequest("/v1/devices", {}, "");
     expect(devices.status).toBe(200);
     expect(devices.headers.get("cache-control")).toBe("no-store");
     const deviceText = await devices.text();
@@ -177,11 +233,49 @@ describe("coordinator device pairing", () => {
         }),
       ],
     });
+    expect(fixture.runtime.storage.listPrefixes).toContainEqual(
+      expect.stringMatching(/^device-owner:/),
+    );
+    expect(fixture.runtime.storage.listPrefixes).not.toContain("device-token:");
+  });
+
+  it("never refreshes provider access or writes storage during device detail reads", async () => {
+    const fixture = await pairingFixture();
+    const managed = lease("cbx_000000000004", owner);
+    managed.provider = "daytona";
+    managed.lifecycle = "managed";
+    managed.host = "ssh.app.daytona.io";
+    managed.sshUser = "live-provider-access-token";
+    managed.sshPort = "22";
+    managed.sshFallbackPorts = ["2222"];
+    managed.sshHostKey = "SHA256:host-key";
+    managed.providerAccessExpiresAt = new Date(Date.now() + 60_000).toISOString();
+    managed.tailscale = { enabled: true, ipv4: "100.64.0.1", state: "ready" };
+    await seedLease(fixture.runtime, managed);
+    const { token } = await fixture.pair();
+    const providerFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("provider called"));
+    fixture.runtime.storage.resetObservations();
+
+    const response = await fixture.request(`/v1/leases/${managed.id}`, deviceRequest(token));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      lease: {
+        host: "<redacted>",
+        sshUser: "<redacted>",
+        sshPort: "<redacted>",
+        workRoot: "<redacted>",
+      },
+    });
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(fixture.runtime.storage.writes).toBe(0);
   });
 
   it("expires grants, consumes successful grants once, and rejects replay", async () => {
     vi.useFakeTimers({ now: new Date("2026-07-27T12:00:00Z") });
-    const fixture = pairingFixture();
+    const fixture = await pairingFixture();
     const expiredGrant = await issueGrant(fixture);
     await vi.advanceTimersByTimeAsync(pairingGrantTTLSeconds * 1000 + 1);
 
@@ -198,7 +292,7 @@ describe("coordinator device pairing", () => {
   });
 
   it("revokes individual devices and all owner devices immediately", async () => {
-    const fixture = pairingFixture();
+    const fixture = await pairingFixture();
     await seedLease(fixture.runtime, lease("cbx_000000000001", owner));
     const first = await fixture.pair("First phone");
     const second = await fixture.pair("Second phone");
@@ -216,16 +310,18 @@ describe("coordinator device pairing", () => {
     expect((await fixture.request("/v1/leases", deviceRequest(second.token))).status).toBe(401);
   });
 
-  it("expires device tokens and removes their stored verifier", async () => {
+  it("expires device tokens without mutating storage from the device request", async () => {
     vi.useFakeTimers({ now: new Date("2026-07-27T12:00:00Z") });
-    const fixture = pairingFixture();
+    const fixture = await pairingFixture();
     const { token } = await fixture.pair();
     await vi.advanceTimersByTimeAsync(deviceTokenTTLSeconds * 1000 + 1);
+    fixture.runtime.storage.resetObservations();
 
     const expired = await fixture.request("/v1/leases", deviceRequest(token));
     expect(expired.status).toBe(401);
     await expect(expired.json()).resolves.toEqual({ error: "device_token_expired" });
-    expect(fixture.runtime.storage.serialized()).not.toContain("device-token:");
+    expect(fixture.runtime.storage.writes).toBe(0);
+    expect(fixture.runtime.storage.serialized()).toContain("device-token:");
   });
 
   it.each([
@@ -240,7 +336,7 @@ describe("coordinator device pairing", () => {
       "GET",
     ],
   ])("returns 403 when a device token attempts to %s", async (_label, path, method) => {
-    const fixture = pairingFixture();
+    const fixture = await pairingFixture();
     const { token } = await fixture.pair();
     const response = await fixture.request(path, deviceRequest(token, method));
     expect(response.status).toBe(403);
@@ -248,7 +344,7 @@ describe("coordinator device pairing", () => {
   });
 
   it("rejects forged and non-canonical device credentials", async () => {
-    const fixture = pairingFixture();
+    const fixture = await pairingFixture();
     const { token } = await fixture.pair();
     const [prefix, secret] = token.split(".") as [string, string];
     const deviceID = prefix.slice("cbxd_".length);
@@ -271,14 +367,10 @@ describe("coordinator device pairing", () => {
   });
 
   it("requires the exact configured origin without redirecting credentials", async () => {
-    const fixture = pairingFixture();
+    const fixture = await pairingFixture();
     const missingOrigin = await fixture.ownerRequest(
       "/v1/pairing/grants",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      },
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
       "",
     );
     expect(missingOrigin.status).toBe(403);
@@ -289,15 +381,17 @@ describe("coordinator device pairing", () => {
       "https://evil.example.test",
     );
     expect(wrongBrowserOrigin.status).toBe(403);
+    const wrongDeviceListOrigin = await fixture.ownerRequest(
+      "/v1/devices",
+      {},
+      "https://evil.example.test",
+    );
+    expect(wrongDeviceListOrigin.status).toBe(403);
 
     const grant = await issueGrant(fixture);
     const wrongDestination = await fixture.request(
       "/v1/pairing/exchange",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", origin },
-        body: JSON.stringify({ grant }),
-      },
+      jsonPost({ grant }),
       origin,
       "https://alias.example.test",
     );
@@ -312,13 +406,11 @@ describe("coordinator device pairing", () => {
     expect(wrongAPIOrigin.status).toBe(403);
   });
 
-  it("fails closed after lease sharing changes and isolates device management by owner", async () => {
-    const fixture = pairingFixture();
-    const shared = lease("cbx_000000000001", "bob@example.com", {
-      users: { [owner]: "use" },
-    });
+  it("fails closed after membership or lease sharing changes", async () => {
+    const fixture = await pairingFixture();
+    const shared = lease("cbx_000000000001", otherOwner, { users: { [owner]: "use" } });
     await seedLease(fixture.runtime, shared);
-    const { deviceID, token } = await fixture.pair();
+    const { token } = await fixture.pair();
     expect((await fixture.request(`/v1/leases/${shared.id}`, deviceRequest(token))).status).toBe(
       200,
     );
@@ -329,7 +421,17 @@ describe("coordinator device pairing", () => {
       404,
     );
 
-    const bob = pairingFixture(fixture.runtime, "bob@example.com");
+    fixture.membershipAllowed.value = false;
+    const offboarded = await fixture.request("/v1/leases", deviceRequest(token));
+    expect(offboarded.status).toBe(401);
+    await expect(offboarded.json()).resolves.toEqual({ error: "device_owner_unauthorized" });
+  });
+
+  it("isolates device management indexes by owner", async () => {
+    const fixture = await pairingFixture();
+    const { deviceID, token } = await fixture.pair();
+    const bob = await pairingFixture(fixture.runtime, otherOwner, "bob");
+
     const bobDevices = await bob.ownerRequest("/v1/devices");
     await expect(bobDevices.json()).resolves.toEqual({ devices: [] });
     expect((await bob.ownerRequest(`/v1/devices/${deviceID}`, { method: "DELETE" })).status).toBe(
@@ -338,36 +440,109 @@ describe("coordinator device pairing", () => {
     expect((await fixture.request("/v1/leases", deviceRequest(token))).status).toBe(200);
   });
 
-  it("requires a non-admin owner session to issue pairing grants", async () => {
-    const fixture = pairingFixture();
+  it("requires a GitHub browser session rather than any API bearer", async () => {
+    const fixture = await pairingFixture();
     const anonymous = await fixture.request("/v1/pairing/grants", jsonPost({}));
     expect(anonymous.status).toBe(401);
 
+    const shared = await fixture.bearerRequest("/v1/pairing/grants", jsonPost({}));
+    expect(shared.status).toBe(403);
+    await expect(shared.json()).resolves.toEqual({ error: "owner_session_required" });
+
+    const signedBearer = await fixture.userBearerRequest("/v1/pairing/grants", jsonPost({}));
+    expect(signedBearer.status).toBe(403);
+    await expect(signedBearer.json()).resolves.toEqual({ error: "owner_session_required" });
+
+    const copiedCookie = await fixture.userCookieRequest("/v1/pairing/grants", jsonPost({}));
+    expect(copiedCookie.status).toBe(403);
+    await expect(copiedCookie.json()).resolves.toEqual({ error: "owner_session_required" });
+
+    const portalBearer = await fixture.portalBearerRequest("/v1/leases");
+    expect(portalBearer.status).toBe(401);
+
     const admin = await fixture.request("/v1/pairing/grants", {
       ...jsonPost({}),
-      headers: {
-        ...jsonPost({}).headers,
-        authorization: "Bearer admin-token",
-        origin,
-      },
+      headers: { "content-type": "application/json", authorization: "Bearer admin-token", origin },
     });
     expect(admin.status).toBe(403);
     await expect(admin.json()).resolves.toEqual({ error: "owner_session_required" });
   });
+
+  it("caps active devices per owner", async () => {
+    const fixture = await pairingFixture();
+    for (let index = 0; index < maxDeviceTokensPerOwner - 1; index += 1) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each pairing consumes its one-use grant.
+      await fixture.pair(`Device ${index + 1}`);
+    }
+
+    const grants = await Promise.all([
+      issueGrant(fixture, "Concurrent device A"),
+      issueGrant(fixture, "Concurrent device B"),
+    ]);
+    const exchanges = await Promise.all(grants.map((grant) => exchangeGrant(fixture, grant)));
+    expect(exchanges.map((response) => response.status).toSorted()).toEqual([200, 409]);
+    const rejected = exchanges.find((response) => response.status === 409)!;
+    await expect(rejected.json()).resolves.toEqual({
+      error: "device_limit_reached",
+      limit: maxDeviceTokensPerOwner,
+    });
+    const devices = await fixture.ownerRequest("/v1/devices");
+    const body = (await devices.json()) as { devices: unknown[] };
+    expect(body.devices).toHaveLength(maxDeviceTokensPerOwner);
+  });
+
+  it("bounds active pairing grants per owner", async () => {
+    const fixture = await pairingFixture();
+    const responses = await Promise.all(
+      Array.from({ length: maxPairingGrantsPerOwner + 1 }, (_, index) =>
+        fixture.ownerRequest(
+          "/v1/pairing/grants",
+          jsonPost({ name: `Concurrent pending device ${index + 1}` }),
+        ),
+      ),
+    );
+    expect(responses.map((response) => response.status).toSorted()).toEqual([
+      ...Array.from({ length: maxPairingGrantsPerOwner }, () => 200),
+      429,
+    ]);
+    const rejected = responses.find((response) => response.status === 429)!;
+    expect(rejected.status).toBe(429);
+    await expect(rejected.json()).resolves.toEqual({ error: "pairing_grant_limit_reached" });
+  });
 });
 
-function pairingFixture(
+async function pairingFixture(
   existingRuntime = new MemoryRuntime(),
-  sharedOwner = owner,
-): PairingFixture {
+  sessionOwner = owner,
+  login = ownerLogin,
+): Promise<PairingFixture> {
   const env = {
     CRABBOX_PUBLIC_URL: origin,
-    CRABBOX_SHARED_TOKEN: "owner-token",
-    CRABBOX_SHARED_OWNER: sharedOwner,
+    CRABBOX_SHARED_TOKEN: "shared-token",
+    CRABBOX_SHARED_OWNER: "automation@example.com",
     CRABBOX_ADMIN_TOKEN: "admin-token",
+    CRABBOX_SESSION_SECRET: "session-secret",
     CRABBOX_DEFAULT_ORG: org,
+    CRABBOX_GITHUB_ALLOWED_ORG: org,
+    CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "0",
   } as Env;
-  const fleet = new FleetCoordinator(existingRuntime, env);
+  const membershipAllowed = { value: true };
+  const membershipChecks = vi.fn<() => Promise<void>>(async (): Promise<void> => {
+    if (!membershipAllowed.value) throw new Error("membership removed");
+  });
+  const authContext = { githubMembership: membershipChecks };
+  const tokenInput = {
+    owner: sessionOwner,
+    ownerSource: "github-verified-email" as const,
+    org,
+    login,
+    githubAccessToken: `github-access-token-${sessionOwner}`,
+  };
+  const [userToken, portalToken] = await Promise.all([
+    issueUserToken(env, tokenInput),
+    issuePortalToken(env, tokenInput),
+  ]);
+  const fleet = new FleetCoordinator(existingRuntime, env, {}, authContext);
   const request = async (
     path: string,
     init: RequestInit = {},
@@ -378,6 +553,7 @@ function pairingFixture(
       new Request(`${destinationOrigin}${path}`, init),
       env,
       async (prepared) => await fleet.fetch(prepared),
+      authContext,
     );
   const ownerRequest = async (
     path: string,
@@ -385,15 +561,32 @@ function pairingFixture(
     requestOrigin = origin,
   ): Promise<Response> => {
     const headers = new Headers(init.headers);
-    headers.set("authorization", "Bearer owner-token");
+    headers.set("cookie", `__Host-crabbox_session=${encodeURIComponent(portalToken)}`);
     if (requestOrigin) headers.set("origin", requestOrigin);
+    return await request(path, { ...init, headers });
+  };
+  const withBearer = async (token: string, path: string, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers);
+    headers.set("authorization", `Bearer ${token}`);
+    headers.set("origin", origin);
     return await request(path, { ...init, headers });
   };
   const fixture: PairingFixture = {
     env,
     runtime: existingRuntime,
+    membershipAllowed,
+    membershipChecks,
     request,
     ownerRequest,
+    bearerRequest: async (path, init) => await withBearer("shared-token", path, init),
+    userBearerRequest: async (path, init) => await withBearer(userToken, path, init),
+    portalBearerRequest: async (path, init) => await withBearer(portalToken, path, init),
+    userCookieRequest: async (path, init = {}) => {
+      const headers = new Headers(init.headers);
+      headers.set("cookie", `__Host-crabbox_session=${encodeURIComponent(userToken)}`);
+      headers.set("origin", origin);
+      return await request(path, { ...init, headers });
+    },
     async pair(name?: string) {
       const grant = await issueGrant(fixture, name);
       const response = await exchangeGrant(fixture, grant);
@@ -456,6 +649,8 @@ function lease(id: string, leaseOwner: string, share?: LeaseRecord["share"]): Le
     host: "127.0.0.1",
     sshUser: "crabbox",
     sshPort: "22",
+    sshFallbackPorts: ["2222"],
+    sshHostKey: "SHA256:test-host-key",
     workRoot: "/work/crabbox",
     keep: true,
     ttlSeconds: 3600,

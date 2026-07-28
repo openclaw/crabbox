@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { authenticateRequest, issueUserToken } from "../src/auth";
 import { prepareCoordinatorRequest } from "../src/coordinator-entry";
+import { requireFreshGitHubMembership } from "../src/github-membership";
 import type { Env } from "../src/types";
 
 const accessToken = "github-access-token-for-tests";
@@ -110,6 +111,24 @@ describe("GitHub user-token membership", () => {
       authorized: true,
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("supports uncached membership checks for device principals", async () => {
+    const env = testEnv({ CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "300" });
+    const fetchMock = membershipFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const identity = {
+      accessToken,
+      tokenID: crypto.randomUUID(),
+      owner: `github:${accountID}`,
+      org: "example-org",
+      login: "alice",
+    };
+
+    await requireFreshGitHubMembership(identity, env);
+    await requireFreshGitHubMembership(identity, env);
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("rejects a credential whose GitHub account id no longer matches the session", async () => {

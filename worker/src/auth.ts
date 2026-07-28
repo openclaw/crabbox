@@ -8,7 +8,8 @@ import { bearerToken } from "./http";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";
 
-const tokenPrefix = "cbxu_";
+const userTokenPrefix = "cbxu_";
+const portalTokenPrefix = "cbwp_";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const accessJwtHeaderMaxChars = 2048;
@@ -29,6 +30,7 @@ export interface AuthContext {
   owner: string;
   org: string;
   login?: string;
+  portalSession?: boolean;
   tokenExpiresAt?: string;
   githubGrant?: GitHubUserGrant;
 }
@@ -48,7 +50,7 @@ export interface AuthRequestContext {
 }
 
 interface UserTokenPayload {
-  typ: "crabbox-user";
+  typ: "crabbox-user" | "crabbox-portal";
   version: typeof userTokenVersion;
   ownerSource: "github-verified-email";
   jti: string;
@@ -157,6 +159,36 @@ export async function authenticateRequest(
   return trustedIdentity;
 }
 
+export async function authenticatePortalToken(
+  token: string,
+  env: Env,
+  context: AuthRequestContext = {},
+): Promise<AuthContext | undefined> {
+  const payload = await verifyPortalToken(token, env).catch(() => undefined);
+  if (!payload) return undefined;
+  const accessToken = await openGitHubCredential(
+    payload.githubCredential,
+    sessionSecret(env),
+  ).catch(() => undefined);
+  if (!accessToken) return undefined;
+  const membership = context.githubMembership ?? requireCurrentGitHubMembership;
+  try {
+    await membership(
+      {
+        accessToken,
+        tokenID: payload.jti,
+        owner: payload.owner,
+        org: payload.org,
+        login: payload.login,
+      },
+      env,
+    );
+  } catch {
+    return undefined;
+  }
+  return authContextForPayload(payload, env, true);
+}
+
 export function githubUserIsAdmin(
   payload: { owner: string },
   env: Pick<Env, "CRABBOX_GITHUB_ADMIN_OWNERS">,
@@ -165,6 +197,29 @@ export function githubUserIsAdmin(
   return (
     githubAccountID(owner) !== undefined && envList(env.CRABBOX_GITHUB_ADMIN_OWNERS).includes(owner)
   );
+}
+
+function authContextForPayload(
+  payload: UserTokenPayload,
+  env: Pick<Env, "CRABBOX_GITHUB_ADMIN_OWNERS">,
+  portalSession = false,
+): AuthContext {
+  const expiresAt = new Date(payload.exp * 1000).toISOString();
+  return {
+    authorized: true,
+    admin: githubUserIsAdmin(payload, env),
+    auth: "github",
+    owner: payload.owner,
+    org: payload.org,
+    login: payload.login,
+    ...(portalSession ? { portalSession: true } : {}),
+    tokenExpiresAt: expiresAt,
+    githubGrant: {
+      tokenID: payload.jti,
+      sealedCredential: payload.githubCredential,
+      expiresAt,
+    },
+  };
 }
 
 function envList(value: string | undefined): string[] {
@@ -188,6 +243,11 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
     headers.set("x-crabbox-github-login", auth.login);
   } else {
     headers.delete("x-crabbox-github-login");
+  }
+  if (auth.portalSession) {
+    headers.set("x-crabbox-portal-session", "true");
+  } else {
+    headers.delete("x-crabbox-portal-session");
   }
   if (auth.tokenExpiresAt) {
     headers.set("x-crabbox-token-expires-at", auth.tokenExpiresAt);
@@ -219,7 +279,8 @@ export function requestWithoutTrustedHeaders(request: Request): Request {
     !request.headers.has("x-crabbox-proxy-secret") &&
     !request.headers.has("x-crabbox-admin-grant-version") &&
     !request.headers.has("x-crabbox-github-token-id") &&
-    !request.headers.has("x-crabbox-github-sealed-credential")
+    !request.headers.has("x-crabbox-github-sealed-credential") &&
+    !request.headers.has("x-crabbox-portal-session")
   ) {
     return request;
   }
@@ -229,6 +290,7 @@ export function requestWithoutTrustedHeaders(request: Request): Request {
   headers.delete("x-crabbox-admin-grant-version");
   headers.delete("x-crabbox-github-token-id");
   headers.delete("x-crabbox-github-sealed-credential");
+  headers.delete("x-crabbox-portal-session");
   return new Request(request, { headers });
 }
 
@@ -236,24 +298,42 @@ export function isAdminRequest(request: Request): boolean {
   return request.headers.get("x-crabbox-admin") === "true";
 }
 
+interface SignedUserTokenInput {
+  owner: string;
+  ownerSource: "github-verified-email";
+  org: string;
+  login: string;
+  githubAccessToken: string;
+  name?: string;
+  ttlSeconds?: number;
+}
+
 export async function issueUserToken(
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
-  input: {
-    owner: string;
-    ownerSource: "github-verified-email";
-    org: string;
-    login: string;
-    githubAccessToken: string;
-    name?: string;
-    ttlSeconds?: number;
-  },
+  input: SignedUserTokenInput,
+): Promise<string> {
+  return issueSignedUserToken(env, input, "crabbox-user", userTokenPrefix);
+}
+
+export async function issuePortalToken(
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
+  input: SignedUserTokenInput,
+): Promise<string> {
+  return issueSignedUserToken(env, input, "crabbox-portal", portalTokenPrefix);
+}
+
+async function issueSignedUserToken(
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
+  input: SignedUserTokenInput,
+  typ: UserTokenPayload["typ"],
+  prefix: string,
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   if (!input.githubAccessToken || input.githubAccessToken.length > githubAccessTokenMaxChars) {
     throw new Error("GitHub access token is required for signed user tokens");
   }
   const payload: UserTokenPayload = {
-    typ: "crabbox-user",
+    typ,
     version: userTokenVersion,
     ownerSource: input.ownerSource,
     jti: crypto.randomUUID(),
@@ -269,11 +349,19 @@ export async function issueUserToken(
   }
   const encodedPayload = base64URL(encoder.encode(JSON.stringify(payload)));
   const sig = await sign(encodedPayload, sessionSecret(env));
-  return `${tokenPrefix}${encodedPayload}.${sig}`;
+  return `${prefix}${encodedPayload}.${sig}`;
 }
 
 export function userTokenExpiresAt(token: string): string | undefined {
-  const payload = decodeUserTokenPayload(token);
+  const payload = decodeSignedUserTokenPayload(token, userTokenPrefix);
+  if (typeof payload?.exp !== "number") {
+    return undefined;
+  }
+  return new Date(payload.exp * 1000).toISOString();
+}
+
+export function portalTokenExpiresAt(token: string): string | undefined {
+  const payload = decodeSignedUserTokenPayload(token, portalTokenPrefix);
   if (typeof payload?.exp !== "number") {
     return undefined;
   }
@@ -286,6 +374,14 @@ export async function verifiedUserTokenExpiresAtForRevocation(
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
 ): Promise<string | undefined> {
   const payload = await verifyUserToken(token, env).catch(() => undefined);
+  return payload ? new Date(payload.exp * 1000).toISOString() : undefined;
+}
+
+export async function verifiedPortalTokenExpiresAtForRevocation(
+  token: string,
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
+): Promise<string | undefined> {
+  const payload = await verifyPortalToken(token, env).catch(() => undefined);
   return payload ? new Date(payload.exp * 1000).toISOString() : undefined;
 }
 
@@ -310,6 +406,15 @@ export async function authenticateUserTokenForRevocation(
       expiresAt: new Date(payload.exp * 1000).toISOString(),
     },
   };
+}
+
+export async function authenticatePortalTokenForRevocation(
+  token: string,
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET" | "CRABBOX_GITHUB_ADMIN_OWNERS">,
+): Promise<AuthContext | undefined> {
+  const payload = await verifyPortalToken(token, env).catch(() => undefined);
+  if (!payload) return undefined;
+  return authContextForPayload(payload, env, true);
 }
 
 export async function githubUserGrantIsCurrent(
@@ -347,7 +452,23 @@ async function verifyUserToken(
   token: string,
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
 ): Promise<UserTokenPayload | undefined> {
-  const parts = userTokenParts(token);
+  return verifySignedUserToken(token, env, userTokenPrefix, "crabbox-user");
+}
+
+async function verifyPortalToken(
+  token: string,
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
+): Promise<UserTokenPayload | undefined> {
+  return verifySignedUserToken(token, env, portalTokenPrefix, "crabbox-portal");
+}
+
+async function verifySignedUserToken(
+  token: string,
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
+  prefix: string,
+  typ: UserTokenPayload["typ"],
+): Promise<UserTokenPayload | undefined> {
+  const parts = signedUserTokenParts(token, prefix);
   if (!parts) {
     return undefined;
   }
@@ -356,9 +477,9 @@ async function verifyUserToken(
   if (!timingSafeEqual(signature, expected)) {
     return undefined;
   }
-  const payload = decodeUserTokenPayload(token);
+  const payload = decodeSignedUserTokenPayload(token, prefix);
   if (
-    payload.typ !== "crabbox-user" ||
+    payload.typ !== typ ||
     payload.version !== userTokenVersion ||
     payload.ownerSource !== "github-verified-email" ||
     typeof payload.owner !== "string" ||
@@ -380,8 +501,8 @@ async function verifyUserToken(
   return payload as UserTokenPayload;
 }
 
-function decodeUserTokenPayload(token: string): Partial<UserTokenPayload> {
-  const parts = userTokenParts(token);
+function decodeSignedUserTokenPayload(token: string, prefix: string): Partial<UserTokenPayload> {
+  const parts = signedUserTokenParts(token, prefix);
   if (!parts) {
     return {};
   }
@@ -394,11 +515,14 @@ function decodeUserTokenPayload(token: string): Partial<UserTokenPayload> {
   }
 }
 
-function userTokenParts(token: string): { encodedPayload: string; signature: string } | undefined {
-  if (!token.startsWith(tokenPrefix)) {
+function signedUserTokenParts(
+  token: string,
+  prefix: string,
+): { encodedPayload: string; signature: string } | undefined {
+  if (!token.startsWith(prefix)) {
     return undefined;
   }
-  const parts = token.slice(tokenPrefix.length).split(".");
+  const parts = token.slice(prefix.length).split(".");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
     return undefined;
   }

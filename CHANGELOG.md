@@ -6,7 +6,7 @@
 
 - Added coordinator-owned ready-pool desired capacity with atomic fill claims, provider-neutral compatibility keys, borrow heartbeats, abandoned-borrow quarantine, stale-record pruning, and pool counters.
 - Added reserved `CRABBOX_LEASE_ID`, `CRABBOX_RUN_ID`, and `CRABBOX_SLUG` metadata to every remote command, with Crabbox-owned values taking precedence over forwarded environment variables.
-- Added owner-bound, single-use coordinator pairing grants and revocable read-only device tokens for listing and inspecting visible leases.
+- Added browser-initiated, owner-bound coordinator pairing grants and revocable credential-free device tokens for read-only lease status.
 
 ### Fixed
 

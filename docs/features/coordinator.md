@@ -85,14 +85,22 @@ owner email for admin and shared-token requests.
 After auth, the coordinator strips inbound Access headers and injects a trusted
 context for the fleet implementation: `x-crabbox-auth`, `x-crabbox-admin`,
 `x-crabbox-owner`, `x-crabbox-org`, and `x-crabbox-github-login`. The portal
-converts one unique `__Host-crabbox_session` host-only cookie into a Bearer token
-so browser sessions reuse the same auth path. Duplicate session cookies fail
-closed.
+stores a distinct `cbwp_` browser-session credential in the unique
+`__Host-crabbox_session` host-only cookie. The coordinator accepts that audience
+only from the cookie-authenticated portal path and marks it as a trusted portal
+session; normal API Bearer authentication rejects it. Legacy `cbxu_` portal
+cookies remain usable for ordinary portal pages but cannot initiate pairing.
+Duplicate session cookies fail closed.
 
 GitHub user tokens are scoped to their owner/org for lease, run, log, and usage
 routes. Admin scope (admin token, or shared token where allowed) is required for
 `GET /v1/pool`, all `/v1/admin/*` routes, `POST /v1/images`, and the image
 sub-routes.
+
+The [read-only device pairing](device-pairing.md) surface uses a separate
+`crabbox-device` principal. It can only list and inspect credential-free lease
+status, never inherits owner or admin authority, and revalidates the paired
+GitHub owner on every request.
 
 ## API surface
 

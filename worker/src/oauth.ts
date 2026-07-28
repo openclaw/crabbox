@@ -1,5 +1,7 @@
 import {
+  issuePortalToken,
   issueUserToken,
+  portalTokenExpiresAt,
   sha256Hex,
   userTokenExpiresAt,
   userTokenSigningConfigurationError,
@@ -349,7 +351,10 @@ async function githubAuthCallback(
     if (identity.name) {
       tokenInput.name = identity.name;
     }
-    const token = await issueUserToken(env, tokenInput);
+    const token =
+      pending.mode === "portal"
+        ? await issuePortalToken(env, tokenInput)
+        : await issueUserToken(env, tokenInput);
     const completion: Pick<OAuthPending, "token" | "owner" | "org" | "login"> & {
       tokenExpiresAt?: string;
     } = {
@@ -358,7 +363,8 @@ async function githubAuthCallback(
       org,
       login: identity.login,
     };
-    const tokenExpiresAt = userTokenExpiresAt(token);
+    const tokenExpiresAt =
+      pending.mode === "portal" ? portalTokenExpiresAt(token) : userTokenExpiresAt(token);
     if (tokenExpiresAt) {
       completion.tokenExpiresAt = tokenExpiresAt;
     }

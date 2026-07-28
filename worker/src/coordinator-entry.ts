@@ -1,4 +1,6 @@
 import {
+  authenticatePortalToken,
+  authenticatePortalTokenForRevocation,
   authenticateUserTokenForRevocation,
   authenticateRequest,
   requestWithAdminGrantVersion,
@@ -14,8 +16,10 @@ import { InvalidOrgLabelError, orgKeyForLabel } from "./org-identity";
 import {
   coordinatorOriginStatus,
   deviceTokenRouteAllowed,
+  isDeviceManagementRequest,
   isDeviceTokenRequest,
   isPairingExchangeRequest,
+  isPairingGrantRequest,
   pairingRequestBodyBytes,
 } from "./pairing";
 import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
@@ -141,7 +145,9 @@ export async function prepareCoordinatorRequest(
     };
   }
   const portal = url.pathname.startsWith("/portal");
-  if (portal && !portalCookieRequestIntentAllowed(request, env, url)) {
+  const browserSessionRequest =
+    isPairingGrantRequest(request) || isDeviceManagementRequest(request);
+  if ((portal || browserSessionRequest) && !portalCookieRequestIntentAllowed(request, env, url)) {
     return {
       response: json({ error: "portal_request_origin_forbidden" }, { status: 403 }),
       authenticated: false,
@@ -156,17 +162,30 @@ export async function prepareCoordinatorRequest(
       authenticated: false,
     };
   }
-  const authRequest = portal ? requestWithPortalCookie(request) : request;
+  const authRequest = portal || browserSessionRequest ? requestWithPortalCookie(request) : request;
+  const portalCookieToken =
+    (portal || browserSessionRequest) && !request.headers.has("authorization")
+      ? cookieValue(request.headers.get("cookie") ?? "", portalSessionCookieName)
+      : undefined;
   const portalLogoutToken =
     portal &&
     request.method === "POST" &&
     url.pathname === "/portal/logout" &&
     !request.headers.has("authorization")
-      ? cookieValue(request.headers.get("cookie") ?? "", portalSessionCookieName)
+      ? portalCookieToken
       : undefined;
-  const auth = portalLogoutToken
-    ? await authenticateUserTokenForRevocation(portalLogoutToken, env)
-    : await authenticateRequest(authRequest, env, authContext);
+  let auth: AuthContext | undefined;
+  if (portalLogoutToken) {
+    auth =
+      (await authenticatePortalTokenForRevocation(portalLogoutToken, env)) ??
+      (await authenticateUserTokenForRevocation(portalLogoutToken, env));
+  } else if (portalCookieToken) {
+    auth =
+      (await authenticatePortalToken(portalCookieToken, env, authContext)) ??
+      (await authenticateRequest(authRequest, env, authContext));
+  } else {
+    auth = await authenticateRequest(authRequest, env, authContext);
+  }
   if (!auth?.authorized) {
     if (portal && request.method === "GET" && request.headers.get("upgrade") !== "websocket") {
       const login = new URL("/portal/login", url.origin);

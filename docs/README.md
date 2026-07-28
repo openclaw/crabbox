@@ -76,7 +76,8 @@ certification.
   [Repository Onboarding](features/repository-onboarding.md).
 - **Fleet and operations:** [Architecture](architecture.md),
   [Infrastructure](infrastructure.md), [Operations](operations.md),
-  [Observability](observability.md), and [Security](security.md).
+  [Observability](observability.md), [Read-Only Device Pairing](features/device-pairing.md),
+  and [Security](security.md).
 - **Runs and evidence:** [Jobs](features/jobs.md),
   [Actions Hydration](features/actions-hydration.md),
   [Artifacts](features/artifacts.md), [Checkpoints](features/checkpoints.md),

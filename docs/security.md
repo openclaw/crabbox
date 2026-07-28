@@ -81,6 +81,13 @@ in `worker/src/auth.ts` in this precedence:
    claim; admin is derived only from an immutable owner allowlist at request
    time. Legacy email-owned sessions are rejected and require a fresh login.
 
+Portal OAuth uses a separate `cbwp_` signed audience in the host-only
+`__Host-crabbox_session` cookie. It carries the same encrypted GitHub
+revalidation material but is accepted only by the portal-cookie path, never as
+a normal API Bearer. Browser-only pairing requires this trusted portal-session
+context, so replaying a `cbxu_` API token in a caller-supplied Cookie header does
+not grant browser authority.
+
 ### GitHub browser login
 
 `crabbox login --url <broker-url>` opens a GitHub OAuth flow and stores the
