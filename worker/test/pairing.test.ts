@@ -26,6 +26,7 @@ const org = "example-org";
 
 class MemoryStorage implements CoordinatorStorage {
   private readonly values = new Map<string, unknown>();
+  deleteFailureKey?: string;
   writes = 0;
   readonly listPrefixes: string[] = [];
 
@@ -41,6 +42,7 @@ class MemoryStorage implements CoordinatorStorage {
 
   delete(key: string): Promise<void> {
     this.writes += 1;
+    if (key === this.deleteFailureKey) return Promise.reject(new Error("injected delete failure"));
     this.values.delete(key);
     return Promise.resolve();
   }
@@ -310,6 +312,23 @@ describe("coordinator device pairing", () => {
     expect((await fixture.request("/v1/leases", deviceRequest(second.token))).status).toBe(401);
   });
 
+  it("keeps a device indexed when verifier deletion fails", async () => {
+    const fixture = await pairingFixture();
+    const { deviceID, token } = await fixture.pair();
+    fixture.runtime.storage.deleteFailureKey = `device-token:${deviceID}`;
+
+    const failed = await fixture.ownerRequest(`/v1/devices/${deviceID}`, { method: "DELETE" });
+    expect(failed.status).toBe(500);
+    expect(fixture.runtime.storage.serialized()).toContain(`device-token:${deviceID}`);
+    expect(fixture.runtime.storage.serialized()).toContain("device-owner:");
+
+    fixture.runtime.storage.deleteFailureKey = undefined;
+    expect(
+      (await fixture.ownerRequest(`/v1/devices/${deviceID}`, { method: "DELETE" })).status,
+    ).toBe(204);
+    expect((await fixture.request("/v1/leases", deviceRequest(token))).status).toBe(401);
+  });
+
   it("expires device tokens without mutating storage from the device request", async () => {
     vi.useFakeTimers({ now: new Date("2026-07-27T12:00:00Z") });
     const fixture = await pairingFixture();
@@ -466,6 +485,35 @@ describe("coordinator device pairing", () => {
     });
     expect(admin.status).toBe(403);
     await expect(admin.json()).resolves.toEqual({ error: "owner_session_required" });
+  });
+
+  it("preserves configured bearer precedence for device-shaped static tokens", async () => {
+    const fixture = await pairingFixture();
+    const configured = `cbxd_${crypto.randomUUID()}.${"A".repeat(43)}`;
+    fixture.env.CRABBOX_SHARED_TOKEN = configured;
+
+    const response = await fixture.request("/v1/leases", deviceRequest(configured));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ leases: [] });
+  });
+
+  it("ignores forged fleet-auth headers on device-shaped credentials", async () => {
+    const fixture = await pairingFixture();
+    const forged = `cbxd_${crypto.randomUUID()}.${"B".repeat(43)}`;
+
+    const response = await fixture.request("/v1/leases", {
+      headers: {
+        authorization: `Bearer ${forged}`,
+        origin,
+        "x-crabbox-auth": "bearer",
+        "x-crabbox-owner": owner,
+        "x-crabbox-org": org,
+      },
+    });
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "device_token_invalid" });
   });
 
   it("caps active devices per owner", async () => {

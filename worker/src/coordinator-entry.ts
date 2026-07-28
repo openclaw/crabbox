@@ -84,7 +84,9 @@ export async function prepareCoordinatorRequest(
       authenticated: false,
     };
   }
-  if (isPairingExchangeRequest(request) || isDeviceTokenRequest(request)) {
+  const deviceTokenRequest =
+    isDeviceTokenRequest(request) && !configuredCoordinatorBearer(request, env);
+  if (isPairingExchangeRequest(request) || deviceTokenRequest) {
     const origin = coordinatorOriginStatus(request, env, true);
     if (origin === "unavailable") {
       return {
@@ -98,7 +100,7 @@ export async function prepareCoordinatorRequest(
         authenticated: false,
       };
     }
-    if (isDeviceTokenRequest(request) && !deviceTokenRouteAllowed(request)) {
+    if (deviceTokenRequest && !deviceTokenRouteAllowed(request)) {
       return {
         response: json({ error: "device_scope_forbidden" }, { status: 403 }),
         authenticated: false,
@@ -349,6 +351,19 @@ function runtimeAdapterServiceAuth(
     owner: env.CRABBOX_RUNTIME_ADAPTER_OWNER || "service@openclaw.org",
     org: env.CRABBOX_RUNTIME_ADAPTER_ORG || env.CRABBOX_DEFAULT_ORG || "openclaw",
   };
+}
+
+function configuredCoordinatorBearer(
+  request: Request,
+  env: Pick<Env, "CRABBOX_ADMIN_TOKEN" | "CRABBOX_SHARED_TOKEN" | "CRABBOX_RUNTIME_ADAPTER_TOKEN">,
+): boolean {
+  const token = bearerToken(request);
+  return Boolean(
+    token &&
+    [env.CRABBOX_ADMIN_TOKEN, env.CRABBOX_SHARED_TOKEN, env.CRABBOX_RUNTIME_ADAPTER_TOKEN].some(
+      (configured) => configured && timingSafeEqual(token, configured),
+    ),
+  );
 }
 
 async function canonicalPortalRedirect(

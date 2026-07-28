@@ -1019,7 +1019,7 @@ export class FleetCoordinator {
 
   async fetch(request: Request): Promise<Response> {
     try {
-      if (isDeviceTokenRequest(request)) {
+      if (isDeviceTokenRequest(request) && !configuredFleetBearer(request, this.env)) {
         const authenticated = await this.authenticatedDeviceRequest(request);
         if (authenticated instanceof Response) return authenticated;
         request = authenticated;
@@ -1459,12 +1459,7 @@ export class FleetCoordinator {
     if (method === "DELETE" && !deviceID) {
       const devices = await this.state.runExclusive(async () => {
         const active = await this.activeOwnerDevices(owner, org);
-        await Promise.all(
-          active.flatMap((record) => [
-            this.state.storage.delete(deviceTokenKey(record.id)),
-            this.state.storage.delete(deviceOwnerIndexKey(owner, org, record.id)),
-          ]),
-        );
+        await Promise.all(active.map((record) => this.revokeDeviceRecord(record)));
         return active;
       });
       return pairingJSON({ revoked: devices.length });
@@ -1481,10 +1476,7 @@ export class FleetCoordinator {
         ) {
           return notFound();
         }
-        await Promise.all([
-          this.state.storage.delete(key),
-          this.state.storage.delete(deviceOwnerIndexKey(owner, org, deviceID)),
-        ]);
+        await this.revokeDeviceRecord(record);
         return new Response(null, { status: 204, headers: pairingResponseHeaders() });
       });
     }
@@ -1570,6 +1562,11 @@ export class FleetCoordinator {
       }),
     );
     return records.filter((record): record is DeviceTokenRecord => record !== undefined);
+  }
+
+  private async revokeDeviceRecord(record: DeviceTokenRecord): Promise<void> {
+    await this.state.storage.delete(deviceTokenKey(record.id));
+    await this.state.storage.delete(deviceOwnerIndexKey(record.owner, record.org, record.id));
   }
 
   private async activeOwnerPairingGrants(
@@ -17291,6 +17288,19 @@ function pairingOriginError(
   return status === "forbidden"
     ? json({ error: "coordinator_origin_forbidden" }, { status: 403 })
     : undefined;
+}
+
+function configuredFleetBearer(
+  request: Request,
+  env: Pick<Env, "CRABBOX_ADMIN_TOKEN" | "CRABBOX_SHARED_TOKEN" | "CRABBOX_RUNTIME_ADAPTER_TOKEN">,
+): boolean {
+  const token = bearerToken(request);
+  return Boolean(
+    token &&
+    [env.CRABBOX_ADMIN_TOKEN, env.CRABBOX_SHARED_TOKEN, env.CRABBOX_RUNTIME_ADAPTER_TOKEN].some(
+      (configured) => configured && timingSafeEqual(token, configured),
+    ),
+  );
 }
 
 async function pairingInput(
