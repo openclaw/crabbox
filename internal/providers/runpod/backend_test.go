@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -220,6 +221,26 @@ func TestRunpodDeployPayloadUsesGPUAvailabilityPriority(t *testing.T) {
 	}
 }
 
+func TestRunpodDeployPayloadSerializesSSHPublicKey(t *testing.T) {
+	payload := runpodDeployPayload(runpodDeployInput{
+		InstanceID: "NVIDIA L4",
+		PublicKey:  testRunpodPublicKey,
+	})
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Env["PUBLIC_KEY"] != testRunpodPublicKey {
+		t.Fatalf("serialized PUBLIC_KEY=%q, want configured key", decoded.Env["PUBLIC_KEY"])
+	}
+}
+
 func TestRunpodSSHTargetUsesPublicPortAndUser(t *testing.T) {
 	cfg := Config{Runpod: RunpodConfig{User: "root", WorkRoot: "/tmp/crabbox"}}
 	applyRunpodDefaults(&cfg)
@@ -331,6 +352,23 @@ type fakeRunpodAPI struct {
 	deployPod    runpodPod
 }
 
+const testRunpodPublicKey = "ssh-ed25519 AAAATEST crabbox-runpod-test"
+
+func testRunpodConfig(t *testing.T) Config {
+	t.Helper()
+	keyPath := t.TempDir() + "/id_ed25519"
+	if err := os.WriteFile(keyPath+".pub", []byte(testRunpodPublicKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return Config{
+		SSHKey: keyPath,
+		Runpod: RunpodConfig{
+			APIKey:     "test-key",
+			InstanceID: "NVIDIA L4",
+		},
+	}
+}
+
 func (f *fakeRunpodAPI) Whoami(_ context.Context) (runpodMyself, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -369,6 +407,27 @@ func (f *fakeRunpodAPI) TerminatePod(ctx context.Context, podID string) error {
 		return terminatePod(ctx, podID)
 	}
 	return nil
+}
+
+func TestRunpodAcquireUsesConfiguredSSHPublicKey(t *testing.T) {
+	fake := &fakeRunpodAPI{
+		deployPod: runpodPod{ID: "pod_created"},
+		getPod: func(string) (runpodPod, error) {
+			return runpodPod{}, errors.New("stop after deploy")
+		},
+	}
+	backend := &runpodLeaseBackend{
+		cfg:    testRunpodConfig(t),
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client: fake,
+	}
+
+	if _, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}); err == nil {
+		t.Fatal("Acquire succeeded after the fake readiness failure")
+	}
+	if len(fake.deployCalls) != 1 || fake.deployCalls[0].PublicKey != testRunpodPublicKey {
+		t.Fatalf("deploy calls=%#v, want configured public key", fake.deployCalls)
+	}
 }
 
 func TestRunpodListFiltersCrabboxPodsByDefault(t *testing.T) {
@@ -456,7 +515,7 @@ func TestRunpodAcquireRollbackUsesBoundedCleanup(t *testing.T) {
 		},
 	}
 	backend := &runpodLeaseBackend{
-		cfg:                    Config{Runpod: RunpodConfig{APIKey: "k"}},
+		cfg:                    testRunpodConfig(t),
 		rt:                     Runtime{Stdout: io.Discard, Stderr: io.Discard},
 		client:                 fake,
 		pollInitialOverride:    time.Millisecond,
@@ -485,7 +544,7 @@ func TestRunpodAcquireRollbackCannotBlockForever(t *testing.T) {
 		},
 	}
 	backend := &runpodLeaseBackend{
-		cfg:                    Config{Runpod: RunpodConfig{APIKey: "k"}},
+		cfg:                    testRunpodConfig(t),
 		rt:                     Runtime{Stdout: io.Discard, Stderr: io.Discard},
 		client:                 fake,
 		pollInitialOverride:    time.Millisecond,
@@ -516,7 +575,7 @@ func TestRunpodAcquireRejectsMismatchedReadyPodAndRollsBack(t *testing.T) {
 		},
 	}
 	backend := &runpodLeaseBackend{
-		cfg:    Config{Runpod: RunpodConfig{APIKey: "k"}},
+		cfg:    testRunpodConfig(t),
 		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
 		client: fake,
 	}

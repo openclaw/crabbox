@@ -112,7 +112,7 @@ type runpodDeployInput struct {
 	TemplateID        string
 	ContainerDiskInGb int
 	Ports             string
-	StartSSH          bool
+	PublicKey         string
 }
 
 func newRunpodClient(cfg Config, rt Runtime) (runpodAPI, error) {
@@ -271,6 +271,9 @@ func runpodDeployPayload(input runpodDeployInput) map[string]any {
 	}
 	if input.TemplateID != "" {
 		payload["templateId"] = input.TemplateID
+	}
+	if publicKey := strings.TrimSpace(input.PublicKey); publicKey != "" {
+		payload["env"] = map[string]string{"PUBLIC_KEY": publicKey}
 	}
 	instanceIDs := runpodInstanceIDs(input.InstanceID)
 	if strings.HasPrefix(strings.ToLower(instanceIDs[0]), "cpu") {

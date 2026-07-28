@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,6 +90,10 @@ func (b *runpodLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s image=%s instance=%s disk=%dGB keep=%v\n",
 		providerName, leaseID, slug, name, cfg.Runpod.Image, cfg.Runpod.InstanceID, cfg.Runpod.DiskGB, req.Keep)
 
+	publicKey, err := runpodPublicKey(cfg.SSHKey)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
 	pod, err := client.DeployPod(ctx, runpodDeployInput{
 		Name:              name,
 		ImageName:         cfg.Runpod.Image,
@@ -97,7 +102,7 @@ func (b *runpodLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 		TemplateID:        cfg.Runpod.TemplateID,
 		ContainerDiskInGb: cfg.Runpod.DiskGB,
 		Ports:             "22/tcp",
-		StartSSH:          true,
+		PublicKey:         publicKey,
 	})
 	if err != nil {
 		return LeaseTarget{}, exit(1, "runpod create pod failed: %v", err)
@@ -132,6 +137,19 @@ func (b *runpodLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s pod=%s state=ready\n", leaseID, pod.ID)
 	return lease, nil
+}
+
+func runpodPublicKey(privatePath string) (string, error) {
+	path := privatePath + ".pub"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", exit(2, "read ssh public key %s: %v", path, err)
+	}
+	publicKey := strings.TrimSpace(string(data))
+	if publicKey == "" {
+		return "", exit(2, "ssh public key %s is empty", path)
+	}
+	return publicKey, nil
 }
 
 func (b *runpodLeaseBackend) cleanupFailedAcquire(client runpodAPI, podID string, cause error) error {
