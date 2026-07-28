@@ -640,6 +640,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	runReq := RunRequest{
 		Repo:                  repo,
 		ID:                    *leaseIDFlag,
+		RunID:                 executionRunID,
 		Options:               options,
 		Keep:                  *keep,
 		KeepOnFailure:         *keepOnFailure,
@@ -883,6 +884,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		executionRunID = recorder.runID
 	}
 	applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
+	runReq.RunID = executionRunID
 	runReq.Env = envSelection.Effective
 	keepFailedLease := false
 	defer func() {
@@ -1004,7 +1006,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if contextPrinted {
 			return
 		}
-		printRunContextSummary(a.Stderr, coord, cfg, server, currentTarget, leaseID, executionRunID, workdir, hydratedByActions, actionsURL)
+		printRunContextSummary(a.Stderr, coord, cfg, server, currentTarget, leaseID, executionRunID, recorder.runID, workdir, hydratedByActions, actionsURL)
 		contextPrinted = true
 	}
 	printPreflight := func(currentTarget SSHTarget) {
@@ -1161,6 +1163,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			executionRunID = recorder.runID
 		}
 		applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
+		runReq.RunID = executionRunID
 		runReq.Env = envSelection.Effective
 		if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 			return true, err
@@ -1798,7 +1801,7 @@ afterSync:
 			LeaseID:               leaseID,
 			Slug:                  serverSlug(server),
 			RunID:                 executionRunID,
-			RunHistoryUnavailable: recorder.historyUnavailable,
+			RunHistoryUnavailable: recorder.historyIsUnavailable(),
 			CommandDisplay:        commandDisplay,
 			ShellMode:             *shellMode || useShell,
 			ScriptMode:            script != nil,
@@ -1944,6 +1947,7 @@ func writeDelegatedRunProof(path, templateName string, cfg Config, result RunRes
 		Provider:    provider,
 		LeaseID:     leaseID,
 		Slug:        slug,
+		RunID:       delegatedRunID(req, result),
 		Command:     command,
 		LogExcerpt:  logExcerpt,
 		ActionsURL:  result.ActionsURL,
@@ -1964,6 +1968,7 @@ func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult
 		Provider:   result.Provider,
 		LeaseID:    result.LeaseID,
 		Slug:       result.Slug,
+		RunID:      delegatedRunID(req, result),
 		Command:    command,
 		ExitCode:   result.ExitCode,
 		CommandMs:  result.Command.Milliseconds(),
@@ -1973,11 +1978,20 @@ func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult
 		receipt.Provider = firstNonBlank(receipt.Provider, session.Provider)
 		receipt.LeaseID = firstNonBlank(receipt.LeaseID, session.LeaseID)
 		receipt.Slug = firstNonBlank(receipt.Slug, session.Slug)
-		receipt.RunID = session.RunID
 		receipt.ActionsURL = firstNonBlank(receipt.ActionsURL, session.ActionsURL)
 	}
 	receipt.Provider = firstNonBlank(receipt.Provider, cfg.Provider)
 	return writeRunReceipt(path, keyPath, receipt)
+}
+
+func delegatedRunID(req RunRequest, result RunResult) string {
+	if runID := strings.TrimSpace(req.RunID); runID != "" {
+		return runID
+	}
+	if result.Session != nil {
+		return strings.TrimSpace(result.Session.RunID)
+	}
+	return ""
 }
 
 func runCommandDisplay(command []string, shellMode bool) string {

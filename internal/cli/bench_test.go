@@ -76,17 +76,21 @@ func (b benchmarkTimingTestBackend) Status(context.Context, StatusRequest) (Stat
 func (b benchmarkTimingTestBackend) Stop(context.Context, StopRequest) error { return nil }
 
 func TestTimingReportFromDelegatedRunResultClassifiesRunError(t *testing.T) {
-	report := timingReportFromDelegatedRunResult(RunRequest{}, RunResult{
+	report := timingReportFromDelegatedRunResult(RunRequest{RunID: "run_execution"}, RunResult{
 		Provider:      "sandbox-test",
 		SyncDelegated: true,
 		Command:       250 * time.Millisecond,
 		Total:         time.Second,
+		Session:       &RunSessionHandle{RunID: "run_provider"},
 	}, "fallback", context.DeadlineExceeded)
 	if report.ExitCode != 1 {
 		t.Fatalf("ExitCode=%d, want 1", report.ExitCode)
 	}
 	if report.RunStatus != RunStatusTimedOut || report.ErrorKind != RunErrorTimeout {
 		t.Fatalf("runStatus/errorKind=%q/%q", report.RunStatus, report.ErrorKind)
+	}
+	if report.RunID != "run_execution" {
+		t.Fatalf("RunID=%q, want execution metadata run ID", report.RunID)
 	}
 }
 

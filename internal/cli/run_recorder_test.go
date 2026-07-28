@@ -160,6 +160,21 @@ func TestRunRecorderDefersCreateWhenCoordinatorRequiresLeaseID(t *testing.T) {
 	}
 }
 
+func TestRunRecorderHistoryAvailabilityRequiresRecordedRunID(t *testing.T) {
+	if !((*runRecorder)(nil)).historyIsUnavailable() {
+		t.Fatal("nil recorder reported history available")
+	}
+	if !(&runRecorder{}).historyIsUnavailable() {
+		t.Fatal("local-only recorder reported history available")
+	}
+	if (&runRecorder{runID: "run_123"}).historyIsUnavailable() {
+		t.Fatal("recorded coordinator run reported history unavailable")
+	}
+	if !(&runRecorder{runID: "run_123", historyUnavailable: true}).historyIsUnavailable() {
+		t.Fatal("failed coordinator history reported available")
+	}
+}
+
 func TestRunRecorderDefersCreateForExplicitLeaseRuns(t *testing.T) {
 	var stderr bytes.Buffer
 	var createBodies []map[string]any

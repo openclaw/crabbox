@@ -811,6 +811,7 @@ type ListRequest struct {
 type RunRequest struct {
 	Repo                  Repo
 	ID                    string
+	RunID                 string
 	Options               LeaseOptions
 	Keep                  bool
 	Reclaim               bool

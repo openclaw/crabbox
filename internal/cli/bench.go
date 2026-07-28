@@ -763,6 +763,7 @@ func timingReportFromDelegatedRunResult(req RunRequest, result RunResult, provid
 		Provider:      firstNonBlank(result.Provider, provider),
 		LeaseID:       result.LeaseID,
 		Slug:          result.Slug,
+		RunID:         delegatedRunID(req, result),
 		SyncDelegated: result.SyncDelegated,
 		CommandMs:     result.Command.Milliseconds(),
 		TotalMs:       result.Total.Milliseconds(),

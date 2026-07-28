@@ -65,6 +65,10 @@ func (r *runRecorder) UseCoordinator(coord *CoordinatorClient) {
 	r.coord = coord
 }
 
+func (r *runRecorder) historyIsUnavailable() bool {
+	return r == nil || r.runID == "" || r.historyUnavailable
+}
+
 func (r *runRecorder) Event(kind, phase, message string) {
 	if r == nil || r.runID == "" || (r.finished && kind != "lease.released") {
 		return

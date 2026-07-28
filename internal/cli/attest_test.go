@@ -442,6 +442,29 @@ func TestDelegatedRunReceiptUsesSessionIdentityFallbacks(t *testing.T) {
 	}
 }
 
+func TestDelegatedRunReceiptPrefersExecutionRunID(t *testing.T) {
+	setAttestTestHome(t)
+	path := filepath.Join(t.TempDir(), "receipt.json")
+	result := RunResult{
+		Provider: "e2b",
+		Session:  &RunSessionHandle{RunID: "run_provider"},
+	}
+	if _, err := writeDelegatedRunReceipt(path, "", Config{Provider: "e2b"}, result, RunRequest{RunID: "run_execution"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt["run_id"] != "run_execution" {
+		t.Fatalf("run_id=%v, want execution metadata run ID", receipt["run_id"])
+	}
+}
+
 func TestAttestReceiptCreatesMissingParentDirectories(t *testing.T) {
 	setAttestTestHome(t)
 	path := filepath.Join(t.TempDir(), "nested", "deeper", "receipt.json")

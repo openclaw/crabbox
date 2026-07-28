@@ -480,6 +480,26 @@ func TestRenderRunProofUsesTemplateAndLiveOutput(t *testing.T) {
 	}
 }
 
+func TestDelegatedRunProofUsesExecutionRunID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proof.md")
+	_, err := writeDelegatedRunProof(path, "", Config{Provider: "e2b"}, RunResult{
+		Provider:   "e2b",
+		LeaseID:    "cbx_123",
+		LogExcerpt: "passed",
+		Session:    &RunSessionHandle{RunID: "run_provider"},
+	}, RunRequest{RunID: "run_execution", Command: []string{"true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Crabbox `run_execution`") || strings.Contains(string(data), "run_provider") {
+		t.Fatalf("delegated proof did not correlate execution metadata run ID:\n%s", data)
+	}
+}
+
 func TestRenderRunProofUsesSafeMarkdownFence(t *testing.T) {
 	got, err := renderRunProof(proofRenderInput{
 		Provider:   "aws",

@@ -982,11 +982,35 @@ func TestRunCommandInjectsReservedMetadataIntoDelegatedRequest(t *testing.T) {
 	if !regexp.MustCompile(`^run_[a-f0-9]{12}$`).MatchString(env[runEnvRunID]) {
 		t.Fatalf("delegated run ID=%q", env[runEnvRunID])
 	}
+	if runModuleRuntimeTestRequests[0].RunID != env[runEnvRunID] {
+		t.Fatalf("delegated request run ID=%q, env run ID=%q", runModuleRuntimeTestRequests[0].RunID, env[runEnvRunID])
+	}
 	for _, forbidden := range []string{"ambient-lease", "ambient-run", "ambient-slug"} {
 		for _, value := range env {
 			if value == forbidden {
 				t.Fatalf("reserved override %q reached delegated request: %#v", forbidden, env)
 			}
+		}
+	}
+}
+
+func TestPrintRunContextSummarySeparatesExecutionAndHistoryRunIDs(t *testing.T) {
+	coord := &CoordinatorClient{BaseURL: "https://coordinator.example.test"}
+	var local bytes.Buffer
+	printRunContextSummary(&local, coord, Config{Provider: "aws", TargetOS: targetLinux}, Server{}, SSHTarget{}, "cbx_123", "run_local", "", "/work/repo", false, "")
+	if got := local.String(); !strings.Contains(got, "run=run_local portal=- logs=-") || strings.Contains(got, "/runs/run_local") {
+		t.Fatalf("local run context exposed nonexistent history URLs:\n%s", got)
+	}
+
+	var recorded bytes.Buffer
+	printRunContextSummary(&recorded, coord, Config{Provider: "aws", TargetOS: targetLinux}, Server{}, SSHTarget{}, "cbx_123", "run_execution", "run_history", "/work/repo", false, "")
+	for _, want := range []string{
+		"run=run_execution",
+		"portal=https://coordinator.example.test/portal/runs/run_history",
+		"logs=https://coordinator.example.test/v1/runs/run_history/logs",
+	} {
+		if !strings.Contains(recorded.String(), want) {
+			t.Fatalf("recorded run context missing %q:\n%s", want, recorded.String())
 		}
 	}
 }
