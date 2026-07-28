@@ -11,6 +11,13 @@ import { codeProxyRequestBodyBytes, isIsolatedCodeRequest } from "./code-origin"
 import { cookieValue, portalSessionCookieName } from "./cookies";
 import { bearerToken, json, pathParts } from "./http";
 import { InvalidOrgLabelError, orgKeyForLabel } from "./org-identity";
+import {
+  coordinatorOriginStatus,
+  deviceTokenRouteAllowed,
+  isDeviceTokenRequest,
+  isPairingExchangeRequest,
+  pairingRequestBodyBytes,
+} from "./pairing";
 import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";
@@ -71,6 +78,32 @@ export async function prepareCoordinatorRequest(
     return {
       response: json({ error: "not_found" }, { status: 404 }),
       authenticated: false,
+    };
+  }
+  if (isPairingExchangeRequest(request) || isDeviceTokenRequest(request)) {
+    const origin = coordinatorOriginStatus(request, env, true);
+    if (origin === "unavailable") {
+      return {
+        response: json({ error: "pairing_unavailable" }, { status: 503 }),
+        authenticated: false,
+      };
+    }
+    if (origin === "forbidden") {
+      return {
+        response: json({ error: "coordinator_origin_forbidden" }, { status: 403 }),
+        authenticated: false,
+      };
+    }
+    if (isDeviceTokenRequest(request) && !deviceTokenRouteAllowed(request)) {
+      return {
+        response: json({ error: "device_scope_forbidden" }, { status: 403 }),
+        authenticated: false,
+      };
+    }
+    return {
+      request: requestWithoutCoordinatorAuthContext(request),
+      authenticated: false,
+      ...(isPairingExchangeRequest(request) ? { bodyLimit: pairingRequestBodyBytes } : {}),
     };
   }
   if (isolatedCode) {

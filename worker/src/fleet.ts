@@ -126,6 +126,28 @@ import {
 } from "./org-records";
 import { defaultOSImage, normalizeOSImage } from "./os-image";
 import {
+  coordinatorOriginStatus,
+  deviceTokenKey,
+  deviceTokenPrefixKey,
+  deviceTokenRouteAllowed,
+  deviceTokenTTLSeconds,
+  isDeviceTokenRequest,
+  newDeviceToken,
+  newPairingGrant,
+  pairingDeviceName,
+  pairingGrantHash,
+  pairingGrantKey,
+  pairingGrantPrefixKey,
+  pairingGrantTTLSeconds,
+  parsedDeviceToken,
+  publicDeviceRecord,
+  validDeviceID,
+  validDeviceTokenRecord,
+  validPairingGrantRecord,
+  type DeviceTokenRecord,
+  type PairingGrantRecord,
+} from "./pairing";
+import {
   portalCode,
   portalCodeBootstrapHandoff,
   portalAdmin,
@@ -983,6 +1005,11 @@ export class FleetCoordinator {
 
   async fetch(request: Request): Promise<Response> {
     try {
+      if (isDeviceTokenRequest(request)) {
+        const authenticated = await this.authenticatedDeviceRequest(request);
+        if (authenticated instanceof Response) return authenticated;
+        request = authenticated;
+      }
       await this.reconcileAdminGrantVersion(request);
       if (!(await this.restoredBridgesReady())) {
         return json(
@@ -1037,6 +1064,19 @@ export class FleetCoordinator {
       }
       if (method === "GET" && parts.join("/") === "v1/whoami") {
         return this.whoami(request);
+      }
+      if (method === "POST" && parts.join("/") === "v1/pairing/grants") {
+        return await this.createPairingGrant(request);
+      }
+      if (method === "POST" && parts.join("/") === "v1/pairing/exchange") {
+        return await this.exchangePairingGrant(request);
+      }
+      if (
+        parts[0] === "v1" &&
+        parts[1] === "devices" &&
+        (parts.length === 2 || parts.length === 3)
+      ) {
+        return await this.deviceRoute(request, parts[2]);
       }
       if (
         method === "GET" &&
@@ -1266,6 +1306,159 @@ export class FleetCoordinator {
     } catch (error) {
       return json({ error: coordinatorErrorMessage(this.env, error) }, { status: 500 });
     }
+  }
+
+  private async createPairingGrant(request: Request): Promise<Response> {
+    const originError = pairingOriginError(request, this.env);
+    if (originError) return originError;
+    if (!pairingOwnerSession(request)) {
+      return json({ error: "owner_session_required" }, { status: 403 });
+    }
+    const input = await pairingInput(request);
+    if (!input) return json({ error: "invalid_pairing_request" }, { status: 400 });
+    const name = pairingDeviceName(input.name);
+    if (!name) return json({ error: "invalid_device_name" }, { status: 400 });
+    const now = new Date();
+    const credentials = await newPairingGrant();
+    const record: PairingGrantRecord = {
+      version: 1,
+      audience: "crabbox-device-pairing",
+      scope: "leases:read",
+      grantHash: credentials.grantHash,
+      owner: requestOwner(request),
+      org: requestOrg(request, this.env),
+      name,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + pairingGrantTTLSeconds * 1000).toISOString(),
+    };
+    const grants = await this.state.storage.list<PairingGrantRecord>({
+      prefix: pairingGrantPrefixKey(),
+    });
+    await Promise.all(
+      [...grants.entries()]
+        .filter(([, grant]) => Date.parse(grant.expiresAt) <= now.getTime())
+        .map(([key]) => this.state.storage.delete(key)),
+    );
+    await this.state.storage.put(pairingGrantKey(record.grantHash), record);
+    return pairingJSON({
+      grant: credentials.grant,
+      audience: record.audience,
+      scope: [record.scope],
+      expiresAt: record.expiresAt,
+    });
+  }
+
+  private async exchangePairingGrant(request: Request): Promise<Response> {
+    const originError = pairingOriginError(request, this.env);
+    if (originError) return originError;
+    const input = await pairingInput(request);
+    if (!input || typeof input.grant !== "string") {
+      return json({ error: "invalid_pairing_request" }, { status: 400 });
+    }
+    const grantHash = await pairingGrantHash(input.grant);
+    if (!grantHash) return pairingUnauthorized("pairing_grant_invalid");
+    const record = await this.state.take<PairingGrantRecord>(pairingGrantKey(grantHash));
+    if (!record || !validPairingGrantRecord(record, grantHash)) {
+      return pairingUnauthorized("pairing_grant_invalid");
+    }
+    if (Date.parse(record.expiresAt) <= Date.now()) {
+      return pairingUnauthorized("pairing_grant_expired");
+    }
+    const now = new Date();
+    const credentials = await newDeviceToken();
+    const device: DeviceTokenRecord = {
+      version: 1,
+      id: credentials.id,
+      audience: "crabbox-device",
+      scope: ["leases:read"],
+      tokenHash: credentials.tokenHash,
+      owner: record.owner,
+      org: record.org,
+      name: record.name,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + deviceTokenTTLSeconds * 1000).toISOString(),
+    };
+    await this.state.storage.put(deviceTokenKey(device.id), device);
+    return pairingJSON({ device: publicDeviceRecord(device), token: credentials.token });
+  }
+
+  private async deviceRoute(request: Request, deviceID?: string): Promise<Response> {
+    const originError = pairingOriginError(request, this.env);
+    if (originError) return originError;
+    if (!pairingOwnerSession(request)) {
+      return json({ error: "owner_session_required" }, { status: 403 });
+    }
+    const method = request.method.toUpperCase();
+    const owner = requestOwner(request);
+    const org = requestOrg(request, this.env);
+    if (method === "GET" && !deviceID) {
+      const records = await this.state.storage.list<DeviceTokenRecord>({
+        prefix: deviceTokenPrefixKey(),
+      });
+      const expiredKeys: string[] = [];
+      const devices = [...records.entries()]
+        .filter(([key, record]) => {
+          if (Date.parse(record.expiresAt) <= Date.now()) {
+            expiredKeys.push(key);
+            return false;
+          }
+          return record.owner === owner && record.org === org;
+        })
+        .map(([, record]) => publicDeviceRecord(record))
+        .toSorted((left, right) => right.createdAt.localeCompare(left.createdAt));
+      await Promise.all(expiredKeys.map((key) => this.state.storage.delete(key)));
+      return pairingJSON({ devices });
+    }
+    if (method === "DELETE" && !deviceID) {
+      const records = await this.state.storage.list<DeviceTokenRecord>({
+        prefix: deviceTokenPrefixKey(),
+      });
+      const keys = [...records.entries()]
+        .filter(([, record]) => record.owner === owner && record.org === org)
+        .map(([key]) => key);
+      await Promise.all(keys.map((key) => this.state.storage.delete(key)));
+      return pairingJSON({ revoked: keys.length });
+    }
+    if (method === "DELETE" && deviceID && validDeviceID(deviceID)) {
+      const key = deviceTokenKey(deviceID);
+      const record = await this.state.storage.get<DeviceTokenRecord>(key, { noCache: true });
+      if (!record || record.owner !== owner || record.org !== org) return notFound();
+      await this.state.storage.delete(key);
+      return new Response(null, { status: 204, headers: pairingResponseHeaders() });
+    }
+    return json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async authenticatedDeviceRequest(request: Request): Promise<Request | Response> {
+    const originError = pairingOriginError(request, this.env);
+    if (originError) return originError;
+    if (!deviceTokenRouteAllowed(request)) {
+      return json({ error: "device_scope_forbidden" }, { status: 403 });
+    }
+    const parsed = await parsedDeviceToken(bearerToken(request));
+    if (!parsed) return pairingUnauthorized("device_token_invalid");
+    const key = deviceTokenKey(parsed.id);
+    const record = await this.state.storage.get<DeviceTokenRecord>(key, { noCache: true });
+    if (!record || !validDeviceTokenRecord(record, parsed.id, parsed.tokenHash)) {
+      return pairingUnauthorized("device_token_invalid");
+    }
+    if (Date.parse(record.expiresAt) <= Date.now()) {
+      await this.state.storage.delete(key);
+      return pairingUnauthorized("device_token_expired");
+    }
+    const org = orgAuthLabelFromKey(record.org);
+    if (org === undefined) {
+      await this.state.storage.delete(key);
+      return pairingUnauthorized("device_token_invalid");
+    }
+    return requestWithAuthContext(request, {
+      authorized: true,
+      admin: false,
+      auth: "device",
+      owner: record.owner,
+      org,
+      tokenExpiresAt: record.expiresAt,
+    });
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -16847,7 +17040,66 @@ function canonicalCodeReturnTo(request: Request, leaseID: string): string {
 
 function requestAuthType(request: Request): AuthContext["auth"] {
   const auth = request.headers.get("x-crabbox-auth");
-  return auth === "bearer" || auth === "github" || auth === "proxy" ? auth : "github";
+  return auth === "bearer" || auth === "device" || auth === "github" || auth === "proxy"
+    ? auth
+    : "github";
+}
+
+function pairingOwnerSession(request: Request): boolean {
+  if (!request.headers.has("x-crabbox-auth")) return false;
+  const auth = requestAuthType(request);
+  return (
+    auth === "github" ||
+    auth === "proxy" ||
+    (auth === "bearer" && !isAdminRequest(request) && requestOwner(request) !== "unknown")
+  );
+}
+
+function pairingOriginError(
+  request: Request,
+  env: Pick<Env, "CRABBOX_PUBLIC_URL">,
+): Response | undefined {
+  const status = coordinatorOriginStatus(request, env, true);
+  if (status === "unavailable") {
+    return json({ error: "pairing_unavailable" }, { status: 503 });
+  }
+  return status === "forbidden"
+    ? json({ error: "coordinator_origin_forbidden" }, { status: 403 })
+    : undefined;
+}
+
+async function pairingInput(
+  request: Request,
+): Promise<{ grant?: unknown; name?: unknown } | undefined> {
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    return undefined;
+  }
+  try {
+    const input = (await request.json()) as unknown;
+    return input && typeof input === "object" && !Array.isArray(input)
+      ? (input as { grant?: unknown; name?: unknown })
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function pairingResponseHeaders(): Headers {
+  return new Headers({
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+  });
+}
+
+function pairingJSON(data: unknown, init: ResponseInit = {}): Response {
+  const headers = pairingResponseHeaders();
+  for (const [name, value] of new Headers(init.headers)) headers.set(name, value);
+  return json(data, { ...init, headers });
+}
+
+function pairingUnauthorized(error: string): Response {
+  return pairingJSON({ error }, { status: 401 });
 }
 
 function webVNCPortalViewerRequest(

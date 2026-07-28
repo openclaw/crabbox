@@ -25,7 +25,7 @@ const accessKeySetLoads = new Map<string, Promise<AccessKeySetCacheEntry>>();
 export interface AuthContext {
   authorized: boolean;
   admin: boolean;
-  auth: "bearer" | "github" | "proxy";
+  auth: "bearer" | "device" | "github" | "proxy";
   owner: string;
   org: string;
   login?: string;
