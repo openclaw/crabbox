@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -137,6 +138,44 @@ func TestJobRunDryRunPropagatesArchitecture(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("dry-run output missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestJobRunInjectsReservedExecutionMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	logPath := installRecordingSSH(t, dir)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+	configPath := filepath.Join(dir, ".crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`jobs:
+  metadata:
+    provider: run-env-profile-test
+    noSync: true
+    command: env
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(context.Background(), []string{"job", "run", "--id", "cbx_env_profile_test", "metadata"}); err != nil {
+		t.Fatalf("job run failed: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(data)
+	for _, want := range []string{"CRABBOX_LEASE_ID='cbx_env_profile_test'", "CRABBOX_SLUG=''"} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("job command missing %q:\n%s", want, logText)
+		}
+	}
+	if !regexp.MustCompile(`CRABBOX_RUN_ID='run_[a-f0-9]{12}'`).MatchString(logText) {
+		t.Fatalf("job command missing run metadata:\n%s", logText)
 	}
 }
 

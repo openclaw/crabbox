@@ -3,9 +3,22 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+func TestNewRunIDUsesCanonicalFormatAndIsUnique(t *testing.T) {
+	first := newRunID()
+	second := newRunID()
+	pattern := regexp.MustCompile(`^run_[a-f0-9]{12}$`)
+	if !pattern.MatchString(first) || !pattern.MatchString(second) {
+		t.Fatalf("run IDs must use canonical format: first=%q second=%q", first, second)
+	}
+	if first == second {
+		t.Fatalf("run IDs must be unique per invocation: %q", first)
+	}
+}
 
 func TestTestboxKeyPathRejectsTraversalIDs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

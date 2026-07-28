@@ -153,6 +153,11 @@ func TestRunRecorderDefersCreateWhenCoordinatorRequiresLeaseID(t *testing.T) {
 	if text := stderr.String(); strings.Contains(text, "warning:") || !strings.Contains(text, "recording run run_123") {
 		t.Fatalf("stderr=%q", text)
 	}
+	selection := runEnvSelection{Inline: map[string]string{}, Effective: map[string]string{}}
+	applyRunExecutionMetadata(&selection, "cbx_abcdef123456", rec.runID, "blue-lobster")
+	if selection.Effective[runEnvRunID] != "run_123" {
+		t.Fatalf("execution metadata run ID=%q, want coordinator-issued run_123", selection.Effective[runEnvRunID])
+	}
 }
 
 func TestRunRecorderDefersCreateForExplicitLeaseRuns(t *testing.T) {

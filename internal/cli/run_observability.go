@@ -71,13 +71,9 @@ func envNameLooksSecret(name string) bool {
 	return false
 }
 
-func printRunContextSummary(w io.Writer, coord *CoordinatorClient, cfg Config, server Server, target SSHTarget, leaseID, workdir string, hydrated bool, actionsURL string, recorder *runRecorder) {
+func printRunContextSummary(w io.Writer, coord *CoordinatorClient, cfg Config, server Server, target SSHTarget, leaseID, runID, workdir string, hydrated bool, actionsURL string) {
 	if w == nil {
 		return
-	}
-	runID := ""
-	if recorder != nil {
-		runID = recorder.runID
 	}
 	workspace := "raw"
 	if hydrated {

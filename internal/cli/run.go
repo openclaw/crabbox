@@ -518,6 +518,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	envSelection.Inline = mergeEnv(envSelection.Inline, expansion.Env)
 	envSelection.Effective = mergeEnv(envSelection.Effective, expansion.Env)
 	stripExternalDesktopPasswordFromRunEnv(cfg, &envSelection)
+	executionRunID := newRunID()
+	applyRunExecutionMetadata(&envSelection, strings.TrimSpace(*leaseIDFlag), executionRunID, requestedSlug)
 	envHelperName := strings.TrimSpace(*envHelper)
 	if envHelperName != "" && len(envSelection.Profile) == 0 {
 		return exit(2, "--env-helper requires --env-from-profile values selected by --allow-env")
@@ -877,6 +879,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if useCoordinator {
 		recorder.AttachLease(leaseID, serverSlug(server), cfg)
 	}
+	if recorder.runID != "" {
+		executionRunID = recorder.runID
+	}
+	applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
+	runReq.Env = envSelection.Effective
 	keepFailedLease := false
 	defer func() {
 		if !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure) {
@@ -997,7 +1004,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if contextPrinted {
 			return
 		}
-		printRunContextSummary(a.Stderr, coord, cfg, server, currentTarget, leaseID, workdir, hydratedByActions, actionsURL, recorder)
+		printRunContextSummary(a.Stderr, coord, cfg, server, currentTarget, leaseID, executionRunID, workdir, hydratedByActions, actionsURL)
 		contextPrinted = true
 	}
 	printPreflight := func(currentTarget SSHTarget) {
@@ -1150,6 +1157,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			recorder.AttachLease(leaseID, serverSlug(server), cfg)
 			startRunHeartbeat(nil)
 		}
+		if recorder.runID != "" {
+			executionRunID = recorder.runID
+		}
+		applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
+		runReq.Env = envSelection.Effective
 		if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 			return true, err
 		}
@@ -1418,7 +1430,7 @@ afterSync:
 		if *timingJSON || timingRecordEnabled {
 			total := time.Since(timings.started)
 			report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, 0, actionsURL)
-			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, nil)
+			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
 			report.Label = runLabelValue
 			finalTimingReport = &report
 		}
@@ -1472,7 +1484,7 @@ afterSync:
 		return recordFailure(err)
 	}
 	if len(envSelection.Profile) > 0 {
-		profileEnvFile = runEnvProfilePath(firstNonBlank(recorder.runID, leaseID, "run"))
+		profileEnvFile = runEnvProfilePath(firstNonBlank(executionRunID, leaseID, "run"))
 		envHelperPath := ""
 		if envHelperName != "" {
 			safeName, _ := safeEnvHelperName(envHelperName)
@@ -1557,6 +1569,7 @@ afterSync:
 		maybePrintEnvForwardingSummary(a.Stderr, cfg.Provider, "forwarded", cfg.EnvAllow, envSelection.Effective)
 	}
 	runEnv := mergeEnv(envSelection.Inline, capabilityEnv)
+	runEnv = mergeEnv(runEnv, runExecutionMetadata(leaseID, executionRunID, serverSlug(server)))
 	envFiles := remoteRunEnvFiles(actionsEnvFile, profileEnvFile)
 	useShell := shouldUseShellWithLiteralArgs(command, expansion.LiteralArgs)
 	remote := remoteCommandWithEnvFiles(workdir, runEnv, envFiles, command)
@@ -1680,7 +1693,7 @@ afterSync:
 	}
 	var runArtifacts []runArtifact
 	if code == 0 && len(runArtifactGlobs) > 0 {
-		collected, artifactOutput, err := collectRunArtifactGlobs(ctx, target, workdir, repo.Root, recorder.runID, leaseID, runArtifactGlobs)
+		collected, artifactOutput, err := collectRunArtifactGlobs(ctx, target, workdir, repo.Root, executionRunID, leaseID, runArtifactGlobs)
 		if err != nil {
 			return recordFailure(err)
 		}
@@ -1714,7 +1727,7 @@ afterSync:
 		failureClassificationPrinted = true
 	}
 	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, code, actionsURL)
-	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, runArtifacts)
+	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, runArtifacts)
 	report.Label = runLabelValue
 	report.SchemaValidations = schemaValidationResults
 	if strings.TrimSpace(*emitProof) != "" && code == 0 {
@@ -1724,7 +1737,7 @@ afterSync:
 			Provider:    cfg.Provider,
 			LeaseID:     leaseID,
 			Slug:        serverSlug(server),
-			RunID:       recorder.runID,
+			RunID:       executionRunID,
 			Command:     commandDisplay,
 			LogExcerpt:  selectProofLogExcerpt(logBuffer.String()),
 			ActionsURL:  actionsURL,
@@ -1746,7 +1759,7 @@ afterSync:
 			Provider:   cfg.Provider,
 			LeaseID:    leaseID,
 			Slug:       serverSlug(server),
-			RunID:      recorder.runID,
+			RunID:      executionRunID,
 			Command:    commandDisplay,
 			ExitCode:   code,
 			CommandMs:  report.CommandMs,
@@ -1764,7 +1777,7 @@ afterSync:
 	if a.runOutcome != nil {
 		a.runOutcome.Recorded = true
 		a.runOutcome.ExitCode = code
-		a.runOutcome.RunID = recorder.runID
+		a.runOutcome.RunID = executionRunID
 		a.runOutcome.Results = results
 	}
 	fmt.Fprintf(a.Stderr, "command complete in %s total=%s\n", timings.command.Round(time.Millisecond), total.Round(time.Millisecond))
@@ -1773,7 +1786,7 @@ afterSync:
 	if runLabelValue != "" {
 		labelField = fmt.Sprintf(" label=%q", runLabelValue)
 	}
-	fmt.Fprintf(a.Stderr, "run details provider=%s lease=%s slug=%s run=%s%s type=%s repo=%s workdir=%s actions=%s stop_command=%q idle_timeout=%s\n", cfg.Provider, leaseID, blank(serverSlug(server), "-"), blank(recorder.runID, "-"), labelField, blank(server.ServerType.Name, "-"), repo.Root, workdir, blank(actionsURL, "-"), report.StopCommand, cfg.IdleTimeout)
+	fmt.Fprintf(a.Stderr, "run details provider=%s lease=%s slug=%s run=%s%s type=%s repo=%s workdir=%s actions=%s stop_command=%q idle_timeout=%s\n", cfg.Provider, leaseID, blank(serverSlug(server), "-"), executionRunID, labelField, blank(server.ServerType.Name, "-"), repo.Root, workdir, blank(actionsURL, "-"), report.StopCommand, cfg.IdleTimeout)
 	if *timingJSON || timingRecordEnabled {
 		finalTimingReport = &report
 	}
@@ -1784,7 +1797,7 @@ afterSync:
 			WindowsMode:           cfg.WindowsMode,
 			LeaseID:               leaseID,
 			Slug:                  serverSlug(server),
-			RunID:                 recorder.runID,
+			RunID:                 executionRunID,
 			RunHistoryUnavailable: recorder.historyUnavailable,
 			CommandDisplay:        commandDisplay,
 			ShellMode:             *shellMode || useShell,
@@ -1800,7 +1813,7 @@ afterSync:
 			Provider:       cfg.Provider,
 			LeaseID:        leaseID,
 			Slug:           serverSlug(server),
-			RunID:          recorder.runID,
+			RunID:          executionRunID,
 			Workdir:        workdir,
 			ExitCode:       code,
 			ActionsRunURL:  actionsURL,
@@ -1812,7 +1825,7 @@ afterSync:
 			StderrPath:     streamCaptures.stderr.path(),
 			CaptureFlagSet: *captureOnFail,
 		}
-		if local, bytes, captureErr := captureFailureBundle(ctx, target, workdir, leaseID, recorder.runID, capture); captureErr != nil {
+		if local, bytes, captureErr := captureFailureBundle(ctx, target, workdir, leaseID, executionRunID, capture); captureErr != nil {
 			fmt.Fprintf(a.Stderr, "warning: failure bundle failed: %v\n", captureErr)
 			if local != "" {
 				fmt.Fprintf(a.Stderr, "failure-bundle local=%s bytes=%d secret_risk=caller-redacts-before-sharing\n", local, bytes)

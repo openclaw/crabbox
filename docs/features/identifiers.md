@@ -103,22 +103,23 @@ lease ID with `_` rewritten to `-`).
 
 ## Run ID
 
-Each `crabbox run` against a coordinator also gets a durable run handle:
+Each `crabbox run` gets a run ID:
 
 ```text
 run_abcdef123456
 ```
 
 Like lease IDs, run IDs are the `run_` prefix plus 12 lowercase hex characters
-(`newRunID` in the coordinator, from 6 random bytes). The coordinator mints the run
-record before the lease is acquired, so events can be appended for leasing
-failures, sync failures, and command output even when the run never reaches
-command-start. A run ID is stable across a single invocation; retrying the same
-command produces a new run.
+from 6 random bytes. A configured coordinator mints the durable run record; the
+CLI uses that issued ID for execution metadata. Coordinator-free runs mint the
+same shape locally before dispatch. A run ID is stable across a single
+invocation; retrying the same command produces a new run.
 
-`crabbox history`, `crabbox events`, `crabbox attach`, `crabbox logs`, and
-`crabbox results` all accept run IDs. Slugs do not resolve to runs — only to
-leases.
+Coordinator-issued IDs are durable handles accepted by `crabbox history`,
+`crabbox events`, `crabbox attach`, `crabbox logs`, and `crabbox results`.
+Locally minted IDs identify the invocation in command environments, timing,
+proof, and failure artifacts but do not create coordinator history. Slugs do
+not resolve to runs — only to leases.
 
 ## Local Claims
 
@@ -224,7 +225,7 @@ provisional lease ID  newLeaseID() before the broker call
 final lease ID        broker may return a different ID; key dir + claim re-keyed to it
 slug                  computed on first lease creation, stable for that lease
 provider name         derived from final lease ID + slug
-run ID                minted per crabbox run when a coordinator is configured
+run ID                minted per crabbox run by the coordinator or local CLI
 ```
 
 Slugs are not reserved after a lease ends. The next lease that happens to hash

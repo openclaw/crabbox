@@ -121,8 +121,30 @@ a per-run file at `.crabbox/env/<run-or-lease-id>.env` inside the workdir
 removed after the run, and a one-line probe reports which names landed:
 
 ```text
-env profile remote=.crabbox/env/cbx_ab12cd34ef56.env vars=PROJECT_FOO=set,PROJECT_BAR=set
+env profile remote=.crabbox/env/run_ab12cd34ef56.env vars=PROJECT_FOO=set,PROJECT_BAR=set
 ```
+
+## Reserved execution metadata
+
+Every remote command receives three Crabbox-owned environment variables:
+
+```text
+CRABBOX_LEASE_ID  Stable ID for the lease or workspace used by the command.
+CRABBOX_RUN_ID    Unique ID for this crabbox run invocation.
+CRABBOX_SLUG      Friendly lease slug when available; empty otherwise.
+```
+
+`CRABBOX_RUN_ID` uses the durable coordinator-issued run ID when the run is
+coordinator-backed. Without a coordinator, the CLI generates the same
+`run_<12 lowercase hex characters>` shape before dispatch. The value stays
+fixed across argv, shell, uploaded-script, job, and delegated execution within
+that invocation; a later `crabbox run` gets a new ID.
+
+These names are reserved and do not need to appear in `env.allow`. Crabbox
+applies them after ambient allowlist values, profile files, and profile or
+preset environment expansion, so user-supplied values cannot override the
+execution metadata. Matching names are removed from uploaded profile env before
+the remote file is sourced, then the Crabbox-owned values are injected inline.
 
 ## Reusable helpers: `--env-helper`
 

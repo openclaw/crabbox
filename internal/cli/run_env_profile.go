@@ -63,6 +63,34 @@ type runEnvSelection struct {
 	SummaryRequested bool
 }
 
+const (
+	runEnvLeaseID = "CRABBOX_LEASE_ID"
+	runEnvRunID   = "CRABBOX_RUN_ID"
+	runEnvSlug    = "CRABBOX_SLUG"
+)
+
+var reservedRunEnvNames = []string{runEnvLeaseID, runEnvRunID, runEnvSlug}
+
+func runExecutionMetadata(leaseID, runID, slug string) map[string]string {
+	return map[string]string{
+		runEnvLeaseID: strings.TrimSpace(leaseID),
+		runEnvRunID:   strings.TrimSpace(runID),
+		runEnvSlug:    strings.TrimSpace(slug),
+	}
+}
+
+func applyRunExecutionMetadata(selection *runEnvSelection, leaseID, runID, slug string) {
+	if selection == nil {
+		return
+	}
+	removeEnvironmentKeys(selection.Profile, reservedRunEnvNames...)
+	removeEnvironmentKeys(selection.Inline, reservedRunEnvNames...)
+	removeEnvironmentKeys(selection.Effective, reservedRunEnvNames...)
+	metadata := runExecutionMetadata(leaseID, runID, slug)
+	selection.Inline = mergeEnv(selection.Inline, metadata)
+	selection.Effective = mergeEnv(selection.Effective, metadata)
+}
+
 func removeEnvironmentKeys(values map[string]string, denied ...string) {
 	for key := range values {
 		for _, name := range denied {

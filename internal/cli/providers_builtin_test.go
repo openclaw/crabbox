@@ -1033,7 +1033,24 @@ func (testStaticSSHProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testStaticSSHProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
+	return testStaticSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec()}, cfg: cfg}, nil
+}
+
+type testStaticSSHBackend struct {
+	testSSHBackend
+	cfg Config
+}
+
+func (b testStaticSSHBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+	server, target, leaseID, err := staticLease(b.cfg)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func (b testStaticSSHBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+	return b.Acquire(context.Background(), AcquireRequest{})
 }
 
 type testExeDevProvider struct{}

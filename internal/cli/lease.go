@@ -23,6 +23,10 @@ func NewLeaseID() string {
 	return newLeaseID()
 }
 
+func newRunID() string {
+	return "run_" + strings.TrimPrefix(newLeaseID(), "cbx_")
+}
+
 func publicKeyFor(privatePath string) (string, error) {
 	pub := privatePath + ".pub"
 	data, err := os.ReadFile(pub)

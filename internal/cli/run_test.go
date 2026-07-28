@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -246,6 +247,74 @@ func assertSSHLogContains(t *testing.T, logPath, want string) {
 	}
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("ssh log missing %q:\n%s", want, data)
+	}
+}
+
+func TestRunCommandInjectsReservedMetadataAcrossSSHCommandModes(t *testing.T) {
+	tests := []struct {
+		name string
+		args func(string) []string
+	}{
+		{name: "argv", args: func(string) []string { return []string{"--", "env"} }},
+		{name: "shell", args: func(string) []string { return []string{"--shell", "--", "env | sort"} }},
+		{name: "script", args: func(script string) []string { return []string{"--script", script} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			logPath := installRecordingSSH(t, dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+			t.Setenv(runEnvLeaseID, "ambient-lease")
+			t.Setenv(runEnvRunID, "ambient-run")
+			t.Setenv(runEnvSlug, "ambient-slug")
+
+			profile := filepath.Join(dir, "env.profile")
+			if err := os.WriteFile(profile, []byte("CRABBOX_LEASE_ID=profile-lease\nCRABBOX_RUN_ID=profile-run\nCRABBOX_SLUG=profile-slug\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			script := filepath.Join(dir, "proof.sh")
+			if err := os.WriteFile(script, []byte("#!/bin/sh\nenv | sort\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{
+				"--provider", "run-env-profile-test",
+				"--no-sync",
+				"--allow-env", strings.Join(reservedRunEnvNames, ","),
+				"--env-from-profile", profile,
+			}
+			args = append(args, tt.args(script)...)
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args); err != nil {
+				t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			logText := string(data)
+			if !strings.Contains(logText, "CRABBOX_LEASE_ID='cbx_env_profile_test'") {
+				t.Fatalf("lease metadata missing from SSH command:\n%s", logText)
+			}
+			if !strings.Contains(logText, "CRABBOX_SLUG=''") {
+				t.Fatalf("empty slug metadata missing from SSH command:\n%s", logText)
+			}
+			runIDMatch := regexp.MustCompile(`CRABBOX_RUN_ID='(run_[a-f0-9]{12})'`).FindStringSubmatch(logText)
+			if len(runIDMatch) != 2 {
+				t.Fatalf("CLI-generated run metadata missing from SSH command:\n%s", logText)
+			}
+			if !strings.Contains(stderr.String(), "run="+runIDMatch[1]) {
+				t.Fatalf("reported run ID differs from command metadata: run=%s stderr=%s", runIDMatch[1], stderr.String())
+			}
+			for _, forbidden := range []string{"ambient-lease", "ambient-run", "ambient-slug", "profile-lease", "profile-run", "profile-slug"} {
+				if strings.Contains(logText, forbidden) {
+					t.Fatalf("reserved metadata override %q reached SSH command:\n%s", forbidden, logText)
+				}
+			}
+		})
 	}
 }
 
@@ -880,6 +949,80 @@ func TestRunCommandPassesScriptToModuleDelegatedProvider(t *testing.T) {
 	}
 	if len(req.Command) != 0 {
 		t.Fatalf("command=%v, want none", req.Command)
+	}
+}
+
+func TestRunCommandInjectsReservedMetadataIntoDelegatedRequest(t *testing.T) {
+	clearConfigEnv(t)
+	runModuleRuntimeTestRequests = nil
+	t.Setenv(runEnvLeaseID, "ambient-lease")
+	t.Setenv(runEnvRunID, "ambient-run")
+	t.Setenv(runEnvSlug, "ambient-slug")
+	script := filepath.Join(t.TempDir(), "worker.mjs")
+	if err := os.WriteFile(script, []byte("export default { fetch() { return new Response('ok') } }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--id", "cbx_delegated",
+		"--allow-env", strings.Join(reservedRunEnvNames, ","),
+		"--script", script,
+	})
+	if err != nil {
+		t.Fatalf("run error=%v stderr=%q", err, stderr.String())
+	}
+	if len(runModuleRuntimeTestRequests) != 1 {
+		t.Fatalf("run requests=%#v, want one", runModuleRuntimeTestRequests)
+	}
+	env := runModuleRuntimeTestRequests[0].Env
+	if env[runEnvLeaseID] != "cbx_delegated" || env[runEnvSlug] != "" {
+		t.Fatalf("delegated lease metadata=%#v", env)
+	}
+	if !regexp.MustCompile(`^run_[a-f0-9]{12}$`).MatchString(env[runEnvRunID]) {
+		t.Fatalf("delegated run ID=%q", env[runEnvRunID])
+	}
+	for _, forbidden := range []string{"ambient-lease", "ambient-run", "ambient-slug"} {
+		for _, value := range env {
+			if value == forbidden {
+				t.Fatalf("reserved override %q reached delegated request: %#v", forbidden, env)
+			}
+		}
+	}
+}
+
+func TestRunCommandInjectsReservedMetadataIntoStaticSSH(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	logPath := installRecordingSSH(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "ssh",
+		"--static-host", "127.0.0.1",
+		"--static-user", "runner",
+		"--static-work-root", "/tmp/crabbox-static-test",
+		"--no-sync",
+		"--",
+		"env",
+	})
+	if err != nil {
+		t.Fatalf("static SSH run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(data)
+	for _, pattern := range []string{
+		`CRABBOX_LEASE_ID='static_[^']+'`,
+		`CRABBOX_RUN_ID='run_[a-f0-9]{12}'`,
+		`CRABBOX_SLUG=''`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(logText) {
+			t.Fatalf("static SSH metadata %q missing:\n%s", pattern, logText)
+		}
 	}
 }
 
@@ -1613,7 +1756,7 @@ exit 0
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if !strings.Contains(string(logData), "rm -f --") || !strings.Contains(string(logData), ".crabbox/env/cbx_env_profile_test.env") {
+	if !strings.Contains(string(logData), "rm -f --") || !regexp.MustCompile(`\.crabbox/env/run_[a-f0-9]{12}\.env`).Match(logData) {
 		t.Fatalf("cleanup command missing from ssh log:\n%s", logData)
 	}
 }
