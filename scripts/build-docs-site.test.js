@@ -158,8 +158,8 @@ generatedTest("generated AWS page is active in Providers navigation and pager", 
   const next = providerOutput(providerMarkdown[awsIndex + 1]);
   const pager = element(html, "nav", /class="page-nav"/);
 
-  assert.match(pager, new RegExp(`href="\.\./providers/${escapeRegExp(previous)}"`));
-  assert.match(pager, new RegExp(`href="\.\./providers/${escapeRegExp(next)}"`));
+  assert.match(pager, new RegExp(escapeRegExp(`href="../providers/${previous}"`)));
+  assert.match(pager, new RegExp(escapeRegExp(`href="../providers/${next}"`)));
 });
 
 generatedTest("homepage presents use-case, pricing, and onboarding paths", () => {

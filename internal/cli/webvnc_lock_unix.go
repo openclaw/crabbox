@@ -34,11 +34,11 @@ func forwardInheritedWebVNCDaemonPortReservation(cmd *exec.Cmd) (func(), error) 
 	if port == "" && descriptor == "" {
 		return func() {}, nil
 	}
-	fd, err := strconv.ParseUint(descriptor, 10, strconv.IntSize)
+	fd, err := strconv.Atoi(descriptor)
 	if err != nil || fd <= 2 {
 		return nil, fmt.Errorf("inherited WebVNC daemon TCP listener descriptor is invalid")
 	}
-	duplicate, err := unix.Dup(int(fd))
+	duplicate, err := unix.Dup(fd)
 	if err != nil {
 		return nil, fmt.Errorf("duplicate inherited WebVNC daemon TCP listener: %w", err)
 	}

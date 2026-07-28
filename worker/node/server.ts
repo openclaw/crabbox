@@ -147,8 +147,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
 server.on("upgrade", (request, socket, head) => {
   void activeRequests
     .run(() => handleUpgrade(request, socket, head))
-    .catch((error) => {
-      console.error("coordinator websocket upgrade handler failed", error);
+    .catch(() => {
+      console.error("coordinator websocket upgrade handler failed");
       socket.destroy();
     });
 });
