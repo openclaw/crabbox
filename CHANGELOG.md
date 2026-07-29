@@ -11,6 +11,7 @@
 ### Fixed
 
 - Kept ready-pool reconciliation rollout-compatible with older CLIs and coordinators, preserved unexpired in-flight claims across policy changes, and required actual ready capacity for `pool ensure` success.
+- Authorized RunPod SSH access with the configured public key while rejecting missing, empty, or invalid key files before creating a paid pod. Thanks @morluto.
 
 ## 0.40.1 - 2026-07-23
 

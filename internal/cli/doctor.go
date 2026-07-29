@@ -341,7 +341,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		if _, err := os.Stat(cfg.SSHKey); err != nil {
 			record("missing", "ssh-key", cfg.SSHKey, map[string]string{"path": cfg.SSHKey})
 			ok = false
-		} else if _, err := publicKeyFor(cfg.SSHKey); err != nil {
+		} else if _, err := PublicKeyFor(cfg.SSHKey); err != nil {
 			record("missing", "ssh-key", cfg.SSHKey+".pub", map[string]string{"path": cfg.SSHKey + ".pub"})
 			ok = false
 		} else {

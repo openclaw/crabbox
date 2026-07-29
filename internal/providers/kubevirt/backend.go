@@ -571,7 +571,7 @@ func (b *leaseBackend) sshKey(leaseID string) (string, string, error) {
 
 func kubeVirtPublicKeyValue(value string) (string, error) {
 	value = strings.TrimSpace(value)
-	if value == "" || looksLikeInlineSSHPublicKey(value) {
+	if value == "" || core.LooksLikeInlineSSHPublicKey(value) {
 		return value, nil
 	}
 	if publicKey, err := readKubeVirtPublicKeyFile(value); err == nil {
@@ -591,23 +591,10 @@ func readKubeVirtPublicKeyFile(path string) (string, error) {
 	if publicKey == "" {
 		return "", core.Exit(2, "KubeVirt SSH public key %s is empty", path)
 	}
-	if !looksLikeInlineSSHPublicKey(publicKey) {
+	if !core.LooksLikeInlineSSHPublicKey(publicKey) {
 		return "", core.Exit(2, "KubeVirt SSH public key %s is not a supported OpenSSH public key", path)
 	}
 	return publicKey, nil
-}
-
-func looksLikeInlineSSHPublicKey(value string) bool {
-	fields := strings.Fields(value)
-	if len(fields) < 2 {
-		return false
-	}
-	switch fields[0] {
-	case "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com":
-		return true
-	default:
-		return false
-	}
 }
 
 func looksLikePublicKeyPath(value string) bool {

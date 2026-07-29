@@ -27,7 +27,10 @@ func newRunID() string {
 	return "run_" + strings.TrimPrefix(newLeaseID(), "cbx_")
 }
 
-func publicKeyFor(privatePath string) (string, error) {
+func PublicKeyFor(privatePath string) (string, error) {
+	if strings.TrimSpace(privatePath) == "" {
+		return "", exit(2, "ssh key path is not configured")
+	}
 	pub := privatePath + ".pub"
 	data, err := os.ReadFile(pub)
 	if err != nil {
@@ -37,7 +40,23 @@ func publicKeyFor(privatePath string) (string, error) {
 	if key == "" {
 		return "", exit(2, "ssh public key %s is empty", pub)
 	}
+	if !LooksLikeInlineSSHPublicKey(key) {
+		return "", exit(2, "ssh public key %s is not a supported OpenSSH public key", pub)
+	}
 	return key, nil
+}
+
+func LooksLikeInlineSSHPublicKey(value string) bool {
+	fields := strings.Fields(value)
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com":
+		return true
+	default:
+		return false
+	}
 }
 
 func testboxKeyPath(leaseID string) (string, error) {
@@ -80,7 +99,7 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 		return "", "", err
 	}
 	if _, err := os.Stat(privatePath); err == nil {
-		publicKey, err := publicKeyFor(privatePath)
+		publicKey, err := PublicKeyFor(privatePath)
 		return privatePath, publicKey, err
 	}
 	if err := os.MkdirAll(filepath.Dir(privatePath), 0o700); err != nil {
@@ -94,7 +113,7 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", "", exit(2, "generate ssh key for %s: %v: %s", leaseID, err, strings.TrimSpace(string(out)))
 	}
-	publicKey, err := publicKeyFor(privatePath)
+	publicKey, err := PublicKeyFor(privatePath)
 	return privatePath, publicKey, err
 }
 

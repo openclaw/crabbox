@@ -51,6 +51,10 @@ func newLeaseID() string {
 	return core.NewLeaseID()
 }
 
+func publicKeyFor(privatePath string) (string, error) {
+	return core.PublicKeyFor(privatePath)
+}
+
 func newLeaseSlug(leaseID string) string {
 	return core.NewLeaseSlug(leaseID)
 }

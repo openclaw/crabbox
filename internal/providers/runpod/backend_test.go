@@ -430,6 +430,75 @@ func TestRunpodAcquireUsesConfiguredSSHPublicKey(t *testing.T) {
 	}
 }
 
+func TestRunpodAcquireRejectsInvalidSSHPublicKeyBeforeDeploy(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*testing.T, *Config)
+		wantError string
+	}{
+		{
+			name: "unconfigured key path",
+			configure: func(_ *testing.T, cfg *Config) {
+				cfg.SSHKey = ""
+			},
+			wantError: "ssh key path is not configured",
+		},
+		{
+			name: "missing public key",
+			configure: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if err := os.Remove(cfg.SSHKey + ".pub"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "read ssh public key",
+		},
+		{
+			name: "empty public key",
+			configure: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if err := os.WriteFile(cfg.SSHKey+".pub", nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "is empty",
+		},
+		{
+			name: "private key material",
+			configure: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				privateKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-public-key\n-----END OPENSSH PRIVATE KEY-----\n"
+				if err := os.WriteFile(cfg.SSHKey+".pub", []byte(privateKey), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "is not a supported OpenSSH public key",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testRunpodConfig(t)
+			test.configure(t, &cfg)
+			fake := &fakeRunpodAPI{}
+			backend := &runpodLeaseBackend{
+				cfg:    cfg,
+				rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+				client: fake,
+			}
+
+			_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+			var exitErr core.ExitError
+			if err == nil || !core.AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("Acquire error=%v, want exit 2 containing %q", err, test.wantError)
+			}
+			if len(fake.deployCalls) != 0 {
+				t.Fatalf("deploy calls=%#v, want zero paid resources created", fake.deployCalls)
+			}
+		})
+	}
+}
+
 func TestRunpodListFiltersCrabboxPodsByDefault(t *testing.T) {
 	fake := &fakeRunpodAPI{listPods: []runpodPod{
 		{ID: "pod_a", Name: "crabbox-blue-12345678", DesiredStatus: "RUNNING"},
