@@ -1,12 +1,13 @@
 # Crabbox Vision
 
-Crabbox is a remote software testing and execution tool. It gives a caller a
-consistent way to provision or select disposable machines, synchronize a
-workspace, run commands, collect evidence, and clean up afterward.
+Crabbox makes remote software execution disposable without making ownership or cleanup ambiguous. Core behavior stays provider-neutral; provider adapters own provider-specific lifecycle rules.
 
-The core promise is simple: a local command should become a trustworthy remote
-run without forcing every repository or automation system to learn each
-provider's lifecycle, transport, and evidence conventions.
+## Lifecycle Safety
+
+- Destructive and reuse operations require verified ownership bound to the exact provider, resource, and claim. Labels, names, and IDs alone are not ownership proof.
+- Legacy or external adoption is explicit and conflict-safe. Adoption may bind an unclaimed resource, but must never silently retarget an already-bound claim.
+- Provider lifecycle paths fail closed when ownership checks or inventory/list operations fail. Claims preserve enough non-secret provider, resource, endpoint, account, and connection metadata to route and guarantee cleanup without persisting credentials.
+- Funded or remote providers require real create, use, and destroy proof with zero residue before merge, including cleanup after partial failure.
 
 ## Who Crabbox Serves
 
@@ -52,13 +53,14 @@ Crabbox does not own an agent's prompt loop, choose its next action, interpret
 its model output, or supervise its work. Agent orchestration is a real need,
 but it belongs one layer up in the caller.
 
-OpenClaw supports calling Crabbox from its own agent-orchestration layer; that capability lives in the caller rather than in Crabbox.
+OpenClaw supports calling Crabbox from its own agent-orchestration layer; that
+capability lives in the caller rather than in Crabbox.
 
 The following are explicit non-goals:
 
 - supervising or hosting long-running agent runtimes inside the box;
-- delivering model credentials into leases;
-- brokering model or API credentials into sandboxes on behalf of an agent;
+- delivering model credentials into leases or brokering model or API
+  credentials into sandboxes on behalf of an agent;
 - storing prompts, reasoning traces, agent memory, or conversation state;
 - judging whether generated code, tests, or model output are semantically
   correct;
@@ -69,17 +71,6 @@ case Crabbox owns remote execution and evidence plumbing, while the caller owns
 the harness protocol, credentials, decisions, and higher-level lifecycle.
 
 ## Quality Bar
-
-Remote execution is infrastructure, so correctness includes failure behavior.
-Operations should be bounded, cancellable, retry-safe where appropriate, and
-explicit about partial success. Destructive and reuse operations require
-verified ownership bound to the exact provider, resource, and claim. Adoption
-must be explicit and conflict-safe, and cleanup must fail closed when identity
-or provider inventory is ambiguous.
-
-Funded or remote providers need real create, use, destroy, and partial-failure
-proof with zero residue before merge. Claims should retain enough non-secret
-metadata to route and guarantee cleanup without persisting credentials.
 
 Secrets must not appear in command arguments, logs, artifacts, or persistent
 state unless a documented feature explicitly requires protected storage.

@@ -41,6 +41,8 @@ when you already know where the work should run.
   bring-your-own-compute cost model and its guardrails.
 - [How Crabbox Works](how-it-works.md) — follow a run across the CLI,
   coordinator, and runner.
+- [Crabbox Vision](../VISION.md) — understand product scope, non-goals, and
+  lifecycle safety rules.
 
 ## Pick an Operating Model
 

@@ -44,7 +44,7 @@ guide linked from it should make these fields visible:
 | Field | Meaning |
 | --- | --- |
 | Type | Editor, terminal UI, or local agent client |
-| Status | Available, package available, experimental, or contract only |
+| Status | Available, package available, or experimental |
 | Install owner | The host registry/CLI or Crabbox itself |
 | Required Crabbox contract | Commands and versioned JSON schemas consumed |
 | Platforms and targets | Local OS plus supported remote target OS |

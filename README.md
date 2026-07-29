@@ -132,7 +132,8 @@ use the fail-closed ECS Fargate deployment and canary in
 labels do not select that service's AWS placement; its URL and server policy do.
 
 For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For
-the doc-to-code map, see [Source Map](docs/source-map.md).
+product scope and non-goals, see the [Crabbox Vision](VISION.md). For the
+doc-to-code map, see [Source Map](docs/source-map.md).
 
 ## Install
 
