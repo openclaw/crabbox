@@ -80,8 +80,10 @@ organizations.
 After a cache miss or expiry, GitHub errors, account mismatch, removed
 membership, revoked users, or a no-longer-allowed organization fail closed with
 `401`; a stale positive is never used as an error fallback. An expired or
-revoked OAuth credential returns `pairing_reauth_required`, while other owner
-authorization failures return `device_owner_unauthorized`.
+revoked OAuth credential, or a recognized GitHub SAML/OAuth authorization
+requirement, returns `pairing_reauth_required`. Other owner authorization
+failures, including unrecognized GitHub `403` responses, return
+`device_owner_unauthorized`.
 
 The sealed grant never reaches the device. Only a hash of the device token is
 stored, and the public device response contains no credential material.

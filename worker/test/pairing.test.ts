@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { issuePortalToken, issueUserToken } from "../src/auth";
+import { issuePortalToken, issueUserToken, type AuthRequestContext } from "../src/auth";
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   type CoordinatorRuntime,
@@ -178,6 +178,7 @@ describe("coordinator device pairing", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("exchanges a browser grant for a distinct credential-free device principal", async () => {
@@ -521,6 +522,104 @@ describe("coordinator device pairing", () => {
     });
   });
 
+  it.each([
+    {
+      label: "SAML authorization required",
+      endpoint: "membership" as const,
+      githubResponse: () =>
+        Response.json(
+          {
+            message:
+              "Resource protected by organization SAML enforcement. You must grant your OAuth token access to this organization.",
+            documentation_url:
+              "https://docs.github.com/rest/authentication/authenticating-to-the-rest-api#saml-sso-authentication",
+          },
+          {
+            status: 403,
+            headers: { "x-github-sso": "required; url=https://github.com/orgs/example-org/sso" },
+          },
+        ),
+      expectedError: "pairing_reauth_required",
+    },
+    {
+      label: "revoked credential",
+      endpoint: "user" as const,
+      githubResponse: () =>
+        Response.json(
+          {
+            message: "Bad credentials",
+            documentation_url:
+              "https://docs.github.com/rest/authentication/authenticating-to-the-rest-api",
+          },
+          { status: 403 },
+        ),
+      expectedError: "pairing_reauth_required",
+    },
+    {
+      label: "genuine non-member",
+      endpoint: "membership" as const,
+      githubResponse: () =>
+        Response.json(
+          {
+            message: "You are not an active member of this organization.",
+            documentation_url:
+              "https://docs.github.com/rest/orgs/members#get-organization-membership-for-a-user",
+          },
+          { status: 403 },
+        ),
+      expectedError: "device_owner_unauthorized",
+    },
+    {
+      label: "unrecognized forbidden response",
+      endpoint: "user" as const,
+      githubResponse: () =>
+        Response.json(
+          { message: "Forbidden", documentation_url: "https://docs.github.com/rest" },
+          {
+            status: 403,
+            headers: { "x-github-sso": "partial-results; organizations=12345" },
+          },
+        ),
+      expectedError: "device_owner_unauthorized",
+    },
+  ])("classifies a GitHub 403 for $label", async ({ endpoint, githubResponse, expectedError }) => {
+    const failure: {
+      endpoint?: "user" | "membership";
+      response?: () => Response;
+    } = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+        const url = String(input);
+        if (failure.endpoint === "user" && url === "https://api.github.com/user") {
+          return failure.response!();
+        }
+        if (
+          failure.endpoint === "membership" &&
+          url === "https://api.github.com/user/memberships/orgs/example-org"
+        ) {
+          return failure.response!();
+        }
+        if (url === "https://api.github.com/user") {
+          return Response.json({ id: 12345, login: ownerLogin });
+        }
+        if (url === "https://api.github.com/user/memberships/orgs/example-org") {
+          return Response.json({ state: "active", organization: { login: org } });
+        }
+        throw new Error(`unexpected GitHub request ${url}`);
+      }),
+    );
+    const fixture = await pairingFixture(new MemoryRuntime(), owner, ownerLogin, {});
+    const { token } = await fixture.pair();
+    failure.endpoint = endpoint;
+    failure.response = githubResponse;
+
+    const response = await fixture.request("/v1/leases", deviceRequest(token));
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: expectedError });
+  });
+
   it("does not share cached membership between device tokens", async () => {
     const fixture = await pairingFixture();
     const first = await fixture.pair("First phone");
@@ -653,6 +752,7 @@ async function pairingFixture(
   existingRuntime = new MemoryRuntime(),
   sessionOwner = owner,
   login = ownerLogin,
+  authContextOverride?: AuthRequestContext,
 ): Promise<PairingFixture> {
   const env = {
     CRABBOX_PUBLIC_URL: origin,
@@ -670,7 +770,7 @@ async function pairingFixture(
     if (membershipFailure.value) throw membershipFailure.value;
     if (!membershipAllowed.value) throw new Error("membership removed");
   });
-  const authContext = { githubMembership: membershipChecks };
+  const authContext = authContextOverride ?? { githubMembership: membershipChecks };
   const tokenInput = {
     owner: sessionOwner,
     ownerSource: "github-verified-email" as const,

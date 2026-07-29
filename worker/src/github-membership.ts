@@ -159,7 +159,7 @@ async function requireExactGitHubAccount(
   }
   const response = await fetch(`${githubAPIURL}/user`, { headers: githubHeaders(accessToken) });
   if (!response.ok) {
-    throw githubResponseError(
+    throw await githubResponseError(
       response,
       `Could not verify GitHub user ${login}: GitHub returned ${response.status}.`,
     );
@@ -192,7 +192,7 @@ async function requireExactGitHubMembership(
     { headers: githubHeaders(accessToken) },
   );
   if (!response.ok) {
-    throw githubResponseError(
+    throw await githubResponseError(
       response,
       `GitHub user ${login} is not an active member of ${exactOrg}.`,
     );
@@ -257,7 +257,8 @@ async function userGitHubTeams(accessToken: string): Promise<GitHubTeam[]> {
       headers: githubHeaders(accessToken),
     });
     if (!response.ok) {
-      throw githubResponseError(
+      // oxlint-disable-next-line eslint/no-await-in-loop -- classify the current page response before advancing.
+      throw await githubResponseError(
         response,
         `Could not verify GitHub team membership: GitHub returned ${response.status}.`,
       );
@@ -324,10 +325,59 @@ function githubHeaders(accessToken: string): Record<string, string> {
   };
 }
 
-function githubResponseError(response: Response, message: string): GitHubAuthorizationError {
-  return response.status === 401
+async function githubResponseError(
+  response: Response,
+  message: string,
+): Promise<GitHubAuthorizationError> {
+  if (response.status === 401) return new GitHubCredentialError(message);
+  if (response.status !== 403) return new GitHubAuthorizationError(message);
+
+  const sso = response.headers.get("x-github-sso")?.trim().toLowerCase() ?? "";
+  if (/^required(?:;|$)/.test(sso)) return new GitHubCredentialError(message);
+
+  const details = await githubErrorDetails(response);
+  return github403RequiresReauthentication(details)
     ? new GitHubCredentialError(message)
     : new GitHubAuthorizationError(message);
+}
+
+async function githubErrorDetails(
+  response: Response,
+): Promise<{ message: string; documentationURL: string }> {
+  try {
+    const body = (await response.json()) as { message?: unknown; documentation_url?: unknown };
+    return {
+      message: typeof body.message === "string" ? body.message.trim().toLowerCase() : "",
+      documentationURL:
+        typeof body.documentation_url === "string"
+          ? body.documentation_url.trim().toLowerCase()
+          : "",
+    };
+  } catch {
+    return { message: "", documentationURL: "" };
+  }
+}
+
+function github403RequiresReauthentication(details: {
+  message: string;
+  documentationURL: string;
+}): boolean {
+  if (
+    details.message === "bad credentials" ||
+    details.message.includes("resource protected by organization saml enforcement") ||
+    details.message.includes("oauth app access restrictions") ||
+    /\b(?:token|credentials?) (?:has |have |is |are )?(?:expired|revoked|invalid)\b/.test(
+      details.message,
+    ) ||
+    /\b(?:expired|revoked|invalid) (?:token|credentials?)\b/.test(details.message)
+  ) {
+    return true;
+  }
+  return (
+    details.documentationURL.startsWith("https://docs.github.com/") &&
+    (details.documentationURL.includes("/token-expiration-and-revocation") ||
+      details.documentationURL.includes("#saml-sso-authentication"))
+  );
 }
 
 export class GitHubAuthorizationError extends Error {}
