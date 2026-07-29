@@ -5,6 +5,7 @@ const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
 import {
   adminGrantVersion as configuredAdminGrantVersion,
+  githubUserGrantStatus,
   githubUserGrantIsCurrent,
   githubUserIsAdmin,
   isAdminRequest,
@@ -71,7 +72,12 @@ import {
   type DaytonaSSHEndpoint,
 } from "./daytona";
 import { GCPClient, gcpProviderLabelValue } from "./gcp";
-import { requireFreshGitHubMembership } from "./github-membership";
+import {
+  requireFreshGitHubMembership,
+  requireGitHubMembershipPolicy,
+  type GitHubMembershipEnv,
+  type GitHubMembershipIdentity,
+} from "./github-membership";
 import {
   HetznerClient,
   HetznerProvisioningError,
@@ -342,6 +348,8 @@ const readyPoolCountersPrefix = "ready-pool-counters:";
 const readyPoolBorrowTimeoutMs = 2 * 60_000;
 const readyPoolFillClaimTimeoutMs = 15 * 60_000;
 const readyPoolTerminalRetentionMs = 24 * 60 * 60_000;
+export const deviceMembershipCacheTTLMS = 60_000;
+const deviceMembershipCacheMaxEntries = 1024;
 const workspaceReconcileIntervalMs = 10_000;
 const workspaceReconcileMaxIntervalMs = 5 * 60_000;
 const workspaceProvisionClaimMs = 15 * 60_000;
@@ -560,6 +568,11 @@ interface RuntimeAdapterDeleteCompletion {
   workspaceID: string;
   registrationID: string;
   status: "absent";
+}
+
+interface DeviceMembershipCacheEntry {
+  expiresAt: number;
+  load?: Promise<void>;
 }
 
 interface RuntimeAdapterLegacyDeleteCompletion {
@@ -998,6 +1011,7 @@ export class FleetCoordinator {
   private readonly adminGrantValidationTimes = new WeakMap<WebSocket, number>();
   private readonly userGrantValidationTimes = new WeakMap<WebSocket, number>();
   private readonly viewerSessionValidationTimes = new WeakMap<WebSocket, number>();
+  private readonly deviceMembershipCache = new Map<string, DeviceMembershipCacheEntry>();
   private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
@@ -1503,7 +1517,11 @@ export class FleetCoordinator {
     if (org === undefined) {
       return pairingUnauthorized("device_token_invalid");
     }
-    if (!(await this.pairingOwnerIsCurrent(record))) {
+    const ownerStatus = await this.deviceOwnerStatus(record);
+    if (ownerStatus === "reauth_required") {
+      return pairingUnauthorized("pairing_reauth_required");
+    }
+    if (ownerStatus !== "current") {
       return pairingUnauthorized("device_owner_unauthorized");
     }
     return requestWithAuthContext(request, {
@@ -1529,6 +1547,61 @@ export class FleetCoordinator {
         githubMembership: this.authContext.githubMembership ?? requireFreshGitHubMembership,
       },
     );
+  }
+
+  private async deviceOwnerStatus(record: DeviceTokenRecord) {
+    const org = orgAuthLabelFromKey(record.org);
+    if (org === undefined) return "unauthorized" as const;
+    return await githubUserGrantStatus(
+      record.ownerGrant,
+      { owner: record.owner, org, login: record.ownerLogin },
+      this.env,
+      {
+        githubMembership: async (identity, env) =>
+          await this.requireCachedDeviceMembership(record, identity, env),
+      },
+    );
+  }
+
+  private async requireCachedDeviceMembership(
+    record: Pick<DeviceTokenRecord, "id" | "tokenHash">,
+    identity: GitHubMembershipIdentity,
+    env: GitHubMembershipEnv,
+  ): Promise<void> {
+    requireGitHubMembershipPolicy(identity, env);
+    const key = deviceMembershipCacheKey(record);
+    const now = Date.now();
+    const cached = this.deviceMembershipCache.get(key);
+    if (cached?.expiresAt && cached.expiresAt > now) {
+      this.deviceMembershipCache.delete(key);
+      this.deviceMembershipCache.set(key, cached);
+      return;
+    }
+    if (cached?.load) return await cached.load;
+    this.deviceMembershipCache.delete(key);
+
+    const entry: DeviceMembershipCacheEntry = { expiresAt: 0 };
+    const membership = this.authContext.githubMembership ?? requireFreshGitHubMembership;
+    entry.load = membership(identity, env).then(
+      () => {
+        if (this.deviceMembershipCache.get(key) === entry) {
+          entry.expiresAt = Date.now() + deviceMembershipCacheTTLMS;
+          delete entry.load;
+          this.deviceMembershipCache.delete(key);
+          this.deviceMembershipCache.set(key, entry);
+        }
+        return undefined;
+      },
+      (error: unknown) => {
+        if (this.deviceMembershipCache.get(key) === entry) {
+          this.deviceMembershipCache.delete(key);
+        }
+        throw error;
+      },
+    );
+    this.deviceMembershipCache.set(key, entry);
+    trimDeviceMembershipCache(this.deviceMembershipCache);
+    return await entry.load;
   }
 
   private async activeOwnerDevices(owner: string, org: string): Promise<DeviceTokenRecord[]> {
@@ -1566,6 +1639,7 @@ export class FleetCoordinator {
 
   private async revokeDeviceRecord(record: DeviceTokenRecord): Promise<void> {
     await this.state.storage.delete(deviceTokenKey(record.id));
+    this.deviceMembershipCache.delete(deviceMembershipCacheKey(record));
     await this.state.storage.delete(deviceOwnerIndexKey(record.owner, record.org, record.id));
   }
 
@@ -17274,6 +17348,22 @@ function pairingBrowserSession(
     return undefined;
   }
   return { login, grant: { tokenID, sealedCredential, expiresAt } };
+}
+
+function deviceMembershipCacheKey(record: Pick<DeviceTokenRecord, "id" | "tokenHash">): string {
+  return `${record.id}:${record.tokenHash}`;
+}
+
+function trimDeviceMembershipCache(cache: Map<string, DeviceMembershipCacheEntry>): void {
+  const now = Date.now();
+  for (const [key, entry] of cache) {
+    if (!entry.load && entry.expiresAt <= now) cache.delete(key);
+  }
+  while (cache.size > deviceMembershipCacheMaxEntries) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
 }
 
 function pairingOriginError(

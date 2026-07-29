@@ -8,13 +8,16 @@ import {
   type CoordinatorStorage,
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
-import { FleetCoordinator } from "../src/fleet";
+import { deviceMembershipCacheTTLMS, FleetCoordinator } from "../src/fleet";
+import { GitHubCredentialError } from "../src/github-membership";
 import { orgKeyForLabel } from "../src/org-identity";
 import {
   deviceTokenTTLSeconds,
+  deviceTokenKey,
   maxDeviceTokensPerOwner,
   maxPairingGrantsPerOwner,
   pairingGrantTTLSeconds,
+  type DeviceTokenRecord,
 } from "../src/pairing";
 import type { Env, LeaseRecord } from "../src/types";
 
@@ -151,6 +154,7 @@ interface PairingFixture {
   env: Env;
   runtime: MemoryRuntime;
   membershipAllowed: { value: boolean };
+  membershipFailure: { value?: Error };
   membershipChecks: ReturnType<typeof vi.fn>;
   request(
     path: string,
@@ -298,12 +302,15 @@ describe("coordinator device pairing", () => {
     await seedLease(fixture.runtime, lease("cbx_000000000001", owner));
     const first = await fixture.pair("First phone");
     const second = await fixture.pair("Second phone");
+    expect((await fixture.request("/v1/leases", deviceRequest(first.token))).status).toBe(200);
 
     const revokeOne = await fixture.ownerRequest(`/v1/devices/${first.deviceID}`, {
       method: "DELETE",
     });
     expect(revokeOne.status).toBe(204);
-    expect((await fixture.request("/v1/leases", deviceRequest(first.token))).status).toBe(401);
+    const revoked = await fixture.request("/v1/leases", deviceRequest(first.token));
+    expect(revoked.status).toBe(401);
+    await expect(revoked.json()).resolves.toEqual({ error: "device_token_invalid" });
     expect((await fixture.request("/v1/leases", deviceRequest(second.token))).status).toBe(200);
 
     const revokeAll = await fixture.ownerRequest("/v1/devices", { method: "DELETE" });
@@ -426,6 +433,7 @@ describe("coordinator device pairing", () => {
   });
 
   it("fails closed after membership or lease sharing changes", async () => {
+    vi.useFakeTimers({ now: new Date("2026-07-27T12:00:00Z") });
     const fixture = await pairingFixture();
     const shared = lease("cbx_000000000001", otherOwner, { users: { [owner]: "use" } });
     await seedLease(fixture.runtime, shared);
@@ -441,9 +449,91 @@ describe("coordinator device pairing", () => {
     );
 
     fixture.membershipAllowed.value = false;
+    expect((await fixture.request("/v1/leases", deviceRequest(token))).status).toBe(200);
+    await vi.advanceTimersByTimeAsync(deviceMembershipCacheTTLMS + 1);
     const offboarded = await fixture.request("/v1/leases", deviceRequest(token));
     expect(offboarded.status).toBe(401);
     await expect(offboarded.json()).resolves.toEqual({ error: "device_owner_unauthorized" });
+  });
+
+  it("caches successful membership checks for 60 seconds per device token", async () => {
+    vi.useFakeTimers({ now: new Date("2026-07-27T12:00:00Z") });
+    const fixture = await pairingFixture();
+    const { token } = await fixture.pair();
+    fixture.membershipChecks.mockClear();
+
+    expect((await fixture.request("/v1/leases", deviceRequest(token))).status).toBe(200);
+    expect((await fixture.request("/v1/leases", deviceRequest(token))).status).toBe(200);
+    expect(fixture.membershipChecks).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(deviceMembershipCacheTTLMS + 1);
+    expect((await fixture.request("/v1/leases", deviceRequest(token))).status).toBe(200);
+    expect(fixture.membershipChecks).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed on a lookup error after a warm membership entry expires", async () => {
+    vi.useFakeTimers({ now: new Date("2026-07-27T12:00:00Z") });
+    const fixture = await pairingFixture();
+    const { token } = await fixture.pair();
+    fixture.membershipChecks.mockClear();
+    expect((await fixture.request("/v1/leases", deviceRequest(token))).status).toBe(200);
+
+    fixture.membershipFailure.value = new Error("GitHub unavailable");
+    await vi.advanceTimersByTimeAsync(deviceMembershipCacheTTLMS + 1);
+    const failed = await fixture.request("/v1/leases", deviceRequest(token));
+
+    expect(failed.status).toBe(401);
+    await expect(failed.json()).resolves.toEqual({ error: "device_owner_unauthorized" });
+    expect(fixture.membershipChecks).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns a distinct reauthentication error for expired or revoked OAuth grants", async () => {
+    const expiredFixture = await pairingFixture();
+    const expired = await expiredFixture.pair();
+    const stored = await expiredFixture.runtime.storage.get<DeviceTokenRecord>(
+      deviceTokenKey(expired.deviceID),
+    );
+    if (!stored) throw new Error("device record was not stored");
+    await expiredFixture.runtime.storage.put(deviceTokenKey(expired.deviceID), {
+      ...stored,
+      ownerGrant: { ...stored.ownerGrant, expiresAt: new Date(Date.now() - 1).toISOString() },
+    });
+
+    const expiredResponse = await expiredFixture.request(
+      "/v1/leases",
+      deviceRequest(expired.token),
+    );
+    expect(expiredResponse.status).toBe(401);
+    await expect(expiredResponse.json()).resolves.toEqual({
+      error: "pairing_reauth_required",
+    });
+
+    const revokedFixture = await pairingFixture();
+    const revoked = await revokedFixture.pair();
+    revokedFixture.membershipFailure.value = new GitHubCredentialError("Bad credentials");
+    const revokedResponse = await revokedFixture.request(
+      "/v1/leases",
+      deviceRequest(revoked.token),
+    );
+    expect(revokedResponse.status).toBe(401);
+    await expect(revokedResponse.json()).resolves.toEqual({
+      error: "pairing_reauth_required",
+    });
+  });
+
+  it("does not share cached membership between device tokens", async () => {
+    const fixture = await pairingFixture();
+    const first = await fixture.pair("First phone");
+    const second = await fixture.pair("Second phone");
+    fixture.membershipChecks.mockClear();
+
+    expect((await fixture.request("/v1/leases", deviceRequest(first.token))).status).toBe(200);
+    fixture.membershipAllowed.value = false;
+    const secondResponse = await fixture.request("/v1/leases", deviceRequest(second.token));
+
+    expect(secondResponse.status).toBe(401);
+    await expect(secondResponse.json()).resolves.toEqual({ error: "device_owner_unauthorized" });
+    expect(fixture.membershipChecks).toHaveBeenCalledTimes(2);
   });
 
   it("isolates device management indexes by owner", async () => {
@@ -575,7 +665,9 @@ async function pairingFixture(
     CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "0",
   } as Env;
   const membershipAllowed = { value: true };
+  const membershipFailure: { value?: Error } = {};
   const membershipChecks = vi.fn<() => Promise<void>>(async (): Promise<void> => {
+    if (membershipFailure.value) throw membershipFailure.value;
     if (!membershipAllowed.value) throw new Error("membership removed");
   });
   const authContext = { githubMembership: membershipChecks };
@@ -623,6 +715,7 @@ async function pairingFixture(
     env,
     runtime: existingRuntime,
     membershipAllowed,
+    membershipFailure,
     membershipChecks,
     request,
     ownerRequest,

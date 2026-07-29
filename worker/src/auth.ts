@@ -1,4 +1,5 @@
 import {
+  GitHubCredentialError,
   githubAccountID,
   requireCurrentGitHubMembership,
   type GitHubMembershipEnv,
@@ -40,6 +41,8 @@ export interface GitHubUserGrant {
   sealedCredential: string;
   expiresAt: string;
 }
+
+export type GitHubUserGrantStatus = "current" | "reauth_required" | "unauthorized";
 
 export interface AuthRequestContext {
   trustedProxy?: boolean;
@@ -423,28 +426,37 @@ export async function githubUserGrantIsCurrent(
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET"> & GitHubMembershipEnv,
   context: AuthRequestContext = {},
 ): Promise<boolean> {
+  return (await githubUserGrantStatus(grant, identity, env, context)) === "current";
+}
+
+export async function githubUserGrantStatus(
+  grant: GitHubUserGrant,
+  identity: Pick<GitHubMembershipIdentity, "owner" | "org" | "login">,
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET"> & GitHubMembershipEnv,
+  context: AuthRequestContext = {},
+): Promise<GitHubUserGrantStatus> {
   if (
     !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(grant.tokenID) ||
     !grant.sealedCredential ||
-    !Number.isFinite(Date.parse(grant.expiresAt)) ||
-    Date.parse(grant.expiresAt) <= Date.now()
+    !Number.isFinite(Date.parse(grant.expiresAt))
   ) {
-    return false;
+    return "unauthorized";
   }
+  if (Date.parse(grant.expiresAt) <= Date.now()) return "reauth_required";
   let accessToken: string;
   try {
     const opened = await openGitHubCredential(grant.sealedCredential, sessionSecret(env));
-    if (!opened) return false;
+    if (!opened) return "reauth_required";
     accessToken = opened;
   } catch {
-    return false;
+    return "reauth_required";
   }
   const membership = context.githubMembership ?? requireCurrentGitHubMembership;
   try {
     await membership({ accessToken, tokenID: grant.tokenID, ...identity }, env);
-    return true;
-  } catch {
-    return false;
+    return "current";
+  } catch (error) {
+    return error instanceof GitHubCredentialError ? "reauth_required" : "unauthorized";
   }
 }
 

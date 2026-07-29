@@ -68,13 +68,7 @@ export async function requireCurrentGitHubMembership(
   identity: GitHubMembershipIdentity,
   env: GitHubMembershipEnv,
 ): Promise<void> {
-  requireSafeGitHubRevocationConfig(env);
-  if (githubUserIsRevoked(identity, env)) {
-    throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
-  }
-  if (!allowedGitHubOrgs(env).includes(identity.org.trim().toLowerCase())) {
-    throw new GitHubAuthorizationError(`GitHub organization ${identity.org} is no longer allowed.`);
-  }
+  requireGitHubMembershipPolicy(identity, env);
   const key = membershipCacheKey(identity, env);
   const now = Date.now();
   const cachedUntil = membershipCache.get(key) ?? 0;
@@ -107,6 +101,15 @@ export async function requireFreshGitHubMembership(
   identity: GitHubMembershipIdentity,
   env: GitHubMembershipEnv,
 ): Promise<void> {
+  requireGitHubMembershipPolicy(identity, env);
+  await requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login);
+  await requireExactGitHubMembership(identity.accessToken, identity.login, identity.org, env);
+}
+
+export function requireGitHubMembershipPolicy(
+  identity: Pick<GitHubMembershipIdentity, "owner" | "org" | "login">,
+  env: GitHubMembershipEnv,
+): void {
   requireSafeGitHubRevocationConfig(env);
   if (githubUserIsRevoked(identity, env)) {
     throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
@@ -114,8 +117,6 @@ export async function requireFreshGitHubMembership(
   if (!allowedGitHubOrgs(env).includes(identity.org.trim().toLowerCase())) {
     throw new GitHubAuthorizationError(`GitHub organization ${identity.org} is no longer allowed.`);
   }
-  await requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login);
-  await requireExactGitHubMembership(identity.accessToken, identity.login, identity.org, env);
 }
 
 function githubUserIsRevoked(
@@ -158,7 +159,8 @@ async function requireExactGitHubAccount(
   }
   const response = await fetch(`${githubAPIURL}/user`, { headers: githubHeaders(accessToken) });
   if (!response.ok) {
-    throw new GitHubAuthorizationError(
+    throw githubResponseError(
+      response,
       `Could not verify GitHub user ${login}: GitHub returned ${response.status}.`,
     );
   }
@@ -190,7 +192,8 @@ async function requireExactGitHubMembership(
     { headers: githubHeaders(accessToken) },
   );
   if (!response.ok) {
-    throw new GitHubAuthorizationError(
+    throw githubResponseError(
+      response,
       `GitHub user ${login} is not an active member of ${exactOrg}.`,
     );
   }
@@ -254,7 +257,8 @@ async function userGitHubTeams(accessToken: string): Promise<GitHubTeam[]> {
       headers: githubHeaders(accessToken),
     });
     if (!response.ok) {
-      throw new GitHubAuthorizationError(
+      throw githubResponseError(
+        response,
         `Could not verify GitHub team membership: GitHub returned ${response.status}.`,
       );
     }
@@ -320,4 +324,12 @@ function githubHeaders(accessToken: string): Record<string, string> {
   };
 }
 
+function githubResponseError(response: Response, message: string): GitHubAuthorizationError {
+  return response.status === 401
+    ? new GitHubCredentialError(message)
+    : new GitHubAuthorizationError(message);
+}
+
 export class GitHubAuthorizationError extends Error {}
+
+export class GitHubCredentialError extends GitHubAuthorizationError {}

@@ -56,7 +56,11 @@ grants cannot mint a token. The coordinator allows at most 10 active grants and
 pairing another when the device limit is reached.
 
 A device token expires after at most 90 days and stops earlier if its paired
-browser authorization grant expires or can no longer be revalidated.
+browser authorization grant expires or can no longer be revalidated. When the
+stored OAuth grant has expired, been revoked, or can no longer be opened, the
+coordinator returns `401 pairing_reauth_required` so the companion can ask the
+user to pair again. Device-token revocation remains distinct and returns `401
+device_token_invalid`.
 
 Pairing codes and device tokens belong only in request bodies, the
 `Authorization` header, and the device's protected credential store. Do not put
@@ -66,10 +70,18 @@ repository configuration.
 ## Owner revalidation
 
 The coordinator stores the paired browser session's sealed GitHub authorization
-grant beside the token hash. Every device request performs a fresh, uncached
-check of the immutable GitHub account and its current allowed organization/team
-membership. GitHub errors, account mismatch, removed membership, revoked users,
-or a no-longer-allowed organization fail closed with `401`.
+grant beside the token hash. Every device request reads the durable token
+verifier, checks the sealed grant's expiry and readability, and applies current
+local revoked-user and allowed-organization policy. Successful remote GitHub
+account and organization/team membership checks are cached for 60 seconds per
+exact device token. The cache is bounded and never shared by devices, owners, or
+organizations.
+
+After a cache miss or expiry, GitHub errors, account mismatch, removed
+membership, revoked users, or a no-longer-allowed organization fail closed with
+`401`; a stale positive is never used as an error fallback. An expired or
+revoked OAuth credential returns `pairing_reauth_required`, while other owner
+authorization failures return `device_owner_unauthorized`.
 
 The sealed grant never reaches the device. Only a hash of the device token is
 stored, and the public device response contains no credential material.
@@ -86,7 +98,8 @@ DELETE /v1/devices       revoke all devices for this owner/org
 
 Device and grant indexes are scoped to the exact owner/org and bounded by their
 caps; management does not scan other owners' records. Revocation removes the
-server-side verifier, so the next request with that token returns `401`. Lease
+server-side verifier and its in-memory membership entry, so the next request
+with that token returns `401` even when it had a warm membership result. Lease
 owner or sharing changes are evaluated from current lease state on every read,
 so removed visibility fails closed on the next request as well.
 
@@ -99,6 +112,22 @@ but still requires the exact configured request destination and rejects a
 different supplied Origin. The configured origin must be HTTPS. Loopback HTTP
 is accepted only for local development. These credential-bearing routes do not
 redirect to another origin.
+
+## Threat model
+
+The 60-second positive membership cache is an explicit availability and quota
+tradeoff. A user removed from GitHub organization or team membership can retain
+device read access only until that device token's current cache entry expires,
+so the accepted removal latency is at most about 60 seconds. GitHub lookup
+failures after that deadline deny access rather than extending the window.
+
+The window does not apply to the durable device-token verifier, device-token
+expiry, sealed-grant expiry or decryption, configured revoked-user policy,
+allowed-organization policy, or current lease visibility. Those checks run on
+every request. Individual or bulk device revocation deletes the verifier first
+and takes effect on the next request regardless of cache state. Cache entries
+are keyed by the exact device ID and token hash and are held only in bounded
+ephemeral Worker memory, preventing cross-token or cross-tenant reuse.
 
 ## Non-goals
 
