@@ -1,9 +1,8 @@
 # AI Agents and Harnesses
 
-"Agent integration" can mean three different workflows. Choose the smallest
-one that fits: teach a local coding agent to call Crabbox, run a repo-owned
-one-shot harness through normal execution, or supervise a long-lived harness
-inside a lease.
+"Agent integration" can mean two different workflows. Choose the smallest one
+that fits: teach a local coding agent to call Crabbox, or run a repo-owned
+one-shot harness through normal execution.
 
 ## Local agent clients
 
@@ -209,30 +208,9 @@ require and download proof artifacts. Crabbox owns remote execution and proof
 plumbing; the repository owns the harness protocol, prompts, role separation,
 and result interpretation.
 
-Crabbox does not deliver model credentials for this pattern. Do not put model
-or tool secrets in repository YAML, command arguments, or `env.allow`. A real
-model-backed run must wait for a separately reviewed, workload-specific
-credential path.
+Crabbox does not broker or deliver model credentials for this pattern. The
+calling harness owns that security boundary; do not put model or tool secrets
+in repository YAML, command arguments, or `env.allow`.
 
 See [Hermetic Agent Evidence](../features/hermetic-agent-evidence.md) for the
 implemented run-evidence pattern.
-
-## Long-running harnesses
-
-A daemonized Codex, Claude Code, OpenCode, Amp, or generic harness running
-inside the box is not a local plugin. It needs durable supervision and an
-authenticated HTTP/SSE bridge.
-
-That path is contract-only today and belongs under Station. The first
-implementation must remain SSH-backed Linux only, bind the daemon to lease
-loopback, pin downloaded artifacts, use attempt-scoped bridge authorization,
-stop descendants deterministically, and keep model credentials disabled.
-
-Crabbox owns station and lease lifecycle, workspace grounding, bridge policy,
-logs, evidence, egress, and cleanup. The harness owns its model, prompt loop,
-edits, tools, and API schema. See [Agent Runtime Bridge](../features/agent-runtime-bridge.md)
-and [Station Profiles](../features/station-profiles.md).
-
-Do not forward model or tool credentials through `env.allow` as a shortcut.
-Scoped model access is a separate security-reviewed phase with revocation,
-redaction, egress, budget, and evidence requirements.

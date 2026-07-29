@@ -23,8 +23,7 @@ The best Crabbox fit is a **run-evidence pattern**, not a new agent framework:
 
 Crabbox should not judge model output, store reasoning traces, decide whether a
 test is correct, or deliver model credentials for this pattern. Those decisions
-belong to the repo-owned harness and, later, to separately reviewed Station and
-agent-runtime bridge work.
+belong to the repo-owned harness.
 
 This page records the repo-local pattern tracked by
 [openclaw/crabbox#1020](https://github.com/openclaw/crabbox/issues/1020).
@@ -111,7 +110,6 @@ Pick the provider the same way you would for any other Crabbox run:
 | Artifacts | The proof JSON/Markdown are small run evidence, not raw transcripts or secrets. Delegated retrieval is byte-bounded by the adapter contract. |
 | Jobs | `.crabbox.yaml` names the repeatable remote proof as `hermetic-agents`. |
 | History/logs | Brokered SSH providers can add central run history; direct/delegated runs still provide live output and local proof downloads. |
-| Station | Future fit for long-running agent harnesses. This pattern is intentionally a one-shot run. |
 
 ## Trust Boundary
 
@@ -129,25 +127,14 @@ Keep these boundaries explicit:
   command arguments.
 - Proof artifacts should be small, bounded, and redacted before sharing.
 - If a real model-backed version needs credentials, do not forward ambient
-  secrets through `env.allow`; wait for a reviewed workload-specific credential
-  path.
+  secrets through `env.allow`; Crabbox does not provide workload-specific
+  credential delivery.
 
-## Station Later
-
-Long-running hermetic-agent systems may eventually fit Station better than
-one-shot `run`: a station could supervise coder/tester/QA processes, record
-attempt lifecycle, bridge a repo-owned harness API, and revoke model access on
-stop. That is not what this pattern uses.
-
-Today, keep the path simple:
+The path stays deliberately simple:
 
 ```text
 repo harness -> crabbox run -> required proof artifact -> downloaded evidence
 ```
-
-When Station and the agent-runtime bridge mature, the same proof schema can
-become station evidence without moving prompt loops or test interpretation into
-Crabbox core.
 
 ## Why This Belongs In Repo Config
 

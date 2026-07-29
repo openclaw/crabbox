@@ -11,11 +11,10 @@ package, task pack, or other external control surface.
 | What optional software or reachability does a lease expose? | Lease capability |
 | What repeatable repository command should run? | Job or preset |
 | What local UI or agent invokes Crabbox? | Integration |
-| What long-running workload is supervised inside a lease? | Station profile or harness |
 
-Do not use "plugin" as a generic answer to all five questions. Host plugin
+Do not use "plugin" as a generic answer to all four questions. Host plugin
 manifests are distribution details for integrations. Runtime-loaded provider
-plugins and Station harnesses have different trust and lifecycle contracts.
+plugins have a different trust and lifecycle contract.
 
 ## Local integration contract
 
@@ -44,7 +43,7 @@ guide linked from it should make these fields visible:
 
 | Field | Meaning |
 | --- | --- |
-| Type | Editor, terminal UI, local agent client, or Station runtime |
+| Type | Editor, terminal UI, or local agent client |
 | Status | Available, package available, experimental, or contract only |
 | Install owner | The host registry/CLI or Crabbox itself |
 | Required Crabbox contract | Commands and versioned JSON schemas consumed |
@@ -70,8 +69,6 @@ Do not add:
   the workflow;
 - a second provider or credential client inside an integration;
 - an MCP tool for every CLI flag without a smaller typed workflow;
-- an in-box daemon before Station supervision, bridge authorization, cleanup,
-  and evidence exist;
 - a runtime executable marketplace before signature, update, permission, and
   compatibility policy are designed.
 
@@ -86,6 +83,3 @@ At minimum:
 - exercise read, acquire/run, cancellation, and release flows;
 - add redacted proof from the real host before claiming registry availability;
 - run the normal Crabbox docs, unit, and integration checks.
-
-For an in-box runtime, use the stricter review checklist in
-[Agent Runtime Bridge](../features/agent-runtime-bridge.md).

@@ -121,8 +121,7 @@ be repository-relative and end in `crabbox/SKILL.md`; Crabbox rejects other
 paths because the declared skill name must match its parent directory.
 
 See [AI Agents and Harnesses](../integrations/agents.md) for the boundary
-between a local agent skill, a one-shot repo harness, and a future long-running
-Station runtime.
+between a local agent skill and a one-shot repo harness.
 
 ## Flags
 

@@ -57,9 +57,6 @@ live in the [Command Reference](../commands/README.md).
 
 - [Sync](sync.md): Git file-list manifests, rsync, fingerprints, excludes, guardrails, and sanity checks.
 - [Jobs](jobs.md): named repo-local warmup, hydrate, run, and cleanup workflows.
-- [Station profiles](station-profiles.md): planned supervised workload records, agent profile, and model-access security gates.
-- [Agent runtime bridge](agent-runtime-bridge.md): contract for future
-  harness-in-the-box HTTP/SSE bridge support under Station.
 - [Hermetic agent evidence](hermetic-agent-evidence.md): repo-local pattern for
   separate code/test writer contexts, QA arbitration, required artifacts, and
   Crabbox remote proof collection.
@@ -81,5 +78,5 @@ live in the [Command Reference](../commands/README.md).
 ## Integrations
 
 - [Integration catalog](../integrations/README.md): editors, terminal UIs,
-  coding-agent clients, and the boundary with future in-box Station harnesses.
+  coding-agent clients, and one-shot harnesses.
 - [Repository onboarding](repository-onboarding.md): `crabbox init`, repo config, workflow stub, and agent skill.

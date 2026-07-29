@@ -44,9 +44,6 @@ Crabbox has three implementation surfaces:
 - Deterministic perf evidence is contract-only for now:
   `docs/features/deterministic-perf-evidence.md`; no `--perf-budget`,
   `--fuel-budget`, WASI, or wasmtime-fuel implementation is registered yet.
-- Agent runtime bridge is contract-only for now:
-  `docs/features/agent-runtime-bridge.md`; no generic harness HTTP/SSE bridge,
-  sandbox-agent launcher, or `crabbox station` command is registered yet.
 
 ## Integration Surfaces
 
@@ -70,9 +67,6 @@ Crabbox has three implementation surfaces:
   `scripts/check-zed-extension.mjs`, `scripts/test-zed-extension-e2e.mjs`.
 - Herdr package and CLI adapter: `plugins/herdr`,
   `internal/cli/herdr_plugin.go`, `scripts/herdr-plugin.test.js`.
-- Long-running in-box agent harnesses remain contract-only under Station:
-  `docs/features/agent-runtime-bridge.md`, `docs/features/station-profiles.md`,
-  and the disabled primitives in `internal/station`.
 
 ## Leases, Slugs, Claims, And Expiry
 
