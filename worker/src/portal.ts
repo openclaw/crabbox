@@ -2156,10 +2156,15 @@ export function portalCodeBootstrapHandoff(action: URL, ticket: string): Respons
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Opening Code</title>
   <style nonce="${nonce}">
-    :root { color-scheme: dark light; font: 16px/1.5 system-ui,sans-serif; }
-    body { min-height: 100vh; margin: 0; display: grid; place-items: center; }
+    /* Palette: vendored carapace v0.6.1 neutral product tokens. */
+    :root { color-scheme: dark light; font: 16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: oklch(0.135 0 0); color: oklch(0.985 0 0); }
     form { text-align: center; }
-    button { font: inherit; padding: .55rem 1rem; }
+    button { font: inherit; font-weight: 700; padding: .55rem 1rem; border: 1px solid transparent; border-radius: .5rem; background: #f5654a; color: oklch(0.135 0 0); cursor: pointer; }
+    @media (prefers-color-scheme: light) {
+      body { background: oklch(0.985 0 0); color: oklch(0.205 0 0); }
+      button { background: #d84a31; color: #fff; }
+    }
   </style>
 </head>
 <body>
