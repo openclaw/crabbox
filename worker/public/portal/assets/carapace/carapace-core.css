@@ -1,0 +1,312 @@
+/*!
+ * Carapace core bundle (vendored)
+ * Source: https://github.com/openclaw/carapace @ v0.6.1 (3a8bcfbc7f0563f501626d37245f31efc0d7be9f)
+ * Files: styles/tokens.css, styles/themes.css, styles/typography.css, styles/themes/product.css
+ * Regenerate: see VENDORED.md in this directory.
+ */
+:root {
+  /* Canonical source palette: openclaw.ai at b94b43b. */
+  --oc-palette-ink-950: #101012;
+  --oc-palette-ink-900: #19191c;
+  --oc-palette-ink-850: #202024;
+  --oc-palette-ink-50: #ededed;
+  --oc-palette-ink-300: #bcbcc4;
+  --oc-palette-ink-500: #9a9aa2;
+
+  --oc-palette-paper-50: #ffffff;
+  --oc-palette-paper-100: #f6f5f3;
+  --oc-palette-paper-200: #eceae6;
+  --oc-palette-paper-950: #17171a;
+  --oc-palette-paper-700: #46464e;
+  --oc-palette-paper-600: #63636c;
+
+  --oc-palette-coral-dark-bright: #f5654a;
+  --oc-palette-coral-dark-mid: #e05540;
+  --oc-palette-coral-dark-deep: #b23a28;
+  --oc-palette-coral-light-bright: #d84a31;
+  --oc-palette-coral-light-mid: #c24028;
+  --oc-palette-coral-light-deep: #9c3222;
+
+  --oc-palette-sea-dark-bright: #4fc8ae;
+  --oc-palette-sea-dark-mid: #2fa48d;
+  --oc-palette-sea-light-bright: #14806e;
+  --oc-palette-sea-light-mid: #0f6355;
+
+  --oc-space-1: 0.25rem;
+  --oc-space-2: 0.5rem;
+  --oc-space-3: 0.75rem;
+  --oc-space-4: 1rem;
+  --oc-space-5: 1.5rem;
+  --oc-space-6: 2rem;
+  --oc-space-7: 3rem;
+  --oc-space-8: 4rem;
+
+  --oc-font-size-xs: 0.75rem;
+  --oc-font-size-sm: 0.8125rem;
+  --oc-font-size-base: 0.875rem;
+  --oc-font-size-md: 0.9375rem;
+  --oc-font-size-lg: 1.0625rem;
+  --oc-font-size-xl: 1.25rem;
+  --oc-font-size-2xl: 1.5rem;
+  --oc-font-size-3xl: 2rem;
+
+  --oc-radius-sm: 0.25rem;
+  --oc-radius-md: 0.5rem;
+  --oc-radius-lg: 0.75rem;
+  --oc-radius-xl: 1rem;
+  --oc-radius-full: 999px;
+  --oc-radius-surface: var(--oc-radius-md);
+  --oc-radius-control: var(--oc-radius-md);
+  --oc-radius-inset: var(--oc-radius-sm);
+  --oc-radius-round: var(--oc-radius-full);
+
+  --oc-shadow-sm: 0 1px 2px rgb(0 0 0 / 0.12);
+  --oc-shadow-md: 0 8px 24px -6px rgb(0 0 0 / 0.28);
+  --oc-shadow-lg: 0 24px 48px -12px rgb(0 0 0 / 0.42);
+
+  --oc-duration-fast: 160ms;
+  --oc-duration-ui: 200ms;
+  --oc-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+
+  --oc-control-min-height: 2.75rem;
+
+  --oc-content-max: 75rem;
+  --oc-content-narrow: 48rem;
+}
+:root,
+html[data-theme="dark"] {
+  color-scheme: dark;
+
+  --oc-bg-page: var(--oc-palette-ink-950);
+  --oc-bg-surface: var(--oc-palette-ink-900);
+  --oc-bg-elevated: var(--oc-palette-ink-850);
+  --oc-bg-recessed: color-mix(in oklch, var(--oc-bg-page) 86%, oklch(0 0 0));
+  --oc-bg-contrast: var(--oc-text-primary);
+
+  --oc-accent-primary: var(--oc-palette-coral-dark-bright);
+  --oc-accent-primary-hover: var(--oc-palette-coral-dark-mid);
+  --oc-accent-primary-deep: var(--oc-palette-coral-dark-deep);
+  --oc-accent-secondary: var(--oc-palette-sea-dark-bright);
+  --oc-accent-secondary-deep: var(--oc-palette-sea-dark-mid);
+
+  --oc-text-primary: var(--oc-palette-ink-50);
+  --oc-text-secondary: var(--oc-palette-ink-300);
+  --oc-text-muted: var(--oc-palette-ink-500);
+  --oc-text-inactive: color-mix(in oklch, var(--oc-text-muted) 62%, transparent);
+  --oc-text-inverse: var(--oc-bg-page);
+  --oc-text-link: var(--oc-accent-primary);
+  --oc-text-on-accent: var(--oc-palette-ink-950);
+
+  --oc-border-subtle: rgb(154 154 162 / 0.18);
+  --oc-border-strong: color-mix(in oklch, var(--oc-text-primary) 32%, transparent);
+  --oc-border-accent: rgb(245 101 74 / 0.4);
+
+  --oc-surface-card: rgb(25 25 28 / 0.72);
+  --oc-surface-card-strong: rgb(25 25 28 / 0.9);
+  --oc-surface-overlay: rgb(0 0 0 / 0.3);
+  --oc-surface-interactive: rgb(237 237 237 / 0.08);
+  --oc-surface-interactive-hover: rgb(237 237 237 / 0.16);
+  --oc-control-bg: var(--oc-surface-interactive);
+  --oc-control-bg-hover: var(--oc-surface-interactive-hover);
+  --oc-surface-accent-soft: rgb(245 101 74 / 0.14);
+  --oc-surface-secondary-soft: rgb(79 200 174 / 0.14);
+  --oc-chart-line: rgb(237 237 237 / 0.09);
+  --oc-selection-bg: rgb(245 101 74 / 0.28);
+  --oc-focus-ring: rgb(79 200 174 / 0.72);
+
+  /* Compatibility aliases retained for zero-diff openclaw.ai extraction. */
+  --bg-deep: var(--oc-bg-page);
+  --bg-surface: var(--oc-bg-surface);
+  --bg-elevated: var(--oc-bg-elevated);
+  --coral-bright: var(--oc-accent-primary);
+  --coral-mid: var(--oc-accent-primary-hover);
+  --coral-dark: var(--oc-accent-primary-deep);
+  --cyan-bright: var(--oc-accent-secondary);
+  --cyan-mid: var(--oc-accent-secondary-deep);
+  --cyan-glow: rgb(79 200 174 / 0.35);
+  --text-primary: var(--oc-text-primary);
+  --text-secondary: var(--oc-text-secondary);
+  --text-muted: var(--oc-text-muted);
+  --on-accent: var(--oc-text-on-accent);
+  --border-subtle: var(--oc-border-subtle);
+  --border-accent: var(--oc-border-accent);
+  --surface-card: var(--oc-surface-card);
+  --surface-card-strong: var(--oc-surface-card-strong);
+  --surface-overlay: var(--oc-surface-overlay);
+  --surface-interactive: var(--oc-surface-interactive);
+  --surface-interactive-hover: var(--oc-surface-interactive-hover);
+  --surface-coral-soft: var(--oc-surface-accent-soft);
+  --surface-cyan-soft: var(--oc-surface-secondary-soft);
+  --surface-inset-highlight: rgb(237 237 237 / 0.05);
+  --chart-line: var(--oc-chart-line);
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+
+  --oc-bg-page: var(--oc-palette-paper-100);
+  --oc-bg-surface: var(--oc-palette-paper-200);
+  --oc-bg-elevated: var(--oc-palette-paper-50);
+  --oc-bg-recessed: color-mix(
+    in oklch,
+    var(--oc-bg-page) 94%,
+    var(--oc-text-primary)
+  );
+  --oc-bg-contrast: var(--oc-text-primary);
+
+  --oc-accent-primary: var(--oc-palette-coral-light-bright);
+  --oc-accent-primary-hover: var(--oc-palette-coral-light-mid);
+  --oc-accent-primary-deep: var(--oc-palette-coral-light-deep);
+  --oc-accent-secondary: var(--oc-palette-sea-light-bright);
+  --oc-accent-secondary-deep: var(--oc-palette-sea-light-mid);
+
+  --oc-text-primary: var(--oc-palette-paper-950);
+  --oc-text-secondary: var(--oc-palette-paper-700);
+  --oc-text-muted: var(--oc-palette-paper-600);
+  --oc-text-inactive: color-mix(in oklch, var(--oc-text-muted) 62%, transparent);
+  --oc-text-inverse: var(--oc-bg-page);
+  --oc-text-link: var(--oc-accent-primary);
+  --oc-text-on-accent: var(--oc-palette-paper-50);
+
+  --oc-border-subtle: rgb(23 23 26 / 0.14);
+  --oc-border-strong: color-mix(in oklch, var(--oc-text-primary) 28%, transparent);
+  --oc-border-accent: rgb(216 74 49 / 0.42);
+
+  --oc-surface-card: rgb(255 255 255 / 0.8);
+  --oc-surface-card-strong: rgb(255 255 255 / 0.95);
+  --oc-surface-overlay: rgb(23 23 26 / 0.08);
+  --oc-surface-interactive: rgb(23 23 26 / 0.07);
+  --oc-surface-interactive-hover: rgb(23 23 26 / 0.14);
+  --oc-control-bg: var(--oc-surface-interactive);
+  --oc-control-bg-hover: var(--oc-surface-interactive-hover);
+  --oc-surface-accent-soft: rgb(216 74 49 / 0.12);
+  --oc-surface-secondary-soft: rgb(20 128 110 / 0.13);
+  --oc-chart-line: rgb(23 23 26 / 0.12);
+  --oc-selection-bg: rgb(216 74 49 / 0.2);
+  --oc-focus-ring: rgb(20 128 110 / 0.58);
+
+  --cyan-glow: rgb(20 128 110 / 0.24);
+  --surface-inset-highlight: rgb(23 23 26 / 0.05);
+}
+
+/* Neutral application palette used by the reference site. Keep this additive
+   to the stable theme contract: the stronger root selectors let consumers
+   import themes/product.css afterward without copying these role overrides. */
+html:root,
+html:root[data-theme="dark"] {
+  --oc-bg-page: oklch(0.135 0 0);
+  --oc-bg-surface: oklch(0.178 0 0);
+  --oc-bg-elevated: oklch(0.205 0 0);
+  --oc-text-primary: oklch(0.985 0 0);
+  --oc-text-secondary: oklch(0.87 0 0);
+  --oc-text-muted: oklch(0.716 0 0);
+  --oc-text-on-accent: oklch(0.135 0 0);
+  --oc-border-subtle: oklch(0.269 0 0);
+  --oc-surface-card: oklch(0.178 0 0 / 0.82);
+  --oc-surface-card-strong: oklch(0.205 0 0 / 0.96);
+  --oc-surface-overlay: oklch(0 0 0 / 0.3);
+  --oc-surface-interactive: oklch(0.178 0 0);
+  --oc-surface-interactive-hover: oklch(0.239 0 0);
+  --oc-control-bg: var(--oc-surface-interactive);
+  --oc-control-bg-hover: var(--oc-surface-interactive-hover);
+  --oc-chart-line: oklch(1 0 0 / 0.1);
+  --oc-focus-ring: oklch(0.935 0 0 / 0.72);
+  --oc-input-bg: oklch(0.205 0 0);
+  --oc-input-focus-border: color-mix(in srgb, var(--oc-text-primary) 62%, transparent);
+  --oc-input-focus-ring: color-mix(in srgb, var(--oc-text-primary) 22%, transparent);
+}
+
+html:root[data-theme="light"] {
+  --oc-bg-page: oklch(0.985 0 0);
+  --oc-bg-surface: oklch(0.97 0 0);
+  --oc-bg-elevated: oklch(1 0 0);
+  --oc-text-primary: oklch(0.205 0 0);
+  --oc-text-secondary: oklch(0.269 0 0);
+  --oc-text-muted: oklch(0.555 0 0);
+  --oc-text-on-accent: oklch(1 0 0);
+  --oc-border-subtle: oklch(0.922 0 0);
+  --oc-surface-card: oklch(1 0 0);
+  --oc-surface-card-strong: oklch(1 0 0);
+  --oc-surface-overlay: oklch(0.205 0 0 / 0.08);
+  --oc-surface-interactive: oklch(0.97 0 0);
+  --oc-surface-interactive-hover: oklch(0.922 0 0);
+  --oc-control-bg: var(--oc-bg-elevated);
+  --oc-control-bg-hover: var(--oc-surface-interactive-hover);
+  --oc-chart-line: oklch(0.205 0 0 / 0.12);
+  --oc-focus-ring: oklch(0.15 0 0 / 0.7);
+  --oc-input-bg: oklch(1 0 0);
+  --oc-input-focus-border: color-mix(in srgb, var(--oc-text-primary) 62%, transparent);
+  --oc-input-focus-ring: color-mix(in srgb, var(--oc-text-primary) 22%, transparent);
+}
+:root {
+  /*
+   * Font binaries are intentionally not distributed. Consumers must load
+   * licensed fonts themselves or use the documented fallback stacks.
+   */
+  --oc-font-display: "Switzer", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --oc-font-body: "Switzer", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --oc-font-serif: "Sentient", Georgia, "Times New Roman", serif;
+  --oc-font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+
+  --font-display: var(--oc-font-display);
+  --font-body: var(--oc-font-body);
+  --font-serif: var(--oc-font-serif);
+  --font-mono: var(--oc-font-mono);
+}
+
+:root {
+  --oc-status-success-bg: rgb(34 197 94 / 0.12);
+  --oc-status-success-fg: #22c55e;
+  --oc-status-warning-bg: rgb(251 191 36 / 0.12);
+  --oc-status-warning-fg: #fbbf24;
+  --oc-status-error-bg: rgb(239 68 68 / 0.12);
+  --oc-status-error-fg: #f87171;
+  --oc-status-info-bg: rgb(59 130 246 / 0.14);
+  --oc-status-info-fg: #60a5fa;
+
+  --oc-input-bg: var(--oc-bg-elevated);
+  --oc-input-border: var(--oc-border-subtle);
+  --oc-input-placeholder: color-mix(in srgb, var(--oc-text-muted) 70%, transparent);
+  --oc-input-focus-border: color-mix(in srgb, var(--oc-accent-primary) 58%, transparent);
+  --oc-input-focus-ring: color-mix(in srgb, var(--oc-accent-primary) 22%, transparent);
+
+  --oc-diff-added: #22c55e;
+  --oc-diff-added-strong: #16a34a;
+  --oc-diff-removed: #f87171;
+  --oc-diff-removed-strong: #ef4444;
+}
+
+html[data-theme="light"],
+[data-theme-family="claw"][data-theme-resolved="light"] {
+  --oc-status-success-bg: rgb(34 197 94 / 0.1);
+  --oc-status-success-fg: #146c37;
+  --oc-status-warning-bg: rgb(245 158 11 / 0.1);
+  --oc-status-warning-fg: #8f5100;
+  --oc-status-error-bg: rgb(239 68 68 / 0.1);
+  --oc-status-error-fg: #b91c1c;
+  --oc-status-info-bg: rgb(37 99 235 / 0.1);
+  --oc-status-info-fg: #1d4ed8;
+
+  --oc-diff-added: #16a34a;
+  --oc-diff-added-strong: #15803d;
+  --oc-diff-removed: #e57373;
+  --oc-diff-removed-strong: #dc2626;
+}
+
+@media (prefers-color-scheme: light) {
+  [data-theme-family="claw"][data-theme-mode="system"] {
+    --oc-status-success-bg: rgb(34 197 94 / 0.1);
+    --oc-status-success-fg: #146c37;
+    --oc-status-warning-bg: rgb(245 158 11 / 0.1);
+    --oc-status-warning-fg: #8f5100;
+    --oc-status-error-bg: rgb(239 68 68 / 0.1);
+    --oc-status-error-fg: #b91c1c;
+    --oc-status-info-bg: rgb(37 99 235 / 0.1);
+    --oc-status-info-fg: #1d4ed8;
+    --oc-diff-added: #16a34a;
+    --oc-diff-added-strong: #15803d;
+    --oc-diff-removed: #e57373;
+    --oc-diff-removed-strong: #dc2626;
+  }
+}
+
