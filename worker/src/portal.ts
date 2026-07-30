@@ -2945,7 +2945,9 @@ function telemetryHealthPills(telemetry: LeaseRecord["telemetry"]): string {
     );
   }
   if ((telemetry.load1 ?? 0) >= 16) {
-    pills.push(`<span class="oc-badge oc-badge-warning">load ${telemetry.load1?.toFixed(1)}</span>`);
+    pills.push(
+      `<span class="oc-badge oc-badge-warning">load ${telemetry.load1?.toFixed(1)}</span>`,
+    );
   }
   return pills.join("");
 }

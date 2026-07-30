@@ -13041,8 +13041,12 @@ describe("fleet lease identity and idle", () => {
     expect(friendShareBody).toContain("share blue-lobster");
     expect(friendShareBody).toContain("share-shell");
     expect(friendShareBody).toContain("back to lease");
-    expect(friendShareBody).toContain('class="oc-action oc-action-secondary" type="submit">save</button>');
-    expect(friendShareBody).toContain('class="oc-action oc-action-secondary" type="submit">add</button>');
+    expect(friendShareBody).toContain(
+      'class="oc-action oc-action-secondary" type="submit">save</button>',
+    );
+    expect(friendShareBody).toContain(
+      'class="oc-action oc-action-secondary" type="submit">add</button>',
+    );
 
     const embeddedSharePage = await fleet.fetch(
       request("GET", "/portal/leases/blue-lobster/share?embed=1", { headers: friendHeaders }),
@@ -21838,7 +21842,9 @@ describe("fleet lease identity and idle", () => {
     ]) {
       expect(pageBody).not.toContain(secret);
     }
-    expect(pageBody).not.toContain('<a class="oc-action oc-action-outline" href="/portal">leases</a>');
+    expect(pageBody).not.toContain(
+      '<a class="oc-action oc-action-outline" href="/portal">leases</a>',
+    );
     expect(pageBody).not.toContain('action="/portal/logout"');
     expect(pageBody).not.toContain('<button id="vnc-share"');
     expect(pageBody).not.toContain('id="vnc-bridge-cmd"');
