@@ -184,7 +184,7 @@ export function portalHome(
     "Crabbox Portal",
     `<main class="portal-shell">
       ${portalHeader({
-        meta: `${escapeHTML(new URL(request.url).host)}${admin ? ` <span class="pill admin-pill">admin</span>` : ""}`,
+        meta: `${escapeHTML(new URL(request.url).host)}${admin ? ` <span class="oc-badge oc-badge-accent">admin</span>` : ""}`,
         actions: `${admin ? `<a class="oc-action oc-action-outline admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>` : ""}${portalLogoutButton()}`,
       })}
       ${admin ? portalAdminSummary({ owner, org, active: active.length, ended, runners: sortedRunners.length, system, providers: portalProviderSummary(sortedLeases, sortedRunners, macHosts) }) : ""}
@@ -251,7 +251,7 @@ export function portalAdmin(
     "Crabbox Admin",
     `<main class="portal-shell admin-shell">
       ${portalHeader({
-        meta: `${escapeHTML(new URL(request.url).host)} <span class="pill admin-pill">admin</span>`,
+        meta: `${escapeHTML(new URL(request.url).host)} <span class="oc-badge oc-badge-accent">admin</span>`,
         actions: `
           <a class="oc-action oc-action-outline" href="/portal">leases</a>
           <a class="oc-action oc-action-outline admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>
@@ -380,7 +380,7 @@ function providerAdminRow(provider: PortalAdminProviderStatus): string {
         <strong>${escapeHTML(providerSpec.label)}</strong>
         <span><span class="traffic-light" data-tone="${provider.status}" aria-label="${provider.status}"></span>${escapeHTML(provider.configured ? "configured" : "missing config")}</span>
       </div>
-      <span class="pill"${tone ? ` data-tone="${tone}"` : ""}>${escapeHTML(provider.status)}</span>
+      <span class="${badgeClass(tone)}">${escapeHTML(provider.status)}</span>
     </div>
     <dl class="provider-status-meta">
       <div><dt>config</dt><dd>${provider.configured ? "ready" : "missing"}</dd></div>
@@ -423,7 +423,7 @@ function adminLeaseRow(
   const releaseConfirmation = leaseReleaseConfirmation(lease);
   return `<tr data-filter-tags="${escapeHTML([stateGroup, lease.state, lease.provider, lease.owner, lease.org, lease.target, lease.serverType].join(" "))}">
     <td><a class="lease-link" href="/portal/leases/${encodeURIComponent(lease.id)}"><strong>${escapeHTML(lease.slug || lease.id)}</strong><small>${escapeHTML(lease.id)}</small></a></td>
-    <td><span class="pill" data-state="${escapeHTML(lease.state)}">${escapeHTML(lease.state)}</span></td>
+    <td><span class="${leaseStateBadge(lease.state)}" data-state="${escapeHTML(lease.state)}">${escapeHTML(lease.state)}</span></td>
     <td>${providerBadge(lease.provider)}</td>
     <td><strong>${escapeHTML(lease.owner || "unknown")}</strong><small>${escapeHTML(lease.org || "no org")}</small></td>
     <td>${targetBadge(lease.target)}</td>
@@ -455,7 +455,7 @@ function portalAdminSummary(input: {
   return `<section class="panel admin-panel" data-admin-panel>
     <div class="section-head">
       <h2>admin mode</h2>
-      <span class="pill admin-pill">all scopes</span>
+      <span class="oc-badge oc-badge-accent">all scopes</span>
     </div>
     <div class="admin-grid">
       ${adminMetric("identity", `${input.owner || "unknown"} / ${input.org || "unknown"}`)}
@@ -558,7 +558,7 @@ export function portalLeaseDetail(
         <div class="panel detail-card">
           <div class="section-head">
             <h2>status</h2>
-            <span class="pill" data-state="${escapeHTML(lease.state)}">${escapeHTML(lease.state)}</span>
+            <span class="${leaseStateBadge(lease.state)}" data-state="${escapeHTML(lease.state)}">${escapeHTML(lease.state)}</span>
           </div>
           <dl class="meta-grid">
             ${metaHTMLRow("provider", providerBadge(lease.provider))}
@@ -628,7 +628,7 @@ export function portalShareLease(
         .map(
           ([user, role]) => `<tr>
             <td>${escapeHTML(user)}</td>
-            <td><span class="pill">${escapeHTML(role)}</span></td>
+            <td><span class="oc-badge oc-badge-neutral">${escapeHTML(role)}</span></td>
             <td>
               <form method="post" action="${sharePath}">
                 <input type="hidden" name="action" value="remove-user">
@@ -658,7 +658,7 @@ export function portalShareLease(
       <section class="panel">
         <div class="section-head">
           <h2>org access</h2>
-          <span class="pill">${escapeHTML(lease.share?.org ?? "off")}</span>
+          <span class="oc-badge oc-badge-neutral">${escapeHTML(lease.share?.org ?? "off")}</span>
         </div>
         <form class="share-form" method="post" action="${sharePath}">
           <input type="hidden" name="action" value="set-org">
@@ -730,7 +730,7 @@ export function portalExternalRunnerDetail(
           <div class="section-head">
             <h2>runner</h2>
             <div class="state-stack">
-              <span class="pill" data-tone="${runner.stale ? "warn" : runnerStatusTone(runner.status)}">${escapeHTML(runner.status || "-")}</span>
+              <span class="${badgeClass(runner.stale ? "warn" : runnerStatusTone(runner.status))}">${escapeHTML(runner.status || "-")}</span>
               ${externalRunnerActionBadge(actionState)}
             </div>
           </div>
@@ -840,7 +840,7 @@ export function portalMacHostDetail(
         <div class="panel detail-card">
           <div class="section-head">
             <h2>dedicated host</h2>
-            <span class="pill" data-tone="${stateTone}">${escapeHTML(host.state || "-")}</span>
+            <span class="${badgeClass(stateTone)}">${escapeHTML(host.state || "-")}</span>
           </div>
           <dl class="meta-grid">
             ${metaRow("id", host.id)}
@@ -925,7 +925,7 @@ export function portalRunDetail(
         <div class="panel detail-card run-summary-card">
           <div class="section-head">
             <h2>run</h2>
-            <span class="pill" data-tone="${stateTone}">${escapeHTML(run.state)}</span>
+            <span class="${badgeClass(stateTone)}">${escapeHTML(run.state)}</span>
           </div>
           <dl class="meta-grid">
             ${metaRow("lease", run.slug ? `${run.slug} / ${run.leaseID}` : run.leaseID)}
@@ -2239,7 +2239,7 @@ function leaseRow(
   });
   return `<tr data-filter-tags="${escapeHTML(["lease", filterValue, ownership, lease.provider, target].join(" "))}" data-filter-group-tags="${escapeHTML(groupTags)}">
     <td><a class="lease-link" href="${detailPath}"><strong>${escapeHTML(label)}</strong><small>${escapeHTML(subline)}</small></a></td>
-    <td><span class="pill" data-state="${escapeHTML(lease.state)}">${escapeHTML(lease.state)}</span></td>
+    <td><span class="${leaseStateBadge(lease.state)}" data-state="${escapeHTML(lease.state)}">${escapeHTML(lease.state)}</span></td>
     <td>${providerBadge(lease.provider)}</td>
     <td>${targetBadge(target, lease.windowsMode)}</td>
     <td>${escapeHTML(lease.class)}</td>
@@ -2447,7 +2447,7 @@ function macHostRow(
     : [host.region, host.availabilityZone].filter(Boolean).join(" · ");
   return `<tr class="capacity-row" data-filter-tags="${escapeHTML(tags.filter(Boolean).join(" "))}" data-filter-group-tags="${escapeHTML(groupTags)}">
     <td><a class="lease-link dedicated-link" href="${detailPath}"><span class="dedicated-mark" title="dedicated host" aria-label="dedicated host">${dedicatedHostIcon}</span><span><strong>${escapeHTML(shortHostID(host.id))}</strong><small>${escapeHTML(leaseMeta || host.id)}</small></span></a></td>
-    <td><span class="pill" data-tone="${stateTone}">${escapeHTML(host.state || "-")}</span></td>
+    <td><span class="${badgeClass(stateTone)}">${escapeHTML(host.state || "-")}</span></td>
     <td>${providerBadge(host.provider)}</td>
     <td>${targetBadge(host.target)}</td>
     <td><span title="${escapeHTML([host.availabilityZone, host.autoPlacement].filter(Boolean).join(" · ") || "Dedicated Host")}">${escapeHTML(host.instanceType || "dedicated")}</span></td>
@@ -2547,7 +2547,7 @@ function externalRunnerLeaseRow(
   });
   return `<tr class="external-row" data-filter-tags="${escapeHTML(filterTags.filter(Boolean).join(" "))}" data-filter-group-tags="${escapeHTML(groupTags)}">
     <td><a class="lease-link" href="${escapeHTML(detailPath)}"><strong>${escapeHTML(runner.id)}</strong><small>${escapeHTML(subline)}</small></a></td>
-    <td><div class="state-stack"><span class="pill" data-tone="${runner.stale ? "warn" : runnerStatusTone(runner.status)}">${escapeHTML(runner.status || "-")}</span>${externalRunnerActionBadge(actionState)}</div></td>
+    <td><div class="state-stack"><span class="${badgeClass(runner.stale ? "warn" : runnerStatusTone(runner.status))}">${escapeHTML(runner.status || "-")}</span>${externalRunnerActionBadge(actionState)}</div></td>
     <td>${providerBadge(runner.provider)}</td>
     <td><span class="muted" title="Blacksmith owns runner host details">-</span></td>
     <td><span title="${escapeHTML([runner.repo, runner.workflow, jobRef].filter(Boolean).join(" · "))}">${externalRunnerActionsCell(runner, actionsLinks)}</span></td>
@@ -2655,7 +2655,7 @@ function externalRunnerActionBadge(state: ExternalRunnerActionState | undefined)
   if (!state) {
     return "";
   }
-  return `<span class="pill action-pill" data-tone="${escapeHTML(state.tone)}" title="${escapeHTML(state.title)}">${escapeHTML(state.label)}</span>`;
+  return `<span class="${badgeClass(state.tone)} action-pill" title="${escapeHTML(state.title)}">${escapeHTML(state.label)}</span>`;
 }
 
 function externalRunnerActionsCell(runner: ExternalRunnerRecord, actionsLinks: string): string {
@@ -2764,7 +2764,7 @@ function runRow(run: RunRecord): string {
   const subtitle = run.label || run.command.join(" ");
   return `<tr data-filter-tags="${escapeHTML([run.state, run.provider, run.target || "linux"].filter(Boolean).join(" "))}">
     <td><a class="lease-link" href="/portal/runs/${encodeURIComponent(run.id)}"><strong>${escapeHTML(run.id)}</strong><small>${escapeHTML(subtitle)}</small></a></td>
-    <td><span class="pill" data-tone="${stateTone}">${escapeHTML(run.state)}</span></td>
+    <td><span class="${badgeClass(stateTone)}">${escapeHTML(run.state)}</span></td>
     ${elapsedTimeCell(run.startedAt)}
     <td>${escapeHTML(formatDuration(run.durationMs))}</td>
     <td>${escapeHTML(runTelemetryCell(run.telemetry))}</td>
@@ -2923,29 +2923,29 @@ type LeaseTelemetrySample = NonNullable<LeaseRecord["telemetry"]>;
 
 function telemetryHealthPills(telemetry: LeaseRecord["telemetry"]): string {
   if (!telemetry?.capturedAt) {
-    return `<span class="pill" data-tone="warn">no signal</span>`;
+    return `<span class="oc-badge oc-badge-warning">no signal</span>`;
   }
   const pills = [];
   const ageMs = Date.now() - Date.parse(telemetry.capturedAt);
   if (!Number.isFinite(ageMs) || ageMs > 10 * 60 * 1000) {
     pills.push(
-      `<span class="pill" data-tone="warn">stale ${escapeHTML(relativeTime(telemetry.capturedAt))}</span>`,
+      `<span class="oc-badge oc-badge-warning">stale ${escapeHTML(relativeTime(telemetry.capturedAt))}</span>`,
     );
   } else {
-    pills.push(`<span class="pill" data-tone="ok">live</span>`);
+    pills.push(`<span class="oc-badge oc-badge-success">live</span>`);
   }
   if ((telemetry.memoryPercent ?? 0) >= 85) {
     pills.push(
-      `<span class="pill" data-tone="bad">memory ${Math.round(telemetry.memoryPercent ?? 0)}%</span>`,
+      `<span class="oc-badge oc-badge-error">memory ${Math.round(telemetry.memoryPercent ?? 0)}%</span>`,
     );
   }
   if ((telemetry.diskPercent ?? 0) >= 85) {
     pills.push(
-      `<span class="pill" data-tone="bad">disk ${Math.round(telemetry.diskPercent ?? 0)}%</span>`,
+      `<span class="oc-badge oc-badge-error">disk ${Math.round(telemetry.diskPercent ?? 0)}%</span>`,
     );
   }
   if ((telemetry.load1 ?? 0) >= 16) {
-    pills.push(`<span class="pill" data-tone="warn">load ${telemetry.load1?.toFixed(1)}</span>`);
+    pills.push(`<span class="oc-badge oc-badge-warning">load ${telemetry.load1?.toFixed(1)}</span>`);
   }
   return pills.join("");
 }
@@ -3135,6 +3135,27 @@ function providerIcon(provider: string): string {
   return providerIcons[provider] ?? genericProviderIcon;
 }
 
+// Tone-to-class mapping for the vendored carapace oc-badge family: status
+// color selection lives here in TS, not in attribute-matching CSS, so the
+// light/dark status palette comes entirely from carapace product tokens.
+function badgeClass(tone: string | undefined): string {
+  if (tone === "ok") {
+    return "oc-badge oc-badge-success";
+  }
+  if (tone === "warn") {
+    return "oc-badge oc-badge-warning";
+  }
+  if (tone === "bad") {
+    return "oc-badge oc-badge-error";
+  }
+  return "oc-badge oc-badge-neutral";
+}
+
+function leaseStateBadge(state: string): string {
+  const tone = state === "active" ? "ok" : state === "released" || state === "expired" ? "bad" : "";
+  return badgeClass(tone);
+}
+
 function runnerStatusTone(status: string): string {
   if (status === "ready" || status === "running") {
     return "ok";
@@ -3182,7 +3203,7 @@ function bridgeRow(
   const tone = enabled ? (coarse || bridgeConnected ? "ok" : "warn") : "";
   return `<div class="bridge-row">
     <div><strong>${escapeHTML(label)}</strong><small>${escapeHTML(status)}</small></div>
-    <span class="pill" data-tone="${tone}">${escapeHTML(enabled ? (coarse ? "active" : bridgeConnected ? "connected" : "waiting") : "off")}</span>
+    <span class="${badgeClass(tone)}">${escapeHTML(enabled ? (coarse ? "active" : bridgeConnected ? "connected" : "waiting") : "off")}</span>
     ${action}
   </div>`;
 }
@@ -3429,11 +3450,12 @@ function html(
     .failure-list li { padding:10px; border-bottom:1px solid var(--line-soft); }
     .failure-list small { display:block; color:var(--muted); margin-top:2px; }
     .failure-list p { margin-top:8px; color:var(--danger-fg); }
-    .pill { display:inline-flex; align-items:center; justify-content:center; min-height:22px; padding:0 7px; border-radius:999px; border:1px solid var(--line); color:var(--muted); background:var(--panel-2); font-size:11px; white-space:nowrap; }
-    .admin-pill { color:var(--accent-soft-fg); border-color:color-mix(in srgb, var(--accent) 42%, var(--line)); background:color-mix(in srgb, var(--accent) 12%, transparent); }
-    .pill[data-tone="ok"],.pill[data-state="active"] { color:var(--ok); border-color:color-mix(in srgb, var(--ok) 35%, var(--line)); }
-    .pill[data-tone="warn"] { color:var(--warn); border-color:color-mix(in srgb, var(--warn) 35%, var(--line)); }
-    .pill[data-tone="bad"],.pill[data-state="released"],.pill[data-state="expired"] { color:var(--bad); border-color:color-mix(in srgb, var(--bad) 45%, var(--line)); }
+    /* Badges come from the vendored carapace oc-badge family (tone variants,
+       light/dark handled by product tokens). Portal-scoped: row density plus a
+       local accent-identity variant for admin/scope markers. */
+    .oc-badge { min-height:22px; padding:2px 7px; font-size:11px; }
+    .oc-badge-accent { color:var(--accent-soft-fg); border-color:color-mix(in srgb, var(--accent) 42%, var(--line)); background:color-mix(in srgb, var(--accent) 12%, transparent); }
+    .oc-badge-accent::before { display:none; }
     .icon-label { display:inline-flex; align-items:center; gap:7px; min-width:0; }
     .icon-label svg { width:14px; height:14px; flex:0 0 14px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; color:var(--icon); }
     .icon-label span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -3501,7 +3523,7 @@ function html(
     .external-row .lease-link { color:var(--ext-fg); pointer-events:none; }
     .external-row .lease-link strong::after { content:"external"; display:inline-flex; margin-left:8px; min-height:18px; align-items:center; padding:0 6px; border:1px solid var(--line); border-radius:999px; color:var(--ext-badge); font-size:10px; font-weight:700; text-transform:uppercase; vertical-align:middle; }
     .external-row .icon-label svg { color:var(--ext-icon); }
-    .external-row .pill { opacity:0.82; }
+    .external-row .oc-badge { opacity:0.82; }
     .row-links { display:inline-flex; align-items:center; gap:5px; min-width:0; }
     .row-link { display:inline-flex; align-items:center; min-height:22px; padding:0 7px; border:1px solid color-mix(in srgb, var(--accent) 36%, var(--line)); border-radius:6px; color:var(--accent-soft-fg); background:color-mix(in srgb, var(--accent) 9%, transparent); text-decoration:none; font-size:11px; font-weight:700; }
     .row-link.secondary { color:var(--icon); border-color:var(--line); background:var(--inset); font-weight:600; }

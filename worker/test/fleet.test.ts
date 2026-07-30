@@ -13041,8 +13041,8 @@ describe("fleet lease identity and idle", () => {
     expect(friendShareBody).toContain("share blue-lobster");
     expect(friendShareBody).toContain("share-shell");
     expect(friendShareBody).toContain("back to lease");
-    expect(friendShareBody).toContain('class="button action" type="submit">save</button>');
-    expect(friendShareBody).toContain('class="button action" type="submit">add</button>');
+    expect(friendShareBody).toContain('class="oc-action oc-action-secondary" type="submit">save</button>');
+    expect(friendShareBody).toContain('class="oc-action oc-action-secondary" type="submit">add</button>');
 
     const embeddedSharePage = await fleet.fetch(
       request("GET", "/portal/leases/blue-lobster/share?embed=1", { headers: friendHeaders }),
@@ -18881,7 +18881,7 @@ describe("fleet lease identity and idle", () => {
     expect(runBody).not.toContain("<dt>blocked</dt><dd>unknown</dd>");
     expect(runBody).not.toContain("<dt>retry</dt><dd>unknown</dd>");
     expect(runBody).toContain('class="run-telemetry-grid"');
-    expect(runBody).toContain(".run-artifact-card .button { width:100%; }");
+    expect(runBody).toContain(".run-artifact-card .oc-action { width:100%; }");
     expect(runBody).toContain("@media (max-width: 980px)");
     expect(runBody).toContain(
       ".run-telemetry-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }",
@@ -20833,7 +20833,7 @@ describe("fleet lease identity and idle", () => {
     const viewerPortalBody = await viewerPortal.text();
     expect(viewerPortalBody).toContain("<strong>egress</strong><small>active</small>");
     expect(viewerPortalBody).toContain('<span class="muted">active</span>');
-    expect(viewerPortalBody).toContain('<span class="pill" data-tone="ok">active</span>');
+    expect(viewerPortalBody).toContain('<span class="oc-badge oc-badge-success">active</span>');
     expect(viewerPortalBody).not.toContain("discord · discord.com");
     expect(viewerPortalBody).not.toContain("*.discordcdn.com");
     expect(viewerPortalBody).not.toContain("crabbox egress status --id blue-lobster");
@@ -21838,7 +21838,7 @@ describe("fleet lease identity and idle", () => {
     ]) {
       expect(pageBody).not.toContain(secret);
     }
-    expect(pageBody).not.toContain('<a class="button secondary" href="/portal">leases</a>');
+    expect(pageBody).not.toContain('<a class="oc-action oc-action-outline" href="/portal">leases</a>');
     expect(pageBody).not.toContain('action="/portal/logout"');
     expect(pageBody).not.toContain('<button id="vnc-share"');
     expect(pageBody).not.toContain('id="vnc-bridge-cmd"');
